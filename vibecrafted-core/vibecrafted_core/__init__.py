@@ -182,29 +182,36 @@ def __getattr__(name: str) -> Any:
     if module_name is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
+    # Each branch imports its sibling BY MODULE PATH. The obvious spelling here
+    # is `from . import workflow`, and it is what this chain used to say — but
+    # `.` is the package barrel, i.e. this very file, so every static importer
+    # graph recorded `__init__.py -> __init__.py` and reported a structural
+    # self-cycle that has no load-order meaning. The absolute form names the
+    # module that actually owns the symbol. Runtime behaviour is unchanged:
+    # these imports still happen lazily, only when __getattr__ is reached.
     module: Any
     if module_name == ".workflow":
-        from . import workflow
+        from vibecrafted_core import workflow
 
         module = workflow
     elif module_name == ".continuity":
-        from . import continuity
+        from vibecrafted_core import continuity
 
         module = continuity
     elif module_name == ".delivery":
-        from . import delivery
+        from vibecrafted_core import delivery
 
         module = delivery
     elif module_name == ".events":
-        from . import events
+        from vibecrafted_core import events
 
         module = events
     elif module_name == ".control_plane":
-        from . import control_plane
+        from vibecrafted_core import control_plane
 
         module = control_plane
     elif module_name == ".settlement_ledger":
-        from . import settlement_ledger
+        from vibecrafted_core import settlement_ledger
 
         module = settlement_ledger
     else:  # pragma: no cover - _LAZY_EXPORTS is the whitelist.

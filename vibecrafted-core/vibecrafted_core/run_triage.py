@@ -51,7 +51,9 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Protocol, TypeGuard
 
-from . import run_mutation as run_mutation_module
+# Module-path import on purpose; see the note in vc_frame_delivery.py.
+import vibecrafted_core.run_mutation as run_mutation_module
+
 from .run_mutation import (
     RunMetaMutationError,
     mutate_run_meta,

@@ -25,7 +25,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import vc_frame_staging as _vc_frame_staging
+# Imported by module path, not `from . import ...`: the relative form binds the
+# sibling through the package barrel, and every static importer graph then
+# records an edge back into `vibecrafted_core/__init__.py`. Runtime behaviour is
+# identical (the package still initialises first); what changes is that the
+# graph names the module that actually owns these symbols.
+import vibecrafted_core.vc_frame_staging as _vc_frame_staging
+
 from .frontier_assets import vc_frame_config_source
 from .runtime_paths import vibecrafted_tools_home, xdg_config_home
 from .vc_frame_staging import (
