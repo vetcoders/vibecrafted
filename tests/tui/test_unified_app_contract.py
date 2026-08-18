@@ -3121,7 +3121,12 @@ def test_unified_release_has_one_top_level_owner() -> None:
     assert '"$runtime/server/site/"' in builder
     assert "uv python install 3.12.3" in builder
     assert "install_name_tool -id '@loader_path/libpython3.12.dylib'" in builder
-    assert "--remap-path-prefix=$HOME=/usr/src/operator-home" in builder
+    # The remaps are built from PATH_REMAPS rather than written as one literal
+    # string, because the snapshot pair is conditional and because rustc applies
+    # the LAST match — so the list has to be ordered broadest-first, with $HOME
+    # ahead of the checkout instead of trailing it.
+    assert '"$HOME=/usr/src/operator-home"' in builder
+    assert "--remap-path-prefix=$mapping" in builder
     assert "install_name_tool -delete_rpath /usr/lib/swift" in builder
     assert 'run_bundled_verifier app "$APP" --require-clean' in builder
     assert "run_bundled_verifier release-output" in builder

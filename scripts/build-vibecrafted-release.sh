@@ -147,8 +147,18 @@ export SWIFT_PREFIX_MAP
 . "$REPO_ROOT/scripts/lib/payload-hygiene.sh"
 
 cleanup() {
-  donor_snapshot_reap || true
+  # Host-wide resources first. The keychain session mutates state that outlives
+  # this process and affects every application on the machine; the donor
+  # snapshots are directories under this repo's own build/ and a stale one is
+  # merely untidy. Reaping first meant a hung `git worktree remove` — an index
+  # lock on a busy donor is enough — would strand the keychain instead.
+  #
+  # In practice keychain_session_begin also arms its own EXIT handler which
+  # chains ahead of this one, so the keychain is usually already released by the
+  # time we arrive. That path does not exist when no signing certificate was
+  # present, which is exactly when this ordering is the only ordering.
   keychain_session_end "$SIGNING_KEYCHAIN_LABEL" || true
+  donor_snapshot_reap || true
 }
 trap cleanup EXIT INT TERM HUP
 

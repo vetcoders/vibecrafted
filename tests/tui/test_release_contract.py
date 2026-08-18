@@ -420,8 +420,25 @@ def test_dirty_donors_are_a_release_flag_with_a_reaper_not_a_manual_ritual() -> 
     assert "$label is dirty; release receipts refuse moving source" in builder
 
     assert "RELEASE_FLAGS ?=" in makefile
-    assert "--app-only $(RELEASE_FLAGS)" in makefile
-    assert "--no-notarize $(RELEASE_FLAGS)" in makefile
+    # The flags must reach the builder as argv WORDS. Splicing $(RELEASE_FLAGS)
+    # into the single-quoted `zsh -ic` argument handed the value to zsh as
+    # source: measured 2026-08-18, `RELEASE_FLAGS='--snapshot-donors
+    # $(touch /tmp/proof)'` created the file, because zsh evaluates command
+    # substitution while building the exec's argv. (A `;` lands after `exec`
+    # and never runs — the vector is narrower than it looks, and real.)
+    for flag in ("--app-only", "--no-notarize", "--notarize-only"):
+        assert f"{flag} $${{=VC_RELEASE_FLAGS}}" in makefile, flag
+    assert makefile.count("VC_RELEASE_FLAGS='$(RELEASE_FLAGS)'") == 4
+    # The only place $(RELEASE_FLAGS) may still be expanded is that leading
+    # environment assignment. Nothing after `zsh -ic` may name it, because
+    # everything after `zsh -ic` is source.
+    spliced = [
+        line.strip()
+        for line in makefile.splitlines()
+        if "$(RELEASE_SCRIPT)" in line
+        and "$(RELEASE_FLAGS)" in line.partition("zsh -ic")[2]
+    ]
+    assert not spliced, spliced
 
 
 def test_donor_remap_prefixes_are_resolved_never_concatenated() -> None:

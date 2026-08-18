@@ -43,17 +43,17 @@ W3 (after W1-a). Every wave ends at an operator button (merge / deploy / install
 Stage `implement` ran as a single worker (no fleet), so every cut below carries the
 executing agent's own authorship, not the brief's planned assignee.
 
-| Cut  | State | Landed SHA(s)          | Measured result                                                                                                                                                                                                                           |
-| ---- | ----- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| W0-a | `[!]` | recon only, no commit  | Portable payload clean (0 symlinks, 0 `.env`, no operator identity). **DMG is not:** `Contents/Helpers/vc-frame` and `Contents/MacOS/Vibecrafted` carry `/Users/<operator>/.cargo/...`, and four binaries carry the living checkout path. |
-| W0-b | `[~]` | recon only, no commit  | Installed runtime `4.1.0+g237d2814` contains `18dea346`; `resume --run-id <missing>` fails loudly (exit 1, names the id). Live resume of a real run not exercised from a headless worker.                                                 |
-| W0-c | `[!]` | recon only, no commit  | `catalog.json` present, schema valid, 48 workspaces — but **22 of 48 ids are UUIDv4, including this repo's** (`bda366e0-…-45f1-…`). The plan's UUIDv7 premise is false.                                                                   |
-| W1-a | `[~]` | `838165d6`             | Guard added; the clone smoke found a real break and fixed it (see below).                                                                                                                                                                 |
-| W1-b | `[~]` | `cd13e1ca`             | `--snapshot-donors` + reaper; proved on the real donors, failure path included.                                                                                                                                                           |
-| W1-c | `[~]` | `e9f47da1`             | Parity guarded. The 404 is a stale deploy branch, not a pipeline limit.                                                                                                                                                                   |
-| W2-a | `[ ]` | —                      | Not implemented; premise falsified (see W0-c) and acceptance is GUI-only.                                                                                                                                                                 |
-| W2-b | `[~]` | —                      | Chrome asks already landed in vc-frame `76048ca54`; the menu question is answered below.                                                                                                                                                  |
-| W3-a | `[~]` | `01e5e18a`, `4918c7fb` | Import cycles 4 → **0**; loctree health 74 → **80**.                                                                                                                                                                                      |
+| Cut  | State | Landed SHA(s)          | Measured result                                                                                                                                                                                                               |
+| ---- | ----- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| W0-a | `[!]` | recon only, no commit  | Portable payload clean of the operator's **account**; it still carried the **checkout root** in 5 tracked files. **DMG is not clean:** 8 of 2955 files name the build host. Both addressed in the workflow stage — see below. |
+| W0-b | `[~]` | recon only, no commit  | Installed runtime `4.1.0+g237d2814` contains `18dea346`; `resume --run-id <missing>` fails loudly (exit 1, names the id). Live resume of a real run not exercised from a headless worker.                                     |
+| W0-c | `[!]` | recon only, no commit  | `catalog.json` present, schema valid, 48 workspaces — but **22 of 48 ids are UUIDv4, including this repo's** (`bda366e0-…-45f1-…`). The plan's UUIDv7 premise is false.                                                       |
+| W1-a | `[~]` | `838165d6`             | Guard added; the clone smoke found a real break and fixed it (see below).                                                                                                                                                     |
+| W1-b | `[~]` | `cd13e1ca`             | `--snapshot-donors` + reaper; proved on the real donors, failure path included.                                                                                                                                               |
+| W1-c | `[~]` | `e9f47da1`             | Parity guarded. The 404 is a stale deploy branch, not a pipeline limit.                                                                                                                                                       |
+| W2-a | `[ ]` | —                      | Not implemented; premise falsified (see W0-c) and acceptance is GUI-only.                                                                                                                                                     |
+| W2-b | `[~]` | —                      | Chrome asks already landed in vc-frame `76048ca54`; the menu question is answered below.                                                                                                                                      |
+| W3-a | `[~]` | `01e5e18a`, `4918c7fb` | Import cycles 4 → **0**; loctree health 74 → **80**.                                                                                                                                                                          |
 
 ### Measured findings that changed the plan
 
@@ -64,8 +64,8 @@ executing agent's own authorship, not the brief's planned assignee.
 2. **The 4.1.0 DMG leaks operator paths.** `--remap-path-prefix` ran (`/usr/src/operator-home`
    is present) yet `/usr/src/vc-frame` and `/usr/src/vc-terminal` are present in _no_ binary:
    the donor prefixes were built as `"$REPO_ROOT/../vc-frame"`, and a prefix containing `..`
-   never matches textually. Fixed in `cd13e1ca`; the remaining `.cargo/registry` leak in
-   `Contents/Helpers/vc-frame` is unexplained and needs its own cut.
+   never matches textually. Fixed in `cd13e1ca`. **The rest is explained as of the workflow
+   stage** — see "Workflow stage" below. It was never one leak.
 3. **`keychain-session.sh` silently dropped the caller's cleanup on any failed release.**
    `_ks_trap_cleanup` returns the triggering status by design, and under `set -e` a non-zero
    command inside a trap tears the shell down before the chained handler runs. Measured on a
@@ -85,7 +85,94 @@ executing agent's own authorship, not the brief's planned assignee.
 7. **Five tests were already red before this stage** and stayed red: three
    `test_research_launcher.py` settle timeouts, `test_vibecrafted_launcher.py::test_dashboard_subcommand_launches_repo_owned_vc_frame_layout`,
    and `vibecrafted-core/tests/test_aicx_session_chain.py::test_resume_pack_never_selects_native_even_with_same_agent`.
-   All four/one confirmed against a clean `HEAD`.
+   All four/one confirmed against a clean `HEAD`. The dashboard one is green as of the
+   workflow stage; the three research timeouts are diagnosed there and remain red.
+
+## Workflow stage — what landed, 2026-08-18
+
+Stage `workflow` consumed the review report (`revi-260818-160222-61808`) and its
+Before-Merge TODO. Three commits: `85cebab5`, `f08e8076`, and the one carrying this
+section.
+
+### W0-a is now a mechanism, not a mystery
+
+The review attributed the surviving `.cargo/registry` leak to vc-frame's git-tracked
+WASM blobs. Measuring the shipped `Vibecrafted_4.1.0-20260817-237d2814.dmg` file by file
+found **five** producers, of which `--remap-path-prefix` reaches exactly one:
+
+| Where                                                            |             Count | Producer                                                 | Lever                          |
+| ---------------------------------------------------------------- | ----------------: | -------------------------------------------------------- | ------------------------------ |
+| `Contents/Helpers/vc-frame`                                      |     411 × `$HOME` | git-tracked `assets/plugins/*.wasm` via `include_bytes!` | rebuild the plugins            |
+| `Contents/Helpers/vc-frame`                                      |     17 × checkout | same blobs                                               | same                           |
+| `Contents/Helpers/vc-terminal.app/…/alacritty`                   |  277 × donor root | the `..` prefix bug                                      | `canonical_dir`, already fixed |
+| `Contents/MacOS/Vibecrafted`                                     |      21 × `$HOME` | cc-rs C sources (`ring`)                                 | `CFLAGS=-ffile-prefix-map`     |
+| `Contents/MacOS/Vibecrafted`                                     |     51 × checkout | Swift sources + xcodebuild DerivedData                   | `-debug-prefix-map`            |
+| `runtime/python/lib/python3.12/_sysconfigdata__darwin_darwin.py` |     27 × checkout | uv's CPython recording its seed prefix                   | rewrite the literal            |
+| `runtime/python-site/bin/jsonschema`                             |      1 × checkout | pip console-script shebang                               | delete the directory           |
+| `Contents/MacOS/voc`, `Contents/MacOS/vc-mux-daemon`             | 1 × checkout each | `env!("CARGO_MANIFEST_DIR")` probed at runtime           | `#[cfg(debug_assertions)]`     |
+
+Two of these are worse than leaks:
+
+- `runtime/python-site/bin/*` shipped **scripts that cannot run** — their shebang names a
+  `mktemp` directory the build deletes on its way out. Nothing invokes them (python-site
+  is on `PYTHONPATH`, never on `PATH`), so the directory is now removed outright.
+- `default_command_deck()` and `find_tray_icon()` probed the build machine's checkout at
+  runtime, and on that machine the path **exists**. The shipped binary therefore preferred
+  the developer's living checkout — on the one machine where a release gets walked around
+  before it goes out.
+
+### The primary defence is a gate, not another flag
+
+Five producers with five different levers, and the set grows with every new kind of
+bundled artifact. `scripts/payload_hygiene.py` reads the finished payload and knows
+nothing about how it was made; both release channels run it before they sign or publish,
+and `make payload-hygiene ARTIFACT=<path>` asks the same question of anything already on
+disk (`.app`, `.dmg`, `.tar.gz`). No allowlist. 2955 files in 1.7 s.
+
+Its first run found its own weakness: without the donor roots it certified a payload that
+carries 277 occurrences of the vc-terminal donor path. A test pins that now.
+
+### Measured, closed-loop
+
+- **Plugin rebuild.** All 14 blobs rebuilt inside a real donor snapshot under the release
+  remaps: `$HOME` 276 → **0**, checkout root 14 → **0**. 60 s. The snapshot's resulting
+  dirty set is exactly `zellij-utils/assets/plugins/`, which is the whole of the new
+  `require_clean_repo` allowance. Donor restored: 2 worktrees before and after, 8 stashes
+  untouched, `git status` clean.
+- **Remap precedence.** rustc applies the **last** matching `--remap-path-prefix`
+  (measured with two overlapping prefixes). `$HOME` was last, so on any host whose
+  checkout lives under `$HOME` every specific root was dead. Order is now broadest-first.
+- **Keychain harness.** `run_child` now runs `set -euo pipefail`; all 61 existing cases
+  stay green, which is the finding — the suite was blind, not wrong. Two cases added for
+  the missing cell. Reverting `cd13e1ca` turns exactly one case red: the new one.
+- **Barrel self-cycle.** Reproducing ruff PLR0402's rewrite turns the new AST test red at
+  the exact line, and `loct audit` agrees (`structural: 1`, node `__init__.py`).
+- **RELEASE_FLAGS injection.** The vector is command substitution, not `;` — a `;` lands
+  after `exec` and never runs, while `$(...)` is evaluated while zsh builds the argv.
+  Both are inert now.
+
+### Corrections to the review
+
+- **P2-05 does not survive measurement.** `VIBECRAFTED_HOME` was already redirected to
+  `tmp_path`; the newest `rese-*` in the operator's real control plane is from 2026-08-13,
+  not from any test run. The three reds are a **product hang**: the dispatcher blocks in
+  `wait4` and its `workflow_runtime research` child blocks in the asyncio `kevent` loop,
+  with no timeout, both reparented to init and alive six minutes later. The stage fixed
+  the damage (the timeout path now reaps the recorded pgid — 0 orphans after a run, was 6)
+  and reports the hang rather than smuggling a supervisor rewrite into a review-fix stage.
+- **P3-05 declined, with a reason.** Setting `CARGO_TARGET_DIR` to survive the reaper would
+  break vc-frame's own asset producer: `scripts/plugins-parity.zsh` hardcodes
+  `$REPO/target/wasm32-wasip1/release`. That is a vc-frame change and belongs to a cut that
+  can verify it there.
+
+### Not verified
+
+- The **Swift** and **cc-rs** prefix maps are wired but need a full signed release to
+  confirm. The payload gate is what makes that non-optional: the next release fails loudly
+  if they did not work.
+- The plugin rebuild is proven on the blobs and on the snapshot's dirty set, **not** end to
+  end through a complete `--snapshot-donors` release (cold cargo ×2, signing, notarization).
+- Nothing in this stage was pushed, merged, tagged or deployed.
 
 ## Explicit non-goals
 

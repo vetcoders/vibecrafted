@@ -67,19 +67,30 @@ PORTABLE_SCRIPT := scripts/build-portable-release.sh
 KEYS ?= $(HOME)/.keys
 # Extra builder flags, e.g. RELEASE_FLAGS=--snapshot-donors to build from
 # detached worktrees at each donor HEAD instead of refusing a dirty donor.
+# RELEASE_FLAGS reaches the builder as ARGV WORDS, never as shell text. Make
+# expands its own variables into the recipe before zsh parses it, so the earlier
+# spelling — $(RELEASE_FLAGS) spliced straight into the single-quoted `zsh -ic`
+# argument — handed the value to zsh as source.
+#
+# MEASURED 2026-08-18, and the vector is narrower than it looks: a `;` in the
+# value lands AFTER `exec`, so it never runs. Command substitution does, because
+# zsh evaluates $(...) and backticks while building the exec's argv:
+#   RELEASE_FLAGS='--snapshot-donors $(touch /tmp/proof)'   -> /tmp/proof exists
+# Through the environment and split with zsh's ${=...} the same value arrives as
+# four inert argv words and nothing is evaluated.
 RELEASE_FLAGS ?=
 
 app:
-	@zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --app-only $(RELEASE_FLAGS)'
+	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --app-only $${=VC_RELEASE_FLAGS}'
 
 dmg dmg-signed release-local:
-	@zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --no-notarize $(RELEASE_FLAGS)'
+	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --no-notarize $${=VC_RELEASE_FLAGS}'
 
 notarize:
-	@zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --notarize-only $(RELEASE_FLAGS)'
+	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --notarize-only $${=VC_RELEASE_FLAGS}'
 
 release:
-	@zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" $(RELEASE_FLAGS)'
+	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" $${=VC_RELEASE_FLAGS}'
 
 # The portable channel needs no signing identity and no notary account: it is a
 # provenance-bound source distribution, so it builds anywhere git and python3 do.

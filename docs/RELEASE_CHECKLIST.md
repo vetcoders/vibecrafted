@@ -119,6 +119,41 @@ git -C ../vc-frame worktree list      # same entries as before the build
 git -C ../vc-terminal worktree list
 ```
 
+**Use it for anything you intend to ship.** `--snapshot-donors` is the only mode
+that rebuilds vc-frame's bundled WASM plugins. Those blobs are git-tracked build
+output: `make release-binary` builds `--no-plugins` and embeds them with
+`include_bytes!`, so without a rebuild the release ships whatever paths the
+machine that last ran `make plugins-assets` happened to have. Measured on the
+4.1.0 DMG that was 411 occurrences of the operator's home directory inside
+`Contents/Helpers/vc-frame` alone. The rebuild adds about a minute and the
+snapshot is the only tree we are entitled to regenerate into — doing it to the
+living donor would rewrite tracked files another agent may be mid-edit on.
+
+### The payload gate
+
+Before a signature is spent, the builder greps the assembled bundle for every
+path that exists only on this machine — your home directory, the checkout, both
+donors, the snapshots — and refuses to continue if it finds one. There is no
+allowlist, on purpose.
+
+If it fires, the message names each offending file and how many times. Read it
+as a real finding: `--remap-path-prefix` only covers rustc, and the payload has
+at least four other producers (cc-rs, Swift/xcodebuild, uv's CPython, pip
+console scripts). `scripts/payload_hygiene.py` explains each one.
+
+You can ask the same question of an artifact you already have, without a
+rebuild:
+
+```bash
+make payload-hygiene ARTIFACT=dist/Vibecrafted.app
+make payload-hygiene ARTIFACT=dist/Vibecrafted_4.1.0-20260817-237d2814.dmg
+make payload-hygiene ARTIFACT=dist/Vibecrafted_4.1.0-20260818-c52f1326-portable.tar.gz
+```
+
+A `.dmg` is attached read-only and detached again; a tarball is extracted into a
+temp directory that is removed on every exit path. The artifact is never written
+to.
+
 ## 3. Build, sign, notarize
 
 ```bash
@@ -126,8 +161,12 @@ make release
 ```
 
 This is `scripts/build-vibecrafted-release.sh` with `KEYS=$HOME/.keys`.
-It remaps `RUSTFLAGS` so panic/debug metadata never contain `$HOME` or
-the checkout path, and sets `MACOSX_DEPLOYMENT_TARGET=14.0`.
+It sets `MACOSX_DEPLOYMENT_TARGET=14.0` and hands every compiler in the build a
+prefix map so no debug metadata names this machine: `RUSTFLAGS` for rustc,
+`CFLAGS`/`CXXFLAGS` for the C sources cc-rs compiles, and `-debug-prefix-map`
+for Swift through xcodebuild. Order matters — rustc applies the **last** match,
+so the list runs broadest first. The payload gate above is what checks the
+result rather than assuming it.
 
 Expected outputs under `dist/`:
 

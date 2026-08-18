@@ -35,6 +35,22 @@
 
 # Records of live snapshots, one "<donor>\t<path>" per entry.
 DONOR_SNAPSHOTS=()
+
+# _donor_snapshot_force_remove <donor> <path>
+#
+# The one place in this file allowed to run `rm -rf`. It existed only in the
+# reaper, carefully guarded; `donor_snapshot_create` had a second, unguarded
+# copy on its cleanup path. Both live call sites pass a hardcoded
+# "$REPO_ROOT/build/..." so neither was reachable — but two spellings of the
+# same dangerous operation, one of them guarded, is how the guard gets lost.
+_donor_snapshot_force_remove() {
+  local donor="$1" path="$2"
+  # Never the donor repository itself, never a root, never an empty word — the
+  # last of which is what an unquoted "${DONOR_SNAPSHOTS[@]}" expansion would
+  # have produced by word-splitting a record on its tab.
+  [[ -n "$path" && "$path" != "$donor" && "$path" != "/" ]] || return 0
+  rm -rf "$path"
+}
 # The HEAD the most recent snapshot was taken at. Exported because its only
 # reader is the script that sources this file, not this file itself.
 export DONOR_SNAPSHOT_HEAD=""
@@ -63,7 +79,8 @@ donor_snapshot_create() {
   # registration for this exact path would make `worktree add` refuse.
   git -C "$donor" worktree prune >/dev/null 2>&1 || true
   if [[ -e "$path" ]]; then
-    git -C "$donor" worktree remove --force "$path" >/dev/null 2>&1 || rm -rf "$path"
+    git -C "$donor" worktree remove --force "$path" >/dev/null 2>&1 \
+      || _donor_snapshot_force_remove "$donor" "$path"
     git -C "$donor" worktree prune >/dev/null 2>&1 || true
   fi
 
@@ -88,8 +105,7 @@ donor_snapshot_reap() {
     donor="${record%%$'\t'*}"
     path="${record#*$'\t'}"
     if ! git -C "$donor" worktree remove --force "$path" >/dev/null 2>&1; then
-      # Belt and braces: never recursively delete the donor, and never a root.
-      [[ -n "$path" && "$path" != "$donor" && "$path" != "/" ]] && rm -rf "$path"
+      _donor_snapshot_force_remove "$donor" "$path"
     fi
     git -C "$donor" worktree prune >/dev/null 2>&1 || true
   done
