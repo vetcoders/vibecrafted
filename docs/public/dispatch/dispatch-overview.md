@@ -35,7 +35,7 @@ vibecrafted dispatch plan.dispatch.toml --resume <run-id>
 Run `--doctor` before every real launch: it parses the plan, checks the
 schema, and enforces the policy rules (for example, READ cuts must declare a
 `mutation` policy, and verifier commands must not contain hard-stop commands
-like `git push`). `--dry-run` then shows you the exact prompt each worker
+like `git push --force` or `git push origin main`). `--dry-run` then shows you the exact prompt each worker
 would receive — placeholders rendered, briefs inlined, baton attached.
 
 ## What the supervisor does per cut

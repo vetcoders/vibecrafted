@@ -182,8 +182,10 @@ expect = { contains = "passed", not_contains = "FAILED", matches = "[0-9]+ passe
 | `exit_code`    | integer | Command exit code equals the value                 |
 
 `run` is required and must not contain hard-stop commands — the parser
-refuses `--no-verify`, `git reset --hard`, `git clean`, `git push`, `rm -rf /`,
-and release invocations. Outward-facing actions belong to the operator, not
+refuses `--no-verify`, `git reset --hard`, `git clean`, destructive remote
+push (force / trunk / delete / tags), `rm -rf /`, and release invocations.
+A non-destructive `git push origin HEAD` of a feature branch is allowed.
+Outward-facing merge, deploy, and publish still belong to the operator, not
 to a verifier shell.
 
 ## Placeholder rendering

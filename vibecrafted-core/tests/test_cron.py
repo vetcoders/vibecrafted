@@ -111,6 +111,36 @@ def test_tick_refuses_hard_stop_then_command(
     assert "git push" in payload["then"]["reason"]
 
 
+def test_tick_allows_non_destructive_feature_branch_push(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    state = root / ".vibecrafted" / "operator-loop.local.md"
+    write_state(state, updated_at=datetime.now(timezone.utc) - timedelta(minutes=15))
+
+    cron.main(
+        [
+            "tick",
+            "--json",
+            "--root",
+            str(root),
+            "--state-file",
+            str(state),
+            "--journal",
+            str(tmp_path / "journal.jsonl"),
+            "--no-context",
+            "--then-cmd",
+            "git push origin HEAD",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["then"]["status"] == "ran"
+    assert payload["then"]["command"] == "git push origin HEAD"
+
+
 def test_tick_default_prints_human_summary_not_json(
     tmp_path: Path,
     monkeypatch,

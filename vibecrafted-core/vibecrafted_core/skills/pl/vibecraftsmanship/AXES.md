@@ -30,7 +30,7 @@ triggery, antywzorce i testy przetrwania.
 - Nie decydują jednostronnie, co znaczy „dobre"
 - Nie narzucają rankingu, gdy operator chciał equal-intensity
 - Nie stosują konwencjonalnych szacunków bez sprawdzenia tych przeskalowanych przez operatora
-- Nie pushują bez autoryzacji operatora (nieodwracalne)
+- Nie force-pushują, nie pushują trunka i nie mergują bez autoryzacji operatora (nieodwracalne). Niedestruktywny push gałęzi feature po własnym commicie jest obowiązkiem, nie przyciskiem.
 - Nie podpisują commitów jako swoich, gdy praca była agenta (AGENT FAIRNESS)
 
 ### Konkretne przykłady z sesji 2026-05-24

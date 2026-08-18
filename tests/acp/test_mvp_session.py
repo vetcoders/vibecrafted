@@ -102,6 +102,18 @@ def test_mvp_fixture_handshake_prompt_update_and_cancel(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "sample",
     [
+        "git push",
+        "git push origin HEAD",
+        "git push -u origin feat/mcp-sessions-continuity",
+    ],
+)
+def test_policy_allows_non_destructive_feature_branch_push(sample: str) -> None:
+    assert classify_hard_stop({"command": sample}) is None
+
+
+@pytest.mark.parametrize(
+    "sample",
+    [
         "git push origin main",
         "gh pr merge 42",
         "npm publish",

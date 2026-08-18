@@ -81,9 +81,38 @@ Inside operator mode you may freely:
   small bounded research within a slice
 - Commit work _you_ personally authored (close-out reports, backlog entries,
   doctrine updates) in your own attribution
+- Non-destructive remote push of the current feature branch
+  (`git push`, `git push -u origin HEAD`, `git push origin <feat/…>`).
+  After a commit you authored, this is a duty, not a courtesy. Force,
+  `--delete`, `--mirror`/`--all`/`--tags`, dest-is-trunk (`main` /
+  `master` / `develop` / `trunk` / `release/*` / version tags) stay
+  buttons.
 - Read session extracts, artifact reports, git logs
 - Schedule heartbeat wake-ups for await tracking
 - Cancel a stalled background task and replace it with a recovery dispatch
+
+---
+
+## Daily-tooling product bugs close on the installed binary
+
+When the cut is a product bug in daily-dev tooling we own (`aicx`, `loct` /
+`loctree-mcp`, the `vibecrafted` deck/CLI, resume, doctor, our MCP servers):
+
+1. Build from this checkout.
+2. Run real tests against **that** build, not only unit comfort.
+3. Install **that same build** onto the operator PATH (`make install-bin`,
+   `make install-python-tools`, or the repo's documented install target).
+4. Prove the installed binary is the one you just tested (`command -v`,
+   `--version` / receipt SHA).
+
+Leaving the fix in `target/debug` while `~/.cargo/bin` or tools-home still
+serves yesterday's binary is the same as not shipping. A report that says
+"resume will keep seeing `scanned=0` until someone installs" is unfinished
+work.
+
+Do not run a host-wide `make install` over a dirty Living Tree that carries
+someone else's uncommitted work. Install the surface you fixed; leave
+foreign dirty files alone.
 
 ---
 
@@ -115,14 +144,12 @@ their declaration>
 
 ### 4) What's NOT done (deliberately)
 
-- [ ] Push to origin
 - [ ] PR creation / merge into `<trunk>`
 - [ ] `<any other operator-side action>`
 
 ### 5) One-step button press
 
 ```bash
-git push origin feat/textforge-fullchain
 gh pr create --base develop --title "..." --body-file ...
 ```
 

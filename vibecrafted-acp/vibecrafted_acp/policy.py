@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from vibecrafted_core.autonomy_surface import destructive_remote_push
+
 
 @dataclass(frozen=True)
 class HardStop:
@@ -17,7 +19,6 @@ class HardStop:
 
 
 _HARD_STOP_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("git-push", re.compile(r"\bgit\s+push\b", re.IGNORECASE)),
     (
         "git-history",
         re.compile(
@@ -63,6 +64,9 @@ def _searchable_text(value: Any) -> str:
 def classify_hard_stop(raw_input: Any) -> HardStop | None:
     """Classify operator-button actions conservatively from raw tool/prompt input."""
     text = _searchable_text(raw_input)
+    destructive = destructive_remote_push(text)
+    if destructive is not None:
+        return HardStop(category="git-push", evidence=destructive)
     for category, pattern in _HARD_STOP_PATTERNS:
         match = pattern.search(text)
         if match is not None:

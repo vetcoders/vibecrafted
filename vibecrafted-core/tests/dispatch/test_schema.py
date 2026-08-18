@@ -170,6 +170,18 @@ def test_parser_accepts_read_cut_without_mutation_for_doctor_policy() -> None:
     assert "cuts[6].mutation: required for READ cuts" in result.errors
 
 
+def test_non_destructive_feature_branch_push_is_a_legal_verifier() -> None:
+    text = (FIXTURES / "minimal.dispatch.toml").read_text(encoding="utf-8")
+    text = text.replace(
+        'run = "python -m pytest vibecrafted-core/tests/dispatch -q"',
+        'run = "git push origin HEAD"',
+    )
+
+    dispatch = parse_dispatch(text, base_dir=FIXTURES)
+
+    assert dispatch.cuts[0].verify[0].run == "git push origin HEAD"
+
+
 def test_rejects_unsupported_read_mutation_at_parse_time() -> None:
     text = (FIXTURES / "stage0.dispatch.toml").read_text(encoding="utf-8")
     text = text.replace(

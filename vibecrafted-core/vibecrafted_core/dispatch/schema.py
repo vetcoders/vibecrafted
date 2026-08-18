@@ -11,6 +11,7 @@ from typing import Any
 
 import tomllib
 
+from vibecrafted_core.autonomy_surface import destructive_remote_push
 from vibecrafted_core.delivery.model import ContractError, ExecutionEnvelope
 from vibecrafted_core.workflow import SUPPORTED_WORKFLOWS
 
@@ -37,7 +38,6 @@ FORBIDDEN_COMMAND_NEEDLES = (
     "git reset --hard",
     "git clean -fd",
     "git clean -xdf",
-    "git push",
     "make release",
     "release",
     "rm -rf /",
@@ -652,6 +652,11 @@ def _validate_command(run: str, prefix: str, errors: list[str]) -> None:
         return
     normalized = " ".join(shlex.split(run)) if _can_shlex(run) else run
     lowered = normalized.lower()
+    destructive = destructive_remote_push(normalized)
+    if destructive is not None:
+        errors.append(
+            f"{prefix}.run: forbidden destructive remote push {destructive!r}"
+        )
     for needle in FORBIDDEN_COMMAND_NEEDLES:
         if needle in lowered:
             errors.append(f"{prefix}.run: forbidden hard-stop command {needle!r}")

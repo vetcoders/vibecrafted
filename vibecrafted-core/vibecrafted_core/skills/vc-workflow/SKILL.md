@@ -277,7 +277,7 @@ Do not stop at implementation. Proceed through the convergence boundary:
 One commit per round (marbles: one round = one commit), committed locally on the current
 branch, well-formed per the commit-msg hook — delivered work is never left uncommitted. A
 vc-workflow run produces **up to 3 commits** (the write phases — Implement, Marbles, Polarize
-— each commit their round). **Do not push**: push is the operator's button.
+— each commit their round). Non-destructive remote push of this feature branch is a duty after those commits. Force-push, trunk push, merge, and deploy stay operator buttons.
 
 ## Quick Reference
 

@@ -44,8 +44,10 @@ cztery** warunki:
 3. **Jeden integrator.** Nazwany koordynator jest właścicielem integracji:
    merge'uje gałęzie cięć jednowątkowo po zielonych verifierach, uruchamia
    pełne bramki na zintegrowanym drzewie i journaluje każdą zmianę planu w
-   locie. Workerzy NIGDY nie pushują, NIGDY nie merge'ują, NIGDY nie dotykają
-   głównego checkoutu.
+   locie. Workerzy Trybu B NIGDY nie pushują, NIGDY nie merge'ują, NIGDY nie
+   dotykają głównego checkoutu — remotes należą do integratora. Workerzy
+   Trybu A / współdzielonego checkoutu traktują niedestruktywny push gałęzi
+   feature jako wolny ruch po swoich commitach (zob. `vc-operator/AUTONOMY.md`).
 4. **Standardowa geometria.** Dispatcher jest właścicielem neutralnych wobec
    providera worktree pod
    `~/.vibecrafted/worktrees/<org>/<repo>/YYYY_MMDD/<cut-id>` na gałęziach

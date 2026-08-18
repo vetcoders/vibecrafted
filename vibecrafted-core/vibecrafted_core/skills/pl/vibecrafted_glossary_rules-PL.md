@@ -937,9 +937,9 @@ Znaczenie: czynność, której agent nie może wykonać sam, nawet jeśli techni
 
 Typowe operator buttons:
 
-- push
-- PR
-- merge
+- force-push / trunk push
+- PR merge
+- merge do trunka
 - release
 - deploy
 - public repo toggle
@@ -952,7 +952,7 @@ Typowe operator buttons:
 
 Dobre:
 
-- “Push jest operator button.”
+- “Force-push i push na trunk są operator button.”
 - “Agent może przygotować PR body, ale nie otwiera PR bez zgody.”
 
 Nie tłumaczyć jako “przycisk operatora” w głównym żargonie, chyba że objaśniająco.
@@ -1148,7 +1148,7 @@ Można opisać: “pełna autonomia w obrębie granic”.
 
 Dobre:
 
-- “Full autonomy, local commits only, no push.”
+- “Full autonomy: non-destructive feature-branch push after your commit; no force/trunk/merge.”
 - “Pełna autonomia nie obejmuje operator buttons.”
 
 ⸻
@@ -1554,7 +1554,7 @@ Zostają: ahead / behind
 Dobre:
 
 - “Branch jest ahead 2, behind 0.”
-- “Nie pushuj bez operator decision.”
+- “Nie force-pushuj i nie pushuj trunka bez operator decision.”
 
 ⸻
 
@@ -2121,7 +2121,7 @@ Dobre:
 - “Zrób vc-init, potem followup pass i wrzuć mi verdict.”
 - “To wygląda na CHECK, nie FIX.”
 - “Nie odpalaj marbles bez bounded targetu.”
-- “Push jest operator button.”
+- “Force-push i push na trunk są operator button.”
 - “Worker ma wykonać mały slice i oddać delta report.”
 - “Audit ma falsyfikować kontrakt, nie robić ogólnego przeglądu.”
 - “Hydrate uzupełnia onboarding i docs, ale nie robi release.”

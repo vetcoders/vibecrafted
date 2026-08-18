@@ -11,5 +11,5 @@ workflow = "implement"
 prompt = "Do it."
 
   [[cuts.verify]]
-  run = "git push origin HEAD"
+  run = "git push --force origin HEAD"
   expect = { exit_code = 0 }

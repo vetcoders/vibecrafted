@@ -240,8 +240,8 @@ osiąga wszystkie `[x]` lub gdy krok 7 dochodzi do punktu stopu.
 
 ```text
 Operator stops at the operator's button for actions not already permitted
-by the written plan or current session — push, merge, public release,
-deploy, paid action.
+by the written plan or current session — force-push, trunk push, merge,
+public release, deploy, paid action.
 ```
 
 Zobacz `./AUTONOMY.md` po harmonogram hard-stop (powierzchnia git +
@@ -254,8 +254,10 @@ Mutacje zmieniające scope nadal wymagają przycisku.
 
 Gdy tracker fali jest cały `[x]`, a następny ruch jest po stronie operatora
 bez zezwolenia spisanego plan/sesja, napisz handoff w punkcie stopu per
-`./AUTONOMY.md` „The stop-point handoff" i wyjdź. Nie pushuj, nie merguj,
-nie deployuj, chyba że spisany plan lub bieżąca sesja jawnie na to zezwala.
+`./AUTONOMY.md` „The stop-point handoff" i wyjdź. Nie force-pushuj, nie
+pushuj trunka, nie merguj, nie deployuj, chyba że spisany plan lub
+bieżąca sesja jawnie na to zezwala. Niedestruktywny push gałęzi feature
+jest już dozwolony — zrób go po swoich commitach.
 
 ---
 

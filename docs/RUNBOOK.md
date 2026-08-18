@@ -192,9 +192,10 @@ Two standing rules underneath all of the above:
    editing, never revert others' changes, commit only your own paths in small
    packs, `[<agent>/<workflow>]` titles, `Authored-By: <agent>
 <agents@vetcoders.io>`.
-2. **Buttons** — `git push`, merge, deploy, and anything outward-facing
-   belongs to the human operator. Workers stop at the button and write a
-   one-step handoff instead.
+2. **Buttons** — force-push, trunk push, merge, deploy, and anything
+   outward-facing belongs to the human operator. A non-destructive
+   `git push` of the current feature branch is not a button. Workers stop
+   at the remaining buttons and write a one-step handoff instead.
 
 ## 8. When lost
 

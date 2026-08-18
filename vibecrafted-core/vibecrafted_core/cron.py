@@ -12,10 +12,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import ui
+from .autonomy_surface import destructive_remote_push
 from .runtime_paths import vibecrafted_home
 
 HARD_STOP_NEEDLES = (
-    "git push",
     "git reset --hard",
     "git checkout --",
     "rm -rf",
@@ -116,6 +116,9 @@ def append_jsonl(path: Path, payload: dict[str, object]) -> None:
 
 def hard_stop_reason(command: str) -> str:
     """Return the matched HARD_STOP_NEEDLES substring if ``command`` is dangerous, else ""."""
+    destructive = destructive_remote_push(command)
+    if destructive is not None:
+        return destructive
     lowered = command.lower()
     for needle in HARD_STOP_NEEDLES:
         if needle in lowered:

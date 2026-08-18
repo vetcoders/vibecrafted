@@ -241,8 +241,8 @@ hits all `[x]` or when step 7 reaches the stop point.
 
 ```text
 Operator stops at the operator's button for actions not already permitted
-by the written plan or current session — push, merge, public release,
-deploy, paid action.
+by the written plan or current session — force-push, trunk push, merge,
+public release, deploy, paid action.
 ```
 
 See `./AUTONOMY.md` for the hard-stop schedule (git surface +
@@ -255,8 +255,10 @@ Scope-changing mutations still require the button.
 
 When the wave tracker is all `[x]` and the next move is operator-side
 without written plan/session permission, write the stop-point handoff per
-`./AUTONOMY.md` "The stop-point handoff" and exit. Do not push, merge,
-or deploy unless the written plan or current session explicitly permits it.
+`./AUTONOMY.md` "The stop-point handoff" and exit. Do not force-push, push
+trunk, merge, or deploy unless the written plan or current session
+explicitly permits it. Non-destructive feature-branch push is already
+permitted — do it after authored commits.
 
 ---
 

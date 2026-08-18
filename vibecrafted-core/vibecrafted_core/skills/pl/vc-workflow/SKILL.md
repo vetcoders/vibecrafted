@@ -269,7 +269,7 @@ Nie zatrzymuj się na implementacji. Przejdź przez granicę zbieżności:
 Jeden commit na rundę (marbles: jedna runda = jeden commit), commitowany lokalnie na bieżącej
 gałęzi, dobrze sformowany wg hooka commit-msg — dowieziona praca nigdy nie zostaje niezacommitowana.
 Przebieg vc-workflow produkuje **do 3 commitów** (fazy zapisu — Implement, Marbles, Polarize
-— każda commituje swoją rundę). **Nie pushuj**: push to operator button.
+— każda commituje swoją rundę). Niedestruktywny remote push tej gałęzi feature to obowiązek po tych commitach. Force-push, push na trunk, merge i deploy zostają przyciskami operatora.
 
 ## Szybka ściąga
 

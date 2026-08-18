@@ -82,9 +82,39 @@ Wewnątrz trybu operatora możesz swobodnie:
   małego bounded researchu wewnątrz slice'a
 - commitować pracę, której _ty_ jesteś osobistym autorem (raporty zamknięcia, wpisy
   backlogu, aktualizacje doktryny) we własnej atrybucji
+- niedestruktywny remote push bieżącej gałęzi feature
+  (`git push`, `git push -u origin HEAD`, `git push origin <feat/…>`).
+  Po commicie, którego jesteś autorem, to obowiązek, nie uprzejmość.
+  Force, `--delete`, `--mirror`/`--all`/`--tags`, dest-to-trunk (`main` /
+  `master` / `develop` / `trunk` / `release/*` / tagi wersji) zostają
+  przyciskami.
 - czytać ekstrakty sesji, raporty artefaktów, logi gita
 - planować pobudki heartbeat do śledzenia await
 - anulować zacięty task w tle i zastąpić go dispatchem odzyskiwania
+
+---
+
+## Bugi produktowe daily-toolingu zamyka zainstalowana binarka
+
+Gdy cięcie to bug produktowy w daily-dev toolingu, którego jesteśmy właścicielami
+(`aicx`, `loct` / `loctree-mcp`, deck/CLI `vibecrafted`, resume, doctor, nasze
+serwery MCP):
+
+1. Zbuduj z tego checkoutu.
+2. Odpal prawdziwe testy na **tym** buildzie, nie tylko unit comfort.
+3. Zainstaluj **ten sam build** na PATH operatora (`make install-bin`,
+   `make install-python-tools` albo kanoniczny target instalacyjny repo).
+4. Udowodnij, że zainstalowana binarka to ta, którą właśnie przetestowałeś
+   (`command -v`, `--version` / SHA z receiptu).
+
+Zostawienie poprawki w `target/debug`, podczas gdy `~/.cargo/bin` albo
+tools-home nadal serwuje wczorajszą binarkę, to to samo co nie dowieźć.
+Raport „resume dalej zobaczy `scanned=0`, dopóki ktoś nie zainstaluje" jest
+niedokończoną pracą.
+
+Nie odpalaj host-wide `make install` na brudnym Living Tree, które niesie
+niezacommitowaną pracę kogoś innego. Zainstaluj powierzchnię, którą naprawiłeś;
+cudzych brudnych plików nie ruszaj.
 
 ---
 
@@ -116,14 +146,12 @@ jego deklaracji>
 
 ### 4) Co NIE jest zrobione (celowo)
 
-- [ ] Push do origin
 - [ ] Utworzenie PR / merge do `<trunk>`
 - [ ] `<jakiekolwiek inne działanie po stronie operatora>`
 
 ### 5) Jednokrokowe wciśnięcie guzika
 
 ```bash
-git push origin feat/textforge-fullchain
 gh pr create --base develop --title "..." --body-file ...
 ```
 

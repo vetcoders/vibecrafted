@@ -52,8 +52,11 @@ A written multi-agent dispatch MAY put each cut in its own worktree — and at
    are sequence zones by definition.
 3. **One integrator.** A named coordinator owns integration: merges cut
    branches back single-threaded after green verifiers, runs full gates on
-   the integrated tree, and journals every mid-plan change. Workers NEVER
-   push, NEVER merge, NEVER touch the main checkout.
+   the integrated tree, and journals every mid-plan change. Mode B workers
+   NEVER push, NEVER merge, NEVER touch the main checkout — the integrator
+   owns remotes. Mode A / shared-checkout workers treat a non-destructive
+   feature-branch push as a free move after their own commits (see
+   `vc-operator/AUTONOMY.md`).
 4. **Standard geometry.** The dispatcher owns provider-neutral worktrees at
    `~/.vibecrafted/worktrees/<org>/<repo>/YYYY_MMDD/<cut-id>` on
    `cut/<cut-id>` branches. Every cut owns a real ignored

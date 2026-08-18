@@ -114,10 +114,12 @@ Unknown slash commands fail closed with `stopReason: refusal`.
 
 ## Permissions and cancellation
 
-The MVP hard-stop classifier is unchanged. Push, merge, publish, and deploy
-intents require an ACP permission request and only explicit `allow_once`
-continues. Denial, timeout, and missing decisions fail closed. Accepted
-overrides are written through the existing audit event path.
+The hard-stop classifier treats force-push, trunk push, merge, publish, and
+deploy as operator buttons. A non-destructive feature-branch `git push`
+does not request permission. Remaining hard-stop intents require an ACP
+permission request and only explicit `allow_once` continues. Denial,
+timeout, and missing decisions fail closed. Accepted overrides are written
+through the existing audit event path.
 
 `session/cancel` signals the session and stops the active child run through the
 canonical workflow stop API.

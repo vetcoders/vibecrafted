@@ -221,7 +221,7 @@ Living tree note:
 - Run required checks. If something is blocked, report the exact blocker and run the closest safe equivalent.
 - Coordination mode: <solo on this stage / parallel with other agents on this stage>
 - You do not need to inspect other agents' plans unless this plan explicitly tells you to.
-- **Commit is an obligation, not a checkpoint option: ONE commit per round** (marbles — one round = one commit), well-formed per the commit-msg hook, on the current branch. Do NOT leave delivered work uncommitted. **Do NOT push** — push is the operator's button. When the mission spans multiple rounds/units, multi-commit per dispatch is expected.
+- **Commit is an obligation, not a checkpoint option: ONE commit per round** (marbles — one round = one commit), well-formed per the commit-msg hook, on the current branch. Do NOT leave delivered work uncommitted. Non-destructive remote push of the current feature branch (`git push -u origin HEAD`, not force, not trunk) is a duty after that commit. Force-push, trunk push, merge, and deploy stay operator buttons. When the mission spans multiple rounds/units, multi-commit per dispatch is expected.
 - You are an execution unit, not orchestration authority: do not invoke `vc-agents`, do not reopen frontier selection, and do not reinterpret the `vc-why-matrix`.
 - If the mission reveals a wider unresolved surface, report that boundary clearly and leave orchestration changes to the operator.
 ```

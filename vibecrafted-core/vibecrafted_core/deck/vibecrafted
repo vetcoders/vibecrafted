@@ -871,7 +871,7 @@ cmd_cron_help() {
   printf '  vibecrafted cron line --root /path/to/repo --every-minutes 10 --then-cmd '"'"'vibecrafted loop next'"'"'\n'
   printf '\n'
   printf '%bSafety:%b\n' "$_bold" "$_reset"
-  printf '  tick refuses hard-stop commands such as push, deploy, publish, release, reset, checkout --, and rm -rf.\n'
+  printf '  tick refuses hard-stop commands such as force-push, trunk push, deploy, publish, release, reset, checkout --, and rm -rf.\n'
   printf '  Runtime shell is only a wrapper; implementation lives in vibecrafted-core.\n'
   printf '\n'
 }
