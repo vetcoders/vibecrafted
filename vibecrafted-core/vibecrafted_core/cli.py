@@ -420,10 +420,32 @@ def _default_runtime(explicit_runtime: str, root: str = "") -> str:
     return "headless"
 
 
+def _argv_names_stopped_run(argv: Sequence[str]) -> bool:
+    """True when argv names a control-plane run (``--run-id`` / ``--last``)."""
+    return any(
+        token == "--last" or token == "--run-id" or token.startswith("--run-id=")
+        for token in argv
+    )
+
+
 def _normalize_raw_args(raw_args: list[str]) -> list[str]:
-    """Swap a leading ``<agent> <launcher>`` pair into ``<launcher> <agent>`` order."""
+    """Canonicalize leading pairs so later dispatch sees one shape.
+
+    ``<agent> <launcher>`` becomes ``<launcher> <agent>``.
+    ``resume <agent> --run-id|--last`` becomes ``<agent> resume …`` so the
+    stopped-run flag is not delegated to the deck (which historically had no
+    ``--run-id`` and swallowed it) or to ``_build_parser`` (no ``resume``
+    subcommand). ``--session`` / bare resume stay resume-first for the deck.
+    """
     if len(raw_args) >= 2 and raw_args[0] in AGENTS and raw_args[1] in LAUNCHERS:
         return [raw_args[1], raw_args[0], *raw_args[2:]]
+    if (
+        len(raw_args) >= 2
+        and raw_args[0] == "resume"
+        and raw_args[1] in AGENTS
+        and _argv_names_stopped_run(raw_args[2:])
+    ):
+        return [raw_args[1], "resume", *raw_args[2:]]
     return raw_args
 
 

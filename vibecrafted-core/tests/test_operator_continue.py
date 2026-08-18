@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
 from vibecrafted_core import cli, workflow
 from vibecrafted_core.package_resources import deck_path
 from vibecrafted_core.workflow import (
@@ -12,9 +13,11 @@ from vibecrafted_core.workflow import (
     operator_continue_run,
 )
 
+STOPPED_RUN_ID = "work-260816-213657-08420"
+
 
 def test_looks_like_control_plane_run_id_accepts_work_ids() -> None:
-    assert looks_like_control_plane_run_id("work-260816-213657-08420")
+    assert looks_like_control_plane_run_id(STOPPED_RUN_ID)
     assert looks_like_control_plane_run_id("rsme-260816-215903-94636")
     assert not looks_like_control_plane_run_id("d863c229-8b7a-4ee4-a972-16babba5ae30")
     assert not looks_like_control_plane_run_id("01a00ad6-4495-7864-b995-dfa1a2ca8cfa")
@@ -196,6 +199,68 @@ def test_operator_continue_run_refuses_live_worker(monkeypatch, tmp_path: Path) 
     assert result["reason"] == "still_running"
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["claude", "resume", "--run-id", STOPPED_RUN_ID],
+        ["resume", "claude", "--run-id", STOPPED_RUN_ID],
+        ["resume", "claude", f"--run-id={STOPPED_RUN_ID}"],
+    ],
+)
+def test_resume_run_id_argv_round_trips_both_orders(
+    argv: list[str], monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """Both public orders keep --run-id; the parser must not swallow the flag."""
+    seen: dict[str, Any] = {}
+
+    def fake_continue(run_id: str, **kwargs: Any) -> dict[str, Any]:
+        seen["run_id"] = run_id
+        seen["agent"] = kwargs.get("expected_agent")
+        return {
+            "accepted": True,
+            "run_id": "work-child",
+            "resume_of": run_id,
+            "agent": kwargs.get("expected_agent"),
+            "resume_mode": "manual_explicit",
+            "root": str(tmp_path),
+        }
+
+    monkeypatch.setattr(cli, "operator_continue_run", fake_continue)
+    monkeypatch.setattr(cli, "_watch_launch_startup", lambda *_a, **_k: None)
+
+    rc = cli.main(argv)
+
+    assert rc == 0
+    assert seen["run_id"] == STOPPED_RUN_ID
+    assert seen["agent"] == "claude"
+    output = capsys.readouterr().out
+    assert "OPERATOR CONTINUE RECEIPT" in output
+    assert STOPPED_RUN_ID in output
+
+
+def test_normalize_raw_args_promotes_resume_first_run_id() -> None:
+    promoted = cli._normalize_raw_args(
+        ["resume", "claude", "--run-id", STOPPED_RUN_ID, "--prompt", "continue"]
+    )
+    assert promoted == [
+        "claude",
+        "resume",
+        "--run-id",
+        STOPPED_RUN_ID,
+        "--prompt",
+        "continue",
+    ]
+    assert cli._normalize_raw_args(
+        ["claude", "resume", "--run-id", STOPPED_RUN_ID]
+    ) == ["claude", "resume", "--run-id", STOPPED_RUN_ID]
+    assert cli._normalize_raw_args(["resume", "claude", "--session", "abc-123"]) == [
+        "resume",
+        "claude",
+        "--session",
+        "abc-123",
+    ]
+
+
 def test_agent_resume_cli_routes_run_id(monkeypatch, tmp_path: Path, capsys) -> None:
     monkeypatch.setattr(
         cli,
@@ -216,7 +281,7 @@ def test_agent_resume_cli_routes_run_id(monkeypatch, tmp_path: Path, capsys) -> 
             "claude",
             "resume",
             "--run-id",
-            "work-260816-213657-08420",
+            STOPPED_RUN_ID,
             "--prompt",
             "continue",
         ]
@@ -225,7 +290,7 @@ def test_agent_resume_cli_routes_run_id(monkeypatch, tmp_path: Path, capsys) -> 
     assert rc == 0
     output = capsys.readouterr().out
     assert "OPERATOR CONTINUE RECEIPT" in output
-    assert "work-260816-213657-08420" in output
+    assert STOPPED_RUN_ID in output
 
 
 def test_agent_resume_cli_rejects_session_flag_used_as_run(capsys) -> None:
