@@ -70,42 +70,6 @@ when Loctree cannot answer cleanly.
 
 ---
 
-# Vibecrafted Feedback Loop (this repository's own runtime)
-
-Vibecrafted's fail ledger is `~/.vibecrafted/vibecrafted/vibecrafted-fail.md`
-(HAK-numbered, append-only). It mirrors the Loctree loop, with the same split of
-roles — and the same rule that made Loctree's loop work:
-
-- **Downstream users / operators of the installed runtime** append evidence
-  (version from `vibecrafted --version`, run_id, receipt, transcript tail,
-  expected vs observed) so the runtime team can reproduce and prioritize.
-- **Contributors working inside this repository** treat an observed runtime
-  failure as **product work, not note-taking**. Order:
-  1. Reproduce it (run_id + control-plane state or a failing test).
-  2. Fix it in the same cut when the scope is bounded.
-  3. Add a focused test or contract that fails without the fix.
-  4. Append to `vibecrafted-fail.md` **only when the repair cannot land now**,
-     and state the concrete blocker (hub file in another cut's domain, needs
-     operator button, needs a substrate you do not have).
-
-A workaround is not a fix. If you route around a runtime defect
-(`env -u PYTHONPATH`, `--force`, a hand-rolled poller, a manual
-`interrupt → fallback → approve` after a provider error, `--no-verify`), the
-defect goes into the ledger with the run_id **in the same commit** as the
-workaround — otherwise the workaround becomes the convention and the defect
-becomes invisible.
-
-Supervisors of lifecycle/dispatch runs append on every `infra_failure`,
-`interrupt`, `fallback`, `approve --force`, and every `[?]` that survives DoU.
-
-### Rules
-
-- Never recreate the file. Never overwrite it. Always append.
-- Repeated reports are signal, not noise — do not skip because a similar HAK exists.
-- Every entry carries: date, agent, session_id, run_id(s), version, expected vs observed.
-
----
-
 # Loctree Feedback Loop
 
 If Loctree is:
