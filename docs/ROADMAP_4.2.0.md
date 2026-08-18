@@ -227,6 +227,82 @@ restore. The guard reproduces the exact regression it exists to stop.
 **Unblocked by this cut.** W2-a may now implement the host-side `SessionInfo`
 projection against a stated, tested rule. It remains unimplemented.
 
+## Polarize stage, loop 2 — the installed owner, 2026-08-18
+
+**Chosen axis — an installed owner is where the launcher _lands_, not what its
+directory is _named_. `Vibecrafted.app` is a first-class installed owner.**
+
+`vibecrafted doctor` graded three subsystems against one binary and got three
+different answers on this host:
+
+| Subsystem                               | Verdict on `~/.local/bin/vibecrafted`                              |
+| --------------------------------------- | ------------------------------------------------------------------ |
+| `_launcher_shim_findings`               | `fail` — "checkout/legacy bash deck … Reinstall"                   |
+| `server_supervisor` (via `active.json`) | authoritative generation for the launchd plist                     |
+| delivery receipt                        | `[CLEAN]`, `installed: …/releases/4.1.0+g237d2814/bin/vibecrafted` |
+
+The cause is not two _ages_ of one install — it is two _layouts_. `make install`
+stages `tools/vibecrafted-generation-*` behind the `vibecrafted-current`
+symlink; `Vibecrafted.app` (`AppDelegate.swift`) publishes
+`releases/<version>/` and writes `~/.local/bin` wrappers that `exec` into it.
+The doctor recognised only two owners — a uv-tool Python shim, and a bash deck
+whose _path string_ contains `vibecrafted-generation-`. The app's own install
+matched neither, so the shipped product was told to "reinstall so an installed
+owner wins PATH" — advice that reproduces the identical layout and can never be
+satisfied.
+
+Measured, not assumed: `releases/4.1.0+g237d2814/bin/vibecrafted` is a 203 KB
+regular file, `resolve()` stays inside itself, and **0** symlinks under that
+root escape to the checkout. It is an installed runtime by every property the
+check claims to care about.
+
+The repository's own documentation already stated the correct rule. The
+"Checkout-free gate" section of `docs/runtime/INSTALLED_RUNTIME_CAPSULE.md`
+says doctor fails "when the public launcher resolves outside
+`~/.local/share/vibecrafted`" — containment, not naming. The code implemented a
+narrower rule than the doc it was written against, and the doc's _opening_
+paragraph had since drifted the other way ("enter **only** … `vibecrafted-current`").
+This cut restores one rule and makes both surfaces state it.
+
+**Rejected alternatives**
+
+| Rejected                                                                                                             | Why it loses                                                                                                                                                                                                                                                    |
+| -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **The capsule layout is the only installed owner; the app must be repackaged into `tools/vibecrafted-generation-*`** | That is a packaging rewrite of the shipped product to satisfy a string test. The app already audits every runtime entry for executability and refuses symlinks before publishing; it is not less installed for choosing a different directory.                  |
+| **The app channel wins and the capsule is legacy**                                                                   | Refuted on this host: `tools/vibecrafted-current` is live at `4.1.0+ga7f262d9`, `make install` still writes it, and the generation manifest's digest closure has no counterpart in the app channel. Declaring it legacy would delete a real integrity boundary. |
+| **Leave the `fail` and let operators reinstall**                                                                     | The instruction is false. Reinstalling from the app reproduces byte-for-byte the layout being rejected. A gate whose remedy cannot satisfy it is noise that trains operators to ignore doctor.                                                                  |
+| **Unify the two pointers (`active.json` and `vibecrafted-current`) into one**                                        | The right end state, and out of scope for a cut. It needs the app and the shell installer to agree on a write protocol — implement/marbles work. Polarize names the disagreement and makes doctor surface it; it does not invent the merged pointer.            |
+| **Also re-point `__version__` resolution at the entered runtime root**                                               | Rewrites version resolution across `staged_tools_sync` (268 tests). The lie is closed by _reporting_ the disagreement, not by silently switching which generation answers.                                                                                      |
+
+**Aligned surfaces**
+
+- `vibecrafted_core/doctor.py` — ownership is containment in
+  `$VIBECRAFTED_RUNTIME_HOME`, resolved either directly or through a wrapper's
+  `exec` target. The target is believed only after `is_file()` + `X_OK` +
+  `resolve(strict=True)`, so a wrapper cannot talk its way into a root it does
+  not enter. New cross-check: the reported install identity is compared against
+  the `VERSION` of the root the launcher actually enters, and a mismatch is a
+  `warn` naming both.
+- `docs/runtime/INSTALLED_RUNTIME_CAPSULE.md` — the opening paragraph now states
+  the boundary and both channels instead of contradicting the app.
+- `vibecrafted-core/tests/test_doctor.py` — five regression tests: the
+  app-shaped wrapper is `ok`; a wrapper execing a checkout is `fail`; an `exec`
+  target that does not exist is `fail`; the version cross-check warns on
+  disagreement and stays quiet on agreement.
+
+**Proof the guards bite.** Against the pre-cut doctor,
+`test_launcher_shim_finding_ok_for_app_installed_release_launcher` fails
+`assert 'fail' == 'ok'`. With the cross-check branch mutated to `elif False`,
+`test_launcher_version_warns_…` fails `assert 'ok' == 'warn'`. Both green on
+restore. On the live host the check flips `fail` → `ok` and raises the
+previously invisible `warn: doctor resolves install identity 4.1.0+ga7f262d9,
+but the PATH launcher enters …/releases/4.1.0+g237d2814`.
+
+**What this does not fix.** One install channel still does not know about the
+other. `make install` and the app both claim `~/.local/bin`; last writer wins.
+Doctor now reports that instead of hiding it, which is the honest state — the
+merge is a wave, not a cut.
+
 ## Explicit non-goals
 
 Native Windows runtime · a second control plane · new vc-frame features beyond the

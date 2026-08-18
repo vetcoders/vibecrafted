@@ -2,16 +2,32 @@
 
 The repository is a workshop. The installed generation is the runtime.
 
-`~/.local/bin/vibecrafted` and its `vc-*` aliases enter only the command deck
-under:
+`~/.local/bin/vibecrafted` and its `vc-*` aliases enter an **installed runtime
+root**, never a repository checkout. Ownership is decided by where the launcher
+lands, not by the shape of a directory name:
 
 ```text
-~/.local/share/vibecrafted/tools/vibecrafted-current/
+~/.local/share/vibecrafted/            <- $VIBECRAFTED_RUNTIME_HOME, the boundary
+  tools/vibecrafted-current/           <- `make install` channel (capsule)
+  releases/<version>/                  <- Vibecrafted.app channel
 ```
 
-`vibecrafted-current` is an atomic symlink to one immutable
-`vibecrafted-generation-*` directory. The installer refuses to use a uv tool
-shim or repository checkout as the public launcher target.
+Two publication channels are live and both are first-class installed owners:
+
+- **`make install`** stages `tools/vibecrafted-generation-*` and flips the
+  atomic `vibecrafted-current` symlink onto it.
+- **`Vibecrafted.app`** publishes `releases/<version>/`, records it in
+  `active.json` (`vibecrafted.active-runtime.v1`), and writes the `~/.local/bin`
+  launchers as env preambles ending in `exec '<runtime_root>/bin/<tool>' "$@"`.
+
+A launcher qualifies when it resolves inside the runtime home, or when the
+executable it `exec`s does — and that target really exists and is executable.
+Neither a uv tool shim posing as a deck nor a repository checkout can qualify.
+
+Both channels writing `~/.local/bin` means both can be installed at once. When
+they disagree, `vibecrafted doctor` says so: the version it reports is checked
+against the `VERSION` of the runtime root the PATH launcher actually enters, and
+a mismatch is a `warn`, not a silent `ok` on a generation nothing runs.
 
 ## Generation manifest
 
@@ -59,8 +75,11 @@ Publication fails when:
 
 `vibecrafted doctor` repeats the audit against the installed artifact. It also
 fails when the public launcher resolves outside
-`~/.local/share/vibecrafted`, when the manifest is invalid, or when a
-manifest-bound file has drifted.
+`~/.local/share/vibecrafted` — including through the `exec` target of a
+generated wrapper — when the manifest is invalid, or when a manifest-bound file
+has drifted. The generation manifest and its digest closure are a property of
+the `make install` capsule channel; the app channel is bounded by the app's own
+pre-publication executable audit, not by `runtime-manifest.json`.
 
 Generations created before this closed verifier inventory are intentionally
 rejected and must be reinstalled. W4 binds this manifest into the signed release

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -128,6 +129,77 @@ def _loaded_checkout_root(package_dir: Path) -> Path | None:
     return root if find_git_dir(package_dir) is not None else None
 
 
+def _runtime_home_root() -> Path:
+    """The installed runtime home, resolved — the ownership boundary for PATH.
+
+    `docs/runtime/INSTALLED_RUNTIME_CAPSULE.md` states the gate in exactly these
+    terms: doctor fails "when the public launcher resolves outside
+    `~/.local/share/vibecrafted`". Ownership is the directory a launcher lands
+    in, never the shape of its name.
+    """
+    from .runtime_paths import vibecrafted_runtime_home
+
+    home = vibecrafted_runtime_home()
+    try:
+        return home.resolve(strict=True)
+    except OSError:
+        return home
+
+
+def _is_inside(candidate: Path, root: Path) -> bool:
+    """True when `candidate` is `root` itself or lives beneath it."""
+    return candidate == root or root in candidate.parents
+
+
+def _launcher_exec_target(head: str) -> Path | None:
+    """Resolve the executable a generated bash launcher hands control to.
+
+    `Vibecrafted.app` writes `~/.local/bin/<tool>` as a small env preamble ending
+    in `exec '<runtime_root>/bin/<tool>' "$@"`. That wrapper is a regular file,
+    so `resolve()` never reaches the runtime it actually runs — the `exec` line
+    is its only honest statement of ownership. It is believed only when the
+    named target really exists and is executable, so a wrapper cannot talk its
+    way into an installed root it does not enter.
+    """
+    for line in reversed(head.splitlines()):
+        stripped = line.strip()
+        if not stripped.startswith("exec "):
+            continue
+        try:
+            argv = shlex.split(stripped)
+        except ValueError:
+            return None
+        if len(argv) < 2:
+            return None
+        target = Path(argv[1])
+        if not target.is_file() or not os.access(target, os.X_OK):
+            return None
+        try:
+            return target.resolve(strict=True)
+        except OSError:
+            return None
+    return None
+
+
+def _entered_runtime_version(
+    target: Path, runtime_home: Path
+) -> tuple[Path, str] | None:
+    """Read the VERSION of the runtime root the PATH launcher actually enters.
+
+    Walks up from the exec target to the nearest ancestor inside the runtime
+    home that carries a `VERSION` file — `releases/<version>/VERSION` for the
+    app channel, the generation directory for the `make install` channel.
+    """
+    from .runtime_paths import read_version_file
+
+    node = target.parent
+    while _is_inside(node, runtime_home) and node != runtime_home:
+        if (node / "VERSION").is_file():
+            return node, read_version_file(node)
+        node = node.parent
+    return None
+
+
 def _launcher_shim_findings(
     which: Callable[[str], str | None] = shutil.which,
 ) -> list[_Finding]:
@@ -149,6 +221,7 @@ def _launcher_shim_findings(
         return [_Finding("warn", "launcher", f"cannot read {path}: {exc}")]
 
     findings: list[_Finding] = []
+    entered: tuple[Path, str] | None = None
     if "vibecrafted_core.cli" in head and "import main" in head:
         findings.append(
             _Finding("ok", "launcher", f"Python package entrypoint on PATH -> {path}")
@@ -158,13 +231,9 @@ def _launcher_shim_findings(
             deck = path.resolve(strict=True)
         except OSError:
             deck = path
-        installed_deck = (
-            deck.name == "vibecrafted"
-            and deck.parent.name == "deck"
-            and deck.parent.parent.name == "vibecrafted_core"
-            and any(part.startswith("vibecrafted-generation-") for part in deck.parts)
-        )
-        if installed_deck:
+        runtime_home = _runtime_home_root()
+        target = _launcher_exec_target(head)
+        if _is_inside(deck, runtime_home):
             findings.append(
                 _Finding(
                     "ok",
@@ -172,6 +241,15 @@ def _launcher_shim_findings(
                     f"immutable runtime command deck on PATH -> {deck}",
                 )
             )
+        elif target is not None and _is_inside(target, runtime_home):
+            findings.append(
+                _Finding(
+                    "ok",
+                    "launcher",
+                    f"installed runtime launcher on PATH -> {path} -> {target}",
+                )
+            )
+            entered = _entered_runtime_version(target, runtime_home)
         else:
             shim = _uv_tool_shim()
             shim_hint = f" (uv-tool shim lives at {shim})" if shim.exists() else ""
@@ -179,8 +257,9 @@ def _launcher_shim_findings(
                 _Finding(
                     "fail",
                     "launcher",
-                    f"vibecrafted on PATH ({path}) is a checkout/legacy bash deck, "
-                    f"not the immutable runtime deck or uv-tool shim{shim_hint}. "
+                    f"vibecrafted on PATH ({path}) is a checkout/legacy bash deck: "
+                    f"neither it nor the launcher it execs lands inside the "
+                    f"installed runtime home ({runtime_home}){shim_hint}. "
                     "Reinstall so an installed owner wins PATH.",
                 )
             ]
@@ -237,6 +316,19 @@ def _launcher_shim_findings(
                 f"vibecrafted --version is unstamped ({resolved_version}) — "
                 f"install identity must be X.Y.Z+gSHORTSHA.{staged_hint} "
                 f"{cause_hint}",
+            )
+        )
+    elif entered is not None and entered[1] not in ("unknown", resolved_version):
+        entered_root, entered_version = entered
+        findings.append(
+            _Finding(
+                "warn",
+                "version",
+                f"doctor resolves install identity {resolved_version}, but the "
+                f"PATH launcher enters {entered_root} which is stamped "
+                f"{entered_version}. Two installed runtimes are live and the "
+                f"reported version is not the one that runs. Re-run the "
+                f"installer for the channel you want to own PATH.",
             )
         )
     else:

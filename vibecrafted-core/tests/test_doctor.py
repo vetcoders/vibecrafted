@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import shlex
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 from xml.parsers.expat import ExpatError
 
+import pytest
 from vibecrafted_core import doctor
 
 
@@ -65,7 +67,10 @@ def test_launcher_shim_finding_ok_for_uv_shim(tmp_path: Path) -> None:
     assert finding.component == "launcher"
 
 
-def test_launcher_shim_finding_ok_for_immutable_runtime_deck(tmp_path: Path) -> None:
+def test_launcher_shim_finding_ok_for_immutable_runtime_deck(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(tmp_path))
     deck = (
         tmp_path
         / "tools"
@@ -83,6 +88,146 @@ def test_launcher_shim_finding_ok_for_immutable_runtime_deck(tmp_path: Path) -> 
     assert finding.level == "ok"
     assert finding.component == "launcher"
     assert "immutable runtime command deck" in finding.message
+
+
+def _app_style_launcher(wrapper: Path, runtime_root: Path) -> Path:
+    """Write the launcher shape `Vibecrafted.app` installs into `~/.local/bin`.
+
+    Mirrors `AppDelegate.swift`: an env preamble naming the generation, then a
+    single `exec` into `<runtime_root>/bin/vibecrafted`.
+    """
+    deck = runtime_root / "bin" / "vibecrafted"
+    deck.parent.mkdir(parents=True, exist_ok=True)
+    deck.write_text(
+        "#!/usr/bin/env bash\n# command deck\nset -euo pipefail\n", encoding="utf-8"
+    )
+    deck.chmod(0o755)
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
+    wrapper.write_text(
+        "#!/bin/bash\n"
+        "set -euo pipefail\n"
+        f"export VIBECRAFTED_RUNTIME_ROOT={shlex.quote(str(runtime_root))}\n"
+        f'exec {shlex.quote(str(deck))} "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    return deck
+
+
+def test_launcher_shim_finding_ok_for_app_installed_release_launcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shipped macOS app is a first-class installed owner.
+
+    `Vibecrafted.app` publishes `releases/<version>/`, not
+    `tools/vibecrafted-generation-*/`, and writes a `~/.local/bin` wrapper that
+    execs into it. Grading that `fail` told operators to reinstall, which
+    reproduces the identical layout — the advice could never be satisfied.
+    """
+    runtime_home = tmp_path / "share" / "vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    runtime_root = runtime_home / "releases" / "4.1.0+g237d2814"
+    wrapper = tmp_path / "bin" / "vibecrafted"
+    deck = _app_style_launcher(wrapper, runtime_root)
+
+    finding = doctor._launcher_shim_findings(which=lambda _name: str(wrapper))[0]
+
+    assert finding.level == "ok"
+    assert finding.component == "launcher"
+    assert str(deck) in finding.message
+
+
+def test_launcher_shim_finding_fails_when_wrapper_execs_a_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ownership is containment, so a wrapper cannot import a checkout by exec."""
+    runtime_home = tmp_path / "share" / "vibecrafted"
+    runtime_home.mkdir(parents=True)
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    checkout_root = tmp_path / "checkout"
+    wrapper = tmp_path / "bin" / "vibecrafted"
+    _app_style_launcher(wrapper, checkout_root)
+
+    finding = doctor._launcher_shim_findings(which=lambda _name: str(wrapper))[0]
+
+    assert finding.level == "fail"
+    assert finding.component == "launcher"
+    assert str(runtime_home) in finding.message
+
+
+def test_launcher_version_warns_when_entered_generation_is_not_the_reported_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The version doctor reports must be the one the PATH launcher enters.
+
+    Two install channels can be live at once (`make install` stages
+    `tools/vibecrafted-current`, the app publishes `releases/<version>`). When
+    they disagree, reporting the staged stamp as `ok` hides the fact that a
+    different generation is what actually runs.
+    """
+    import vibecrafted_core
+
+    runtime_home = tmp_path / "share" / "vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    runtime_root = runtime_home / "releases" / "4.1.0+g237d2814"
+    wrapper = tmp_path / "bin" / "vibecrafted"
+    _app_style_launcher(wrapper, runtime_root)
+    (runtime_root / "VERSION").write_text("4.1.0+g237d2814\n", encoding="utf-8")
+    monkeypatch.setattr(vibecrafted_core, "__version__", "4.1.0+ga7f262d9")
+
+    findings = doctor._launcher_shim_findings(which=lambda _name: str(wrapper))
+    version_findings = [f for f in findings if f.component == "version"]
+
+    assert version_findings, "expected a version finding"
+    finding = version_findings[0]
+    assert finding.level == "warn"
+    assert "4.1.0+g237d2814" in finding.message
+    assert "4.1.0+ga7f262d9" in finding.message
+
+
+def test_launcher_version_stays_ok_when_the_entered_generation_agrees(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One channel live, versions agreeing — the cross-check must stay quiet."""
+    import vibecrafted_core
+
+    runtime_home = tmp_path / "share" / "vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    runtime_root = runtime_home / "releases" / "4.1.0+g237d2814"
+    wrapper = tmp_path / "bin" / "vibecrafted"
+    _app_style_launcher(wrapper, runtime_root)
+    (runtime_root / "VERSION").write_text("4.1.0+g237d2814\n", encoding="utf-8")
+    monkeypatch.setattr(vibecrafted_core, "__version__", "4.1.0+g237d2814")
+
+    version_findings = [
+        f
+        for f in doctor._launcher_shim_findings(which=lambda _name: str(wrapper))
+        if f.component == "version"
+    ]
+
+    assert version_findings
+    assert version_findings[0].level == "ok"
+
+
+def test_launcher_shim_finding_fails_when_exec_target_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wrapper's `exec` line is a claim; only the filesystem may confirm it."""
+    runtime_home = tmp_path / "share" / "vibecrafted"
+    runtime_home.mkdir(parents=True)
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    wrapper = tmp_path / "bin" / "vibecrafted"
+    wrapper.parent.mkdir(parents=True)
+    ghost = runtime_home / "releases" / "9.9.9+gdeadbee" / "bin" / "vibecrafted"
+    wrapper.write_text(
+        "#!/bin/bash\nset -euo pipefail\n" + f'exec {shlex.quote(str(ghost))} "$@"\n',
+        encoding="utf-8",
+    )
+
+    finding = doctor._launcher_shim_findings(which=lambda _name: str(wrapper))[0]
+
+    assert finding.level == "fail"
+    assert finding.component == "launcher"
 
 
 def test_vc_frame_launcher_finding_flags_raw_binary(tmp_path: Path) -> None:
