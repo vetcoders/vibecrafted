@@ -34,7 +34,7 @@ Skill zakłada, że:
 - wow effect bierze się z kompletności, nie z samej dekoracji
 - zielony kod nie jest skończony, dopóki percepcja read-only nie sprawdzi wyniku
 
-## Relacja z innymi skillami VibeCraft
+## Relacja z innymi skillami Vibecrafted
 
 Ten skill często komponuje się z:
 

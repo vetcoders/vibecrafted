@@ -56,6 +56,24 @@ istnieje publiczna komenda `vibecrafted operator`.
 | Deterministyczny supervisor   | `vibecrafted dispatch <file.toml>` |
 | Dowiezienie na zewnątrz       | `vibecrafted release <agent>`      |
 
+## Headless to domyślny runtime workera
+
+Tryb runtime'u to `headless | terminal | visible` (`SUPPORTED_RUNTIMES`). Selektor
+rozstrzyga tak:
+
+- Workery workflow z CLI i z MCP domyślnie idą jako `headless`, niezależnie od tego,
+  czy `VC_FRAME_SESSION_NAME` jest żywe.
+- Wykonanie headless startuje workera w odłączonej sesji procesu. Kontraktem
+  obserwacji są: trwały stan runu, transkrypt, settlement Guardiana, `observe` i
+  `await`.
+- vc-frame może wyrenderować projekcję transkryptu albo stanu runu. Projekcja to nie
+  własność procesu i jej zamknięcie nie może zatrzymać workera.
+- `terminal` / `visible` to jawny pas kompatybilności dla ścieżki providera, o której
+  wiadomo, że wymaga TTY. Dopóki nie ma brokera PTY prowadzonego przez daemona,
+  zostaje przywiązany do terminala.
+- `init`, `operator` i samo interaktywne `resume` pozostają prawdziwymi User Session
+  opartymi o PTY.
+
 ## Stany terminalne
 
 ```yaml
@@ -87,7 +105,7 @@ terminal_state:
 ## Nie-cele
 
 - Nie używaj runtime'u do ukrywania decyzji przed operatorem.
-- Nie uruchamiaj nieobserwowalnego dispatchu.
+- Nie czyń zakładki-projekcji właścicielem ani sygnałem życia workera.
 - Nie obchodź telemetrii uruchomień.
 - Nie zamieniaj handoffu w punkcie stopu w push/merge/deploy, chyba że spisany plan
   lub bieżąca sesja jawnie dopuściły to działanie.

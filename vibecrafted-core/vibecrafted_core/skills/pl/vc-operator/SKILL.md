@@ -222,6 +222,25 @@ jest dozwolona dla równoległego zwiadu lub małego bounded researchu wewnątrz
 operatora, ale zdispatchowane slice'y workerów potrzebują telemetrii, kart uruchomienia,
 raportów, transkryptów, meta i awaitowalnego stanu.
 
+### Granica workera headless
+
+Sesja operatora vc-frame to **User Session**, nie host procesu workera. Każdy zwykły
+dispatch floty domyślnie idzie jako `headless` — również praca prowadzona przy
+operatorze, odpalona przy ustawionym `VC_FRAME_SESSION_NAME`. To worker jest
+właścicielem trwałego stanu runu i transkryptu; vc-frame może te powierzchnie
+projektować, a zamknięcie projekcji nie może zatrzymać runu.
+
+- **CLI i MCP są zgodne.** `vibecrafted <skill> <agent> --file <brief>` oraz
+  `vc_run_launch` / `vc_launch` domyślnie odpalają odłączonego workera headless.
+- **Obserwacja jest jawna i trwała.** Używaj `observe`, `await`, transkryptów, stanu
+  runu i settlementu Guardiana zamiast traktować panel jako dowód, że coś żyje.
+- **Terminal jest wyjątkiem.** `runtime="visible"` albo `--runtime terminal` podawaj
+  tylko dla ścieżki providera, o której wiadomo, że wymaga TTY. Dopóki nie ma brokera
+  PTY prowadzonego przez daemona, ta ścieżka kompatybilności zostaje przywiązana do
+  terminala i nie dziedziczy gwarancji przeżycia runu headless.
+- **Interaktywne PTY zostaje po stronie człowieka.** `init`, `operator` i samo
+  interaktywne `resume` pozostają prawdziwymi zakładkami User Session.
+
 ## Dopuszczalność mutacji planu
 
 Operator może pominąć, dodać, przestawić lub przegrupować prompty oraz może cherry-pickować
@@ -262,7 +281,7 @@ Zobacz [JOURNAL.md](JOURNAL.md).
 - Ciche obniżanie tieru modelu lub naruszanie sprawiedliwości agentów.
 - Ogłaszanie fali jako zielonej bez evidence raportu, bramki, gałęzi i SHA.
 - Autorstwo commitów lub zamknięć workera, jakby operator wykonał ich pracę.
-- Uruchamianie headless lub nieobserwowalnych dispatchów.
+- Czynienie zakładki lub sesji vc-frame właścicielem procesu zwykłego workera.
 - Push, merge, deploy lub publikacja bez spisanego zezwolenia plan/sesja lub jawnego
   naciśnięcia operator button.
 
@@ -282,3 +301,7 @@ Dla finalnego handoffu:
 3. Bramki i nierozwiązane ryzyka.
 4. Podjęte działania odzyskiwania.
 5. Handoff w punkcie stopu: jaki przycisk pozostaje dla operatora.
+
+## Weryfikacja w stopce dispatchu
+
+Każdy prompt workera, który komponuje ten operator, niesie [Verification Rule](../../VERIFICATION_RULE.md) — weryfikację walk-around (sekcja 6, zielone bramki ≠ działa) + loct literal-vs-semantic (sekcja 9) — przez `DISPATCH_TEMPLATE.md`.

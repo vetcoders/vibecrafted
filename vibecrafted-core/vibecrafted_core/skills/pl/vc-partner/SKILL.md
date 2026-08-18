@@ -172,6 +172,13 @@ Wybierz najmniejszy lane runtime'u, który uczciwie zaspokoi kontrakt sukcesu
 
 Nie deleguj, zanim problem i kontrakt sukcesu (success contract) nie będą jawne.
 
+Gdy dispatchujesz lane, siedząc razem z operatorem, trzymaj workera **headless
+i obserwowalnego**. CLI i MCP mają ten sam odłączony default, nawet gdy
+`VC_FRAME_SESSION_NAME` jest żywe. Dziel się trwałym transkryptem, `observe`,
+`await` i stanem Guardiana; vc-frame może te powierzchnie projektować, ale nie może
+być właścicielem procesu workera. `terminal` / `visible` używaj tylko dla ścieżki
+providera, o której wiadomo, że wymaga TTY.
+
 ## Dziennik partnera
 
 Dla pracy, która może rozciągnąć się przez compaction, delegację, review lub wiele

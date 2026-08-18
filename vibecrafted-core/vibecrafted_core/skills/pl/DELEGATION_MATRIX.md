@@ -74,26 +74,26 @@ Różnica to tylko:
 
 Niemniej:
 
-- **Headless worker** zachowuje prawo do własnych natywnych subagentów.
+- **Headless worker** zachowuje prawo do własnych natywnych subagentów — bycie workerem ogranicza zakres i cykl życia przebiegu, nie prawo do natywnej delegacji.
 - **Agent z interaktywnym skillem** wykonuje go lokalnie w sesji, z native gdy wypada.
-- **Swobodniejszy native** na niektórych biegach = dokończ skill native zamiast odruchowo re-dispatchować external. To **nie** znaczy porzucić external launchery.
+- **Swobodniejszy native** na niektórych biegach = gdy pracujesz interaktywnie (albo worker potrzebuje głębi) dokończ skill native zamiast odruchowo re-dispatchować external. To **nie** znaczy porzucić external launchery.
 
 ---
 
 ## Natywne subagenty vs zewnętrzni workerzy
 
-| Rodzaj                  | Cykl życia                   | Kontekst                                   |
-| ----------------------- | ---------------------------- | ------------------------------------------ |
-| **Natywne subagenty**   | Ten sam proces               | Wspólna pamięć, config, rozmowa            |
-| **Zewnętrzni workerzy** | Osobne procesy `vibecrafted` | Control-plane / report / transcript / meta |
+| Rodzaj                  | Cykl życia                   | Kontekst                                                      |
+| ----------------------- | ---------------------------- | ------------------------------------------------------------- |
+| **Natywne subagenty**   | Ten sam proces               | Wspólna pamięć, config, rozmowa                               |
+| **Zewnętrzni workerzy** | Osobne procesy `vibecrafted` | Control-plane / report / transcript / meta; własny cykl życia |
 
-**Reguła:** władza wykonania skilla zostaje u agenta, który trzyma skill, chyba że jawnie oddelegowano zdefiniowanymi kanałami.
+**Reguła:** władza wykonania skilla zostaje u agenta, który trzyma skill, chyba że jawnie oddelegowano zdefiniowanymi kanałami (`vc-dispatch`, linie ship operatora, worker z CLI użytkownika).
 
 ---
 
 ## Katalog launcherów (core runtime)
 
-Oparty o `vibecrafted_core.cli.LAUNCHERS` + shell wrappers + meta lifecycle.
+Oparty o `vibecrafted_core.cli.LAUNCHERS` + shell wrappers + meta lifecycle. Katalog skilla to `vc-<launcher>`, o ile nie zaznaczono inaczej.
 
 ### Launchery cyklu ship (kolejność kanoniczna)
 
@@ -102,7 +102,7 @@ Oparty o `vibecrafted_core.cli.LAUNCHERS` + shell wrappers + meta lifecycle.
 | `scaffold`  | [`vc-scaffold`](../vc-scaffold/SKILL.md)   | `vibecrafted scaffold <agent>`  | `/vc-scaffold`  | Plan / briefy                                                   |
 | `implement` | [`vc-implement`](../vc-implement/SKILL.md) | `vibecrafted implement <agent>` | `/vc-implement` | **Faza WRITE ship** — ustrukturyzowane e2e z followup + marbles |
 | `review`    | [`vc-review`](../vc-review/SKILL.md)       | `vibecrafted review <agent>`    | `/vc-review`    | READ                                                            |
-| `workflow`  | [`vc-workflow`](vc-workflow/SKILL.md)      | `vibecrafted workflow <agent>`  | `/vc-workflow`  | ERi                                                             |
+| `workflow`  | [`vc-workflow`](../vc-workflow/SKILL.md)   | `vibecrafted workflow <agent>`  | `/vc-workflow`  | ERi                                                             |
 | `followup`  | [`vc-followup`](../vc-followup/SKILL.md)   | `vibecrafted followup <agent>`  | `/vc-followup`  | Trajektoria                                                     |
 | `marbles`   | [`vc-marbles`](../vc-marbles/SKILL.md)     | `vibecrafted marbles <agent>`   | `/vc-marbles`   | WRITE; `--count`/`--depth`                                      |
 | `audit`     | [`vc-audit`](../vc-audit/SKILL.md)         | `vibecrafted audit <agent>`     | `/vc-audit`     | Falsyfikacja planu                                              |
@@ -114,30 +114,42 @@ Oparty o `vibecrafted_core.cli.LAUNCHERS` + shell wrappers + meta lifecycle.
 
 ### Dodatkowe launchery skilli
 
-| Launcher    | Skill                                      | Worker CLI                      | Interactive     | Notatki                                                                                   |
-| ----------- | ------------------------------------------ | ------------------------------- | --------------- | ----------------------------------------------------------------------------------------- |
-| `justdo`    | [`vc-justdo`](../vc-justdo/SKILL.md)       | `vibecrafted justdo <agent>`    | `/vc-justdo`    | **Samodzielna postawa** — nie faza ship; nie `implement`. Typ zadania z promptu. ADR-0001 |
-| `research`  | [`vc-research`](../vc-research/SKILL.md)   | `vibecrafted research …`        | `/vc-research`  | Swarm                                                                                     |
-| `ownership` | [`vc-ownership`](../vc-ownership/SKILL.md) | `vibecrafted ownership <agent>` | `/vc-ownership` | Ownership delivery                                                                        |
-| `partner`   | [`vc-partner`](../vc-partner/SKILL.md)     | `vibecrafted partner <agent>`   | `/vc-partner`   | Wspólne sterowanie                                                                        |
-| `prune`     | [`vc-prune`](../vc-prune/SKILL.md)         | `vibecrafted prune <agent>`     | `/vc-prune`     | Runtime cone                                                                              |
-| `intents`   | [`vc-intents`](../vc-intents/SKILL.md)     | `vibecrafted intents <agent>`   | `/vc-intents`   | Plan→runtime                                                                              |
-| `delegate`  | [`vc-delegate`](../vc-delegate/SKILL.md)   | `vibecrafted delegate <agent>`  | `/vc-delegate`  | Doktryna **native**                                                                       |
-| `paste`     | (helper)                                   | `vibecrafted paste …`           | —               | Nie pełny ERi                                                                             |
+| Launcher    | Skill                                      | Worker CLI                      | Interactive     | Notatki                                                                                        |
+| ----------- | ------------------------------------------ | ------------------------------- | --------------- | ---------------------------------------------------------------------------------------------- |
+| `justdo`    | [`vc-justdo`](../vc-justdo/SKILL.md)       | `vibecrafted justdo <agent>`    | `/vc-justdo`    | **Samodzielna postawa** — nie faza ship; nie `implement`. Typ zadania z promptu. ADR-0001      |
+| `canary`    | [`vc-canary`](../vc-canary/SKILL.md)       | `vibecrafted canary <agent>`    | `/vc-canary`    | Katalog ownership: wyczucie atlasu → 1 agent/scope → jeden commit → raport z ustaleniami       |
+| `research`  | [`vc-research`](../vc-research/SKILL.md)   | `vibecrafted research …`        | `/vc-research`  | Swarm                                                                                          |
+| `ownership` | [`vc-ownership`](../vc-ownership/SKILL.md) | `vibecrafted ownership <agent>` | `/vc-ownership` | Ownership delivery                                                                             |
+| `partner`   | [`vc-partner`](../vc-partner/SKILL.md)     | `vibecrafted partner <agent>`   | `/vc-partner`   | Wspólne sterowanie                                                                             |
+| `prune`     | [`vc-prune`](../vc-prune/SKILL.md)         | `vibecrafted prune <agent>`     | `/vc-prune`     | Runtime cone                                                                                   |
+| `intents`   | [`vc-intents`](../vc-intents/SKILL.md)     | `vibecrafted intents <agent>`   | `/vc-intents`   | Plan→runtime                                                                                   |
+| `delegate`  | [`vc-delegate`](../vc-delegate/SKILL.md)   | `vibecrafted delegate <agent>`  | `/vc-delegate`  | Doktryna **native**                                                                            |
+| `trust`     | [`vc-trust`](../vc-trust/SKILL.md)         | `vibecrafted trust <agent>`     | `/vc-trust`     | READ; post-hoc falsyfikacja claimów commitów (agent fairness + kompletność) + settlement f/x/n |
+| `guard`     | [`vc-guard`](../vc-guard/SKILL.md)         | `vibecrafted guard <agent>`     | `/vc-guard`     | READ; inwentarz gates + odmowa kontynuacji przy trust `block` (nigdy nie zmyśla settlementu)   |
+| `paste`     | (helper)                                   | `vibecrafted paste …`           | —               | Nie pełny ERi                                                                                  |
 
-### Meta i orientacja
+### Meta i orientacja (inny kształt niż workery skillowe)
 
-| Powierzchnia | Skill                                    | Wywołanie                                         | Rola                                    |
-| ------------ | ---------------------------------------- | ------------------------------------------------- | --------------------------------------- |
-| **init**     | [`vc-init`](vc-init/SKILL.md)            | `vibecrafted init [agent]`, `vc-init`, `/vc-init` | Orientacja sesji                        |
-| **ship**     | [`vc-ship`](../vc-ship/SKILL.md)         | `vibecrafted ship <agent>`, `vc-ship`             | **Parasol lifecycle**, nie single-stage |
-| **dispatch** | [`vc-dispatch`](vc-dispatch/SKILL.md)    | `vibecrafted dispatch …`                          | Dyspozytura floty                       |
-| **operator** | [`vc-operator`](../vc-operator/SKILL.md) | interactive / postawa                             | Multi-wave                              |
-| **agents**   | [`vc-agents`](vc-agents/SKILL.md)        | doktryna floty                                    | Kontrakt external                       |
+| Powierzchnia | Skill / powierzchnia                     | Wywołanie                                         | Rola                                                                             |
+| ------------ | ---------------------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------------- |
+| **init**     | [`vc-init`](../vc-init/SKILL.md)         | `vibecrafted init [agent]`, `vc-init`, `/vc-init` | Orientacja sesji — nie worker pipeline'u WRITE                                   |
+| **ship**     | [`vc-ship`](../vc-ship/SKILL.md)         | `vibecrafted ship <agent>`, `vc-ship`, `/vc-ship` | **Parasol lifecycle** (scaffold→release), nie single-stage                       |
+| **dispatch** | [`vc-dispatch`](../vc-dispatch/SKILL.md) | `vibecrafted dispatch …`, `vc-dispatch`           | **Dyspozytura floty external** — prowadzi plany/linie; nie staje się „implement” |
+| **operator** | [`vc-operator`](../vc-operator/SKILL.md) | interactive / postawa                             | Postawa orkiestracji multi-wave                                                  |
+| **agents**   | [`vc-agents`](../vc-agents/SKILL.md)     | doktryna + tryby floty                            | Kontrakt floty external; nie zastępuje interaktywnego skilla                     |
 
 ### Fundament (bez własnego workera `vibecrafted <name> <agent>`)
 
-`vc-loctree`, `vc-aicx`, `vc-prview`, `vc-screenscribe`, `vc-skillaunch`, `vibecraftsmanship` — ładują się **wewnątrz** innych skilli / sesji. Nie wymyślamy im fałszywego launchera dla symetrii.
+Te skille ładują się **wewnątrz** innych skilli albo sesji interaktywnych. Nie wymyślamy im fałszywego workera `vibecrafted loctree claude` dla symetrii.
+
+| Skill                                                | Rola                         |
+| ---------------------------------------------------- | ---------------------------- |
+| [`vc-loctree`](../vc-loctree/SKILL.md)               | Percepcja strukturalna       |
+| [`vc-aicx`](../vc-aicx/SKILL.md)                     | Retrieval intencji / sesji   |
+| [`vc-prview`](../vc-prview/SKILL.md)                 | Generowanie artefaktów PR    |
+| [`vc-screenscribe`](../vc-screenscribe/SKILL.md)     | Screencast → ustalenia       |
+| [`vc-skillaunch`](../vc-skillaunch/SKILL.md)         | Zapakowanie workflow w skill |
+| [`vibecraftsmanship`](../vibecraftsmanship/SKILL.md) | Doktryna rzemiosła           |
 
 ---
 
@@ -146,34 +158,59 @@ Oparty o `vibecrafted_core.cli.LAUNCHERS` + shell wrappers + meta lifecycle.
 Dla launchera `L` i skilla `vc-L`:
 
 1. **Worker:** tylko `vibecrafted L <agent>` (lub udokumentowany alias). Nigdy `vibecrafted <workflow> <agent>` jako placeholder na wszystkie skille.
-2. **Interactive:** tylko `/vc-L`. W sesji; swobodniejszy native gdy bieg tego wymaga.
-3. **Operator dispatch:** może odpalić `vibecrafted L <agent>`; tożsamość `L` w briefie zostaje.
+2. **Interactive:** tylko `/vc-L` (albo załadowanie `vc-L/SKILL.md`). W sesji; swobodniejszy native gdy bieg tego wymaga.
+3. **Operator dispatch:** może odpalić `vibecrafted L <agent>` na linii; tożsamość skilla `L` w briefie workera zostaje.
 4. **Nie** zewnętrzniaj interaktywnego `/vc-L` tylko dlatego, że launcher istnieje.
 5. **Nie** zamieniaj każdego skilla w workflow-ERi; ERi ma tylko `workflow`.
 
+### Przykład: workflow (kanon operatora)
+
+| Ścieżka       | Literał                                                 |
+| ------------- | ------------------------------------------------------- |
+| 1 Worker      | `vibecrafted workflow <agent>`                          |
+| 2 Interactive | `/vc-workflow`                                          |
+| 3 Operator    | `vibecrafted workflow <agent>` przez dispatch/operatora |
+
+### Przykład: review (ten sam kształt, inna nazwa)
+
+| Ścieżka       | Literał                                               |
+| ------------- | ----------------------------------------------------- |
+| 1 Worker      | `vibecrafted review <agent>`                          |
+| 2 Interactive | `/vc-review`                                          |
+| 3 Operator    | `vibecrafted review <agent>` przez dispatch/operatora |
+
 ### Przykład: implement vs justdo (precyzja — nie ta sama komórka)
 
-|                 | `implement`                               | `justdo`                                |
-| --------------- | ----------------------------------------- | --------------------------------------- |
-| Komórka matrycy | Cykl **ship** — faza WRITE                | **Dodatkowy** launcher postawy          |
-| Skill id        | `implement` / `vc-implement`              | `justdo` / `vc-justdo`                  |
-| Mandat          | Ustrukturyzowane e2e (followup + marbles) | Bez ceremonii; **typ zadania = prompt** |
-| Pipeline        | Tak — faza VC-ship                        | **Nie** — obok ship (ADR-0001)          |
-| Worker          | `vibecrafted implement <agent>`           | `vibecrafted justdo <agent>`            |
-| Interactive     | `/vc-implement`                           | `/vc-justdo`                            |
-| Nie jest        | Aliasem na „wszystko”                     | Aliasem `implement`                     |
+|                 | `implement`                                        | `justdo`                                                                                  |
+| --------------- | -------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Komórka matrycy | Cykl **ship** — faza WRITE                         | **Dodatkowy** launcher postawy                                                            |
+| Skill id        | `implement` / `vc-implement`                       | `justdo` / `vc-justdo`                                                                    |
+| Mandat          | Ustrukturyzowane e2e (followup + marbles w środku) | Bez ceremonii; **typ zadania = prompt** (implement / review / audit / research / fix / …) |
+| Pipeline        | Tak — faza VC-ship                                 | **Nie** — obok ship (ADR-0001)                                                            |
+| Worker          | `vibecrafted implement <agent>`                    | `vibecrafted justdo <agent>`                                                              |
+| Interactive     | `/vc-implement`                                    | `/vc-justdo`                                                                              |
+| Nie jest        | Aliasem postawy na „wszystko”                      | Aliasem `implement`                                                                       |
 
-Ship-stage delivery → `implement`. Daily rescue / zadanie zdefiniowane promptem → `justdo`.
+Komórkę wybiera intencja: dostawa w fazie ship → `implement`. Daily rescue / zadanie zdefiniowane promptem, z postawą ownership → `justdo`.
+
+### Przykład: ship (meta — inny produkt)
+
+| Ścieżka       | Literał                                                                         |
+| ------------- | ------------------------------------------------------------------------------- |
+| 1 Worker      | `vibecrafted ship <agent>` (przebieg lifecycle)                                 |
+| 2 Interactive | `/vc-ship` — ładujesz parasol ship; fazy trzymają własne launchery              |
+| 3 Operator    | ship jako niosący pałeczkę; fazy nadal `vibecrafted scaffold \| implement \| …` |
 
 ---
 
 ## Wyjątki i odnośniki
 
 - **Granice native:** [`vc-delegate`](../vc-delegate/SKILL.md)
-- **Dyspozytura:** [`vc-dispatch`](vc-dispatch/SKILL.md)
+- **Dyspozytura:** [`vc-dispatch`](../vc-dispatch/SKILL.md)
 - **Operator:** [`vc-operator`](../vc-operator/SKILL.md)
-- **Flota:** [`vc-agents`](vc-agents/SKILL.md)
+- **Flota:** [`vc-agents`](../vc-agents/SKILL.md)
 - **Weryfikacja:** [`../VERIFICATION_RULE.md`](../VERIFICATION_RULE.md)
-- **Living Tree:** [`LIVING_TREE_RULE.md`](LIVING_TREE_RULE.md)
+- **Living Tree:** [`../LIVING_TREE_RULE.md`](../LIVING_TREE_RULE.md)
+- **Ledger feedbacku runtime'u (poprawki per komenda):** [`../RUNTIME_FEEDBACK.md`](../RUNTIME_FEEDBACK.md)
 
 <!-- /fleet-imperative -->
