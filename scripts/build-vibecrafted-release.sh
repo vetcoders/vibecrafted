@@ -203,7 +203,7 @@ prepare_signing_identity() {
     || die "Developer ID identity is not available in the keychain"
 }
 
-for command in cargo codesign file git hdiutil install_name_tool make otool uv xcodebuild xcodegen xcrun; do
+for command in cargo codesign file git hdiutil install_name_tool make otool strip uv xcodebuild xcodegen xcrun; do
   require "$command"
 done
 [[ -f "$SIGNING_IDENTITY_FILE" ]] || die "missing $SIGNING_IDENTITY_FILE"
@@ -328,6 +328,24 @@ sign_macho_tree() {
   done < <(find "$APP/Contents" -type f -print0)
 }
 
+# Debug stabs are the producer no compiler flag reaches. rustc's
+# --remap-path-prefix rewrites SOURCE paths (SO stabs read /usr/src/...), but
+# the linker still records every OBJECT file it consumed as an N_OSO stab —
+# .../target/release/deps/alacritty-*.o and DerivedData/Intermediates.noindex/...
+# — verbatim. MEASURED 2026-08-19 on a fresh af98ebfe build: alacritty carried
+# 249 such stabs and Contents/MacOS/Vibecrafted 40, all naming the build root.
+# `strip -S` removes debugging symbol table entries only; code, exports and
+# the indirect symbol table are untouched, and it runs before any signature.
+strip_debug_stabs() {
+  local candidate
+  while IFS= read -r -d '' candidate; do
+    if /usr/bin/file -b "$candidate" | grep -q 'Mach-O'; then
+      strip -S "$candidate" 2>/dev/null \
+        || die "strip -S failed on ${candidate#"$APP"/}"
+    fi
+  done < <(find "$APP/Contents/MacOS" "$APP/Contents/Helpers" -type f -print0)
+}
+
 sign_nested_app_bundles() {
   local nested_app
   while IFS= read -r -d '' nested_app; do
@@ -413,6 +431,13 @@ build_product() {
   fi
 
   log "Building vc-frame through its provenance-stable donor target"
+  # zellij-utils/build.rs bakes CARGO_MANIFEST_DIR into the binary for
+  # install-freshness (dev builds compare themselves with their checkout). A
+  # release build's checkout is a donor snapshot that is reaped minutes later,
+  # so the baked path would be both useless and a host-path leak (measured
+  # 2026-08-19: 1 hit in Contents/Helpers/vc-frame). Pin it to the same root
+  # the source remap advertises; the freshness probe then reports NoCheckout.
+  VC_FRAME_SOURCE_MANIFEST_DIR=/usr/src/vc-frame/zellij-utils \
   make -C "$FRAME_REPO" release-binary
   local frame_source="$FRAME_REPO/target/release/vc-frame"
   [[ -x "$frame_source" ]] || die "vc-frame release binary is missing"
@@ -581,6 +606,9 @@ build_product() {
   # every compiler-side answer is partial: measured on the shipped 4.1.0 DMG,
   # eight files named the operator across five producers rustc cannot all
   # reach. See scripts/payload_hygiene.py.
+  log "Stripping linker debug stabs from the binaries this build produced"
+  strip_debug_stabs
+
   log "Asserting the assembled app does not name the build host"
   assert_payload_is_anonymous "$APP" "Vibecrafted.app"
 
