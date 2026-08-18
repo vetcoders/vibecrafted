@@ -70,6 +70,54 @@ Mode B is operator-explicit by construction: it exists only inside a written
 plan (dispatch TOML + briefs) that passed its doctors. An agent may not enter
 Mode B ad hoc.
 
+## Reach — what the runtime can and cannot do today (measured 2026-08-18)
+
+The two modes above describe the doctrine. This section describes the
+_mechanism_, so that nobody reads Mode B as a capability the everyday launcher
+already has. Measured against this tree, not remembered:
+
+**Mode B is real, and only in the dispatch plane.** `dispatch/worktrees.py`
+owns the canonical geometry end to end: `WorktreeManager.prepare` refuses an
+ambiguous reuse, `_validate_reuse` refuses a dirty or unregistered checkout,
+`_validate_target` refuses a symlinked or escaping Cargo target, and
+`cleanup` refuses anything that is not settled. `_validate_integrator` enforces
+the integrator's own contract — main checkout, clean tree, baseline SHA match.
+`dispatch/supervisor.py` drives it, `dispatch/doctor.py` preflights it,
+`scripts/smoke-dispatch-worktrees.py` exercises two concurrent workers plus an
+exclusive join on real linked checkouts. This part is finished work.
+
+**The everyday launcher plane has no worktree at all.** `workflow.py` is the
+launcher for all 24 registered workflows, and it contains zero worktree
+references; `WorkflowLaunchSpec` carries no cut id, no worktree, no integrator
+field. So `vibecrafted implement claude`, `vibecrafted marbles codex`, and
+every other `vibecrafted <skill> <agent>` run in the shared main checkout by
+construction. **Mode B is unreachable from the daily command surface.** That
+is the gap — not the doctrine.
+
+**Where concurrency actually comes from.** Inside one launch the runtime is
+single-writer: `workflow_runtime._run_loop` runs marbles/polarize `--count`
+iterations _sequentially_, and research runs its lanes concurrently but under
+read cadence. Concurrent _writers_ appear when the operator fires several
+launches against the same checkout — the ordinary daily case. Nothing in the
+control plane makes a checkout exclusive to one writing run, so that case lands
+in Mode A whether or not it satisfies Mode B's four conditions.
+
+**Consequences, stated plainly.**
+
+- An agent that "should" be in Mode B under condition 3 cannot get there
+  without a written dispatch plan. Asking for a worktree from a workflow
+  launch is not a discipline failure; the surface does not exist.
+- `integrator = true` is a dispatch-TOML field. There is no integrator surface
+  outside a plan: no launcher flag, no control-plane role, no join primitive.
+- Until that reach closes, "parallel work happens in worktrees" describes the
+  dispatch plane only. Saying it about the whole runtime would be a claim the
+  code does not support.
+
+Closing the reach is an architecture cut, not a doctrine edit: it needs a
+worktree-aware `WorkflowLaunchSpec`, a launcher path through `WorktreeManager`,
+and an integrator role the control plane can name. Until then this section is
+the honest boundary of the rule.
+
 ## Why two modes (measured, 2026-08-10)
 
 The original single-mode rule was a prosthesis for the pre-measurement era:

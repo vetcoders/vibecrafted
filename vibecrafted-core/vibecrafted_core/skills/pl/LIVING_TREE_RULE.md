@@ -62,6 +62,57 @@ Tryb B jest operator-explicit z konstrukcji: istnieje wyłącznie wewnątrz
 pisanego planu (dispatch TOML + briefy), który przeszedł swoje doctory. Agent
 nie może wejść w Tryb B ad hoc.
 
+## Zasięg — co runtime dziś potrafi, a czego nie (zmierzone 2026-08-18)
+
+Dwa tryby powyżej opisują doktrynę. Ta sekcja opisuje _mechanizm_, żeby nikt
+nie czytał Trybu B jako możliwości, którą codzienny launcher już ma. Zmierzone
+na tym drzewie, nie zapamiętane:
+
+**Tryb B jest prawdziwy i istnieje wyłącznie w planie dispatchu.**
+`dispatch/worktrees.py` trzyma kanoniczną geometrię od początku do końca:
+`WorktreeManager.prepare` odmawia niejednoznacznego reuse, `_validate_reuse`
+odmawia brudnego lub niezarejestrowanego checkoutu, `_validate_target` odmawia
+symlinkowanego albo uciekającego targetu Cargo, a `cleanup` odmawia wszystkiego,
+co nie jest settled. `_validate_integrator` egzekwuje kontrakt samego
+integratora — główny checkout, czyste drzewo, zgodność baseline SHA.
+`dispatch/supervisor.py` to napędza, `dispatch/doctor.py` robi preflight,
+`scripts/smoke-dispatch-worktrees.py` ćwiczy dwóch współbieżnych workerów plus
+wyłączny join na prawdziwych linked checkoutach. Ta część jest robotą skończoną.
+
+**Codzienny plan launchera nie ma worktree w ogóle.** `workflow.py` jest
+launcherem wszystkich 24 zarejestrowanych workflowów i nie zawiera ani jednego
+odwołania do worktree; `WorkflowLaunchSpec` nie niesie ani cut id, ani worktree,
+ani pola integratora. Zatem `vibecrafted implement claude`,
+`vibecrafted marbles codex` i każdy inny `vibecrafted <skill> <agent>` działają
+we współdzielonym głównym checkoucie z konstrukcji. **Tryb B jest nieosiągalny
+z codziennej powierzchni komend.** To jest luka — nie doktryna.
+
+**Skąd naprawdę bierze się współbieżność.** Wewnątrz jednego launcha runtime
+jest jednopiszący: `workflow_runtime._run_loop` uruchamia iteracje
+marbles/polarize `--count` _sekwencyjnie_, a research puszcza swoje tory
+współbieżnie, ale w kadencji read. Współbieżni _piszący_ pojawiają się, gdy
+operator odpala kilka launchów na tym samym checkoucie — czyli w zwykłym
+codziennym przypadku. Nic w control plane nie czyni checkoutu wyłącznym dla
+jednego piszącego runu, więc ten przypadek ląduje w Trybie A niezależnie od
+tego, czy spełnia cztery warunki Trybu B.
+
+**Konsekwencje, powiedziane wprost.**
+
+- Agent, który „powinien" być w Trybie B wedle warunku 3, nie ma jak tam wejść
+  bez pisanego planu dispatchu. Prośba o worktree z poziomu launcha workflow nie
+  jest złamaniem dyscypliny; ta powierzchnia po prostu nie istnieje.
+- `integrator = true` to pole dispatch-TOML. Poza planem nie ma powierzchni
+  integratora: żadnej flagi launchera, żadnej roli w control plane, żadnego
+  prymitywu join.
+- Dopóki ten zasięg się nie domknie, „praca równoległa odbywa się w worktrees"
+  opisuje wyłącznie plan dispatchu. Powiedzenie tego o całym runtimie byłoby
+  deklaracją, której kod nie potwierdza.
+
+Domknięcie zasięgu to cięcie architektoniczne, nie edycja doktryny: potrzebuje
+`WorkflowLaunchSpec` świadomego worktree, ścieżki launchera przez
+`WorktreeManager` i roli integratora, którą control plane potrafi nazwać. Do
+tego czasu ta sekcja jest uczciwą granicą reguły.
+
 ## Dlaczego dwa tryby (zmierzone, 2026-08-10)
 
 Pierwotna reguła jednotrybowa była protezą ery przed-pomiarowej: bez

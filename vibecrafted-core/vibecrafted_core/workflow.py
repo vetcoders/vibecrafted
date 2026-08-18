@@ -41,6 +41,7 @@ from .control_plane import (
 from .cron import parse_frontmatter
 from .delivery.store import atomic_write_json
 from .events import append_event
+from .init_resume import init_resume_block
 from .model_overrides import _model_override_receipt, _with_model_override
 from .package_resources import deck_path as package_deck_path
 from .process_control import process_identity_receipt, validate_process_identity
@@ -1755,6 +1756,11 @@ def _runtime_prompt(spec: WorkflowLaunchSpec) -> str:
     report_hint = "${VIBECRAFTED_REPORT_PATH}"
     transcript_hint = "${VIBECRAFTED_TRANSCRIPT_PATH}"
     source_prompt = _source_prompt(spec)
+    # Resume is a payload of the init pass, not a verb someone has to remember.
+    # The block is empty on a clean checkout, so it costs nothing when there is
+    # no unfinished work; `init_resume_block` never raises.
+    resume_block = init_resume_block(spec.root)
+    resume_section = f"\n{resume_block}\n" if resume_block else ""
     return f"""You are running under Vibecrafted core runtime.
 
 Contract:
@@ -1790,7 +1796,7 @@ due-diligence right here in this thread, because it is what makes every later mo
 Your skill (vc-{spec.skill}) carries its own orientation gate — this is it. Not a rule barked at
 you: it is simply the move that separates a real cut from a confident guess, and it pays for
 itself in the very next step.
-
+{resume_section}
 Operator prompt:
 {source_prompt}
 """

@@ -38,6 +38,19 @@ The interactive first context handoff: loads repository context (history,
 structural perception, verification) and opens an oriented agent session.
 Run it once per repository session before dispatching work.
 
+**Resume rides along.** Init also computes this checkout's resume payload and
+carries it into the session — you never have to remember to look. If any run
+here settled `n` (needs attention), init names it, says who owns it, and prints
+the exact command that continues it. Runs the Guardian already owns are
+reported without a command, because each holds a single automatic attempt that a
+hand resume would burn. A checkout with nothing unfinished adds nothing to the
+prompt; an unreadable ledger says so rather than implying "clean".
+
+The same payload is attached to the init step of **every** pipeline launch
+(`vibecrafted <skill> <agent>`), so a worker opens with unfinished work already
+in view. Full inventory on demand:
+`vibecrafted settlements list --bucket n --revalidatable`.
+
 ## status
 
 ```bash
