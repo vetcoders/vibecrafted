@@ -3,7 +3,7 @@
 Status: planned (scaffolded 2026-08-18). Not part of the 4.1.0 release contract.
 
 Plan package (atlas · falsification · tracker · DRIVER · 9 briefs · manifest):
-`/Users/polyversai/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0818/plans/roadmap-4.2.0/`
+`~/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0818/plans/roadmap-4.2.0/`
 Drive it from `DRIVER.md` there; this file is the repo-facing summary.
 
 ## Thesis
@@ -302,6 +302,66 @@ but the PATH launcher enters …/releases/4.1.0+g237d2814`.
 other. `make install` and the app both claim `~/.local/bin`; last writer wins.
 Doctor now reports that instead of hiding it, which is the honest state — the
 merge is a wave, not a cut.
+
+## Polarize stage, loop 3 — one identity resolution order, 2026-08-18
+
+**Chosen axis — every surface answers "which workspace is this process?" in the
+same order: the exported `VIBECRAFTED_WORKSPACE_ID` first, then the one
+canonical catalog by `canonical_root`, both arbitrated by that catalog.**
+
+The audit filed the LIVE RUNS filter under "silent dashboard fallback". Measured
+fresh this stage, it is not a fallback problem — it is a **twin**. The runtime
+stamps a run through `resolve_run_workspace_identity`, whose first step is the
+exported `VIBECRAFTED_WORKSPACE_ID`. The dashboard resolved its own identity
+through `live_dashboard.resolve_workspace_id`, which read only the catalog by
+root and never looked at the environment. Two implementations of one question,
+free to disagree — and on this host they did.
+
+**Measured, live, while this stage ran.** `VIBECRAFTED_WORKSPACE_ID` in the
+flight's shell is `01a00d7b-3964-77a8-bc53-2f41e4b4e509`; the catalog roots that
+workspace at a **pytest temp directory** that no longer exists. 27 run metas
+carry a `workspace_id` the catalog does not root where the run ran. The
+dashboard, opened in this repository, computed `bda366e0-…` from the root and
+showed **1 of 2** live rows: it hid `pola-260818-192800-88430` — the parent run
+of this very polarize flight — and it hid `scaf-260818-202208-26610`, a Mode B
+worker in a worktree. After the cut both are visible.
+
+The worktree row is what settles the axis. A worker's worktree root can never
+equal its dispatcher's root, so a root-only reader is **structurally** unable to
+see a dispatched worker. `workspace_id` is documented as _not_ derived from
+root; the dashboard was the surface that had forgotten it.
+
+**Rejected alternatives.**
+
+- _Make the dashboard's root lookup win and treat the stamp as advisory._ Kills
+  Mode B visibility outright and contradicts the wire contract's own line that
+  `workspace_id` is not derived from root.
+- _Trust any exported id without asking the catalog._ Then a variable left in a
+  shell renames the workspace. The catalog is the sole durable writer; a bare id
+  is evidence, not identity.
+- _Repair the 27 mis-stamped metas / delete the leaked pytest workspace._ Host
+  state, not repository truth, and rewriting durable run history to make a
+  reader agree is the wrong direction. The reader was wrong.
+- _Change the writer to fall through on a stale export instead of raising._ A
+  writer creating durable state should refuse loudly; only the reader must
+  degrade. The role boundary is now stated in the wire contract rather than left
+  to each surface.
+- _Send it back to marbles as a behaviour change._ Loops 1 and 2 both deferred
+  it on that reasoning. It is a choice between two coexisting identities, which
+  is precisely the cut polarize owns.
+
+**Proof the guards bite.** With the env branch disabled,
+`test_dashboard_identity_honours_the_exported_workspace_id` fails
+`assert 'ws-rooted-here' == 'ws-exported'` and
+`test_worktree_worker_stays_visible_in_the_dispatching_workspace` fails
+`assert [] == ['pola-…', 'scaf-…']` — the whole flight hidden, exactly the live
+shape. With the catalog corroboration dropped, the unknown-id and buried-id
+refusals both fail. All green on restore; no probe residue in 1167 scanned files.
+
+**What this does not fix.** The leaked pytest workspace and the 27 mis-stamped
+metas are still in the operator's control plane. Settlement scoping still counts
+membership from the raw stamp (it projects zero on this host today, so nothing
+is provably misattributed). Neither is repository truth; both are named for DoU.
 
 ## Explicit non-goals
 
