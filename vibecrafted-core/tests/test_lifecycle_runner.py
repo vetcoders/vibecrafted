@@ -1752,7 +1752,10 @@ def test_mission_stage_agents_parses_inline_and_nested() -> None:
     from vibecrafted_core.lifecycle_runner import _mission_stage_agents
 
     inline = "---\nstage_agents: scaffold=claude, review=codex\n---\nmission"
-    assert _mission_stage_agents(inline) == {"scaffold": "claude", "review": "codex"}
+    assert _mission_stage_agents(inline) == {
+        "scaffold": ["claude"],
+        "review": ["codex"],
+    }
 
     nested = (
         "---\n"
@@ -1764,7 +1767,10 @@ def test_mission_stage_agents_parses_inline_and_nested() -> None:
         "---\n"
         "mission body\n"
     )
-    assert _mission_stage_agents(nested) == {"marbles": "codex", "audit": "claude"}
+    assert _mission_stage_agents(nested) == {
+        "marbles": ["codex"],
+        "audit": ["claude"],
+    }
 
     assert _mission_stage_agents("plain mission, no frontmatter") == {}
 

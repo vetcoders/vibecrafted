@@ -22,6 +22,14 @@ from .lifecycle_delivery import (
     try_grant_lifecycle_stage_seal,
 )
 from .report_contract import parse_report_path
+from .stage_cast import (
+    _mission_stage_agents,
+    _mission_stage_models,
+    _validated_stage_agents,
+    _validated_stage_models,
+    encode_stage_cast,
+    primary_stage_map,
+)
 from .workflow import (
     SUPPORTED_AGENTS,
     WorkflowLaunchSpec,
@@ -303,7 +311,8 @@ class LifecycleRunSpec:
     # Continuation runs (approve / force-audit) seed these so the next stage
     # prompt keeps consuming what the previous Read/Write stages produced.
     previous_reports: tuple[str, ...] = ()
-    # Operator-declared per-stage casting: {stage_id: agent}. Usually parsed
+    # Operator-declared per-stage casting: {stage_id: agent} or a comma-joined
+    # failover list (audit=claude,grok). First name is primary. Usually parsed
     # from the mission file's frontmatter (stage_agents:) so one plan file
     # carries the whole relay's crew. An explicit entry for a stage wins over
     # worker-requested next_agent steering.
@@ -587,131 +596,6 @@ def _stage_worker_liveness(
     return liveness
 
 
-def _mission_stage_agents(mission_text: str) -> dict[str, str]:
-    """Per-stage casting declared in the mission file's YAML frontmatter.
-
-    Two accepted shapes, so an operator plan file can carry the whole relay's
-    crew A-to-Z:
-
-        ---
-        stage_agents: scaffold=claude, review=codex
-        ---
-
-        ---
-        stage_agents:
-          scaffold: claude
-          review: codex
-        ---
-    """
-    lines = str(mission_text or "").splitlines()
-    if not lines or lines[0].strip() != "---":
-        return {}
-    agents: dict[str, str] = {}
-    in_block = False
-    for line in lines[1:]:
-        stripped = line.strip()
-        if stripped == "---":
-            break
-        if not in_block:
-            if not stripped.startswith("stage_agents:"):
-                continue
-            inline = stripped.split(":", 1)[1].strip()
-            if inline:
-                for pair in inline.split(","):
-                    separator = "=" if "=" in pair else ":"
-                    if separator not in pair:
-                        continue
-                    key, value = pair.split(separator, 1)
-                    agents[key.strip()] = value.strip().strip('"')
-                break
-            in_block = True
-            continue
-        if not line.startswith((" ", "\t")) or ":" not in stripped:
-            break
-        key, value = stripped.split(":", 1)
-        agents[key.strip()] = value.strip().strip('"')
-    return agents
-
-
-def _mission_stage_models(mission_text: str) -> dict[str, str]:
-    """Per-stage model pins declared in mission YAML frontmatter.
-
-    Accepted shapes mirror stage_agents. Model names are passed through
-    verbatim; the runtime only knows whether a runner has a model flag.
-    """
-
-    lines = str(mission_text or "").splitlines()
-    if not lines or lines[0].strip() != "---":
-        return {}
-    models: dict[str, str] = {}
-    in_block = False
-    for line in lines[1:]:
-        stripped = line.strip()
-        if stripped == "---":
-            break
-        if not in_block:
-            if not stripped.startswith("stage_models:"):
-                continue
-            inline = stripped.split(":", 1)[1].strip()
-            if inline:
-                for pair in inline.split(","):
-                    separator = "=" if "=" in pair else ":"
-                    if separator not in pair:
-                        continue
-                    key, value = pair.split(separator, 1)
-                    models[key.strip()] = value.strip().strip('"')
-                break
-            in_block = True
-            continue
-        if not line.startswith((" ", "\t")) or ":" not in stripped:
-            break
-        key, value = stripped.split(":", 1)
-        models[key.strip()] = value.strip().strip('"')
-    return models
-
-
-def _validated_stage_agents(
-    raw: dict[str, str], manifest: WorkflowManifest
-) -> dict[str, str]:
-    """Fail fast at launch: an A-to-Z casting with a typo must not fly."""
-    stage_ids = {stage.id for stage in manifest.stages}
-    resolved: dict[str, str] = {}
-    for stage_id, agent in dict(raw or {}).items():
-        stage_key = str(stage_id).strip()
-        agent_name = str(agent).strip()
-        if not stage_key or not agent_name:
-            continue
-        if stage_key not in stage_ids:
-            raise ValueError(
-                f"stage_agents names unknown stage '{stage_key}' "
-                f"for workflow {manifest.id}"
-            )
-        if agent_name not in SUPPORTED_AGENTS:
-            raise ValueError(
-                f"stage_agents names unsupported agent '{agent_name}' "
-                f"for stage '{stage_key}' (supported: "
-                + ", ".join(sorted(SUPPORTED_AGENTS))
-                + ")"
-            )
-        resolved[stage_key] = agent_name
-    return resolved
-
-
-def _validated_stage_models(
-    raw: dict[str, str], manifest: WorkflowManifest
-) -> dict[str, str]:
-    """Manifest-gate optional model pins without whitelisting model names."""
-    stage_ids = {stage.id for stage in manifest.stages}
-    resolved: dict[str, str] = {}
-    for stage_id, model in dict(raw or {}).items():
-        stage_key = str(stage_id).strip()
-        model_name = str(model).strip()
-        if not stage_key or not model_name or stage_key not in stage_ids:
-            continue
-        resolved[stage_key] = model_name
-    return resolved
-
-
 def _lifecycle_max_stage_launches(manifest: WorkflowManifest) -> int:
     """Ceiling on stage launches per lifecycle run.
 
@@ -761,10 +645,11 @@ class LifecycleRunner:
 
         root = Path(normalize_run_root(spec.root, Path.cwd()))
         source_prompt = spec.prompt or _read_file(spec.file)
-        stage_agents = _validated_stage_agents(
+        stage_cast = _validated_stage_agents(
             dict(spec.stage_agents or {}) or _mission_stage_agents(source_prompt),
             manifest,
         )
+        stage_agents = primary_stage_map(stage_cast)
         stage_models = _validated_stage_models(
             dict(spec.stage_models or {}) or _mission_stage_models(source_prompt),
             manifest,
@@ -807,7 +692,7 @@ class LifecycleRunner:
                 "count": spec.count,
                 "depth": spec.depth,
                 "previous_reports": list(previous_reports),
-                "stage_agents": dict(stage_agents),
+                "stage_agents": encode_stage_cast(stage_cast),
                 "stage_models": dict(stage_models),
             },
             "supervisor": "vibecrafted_core.lifecycle_runner.LifecycleSupervisor",
