@@ -52,26 +52,30 @@ def fail_closed_isolated_home(assigned: str | None) -> Path:
 
 def isolate_vibecrafted_test_env(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    isolated_home: Path,
     *,
     strip_prefixes: tuple[str, ...] = ("VIBECRAFTED_",),
     restore: Mapping[str, str] | None = None,
     unset_pythonpath: bool = True,
 ) -> Path:
-    """Strip ambient runtime env, then pin ``VIBECRAFTED_HOME`` to ``tmp_path``.
+    """Strip ambient runtime env, then pin ``VIBECRAFTED_HOME`` to ``isolated_home``.
 
     Order is load-bearing: strip first (live run identity), then assign the
     tmp home so the strip cannot fall through to the operator store.
+
+    ``isolated_home`` must NOT be a child of the test's ``tmp_path``. Distribution
+    and other tests treat ``tmp_path`` as a clean staging tree; nesting the
+    control-plane home there leaked ``isolated-vibecrafted-home`` into archive
+    inventories (C10 × GTM).
     """
     for key in [name for name in os.environ if name.startswith(strip_prefixes)]:
         monkeypatch.delenv(key, raising=False)
     if unset_pythonpath:
         monkeypatch.delenv("PYTHONPATH", raising=False)
 
-    isolated = tmp_path / ISOLATED_HOME_DIRNAME
-    isolated.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("VIBECRAFTED_HOME", str(isolated))
+    isolated_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(isolated_home))
     for key, value in (restore or {}).items():
         monkeypatch.setenv(key, value)
     fail_closed_isolated_home(os.environ.get("VIBECRAFTED_HOME"))
-    return isolated
+    return isolated_home

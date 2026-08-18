@@ -20,7 +20,7 @@ _home_isolation = importlib.import_module("_home_isolation")
 
 @pytest.fixture(autouse=True)
 def _isolate_vibecrafted_runtime_env(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
 ) -> Path:
     """Strip ambient ``VIBECRAFTED_*`` vars leaked by a live dispatched runtime.
 
@@ -39,9 +39,12 @@ def _isolate_vibecrafted_runtime_env(
     unset falls through to the operator ``~/.vibecrafted`` and tests write a
     real workspace (HAK-31 / C10).
     """
+    isolated = (
+        tmp_path_factory.mktemp("vc-home") / _home_isolation.ISOLATED_HOME_DIRNAME
+    )
     return _home_isolation.isolate_vibecrafted_test_env(
         monkeypatch,
-        tmp_path,
+        isolated,
         strip_prefixes=("VIBECRAFTED_", "VC_FRAME", "ZELLIJ"),
         restore={"VIBECRAFTED_LIVE_VIEWER": "0"},
     )

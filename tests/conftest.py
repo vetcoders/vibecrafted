@@ -30,12 +30,15 @@ def pytest_configure(config: pytest.Config) -> None:
 
 @pytest.fixture(autouse=True)
 def _isolate_vibecrafted_runtime_env(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
 ) -> Path:
     """Keep root tests independent from the live Vibecrafted runtime."""
+    isolated = (
+        tmp_path_factory.mktemp("vc-home") / _home_isolation.ISOLATED_HOME_DIRNAME
+    )
     return _home_isolation.isolate_vibecrafted_test_env(
         monkeypatch,
-        tmp_path,
+        isolated,
         restore={
             "VIBECRAFTED_MARBLES_PROBE_NOTIFY": "0",
             "VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME": "1",
