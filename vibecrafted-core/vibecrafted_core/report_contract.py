@@ -7,6 +7,13 @@ Philosophy (dashboard-ready):
   is an explicit self-attestation tier, never a delivery-kernel seal.
 * Runtime triangulates claim against exit code, report/transcript artifacts,
   optional declared artifact paths, and delivery-kernel axes when present.
+* Ship / lifecycle reports (skill ``ship``, ``vc-ship``, ``lifecycle``,
+  ``vc-lifecycle``) must **lead** with delivery truth: ``dou_index`` and
+  the cut table (``cuts_done`` / ``cuts_total``). An ``11/11 stages``
+  header is not a substitute for ``3/9`` cuts.
+* Supervisor defer of a cut is not acceptance. The existing operator verb
+  is ``accept-dou``. A defer that does not go through that verb leaves the
+  cut ``[ ]``. Do not invent another surface.
 
 Contract id: ``vibecrafted.report-frontmatter.v1``
 """
@@ -43,7 +50,27 @@ RECOMMENDED_KEYS: tuple[str, ...] = (
     "claim_digest",
     "repo_path",
     "model",
+    "dou_index",
+    "cuts_done",
+    "cuts_total",
+    "accepted_dou",
 )
+
+# Skills whose reports must lead with DoU / cut-table fields. A stage
+# theatre header ("11/11 stages") cannot stand in for delivery.
+SHIP_LIFECYCLE_SKILLS = frozenset({"ship", "vc-ship", "lifecycle", "vc-lifecycle"})
+SHIP_LIFECYCLE_LEAD_KEYS: tuple[str, ...] = (
+    "dou_index",
+    "cuts_done",
+    "cuts_total",
+)
+
+# Existing lifecycle verb. Defer without it leaves the cut unchecked.
+ACCEPT_DOU_VERB = "accept-dou"
+DEFERRED_CUT_MARK = "[ ]"
+
+_DOU_RATIO_RE = re.compile(r"\A(\d+)\s*/\s*(\d+)\Z")
+_STAGES_THEATRE_RE = re.compile(r"\b\d+\s*/\s*\d+\s+stages\b", re.IGNORECASE)
 
 # Agent claim vocabulary (status / claim_status).
 CLAIM_COMPLETED = frozenset({"completed", "complete", "success", "ok", "done"})
@@ -124,6 +151,11 @@ class ReportFrontmatter:
         """Human-readable claim attached to a positive self-attestation."""
         return (self.fields.get("claim") or "").strip()
 
+    @property
+    def dou_index(self) -> str:
+        """Raw ``dou_index`` field (open findings or ``done/total``)."""
+        return (self.fields.get("dou_index") or "").strip()
+
     def as_payload(self) -> dict[str, Any]:
         """Serialize this frontmatter for JSON output / dashboard consumption."""
         return {
@@ -135,9 +167,110 @@ class ReportFrontmatter:
             "claim_kind": self.claim_kind,
             "finalized": self.finalized,
             "claim": self.claim,
+            "dou_index": self.dou_index,
             "errors": list(self.errors),
             "warnings": list(self.warnings),
         }
+
+
+def is_ship_or_lifecycle_skill(skill: str) -> bool:
+    """True when *skill* is a ship / lifecycle umbrella report."""
+    return (skill or "").strip().lower() in SHIP_LIFECYCLE_SKILLS
+
+
+def parse_dou_index_value(raw: str) -> tuple[int | None, int | None, int | None]:
+    """Parse ``dou_index``.
+
+    ``6`` → ``(6, None, None)`` — open DoU findings (lifecycle contract).
+    ``3/9`` → ``(None, 3, 9)`` — cut ratio; open findings not stated.
+    Unparseable or negative → ``(None, None, None)``.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None, None, None
+    ratio = _DOU_RATIO_RE.fullmatch(text)
+    if ratio:
+        return None, int(ratio.group(1)), int(ratio.group(2))
+    try:
+        value = int(text)
+    except ValueError:
+        return None, None, None
+    if value < 0:
+        return None, None, None
+    return value, None, None
+
+
+def _parse_non_negative_int(raw: str) -> int | None:
+    """Parse a non-negative integer field; ``None`` if absent or invalid."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        value = int(text)
+    except ValueError:
+        return None
+    return value if value >= 0 else None
+
+
+def _validate_ship_lifecycle_lead(
+    normalized: Mapping[str, str],
+    body: str,
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    """Require dou_index + cut table on ship/lifecycle; stages are a footnote."""
+    if not is_ship_or_lifecycle_skill(normalized.get("skill", "")):
+        return
+
+    raw_index = (normalized.get("dou_index") or "").strip()
+    open_findings, ratio_done, ratio_total = parse_dou_index_value(raw_index)
+    if not raw_index:
+        errors.append("report_frontmatter_missing_key:dou_index")
+    elif open_findings is None and ratio_done is None:
+        errors.append("report_frontmatter_dou_index_invalid")
+
+    cuts_done = _parse_non_negative_int(normalized.get("cuts_done", ""))
+    cuts_total = _parse_non_negative_int(normalized.get("cuts_total", ""))
+    if cuts_done is None and ratio_done is not None:
+        cuts_done = ratio_done
+    if cuts_total is None and ratio_total is not None:
+        cuts_total = ratio_total
+
+    if (normalized.get("cuts_done") or "").strip() and cuts_done is None:
+        errors.append("report_frontmatter_cuts_done_invalid")
+    if (normalized.get("cuts_total") or "").strip() and cuts_total is None:
+        errors.append("report_frontmatter_cuts_total_invalid")
+
+    if cuts_done is None:
+        errors.append("report_frontmatter_missing_key:cuts_done")
+    if cuts_total is None:
+        errors.append("report_frontmatter_missing_key:cuts_total")
+    if cuts_done is not None and cuts_total is not None and cuts_done > cuts_total:
+        errors.append("report_frontmatter_cuts_inverted")
+
+    status = (
+        (normalized.get("claim_status") or normalized.get("status") or "")
+        .strip()
+        .lower()
+    )
+    incomplete_cuts = (
+        cuts_done is not None and cuts_total is not None and cuts_done < cuts_total
+    )
+    if incomplete_cuts and status in CLAIM_COMPLETED:
+        warnings.append("report_frontmatter_cuts_incomplete")
+
+    if incomplete_cuts and _STAGES_THEATRE_RE.search(body or ""):
+        warnings.append("report_frontmatter_stages_hide_cuts")
+
+    # Defer without accept-dou is not acceptance. A completed or blocked
+    # ship report that still has open cuts and never names the verb is
+    # a silent defer — the cut stays [ ].
+    named_accept = ACCEPT_DOU_VERB in (body or "") or bool(
+        (normalized.get("accepted_dou") or "").strip()
+    )
+    settled = status in (CLAIM_COMPLETED | CLAIM_BLOCKED)
+    if incomplete_cuts and settled and not named_accept:
+        warnings.append("report_frontmatter_defer_without_accept_dou")
 
 
 def parse_report_text(text: str) -> tuple[dict[str, str], str, bool]:
@@ -229,6 +362,8 @@ def validate_frontmatter_fields(
     )
     if status and status not in _VALID_STATUS:
         warnings.append(f"report_frontmatter_status_unrecognized:{status}")
+
+    _validate_ship_lifecycle_lead(normalized, body, errors, warnings)
 
     if require_recommended:
         for key in RECOMMENDED_KEYS:
@@ -326,6 +461,11 @@ def render_minimal_frontmatter(
         "run_id",
         "agent",
         "skill",
+        # Delivery truth leads: stages are a footnote, not a substitute.
+        "dou_index",
+        "cuts_done",
+        "cuts_total",
+        "accepted_dou",
         "project",
         "status",
         "claim_status",

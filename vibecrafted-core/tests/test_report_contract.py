@@ -6,11 +6,17 @@ from pathlib import Path
 
 from vibecrafted_core.artifacts import validate_artifacts
 from vibecrafted_core.report_contract import (
+    ACCEPT_DOU_VERB,
+    DEFERRED_CUT_MARK,
+    SHIP_LIFECYCLE_LEAD_KEYS,
     ensure_frontmatter_on_text,
+    is_ship_or_lifecycle_skill,
     materialize_launcher_report_template,
+    parse_dou_index_value,
     parse_report_text,
     render_minimal_frontmatter,
     stamp_launcher_report_identity,
+    validate_frontmatter_fields,
     validate_report_file,
 )
 from vibecrafted_core.run_triage import classify_run
@@ -152,3 +158,123 @@ def test_classify_exit_0_completed_claim_finalizes() -> None:
         report_frontmatter_ok=True,
     )
     assert verdict.verdict == "finalized"
+
+
+def test_accept_dou_verb_is_the_only_defer_surface() -> None:
+    assert ACCEPT_DOU_VERB == "accept-dou"
+    assert DEFERRED_CUT_MARK == "[ ]"
+    assert SHIP_LIFECYCLE_LEAD_KEYS[:3] == ("dou_index", "cuts_done", "cuts_total")
+    assert is_ship_or_lifecycle_skill("vc-ship")
+    assert is_ship_or_lifecycle_skill("lifecycle")
+    assert not is_ship_or_lifecycle_skill("scaffold")
+    assert parse_dou_index_value("3/9") == (None, 3, 9)
+    assert parse_dou_index_value("0") == (0, None, None)
+
+
+def test_ship_report_without_dou_index_fails(tmp_path: Path) -> None:
+    report = tmp_path / "ship.md"
+    report.write_text(
+        render_minimal_frontmatter(
+            run_id="life-ship-1",
+            agent="grok",
+            skill="ship",
+            status="completed",
+        )
+        + "# 11/11 stages\n\nok\n",
+        encoding="utf-8",
+    )
+    fm = validate_report_file(report)
+    assert not fm.ok
+    assert "report_frontmatter_missing_key:dou_index" in fm.errors
+    assert "report_frontmatter_missing_key:cuts_done" in fm.errors
+    assert "report_frontmatter_missing_key:cuts_total" in fm.errors
+
+
+def test_ship_report_leads_with_dou_index_and_cut_table() -> None:
+    text = render_minimal_frontmatter(
+        run_id="life-ship-1",
+        agent="grok",
+        skill="vc-ship",
+        status="completed",
+        extra={
+            "dou_index": "6",
+            "cuts_done": "3",
+            "cuts_total": "9",
+        },
+    )
+    # Delivery fields sit before status so "11/11 stages" cannot bury 3/9.
+    lead = text.split("status:", 1)[0]
+    assert "dou_index: 6" in lead
+    assert "cuts_done: 3" in lead
+    assert "cuts_total: 9" in lead
+
+    fm = validate_frontmatter_fields(
+        {
+            "run_id": "life-ship-1",
+            "agent": "grok",
+            "skill": "vc-ship",
+            "status": "completed",
+            "dou_index": "6",
+            "cuts_done": "3",
+            "cuts_total": "9",
+        },
+        body="# 11/11 stages\n\nthree cuts landed; the rest stayed "
+        + DEFERRED_CUT_MARK
+        + "\n",
+        has_fm=True,
+    )
+    assert fm.ok
+    assert fm.dou_index == "6"
+    assert "report_frontmatter_cuts_incomplete" in fm.warnings
+    assert "report_frontmatter_stages_hide_cuts" in fm.warnings
+    assert "report_frontmatter_defer_without_accept_dou" in fm.warnings
+
+
+def test_ship_dou_index_ratio_fills_cut_table() -> None:
+    fm = validate_frontmatter_fields(
+        {
+            "run_id": "life-ship-1",
+            "agent": "grok",
+            "skill": "ship",
+            "status": "partial",
+            "dou_index": "3/9",
+        },
+        body="in flight\n",
+        has_fm=True,
+    )
+    assert fm.ok
+    assert fm.dou_index == "3/9"
+    assert "report_frontmatter_missing_key:cuts_done" not in fm.errors
+
+
+def test_defer_named_via_accept_dou_is_not_a_silent_defer() -> None:
+    fm = validate_frontmatter_fields(
+        {
+            "run_id": "life-ship-1",
+            "agent": "grok",
+            "skill": "ship",
+            "status": "completed",
+            "dou_index": "3/9",
+        },
+        body=f"remaining cuts stay {DEFERRED_CUT_MARK} until {ACCEPT_DOU_VERB}\n",
+        has_fm=True,
+    )
+    assert fm.ok
+    assert "report_frontmatter_defer_without_accept_dou" not in fm.warnings
+
+
+def test_scaffold_report_does_not_require_dou_index() -> None:
+    fm = validate_frontmatter_fields(
+        {
+            "run_id": "run-1",
+            "agent": "codex",
+            "skill": "scaffold",
+            "status": "completed",
+        },
+        body="no cuts here\n",
+        has_fm=True,
+    )
+    assert fm.ok
+    assert not any(
+        e.startswith("report_frontmatter_missing_key:dou") for e in fm.errors
+    )
