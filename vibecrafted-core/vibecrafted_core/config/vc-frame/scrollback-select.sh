@@ -78,7 +78,9 @@ fi
 {
   cat <<'VIMRC_HEAD'
 set nocompatible
-set number
+" No line numbers: a mouse selection copies rendered cells, so a gutter would
+" ride into every paste. In-editor yanks (v/V + y) never carried it anyway.
+set nonumber
 set laststatus=0
 set noshowcmd
 set noruler

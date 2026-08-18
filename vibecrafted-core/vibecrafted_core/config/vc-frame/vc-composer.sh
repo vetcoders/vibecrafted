@@ -86,7 +86,9 @@ caret_color="${VC_COMPOSER_CARET_COLOR:-0}"
 {
   cat <<'VIMRC_HEAD'
 set nocompatible
-set number
+" No line numbers: the Composer is prose, not code, and a mouse selection
+" copies rendered cells — numbers in the gutter would ride into every paste.
+set nonumber
 set laststatus=0
 set noshowcmd
 set noruler
