@@ -363,6 +363,78 @@ metas are still in the operator's control plane. Settlement scoping still counts
 membership from the raw stamp (it projects zero on this host today, so nothing
 is provably misattributed). Neither is repository truth; both are named for DoU.
 
+## Hydrate stage — the landed ledger, 2026-08-18
+
+Stage 10 of the flight. The DoU audit found the engineering sound and the outward
+channel dead, so hydrate did the two things that are repository truth — write down
+what landed, and stop the payload from contradicting itself — and left every
+outward valve as a named operator button.
+
+### What landed, per cut
+
+| Cut  | State at hydrate | Landing commits                             | What still stands between it and `[x]`                                                                                                                                         |
+| ---- | ---------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| W0-a | `[?]`            | `85cebab5` `25fe62b3` `f08e8076` `48b3d9a9` | Portable payload proven clean from `48b3d9a9` (993 files, 0 leaks). No DMG has been rebuilt through the repaired remap and the new gate.                                       |
+| W0-b | `[?]`            | `0e26b077`                                  | Help and missing-id `rc=1` verified; the live start → stop → `resume --run-id` → `--last` walk needs an installed build newer than `18dea346`.                                 |
+| W0-c | `[ ]`            | `8e872b17` `289cff14` `fabf0e21`            | One identity resolution order landed with a 5-test contract; GUI acceptance and screenshots need a live vc-frame session.                                                      |
+| W1-a | `[x]`            | `838165d6`                                  | Guard plus Windows-clone smoke; re-earned independently by the audit stage.                                                                                                    |
+| W1-b | `[x]`            | `cd13e1ca` `1f6d36c3`                       | `--snapshot-donors`, the reaper, and the release-script hardening that followed it.                                                                                            |
+| W1-c | `[?]`            | `e9f47da1`                                  | Byte-parity guard green and the docs honest; `https://vibecrafted.io/install.ps1` still answers 404 until `feat/saas-portal-merge` is merged and deployed in `vibecrafted-io`. |
+| W2-a | `[ ]` deferred   | —                                           | `workspace_id` reaches 0 of 556 sites in vc-frame; a host-side `SessionInfo` projection is the agreed shape. Deferral is traced but not yet an operator `accept-dou`.          |
+| W2-b | `[ ]` deferred   | —                                           | The tray already carries both `Open Console` and `Open vc-terminal`; the proposed rename would collide. Same deferral.                                                         |
+| W3-a | `[x]`            | `01e5e18a` `4918c7fb`                       | 0 breaking / 0 structural / 0 diamond cycles, health 74 to 80; re-earned by the audit stage.                                                                                   |
+
+Carried under the flight without belonging to a single cut: `b18b1483` and
+`bcbfc776` (PR #54 review threads and the formatter settling after them),
+`e9348458` (autonomy: non-destructive push classified as a duty, authored by
+grok), `df9b6337` and the scaffold records `cf20aa4e` `833f770e` `63e5e8d3`
+`69101f2c`, and this stage's own commits.
+
+### What hydrate changed
+
+- `plugin.json` declared `2.0.0` and `Apache-2.0` while `VERSION` read `4.1.0`
+  and `LICENSE` opened with `SPDX-License-Identifier: BUSL-1.1`. That file is in
+  `ALLOWED_TOP_LEVEL` in both `install.sh` and `scripts/distribution_manifest.py`,
+  so the contradiction shipped to every installed host and into every
+  distribution archive, sitting next to the LICENSE it disagreed with. It now
+  states the version and the SPDX identifier it actually ships with, and carries
+  the same author, homepage, and repository as the generated marketplace
+  manifest. Two contract tests in `tests/tui/test_distribution_manifest.py` bind
+  it to `VERSION` and to `LICENSE`; restoring the pre-cut values turns the first
+  red with `plugin.json version '2.0.0' != VERSION '4.1.0'`.
+- `CHANGELOG.md` carried two bullets under `## Unreleased` against 23 commits of
+  landed work. The section now describes the 4.2.0 scope in Added / Changed /
+  Fixed / Security. It deliberately stays `Unreleased`: `v4.1.0` was never
+  tagged, so dating a `## 4.2.0` heading here would repeat exactly the kind of
+  claim this flight exists to retire. The release stage promotes it with the tag.
+
+### Corrections to the DoU audit
+
+- **P1-8, the docs half, is not true of this repository.** The audit reported the
+  install page never mentioning the desktop product (`dmg`, `--gui`, `Desktop`,
+  `notariz` all at zero hits). Measured here, `docs/INSTALL.md` opens with a
+  channel matrix naming the signed `Vibecrafted.app` DMG and its publication
+  status, carries a `## macOS — the signed desktop app` section with the
+  `shasum -a 256 -c` walk, documents `make app` and the desktop update path;
+  `README.md` and `docs/RELEASE_CHECKLIST.md` both enumerate the DMG assets. The
+  measurement was of the **deployed site**, which is three months stale and lives
+  in `vibecrafted-io`. The gap is a deploy, not a docs gap — same button as W1-c.
+- **P2-10, the brand half, is declined.** The audit called `"Vetcoders"` a
+  drift from the canonical `VetCoders`. In this repository `Vetcoders` is the
+  prevailing form at 272 occurrences against 6, it is hardcoded in
+  `build_marketplace_bundle.plugin_manifest`, and it matches the `vetcoders`
+  org slug. A 272-site rename is a branding decision for the operator, not a
+  hydration cut; hydrate changed the version and the licence, and left the
+  spelling alone.
+
+### Not verified by hydrate
+
+No DMG rebuilt, no payload re-scanned, no tag pushed, no site deployed, no
+`make install`, no live vc-frame session, no full pytest roots, and no
+`make unified-product-contract-gate` — this stage touched neither
+`vibecrafted_core` nor `scripts/`, so the gate's trigger condition did not fire.
+The tests that do cover the changed surface were run and are green.
+
 ## Explicit non-goals
 
 Native Windows runtime · a second control plane · new vc-frame features beyond the

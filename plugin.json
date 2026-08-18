@@ -1,9 +1,12 @@
 {
   "name": "vibecrafted",
-  "version": "2.0.0",
-  "description": "Vibecrafted release engine and workflows.",
+  "version": "4.1.0",
+  "description": "Release engine for AI-built software. Structural mapping, convergence loops, install truth, and launch-ready packaging for AI-generated repos.",
   "author": {
-    "name": "Vetcoders"
+    "name": "Vetcoders",
+    "email": "hello@vetcoders.io"
   },
-  "license": "Apache-2.0"
+  "homepage": "https://vibecrafted.io/",
+  "repository": "https://github.com/vetcoders/vibecrafted",
+  "license": "BUSL-1.1"
 }

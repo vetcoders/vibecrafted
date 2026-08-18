@@ -18,6 +18,13 @@ Official submit/help surfaces below were re-checked on 2026-04-11 before this pa
 
 ## Recommended launch order
 
+0. awesome-agent-orchestrators
+   Official submit surface: https://github.com/andyrewlee/awesome-agent-orchestrators (fork, add one line, open a PR)
+   Why zeroth: it is the only entry on this list that costs nothing, waits on no
+   editorial queue, and is read by exactly our audience. It is also the one
+   directory where the namesake is already listed and we are not — see the
+   directory note below. Do this before any paid or curated submission.
+
 1. There's An AI For That
    Official submit surface: https://theresanaiforthat.com/launch/
    Why first: highest AI-directory traffic, native support for launches and developer tools.
@@ -180,6 +187,34 @@ Every public surface should agree on:
 - audience: founders and teams shipping AI-generated repos into production
 
 ## Directory-specific notes
+
+### awesome-agent-orchestrators
+
+- Submit URL: https://github.com/andyrewlee/awesome-agent-orchestrators
+- Mechanism: a curated GitHub awesome-list, ~1.2k stars. Submission is a fork
+  plus a pull request adding one line in the list's own `Name - sentence.`
+  format. No fee, no editorial queue, no launch window.
+- Why it is first: its topic tags are our exact audience — `claude-code`,
+  `codex`, `gemini-cli`, `multi-agent-systems`, `parallel-agents`,
+  `git-worktree`, `agent-orchestration`. Neighbouring entries (ClawTeam,
+  CompanyHelm, Contrabass, vibe-kanban, constellagent, parallel-code) are the
+  tools a stranger currently finds instead of us.
+- **Positioning risk, measured 2026-08-18.** A near-identical namesake,
+  `vibecraft.build`, is already listed here and ranks second for the category
+  query while Vibecrafted returns nothing. The entry must therefore differentiate
+  in its first clause, not its last: most neighbours orchestrate agents across
+  worktrees, which is the crowded half of the category. Ours is the lifecycle and
+  the settlement ledger — the part that says whether the work actually landed.
+- Paste-ready line, in the list's format:
+
+  ```text
+  Vibecrafted - Lifecycle runtime that drives Claude, Codex, and Gemini through an eleven-stage read/write cadence on one shared checkout, settling every stage against a signed delivery ledger instead of an agent's own report.
+  ```
+
+- Prerequisite: land it **after** a GitHub Release actually carries an
+  installable artifact. An awesome-list PR pointing at a repository whose latest
+  release is four minors stale is the one version of this submission that can be
+  rejected on merit.
 
 ### There's An AI For That
 
