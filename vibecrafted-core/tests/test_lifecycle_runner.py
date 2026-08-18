@@ -8,6 +8,11 @@ from pathlib import Path
 import pytest
 from vibecrafted_core import control_plane, ship, wrappers
 from vibecrafted_core.lifecycle_delivery import claim_digest_for_text
+from vibecrafted_core.lifecycle_fleet import (
+    CutDispatchContract,
+    live_vc_dispatch_permitted,
+    load_cut_records,
+)
 from vibecrafted_core.lifecycle_runner import (
     LIFECYCLE_SCHEMA_ID,
     LifecycleRunner,
@@ -1968,3 +1973,158 @@ def test_lifecycle_run_rejects_invalid_stage_casting(
                 )
             )
         )
+
+
+def test_write_stage_with_n_cuts_records_n_cut_id_children(
+    monkeypatch, tmp_path: Path
+) -> None:
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setattr(
+        "vibecrafted_core.lifecycle_runner.load_context_atlas",
+        lambda *_args, **_kwargs: {"ok": True, "command": ["loct", "context"]},
+    )
+    launched: list[str] = []
+
+    def supervisor(contract: CutDispatchContract) -> dict:
+        launched.append(contract.cut_id)
+        return {"accepted": True, "cut_id": contract.cut_id}
+
+    def fake_launcher(spec, _source_dir):
+        report = tmp_path / f"{spec.skill}.md"
+        report.write_text(f"{spec.skill} ok\n", encoding="utf-8")
+        return {
+            "accepted": True,
+            "run_id": f"{spec.skill}-run",
+            "report": str(report),
+            "transcript": str(tmp_path / f"{spec.skill}.log"),
+            "meta": str(tmp_path / f"{spec.skill}.json"),
+        }
+
+    mission = (
+        "---\n"
+        "cuts:\n"
+        "  - W0-a\n"
+        "  - W0-b\n"
+        "  - W1-c\n"
+        "---\n"
+        "# Mission: fleet the WRITE stage\n"
+    )
+    runner = LifecycleRunner(
+        launcher=fake_launcher,
+        awaiter=lambda payload: {
+            "completed": True,
+            "artifact_ok": True,
+            "report": payload["report"],
+        },
+        fleet_supervisor=supervisor,
+    )
+    state = asyncio.run(
+        runner.run(
+            LifecycleRunSpec(
+                workflow_id="vc-implement",
+                agent="codex",
+                run_id="life-impl-fleet",
+                prompt=mission,
+                root=str(tmp_path),
+                await_stages=True,
+            )
+        )
+    )
+
+    fleet = state["stages"][0]["fleet"]
+    assert fleet["exception_granted"] is True
+    assert fleet["live_dispatch"] is False
+    assert fleet["cuts"] == ["W0-a", "W0-b", "W1-c"]
+    assert launched == ["W0-a", "W0-b", "W1-c"]
+    assert live_vc_dispatch_permitted() is False
+    records = load_cut_records("life-impl-fleet")
+    assert len(records) >= 3
+    by_cut = {item["cut_id"]: item for item in records}
+    for cut_id in ("W0-a", "W0-b", "W1-c"):
+        worktree = Path(by_cut[cut_id]["worktree_path"])
+        assert "worktrees" in worktree.parts
+        assert worktree.parts[-2:] == ("life-impl-fleet", cut_id)
+        assert worktree.is_relative_to(home / "worktrees")
+        assert len(worktree.relative_to(home / "worktrees").parts) == 4
+
+
+def test_read_stage_with_cuts_does_not_record_fleet(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    monkeypatch.setattr(
+        "vibecrafted_core.lifecycle_runner.load_context_atlas",
+        lambda *_args, **_kwargs: {"ok": True, "command": ["loct", "context"]},
+    )
+    prompts: list[str] = []
+
+    def fake_launcher(spec, _source_dir):
+        prompts.append(spec.prompt)
+        report = tmp_path / f"{spec.skill}.md"
+        report.write_text(f"{spec.skill} ok\n", encoding="utf-8")
+        return {
+            "accepted": True,
+            "run_id": f"{spec.skill}-run",
+            "report": str(report),
+        }
+
+    runner = LifecycleRunner(
+        launcher=fake_launcher,
+        awaiter=lambda payload: {
+            "completed": True,
+            "artifact_ok": True,
+            "report": payload["report"],
+        },
+    )
+    state = asyncio.run(
+        runner.run(
+            LifecycleRunSpec(
+                workflow_id="vc-dou",
+                agent="codex",
+                run_id="life-dou-nofleet",
+                prompt="---\ncuts: W0-a, W0-b\n---\nREAD mission\n",
+                root=str(tmp_path),
+                await_stages=True,
+            )
+        )
+    )
+    assert "fleet" not in state["stages"][0]
+    assert load_cut_records("life-dou-nofleet") == []
+    assert "WRITE fleet exception" not in prompts[0]
+    assert "must not launch external agent lines" in prompts[0]
+
+
+def test_write_stage_prompt_names_fleet_exception_when_cuts_listed(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    monkeypatch.setattr(
+        "vibecrafted_core.lifecycle_runner.load_context_atlas",
+        lambda *_args, **_kwargs: {"ok": True, "command": ["loct", "context"]},
+    )
+    prompts: list[str] = []
+
+    def fake_launcher(spec, _source_dir):
+        prompts.append(spec.prompt)
+        return {
+            "accepted": True,
+            "run_id": "impl-run",
+            "report": str(tmp_path / "implement.md"),
+        }
+
+    asyncio.run(
+        LifecycleRunner(launcher=fake_launcher).run(
+            LifecycleRunSpec(
+                workflow_id="vc-implement",
+                agent="codex",
+                run_id="life-impl-prompt",
+                prompt="---\ncuts: A, B\n---\nship the cuts\n",
+                root=str(tmp_path),
+            )
+        )
+    )
+    assert "WRITE fleet exception" in prompts[0]
+    assert "Listed cuts: A, B" in prompts[0]
+    assert "no live vc-dispatch" in prompts[0]
+    assert "life-impl-prompt" in prompts[0]

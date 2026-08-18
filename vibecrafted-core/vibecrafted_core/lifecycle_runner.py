@@ -21,6 +21,14 @@ from .lifecycle_delivery import (
     claim_digest_for_text,
     try_grant_lifecycle_stage_seal,
 )
+from .lifecycle_fleet import (
+    SupervisorLaunch,
+    dispatch_recorded_children,
+    live_vc_dispatch_permitted,
+    mission_cuts,
+    record_write_stage_fleet,
+    stage_worker_may_launch_agent_lines,
+)
 from .report_contract import parse_report_path
 from .stage_cast import (
     _mission_stage_agents,
@@ -624,6 +632,7 @@ class LifecycleRunner:
         *,
         launcher: LaunchWorkflow = launch_workflow,
         awaiter: AwaitWorkflow | None = None,
+        fleet_supervisor: SupervisorLaunch | None = None,
     ) -> None:
         """Wire the workflow launcher and awaiter (defaults to the real runtime paths)."""
         self.launcher = launcher
@@ -635,6 +644,7 @@ class LifecycleRunner:
                 hard_cap_seconds=_lifecycle_await_hard_cap_seconds(),
             )
         )
+        self.fleet_supervisor = fleet_supervisor
 
     async def run(self, spec: LifecycleRunSpec) -> dict[str, Any]:
         """Execute the full lifecycle: initialize state, then loop launching stages until
@@ -750,6 +760,7 @@ class LifecycleRunner:
                 previous_reports=previous_reports,
                 context=context,
                 state_path=state_path,
+                lifecycle_run_id=run_id,
             )
             state["stages"].append(record)
             record.update(delivery_axes_for_receipt("launching", record.get("launch")))
@@ -863,15 +874,19 @@ class LifecycleRunner:
         previous_reports: list[str],
         context: dict[str, Any],
         state_path: Path | None = None,
+        lifecycle_run_id: str = "",
     ) -> dict[str, Any]:
         """Build the stage prompt, capture the pre-launch git baseline, and launch the
         stage worker; returns the initial stage record (before await/completion)."""
+        cuts = mission_cuts(source_prompt)
         prompt = self._stage_prompt(
             manifest=manifest,
             stage=stage,
             source_prompt=source_prompt,
             previous_reports=previous_reports,
             context=context,
+            cuts=cuts,
+            lifecycle_run_id=lifecycle_run_id,
         )
         stage_definition = workflow_definition(stage.workflow)
         launch_spec = WorkflowLaunchSpec(
@@ -900,7 +915,7 @@ class LifecycleRunner:
         git_before = _git_status(root)
         git_snapshot_before = _git_worktree_snapshot(root, git_before)
         launch = await asyncio.to_thread(self.launcher, launch_spec, root)
-        return {
+        record: dict[str, Any] = {
             "id": stage.id,
             "name": stage.name,
             "workflow": stage.workflow,
@@ -920,6 +935,21 @@ class LifecycleRunner:
             "launch": launch,
             "status": "launching",
         }
+        fleet = record_write_stage_fleet(
+            stage=stage,
+            cuts=cuts,
+            parent_run_id=lifecycle_run_id or str(launch.get("run_id") or ""),
+            repo_root=root,
+            agent=agent,
+        )
+        if fleet.children:
+            record["fleet"] = {
+                **fleet.to_payload(),
+                "supervisor_launches": dispatch_recorded_children(
+                    fleet, supervisor=self.fleet_supervisor
+                ),
+            }
+        return record
 
     def _stage_prompt(
         self,
@@ -929,6 +959,8 @@ class LifecycleRunner:
         source_prompt: str,
         previous_reports: list[str],
         context: dict[str, Any],
+        cuts: tuple[str, ...] = (),
+        lifecycle_run_id: str = "",
     ) -> str:
         """Render the full worker-facing prompt for a stage, embedding the manifest
         contract, prior reports, the context atlas excerpt, and the operator prompt."""
@@ -942,6 +974,21 @@ class LifecycleRunner:
         human_controls = ", ".join(manifest.human_controls) or "none"
         known_agents = ", ".join(sorted(SUPPORTED_AGENTS))
         claim_digest = claim_digest_for_text(source_prompt)
+        fleet_contract = (
+            "\n- Stage workers must not launch external agent lines "
+            "(no live vc-dispatch)."
+        )
+        if stage_worker_may_launch_agent_lines(stage=stage, cuts=cuts):
+            listed = ", ".join(cuts)
+            fleet_contract += (
+                "\n- WRITE fleet exception: this stage is a dispatcher, not the"
+                "\n  coder of every cut. Record one child run per listed cut with"
+                "\n  cut_id and worktree"
+                f" $VIBECRAFTED_HOME/worktrees/<org>/<repo>/{lifecycle_run_id or '<run_id>'}/<cut_id>."
+                "\n  Still no live vc-dispatch"
+                f" (live_vc_dispatch_permitted={live_vc_dispatch_permitted()})."
+                f"\n- Listed cuts: {listed}"
+            )
         dou_contract = ""
         if stage.workflow == "dou":
             dou_contract = (
@@ -972,7 +1019,7 @@ READ phase rule:
   malformed values are a hard contract violation.
 
 WRITE phase rule:
-- Code changes are allowed, but changed files must be reported.
+- Code changes are allowed, but changed files must be reported.{fleet_contract}
 
 Lifecycle steering (optional, via your report YAML frontmatter):
 - next_stage: <stage-id> — steer the lifecycle forward or backward; unknown
