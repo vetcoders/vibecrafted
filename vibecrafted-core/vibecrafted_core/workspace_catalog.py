@@ -5,11 +5,16 @@ workspace identity. Server/API and vc-frame integrations are readers only.
 
 Identity model
 --------------
-- ``workspace_id`` — explicit UUIDv7 for one durable logical workspace.
+- ``workspace_id`` — explicit UUID for one durable logical workspace.
   Never derived from root path; the same root may host multiple workspaces.
 - ``vibecrafted_session_id`` — durable logical session under a workspace.
 - ``workspace_instance_id`` — concrete materialization bound to a ``build_id``.
 - ``run_id`` — concrete execution belonging to workspace + vibecrafted session.
+
+Ids are *minted* as UUIDv7 (:func:`new_uuid7`) but *accepted* version-agnostically
+(:func:`require_uuid`): the live catalog legitimately mixes v4 and v7. Readers
+must never validate, filter, or sort on the UUID version — use ``created_at``
+for chronology.
 
 ``agent_session_id``, ``runtime_session_id``, and vc-frame/Zellij session
 names remain subordinate technical identifiers and are not renamed here.

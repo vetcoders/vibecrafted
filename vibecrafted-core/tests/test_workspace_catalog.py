@@ -286,6 +286,64 @@ def test_new_uuid7_fallback_emits_uuid7(monkeypatch: pytest.MonkeyPatch) -> None
     assert generated == sorted(generated)
 
 
+# The live catalog mixes v4 and v7 by construction: workspaces minted before
+# UUIDv7 became the default keep their v4 ids, and Vibecrafted's own repository
+# is one of them. Acceptance must therefore never look at the version.
+LEGACY_V4_WORKSPACE_ID = "bda366e0-519f-45f1-8d10-449058491a94"
+
+
+def test_uuid_acceptance_is_version_agnostic() -> None:
+    assert uuid.UUID(LEGACY_V4_WORKSPACE_ID).version == 4
+    assert wc.is_uuid(LEGACY_V4_WORKSPACE_ID)
+    assert wc.require_uuid(LEGACY_V4_WORKSPACE_ID, field_name="workspace_id") == (
+        LEGACY_V4_WORKSPACE_ID
+    )
+
+    minted = wc.new_uuid7()
+    assert uuid.UUID(minted).version == 7
+    assert wc.is_uuid(minted)
+
+
+def test_legacy_v4_workspace_survives_the_full_catalog_round_trip(
+    home: Path, tmp_path: Path
+) -> None:
+    """A v4 id minted before the v7 default must stay a first-class workspace.
+
+    This is the regression guard for a v7-only rail: any reader that validates,
+    filters, or sorts on the UUID version drops 22 of the 57 live workspaces --
+    Vibecrafted's own checkout among them.
+    """
+
+    root = tmp_path / "legacy"
+    root.mkdir()
+    created = wc.create_workspace(
+        root=root,
+        display_label="legacy",
+        workspace_id=LEGACY_V4_WORKSPACE_ID,
+        select=True,
+    )
+    assert created.workspace_id == LEGACY_V4_WORKSPACE_ID
+
+    assert wc.show_workspace(LEGACY_V4_WORKSPACE_ID).workspace_id == (
+        LEGACY_V4_WORKSPACE_ID
+    )
+    assert wc.select_workspace(LEGACY_V4_WORKSPACE_ID).workspace_id == (
+        LEGACY_V4_WORKSPACE_ID
+    )
+
+    v7_root = tmp_path / "modern"
+    v7_root.mkdir()
+    modern = wc.create_workspace(root=v7_root, display_label="modern", select=False)
+    assert uuid.UUID(modern.workspace_id).version == 7
+
+    listed = wc.list_workspaces()
+    ids = [record.workspace_id for record in listed]
+    assert LEGACY_V4_WORKSPACE_ID in ids
+    assert modern.workspace_id in ids
+    # Chronology comes from created_at, never from the id bits.
+    assert listed == sorted(listed, key=lambda record: record.created_at)
+
+
 def test_dirty_build_id_distinguishes_content_with_same_status(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     root.mkdir()

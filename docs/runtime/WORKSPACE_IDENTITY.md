@@ -14,13 +14,27 @@ _Status: control-plane authority · Cut A landed · vc-frame Cut B consumer cont
 
 | Field                          | Kind   | Meaning                                                                                                            |
 | ------------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------ |
-| `workspace_id`                 | UUIDv7 | Durable logical Vibecrafted Workspace. **Not** derived from root. Same root may host multiple parallel workspaces. |
-| `vibecrafted_session_id`       | UUIDv7 | Durable logical session belonging to `workspace_id`.                                                               |
-| `workspace_instance_id`        | UUIDv7 | Concrete runtime materialization of `workspace_id`, bound to an exact `build_id`.                                  |
+| `workspace_id`                 | UUID   | Durable logical Vibecrafted Workspace. **Not** derived from root. Same root may host multiple parallel workspaces. |
+| `vibecrafted_session_id`       | UUID   | Durable logical session belonging to `workspace_id`.                                                               |
+| `workspace_instance_id`        | UUID   | Concrete runtime materialization of `workspace_id`, bound to an exact `build_id`.                                  |
 | `run_id`                       | string | Concrete execution belonging to `workspace_id` + `vibecrafted_session_id`.                                         |
 | `agent_session_id`             | string | Provider-native session (subordinate).                                                                             |
 | `runtime_session_id`           | string | Runtime tracking id (subordinate).                                                                                 |
 | vc-frame / Zellij session name | string | Physical pane host (subordinate). Never overload `session_id`.                                                     |
+
+### Accepted id rule — mint v7, accept any UUID
+
+New ids are minted as UUIDv7 (`new_uuid7`) so that lexical order is
+chronological. **Acceptance is version-agnostic:** `require_uuid` admits any
+canonical RFC 4122 UUID, and every reader — control plane, server/API,
+vc-frame — MUST do the same.
+
+No consumer may validate, filter, or sort on the UUID _version_. The live
+catalog is mixed by construction: workspaces minted before v7 became the
+default carry v4 ids, including Vibecrafted's own repository
+(`bda366e0-519f-45f1-8d10-449058491a94`). A v7-only rail would drop them.
+
+Ordering that needs chronology reads `created_at`, never the id bits.
 
 ## build_id
 

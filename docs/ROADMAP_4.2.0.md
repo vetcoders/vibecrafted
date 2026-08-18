@@ -174,6 +174,59 @@ carries 277 occurrences of the vc-terminal donor path. A test pins that now.
   end through a complete `--snapshot-donors` release (cold cargo ×2, signing, notarization).
 - Nothing in this stage was pushed, merged, tagged or deployed.
 
+## Polarize stage — the one truth, 2026-08-18
+
+The audit named three candidate axes. Only one of them was a live contradiction
+_inside this repository_, so only one was cut.
+
+**Chosen axis — `workspace_id` is minted as UUIDv7 and accepted as any canonical
+UUID.** No consumer may validate, filter, or sort on the version.
+
+The runtime already implemented this rule and was never wrong: `new_uuid7()` is
+the single minting point, `require_uuid()` the single acceptance chokepoint
+(fan-in 6, 35 callsites), and it is version-agnostic by construction. What
+disagreed was the prose. `docs/runtime/WORKSPACE_IDENTITY.md` — the wire
+contract a vc-frame Cut B reader consumes — declared the _kind_ of the three id
+fields to be `UUIDv7`, and the `workspace_catalog` module docstring said the
+same. Read as a validation rule, that prose is what turns W2-a into the top-2
+risk of this flight.
+
+Measured this stage, against the live catalog: **57 workspaces, 35 UUIDv7 and 22
+UUIDv4** — and this repository's own entry is
+`bda366e0-519f-45f1-8d10-449058491a94`, **version 4**. A v7-only rail drops
+Vibecrafted from its own dashboard.
+
+**Rejected alternatives.**
+
+- _Migrate the v4 ids to v7 so the doc becomes true._ Rejected: the catalog is
+  the sole durable identity store. Rewriting durable ids to satisfy a sentence
+  invalidates every projection keyed on them, for cosmetic gain.
+- _Mint v7 **and** validate v7 (the "average" of the two axes)._ Rejected — this
+  is the exact shape of the failure. Averaging two viable-looking rules here
+  produces the bug.
+- _Cut the cycle-gate axis (`loct audit --json` vs `loct follow` diamonds)._
+  Rejected as out of scope for a repo cut: `loct follow` appears nowhere in this
+  tree as a gate. That conflict lives between two sentences of the W3-a brief,
+  not between two surfaces of the product. `loct audit --json` stands as the
+  instrument.
+- _Cut the release-scope axis (4.2.0 = integrity spine, W2 deferred)._ Rejected
+  as **not an agent's call**: whether 4.2.0 waits for W2 is an operator button,
+  and the audit files it under "needs a human".
+
+**Aligned surfaces.** `docs/runtime/WORKSPACE_IDENTITY.md` (identity table now
+reads `UUID`, plus an explicit _Accepted id rule_ section) · the
+`workspace_catalog` module docstring · two regression tests in
+`vibecrafted-core/tests/test_workspace_catalog.py` that put a real legacy v4 id
+through create → show → select → list and assert list order comes from
+`created_at`, never from the id bits.
+
+**Proof the gate can fail.** `is_uuid` was mutated to require version 7; both new
+tests went red with `workspace_id must be a canonical UUID`, and green again on
+restore. The guard reproduces the exact regression it exists to stop.
+
+**Unblocked by this cut.** W2-a may now implement the host-side `SessionInfo`
+projection against a stated, tested rule. It remains unimplemented.
+
 ## Explicit non-goals
 
 Native Windows runtime · a second control plane · new vc-frame features beyond the
