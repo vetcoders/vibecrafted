@@ -28,7 +28,7 @@ are visibly unfinished. 4.2.0 turns each into a verifier-earned `[x]` or an hone
 | W3   | W3-a | Core `__init__` import direction                | stabilize | vibecrafted            |
 
 Order: W0 (parallel, read-only) → W1 (parallel, disjoint files) → W2 (parallel) →
-W3 (after W1-a). Every wave ends at an operator button (push / PR / deploy / install).
+W3 (after W1-a). Every wave ends at an operator button (merge / deploy / install).
 
 ## Decisions
 
@@ -41,5 +41,5 @@ W3 (after W1-a). Every wave ends at an operator button (push / PR / deploy / ins
 ## Explicit non-goals
 
 Native Windows runtime · a second control plane · new vc-frame features beyond the
-rail and the 2026-08-16 chrome asks · rewriting the release scripts · any push,
-merge, or deploy performed by an agent.
+rail and the 2026-08-16 chrome asks · rewriting the release scripts · merges into trunk,
+deploys, or host installs performed by an agent (branch pushes and PR creation are the supervisor's; canonical list: vc-operator/AUTONOMY.md).
