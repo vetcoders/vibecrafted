@@ -1,4 +1,8 @@
-"""Interactive LIVE RUNS dashboard — the product surface behind the LIVE chip.
+"""Interactive LIVE RUNS dashboard — the control-plane-direct census reader
+(``python -m vibecrafted_core.live_dashboard``). The ``voc`` LIVE chip is
+server-backed (`vibecrafted-app/tui-agent/src/observe.rs`, one origin
+`/api/control/state`); this module is the direct reader beside it, not behind
+it, and the two must never grow a second liveness definition between them.
 
 One canonical liveness selector, shared with vc-frame's server census
 (``zellij-server/src/vc_live_runs.rs``): a run is live when its
@@ -6,6 +10,14 @@ One canonical liveness selector, shared with vc-frame's server census
 pid answers signal-0 (``EPERM`` still proves life; only ``ESRCH`` proves
 death). Rows and the LIVE count both come from ONE ``scan_live_runs`` call —
 this module never invents a second liveness definition.
+
+One canonical workspace-identity resolution order, shared with the runtime
+writer (``workspace_catalog.resolve_run_workspace_identity``): the exported
+``VIBECRAFTED_WORKSPACE_ID`` first, then the ONE canonical catalog by
+``canonical_root``, both arbitrated by that catalog. This module never invents
+a second answer to "which workspace am I" — a dashboard that resolved its own
+identity differently from the runtime would hide the very runs its shell
+launched.
 
 Transcript policy: HUMAN (``transcript.human.log``) is the default surface;
 RAW (``transcript.log``) is an explicit toggle. A missing human transcript
@@ -21,6 +33,7 @@ import curses
 import errno
 import os
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -111,13 +124,14 @@ def scan_live_runs(root: Path, is_alive=worker_is_alive) -> list[LiveRunCard]:
 
 
 WORKSPACE_CATALOG_SCHEMA = "vibecrafted.workspace-catalog.v1"
+ENV_WORKSPACE_ID = "VIBECRAFTED_WORKSPACE_ID"
 
 
-def resolve_workspace_id(current_root: str, plane_root: Path) -> str | None:
-    """Map the dashboard's launch root to its workspace_id via the ONE
-    canonical catalog (``workspaces/catalog.json`` — never a second catalog,
-    never basename guessing). Unknown root / absent / foreign-schema catalog
-    resolve to None; the filter then falls back to exact-root identity."""
+def _active_workspaces(plane_root: Path) -> dict[str, dict] | None:
+    """Active records of the ONE canonical catalog, keyed by workspace_id.
+
+    None means the catalog is unusable (absent, unreadable, foreign schema,
+    malformed) — distinct from an empty catalog, which is a usable answer."""
     import json
 
     path = plane_root / "workspaces" / "catalog.json"
@@ -127,20 +141,55 @@ def resolve_workspace_id(current_root: str, plane_root: Path) -> str | None:
         return None
     if value.get("schema") != WORKSPACE_CATALOG_SCHEMA:
         return None
+    workspaces = value.get("workspaces")
+    if not isinstance(workspaces, dict):
+        return None
+    active: dict[str, dict] = {}
+    for workspace in workspaces.values():
+        if not isinstance(workspace, dict) or workspace.get("buried_at"):
+            continue
+        workspace_id = workspace.get("workspace_id")
+        if isinstance(workspace_id, str) and workspace_id:
+            active[workspace_id] = workspace
+    return active
+
+
+def resolve_workspace_id(
+    current_root: str,
+    plane_root: Path,
+    env: Mapping[str, str] | None = None,
+) -> str | None:
+    """Answer "which workspace is this dashboard?" in the SAME preference
+    order the runtime uses when it stamps a run
+    (``workspace_catalog.resolve_run_workspace_identity``):
+
+    1. ``VIBECRAFTED_WORKSPACE_ID`` — the identity the runtime already
+       resolved and exported into this process tree. A dashboard that ignores
+       it disagrees with every run launched from its own shell.
+    2. the ONE canonical catalog (``workspaces/catalog.json``) by
+       ``canonical_root`` — never a second catalog, never basename guessing.
+
+    Both steps are arbitrated by that same catalog: an env id naming no active
+    workspace is stale evidence, not identity, and is refused. Unknown root /
+    absent / foreign-schema catalog resolve to None; the filter then falls back
+    to exact-root identity."""
+    active = _active_workspaces(plane_root)
+    if active is None:
+        return None
+
+    environ = os.environ if env is None else env
+    claimed = str(environ.get(ENV_WORKSPACE_ID) or "").strip()
+    if claimed and claimed in active:
+        return claimed
+
     try:
         target = os.path.realpath(current_root)
     except OSError:
         target = current_root
-    workspaces = value.get("workspaces")
-    if not isinstance(workspaces, dict):
-        return None
-    for workspace in workspaces.values():
-        if not isinstance(workspace, dict) or workspace.get("buried_at"):
-            continue
+    for workspace_id, workspace in active.items():
         root = workspace.get("canonical_root")
         if isinstance(root, str) and os.path.realpath(root) == target:
-            workspace_id = workspace.get("workspace_id")
-            return workspace_id if isinstance(workspace_id, str) else None
+            return workspace_id
     return None
 
 
@@ -183,10 +232,12 @@ class DashboardState:
     current_root: str
     cards: list[LiveRunCard] = field(default_factory=list)
     # 'current' selects by explicit workspace_id (Cut B wire contract) when
-    # BOTH sides carry one: the dashboard's identity comes from the canonical
-    # catalog, the run's from its meta.json. Legacy runs without workspace_id
-    # fall back to full resolved-root identity — never the basename; two
-    # roots both named `vibecrafted` stay distinct.
+    # BOTH sides carry one. Both sides now answer that question the same way:
+    # the run's identity comes from `resolve_run_workspace_identity` at launch,
+    # the dashboard's from `resolve_workspace_id` here — one preference order,
+    # env first, catalog-arbitrated. Legacy runs without workspace_id fall back
+    # to full resolved-root identity — never the basename; two roots both named
+    # `vibecrafted` stay distinct.
     current_workspace_id: str | None = None
     filter_mode: str = "current"
     selected_run_id: str | None = None

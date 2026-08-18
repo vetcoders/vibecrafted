@@ -36,6 +36,40 @@ default carry v4 ids, including Vibecrafted's own repository
 
 Ordering that needs chronology reads `created_at`, never the id bits.
 
+### Identity resolution order — one order, writers and readers alike
+
+"Which workspace is this process?" has exactly ONE answer path. Every surface
+that asks it — the run stamper, the LIVE RUNS dashboard, server projections,
+vc-frame — resolves in this order:
+
+1. **`VIBECRAFTED_WORKSPACE_ID`** — the identity the runtime already resolved
+   and exported into this process tree. It is honoured only when it names an
+   **active** workspace in the catalog.
+2. **The one canonical catalog by `canonical_root`** — the unique active
+   workspace rooted here. When several are rooted here, the selected one wins;
+   an ambiguous root without a selection is an error, never a guess.
+3. **Create** (writers only, `create_if_missing`) — readers stop at `None`.
+
+Two rules follow, and both are load-bearing:
+
+- **A `workspace_id` the catalog does not hold active is stale evidence, not
+  identity.** No surface trusts a bare id. What follows the refusal is decided
+  by role, and only by role: a **writer** about to create durable state
+  refuses loudly (`WorkspaceNotFound`, or "workspace … is buried; recover it
+  before launching runs") because a stale export must never silently re-home a
+  run; a **reader** refuses quietly and continues down the order, because a
+  dashboard must never go blank over an environment variable.
+- **A reader that skips step 1 disagrees with every run its own shell
+  launched.** `workspace_id` is explicitly _not_ derived from root, so a
+  root-only reader cannot see a Mode B worker at all: a worktree worker's root
+  never equals its dispatcher's. Root identity is the fallback for runs that
+  carry no stamp, not a competing authority.
+
+Membership questions with stricter semantics stay stricter — settlement
+scoping still excludes unstamped runs rather than guessing them (see
+_Settlement F/X/N scoping_) — but no surface may believe a stamp the catalog
+refuses.
+
 ## build_id
 
 Schema: `vibecrafted.build-id.v1`
@@ -139,6 +173,16 @@ Env exports for workers:
 | `VIBECRAFTED_SESSION_ID`            | `vibecrafted_session_id` |
 | `VIBECRAFTED_WORKSPACE_INSTANCE_ID` | `workspace_instance_id`  |
 | `VIBECRAFTED_BUILD_ID`              | `build_id.rendered`      |
+
+These are exports **and** inputs: a child process inherits them and re-enters
+the resolution order above at step 1. That is how a Mode B worker in a
+worktree stays inside the workspace that dispatched it — and why every reader
+must honour step 1 rather than resolve by root on its own.
+
+Consequence to know: because writers refuse loudly, an inherited export whose
+workspace is later buried or dropped from the catalog turns every subsequent
+launch in that shell into a hard error. That is deliberate fail-closed
+behaviour, not a fallback; clear the variable or recover the workspace.
 
 ## Run metadata fields (new, additive)
 

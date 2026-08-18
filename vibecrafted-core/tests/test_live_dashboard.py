@@ -250,6 +250,144 @@ def test_foreign_schema_or_missing_catalog_resolves_to_none(tmp_path: Path) -> N
     assert resolve_workspace_id(str(tmp_path), tmp_path) is None
 
 
+# ---------------------------------------------------------------------------
+# One identity resolution order — regression contract
+#
+# The runtime resolves a run's workspace from VIBECRAFTED_WORKSPACE_ID first
+# (`workspace_catalog.resolve_run_workspace_identity`). A dashboard that
+# resolved its own identity by root alone would disagree with every run its
+# own shell launched. These pin the shared order, both directions.
+# ---------------------------------------------------------------------------
+
+
+def test_dashboard_identity_honours_the_exported_workspace_id(tmp_path: Path) -> None:
+    mine = tmp_path / "repo"
+    mine.mkdir()
+    write_catalog(
+        tmp_path,
+        [
+            {"workspace_id": "ws-rooted-here", "canonical_root": str(mine)},
+            {"workspace_id": "ws-exported", "canonical_root": str(tmp_path / "other")},
+        ],
+    )
+    # The export wins over the root lookup: it is the identity the runtime
+    # already resolved for this process tree.
+    assert (
+        resolve_workspace_id(
+            str(mine), tmp_path, env={"VIBECRAFTED_WORKSPACE_ID": "ws-exported"}
+        )
+        == "ws-exported"
+    )
+    # No export → the catalog answers by canonical_root, as before.
+    assert resolve_workspace_id(str(mine), tmp_path, env={}) == "ws-rooted-here"
+
+
+def test_exported_workspace_id_unknown_to_the_catalog_is_refused(
+    tmp_path: Path,
+) -> None:
+    mine = tmp_path / "repo"
+    mine.mkdir()
+    write_catalog(
+        tmp_path, [{"workspace_id": "ws-rooted-here", "canonical_root": str(mine)}]
+    )
+    # Stale evidence is not identity — the one catalog arbitrates both steps.
+    assert (
+        resolve_workspace_id(
+            str(mine), tmp_path, env={"VIBECRAFTED_WORKSPACE_ID": "ws-long-gone"}
+        )
+        == "ws-rooted-here"
+    )
+
+
+def test_exported_workspace_id_of_a_buried_workspace_is_refused(
+    tmp_path: Path,
+) -> None:
+    mine = tmp_path / "repo"
+    mine.mkdir()
+    write_catalog(
+        tmp_path,
+        [
+            {"workspace_id": "ws-rooted-here", "canonical_root": str(mine)},
+            {
+                "workspace_id": "ws-buried",
+                "canonical_root": str(tmp_path / "other"),
+                "buried_at": "2026-08-12T00:00:00+00:00",
+            },
+        ],
+    )
+    assert (
+        resolve_workspace_id(
+            str(mine), tmp_path, env={"VIBECRAFTED_WORKSPACE_ID": "ws-buried"}
+        )
+        == "ws-rooted-here"
+    )
+
+
+def test_unusable_catalog_refuses_even_an_exported_workspace_id(
+    tmp_path: Path,
+) -> None:
+    write_catalog(
+        tmp_path,
+        [{"workspace_id": "ws-exported", "canonical_root": str(tmp_path)}],
+        schema="somebody.elses.catalog.v9",
+    )
+    assert (
+        resolve_workspace_id(
+            str(tmp_path), tmp_path, env={"VIBECRAFTED_WORKSPACE_ID": "ws-exported"}
+        )
+        is None
+    )
+
+
+def test_worktree_worker_stays_visible_in_the_dispatching_workspace(
+    tmp_path: Path,
+) -> None:
+    # The live shape this pins: the shell exports ws-flight, every run of the
+    # flight is stamped ws-flight, and the catalog ALSO holds an older
+    # workspace rooted at this very repo. Resolving the dashboard's identity
+    # by root alone answers ws-stale and hides the whole flight — including
+    # the Mode B worker, whose worktree root can never equal the dispatcher's.
+    repo = tmp_path / "repo"
+    worktree = tmp_path / "worktrees" / "feat-x"
+    repo.mkdir()
+    worktree.mkdir(parents=True)
+    write_catalog(
+        tmp_path,
+        [
+            {"workspace_id": "ws-stale", "canonical_root": str(repo)},
+            {
+                "workspace_id": "ws-flight",
+                "canonical_root": str(tmp_path / "elsewhere"),
+            },
+        ],
+    )
+    write_meta(
+        tmp_path,
+        "scaf-260818-202208-1",
+        99,
+        repo_root=str(worktree),
+        workspace_id="ws-flight",
+    )
+    write_meta(
+        tmp_path,
+        "pola-260818-192800-2",
+        98,
+        repo_root=str(repo),
+        workspace_id="ws-flight",
+    )
+
+    identity = resolve_workspace_id(
+        str(repo), tmp_path, env={"VIBECRAFTED_WORKSPACE_ID": "ws-flight"}
+    )
+    state = DashboardState(current_root=str(repo), current_workspace_id=identity)
+    state.refresh(scan_live_runs(tmp_path, is_alive=lambda _pid: True))
+
+    assert sorted(card.run_id for card in state.visible_rows()) == [
+        "pola-260818-192800-2",
+        "scaf-260818-202208-1",
+    ]
+
+
 def test_current_filter_prefers_workspace_id_over_root(tmp_path: Path) -> None:
     # Same root string on both cards — only the workspace identity separates
     # them (the exact aliasing Cut A exists to kill).
