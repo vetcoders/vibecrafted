@@ -324,9 +324,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let sourceShell = generation.appendingPathComponent(
       "vibecrafted-core/vibecrafted_core/runtime/shell", isDirectory: true)
     let productShell = productConfig.appendingPathComponent("shell", isDirectory: true)
-    if !manager.fileExists(atPath: productShell.path) {
-      try manager.copyItem(at: sourceShell, to: productShell)
+    // The shell helper layer is runtime code, not operator config. A
+    // copy-once projection froze an old parser here (`--run-id` unknown while
+    // the release already spoke it), so every install refreshes it in full.
+    if manager.fileExists(atPath: productShell.path) {
+      try manager.removeItem(at: productShell)
     }
+    try manager.copyItem(at: sourceShell, to: productShell)
     try assertNoSymlinks(below: productConfig)
 
     let terminal = generation.appendingPathComponent("bin/vc-terminal")
@@ -382,6 +386,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     try writeLauncher(
       launcherHome.appendingPathComponent("vc-terminal"), common: common, executable: terminalHost,
       leadingArguments: ["--config-file", terminalConfig.path])
+
+    // Deck-verb wrappers. These public names have no runtime binary of their
+    // own — they are verbs of the bash deck. A plain `exec deck "$@"` shim (or
+    // a symlink onto one) loses the invoked name at the shebang boundary, so
+    // `vc-resume claude --session <id>` used to degrade into
+    // `vibecrafted claude --session <id>` ("Unknown mode"). Injecting the verb
+    // into the shim keeps launcher identity across any exec chain. Keep this
+    // map in lockstep with SHELL_WRAPPER_VERBS in vibecrafted_core/cli.py
+    // (tests/tui/test_keys.py pins the parity).
+    let deckVerbWrappers: [(name: String, verb: String)] = [
+      ("vc-help", "help"),
+      ("vc-init", "init"),
+      ("vc-dashboard", "dashboard"),
+      ("vc-dispatch", "dispatch"),
+      ("vc-resume", "resume"),
+      ("vc-justdo", "justdo"),
+      ("telemetry", "telemetry"),
+    ]
+    for wrapper in deckVerbWrappers
+      where !manager.isExecutableFile(atPath: bin.appendingPathComponent(wrapper.name).path)
+    {
+      try writeLauncher(
+        launcherHome.appendingPathComponent(wrapper.name), common: common, executable: deck,
+        leadingArguments: [wrapper.verb])
+    }
 
     let active: [String: String] = [
       "schema": "vibecrafted.active-runtime.v1",
