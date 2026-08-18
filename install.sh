@@ -323,6 +323,7 @@ FORBIDDEN_COMPONENTS = frozenset(
         ".DS_Store",
         ".backup",
         ".build",
+        ".cache",
         ".circleci",
         ".coverage",
         ".devcontainer",
@@ -337,6 +338,7 @@ FORBIDDEN_COMPONENTS = frozenset(
         ".loctignore",
         ".loctree",
         ".mypy_cache",
+        ".netrc",
         ".next",
         ".prettierignore",
         ".pytest_cache",
@@ -352,11 +354,18 @@ FORBIDDEN_COMPONENTS = frozenset(
         "__tests__",
         "build",
         "coverage.xml",
+        "credentials.json",
         "dist",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        "id_rsa",
         "node_modules",
         "package-lock.json",
         "pnpm-lock.yaml",
         "poetry.lock",
+        "reports",
+        "secrets.json",
         "target",
         "test",
         "tests",
@@ -364,7 +373,7 @@ FORBIDDEN_COMPONENTS = frozenset(
         "yarn.lock",
     }
 )
-FORBIDDEN_SUFFIXES = (".pyc", ".pyo", ".swp", "~")
+FORBIDDEN_SUFFIXES = (".pyc", ".pyo", ".swp", "~", ".pem", ".p12", ".pfx")
 REQUIRED_LOCKFILES = frozenset(
     {"vibecrafted-app/Cargo.lock", "vibecrafted-server/Cargo.lock"}
 )
