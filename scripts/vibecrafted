@@ -1020,6 +1020,7 @@ cmd_doctor_help() {
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted doctor\n'
+  printf '  vibecrafted doctor --release\n'
   printf '  vibecrafted doctor --fix-server-service\n'
   printf '  vibecrafted check\n'
   printf '\n'
@@ -4730,7 +4731,7 @@ cmd_doctor() {
     return $?
   fi
   case "${1:-}" in
-    ""|--json)
+    ""|--json|--release)
       core_dir="$(_core_module_dir 2>/dev/null || true)"
       if [[ -n "$core_dir" ]]; then
         python_bin="$(_vibecrafted_python)"

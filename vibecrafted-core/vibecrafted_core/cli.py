@@ -210,6 +210,15 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor", help="verify installed Vibecrafted runtime")
     doctor.add_argument("--json", action="store_true")
     doctor.add_argument(
+        "--release",
+        action="store_true",
+        help=(
+            "probe GitHub Latest (gh release view --json tagName) and the "
+            "latest Release source gate conclusion against the local VERSION "
+            "file; mismatch is red and names the tag/publish operator button"
+        ),
+    )
+    doctor.add_argument(
         "--quarantine-legacy-runs",
         action="store_true",
         help=(
@@ -1395,7 +1404,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for err in payload["parse_errors"]:
                     print(f"  parse_error: {err}")
             return 0
-        findings = doctor_module.doctor_run()
+        findings = doctor_module.doctor_run(
+            release=bool(getattr(args, "release", False))
+        )
         summary = doctor_module.doctor_summary(findings)
         from .runtime_receipt import build_receipt, render_receipt_text
 
