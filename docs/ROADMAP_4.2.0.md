@@ -2,9 +2,40 @@
 
 Status: planned (scaffolded 2026-08-18). Not part of the 4.1.0 release contract.
 
+Cut states are written only in the plan-root tracker. This file is a projection
+plus historical stage notes. Do not hand-edit the generated block; do not treat
+stage snapshots below as a second live `[x]`.
+
 Plan package (atlas · falsification · tracker · DRIVER · 9 briefs · manifest):
 `~/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0818/plans/roadmap-4.2.0/`
-Drive it from `DRIVER.md` there; this file is the repo-facing summary.
+Drive it from `DRIVER.md` there. Refresh the block with
+`vibecrafted ship roadmap --render --plan <plan_root>`.
+
+<!-- vibecrafted-ship-roadmap:begin -->
+
+## Cut states (from tracker)
+
+Source of truth: `~/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0818/plans/roadmap-4.2.0/tracker.md`
+Rendered by: `vibecrafted ship roadmap --render --plan <plan_root>`
+This block is a projection of the dispatcher-written tracker.
+It is not a delivery certificate and does not flip cut states.
+
+| Wave | Cut  | State | Commit SHA        | Gate                                                                                                                 |
+| ---- | ---- | ----- | ----------------- | -------------------------------------------------------------------------------------------------------------------- |
+| W0   | W0-a | [?]   | 85cebab5 1f6d36c3 | payload gate ran on real tarball: exit 1 named 5 files, fixed; clean rebuild pending (make dmg = ⛔)                 |
+| W0   | W0-b | [?]   | —                 | pkt1 verified (installed ≥18dea346); pkt 2-4 need live agent run                                                     |
+| W0   | W0-c | [ ]   | —                 | not run (needs live vc-frame)                                                                                        |
+| W1   | W1-a | [x]   | 838165d6          | symlink guard red-on-mutation + core.symlinks=false clone smoke (followup re-ran)                                    |
+| W1   | W1-b | [x]   | cd13e1ca f08e8076 | walkaround 3rd run green, worktree list=1 after; keychain trap test now falsifiable                                  |
+| W1   | W1-c | [?]   | e9f47da1          | parity guard green; live /install.ps1 still 404, VERSION 3.7.0 → deploy = ⛔                                         |
+| W2   | W2-a | [ ]   | —                 | not started; premise partly refuted (22/48 ids UUIDv4; plugin lacks request_permission → host-side projection)       |
+| W2   | W2-b | [ ]   | —                 | not started                                                                                                          |
+| W3   | W3-a | [x]   | 01e5e18a 4918c7fb | loct cycles structural 0 diamond 0 (was 1/3), health 74→80; both pytest roots green (supervisor + review + followup) |
+
+**dou-index:** 3/9 — `[x]` 3 · `[?]` 3 · `[ ]` 3 · `[~]` 0 · `[!]` 0
+
+Only a delivery-verifier flips `[~]→[x]`. Stage snapshots below, if any, are historical notes — not a second live writer.
+<!-- vibecrafted-ship-roadmap:end -->
 
 ## Thesis
 
@@ -40,20 +71,23 @@ W3 (after W1-a). Every wave ends at an operator button (merge / deploy / install
 
 ## Implement stage — what landed, 2026-08-18
 
+Stage snapshot only (2026-08-18). Live cut states are the generated block
+above; the dispatcher writes `tracker.md`.
+
 Stage `implement` ran as a single worker (no fleet), so every cut below carries the
 executing agent's own authorship, not the brief's planned assignee.
 
-| Cut  | State | Landed SHA(s)          | Measured result                                                                                                                                                                                                               |
-| ---- | ----- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| W0-a | `[!]` | recon only, no commit  | Portable payload clean of the operator's **account**; it still carried the **checkout root** in 5 tracked files. **DMG is not clean:** 8 of 2955 files name the build host. Both addressed in the workflow stage — see below. |
-| W0-b | `[~]` | recon only, no commit  | Installed runtime `4.1.0+g237d2814` contains `18dea346`; `resume --run-id <missing>` fails loudly (exit 1, names the id). Live resume of a real run not exercised from a headless worker.                                     |
-| W0-c | `[!]` | recon only, no commit  | `catalog.json` present, schema valid, 48 workspaces — but **22 of 48 ids are UUIDv4, including this repo's** (`bda366e0-…-45f1-…`). The plan's UUIDv7 premise is false.                                                       |
-| W1-a | `[~]` | `838165d6`             | Guard added; the clone smoke found a real break and fixed it (see below).                                                                                                                                                     |
-| W1-b | `[~]` | `cd13e1ca`             | `--snapshot-donors` + reaper; proved on the real donors, failure path included.                                                                                                                                               |
-| W1-c | `[~]` | `e9f47da1`             | Parity guarded. The 404 is a stale deploy branch, not a pipeline limit.                                                                                                                                                       |
-| W2-a | `[ ]` | —                      | Not implemented; premise falsified (see W0-c) and acceptance is GUI-only.                                                                                                                                                     |
-| W2-b | `[~]` | —                      | Chrome asks already landed in vc-frame `76048ca54`; the menu question is answered below.                                                                                                                                      |
-| W3-a | `[~]` | `01e5e18a`, `4918c7fb` | Import cycles 4 → **0**; loctree health 74 → **80**.                                                                                                                                                                          |
+| Cut  | Stage snapshot | Landed SHA(s)          | Measured result                                                                                                                                                                                                               |
+| ---- | -------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| W0-a | `[!]`          | recon only, no commit  | Portable payload clean of the operator's **account**; it still carried the **checkout root** in 5 tracked files. **DMG is not clean:** 8 of 2955 files name the build host. Both addressed in the workflow stage — see below. |
+| W0-b | `[~]`          | recon only, no commit  | Installed runtime `4.1.0+g237d2814` contains `18dea346`; `resume --run-id <missing>` fails loudly (exit 1, names the id). Live resume of a real run not exercised from a headless worker.                                     |
+| W0-c | `[!]`          | recon only, no commit  | `catalog.json` present, schema valid, 48 workspaces — but **22 of 48 ids are UUIDv4, including this repo's** (`bda366e0-…-45f1-…`). The plan's UUIDv7 premise is false.                                                       |
+| W1-a | `[~]`          | `838165d6`             | Guard added; the clone smoke found a real break and fixed it (see below).                                                                                                                                                     |
+| W1-b | `[~]`          | `cd13e1ca`             | `--snapshot-donors` + reaper; proved on the real donors, failure path included.                                                                                                                                               |
+| W1-c | `[~]`          | `e9f47da1`             | Parity guarded. The 404 is a stale deploy branch, not a pipeline limit.                                                                                                                                                       |
+| W2-a | `[ ]`          | —                      | Not implemented; premise falsified (see W0-c) and acceptance is GUI-only.                                                                                                                                                     |
+| W2-b | `[~]`          | —                      | Chrome asks already landed in vc-frame `76048ca54`; the menu question is answered below.                                                                                                                                      |
+| W3-a | `[~]`          | `01e5e18a`, `4918c7fb` | Import cycles 4 → **0**; loctree health 74 → **80**.                                                                                                                                                                          |
 
 ### Measured findings that changed the plan
 
@@ -371,6 +405,9 @@ what landed, and stop the payload from contradicting itself — and left every
 outward valve as a named operator button.
 
 ### What landed, per cut
+
+Hydrate-stage snapshot (2026-08-18). Not a second live writer — see the
+generated block and `tracker.md` for current cut states.
 
 | Cut  | State at hydrate | Landing commits                             | What still stands between it and `[x]`                                                                                                                                         |
 | ---- | ---------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
