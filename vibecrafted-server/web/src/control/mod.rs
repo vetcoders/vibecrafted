@@ -15,6 +15,8 @@
 //!   read from the Python-owned snapshots. The raw self-sufficient merge stays
 //!   available to TUI/diagnostic consumers, but is too expensive for an HTTP
 //!   request over a long-lived control plane.
+//! * `GET /api/control/dashboard` — the exact JSON the Leptos console hydrates
+//!   and client-navigates with (state + lifecycle summaries + loctree report).
 //! * `GET /api/control/runs` — every `runs/<id>.json` snapshot, newest-first.
 //!   Each run serialises optional delivery-proof axes (`execution_state`,
 //!   `proof_state`, `delivery_state`) and optional `seal` when present on the
@@ -72,6 +74,7 @@ pub mod api {
         Router::<leptos::config::LeptosOptions>::new()
             .route("/api/health", get(health))
             .route("/api/control/state", get(state))
+            .route("/api/control/dashboard", get(crate::app::dashboard_api))
             .route("/api/control/runs", get(runs))
             .route("/api/control/runs/{run_id}/transcript", get(transcript))
             .route("/api/control/runs/{run_id}", get(run))
