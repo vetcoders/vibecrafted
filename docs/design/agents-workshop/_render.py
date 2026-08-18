@@ -225,7 +225,7 @@ def box_new_agent(focus: str = "agent") -> list[str]:
     def mark(name: str) -> str:
         return "▸" if focus == name else " "
 
-    path = "/Volumes/vc-workspace/vetcoders/vibecrafted-suite/vibecrafted"
+    path = "/srv/vetcoders/vibecrafted"
     if focus == "path":
         path += "█"
     rows_inner = [
@@ -254,7 +254,7 @@ def box_new_dispatch() -> list[str]:
     rows_inner = [
         "  ▸ agent    [agy] [claude] [codex] «grok» [junie]",
         "    rytual   [init] «resume» [operator] [partner]",
-        "    sciezka  /Volumes/vc-workspace/vetcoders/vibecrafted-suite/vibecrafted",
+        "    sciezka  /srv/vetcoders/vibecrafted                                   ",
         "  Enter = HEADLESS worker. Bez TTY. Widać go na serwerze / w voc.",
     ]
     title = "┌ ❯ Nowy dispatch "

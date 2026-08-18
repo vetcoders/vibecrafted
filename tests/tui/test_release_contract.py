@@ -411,7 +411,7 @@ def test_dirty_donors_are_a_release_flag_with_a_reaper_not_a_manual_ritual() -> 
 
     # Without the flag the refusal is unchanged: a receipt must not be built
     # from a tree that can move underneath it.
-    assert 'die "$label is dirty; release receipts refuse moving source"' in builder
+    assert "$label is dirty; release receipts refuse moving source" in builder
 
     assert "RELEASE_FLAGS ?=" in makefile
     assert "--app-only $(RELEASE_FLAGS)" in makefile
@@ -440,11 +440,172 @@ def test_donor_remap_prefixes_are_resolved_never_concatenated() -> None:
         'FRAME_DONOR="$(canonical_dir "${VIBECRAFTED_FRAME_REPO:-$REPO_ROOT/../vc-frame}")"'
         in builder
     )
-    assert "--remap-path-prefix=$TERMINAL_DONOR=/usr/src/vc-terminal" in builder
-    assert "--remap-path-prefix=$FRAME_DONOR=/usr/src/vc-frame" in builder
-    # The snapshot roots are compiled too when --snapshot-donors is used.
-    assert "--remap-path-prefix=$TERMINAL_REPO=/usr/src/vc-terminal" in builder
-    assert "--remap-path-prefix=$FRAME_REPO=/usr/src/vc-frame" in builder
+    assert '"$TERMINAL_DONOR=/usr/src/vc-terminal"' in builder
+    assert '"$FRAME_DONOR=/usr/src/vc-frame"' in builder
+
+
+def test_remaps_run_broadest_prefix_first() -> None:
+    """rustc applies the LAST matching --remap-path-prefix.
+
+    Measured 2026-08-18 with two overlapping prefixes: outer-then-inner reports
+    the inner mapping, inner-then-outer reports the outer one. So `$HOME` has to
+    come FIRST or it shadows every specific root on any host whose checkout
+    lives under it, and the donor snapshots — which sit under `$REPO_ROOT/build`
+    — have to come AFTER `$REPO_ROOT`.
+    """
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+
+    order = [
+        '"$HOME=/usr/src/operator-home"',
+        '"$REPO_ROOT=/usr/src/vibecrafted"',
+        '"$TERMINAL_DONOR=/usr/src/vc-terminal"',
+        '"$FRAME_DONOR=/usr/src/vc-frame"',
+        '"$TERMINAL_REPO=/usr/src/vc-terminal"',
+        '"$FRAME_REPO=/usr/src/vc-frame"',
+    ]
+    positions = [builder.index(entry) for entry in order]
+    assert positions == sorted(positions), "remap order is no longer broadest-first"
+
+    # The snapshot pair is emitted only when it can differ from the donors.
+    snapshot_block = builder[
+        builder.index("PATH_REMAPS=(") : builder.index('RUSTFLAGS=""')
+    ]
+    assert "if (( SNAPSHOT_DONORS )); then" in snapshot_block
+
+
+def test_every_compiler_in_the_build_gets_a_prefix_map() -> None:
+    """RUSTFLAGS is one of four producers; the other three need their own.
+
+    Measured on the shipped 4.1.0 payload: cc-rs left 21 `$HOME` paths from
+    ring's C sources in Contents/MacOS/Vibecrafted, and xcodebuild left 51
+    checkout paths from Swift sources and DerivedData intermediates. Neither
+    reads RUSTFLAGS.
+    """
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "-ffile-prefix-map=$mapping" in builder
+    assert "export CFLAGS=" in builder
+    assert "export CXXFLAGS=" in builder
+    assert "-debug-prefix-map $mapping" in builder
+    assert "OTHER_SWIFT_FLAGS=" in builder
+    assert "OTHER_CFLAGS=" in builder
+
+
+def test_bundled_wasm_plugins_are_rebuilt_only_inside_a_snapshot() -> None:
+    """The blobs are git-tracked build output; a flag cannot reach them.
+
+    `make release-binary` builds `--no-plugins` and the binary embeds
+    zellij-utils/assets/plugins/*.wasm via include_bytes!. Measured 2026-08-18:
+    276 occurrences of `$HOME/.cargo/registry` across the 14 tracked blobs, 411
+    of which reached Contents/Helpers/vc-frame in the shipped DMG. Rebuilding
+    them under the release remaps drops both counts to zero — measured on all
+    fourteen inside a real snapshot worktree.
+
+    It must not happen against the living donor: that would rewrite tracked
+    files another agent may be mid-edit on.
+    """
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+
+    rebuild_at = builder.index('make -C "$FRAME_REPO" plugins-assets')
+    guard_at = builder.rindex("if (( SNAPSHOT_DONORS )); then", 0, rebuild_at)
+    assert rebuild_at - guard_at < 400, "the plugin rebuild escaped its snapshot guard"
+
+    binary_at = builder.index('make -C "$FRAME_REPO" release-binary')
+    assert rebuild_at < binary_at, (
+        "plugins must be rebuilt before the binary embeds them"
+    )
+
+
+def test_the_clean_repo_allowance_is_exactly_the_regenerated_plugin_assets() -> None:
+    """Rebuilding into the snapshot makes it dirty; the allowance is narrow.
+
+    Measured on a real snapshot: `git status --porcelain` afterwards lists
+    exactly SHA256SUMS and the fourteen .wasm files under
+    zellij-utils/assets/plugins/, and nothing else. The receipt still binds the
+    donor HEAD, and those files are a deterministic function of it.
+    """
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'FRAME_DERIVED=("zellij-utils/assets/plugins/")' in builder
+    assert (
+        'require_clean_repo "$FRAME_REPO" vc-frame ${FRAME_DERIVED+"${FRAME_DERIVED[@]}"}'
+        in builder
+    )
+    # The pre-build assertion stays strict: a snapshot that is dirty on arrival
+    # is a refusal, not an allowance. Exactly one of the two frame assertions
+    # carries the allowance, and vc-terminal never gets one — nothing
+    # regenerates into it.
+    frame_calls = [
+        line.strip()
+        for line in builder.splitlines()
+        if 'require_clean_repo "$FRAME_REPO"' in line
+    ]
+    assert len(frame_calls) == 2, frame_calls
+    assert sum("FRAME_DERIVED" in line for line in frame_calls) == 1, frame_calls
+    assert not any(
+        "DERIVED" in line
+        for line in builder.splitlines()
+        if 'require_clean_repo "$TERMINAL_REPO"' in line
+    )
+
+
+def test_the_embedded_interpreter_forgets_where_it_was_seeded() -> None:
+    """Two leaks, one of which was also a broken script.
+
+    Measured on the 4.1.0 payload: 27 mentions of the ephemeral
+    `build/unified-release/python-seed.XXXXXX/` directory inside
+    `runtime/python/lib/python3.12/_sysconfigdata__darwin_darwin.py`, and a pip
+    console script at `runtime/python-site/bin/jsonschema` whose shebang points
+    at that same directory — a path no customer has, so the script could never
+    have run. python-site is on PYTHONPATH and never on PATH, so nothing
+    invoked it.
+    """
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'rm -rf "$runtime/python-site/bin"' in builder
+    assert "normalize_embedded_python_paths()" in builder
+    assert 'normalize_embedded_python_paths "$runtime" "$python_seed"' in builder
+
+
+def test_release_binaries_never_probe_the_machine_that_compiled_them() -> None:
+    """`env!("CARGO_MANIFEST_DIR")` is opaque to --remap-path-prefix.
+
+    Both call sites used the constant as a runtime filesystem probe, so the
+    shipped binary carried the builder's checkout AND behaved differently on
+    that one machine — the machine the release is walked around on.
+    """
+    config = (REPO_ROOT / "vibecrafted-app/tui-agent/src/config.rs").read_text(
+        encoding="utf-8"
+    )
+    tray = (REPO_ROOT / "vibecrafted-app/mux-agent/src/tray.rs").read_text(
+        encoding="utf-8"
+    )
+
+    for source, name in ((config, "config.rs"), (tray, "tray.rs")):
+        lines = source.splitlines()
+        call_sites = [
+            index
+            for index, line in enumerate(lines)
+            if 'env!("CARGO_MANIFEST_DIR")' in line
+            and not line.lstrip().startswith("//")
+        ]
+        assert call_sites, f"{name} no longer reads CARGO_MANIFEST_DIR at all"
+        for index in call_sites:
+            window = lines[max(0, index - 8) : index]
+            assert any("#[cfg(debug_assertions)]" in line for line in window), (
+                f"{name}:{index + 1} probes CARGO_MANIFEST_DIR outside a "
+                "debug-only guard"
+            )
 
 
 def test_windows_entry_point_does_not_drift_between_its_two_copies() -> None:

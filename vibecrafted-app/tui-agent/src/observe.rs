@@ -41,17 +41,12 @@ pub struct ObserveState {
     pub transcript_run_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ObserveHealth {
     Live,
     Degraded,
+    #[default]
     Offline,
-}
-
-impl Default for ObserveHealth {
-    fn default() -> Self {
-        Self::Offline
-    }
 }
 
 impl ObserveHealth {
@@ -255,7 +250,7 @@ mod tests {
             "state": "active",
             "agent": "grok",
             "skill": "workflow",
-            "root": "/Volumes/vc-workspace/vetcoders/vibecrafted-suite/vibecrafted",
+            "root": "/srv/vetcoders/vibecrafted",
             "started_at": "2026-08-16T19:59:03.642175+00:00",
             "liveness": "pid_alive"
           }],

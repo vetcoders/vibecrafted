@@ -33,7 +33,7 @@ SESSIONS 5          ┌ grok · vibecrafted ────────────
    · resume-codex   │     ┌ ❯ Nowy agent ────────────────────────────────────────────────────────────── [Anuluj] ┐     │
 04 ◉ vc-release     │     │  ▸ agent    [agy] [claude] [codex] «grok» [junie]                                    │     │
    · Start here     │     │    rytual   [init] «resume» [operator] [partner]                                     │     │
-   ◉ Agents         │     │    sciezka  /Volumes/vc-workspace/vetcoders/vibecrafted-suite/vibecrafted            │     │
+   ◉ Agents         │     │    sciezka  /srv/vetcoders/vibecrafted                                               │     │
    · shell          │     │  Enter = interaktywny panel na tym tabie. Nie mux. Nie headless.                     │     │
    · voc            │     └─ ↑/↓ wiersz  ·  ←/→ chip  ·  spacja  ·  enter  ·  esc ───────────────────────────────┘     │
 05 ○ vibecrafted-vc_│                                                                                                  │

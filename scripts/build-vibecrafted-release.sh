@@ -80,8 +80,56 @@ SIGNING_KEYCHAIN_LABEL="vibecrafted-signing-$$"
 CODESIGN_KEYCHAIN_ARGS=()
 export MACOSX_DEPLOYMENT_TARGET=14.0
 # Release payloads must not remember the operator account, Cargo registry, or
-# living checkout locations through Rust panic/debug metadata.
-export RUSTFLAGS="--remap-path-prefix=$REPO_ROOT=/usr/src/vibecrafted --remap-path-prefix=$TERMINAL_DONOR=/usr/src/vc-terminal --remap-path-prefix=$FRAME_DONOR=/usr/src/vc-frame --remap-path-prefix=$TERMINAL_REPO=/usr/src/vc-terminal --remap-path-prefix=$FRAME_REPO=/usr/src/vc-frame --remap-path-prefix=$HOME=/usr/src/operator-home"
+# living checkout locations through compiler metadata.
+#
+# ORDER IS LOAD-BEARING. rustc applies the LAST matching --remap-path-prefix.
+# MEASURED 2026-08-18:
+#   rustc --remap-path-prefix=$T=/usr/src/OUTER \
+#         --remap-path-prefix=$T/inner=/usr/src/INNER  $T/inner/main.rs
+# reports /usr/src/INNER/main.rs, and swapping the two arguments reports
+# /usr/src/OUTER/inner/main.rs. So the list runs BROADEST FIRST:
+#   * $HOME must precede the checkout and the donors. It used to be last, which
+#     is correct only by accident on this host — every repository happens to
+#     live on /Volumes. On any operator whose checkout sits under $HOME, the
+#     trailing $HOME entry would win and every specific root would be dead.
+#   * the donor snapshots live under $REPO_ROOT/build/..., so they must follow
+#     $REPO_ROOT or they would be rewritten as /usr/src/vibecrafted/build/...
+#
+# The snapshot pair is emitted only when it exists. Without --snapshot-donors
+# TERMINAL_REPO IS TERMINAL_DONOR, and the duplicate pair merely pinned its own
+# redundancy into the contract test.
+PATH_REMAPS=(
+  "$HOME=/usr/src/operator-home"
+  "$REPO_ROOT=/usr/src/vibecrafted"
+  "$TERMINAL_DONOR=/usr/src/vc-terminal"
+  "$FRAME_DONOR=/usr/src/vc-frame"
+)
+if (( SNAPSHOT_DONORS )); then
+  PATH_REMAPS+=(
+    "$TERMINAL_REPO=/usr/src/vc-terminal"
+    "$FRAME_REPO=/usr/src/vc-frame"
+  )
+fi
+RUSTFLAGS=""
+FILE_PREFIX_MAP=""
+SWIFT_PREFIX_MAP=""
+for mapping in "${PATH_REMAPS[@]}"; do
+  RUSTFLAGS+="${RUSTFLAGS:+ }--remap-path-prefix=$mapping"
+  FILE_PREFIX_MAP+="${FILE_PREFIX_MAP:+ }-ffile-prefix-map=$mapping"
+  SWIFT_PREFIX_MAP+="${SWIFT_PREFIX_MAP:+ }-debug-prefix-map $mapping"
+done
+export RUSTFLAGS
+# cc-rs compiles the C half of crates such as `ring`, and rustc's remap never
+# sees those translation units. MEASURED on the shipped 4.1.0 DMG:
+# Contents/MacOS/Vibecrafted carried 21 occurrences of
+# $HOME/.cargo/registry/src/.../ring-0.17.14/crypto/... clang's
+# -ffile-prefix-map is the same instrument on the C side.
+export CFLAGS="${CFLAGS:+$CFLAGS }$FILE_PREFIX_MAP"
+export CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }$FILE_PREFIX_MAP"
+# The Swift host is built by xcodebuild, which reads none of the above. Same
+# payload, 51 occurrences of the checkout root from Swift source locations and
+# DerivedData intermediates. Passed to xcodebuild as build settings below.
+export SWIFT_PREFIX_MAP
 
 # The ephemeral signing keychain is owned by scripts/lib/keychain-session.sh,
 # which arms its own EXIT/INT/TERM/HUP traps and chains onto whatever this
@@ -95,6 +143,8 @@ export RUSTFLAGS="--remap-path-prefix=$REPO_ROOT=/usr/src/vibecrafted --remap-pa
 . "$REPO_ROOT/scripts/lib/keychain-session.sh"
 # shellcheck source=/dev/null
 . "$REPO_ROOT/scripts/lib/donor-snapshot.sh"
+# shellcheck source=/dev/null
+. "$REPO_ROOT/scripts/lib/payload-hygiene.sh"
 
 cleanup() {
   donor_snapshot_reap || true
@@ -154,10 +204,82 @@ LC_ALL=C file -b "$SPOT_MONO_FONT" \
 prepare_signing_identity
 
 git_sha() { git -C "$1" rev-parse HEAD; }
+
+# require_clean_repo <repo> <label> [allowed-path-prefix...]
+#
+# The allowance exists for exactly one case and is empty everywhere else: under
+# --snapshot-donors this script regenerates vc-frame's bundled plugin assets
+# INSIDE the snapshot, so that tree legitimately differs from its HEAD. That is
+# derived output of the very commit the receipt binds — `plugins-parity
+# double-rebuild` is what asserts it is a function of the source and nothing
+# else — and the snapshot is a detached worktree this script created and will
+# reap. Every other difference still refuses, including an unexpected file
+# under the allowed directory's sibling.
 require_clean_repo() {
   local repo="$1" label="$2"
-  [[ -z "$(git -C "$repo" status --porcelain --untracked-files=normal)" ]] \
-    || die "$label is dirty; release receipts refuse moving source"
+  shift 2
+  local status line path prefix allowed
+  local -a offending=()
+  status="$(git -C "$repo" status --porcelain --untracked-files=normal)"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    path="${line:3}"
+    allowed=0
+    for prefix in ${1+"$@"}; do
+      if [[ "$path" == "$prefix"* ]]; then
+        allowed=1
+        break
+      fi
+    done
+    (( allowed )) || offending+=("$line")
+  done <<< "$status"
+  (( ${#offending[@]} == 0 )) \
+    || die "$label is dirty; release receipts refuse moving source: ${offending[*]}"
+}
+
+# Empty unless the frame repo is a snapshot we are entitled to regenerate into.
+FRAME_DERIVED=()
+if (( SNAPSHOT_DONORS )); then
+  FRAME_DERIVED=("zellij-utils/assets/plugins/")
+fi
+
+# normalize_embedded_python_paths <runtime-root> <seed-dir>
+#
+# Replace every textual mention of the ephemeral CPython seed directory with a
+# stable placeholder. Binary files are reported and skipped: shortening a string
+# inside a Mach-O would corrupt it, and the payload gate is the backstop that
+# refuses the build if one ever appears.
+normalize_embedded_python_paths() {
+  local runtime="$1" seed="$2"
+  python3 - "$runtime" "$seed" <<'PY'
+import pathlib
+import sys
+
+runtime = pathlib.Path(sys.argv[1])
+seed = sys.argv[2].rstrip("/").encode()
+placeholder = b"/usr/src/python-seed"
+
+rewritten = 0
+binary = []
+for path in runtime.rglob("*"):
+    if path.is_symlink() or not path.is_file():
+        continue
+    data = path.read_bytes()
+    if seed not in data:
+        continue
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        binary.append(str(path.relative_to(runtime)))
+        continue
+    path.write_text(text.replace(seed.decode(), placeholder.decode()), encoding="utf-8")
+    rewritten += 1
+
+print(f"normalized the embedded interpreter seed path in {rewritten} text file(s)")
+if binary:
+    print(f"binary files still naming the seed: {binary}", file=sys.stderr)
+    raise SystemExit(1)
+PY
 }
 
 run_bundled_verifier() {
@@ -257,6 +379,29 @@ build_product() {
   [[ -x "$terminal_source" ]] || die "vc-terminal release binary is missing"
   chmod 0755 "$terminal_source"
 
+  # vc-frame's `release-binary` target builds --no-plugins and the binary
+  # embeds zellij-utils/assets/plugins/*.wasm through include_bytes!. Those
+  # blobs are GIT-TRACKED build output: they carry whatever paths the machine
+  # that last ran `make plugins-assets` happened to have. MEASURED 2026-08-18:
+  # 276 occurrences of $HOME/.cargo/registry across the 14 tracked blobs, of
+  # which 411 reached Contents/Helpers/vc-frame in the shipped 4.1.0 DMG. No
+  # compiler flag rewrites bytes that were compiled somewhere else, so the
+  # release has to compile them again under its own remaps. Closed loop,
+  # measured on default-plugins/link: 16 -> 0 occurrences of $HOME.
+  #
+  # Only ever against a SNAPSHOT. This rebuild rewrites assets/plugins/ and its
+  # SHA256SUMS; doing that to the operator's living donor would trample work
+  # another agent may be mid-edit on. The snapshot is a detached worktree this
+  # script created and will reap, so it is ours to dirty.
+  if (( SNAPSHOT_DONORS )); then
+    log "Rebuilding vc-frame's bundled WASM plugins under the release remaps"
+    make -C "$FRAME_REPO" plugins-assets
+  else
+    log "NOTE: --snapshot-donors is off, so the tracked WASM plugin blobs ship"
+    log "      as they are. If they name this host the payload gate refuses"
+    log "      the build; rerun with --snapshot-donors."
+  fi
+
   log "Building vc-frame through its provenance-stable donor target"
   make -C "$FRAME_REPO" release-binary
   local frame_source="$FRAME_REPO/target/release/vc-frame"
@@ -281,10 +426,17 @@ build_product() {
   make -C "$REPO_ROOT/vibecrafted-app/shell-agent" bindings xcode
   rm -rf "$BUILD_DIR/DerivedData" "$APP"
   mkdir -p "$BUILD_DIR" "$DIST_DIR"
+  # `$(inherited)` is xcodebuild's own build-setting syntax, not a shell
+  # command substitution: it must reach xcodebuild verbatim, so the single
+  # quotes are the point. The prefix maps beside it ARE expanded, which is why
+  # each setting is spliced from a quoted and an unquoted half.
+  # shellcheck disable=SC2016
   xcodebuild \
     -project "$REPO_ROOT/vibecrafted-app/shell-agent/app/Vibecrafted.xcodeproj" \
     -scheme Vibecrafted -configuration Release \
     -derivedDataPath "$BUILD_DIR/DerivedData" \
+    OTHER_SWIFT_FLAGS='$(inherited) '"$SWIFT_PREFIX_MAP" \
+    OTHER_CFLAGS='$(inherited) '"$FILE_PREFIX_MAP" \
     CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
   local built_app
   built_app="$(find "$BUILD_DIR/DerivedData" -type d -name Vibecrafted.app -print -quit)"
@@ -362,6 +514,29 @@ build_product() {
     'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7'
   install_name_tool -id '@loader_path/libpython3.12.dylib' \
     "$runtime/python/lib/libpython3.12.dylib"
+
+  # pip writes each console script with a shebang naming the interpreter it
+  # installed against — here, the mktemp seed under $BUILD_DIR that this build
+  # deletes on its way out. MEASURED on the 4.1.0 payload:
+  # runtime/python-site/bin/jsonschema opens with an exec line pointing at
+  # .../python-seed.ZOVHSX/.../bin/python3.12, a path no customer has. So this
+  # directory was never merely a leak: it shipped scripts that cannot run.
+  #
+  # Deleted rather than rewritten, because nothing invokes it. python-site goes
+  # on PYTHONPATH and never on PATH, and every shipped command is rendered into
+  # runtime/bin from pyproject.toml a few lines below.
+  rm -rf "$runtime/python-site/bin"
+
+  # CPython records the prefix it was installed under in `sysconfig`, and uv's
+  # distribution is no exception: 27 occurrences of the same ephemeral seed
+  # directory in runtime/python/lib/python3.12/_sysconfigdata__darwin_darwin.py.
+  # Those values are consulted only when compiling a C extension, which the
+  # shipped runtime never does, so rewriting the literal is honest — and the
+  # rewrite is confined to files that decode as UTF-8. A Mach-O naming the seed
+  # would need a length-preserving patch, so it is deliberately left alone and
+  # left for the payload gate to catch; measured on 4.1.0, no binary does.
+  normalize_embedded_python_paths "$runtime" "$python_seed"
+
   find "$runtime" -type f -name '*.pyc' -delete
   find "$runtime" -depth -type d -name __pycache__ -empty -delete
   find "$runtime" -type f -name '.DS_Store' -delete
@@ -391,12 +566,20 @@ build_product() {
     die "assembled app contains symlinks"
   fi
 
+  # Before a signature is spent, and before notarization makes these bytes
+  # permanent, ask the finished bundle who built it. This gate exists because
+  # every compiler-side answer is partial: measured on the shipped 4.1.0 DMG,
+  # eight files named the operator across five producers rustc cannot all
+  # reach. See scripts/payload_hygiene.py.
+  log "Asserting the assembled app does not name the build host"
+  assert_payload_is_anonymous "$APP" "Vibecrafted.app"
+
   log "Signing nested code and binding exact source receipts"
   sign_macho_tree
   sign_nested_app_bundles
   require_clean_repo "$REPO_ROOT" vibecrafted
   require_clean_repo "$TERMINAL_REPO" vc-terminal
-  require_clean_repo "$FRAME_REPO" vc-frame
+  require_clean_repo "$FRAME_REPO" vc-frame ${FRAME_DERIVED+"${FRAME_DERIVED[@]}"}
   PYTHONPATH="$REPO_ROOT/vibecrafted-core" "$REPO_ROOT/scripts/project-python" \
     "$REPO_ROOT/scripts/unified_product_manifest.py" app \
     --app "$APP" --terminal-source "$terminal_source" --frame-source "$frame_source" \

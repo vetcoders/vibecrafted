@@ -233,11 +233,20 @@ fn default_icon() -> Icon {
 }
 
 pub fn find_tray_icon() -> Option<LoadedIcon> {
-    let candidates = [
+    let mut candidates = vec![
         PathBuf::from("public/icon.png"),
         PathBuf::from("../public/icon.png"),
-        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/public/icon.png")),
     ];
+    // Same reasoning as config::default_command_deck: a build-time absolute
+    // path probed at runtime is both a leak rustc's remaps cannot reach and a
+    // behaviour that only ever fires on the machine that compiled the binary.
+    // A shipped tray that loads the developer's icon is a bug nobody can
+    // reproduce off that machine.
+    #[cfg(debug_assertions)]
+    candidates.push(PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/public/icon.png"
+    )));
 
     for path in candidates {
         if let Some(icon) = load_icon_from_file(&path) {

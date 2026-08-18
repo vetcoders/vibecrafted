@@ -91,6 +91,17 @@ bash -n "$VERIFY_DIR/$ARCHIVE_ROOT_NAME/install.sh"
 bash "$VERIFY_DIR/$ARCHIVE_ROOT_NAME/install.sh" --help >/dev/null \
   || die "packed install.sh cannot print its own usage"
 
+# This channel ships a projection of a commit rather than compiled bytes, so it
+# has always been the cleaner of the two — measured on the 4.1.0 tarball, the
+# only `/Users|/home` matches were documentation placeholders. That is a fact
+# about one build, not a property of the channel: the packer's allowlist can
+# grow, and a generated file can arrive carrying an absolute path. Ask the
+# extracted tree the same question the DMG channel is asked.
+# shellcheck source=/dev/null
+. "$REPO_ROOT/scripts/lib/payload-hygiene.sh"
+log "asserting the packed payload does not name the build host"
+assert_payload_is_anonymous "$VERIFY_DIR/$ARCHIVE_ROOT_NAME" "$PORTABLE_NAME"
+
 (
   cd "$DIST_DIR"
   if command -v shasum >/dev/null 2>&1; then

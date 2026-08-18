@@ -21,7 +21,7 @@ CARGO_BUILD_ROOT ?= $(INSTALLER_CACHE_HOME)/vibecrafted/build/$(INSTALLER_HOST_T
 # in-tree cache is never read or written by install lanes.
 export PYTHONPYCACHEPREFIX ?= $(INSTALLER_CACHE_HOME)/vibecrafted/pycache-$(INSTALLER_HOST_TAG)
 
-.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release portable publish-release gui-install wizard wizard-dev check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate install install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service server-smoke
+.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release portable publish-release gui-install wizard wizard-dev check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate payload-hygiene install install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service server-smoke
 
 help:
 	@printf "\n"
@@ -85,6 +85,23 @@ release:
 # provenance-bound source distribution, so it builds anywhere git and python3 do.
 portable:
 	@bash "$(PORTABLE_SCRIPT)"
+
+# Ask an artifact that ALREADY EXISTS whether it names the build host. Both
+# release scripts run this gate before they sign or publish, but a release is
+# expensive and the artifacts from before the gate existed are still on disk —
+# so the same question has to be answerable without a rebuild.
+#
+#   make payload-hygiene ARTIFACT=dist/Vibecrafted.app
+#   make payload-hygiene ARTIFACT=dist/Vibecrafted_4.1.0-20260817-237d2814.dmg
+#
+# A .dmg is mounted read-only and detached again; nothing is written anywhere.
+PAYLOAD_HYGIENE_SCRIPT := scripts/payload-hygiene-artifact.sh
+ARTIFACT ?=
+payload-hygiene:
+	@test -n "$(ARTIFACT)" || { \
+		printf 'usage: make payload-hygiene ARTIFACT=<path to .app, .dmg or directory>\n' >&2; \
+		exit 2; }
+	@bash "$(PAYLOAD_HYGIENE_SCRIPT)" "$(ARTIFACT)"
 
 publish-release:
 	@zsh -ic 'cd "$(CURDIR)" && exec bash scripts/publish-vibecrafted-release.sh'
