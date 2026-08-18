@@ -435,6 +435,75 @@ No DMG rebuilt, no payload re-scanned, no tag pushed, no site deployed, no
 `vibecrafted_core` nor `scripts/`, so the gate's trigger condition did not fire.
 The tests that do cover the changed surface were run and are green.
 
+## Release stage — the gate's second missing tool, 2026-08-18
+
+The DoU named the top risk precisely: 4.2.0 could be tagged and fail exactly as
+4.0.0 did, because the `runs-on: macos-15` cure (`54a98b23`) has never run
+against a real tag. Release went looking for what else that untested path would
+hit, and found the next mine on it.
+
+**The final step of the source gate called a tool its own runner does not have.**
+`Confirm publication boundary for both channels` invoked `command rg` — which
+forces a lookup of a real `rg` binary on `PATH`. The GitHub `macos-15` image
+ships no ripgrep: measured 2026-08-18 against the published image manifest
+(`actions/runner-images`, `images/macos/macos-15-Readme.md`), zero occurrences,
+alongside zero for shellcheck — which this same workflow independently confirms
+by having to `brew install shellcheck` before it can lint. In this repository
+`rg` exists only inside our own container images (`Dockerfile:40`,
+`vibecrafted-vm/Containerfile:118`), never on the runner.
+
+Under `set -euo pipefail` that step ends the job. So curing `xcrun` would have
+moved the failure four steps later, not removed it: every test green, every
+build done, and then the gate dies on a missing binary — the exact shape of the
+v4.0.0 death. The step arrived in `ef700e52` (3.7.1) and **has never once
+executed**, because every tag since died earlier. No amount of "the last release
+worked" could surface it.
+
+### What landed
+
+| File                                  | What changed                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.github/workflows/release.yml`       | The two publication-boundary assertions moved from `command rg -n` to `grep -nE`. Same patterns, same files, same fail-on-no-match semantics — verified locally to still match on both channels — with no tool that has to be installed first.                                                                                                                 |
+| `tests/tui/test_release_contract.py`  | Two new tests. One refuses any `run:` line in the tag gate that calls a binary absent from the runner image and not `brew install`ed, and separately requires the shellcheck install wherever `make check` runs. The other pins the boundary step's two patterns and all four files it covers, so rewriting the matcher cannot quietly shrink what it matches. |
+| `scripts/hooks/pre-push`              | Semgrep now runs under `env -u PYTHONPATH -u PYTHONHOME`, the isolation `pre-commit` has carried for a while. Hydrate measured this one: inside a worker the scanner dies with `ModuleNotFoundError: No module named 'rpds.rpds'` and the push fails on a broken gate rather than on a finding.                                                                |
+| `templates/hooks/lib/lint-routing.sh` | The same isolation for the shipped husky template's staged and full semgrep helpers. There the crash is worse-behaved, not better: the WARN-mode step counter reports it as a warning, so the gate stops gating without anyone noticing.                                                                                                                       |
+| `docs/RELEASE_CHECKLIST.md`           | Section 5 now carries the gate's real run history and both tool gaps, and says plainly that the next tag is an experiment.                                                                                                                                                                                                                                     |
+
+The shellcheck half of the tooling test is the quieter finding.
+`scripts/check_shell.py` falls back to `bash -n` when shellcheck is missing, so
+dropping that `brew install` would not fail the release gate — it would keep
+reporting green while silently degrading from a linter to a syntax check.
+
+### Why the version was not bumped and the CHANGELOG stays `Unreleased`
+
+Hydrate left `## Unreleased` deliberately and release agrees, for a sharper
+reason than symmetry: `v4.1.0` has no tag at all while `VERSION` and
+`CHANGELOG.md` both call it released (DoU P0-2). Writing a dated `## 4.2.0`
+heading on top of that would add a third unanchored version claim to a flight
+whose whole purpose is retiring that class of claim. `VERSION` stays `4.1.0`
+until the tag that makes it true exists.
+
+### Mutation evidence
+
+Both new assertions were driven red before they were trusted, and both first
+drafts passed for the wrong reason — worth recording, because the failure mode
+generalises. Restoring `command rg` turns the tooling test red naming both
+offending lines; removing `brew install shellcheck` turns it red on the
+`make check` allowance. The first draft of that second case stayed **green**:
+the test read `brew install` out of the raw workflow text, and the explanatory
+comment this same cut added to `release.yml` contains that phrase. A test that
+reads a whole file also reads the comments written about it. Installs are now
+parsed only out of `run:` lines.
+
+### Not verified by release
+
+No tag pushed, no release published, no site deployed, no `make install`, no DMG
+built or re-scanned, no live vc-frame session, no `resume --run-id` walk. All
+operator buttons, and all still open. The `grep -nE` step is proven to match
+locally on macOS; it is **not** proven on a GitHub runner, because proving that
+requires the tag push this stage does not make. The runner-image measurement is
+a live read of one published manifest, not an execution on the image itself.
+
 ## Explicit non-goals
 
 Native Windows runtime · a second control plane · new vc-frame features beyond the

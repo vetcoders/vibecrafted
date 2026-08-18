@@ -96,9 +96,13 @@ husky_lint_semgrep_staged() {
     husky_warn "semgrep not installed — skipping (install: pipx install semgrep)."
     return 0
   fi
-  # Build NUL-separated list and pipe to semgrep
+  # Build NUL-separated list and pipe to semgrep. `env -u PYTHONPATH
+  # -u PYTHONHOME` because a caller that exports a runtime's own python-site
+  # (Vibecrafted does) shadows pysemgrep's jsonschema/rpds and the scanner dies
+  # on import — a crash the WARN-mode counter reports as a warning, which is
+  # how a security gate quietly stops being one.
   printf '%s\n' "$files" | tr '\n' '\0' \
-    | xargs -0 semgrep scan --config auto --quiet --error \
+    | xargs -0 env -u PYTHONPATH -u PYTHONHOME semgrep scan --config auto --quiet --error \
     || { husky_err "Semgrep found issues on staged files."; return 1; }
 }
 
@@ -107,7 +111,7 @@ husky_lint_semgrep_full() {
     husky_warn "semgrep not installed — skipping full scan."
     return 0
   fi
-  semgrep scan --config auto --quiet --error \
+  env -u PYTHONPATH -u PYTHONHOME semgrep scan --config auto --quiet --error \
     || { husky_err "Semgrep full-repo scan failed."; return 1; }
 }
 

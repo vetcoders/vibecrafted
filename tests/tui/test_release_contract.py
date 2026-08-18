@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -16,6 +17,14 @@ RELEASE_PAGE = "https://github.com/vetcoders/vibecrafted/releases/latest"
 # test_windows_entry_point_does_not_drift_between_its_two_copies for why a
 # constant is needed on top of the cross-repo comparison.
 INSTALL_PS1_SHA256 = "12c2ca5b95195a2fcee0f4987962fd35ec52dde85588c226f68bcab4680450b6"
+
+# Binaries a developer laptop always has and the GitHub macos-15 image does
+# not. Measured 2026-08-18 against actions/runner-images
+# `images/macos/macos-15-Readme.md`: zero occurrences of either, and zero of
+# shellcheck — which this same workflow independently confirms by having to
+# brew install it. Calling one of these from a `run:` line is fatal at the
+# step, with no fallback.
+ABSENT_FROM_MACOS_RUNNER_IMAGE = ("rg", "fd")
 
 
 def test_public_install_surfaces_name_both_release_channels() -> None:
@@ -61,6 +70,100 @@ def test_tag_workflow_is_a_read_only_source_gate() -> None:
     assert "gh release upload" not in workflow
     assert "install.sh" not in workflow
     assert "vibecrafted-framework.plugin" not in workflow
+
+
+def test_tag_gate_only_calls_tools_its_own_runner_provides() -> None:
+    """The gate may only shell out to binaries `macos-15` actually ships.
+
+    Every tag since v3.7.0 failed this workflow, and v4.0.0 failed after 7m43s
+    with `483 passed ... VCPC033: xcrun is required` — a green test suite killed
+    by a host tool the runner did not have. `54a98b23` moved the job to
+    `macos-15` to cure exactly that, but the final publication-boundary step was
+    still calling `rg`, which the GitHub macos-15 image does not ship either.
+    Measured 2026-08-18 against the published image manifest
+    (actions/runner-images `images/macos/macos-15-Readme.md`): zero occurrences
+    of ripgrep, and zero of shellcheck — which is independently corroborated by
+    this same workflow having to `brew install shellcheck` before it can lint.
+    shellcheck is checked separately at the bottom, because its absence
+    degrades a step rather than failing it.
+
+    That step arrived in ef700e52 and has never executed, because every tag
+    since died at an earlier step. So the tool gap could not be caught by
+    "the last release worked". It has to be caught here.
+
+    Scope: the workflow's own `run:` lines. A tool reached through a `make`
+    target is out of scope — those resolve at recipe level and several fall
+    back to `uvx`.
+    """
+    workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    run_lines: list[str] = []
+    in_run = False
+    for raw in workflow.splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("#"):
+            continue
+        if re.match(r"^-?\s*(run|name|uses|with):", stripped):
+            in_run = stripped.startswith(("run:", "- run:"))
+            if in_run:
+                run_lines.append(stripped.split("run:", 1)[1])
+            continue
+        if in_run and stripped:
+            run_lines.append(stripped)
+
+    assert run_lines, "no run: lines parsed out of the release workflow"
+
+    # Read the installs out of the run lines, never out of the raw file: a
+    # comment mentioning `brew install shellcheck` would otherwise satisfy the
+    # allowance below without a single package being installed. Measured while
+    # writing this test — the first draft passed for exactly that reason.
+    installed = {
+        match.group(1)
+        for line in run_lines
+        for match in re.finditer(r"brew install ([\w-]+)", line)
+    }
+
+    for tool in ABSENT_FROM_MACOS_RUNNER_IMAGE:
+        if tool in installed:
+            continue
+        pattern = re.compile(rf"(?:^|[|;&]|\bcommand\s+)\s*{tool}\b")
+        offenders = [line for line in run_lines if pattern.search(line)]
+        assert not offenders, (
+            f"release.yml calls `{tool}`, which the macos-15 runner image does "
+            f"not ship and this workflow does not brew install: {offenders}"
+        )
+
+    # shellcheck is the quieter half of the same gap. `make check` does not die
+    # without it — `scripts/check_shell.py` falls back to `bash -n`, so the
+    # release gate would keep reporting green while silently degrading from a
+    # linter to a syntax check. That is worse than a hard failure, because
+    # nobody would ever see it. The brew install is what keeps the step honest.
+    if any(line.strip() == "make check" for line in run_lines):
+        assert "shellcheck" in installed, (
+            "release.yml runs `make check` without brew installing shellcheck; "
+            "check_shell.py would silently degrade to a syntax-only fallback "
+            "on the macos-15 image"
+        )
+
+
+def test_publication_boundary_step_still_asserts_both_channel_names() -> None:
+    """The boundary step is the only thing pinning the six-asset shape.
+
+    Rewriting its matcher (rg -> grep) must not quietly drop what it matches:
+    one canonically named DMG and one portable tarball, each resolved by the
+    publisher from a build script and documented in the kickoff.
+    """
+    workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    assert "Vibecrafted_.*YYYYMMDD|DMG_NAME|\\.dmg\\.sha256" in workflow
+    assert "PORTABLE_NAME|portable\\.tar\\.gz|portable-output\\.json" in workflow
+    for target in (
+        "scripts/build-vibecrafted-release.sh",
+        "scripts/build-portable-release.sh",
+        "scripts/publish-vibecrafted-release.sh",
+        "docs/RELEASE_KICKOFF.md",
+    ):
+        assert target in workflow, f"boundary step stopped covering {target}"
 
 
 def test_macos_publisher_cold_verifies_exact_uploaded_bytes() -> None:

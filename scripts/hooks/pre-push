@@ -55,10 +55,17 @@ if [ ${#MD_YAML_FILES[@]} -gt 0 ]; then
 fi
 
 echo "▸ semgrep (full)"
+# A worker's VIBECRAFTED_ROOT/python-site on PYTHONPATH poisons Homebrew
+# pysemgrep (jsonschema/rpds clash), exactly as it does in pre-commit — which
+# has carried this isolation for a while. Without it the scanner dies with
+# `ModuleNotFoundError: No module named 'rpds.rpds'` and the push fails on a
+# broken gate rather than on a finding. A security gate that crashes is a
+# security gate people learn to --no-verify past, so isolate the interpreter.
+SEMGREP_ARGS=(scan --config auto --error --quiet --exclude-rule html.security.audit.missing-integrity.missing-integrity)
 if command -v semgrep >/dev/null 2>&1; then
-    semgrep scan --config auto --error --quiet --exclude-rule html.security.audit.missing-integrity.missing-integrity
+    env -u PYTHONPATH -u PYTHONHOME semgrep "${SEMGREP_ARGS[@]}"
 elif command -v uvx >/dev/null 2>&1; then
-    uvx semgrep scan --config auto --error --quiet --exclude-rule html.security.audit.missing-integrity.missing-integrity
+    env -u PYTHONPATH -u PYTHONHOME uvx semgrep "${SEMGREP_ARGS[@]}"
 else
     echo "[warn] semgrep unavailable; skipping"
 fi

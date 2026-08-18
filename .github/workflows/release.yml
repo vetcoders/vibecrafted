@@ -61,16 +61,25 @@ jobs:
       - name: Build the portable release channel
         run: make portable
 
+      # POSIX grep, not ripgrep: this job runs on the bare GitHub macos-15
+      # image, which ships neither ripgrep nor shellcheck — the latter is
+      # why the `brew install shellcheck` step above exists. The earlier
+      # spelling forced a lookup of a real rg binary on PATH, so this step
+      # would have failed the whole gate after every test had already
+      # passed: the exact shape of the v4.0.0 xcrun death, four steps
+      # later. It arrived in ef700e52 (3.7.1) and every tag since died
+      # earlier, so it has never once executed. These are literal presence
+      # assertions over enumerated files, which is what grep is for.
       - name: Confirm publication boundary for both channels
         run: |
           set -euo pipefail
           test -x scripts/publish-vibecrafted-release.sh
           test -x scripts/build-portable-release.sh
-          command rg -n 'Vibecrafted_.*YYYYMMDD|DMG_NAME|\.dmg\.sha256' \
+          grep -nE 'Vibecrafted_.*YYYYMMDD|DMG_NAME|\.dmg\.sha256' \
             scripts/build-vibecrafted-release.sh \
             scripts/publish-vibecrafted-release.sh \
             docs/RELEASE_KICKOFF.md
-          command rg -n 'PORTABLE_NAME|portable\.tar\.gz|portable-output\.json' \
+          grep -nE 'PORTABLE_NAME|portable\.tar\.gz|portable-output\.json' \
             scripts/build-portable-release.sh \
             scripts/publish-vibecrafted-release.sh \
             docs/RELEASE_KICKOFF.md

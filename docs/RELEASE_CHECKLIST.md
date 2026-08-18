@@ -264,6 +264,39 @@ and the product-contract / core / installer gates passed on the immutable
 tag SHA. It does **not** build or upload a DMG. That is intentional.
 Do not add `contents: write` or `gh release create` to `release.yml`.
 
+### What this gate has actually done — read before you push the tag
+
+The source gate is not a formality with a green history. It has **failed on
+every tag since `v3.5.0`**, and the two repairs below have never been exercised
+by a real tag push.
+
+| Tag    | Date       | Result  | Died on                                              |
+| ------ | ---------- | ------- | ---------------------------------------------------- |
+| v3.5.0 | 2026-07-12 | success | —                                                    |
+| v3.7.0 | 2026-07-27 | failure | 1m42s                                                |
+| v3.7.1 | 2026-08-14 | failure | 12s                                                  |
+| v3.7.1 | 2026-08-14 | failure | 12s                                                  |
+| v4.0.0 | 2026-08-15 | failure | `VCPC033: xcrun is required`, after 483 tests passed |
+
+Both failures were the same class — a **host tool the runner did not have**,
+never a code defect:
+
+1. `v4.0.0` ran on a Linux runner while the product contract inspects a real
+   Mach-O fixture. Cured by `54a98b23` (`runs-on: macos-15`), which landed 86
+   minutes _after_ that tag failed and has not run since.
+2. The final `Confirm publication boundary` step called `rg`, which the
+   `macos-15` image does not ship either. It arrived in `ef700e52` (3.7.1) and
+   every tag since died before reaching it, so the gap was invisible to "the
+   last release worked". Cured in the 4.2.0 flight by moving those two literal
+   presence assertions to POSIX `grep`, and bound by
+   `tests/tui/test_release_contract.py::test_tag_gate_only_calls_tools_its_own_runner_provides`.
+
+Consequence for whoever pushes the next tag: **treat the first run as an
+experiment, not a formality.** Push `v4.1.0` at `27ad70e2` first — it is already
+merged and stable, `VERSION` and `CHANGELOG.md` both already call it released,
+and it has no tag at all — so the never-exercised path gets proven on a version
+that is safe to re-cut, before a new one depends on it.
+
 Also required: zero open CodeQL alerts on `main`.
 
 ```bash
