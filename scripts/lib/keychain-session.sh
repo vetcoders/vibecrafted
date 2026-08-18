@@ -349,11 +349,22 @@ _ks_arm_traps() {
     # was already registered, read back a few lines above, and it has to be
     # baked into the new handler at arm time. Deferring it would splice the
     # variable's value at signal time, when it no longer holds anything.
+    #
+    # `|| true` is load-bearing, not defensive noise. _ks_trap_cleanup ends with
+    # `return $rc` so it PRESERVES the status that triggered the trap — which
+    # means on any failed run it returns non-zero, and under `set -eu` (every
+    # release script here) a non-zero command inside a trap handler tears the
+    # shell down on the spot. The caller's chained handler then never runs.
+    # MEASURED 2026-08-18: a release that died on purpose after taking donor
+    # worktree snapshots skipped its own reaper entirely and left both
+    # registrations behind — the very ghost the chaining exists to prevent.
+    # An EXIT trap that does not call `exit` cannot change the script's exit
+    # status, so swallowing the status here costs nothing.
     case "$sig" in
-      EXIT) trap "_ks_trap_cleanup${body:+; $body}" EXIT ;;
-      INT)  trap "_ks_trap_cleanup; ${body:-exit 130}" INT ;;
-      TERM) trap "_ks_trap_cleanup; ${body:-exit 143}" TERM ;;
-      HUP)  trap "_ks_trap_cleanup; ${body:-exit 129}" HUP ;;
+      EXIT) trap "_ks_trap_cleanup || true${body:+; $body}" EXIT ;;
+      INT)  trap "_ks_trap_cleanup || true; ${body:-exit 130}" INT ;;
+      TERM) trap "_ks_trap_cleanup || true; ${body:-exit 143}" TERM ;;
+      HUP)  trap "_ks_trap_cleanup || true; ${body:-exit 129}" HUP ;;
     esac
   done
 }

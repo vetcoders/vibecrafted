@@ -1,9 +1,54 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+log() { printf '\n==> %s\n' "$*"; }
+die() { printf 'FATAL: %s\n' "$*" >&2; exit 1; }
+require() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
+
+# A --remap-path-prefix whose prefix still contains `..` never matches the path
+# the compiler actually sees, because the match is textual. The donor roots used
+# to be plain concatenations ("$REPO_ROOT/../vc-terminal"), so both donor remaps
+# silently missed every file: measured on the shipped 4.1.0 payload
+# (Vibecrafted_4.1.0-20260817-237d2814.dmg, roadmap 4.2.0 cut W0-a), the strings
+# `/usr/src/vc-frame` and `/usr/src/vc-terminal` are ABSENT from every binary
+# while `/Volumes/<...>/vc-frame` and `/Volumes/<...>/vc-terminal` are present in
+# Contents/Helpers/vc-frame, Contents/MacOS/Vibecrafted, Contents/MacOS/voc and
+# the bundled alacritty. Resolve the donor roots; never concatenate them.
+canonical_dir() {
+  local target="$1"
+  (cd "$target" >/dev/null 2>&1 && pwd) || die "missing donor directory: $target"
+}
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TERMINAL_REPO="${VIBECRAFTED_TERMINAL_REPO:-$REPO_ROOT/../vc-terminal}"
-FRAME_REPO="${VIBECRAFTED_FRAME_REPO:-$REPO_ROOT/../vc-frame}"
+
+MODE="release"
+SNAPSHOT_DONORS=0
+for argument in "$@"; do
+  case "$argument" in
+    --app-only) MODE="app" ;;
+    --no-notarize) MODE="dmg" ;;
+    --notarize-only) MODE="notarize" ;;
+    --snapshot-donors) SNAPSHOT_DONORS=1 ;;
+    *)
+      echo "usage: $0 [--app-only|--no-notarize|--notarize-only] [--snapshot-donors]" >&2
+      exit 2
+      ;;
+  esac
+done
+
+# The donor is where the source lives; the repo is what we compile. They differ
+# only under --snapshot-donors, where the repo becomes a detached worktree at the
+# donor HEAD so a dirty Living Tree donor can still produce an honest receipt.
+TERMINAL_DONOR="$(canonical_dir "${VIBECRAFTED_TERMINAL_REPO:-$REPO_ROOT/../vc-terminal}")"
+FRAME_DONOR="$(canonical_dir "${VIBECRAFTED_FRAME_REPO:-$REPO_ROOT/../vc-frame}")"
+DONOR_SNAPSHOT_ROOT="$REPO_ROOT/build/unified-release/donor-snapshots"
+if (( SNAPSHOT_DONORS )); then
+  TERMINAL_REPO="$DONOR_SNAPSHOT_ROOT/vc-terminal"
+  FRAME_REPO="$DONOR_SNAPSHOT_ROOT/vc-frame"
+else
+  TERMINAL_REPO="$TERMINAL_DONOR"
+  FRAME_REPO="$FRAME_DONOR"
+fi
 ICON_SOURCE="${VIBECRAFTED_ICON_SOURCE:-$TERMINAL_REPO/assets/icon/vc-terminal-icon.png}"
 ICON_REFERENCE="${VIBECRAFTED_ICON_REFERENCE:-$TERMINAL_REPO/assets/icon/terminal.png}"
 DIST_DIR="${VIBECRAFTED_RELEASE_DIR:-$REPO_ROOT/dist}"
@@ -29,7 +74,6 @@ CERT_PASSWORD_FILE="$KEYS/cert_password.txt"
 SIGNING_KEY="$KEYS/vibecrafted-signing.key"
 NOTARY_ENV="$KEYS/.notary.env"
 BUILD_NUMBER="${BUILD_NUMBER:-$(date -u +%Y%m%d%H%M%S)}"
-MODE="release"
 SIGNING_IDENTITY=""
 TEMP_KEYCHAIN_PATH=""
 SIGNING_KEYCHAIN_LABEL="vibecrafted-signing-$$"
@@ -37,19 +81,7 @@ CODESIGN_KEYCHAIN_ARGS=()
 export MACOSX_DEPLOYMENT_TARGET=14.0
 # Release payloads must not remember the operator account, Cargo registry, or
 # living checkout locations through Rust panic/debug metadata.
-export RUSTFLAGS="--remap-path-prefix=$REPO_ROOT=/usr/src/vibecrafted --remap-path-prefix=$TERMINAL_REPO=/usr/src/vc-terminal --remap-path-prefix=$FRAME_REPO=/usr/src/vc-frame --remap-path-prefix=$HOME=/usr/src/operator-home"
-
-case "${1:-}" in
-  --app-only) MODE="app" ;;
-  --no-notarize) MODE="dmg" ;;
-  --notarize-only) MODE="notarize" ;;
-  "") ;;
-  *) echo "usage: $0 [--app-only|--no-notarize|--notarize-only]" >&2; exit 2 ;;
-esac
-
-log() { printf '\n==> %s\n' "$*"; }
-die() { printf 'FATAL: %s\n' "$*" >&2; exit 1; }
-require() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
+export RUSTFLAGS="--remap-path-prefix=$REPO_ROOT=/usr/src/vibecrafted --remap-path-prefix=$TERMINAL_DONOR=/usr/src/vc-terminal --remap-path-prefix=$FRAME_DONOR=/usr/src/vc-frame --remap-path-prefix=$TERMINAL_REPO=/usr/src/vc-terminal --remap-path-prefix=$FRAME_REPO=/usr/src/vc-frame --remap-path-prefix=$HOME=/usr/src/operator-home"
 
 # The ephemeral signing keychain is owned by scripts/lib/keychain-session.sh,
 # which arms its own EXIT/INT/TERM/HUP traps and chains onto whatever this
@@ -61,8 +93,11 @@ require() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
 # host-wide side effect for the entire duration of the release.
 # shellcheck source=/dev/null
 . "$REPO_ROOT/scripts/lib/keychain-session.sh"
+# shellcheck source=/dev/null
+. "$REPO_ROOT/scripts/lib/donor-snapshot.sh"
 
 cleanup() {
+  donor_snapshot_reap || true
   keychain_session_end "$SIGNING_KEYCHAIN_LABEL" || true
 }
 trap cleanup EXIT INT TERM HUP
@@ -188,7 +223,29 @@ remove_ambient_swift_rpath() {
   fi
 }
 
+# Snapshots are materialised here, not at parse time: --notarize-only reuses an
+# already assembled app and must not touch the donors at all.
+materialize_donor_snapshots() {
+  (( SNAPSHOT_DONORS )) || return 0
+  require git
+  log "Snapshotting donors at HEAD; their dirty working trees stay untouched"
+  # No command substitution here: it would run the snapshot in a subshell and
+  # the reaper would lose the record. See scripts/lib/donor-snapshot.sh.
+  local terminal_head frame_head
+  donor_snapshot_create "$TERMINAL_DONOR" "$TERMINAL_REPO"
+  terminal_head="$DONOR_SNAPSHOT_HEAD"
+  donor_snapshot_create "$FRAME_DONOR" "$FRAME_REPO"
+  frame_head="$DONOR_SNAPSHOT_HEAD"
+  log "vc-terminal snapshot at $terminal_head"
+  log "vc-frame snapshot at $frame_head"
+  # Every snapshot build starts from a cold target directory. That is the price
+  # of a receipt that binds a SHA nobody edited mid-build.
+  [[ -z "${VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT:-}" ]] \
+    || die "VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT is set; failing on purpose so the reaper is exercised"
+}
+
 build_product() {
+  materialize_donor_snapshots
   require_clean_repo "$REPO_ROOT" vibecrafted
   require_clean_repo "$TERMINAL_REPO" vc-terminal
   require_clean_repo "$FRAME_REPO" vc-frame

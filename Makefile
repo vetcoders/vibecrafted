@@ -65,18 +65,21 @@ vibecrafted: install
 RELEASE_SCRIPT := scripts/build-vibecrafted-release.sh
 PORTABLE_SCRIPT := scripts/build-portable-release.sh
 KEYS ?= $(HOME)/.keys
+# Extra builder flags, e.g. RELEASE_FLAGS=--snapshot-donors to build from
+# detached worktrees at each donor HEAD instead of refusing a dirty donor.
+RELEASE_FLAGS ?=
 
 app:
-	@zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --app-only'
+	@zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --app-only $(RELEASE_FLAGS)'
 
 dmg dmg-signed release-local:
-	@zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --no-notarize'
+	@zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --no-notarize $(RELEASE_FLAGS)'
 
 notarize:
-	@zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --notarize-only'
+	@zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --notarize-only $(RELEASE_FLAGS)'
 
 release:
-	@zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)"'
+	@zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" $(RELEASE_FLAGS)'
 
 # The portable channel needs no signing identity and no notary account: it is a
 # provenance-bound source distribution, so it builds anywhere git and python3 do.

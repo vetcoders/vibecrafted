@@ -376,3 +376,69 @@ def test_vc_release_skill_locks_four_mandatory_report_sections() -> None:
         "## Sign-off",
     ):
         assert heading in template_text
+
+
+def test_dirty_donors_are_a_release_flag_with_a_reaper_not_a_manual_ritual() -> None:
+    """`--snapshot-donors` must build from detached worktrees and always reap.
+
+    Roadmap 4.2.0 D2. Before this flag the operator hand-rolled
+    `git worktree add --detach` into a temp dir; the dir disappeared first and
+    left a ghost registration in the donor for a week.
+    """
+
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    library = (REPO_ROOT / "scripts/lib/donor-snapshot.sh").read_text(encoding="utf-8")
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+
+    assert "--snapshot-donors) SNAPSHOT_DONORS=1 ;;" in builder
+    assert '. "$REPO_ROOT/scripts/lib/donor-snapshot.sh"' in builder
+    # The reaper runs from the same trap that ends the keychain session, so it
+    # fires on success, on error, and on Ctrl-C during a notarization wait.
+    assert "donor_snapshot_reap || true" in builder
+    assert "trap cleanup EXIT INT TERM HUP" in builder
+    assert "materialize_donor_snapshots" in builder
+    assert "VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT" in builder
+
+    # Reaping goes through git; `rm -rf` alone is what creates ghosts.
+    assert "worktree add --detach" in library
+    assert "worktree remove --force" in library
+    assert "worktree prune" in library
+
+    # Without the flag the refusal is unchanged: a receipt must not be built
+    # from a tree that can move underneath it.
+    assert 'die "$label is dirty; release receipts refuse moving source"' in builder
+
+    assert "RELEASE_FLAGS ?=" in makefile
+    assert "--app-only $(RELEASE_FLAGS)" in makefile
+    assert "--no-notarize $(RELEASE_FLAGS)" in makefile
+
+
+def test_donor_remap_prefixes_are_resolved_never_concatenated() -> None:
+    """A `..` inside a --remap-path-prefix never matches; measured on 4.1.0.
+
+    In `Vibecrafted_4.1.0-20260817-237d2814.dmg` the strings `/usr/src/vc-frame`
+    and `/usr/src/vc-terminal` are absent from every shipped binary while the
+    living checkout path is present, because both donor prefixes were built as
+    `"$REPO_ROOT/../vc-frame"` and the compiler matches prefixes textually.
+    """
+
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "canonical_dir()" in builder
+    assert (
+        'TERMINAL_DONOR="$(canonical_dir "${VIBECRAFTED_TERMINAL_REPO:-$REPO_ROOT/../vc-terminal}")"'
+        in builder
+    )
+    assert (
+        'FRAME_DONOR="$(canonical_dir "${VIBECRAFTED_FRAME_REPO:-$REPO_ROOT/../vc-frame}")"'
+        in builder
+    )
+    assert "--remap-path-prefix=$TERMINAL_DONOR=/usr/src/vc-terminal" in builder
+    assert "--remap-path-prefix=$FRAME_DONOR=/usr/src/vc-frame" in builder
+    # The snapshot roots are compiled too when --snapshot-donors is used.
+    assert "--remap-path-prefix=$TERMINAL_REPO=/usr/src/vc-terminal" in builder
+    assert "--remap-path-prefix=$FRAME_REPO=/usr/src/vc-frame" in builder

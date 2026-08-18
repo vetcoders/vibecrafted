@@ -90,6 +90,35 @@ make semgrep
 What this proves: the version file, the donors, and the source gates agree
 before you spend an hour in notarization.
 
+### When a donor is dirty and you are not going to clean it
+
+The Living Tree keeps donors dirty on purpose, and the builder refuses a dirty
+donor because a receipt must not bind a SHA that could move mid-build. Do **not**
+hand-roll `git worktree add --detach` into a temp dir: that is where the ghost
+registration of 2026-08-11 came from. Use the flag instead:
+
+```bash
+make dmg RELEASE_FLAGS=--snapshot-donors
+# or directly:
+bash scripts/build-vibecrafted-release.sh --no-notarize --snapshot-donors
+```
+
+It creates a detached worktree at each donor's HEAD under
+`build/unified-release/donor-snapshots/`, builds from those, and reaps them from
+the same trap that ends the signing keychain — on success, on failure and on
+Ctrl-C. The donor's own working tree, index and stashes are never touched, and
+the receipt still binds the donor HEAD, because that is what the snapshot is.
+
+Two things to know before you use it: the snapshot starts from a **cold cargo
+target directory**, so the build is a full rebuild; and the check afterwards is
+that each donor is back to the worktree count it had _before_ the build, not
+that it has exactly one — donors legitimately carry other agents' worktrees.
+
+```bash
+git -C ../vc-frame worktree list      # same entries as before the build
+git -C ../vc-terminal worktree list
+```
+
 ## 3. Build, sign, notarize
 
 ```bash
