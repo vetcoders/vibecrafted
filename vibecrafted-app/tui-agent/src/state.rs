@@ -739,7 +739,7 @@ mod tests {
                 "message": "heartbeat",
                 "payload": {
                     "state": "active",
-                    "root": "/Volumes/vc-workspace/vetcoders/vibecrafted",
+                    "root": "/srv/checkout/vibecrafted",
                     "launcher_pid": std::process::id()
                 }
             }),
@@ -752,7 +752,7 @@ mod tests {
                     "state": "running",
                     "health": "active",
                     "heartbeat_at": (now - chrono::Duration::hours(2)).to_rfc3339(),
-                    "root": "/Volumes/vc-workspace/vetcoders/vibecrafted"
+                    "root": "/srv/checkout/vibecrafted"
                 }
             }),
             serde_json::json!({

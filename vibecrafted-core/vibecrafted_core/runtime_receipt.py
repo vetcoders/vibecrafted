@@ -573,8 +573,10 @@ def _default_candidate_roots(name: str) -> list[Path]:
     2. ``VIBECRAFTED_FLEET_ROOT/<name>`` when the fleet root env is set.
     3. Sibling of a *verified* vibecrafted package checkout (package-path only,
        never ``Path.cwd()``).
-    4. Well-known absolute workshop paths (still verified by identity markers
-       before acceptance — presence on this list is not proof).
+    4. Home-relative workshop bases (still verified by identity markers before
+       acceptance — presence on this list is not proof). Absolute build-host
+       paths are deliberately absent: they duplicate source 3 where they exist
+       and leak the operator's disk layout into every shipped artifact.
     """
     # scaffold-doctor ships from the vibecrafted monorepo, not its own folder.
     folder_names = {
@@ -606,10 +608,18 @@ def _default_candidate_roots(name: str) -> list[Path]:
         if name in {"vibecrafted", "scaffold-doctor"}:
             out.append(package_repo)
 
-    # Workshop absolutes — accepted only after marker verification
+    # Workshop bases — accepted only after marker verification.
+    #
+    # The two absolute entries that used to head this list (one build host's
+    # `/Volumes/...` workshop and its Loctree sibling) are gone, and nothing was
+    # lost with them: source 3 above already derives both from the package's own
+    # location — `parent` reaches the vetcoders folder and `grand / "Loctree"`
+    # reaches the sibling — so on the host where they resolved they were pure
+    # duplicates, and on every other host they were dead entries that shipped
+    # the operator's disk layout inside a signed artifact. A workshop that is
+    # not a sibling of the package is named by VIBECRAFTED_FLEET_ROOT (source 2),
+    # which is the supported way to say it and does not travel in the payload.
     for base in (
-        Path("/Volumes/vc-workspace/vetcoders"),
-        Path("/Volumes/vc-workspace/Loctree"),
         Path.home() / "vc-workspace" / "vetcoders",
         Path.home() / "Libraxis",
     ):

@@ -1847,7 +1847,7 @@ mod tests {
                 "agent": "codex",
                 "skill": "workflow",
                 "mode": "workflow",
-                "root": "/Volumes/vc-workspace/vetcoders/vibecrafted",
+                "root": "/srv/checkout/vibecrafted",
                 "updated_at": (Utc::now() - Duration::seconds(4)).to_rfc3339(),
                 "health": "final",
                 "liveness": "terminal",
@@ -1866,7 +1866,7 @@ mod tests {
                 "message": "worker active",
                 "payload": {
                     "state": "active",
-                    "root": "/Volumes/vc-workspace/vetcoders/vibecrafted",
+                    "root": "/srv/checkout/vibecrafted",
                     "worker_pid": 987654,
                     "worker_pgid": 987654,
                     "liveness": "pid_alive"
@@ -1954,7 +1954,7 @@ mod tests {
                 "agent": "codex",
                 "skill": "implement",
                 "mode": "implement",
-                "root": "/Volumes/vc-workspace/vetcoders/vibecrafted",
+                "root": "/srv/checkout/vibecrafted",
                 "operator_session": "vibecrafted-event-only",
                 "latest_report": "",
                 "latest_transcript": "",
@@ -2031,7 +2031,7 @@ mod tests {
                 "message": "worker active",
                 "payload": {
                     "state": "active",
-                    "root": "/Volumes/vc-workspace/vetcoders/vibecrafted",
+                    "root": "/srv/checkout/vibecrafted",
                     "worker_pid": std::process::id(),
                     "liveness": "pid_alive"
                 }
@@ -2079,7 +2079,7 @@ mod tests {
                 "message": "worker heartbeat",
                 "payload": {
                     "state": "active",
-                    "root": "/Volumes/vc-workspace/vetcoders/vibecrafted",
+                    "root": "/srv/checkout/vibecrafted",
                     "worker_pid": std::process::id(),
                     "liveness": "pid_alive",
                     "heartbeat_at": (now - Duration::hours(2)).to_rfc3339()
@@ -2095,7 +2095,7 @@ mod tests {
                     "health": "active",
                     "liveness": "pid_alive",
                     "heartbeat_at": (now - Duration::hours(2)).to_rfc3339(),
-                    "root": "/Volumes/vc-workspace/vetcoders/vibecrafted"
+                    "root": "/srv/checkout/vibecrafted"
                 }
             }),
             json!({
@@ -2232,7 +2232,7 @@ mod tests {
         let receipt = json!({
             "schema": "vibecrafted.trust-receipt.v1",
             "receipt_id": "a".repeat(64),
-            "repo_root": "/Volumes/vc-workspace/vetcoders/vibecrafted",
+            "repo_root": "/srv/checkout/vibecrafted",
             "run_id": "receipt-run",
             "commit_sha": "b".repeat(40),
             "trust_verdict": "pass-with-gaps",
@@ -2248,7 +2248,7 @@ mod tests {
                 "status": "failed",
                 "exit_code": 9,
                 "agent": "codex",
-                "root": "/Volumes/vc-workspace/vetcoders/vibecrafted",
+                "root": "/srv/checkout/vibecrafted",
                 "settlement_verdict": "needs_attention",
                 "settlement_tui": "n",
                 "settlement_source": "trust",
@@ -2266,7 +2266,7 @@ mod tests {
                 "agent": "codex",
                 "skill": "implement",
                 "mode": "workflow",
-                "root": "/Volumes/vc-workspace/vetcoders/vibecrafted",
+                "root": "/srv/checkout/vibecrafted",
                 "operator_session": "vibecrafted-receipt-run",
                 "latest_report": "",
                 "latest_transcript": "",

@@ -1318,3 +1318,112 @@ def test_operator_tab_env_never_reaches_the_stamp() -> None:
     )
     assert fields["origin_tab"] == "work-2"
     assert "origin_pane_id" not in fields
+
+
+def test_async_supervisor_stalls_a_worker_that_goes_silent(tmp_path: Path) -> None:
+    """A mute-but-live worker must settle as STALLED, not hang the supervisor.
+
+    Before the silence bound the only route to RunState.STALLED was the
+    wall-clock ``--timeout``, which no production caller ever passed — so a
+    worker blocked in ``wait4`` blocked until a human noticed.
+    """
+    transcript = tmp_path / "silent-transcript.log"
+    script = tmp_path / "silent-worker.py"
+    # Never writes a byte, never exits on its own: the exact shape of the hang.
+    script.write_text("import time\ntime.sleep(120)\n", encoding="utf-8")
+
+    handle = asyncio.run(
+        AsyncSupervisor().run(
+            run_id="asup-silent-1",
+            command=[sys.executable, str(script)],
+            root=tmp_path,
+            transcript_path=transcript,
+            silence_timeout=0.4,
+            require_report=False,
+        )
+    )
+
+    assert handle.state is RunState.STALLED
+    assert handle.exit_code is not None, "a stalled worker must carry a real exit code"
+    assert handle.completed_at is not None
+
+
+def test_silence_bound_is_armed_without_any_caller_threading_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The bound must hold for callers that never learned the parameter exists.
+
+    This is the regression that made the stall machine dead code: the handler
+    was complete, and the single argv builder for every workflow-launched worker
+    had no way to reach it. Resolving the default inside the watcher means the
+    guarantee does not depend on anyone remembering to pass a flag.
+    """
+    monkeypatch.setenv("VIBECRAFTED_SILENCE_TIMEOUT_SECONDS", "0.4")
+    script = tmp_path / "mute-worker.py"
+    script.write_text("import time\ntime.sleep(120)\n", encoding="utf-8")
+
+    handle = asyncio.run(
+        AsyncSupervisor().run(
+            run_id="asup-silent-default",
+            command=[sys.executable, str(script)],
+            root=tmp_path,
+            transcript_path=tmp_path / "mute-transcript.log",
+            require_report=False,
+        )
+    )
+
+    assert handle.state is RunState.STALLED
+
+
+def test_silence_bound_never_touches_a_slow_worker_that_keeps_talking(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Total runtime is not the signal; unbroken silence is.
+
+    A wall-clock cap would have killed this worker. The bound must let it finish
+    because it never stops producing output.
+    """
+    monkeypatch.setenv("VIBECRAFTED_SILENCE_TIMEOUT_SECONDS", "0.5")
+    script = tmp_path / "chatty-worker.py"
+    script.write_text(
+        "import time, sys\n"
+        "for index in range(8):\n"
+        "    print(f'still working {index}', flush=True)\n"
+        "    time.sleep(0.15)\n",
+        encoding="utf-8",
+    )
+
+    handle = asyncio.run(
+        AsyncSupervisor().run(
+            run_id="asup-chatty-1",
+            command=[sys.executable, str(script)],
+            root=tmp_path,
+            transcript_path=tmp_path / "chatty-transcript.log",
+            require_report=False,
+        )
+    )
+
+    assert handle.state is not RunState.STALLED
+    assert handle.exit_code == 0
+
+
+def test_unparseable_silence_override_does_not_disable_the_bound() -> None:
+    """A typo in the env override must not silently remove the guarantee."""
+    import os
+
+    from vibecrafted_core.supervisor_async import (
+        _DEFAULT_SILENCE_TIMEOUT_SECONDS,
+        _default_silence_timeout,
+    )
+
+    previous = os.environ.get("VIBECRAFTED_SILENCE_TIMEOUT_SECONDS")
+    try:
+        os.environ["VIBECRAFTED_SILENCE_TIMEOUT_SECONDS"] = "thirty minutes"
+        assert _default_silence_timeout() == _DEFAULT_SILENCE_TIMEOUT_SECONDS
+        os.environ["VIBECRAFTED_SILENCE_TIMEOUT_SECONDS"] = "0"
+        assert _default_silence_timeout() == 0.0
+    finally:
+        if previous is None:
+            os.environ.pop("VIBECRAFTED_SILENCE_TIMEOUT_SECONDS", None)
+        else:
+            os.environ["VIBECRAFTED_SILENCE_TIMEOUT_SECONDS"] = previous

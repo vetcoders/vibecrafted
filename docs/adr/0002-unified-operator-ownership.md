@@ -89,7 +89,7 @@ primary shared memory.
 
 Installed artifacts (symlinks, configs, KDL, generated profiles under
 `~/.local/share/vibecrafted` and `~/.vibecrafted`) must never resolve to a repository checkout
-(`/Volumes/vc-workspace`, `~/Libraxis` or any git checkout path). Repository paths may appear only
+(`/Volumes/<workspace>`, `~/Libraxis` or any git checkout path). Repository paths may appear only
 in development receipts, never in runtime links. The host shell receives one reversible path
 helper and no product logic.
 

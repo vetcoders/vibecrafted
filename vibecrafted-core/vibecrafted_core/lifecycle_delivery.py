@@ -52,6 +52,32 @@ CLAIM_DIGEST_RE = re.compile(r"^[0-9a-f]{16}$")
 ZERO_DIGEST = "sha256:" + "0" * 64
 EventSink = Callable[[str, str, str, dict[str, Any]], Mapping[str, Any]]
 
+# The proof executor scrubs the subject's environment down to _SAFE_ENV_KEYS —
+# HOME, PATH, TERM and friends — because a proof that inherits ambient state is
+# not a proof. PYTHONPATH is scrubbed with the rest, and rightly so. But the
+# subject was declared as `-m vibecrafted_core.lifecycle_delivery`: a module
+# invocation resolved through exactly the sys.path the scrub had just removed.
+# On any host where the package reaches the interpreter through PYTHONPATH
+# rather than site-packages — which is how the installed runtime ships it and
+# how the test suite imports it — the subject died with ModuleNotFoundError,
+# exit 1, and the kernel wrote `proof.failed: subject execution failed`. Every
+# run it judged then settled `failed` regardless of what the worker had done.
+#
+# The answer is not to widen the scrub. It is to stop depending on ambient
+# state at all: carry the package's own location as an explicit argument, so the
+# import path is digest-covered contract evidence like every other input rather
+# than something the environment is trusted to remember.
+_SUBJECT_BOOTSTRAP = (
+    "import sys; sys.path.insert(0, sys.argv[1]); "
+    "from vibecrafted_core.lifecycle_delivery import _main; "
+    "raise SystemExit(_main(sys.argv[2:]))"
+)
+
+
+def _package_search_path() -> str:
+    """Directory that must be on ``sys.path`` for ``vibecrafted_core`` to import."""
+    return str(Path(__file__).resolve().parent.parent)
+
 
 @dataclass(frozen=True)
 class StageSealResult:
@@ -384,8 +410,9 @@ def try_grant_lifecycle_stage_seal(
             "public_surface": sys.executable,
             "argv": [
                 sys.executable,
-                "-m",
-                "vibecrafted_core.lifecycle_delivery",
+                "-c",
+                _SUBJECT_BOOTSTRAP,
+                _package_search_path(),
                 "verify-report",
                 "--report",
                 str(canonical_report),

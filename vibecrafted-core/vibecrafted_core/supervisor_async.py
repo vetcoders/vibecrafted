@@ -38,6 +38,43 @@ STDIO_LIMIT_BYTES = 16 * 1024 * 1024
 # at most a handful of pulse events.
 _HEARTBEAT_INTERVAL_SECONDS = 20.0
 
+# The heartbeat above tells "quiet" apart from "dead"; it never tells 20 seconds
+# of quiet apart from three hours of it. Every pulse looks identical, so a worker
+# blocked forever in `wait4` held the supervisor open forever — which made the
+# RunState.STALLED transition in `run()` unreachable in production, because the
+# only thing that could reach it was `--timeout` and no caller ever passed one.
+#
+# A wall-clock cap is the wrong instrument: it would also kill a worker that is
+# legitimately long AND talking. Bound the SILENCE instead — the signal the
+# watcher already measures — so productive runs are never touched and a mute one
+# becomes a recorded stall with an exit code. Resolved at the watcher, not at the
+# caller: a bound that has to be threaded is a bound nobody arms.
+#
+# 0 or negative disables it; VIBECRAFTED_SILENCE_TIMEOUT_SECONDS overrides.
+_SILENCE_TIMEOUT_ENV = "VIBECRAFTED_SILENCE_TIMEOUT_SECONDS"
+_DEFAULT_SILENCE_TIMEOUT_SECONDS = 1800.0
+
+
+class _SilenceTimeout(asyncio.TimeoutError):
+    """A live worker produced no output for longer than the silence bound.
+
+    Subclasses ``asyncio.TimeoutError`` so the wall-clock ``wait_for`` handler in
+    ``run()`` settles both stall kinds through one already-tested path, while the
+    recorded reason still says which instrument fired.
+    """
+
+
+def _default_silence_timeout() -> float:
+    """Seconds of unbroken stdout silence after which a live worker is stalled."""
+    raw = os.environ.get(_SILENCE_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_SILENCE_TIMEOUT_SECONDS
+    try:
+        return float(raw)
+    except ValueError:
+        # An unparseable override must not silently disable the bound.
+        return _DEFAULT_SILENCE_TIMEOUT_SECONDS
+
 
 def _utc_now() -> datetime:
     """Current UTC-aware datetime."""
@@ -656,6 +693,7 @@ class AsyncSupervisor:
         transcript_path: str | Path | None = None,
         prompt_file_path: str | Path | None = None,
         timeout: float | None = None,
+        silence_timeout: float | None = None,
         require_report: bool = True,
         require_transcript_output: bool = False,
         tee_output: bool = False,
@@ -681,24 +719,34 @@ class AsyncSupervisor:
             _write_terminal(_terminal_frontmatter(handle))
         try:
             if timeout is None:
-                await self._watch_process(handle, tee_output=tee_output)
+                await self._watch_process(
+                    handle, tee_output=tee_output, silence_timeout=silence_timeout
+                )
             else:
                 await asyncio.wait_for(
-                    self._watch_process(handle, tee_output=tee_output),
+                    self._watch_process(
+                        handle, tee_output=tee_output, silence_timeout=silence_timeout
+                    ),
                     timeout=timeout,
                 )
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as stall:
             await self._terminate(handle)
             handle.exit_code = handle.process.returncode
             handle.completed_at = _utc_now()
+            # Both stall kinds settle through this one path; the recorded reason
+            # still names which instrument fired, so a triage never has to guess
+            # whether the worker ran too long or went mute.
+            silent = isinstance(stall, _SilenceTimeout)
+            reason = str(stall) if silent else "process timed out"
             await self._transition(
                 handle,
                 RunState.STALLED,
-                "process timed out",
+                f"worker went silent: {reason}" if silent else reason,
                 payload={
                     "exit_code": handle.exit_code,
                     "completed_at": handle.completed_at.isoformat(),
                     "liveness": "terminal",
+                    "stall_kind": "silence" if silent else "wall_clock",
                 },
             )
             return handle
@@ -812,14 +860,25 @@ class AsyncSupervisor:
         return handle
 
     async def _watch_process(
-        self, handle: AsyncRunHandle, *, tee_output: bool = False
+        self,
+        handle: AsyncRunHandle,
+        *,
+        tee_output: bool = False,
+        silence_timeout: float | None = None,
     ) -> None:
         """Stream stdout lines to the transcript, parse usage, and emit heartbeats.
 
         Emits a synthetic heartbeat every ``_HEARTBEAT_INTERVAL_SECONDS`` of
-        stdout silence so a long tool call is never mistaken for a dead worker.
+        stdout silence so a long tool call is never mistaken for a dead worker,
+        and raises ``_SilenceTimeout`` once that silence outlives
+        ``silence_timeout`` so an unbroken quiet worker settles as STALLED
+        instead of hanging the supervisor forever.
         """
         assert handle.process.stdout is not None
+        silence_bound = (
+            _default_silence_timeout() if silence_timeout is None else silence_timeout
+        )
+        last_output_monotonic = time.monotonic()
         parser = AgentStreamParser(handle.agent, default_model=handle.agent_model)
         human_path = transcript_human_path(handle.transcript_path)
         read_task = asyncio.create_task(handle.process.stdout.readline())
@@ -832,6 +891,12 @@ class AsyncSupervisor:
                     # stdout silence is normal while an agent waits inside a
                     # long build/test/install tool call. Drive liveness from
                     # the process clock so the exact quiet phase still pulses.
+                    silent_for = time.monotonic() - last_output_monotonic
+                    if silence_bound > 0 and silent_for >= silence_bound:
+                        raise _SilenceTimeout(
+                            f"no worker output for {silent_for:.0f}s"
+                            f" (bound {silence_bound:.0f}s)"
+                        )
                     if handle.process.returncode is None:
                         handle.heartbeat_monotonic = time.monotonic()
                         await self._emit(
@@ -848,6 +913,7 @@ class AsyncSupervisor:
                 chunk = read_task.result()
                 if not chunk:
                     break
+                last_output_monotonic = time.monotonic()
                 read_task = asyncio.create_task(handle.process.stdout.readline())
                 if handle.transcript_path is not None:
                     with handle.transcript_path.open("ab") as transcript:

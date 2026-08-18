@@ -19,11 +19,66 @@
 #
 # 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by VetCoders (c)2024-2026 LibraxisAI
 
+# Directories every macOS or Linux box has. An ancestor walk must stop here: a
+# payload that mentions `/Users` or `/Volumes` says nothing about who built it,
+# and forbidding one would flag every legitimate path reference in the tree.
+_PAYLOAD_HYGIENE_GENERIC_ROOTS=$'/\n/Applications\n/Library\n/System\n/Users\n/Volumes\n/home\n/media\n/mnt\n/opt\n/private\n/private/var\n/srv\n/tmp\n/usr\n/var'
+
+# payload_hygiene_topmost_host_root <absolute-path>
+#
+# Print the highest ancestor of <absolute-path> that is still specific to this
+# host, or nothing when the path sits directly under a generic root.
+#
+# MEASURED 2026-08-18 on Vibecrafted_4.1.0-20260818-c52f1326-portable.tar.gz:
+# forbidding only the exact checkout named 5 offending files, while forbidding
+# the workshop one level up named 12. The seven in the difference — among them
+# vibecrafted_core/runtime_receipt.py, control-core/src/read.rs and
+# tui-agent/src/state.rs — leak the workshop directory that sits ABOVE the
+# checkout. Substring matching cannot see them from the checkout root: the
+# workshop is a prefix of it, never a substring of the payload's own text. The
+# gate promised "must not carry the operator's account or checkout" and, for
+# every path one level up, quietly certified the opposite.
+payload_hygiene_topmost_host_root() {
+  local path="${1%/}" parent topmost=""
+  [[ -n "$path" && "$path" != "/" ]] || return 0
+  while :; do
+    parent="$(dirname "$path")"
+    [[ "$parent" != "$path" ]] || break
+    if printf '%s\n' "$_PAYLOAD_HYGIENE_GENERIC_ROOTS" | grep -qxF -- "$parent"; then
+      break
+    fi
+    topmost="$parent"
+    path="$parent"
+  done
+  [[ -z "$topmost" ]] || printf '%s\n' "$topmost"
+}
+
 # payload_hygiene_literals — one build-host-only absolute path per line.
 #
 # Reads the release scripts' own variables when they are set; every one of them
 # is optional so the function is usable from a test with nothing exported.
+#
+# Emits the workshop above each root as well: the topmost still-host-specific
+# ancestor subsumes every longer path under it, so one literal closes the whole
+# blind spot without drowning the report in near-duplicate matches.
 payload_hygiene_literals() {
+  local root
+  local -a ancestors=()
+  for root in \
+    "${HOME:-}" \
+    "${PAYLOAD_HYGIENE_REPO_ROOT:-${REPO_ROOT:-}}" \
+    "${TERMINAL_DONOR:-}" \
+    "${FRAME_DONOR:-}" \
+    "${TERMINAL_REPO:-}" \
+    "${FRAME_REPO:-}"
+  do
+    [[ -n "$root" ]] || continue
+    while IFS= read -r ancestor; do
+      [[ -n "$ancestor" ]] || continue
+      ancestors+=("$ancestor")
+    done < <(payload_hygiene_topmost_host_root "$root")
+  done
+
   local candidate
   for candidate in \
     "${HOME:-}" \
@@ -32,6 +87,7 @@ payload_hygiene_literals() {
     "${FRAME_DONOR:-}" \
     "${TERMINAL_REPO:-}" \
     "${FRAME_REPO:-}" \
+    "${ancestors[@]+"${ancestors[@]}"}" \
     "$@"
   do
     # `/` and the empty string would match the entire payload; the scanner

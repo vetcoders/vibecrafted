@@ -33,7 +33,7 @@ Rozpoznanie wykonano w checkoutcie:
 
 ```text
 repo: vetcoders/vibecrafted
-path: /Volumes/vc-workspace/vetcoders/vibecrafted
+path: /srv/checkout/vibecrafted
 branch: feat/reduce-wrong-assumptions
 observed HEAD: 15a35e8dc4825e8e1b6869f57212681913da6e8f
 upstream: origin/feat/reduce-wrong-assumptions
@@ -407,7 +407,7 @@ execution:
     selection_source: omitted
     resolution_policy: provider-default
   repo: Loctree/aicx
-  root: /Volumes/vc-workspace/Loctree/aicx
+  root: /srv/checkout/aicx
   branch: fix/example
   expected_head: <full sha>
   upstream_ref: origin/fix/example
@@ -484,7 +484,7 @@ identity:
     parent_pid: <pid>
     resolved_executable: /absolute/path/to/codex
     argv_sha256: sha256:...
-    cwd: /Volumes/vc-workspace/vetcoders/codescribe
+    cwd: /srv/checkout/codescribe
 ```
 
 `orchestration_session` i `provider.requested_session` mogą przypadkiem mieć ten
@@ -551,7 +551,7 @@ proof:
     producer_id: Loctree/aicx
     public_surface: aicx extract codex --file <fixture> --emit session-record
     argv: [aicx, extract, codex, --file, <fixture>, --emit, session-record]
-    cwd: /Volumes/vc-workspace/Loctree/aicx
+    cwd: /srv/checkout/aicx
     expected_exit: 0
     output: <run-artifact>/subject/session_record.json
 

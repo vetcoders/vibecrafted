@@ -198,3 +198,120 @@ def test_make_exposes_the_gate_for_an_artifact_already_on_disk() -> None:
     assert "payload-hygiene:" in makefile
     assert "ARTIFACT" in makefile
     assert "scripts/payload-hygiene-artifact.sh" in makefile
+
+
+def run_library(snippet: str, **environment: str) -> str:
+    """Source the gate library and run one bash snippet against it."""
+    script = f'set -euo pipefail\n. "{LIBRARY}"\n{snippet}\n'
+    result = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", **environment},
+    )
+    return result.stdout
+
+
+def test_the_literal_set_reaches_the_workshop_above_the_checkout() -> None:
+    """The gate's blind spot: a prefix of REPO_ROOT is never a substring of it.
+
+    Matching is a byte `count()`, so forbidding the exact checkout can only ever
+    catch paths at or below it. Every path naming the directory the checkout
+    lives IN — the workshop — passed as clean. Measured 2026-08-18 on the 4.1.0
+    portable tarball: 5 offending files with the checkout alone, 12 with the
+    workshop, and the seven in between included shipped runtime code.
+    """
+    literals = run_library(
+        "payload_hygiene_literals",
+        HOME="/Users/nobody",
+        REPO_ROOT="/Volumes/workshop/org/suite/repo",
+    ).split()
+
+    assert "/Volumes/workshop" in literals, (
+        "the workshop above the checkout is not gated; paths one level up ship clean"
+    )
+    assert "/Volumes/workshop/org/suite/repo" in literals
+
+
+def test_the_ancestor_walk_stops_before_generic_system_roots() -> None:
+    """`/Users` or `/Volumes` says nothing about who built the payload.
+
+    Walking all the way to `/` would forbid a directory every machine has and
+    flag every legitimate absolute path in the tree — a gate that fails on
+    everything is a gate nobody keeps.
+    """
+    assert (
+        run_library('payload_hygiene_topmost_host_root "/Users/nobody"').strip() == ""
+    )
+    assert (
+        run_library('payload_hygiene_topmost_host_root "/Volumes/solo"').strip() == ""
+    )
+    assert (
+        run_library('payload_hygiene_topmost_host_root "/Volumes/ws/a/b"').strip()
+        == "/Volumes/ws"
+    )
+
+
+# The packer refuses any path carrying one of these components, so a literal
+# inside them never reaches a customer. Mirrors
+# scripts/distribution_manifest.py::FORBIDDEN_COMPONENTS for the parts that
+# matter to this invariant.
+_UNSHIPPED_COMPONENTS = frozenset({"tests", "test", "__tests__", ".github", ".loctree"})
+
+# One tracked shipping file still names the workshop, and it is NOT an oversight:
+# docs/adr/ownership-matrix.json declares `/Volumes/vc-workspace` as a
+# forbidden_path_patterns entry for the `checkout-free-install` rule, pinned by
+# tests/test_ownership_contract.py. Two correct rules collide on one string —
+# "installed artifacts must never resolve into a checkout" needs to name the
+# checkout root, and "a shipped artifact must not name the build host" forbids
+# exactly that. Resolving it means choosing whether that rule forbids one
+# operator's volume or any checkout root, which is a product decision this gate
+# must surface rather than settle. Listed here so it stays visible and so no
+# NEW leak can hide behind it.
+_UNRESOLVED_WORKSHOP_REFERENCES = frozenset({"docs/adr/ownership-matrix.json"})
+
+
+def test_no_shipping_file_names_the_workshop_above_the_checkout() -> None:
+    """Sibling of the checkout invariant, one directory up.
+
+    Host-independent: it asks the repository where it lives and forbids the
+    workshop that contains it, so it holds on any machine.
+    """
+    # Ask the library itself where the workshop is. Deriving it here with a
+    # guess like `REPO_ROOT.parent.parent` produced a test that silently passed:
+    # it looked one level too deep, so the literal it searched for did not exist
+    # in any file and the assertion could never fire.
+    workshop = Path(
+        run_library(f'payload_hygiene_topmost_host_root "{REPO_ROOT}"').strip()
+    )
+    assert str(workshop) not in {"", "/", "."}, (
+        "checkout sits directly under a generic root; there is no workshop to gate"
+    )
+
+    tracked = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", "-z"],
+        capture_output=True,
+        check=True,
+    ).stdout.split(b"\0")
+    needle = str(workshop).encode()
+
+    offenders = []
+    for raw in tracked:
+        if not raw:
+            continue
+        relative = raw.decode()
+        if _UNSHIPPED_COMPONENTS & set(Path(relative).parts):
+            continue
+        if relative in _UNRESOLVED_WORKSHOP_REFERENCES:
+            continue
+        path = REPO_ROOT / relative
+        if not path.is_file() or path.is_symlink():
+            continue
+        if needle in path.read_bytes():
+            offenders.append(relative)
+
+    assert not offenders, (
+        f"tracked shipping files name the workshop {workshop} and would reach "
+        f"customers in the portable tarball: {offenders}"
+    )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -318,3 +319,55 @@ def test_resettle_is_honest_and_idempotent(tmp_path: Path) -> None:
     assert second["rewritten"] == 0  # idempotent
     assert second["after"]["f"] == first["after"]["f"]
     assert second["after"]["n"] == first["after"]["n"]
+
+
+def test_proof_subject_runs_under_the_executor_env_scrub(tmp_path: Path) -> None:
+    """The proof subject must not need an environment the executor deliberately removes.
+
+    ``delivery/executor.py`` filters the subject's environment down to
+    ``_SAFE_ENV_KEYS``; PYTHONPATH is not among them, on purpose. A subject
+    declared as ``-m vibecrafted_core.lifecycle_delivery`` therefore died with
+    ModuleNotFoundError on every host where the package arrives via PYTHONPATH
+    instead of site-packages, and the kernel recorded proof.failed for runs that
+    were in fact perfectly good. Spawn the declared shape under exactly that
+    scrub and require it to answer.
+    """
+    import subprocess
+    import sys
+
+    from vibecrafted_core.delivery.executor import _SAFE_ENV_KEYS
+    from vibecrafted_core.lifecycle_delivery import (
+        _SUBJECT_BOOTSTRAP,
+        _package_search_path,
+    )
+
+    digest = claim_digest_for_text("scrubbed subject mission")
+    report = tmp_path / "report.md"
+    _valid_report(report, claim_digest=digest)
+
+    scrubbed = {
+        key: value for key, value in os.environ.items() if key in _SAFE_ENV_KEYS
+    }
+    assert "PYTHONPATH" not in scrubbed
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _SUBJECT_BOOTSTRAP,
+            _package_search_path(),
+            "verify-report",
+            "--report",
+            str(report),
+            "--mission-digest",
+            digest,
+        ],
+        env=scrubbed,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["claim_digest"] == digest

@@ -44,7 +44,7 @@ MUST be unique across the whole tree, lowercase, dash-separated.
 
 Never emit:
 
-- Absolute private paths: `/Users/<anyone>`, `/Volumes/vc-workspace`, `~/Libraxis`.
+- Absolute private paths: `/Users/<anyone>`, `/Volumes/<workspace>`, `~/Libraxis`.
   Use `~/.vibecrafted`, `~/.local/share/vibecrafted`, `~/projects/my-app`.
 - Hostnames/IPs of private infra: `dragon`, Tailscale `100.x.x.x`, `localhost:3025`
   (the canonical local server example is `http://127.0.0.1:3024`).

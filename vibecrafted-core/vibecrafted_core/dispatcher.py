@@ -39,7 +39,20 @@ def _build_parser() -> argparse.ArgumentParser:
             "report-on-death)"
         ),
     )
-    run.add_argument("--timeout", type=float)
+    run.add_argument(
+        "--timeout",
+        type=float,
+        help="wall-clock cap; unset means a productive worker may run as long as it talks",
+    )
+    run.add_argument(
+        "--silence-timeout",
+        type=float,
+        help=(
+            "seconds of unbroken worker silence that mark the run STALLED; "
+            "unset uses the supervisor default (VIBECRAFTED_SILENCE_TIMEOUT_SECONDS), "
+            "0 disables the bound"
+        ),
+    )
     run.add_argument(
         "--no-require-report",
         action="store_true",
@@ -117,6 +130,7 @@ async def _run(args: argparse.Namespace) -> int:
         transcript_path=args.transcript,
         prompt_file_path=args.prompt_file,
         timeout=args.timeout,
+        silence_timeout=args.silence_timeout,
         require_report=not args.no_require_report,
         require_transcript_output=args.require_transcript_output,
         tee_output=args.tee_output,
