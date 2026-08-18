@@ -39,7 +39,11 @@ themes {
             base 70 64 58
             background 235 228 215   // bone ribbon
             emphasis_0 140 120 100
-            emphasis_1 55 48 42
+            // Alternate ribbon shade — rhythm only: one close step from the
+            // bone background, never a state signal (THEMES_GUIDE doctrine).
+            // 55 48 42 (ink) here painted every second tab as a dark chip
+            // once compact-bar started using this slot as the alternate bg.
+            emphasis_1 226 219 205
             emphasis_2 90 85 78
             emphasis_3 160 145 125
         }
