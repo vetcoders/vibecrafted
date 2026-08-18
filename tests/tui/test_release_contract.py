@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RELEASE_PAGE = "https://github.com/vetcoders/vibecrafted/releases/latest"
@@ -442,3 +445,26 @@ def test_donor_remap_prefixes_are_resolved_never_concatenated() -> None:
     # The snapshot roots are compiled too when --snapshot-donors is used.
     assert "--remap-path-prefix=$TERMINAL_REPO=/usr/src/vc-terminal" in builder
     assert "--remap-path-prefix=$FRAME_REPO=/usr/src/vc-frame" in builder
+
+
+def test_windows_entry_point_does_not_drift_between_its_two_copies() -> None:
+    """`install.ps1` lives here and in vibecrafted-io; two copies means drift.
+
+    Roadmap 4.2.0 cut W1-c. The site copy is what a Windows user would fetch
+    over HTTPS, so the moment the two differ the served script is a lie about
+    this repository. Measured 2026-08-18: identical, and
+    `https://vibecrafted.io/install.ps1` still answers 404 — not because the
+    pipeline drops non-HTML assets (`/install.sh` answers 200) but because the
+    site repo's deploy branch has not received the commit that added it.
+    """
+
+    framework = REPO_ROOT / "install.ps1"
+    served = REPO_ROOT.parent / "vibecrafted-io/site/public/install.ps1"
+    assert framework.is_file()
+    if not served.is_file():
+        pytest.skip("vibecrafted-io is not checked out beside this repository")
+
+    digest = hashlib.sha256(framework.read_bytes()).hexdigest()
+    assert digest == hashlib.sha256(served.read_bytes()).hexdigest(), (
+        "install.ps1 drifted between the framework repo and the served site copy"
+    )
