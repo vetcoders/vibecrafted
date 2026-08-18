@@ -1056,6 +1056,7 @@ pub fn doctor_plan_root_in_repo(
         &manifest,
         repo_root.as_ref().map(AsRef::as_ref),
     );
+    crate::scaffold_verifiers::execute_brief_verifiers(root, &manifest, &mut report.errors);
     report.valid = report.errors.is_empty();
     Ok(report)
 }

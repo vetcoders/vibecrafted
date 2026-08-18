@@ -43,6 +43,7 @@ pub mod events;
 pub mod model;
 pub mod read;
 pub mod scaffold;
+pub mod scaffold_verifiers;
 
 pub use events::{
     ConnectionWindow, EventBatch, EventStream, STREAM_BATCH_MAX_BYTES, STREAM_BATCH_MAX_EVENTS,
@@ -70,3 +71,4 @@ pub use scaffold::{
     ScaffoldWorkspace, apply_plan_geometry, collect_delivery_verifiers, doctor_plan_root,
     doctor_plan_root_in_repo,
 };
+pub use scaffold_verifiers::{execute_brief_verifiers, extract_brief_verifier_commands};
