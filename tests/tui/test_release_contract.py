@@ -11,6 +11,12 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RELEASE_PAGE = "https://github.com/vetcoders/vibecrafted/releases/latest"
 
+# Pinned so the Windows entry point cannot drift silently. Measured
+# 2026-08-18; both copies agreed at this digest. See
+# test_windows_entry_point_does_not_drift_between_its_two_copies for why a
+# constant is needed on top of the cross-repo comparison.
+INSTALL_PS1_SHA256 = "12c2ca5b95195a2fcee0f4987962fd35ec52dde85588c226f68bcab4680450b6"
+
 
 def test_public_install_surfaces_name_both_release_channels() -> None:
     surfaces = (
@@ -620,12 +626,22 @@ def test_windows_entry_point_does_not_drift_between_its_two_copies() -> None:
     """
 
     framework = REPO_ROOT / "install.ps1"
-    served = REPO_ROOT.parent / "vibecrafted-io/site/public/install.ps1"
     assert framework.is_file()
+    digest = hashlib.sha256(framework.read_bytes()).hexdigest()
+
+    # The cross-repo comparison below is opportunistic: it skips wherever
+    # vibecrafted-io is not checked out, which is everywhere except this
+    # laptop, so on its own it guards nothing in CI. The pin is what bites.
+    # Editing install.ps1 now forces a deliberate bump of this constant, and
+    # that bump is the reminder that the served copy has to move too.
+    assert digest == INSTALL_PS1_SHA256, (
+        "install.ps1 changed. Update the served copy in vibecrafted-io "
+        f"(site/public/install.ps1) and set INSTALL_PS1_SHA256 to {digest}"
+    )
+
+    served = REPO_ROOT.parent / "vibecrafted-io/site/public/install.ps1"
     if not served.is_file():
         pytest.skip("vibecrafted-io is not checked out beside this repository")
-
-    digest = hashlib.sha256(framework.read_bytes()).hexdigest()
     assert digest == hashlib.sha256(served.read_bytes()).hexdigest(), (
         "install.ps1 drifted between the framework repo and the served site copy"
     )

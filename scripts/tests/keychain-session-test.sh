@@ -190,11 +190,23 @@ assert_default_is() {
 # and `$(...)` before the child ever saw them, so `kill -INT $$` would signal
 # the test harness instead of the child, and every assertion about interrupted
 # flows would be measuring the wrong process.
+# `-e` IS THE POINT, not a tidy-up. Until 2026-08-18 this printed
+# `set -uo pipefail`, and the whole suite was blind by construction to the class
+# of bug it exists to catch: `_ks_trap_cleanup` ends with `return $rc` so it
+# preserves the status that fired the trap, and ONLY under `set -e` does a
+# non-zero return inside a trap handler tear the shell down before the chained
+# caller handler runs. Twenty green cases never touched that cell. The bug
+# shipped, was found by a release that died on purpose, and was fixed in
+# cd13e1ca — while the harness that should have found it still could not.
+#
+# Every real caller runs `set -euo pipefail`: build-vibecrafted-release.sh line
+# 2, build-portable-release.sh line 15. A harness weaker than its callers is
+# measuring a shell nobody uses.
 run_child() {
   local snippet="$1" script="$ROOT/child.sh"
   {
     printf '#!/usr/bin/env bash\n'
-    printf 'set -uo pipefail\n'
+    printf 'set -euo pipefail\n'
     printf '. %q\n' "$LIB"
     printf '%s\n' "$snippet"
   } > "$script"
@@ -568,7 +580,70 @@ assert_list_equals "$LOGIN"
 teardown_env
 
 # ==========================================================================
-# 19. Labels are path components. Dot aliases must be rejected by every public
+# 19. THE CELL THE SHIPPED BUG LIVED IN: a chained caller handler AND a
+#     non-zero exit, under `set -e`.
+#
+#     Case 17 chains a caller handler but the child exits 0. Case 4 exits
+#     non-zero but arms no caller handler. The intersection — which is what
+#     every failed release actually is — was covered by neither, and that is
+#     precisely where the bug lived.
+#
+#     MEASURED 2026-08-18: a release deliberately failed after taking donor
+#     worktree snapshots. It entered its EXIT trap, `_ks_trap_cleanup` returned
+#     the triggering status to preserve it, `set -e` tore the shell down INSIDE
+#     the handler, and the caller's reaper never ran — both worktree
+#     registrations survived, which is the 2026-08-11 ghost all over again.
+#     Fixed in cd13e1ca by `_ks_trap_cleanup || true`; this is the case that
+#     can see it.
+# ==========================================================================
+setup_env
+test_case "a chained caller handler still runs when the build exits non-zero"
+LOGIN="$HOME/Library/Keychains/login.keychain-db"
+seed_list "$LOGIN"
+ORDER="$ROOT/order-nonzero.txt"
+: > "$ORDER"
+run_child "trap 'printf \"caller-reaper\\n\" >> \"$ORDER\"' EXIT
+           keychain_session_begin codescribe-signing >/dev/null
+           exit 7" >/dev/null
+rc=$?
+if [[ $rc -eq 7 ]]; then
+  ok "the triggering exit status is still preserved (7)"
+else
+  bad "child exit code was $rc, expected 7"
+fi
+if grep -q '^caller-reaper$' "$ORDER"; then
+  ok "the caller's reaper ran despite the non-zero exit"
+else
+  bad "the caller's reaper was skipped — a failed release would leak its worktrees"
+fi
+assert_list_equals "$LOGIN"
+teardown_env
+
+# ==========================================================================
+# 20. Same intersection on SIGINT: a caller handler that itself exits non-zero.
+#     The INT/TERM/HUP arms chain differently from EXIT (they must supply an
+#     exit of their own), so the cell has to be checked on both paths.
+# ==========================================================================
+setup_env
+test_case "a chained INT handler that exits non-zero still runs to completion"
+LOGIN="$HOME/Library/Keychains/login.keychain-db"
+seed_list "$LOGIN"
+MARK="$ROOT/int-nonzero.txt"
+: > "$MARK"
+run_child "trap 'printf \"caller-int-reaper\\n\" >> \"$MARK\"; exit 130' INT
+           keychain_session_begin codescribe-signing >/dev/null
+           kill -INT \$\$
+           sleep 5" >/dev/null 2>&1
+if grep -q '^caller-int-reaper$' "$MARK"; then
+  ok "the caller's INT reaper ran"
+else
+  bad "the caller's INT reaper was skipped"
+fi
+assert_list_equals "$LOGIN"
+teardown_env
+
+# ==========================================================================
+# 21. Labels are path components. Dot aliases must be rejected by every public
 #     operation before `security` runs or session state can escape its root.
 # ==========================================================================
 setup_env

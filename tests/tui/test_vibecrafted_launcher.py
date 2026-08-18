@@ -2320,6 +2320,15 @@ def test_dashboard_subcommand_launches_repo_owned_vc_frame_layout(
 
     env = os.environ.copy()
     env["HOME"] = str(home)
+    # Redirecting HOME is not enough. The launcher resolves the frontier config
+    # under $XDG_CONFIG_HOME, which the operator's shell sets independently of
+    # HOME, so os.environ.copy() carries the real one straight into the test.
+    # MEASURED 2026-08-18: this case was red on the release machine and green
+    # everywhere else, because ~/.config/vetcoders/frontier/vc-frame EXISTS
+    # there and the launcher preferred it over the repo-owned layout that is
+    # the whole subject of the assertion below. A suite that cannot be trusted
+    # on the host which builds the release is not a release gate.
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg-config")
     env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
     env["CAPTURE_FILE"] = str(capture_file)
     env["VETCODERS_SPAWN_RUNTIME"] = "headless"
@@ -2369,6 +2378,9 @@ def test_start_subcommand_launches_operator_entrypoint_layout(tmp_path: Path) ->
 
     env = os.environ.copy()
     env["HOME"] = str(home)
+    # Same host-config leak as the dashboard case above; this assertion also
+    # names a repo-owned layout, so it must not be able to see the operator's.
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg-config")
     env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
     env["CAPTURE_FILE"] = str(capture_file)
     env["VETCODERS_SPAWN_RUNTIME"] = "headless"

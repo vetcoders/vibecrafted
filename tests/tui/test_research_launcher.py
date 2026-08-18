@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 import textwrap
 import time
@@ -34,6 +35,18 @@ def _env(tmp_path: Path, *, crafted_home: Path | None = None) -> dict[str, str]:
     env = os.environ.copy()
     home = crafted_home or (tmp_path / "home" / ".vibecrafted")
     home.mkdir(parents=True, exist_ok=True)
+    # MUST be canonical. `run_mutation._canonical_directory` refuses a mutation
+    # root that differs from its own realpath — a deliberate TOCTOU and
+    # symlink-redirection guard around run meta — and the refusal surfaces only
+    # as `RunMetaMutationError` inside the supervisor, so the caller sees a run
+    # that never settles rather than an error.
+    #
+    # pytest's own tmp_path happens to be canonical on this host
+    # (/private/var/folders/...), so this is defence, not the fix for the three
+    # reds below; MEASURED 2026-08-18 by reproducing the same launch under
+    # /tmp, where /tmp -> /private/tmp makes the guard fire every time. Any host
+    # whose TMPDIR is reached through a symlink would hit it here.
+    home = home.resolve()
     env["VIBECRAFTED_HOME"] = str(home)
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
@@ -93,7 +106,48 @@ def _wait_for_test_run_exit(
         check=False,
         timeout=5,
     )
-    pytest.fail(f"test research run {run_id} did not settle within {timeout}s")
+    leaked = _reap_run_process_group(meta_path)
+    pytest.fail(
+        f"test research run {run_id} did not settle within {timeout}s"
+        + (f" (reaped {leaked} leaked process(es))" if leaked else "")
+    )
+
+
+def _reap_run_process_group(meta_path: Path) -> int:
+    """Kill the worker this test started, so a red test cannot poison the host.
+
+    `swarm stop` above is the polite request and it is not enough. MEASURED
+    2026-08-18: each timing-out case left a `vibecrafted_core.dispatcher run`
+    blocked in wait4 and its `workflow_runtime research` child blocked in the
+    asyncio kevent loop, both reparented to init and still alive six minutes
+    later. SIGTERM to the group took the dispatcher only; the child needed
+    SIGKILL.
+
+    Only ever the pgid this run recorded in its own meta under the test's
+    private VIBECRAFTED_HOME, and never the test runner's own group.
+    """
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return 0
+
+    pgid = payload.get("worker_pgid")
+    pid = payload.get("worker_pid")
+    if not isinstance(pgid, int) or pgid <= 1 or pgid == os.getpgrp():
+        pgid = None
+
+    reaped = 0
+    for signal_number in (signal.SIGTERM, signal.SIGKILL):
+        for target, killer in ((pgid, os.killpg), (pid, os.kill)):
+            if not isinstance(target, int) or target <= 1:
+                continue
+            try:
+                killer(target, signal_number)
+                reaped += 1
+            except (ProcessLookupError, PermissionError):
+                pass
+        time.sleep(0.2)
+    return reaped
 
 
 def _run_vc_research(
