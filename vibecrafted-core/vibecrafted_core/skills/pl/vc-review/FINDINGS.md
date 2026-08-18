@@ -71,7 +71,7 @@ Skanuj patche per-file oraz `full.patch` pod kątem:
 `@ts-ignore`, `@ts-expect-error`, `eslint-disable`,
 `// TODO|FIXME|HACK`, puste `catch {}` bez logu/rethrow, non-null
 assertion `!` na niepewnych wartościach, `console.log|warn|error` (powinno
-używać secureLogger w Viście)
+używać secureLogger w example-app)
 
 **Security / PII** — logowanie tokenów / e-maili / haseł / osobistych
 ID, nowa telemetria bez przeglądu prywatności, nowe endpointy / command

@@ -8,7 +8,7 @@ flowchart TD
     B --> C[Create or inherit swarm run context]
     C --> D[Create research/<run_id> and prepare launchers]
     D --> E{Runtime?}
-    E -->|terminal or visible| F[Open shared zellij research tab]
+    E -->|terminal or visible| F[Open shared vc_frame research tab]
     E -->|headless| G[Print launcher paths and await command]
     F --> H[Each agent writes report plus logs inside the run directory]
     G --> H
@@ -27,7 +27,7 @@ flowchart TD
 ### Krawędzie eskalacji
 
 - Research skończony i zespół chce plan -> `vibecrafted scaffold <agent>`
-- Research skończony i ma ruszyć wykonanie -> `vibecrafted workflow <agent>` lub `implement` (alias: `justdo`)
+- Research skończony i ma ruszyć wykonanie -> `vibecrafted workflow <agent>` lub `implement` (ship WRITE); postawa na pierwszym miejscu -> `justdo`
 - Research potrzebuje jednego silnego ownera zamiast swarmu -> `vibecrafted <agent> research <plan.md>`
 
 ### Artefakty sesji

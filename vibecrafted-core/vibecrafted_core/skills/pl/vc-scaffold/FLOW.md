@@ -32,7 +32,7 @@ Każdy WRITE zostawia artefakt; następny READ go falsyfikuje. Zobacz `reference
 
 ### Krawędzie eskalacji
 
-- Plan gotowy do wykonania -> `vibecrafted implement <agent>` (alias `justdo`) lub `workflow`
+- Plan gotowy do wykonania ship WRITE -> `vibecrafted implement <agent>` lub `workflow`; praca promptowa z postawą na pierwszym miejscu -> `vibecrafted justdo <agent>`
 - Poprowadzenie wielofalowego dispatchu -> postawa `$vc-operator` plus `vibecrafted dispatch` lub lane'y workflow
 - Wciąż potrzebne wspólne sterowanie -> `vibecrafted partner <agent>`
 - Repo już istnieje i potrzebuje prawdy przed planowaniem -> `vibecrafted init <agent>`

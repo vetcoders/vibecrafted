@@ -178,7 +178,7 @@ Noty zamknięcia o charakterze przekrojowym:
   z noty Znana luka w danych jest na żywo. Fix telemetrii Wave 0 wylądował w
   `40935d5` (źle oznaczony subject; `runtime/scripts/lib/meta.sh`).
 - Prawda motywu: nie ma w aplikacji palety light/dark — dashboard
-  emituje wyłącznie nazwane kolory ANSI, a motywy mesh zellij rozwiązują je
+  emituje wyłącznie nazwane kolory ANSI, a motywy mesh vc_frame rozwiązują je
   po stronie terminala. Suite snapshotów zamraża treść + rozmieszczenie kolorów
   i pilnuje inwariantu named-ANSI.
 

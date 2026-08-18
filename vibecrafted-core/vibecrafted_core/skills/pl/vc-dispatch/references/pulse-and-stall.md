@@ -19,6 +19,19 @@ vibecrafted dostarcza heartbeat — sięgnij po niego, zanim ręcznie sklecisz t
 | wznów po oknie bezczynności         | `vibecrafted cron tick --after-idle-minutes 10 --then-cmd <cmd>`                                                                                                                                                           |
 | auto-await pane per-dispatch        | `vibecrafted-await-watch.sh --meta <meta.json>` — tailuje transcript, obserwuje status meta + deltę rozmiaru + liveness procesu, sam się terminuje (tunable'e: `VIBECRAFTED_AWAIT_IDLE_TIMEOUT`, `VIBECRAFTED_AWAIT_POLL`) |
 
+Kanoniczny kontrakt supervisora (zobacz `docs/runtime/AGENT_OPS.md`): po dispatchu
+od razu uzbrój `vibecrafted <agent> await --run-id <id>` po stronie supervisora.
+JSON control plane'u, pliki raportów, transkrypty, pane'y i zaplanowane wybudzenia
+są wyłącznie diagnostyczne — to nie są sygnały wybudzenia. Hedge'owanie awaita
+doraźnymi pollerami/watcherami to naruszenie Class 3; napraw
+`control_plane.await_run`, nie normalizuj hedge'a.
+
+Liveness na 3 sygnałach: verdict awaita, terminalne meta runu, martwy pid workera,
+plus obecność obiecanego raportu. Dwa zgodne sygnały wystarczą, żeby działać, trzy —
+żeby ogłosić done; każda niezgodność oznacza traktuj jako żywy i uzbrój await
+ponownie. Znany skew: rc=0 przy żywym runie i meta zawieszone na `active`/`stalled`
+po faktycznym zakończeniu.
+
 Prowadź await dedykowaną komendą (NASZ vc-loop / cron) jako STANDARD nawet z
 sesji interaktywnej — dispatchowany run MA CLI. Pętla na poziomie harnessa
 (Claude `/loop 15m <watch prompt>`) to prawdziwy last-resort, tylko gdy CLI

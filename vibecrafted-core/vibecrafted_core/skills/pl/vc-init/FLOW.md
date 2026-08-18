@@ -4,7 +4,7 @@
 
 ```mermaid
 flowchart TD
-    A[Operator: vibecrafted init claude] --> B[Require zellij-backed operator runtime]
+    A[Operator: vibecrafted init claude] --> B[Require vc_frame-backed operator runtime]
     B --> C[Compose /vc-init prompt plus optional file or prompt context]
     C --> D[Attach or create operator session]
     D --> E[Open agent tab with init prompt]
@@ -28,6 +28,6 @@ flowchart TD
 
 ### Artefakty sesji
 
-- Sesja operatora: sesja zellij nazwana od bazy repo lub odziedziczona z kontekstu przebiegu (run context)
+- Sesja operatora: sesja vc_frame nazwana od bazy repo lub odziedziczona z kontekstu przebiegu (run context)
 - Lock: samo `vc-init` nie gwarantuje nowego locka; dalsze skille tworzą go lub dziedziczą
 - Wyjścia: zespawnowana sesja agenta zapisuje taki raport, transkrypt i meta, jakie produkuje następny workflow
