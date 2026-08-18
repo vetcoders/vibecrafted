@@ -338,10 +338,18 @@ def _read_meta(path: Path | None) -> dict[str, Any]:
 
 
 def _write_meta(path: Path, payload: dict[str, Any]) -> None:
-    """Write *payload* as pretty-printed, newline-terminated JSON to *path*."""
-    path.write_text(
+    """Write *payload* as pretty JSON, published atomically via tmp + rename.
+
+    meta.json is read concurrently by the launcher, the startup watcher, the
+    control-plane sync and dashboards; an in-place write truncates first, so
+    a concurrent reader could observe an empty file. os.replace guarantees a
+    reader sees the previous document or the new one, never a torn one.
+    """
+    tmp_path = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    tmp_path.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
+    os.replace(tmp_path, path)
 
 
 def _read_text(path: Path) -> str:

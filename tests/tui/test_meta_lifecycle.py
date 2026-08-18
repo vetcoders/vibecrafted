@@ -525,3 +525,52 @@ def test_triage_run_tolerates_a_missing_meta(tmp_path: Path) -> None:
         spawn_triage_run "{tmp_path / "absent.meta.json"}"
         '''
     )
+
+
+def test_meta_writers_replace_never_truncate_in_place() -> None:
+    """Every meta.json writer must publish via tmp + os.replace, never open("w").
+
+    run.meta.json is a cross-process contract: the launcher, the startup
+    watcher, the control-plane sync, dashboards and the lifecycle tests all
+    read it while someone else is writing. An in-place `open(path, "w")`
+    truncates first and fills later, so a concurrent reader can observe an
+    empty file — the exact JSONDecodeError flake this suite hit in CI on
+    test_generated_launcher_walks_full_lifecycle. Atomic rename means a
+    reader sees the old document or the new one, never a half-written one.
+    """
+    meta_sh = (
+        REPO_ROOT
+        / "vibecrafted-core"
+        / "vibecrafted_core"
+        / "runtime"
+        / "scripts"
+        / "lib"
+        / "meta.sh"
+    ).read_text(encoding="utf-8")
+
+    # No shell-embedded writer may truncate the destination in place.
+    assert 'open(meta_path, "w"' not in meta_sh, (
+        "meta.sh writes meta.json in place; use tmp + os.replace so "
+        "concurrent readers never observe a truncated file"
+    )
+
+    # Each live-state writer publishes through an atomic rename.
+    for writer in (
+        "spawn_update_meta_pid",
+        "spawn_mark_meta_running",
+        "spawn_reap_dead_run",
+        "spawn_mark_unknown_liveness",
+    ):
+        start = meta_sh.index(f"{writer}()")
+        body = meta_sh[start : meta_sh.index("\n}", start)]
+        assert "os.replace(" in body, f"{writer} must publish via os.replace"
+
+    spawn_py = (
+        REPO_ROOT / "vibecrafted-core" / "vibecrafted_core" / "spawn.py"
+    ).read_text(encoding="utf-8")
+    start = spawn_py.index("def _write_meta(")
+    body = spawn_py[start : spawn_py.index("\ndef ", start + 1)]
+    assert "os.replace(" in body, (
+        "_write_meta (write-meta/finish-meta/finalize) must publish via "
+        "tmp + os.replace"
+    )

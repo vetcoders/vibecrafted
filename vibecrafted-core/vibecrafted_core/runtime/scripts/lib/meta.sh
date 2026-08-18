@@ -164,6 +164,7 @@ spawn_update_meta_pid() {
 
   python3 - "$meta_path" "$pid" <<'PY'
 import json
+import os
 import sys
 
 meta_path, pid = sys.argv[1:3]
@@ -180,9 +181,11 @@ except (TypeError, ValueError):
     payload["launcher_pid"] = None
     payload["liveness"] = "unknown_legacy"
 
-with open(meta_path, "w", encoding="utf-8") as fh:
+tmp_path = f"{meta_path}.tmp.{os.getpid()}"
+with open(tmp_path, "w", encoding="utf-8") as fh:
     json.dump(payload, fh, indent=2, ensure_ascii=False)
     fh.write("\n")
+os.replace(tmp_path, meta_path)
 PY
 }
 
@@ -265,9 +268,11 @@ payload.setdefault("exit_code", 137)  # canonical kill-killed code, for parity
 payload["ghost_reason"] = "launcher_pid dead at reap"
 payload["liveness"] = "pid_dead"
 
-with open(meta_path, "w", encoding="utf-8") as fh:
+tmp_path = f"{meta_path}.tmp.{os.getpid()}"
+with open(tmp_path, "w", encoding="utf-8") as fh:
     json.dump(payload, fh, indent=2, ensure_ascii=False)
     fh.write("\n")
+os.replace(tmp_path, meta_path)
 
 # Best-effort lock cleanup — meta may reference a lock path.
 lock_path = payload.get("run_lock") or payload.get("lock")
@@ -289,6 +294,7 @@ spawn_mark_unknown_liveness() {
   python3 - "$meta_path" <<'PY'
 import datetime as dt
 import json
+import os
 import sys
 
 meta_path = sys.argv[1]
@@ -309,9 +315,11 @@ payload["liveness"] = "unknown_legacy"
 payload.setdefault("liveness_reason", "live status without launcher_pid")
 payload["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
 
-with open(meta_path, "w", encoding="utf-8") as fh:
+tmp_path = f"{meta_path}.tmp.{os.getpid()}"
+with open(tmp_path, "w", encoding="utf-8") as fh:
     json.dump(payload, fh, indent=2, ensure_ascii=False)
     fh.write("\n")
+os.replace(tmp_path, meta_path)
 PY
   spawn_sync_control_plane
 }
