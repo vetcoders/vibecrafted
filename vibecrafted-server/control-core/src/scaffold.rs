@@ -5,6 +5,7 @@ use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -276,6 +277,16 @@ impl ScaffoldDoctorReport {
     pub fn workspace_reviewable(&self) -> bool {
         !self.errors.iter().any(workspace_fatal_error)
     }
+}
+
+/// Delivery-verifier command inventoried from a brief Gates section.
+///
+/// C4 only collects these. C5 is the execution owner — do not run them here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScaffoldVerifierProbe {
+    pub artifact_id: String,
+    pub path: String,
+    pub command: String,
 }
 
 /// Canonical 12 brief section markers (heading-substring, case-insensitive).
@@ -676,6 +687,18 @@ impl ScaffoldArtifactStore {
         day: &str,
         plan_id: &str,
     ) -> ScaffoldResult<ScaffoldDoctorReport> {
+        self.doctor_with_repo(org, repo, day, plan_id, None)
+    }
+
+    /// Same as [`Self::doctor`], with an explicit git checkout for C4 geometry.
+    pub fn doctor_with_repo(
+        &self,
+        org: &str,
+        repo: &str,
+        day: &str,
+        plan_id: &str,
+        repo_root: Option<&Path>,
+    ) -> ScaffoldResult<ScaffoldDoctorReport> {
         let root = self.plan_root(org, repo, day, plan_id)?;
         let manifest = read_manifest(&root)?;
         validate_identity(&manifest, org, repo, day, plan_id)?;
@@ -690,8 +713,9 @@ impl ScaffoldArtifactStore {
                 None,
                 &message,
             );
-            report.valid = report.errors.is_empty();
         }
+        apply_plan_geometry(&mut report, &root, &manifest, repo_root);
+        report.valid = report.errors.is_empty();
         Ok(report)
     }
 
@@ -986,6 +1010,17 @@ fn read_manifest(root: &Path) -> ScaffoldResult<ScaffoldManifest> {
 
 /// Free-function entry used by the `scaffold-doctor` binary and server.
 pub fn doctor_plan_root(plan_root: impl AsRef<Path>) -> ScaffoldResult<ScaffoldDoctorReport> {
+    doctor_plan_root_in_repo(plan_root, None::<&Path>)
+}
+
+/// Doctor a plan against an explicit git checkout (C4 geometry).
+///
+/// `repo_root = None` discovers the checkout from mission/DRIVER, then cwd.
+/// An explicit path that is not a git work tree is fail-closed (no cwd fallback).
+pub fn doctor_plan_root_in_repo(
+    plan_root: impl AsRef<Path>,
+    repo_root: Option<impl AsRef<Path>>,
+) -> ScaffoldResult<ScaffoldDoctorReport> {
     let root = plan_root.as_ref();
     if !root.is_dir() {
         return Err(ScaffoldError::InvalidManifest {
@@ -1014,9 +1049,597 @@ pub fn doctor_plan_root(plan_root: impl AsRef<Path>) -> ScaffoldResult<ScaffoldD
             None,
             &message,
         );
-        report.valid = report.errors.is_empty();
     }
+    apply_plan_geometry(
+        &mut report,
+        root,
+        &manifest,
+        repo_root.as_ref().map(AsRef::as_ref),
+    );
+    report.valid = report.errors.is_empty();
     Ok(report)
+}
+
+/// C4 geometry: named git baseline must be an ancestor of HEAD, and every
+/// repo path named in mission/DRIVER/brief Files must exist on HEAD.
+///
+/// Local `git merge-base --is-ancestor` / `git cat-file` only — no network.
+/// C5 may call this after its own verifier inventory.
+pub fn apply_plan_geometry(
+    report: &mut ScaffoldDoctorReport,
+    plan_root: &Path,
+    manifest: &ScaffoldManifest,
+    repo_root: Option<&Path>,
+) {
+    let sources = geometry_source_texts(plan_root, manifest);
+    let baselines = collect_named_baseline_shas(&sources);
+    let named_paths = collect_named_repo_paths(&sources);
+    if baselines.is_empty() && named_paths.is_empty() {
+        return;
+    }
+
+    let resolved = resolve_geometry_repo(plan_root, &sources, repo_root);
+    let Some(repo) = resolved else {
+        if !baselines.is_empty() {
+            doctor_error(
+                &mut report.errors,
+                "baseline_repo_unresolved",
+                Some("C4"),
+                None,
+                None,
+                &format!(
+                    "mission/DRIVER names baseline SHA(s) {} but no git checkout was found (pass --repo)",
+                    baselines.join(", ")
+                ),
+            );
+        }
+        if !named_paths.is_empty() {
+            doctor_error(
+                &mut report.errors,
+                "named_path_repo_unresolved",
+                Some("C4"),
+                None,
+                None,
+                &format!(
+                    "plan/briefs name repo path(s) {} but no git checkout was found (pass --repo)",
+                    named_paths
+                        .iter()
+                        .take(6)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
+        }
+        return;
+    };
+
+    for sha in &baselines {
+        match git_is_ancestor_of_head(&repo, sha) {
+            Ok(true) => {}
+            Ok(false) => doctor_error(
+                &mut report.errors,
+                "baseline_not_ancestor",
+                Some("C4"),
+                None,
+                None,
+                &format!(
+                    "named baseline {sha} is not an ancestor of HEAD (`git merge-base --is-ancestor`)"
+                ),
+            ),
+            Err(message) => doctor_error(
+                &mut report.errors,
+                "baseline_unknown",
+                Some("C4"),
+                None,
+                None,
+                &message,
+            ),
+        }
+    }
+
+    for rel in &named_paths {
+        if !git_path_exists_on_head(&repo, rel) {
+            doctor_error(
+                &mut report.errors,
+                "named_path_missing",
+                Some("C4"),
+                None,
+                Some(rel),
+                &format!("named path `{rel}` is missing on HEAD"),
+            );
+        }
+    }
+}
+
+/// Collect delivery-verifier command lines from briefs. C5 executes them.
+#[must_use]
+pub fn collect_delivery_verifiers(
+    plan_root: impl AsRef<Path>,
+    manifest: &ScaffoldManifest,
+) -> Vec<ScaffoldVerifierProbe> {
+    let root = plan_root.as_ref();
+    let mut probes = Vec::new();
+    for artifact in &manifest.artifacts {
+        if artifact.role != ScaffoldArtifactRole::Brief {
+            continue;
+        }
+        let Ok(path) = declared_path(root, artifact) else {
+            continue;
+        };
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(gates) = section_body(&content, "gates") else {
+            continue;
+        };
+        for line in gates.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("```") {
+                continue;
+            }
+            if has_verifier_command(trimmed) {
+                let command = trimmed.trim_start_matches('$').trim().to_string();
+                probes.push(ScaffoldVerifierProbe {
+                    artifact_id: artifact.id.clone(),
+                    path: artifact.path.clone(),
+                    command,
+                });
+            }
+        }
+    }
+    probes
+}
+
+struct GeometrySources {
+    mission_driver: Vec<(String, String)>,
+    briefs: Vec<(String, String)>,
+}
+
+fn geometry_source_texts(plan_root: &Path, manifest: &ScaffoldManifest) -> GeometrySources {
+    let mut mission_driver = Vec::new();
+    let mut briefs = Vec::new();
+    for artifact in &manifest.artifacts {
+        let Ok(path) = declared_path(plan_root, artifact) else {
+            continue;
+        };
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if is_mission_or_driver(artifact, &content) {
+            mission_driver.push((artifact.id.clone(), content));
+        } else if artifact.role == ScaffoldArtifactRole::Brief {
+            briefs.push((artifact.id.clone(), content));
+        }
+    }
+    GeometrySources {
+        mission_driver,
+        briefs,
+    }
+}
+
+fn is_mission_or_driver(artifact: &ScaffoldArtifactDeclaration, content: &str) -> bool {
+    if artifact.role == ScaffoldArtifactRole::Driver {
+        return true;
+    }
+    if artifact.id.eq_ignore_ascii_case("mission") {
+        return true;
+    }
+    let file = artifact
+        .path
+        .rsplit('/')
+        .next()
+        .unwrap_or(artifact.path.as_str());
+    if file.eq_ignore_ascii_case("mission.md") {
+        return true;
+    }
+    parse_frontmatter(content).is_some_and(|frontmatter| {
+        frontmatter
+            .get("role")
+            .is_some_and(|role| role.eq_ignore_ascii_case("mission"))
+    })
+}
+
+fn collect_named_baseline_shas(sources: &GeometrySources) -> Vec<String> {
+    let mut shas = BTreeSet::new();
+    for (_, content) in &sources.mission_driver {
+        extract_named_baseline_shas(content, &mut shas);
+    }
+    shas.into_iter().collect()
+}
+
+fn collect_named_repo_paths(sources: &GeometrySources) -> Vec<String> {
+    let mut paths = BTreeSet::new();
+    for (_, content) in &sources.mission_driver {
+        extract_repo_paths_from_text(content, false, &mut paths);
+    }
+    for (_, content) in &sources.briefs {
+        if let Some(files) = section_body(content, "files") {
+            extract_repo_paths_from_text(&files, true, &mut paths);
+        }
+    }
+    paths.into_iter().collect()
+}
+
+const BASELINE_MARKERS: &[&str] = &[
+    "authoring baseline",
+    "original baseline",
+    "reference baseline",
+    "operator_chosen_baseline",
+    "orientation head",
+    "handoff baseline",
+    "parent_branch",
+    "baseline_branch",
+    "baseline_sha",
+    "git baseline",
+    "scaffold baseline",
+];
+
+fn extract_named_baseline_shas(content: &str, shas: &mut BTreeSet<String>) {
+    if let Some(frontmatter) = parse_frontmatter(content) {
+        for key in [
+            "baseline_sha",
+            "baseline",
+            "parent_branch",
+            "baseline_branch",
+            "git_baseline",
+        ] {
+            if let Some(value) = frontmatter.get(key) {
+                collect_git_shas(value, shas);
+            }
+        }
+    }
+    for line in content.lines() {
+        collect_baseline_shas_from_line(line, shas);
+    }
+}
+
+fn collect_baseline_shas_from_line(line: &str, shas: &mut BTreeSet<String>) {
+    let lower = line.to_ascii_lowercase();
+    let mut starts = Vec::new();
+    for marker in BASELINE_MARKERS {
+        let mut offset = 0usize;
+        while let Some(idx) = lower[offset..].find(marker) {
+            starts.push(offset + idx + marker.len());
+            offset += idx + marker.len();
+        }
+    }
+    if starts.is_empty() {
+        if let Some(idx) = word_index(&lower, "baseline") {
+            starts.push(idx + "baseline".len());
+        }
+    }
+    for start in starts {
+        if start <= line.len() {
+            collect_git_shas(&line[start..], shas);
+        }
+    }
+}
+
+fn word_index(haystack: &str, word: &str) -> Option<usize> {
+    let mut offset = 0usize;
+    for token in haystack.split_inclusive(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
+        let trimmed = token.trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_');
+        if trimmed == word {
+            return Some(offset);
+        }
+        offset += token.len();
+    }
+    None
+}
+
+fn collect_git_shas(text: &str, shas: &mut BTreeSet<String>) {
+    let bytes = text.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index].is_ascii_hexdigit() {
+            let start = index;
+            while index < bytes.len() && bytes[index].is_ascii_hexdigit() {
+                index += 1;
+            }
+            let token = &text[start..index];
+            if is_git_sha(token) && !preceded_by_sha256(&text[..start]) {
+                shas.insert(token.to_ascii_lowercase());
+            }
+        } else {
+            index += 1;
+        }
+    }
+}
+
+fn preceded_by_sha256(prefix: &str) -> bool {
+    let trimmed = prefix.trim_end_matches(|c: char| c == ':' || c.is_ascii_whitespace());
+    trimmed
+        .len()
+        .checked_sub(6)
+        .is_some_and(|start| trimmed[start..].eq_ignore_ascii_case("sha256"))
+}
+
+fn is_git_sha(token: &str) -> bool {
+    let len = token.len();
+    (7..=40).contains(&len)
+        && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && token.bytes().any(|byte| byte.is_ascii_digit())
+}
+
+fn extract_repo_paths_from_text(text: &str, files_section: bool, paths: &mut BTreeSet<String>) {
+    for line in text.lines() {
+        if is_plan_store_line(line) {
+            continue;
+        }
+        for span in backtick_spans(line) {
+            if let Some(path) = normalize_named_path(&span) {
+                if !files_section || !path_marked_create_only(line, &span) {
+                    paths.insert(path);
+                }
+            }
+        }
+        if files_section {
+            let trimmed = line.trim_start();
+            let item = trimmed
+                .strip_prefix('-')
+                .or_else(|| trimmed.strip_prefix('*'))
+                .map(str::trim);
+            if let Some(item) = item {
+                let token = item
+                    .trim_start_matches(['[', ']', 'x', 'X', '~', '?', '!', ' '])
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("");
+                if let Some(path) = normalize_named_path(token) {
+                    if !path_marked_create_only(line, token) {
+                        paths.insert(path);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn is_plan_store_line(line: &str) -> bool {
+    line.contains("/.vibecrafted/") || line.contains("/artifacts/") && line.contains("/plans/")
+}
+
+fn backtick_spans(text: &str) -> Vec<String> {
+    let mut spans = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('`') {
+        rest = &rest[start + 1..];
+        let Some(end) = rest.find('`') else {
+            break;
+        };
+        let inner = rest[..end].trim();
+        if !inner.is_empty() && !inner.contains('\n') {
+            spans.push(inner.to_string());
+        }
+        rest = &rest[end + 1..];
+    }
+    spans
+}
+
+fn path_marked_create_only(line: &str, path: &str) -> bool {
+    let Some(index) = line.find(path) else {
+        return false;
+    };
+    let before = line[..index].to_ascii_lowercase();
+    let window = if before.len() > 56 {
+        &before[before.len() - 56..]
+    } else {
+        before.as_str()
+    };
+    let create = window.contains("create")
+        || window.contains("new file")
+        || window.contains("or new")
+        || window.contains("(new ");
+    let existing = window.contains("edit")
+        || window.contains("read")
+        || window.contains("do not")
+        || window.contains("touch");
+    create && !existing
+}
+
+fn normalize_named_path(raw: &str) -> Option<String> {
+    let trimmed = raw
+        .trim()
+        .trim_matches(|c: char| matches!(c, ',' | ';' | '.' | ':' | ')' | '(' | '"' | '\''));
+    if trimmed.is_empty() || trimmed.starts_with("~/") || trimmed.starts_with('$') {
+        return None;
+    }
+    if trimmed.contains("://") || trimmed.contains(' ') {
+        return None;
+    }
+    if trimmed.contains('*')
+        || trimmed.contains('?')
+        || trimmed.contains('{')
+        || trimmed.contains('}')
+    {
+        return None;
+    }
+    if trimmed.contains("..") {
+        return None;
+    }
+    let relative = if trimmed.starts_with('/') {
+        return None;
+    } else {
+        trimmed.trim_start_matches("./")
+    };
+    if !looks_like_repo_path(relative) {
+        return None;
+    }
+    Some(relative.to_string())
+}
+
+fn looks_like_repo_path(path: &str) -> bool {
+    if !path.contains('/') || path.starts_with('/') {
+        return false;
+    }
+    let first = path.split('/').next().unwrap_or("");
+    if matches!(first, "origin" | "remotes" | "refs" | "heads") {
+        return false;
+    }
+    if path
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return false;
+    }
+    Path::new(path).extension().is_some_and(|extension| {
+        let ext = extension.to_string_lossy();
+        !ext.is_empty() && ext.chars().all(|c| c.is_ascii_alphanumeric())
+    })
+}
+
+fn resolve_geometry_repo(
+    _plan_root: &Path,
+    sources: &GeometrySources,
+    explicit: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(explicit) = explicit {
+        return git_toplevel(explicit);
+    }
+    for (_, content) in &sources.mission_driver {
+        if let Some(declared) = parse_declared_repo_root(content) {
+            if let Some(top) = git_toplevel(&declared) {
+                return Some(top);
+            }
+        }
+        for absolute in extract_absolute_fs_paths(content) {
+            if absolute.contains("/.vibecrafted/") {
+                continue;
+            }
+            let candidate = PathBuf::from(&absolute);
+            let start = if candidate.is_file() {
+                candidate.parent().map(Path::to_path_buf)
+            } else {
+                Some(candidate)
+            };
+            if let Some(start) = start {
+                if let Some(top) = git_toplevel(&start) {
+                    return Some(top);
+                }
+            }
+        }
+    }
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| git_toplevel(&cwd))
+}
+
+fn parse_declared_repo_root(content: &str) -> Option<PathBuf> {
+    for line in content.lines() {
+        let trimmed = line.trim().trim_start_matches(['-', '*']).trim();
+        let lower = trimmed.to_ascii_lowercase();
+        const KEYS: &[&str] = &[
+            "baseline_repo_root:",
+            "repository root:",
+            "repo target:",
+            "repo:",
+        ];
+        let Some(key) = KEYS.iter().copied().find(|key| lower.starts_with(*key)) else {
+            continue;
+        };
+        let value = trimmed.get(key.len()..).unwrap_or("").trim();
+        let cleaned = value
+            .trim_matches('`')
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches(|c: char| matches!(c, ',' | ';' | '.' | '"' | '\''));
+        if cleaned.starts_with('/') {
+            return Some(PathBuf::from(cleaned));
+        }
+    }
+    None
+}
+
+fn extract_absolute_fs_paths(content: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for line in content.lines() {
+        let mut rest = line;
+        while let Some(idx) = rest.find('/') {
+            if idx > 0 {
+                let prev = rest.as_bytes()[idx - 1];
+                if prev != b' ' && prev != b'`' && prev != b'"' && prev != b'\'' && prev != b'(' {
+                    rest = &rest[idx + 1..];
+                    continue;
+                }
+            }
+            let slice = &rest[idx..];
+            let end = slice
+                .find(|c: char| {
+                    c.is_whitespace() || matches!(c, '`' | '"' | '\'' | ')' | ']' | ',')
+                })
+                .unwrap_or(slice.len());
+            let path = &slice[..end];
+            if path.starts_with("/Users/")
+                || path.starts_with("/home/")
+                || path.starts_with("/Volumes/")
+            {
+                paths.push(path.to_string());
+            }
+            rest = &slice[end.max(1)..];
+        }
+    }
+    paths
+}
+
+fn git_toplevel(path: &Path) -> Option<PathBuf> {
+    if !path.exists() {
+        return None;
+    }
+    let start = if path.is_file() { path.parent()? } else { path };
+    let output = git_command(start, &["rev-parse", "--show-toplevel"])?;
+    if !output.status.success() {
+        return None;
+    }
+    let top = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if top.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(top))
+    }
+}
+
+fn git_is_ancestor_of_head(repo: &Path, sha: &str) -> Result<bool, String> {
+    let object = format!("{sha}^{{commit}}");
+    let exists = git_command(repo, &["cat-file", "-e", &object])
+        .ok_or_else(|| format!("git cat-file failed while resolving baseline {sha}"))?;
+    if !exists.status.success() {
+        return Err(format!(
+            "named baseline {sha} is not a commit in this repository"
+        ));
+    }
+    let output = git_command(repo, &["merge-base", "--is-ancestor", sha, "HEAD"])
+        .ok_or_else(|| format!("git merge-base failed while checking baseline {sha}"))?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(format!(
+            "git merge-base --is-ancestor {sha} HEAD failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+    }
+}
+
+fn git_path_exists_on_head(repo: &Path, relative: &str) -> bool {
+    if relative.starts_with('-') {
+        return false;
+    }
+    let spec = format!("HEAD:{relative}");
+    git_command(repo, &["cat-file", "-e", &spec]).is_some_and(|output| output.status.success())
+}
+
+fn git_command(repo: &Path, args: &[&str]) -> Option<std::process::Output> {
+    Command::new("git")
+        .current_dir(repo)
+        .args(args)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()
 }
 
 fn validate_identity(
@@ -2150,5 +2773,55 @@ mod tests {
             message: "missing".into(),
         });
         assert!(!report.workspace_reviewable());
+    }
+
+    #[test]
+    fn named_baseline_shas_take_only_the_labeled_span() {
+        let mut shas = BTreeSet::new();
+        extract_named_baseline_shas(
+            "- Branch: `fix/foo` @ `69101f2c` (base 27ad70e2). Original baseline `fix/bar @ e6638c68` superseded",
+            &mut shas,
+        );
+        assert_eq!(shas.iter().cloned().collect::<Vec<_>>(), ["e6638c68"]);
+    }
+
+    #[test]
+    fn authoring_baseline_pair_is_collected() {
+        let mut shas = BTreeSet::new();
+        extract_named_baseline_shas(
+            "The authoring baseline `fix/contract-alignment-to-pr-53` @ `f55fc2d6`/`e6638c68` is **not** an ancestor",
+            &mut shas,
+        );
+        assert_eq!(
+            shas.iter().cloned().collect::<Vec<_>>(),
+            ["e6638c68", "f55fc2d6"]
+        );
+    }
+
+    #[test]
+    fn baseline_sha_field_is_collected_and_sha256_is_ignored() {
+        let mut shas = BTreeSet::new();
+        extract_named_baseline_shas(
+            "baseline_sha: 1d1669ecace92c4196a7f9bf6e1adc1b7eae6a1f (content sha256:abcdef1)\n",
+            &mut shas,
+        );
+        assert_eq!(
+            shas.iter().cloned().collect::<Vec<_>>(),
+            ["1d1669ecace92c4196a7f9bf6e1adc1b7eae6a1f"]
+        );
+    }
+
+    #[test]
+    fn files_section_skips_create_only_and_unqualified_names() {
+        let mut paths = BTreeSet::new();
+        extract_repo_paths_from_text(
+            "- Edit: `scripts/build-vibecrafted-release.sh` and a.rs\n- add (or new `tests/tui/test_repo_symlink_free.py`)\n",
+            true,
+            &mut paths,
+        );
+        assert_eq!(
+            paths.iter().cloned().collect::<Vec<_>>(),
+            ["scripts/build-vibecrafted-release.sh"]
+        );
     }
 }

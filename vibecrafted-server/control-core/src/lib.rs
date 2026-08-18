@@ -66,5 +66,7 @@ pub use scaffold::{
     ScaffoldArtifactStore, ScaffoldCatalog, ScaffoldCatalogSkip, ScaffoldChange,
     ScaffoldCheckpoint, ScaffoldCheckpointPatch, ScaffoldDoctorError, ScaffoldDoctorReport,
     ScaffoldError, ScaffoldExportArtifact, ScaffoldExportBundle, ScaffoldManifest,
-    ScaffoldPlanSummary, ScaffoldResult, ScaffoldStatusPatch, ScaffoldWorkspace, doctor_plan_root,
+    ScaffoldPlanSummary, ScaffoldResult, ScaffoldStatusPatch, ScaffoldVerifierProbe,
+    ScaffoldWorkspace, apply_plan_geometry, collect_delivery_verifiers, doctor_plan_root,
+    doctor_plan_root_in_repo,
 };
