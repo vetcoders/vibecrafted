@@ -1,3 +1,4 @@
+import importlib
 import os
 import sys
 from pathlib import Path
@@ -9,6 +10,12 @@ repo_root_str = str(REPO_ROOT)
 
 if repo_root_str not in sys.path:
     sys.path.insert(0, repo_root_str)
+
+_HELPER_DIR = str(Path(__file__).resolve().parent)
+if _HELPER_DIR not in sys.path:
+    sys.path.append(_HELPER_DIR)
+
+_home_isolation = importlib.import_module("_home_isolation")
 
 os.environ.setdefault("VIBECRAFTED_MARBLES_PROBE_NOTIFY", "0")
 os.environ.setdefault("VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME", "1")
@@ -22,9 +29,15 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_vibecrafted_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolate_vibecrafted_runtime_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Path:
     """Keep root tests independent from the live Vibecrafted runtime."""
-    for key in [name for name in os.environ if name.startswith("VIBECRAFTED_")]:
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("VIBECRAFTED_MARBLES_PROBE_NOTIFY", "0")
-    monkeypatch.setenv("VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME", "1")
+    return _home_isolation.isolate_vibecrafted_test_env(
+        monkeypatch,
+        tmp_path,
+        restore={
+            "VIBECRAFTED_MARBLES_PROBE_NOTIFY": "0",
+            "VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME": "1",
+        },
+    )
