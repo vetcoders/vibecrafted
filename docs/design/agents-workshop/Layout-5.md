@@ -26,18 +26,18 @@ Nie budujemy teraz. Ten sam chassis. Inne narodziny: headless, serwer, nie TTY.
 SESSIONS 5          ┌ grok · vibecrafted ──────────────────────────────────────────────────────── [‹2/4›] [Voc] [Nowy] ┐
  ● Live 3           │ 4.1.0 · feat/resume-no-implicit-native-session                                                   │
 01 ○ main           │                                                                                                  │
-02 ○ lbrx-svc       │ Maciej: floating, Ctrl+P, strzalki. hehe                                                         │
-   · Shell          │ Jeden talerz. Host: float, rename, PANE, strzalki.                                               │
-03 ○ w-c207         │                                                                                                  │
-   · resume-grok    │                                                                                                  │
-   · resume-codex   │     ┌ ❯ Nowy dispatch ─────────────────────────────────────────────────────────── [Anuluj] ┐     │
+02 ○ lbrx-svc       │ Maciej: floating, Ctrl+P, strzałki. hehe                                                         │
+   · Shell          │ Jeden talerz. Host: float, rename, PANE, strzałki.                                               │
+03 ○ codescribe     │                                                                                                  │
+   · grok           │                                                                                                  │
+   · codex          │     ┌ ❯ Nowy dispatch ─────────────────────────────────────────────────────────── [Anuluj] ┐     │
 04 ◉ vc-release     │     │  ▸ agent    [agy] [claude] [codex] «grok» [junie]                                    │     │
-   · Start here     │     │    rytual   [init] «resume» [operator] [partner]                                     │     │
-   ◉ Agents         │     │    sciezka  /srv/vetcoders/vibecrafted                                               │     │
-   · shell          │     │  Enter = HEADLESS worker. Bez TTY. Widać go na serwerze / w voc.                     │     │
+   · Start here     │     │    rytuał   [init] «resume» [operator] [partner]                                     │     │
+   ◉ Agents         │     │    ścieżka  /srv/vetcoders/vibecrafted                                               │     │
+   · shell          │     │  Enter uruchamia workera headless. Podgląd: vc-server / voc.                         │     │
    · voc            │     └─ ten sam chassis co Nowy agent · inne narodziny ─────────────────────────────────────┘     │
-05 ○ vibecrafted-vc_│                                                                                                  │
-   · resume-grok    │                                                                                                  │
+05 ○ vibecrafted    │                                                                                                  │
+   · grok           │                                                                                                  │
    · Shell          │                                                                                                  │
    · grok           │                                                                                                  │
                     │                                                                                                  │

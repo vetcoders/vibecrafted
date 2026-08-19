@@ -26,18 +26,18 @@ Rytuał z Session Managera, nie jego lista. Tylko interaktywny launch. `←` `�
 SESSIONS 5          ┌ grok · vibecrafted ──────────────────────────────────────────────────────── [‹2/4›] [Voc] [Nowy] ┐
  ● Live 3           │ 4.1.0 · feat/resume-no-implicit-native-session                                                   │
 01 ○ main           │                                                                                                  │
-02 ○ lbrx-svc       │ Maciej: floating, Ctrl+P, strzalki. hehe                                                         │
-   · Shell          │ Jeden talerz. Host: float, rename, PANE, strzalki.                                               │
-03 ○ w-c207         │                                                                                                  │
-   · resume-grok    │                                                                                                  │
-   · resume-codex   │     ┌ ❯ Nowy agent ────────────────────────────────────────────────────────────── [Anuluj] ┐     │
+02 ○ lbrx-svc       │ Maciej: floating, Ctrl+P, strzałki. hehe                                                         │
+   · Shell          │ Jeden talerz. Host: float, rename, PANE, strzałki.                                               │
+03 ○ codescribe     │                                                                                                  │
+   · grok           │                                                                                                  │
+   · codex          │     ┌ ❯ Nowy agent ────────────────────────────────────────────────────────────── [Anuluj] ┐     │
 04 ◉ vc-release     │     │  ▸ agent    [agy] [claude] [codex] «grok» [junie]                                    │     │
-   · Start here     │     │    rytual   [init] «resume» [operator] [partner]                                     │     │
-   ◉ Agents         │     │    sciezka  /srv/vetcoders/vibecrafted                                               │     │
-   · shell          │     │  Enter = interaktywny panel na tym tabie. Nie mux. Nie headless.                     │     │
+   · Start here     │     │    rytuał   [init] «resume» [operator] [partner]                                     │     │
+   ◉ Agents         │     │    ścieżka  /srv/vetcoders/vibecrafted                                               │     │
+   · shell          │     │  Enter uruchamia interaktywny panel na tym tabie.                                    │     │
    · voc            │     └─ ↑/↓ wiersz  ·  ←/→ chip  ·  spacja  ·  enter  ·  esc ───────────────────────────────┘     │
-05 ○ vibecrafted-vc_│                                                                                                  │
-   · resume-grok    │                                                                                                  │
+05 ○ vibecrafted    │                                                                                                  │
+   · grok           │                                                                                                  │
    · Shell          │                                                                                                  │
    · grok           │                                                                                                  │
                     │                                                                                                  │

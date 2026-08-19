@@ -26,18 +26,18 @@ next: layout-factory
 SESSIONS 5          ┌ grok · vibecrafted ──────────────────────────────────────────────────────── [‹2/4›] [Voc] [Nowy] ┐
  ● Live 3           │ 4.1.0 · feat/resume-no-implicit-native-session                                                   │
 01 ○ main           │                                                                                                  │
-02 ○ lbrx-svc       │ Maciej: floating, Ctrl+P, strzalki. hehe                                                         │
-   · Shell          │ Jeden talerz. Host: float, rename, PANE, strzalki.                                               │
-03 ○ w-c207         │                                                                                                  │
-   · resume-grok    │   ┌ voc · ten tab ──────────────────────────────────────── PIN ◉ ┐                               │
-   · resume-codex   │   │  ● grok     vibecrafted   14m  na wierzchu                   │                               │
-04 ◉ vc-release     │   │  ○ claude   vibecrafted    0m                                │                               │
-   · Start here     │   │  ○ codex    vc-workspace   1h                                │                               │
-   ◉ Agents         │   │  ○ junie    ~             40m                                │                               │
-   · shell          │   │  j/k  enter podnies  n Nowy agent                            │                               │
-   · voc            │   └─ drzwi tego taba, nie farma ─────────────────────────────────┘                               │
-05 ○ vibecrafted-vc_│                                                                                                  │
-   · resume-grok    │                                                                                                  │
+02 ○ lbrx-svc       │ Maciej: floating, Ctrl+P, strzałki. hehe                                                         │
+   · Shell          │ Jeden talerz. Host: float, rename, PANE, strzałki.                                               │
+03 ○ codescribe     │                                                                                                  │
+   · grok           │   ┌ voc · ten tab ──────────────────────────────────────── PIN ◉ ┐                               │
+   · codex          │   │  ● grok     vibecrafted   14m  na wierzchu                   │                               │
+04 ◉ vc-release     │   │  ○ claude   vibecrafted   0m                                 │                               │
+   · Start here     │   │  ○ codex    vc-workspace  1h                                 │                               │
+   ◉ Agents         │   │  ○ junie    codescribe   40m                                 │                               │
+   · shell          │   │  j/k  enter podnieś  n Nowy agent                            │                               │
+   · voc            │   └─ twarze tego taba ───────────────────────────────────────────┘                               │
+05 ○ vibecrafted    │                                                                                                  │
+   · grok           │                                                                                                  │
    · Shell          │                                                                                                  │
    · grok           │                                                                                                  │
                     │                                                                                                  │

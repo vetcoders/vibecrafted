@@ -135,16 +135,16 @@ def paint_rail(fr: Frame) -> None:
         "01 ○ main",
         "02 ○ lbrx-svc",
         "   · Shell",
-        "03 ○ w-c207",
-        "   · resume-grok",
-        "   · resume-codex",
+        "03 ○ codescribe",
+        "   · grok",
+        "   · codex",
         "04 ◉ vc-release",
         "   · Start here",
         "   ◉ Agents",
         "   · shell",
         "   · voc",
-        "05 ○ vibecrafted-vc_",
-        "   · resume-grok",
+        "05 ○ vibecrafted",
+        "   · grok",
         "   · Shell",
         "   · grok",
     ]
@@ -175,12 +175,12 @@ def grok_transcript() -> list[str]:
     blocks = [
         "4.1.0 · feat/resume-no-implicit-native-session",
         "",
-        "Maciej: floating, Ctrl+P, strzalki. hehe",
-        "Jeden talerz. Host: float, rename, PANE, strzalki.",
+        "Maciej: floating, Ctrl+P, strzałki. hehe",
+        "Jeden talerz. Host: float, rename, PANE, strzałki.",
         "",
         "Pasek talii:  [‹][›]  [Voc]  [Nowy]",
         "New agent = interaktywny TTY na tym tabie.",
-        "Dispatch / headless = inne drzwi, pozniej.",
+        "Dispatch / headless = inne drzwi, później.",
     ]
     width = CANVAS - 4
     out: list[str] = []
@@ -230,9 +230,9 @@ def box_new_agent(focus: str = "agent") -> list[str]:
         path += "█"
     rows_inner = [
         f"  {mark('agent')} agent    {chips(agents, 'grok')}",
-        f"  {mark('workflow')} rytual   {chips(flows, 'resume')}",
-        f"  {mark('path')} sciezka  {path}",
-        "  Enter = interaktywny panel na tym tabie. Nie mux. Nie headless.",
+        f"  {mark('workflow')} rytuał   {chips(flows, 'resume')}",
+        f"  {mark('path')} ścieżka  {path}",
+        "  Enter uruchamia interaktywny panel na tym tabie.",
     ]
     title = "┌ ❯ Nowy agent "
     right = " [Anuluj] ┐"
@@ -253,9 +253,9 @@ def box_new_dispatch() -> list[str]:
     inner_w = 88
     rows_inner = [
         "  ▸ agent    [agy] [claude] [codex] «grok» [junie]",
-        "    rytual   [init] «resume» [operator] [partner]",
-        "    sciezka  /srv/vetcoders/vibecrafted                                   ",
-        "  Enter = HEADLESS worker. Bez TTY. Widać go na serwerze / w voc.",
+        "    rytuał   [init] «resume» [operator] [partner]",
+        "    ścieżka  /srv/vetcoders/vibecrafted                                   ",
+        "  Enter uruchamia workera headless. Podgląd: vc-server / voc.",
     ]
     title = "┌ ❯ Nowy dispatch "
     right = " [Anuluj] ┐"
@@ -274,16 +274,16 @@ def box_voc() -> list[str]:
     inner_w = 64
     rows_inner = [
         "  ● grok     vibecrafted   14m  na wierzchu",
-        "  ○ claude   vibecrafted    0m",
-        "  ○ codex    vc-workspace   1h",
-        "  ○ junie    ~             40m",
-        "  j/k  enter podnies  n Nowy agent",
+        "  ○ claude   vibecrafted   0m",
+        "  ○ codex    vc-workspace  1h",
+        "  ○ junie    codescribe   40m",
+        "  j/k  enter podnieś  n Nowy agent",
     ]
     title = "┌ voc · ten tab "
     right = " PIN ◉ ┐"
     fill = inner_w - vis(title) - vis(right)
     top = title + ("─" * max(1, fill)) + right
-    bot = "└" + clip("─ drzwi tego taba, nie farma ", inner_w - 2, "─") + "┘"
+    bot = "└" + clip("─ twarze tego taba ", inner_w - 2, "─") + "┘"
     body = ["│" + clip(s, inner_w - 2) + "│" for s in rows_inner]
     return [top, *body, bot]
 
@@ -323,12 +323,12 @@ def layout_2() -> list[str]:
 
 def layout_3() -> list[str]:
     born = [
-        "claude · resume · vibecrafted",
+        "4.1.0 · feat/resume-no-implicit-native-session",
         "",
-        "Wlasnie sie urodzil. Interaktywny TTY. Talia 3/5.",
-        "Poprzedni grok zyje jedno [‹] wstecz.",
-        "Nie powstala sesja muxa. Nie Tab #7. Nie resume-*.",
-        "Headless to nie ten przycisk — to Layout-5 albo Quick cmd.",
+        "Właśnie się urodził. Interaktywny TTY. Talia 3/5.",
+        "Poprzedni grok żyje jedno [‹] wstecz.",
+        "Bez nowej sesji muxa. Ta sama karta, nowa twarz.",
+        "Headless to inne drzwi — [Nowy dispatch] albo Quick cmd.",
     ]
     width = CANVAS - 4
     lines: list[str] = []
@@ -338,7 +338,7 @@ def layout_3() -> list[str]:
         SWITCH_AFTER,
         "claude · resume · vibecrafted",
         lines,
-        "Claude · interactive pane",
+        "Claude · always-approve",
     ).lines()
 
 
@@ -416,6 +416,17 @@ Nie kopiujemy Tab #6 / Tab #7 — tylko proporcje canvy.
 ## Korekty
 
 Grok nie powinien był rysować 130 wierszy. Miał poprawić: „to piksele, nie komórki”.
+
+**Korekty 2026-08-19 (operator, na żywym railu):**
+
+1. Nagłówek railu i tytuły mówią projektem — `vibecrafted · Agents (3)` —
+   nigdy surową nazwą sesji (`w-cdfc-r035…`). Prawdziwą nazwę zna
+   control_plane, vc-server i vc-frame; UI pokazuje projekcję dla człowieka.
+   (Runtime: cut `b0c6c624` wprowadził miejsca i twarze; rail Layoutów
+   modeluje ten stan.)
+2. OTWARTE: oś „rytuał" karty to launchery vc-skill „jeśli w ogóle" —
+   operator zaczął korektę, nie domknął. Chipy `[init] [resume] [operator]
+   [partner]` stoją do jego decyzji; fabryka nie utrwala ich bez tego.
 
 Poza tym z recenzji użytkownika zostaje:
 
