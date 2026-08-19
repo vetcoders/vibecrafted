@@ -1370,7 +1370,9 @@ _server_supervisor_cli() {
       *) normalized+=("$1"); shift ;;
     esac
   done
-  set -- "${normalized[@]}"
+  # bash 3.2 + set -u: an empty array expands as "unbound variable" without
+  # the ${arr[@]+...} guard — "server status" (no args) died on this line.
+  set -- ${normalized[@]+"${normalized[@]}"}
   local core_dir python_bin launcher supervisor_bin
   local -a common_args command_args
   common_args=(
