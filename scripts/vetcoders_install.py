@@ -5836,6 +5836,12 @@ def _run_install_child_with_lifecycle_guard(
                 os.killpg(process.pid, 0)
             except ProcessLookupError:
                 break
+            except PermissionError:
+                # EPERM from killpg(pgid, 0) means the group still has members
+                # we may not signal (macOS CI runs the child under a different
+                # security context).  That is "alive", not "gone": keep
+                # draining toward the bounded deadline instead of crashing.
+                pass
             if time.monotonic() >= drain_deadline:
                 raise OSError(
                     "installer child exited while same-group descendants remained"
