@@ -190,15 +190,16 @@ _vetcoders_compose_input_context() {
     _vetcoders_require_file "$file_path" || return 1
     local abs_file
     abs_file="$(cd "$(dirname "$file_path")" && pwd)/$(basename "$file_path")"
-    local file_body
-    file_body="$(cat "$file_path")"
     if [[ -n "$combined" ]]; then
       combined+=$'\n\n'
     fi
+    # Pointer, never payload. Inlining the file body here put whole
+    # continuity packs (session ids, paths) into agent argv — world-readable
+    # in `ps`, capped by ARG_MAX, mangled on newlines. The file is the single
+    # source of truth; every agent runs with file access and reads it itself.
     combined+="Primary input file: $abs_file"
-    combined+=$'\n\n```md\n'
-    combined+="$file_body"
-    combined+=$'\n```'
+    combined+=$'\n'
+    combined+="Read that file in full before acting — it is the task payload, not optional context. Do not act on this pointer alone."
   fi
 
   printf '%s' "$combined"
