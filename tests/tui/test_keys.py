@@ -281,11 +281,15 @@ def test_non_python_launcher_wrappers_have_explicit_deck_verbs() -> None:
         "telemetry": "telemetry",
         "vc-dashboard": "dashboard",
         "vc-dispatch": "dispatch",
+        "vc-doctor": "doctor",
         "vc-help": "help",
         "vc-init": "init",
         "vc-justdo": "justdo",
+        "vc-receipt": "receipt",
         "vc-resume": "resume",
         "vc-start": "start",
+        "vc-status": "status",
+        "vc-update": "update",
     }
 
 

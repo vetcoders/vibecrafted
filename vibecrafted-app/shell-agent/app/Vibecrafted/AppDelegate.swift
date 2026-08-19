@@ -425,6 +425,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       ("vc-dispatch", "dispatch"),
       ("vc-resume", "resume"),
       ("vc-justdo", "justdo"),
+      ("vc-doctor", "doctor"),
+      ("vc-status", "status"),
+      ("vc-update", "update"),
+      ("vc-receipt", "receipt"),
       ("telemetry", "telemetry"),
     ]
     for wrapper in deckVerbWrappers

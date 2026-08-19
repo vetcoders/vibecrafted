@@ -74,11 +74,15 @@ SHELL_WRAPPER_VERBS = {
     "telemetry": "telemetry",
     "vc-dashboard": "dashboard",
     "vc-dispatch": "dispatch",
+    "vc-doctor": "doctor",
     "vc-help": "help",
     "vc-init": "init",
     "vc-justdo": "justdo",
+    "vc-receipt": "receipt",
     "vc-resume": "resume",
     "vc-start": "start",
+    "vc-status": "status",
+    "vc-update": "update",
 }
 SUCCESS_STATES = {"report_validated", "completed", "closed"}
 TERMINAL_STATES = {

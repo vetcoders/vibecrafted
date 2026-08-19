@@ -5486,6 +5486,22 @@ run_wrapper() {
     cmd_telemetry "$@"
     return
   fi
+  if [[ "$wrapper" == "vc-doctor" ]]; then
+    cmd_doctor "$@"
+    return
+  fi
+  if [[ "$wrapper" == "vc-status" ]]; then
+    cmd_stats "$@"
+    return
+  fi
+  if [[ "$wrapper" == "vc-update" ]]; then
+    cmd_update "$@"
+    return
+  fi
+  if [[ "$wrapper" == "vc-receipt" ]]; then
+    cmd_receipt "$@"
+    return
+  fi
   local skill="${wrapper#vc-}"
   _has_skill "$skill" || {
     printf '%b✗%b Unknown wrapper: %s\n' "$_red" "$_reset" "$wrapper" >&2
