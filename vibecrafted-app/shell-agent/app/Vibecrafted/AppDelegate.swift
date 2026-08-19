@@ -532,7 +532,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let prefix = arguments.isEmpty ? "" : "\(arguments) "
     let body =
       (["#!/bin/bash", "set -euo pipefail"] + common
-        + ["exec \(shellQuote(executable.path)) \(prefix)\"$@\""])
+        + [
+          // The deck's identity guard compares the DECLARED launcher path with
+          // the live process argv. The wrapper is that declared path, so it
+          // must ride through every exec into the final python argv — without
+          // this line vc-guardian failed capture-identity and `server start`
+          // rolled a healthy server back.
+          "export VIBECRAFTED_DECLARED_LAUNCHER=\"$0\"",
+          "exec \(shellQuote(executable.path)) \(prefix)\"$@\"",
+        ])
       .joined(separator: "\n") + "\n"
     let temporary = destination.deletingLastPathComponent().appendingPathComponent(
       ".\(destination.lastPathComponent).new-\(UUID().uuidString)")

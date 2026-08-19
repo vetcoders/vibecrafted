@@ -1350,6 +1350,27 @@ _server_supervisor_binary() {
 _server_supervisor_cli() {
   local command_name="${1:-}"
   shift || true
+  # Deck help promises `-h <host>` / `-p <port>`; the supervisor's argparse
+  # owns `-h` as --help. Translate here so the promise the operator read is
+  # the contract the tool receives ("service install -h X" once printed help
+  # and exited 0 — an install that never happened).
+  local -a normalized=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h)
+        if [[ $# -ge 2 && "$2" != -* ]]; then
+          normalized+=(--host "$2"); shift 2; continue
+        fi
+        normalized+=("$1"); shift ;;
+      -p)
+        if [[ $# -ge 2 && "$2" != -* ]]; then
+          normalized+=(--port "$2"); shift 2; continue
+        fi
+        normalized+=("$1"); shift ;;
+      *) normalized+=("$1"); shift ;;
+    esac
+  done
+  set -- "${normalized[@]}"
   local core_dir python_bin launcher supervisor_bin
   local -a common_args command_args
   common_args=(
@@ -3424,6 +3445,14 @@ cmd_server() {
     cmd_server_help
     return 0
   fi
+  case "$verb" in
+    install|reconcile|uninstall)
+      # Persistent service management lives under `service`; the bare verb is
+      # what operators actually type first. Route it instead of refusing.
+      set -- "$verb" "$@"
+      verb="service"
+      ;;
+  esac
   case "$verb:${1:-}" in
     start:*|stop:*)
       if [[ "${VIBECRAFTED_SERVER_SUPERVISOR_CHILD:-0}" != "1" ]]; then

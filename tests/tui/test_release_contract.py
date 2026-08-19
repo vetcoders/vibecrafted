@@ -330,7 +330,10 @@ native-cli = "demo_module:main"
         capture_output=True,
         text=True,
     )
-    assert json.loads(result.stdout) == ["demo-cli", "one"]
+    # argv[0] is the shim's ABSOLUTE path now (identity-guard contract:
+    # the declared launcher path must be visible in process argv), with
+    # VIBECRAFTED_DECLARED_LAUNCHER as the wrapper-chain override.
+    assert json.loads(result.stdout) == [str(bin_dir / "demo-cli"), "one"]
 
 
 def test_release_bundle_binds_the_vibecrafted_app_icon() -> None:
@@ -765,3 +768,93 @@ def test_windows_entry_point_does_not_drift_between_its_two_copies() -> None:
     assert digest == hashlib.sha256(served.read_bytes()).hexdigest(), (
         "install.ps1 drifted between the framework repo and the served site copy"
     )
+
+
+def test_python_entrypoint_launcher_declares_identity_path(tmp_path):
+    """The rendered shim must put a DECLARED absolute path into process argv.
+
+    The deck's identity guard matches the declared launcher path against the
+    live argv. A bare `launcher=vc-guardian` made capture-identity fail through
+    every wrapper chain: `server start` rolled a healthy server back
+    (2026-08-19). The wrapper exports VIBECRAFTED_DECLARED_LAUNCHER="$0"; the
+    shim must honor it and fall back to its own absolute path.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "render_launchers_mod",
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "render-python-entrypoint-launchers.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "x"\nversion = "0"\n'
+        '[project.scripts]\nvc-guardian = "vibecrafted_core.guardian:main"\n',
+        encoding="utf-8",
+    )
+    bin_dir = tmp_path / "bin"
+    created = mod.render_launchers(pyproject, bin_dir)
+    assert created == ["vc-guardian"]
+    payload = (bin_dir / "vc-guardian").read_text(encoding="utf-8")
+    assert (
+        'launcher="${VIBECRAFTED_DECLARED_LAUNCHER:-$bin_dir/vc-guardian}"' in payload
+    )
+    assert "launcher=vc-guardian\n" not in payload
+
+
+def test_deck_server_service_translates_short_host_port_flags(tmp_path):
+    """`vibecrafted server service install -h X -p Y` must reach the supervisor
+    as --host/--port — argparse owns `-h` as --help, so the raw forward printed
+    usage and exited 0: an install that never happened (2026-08-19).
+    """
+    import os
+    import subprocess
+
+    repo = Path(__file__).resolve().parents[2]
+    deck = repo / "vibecrafted-core" / "vibecrafted_core" / "deck" / "vibecrafted"
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    capture = tmp_path / "argv.txt"
+    supervisor = fake_bin / "vc-server-supervisor"
+    supervisor.write_text(
+        '#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$CAPTURE_FILE"\nexit 0\n',
+        encoding="utf-8",
+    )
+    supervisor.chmod(0o755)
+    # _server_launcher_path requires a sibling `vibecrafted` executable.
+    (fake_bin / "vibecrafted").write_text(
+        "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8"
+    )
+    (fake_bin / "vibecrafted").chmod(0o755)
+
+    env = dict(os.environ)
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    env["CAPTURE_FILE"] = str(capture)
+    env["VIBECRAFTED_HOME"] = str(tmp_path / "home")
+    result = subprocess.run(
+        [
+            "bash",
+            str(deck),
+            "server",
+            "service",
+            "status",
+            "-h",
+            "9.9.9.9",
+            "-p",
+            "3025",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    argv = capture.read_text(encoding="utf-8").split()
+    assert "--host" in argv and argv[argv.index("--host") + 1] == "9.9.9.9"
+    assert "--port" in argv and argv[argv.index("--port") + 1] == "3025"
+    assert "-h" not in argv
