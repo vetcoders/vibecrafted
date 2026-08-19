@@ -198,12 +198,15 @@ def _resolved_workspace_session(env: dict[str, str]) -> str:
         capture_output=True,
     )
     match = re.search(
-        r"^VIBECRAFTED_OPERATOR_SESSION=(workspace-[0-9a-f]{8})$",
+        r"^VIBECRAFTED_OPERATOR_SESSION=([^\s]+)$",
         result.stdout,
         re.MULTILINE,
     )
     assert match, result.stdout
-    return match.group(1)
+    value = match.group(1).strip()
+    assert value
+    assert not re.fullmatch(r"workspace-[0-9a-f]{8}", value), value
+    return value
 
 
 def _org_repo() -> str:
@@ -677,7 +680,7 @@ def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
     expected_session = _expected_operator_session()
     assert f"--session {expected_session} --new-session-with-layout" in payload
     assert f"--session {expected_session} action new-tab" in payload
-    assert f"run_id=interactive target={expected_session}/claude-init" in result.stdout
+    assert f"run_id=interactive target={expected_session}/claude" in result.stdout
     assert f"watch=vc-frame attach {expected_session}" in result.stdout
     assert "There is no active session!" not in result.stderr
 
@@ -912,7 +915,7 @@ def test_explicit_terminal_marbles_from_operator_mode_spawns_fresh_tab(
     env["VC_FRAME"] = "operator"
     env["VIBECRAFTED_RUN_ID"] = "marb-014520"
     env["VIBECRAFTED_MARBLES_RUN_ID"] = "marb-014520"
-    expected_session = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
+    expected_session = _expected_operator_session()
     env["VC_FRAME_SESSION_NAME"] = expected_session
     subprocess.run(
         [
@@ -966,7 +969,7 @@ def test_explicit_terminal_marbles_inside_vc_frame_prefers_bundled_vc_frame(
     env["VC_FRAME"] = "operator"
     env["VIBECRAFTED_RUN_ID"] = "marb-014520"
     env["VIBECRAFTED_MARBLES_RUN_ID"] = "marb-014520"
-    expected_session = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
+    expected_session = _expected_operator_session()
     env["VC_FRAME_SESSION_NAME"] = expected_session
 
     result = subprocess.run(
@@ -1394,7 +1397,7 @@ raise SystemExit(0)
     assert process.returncode == 0, stderr
 
 
-def test_vc_dashboard_recreates_dead_run_id_session_without_layout_suffix(
+def test_vc_dashboard_recreates_dead_place_session_without_layout_suffix(
     tmp_path: Path,
 ) -> None:
     home = tmp_path / "home"
@@ -1415,13 +1418,13 @@ def test_vc_dashboard_recreates_dead_run_id_session_without_layout_suffix(
     env["CAPTURE_FILE"] = str(capture_file)
     env["SESSION_STATE_FILE"] = str(session_state_file)
     env["VIBECRAFTED_RUN_ID"] = "marb-014520"
-    env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
+    env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session()
     env["VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME"] = "1"
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
     # Scrub any operator-session context leaked from a running operator shell so
-    # the dashboard resolves the run-id session rather than the ambient one.
+    # the dashboard joins the place session rather than minting a run-id host.
     env.pop("VIBECRAFTED_OPERATOR_SESSION", None)
     env.pop("VIBECRAFTED_OPERATOR_MODE", None)
 
@@ -1435,7 +1438,7 @@ def test_vc_dashboard_recreates_dead_run_id_session_without_layout_suffix(
     )
 
     payload = capture_file.read_text(encoding="utf-8")
-    expected_session = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
+    expected_session = _expected_operator_session()
     # Dead sessions are preserved; a fresh recovery session gets the layout.
     created = re.search(r"creating '([^']+)'", result.stderr)
     assert created is not None
@@ -1527,14 +1530,14 @@ def test_skill_bootstraps_fresh_operator_session_when_existing_one_is_dead(
     env["SESSION_STATE_FILE"] = str(session_state_file)
     env["VIBECRAFTED_OSASCRIPT_BIN"] = str(fake_bin / "osascript")
     env["VIBECRAFTED_RUN_ID"] = "fwup-014520"
-    env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
+    env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session()
     # This test exercises the real dead-session recreate path; allow it without a TTY.
     env["VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME"] = "1"
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
     # Scrub any operator-session context leaked from a running operator shell so
-    # the runtime recreates the dead run-id session instead of reusing the ambient one.
+    # the runtime recreates the dead place session instead of minting a run-id host.
     env.pop("VIBECRAFTED_OPERATOR_SESSION", None)
     env.pop("VIBECRAFTED_OPERATOR_MODE", None)
 
@@ -1555,8 +1558,9 @@ def test_skill_bootstraps_fresh_operator_session_when_existing_one_is_dead(
         check=False,
     )
 
-    expected_session = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
+    expected_session = _expected_operator_session()
     assert result.returncode == 0
+    assert env["VIBECRAFTED_RUN_ID"] not in result.stdout
     created = re.search(r"creating '([^']+)'", result.stderr)
     assert created is not None
     recovery_session = created.group(1)
@@ -1578,6 +1582,68 @@ def test_skill_bootstraps_fresh_operator_session_when_existing_one_is_dead(
     )
     assert "--new-session-with-layout" in payload and recovery_session in payload
     assert "OSA " not in payload
+
+
+def test_operator_session_name_is_place_not_run_id(tmp_path: Path) -> None:
+    env = os.environ.copy()
+    env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
+    env["VIBECRAFTED_HOME"] = str(tmp_path / "home")
+    env["VIBECRAFTED_RUN_ID"] = "work-260819-044606-42152"
+    env.pop("VIBECRAFTED_OPERATOR_SESSION", None)
+    result = subprocess.run(
+        [
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            (f'source "{HELPER_SCRIPT}"; _vetcoders_operator_session_name'),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    name = result.stdout.strip()
+    assert name
+    assert env["VIBECRAFTED_RUN_ID"] not in name
+    assert not re.fullmatch(r"workspace-[0-9a-f]{8}", name)
+
+
+def test_legacy_workspace_token_operator_session_is_rewritten(
+    tmp_path: Path,
+) -> None:
+    env = os.environ.copy()
+    env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
+    env["VIBECRAFTED_HOME"] = str(tmp_path / "home")
+    env["VIBECRAFTED_OPERATOR_SESSION"] = "workspace-8831606a"
+    env.pop("VC_FRAME", None)
+    env.pop("VC_FRAME_PANE_ID", None)
+    env.pop("VC_FRAME_SESSION_NAME", None)
+    result = subprocess.run(
+        [
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            (
+                f'source "{HELPER_SCRIPT}"; '
+                "_vetcoders_prepare_operator_runtime terminal; "
+                'printf "%s\\n" "$VIBECRAFTED_OPERATOR_SESSION"'
+            ),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    name = result.stdout.strip()
+    assert name
+    assert name != "workspace-8831606a"
+    assert not re.fullmatch(r"workspace-[0-9a-f]{8}", name)
 
 
 def test_dashboard_alt_layout_reuses_live_repo_session_instead_of_layout_session(

@@ -494,12 +494,15 @@ def _resolved_workspace_session(env: dict[str, str]) -> str:
         capture_output=True,
     )
     match = re.search(
-        r"^VIBECRAFTED_OPERATOR_SESSION=(workspace-[0-9a-f]{8})$",
+        r"^VIBECRAFTED_OPERATOR_SESSION=([^\s]+)$",
         result.stdout,
         re.MULTILINE,
     )
     assert match, result.stdout
-    return match.group(1)
+    value = match.group(1).strip()
+    assert value
+    assert not re.fullmatch(r"workspace-[0-9a-f]{8}", value), value
+    return value
 
 
 def test_init_claude_uses_interactive_tab_without_print_mode(
@@ -2509,7 +2512,8 @@ def test_resume_subcommand_wraps_headless_codex_in_vc_frame_worker_session(
     assert "action" in payload
     assert "new-tab" in payload
     assert "--name" in payload
-    assert "resume-codex" in payload
+    assert "codex" in payload
+    assert "resume-codex" not in payload
     assert "--cwd" in payload
     assert str(REPO_ROOT) in payload
 

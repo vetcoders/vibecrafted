@@ -262,6 +262,7 @@ def test_workspace_resolve_cli_reuses_selected_identity_and_stable_session(
     )
     assert first[wc.ENV_WORKSPACE_ID] == created.workspace_id
     assert first["VIBECRAFTED_WORKSPACE_ROOT"] == str(root)
+    assert first["VIBECRAFTED_OPERATOR_SESSION"] == "repo"
     assert first["VIBECRAFTED_OPERATOR_SESSION"] == wc.operator_session_name(
         created.workspace_id
     )
@@ -277,6 +278,40 @@ def test_workspace_resolve_cli_reuses_selected_identity_and_stable_session(
     assert (
         second["VIBECRAFTED_OPERATOR_SESSION"] == first["VIBECRAFTED_OPERATOR_SESSION"]
     )
+
+
+def test_operator_session_name_is_human_place_not_catalog_fallback(
+    home: Path, tmp_path: Path
+) -> None:
+    root = tmp_path / "codescribe"
+    root.mkdir()
+    created = wc.create_workspace(root=root, display_label="codescribe", select=True)
+    place = wc.operator_session_name(created.workspace_id)
+    assert place == "codescribe"
+    assert not wc.is_legacy_operator_session_name(place)
+    assert wc.legacy_operator_session_name(created.workspace_id) == (
+        f"workspace-{wc.short_workspace_token(created.workspace_id)}"
+    )
+    assert wc.resolve_operator_place_session(root=root) == "codescribe"
+
+
+def test_operator_session_name_suffixes_only_on_label_collision(
+    home: Path, tmp_path: Path
+) -> None:
+    left = tmp_path / "checkouts" / "left" / "vibecrafted"
+    right = tmp_path / "checkouts" / "right" / "vibecrafted"
+    left.mkdir(parents=True)
+    right.mkdir(parents=True)
+    a = wc.create_workspace(root=left, display_label="vibecrafted", select=False)
+    assert wc.operator_session_name(a.workspace_id) == "vibecrafted"
+    b = wc.create_workspace(root=right, display_label="vibecrafted", select=False)
+    name_a = wc.operator_session_name(a.workspace_id)
+    name_b = wc.operator_session_name(b.workspace_id)
+    assert name_a != name_b
+    assert name_a == f"vibecrafted-{wc.short_workspace_token(a.workspace_id)}"
+    assert name_b == f"vibecrafted-{wc.short_workspace_token(b.workspace_id)}"
+    assert "work-" not in name_a
+    assert "work-" not in name_b
 
 
 def test_new_uuid7_fallback_emits_uuid7(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -27,7 +27,7 @@ _vetcoders_skill_init() {
   command_text="$(_vetcoders_init_command_text "$tool" "$init_prompt")" || return 1
 
   _vetcoders_prepare_operator_runtime "$runtime" || return 1
-  _vetcoders_spawn_into_operator_session "${tool}-init" "$command_text"
+  _vetcoders_spawn_into_operator_session "$(_vetcoders_operator_face_tab "$tool")" "$command_text"
 }
 
 # vc-operator launcher — interactive operator session entry point.
@@ -60,6 +60,6 @@ _vetcoders_skill_operator() {
   command_text="$(_vetcoders_operator_command_text "$tool" "$operator_prompt")" || return 1
 
   _vetcoders_prepare_operator_runtime "$runtime" || return 1
-  _vetcoders_spawn_into_operator_session "${tool}-operator" "$command_text"
+  _vetcoders_spawn_into_operator_session "$(_vetcoders_operator_face_tab "$tool")" "$command_text"
 }
 

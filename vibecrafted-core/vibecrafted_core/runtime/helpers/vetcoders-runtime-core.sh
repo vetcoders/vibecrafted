@@ -342,6 +342,57 @@ _vetcoders_operator_session_name_for_run_id() {
   fi
 }
 
+# Interactive rail is a place (repo/display label), never a run-id or
+# catalog-fallback workspace-{8hex} token. Run-bound names stay available
+# via _vetcoders_operator_session_name_for_run_id for leak detection only.
+_vetcoders_operator_place_session_name() {
+  if [[ "$(_vetcoders_vc_frame_session_scope)" == folder ]]; then
+    _vetcoders_session_base_name
+    return 0
+  fi
+  local root_dir="${SPAWN_ROOT:-${VIBECRAFTED_ROOT:-${_vetcoders_contract_root:-}}}"
+  if [[ -z "$root_dir" ]]; then
+    root_dir="$(_vetcoders_repo_root 2>/dev/null || pwd)"
+  fi
+  local resolved=""
+  if command -v python3 >/dev/null 2>&1; then
+    resolved="$(
+      SPAWN_ROOT="$root_dir" VIBECRAFTED_ROOT="$root_dir" python3 - <<'PY' 2>/dev/null
+import os
+from pathlib import Path
+root = os.environ.get("SPAWN_ROOT") or os.environ.get("VIBECRAFTED_ROOT") or os.getcwd()
+try:
+    from vibecrafted_core.workspace_catalog import resolve_operator_place_session
+    print(resolve_operator_place_session(root=root, env=os.environ), end="")
+except Exception:
+    print(Path(root).name or "vibecrafted", end="")
+PY
+    )" || resolved=""
+  fi
+  if [[ -n "$resolved" ]]; then
+    printf '%s\n' "$resolved"
+    return 0
+  fi
+  _vetcoders_session_base_name
+}
+
+_vetcoders_is_legacy_operator_session_name() {
+  local name="${1:-}"
+  case "$name" in
+    workspace-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+_vetcoders_operator_face_tab() {
+  local tool="${1:-}"
+  tool="${tool##*/}"
+  [[ -n "$tool" ]] || return 1
+  printf '%s\n' "$tool"
+}
+
 _vetcoders_expected_run_lock_path() {
   local run_id="${1:-}"
   local root="${2:-$(_vetcoders_repo_root)}"
