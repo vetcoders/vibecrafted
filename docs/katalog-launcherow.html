@@ -150,19 +150,31 @@ footer{margin-top:70px;padding-top:20px;border-top:1px solid var(--line);color:v
 
 <section id="ship">
   <h2>Ship-cycle — 11 etapów w kolejności kanonicznej</h2>
+  <!-- gen:pipeline -->
   <div class="pipeline">
-    <span class="st r">scaffold</span><span class="arr">→</span>
-    <span class="st w">implement</span><span class="arr">→</span>
-    <span class="st r">review</span><span class="arr">→</span>
-    <span class="st w">workflow</span><span class="arr">→</span>
-    <span class="st r">followup</span><span class="arr">→</span>
-    <span class="st w">marbles</span><span class="arr">→</span>
-    <span class="st r">audit</span><span class="arr">→</span>
-    <span class="st w">polarize</span><span class="arr">→</span>
-    <span class="st r">dou</span><span class="arr">→</span>
-    <span class="st w">hydrate</span><span class="arr">→</span>
+    <span class="st r">scaffold</span>
+    <span class="arr">→</span>
+    <span class="st w">implement</span>
+    <span class="arr">→</span>
+    <span class="st r">review</span>
+    <span class="arr">→</span>
+    <span class="st w">workflow</span>
+    <span class="arr">→</span>
+    <span class="st r">followup</span>
+    <span class="arr">→</span>
+    <span class="st w">marbles</span>
+    <span class="arr">→</span>
+    <span class="st r">audit</span>
+    <span class="arr">→</span>
+    <span class="st w">polarize</span>
+    <span class="arr">→</span>
+    <span class="st r">dou</span>
+    <span class="arr">→</span>
+    <span class="st w">hydrate</span>
+    <span class="arr">→</span>
     <span class="st w">release</span>
   </div>
+  <!-- /gen:pipeline -->
   <p class="extra" style="margin-top:8px">Rytm READ/WRITE: etapy czytające budują dowód, etapy piszące tną. <code>decorate</code> (WRITE 2.1.0) wchodzi między dou a hydrate, gdy powierzchnia wymaga wykończenia wizualnego. Parasol całości: <code>vc-ship</code>.</p>
   <div class="grid" style="margin-top:16px">
     <div class="card"><h3>scaffold <span class="badge b-read">READ</span><span class="badge b-ver">0.2.0</span></h3>
@@ -361,7 +373,7 @@ vc-ship &lt;agent&gt; --prompt "Run the full lifecycle"</pre></div>
     <thead><tr><th>launcher</th><th>gatunek</th><th>cel</th></tr></thead>
     <tbody>
       <tr><td class="mono"><code>vibecrafted</code></td><td>env-wrapper</td><td>kanoniczny deck (release bin)</td></tr>
-      <tr><td class="mono"><code>vc-init</code> · <code>vc-resume</code> · <code>vc-help</code> · <code>vc-dashboard</code> · <code>vc-dispatch</code> · <code>vc-justdo</code></td><td>wrapper-alias decka</td><td><code>exec vibecrafted &lt;init|resume|help|dashboard|dispatch|justdo&gt; "$@"</code></td></tr>
+      <tr><td class="mono"><code>vc-init</code> · <code>vc-resume</code> · <code>vc-help</code> · <code>vc-dashboard</code> · <code>vc-dispatch</code> · <code>vc-justdo</code> · <code>vc-doctor</code> · <code>vc-status</code> · <code>vc-update</code> · <code>vc-receipt</code></td><td>wrapper-alias decka</td><td><code>exec vibecrafted &lt;verb&gt; "$@"</code> — codzienne verby zawsze też w rodzinie vc-* (dwie warstwy, jeden świat; od 9536f198)</td></tr>
       <tr><td class="mono"><code>vc-scaffold</code> <code>vc-implement</code> <code>vc-review</code> <code>vc-workflow</code> <code>vc-followup</code> <code>vc-marbles</code> <code>vc-audit</code> <code>vc-polarize</code> <code>vc-dou</code> <code>vc-decorate</code> <code>vc-hydrate</code> <code>vc-release</code></td><td>env-wrapper</td><td>binarka release o tej samej nazwie (etapy ship-cycle)</td></tr>
       <tr><td class="mono"><code>vc-agents</code> <code>vc-intents</code> <code>vc-partner</code> <code>vc-ownership</code> <code>vc-delegate</code> <code>vc-research</code> <code>vc-prune</code> <code>vc-trust</code> <code>vc-guard</code> <code>vc-ship</code></td><td>env-wrapper</td><td>binarka release o tej samej nazwie (skille poza pipeline)</td></tr>
       <tr><td class="mono"><code>vc-research-await</code> · <code>vc-research-synthesize</code></td><td>env-wrapper</td><td>sidecary research swarm</td></tr>
