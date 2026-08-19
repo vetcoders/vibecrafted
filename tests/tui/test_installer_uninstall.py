@@ -649,3 +649,38 @@ def test_cmd_uninstall_cleans_launcher_only_surface_without_manifest(
 
 def collect_names(entries: list[tuple[Path, Path]]) -> set[str]:
     return {entry.name for _, entry in entries}
+
+
+def test_deck_launcher_forwards_uninstall_argv(tmp_path, monkeypatch) -> None:
+    """`vibecrafted uninstall --dry-run` must reach the installer with the flag intact.
+
+    The deck once called `python3 "$installer" uninstall` without `"$@"`, so a
+    dry-run request executed a real, unconfirmed teardown (2026-08-19 incident).
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    deck = repo_root / "vibecrafted-core" / "vibecrafted_core" / "deck" / "vibecrafted"
+    capture = tmp_path / "argv.txt"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_python = fake_bin / "python3"
+    fake_python.write_text(
+        '#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$CAPTURE_FILE"\nexit 0\n',
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    env = dict(os.environ)
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    env["CAPTURE_FILE"] = str(capture)
+    result = subprocess.run(
+        ["bash", str(deck), "uninstall", "--dry-run"],
+        check=False,
+        env=env,
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    argv = capture.read_text(encoding="utf-8").splitlines()
+    assert argv[-2:] == ["uninstall", "--dry-run"], argv
