@@ -48,6 +48,8 @@ targets:
           - "SystemConfiguration"
           - "-framework"
           - "Carbon"
+          - "-framework"
+          - "UserNotifications"
         HEADER_SEARCH_PATHS:
           - "$(PROJECT_DIR)/Vibecrafted/Bridge"
         LIBRARY_SEARCH_PATHS:

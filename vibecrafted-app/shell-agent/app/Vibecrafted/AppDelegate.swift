@@ -64,6 +64,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     buildMainMenu()
     buildStatusItem()
+    startNativeNotifications()
 
     let socketPath = "/tmp/vibecrafted-mux.sock"
     do {
@@ -88,6 +89,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
   func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
     true
+  }
+
+  func application(_ application: NSApplication, open urls: [URL]) {
+    NotificationManager.shared.handleOpenURLs(urls)
+  }
+
+  func applicationWillTerminate(_ notification: Notification) {
+    NotificationManager.shared.clearHeartbeat(craftedHome: craftedHomeURL())
+  }
+
+  private func startNativeNotifications() {
+    NotificationManager.shared.presentWindow = { [weak self] in
+      self?.showMainWindowIfNeeded()
+    }
+    NotificationManager.shared.start(craftedHome: craftedHomeURL())
+  }
+
+  private func craftedHomeURL() -> URL {
+    let host = ProcessInfo.processInfo.environment
+    let home = host["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
+    return URL(
+      fileURLWithPath: host["VIBECRAFTED_HOME"] ?? "\(home)/.vibecrafted", isDirectory: true)
   }
 
   private func launchWorkspaceTerminal() {

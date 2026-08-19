@@ -1915,6 +1915,102 @@ def notification_for(event: SettlementRevision) -> GuardianNotification:
     )
 
 
+NATIVE_APP_BUNDLE_ID = "io.vetcoders.vibecrafted"
+NATIVE_APP_PID_NAME = "native_app.pid"
+
+
+def native_app_pid_path(*, home: Path | None = None) -> Path:
+    """Heartbeat written by Vibecrafted.app so guardian can skip osascript."""
+
+    return (
+        (home if home is not None else vibecrafted_home())
+        / "control_plane"
+        / NATIVE_APP_PID_NAME
+    )
+
+
+def _native_app_comm(pid: int) -> str | None:
+    """Return ``ps`` comm for ``pid``, or None when the lookup cannot run."""
+
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "comm="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    comm = (result.stdout or "").strip()
+    return comm or None
+
+
+def native_app_is_alive(
+    *,
+    home: Path | None = None,
+    kill: Callable[[int, int], None] = os.kill,
+    comm_reader: Callable[[int], str | None] | None = None,
+) -> bool:
+    """True when Vibecrafted.app left a live heartbeat pid.
+
+    Mux being up is not enough: tray/TUI can own the socket without the
+    Swift bundle that posts ``UNUserNotificationCenter`` banners.
+    """
+
+    path = native_app_pid_path(home=home)
+    try:
+        raw = path.read_text(encoding="utf-8").strip().splitlines()
+        pid = int(raw[0])
+        recorded_bundle = raw[1].strip() if len(raw) > 1 else ""
+    except (OSError, ValueError, IndexError):
+        return False
+    if pid <= 0:
+        return False
+    if recorded_bundle and recorded_bundle != NATIVE_APP_BUNDLE_ID:
+        return False
+    try:
+        kill(pid, 0)
+    except OSError:
+        return False
+    comm = (comm_reader or _native_app_comm)(pid)
+    if comm is None:
+        return True
+    return Path(comm).name == "Vibecrafted"
+
+
+def _append_run_settled_event(
+    notification: GuardianNotification, *, home: Path | None = None
+) -> None:
+    """Append a spawn-update the jsonl bridge already maps to IpcEvent."""
+
+    control = (home if home is not None else vibecrafted_home()) / "control_plane"
+    control.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = control / "events.jsonl"
+    event = {
+        "ts": notification.event.settled_at
+        or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "run_id": notification.event.run_id,
+        "kind": "spawn-update",
+        "payload": {
+            "agent": "guardian",
+            "skill": "settlement",
+            "mode": notification.event.tui,
+            "state": "settled",
+            "status": "settled",
+            "verdict": notification.event.verdict,
+            "reason": notification.event.reason,
+        },
+    }
+    line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    fd = os.open(path, flags, 0o600)
+    try:
+        os.write(fd, line.encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
 def notify_operator(
     notification: GuardianNotification,
     *,
@@ -1922,8 +2018,10 @@ def notify_operator(
     platform: str | None = None,
     which: Callable[[str], str | None] = shutil.which,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    app_alive: Callable[[], bool] | None = None,
+    home: Path | None = None,
 ) -> None:
-    """Log every notification and best-effort a native macOS notification."""
+    """Log every notification; native app owns the banner when it is alive."""
 
     level = {
         "info": logging.INFO,
@@ -1934,6 +2032,23 @@ def notify_operator(
 
     if not desktop or (platform or sys.platform) != "darwin":
         return
+    try:
+        _append_run_settled_event(notification, home=home)
+    except OSError as exc:
+        LOGGER.warning("control-plane settlement event not written: %s", exc)
+    alive = (
+        app_alive if app_alive is not None else (lambda: native_app_is_alive(home=home))
+    )
+    if alive():
+        LOGGER.info(
+            "native app owns the notification; skipping osascript degradation (%s)",
+            notification.event.run_id,
+        )
+        return
+    LOGGER.info(
+        "native app absent; osascript degradation for %s",
+        notification.event.run_id,
+    )
     osascript = which("osascript")
     if not osascript:
         return

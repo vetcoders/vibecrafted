@@ -108,6 +108,10 @@ class CanvasViewController: NSViewController, NSTableViewDataSource, NSTableView
       name: NSNotification.Name("MissionControlFocusSection"), object: nil
     )
     NotificationCenter.default.addObserver(
+      self, selector: #selector(handleMissionControlFocusRun),
+      name: NSNotification.Name("MissionControlFocusRun"), object: nil
+    )
+    NotificationCenter.default.addObserver(
       self, selector: #selector(handleMissionControlSelection),
       name: NSNotification.Name("MissionControlSelection"), object: nil
     )
@@ -149,6 +153,14 @@ class CanvasViewController: NSViewController, NSTableViewDataSource, NSTableView
   }
 
   @objc private func handleMissionControlFocusSection(_ notification: Notification) {
+    showMissionControlTab()
+  }
+
+  @objc private func handleMissionControlFocusRun(_ notification: Notification) {
+    showMissionControlTab()
+  }
+
+  private func showMissionControlTab() {
     if segmentedControl.selectedSegment != 0 {
       segmentedControl.selectedSegment = 0
       segmentChanged(segmentedControl)
