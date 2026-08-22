@@ -41,9 +41,6 @@ on:
   push:
     tags:
       - "v*"
-    # temporary until this workflow lands on main (workflow_dispatch needs that)
-    branches:
-      - ci/release-dmg-runner
 
 permissions:
   contents: read

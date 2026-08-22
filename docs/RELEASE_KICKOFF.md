@@ -12,14 +12,26 @@
 - Entry: bundled `vc-start` with durable `workspace_id`
 
 The donor repositories never publish an app, DMG, MSI, installer or update
-channel. The root tag workflow is read-only. Apple signing, notarization and
-publication run from the explicit macOS operator boundary:
+channel. Apple signing and notarization run in one of two places; publication
+stays an explicit operator step either way:
+
+- **Hosted runner** (`.github/workflows/release-dmg.yml`, macos-15): builds,
+  signs and notarizes `Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg` on every
+  `v*` tag or via `workflow_dispatch` (ref, donor refs, notarize on/off) and
+  uploads it as the `vibecrafted-dmg-<run_id>` artifact together with
+  `release-output.json[.sig]`. The runner's home is declared ephemeral for the
+  payload-hygiene gate; the operator's account and checkout are still refused.
+  Nothing is published from CI.
+- **Operator machine**:
 
 ```bash
 make release
 make portable
 GH_TOKEN=... make publish-release
 ```
+
+Either way `gh run download -n vibecrafted-dmg-<run_id>` / `dist/` is what
+`publish-vibecrafted-release.sh` takes to the GitHub release.
 
 `make portable` needs neither signing identity nor notary account — it is a
 provenance-bound source distribution, so it builds anywhere `git` and `python3`
