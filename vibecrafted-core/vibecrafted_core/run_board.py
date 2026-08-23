@@ -19,6 +19,7 @@ from .control_plane import ControlPlaneStorageError, sync_state
 
 _STATE_GLYPH = {
     "completed": "ok",
+    "report_validated": "ok",
     "active": "run",
     "running": "run",
     "launching": "run",
@@ -129,7 +130,7 @@ def render_board(result: dict[str, Any], *, all_days: bool) -> str:
         if report:
             lines.append(f"          report: {report}")
         error = str(run.get("last_error") or "").strip()
-        if error and state not in {"completed"}:
+        if error and state not in {"completed", "report_validated"}:
             first = error.split(";")[0].strip()
             lines.append(f"          note:   {first}")
         if state in {"active", "running", "launching"}:

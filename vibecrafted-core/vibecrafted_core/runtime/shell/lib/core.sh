@@ -50,13 +50,20 @@ _vetcoders_runtime_helper_candidates() {
 }
 
 _vetcoders_source_runtime_helpers() {
-  local helper
+  local helper candidates=()
+  # Drain the enumerator fully before sourcing: returning out of a
+  # `while read < <(...)` loop closes the pipe under the producer and every
+  # later candidate printf dies with "write error: Broken pipe" on stderr.
+  # (No mapfile: /bin/bash on macOS is 3.2.)
   while IFS= read -r helper; do
+    candidates+=("$helper")
+  done < <(_vetcoders_runtime_helper_candidates)
+  for helper in ${candidates[@]+"${candidates[@]}"}; do
     [[ -n "$helper" && -r "$helper" ]] || continue
     # shellcheck disable=SC1090
     source "$helper"
     return 0
-  done < <(_vetcoders_runtime_helper_candidates)
+  done
 
   printf '%s\n' "Missing Vetcoders runtime helpers in:" >&2
   _vetcoders_runtime_helper_candidates >&2

@@ -62,7 +62,12 @@ def _vc_frame_launcher_findings(
             _Finding(
                 "warn",
                 "vc-frame:path",
-                "vc-frame not found on PATH — run `make install` or the foundations installer",
+                (
+                    "optional: vc-frame (cockpit) not on PATH — headless runs work "
+                    "without it; it ships with the Vibecrafted desktop app, or "
+                    "maintainers build it via `make install` with the vc-frame "
+                    "checkout beside this repo"
+                ),
             )
         ]
     path = Path(resolved)
