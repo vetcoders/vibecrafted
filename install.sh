@@ -890,9 +890,6 @@ except OSError as exc:
 PY_BOOTSTRAP_SNAPSHOT
 }
 
-is_interactive_session() {
-  [[ -t 0 && -t 1 ]]
-}
 
 has_attended_tty() {
   if { exec 9<>/dev/tty; } 2>/dev/null; then
@@ -900,6 +897,11 @@ has_attended_tty() {
     return 0
   fi
   return 1
+}
+
+# >>> scripts/lib/runtime-roots.sh (verbatim copy — install.sh is the curl|bash bootstrap; parity test pins it)
+is_interactive_session() {
+  [[ -t 0 && -t 1 ]]
 }
 
 default_vibecrafted_home() {
@@ -922,6 +924,22 @@ default_vibecrafted_runtime_home() {
   printf '%s\n' "$HOME/.local/share/vibecrafted"
 }
 
+default_vibecrafted_tools_home() {
+  if [[ -n "${VIBECRAFTED_TOOLS_HOME:-}" ]]; then
+    printf '%s\n' "$VIBECRAFTED_TOOLS_HOME"
+    return
+  fi
+  printf '%s/tools\n' "$(default_vibecrafted_runtime_home)"
+}
+
+default_vibecrafted_launcher_bin() {
+  if [[ -n "${VIBECRAFTED_LAUNCHER_BIN:-}" ]]; then
+    printf '%s\n' "$VIBECRAFTED_LAUNCHER_BIN"
+    return
+  fi
+  printf '%s\n' "$HOME/.local/bin"
+}
+
 canonical_vibecrafted_home() {
   printf '%s\n' "$HOME/.vibecrafted"
 }
@@ -935,11 +953,11 @@ canonical_vibecrafted_launcher_bin() {
 }
 
 pause_runtime_contract_failure() {
-  if ! is_interactive_session; then
+  printf '  → fix: vibecrafted doctor --fix-legacy-bootstrap --fix-launchers\n' >&2
+  if [[ "${VIBECRAFTED_INSTALL_NONINTERACTIVE:-0}" == "1" ]] || ! is_interactive_session; then
     return
   fi
-  printf '  → fix: vibecrafted doctor --fix-launchers\n' >&2
-  printf 'Press Enter to continue, or Ctrl-C to abort: '
+  printf 'Press Enter to continue, or Ctrl-C to abort: ' >&2
   read -r _ || true
 }
 
@@ -954,7 +972,7 @@ enforce_runtime_root_contract() {
 
   resolved_store="$(default_vibecrafted_home)"
   resolved_runtime="$(default_vibecrafted_runtime_home)"
-  resolved_launcher="${VIBECRAFTED_LAUNCHER_BIN:-$expected_launcher}"
+  resolved_launcher="$(default_vibecrafted_launcher_bin)"
 
   if [[ "$resolved_store" != "$expected_store" ]]; then
     printf '✗ store root drift: %s ≠ %s\n' "$resolved_store" "$expected_store" >&2
@@ -978,6 +996,7 @@ enforce_runtime_root_contract() {
 
   return 0
 }
+# <<< scripts/lib/runtime-roots.sh
 
 bootstrap_next_step() {
   if [[ "$target" == "vibecrafted" && "$use_gui" == "1" ]]; then
@@ -1043,7 +1062,7 @@ vibecrafted_home="$(default_vibecrafted_home)"
 export VIBECRAFTED_HOME="$vibecrafted_home"
 vibecrafted_runtime_home="$(default_vibecrafted_runtime_home)"
 export VIBECRAFTED_RUNTIME_HOME="$vibecrafted_runtime_home"
-default_tools_dir="${VIBECRAFTED_TOOLS_HOME:-$vibecrafted_runtime_home/tools}"
+default_tools_dir="$(default_vibecrafted_tools_home)"
 default_ref="${VIBECRAFTED_REF:-main}"
 
 ref="$default_ref"
