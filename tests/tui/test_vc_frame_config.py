@@ -40,7 +40,7 @@ def test_vc_frame_config_uses_plain_ctrl_without_option_layer() -> None:
 def test_vc_frame_config_enables_kitty_protocol_for_super_switcher() -> None:
     # Key-contract v3 (8a0f14e65): the global Super/Cmd switcher rides kitty
     # CSI-u sequences. Disabling this strands "Super Left/Right/Up/Down" and
-    # "Super e" as raw escape passthrough in every pane — see kronika
+    # "Super e" as raw escape passthrough in every pane — see doctrine
     # 2026-08-05 for the live-session repro.
     payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
 

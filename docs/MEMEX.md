@@ -7,7 +7,7 @@
 
 [`rust-memex`](https://github.com/vetcoders/rust-memex) is a small,
 namespace-aware semantic memory substrate. It indexes prior agent
-sessions, kronika fragments, and operator notes into chunks that can
+sessions, chronicle fragments, and operator notes into chunks that can
 be retrieved by free-text query across machines. The memex host
 serves its clients over your private network.
 
@@ -149,7 +149,7 @@ This is opt-in tooling. The agent perception layer works without
 memex — vibecrafted's v1.7 surface is unchanged for operators who
 don't configure it. When configured, memex offers cross-session
 context that would otherwise require manual escalation ("look at
-the silver session from last Thursday"). The trade-off:
+the host-d session from last Thursday"). The trade-off:
 weaker authority tier, opt-in cognitive load (token rotation,
 namespace hygiene), and dependence on a mesh service. Worth it for
 operators running multiple machines in the Vetcoders mesh; safe to

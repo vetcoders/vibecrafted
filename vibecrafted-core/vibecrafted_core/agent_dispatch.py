@@ -1,6 +1,6 @@
 """Agent dispatch model-parity enforcement (Plan 06).
 
-Python parallel to ``scripts/lib/spawn.sh``. Captures the kronika 2026-04-10
+Python parallel to ``scripts/lib/spawn.sh``. Captures the doctrine 2026-04-10
 axiom: every native delegation must pass the parent's model tier. Mixed-tier
 dispatch (Opus parent -> Sonnet child) breaks the Anthropic prompt cache and
 poisons the parent's reasoning chain with shallower subagent output.
@@ -298,7 +298,7 @@ def check_parity(parent: str, child: str) -> tuple[bool, str]:
         (
             f"downgrade rejected — parent='{parent}' (tier={parent_tier}) "
             f"child='{child}' (tier={child_tier}); "
-            "see kronika 2026-04-10 (AGENT MODEL PARITY)"
+            "see doctrine 2026-04-10 (AGENT MODEL PARITY)"
         ),
     )
 
@@ -332,7 +332,7 @@ def require_parity(
     detail = (
         "require_parity: BLOCKED.\n\n"
         "Native delegation from a higher tier to a lower tier within the same\n"
-        "model family violates the AGENT MODEL PARITY axiom (kronika 2026-04-10):\n"
+        "model family violates the AGENT MODEL PARITY axiom (doctrine 2026-04-10):\n"
         "  - Anthropic prompt cache is keyed per model. Mixed-tier dispatch breaks\n"
         "    cache sharing - the subagent re-reads context uncached.\n"
         "  - Lower-tier output feeds back into parent's reasoning chain, producing\n"

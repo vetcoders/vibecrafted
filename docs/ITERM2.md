@@ -16,7 +16,7 @@ namespaced Vibecrafted profile into iTerm2's hot-reload directory.
   and GUID derivation (`uuid5(DNS, "vibecrafted.<namespace>.<name>")`) are
   public API.
 - **Predecessor:** v1.7 shipped this stack under the `[experimental]`
-  prefix (kronika 2026-05-08). Operators with `vibecrafted-experimental.json`
+  prefix (doctrine 2026-05-08). Operators with `vibecrafted-experimental.json`
   on disk should run `make iterm-plugin-migrate` once on upgrade — see
   [Migration](#migration-from-v17-experimental) below.
 
@@ -105,7 +105,7 @@ uv run --project plugins/iterm2 python -m vibecrafted_iterm2.iterm2_profiles --h
 
 ## Migration from v1.7 experimental
 
-If you installed the iTerm2 stack on v1.7 — kronika 2026-05-08 ships it as
+If you installed the iTerm2 stack on v1.7 — doctrine 2026-05-08 ships it as
 `[experimental]` — you have a file like:
 
 ```
@@ -168,7 +168,7 @@ output before relying on it in production.
   (`config/vc-frame/themes/vetcoders-mesh.kdl`). The iTerm2 profile colors
   intentionally rhyme with the vc_frame mesh themes — same identity, two
   presentation layers.
-- **kronika 2026-05-08:** experimental ship landmark — documents the
+- **doctrine 2026-05-08:** experimental ship landmark — documents the
   original 18 OSC primitives, 8 ProfileSpecs, and 58 tests that shipped
   as `[experimental]` before this GA promotion.
 

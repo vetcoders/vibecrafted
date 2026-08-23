@@ -1,7 +1,7 @@
 """Pytest mirror of tests/spawn_parity_test.sh (Plan 06).
 
 Exercises ``vibecrafted_core.agent_dispatch`` against the AGENT MODEL PARITY
-axiom (kronika 2026-04-10). The bash and Python parity layers are kept
+axiom (doctrine 2026-04-10). The bash and Python parity layers are kept
 behaviourally identical; this suite verifies that for the Python side.
 
 Run:
@@ -153,7 +153,7 @@ def test_check_parity_downgrade_rejected():
     ok, reason = agent_dispatch.check_parity("claude-opus-4-7", "claude-sonnet-4-7")
     assert ok is False
     assert "downgrade rejected" in reason
-    assert "kronika 2026-04-10" in reason
+    assert "doctrine 2026-04-10" in reason
 
 
 def test_check_parity_haiku_downgrade_rejected():
@@ -203,7 +203,7 @@ def test_require_parity_raises_on_downgrade():
         agent_dispatch.require_parity("claude-opus-4-7", "claude-sonnet-4-7")
     detail = str(excinfo.value)
     assert "BLOCKED" in detail
-    assert "kronika 2026-04-10" in detail
+    assert "doctrine 2026-04-10" in detail
     assert "VIBECRAFTED_SPAWN_ALLOW_DOWNGRADE" in detail
 
 

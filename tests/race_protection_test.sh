@@ -14,7 +14,7 @@
 # hook installed only for the negative case that runs another `git commit`
 # inside the same repo immediately before the helper's own `git commit`
 # call returns. That faithfully reproduces the "another agent slipped in
-# between stage-tree and commit" interleaving from the kronika incident.
+# between stage-tree and commit" interleaving from the incident.
 
 set -euo pipefail
 

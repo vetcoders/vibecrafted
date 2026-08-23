@@ -4,7 +4,7 @@
 # Copies config/hammerspoon/init.lua to ~/.hammerspoon/init.lua, offering
 # a .bak overwrite when an existing config is present. Triggers a
 # Hammerspoon reload via pkill + open -a (avoids the chicken-and-egg
-# AppleScript-permission problem documented in kronika 2026-05-08:
+# AppleScript-permission problem documented in doctrine 2026-05-08:
 # `osascript reload` requires `hs.allowAppleScript(true)` which itself
 # needs the new init.lua to be live).
 #
@@ -127,7 +127,7 @@ cp "$SRC" "$DST"
 log "installed: $DST"
 
 # Verify the copied file contains hs.allowAppleScript(true) (required for
-# any future `osascript reload` flow — kronika 2026-05-08).
+# any future `osascript reload` flow — doctrine 2026-05-08).
 if ! grep -q 'hs.allowAppleScript(true)' "$DST"; then
     warn "$DST does not declare hs.allowAppleScript(true) — reload via osascript will be denied"
 fi

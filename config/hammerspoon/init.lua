@@ -5,7 +5,7 @@
 -- (scripts/install-hammerspoon.sh copies this file to ~/.hammerspoon/init.lua,
 -- offers .bak overwrite on re-run, triggers Hammerspoon reload).
 --
--- Stack agent-native runtime glue (per kronika 2026-05-08):
+-- Stack agent-native runtime glue (per doctrine 2026-05-08):
 --   OSC 8 hyperlink → iTerm2 Cmd+Click → macOS open URL →
 --   Hammerspoon url handler → AppleScript spawn iTerm2 tab → CLI dispatch.
 --
