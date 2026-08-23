@@ -722,3 +722,28 @@ def test_doctor_summary_counts_findings() -> None:
     assert payload["authority"]["healthy"] is False
     assert payload["authority"]["ok_count"] == 1
     assert payload["authority"]["failure_count"] == 1
+
+
+def test_server_supervision_finding_is_optional_when_never_installed() -> None:
+    status = SimpleNamespace(
+        installed=False,
+        loaded=False,
+        supervisor_live=False,
+        supervisor_verified=False,
+        supervisor_service_managed=False,
+        build_current=False,
+        pair_healthy=False,
+        supervisor_pid=None,
+    )
+
+    findings = doctor._server_supervision_findings(
+        platform="darwin",
+        which=lambda _name: "/usr/local/bin/vibecrafted",
+        config_factory=lambda **kwargs: kwargs,
+        status_reader=lambda _config: status,
+    )
+
+    assert findings[0].level == "warn"
+    assert findings[0].component == "server-supervisor"
+    assert "optional" in findings[0].message
+    assert "vibecrafted server service install" in findings[0].message

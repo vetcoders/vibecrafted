@@ -185,6 +185,20 @@ cd vibecrafted && make install
 make help-dev   # the full target surface
 ```
 
+A source install gives you the complete headless runtime — `vibecrafted
+doctor`, every skill launcher, `observe`/`await`, reports and transcripts under
+`~/.vibecrafted`. The visual cockpit (`vc-frame`, `vc-start`) is not part of it:
+it ships inside the desktop app below, and `vibecrafted init <agent>` falls back
+to your current terminal until it is present. First run after install:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+vibecrafted doctor
+vibecrafted implement claude --prompt "describe this repo"
+vibecrafted await claude --last      # waits, then prints the report path
+vibecrafted status                   # today's runs
+```
+
 **macOS desktop app:** the intended end-user shape is one Developer ID signed
 and notarized `Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg` carrying matching
 builds of `vc-terminal`, `vc-frame`, `vc-start` and the complete runtime.

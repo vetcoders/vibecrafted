@@ -66,6 +66,7 @@ VAPOR_HEADER = _installer_brand.VAPOR_HEADER
 brand_separator = _installer_brand.separator
 brand_version_line = _installer_brand.version_line
 read_version_file = _runtime_paths.read_version_file
+read_staged_tools_version = _runtime_paths.read_staged_tools_version
 vibecrafted_backups_home = _runtime_paths.vibecrafted_backups_home
 vibecrafted_launcher_bin = _runtime_paths.vibecrafted_launcher_bin
 vibecrafted_runtime_home = _runtime_paths.vibecrafted_runtime_home
@@ -301,6 +302,8 @@ class Foundation:
                 hints.append(f"pipx install {pkg}")
             elif ch == "source":
                 hints.append(f"Download from {pkg}")
+            elif ch == "bundled":
+                hints.append(pkg)
         return " | ".join(hints)
 
 
@@ -531,12 +534,15 @@ FOUNDATIONS: list[Foundation] = [
     Foundation(
         name="vc-frame",
         description="VC Frame multi-agent terminal workspace surface",
-        channels=["canonical"],
+        channels=["bundled"],
         packages={
-            # Frame binary installer — not the framework orchestrator.
-            "canonical": (
-                "curl -fsSL https://github.com/vetcoders/vc-frame"
-                "/releases/latest/download/install.sh | sh"
+            # vc-frame has no standalone installer: it ships inside the signed
+            # Vibecrafted desktop app (DMG) and is built from the sibling
+            # checkout by `make install` for maintainers. The headless runtime
+            # (dispatch / observe / await / reports) does not need it.
+            "bundled": (
+                "optional cockpit: ships with the Vibecrafted desktop app (DMG); "
+                "headless runs work without it"
             ),
         },
         verify_cmd="vc-frame --version",
@@ -11053,9 +11059,23 @@ def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
     """Run full installation health check."""
     findings: list[DoctorFinding] = []
 
-    # 0. Framework version
-    fw_ver = state.framework_version or "unknown"
-    findings.append(DoctorFinding("ok", "version", fw_ver))
+    # 0. Framework version. The install state may predate the stamped-identity
+    # contract (or be written by a lane that never filled it); the published
+    # runtime's own VERSION stamp is the same truth the launcher resolves.
+    fw_ver = (state.framework_version or "").strip()
+    if not fw_ver or fw_ver == "unknown":
+        fw_ver = read_staged_tools_version()
+    if fw_ver == "unknown":
+        findings.append(
+            DoctorFinding(
+                "warn",
+                "version",
+                "no stamped install identity found — run `make install` "
+                "(or `vibecrafted update`) to publish a versioned runtime",
+            )
+        )
+    else:
+        findings.append(DoctorFinding("ok", "version", fw_ver))
 
     # 0b. Distribution channel + upgrade path
     current_link = vibecrafted_tools_home() / "vibecrafted-current"

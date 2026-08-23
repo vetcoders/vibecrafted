@@ -673,14 +673,15 @@ install_vcframe() {
   fi
 
   if (( need_binary )) && ! (( CHECK_ONLY )); then
-    warn "vc-frame binary missing — cockpit cannot exist without it."
-    warn "Manual paths:"
+    warn "vc-frame (the visual cockpit) is not installed — the headless runtime works without it:"
+    warn "  vibecrafted doctor · vibecrafted implement claude --prompt \"...\" · vibecrafted await claude --last"
+    warn "To get the cockpit: install the Vibecrafted desktop app (DMG) when published,"
     sibling="$(_vcframe_sibling_root 2>/dev/null || true)"
     if [[ -n "$sibling" ]]; then
-      warn "  make -C $sibling release"
+      warn "  or build the sibling checkout: make -C $sibling release"
+    else
+      warn "  or (maintainers) set VIBECRAFTED_VC_FRAME_SOURCE to a vc-frame checkout and rerun make install"
     fi
-    warn "  set VIBECRAFTED_VC_FRAME_SOURCE to a checkout and rerun"
-    warn "  end users should install the canonical versioned Vibecrafted DMG"
     return 1
   fi
 

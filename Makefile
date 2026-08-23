@@ -240,7 +240,11 @@ install:
 	@VIBECRAFTED_INSTALL_LOG="$(INSTALL_LOG)" VERBOSE="$(VERBOSE)" $(INSTALL_STEP) "skills and launchers" -- $(MAKE) --no-print-directory install-bundle-tools
 	@VIBECRAFTED_INSTALL_LOG="$(INSTALL_LOG)" VERBOSE="$(VERBOSE)" $(INSTALL_STEP) "frontier config" -- bash -c 'stable_root="$${XDG_DATA_HOME:-$$HOME/.local/share}/vibecrafted/tools/vibecrafted-current"; bash "$$stable_root/vibecrafted-core/vibecrafted_core/runtime/scripts/install-frontier-config.sh" --source "$$stable_root" || printf "[warn] Frontier config skipped (non-fatal)\n"'
 	@VIBECRAFTED_INSTALL_LOG="$(INSTALL_LOG)" VERBOSE="$(VERBOSE)" $(INSTALL_STEP) "vc-frame config" -- bash -e -c 'export PATH="$$HOME/.local/bin:$$PATH"; stable_root="$$($(PYTHON) -c '\''import sys; sys.path.insert(0, "$(SOURCE)/scripts"); from runtime_paths import vibecrafted_tools_home; print(vibecrafted_tools_home() / "vibecrafted-current")'\'')"; tool_python="$$(uv tool dir --color never)/vibecrafted/bin/python"; test -x "$$tool_python"; PYTHONPATH="$$stable_root/vibecrafted-core" "$$tool_python" -c "from vibecrafted_core.vc_frame_delivery import wire_vc_frame_config; print(wire_vc_frame_config(force_frontier=True).render(), end=\"\")"'
-	@printf "\nVibecrafted is ready.\n\nStart here:\n  vc-start\n\nHealth:\n  vibecrafted doctor\n\nLog:\n  ~/.vibecrafted/install.log\n"
+	@if PATH="$$HOME/.local/bin:$$PATH" command -v vc-frame >/dev/null 2>&1; then \
+	  printf "\nVibecrafted is ready.\n\nStart here:\n  vc-start\n\nHealth:\n  vibecrafted doctor\n\nLog:\n  ~/.vibecrafted/install.log\n"; \
+	else \
+	  printf "\nVibecrafted is ready (headless: the vc-frame cockpit is not installed; vc-start needs it).\n\nStart here:\n  export PATH=\"\$$HOME/.local/bin:\$$PATH\"\n  vibecrafted doctor\n  vibecrafted implement claude --prompt \"describe this repo\"\n  vibecrafted await claude --last\n\nLog:\n  ~/.vibecrafted/install.log\n"; \
+	fi
 
 # `make install` calls `install-python-tools`; it was an empty .PHONY name
 # (no recipe) so the uv-tool install never ran during `make install`. Alias it

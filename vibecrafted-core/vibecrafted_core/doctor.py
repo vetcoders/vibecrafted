@@ -499,8 +499,23 @@ def _server_supervision_findings(
         ]
 
     supervisor_pid = getattr(status, "supervisor_pid", None)
+    if not bool(getattr(status, "installed", False)):
+        # Never installed is not a broken install. Headless runs, observe,
+        # await and reports work without the LaunchAgent; only the live
+        # dashboard/server surface needs it. A stranger who never asked for a
+        # daemon must not see a red line for one.
+        return [
+            _Finding(
+                "warn",
+                "server-supervisor",
+                "optional: control-plane server service is not installed — "
+                "headless runs, observe/await and reports work without it; "
+                "for the live server/dashboard run "
+                "`vibecrafted server service install`",
+            )
+        ]
     required = {
-        "installed": bool(getattr(status, "installed", False)),
+        "installed": True,
         "loaded": bool(getattr(status, "loaded", False)),
         "supervisor_live": bool(getattr(status, "supervisor_live", False)),
         "supervisor_verified": bool(getattr(status, "supervisor_verified", False)),
