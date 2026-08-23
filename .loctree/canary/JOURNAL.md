@@ -160,3 +160,84 @@ reasonable; the machine looks healthy only while the last reinstall's residue
 papers over the gaps.
 
 ## Phase II — cuts (appended as they land)
+
+### Cut 1 — runtime roots (commits 173c88d9, 84c093bf, c6571a9f)
+
+Throne: `vibecrafted_core.runtime_paths` (Python), `scripts/lib/runtime-roots.sh`
+(shell). Removed:
+
+| Competitor                                    | LOC | What it did wrong                                                                                                                      |
+| --------------------------------------------- | --: | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `dispatch/worktrees.py:vibecrafted_home`      |   3 | empty `VIBECRAFTED_HOME` → cwd                                                                                                         |
+| `scripts/install-foundations.sh` root block   |  84 | `VIBECRAFTED_ROOT/.vibecrafted` as a home (the release generation)                                                                     |
+| `scripts/install-runtime.sh:vibecrafted_home` |   7 | third spelling                                                                                                                         |
+| `scripts/migrate_agents_workspace.sh`         | 229 | `.ai-agents/` migration from March with its own `VIBECRAFTED_ROOT` meaning; Makefile `migrate`/`migrate-dry` and its test went with it |
+| `install.sh` own copies of 7 root functions   |  85 | now a verbatim embed of the library between markers                                                                                    |
+
+Added: `tests/tui/test_runtime_roots_parity.py` — the bootstrap copy is pinned
+byte-for-byte to the library; library and bootstrap resolve identical roots
+for four env shapes (`VIBECRAFTED_ROOT` never a home prefix); the contract
+fails closed on drift with the one-line `✗ … drift` + `→ fix` wording from
+`docs/CLI_PRODUCT_SPEC.md`.
+
+Still two by necessity (recorded, not cut): `read.rs:vibecrafted_home` (Rust
+reader), `plugins/iterm2/…/vc_launcher.py:vibecrafted_home` (AutoLaunch
+sandbox), `deck/vibecrafted:33-44` (bash, shipped without `scripts/lib`),
+`tui-agent/src/config.rs:default_vibecrafted_home`. One per language boundary,
+each documented against the same env grammar; a cross-language contract test
+is the next proof.
+
+### Cut 2 — control-plane entry (commits a2469bb0, 6ef2386b, 6d39bb01)
+
+Throne: `python -m vibecrafted_core.control_plane`. Removed:
+
+| Competitor                                                                                        | LOC | What it did wrong                                                                           |
+| ------------------------------------------------------------------------------------------------- | --: | ------------------------------------------------------------------------------------------- |
+| `scripts/control_plane_state.py`                                                                  |  53 | loaded the throne, then rebound `vibecrafted_home` between two module objects on every call |
+| `scripts/control_plane_launch.py`                                                                 |  27 | forwarder for `workflow`                                                                    |
+| `scripts/runtime_paths.py`                                                                        |  34 | executed the canonical file under a second module name                                      |
+| `deck/vibecrafted:_control_plane_script`                                                          |  12 | three-candidate file-path chain choosing which copy syncs                                   |
+| `runtime/scripts/lib/meta.sh:spawn_control_plane_script`                                          |  15 | same chain, `VIBECRAFTED_ROOT` first                                                        |
+| `tests/tui/test_meta_lifecycle.py::test_control_plane_script_prefers_explicit_root_then_checkout` |  30 | pinned the chain                                                                            |
+
+`vetcoders_install.py` runs on the host's python3 before the product
+interpreter exists and `vibecrafted_core/__init__` needs 3.11+, so it executes
+`runtime_paths.py` from its file — one definition, not imported through the
+package. `installer_gui.py` imports the package directly.
+
+Found on the way: every `tests/tui` test copied `os.environ`, so on an
+operator machine `VIBECRAFTED_RUNTIME_HOME`/`…_PYTHON` from the live launcher
+pointed the deck at the real runtime and the step under test silently did
+nothing. `conftest.py` now deletes the eight root variables for every test.
+
+### Cut 3 — the clock (commit: see `feat(core): one clock`)
+
+Throne: `vibecrafted_core/clock.py`. Removed eleven readers of the wall
+clock: `utc_now` ×3, `_now_iso` ×7, and `control_plane._now`'s own
+`datetime.now` (kept as the injectable seam tests patch, delegating to the
+clock). `lifecycle_control` stamped receipts in **local time with a numeric
+offset**; it is UTC now. Also: `cron.default_state_file` (duplicate of
+`loop`'s), `wrappers.deck_path` (forwarder).
+
+### Measured after the cuts
+
+`loct prism` over four framings (roots · control-plane sync · install ·
+timestamps): **13/15**, union 60 files, 16 shared by all four, mean Jaccard
+0.463 — band "doctrine". The number is the baseline for the next cuts; it has
+to fall.
+
+### Not cut tonight, by name
+
+1. `runtime/scripts/lib` ↔ `runtime/shell/lib` — two `vc_frame.sh` (1091/880
+   LOC, 1553 differing lines). Needs a live vc-frame verifier.
+2. `control_plane.py` ↔ `control-core/src/{read,model}.rs` — reader/writer
+   grammar parity by convention. Needs a cross-language contract test on the
+   on-disk state before either side loses anything.
+3. `vetcoders_install.py` ↔ `AppDelegate.installCanonicalRuntime` — the fork's
+   open cut (`feat/dmg-first-run`, `foundations/fail-closed`).
+4. `wrappers.repo_root` (invocation cwd) ↔ `loop.repo_root` (git toplevel) —
+   two meanings under one name; rename is the honest fix, tests patch the
+   former.
+5. `delivery/doctor.py` ↔ `dispatch/doctor.py`, `capabilities.py` ↔
+   `continuity/capabilities.py` — namesakes across domains.
+6. The integrator (§7) and the orientation pack (§6) — product features, next.
