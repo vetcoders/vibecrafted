@@ -29,7 +29,7 @@ def test_supervised_skill_main_routes_runtime_launch_through_dispatcher(
 ) -> None:
     calls: list[dict[str, object]] = []
     monkeypatch.setenv("VIBECRAFTED_RUN_ID", "impl-test")
-    monkeypatch.setattr(wrappers, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(wrappers, "invocation_root", lambda: tmp_path)
     monkeypatch.setattr(
         wrappers,
         "_await_run_forever",

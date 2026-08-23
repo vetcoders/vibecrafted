@@ -31,8 +31,11 @@ SKILL_PREFIX = {
 }
 
 
-def repo_root() -> Path:
-    """The working directory the CLI was invoked from (the target repo root)."""
+def invocation_root() -> Path:
+    """The directory the CLI was invoked from — the target repo as the operator sees it.
+
+    Not ``loop.repo_root`` (git toplevel); the two answer different questions and
+    carried the same name until 2026-08-23."""
     return Path.cwd()
 
 
@@ -241,7 +244,7 @@ def supervised_skill_main(skill: str, argv: Sequence[str] | None = None) -> int:
             " ".join(args),
             skill=skill,
             mode="raw",
-            root=repo_root(),
+            root=invocation_root(),
             command=args,
             env=_env_for_run(run_id, skill_code),
             run_id=run_id,
@@ -267,7 +270,7 @@ def supervised_skill_main(skill: str, argv: Sequence[str] | None = None) -> int:
     if not _has_flag(rest, "--runtime"):
         command.extend(["--runtime", "headless"])
 
-    root = repo_root()
+    root = invocation_root()
     if sandbox:
         handle = Supervisor().spawn(
             agent,
@@ -441,7 +444,7 @@ def _prepare_research(args: Sequence[str], run_id: str) -> tuple[int, str]:
         command.extend(["--runtime", "headless"])
     proc = subprocess.run(
         command,
-        cwd=str(repo_root()),
+        cwd=str(invocation_root()),
         env=_env_for_run(run_id, "rsch"),
         text=True,
         stdout=subprocess.PIPE,
@@ -493,7 +496,7 @@ def research_main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
 
-    root = repo_root()
+    root = invocation_root()
     if sandbox:
         supervisor = Supervisor()
         handles = [
