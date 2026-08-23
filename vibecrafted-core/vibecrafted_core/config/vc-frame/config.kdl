@@ -21,17 +21,20 @@ themes {
     }
 }
 
-// Plan 12 (META_22) — mesh-aware host theming (kronika 2026-05-05).
+// Plan 12 (META_22) — mesh-aware host theming.
 //
 // Additional themes are loaded from `themes/vetcoders-mesh.kdl` in this
-// same config dir (vc-frame auto-discovers nested theme blocks). Variants:
+// same config dir (vc-frame auto-discovers nested theme blocks). Four accent
+// variants so an operator can tell workstations apart:
 //
-//   vetcoders-dragon   — red    — LibraxisAI server, central hub
-//   vetcoders-sztudio  — purple — desktop
-//   vetcoders-silver   — cyan   — laptop
-//   vetcoders-div0     — green  — laptop (primary dev)
-//   vibecrafted        — neutral default (this file)
+//   mesh-red     — red accent
+//   mesh-purple  — purple accent
+//   mesh-cyan    — cyan accent
+//   mesh-green   — green accent
+//   vibecrafted  — neutral default (this file)
 //
+// Which host gets which accent is configured in `~/.vibecrafted/mesh.conf`
+// (`host theme` per line) or via `VIBECRAFTED_MESH_MAP=host-a=mesh-red,...`.
 // To switch theme per host, run `./config/vc-frame/auto-theme.sh` which emits
 // the matching theme name. Wire it into your shell init, e.g.:
 //
@@ -73,7 +76,7 @@ styled_underlines false
 auto_layout true
 show_startup_tips false
 show_release_notes false
-// Key-contract v3 (kronika 2026-07-30, 8a0f14e65): the global Super/Cmd
+// Key-contract v3 (doctrine 2026-07-30, 8a0f14e65): the global Super/Cmd
 // switcher (bind "Super Left/Right/Up/Down", "Super e") is wired as kitty
 // CSI-u sequences — the Alacritty preset encodes Cmd+arrows/Cmd+E that way,
 // and zellij-client's KittyKeyboardParser only runs when this is on. Plain

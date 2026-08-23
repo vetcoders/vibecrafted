@@ -649,7 +649,7 @@ seed-commit-msg-hooks:
 	@bash scripts/install-agent-commit-msg-hooks.sh ..
 
 # -----------------------------------------------------------------------------
-# Living Tree race protection (Plan 07 — kronika 2026-04-16/17 incident learning)
+# Living Tree race protection (Plan 07 — doctrine 2026-04-16/17 incident learning)
 #
 # Two invocation modes:
 #
@@ -704,7 +704,7 @@ test-race-protection:
 # vibecrafted-core/vibecrafted_core/agent_dispatch.py) reject same-family
 # downgrades, allow cross-family delegation, and honor the
 # VIBECRAFTED_SPAWN_ALLOW_DOWNGRADE=1 operator override with an audit
-# warning. Captures kronika 2026-04-10 doctrine.
+# warning. Captures doctrine 2026-04-10 doctrine.
 # -----------------------------------------------------------------------------
 
 test-parity:
@@ -740,10 +740,10 @@ skill-new:
 # Verifies:
 #   - all shipped layouts under config/vc-frame/layouts/*.kdl parse via
 #     `vc-frame --layout <name> setup --check`
-#   - all four mesh themes (vetcoders-dragon/sztudio/silver/div0) load
+#   - all four mesh accent themes (mesh-red/purple/cyan/green) load
 #   - auto-theme.sh passes bash -n + shellcheck
-#   - auto-theme.sh maps each canonical host (dragon, sztudio, silver, div0,
-#     mgbook16 alias) to the correct mesh theme and falls back to neutral
+#   - auto-theme.sh resolves host -> theme from mesh.conf (or
+#     VIBECRAFTED_MESH_MAP), honours aliases, and falls back to neutral
 #     for unknown hosts
 #
 # Tolerant of missing vc-frame — falls back to script-level checks only.
@@ -842,7 +842,7 @@ test-aicx-sync:
 #   grep checks. Live macOS integration is operator-driven (the test
 #   surfaces the manual command rather than spawning iTerm2 tabs during CI).
 #
-# Stack agent-native runtime context (kronika 2026-05-08): OSC 8 hyperlink
+# Stack agent-native runtime context (doctrine 2026-05-08): OSC 8 hyperlink
 # → iTerm2 Cmd+Click → macOS open URL → Hammerspoon URL handler →
 # AppleScript spawn iTerm2 tab → CLI dispatch. See docs/HAMMERSPOON.md.
 # -----------------------------------------------------------------------------

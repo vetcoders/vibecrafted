@@ -54,10 +54,10 @@ c_dim='\033[2m'
 c_bold='\033[1m'
 c_reset='\033[0m'
 c_amber='\033[38;5;214m'      # vibecrafted brand
-c_dragon='\033[38;5;203m'     # red mesh
-c_sztudio='\033[38;5;141m'    # purple mesh
-c_silver='\033[38;5;87m'      # cyan mesh
-c_div0='\033[38;5;120m'       # green mesh
+c_mesh_red='\033[38;5;203m'    # mesh-red accent
+c_mesh_purple='\033[38;5;141m' # mesh-purple accent
+c_mesh_cyan='\033[38;5;87m'    # mesh-cyan accent
+c_mesh_green='\033[38;5;120m'  # mesh-green accent
 c_steel='\033[38;5;247m'
 c_ok='\033[38;5;82m'
 c_warn='\033[38;5;220m'
@@ -91,13 +91,34 @@ print_header() {
     printf '  %b─────────────────────────────────────────────────────────%b\n\n' "$c_dim" "$c_reset"
 }
 
+# Hosts come from the operator's mesh.conf (same file auto-theme.sh reads):
+# one `host theme` per line, `#` comments allowed. Colored by theme accent.
+mesh_color() {
+    case "$1" in
+        mesh-red)    printf '%s' "$c_mesh_red" ;;
+        mesh-purple) printf '%s' "$c_mesh_purple" ;;
+        mesh-cyan)   printf '%s' "$c_mesh_cyan" ;;
+        mesh-green)  printf '%s' "$c_mesh_green" ;;
+        *)           printf '%s' "$c_amber" ;;
+    esac
+}
+
 print_mesh() {
-    printf '  %bMESH%b    %b🐉 dragon%b  %b🟣 sztudio%b  %b💿 silver%b  %b🌱 div0%b\n' \
-        "$c_bold" "$c_reset" \
-        "$c_dragon" "$c_reset" \
-        "$c_sztudio" "$c_reset" \
-        "$c_silver" "$c_reset" \
-        "$c_div0" "$c_reset"
+    local conf="${VIBECRAFTED_MESH_CONF:-${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/mesh.conf}"
+    local line host theme entries=""
+    if [[ -r "$conf" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            line="${line%%#*}"
+            read -r host theme _ <<<"$line" || true
+            [[ -z "${host:-}" || -z "${theme:-}" ]] && continue
+            entries+="$(printf '  %b%s%b' "$(mesh_color "$theme")" "$host" "$c_reset")"
+        done <"$conf"
+    fi
+    if [[ -n "$entries" ]]; then
+        printf '  %bMESH%b  %b\n' "$c_bold" "$c_reset" "$entries"
+    else
+        printf '  %bMESH%b    %b(no mesh.conf)%b\n' "$c_bold" "$c_reset" "$c_dim" "$c_reset"
+    fi
 }
 
 print_repo_status() {
@@ -149,23 +170,23 @@ print_actions() {
     printf '  '
     osc_link "$(vc_loct_url 'health')" "$(printf '%b🩺 loct health%b' "$c_amber" "$c_reset")"
     printf '    '
-    osc_link "$(vc_loct_url 'follow hotspots')" "$(printf '%b🔥 hotspots%b' "$c_dragon" "$c_reset")"
+    osc_link "$(vc_loct_url 'follow hotspots')" "$(printf '%b🔥 hotspots%b' "$c_mesh_red" "$c_reset")"
     printf '    '
-    osc_link "$(vc_loct_url 'follow dead')" "$(printf '%b💀 dead code%b' "$c_sztudio" "$c_reset")"
+    osc_link "$(vc_loct_url 'follow dead')" "$(printf '%b💀 dead code%b' "$c_mesh_purple" "$c_reset")"
     printf '\n'
 
     # Wiersz 2
     printf '  '
-    osc_link "$(vc_loct_url 'follow cycles')" "$(printf '%b♻️  cycles%b' "$c_silver" "$c_reset")"
+    osc_link "$(vc_loct_url 'follow cycles')" "$(printf '%b♻️  cycles%b' "$c_mesh_cyan" "$c_reset")"
     printf '    '
-    osc_link "$(vc_loct_url 'follow twins')" "$(printf '%b👯 twins%b' "$c_div0" "$c_reset")"
+    osc_link "$(vc_loct_url 'follow twins')" "$(printf '%b👯 twins%b' "$c_mesh_green" "$c_reset")"
     printf '    '
     osc_link "$(vc_loct_url 'doctor')" "$(printf '%b🩻 doctor%b' "$c_amber" "$c_reset")"
     printf '\n'
 
     # Wiersz 3
     printf '  '
-    osc_link "$(vc_aicx_url "$REPO_NAME" "$REPO_NAME")" "$(printf '%b🔎 aicx: %s corpus%b' "$c_silver" "$REPO_NAME" "$c_reset")"
+    osc_link "$(vc_aicx_url "$REPO_NAME" "$REPO_NAME")" "$(printf '%b🔎 aicx: %s corpus%b' "$c_mesh_cyan" "$REPO_NAME" "$c_reset")"
     printf '    '
     osc_link "$(vc_open_url "$REPO/Makefile")" "$(printf '%b📄 Makefile%b' "$c_steel" "$c_reset")"
     printf '    '

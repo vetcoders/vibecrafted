@@ -17,7 +17,7 @@ config/vc-frame/
 ├── config.kdl                       # base config + monochrome chrome (flat UI)
 ├── auto-theme.sh                    # host detection -> theme name
 ├── themes/
-│   └── vetcoders-mesh.kdl           # 4 mesh themes (dragon/sztudio/silver/div0)
+│   └── vetcoders-mesh.kdl           # 4 mesh accent themes (red/purple/cyan/green)
 └── layouts/
     ├── operator.kdl                 # launch alias of built-in vibecrafted — `vibecrafted start`
     ├── dashboard.kdl                # mission control 2x2 grid
@@ -32,21 +32,50 @@ become reachable through the `vibecrafted dashboard <layout>` family of CLIs.
 
 ## Mesh-aware host theming
 
-Kronika 2026-05-05 fixed the Vetcoders mesh topology and assigned a default
-accent color to each workstation so an operator can instantly tell which
-machine they are looking at through screen-share or browser-mirrored vc-frame:
+Vibecrafted ships four accent variants of the base theme so an operator can
+instantly tell workstations apart through screen-share or browser-mirrored
+vc-frame. Which host gets which accent is your configuration, not ours:
 
-| host    | theme               | accent | role                             |
-| ------- | ------------------- | ------ | -------------------------------- |
-| dragon  | `vetcoders-dragon`  | red    | LibraxisAI server, central hub   |
-| sztudio | `vetcoders-sztudio` | purple | Operator desktop                 |
-| silver  | `vetcoders-silver`  | cyan   | Operator laptop                  |
-| div0    | `vetcoders-div0`    | green  | Primary dev laptop               |
-| \*      | `vibecrafted`       | amber  | Neutral default (fleet baseline) |
+| theme         | accent | use it for                       |
+| ------------- | ------ | -------------------------------- |
+| `mesh-red`    | red    | any workstation you pick         |
+| `mesh-purple` | purple | any workstation you pick         |
+| `mesh-cyan`   | cyan   | any workstation you pick         |
+| `mesh-green`  | green  | any workstation you pick         |
+| `vibecrafted` | amber  | Neutral default (fleet baseline) |
 
 The themes live in `config/vc-frame/themes/vetcoders-mesh.kdl`. vc-frame auto-loads
 nested theme blocks from the same config dir, so no extra wiring is needed at
 the framework level.
+
+### Per-host mapping
+
+`auto-theme.sh` never carries a built-in host list. It reads the mapping from
+the first source it finds:
+
+1. `VIBECRAFTED_MESH_MAP` — inline, comma-separated `host=theme` pairs:
+
+   ```bash
+   export VIBECRAFTED_MESH_MAP="host-a=mesh-red,host-b=mesh-green"
+   ```
+
+2. `mesh.conf` — one `host theme` pair per line. Default path is
+   `$VIBECRAFTED_HOME/mesh.conf` (`~/.vibecrafted/mesh.conf`); override with
+   `VIBECRAFTED_MESH_CONF`. `#` comments and blank lines are allowed, and a
+   host may be listed several times to declare aliases:
+
+   ```
+   # host         theme
+   host-a         mesh-red      # server
+   host-b         mesh-purple   # desktop
+   host-c         mesh-cyan     # laptop
+   host-d         mesh-green    # laptop
+   host-d-alias   mesh-green    # same machine, different LocalHostName
+   ```
+
+A host matches an entry when the normalized name is equal to it or starts
+with `<entry>-` (so `host-a-2` picks up the `host-a` line). Hosts with no
+entry — or no configuration at all — resolve to `vibecrafted`.
 
 ### Resolving the theme at runtime
 
@@ -58,9 +87,10 @@ Detection order:
 3. `scutil --get ComputerName` (macOS user-friendly name)
 4. `hostname -s` / `hostname` (Linux fallback)
 
-The result is normalized (lowercase + strip `.local`/`.lan`) before matching,
-and `mgbook16` is wired as an alias for `div0` because that is the value
-`scutil --get LocalHostName` actually returns on that laptop.
+The result is normalized (lowercase + strip `.local`/`.lan`) before matching;
+mapping keys go through the same normalization. If `scutil --get LocalHostName`
+returns something other than the name you use day to day, add that value as an
+alias line in `mesh.conf`.
 
 The `VIBECRAFTED_THEME` env var bypasses host detection outright, so an
 operator can pin a fleet baseline theme even when running on a mesh host.
@@ -169,9 +199,9 @@ Runs `tests/vc-frame-layouts-smoke.sh`, which asserts:
 - every shipped layout parses via `vc-frame --layout <name> setup --check`
 - every mesh theme loads alongside `config.kdl` without parse errors
 - `auto-theme.sh` passes `bash -n` and shellcheck (when installed)
-- `auto-theme.sh` maps `dragon|sztudio|silver|div0|mgbook16` to the right
-  mesh theme and falls back to neutral for unknown hosts (case-insensitive,
-  `.local` suffix tolerant)
+- `auto-theme.sh` resolves hosts through a temporary `mesh.conf` (aliases,
+  `VIBECRAFTED_MESH_MAP` precedence, `VIBECRAFTED_THEME` pin) and falls back
+  to neutral for unknown hosts (case-insensitive, `.local` suffix tolerant)
 
 Tolerant of missing `vc-frame` / `shellcheck` — those checks are deferred to CI
 when the host doesn't have them.
@@ -187,8 +217,8 @@ when the host doesn't have them.
 
 ## Related
 
-- Kronika 2026-05-05 — Vetcoders mesh topology + per-host color assignments
-- Kronika 2026-04-12 — first vc-frame landing
+- Doctrine 2026-05-05 — Vetcoders mesh topology + per-host color assignments
+- Doctrine 2026-04-12 — first vc-frame landing
 - `docs/plans/META_22_SCAFFOLD_TO_RELEASE.md` Plan 12 — full contract
 - `skills/vc-agents/SKILL.md` — operator-facing dispatch surface
 - [`docs/runtime/TRIAGE_AND_SESSIONS.md`](runtime/TRIAGE_AND_SESSIONS.md) — f/x/n, `triage-run`, origin stamp
