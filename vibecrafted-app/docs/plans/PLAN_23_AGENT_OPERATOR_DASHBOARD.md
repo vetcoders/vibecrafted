@@ -84,8 +84,8 @@ responsive grid:
 │ gemini   31  ✓88% ⌀19min  peer-tier 100%  $XX                │
 └───────────────────────────────────────────────────────────────┘
 ┌─ Per-skill invocations ────┬─ Fleet health ───────────────────┐
-│ vc-ownership  ████ 42      │ disk dragon  ▓▓▓▓▓░ 78%          │
-│ vc-marbles    ███  31      │ disk div0    ▓▓▓░░░ 42%          │
+│ vc-ownership  ████ 42      │ disk host-a  ▓▓▓▓▓░ 78%          │
+│ vc-marbles    ███  31      │ disk host-b  ▓▓▓░░░ 42%          │
 │ vc-decorate   ██   18      │ aicx index   stale ⚠ (94h lag)   │
 │ vc-partner    ▏     2  ⚠   │ vc-agents up · MCP servers OK    │
 │ vc-workflow   ██   15      └──────────────────────────────────┘
@@ -122,7 +122,7 @@ vco health                  # fleet health only
 | AICX query           | `aicx serve` MCP endpoint OR `Command::new("aicx").args(["steer", "--json", …])` | Two integration paths; pick at Prompt 3                     |
 | Color / theming      | existing `tui-agent` palette (mid-light / mid-dark)                              | No new tokens                                               |
 | Git log parsing      | `git2` crate or `Command::new("git")`                                            | Per-author + `[agent/workflow]` prefix extraction           |
-| Disk health          | `Command::new("df").args(["-h"])` over Tailscale ssh                             | One impl, two hosts (dragon + div0)                         |
+| Disk health          | `Command::new("df").args(["-h"])` over Tailscale ssh                             | One impl, two hosts (host-a + host-b)                       |
 
 ---
 
@@ -244,7 +244,7 @@ it lands before Wave C-1 (Per-agent stats reads `model` field).
 ## 9) Operator handoff
 
 The plan ships as `~/vc-deliveries/PLAN_23_AGENT_OPERATOR_DASHBOARD.md`
-on dragon. Operator-agent loads via:
+on host-a. Operator-agent loads via:
 
 ```bash
 vc-operator claude --file ~/vc-deliveries/PLAN_23_AGENT_OPERATOR_DASHBOARD.md

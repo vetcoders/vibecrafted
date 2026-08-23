@@ -249,13 +249,13 @@ fn print_help() {
     println!("Voc Agent");
     println!();
     println!("Usage:");
-    println!(
-        "  voc [--view observe|full] [--server <url>] [--state-root <dir>] [--root <path>]"
-    );
+    println!("  voc [--view observe|full] [--server <url>] [--state-root <dir>] [--root <path>]");
     println!();
     println!("Options:");
     println!("  --view observe|full  Default observe: server-backed live board + AICX memory");
-    println!("  --server <url>       Vibecrafted Server origin (default: VC_SERVER_URL or http://127.0.0.1:3024)");
+    println!(
+        "  --server <url>       Vibecrafted Server origin (default: VC_SERVER_URL or http://127.0.0.1:3024)"
+    );
     println!("  --state-root <dir>   Control-plane state root under VIBECRAFTED_HOME");
     println!("  --deck <path>        Command deck binary or script to launch workflows");
     println!("  --root <path>        Workspace root passed through to launched workflows");

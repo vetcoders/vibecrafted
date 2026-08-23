@@ -49,7 +49,10 @@ const LOCTREE_CONTEXT_ATLAS_MANIFEST: &str = ".loctree/context-atlas/manifest.js
 const PROBE_CACHE_TTL_SECS: u64 = 60;
 const TAILSCALE_STATUS_TIMEOUT_MS: u64 = 750;
 const TAILSCALE_STATUS_JSON_ENV: &str = "VIBECRAFTED_TAILSCALE_STATUS_JSON";
-const TAILSCALE_DISPATCH_TARGETS: &[&str] = &["dragon", "div0"];
+/// Comma-separated dispatch hostnames; overrides `mesh.conf` when set.
+const DISPATCH_TARGETS_ENV: &str = "VIBECRAFTED_DISPATCH_TARGETS";
+/// `${VIBECRAFTED_HOME}/mesh.conf` — one `host theme` pair per line, `#` comments.
+const MESH_CONF_FILE: &str = "mesh.conf";
 const AICX_HEALTH_TIMEOUT_MS: u64 = 750;
 const AICX_HEALTH_JSON_ENV: &str = "VIBECRAFTED_AICX_HEALTH_JSON";
 const DISK_HEALTH_JSON_ENV: &str = "VIBECRAFTED_DISK_HEALTH_JSON";
@@ -1350,11 +1353,55 @@ where
 }
 
 fn tailscale_health_signals() -> Vec<FleetHealthSignal> {
-    tailscale_health_signals_from_status(cached_tailscale_status_json())
+    let targets = configured_dispatch_targets();
+    tailscale_health_signals_from_status(cached_tailscale_status_json(), &targets)
+}
+
+/// Dispatch targets in precedence order: `VIBECRAFTED_DISPATCH_TARGETS`
+/// (comma-separated) first, then `${VIBECRAFTED_HOME}/mesh.conf`. No config
+/// yields an empty list — the probe then reports a neutral "not configured"
+/// signal instead of guessing hostnames.
+fn configured_dispatch_targets() -> Vec<String> {
+    if let Some(raw) = env::var_os(DISPATCH_TARGETS_ENV) {
+        let raw = raw.to_string_lossy();
+        return dedupe_preserving_order(raw.split(',').map(str::trim));
+    }
+    let mesh_conf = crate::config::default_vibecrafted_home().join(MESH_CONF_FILE);
+    match fs::read_to_string(&mesh_conf) {
+        Ok(contents) => parse_mesh_conf_hosts(&contents),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// First whitespace-separated token (host) of every non-comment, non-blank line.
+fn parse_mesh_conf_hosts(contents: &str) -> Vec<String> {
+    dedupe_preserving_order(
+        contents
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .filter_map(|line| line.split_whitespace().next()),
+    )
+}
+
+fn dedupe_preserving_order<'a>(hosts: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    hosts
+        .filter(|host| !host.is_empty())
+        .filter(|host| seen.insert(normalize_tailscale_name(host)))
+        .map(str::to_string)
+        .collect()
+}
+
+fn is_dispatch_target(key: &str, targets: &[String]) -> bool {
+    targets
+        .iter()
+        .any(|target| key == normalize_tailscale_name(target))
 }
 
 fn tailscale_health_signals_from_status(
     status_json: Result<String, String>,
+    targets: &[String],
 ) -> Vec<FleetHealthSignal> {
     let raw = match status_json {
         Ok(raw) => raw,
@@ -1388,10 +1435,10 @@ fn tailscale_health_signals_from_status(
     let mut signals = Vec::new();
     for (name, peer) in peers {
         reported_peer_keys.extend(peer.match_keys(&name));
-        signals.push(tailscale_peer_signal(&name, peer));
+        signals.push(tailscale_peer_signal(&name, peer, targets));
     }
 
-    for target in TAILSCALE_DISPATCH_TARGETS {
+    for target in targets {
         if !reported_peer_keys
             .iter()
             .any(|key| key == &normalize_tailscale_name(target))
@@ -1405,21 +1452,31 @@ fn tailscale_health_signals_from_status(
     }
 
     if signals.is_empty() {
-        return vec![FleetHealthSignal {
+        signals.push(FleetHealthSignal {
             label: "tailscale peers".to_string(),
             status: FleetHealthStatus::Unknown,
             detail: "tailscale status reported no peers".to_string(),
-        }];
+        });
+    }
+    if targets.is_empty() {
+        signals.push(FleetHealthSignal {
+            label: "tailscale targets".to_string(),
+            status: FleetHealthStatus::Unknown,
+            detail: format!("no dispatch targets configured ({MESH_CONF_FILE})"),
+        });
     }
     signals
 }
 
-fn tailscale_peer_signal(name: &str, peer: &TailscalePeer) -> FleetHealthSignal {
-    let critical = peer.match_keys(name).iter().any(|key| {
-        TAILSCALE_DISPATCH_TARGETS
-            .iter()
-            .any(|target| key == &normalize_tailscale_name(target))
-    });
+fn tailscale_peer_signal(
+    name: &str,
+    peer: &TailscalePeer,
+    targets: &[String],
+) -> FleetHealthSignal {
+    let critical = peer
+        .match_keys(name)
+        .iter()
+        .any(|key| is_dispatch_target(key, targets));
     match peer.online {
         Some(true) => FleetHealthSignal {
             label: format!("tailscale {name}"),
@@ -3089,11 +3146,13 @@ mod tests {
 
     #[test]
     fn tailscale_probe_maps_reported_peers_and_missing_dispatch_targets() {
-        let signals = tailscale_health_signals_from_status(Ok(r#"{
+        let targets = vec!["host-a".to_string(), "host-b".to_string()];
+        let signals = tailscale_health_signals_from_status(
+            Ok(r#"{
                 "Peer": {
                     "node-a": {
-                        "HostName": "dragon",
-                        "DNSName": "dragon.tailnet.ts.net.",
+                        "HostName": "host-a",
+                        "DNSName": "host-a.tailnet.ts.net.",
                         "Online": false,
                         "TailscaleIPs": ["100.64.0.1"]
                     },
@@ -3110,14 +3169,16 @@ mod tests {
                     }
                 }
             }"#
-        .to_string()));
+            .to_string()),
+            &targets,
+        );
 
-        let dragon = signals
+        let host_a = signals
             .iter()
-            .find(|signal| signal.label == "tailscale dragon")
-            .expect("dragon signal");
-        assert_eq!(dragon.status, FleetHealthStatus::Blocked);
-        assert!(dragon.detail.contains("dispatch target offline"));
+            .find(|signal| signal.label == "tailscale host-a")
+            .expect("host-a signal");
+        assert_eq!(host_a.status, FleetHealthStatus::Blocked);
+        assert!(host_a.detail.contains("dispatch target offline"));
 
         let blacky = signals
             .iter()
@@ -3125,18 +3186,73 @@ mod tests {
             .expect("blacky signal");
         assert_eq!(blacky.status, FleetHealthStatus::Warn);
 
-        let div0 = signals
+        let host_b = signals
             .iter()
-            .find(|signal| signal.label == "tailscale div0")
-            .expect("missing div0 signal");
-        assert_eq!(div0.status, FleetHealthStatus::Blocked);
-        assert!(div0.detail.contains("missing from tailscale status"));
+            .find(|signal| signal.label == "tailscale host-b")
+            .expect("missing host-b signal");
+        assert_eq!(host_b.status, FleetHealthStatus::Blocked);
+        assert!(host_b.detail.contains("missing from tailscale status"));
+        assert!(
+            !signals
+                .iter()
+                .any(|signal| signal.label == "tailscale targets"),
+            "configured targets must not emit the not-configured signal"
+        );
+    }
+
+    #[test]
+    fn tailscale_probe_reports_neutral_signal_without_dispatch_targets() {
+        let signals = tailscale_health_signals_from_status(
+            Ok(r#"{
+                "Peer": {
+                    "node-a": {
+                        "HostName": "host-a",
+                        "Online": false,
+                        "TailscaleIPs": ["100.64.0.1"]
+                    }
+                }
+            }"#
+            .to_string()),
+            &[],
+        );
+        let host_a = signals
+            .iter()
+            .find(|signal| signal.label == "tailscale host-a")
+            .expect("host-a signal");
+        assert_eq!(
+            host_a.status,
+            FleetHealthStatus::Warn,
+            "not a dispatch target"
+        );
+        let targets = signals
+            .iter()
+            .find(|signal| signal.label == "tailscale targets")
+            .expect("neutral targets signal");
+        assert_eq!(targets.status, FleetHealthStatus::Unknown);
+        assert_eq!(targets.detail, "no dispatch targets configured (mesh.conf)");
+    }
+
+    #[test]
+    fn mesh_conf_hosts_take_first_token_skip_comments_and_dedupe() {
+        let hosts = parse_mesh_conf_hosts(
+            "# mesh hosts\n\nhost-a ember\n  host-b  dusk  \nHost-A ember\n#host-c x\nhost-d\n",
+        );
+        assert_eq!(hosts, vec!["host-a", "host-b", "host-d"]);
+        assert!(parse_mesh_conf_hosts("").is_empty());
+    }
+
+    #[test]
+    fn dispatch_targets_env_is_comma_separated_and_deduped() {
+        let hosts = dedupe_preserving_order("host-b, host-a,,host-b ".split(',').map(str::trim));
+        assert_eq!(hosts, vec!["host-b", "host-a"]);
     }
 
     #[test]
     fn tailscale_probe_degrades_to_one_signal_when_status_is_unavailable() {
-        let signals =
-            tailscale_health_signals_from_status(Err("tailscaled is not running".to_string()));
+        let signals = tailscale_health_signals_from_status(
+            Err("tailscaled is not running".to_string()),
+            &["host-a".to_string()],
+        );
         assert_eq!(signals.len(), 1);
         assert_eq!(signals[0].label, "tailscale status");
         assert_eq!(signals[0].status, FleetHealthStatus::Unknown);

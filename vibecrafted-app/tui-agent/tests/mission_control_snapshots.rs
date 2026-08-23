@@ -455,19 +455,19 @@ fn mission_control_tab_tailscale_probe_snapshot() {
     };
     state.fleet_health = vec![
         FleetHealthSignal {
-            label: "tailscale div0".to_string(),
+            label: "tailscale host-b".to_string(),
             status: FleetHealthStatus::Ok,
-            detail: "online (100.73.193.98)".to_string(),
+            detail: "online (100.64.0.11)".to_string(),
         },
         FleetHealthSignal {
-            label: "tailscale dragon".to_string(),
+            label: "tailscale host-a".to_string(),
             status: FleetHealthStatus::Blocked,
             detail: "dispatch target offline (100.64.0.10)".to_string(),
         },
         FleetHealthSignal {
             label: "tailscale blacky".to_string(),
             status: FleetHealthStatus::Warn,
-            detail: "peer offline (100.64.0.11)".to_string(),
+            detail: "peer offline (100.64.0.12)".to_string(),
         },
         FleetHealthSignal {
             label: "tailscale status".to_string(),
@@ -785,17 +785,18 @@ fn vc_admin_status_renders_all_panels_from_disk_fixtures() {
             "VIBECRAFTED_LOCTREE_SNAPSHOT_FRESHNESS_JSON",
             r#"{"fresh": true, "head_label": "refs/heads/feat/runtime-integration"}"#,
         )
+        .env("VIBECRAFTED_DISPATCH_TARGETS", "host-a,host-b")
         .env(
             "VIBECRAFTED_TAILSCALE_STATUS_JSON",
             r#"{
                 "Peer": {
-                    "node-div0": {
-                        "HostName": "div0",
+                    "node-host-b": {
+                        "HostName": "host-b",
                         "Online": true,
-                        "TailscaleIPs": ["100.73.193.98"]
+                        "TailscaleIPs": ["100.64.0.11"]
                     },
-                    "node-dragon": {
-                        "HostName": "dragon",
+                    "node-host-a": {
+                        "HostName": "host-a",
                         "Online": false,
                         "TailscaleIPs": ["100.64.0.10"]
                     }

@@ -1,9 +1,9 @@
 use crate::app::{App, AppTab, LaunchFocus};
-use crate::observe::ConsoleView;
 use crate::mission_control::{
     ActionPriority, ActionQueueItem, ActionQueueKind, ActiveDispatch, AgentStatsRow, DataQuality,
     FailureEntry, FleetHealthSignal, FleetHealthStatus, SkillStatsRow, WaveSegment, WaveState,
 };
+use crate::observe::ConsoleView;
 use crate::state::RunKind;
 use ratatui::prelude::*;
 use ratatui::style::{Color, Modifier, Style};
@@ -209,13 +209,12 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
         )));
     }
     frame.render_widget(
-        Paragraph::new(body)
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(Span::styled(" Transcript ", Style::default().fg(Color::White))),
-            ),
+        Paragraph::new(body).wrap(Wrap { trim: false }).block(
+            Block::default().borders(Borders::ALL).title(Span::styled(
+                " Transcript ",
+                Style::default().fg(Color::White),
+            )),
+        ),
         columns[1],
     );
 }
@@ -246,11 +245,9 @@ fn draw_memory_overlay(frame: &mut Frame, app: &App) {
         lines.push(Line::from(line.clone()));
     }
     frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: true }).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Memory "),
-        ),
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .block(Block::default().borders(Borders::ALL).title(" Memory ")),
         area,
     );
 }

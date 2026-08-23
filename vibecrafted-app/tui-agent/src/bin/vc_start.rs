@@ -26,7 +26,11 @@ const SYSTEM_PATH_ENTRIES: &[&str] = &[
     "/sbin",
 ];
 
-fn host_agent_search_path(runtime_bin: &Path, home: Option<&Path>, inherited: Option<&str>) -> String {
+fn host_agent_search_path(
+    runtime_bin: &Path,
+    home: Option<&Path>,
+    inherited: Option<&str>,
+) -> String {
     let mut entries: Vec<String> = Vec::new();
     let mut push = |path: PathBuf| {
         if path.is_dir() {
@@ -124,8 +128,11 @@ fn run() -> Result<(), String> {
 
     let home = env::var_os("HOME").map(PathBuf::from);
     let inherited_path = env::var("PATH").ok();
-    let runtime_path =
-        host_agent_search_path(&runtime.join("bin"), home.as_deref(), inherited_path.as_deref());
+    let runtime_path = host_agent_search_path(
+        &runtime.join("bin"),
+        home.as_deref(),
+        inherited_path.as_deref(),
+    );
     let mut command = Command::new("/bin/bash");
     command
         .args([
@@ -201,10 +208,16 @@ mod tests {
         assert!(!entries.contains(&""));
         assert!(!entries.contains(&"."));
         assert!(!entries.contains(&"bin"));
-        assert_eq!(entries.iter().filter(|entry| **entry == "/usr/bin").count(), 1);
+        assert_eq!(
+            entries.iter().filter(|entry| **entry == "/usr/bin").count(),
+            1
+        );
         let canon_end = entries.iter().position(|entry| *entry == "/sbin").unwrap();
         let tail = entries.iter().position(|entry| *entry == "/tmp").unwrap();
-        assert!(tail > canon_end, "inherited tail must follow the canon: {path}");
+        assert!(
+            tail > canon_end,
+            "inherited tail must follow the canon: {path}"
+        );
     }
 
     #[test]

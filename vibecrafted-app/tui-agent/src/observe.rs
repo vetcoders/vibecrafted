@@ -125,7 +125,11 @@ pub fn normalize_origin(raw: &str) -> String {
 }
 
 pub fn default_server_origin() -> String {
-    for key in ["VC_SERVER_URL", "VC_SERVER_BROWSER_URL", "VIBECRAFTED_SERVER"] {
+    for key in [
+        "VC_SERVER_URL",
+        "VC_SERVER_BROWSER_URL",
+        "VIBECRAFTED_SERVER",
+    ] {
         if let Ok(value) = std::env::var(key) {
             let trimmed = value.trim();
             if !trimmed.is_empty() {
@@ -149,8 +153,7 @@ pub fn age_label(started_at: &str, now: SystemTime) -> String {
     let Some(started) = parsed else {
         return "—".to_string();
     };
-    let started = SystemTime::UNIX_EPOCH
-        + Duration::from_secs(started.timestamp().max(0) as u64);
+    let started = SystemTime::UNIX_EPOCH + Duration::from_secs(started.timestamp().max(0) as u64);
     let elapsed = now.duration_since(started).unwrap_or_default();
     if elapsed.as_secs() < 3600 {
         return format!("{}m", elapsed.as_secs() / 60);
@@ -168,7 +171,11 @@ pub fn parse_state_json(bytes: &[u8], now: SystemTime) -> anyhow::Result<Vec<Obs
 
 fn runs_from_envelope(envelope: StateEnvelope, now: SystemTime) -> Vec<ObserveRun> {
     let mut runs = Vec::new();
-    for dto in envelope.active_runs.into_iter().chain(envelope.stalled_runs) {
+    for dto in envelope
+        .active_runs
+        .into_iter()
+        .chain(envelope.stalled_runs)
+    {
         let run_id = dto.run_id.unwrap_or_default();
         if run_id.is_empty() {
             continue;
@@ -229,7 +236,11 @@ fn truncate(value: &str, width: usize) -> String {
     if value.chars().count() <= width {
         return value.to_string();
     }
-    value.chars().take(width.saturating_sub(1)).collect::<String>() + "…"
+    value
+        .chars()
+        .take(width.saturating_sub(1))
+        .collect::<String>()
+        + "…"
 }
 
 #[allow(dead_code)]

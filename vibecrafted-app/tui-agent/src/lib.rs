@@ -400,7 +400,7 @@ fn launch_selected(app: &mut App) -> anyhow::Result<()> {
             }
             Err(error) => app.show_error(
                 "launch failed before spawn",
-                vec![format!("{summary}"), format!("{error:#}")],
+                vec![summary.clone(), format!("{error:#}")],
             ),
         }
     } else if let Err(error) = suspend_and_run(&command) {
