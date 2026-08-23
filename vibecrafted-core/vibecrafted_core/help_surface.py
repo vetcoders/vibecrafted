@@ -410,6 +410,11 @@ Examples:
   vibecrafted init claude
   vibecrafted implement codex -p "Ship dark mode"
   vibecrafted marbles claude -p "Loop until clean"
+
+Words:
+  run        one dispatched agent job; its report + transcript live under ~/.vibecrafted
+  stage      one step of the ship cycle above (scaffold, implement, review, …)
+  workspace  the repository root a run works in, tracked by the control plane
 """.lstrip("\n")
 
 

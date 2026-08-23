@@ -990,11 +990,16 @@ cmd_init_help() {
   printf '  Start an interactive repository orientation session with an agent.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted init [claude|codex|agy|junie|grok]\n'
+  printf '  vibecrafted init [claude|codex|agy|junie|grok] [--runtime terminal|visible|plain] [--prompt "<context>"]\n'
   printf '  vc-init [claude|codex|agy|junie|grok]\n'
+  printf '\n'
+  printf '%bRuntime:%b\n' "$_bold" "$_reset"
+  printf '  terminal  (default) open a tab in the vc-frame cockpit; falls back to plain when vc-frame is absent\n'
+  printf '  plain     start the agent in this terminal, no cockpit needed\n'
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted init claude\n'
+  printf '  vibecrafted init claude --runtime plain\n'
   printf '  vc-init codex\n'
   printf '\n'
 }
@@ -1003,11 +1008,12 @@ cmd_status_help() {
   printf '\n'
   printf '%b⚒%b  %bstatus%b\n' "$_copper" "$_reset" "$_bold" "$_reset"
   printf '%b─────────────────────────────────────────%b\n' "$_steel" "$_reset"
-  printf '  Show recent agent activity from today.\n'
+  printf '  Show today'"'"'s runs with their state and report path.\n'
+  printf '  A run is one dispatched agent job; its report and transcript live under ~/.vibecrafted.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted status\n'
-  printf '  vibecrafted stats\n'
+  printf '  vibecrafted status [--all] [--limit N] [--json]\n'
+  printf '  vibecrafted stats skills     (skill context sizes)\n'
   printf '\n'
 }
 
@@ -4250,6 +4256,11 @@ cmd_help() {
   printf '  vibecrafted implement codex -p "Ship dark mode"\n'
   printf '  vibecrafted marbles claude -p "Loop until clean"\n'
   printf '\n'
+  printf '%bWords:%b\n' "$_bold" "$_reset"
+  printf '  run        one dispatched agent job; its report + transcript live under ~/.vibecrafted\n'
+  printf '  stage      one step of the ship cycle above (scaffold, implement, review, …)\n'
+  printf '  workspace  the repository root a run works in, tracked by the control plane\n'
+  printf '\n'
 }
 
 cmd_help_full() {
@@ -4789,6 +4800,17 @@ cmd_receipt() {
     "$@"
 }
 
+cmd_settlements() {
+  local core_dir
+  core_dir="$(_core_module_dir 2>/dev/null || true)"
+  [[ -n "$core_dir" ]] || {
+    printf '%b✗%b Vibecrafted Core module not found.\n' "$_red" "$_reset" >&2
+    return 1
+  }
+  PYTHONPATH="$core_dir${PYTHONPATH:+:$PYTHONPATH}" \
+    "$(_vibecrafted_python)" -m vibecrafted_core.cli settlements "$@"
+}
+
 cmd_workspace() {
   local core_dir
   core_dir="$(_core_module_dir 2>/dev/null || true)"
@@ -4891,7 +4913,23 @@ cmd_stats() {
       cmd_stats_skills
       return
       ;;
+    help|-h|--help)
+      cmd_status_help
+      return 0
+      ;;
   esac
+
+  # Control-plane board (runs + reports) is the product truth; the legacy
+  # artifacts scan below only runs when core is unavailable.
+  local core_dir
+  core_dir="$(_core_module_dir 2>/dev/null || true)"
+  if [[ -n "$core_dir" ]]; then
+    PYTHONPATH="$core_dir${PYTHONPATH:+:$PYTHONPATH}" \
+      "$(_vibecrafted_python)" -c \
+        'from vibecrafted_core.run_board import status_main; import sys; raise SystemExit(status_main(sys.argv[1:]))' \
+        "$@"
+    return
+  fi
 
   local today_dir ts_prefix artifacts_dir local_artifacts_dir matches
   local search_dirs=()
@@ -5619,6 +5657,7 @@ main() {
     dispatch|dispatcher) cmd_dispatch "$@" ;;
     telemetry) cmd_telemetry "$@" ;;
     stats|status) cmd_stats "$@" ;;
+    settlements) cmd_settlements "$@" ;;
     update|upgrade) cmd_update "$@" ;;
     uninstall|remove) cmd_uninstall ;;
     version|--version|-v) printf 'vibecrafted %s\n' "$(_version)" ;;

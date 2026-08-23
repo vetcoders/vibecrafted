@@ -4,11 +4,11 @@
 _vetcoders_init_runtime() {
   local runtime="${1:-terminal}"
   case "$runtime" in
-    terminal|visible)
+    terminal|visible|plain)
       printf '%s\n' "$runtime"
       ;;
     *)
-      echo "vc-init is interactive-only: use --runtime terminal or visible." >&2
+      echo "vc-init is interactive-only: use --runtime terminal, visible, or plain (no vc-frame)." >&2
       return 1
       ;;
   esac
