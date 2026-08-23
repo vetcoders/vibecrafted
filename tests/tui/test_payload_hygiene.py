@@ -37,10 +37,10 @@ def test_scanner_reports_a_planted_literal_and_fails(tmp_path: Path) -> None:
     (payload / "nested").mkdir(parents=True)
     (payload / "clean.txt").write_text("nothing to see", encoding="utf-8")
     (payload / "nested/leaky.bin").write_bytes(
-        b"\x00\x01/Users/someone/.cargo/registry/src\x00 and again /Users/someone/x"
+        b"\x00\x01/Users/tester/.cargo/registry/src\x00 and again /Users/tester/x"
     )
 
-    result = run_scanner("--root", str(payload), "--forbid", "/Users/someone")
+    result = run_scanner("--root", str(payload), "--forbid", "/Users/tester")
 
     assert result.returncode == 1, result.stdout + result.stderr
     assert "nested/leaky.bin" in result.stderr
@@ -56,7 +56,7 @@ def test_scanner_passes_a_payload_that_names_nobody(tmp_path: Path) -> None:
     (payload / "binary").write_bytes(b"\x7fELF" + b"\x00" * 4096)
     (payload / "text.txt").write_text("/usr/src/vibecrafted/main.rs", encoding="utf-8")
 
-    result = run_scanner("--root", str(payload), "--forbid", "/Users/someone")
+    result = run_scanner("--root", str(payload), "--forbid", "/Users/tester")
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "2 files scanned" in result.stdout
@@ -70,7 +70,7 @@ def test_scanner_finds_a_literal_that_straddles_a_read_boundary(tmp_path: Path) 
     """
     payload = tmp_path / "payload"
     payload.mkdir()
-    needle = b"/Users/someone"
+    needle = b"/Users/tester"
     chunk = 4 * 1024 * 1024
     # Land the needle so it begins a few bytes before the first seam.
     prefix = b"\x00" * (chunk - 4)
@@ -97,12 +97,12 @@ def test_scanner_refuses_literals_that_would_match_everything(tmp_path: Path) ->
 
 def test_scanner_does_not_follow_symlinks_out_of_the_payload(tmp_path: Path) -> None:
     outside = tmp_path / "outside.txt"
-    outside.write_text("/Users/someone/secret", encoding="utf-8")
+    outside.write_text("/Users/tester/secret", encoding="utf-8")
     payload = tmp_path / "payload"
     payload.mkdir()
     (payload / "link").symlink_to(outside)
 
-    result = run_scanner("--root", str(payload), "--forbid", "/Users/someone")
+    result = run_scanner("--root", str(payload), "--forbid", "/Users/tester")
 
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -224,7 +224,7 @@ def test_the_literal_set_reaches_the_workshop_above_the_checkout() -> None:
     """
     literals = run_library(
         "payload_hygiene_literals",
-        HOME="/Users/nobody",
+        HOME="/Users/tester",
         REPO_ROOT="/Volumes/workshop/org/suite/repo",
     ).split()
 
@@ -242,7 +242,7 @@ def test_the_ancestor_walk_stops_before_generic_system_roots() -> None:
     everything is a gate nobody keeps.
     """
     assert (
-        run_library('payload_hygiene_topmost_host_root "/Users/nobody"').strip() == ""
+        run_library('payload_hygiene_topmost_host_root "/Users/tester"').strip() == ""
     )
     assert (
         run_library('payload_hygiene_topmost_host_root "/Volumes/solo"').strip() == ""

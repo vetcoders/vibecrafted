@@ -63,10 +63,10 @@ jobs:
         /Users/runner
         ${{ github.workspace }}
       # …and what the runner must still prove: the payload names neither the
-      # operator whose Developer ID signs it nor their workshop.
-      PAYLOAD_HYGIENE_EXTRA_LITERALS: |
-        /Users/polyversai
-        /Volumes/vc-workspace
+      # operator whose Developer ID signs it nor their workshop. The literals
+      # live in the repository variable PAYLOAD_HYGIENE_EXTRA_LITERALS (one
+      # per line), not in this public file.
+      PAYLOAD_HYGIENE_EXTRA_LITERALS: ${{ vars.PAYLOAD_HYGIENE_EXTRA_LITERALS }}
     steps:
       - name: Check out vibecrafted
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -125,6 +125,8 @@ jobs:
           for v in VC_CERT_P12_B64 VC_CERT_PASSWORD VC_SIGNING_IDENTITY VC_SIGNING_KEY VC_NOTARY_APPLE_ID VC_NOTARY_TEAM_ID VC_NOTARY_PASSWORD VC_FONT_PASSPHRASE; do
             [[ -n "${!v:-}" ]] || { echo "::error::missing secret $v"; exit 1; }
           done
+          [[ -n "${PAYLOAD_HYGIENE_EXTRA_LITERALS//[[:space:]]/}" ]] \
+            || { echo "::error::repository variable PAYLOAD_HYGIENE_EXTRA_LITERALS is empty; the hygiene gate would prove nothing about the operator"; exit 1; }
           umask 077
           mkdir -p "$KEYS/fonts"
           printf '%s' "$VC_CERT_P12_B64" | base64 --decode > "$KEYS/Certificates.p12"

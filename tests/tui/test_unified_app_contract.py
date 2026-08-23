@@ -973,14 +973,14 @@ def test_host_path_scan_distinguishes_windows_examples_from_unix_paths(
     tmp_path: Path,
 ) -> None:
     payload = tmp_path / "payload"
-    payload.write_bytes(b"splitroot('C:/Users/Barney')")
+    payload.write_bytes(b"splitroot('C:/Users/tester')")
     contract._reject_host_bound_paths(
         payload,
         relative="payload",
         kind="executable",
     )
 
-    payload.write_bytes(b"panic at /Users/operator/src/main.rs")
+    payload.write_bytes(b"panic at /Users/tester/src/main.rs")
     _assert_error(
         contract.E_PATH,
         lambda: contract._reject_host_bound_paths(
@@ -1563,7 +1563,7 @@ def test_app_negative_controls_reject_competing_or_unbound_product_shape(
     app = tmp_path / "Vibecrafted.app"
     manifest = _app_fixture(app, macho_executable)
     if mutation == "wrong_bundle_id":
-        manifest["bundle_id"] = "space.div0.vibecrafted"
+        manifest["bundle_id"] = "io.example.vibecrafted"
     elif mutation == "wrong_executable":
         manifest["bundle_executable"] = "vibecrafted-launch"
     elif mutation == "missing_module":

@@ -1804,7 +1804,7 @@ def _launchctl_start_diagnostics() -> tuple[str, bool]:
 
 def _launchctl_job_owns_paths(paths: SupervisorPaths) -> bool:
     """Cross-check the loaded launchd job's plist path, program path, and
-    environment (supervisor/home/runtime_home/operator_home) against `paths`,
+    environment (supervisor, home, runtime_home, operator_home) against `paths`,
     to detect a stale job definition pointed at a different install."""
 
     result = _launchctl(["print", _launch_target()])

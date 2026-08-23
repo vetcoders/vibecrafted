@@ -336,7 +336,7 @@ def test_wrapper_pins_darwin_socket_dir_when_unset(tmp_path: Path) -> None:
 
 
 def test_wrapper_allows_non_product_session_without_config(tmp_path: Path) -> None:
-    """Non-product sessions may run bare without product config (polyversai etc.)."""
+    """Non-product sessions may run bare without product config (scratch sessions etc.)."""
     home = tmp_path / "home"
     xdg = tmp_path / "xdg"
     bin_dir = tmp_path / "bin"
@@ -360,14 +360,14 @@ def test_wrapper_allows_non_product_session_without_config(tmp_path: Path) -> No
         "USER": "test",
     }
     proc = subprocess.run(
-        [str(wrapper), "attach", "polyversai"],
+        [str(wrapper), "attach", "scratch"],
         capture_output=True,
         text=True,
         env=env,
         check=False,
     )
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
-    assert "REAL_RAN args=attach polyversai" in proc.stdout
+    assert "REAL_RAN args=attach scratch" in proc.stdout
 
 
 def test_vc_start_probe_pins_product_config(tmp_path: Path) -> None:
