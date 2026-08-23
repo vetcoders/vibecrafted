@@ -235,9 +235,15 @@ to fall.
    on-disk state before either side loses anything.
 3. `vetcoders_install.py` ↔ `AppDelegate.installCanonicalRuntime` — the fork's
    open cut (`feat/dmg-first-run`, `foundations/fail-closed`).
-4. `wrappers.repo_root` (invocation cwd) ↔ `loop.repo_root` (git toplevel) —
-   two meanings under one name; rename is the honest fix, tests patch the
-   former.
+4. ~~`wrappers.repo_root` ↔ `loop.repo_root`~~ — renamed `invocation_root`
+   (955e24b0); `loop.repo_root` is the only `repo_root`.
 5. `delivery/doctor.py` ↔ `dispatch/doctor.py`, `capabilities.py` ↔
    `continuity/capabilities.py` — namesakes across domains.
 6. The integrator (§7) and the orientation pack (§6) — product features, next.
+
+### Gates (2026-08-23, after 0b508a5e)
+
+`make test-core` 1668 passed / 12 skipped · `make test` 1294 passed / 24 skipped /
+1 failed (PL-mirror freshness, red since `de3a017b` — fixed in 0b508a5e, module
+re-run 4 passed) · `make check` passed · pre-commit and pre-push green on every
+commit · focused suites for each cut listed in the commit bodies.
