@@ -232,7 +232,6 @@ REQUIRED_FILES = frozenset(
         "install.toml",
         "scripts/distribution_manifest.py",
         "scripts/vetcoders_install.py",
-        "scripts/runtime_paths.py",
         "scripts/vibecrafted",
         "scripts/verify-vibecrafted-product.sh",
         "vibecrafted-core/pyproject.toml",

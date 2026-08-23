@@ -52,11 +52,37 @@ from typing import Any, Literal
 try:
     _distribution_manifest = importlib.import_module("distribution_manifest")
     _installer_brand = importlib.import_module("installer_brand")
-    _runtime_paths = importlib.import_module("runtime_paths")
 except ModuleNotFoundError:  # pragma: no cover - import path depends on entrypoint
     _distribution_manifest = importlib.import_module("scripts.distribution_manifest")
     _installer_brand = importlib.import_module("scripts.installer_brand")
-    _runtime_paths = importlib.import_module("scripts.runtime_paths")
+
+
+def _load_runtime_paths() -> Any:
+    """Load vibecrafted_core/runtime_paths.py by file, never through the package.
+
+    The root grammar has exactly one definition and it lives in the package.
+    This installer runs on the host's python3 before the product interpreter
+    exists, and ``vibecrafted_core/__init__.py`` pulls the whole control plane
+    (Python 3.11+), so the module is executed from its file without importing
+    the package. No copy of the grammar lives under scripts/.
+    """
+    module_path = (
+        Path(__file__).resolve().parents[1]
+        / "vibecrafted-core"
+        / "vibecrafted_core"
+        / "runtime_paths.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "vibecrafted_core.runtime_paths", module_path
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load runtime paths from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_runtime_paths = _load_runtime_paths()
 
 FOOTER_BRANDING = _installer_brand.FOOTER_BRANDING
 FRAMEWORK_STAMP = _installer_brand.FRAMEWORK_STAMP
