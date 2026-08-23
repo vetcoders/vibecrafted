@@ -168,7 +168,6 @@ def test_python_resolver_skips_bash_product_launchers(tmp_path: Path) -> None:
     fake_python.chmod(0o755)
 
     env = os.environ.copy()
-    env.pop("VIBECRAFTED_PYTHON", None)
     env["PATH"] = f"{fake_bin}:/usr/bin:/bin"
     result = subprocess.run(
         ["bash", "-c", f'source "{launcher_copy}"; _vibecrafted_python'],
@@ -278,6 +277,13 @@ def _write_capture_script(script_path: Path, capture_file: Path) -> None:
         encoding="utf-8",
     )
     script_path.chmod(0o755)
+
+
+def _write_fake_core_package(root: Path) -> None:
+    """Give a fake tools root the one file the deck probes for vibecrafted-core."""
+    pkg = root / "vibecrafted-core" / "vibecrafted_core"
+    pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / "dispatcher.py").write_text("", encoding="utf-8")
 
 
 def _write_fake_python3(bin_dir: Path, capture_file: Path) -> None:
@@ -1294,14 +1300,14 @@ def test_installed_launcher_gui_uses_python_control_plane_surface(
     (current_root / "scripts" / "installer_gui.py").write_text(
         "#!/usr/bin/env python3\n", encoding="utf-8"
     )
-    (current_root / "scripts" / "control_plane_state.py").write_text(
-        "#!/usr/bin/env python3\n", encoding="utf-8"
-    )
+    _write_fake_core_package(current_root)
     _write_fake_python3(fake_bin, capture_file)
 
     env = os.environ.copy()
     env["HOME"] = str(home)
-    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+    # Isolate PATH: a python-shebang `vibecrafted` console script in a venv would
+    # otherwise own the -m call and the fake python3 would never see the sync.
+    env["PATH"] = f"{fake_bin}:/usr/bin:/bin"
     env["CAPTURE_FILE"] = str(capture_file)
 
     result = subprocess.run(
@@ -1314,7 +1320,7 @@ def test_installed_launcher_gui_uses_python_control_plane_surface(
     )
 
     payload = capture_file.read_text(encoding="utf-8")
-    assert f"{current_root / 'scripts' / 'control_plane_state.py'} sync" in payload
+    assert "-m vibecrafted_core.control_plane sync" in payload
     assert (
         f"{current_root / 'scripts' / 'installer_gui.py'} --source {current_root} --no-open --port 4173"
         in payload
@@ -1487,9 +1493,7 @@ def test_installed_launcher_tui_uses_shared_state_and_voc_binary(
         encoding="utf-8",
     )
     (current_root / "VERSION").write_text("0.0.0-test\n", encoding="utf-8")
-    (current_root / "scripts" / "control_plane_state.py").write_text(
-        "#!/usr/bin/env python3\n", encoding="utf-8"
-    )
+    _write_fake_core_package(current_root)
     (current_root / "scripts" / "vibecrafted").write_text(
         "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8"
     )
@@ -1510,9 +1514,8 @@ def test_installed_launcher_tui_uses_shared_state_and_voc_binary(
         env=env,
     )
 
-    assert (
-        f"{current_root / 'scripts' / 'control_plane_state.py'} sync"
-        in python_capture.read_text(encoding="utf-8")
+    assert "-m vibecrafted_core.control_plane sync" in python_capture.read_text(
+        encoding="utf-8"
     )
     tui_args = tui_capture.read_text(encoding="utf-8")
     assert f"--state-root {installed_root / 'control_plane'}" in tui_args
@@ -1540,9 +1543,7 @@ def test_tui_uses_voc_from_path_when_local_build_missing(
     launcher.chmod(0o755)
     (current_root / "scripts").mkdir(parents=True, exist_ok=True)
     (current_root / "VERSION").write_text("0.0.0-test\n", encoding="utf-8")
-    (current_root / "scripts" / "control_plane_state.py").write_text(
-        "#!/usr/bin/env python3\n", encoding="utf-8"
-    )
+    _write_fake_core_package(current_root)
     (current_root / "scripts" / "vibecrafted").write_text(
         "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8"
     )
@@ -1561,9 +1562,8 @@ def test_tui_uses_voc_from_path_when_local_build_missing(
         env=env,
     )
 
-    assert (
-        f"{current_root / 'scripts' / 'control_plane_state.py'} sync"
-        in python_capture.read_text(encoding="utf-8")
+    assert "-m vibecrafted_core.control_plane sync" in python_capture.read_text(
+        encoding="utf-8"
     )
     tui_args = tui_capture.read_text(encoding="utf-8")
     assert "--runtime headless" in tui_args

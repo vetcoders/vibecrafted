@@ -28,7 +28,7 @@ $VIBECRAFTED_HOME/control_plane/
   events.jsonl
 ```
 
-The writer is `scripts/control_plane_state.py`. The reader is strict about
+The writer is `vibecrafted_core.control_plane` (`python -m vibecrafted_core.control_plane sync`). The reader is strict about
 that shape: it does not follow symlinks out of the root and ignores anything
 outside the control-plane directory. `config::default_state_root` falls back to
 historical variants (`state/control-plane`, `state`, `control-plane`) if the

@@ -2,9 +2,9 @@ import sys
 from pathlib import Path
 
 import pytest
+from vibecrafted_core.runtime_paths import read_version_file, vibecrafted_home
 
 from scripts import installer_gui, vetcoders_install
-from scripts.runtime_paths import read_version_file, vibecrafted_home
 
 
 def _write_installed_runtime_deck(home: Path) -> Path:

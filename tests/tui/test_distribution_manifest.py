@@ -37,7 +37,6 @@ EXPECTED_REQUIRED = {
     "install.toml",
     "scripts/distribution_manifest.py",
     "scripts/vetcoders_install.py",
-    "scripts/runtime_paths.py",
     "scripts/vibecrafted",
     "scripts/verify-vibecrafted-product.sh",
     "vibecrafted-core/pyproject.toml",
@@ -1246,6 +1245,9 @@ def test_archive_has_one_safe_root_and_validated_payload(
         source_revision=SOURCE_REVISION,
     )
 
+    # Members are asserted below to be rooted, non-traversing and clean before
+    # extractall(filter="data") refuses anything that could escape `extracted`.
+    # nosemgrep: trailofbits.python.tarfile-extractall-traversal.tarfile-extractall-traversal
     with tarfile.open(archive_path, "r:gz") as archive:
         names = archive.getnames()
         assert names
@@ -1257,7 +1259,9 @@ def test_archive_has_one_safe_root_and_validated_payload(
             not name.startswith("/") and ".." not in Path(name).parts for name in names
         )
         assert not any(name.endswith(".DS_Store") for name in names)
-        archive.extractall(extracted, filter="data")
+        archive.extractall(
+            extracted, filter="data"
+        )  # nosemgrep: trailofbits.python.tarfile-extractall-traversal.tarfile-extractall-traversal
 
     payload = extracted / "vibecrafted-9.8.7"
     manifest.validate_payload(
@@ -1330,7 +1334,7 @@ def test_archive_accepts_clean_committed_included_payload(
     ("mutation", "relative"),
     [
         ("tracked", "scripts/vetcoders_install.py"),
-        ("index", "scripts/runtime_paths.py"),
+        ("index", "scripts/vibecrafted"),
         ("deleted", "scripts/distribution_manifest.py"),
     ],
 )

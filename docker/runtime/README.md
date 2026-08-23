@@ -119,7 +119,7 @@ tailscale ssh runtime-host-a
 
 # One-off command (no interactive shell):
 tailscale ssh runtime-host-a vibecrafted doctor
-tailscale ssh runtime-host-a loctree slice scripts/runtime_paths.py
+tailscale ssh runtime-host-a loctree slice vibecrafted-core/vibecrafted_core/runtime_paths.py
 tailscale ssh runtime-host-a aicx intents -p vibecrafted
 ```
 

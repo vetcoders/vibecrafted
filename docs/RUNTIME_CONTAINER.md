@@ -69,7 +69,7 @@ the public internet.
 tailscale ssh runtime-host-a
 # inside:
 vibecrafted doctor
-loctree slice scripts/runtime_paths.py
+loctree slice vibecrafted-core/vibecrafted_core/runtime_paths.py
 aicx intents -p vibecrafted
 ```
 
