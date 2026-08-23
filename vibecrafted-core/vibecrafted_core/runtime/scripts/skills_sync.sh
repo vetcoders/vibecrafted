@@ -14,11 +14,11 @@ Then create symlink views inside the remote tool homes:
   $HOME/.agy/skills
 
 Examples:
-  bash runtime/scripts/skills_sync.sh mgbook16
-  bash runtime/scripts/skills_sync.sh mgbook16 --tool codex --tool claude
-  bash runtime/scripts/skills_sync.sh mgbook16 --dry-run
-  bash runtime/scripts/skills_sync.sh mgbook16 --mirror
-  bash runtime/scripts/skills_sync.sh mgbook16 --with-shell
+  bash runtime/scripts/skills_sync.sh host-b
+  bash runtime/scripts/skills_sync.sh host-b --tool codex --tool claude
+  bash runtime/scripts/skills_sync.sh host-b --dry-run
+  bash runtime/scripts/skills_sync.sh host-b --mirror
+  bash runtime/scripts/skills_sync.sh host-b --with-shell
 EOF_USAGE
 }
 

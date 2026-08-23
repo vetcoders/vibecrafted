@@ -3,9 +3,9 @@
 #
 # Canonical secret regex + scan helpers. Sourced after lib/core.sh.
 
-# Canonical secret regex — unified from vista, vista-portal, vetcoders-tools.
+# Canonical secret regex — unified across the Vetcoders hook templates.
 # Covers: OpenAI sk-*, GitHub PAT/OAuth, Slack xox*, AWS access keys,
-# Google API keys, OAuth refresh tokens, PEM private keys, Vista-specific
+# Google API keys, OAuth refresh tokens, PEM private keys, product-specific
 # bearer tokens, and Authorization: Bearer headers in plaintext.
 HUSKY_SECRET_REGEX='(sk-(proj|live|test|dev)?-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{36,}|gho_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|ya29\.[0-9A-Za-z_-]{20,}|sk_live_[A-Za-z0-9]{24,}|pk_live_[A-Za-z0-9]{24,}|-----BEGIN (RSA|OPENSSH|EC|DSA|PGP) PRIVATE KEY-----|vista-[A-Za-z0-9_-]{20,})'
 

@@ -12,17 +12,17 @@ Generates interactive HTML forms and can execute bulk operations from JSON.
 
 Usage:
     # Generate HTML form and serve it (recommended)
-    ./repo-transfer.py Szowesgad LibraxisAI Loctree Vetcoders
+    ./repo-transfer.py <source-owner> LibraxisAI Loctree Vetcoders
 
     # Generate HTML and open in browser
-    ./repo-transfer.py Szowesgad LibraxisAI --open
+    ./repo-transfer.py <source-owner> LibraxisAI --open
 
     # Execute operations from JSON
     ./repo-transfer.py --execute cleanup.json
 
     # List repos (non-interactive)
-    ./repo-transfer.py --list Szowesgad --json
-    ./repo-transfer.py --list Szowesgad --filter "cli-*"
+    ./repo-transfer.py --list <source-owner> --json
+    ./repo-transfer.py --list <source-owner> --filter "cli-*"
 
     # Direct operations
     ./repo-transfer.py --delete owner/repo --yes
@@ -765,17 +765,17 @@ def main():
         epilog="""
 Examples:
   # Generate form and serve
-  ./repo-transfer.py Szowesgad LibraxisAI Vetcoders
+  ./repo-transfer.py <source-owner> LibraxisAI Vetcoders
 
   # Generate form and open in browser
-  ./repo-transfer.py Szowesgad LibraxisAI --open
+  ./repo-transfer.py <source-owner> LibraxisAI --open
 
   # Execute from JSON
   ./repo-transfer.py --execute cleanup.json
   ./repo-transfer.py --execute cleanup.json --dry-run
 
   # List repos
-  ./repo-transfer.py --list Szowesgad --json
+  ./repo-transfer.py --list <source-owner> --json
 
   # Direct operations
   ./repo-transfer.py --delete owner/repo --yes

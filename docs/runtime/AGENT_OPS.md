@@ -36,7 +36,7 @@ replace passive waiting with active verification on the side that can act.
 
 ## Class 1 — Gate-nap („Drzemka na bramce")
 
-_3 confirmed cases, prview-rs session 2026-07-02/03 (Monika). Canonical
+_3 confirmed cases, prview-rs session 2026-07-02/03 (operator). Canonical
 description by Monika._
 
 ### Symptom
@@ -378,7 +378,7 @@ three signals are the bar for done.
 ## Provenance
 
 - Class 1: prview-rs, session 2026-07-02/03, cases #1–#3, remediation and
-  canonical description by Monika.
+  canonical description by the operator.
 - Class 2: vibecrafted, vc-ship flights `life-ship-260702-123238-24000`
   (v3.3.0) and `life-ship-260702-202338-58000` (lifecycle.schema.v1),
   supervision by claude, session `2603026d-0c40-4ca9-af91-e2ab74256926`.

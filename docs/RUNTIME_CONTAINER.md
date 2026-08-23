@@ -7,14 +7,14 @@ The full 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. runtime, containerized, o
 > skill pre-seeded. The runtime container is that environment: one image, one
 > compose stack, one `tailscale ssh` away from any of your tailnet devices.
 
-## Quickstart (fresh dragon)
+## Quickstart (fresh host-a)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/vetcoders/vc-workspace/main/bootstrap-modal.sh | bash
 ```
 
 That installer (`scripts/bootstrap-modal.sh` in this repo, mirrored to
-`vetcoders/vc-workspace`) walks dragon through: docker check → clone vibecrafted
+`vetcoders/vc-workspace`) walks host-a through: docker check → clone vibecrafted
 → build images → tailscale auth wizard → compose up → smoke test.
 
 Need non-interactive (CI)?
@@ -24,7 +24,7 @@ curl -fsSL https://raw.githubusercontent.com/vetcoders/vc-workspace/main/bootstr
   | bash -s -- \
       --branch release/v2.0.1 \
       --ts-authkey tskey-auth-XXXX-YYYY \
-      --ts-hostname runtime-dragon \
+      --ts-hostname runtime-host-a \
       --yes
 ```
 
@@ -33,7 +33,7 @@ curl -fsSL https://raw.githubusercontent.com/vetcoders/vc-workspace/main/bootstr
 The "modal" in `bootstrap-modal.sh` refers to the **install modality** — a
 single one-liner installer that handles the whole modal flow (consent, prompt,
 config, bring-up). It is **not** Modal.com integration. Hosting target is
-**operator-owned dragon** on a **private tailnet** because:
+**operator-owned host-a** on a **private tailnet** because:
 
 - `aicx` archives are private session memory — never crosses operator-owned
   network boundary
@@ -50,7 +50,7 @@ If you need a serverless variant later, that's a separate skill — this one is
 
 | Surface          | Where it lives                     | Reachable from                             |
 | ---------------- | ---------------------------------- | ------------------------------------------ |
-| Container        | dragon, Docker                     | n/a (tailnet only)                         |
+| Container        | host-a, Docker                     | n/a (tailnet only)                         |
 | sshd             | `network_mode: service:tailscale`  | tailnet (port 22 on tailnet0 only)         |
 | Tailscale daemon | `vibecrafted-tailscale` sidecar    | tailnet (advertised as `$TS_HOSTNAME`)     |
 | Skill store      | `/workspace/.vibecrafted` (volume) | inside container; via bind-mount if needed |
@@ -63,10 +63,10 @@ the public internet.
 
 ## Access patterns
 
-### Interactive shell (from div0)
+### Interactive shell (from host-b)
 
 ```bash
-tailscale ssh runtime-dragon
+tailscale ssh runtime-host-a
 # inside:
 vibecrafted doctor
 loctree slice scripts/runtime_paths.py
@@ -76,39 +76,39 @@ aicx intents -p vibecrafted
 ### One-shot command (no shell)
 
 ```bash
-tailscale ssh runtime-dragon vibecrafted doctor
-tailscale ssh runtime-dragon -- "cd /workspace/host/some-repo && make test"
+tailscale ssh runtime-host-a vibecrafted doctor
+tailscale ssh runtime-host-a -- "cd /workspace/host/some-repo && make test"
 ```
 
 ### File transfer
 
 ```bash
 # Push artifact to runtime:
-tailscale ssh runtime-dragon "cat > /workspace/.vibecrafted/inbox/file.txt" < ./local-file.txt
+tailscale ssh runtime-host-a "cat > /workspace/.vibecrafted/inbox/file.txt" < ./local-file.txt
 
 # Pull from runtime:
-tailscale ssh runtime-dragon "cat /workspace/.vibecrafted/reports/latest.md" > ./report.md
+tailscale ssh runtime-host-a "cat /workspace/.vibecrafted/reports/latest.md" > ./report.md
 
 # rsync (sshd inside container makes this work transparently):
-rsync -av -e "tailscale ssh" runtime-dragon:/workspace/.vibecrafted/reports/ ./reports/
+rsync -av -e "tailscale ssh" runtime-host-a:/workspace/.vibecrafted/reports/ ./reports/
 ```
 
 ### MCP servers from a remote agent
 
 The container ships `loctree-mcp`, `aicx-mcp`, and friends. They speak stdio.
-Pattern for a remote agent (e.g. claude on div0) that wants to use them:
+Pattern for a remote agent (e.g. claude on host-b) that wants to use them:
 
 ```bash
-# Configure ~/.claude.json (on div0) to spawn the MCP via tailscale ssh:
+# Configure ~/.claude.json (on host-b) to spawn the MCP via tailscale ssh:
 {
   "mcpServers": {
     "loctree-runtime": {
       "command": "tailscale",
-      "args": ["ssh", "runtime-dragon", "loctree-mcp"]
+      "args": ["ssh", "runtime-host-a", "loctree-mcp"]
     },
     "aicx-runtime": {
       "command": "tailscale",
-      "args": ["ssh", "runtime-dragon", "aicx-mcp"]
+      "args": ["ssh", "runtime-host-a", "aicx-mcp"]
     }
   }
 }
@@ -173,7 +173,7 @@ docker compose -f docker/runtime/docker-compose.yml down -v
 | Tailnet device compromise      | Tailscale ACLs gate SSH to the runtime (set `tag:runtime`)                    |
 | Container escape               | Standard Docker boundary; runs as unprivileged `vibecrafted` user             |
 | Foundation supply-chain        | `install-foundations.sh --check` runs at every build via `--all`              |
-| Credential leak in skill store | Volume `vibecrafted-home` lives only on dragon; backup is operator-controlled |
+| Credential leak in skill store | Volume `vibecrafted-home` lives only on host-a; backup is operator-controlled |
 | Stolen `TS_AUTHKEY`            | Use reusable + ephemeral + tag-restricted keys; rotate per quarter            |
 
 ## Limitations and known gaps
@@ -186,7 +186,7 @@ docker compose -f docker/runtime/docker-compose.yml down -v
   `install-foundations.sh` through their official npm packages:
   `@jetbrains/junie` and `@xai-official/grok`.
 - **Microsandbox** is excluded by default (`install-foundations.sh sandbox` is
-  optional and needs KVM). Re-enable via custom Dockerfile if dragon has
+  optional and needs KVM). Re-enable via custom Dockerfile if host-a has
   `/dev/kvm`.
 - **State sync between multiple runtime-\* hosts** is not built in. Each runtime
   container has its own `vibecrafted-home`. Use AICX cross-machine sync (see
@@ -199,7 +199,7 @@ docker compose -f docker/runtime/docker-compose.yml down -v
 - `vc-agents` — agent CLIs are pre-installed; spawn-from-container patterns
   work the same as on a workstation.
 - `vc-release` — release runs from within the container as easily as from
-  dragon's host shell; the container has `make`, `git`, semgrep helpers.
+  host-a's host shell; the container has `make`, `git`, semgrep helpers.
 - `vc-marbles` / `vc-prune` / `vc-followup` — all skills work because the full
   skill store is seeded at boot via `docker/entrypoint.sh`.
 

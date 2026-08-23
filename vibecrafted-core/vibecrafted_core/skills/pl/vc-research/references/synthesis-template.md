@@ -20,7 +20,7 @@ run_id: <generated-unique-id>
 skill: vc-research
 project: <repo-name>
 status: completed
-operator_synthesis_by: <claude|codex|gemini|maciej|monika>
+operator_synthesis_by: <claude|codex|gemini|operator>
 source_reports:
   - claude_<run_id>.md
   - codex_<run_id>.md

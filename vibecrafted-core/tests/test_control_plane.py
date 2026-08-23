@@ -1536,7 +1536,7 @@ def test_await_run_does_not_abandon_live_worker_past_idle_window(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A non-terminal run with a DEMONSTRABLY ALIVE worker must survive the base
-    idle deadline. On dragon the marbles agent did ~13 min of real work (exit 0,
+    idle deadline. On host-a the marbles agent did ~13 min of real work (exit 0,
     full report) but the orchestrator abandoned the loop on a fixed wall clock.
     Here the worker stays alive while the idle window (0.2s) lapses many times
     over; the run is only stopped by the explicit hard cap, never the base idle

@@ -1256,7 +1256,7 @@ verify_signature() {
 
   if curl -fsSL "${base_url}/$(basename "$sig_file")" -o "$sig_file" 2>/dev/null; then
     if openssl dgst -sha256 -verify "$pub_file" -signature "$sig_file" "$file" >/dev/null 2>&1; then
-      vinfo "  Signature ✓  (Maciej Gad / MW223P3NPX)"
+      vinfo "  Signature ✓  (Developer ID, team MW223P3NPX)"
     else
       die "Signature verification FAILED for $(basename "$file")"
     fi

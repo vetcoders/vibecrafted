@@ -16,11 +16,11 @@ Features:
 - Works with local LLMs (llama.cpp, vLLM, etc.)
 
 Usage:
-    # With local server (Dragon, llama.cpp, etc.)
+    # With local server (host-a, llama.cpp, etc.)
     ./chat-cli.py --base-url http://localhost:8080/v1
 
     # With custom model
-    ./chat-cli.py --base-url http://dragon:10240/v1 --model libraxisai/Svetliq-11b
+    ./chat-cli.py --base-url http://host-a:10240/v1 --model libraxisai/a local-11b
 
     # With OpenAI
     ./chat-cli.py --base-url https://api.openai.com/v1 --api-key sk-... --model gpt-4o
@@ -281,8 +281,8 @@ Examples:
   # Local LLM server
   ./chat-cli.py --base-url http://localhost:8080/v1
 
-  # Dragon with Svetliq model
-  ./chat-cli.py --base-url http://dragon:10240/v1 --model libraxisai/Svetliq-11b
+  # host-a with a local model
+  ./chat-cli.py --base-url http://host-a:10240/v1 --model libraxisai/a local-11b
 
   # OpenAI
   ./chat-cli.py --base-url https://api.openai.com/v1 --api-key $OPENAI_API_KEY --model gpt-4o

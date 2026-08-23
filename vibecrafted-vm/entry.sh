@@ -64,7 +64,7 @@ if [ -n "${TAILSCALE_AUTHKEY:-}" ]; then
     # tailscale up
     # --ssh enables Tailscale SSH (peers ssh in WITHOUT an sshd in the image,
     # gated by tailnet ACLs). This is what makes `ssh root@vc-workspace-<host>`
-    # work from div0/silver/ops — the container ships no openssh-server.
+    # work from host-b/host-d/host-e — the container ships no openssh-server.
     TS_UP_ARGS=(
         --authkey="$TAILSCALE_AUTHKEY"
         --hostname="$TS_HOSTNAME"

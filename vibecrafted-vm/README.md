@@ -5,8 +5,8 @@ Debian 13 trixie base, multi-arch (linux/amd64 + linux/arm64), full framework
 
 - 11 foundations + 21 vc-\* skills + 3 agent CLIs + tailnet integration.
 
-Single image, mesh-wide consistency. Works on dragon (macOS arm64), div0
-(macOS), silver (macOS), ops (Linux), windows (WSL2) — same surface
+Single image, mesh-wide consistency. Works on host-a (macOS arm64), host-b
+(macOS), host-d (macOS), host-e (Linux), windows (WSL2) — same surface
 everywhere.
 
 > **Naming, once:** `vc-workspace` is **this container** (image + tailnet node +
@@ -76,7 +76,7 @@ tailscale status
 # expect: vc-workspace-<hostname>  100.x.y.z  ...
 ```
 
-From any other mesh node (dragon/div0/silver/ops) — works via **Tailscale SSH**
+From any other mesh node (host-a/host-b/host-d/ops) — works via **Tailscale SSH**
 (no sshd in the image; `entry.sh` runs `tailscale up --ssh`, gated by ACLs):
 
 ```bash
@@ -121,13 +121,13 @@ Inbound: tailnet peers ssh into container via hostname or tailnet IP.
 
 Apple's `container` CLI (WWDC 2024) runs native macOS Mach-O binaries — would
 require separate `container` build per Mac host + split surface from
-Linux mesh nodes (ops-linux, etc.). For Vetcoders Rust cross-platform
+Linux mesh nodes (host-e, etc.). For Vetcoders Rust cross-platform
 framework, single Linux image (this) preserves mesh-wide consistency.
 
 If/when Metal-accelerated MLX embeddings become hot-path (e.g.
 `aicx-embeddings/metal` feature), add a parallel `apple/container` track
 specifically for M-series Mac dev. Until then, cloud embedder
-(`qwen3-embedding:8b @ silver`) handles embedding side via tailnet.
+(`qwen3-embedding:8b @ host-d`) handles embedding side via tailnet.
 
 ## Authority
 

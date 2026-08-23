@@ -20,19 +20,19 @@ Generates interactive HTML forms and executes operations from JSON.
 chmod +x repo-transfer.py
 
 # Interactive form mode (starts HTTP server + opens browser)
-./repo-transfer.py Szowesgad LibraxisAI Vetcoders
+./repo-transfer.py <source-owner> LibraxisAI Vetcoders
 
 # Open form in browser without server
-./repo-transfer.py Szowesgad LibraxisAI --open
+./repo-transfer.py <source-owner> LibraxisAI --open
 
 # Execute operations from JSON
 ./repo-transfer.py --execute cleanup.json
 ./repo-transfer.py --execute cleanup.json --dry-run
 
 # List repos
-./repo-transfer.py --list Szowesgad
-./repo-transfer.py --list Szowesgad --json
-./repo-transfer.py --list Szowesgad --filter "vista-*"
+./repo-transfer.py --list <source-owner>
+./repo-transfer.py --list <source-owner> --json
+./repo-transfer.py --list <source-owner> --filter "vista-*"
 
 # Direct operations
 ./repo-transfer.py --delete Owner/repo --yes

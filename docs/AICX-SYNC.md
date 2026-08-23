@@ -2,9 +2,9 @@
 
 _Plan 08 (META_22) — bidirectional sync substrate with authority-tier conflict resolution. Ships in v1.8.0._
 
-The AICX corpus is the operator's cross-session memory layer for AI agents — every Codex / Claude / Gemini session writes its outcome into `~/.aicx/store/<org>/<project>/<YYYY_MMDD>/conversations/<agent>/*.md`. On a single machine that is enough. On the **Vetcoders mesh** (dragon ↔ sztudio ↔ silver ↔ div0, per kronika 2026-05-05) the same corpus must converge across hosts so an agent dispatched on `sztudio` sees what `dragon` learned thirty minutes earlier.
+The AICX corpus is the operator's cross-session memory layer for AI agents — every Codex / Claude / Gemini session writes its outcome into `~/.aicx/store/<org>/<project>/<YYYY_MMDD>/conversations/<agent>/*.md`. On a single machine that is enough. On the **Vetcoders mesh** (host-a ↔ host-c ↔ host-d ↔ host-b, per doctrine 2026-05-05) the same corpus must converge across hosts so an agent dispatched on `host-c` sees what `host-a` learned thirty minutes earlier.
 
-This document covers the **v2 bidirectional engine** (`vibecrafted_core.aicx_sync`) and its operator CLI (`scripts/aicx-sync.sh`). The transport layer (rsync, staging, nightly launchd) is owned by the operator's existing `~/.scripts/sync-tool.py` (kronika 2026-05-05); this engine plugs in on top of that.
+This document covers the **v2 bidirectional engine** (`vibecrafted_core.aicx_sync`) and its operator CLI (`scripts/aicx-sync.sh`). The transport layer (rsync, staging, nightly launchd) is owned by the operator's existing `~/.scripts/sync-tool.py` (doctrine 2026-05-05); this engine plugs in on top of that.
 
 ## Why bidirectional
 
@@ -44,7 +44,7 @@ Equal tiers on both sides → tie → operator decides → logged.
 ### Dry-run first — always
 
 ```bash
-scripts/aicx-sync.sh dry-run --remote sztudio --namespace vetcoders/vibecrafted
+scripts/aicx-sync.sh dry-run --remote host-c --namespace vetcoders/vibecrafted
 ```
 
 Prints a JSON `SyncResult` describing adds, conflicts, ties, and corrupted chunks. **No filesystem mutation.** Operator reviews the preview before pushing further.
@@ -52,7 +52,7 @@ Prints a JSON `SyncResult` describing adds, conflicts, ties, and corrupted chunk
 ### Apply after review
 
 ```bash
-scripts/aicx-sync.sh apply --remote sztudio --namespace vetcoders/vibecrafted
+scripts/aicx-sync.sh apply --remote host-c --namespace vetcoders/vibecrafted
 ```
 
 Executes the same plan. Adds copy in both directions; conflicts apply the authority-tier winner; ties are surfaced and the run exits non-zero so the operator records a decision before re-running.
@@ -78,7 +78,7 @@ Fields:
 | Field             | Default         | Notes                                                                         |
 | ----------------- | --------------- | ----------------------------------------------------------------------------- |
 | `local_store`     | `~/.aicx/store` | Override only if AICX corpus lives outside XDG default.                       |
-| `remote_host`     | (none)          | One of `dragon`, `sztudio`, `silver`, `div0`, `mgbook16`.                     |
+| `remote_host`     | (none)          | A tailnet hostname from your `mesh.conf` (e.g. `host-a`, `host-b`).           |
 | `namespace`       | (all)           | Scope to `<org>/<project>` (e.g. `vetcoders/vibecrafted`).                    |
 | `dry_run_default` | `true`          | Informational; the wrapper always honours dry-run unless `apply` is explicit. |
 | `prompt_on_tie`   | `true`          | When `false`, ties are silently logged as unresolved.                         |
@@ -105,7 +105,7 @@ Records are append-only. Re-deciding the same chunk_id appends a new line; the e
 
 ## Performance
 
-Per kronika 2026-05-05 SF→PL benchmark (15 Mbps uplink):
+Per doctrine 2026-05-05 SF→PL benchmark (15 Mbps uplink):
 
 | Corpus size | Initial sync | Subsequent delta |
 | ----------- | ------------ | ---------------- |
@@ -144,7 +144,7 @@ Nothing in this repo modifies `~/.scripts/sync-tool.py`. The operator's transpor
 
 ## Wiring into the nightly launchd job
 
-The operator currently runs `~/.scripts/sync-tool.py` as a nightly launchd job (kronika 2026-05-05). Plan 08 ships the engine but **does not change the launchd plist** — that is an operator decision pending verification on real mesh hardware. To opt in once the dry-run preview looks clean on real cross-mesh data:
+A nightly one-directional sync job preceded this engine (doctrine 2026-05-05). Plan 08 ships the engine but **does not change the launchd plist** — that is an operator decision pending verification on real mesh hardware. To opt in once the dry-run preview looks clean on real cross-mesh data:
 
 ```xml
 <!-- ~/Library/LaunchAgents/io.vetcoders.aicx-sync.plist (operator-owned) -->
@@ -154,7 +154,7 @@ The operator currently runs `~/.scripts/sync-tool.py` as a nightly launchd job (
   <string>/path/to/vibecrafted/scripts/aicx-sync.sh</string>
   <string>apply</string>
   <string>--remote</string>
-  <string>sztudio</string>
+  <string>host-c</string>
 </array>
 ```
 
@@ -172,7 +172,7 @@ The operator currently runs `~/.scripts/sync-tool.py` as a nightly launchd job (
 
 - **Plan 09 (memex retrieval integration)** — adds `memex_derived` chunks to the same corpus.
 - **`~/.scripts/sync-tool.py`** — transport layer (operator-owned, not in repo).
-- **kronika 2026-05-05** — original SF→PL mesh sync design + benchmark.
+- **doctrine 2026-05-05** — original SF→PL mesh sync design + benchmark.
 - **`skills/vc-init/references/loct-context-engine.md`** — default authority tier registry.
 
 ---

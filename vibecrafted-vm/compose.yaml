@@ -8,8 +8,8 @@
 #
 # Tailscale runs in USERSPACE networking (entry.sh: tailscaled
 # --tun=userspace-networking), so NO NET_ADMIN cap and NO /dev/net/tun device
-# are needed — this keeps the same surface on macOS Docker Desktop (dragon,
-# silver) and Linux (ops) hosts. Do NOT add `devices: /dev/net/tun` here; it
+# are needed — this keeps the same surface on macOS Docker Desktop (host-a,
+# host-d) and Linux (host-e) hosts. Do NOT add `devices: /dev/net/tun` here; it
 # does not exist on macOS hosts and would break the run.
 #
 # The interactive wizard (wizard/vc-onboard.py) writes its own
