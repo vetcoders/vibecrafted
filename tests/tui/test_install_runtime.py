@@ -119,7 +119,7 @@ def test_foundations_fail_fast_on_runtime_root_drift(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     merged_output = f"{result.stdout}\n{result.stderr}"
-    assert "Fail-fast: runtime root drift detected" in merged_output
+    assert "✗ runtime root drift:" in merged_output
 
 
 def test_install_sh_fail_fast_on_launcher_root_drift(tmp_path: Path) -> None:

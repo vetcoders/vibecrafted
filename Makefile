@@ -600,12 +600,6 @@ uninstall:
 restore:
 	@$(PYTHON) $(INSTALLER) restore
 
-migrate:
-	@bash scripts/migrate_agents_workspace.sh
-
-migrate-dry:
-	@bash scripts/migrate_agents_workspace.sh --dry-run
-
 check:
 	@$(PYTHON) scripts/check_shell.py
 	@echo "Check complete."
