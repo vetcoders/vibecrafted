@@ -50,7 +50,9 @@ vibecrafted-io-link
 /artifacts
 /operator-tui/*.md
 /operator-tui/README.md
-.loctree/
+# loctree scratch is local; the canary journal is versioned truth
+**/.loctree/*
+!/.loctree/canary/
 /.antigravitycli
 /vibecrafted-server/target
 /docs/plans
