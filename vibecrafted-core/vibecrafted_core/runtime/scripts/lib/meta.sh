@@ -1,30 +1,8 @@
 #!/usr/bin/env bash
 
-spawn_control_plane_script() {
-  local candidate repo_source=""
-  repo_source="$(spawn_repo_root 2>/dev/null || true)"
-  for candidate in \
-    "${VIBECRAFTED_ROOT:+${VIBECRAFTED_ROOT}/scripts/control_plane_state.py}" \
-    "${repo_source:+${repo_source}/scripts/control_plane_state.py}" \
-    "${VIBECRAFTED_TOOLS_HOME:-${XDG_DATA_HOME:-${HOME}/.local/share}/vibecrafted/tools}/vibecrafted-current/scripts/control_plane_state.py"
-  do
-    [[ -n "$candidate" && -f "$candidate" ]] || continue
-    printf '%s\n' "$candidate"
-    return 0
-  done
-  return 1
-}
-
 spawn_sync_control_plane() {
-  local script_path py
-  script_path="$(spawn_control_plane_script 2>/dev/null || true)"
-  if [[ -z "$script_path" ]]; then
-    printf '%s\n' 'vibecrafted: warning: control-plane sync helper unavailable; projection may be stale' >&2
-    return 0
-  fi
-  py="$(spawn_python_bin)"
-  if ! "$py" "$script_path" sync >/dev/null; then
-    printf 'vibecrafted: warning: control-plane sync failed via %s; projection may be stale\n' "$script_path" >&2
+  if ! spawn_python_module vibecrafted_core.control_plane sync >/dev/null; then
+    printf '%s\n' 'vibecrafted: warning: control-plane sync failed; projection may be stale' >&2
   fi
 }
 

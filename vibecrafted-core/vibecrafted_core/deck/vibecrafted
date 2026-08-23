@@ -390,20 +390,6 @@ _installer_gui_script() {
   return 1
 }
 
-_control_plane_script() {
-  local repo_source candidate
-  repo_source="$(_repo_source_root 2>/dev/null || true)"
-  for candidate in \
-    "${repo_source:+$repo_source/scripts/control_plane_state.py}" \
-    "$crafted_tools/scripts/control_plane_state.py" \
-    "$(_script_repo_root)/scripts/control_plane_state.py"; do
-    [[ -f "$candidate" ]] || continue
-    printf '%s\n' "$candidate"
-    return 0
-  done
-  return 1
-}
-
 _loop_script() {
   local repo_source package_root candidate
   repo_source="$(_repo_source_root 2>/dev/null || true)"
@@ -503,10 +489,11 @@ _run_core_help() {
 }
 
 _sync_control_plane_best_effort() {
-  local script_path
-  script_path="$(_control_plane_script 2>/dev/null || true)"
-  [[ -n "$script_path" ]] || return 0
-  python3 "$script_path" sync >/dev/null 2>&1 || true
+  local core_dir
+  core_dir="$(_core_module_dir 2>/dev/null || true)"
+  [[ -n "$core_dir" ]] || return 0
+  PYTHONPATH="$core_dir${PYTHONPATH:+:$PYTHONPATH}" \
+    "$(_vibecrafted_python)" -m vibecrafted_core.control_plane sync >/dev/null 2>&1 || true
 }
 
 _voc_app_dir() {
