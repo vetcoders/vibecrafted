@@ -21,31 +21,36 @@ def runtime_transcript_manifest_path(transcript: Path) -> Path:
 
 
 def _canonical_regular_path(path: Path) -> Path | None:
-    """Resolve `path` to its canonical form, requiring a real regular file with
-    no unresolved symlink components; return None on any mismatch or OS error."""
+    """Resolve `path` to its canonical form and require a real regular file.
+
+    Ancestor directories may sit behind symlinks (a `$HOME` under `/tmp` or
+    `/var/home` is a legitimate runtime root); the file entry itself must not
+    be a symlink, so the O_NOFOLLOW read path keeps its TOCTOU guarantees.
+    Return None on any mismatch or OS error."""
 
     absolute = Path(os.path.abspath(path.expanduser()))
     try:
-        canonical = absolute.resolve(strict=True)
-        metadata = absolute.lstat()
+        canonical_parent = absolute.parent.resolve(strict=True)
+        canonical = canonical_parent / absolute.name
+        metadata = canonical.lstat()
     except OSError:
         return None
-    if canonical != absolute or not stat.S_ISREG(metadata.st_mode):
+    if not stat.S_ISREG(metadata.st_mode):
         return None
     return canonical
 
 
 def _canonical_directory(path: Path) -> Path | None:
-    """Resolve `path` to its canonical form, requiring a real directory with no
-    unresolved symlink components; return None on any mismatch or OS error."""
+    """Resolve `path` to its canonical form, requiring a real directory;
+    symlinked ancestors are followed. Return None on any mismatch or OS error."""
 
     absolute = Path(os.path.abspath(path.expanduser()))
     try:
         canonical = absolute.resolve(strict=True)
-        metadata = absolute.lstat()
+        metadata = canonical.lstat()
     except OSError:
         return None
-    if canonical != absolute or not stat.S_ISDIR(metadata.st_mode):
+    if not stat.S_ISDIR(metadata.st_mode):
         return None
     return canonical
 

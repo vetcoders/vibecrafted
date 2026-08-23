@@ -75,9 +75,13 @@ def run_mutation_locks(
     if key:
         ordered.append(("idempotency", key))
 
-    paths = [
-        _lock_path(Path(control_plane_root), kind, value) for kind, value in ordered
-    ]
+    # Reentrancy is keyed by lock-file path, so one root must always map to
+    # one key: an outer caller holding the lock via ``~/.vibecrafted/...`` and
+    # an inner caller via its resolved form (``/private/...``, ``/var/home``)
+    # would otherwise flock the same file twice and deadlock themselves.
+    lock_root = Path(os.path.abspath(Path(control_plane_root).expanduser()))
+    lock_root = lock_root.resolve(strict=False)
+    paths = [_lock_path(lock_root, kind, value) for kind, value in ordered]
     local_locks = [_local_lock(path) for path in paths]
     counts = _held_lock_counts()
     handles: list[tuple[BinaryIO | None, threading.RLock, str]] = []
@@ -121,7 +125,14 @@ def run_mutation_locks(
 
 
 def _canonical_meta_path(meta_path: Path, *, allow_missing: bool) -> Path:
-    """Return one lexical/canonical path and reject every symlink component."""
+    """Return the canonical path of a run meta file.
+
+    Ancestor directories are resolved (a ``$HOME`` that lives behind a symlink —
+    ``/tmp`` → ``/private/tmp`` on macOS, ``/home`` → ``/var/home`` on ostree
+    Linux — is a legitimate runtime root, not an attack). The meta entry
+    itself must be a regular file: a symlinked or special ``meta.json`` is
+    refused so the TOCTOU checks in :func:`_read_regular_json` stay meaningful.
+    """
 
     absolute = Path(os.path.abspath(meta_path.expanduser()))
     try:
@@ -130,34 +141,36 @@ def _canonical_meta_path(meta_path: Path, *, allow_missing: bool) -> Path:
         raise RunMetaMutationError(
             f"run meta parent is unavailable: {absolute}"
         ) from exc
-    if canonical_parent != absolute.parent:
-        raise RunMetaMutationError(f"run meta path is not canonical: {absolute}")
+    canonical = canonical_parent / absolute.name
     try:
-        mode = absolute.lstat().st_mode
+        mode = canonical.lstat().st_mode
     except FileNotFoundError:
         if allow_missing:
-            return absolute
+            return canonical
         raise
     if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
-        raise RunMetaMutationError(f"run meta is not a regular file: {absolute}")
-    return absolute
+        raise RunMetaMutationError(f"run meta is not a regular file: {canonical}")
+    return canonical
 
 
 def _canonical_directory(path: Path) -> Path:
-    """Resolve ``path`` and reject anything not a canonical, non-symlink directory."""
+    """Resolve ``path`` to its canonical directory.
+
+    Symlinked ancestors are followed and the resolved path is returned, so
+    every later ``relative_to`` boundary check compares canonical forms. The
+    resolved target must exist and be a directory.
+    """
     absolute = Path(os.path.abspath(path.expanduser()))
     try:
         canonical = absolute.resolve(strict=True)
-        mode = absolute.lstat().st_mode
+        mode = canonical.lstat().st_mode
     except OSError as exc:
         raise RunMetaMutationError(
             f"run mutation root is unavailable: {absolute}"
         ) from exc
-    if canonical != absolute or stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
-        raise RunMetaMutationError(
-            f"run mutation root is not a canonical directory: {absolute}"
-        )
-    return absolute
+    if not stat.S_ISDIR(mode):
+        raise RunMetaMutationError(f"run mutation root is not a directory: {absolute}")
+    return canonical
 
 
 def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
