@@ -1632,7 +1632,11 @@ def test_status_empty_state_is_explicit_when_artifact_dirs_exist(
         text=True,
     )
 
-    assert "No activity yet — run `vibecrafted init <agent>` to start." in result.stdout
+    # Empty board: the stranger is told the one command that creates a run,
+    # and the one that waits for it — not sent to a cockpit-only init.
+    assert "No runs yet." in result.stdout
+    assert "vibecrafted implement claude --prompt" in result.stdout
+    assert "vibecrafted await claude --last" in result.stdout
 
 
 def test_stats_skills_reports_context_inventory(tmp_path: Path) -> None:

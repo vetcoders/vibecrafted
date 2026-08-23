@@ -883,16 +883,14 @@ def test_vc_init_missing_vc_frame_message_has_fresh_install_path_hint(
         check=False,
     )
 
+    # No cockpit is not a dead end: init degrades to the caller's terminal.
+    # Under a non-TTY test harness that degraded path must still stop with a
+    # message that names the headless alternative instead of "run vc-start".
     assert result.returncode != 0
-    assert "vc-frame is required for the Vibecrafted operator runtime." in result.stderr
-    assert (
-        "Run 'vc-start' first to create or attach the operator vc-frame session, then retry."
-        in result.stderr
-    )
-    assert (
-        f"Expected vc-frame on PATH or bundled at: {home}/.local/share/vibecrafted/bin/vc-frame"
-        in result.stderr
-    )
+    assert "vc-frame cockpit not installed" in result.stderr
+    assert "vibecrafted init claude --runtime plain" in result.stderr
+    assert "vc-start" not in result.stderr
+    assert 'vibecrafted implement claude --prompt "<task>"' in result.stderr
 
 
 def test_explicit_terminal_marbles_from_operator_mode_spawns_fresh_tab(
