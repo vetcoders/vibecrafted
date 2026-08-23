@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from ..runtime_paths import vibecrafted_home
 
 
 class WorktreeContractError(RuntimeError):
@@ -32,11 +33,6 @@ class WorktreeGeometry:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
-
-def vibecrafted_home() -> Path:
-    """Return the single global Vibecrafted state root."""
-    return Path(os.environ.get("VIBECRAFTED_HOME", "~/.vibecrafted")).expanduser()
 
 
 def repo_identity(repo: str | Path) -> tuple[str, str]:

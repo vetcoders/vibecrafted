@@ -10,10 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from vibecrafted_core.control_plane import control_plane_home
+from vibecrafted_core.runtime_paths import vibecrafted_home
 
 from .model import Dispatch
 from .schema import doctor_dispatch
-from .worktrees import canonical_artifact_root, repo_identity, vibecrafted_home
+from .worktrees import canonical_artifact_root, repo_identity
 
 
 @dataclass(frozen=True)
