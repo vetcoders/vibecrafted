@@ -23,11 +23,11 @@ import time
 from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from . import control_plane
+from .clock import utc_now_iso
 from .run_mutation import run_mutation_locks
 from .settlement import (
     Settlement,
@@ -129,11 +129,6 @@ _CLAIMED_PATH_RE = re.compile(
     r"|(?P<bare>(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+"
     r"|[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,12}))"
 )
-
-
-def _now_iso() -> str:
-    """Current UTC timestamp in ISO 8601 form."""
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _repo_root(path: Path | None = None) -> Path:
@@ -2016,7 +2011,7 @@ def note_verdict(
     # relative roots still match guard/triage lookups.
     resolved_repo = _repo_root(repo)
     commit = _commit_record(resolved_repo, sha)
-    stamp = _now_iso()
+    stamp = utc_now_iso()
     lock = (
         run_mutation_locks(control_plane.control_plane_home(), run_id=run_id)
         if run_id

@@ -15,8 +15,7 @@ from typing import Any
 
 from . import control_plane
 from .events import append_event
-from .package_resources import deck_path as package_deck_path
-from .package_resources import package_root, runtime_path
+from .package_resources import deck_path, package_root, runtime_path
 from .spawn import Supervisor
 
 AGENTS = {"claude", "codex", "agy", "junie", "grok"}
@@ -39,10 +38,6 @@ def repo_root() -> Path:
 
 def runtime_root() -> Path:
     return runtime_path()
-
-
-def deck_path() -> Path:
-    return package_deck_path()
 
 
 def _print_workflow_help(workflow_id: str) -> int:

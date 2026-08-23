@@ -10,18 +10,13 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Sequence
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .clock import utc_now_z
 from .runtime_paths import vibecrafted_home
 
 AICX_EXTRACT_TIMEOUT_SECONDS = 90.0
-
-
-def utc_now() -> str:
-    """Current UTC time as a ``Z``-suffixed ISO 8601 string."""
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def load_hook_input(stdin: str) -> dict[str, object]:
@@ -249,7 +244,7 @@ def delta_lines(
             "project_dir": project_dir,
             "extract": str(extract),
             "raw_line_count": len(raw_lines),
-            "updated_at": utc_now(),
+            "updated_at": utc_now_z(),
         }
         save_compact_state(state)
     return delta, previous_count, len(raw_lines)
@@ -287,7 +282,7 @@ def append_journal(
             handle.write(
                 json.dumps(
                     {
-                        "ts": utc_now(),
+                        "ts": utc_now_z(),
                         "event": event,
                         "agent": agent,
                         "session_id": session_id,

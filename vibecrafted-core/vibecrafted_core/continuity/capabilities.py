@@ -30,10 +30,10 @@ import shutil
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, fields
-from datetime import datetime, timezone
 from typing import Any
 
 from ..capabilities import ProbeResult as CliProbe
+from ..clock import utc_now_iso
 from ..runtime_paths import agent_tool_search_path
 
 # Capability verdicts for the declarative table. ``unverified`` means the
@@ -342,11 +342,6 @@ def clear_probe_cache() -> None:
     _PROBE_CACHE.clear()
 
 
-def _now_iso() -> str:
-    """Current UTC time as an ISO 8601 string."""
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _default_runner(timeout: float) -> Runner:
     """Build a subprocess-backed :data:`Runner` bound to a fixed timeout."""
 
@@ -411,7 +406,7 @@ def probe(
     capability = capability_for(agent)
     if not refresh and agent in _PROBE_CACHE:
         return _PROBE_CACHE[agent]
-    checked_at = _now_iso()
+    checked_at = utc_now_iso()
 
     if capability.execution == EVIDENCE_ONLY or capability.probe_recipe is None:
         result = ProbeResult(

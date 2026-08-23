@@ -22,6 +22,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from .clock import utc_now
 from .delivery.model import (
     ContractError,
     DeliveryProofContract,
@@ -619,8 +620,8 @@ def ensure_session_id(session_id: Any = "") -> str:
 
 
 def _now() -> dt.datetime:
-    """Current UTC time (single point of truth for control-plane "now")."""
-    return dt.datetime.now(dt.timezone.utc)
+    """Control-plane "now" — read from :mod:`vibecrafted_core.clock`."""
+    return utc_now()
 
 
 def _configured_stale_heartbeat_seconds() -> int:

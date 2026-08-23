@@ -17,6 +17,7 @@ from shutil import which
 from typing import Any
 
 from .agent_dispatch import extract_session_id, sandbox_supported
+from .clock import utc_now_iso
 from .control_plane import ensure_session_id, normalize_run_root
 from .events import append_event
 from .report_contract import (
@@ -134,11 +135,6 @@ class _SandboxProcess:
     def wait(self) -> int:
         """Sandbox execution is synchronous by the time this is called; always exit 0."""
         return 0
-
-
-def _now_iso() -> str:
-    """Current UTC timestamp in ISO 8601 form."""
-    return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
 def _set_child_pgid() -> None:
@@ -1356,7 +1352,7 @@ class Supervisor:
                 root=root_path,
                 process=sandbox_process,
                 pgid=None,
-                started_at=_now_iso(),
+                started_at=utc_now_iso(),
                 command=command_list,
                 meta_path=inferred_meta,
                 transcript_path=inferred_transcript,
@@ -1406,7 +1402,7 @@ class Supervisor:
             root=root_path,
             process=process,
             pgid=pgid,
-            started_at=_now_iso(),
+            started_at=utc_now_iso(),
             command=command_list,
             meta_path=inferred_meta,
             transcript_path=inferred_transcript,
@@ -1468,7 +1464,7 @@ class Supervisor:
             handle._done.set()
             return
 
-        handle.completed_at = _now_iso()
+        handle.completed_at = utc_now_iso()
         extracted_session_id = _maybe_extract_session_id(handle)
         if extracted_session_id:
             handle.session_id = extracted_session_id
@@ -1494,7 +1490,7 @@ class Supervisor:
         """Background-thread target: block on subprocess exit, finalize state and events."""
         exit_code = handle.process.wait()
         handle.exit_code = exit_code
-        handle.completed_at = _now_iso()
+        handle.completed_at = utc_now_iso()
         extracted_session_id = _maybe_extract_session_id(handle)
         if extracted_session_id:
             handle.session_id = extracted_session_id
