@@ -143,6 +143,12 @@ if [[ ${#tools[@]} -eq 0 ]]; then
 fi
 
 rsync_args=(-az --exclude '.DS_Store' --exclude '.backup' --exclude '.loctree' -e ssh)
+# Private, operator-only skills are never part of a mirror: neither pushed
+# from the repo nor deleted on the target when --delete is in effect.
+private_skills=(vc-deprivatize)
+for skill in "${private_skills[@]}"; do
+  rsync_args+=(--exclude "/${skill}/")
+done
 if (( mirror )); then
   rsync_args+=(--delete)
 fi
