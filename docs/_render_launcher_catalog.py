@@ -41,7 +41,9 @@ GEN_END = "<!-- /gen:pipeline -->"
 
 # Help advertises these; the dispatch case must either wire them (then this
 # list shrinks) or the page's "Rozjazdy" section keeps naming them as ghosts.
-KNOWN_GHOSTS = ("resume-session", "settlements")
+# settlements left this list when the deck wired `vibecrafted settlements`
+# (read-only f/x/n ledger query).
+KNOWN_GHOSTS = ("resume-session",)
 
 
 def render_pipeline() -> str:

@@ -61,8 +61,10 @@ samym protokołem.
 ## Kanoniczna bramka orientacji
 
 Skonsumuj świeże dowody `vc-init` dla repo; jeśli ich brak, najpierw
-`vc-init`. Wyczuwanie planów przez goły grep, dokumentację albo „pamiętam
-to repo" zamiast organów Loctree to porażka procesu.
+`vc-init`. Użyj `Loctree:loctree` (repo-view, focus, slice, impact, find,
+follow), by zmaterializować Code-Derived Application Map, która zasiewa
+kandydatów na osie. Wyczuwanie planów przez goły grep, dokumentację albo
+„pamiętam to repo" zamiast organów Loctree to porażka procesu.
 
 **Zakazane jako inwentarz:** `loct context --full` `structural.files`
 (wyłącznie ranking hubów). **Zakazane:** ładowanie surowego, wielomegabajtowego

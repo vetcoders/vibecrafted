@@ -150,7 +150,9 @@ def test_shipped_deck_routes_workspace_resolution_to_core(tmp_path: Path) -> Non
     )
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     assert "VIBECRAFTED_WORKSPACE_ID=" in proc.stdout
-    assert "VIBECRAFTED_OPERATOR_SESSION=workspace-" in proc.stdout
+    # Operator session is the resolved PLACE (root basename / catalog label),
+    # not the catalog-fallback workspace-{8hex} token.
+    assert "VIBECRAFTED_OPERATOR_SESSION=workspace\n" in proc.stdout
 
 
 def test_wrapper_refuses_product_attach_without_config(tmp_path: Path) -> None:
@@ -407,7 +409,7 @@ def test_vc_start_probe_pins_product_config(tmp_path: Path) -> None:
             if [[ "$*" == "workspace resolve --env" ]]; then
               echo VIBECRAFTED_WORKSPACE_ID=019ff97a-3328-7660-b6cd-f957b1b163f8
               echo VIBECRAFTED_WORKSPACE_INSTANCE_ID=019ff97a-3328-7660-b6cd-f957b1b163f9
-              echo VIBECRAFTED_OPERATOR_SESSION=workspace-b1b163f8
+              echo VIBECRAFTED_OPERATOR_SESSION=probe-place
               exit 0
             fi
             exit 1
@@ -453,7 +455,9 @@ def test_vc_start_probe_pins_product_config(tmp_path: Path) -> None:
         "VIBECRAFTED_WORKSPACE_INSTANCE_ID=019ff97a-3328-7660-b6cd-f957b1b163f9"
         in proc.stdout
     )
-    assert "VIBECRAFTED_OPERATOR_SESSION=workspace-b1b163f8" in proc.stdout
+    # Place-named sessions pass through untouched; only the legacy
+    # workspace-{8hex} token would be rewritten to the resolved place.
+    assert "VIBECRAFTED_OPERATOR_SESSION=probe-place" in proc.stdout
     assert "should-not-run-in-probe" not in out
 
 

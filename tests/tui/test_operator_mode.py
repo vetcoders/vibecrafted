@@ -200,8 +200,10 @@ def _resolved_workspace_session(env: dict[str, str]) -> str:
         text=True,
         capture_output=True,
     )
+    # Operator session is the resolved PLACE (catalog label / root basename);
+    # workspace-{8hex} survives only as the catalog-fallback token.
     match = re.search(
-        r"^VIBECRAFTED_OPERATOR_SESSION=(workspace-[0-9a-f]{8})$",
+        r"^VIBECRAFTED_OPERATOR_SESSION=(\S+)$",
         result.stdout,
         re.MULTILINE,
     )
@@ -712,9 +714,7 @@ def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
         assert not forbidden_probe.exists()
         assert f"--session {expected_session} --new-session-with-layout" in payload
         assert f"--session {expected_session} action new-tab" in payload
-        assert (
-            f"run_id=interactive target={expected_session}/claude-init" in result.stdout
-        )
+        assert f"run_id=interactive target={expected_session}/claude" in result.stdout
         assert f"watch=vc-frame attach {expected_session}" in result.stdout
         assert "There is no active session!" not in result.stderr
         outcomes.append((result.returncode, result.stdout, result.stderr))

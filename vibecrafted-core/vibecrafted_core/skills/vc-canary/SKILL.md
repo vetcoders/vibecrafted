@@ -59,8 +59,10 @@ reducers, prism 11/12), found by the same protocol.
 ## Canonical Orientation Gate
 
 Consume fresh `vc-init` evidence for the repo; if absent, run `vc-init`
-first. Sensing planes via raw grep, docs, or "I remember this repo"
-instead of Loctree organs is a process failure.
+first. Use `Loctree:loctree` (repo-view, focus, slice, impact, find,
+follow) to materialize the Code-Derived Application Map that seeds the
+axis candidates. Sensing planes via raw grep, docs, or "I remember this
+repo" instead of Loctree organs is a process failure.
 
 **Forbidden as inventory:** `loct context --full` `structural.files` (hub
 ranking only). **Forbidden:** loading raw multi‑MB `snapshot.json` into the

@@ -122,7 +122,7 @@ function startRun(skill,agent,promptTxt){
   runs.push(run);rail();
   raw(`<span class="d">==================== VIBECRAFTED LAUNCH RECEIPT ====================</span>`);
   line(`run_id:     ${id}`);line(`agent:      ${agent}`);line(`skill:      ${skill}`);
-  line(`root:       /Volumes/vc-workspace/vetcoders/vibecrafted-suite/vibecrafted`);
+  line(`root:       ~/vibecrafted`);
   line(`status:     launching`);line(`report:     ~/.vibecrafted/artifacts/…/${run.report}`);
   raw(`observe:    <span class="b">vibecrafted ${agent} observe --run-id ${id}</span>`);
   raw(`await (ARM NOW, supervisor-side): <span class="b">vibecrafted ${agent} await --run-id ${id}</span>`);
