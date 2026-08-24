@@ -37,7 +37,6 @@ EXPECTED_REQUIRED = {
     "install.toml",
     "scripts/distribution_manifest.py",
     "scripts/vetcoders_install.py",
-    "scripts/runtime_paths.py",
     "scripts/vibecrafted",
     "scripts/verify-vibecrafted-product.sh",
     "vibecrafted-core/pyproject.toml",
@@ -1417,7 +1416,7 @@ def test_archive_accepts_clean_committed_included_payload(
     ("mutation", "relative"),
     [
         ("tracked", "scripts/vetcoders_install.py"),
-        ("index", "scripts/runtime_paths.py"),
+        ("index", "scripts/verify-vibecrafted-product.sh"),
         ("deleted", "scripts/distribution_manifest.py"),
     ],
 )

@@ -53,7 +53,6 @@ REQUIRED_FILES = (
     "install.ps1",
     "install.toml",
     "scripts/distribution_manifest.py",
-    "scripts/runtime_paths.py",
     "scripts/vetcoders_install.py",
     "scripts/vibecrafted",
     "scripts/verify-vibecrafted-product.sh",
