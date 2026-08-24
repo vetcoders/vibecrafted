@@ -149,6 +149,10 @@ removed and not backed up.
   no assets. Customers still receive a ready binary and never need Cargo; the
   upstream release channel should be repaired so a future carrier can verify
   and embed its archive directly.
+- Rebuilding upstream AICX release archives without CI host paths. Version
+  `0.12.5` archives are checksum-correct but name their macOS builder under
+  `/Users`; the carrier therefore prebuilds exact commit `ced57997` with path
+  remaps rather than weakening payload hygiene.
 - `$TMPDIR` test scratch. Owned by the test suite, not by the installer.
 
 _𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI_

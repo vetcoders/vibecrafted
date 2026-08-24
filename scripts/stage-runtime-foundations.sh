@@ -8,32 +8,26 @@ require() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
 OUTPUT_BIN_DIR="$1"
 LOCTREE_VERSION="0.14.4"
 AICX_VERSION="0.12.5"
+AICX_REVISION="ced57997dd97a2b08960f35e3a657d7b0c49a200"
 PRVIEW_VERSION="0.6.0"
 
 case "$(uname -s):$(uname -m)" in
   Darwin:arm64)
     LOCTREE_PACKAGE="@loctree/loctree-darwin-arm64"
-    AICX_ASSET="aicx-v${AICX_VERSION}-aarch64-apple-darwin-slim.zip"
-    AICX_ARCHIVE_TYPE="zip"
     EXE_SUFFIX=""
     ;;
   Linux:x86_64)
     LOCTREE_PACKAGE="@loctree/loctree-linux-x64-gnu"
-    AICX_ASSET="aicx-v${AICX_VERSION}-x86_64-linux-gnu-slim.tar.gz"
-    AICX_ARCHIVE_TYPE="tar.gz"
     EXE_SUFFIX=""
     ;;
   MINGW*:x86_64|MSYS*:x86_64|CYGWIN*:x86_64)
     LOCTREE_PACKAGE="@loctree/loctree-win32-x64-msvc"
-    AICX_ASSET="aicx-v${AICX_VERSION}-x86_64-pc-windows-msvc-slim.zip"
-    AICX_ARCHIVE_TYPE="zip"
     EXE_SUFFIX=".exe"
     ;;
   *) die "no complete Runtime Foundations payload for $(uname -s)/$(uname -m)" ;;
 esac
 
-for tool in curl npm cargo python3; do require "$tool"; done
-[[ "$AICX_ARCHIVE_TYPE" != "zip" ]] || require unzip
+for tool in git npm cargo python3; do require "$tool"; done
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/vibecrafted-foundations.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
@@ -50,26 +44,27 @@ for name in loct loctree loctree-mcp loctree-lsp; do
     "$OUTPUT_BIN_DIR/${name}${EXE_SUFFIX}"
 done
 
-# AICX release assets publish a checksum beside every platform archive. The
-# npm platform package uses the same assets; downloading them directly keeps
-# the Runtime Pack independent of Node at customer install time.
-AICX_BASE="https://github.com/Loctree/aicx/releases/download/v${AICX_VERSION}"
-curl -fsSL "$AICX_BASE/$AICX_ASSET" -o "$WORK/aicx/$AICX_ASSET"
-curl -fsSL "$AICX_BASE/$AICX_ASSET.sha256" -o "$WORK/aicx/$AICX_ASSET.sha256"
-(
-  cd "$WORK/aicx"
-  shasum -a 256 -c "$AICX_ASSET.sha256" >/dev/null 2>&1 \
-    || sha256sum -c "$AICX_ASSET.sha256" >/dev/null
-)
-if [[ "$AICX_ARCHIVE_TYPE" == "zip" ]]; then
-  unzip -q "$WORK/aicx/$AICX_ASSET" -d "$WORK/aicx/unpacked"
-else
-  mkdir -p "$WORK/aicx/unpacked"
-  tar -xzf "$WORK/aicx/$AICX_ASSET" -C "$WORK/aicx/unpacked"
-fi
+# The published 0.12.5 AICX archives are checksum-correct but retain their CI
+# builder's /Users path in both native binaries. Build the exact release commit
+# with path remaps instead of weakening payload hygiene or byte-patching signed
+# upstream artifacts. Customers still receive ready binaries and need no Rust.
+git clone --quiet --depth 1 --branch "v${AICX_VERSION}" \
+  https://github.com/Loctree/aicx.git "$WORK/aicx/source"
+[[ "$(git -C "$WORK/aicx/source" rev-parse HEAD)" == "$AICX_REVISION" ]] \
+  || die "AICX v${AICX_VERSION} does not resolve to pinned $AICX_REVISION"
+AICX_TARGET="$WORK/aicx/target"
+NATIVE_REMAP_FLAGS="-ffile-prefix-map=$HOME=/usr/src/operator-home -ffile-prefix-map=$WORK/aicx/source=/usr/src/aicx"
+RUSTFLAGS="--remap-path-prefix=$HOME=/usr/src/operator-home --remap-path-prefix=$WORK/aicx/source=/usr/src/aicx" \
+  CFLAGS="$NATIVE_REMAP_FLAGS" \
+  CXXFLAGS="$NATIVE_REMAP_FLAGS" \
+  OBJCFLAGS="$NATIVE_REMAP_FLAGS" \
+  OBJCXXFLAGS="$NATIVE_REMAP_FLAGS" \
+  CARGO_TARGET_DIR="$AICX_TARGET" \
+  cargo build --manifest-path "$WORK/aicx/source/Cargo.toml" \
+    --release --locked --bin aicx --bin aicx-mcp
 for name in aicx aicx-mcp; do
-  source_path="$(find "$WORK/aicx/unpacked" -type f -name "${name}${EXE_SUFFIX}" -print -quit)"
-  [[ -n "$source_path" ]] || die "$AICX_ASSET contains no ${name}${EXE_SUFFIX}"
+  source_path="$AICX_TARGET/release/${name}${EXE_SUFFIX}"
+  [[ -f "$source_path" ]] || die "AICX build contains no ${name}${EXE_SUFFIX}"
   install -m 0755 "$source_path" "$OUTPUT_BIN_DIR/${name}${EXE_SUFFIX}"
 done
 
@@ -100,6 +95,7 @@ for path in sorted(root.iterdir()):
 payload = {
     "schema": "io.vetcoders.vibecrafted.runtime-foundations.v1",
     "versions": versions,
+    "source_revisions": {"aicx": "ced57997dd97a2b08960f35e3a657d7b0c49a200"},
     "files": files,
 }
 (root.parent / "runtime-foundations.json").write_text(
