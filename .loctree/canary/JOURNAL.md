@@ -310,3 +310,29 @@ Plan with the falsification contract:
 `~/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0824/plans/canary-install-contract-closure-v1`
 (W0-01 repairs this without recreating the shim; the test must _execute_ both
 Make expressions instead of spelling them).
+
+### Host evidence (2026-08-24, operator machine after the DMG 4.2.4 reinstall)
+
+"Which runtime is current" has **two owners**, and on this machine one of them
+is a ghost:
+
+| Owner                                                                                                                            | State on dragon                                                                                                     |
+| -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `active.json` (`vibecrafted.active-runtime.v1`) → `releases/4.2.4+g8d041616`, wrappers in `~/.local/bin` hardcode the generation | **alive** — everything runs from here; `vibecrafted receipt` CLEAN                                                  |
+| `tools/vibecrafted-current` (Makefile's "STABLE runtime home", uv-tool editable source, `install.toml`)                          | **does not exist** — `tools/` holds one empty `.vibecrafted-install.lock`; `uv tool list` has no vibecrafted at all |
+
+So the P0 is deeper than the dead import: after W0-01 repairs the expression,
+the `"vc-frame config"` and `install-tools` steps still aim at a root that a
+DMG-installed machine never creates. Two grammars for one question — "where is
+the current runtime" — and the machine works only because the capsule grammar
+answers while the Makefile grammar points at a grave. This is the operator's
+"another DMG reinstall and everything would work again" made concrete: reinstall
+residue as the only thing standing between green and broken.
+
+Belongs to the installer ↔ DMG power (§ Not cut, item 3 — the fork's cut).
+W1-01's clean-runner rehearsal must decide the throne: either `active.json`
+is the one answer and the Makefile consumes it, or `vibecrafted-current` is
+real and the capsule maintains it. Not both.
+
+Side receipts from the same probe: `scaffold-doctor` INSTALLED_NOT_ON_PATH;
+`vc-frame` DIRTY_BUILD_PROVENANCE (0.47.3+g017e3839.dirty); `voc` absent.
