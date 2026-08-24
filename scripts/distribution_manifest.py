@@ -150,6 +150,7 @@ FORBIDDEN_COMPONENTS = frozenset(
         ".DS_Store",
         ".backup",
         ".build",
+        ".cache",
         ".circleci",
         ".coverage",
         ".devcontainer",
@@ -164,6 +165,7 @@ FORBIDDEN_COMPONENTS = frozenset(
         ".loctignore",
         ".loctree",
         ".mypy_cache",
+        ".netrc",
         ".next",
         ".prettierignore",
         ".pytest_cache",
@@ -179,11 +181,18 @@ FORBIDDEN_COMPONENTS = frozenset(
         "__tests__",
         "build",
         "coverage.xml",
+        "credentials.json",
         "dist",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        "id_rsa",
         "node_modules",
         "package-lock.json",
         "pnpm-lock.yaml",
         "poetry.lock",
+        "reports",
+        "secrets.json",
         "target",
         "test",
         "tests",
@@ -192,7 +201,8 @@ FORBIDDEN_COMPONENTS = frozenset(
     }
 )
 
-FORBIDDEN_SUFFIXES = (".pyc", ".pyo", ".swp", "~")
+FORBIDDEN_SUFFIXES = (".pyc", ".pyo", ".swp", "~", ".pem", ".p12", ".pfx")
+_SECRET_NAME_PREFIXES = ("id_rsa", "id_dsa", "id_ecdsa", "id_ed25519")
 REQUIRED_LOCKFILES = frozenset(
     {
         "vibecrafted-app/Cargo.lock",
@@ -872,6 +882,14 @@ def _component_is_secret_env(name: str) -> bool:
     return name.startswith(".env.") and not name.endswith(".example")
 
 
+def _component_looks_like_secret(name: str) -> bool:
+    """Return True when a path component looks like a private key or credential file."""
+    lowered = name.lower()
+    if lowered.endswith((".pub", ".example")):
+        return False
+    return lowered.startswith(_SECRET_NAME_PREFIXES)
+
+
 def path_is_forbidden(relative: str | Path) -> bool:
     """Return True when a relative path matches a forbidden component/suffix rule."""
     relative_path = _relative_path(relative)
@@ -880,7 +898,9 @@ def path_is_forbidden(relative: str | Path) -> bool:
     if relative_path.as_posix() in REQUIRED_LOCKFILES:
         return False
     return any(
-        part in FORBIDDEN_COMPONENTS or _component_is_secret_env(part)
+        part in FORBIDDEN_COMPONENTS
+        or _component_is_secret_env(part)
+        or _component_looks_like_secret(part)
         for part in relative_path.parts
     ) or relative_path.name.endswith(FORBIDDEN_SUFFIXES)
 
@@ -1702,6 +1722,17 @@ def _assert_archive_matches_git_revision(
 
 def _write_archive(payload_root: Path, output: Path, root_name: str) -> None:
     """Write payload_root as a deterministic gzip+PAX tarball rooted at root_name."""
+    inventory = list(_walk_entries(payload_root))
+    errors = []
+    for path in inventory:
+        relative = path.relative_to(payload_root)
+        if path_is_forbidden(relative):
+            errors.append(f"forbidden path: {relative}")
+            continue
+        if relative.parts[0] not in ALLOWED_TOP_LEVEL:
+            errors.append(f"unexpected top-level path: {relative}")
+    if errors:
+        raise ManifestError("\n".join(sorted(set(errors))))
     output.parent.mkdir(parents=True, exist_ok=True)
     with (
         output.open("wb") as raw_output,
@@ -1712,7 +1743,7 @@ def _write_archive(payload_root: Path, output: Path, root_name: str) -> None:
         root_info.type = tarfile.DIRTYPE
         root_info.mode = 0o755
         tar.addfile(_normalized_tar_info(root_info))
-        for path in _walk_entries(payload_root):
+        for path in inventory:
             relative = path.relative_to(payload_root)
             archive_name = f"{root_name}/{relative.as_posix()}"
             info = _normalized_tar_info(tar.gettarinfo(str(path), arcname=archive_name))

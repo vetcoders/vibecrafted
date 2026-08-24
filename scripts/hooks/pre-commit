@@ -45,6 +45,17 @@ if [ ${#MD_YAML_FILES[@]} -gt 0 ]; then
     git add "${MD_YAML_FILES[@]}"
 fi
 
+echo "▸ host-paths"
+# Same account-home family as payload-hygiene: /Users/<account> and
+# /home/<account>. Generic roots (/Users, /home) are not identity. Fail-closed
+# — a missing scanner or a hit refuses the commit, not the release.
+if ! git diff --cached --name-only --diff-filter=ACM -z \
+    | env -u PYTHONPATH -u PYTHONHOME \
+      python3 scripts/payload_hygiene.py --host-paths --null; then
+    echo "FATAL: staged text names a host account path; refuse the commit" >&2
+    exit 1
+fi
+
 echo "▸ semgrep"
 # Staged-only, same contract as shellcheck/ruff above. A Living Tree often
 # has unrelated dirty files; whole-repo `semgrep --config auto` attributes

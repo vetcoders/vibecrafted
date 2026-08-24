@@ -244,7 +244,7 @@ def test_vc_dashboard_mixes_companion_vc_frame_config_with_repo_layout(
     assert f"VC_FRAME_CONFIG_DIR={vc_frame_config.parent}" in payload
 
 
-def test_vc_dashboard_uses_base_run_id_session_without_layout_suffix(
+def test_vc_dashboard_uses_place_session_without_layout_suffix(
     tmp_path: Path,
 ) -> None:
     home = tmp_path / "home"
@@ -277,7 +277,7 @@ def test_vc_dashboard_uses_base_run_id_session_without_layout_suffix(
     env.pop("ZELLIJ_PANE_ID", None)
     env.pop("ZELLIJ_SESSION_NAME", None)
     # Scrub any operator-session context leaked from a running operator shell so
-    # the dashboard resolves the run-id session rather than the ambient one.
+    # the dashboard resolves the place session rather than the ambient one.
     env.pop("VIBECRAFTED_OPERATOR_SESSION", None)
     env.pop("VIBECRAFTED_OPERATOR_MODE", None)
 
@@ -290,11 +290,9 @@ def test_vc_dashboard_uses_base_run_id_session_without_layout_suffix(
 
     payload = capture_file.read_text(encoding="utf-8").splitlines()
     assert "--session" in payload
-    assert _expected_operator_session(env["VIBECRAFTED_RUN_ID"]) in payload
-    assert (
-        f"{_expected_operator_session(env['VIBECRAFTED_RUN_ID'])}-marbles"
-        not in payload
-    )
+    assert _expected_operator_session() in payload
+    assert env["VIBECRAFTED_RUN_ID"] not in payload
+    assert f"{_expected_operator_session()}-marbles" not in payload
 
 
 def test_zsh_command_backed_skill_does_not_depend_on_external_has_agent(
@@ -368,7 +366,8 @@ def test_operator_session_name_compacts_long_repo_scope_for_vc_frame_limit(
 
     session_name = result.stdout.strip()
     assert len(session_name) <= 24
-    assert session_name.endswith("-inte-091338")
+    assert "inte-091338" not in session_name
+    assert session_name == "mcp-server-semgrep"
 
 
 def test_operator_session_name_supports_folder_scope(

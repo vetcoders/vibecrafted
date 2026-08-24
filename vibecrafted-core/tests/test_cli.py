@@ -1017,7 +1017,9 @@ def test_root_cli_doctor_routes_to_installer_doctor(monkeypatch, capsys) -> None
     monkeypatch.setattr(
         cli.doctor_module,
         "doctor_run",
-        lambda: [SimpleNamespace(level="ok", component="runtime", message="ready")],
+        lambda **_kwargs: [
+            SimpleNamespace(level="ok", component="runtime", message="ready")
+        ],
     )
 
     assert cli.main(["doctor", "--json"]) == 0
@@ -1031,10 +1033,25 @@ def test_root_cli_doctor_returns_failure_for_failed_findings(monkeypatch) -> Non
     monkeypatch.setattr(
         cli.doctor_module,
         "doctor_run",
-        lambda: [SimpleNamespace(level="fail", component="runtime", message="broken")],
+        lambda **_kwargs: [
+            SimpleNamespace(level="fail", component="runtime", message="broken")
+        ],
     )
 
     assert cli.main(["doctor"]) == 1
+
+
+def test_root_cli_doctor_release_forwards_the_flag(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def _run(**kwargs):
+        seen.update(kwargs)
+        return [SimpleNamespace(level="ok", component="runtime", message="ready")]
+
+    monkeypatch.setattr(cli.doctor_module, "doctor_run", _run)
+
+    assert cli.main(["doctor", "--release"]) == 0
+    assert seen.get("release") is True
 
 
 def test_apply_live_liveness_flags_dead_launcher() -> None:

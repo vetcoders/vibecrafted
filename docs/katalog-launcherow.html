@@ -1,0 +1,436 @@
+<title>Katalog launcherów Vibecrafted</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root{
+  --ground:#f4efe6; --panel:#fbf8f2; --panel2:#efe8da; --line:#d8cdb9;
+  --text:#2a2318; --dim:#7d7160; --copper:#a85f2e; --copper-soft:#c07a45;
+  --read:#4f7d54; --write:#a85f2e; --mgmt:#5b6b80; --ghost:#a04545;
+  --code-bg:#eee7d8; --chip:#e7ddc9;
+}
+:root:not([data-theme="light"]){}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#171209; --panel:#1f180d; --panel2:#281f11; --line:#3a2f1d;
+    --text:#ece3d0; --dim:#a2937a; --copper:#d0854f; --copper-soft:#b06a3a;
+    --read:#74a878; --write:#d0854f; --mgmt:#8d9db1; --ghost:#c96a6a;
+    --code-bg:#120d06; --chip:#2e2413;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#171209; --panel:#1f180d; --panel2:#281f11; --line:#3a2f1d;
+  --text:#ece3d0; --dim:#a2937a; --copper:#d0854f; --copper-soft:#b06a3a;
+  --read:#74a878; --write:#d0854f; --mgmt:#8d9db1; --ghost:#c96a6a;
+  --code-bg:#120d06; --chip:#2e2413;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--text);
+  font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:15px;line-height:1.55}
+.mono,code,pre,h1,h2,h3,.cmd{font-family:"IBM Plex Mono","SF Mono",Menlo,monospace}
+.wrap{max-width:1160px;margin:0 auto;padding:0 24px 80px}
+header.hero{border-bottom:1px solid var(--line);background:var(--panel)}
+.hero-in{max-width:1160px;margin:0 auto;padding:40px 24px 28px}
+.hero h1{margin:0 0 6px;font-size:clamp(24px,3.4vw,34px);font-weight:600;letter-spacing:-.01em;text-wrap:balance}
+.hero h1 .hammer{color:var(--copper)}
+.hero .sub{color:var(--dim);margin:0 0 18px;max-width:68ch}
+.stats{display:flex;flex-wrap:wrap;gap:10px}
+.stat{background:var(--chip);border:1px solid var(--line);border-radius:4px;padding:6px 12px;font-size:13px}
+.stat b{font-family:"IBM Plex Mono",monospace;color:var(--copper);font-weight:600;font-variant-numeric:tabular-nums}
+nav.toc{position:sticky;top:0;z-index:5;background:var(--ground);border-bottom:1px solid var(--line);
+  display:flex;gap:2px;overflow-x:auto;padding:0 24px}
+nav.toc a{color:var(--dim);text-decoration:none;padding:10px 12px;font-size:13px;white-space:nowrap;
+  font-family:"IBM Plex Mono",monospace;border-bottom:2px solid transparent}
+nav.toc a:hover,nav.toc a:focus-visible{color:var(--copper);border-bottom-color:var(--copper);outline:none}
+section{margin-top:48px}
+h2{font-size:19px;font-weight:600;margin:0 0 4px;letter-spacing:-.01em}
+h2::before{content:"⚒ ";color:var(--copper)}
+.lede{color:var(--dim);margin:0 0 20px;max-width:75ch}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px 16px;
+  display:flex;flex-direction:column;gap:8px}
+.card h3{margin:0;font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.badge{font-size:10.5px;font-family:"IBM Plex Mono",monospace;font-weight:500;letter-spacing:.06em;
+  padding:1.5px 7px;border-radius:3px;border:1px solid}
+.b-read{color:var(--read);border-color:var(--read)}
+.b-write{color:var(--write);border-color:var(--write)}
+.b-mgmt{color:var(--mgmt);border-color:var(--mgmt)}
+.b-ghost{color:var(--ghost);border-color:var(--ghost)}
+.b-ver{color:var(--dim);border-color:var(--line);background:var(--chip)}
+.role{margin:0;font-size:13.5px;color:var(--text)}
+.card pre{margin:0;background:var(--code-bg);border:1px solid var(--line);border-radius:4px;
+  padding:9px 11px;font-size:12px;line-height:1.6;overflow-x:auto;color:var(--text)}
+.card pre b{color:var(--copper);font-weight:500}
+.extra{font-size:12.5px;color:var(--dim);margin:0}
+.extra code{background:var(--chip);border-radius:3px;padding:0 4px;font-size:12px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:18px 20px}
+.flagtable{display:grid;grid-template-columns:max-content 1fr;gap:6px 22px;font-size:13.5px}
+.flagtable code{color:var(--copper);font-size:13px;white-space:nowrap}
+.tbl-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:6px;background:var(--panel)}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th{font-family:"IBM Plex Mono",monospace;font-weight:500;font-size:11.5px;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--dim);text-align:left;padding:10px 14px;border-bottom:1px solid var(--line)}
+td{padding:8px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:none}
+td code{color:var(--copper);font-size:12.5px}
+td.mono{font-size:12.5px;white-space:nowrap}
+.pipeline{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-family:"IBM Plex Mono",monospace;
+  font-size:13px;background:var(--code-bg);border:1px solid var(--line);border-radius:6px;padding:14px 16px}
+.pipeline .st{padding:2px 8px;border-radius:3px;border:1px solid var(--line);background:var(--panel)}
+.pipeline .st.w{border-color:var(--write);color:var(--write)}
+.pipeline .st.r{border-color:var(--read);color:var(--read)}
+.pipeline .arr{color:var(--dim)}
+.note{border-left:3px solid var(--copper);background:var(--panel);padding:12px 16px;border-radius:0 6px 6px 0;
+  font-size:13.5px;margin:14px 0 0}
+.note.warn{border-left-color:var(--ghost)}
+ul.findings{margin:0;padding-left:20px;font-size:14px;display:flex;flex-direction:column;gap:8px}
+ul.findings code{background:var(--chip);border-radius:3px;padding:0 4px;font-size:12.5px}
+footer{margin-top:70px;padding-top:20px;border-top:1px solid var(--line);color:var(--dim);
+  font-size:12.5px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
+@media (max-width:640px){.flagtable{grid-template-columns:1fr;gap:2px}
+  .flagtable code{margin-top:8px}}
+</style>
+
+<header class="hero">
+  <div class="hero-in">
+    <h1><span class="hammer">⚒</span> Katalog launcherów Vibecrafted</h1>
+    <p class="sub">Pełna powierzchnia komend decka <code>vibecrafted 4.1.0+g237d2814</code>: rola, subkomendy, flagi i mapowanie każdego launchera — zebrane z żywych helpów, kodu decka i canary sweep repo.</p>
+    <div class="stats">
+      <div class="stat"><b>31</b> komend decka</div>
+      <div class="stat"><b>21</b> skill-launcherów</div>
+      <div class="stat"><b>52</b> wpisy w ~/.local/bin</div>
+      <div class="stat"><b>6</b> agentów × <b>9</b> trybów</div>
+      <div class="stat"><b>11</b> etapów ship-cycle</div>
+      <div class="stat"><b>2049</b> jednostek canary</div>
+    </div>
+  </div>
+</header>
+
+<nav class="toc">
+  <a href="#anatomia">anatomia</a>
+  <a href="#flagi">kontrakt flag</a>
+  <a href="#ship">ship-cycle</a>
+  <a href="#skille">skille poza pipeline</a>
+  <a href="#agenci">tryby agentowe</a>
+  <a href="#mgmt">zarządzanie</a>
+  <a href="#operator">powierzchnia operatora</a>
+  <a href="#mapping">mapping shimów</a>
+  <a href="#canary">canary sweep</a>
+  <a href="#rozjazdy">rozjazdy</a>
+</nav>
+
+<div class="wrap">
+
+<section id="anatomia">
+  <h2>Anatomia wywołania</h2>
+  <p class="lede">Deck ma trzy bramy. Każdy skill instaluje też skrót <code>vc-&lt;skill&gt;</code> — cienki wrapper, który przekazuje argv w całości.</p>
+  <div class="panel">
+    <pre class="mono" style="margin:0;background:var(--code-bg);border:1px solid var(--line);border-radius:4px;padding:12px 14px;font-size:13px;overflow-x:auto"><b>vibecrafted &lt;command&gt;</b> [args]                       # komenda decka (init, doctor, server…)
+<b>vibecrafted &lt;skill&gt; &lt;agent&gt;</b> [-p &lt;prompt&gt; | -f &lt;file&gt;]  # workflow z agentem zewnętrznym
+<b>vibecrafted &lt;agent&gt; &lt;mode&gt;</b> &lt;plan.md&gt;                 # tryb plan-based per agent
+<b>vc-&lt;skill&gt;</b> &lt;agent&gt; [flags]                          # skrót; identyczny kontrakt</pre>
+    <p class="extra" style="margin-top:10px">Agenci: <code>claude</code> · <code>codex</code> · <code>agy</code> · <code>junie</code> · <code>grok</code> (<code>gemini</code> przyjmowany, zdeprecjonowany na rzecz agy).</p>
+  </div>
+</section>
+
+<section id="flagi">
+  <h2>Kontrakt flag — wspólny dla wszystkich skilli</h2>
+  <p class="lede">Karty niżej nie powtarzają tych flag; wymieniają tylko odchyłki od kontraktu.</p>
+  <div class="panel flagtable">
+    <code>-p, --prompt &lt;text&gt;</code><span>prompt inline</span>
+    <code>-f, --file &lt;path.md&gt;</code><span>plik wejściowy jako kontekst zadania (wskaźnik, nie payload w argv)</span>
+    <code>--prompt-stdin</code><span>prompt ze stdin; zero kopii w argv/tmp</span>
+    <code>--runtime &lt;terminal|headless&gt;</code><span>powierzchnia workera (domyślnie: headless)</span>
+    <code>--root &lt;path&gt;</code><span>root repozytorium</span>
+    <code>--model &lt;name&gt;</code><span>override modelu agenta</span>
+    <code>--json</code><span>maszynowy launch receipt</span>
+    <code>--count &lt;n&gt;</code><span>rundy pętli (marbles / polarize; domyślnie 3)</span>
+    <code>--depth &lt;n&gt;</code><span>głębokość crawl planu (marbles; domyślnie 3)</span>
+    <code>--verbose</code><span>globalnie: szczegółowy output</span>
+  </div>
+</section>
+
+<section id="ship">
+  <h2>Ship-cycle — 11 etapów w kolejności kanonicznej</h2>
+  <!-- gen:pipeline -->
+  <div class="pipeline">
+    <span class="st r">scaffold</span>
+    <span class="arr">→</span>
+    <span class="st w">implement</span>
+    <span class="arr">→</span>
+    <span class="st r">review</span>
+    <span class="arr">→</span>
+    <span class="st w">workflow</span>
+    <span class="arr">→</span>
+    <span class="st r">followup</span>
+    <span class="arr">→</span>
+    <span class="st w">marbles</span>
+    <span class="arr">→</span>
+    <span class="st r">audit</span>
+    <span class="arr">→</span>
+    <span class="st w">polarize</span>
+    <span class="arr">→</span>
+    <span class="st r">dou</span>
+    <span class="arr">→</span>
+    <span class="st w">hydrate</span>
+    <span class="arr">→</span>
+    <span class="st w">release</span>
+  </div>
+  <!-- /gen:pipeline -->
+  <p class="extra" style="margin-top:8px">Rytm READ/WRITE: etapy czytające budują dowód, etapy piszące tną. <code>decorate</code> (WRITE 2.1.0) wchodzi między dou a hydrate, gdy powierzchnia wymaga wykończenia wizualnego. Parasol całości: <code>vc-ship</code>.</p>
+  <div class="grid" style="margin-top:16px">
+    <div class="card"><h3>scaffold <span class="badge b-read">READ</span><span class="badge b-ver">0.2.0</span></h3>
+      <p class="role">Founder-first planowanie architektury: od mglistego pomysłu do jednego wykonywalnego planu.</p>
+      <pre>vibecrafted scaffold &lt;agent&gt; [flags]
+vc-scaffold &lt;agent&gt; [flags]</pre></div>
+    <div class="card"><h3>implement <span class="badge b-write">WRITE</span><span class="badge b-ver">2.2.0</span></h3>
+      <p class="role">Etap WRITE cyklu: kompletna implementacja e2e z wbudowanym followup i marbles. Nie mylić z justdo.</p>
+      <pre>vibecrafted implement &lt;agent&gt; [flags]</pre></div>
+    <div class="card"><h3>review <span class="badge b-read">READ</span><span class="badge b-ver">2.0.0</span></h3>
+      <p class="role">Ograniczony review PR / gałęzi / zakresu commitów / paczki artefaktów — findings przed podsumowaniem.</p>
+      <pre>vibecrafted review &lt;agent&gt; [flags]</pre></div>
+    <div class="card"><h3>workflow <span class="badge b-write">WRITE</span><span class="badge b-ver">3.6.0</span></h3>
+      <p class="role">Pipeline Examine → Research → Implement dla pracy dotykającej repo.</p>
+      <pre>vibecrafted workflow &lt;agent&gt; [flags]</pre></div>
+    <div class="card"><h3>followup <span class="badge b-read">READ</span><span class="badge b-ver">2.2.0</span></h3>
+      <p class="role">Audyt kierunku po implementacji: luki, drift, regresje, następna najwyższa dźwignia.</p>
+      <pre>vibecrafted followup &lt;agent&gt; [flags]</pre></div>
+    <div class="card"><h3>marbles <span class="badge b-write">WRITE</span><span class="badge b-ver">7.0.0</span></h3>
+      <p class="role">Konwergencja prowadzona kontrprzykładami: naprawia to, co wciąż złe, aż powierzchnia trzyma.</p>
+      <pre>vibecrafted marbles &lt;agent&gt; [flags]
+vibecrafted marbles &lt;pause|stop|resume|
+  session|inspect|delete|gc&gt; [args]</pre>
+      <p class="extra">Jeden tab orkiestratora; <code>--count N</code> = rundy L1…LN sekwencyjnie, bez child-tabów.</p></div>
+    <div class="card"><h3>audit <span class="badge b-read">READ</span><span class="badge b-ver">1.0.0</span></h3>
+      <p class="role">READ-ONLY falsyfikacja ukończonego planu: macierz wymagań, dowód albo odmowa każdego claimu.</p>
+      <pre>vibecrafted audit &lt;agent&gt; [flags]</pre></div>
+    <div class="card"><h3>polarize <span class="badge b-write">WRITE</span><span class="badge b-ver">2.0.0</span></h3>
+      <p class="role">Po marbles: zdejmuje nadmiar do jednej obronnej prawdy. Preflight przez <code>loct prism</code>.</p>
+      <pre>vibecrafted polarize &lt;agent&gt; [flags]</pre>
+      <p class="extra">Dodatkowo honoruje <code>--count</code> / <code>--depth</code>.</p></div>
+    <div class="card"><h3>dou <span class="badge b-read">READ</span><span class="badge b-ver">2.1.0</span></h3>
+      <p class="role">Definition of Undone: audyt całej powierzchni produktu widzianej oczami kupującego.</p>
+      <pre>vibecrafted dou &lt;agent&gt; [flags]</pre></div>
+    <div class="card"><h3>decorate <span class="badge b-write">WRITE</span><span class="badge b-ver">2.1.0</span></h3>
+      <p class="role">Późne wykończenie wizualne i spójność doświadczenia — w języku projektowym użytkownika.</p>
+      <pre>vibecrafted decorate &lt;agent&gt; [flags]</pre></div>
+    <div class="card"><h3>hydrate <span class="badge b-write">WRITE</span><span class="badge b-ver">1.0.0</span></h3>
+      <p class="role">Pakowanie i go-to-market: od findings DoU do produktu, który da się kupić.</p>
+      <pre>vibecrafted hydrate &lt;agent&gt; [flags]</pre></div>
+    <div class="card"><h3>release <span class="badge b-write">WRITE</span><span class="badge b-ver">0.2.1</span></h3>
+      <p class="role">Finalny ship na zewnątrz: bezpiecznie, widocznie, deploy-owalnie, odwracalnie.</p>
+      <pre>vibecrafted release &lt;agent&gt; [flags]</pre></div>
+  </div>
+</section>
+
+<section id="skille">
+  <h2>Skille poza pipeline</h2>
+  <div class="grid">
+    <div class="card"><h3>justdo <span class="badge b-write">WRITE</span><span class="badge b-ver">3.1.0</span></h3>
+      <p class="role">Postura Just Do: bierz zadanie i dowieź, typ pracy definiuje prompt. Furtka poza pipeline (ADR-0001) — nie jest etapem vc-ship i nie jest implementem.</p>
+      <pre>vibecrafted justdo &lt;agent&gt; [flags]</pre></div>
+    <div class="card"><h3>intents <span class="badge b-read">READ</span><span class="badge b-ver">1.0.1</span></h3>
+      <p class="role">Audyt prawdy plan-vs-runtime: co z zaplanowanego faktycznie wylądowało w kodzie.</p>
+      <pre>vibecrafted intents &lt;agent&gt; [flags]</pre></div>
+    <div class="card"><h3>research <span class="badge b-read">READ</span><span class="badge b-ver">1.3.0</span></h3>
+      <p class="role">Wieloagentowy research przed implementacją; <code>uno|duo|trio</code> deklaruje dokładną liczbę torów.</p>
+      <pre>vibecrafted research [agents...] [flags]
+vibecrafted research &lt;uno|duo|trio&gt; &lt;agents...&gt;
+vibecrafted swarm [...]   # alias</pre>
+      <p class="extra">Dodatkowo <code>--synthesizer &lt;agent&gt;</code>; sidecary <code>vc-research-await</code>, <code>vc-research-synthesize</code>.</p></div>
+    <div class="card"><h3>prune <span class="badge b-read">READ</span><span class="badge b-ver">3.3.3</span></h3>
+      <p class="role">Kuracja runtime i stożka publikacji: tnie tylko udowodnione martwe, wystawia zapomniane perły.</p>
+      <pre>vibecrafted prune &lt;agent&gt; [flags]</pre></div>
+    <div class="card"><h3>trust <span class="badge b-read">READ</span><span class="badge b-ver">1.0.0</span></h3>
+      <p class="role">Post-hoc falsyfikacja claimów commitowych (w tym agent fairness); projekcja werdyktów na oś f/x/n. Nigdy nie blokuje — od blokowania jest guard.</p>
+      <pre>vibecrafted trust &lt;agent&gt; [flags]</pre></div>
+    <div class="card"><h3>guard <span class="badge b-read">READ</span><span class="badge b-ver">1.0.0</span></h3>
+      <p class="role">Egzekutor w locie: inwentarz bramek + odmowa kontynuacji przy trust block na HEAD. Fail-closed.</p>
+      <pre>vibecrafted guard &lt;agent&gt; [flags]</pre></div>
+    <div class="card"><h3>partner · ownership · delegate · agents</h3>
+      <p class="role">Postury: wspólne sterowanie z operatorem (partner), pełne przejęcie A→Z (ownership), natywna delegacja in-session (delegate), kontrakt delegacji floty (agents).</p>
+      <pre>vibecrafted partner &lt;agent&gt; [flags]
+vibecrafted ownership &lt;agent&gt; [flags]
+vibecrafted delegate &lt;agent&gt; [flags]</pre></div>
+  </div>
+</section>
+
+<section id="agenci">
+  <h2>Tryby agentowe — jednolita matryca ×6 agentów</h2>
+  <p class="lede"><code>vibecrafted &lt;agent&gt; &lt;mode&gt;</code> — identyczny szablon dla claude / codex / agy / junie / grok (gemini → agy).</p>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>tryb</th><th>argument</th><th>rola</th></tr></thead>
+    <tbody>
+      <tr><td class="mono"><code>implement</code></td><td class="mono">&lt;plan.md&gt;</td><td>wykonaj plik planu</td></tr>
+      <tr><td class="mono"><code>research</code></td><td class="mono">&lt;plan.md&gt;</td><td>research tematu lub planu, jeden agent</td></tr>
+      <tr><td class="mono"><code>review</code></td><td class="mono">&lt;plan.md&gt;</td><td>review ograniczonego PR / gałęzi / zakresu / paczki</td></tr>
+      <tr><td class="mono"><code>plan</code></td><td class="mono">&lt;plan.md&gt;</td><td>wygeneruj plan implementacji</td></tr>
+      <tr><td class="mono"><code>prompt</code></td><td class="mono">&lt;plan.md&gt;</td><td>wolny prompt z kontekstem planu</td></tr>
+      <tr><td class="mono"><code>observe</code></td><td class="mono">--last | --run-id</td><td>podejrzyj ostatni raport / transkrypt</td></tr>
+      <tr><td class="mono"><code>await</code></td><td class="mono">--last | --run-id</td><td>czekaj na terminalne meta + podsumowanie (kanoniczny sygnał wake)</td></tr>
+      <tr><td class="mono"><code>stop</code></td><td class="mono">--run-id | --last</td><td>TERM na process group launchera, oznacz stopped</td></tr>
+      <tr><td class="mono"><code>resume</code></td><td class="mono">--run-id | --last</td><td>kontynuuj zatrzymany run jako NOWY tracked job</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="mgmt">
+  <h2>Zarządzanie instalacją i sesją</h2>
+  <div class="grid">
+    <div class="card"><h3>init <span class="badge b-mgmt">MGMT</span></h3>
+      <p class="role">Interaktywna orientacja agenta w repo: historia, oczy (Loctree), weryfikacja gruntu.</p>
+      <pre>vibecrafted init [claude|codex|agy|junie|grok]
+vc-init [agent]</pre></div>
+    <div class="card"><h3>resume <span class="badge b-mgmt">MGMT</span></h3>
+      <p class="role">Trzy tryby: wznowienie zatrzymanego runa control-plane, natywne wznowienie sesji providera, albo pakiet ciągłości AICX (48 h) bez id.</p>
+      <pre>vibecrafted resume &lt;agent&gt; --run-id work-…
+vibecrafted resume &lt;agent&gt; --session &lt;uuid&gt;
+vibecrafted resume &lt;agent&gt;        # AICX pack
+vc-resume …</pre>
+      <p class="extra">Flagi: <code>--last</code>, <code>-p/-f</code>, <code>--fork-session</code> (tylko claude). Nigdy <code>work-*</code> ani VIBECRAFTED_SESSION_ID do <code>--session</code>. Okno AICX: <code>VIBECRAFTED_RESUME_AICX_HOURS</code>.</p></div>
+    <div class="card"><h3>status <span class="badge b-mgmt">MGMT</span></h3>
+      <p class="role">Dzisiejsza aktywność agentów.</p>
+      <pre>vibecrafted status    # alias: stats</pre></div>
+    <div class="card"><h3>doctor <span class="badge b-mgmt">MGMT</span></h3>
+      <p class="role">Zdrowie instalacji przez bramkę doctora frameworka; potrafi naprawić serwis serwera.</p>
+      <pre>vibecrafted doctor [--fix-server-service]
+vibecrafted check     # alias</pre></div>
+    <div class="card"><h3>receipt <span class="badge b-mgmt">MGMT</span></h3>
+      <p class="role">Kwit delivery/runtime: owner/repo → branch → SHA checkoutu → dirty → zainstalowane SHA → ahead/behind, per narzędzie floty.</p>
+      <pre>vibecrafted receipt</pre></div>
+    <div class="card"><h3>update <span class="badge b-mgmt">MGMT</span></h3>
+      <p class="role">Pobierz najnowszy release i przeinstaluj lokalny command deck.</p>
+      <pre>vibecrafted update [--force] [--ref &lt;channel&gt;]
+vibecrafted upgrade   # alias</pre></div>
+    <div class="card"><h3>uninstall <span class="badge b-mgmt">MGMT</span></h3>
+      <p class="role">Odwróć instalację: inwentarz → backup (restore kit) → usunięcie manifest-tracked + discovery. Odwrotność: <code>restore</code>.</p>
+      <pre>vibecrafted uninstall [--dry-run]
+vibecrafted remove    # alias</pre>
+      <p class="extra">Uwaga: do <code>82dbce90</code> deck gubił argv — <code>--dry-run</code> wykonywał prawdziwy teardown. Naprawione + test regresyjny.</p></div>
+    <div class="card"><h3>version · help <span class="badge b-mgmt">MGMT</span></h3>
+      <p class="role">Wersja (<code>X.Y.Z+g&lt;sha&gt;</code>) i talia komend / pełna referencja.</p>
+      <pre>vibecrafted version   # -v, --version
+vibecrafted help [topic|--all]
+vc-help …</pre></div>
+  </div>
+</section>
+
+<section id="operator">
+  <h2>Powierzchnia operatora</h2>
+  <div class="grid">
+    <div class="card"><h3>dashboard <span class="badge b-mgmt">OPS</span></h3>
+      <p class="role">Cienki shim nad natywnym vc-frame: sesje operatorskie i layouty.</p>
+      <pre>vibecrafted dashboard [layout]
+vibecrafted dashboard ls|switch|attach|kill &lt;name&gt;
+vibecrafted dashboard gc [--apply]
+vibecrafted start     # alias dashboard</pre>
+      <p class="extra">Layouty: <code>dashboard</code> (domyślny) · <code>marbles</code> · <code>workflow</code> · <code>research</code> · <code>operator</code>.</p></div>
+    <div class="card"><h3>loop <span class="badge b-mgmt">OPS</span></h3>
+      <p class="role">Interaktywna kontynuacja Agent-Operatora + łańcuchy async await po workerach.</p>
+      <pre>vibecrafted loop start --prompt|--file …
+  [--completion-promise READY]
+vibecrafted loop next | status | complete --promise
+vibecrafted loop await-run --run-id &lt;id&gt;
+  --then-cmd '&lt;next dispatch&gt;'</pre>
+      <p class="extra">Stan: <code>&lt;repo&gt;/.vibecrafted/operator-loop.local.md</code>. <code>--then-cmd</code> nigdy push/deploy bez planu.</p></div>
+    <div class="card"><h3>cron <span class="badge b-mgmt">OPS</span></h3>
+      <p class="role">Cron-safe heartbeat pętli: łapie kontekst Loctree+AICX, wznawia zatwierdzoną komendę po oknie idle.</p>
+      <pre>vibecrafted cron tick [--root] [--after-idle-minutes 10]
+  [--then-cmd &lt;cmd&gt;]
+vibecrafted cron line [--every-minutes 10] …</pre>
+      <p class="extra"><code>tick</code> odmawia hard-stopów: push, deploy, publish, release, reset, <code>rm -rf</code>…</p></div>
+    <div class="card"><h3>dispatch <span class="badge b-mgmt">OPS</span></h3>
+      <p class="role">Deterministyczny supervisor planów <code>vibecrafted.dispatch.v1</code> (TOML) + async lifecycle jednego workera.</p>
+      <pre>vibecrafted dispatch &lt;plan.dispatch.toml&gt;
+  [--doctor|--dry-run|--json|--resume &lt;run-id&gt;]
+vibecrafted dispatch run --run-id &lt;id&gt; --root &lt;p&gt;
+  --report &lt;p&gt; --transcript &lt;p&gt; -- &lt;cmd&gt; [args]</pre></div>
+    <div class="card"><h3>server <span class="badge b-mgmt">OPS</span></h3>
+      <p class="role">Lokalny serwer viewera control-plane + jego guardian; serwis trwały przez launchd (macOS).</p>
+      <pre>vibecrafted server [start|stop|status|open|doctor]
+vibecrafted server service
+  [install|start|stop|status|uninstall]</pre>
+      <p class="extra">Flagi: <code>--port/-p</code> (3024) · <code>--host/-h</code> (127.0.0.1).</p></div>
+    <div class="card"><h3>gui · tui <span class="badge b-mgmt">OPS</span></h3>
+      <p class="role">GUI: localhost-owy pythonowy control plane. TUI: rustowy kokpit <code>voc</code> nad wspólnym stanem.</p>
+      <pre>vibecrafted gui [--source] [--host] [--port]
+  [--no-open] [--bundle-dir]
+vibecrafted tui [voc flags…]   # binarka: voc
+voc [--state-root] [--deck] [--runtime] [--tick-ms]</pre></div>
+    <div class="card"><h3>telemetry <span class="badge b-mgmt">OPS</span></h3>
+      <p class="role">Smoke ścieżki telemetrii marbles przez zainstalowany deck.</p>
+      <pre>vibecrafted telemetry smoke [--agent &lt;a&gt;]
+  [--count &lt;n&gt;] [--root &lt;p&gt;] [--no-watch|--watch]</pre></div>
+    <div class="card"><h3>ship <span class="badge b-mgmt">OPS</span></h3>
+      <p class="role">Start pętli VC-Ship i dispatch checkpointu — parasol 11-etapowego lifecycle'u z supervisorem.</p>
+      <pre>vibecrafted ship [args]
+vc-ship &lt;agent&gt; --prompt "Run the full lifecycle"</pre></div>
+  </div>
+</section>
+
+<section id="mapping">
+  <h2>Mapping — co naprawdę woła każdy wpis w ~/.local/bin</h2>
+  <p class="lede">Cztery gatunki: env-wrapper na binarkę release, wrapper-alias na komendę decka, natywna binarka Mach-O, samodzielny skrypt. Wszystkie wrappery przekazują <code>"$@"</code>.</p>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>launcher</th><th>gatunek</th><th>cel</th></tr></thead>
+    <tbody>
+      <tr><td class="mono"><code>vibecrafted</code></td><td>env-wrapper</td><td>kanoniczny deck (release bin)</td></tr>
+      <tr><td class="mono"><code>vc-init</code> · <code>vc-resume</code> · <code>vc-help</code> · <code>vc-dashboard</code> · <code>vc-dispatch</code> · <code>vc-justdo</code> · <code>vc-doctor</code> · <code>vc-status</code> · <code>vc-update</code> · <code>vc-receipt</code></td><td>wrapper-alias decka</td><td><code>exec vibecrafted &lt;verb&gt; "$@"</code> — codzienne verby zawsze też w rodzinie vc-* (dwie warstwy, jeden świat; od 9536f198)</td></tr>
+      <tr><td class="mono"><code>vc-scaffold</code> <code>vc-implement</code> <code>vc-review</code> <code>vc-workflow</code> <code>vc-followup</code> <code>vc-marbles</code> <code>vc-audit</code> <code>vc-polarize</code> <code>vc-dou</code> <code>vc-decorate</code> <code>vc-hydrate</code> <code>vc-release</code></td><td>env-wrapper</td><td>binarka release o tej samej nazwie (etapy ship-cycle)</td></tr>
+      <tr><td class="mono"><code>vc-agents</code> <code>vc-intents</code> <code>vc-partner</code> <code>vc-ownership</code> <code>vc-delegate</code> <code>vc-research</code> <code>vc-prune</code> <code>vc-trust</code> <code>vc-guard</code> <code>vc-ship</code></td><td>env-wrapper</td><td>binarka release o tej samej nazwie (skille poza pipeline)</td></tr>
+      <tr><td class="mono"><code>vc-research-await</code> · <code>vc-research-synthesize</code></td><td>env-wrapper</td><td>sidecary research swarm</td></tr>
+      <tr><td class="mono"><code>vc-loop</code> · <code>vc-cron</code> · <code>vc-start</code> · <code>vc-theme</code> · <code>vc-paste</code> · <code>vc-git</code> · <code>vc-sandbox</code> · <code>vc-guardian</code> · <code>vc-server-supervisor</code> · <code>vibecrafted-compact-hook</code> · <code>vibecrafted-resume</code> · <code>vibecrafted-server-web</code></td><td>env-wrapper</td><td>binarki release powierzchni operatora / runtime</td></tr>
+      <tr><td class="mono"><code>vc-frame</code></td><td>env-wrapper</td><td>binarka release vc-frame (mux operatora)</td></tr>
+      <tr><td class="mono"><code>vc-terminal</code></td><td>env-wrapper</td><td><code>Vibecrafted.app/Contents/Helpers/vc-terminal.app/…/alacritty --config-file terminal-entry.toml</code></td></tr>
+      <tr><td class="mono"><code>vc-server</code> · <code>vc-admin</code> · <code>voc</code></td><td>Mach-O arm64</td><td>natywne binarki (serwer control-plane · admin · kokpit TUI)</td></tr>
+      <tr><td class="mono"><code>vc-slack</code></td><td>skrypt (703 linie)</td><td>konektor Slack + mostek floty; własny root przez symlink-walk → <code>providers/vc-slack-agent/current</code></td></tr>
+      <tr><td class="mono"><code>vc-tools</code></td><td>skrypt</td><td><code>pnpm run tui</code> w Libraxis/vetcoders-tools (spoza payloadu)</td></tr>
+      <tr><td class="mono"><code>vibecrafted-mcp</code> · <code>vibecrafted-iterm2-autolaunch</code></td><td>uv-shim</td><td>środowiska uv tools (serwer MCP · autolaunch iTerm2)</td></tr>
+      <tr><td class="mono"><code>verify-vibecrafted-walkaround</code></td><td>env-wrapper</td><td>weryfikator walk-around (Verification Rule)</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="canary">
+  <h2>Canary sweep — kto to implementuje (właściciele w kodzie)</h2>
+  <p class="lede">Dwa przeloty ownership wg playbooka <code>canary-sweep rev 2</code> (loctree-first, 2026-08-07/08): pełna flota na div0 — <b>17/17 kanarków, 2842 jednostki, 1999 docstringów, 103 pliki, ~18 min ściany, 0 zmian logiki, ~3.0 M tokenów</b>; oraz lokalny run <code>workflow-canary-sweep-20260809-vibecrafted</code> (schema <code>canary-catalog.v1</code>): 2049 jednostek w 20 chunkach, 25 docstringów, 12 plików, authority <code>repo_verified</code>. Doktryna rev 2: inwentarz TYLKO ze snapshot-query loctree — <code>loct context --full</code> to orientacja, nie spis (klasa coverage-lie: 26/1074 plików bez ostrzeżenia). Poniżej moduły niosące komendy tego katalogu.</p>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>komenda / powierzchnia</th><th>moduł</th><th>rola (z canary)</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">&lt;skill&gt; &lt;agent&gt;, stop/retry</td><td class="mono"><code>workflow.py</code></td><td>rdzeń runtime całego życia runa: normalizuje launch spec, spawnuje dispatchera (headless albo tab vc-frame), potem stop/retry/block</td></tr>
+      <tr><td class="mono">research · marbles · polarize</td><td class="mono"><code>workflow_runtime.py</code></td><td>nadzorowany runtime rodzica: fan-out procesów-dzieci przez AsyncSupervisor, zbiór trwałych artefaktów</td></tr>
+      <tr><td class="mono">rejestr skilli</td><td class="mono"><code>workflows/registry.py</code></td><td>jedyne źródło prawdy: 21 definicji workflow, 11-etapowy pipeline vc-ship, 12 manifestów per-etap</td></tr>
+      <tr><td class="mono">dispatch (plan TOML)</td><td class="mono"><code>dispatch/supervisor.py</code></td><td>deterministyczny control-plane: idzie po cutach planu, bramkuje każdą na execution envelope</td></tr>
+      <tr><td class="mono">dispatch (parser)</td><td class="mono"><code>dispatch/schema.py</code></td><td>TOML <code>dispatch.v1</code> → w pełni zwalidowany typowany Dispatch; wszystkie defekty w jednym przebiegu</td></tr>
+      <tr><td class="mono">dispatch run</td><td class="mono"><code>dispatcher.py</code></td><td>jeden worker pod AsyncSupervisor: kontrakt artefaktów, terminalna prawda</td></tr>
+      <tr><td class="mono">weryfikatory cutów</td><td class="mono"><code>dispatch/verify.py</code></td><td>deterministyczny silnik verify: komendy shell cuta → trójwartościowy Verdict z dowodem</td></tr>
+      <tr><td class="mono">loop</td><td class="mono"><code>loop.py</code></td><td>dwie powierzchnie pod jednym CLI: pętla iteracji operatora (plik stanu md) + await-chains</td></tr>
+      <tr><td class="mono">cron</td><td class="mono"><code>cron.py</code></td><td>heartbeat crontabowy pętli: czyta frontmatter stanu, snapshot kontekstu przez loct + aicx</td></tr>
+      <tr><td class="mono">server / guardian</td><td class="mono"><code>server_supervisor.py</code></td><td>jednoplikowa płaszczyzna nadzoru pary serwer+guardian: lease flock, kontrakt tożsamości buildu (content-hash)</td></tr>
+      <tr><td class="mono">powiadomienia / triage</td><td class="mono"><code>guardian.py</code></td><td>daemon-konsument SSE: settlementy serwera → trwałe joby triage, powiadomienia operatora, strzeżone native resume</td></tr>
+      <tr><td class="mono">receipt</td><td class="mono"><code>runtime_receipt.py</code></td><td>kwit delivery/runtime: owner/repo → branch → SHA → dirty → installed SHA → ahead/behind per narzędzie</td></tr>
+      <tr><td class="mono">doctor</td><td class="mono"><code>doctor.py</code></td><td>doctor pakietu: findings instalera + tożsamość launcher/wersja + transport MCP + nadzór LaunchAgent + zdrowie configu vc-frame</td></tr>
+      <tr><td class="mono">spawn legacy</td><td class="mono"><code>spawn.py</code></td><td>lane launcherów shellowych: spawn CLI agentów, scraping session id / tokenów / kosztu z transkryptów</td></tr>
+      <tr><td class="mono">parytet modelu</td><td class="mono"><code>agent_dispatch.py</code></td><td>pythonowy odpowiednik spawn.sh egzekwujący aksjomat parytetu modelu przy delegacji</td></tr>
+      <tr><td class="mono">dashboard / vc-frame</td><td class="mono"><code>vc_frame_delivery.py</code> · <code>vc_frame_tab_gc.py</code></td><td>dostawa configu vc-frame do generacji runtime + proof-gated GC tabów</td></tr>
+      <tr><td class="mono">ścieżki</td><td class="mono"><code>runtime_paths.py</code></td><td>jedyny resolver każdego home'u zapisu; wszystko env-overridable</td></tr>
+    </tbody>
+  </table></div>
+  <p class="extra" style="margin-top:10px">Pełny katalog: <code>~/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0809/reports/canary-catalog.json</code> (2049 wpisów: plik · symbol · kind · rola · authority) + playbook <code>canary-sweep-playbook.md</code>.</p>
+</section>
+
+<section id="rozjazdy">
+  <h2>Rozjazdy help vs kod — do naprawy</h2>
+  <ul class="findings">
+    <li><span class="badge b-ghost">GHOST</span> <code>resume-session</code> i <code>settlements</code> — reklamowane w <code>vibecrafted help</code>, ale NIE wpięte w dispatch decka (<code>… is not in the command deck</code>). <code>receipt</code> działa (→ <code>runtime_receipt.receipt_main</code>). Stale copy w cmd_help do wycięcia albo komendy do dowiezienia.</li>
+    <li><code>uninstall</code> gubił całe argv w decku (<code>--dry-run</code> = prawdziwy teardown) — naprawione dziś w <code>82dbce90</code> + test regresyjny; inwentarz teardownu rozszerzany o discovery (releases/providers/config/macOS) w osobnym cucie.</li>
+    <li>Na tej maszynie instaler zostawił <b>6 shimów ze spacją w nazwie</b> (<code>vc-init init</code>, <code>vc-resume resume</code>…) — nie ma ich w uv-receipt; bug instalera do naprawy.</li>
+    <li><code>gemini</code> wciąż przyjmowany w dispatchu agentów, choć zdeprecjonowany (następca: <code>agy</code>) — spójność komunikatu do decyzji.</li>
+    <li><code>vc-server</code> na PATH to już natywna binarka Mach-O; <code>vc-server.wrapper-bak-0819</code> to trup po wrapperze, który zabijał identity guard — do sprzątnięcia.</li>
+  </ul>
+</section>
+
+<footer>
+  <span>Źródła: <span class="mono">vibecrafted help --all</span> + helpy per-topic (żywe CLI) · deck 5595 linii · 52 shimy z ~/.local/bin · canary-catalog.v1</span>
+  <span>𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI</span>
+</footer>
+
+</div>

@@ -74,11 +74,15 @@ SHELL_WRAPPER_VERBS = {
     "telemetry": "telemetry",
     "vc-dashboard": "dashboard",
     "vc-dispatch": "dispatch",
+    "vc-doctor": "doctor",
     "vc-help": "help",
     "vc-init": "init",
     "vc-justdo": "justdo",
+    "vc-receipt": "receipt",
     "vc-resume": "resume",
     "vc-start": "start",
+    "vc-status": "status",
+    "vc-update": "update",
 }
 SUCCESS_STATES = {"report_validated", "completed", "closed"}
 TERMINAL_STATES = {
@@ -209,6 +213,15 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("dispatch", help="run or validate a dispatch plan")
     doctor = sub.add_parser("doctor", help="verify installed Vibecrafted runtime")
     doctor.add_argument("--json", action="store_true")
+    doctor.add_argument(
+        "--release",
+        action="store_true",
+        help=(
+            "probe GitHub Latest (gh release view --json tagName) and the "
+            "latest Release source gate conclusion against the local VERSION "
+            "file; mismatch is red and names the tag/publish operator button"
+        ),
+    )
     doctor.add_argument(
         "--quarantine-legacy-runs",
         action="store_true",
@@ -420,10 +433,32 @@ def _default_runtime(explicit_runtime: str, root: str = "") -> str:
     return "headless"
 
 
+def _argv_names_stopped_run(argv: Sequence[str]) -> bool:
+    """True when argv names a control-plane run (``--run-id`` / ``--last``)."""
+    return any(
+        token == "--last" or token == "--run-id" or token.startswith("--run-id=")
+        for token in argv
+    )
+
+
 def _normalize_raw_args(raw_args: list[str]) -> list[str]:
-    """Swap a leading ``<agent> <launcher>`` pair into ``<launcher> <agent>`` order."""
+    """Canonicalize leading pairs so later dispatch sees one shape.
+
+    ``<agent> <launcher>`` becomes ``<launcher> <agent>``.
+    ``resume <agent> --run-id|--last`` becomes ``<agent> resume …`` so the
+    stopped-run flag is not delegated to the deck (which historically had no
+    ``--run-id`` and swallowed it) or to ``_build_parser`` (no ``resume``
+    subcommand). ``--session`` / bare resume stay resume-first for the deck.
+    """
     if len(raw_args) >= 2 and raw_args[0] in AGENTS and raw_args[1] in LAUNCHERS:
         return [raw_args[1], raw_args[0], *raw_args[2:]]
+    if (
+        len(raw_args) >= 2
+        and raw_args[0] == "resume"
+        and raw_args[1] in AGENTS
+        and _argv_names_stopped_run(raw_args[2:])
+    ):
+        return [raw_args[1], "resume", *raw_args[2:]]
     return raw_args
 
 
@@ -1375,7 +1410,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for err in payload["parse_errors"]:
                     print(f"  parse_error: {err}")
             return 0
-        findings = doctor_module.doctor_run()
+        findings = doctor_module.doctor_run(
+            release=bool(getattr(args, "release", False))
+        )
         summary = doctor_module.doctor_summary(findings)
         from .runtime_receipt import build_receipt, render_receipt_text
 

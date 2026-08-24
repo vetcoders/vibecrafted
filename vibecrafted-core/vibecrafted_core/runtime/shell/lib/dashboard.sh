@@ -76,6 +76,9 @@ _vetcoders_product_workspace_prepare() {
         ;;
     esac
   done <<< "$resolved"
+  if _vetcoders_is_legacy_operator_session_name "${VIBECRAFTED_OPERATOR_SESSION:-}"; then
+    export VIBECRAFTED_OPERATOR_SESSION="$(_vetcoders_operator_session_name)"
+  fi
 }
 
 _vetcoders_control_plane_eye_prepare() {

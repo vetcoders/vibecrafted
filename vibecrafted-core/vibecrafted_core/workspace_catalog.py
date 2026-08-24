@@ -804,7 +804,10 @@ def short_workspace_token(workspace_id: str) -> str:
 
 WORKER_HOST_SUFFIX = "-w"
 LEGACY_WORKER_HOST_SUFFIX = " workers"
+LEGACY_OPERATOR_SESSION_PREFIX = "workspace-"
 _MAX_WORKER_HOST_LABEL = 24
+_MAX_PLACE_SESSION_LEN = 24
+_LEGACY_OPERATOR_SESSION_RE = re.compile(r"^workspace-[0-9a-f]{8}$")
 
 
 def _sanitize_worker_host_label(
@@ -857,10 +860,100 @@ def worker_host_display_label(
     return f"{label} [{short_workspace_token(workspace_id)}]"
 
 
-def operator_session_name(workspace_id: str) -> str:
-    """Stable vc-frame product session bound to one durable workspace."""
+def legacy_operator_session_name(workspace_id: str) -> str:
+    """Pre-2026-08-19 catalog fallback rendered as a rail label."""
 
-    return f"workspace-{short_workspace_token(workspace_id)}"
+    return f"{LEGACY_OPERATOR_SESSION_PREFIX}{short_workspace_token(workspace_id)}"
+
+
+def is_legacy_operator_session_name(name: str) -> bool:
+    """True when ``name`` is the old ``workspace-{8hex}`` catalog fallback."""
+
+    return bool(_LEGACY_OPERATOR_SESSION_RE.fullmatch((name or "").strip()))
+
+
+def _place_label_for_workspace(
+    *,
+    display_label: str = "",
+    canonical_root: str = "",
+    max_len: int = _MAX_PLACE_SESSION_LEN,
+) -> str:
+    raw = (
+        (display_label or "").strip() or Path(canonical_root or "").name or "workspace"
+    )
+    return _sanitize_worker_host_label(raw, max_len=max_len)
+
+
+def operator_session_name(
+    workspace_id: str,
+    *,
+    display_label: str = "",
+    catalog: WorkspaceCatalog | None = None,
+) -> str:
+    """Interactive place-session for the human rail.
+
+    Uses the workspace display label (or checkout basename). A short
+    workspace token is appended only when another *active* workspace
+    would collide on the same sanitized label. Never includes a run_id.
+    """
+
+    wid = require_uuid(workspace_id, field_name="workspace_id")
+    loaded = catalog
+    record: WorkspaceRecord | None = None
+    if loaded is None:
+        try:
+            loaded = read_catalog()
+        except WorkspaceCatalogError:
+            loaded = None
+    if loaded is not None:
+        record = loaded.workspaces.get(wid)
+
+    label = _place_label_for_workspace(
+        display_label=display_label or (record.display_label if record else ""),
+        canonical_root=record.canonical_root if record else "",
+    )
+    collide = False
+    if loaded is not None:
+        for other in loaded.workspaces.values():
+            if other.workspace_id == wid:
+                continue
+            if other.status != WORKSPACE_STATUS_ACTIVE:
+                continue
+            other_label = _place_label_for_workspace(
+                display_label=other.display_label,
+                canonical_root=other.canonical_root,
+            )
+            if other_label == label:
+                collide = True
+                break
+    if not collide:
+        return label
+    token = short_workspace_token(wid)
+    max_label = max(1, _MAX_PLACE_SESSION_LEN - 1 - len(token))
+    short_label = _sanitize_worker_host_label(label, max_len=max_label)
+    return f"{short_label}-{token}"
+
+
+def resolve_operator_place_session(
+    *,
+    root: str | Path,
+    env: Mapping[str, str] | None = None,
+) -> str:
+    """Human place-session for this checkout. Does not create workspaces."""
+
+    environ = dict(env) if env is not None else dict(os.environ)
+    try:
+        identity = resolve_run_workspace_identity(
+            root=root, env=environ, create_if_missing=False
+        )
+        return operator_session_name(
+            identity.workspace_id, display_label=identity.display_label
+        )
+    except (WorkspaceCatalogError, WorkspaceNotFound):
+        return _sanitize_worker_host_label(
+            Path(root or ".").name or "vibecrafted",
+            max_len=_MAX_PLACE_SESSION_LEN,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2089,7 +2182,8 @@ def workspace_cli_main(argv: Sequence[str] | None = None) -> int:
             payload = {
                 **identity.to_env(),
                 "VIBECRAFTED_OPERATOR_SESSION": operator_session_name(
-                    identity.workspace_id
+                    identity.workspace_id,
+                    display_label=identity.display_label,
                 ),
                 "VIBECRAFTED_WORKSPACE_ROOT": str(Path(root).expanduser().resolve()),
             }
@@ -2151,6 +2245,8 @@ __all__ = [
     "claim_live_instance",
     "compute_build_id",
     "create_workspace",
+    "is_legacy_operator_session_name",
+    "legacy_operator_session_name",
     "legacy_worker_host_session_name",
     "list_instances",
     "list_workspaces",
@@ -2163,6 +2259,7 @@ __all__ = [
     "read_workspace_session",
     "record_runtime_session_attachment",
     "recover_workspace",
+    "resolve_operator_place_session",
     "resolve_run_workspace_identity",
     "resolve_worker_host_session",
     "select_workspace",

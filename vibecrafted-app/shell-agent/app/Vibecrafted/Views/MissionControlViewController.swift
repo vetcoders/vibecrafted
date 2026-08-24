@@ -55,6 +55,7 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
   private var focusResetWorkItem: DispatchWorkItem?
   private var snapshot: FfiMissionControlSnapshot?
   private var isLoading = false
+  private var pendingFocusRunId: String?
 
   override func loadView() {
     let root = NSView()
@@ -141,6 +142,10 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
       self, selector: #selector(handleMissionControlFocusSection),
       name: NSNotification.Name("MissionControlFocusSection"), object: nil
     )
+    NotificationCenter.default.addObserver(
+      self, selector: #selector(handleMissionControlFocusRun),
+      name: NSNotification.Name("MissionControlFocusRun"), object: nil
+    )
     refreshSnapshot()
   }
 
@@ -156,6 +161,16 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
   @objc private func handleMissionControlFocusSection(_ notification: Notification) {
     guard let section = notification.userInfo?["section"] as? String else { return }
     focusSection(section)
+  }
+
+  @objc private func handleMissionControlFocusRun(_ notification: Notification) {
+    guard let runId = notification.userInfo?["run_id"] as? String, !runId.isEmpty else { return }
+    pendingFocusRunId = runId
+    if snapshot != nil {
+      applyPendingRunFocus()
+    } else {
+      refreshSnapshot()
+    }
   }
 
   func refreshSnapshot() {
@@ -346,6 +361,26 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
       name: NSNotification.Name("MissionControlSnapshotChanged"), object: self,
       userInfo: ["snapshot": snapshot]
     )
+    applyPendingRunFocus()
+  }
+
+  private func applyPendingRunFocus() {
+    guard let runId = pendingFocusRunId, let snapshot else { return }
+    pendingFocusRunId = nil
+    if let idx = snapshot.activeDispatches.firstIndex(where: { $0.runId == runId }) {
+      focusSection("active_dispatches")
+      activeTableView.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
+      postSelection(runId: runId, sourcePath: nil, kind: "dispatch")
+      return
+    }
+    if let idx = snapshot.failures.firstIndex(where: { $0.runId == runId }) {
+      focusSection("failures")
+      failuresTableView.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
+      let item = snapshot.failures[idx]
+      postSelection(runId: runId, sourcePath: item.sourcePath, kind: "failure")
+      return
+    }
+    postSelection(runId: runId, sourcePath: nil, kind: "dispatch")
   }
 
   private func updateStatus() {

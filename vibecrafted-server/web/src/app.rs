@@ -4,6 +4,7 @@ use leptos::prelude::*;
 use leptos_meta::{Link, Meta, Title};
 use leptos_router::components::{Route, Router, Routes};
 use leptos_router::path;
+use serde::{Deserialize, Serialize};
 
 use crate::chrome::{ServerFrame, ServerSection};
 use crate::run_detail::RunDetailPage;
@@ -39,8 +40,10 @@ fn theme_control_script() -> &'static str {
 })();"#
 }
 
-#[derive(Clone, Default)]
-struct DashboardData {
+const DASHBOARD_EMBED_ID: &str = "vc-dashboard-data";
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct DashboardData {
     control_plane: String,
     generated_at: String,
     settlement: DashboardSettlement,
@@ -53,7 +56,7 @@ struct DashboardData {
     loctree_report: String,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 struct DashboardSettlement {
     scope: String,
     active: usize,
@@ -65,7 +68,7 @@ struct DashboardSettlement {
     total_settled: usize,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 struct DashboardRun {
     run_id: String,
     state: String,
@@ -81,7 +84,7 @@ struct DashboardRun {
     last_error: String,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 struct DashboardLifecycleRun {
     run_id: String,
     workflow: String,
@@ -97,7 +100,7 @@ struct DashboardLifecycleRun {
     updated_at: String,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 struct DashboardEvent {
     ts: String,
     run_id: String,
@@ -216,9 +219,165 @@ fn load_dashboard_data_from(
     }
 }
 
+fn encode_dashboard_embed(data: &DashboardData) -> String {
+    serde_json::to_string(data)
+        .unwrap_or_else(|_| "{}".to_string())
+        .replace('<', "\\u003c")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
+#[cfg(any(test, not(feature = "ssr")))]
+fn decode_dashboard_embed(json: &str) -> Option<DashboardData> {
+    let data: DashboardData = serde_json::from_str(json).ok()?;
+    if data == DashboardData::default() {
+        return None;
+    }
+    Some(data)
+}
+
+fn dashboard_embed_script(json: String) -> impl IntoView {
+    view! {
+        <script id=DASHBOARD_EMBED_ID type="application/json" inner_html=json></script>
+    }
+}
+
+#[cfg(feature = "ssr")]
+pub(crate) async fn dashboard_api() -> axum::Json<DashboardData> {
+    axum::Json(load_dashboard_data())
+}
+
 #[cfg(not(feature = "ssr"))]
-fn load_dashboard_data() -> DashboardData {
-    DashboardData::default()
+std::thread_local! {
+    static CLIENT_DASHBOARD: std::cell::RefCell<Option<DashboardData>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(not(feature = "ssr"))]
+fn store_client_dashboard(data: DashboardData) {
+    if data == DashboardData::default() {
+        return;
+    }
+    CLIENT_DASHBOARD.with(|slot| *slot.borrow_mut() = Some(data));
+}
+
+#[cfg(not(feature = "ssr"))]
+fn client_dashboard_now() -> Option<DashboardData> {
+    CLIENT_DASHBOARD.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(feature = "hydrate")]
+fn read_embedded_dashboard() -> Option<DashboardData> {
+    let document = web_sys::window()?.document()?;
+    let json = document
+        .get_element_by_id(DASHBOARD_EMBED_ID)?
+        .text_content()
+        .filter(|text| !text.trim().is_empty())?;
+    decode_dashboard_embed(&json)
+}
+
+#[cfg(feature = "hydrate")]
+fn hydrate_dashboard_cache() {
+    if client_dashboard_now().is_some() {
+        return;
+    }
+    if let Some(data) = read_embedded_dashboard() {
+        store_client_dashboard(data);
+    }
+}
+
+#[cfg(feature = "hydrate")]
+async fn fetch_dashboard() -> Option<DashboardData> {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen_futures::JsFuture;
+
+    let window = web_sys::window()?;
+    let response = JsFuture::from(window.fetch_with_str("/api/control/dashboard"))
+        .await
+        .ok()?;
+    let response: web_sys::Response = response.dyn_into().ok()?;
+    if !response.ok() {
+        return None;
+    }
+    let json = JsFuture::from(response.text().ok()?)
+        .await
+        .ok()?
+        .as_string()?;
+    let data = decode_dashboard_embed(&json)?;
+    store_client_dashboard(data.clone());
+    Some(data)
+}
+
+#[cfg(feature = "hydrate")]
+fn refresh_client_dashboard() {
+    leptos::task::spawn_local(async {
+        let _ = fetch_dashboard().await;
+    });
+}
+
+#[cfg(not(feature = "ssr"))]
+fn dashboard_loading() -> impl IntoView {
+    view! {
+        <ServerFrame active=ServerSection::Overview status="loading control plane".to_string()>
+            <p class="control-empty">"Loading control plane…"</p>
+        </ServerFrame>
+    }
+}
+
+#[cfg(feature = "ssr")]
+fn control_dashboard(
+    render: impl Fn(DashboardData) -> AnyView + Clone + Send + Sync + 'static,
+) -> AnyView {
+    let data = load_dashboard_data();
+    let json = encode_dashboard_embed(&data);
+    view! {
+        {dashboard_embed_script(json)}
+        {render(data)}
+    }
+    .into_any()
+}
+
+#[cfg(feature = "hydrate")]
+fn control_dashboard(
+    render: impl Fn(DashboardData) -> AnyView + Clone + Send + Sync + 'static,
+) -> AnyView {
+    hydrate_dashboard_cache();
+    if let Some(data) = client_dashboard_now() {
+        refresh_client_dashboard();
+        let json = encode_dashboard_embed(&data);
+        return view! {
+            {dashboard_embed_script(json)}
+            {render(data)}
+        }
+        .into_any();
+    }
+
+    let render_view = render.clone();
+    let dashboard = LocalResource::new(fetch_dashboard);
+    view! {
+        <Suspense fallback=move || dashboard_loading().into_any()>
+            {move || {
+                let render_view = render_view.clone();
+                dashboard.get().flatten().map(move |data| {
+                    let json = encode_dashboard_embed(&data);
+                    view! {
+                        {dashboard_embed_script(json)}
+                        {render_view(data)}
+                    }
+                    .into_any()
+                })
+            }}
+        </Suspense>
+    }
+    .into_any()
+}
+
+#[cfg(not(any(feature = "ssr", feature = "hydrate")))]
+fn control_dashboard(
+    render: impl Fn(DashboardData) -> AnyView + Clone + Send + Sync + 'static,
+) -> AnyView {
+    let _ = render;
+    dashboard_loading().into_any()
 }
 
 fn settlement_badge(tui: &str) -> String {
@@ -450,6 +609,8 @@ pub fn shell(_options: leptos::config::LeptosOptions) -> impl IntoView {
 #[component]
 pub fn App() -> impl IntoView {
     leptos_meta::provide_meta_context();
+    #[cfg(feature = "hydrate")]
+    hydrate_dashboard_cache();
 
     view! {
         <Router>
@@ -467,15 +628,13 @@ pub fn App() -> impl IntoView {
 
 #[component]
 pub fn ConsolePage() -> impl IntoView {
-    let dashboard = load_dashboard_data();
-
     view! {
         <Title text="vc-server - control plane" />
         <Meta name="description" content="Vibecrafted control-plane dashboard." />
         <Meta name="theme-color" content="#0a0a0b" />
         <Link rel="preload" as_="font" type_="font/woff2" href="/fonts/inter-var-latin.woff2" crossorigin="anonymous" />
         <Link rel="preload" as_="font" type_="font/woff2" href="/fonts/jetbrains-mono-var-latin.woff2" crossorigin="anonymous" />
-        {console_dashboard(dashboard)}
+        {control_dashboard(|dashboard| console_dashboard(dashboard).into_any())}
     }
 }
 
@@ -607,7 +766,14 @@ fn route_header(
 
 #[component]
 pub fn RunsPage() -> impl IntoView {
-    let dashboard = load_dashboard_data();
+    view! {
+        <Title text="live runs - vc-server" />
+        <Meta name="description" content="Current agents and their human transcript tails." />
+        {control_dashboard(|dashboard| runs_dashboard(dashboard).into_any())}
+    }
+}
+
+fn runs_dashboard(dashboard: DashboardData) -> impl IntoView {
     let control_plane = dashboard.control_plane;
     let generated_at = dashboard.generated_at;
     let active = operator_active_runs(dashboard.active_runs);
@@ -618,8 +784,6 @@ pub fn RunsPage() -> impl IntoView {
     let recent_count = recent.len();
 
     view! {
-        <Title text="live runs - vc-server" />
-        <Meta name="description" content="Current agents and their human transcript tails." />
         <ServerFrame active=ServerSection::Runs status=format!("{active_count} live")>
             <div class="server-console-shell route-page-shell">
                 {route_header("Runtime", "Live runs", "Choose a current agent to open its bounded transcript.human.log tail and full control-plane detail.")}
@@ -646,12 +810,17 @@ pub fn RunsPage() -> impl IntoView {
 
 #[component]
 pub fn LifecyclePage() -> impl IntoView {
-    let dashboard = load_dashboard_data();
-    let actions = operator_action_runs(dashboard.lifecycle_runs);
-    let count = actions.len();
     view! {
         <Title text="lifecycle - vc-server" />
         <Meta name="description" content="Lifecycle batons that need an operator decision." />
+        {control_dashboard(|dashboard| lifecycle_dashboard(dashboard).into_any())}
+    }
+}
+
+fn lifecycle_dashboard(dashboard: DashboardData) -> impl IntoView {
+    let actions = operator_action_runs(dashboard.lifecycle_runs);
+    let count = actions.len();
+    view! {
         <ServerFrame active=ServerSection::Lifecycle status=format!("{count} next")>
             <div class="server-console-shell route-page-shell">
                 {route_header("Control plane", "Lifecycle", "Open a baton to inspect its current stage, next agent, controls, and delivery state.")}
@@ -667,14 +836,19 @@ pub fn LifecyclePage() -> impl IntoView {
 
 #[component]
 pub fn ActivityPage() -> impl IntoView {
-    let dashboard = load_dashboard_data();
+    view! {
+        <Title text="activity - vc-server" />
+        <Meta name="description" content="Warnings and current control-plane event tail." />
+        {control_dashboard(|dashboard| activity_dashboard(dashboard).into_any())}
+    }
+}
+
+fn activity_dashboard(dashboard: DashboardData) -> impl IntoView {
     let warnings = dashboard.warnings;
     let events = dashboard.events;
     let warning_count = warnings.len();
     let event_count = events.len();
     view! {
-        <Title text="activity - vc-server" />
-        <Meta name="description" content="Warnings and current control-plane event tail." />
         <ServerFrame active=ServerSection::Activity status=format!("{warning_count} warnings")>
             <div class="server-console-shell route-page-shell">
                 {route_header("Runtime", "Activity", "Warnings and the current event tail, separated from agent selection and lifecycle decisions.")}
@@ -695,12 +869,17 @@ pub fn ActivityPage() -> impl IntoView {
 
 #[component]
 pub fn StructurePage() -> impl IntoView {
-    let dashboard = load_dashboard_data();
-    let report = dashboard.loctree_report;
-    let has_report = !report.is_empty();
     view! {
         <Title text="structure - vc-server" />
         <Meta name="description" content="Current structural evidence and scaffold entry points." />
+        {control_dashboard(|dashboard| structure_dashboard(dashboard).into_any())}
+    }
+}
+
+fn structure_dashboard(dashboard: DashboardData) -> impl IntoView {
+    let report = dashboard.loctree_report;
+    let has_report = !report.is_empty();
+    view! {
         <ServerFrame active=ServerSection::Structure status="structural evidence".to_string()>
             <div class="server-console-shell route-page-shell">
                 {route_header("Repository", "Structure", "Structural evidence is shown as runtime truth. Local filesystem paths are never emitted as broken browser links.")}
@@ -732,20 +911,29 @@ pub fn NotFoundPage() -> impl IntoView {
 mod tests {
     use std::fs;
     use std::io::ErrorKind;
+    use std::net::SocketAddr;
     use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
     use chrono::Utc;
     use control_core::ControlPlane;
+    use leptos::config::{Env, LeptosOptions};
     use leptos::prelude::*;
     use serde_json::{Value, json};
+    use tower::ServiceExt;
 
     use super::{
-        ActivityPage, DashboardRun, LifecyclePage, RunsPage, StructurePage, console_dashboard,
+        ActivityPage, ConsolePage, DashboardData, DashboardRun, LifecyclePage, RunsPage,
+        StructurePage, console_dashboard, decode_dashboard_embed, encode_dashboard_embed,
         load_dashboard_data_from, operator_active_runs, run_cards,
     };
-    use crate::control::api::state_payload;
+    use crate::control::api::{control_routes, state_payload};
     use crate::theme::provide_theme_context;
+
+    static DASHBOARD_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn temp_home() -> PathBuf {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
@@ -957,5 +1145,126 @@ mod tests {
 
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].run_id, "real-worker");
+    }
+
+    #[test]
+    fn client_dashboard_wire_payload_is_not_default_and_survives_script_embed() {
+        let home = temp_home();
+        let runs_dir = home.join("control_plane/runs");
+        fs::create_dir_all(&runs_dir).expect("runs dir");
+        write_snapshot(&runs_dir, "finalized", "finalized", "f");
+        write_snapshot(&runs_dir, "failed", "failed", "x");
+        write_snapshot(&runs_dir, "attention", "needs_attention", "n");
+
+        let plane = ControlPlane::new(&home);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-22T12:30:00+00:00")
+            .expect("fixed now")
+            .with_timezone(&Utc);
+        let dashboard = load_dashboard_data_from(&plane, now);
+        assert_ne!(
+            dashboard,
+            DashboardData::default(),
+            "SSR/client payload must carry control-plane truth, not DashboardData::default zeros"
+        );
+        assert_eq!(dashboard.settlement.f, 1);
+        assert_eq!(dashboard.settlement.x, 1);
+        assert_eq!(dashboard.settlement.n, 1);
+
+        let restored: DashboardData =
+            serde_json::from_str(&serde_json::to_string(&dashboard).expect("serialize dashboard"))
+                .expect("deserialize dashboard");
+        assert_eq!(restored.settlement, dashboard.settlement);
+        assert_eq!(restored.recent_runs.len(), dashboard.recent_runs.len());
+        assert_eq!(
+            decode_dashboard_embed(&encode_dashboard_embed(&dashboard)).as_ref(),
+            Some(&dashboard)
+        );
+
+        let mut hostile = dashboard.clone();
+        hostile
+            .warnings
+            .push("click <script>alert(1)</script>".into());
+        let embed = encode_dashboard_embed(&hostile);
+        assert!(
+            !embed.contains('<'),
+            "embedded JSON must not break out of <script>: {embed}"
+        );
+        let decoded = decode_dashboard_embed(&embed).expect("script-safe embed");
+        assert_eq!(decoded.warnings, hostile.warnings);
+        assert_eq!(
+            decode_dashboard_embed(&encode_dashboard_embed(&DashboardData::default())),
+            None,
+            "default zeros must not be treated as a hydrated control-plane payload"
+        );
+
+        fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn ssr_console_embeds_dashboard_json_instead_of_client_zeros() {
+        let owner = Owner::new();
+        let html = owner.with(|| {
+            leptos_meta::provide_meta_context();
+            provide_theme_context();
+            ConsolePage().to_html()
+        });
+        assert!(html.contains("id=\"vc-dashboard-data\""));
+        assert!(html.contains("type=\"application/json\""));
+        assert!(!html.contains("Loading control plane"));
+        assert!(html.contains("Control plane"));
+    }
+
+    #[tokio::test]
+    async fn dashboard_http_route_returns_ssr_payload_not_default() {
+        let _guard = DASHBOARD_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = temp_home();
+        let runs_dir = home.join("control_plane/runs");
+        fs::create_dir_all(&runs_dir).expect("runs dir");
+        write_snapshot(&runs_dir, "finalized", "finalized", "f");
+        write_snapshot(&runs_dir, "failed", "failed", "x");
+        write_snapshot(&runs_dir, "attention", "needs_attention", "n");
+        // Safety: process-global env is serialised by DASHBOARD_ENV_LOCK.
+        unsafe {
+            std::env::set_var("VIBECRAFTED_HOME", &home);
+        }
+
+        let opts = LeptosOptions::builder()
+            .output_name("vibecrafted-server-web-test")
+            .site_root("target/site-test")
+            .site_pkg_dir("pkg")
+            .env(Env::PROD)
+            .site_addr("127.0.0.1:0".parse::<SocketAddr>().expect("addr"))
+            .reload_port(0)
+            .build();
+        let response = control_routes()
+            .with_state(opts)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/control/dashboard")
+                    .body(Body::empty())
+                    .expect("dashboard request"),
+            )
+            .await
+            .expect("dashboard response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("dashboard body");
+        let payload: DashboardData = serde_json::from_slice(&body).expect("dashboard JSON");
+        assert_ne!(payload, DashboardData::default());
+        assert_eq!(payload.settlement.f, 1);
+        assert_eq!(payload.settlement.x, 1);
+        assert_eq!(payload.settlement.n, 1);
+        assert_eq!(
+            decode_dashboard_embed(&encode_dashboard_embed(&payload)).as_ref(),
+            Some(&payload)
+        );
+
+        unsafe {
+            std::env::remove_var("VIBECRAFTED_HOME");
+        }
+        fs::remove_dir_all(home).ok();
     }
 }

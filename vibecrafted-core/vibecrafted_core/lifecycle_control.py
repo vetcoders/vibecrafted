@@ -19,6 +19,7 @@ from .lifecycle_runner import (
     write_lifecycle_report,
     write_lifecycle_state,
 )
+from .stage_cast import primary_stage_agent
 
 RunLifecycle = Callable[[LifecycleRunSpec], dict[str, Any]]
 StopRun = Callable[..., dict[str, Any]]
@@ -202,7 +203,7 @@ def _baton_agent(state: dict[str, Any], stage: str = "") -> str:
     # Operator-declared casting (mission frontmatter stage_agents) wins for a
     # stage it names; worker-requested next_agent steers only the un-cast rest.
     stage_agents = dict(spec_data.get("stage_agents") or {})
-    cast = str(stage_agents.get(str(stage or "").strip()) or "").strip()
+    cast = primary_stage_agent(stage_agents, stage)
     if cast:
         return cast
     return str(baton.get("next_agent") or spec_data.get("agent") or "codex")

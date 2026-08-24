@@ -64,6 +64,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     buildMainMenu()
     buildStatusItem()
+    startNativeNotifications()
 
     let socketPath = "/tmp/vibecrafted-mux.sock"
     do {
@@ -88,6 +89,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
   func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
     true
+  }
+
+  func application(_ application: NSApplication, open urls: [URL]) {
+    NotificationManager.shared.handleOpenURLs(urls)
+  }
+
+  func applicationWillTerminate(_ notification: Notification) {
+    NotificationManager.shared.clearHeartbeat(craftedHome: craftedHomeURL())
+  }
+
+  private func startNativeNotifications() {
+    NotificationManager.shared.presentWindow = { [weak self] in
+      self?.showMainWindowIfNeeded()
+    }
+    NotificationManager.shared.start(craftedHome: craftedHomeURL())
+  }
+
+  private func craftedHomeURL() -> URL {
+    let host = ProcessInfo.processInfo.environment
+    let home = host["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
+    return URL(
+      fileURLWithPath: host["VIBECRAFTED_HOME"] ?? "\(home)/.vibecrafted", isDirectory: true)
   }
 
   private func launchWorkspaceTerminal() {
@@ -402,6 +425,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       ("vc-dispatch", "dispatch"),
       ("vc-resume", "resume"),
       ("vc-justdo", "justdo"),
+      ("vc-doctor", "doctor"),
+      ("vc-status", "status"),
+      ("vc-update", "update"),
+      ("vc-receipt", "receipt"),
       ("telemetry", "telemetry"),
     ]
     for wrapper in deckVerbWrappers
@@ -505,7 +532,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let prefix = arguments.isEmpty ? "" : "\(arguments) "
     let body =
       (["#!/bin/bash", "set -euo pipefail"] + common
-        + ["exec \(shellQuote(executable.path)) \(prefix)\"$@\""])
+        + [
+          // The deck's identity guard compares the DECLARED launcher path with
+          // the live process argv. The wrapper is that declared path, so it
+          // must ride through every exec into the final python argv — without
+          // this line vc-guardian failed capture-identity and `server start`
+          // rolled a healthy server back.
+          "export VIBECRAFTED_DECLARED_LAUNCHER=\"$0\"",
+          "exec \(shellQuote(executable.path)) \(prefix)\"$@\"",
+        ])
       .joined(separator: "\n") + "\n"
     let temporary = destination.deletingLastPathComponent().appendingPathComponent(
       ".\(destination.lastPathComponent).new-\(UUID().uuidString)")

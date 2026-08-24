@@ -12,6 +12,7 @@
 		2C18E0FE8C18A73791678DC2 /* MissionControlViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6F03047FF22E0433924BDD7 /* MissionControlViewController.swift */; };
 		4A2BA6E287B0E5E51054F35F /* libvibecrafted_shell_ffi.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 66F000337318E7E1E774D5AD /* libvibecrafted_shell_ffi.dylib */; };
 		65E37AF5DAC0EC25D709DDB5 /* MainWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD9D34C38918A44FDA163417 /* MainWindowController.swift */; };
+		843BFAC3521E7E073E09D819 /* NotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4B8B7CA9D74B4B887436010 /* NotificationManager.swift */; };
 		A60320E009ED2630B2CD138A /* SidebarViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 018846F7BFF32DDA55BEB6B3 /* SidebarViewController.swift */; };
 		AD8EDDBFCA0E035A3127FE9D /* vibecrafted_shell_ffi.swift in Sources */ = {isa = PBXBuildFile; fileRef = 670FB28076F3623946392EE2 /* vibecrafted_shell_ffi.swift */; };
 		AED4BA44792B0934E269B0C9 /* InspectorViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DC7FC1EB764722753755233 /* InspectorViewController.swift */; };
@@ -49,6 +50,7 @@
 		AD9D34C38918A44FDA163417 /* MainWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindowController.swift; sourceTree = "<group>"; };
 		B6F03047FF22E0433924BDD7 /* MissionControlViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MissionControlViewController.swift; sourceTree = "<group>"; };
 		CB08FBAC6D3A32EA7AA68548 /* CanvasViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasViewController.swift; sourceTree = "<group>"; };
+		D4B8B7CA9D74B4B887436010 /* NotificationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationManager.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -69,6 +71,7 @@
 				0AE9F2A66C4AB43ADF27641A /* .gitkeep */,
 				AD135782CD6D34B7A4639DF0 /* AppDelegate.swift */,
 				9DC22CD11479B2C9FC62F7A0 /* main.swift */,
+				D4B8B7CA9D74B4B887436010 /* NotificationManager.swift */,
 				915E8799B77EBAA0B9A10DFF /* Vibecrafted.icns */,
 				A2D426BFC3DA1DF414A5E096 /* Bridge */,
 				9FFF832B23463AAAFCA9150D /* Views */,
@@ -241,6 +244,7 @@
 				14EAC5B0973436D431AE7153 /* MainSplitViewController.swift in Sources */,
 				65E37AF5DAC0EC25D709DDB5 /* MainWindowController.swift in Sources */,
 				2C18E0FE8C18A73791678DC2 /* MissionControlViewController.swift in Sources */,
+				843BFAC3521E7E073E09D819 /* NotificationManager.swift in Sources */,
 				A60320E009ED2630B2CD138A /* SidebarViewController.swift in Sources */,
 				0F83E26443735866DB5FC793 /* main.swift in Sources */,
 				AD8EDDBFCA0E035A3127FE9D /* vibecrafted_shell_ffi.swift in Sources */,
@@ -284,6 +288,8 @@
 					SystemConfiguration,
 					"-framework",
 					Carbon,
+					"-framework",
+					UserNotifications,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = io.vetcoders.vibecrafted;
 				SDKROOT = macosx;
@@ -389,6 +395,8 @@
 					SystemConfiguration,
 					"-framework",
 					Carbon,
+					"-framework",
+					UserNotifications,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = io.vetcoders.vibecrafted;
 				SDKROOT = macosx;
