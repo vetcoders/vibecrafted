@@ -70,10 +70,27 @@ done
 
 # PRView documents GitHub release binaries, but its release page currently has
 # no assets. Build the exact published crate once, during carrier assembly, so
-# customers still receive a ready binary and never need Rust or Cargo.
-cargo install --locked --version "$PRVIEW_VERSION" --root "$WORK/prview" prview
+# customers still receive a ready binary and never need Rust or Cargo. On macOS
+# the git2 dependency otherwise records the build machine's Homebrew OpenSSL
+# paths, which would make the signed binary unusable on a clean Mac.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  require brew
+  OPENSSL_PREFIX="$(brew --prefix openssl@3)"
+  [[ -f "$OPENSSL_PREFIX/lib/libssl.a" && -f "$OPENSSL_PREFIX/lib/libcrypto.a" ]] \
+    || die "static OpenSSL archives are required to build portable PRView"
+  OPENSSL_DIR="$OPENSSL_PREFIX" OPENSSL_STATIC=1 \
+    cargo install --locked --version "$PRVIEW_VERSION" --root "$WORK/prview" prview
+else
+  cargo install --locked --version "$PRVIEW_VERSION" --root "$WORK/prview" prview
+fi
 install -m 0755 "$WORK/prview/bin/prview${EXE_SUFFIX}" \
   "$OUTPUT_BIN_DIR/prview${EXE_SUFFIX}"
+
+if [[ "$(uname -s)" == "Darwin" ]] && \
+  otool -L "$OUTPUT_BIN_DIR/prview" | grep -Eq '^[[:space:]]+/(opt|usr/local)/'; then
+  otool -L "$OUTPUT_BIN_DIR/prview" >&2
+  die "PRView retains a non-system dynamic library dependency"
+fi
 
 "$OUTPUT_BIN_DIR/loct${EXE_SUFFIX}" --version | grep -F "$LOCTREE_VERSION" >/dev/null
 "$OUTPUT_BIN_DIR/aicx${EXE_SUFFIX}" --version | grep -F "$AICX_VERSION" >/dev/null
