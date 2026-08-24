@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -82,6 +83,8 @@ def _write_stateful_vc_frame(
                 'elif args[:1] == ["attach"] and len(args) > 1:',
                 "    session = args[-1]",
                 'with capture.open("a", encoding="utf-8") as fh:',
+                '    fh.write("EFFECTIVE_HOME " + os.environ.get("HOME", "") + "\\n")',
+                '    fh.write("VC_FRAME_EXECUTABLE " + str(Path(sys.argv[0]).resolve()) + "\\n")',
                 '    fh.write("VC_FRAME " + " ".join(args) + "\\n")',
                 'if args[:1] == ["ls"]:',
                 '    if os.environ.get("FAKE_VC_FRAME_DUPLICATE") == "1":',
@@ -623,19 +626,32 @@ def test_helper_exports_vc_skill_wrappers() -> None:
 
 def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
     tmp_path: Path,
+    hermetic_login_shell: Callable[[dict[str, str], str], str],
 ) -> None:
     home = tmp_path / "home"
     crafted_home = home / ".vibecrafted"
     runtime_home = home / ".local" / "share" / "vibecrafted"
     bundled_bin = runtime_home / "bin"
     fake_bin = tmp_path / "bin"
+    operator_home = tmp_path / "forbidden-operator-home"
+    operator_bin = operator_home / ".local" / "share" / "vibecrafted" / "bin"
+    forbidden_probe = tmp_path / "forbidden-operator-runtime-used"
     capture_file = tmp_path / "capture.log"
     session_state_file = tmp_path / "session-state.txt"
 
     home.mkdir()
     bundled_bin.mkdir(parents=True)
     fake_bin.mkdir()
+    operator_bin.mkdir(parents=True)
     _write_stateful_vc_frame(bundled_bin, capture_file, session_state_file)
+    forbidden_vc_frame = operator_bin / "vc-frame"
+    forbidden_vc_frame.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "used\\n" > "$FORBIDDEN_OPERATOR_PROBE"\n'
+        "exit 97\n",
+        encoding="utf-8",
+    )
+    forbidden_vc_frame.chmod(0o755)
     (fake_bin / "osascript").write_text(
         "#!/usr/bin/env bash\nexit 1\n", encoding="utf-8"
     )
@@ -644,13 +660,15 @@ def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["VIBECRAFTED_HOME"] = str(crafted_home)
-    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+    env["VIBECRAFTED_RUNTIME_HOME"] = str(runtime_home)
+    env["VIBECRAFTED_RUNTIME_BIN"] = str(bundled_bin)
     env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env["CAPTURE_FILE"] = str(capture_file)
     env["SESSION_STATE_FILE"] = str(session_state_file)
     env["VIBECRAFTED_OSASCRIPT_BIN"] = str(fake_bin / "osascript")
     env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session()
+    env["FORBIDDEN_OPERATOR_PROBE"] = str(forbidden_probe)
     # This test exercises the real session-create path; allow it without a TTY.
     env["VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME"] = "1"
     env.pop("VC_FRAME", None)
@@ -661,11 +679,58 @@ def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
     env.pop("VIBECRAFTED_OPERATOR_SESSION", None)
     env.pop("VIBECRAFTED_OPERATOR_MODE", None)
 
-    result = subprocess.run(
+    outcomes: list[tuple[int, str, str]] = []
+    for operator_runtime_visible in (True, False):
+        capture_file.unlink(missing_ok=True)
+        session_state_file.unlink(missing_ok=True)
+        session_state_file.with_suffix(".name").unlink(missing_ok=True)
+        forbidden_probe.unlink(missing_ok=True)
+        visible_path = f":{operator_bin}" if operator_runtime_visible else ""
+        env["PATH"] = (
+            f"{bundled_bin}:{fake_bin}{visible_path}:/usr/bin:/bin:/usr/sbin:/sbin"
+        )
+        command = hermetic_login_shell(
+            env,
+            f'source "{HELPER_SCRIPT}"; vc-init claude --prompt "Check runtime"',
+        )
+
+        result = subprocess.run(
+            ["bash", "-lc", command],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        payload = capture_file.read_text(encoding="utf-8")
+        expected_session = _expected_operator_session()
+        assert f"EFFECTIVE_HOME {home}" in payload
+        assert f"VC_FRAME_EXECUTABLE {bundled_bin / 'vc-frame'}" in payload
+        assert str(operator_home) not in payload
+        assert not forbidden_probe.exists()
+        assert f"--session {expected_session} --new-session-with-layout" in payload
+        assert f"--session {expected_session} action new-tab" in payload
+        assert (
+            f"run_id=interactive target={expected_session}/claude-init" in result.stdout
+        )
+        assert f"watch=vc-frame attach {expected_session}" in result.stdout
+        assert "There is no active session!" not in result.stderr
+        outcomes.append((result.returncode, result.stdout, result.stderr))
+
+    assert outcomes[0] == outcomes[1]
+
+    (bundled_bin / "vc-frame").unlink()
+    env["PATH"] = f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
+    mutated = subprocess.run(
         [
             "bash",
             "-lc",
-            f'source "{HELPER_SCRIPT}"; vc-init claude --prompt "Check runtime"',
+            hermetic_login_shell(
+                env,
+                f'source "{HELPER_SCRIPT}"; vc-init claude --prompt "Check runtime"',
+            ),
         ],
         cwd=REPO_ROOT,
         env=env,
@@ -673,15 +738,9 @@ def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
         text=True,
         check=False,
     )
-
-    assert result.returncode == 0, result.stderr
-    payload = capture_file.read_text(encoding="utf-8")
-    expected_session = _expected_operator_session()
-    assert f"--session {expected_session} --new-session-with-layout" in payload
-    assert f"--session {expected_session} action new-tab" in payload
-    assert f"run_id=interactive target={expected_session}/claude-init" in result.stdout
-    assert f"watch=vc-frame attach {expected_session}" in result.stdout
-    assert "There is no active session!" not in result.stderr
+    assert mutated.returncode != 0
+    assert "vc-frame cockpit not installed" in mutated.stderr
+    assert not forbidden_probe.exists()
 
 
 def test_operator_spawn_success_prints_actionable_receipt(tmp_path: Path) -> None:
@@ -855,27 +914,35 @@ def test_operator_spawn_failure_is_loud_and_preserves_status(tmp_path: Path) -> 
 
 def test_vc_init_missing_vc_frame_message_has_fresh_install_path_hint(
     tmp_path: Path,
+    hermetic_login_shell: Callable[[dict[str, str], str], str],
 ) -> None:
     home = tmp_path / "home"
     crafted_home = home / ".vibecrafted"
+    runtime_home = home / ".local" / "share" / "vibecrafted"
+    effective_home = tmp_path / "effective-home.txt"
 
     home.mkdir()
 
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["VIBECRAFTED_HOME"] = str(crafted_home)
+    env["VIBECRAFTED_RUNTIME_HOME"] = str(runtime_home)
+    env["VIBECRAFTED_RUNTIME_BIN"] = str(runtime_home / "bin")
     env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
 
+    command = hermetic_login_shell(
+        env,
+        (
+            f'printf "%s\\n" "$HOME" > "{effective_home}"; '
+            f'source "{HELPER_SCRIPT}"; vc-init claude --prompt "Check runtime"'
+        ),
+    )
     result = subprocess.run(
-        [
-            "bash",
-            "-lc",
-            f'source "{HELPER_SCRIPT}"; vc-init claude --prompt "Check runtime"',
-        ],
+        ["bash", "-lc", command],
         cwd=REPO_ROOT,
         env=env,
         capture_output=True,
@@ -887,6 +954,7 @@ def test_vc_init_missing_vc_frame_message_has_fresh_install_path_hint(
     # Under a non-TTY test harness that degraded path must still stop with a
     # message that names the headless alternative instead of "run vc-start".
     assert result.returncode != 0
+    assert effective_home.read_text(encoding="utf-8").strip() == str(home)
     assert "vc-frame cockpit not installed" in result.stderr
     assert "vibecrafted init claude --runtime plain" in result.stderr
     assert "vc-start" not in result.stderr

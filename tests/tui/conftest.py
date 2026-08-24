@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import shlex
+from collections.abc import Callable, Mapping
+
 import pytest
 
 # Frame/session targeting env leaks from a live operator shell (vc-frame is a
@@ -36,6 +39,13 @@ _AMBIENT_ROOT_ENV = (
     "VIBECRAFTED_SOURCE",
 )
 
+_LOGIN_SHELL_ROOT_ENV = (
+    "HOME",
+    "PATH",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+) + _AMBIENT_ROOT_ENV
+
 
 @pytest.fixture(autouse=True)
 def _disable_live_perception_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -45,3 +55,21 @@ def _disable_live_perception_side_effects(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("VIBECRAFTED_TEST_MODE", "1")
     for name in _AMBIENT_FRAME_ENV + _AMBIENT_ROOT_ENV:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture
+def hermetic_login_shell() -> Callable[[Mapping[str, str], str], str]:
+    """Re-assert synthetic roots after login startup has read host profiles."""
+
+    def command(environment: Mapping[str, str], script: str) -> str:
+        root_contract = []
+        for name in _LOGIN_SHELL_ROOT_ENV:
+            if name in environment:
+                root_contract.append(
+                    f"export {name}={shlex.quote(str(environment[name]))}"
+                )
+            else:
+                root_contract.append(f"unset {name}")
+        return "\n".join((*root_contract, script))
+
+    return command
