@@ -7,7 +7,11 @@ import UserNotifications
 /// `osascript display notification` is attributed to Script Editor. Posting
 /// through `UNUserNotificationCenter` from this bundle keeps the sender as
 /// Vibecrafted.app and lets a click open Mission Control on the run.
-final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
+///
+/// Mutable state (`started`, `presentWindow`) is only written on the main
+/// thread during app launch; notification-center and IPC callbacks arrive on
+/// other threads but never mutate, which is why this is @unchecked Sendable.
+final class NotificationManager: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
   static let shared = NotificationManager()
 
   static let categoryRunSettled = "run.settled"
