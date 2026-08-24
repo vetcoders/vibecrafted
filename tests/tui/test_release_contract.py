@@ -280,6 +280,19 @@ def test_builder_emits_the_canonical_versioned_dmg_and_checksum() -> None:
     assert '"$runtime/runtime"' not in builder
 
 
+def test_xcodegen_project_is_generated_from_one_tracked_source() -> None:
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    ignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+    assert (REPO_ROOT / "vibecrafted-app/shell-agent/app/project.yml").is_file()
+    assert "/vibecrafted-app/shell-agent/app/Vibecrafted.xcodeproj/" in ignore
+    assert (
+        'git -C "$REPO_ROOT" ls-files --error-unmatch "$generated_project"' in builder
+    )
+    assert "generated Xcode project must not be tracked" in builder
+
+
 def test_release_entrypoint_renderer_uses_manifest_and_preserves_existing(
     tmp_path: Path,
 ) -> None:

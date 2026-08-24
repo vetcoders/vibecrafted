@@ -464,6 +464,10 @@ build_product() {
   [[ -d "$server_site/pkg" ]] || die "Vibecrafted Server hydrated site is missing"
 
   log "Building the single Swift host app"
+  local generated_project="vibecrafted-app/shell-agent/app/Vibecrafted.xcodeproj"
+  if git -C "$REPO_ROOT" ls-files --error-unmatch "$generated_project" >/dev/null 2>&1; then
+    die "generated Xcode project must not be tracked; project.yml is the source of truth"
+  fi
   make -C "$REPO_ROOT/vibecrafted-app/shell-agent" bindings xcode
   rm -rf "$BUILD_DIR/DerivedData" "$APP"
   mkdir -p "$BUILD_DIR" "$DIST_DIR"

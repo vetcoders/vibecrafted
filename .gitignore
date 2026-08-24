@@ -55,6 +55,7 @@ vibecrafted-io-link
 !/.loctree/canary/
 /.antigravitycli
 /vibecrafted-server/target
+/vibecrafted-app/shell-agent/app/Vibecrafted.xcodeproj/
 /docs/plans
 /.air
 /.venv/
