@@ -194,7 +194,7 @@
       "id": "checkout-free-install",
       "statement": "Installed artifacts never resolve to a repository checkout; repo paths appear only in development receipts.",
       "forbidden_path_patterns": [
-        "/Volumes/vc-workspace",
+        "**/vc-workspace/**",
         "~/Libraxis",
         "/Users/*/Libraxis"
       ],

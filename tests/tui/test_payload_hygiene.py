@@ -259,18 +259,6 @@ def test_the_ancestor_walk_stops_before_generic_system_roots() -> None:
 # matter to this invariant.
 _UNSHIPPED_COMPONENTS = frozenset({"tests", "test", "__tests__", ".github", ".loctree"})
 
-# One tracked shipping file still names the workshop, and it is NOT an oversight:
-# docs/adr/ownership-matrix.json declares `/Volumes/vc-workspace` as a
-# forbidden_path_patterns entry for the `checkout-free-install` rule, pinned by
-# tests/test_ownership_contract.py. Two correct rules collide on one string —
-# "installed artifacts must never resolve into a checkout" needs to name the
-# checkout root, and "a shipped artifact must not name the build host" forbids
-# exactly that. Resolving it means choosing whether that rule forbids one
-# operator's volume or any checkout root, which is a product decision this gate
-# must surface rather than settle. Listed here so it stays visible and so no
-# NEW leak can hide behind it.
-_UNRESOLVED_WORKSHOP_REFERENCES = frozenset({"docs/adr/ownership-matrix.json"})
-
 
 def test_no_shipping_file_names_the_workshop_above_the_checkout() -> None:
     """Sibling of the checkout invariant, one directory up.
@@ -302,8 +290,6 @@ def test_no_shipping_file_names_the_workshop_above_the_checkout() -> None:
             continue
         relative = raw.decode()
         if _UNSHIPPED_COMPONENTS & set(Path(relative).parts):
-            continue
-        if relative in _UNRESOLVED_WORKSHOP_REFERENCES:
             continue
         path = REPO_ROOT / relative
         if not path.is_file() or path.is_symlink():
