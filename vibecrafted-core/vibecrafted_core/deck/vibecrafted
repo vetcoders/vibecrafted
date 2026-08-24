@@ -8,6 +8,7 @@ _vc_source_launcher_ulimits() {
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   for candidate in \
     "$script_dir/../runtime/scripts/lib/ulimits.sh" \
+    "$script_dir/../vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh" \
     "${VIBECRAFTED_ROOT:-}/vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh" \
     "${VIBECRAFTED_TOOLS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/tools}/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh" \
     "${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/runtime/scripts/lib/ulimits.sh"; do
@@ -110,6 +111,20 @@ _script_owner_root() {
   done
   script_dir="$(cd "$(dirname "$script_path")" && pwd)"
   cd "$script_dir/.." && pwd
+}
+
+_runtime_payload_root() {
+  local candidate="${VIBECRAFTED_RUNTIME_ROOT:-}"
+  if [[ -n "$candidate" && -x "$candidate/bin/vc-server" && -d "$candidate/server/site" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  candidate="$(_script_owner_root)"
+  if [[ -x "$candidate/bin/vc-server" && -d "$candidate/server/site" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  return 1
 }
 
 _package_resource_root() {
@@ -3510,6 +3525,14 @@ cmd_server() {
       fi
       IFS=$'\t' read -r host port <<< "$endpoint"
 
+      local runtime_root server_bin site_root
+      runtime_root="$(_runtime_payload_root 2>/dev/null || true)"
+      server_bin="${runtime_root:+$runtime_root/bin/vc-server}"
+      site_root="${runtime_root:+$runtime_root/server/site}"
+      [[ -n "$server_bin" ]] || server_bin="$HOME/.local/bin/vc-server"
+      [[ -n "$site_root" ]] || \
+        site_root="${VIBECRAFTED_RUNTIME_HOME:-$HOME/.local/share/vibecrafted}/server/site"
+
       # 1. Check if already running
       local runtime_dir
       runtime_dir="$(_server_runtime_dir)"
@@ -3520,10 +3543,10 @@ cmd_server() {
         existing_pid="$(_pid_file_value "$pid_file" 2>/dev/null || true)"
         existing_state="$(_managed_pid_state "$pid_file" "server")"
         if [[ "$existing_state" == "foreign" ]] && \
-          [[ -x "$HOME/.local/bin/vc-server" ]] && \
+          [[ -x "$server_bin" ]] && \
           _adopt_launch_witness \
-            server "$existing_pid" "$HOME/.local/bin/vc-server" \
-            "$HOME/.local/bin/vc-server"; then
+            server "$existing_pid" "$server_bin" \
+            "$server_bin"; then
           existing_state="$(_managed_pid_state "$pid_file" "server")"
         fi
         if [[ "$existing_state" == "live" ]]; then
@@ -3549,8 +3572,8 @@ cmd_server() {
             if ! _stop_managed_process server Server; then
               if [[ -f "$(_server_launch_witness_file server)" ]] && \
                 _adopt_launch_witness \
-                  server "$existing_pid" "$HOME/.local/bin/vc-server" \
-                  "$HOME/.local/bin/vc-server"; then
+                  server "$existing_pid" "$server_bin" \
+                  "$server_bin"; then
                 _stop_managed_process server Server || return 1
               else
                 return 1
@@ -3585,13 +3608,11 @@ cmd_server() {
       fi
 
       # 3. Locate binary & site root
-      local server_bin="$HOME/.local/bin/vc-server"
       if [[ ! -x "$server_bin" ]]; then
         printf "%b✗%b vc-server binary not found at %s. Please run 'make install-all' or 'make install-server' first.\n" "$_red" "$_reset" "$server_bin" >&2
         return 1
       fi
 
-      local site_root="${VIBECRAFTED_RUNTIME_ROOT:-${VIBECRAFTED_RUNTIME_HOME:-$HOME/.local/share/vibecrafted}}/server/site"
       if [[ ! -d "$site_root" ]]; then
         printf "%b✗%b site assets directory not found at %s. Please run 'make install-all' or 'make install-server' first.\n" "$_red" "$_reset" "$site_root" >&2
         return 1
@@ -3888,7 +3909,13 @@ cmd_server() {
       _server_supervisor_cli runtime-status || has_errors=1
 
       # 1. Binary check
-      local server_bin="$HOME/.local/bin/vc-server"
+      local runtime_root server_bin site_root
+      runtime_root="$(_runtime_payload_root 2>/dev/null || true)"
+      server_bin="${runtime_root:+$runtime_root/bin/vc-server}"
+      site_root="${runtime_root:+$runtime_root/server/site}"
+      [[ -n "$server_bin" ]] || server_bin="$HOME/.local/bin/vc-server"
+      [[ -n "$site_root" ]] || \
+        site_root="${VIBECRAFTED_RUNTIME_HOME:-$HOME/.local/share/vibecrafted}/server/site"
       if [[ -f "$server_bin" ]]; then
         if [[ -x "$server_bin" ]]; then
           printf "  [%b✓%b] Binary present and executable at %s\n" "$_green" "$_reset" "$server_bin"
@@ -3916,7 +3943,6 @@ cmd_server() {
       fi
 
       # 2. Site root & Fonts check
-      local site_root="${VIBECRAFTED_RUNTIME_ROOT:-${VIBECRAFTED_RUNTIME_HOME:-$HOME/.local/share/vibecrafted}}/server/site"
       if [[ -d "$site_root" ]]; then
         printf "  [%b✓%b] Site root present at %s\n" "$_green" "$_reset" "$site_root"
         if [[ -d "$site_root/fonts" ]]; then

@@ -31,6 +31,32 @@ private struct CanonicalRuntimeInstall: Decodable {
     case configHome = "config_home"
     case craftedHome = "crafted_home"
   }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+
+    func fileURL(_ key: CodingKeys) throws -> URL {
+      let path = try container.decode(String.self, forKey: key)
+      guard path.hasPrefix("/") else {
+        throw DecodingError.dataCorruptedError(
+          forKey: key, in: container,
+          debugDescription: "runtime installer returned a non-absolute filesystem path")
+      }
+      return URL(fileURLWithPath: path)
+    }
+
+    root = try fileURL(.root)
+    terminal = try fileURL(.terminal)
+    terminalHost = try fileURL(.terminalHost)
+    frame = try fileURL(.frame)
+    start = try fileURL(.start)
+    primaryShell = try fileURL(.primaryShell)
+    terminalConfig = try fileURL(.terminalConfig)
+    frameConfig = try fileURL(.frameConfig)
+    runtimeHome = try fileURL(.runtimeHome)
+    configHome = try fileURL(.configHome)
+    craftedHome = try fileURL(.craftedHome)
+  }
 }
 
 final class EventObserver: @unchecked Sendable, EventCallback {
@@ -358,6 +384,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   /// log for post-mortem, plus one modal so a broken install is never silent.
   private func reportWorkspaceLaunchFailure(_ message: String) {
     installLog.error("\(message, privacy: .public)")
+    fputs("Vibecrafted workspace launch failed: \(message)\n", stderr)
     guard !workspaceLaunchFailureReported else { return }
     workspaceLaunchFailureReported = true
     let alert = NSAlert()

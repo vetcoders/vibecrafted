@@ -581,8 +581,8 @@ def _process_alive(pid: int) -> bool:
     return True
 
 
-def _active_generation_bin(runtime_home: Path) -> Path | None:
-    """`<generation>/bin` for the runtime generation the app published, read from
+def _active_generation_root(runtime_home: Path) -> Path | None:
+    """Runtime generation the app published, read from
     `runtime_home/active.json`; None when that receipt is missing, malformed, or
     names a root outside `runtime_home`."""
 
@@ -604,7 +604,12 @@ def _active_generation_bin(runtime_home: Path) -> Path | None:
         return None
     if not generation.is_relative_to(runtime_home):
         return None
-    return generation / "bin"
+    return generation
+
+
+def _active_generation_bin(runtime_home: Path) -> Path | None:
+    generation = _active_generation_root(runtime_home)
+    return generation / "bin" if generation is not None else None
 
 
 def _service_path(paths: SupervisorPaths) -> str:
@@ -664,6 +669,9 @@ def _child_environment(paths: SupervisorPaths) -> dict[str, str]:
             "VIBECRAFTED_SERVER_SUPERVISOR_CHILD": "1",
         }
     )
+    generation = _active_generation_root(paths.runtime_home)
+    if generation is not None:
+        environment["VIBECRAFTED_RUNTIME_ROOT"] = str(generation)
     return environment
 
 
@@ -1494,6 +1502,24 @@ def render_launch_agent_plist(
         config.paths.launch_agent_file.parent,
     ):
         _ensure_owned_directory(directory)
+    service_environment = {
+        "HOME": str(config.paths.operator_home),
+        "PATH": _service_path(config.paths),
+        "VIBECRAFTED_HOME": str(config.paths.home),
+        "VIBECRAFTED_RUNTIME_HOME": str(config.paths.runtime_home),
+        "VC_SERVER_PUBLIC_URL": config.public_url or config.endpoint,
+        "VIBECRAFTED_SERVER_CONFIG": str(config.config_file or ""),
+        "VIBECRAFTED_SERVER_SERVICE": "launchd",
+        "VIBECRAFTED_SERVER_SUPERVISOR_PATH": str(supervisor),
+        "VIBECRAFTED_SERVER_SUPERVISOR_SHA256": supervisor_sha256,
+        "VIBECRAFTED_SERVER_SUPERVISOR_RUNTIME_SHA256": runtime_sha256,
+        "VIBECRAFTED_SERVER_SUPERVISOR_VERSION": PACKAGE_VERSION,
+        "VIBECRAFTED_SERVER_LAUNCHER_SHA256": launcher_sha256,
+        "VIBECRAFTED_TRIAGE_RUN": os.environ.get("VIBECRAFTED_TRIAGE_RUN", "1"),
+    }
+    generation = _active_generation_root(config.paths.runtime_home)
+    if generation is not None:
+        service_environment["VIBECRAFTED_RUNTIME_ROOT"] = str(generation)
     payload: dict[str, Any] = {
         "Label": LAUNCH_AGENT_LABEL,
         "ProgramArguments": [
@@ -1525,21 +1551,7 @@ def render_launch_agent_plist(
         "ProcessType": "Background",
         "StandardOutPath": str(config.paths.stdout_log),
         "StandardErrorPath": str(config.paths.stderr_log),
-        "EnvironmentVariables": {
-            "HOME": str(config.paths.operator_home),
-            "PATH": _service_path(config.paths),
-            "VIBECRAFTED_HOME": str(config.paths.home),
-            "VIBECRAFTED_RUNTIME_HOME": str(config.paths.runtime_home),
-            "VC_SERVER_PUBLIC_URL": config.public_url or config.endpoint,
-            "VIBECRAFTED_SERVER_CONFIG": str(config.config_file or ""),
-            "VIBECRAFTED_SERVER_SERVICE": "launchd",
-            "VIBECRAFTED_SERVER_SUPERVISOR_PATH": str(supervisor),
-            "VIBECRAFTED_SERVER_SUPERVISOR_SHA256": supervisor_sha256,
-            "VIBECRAFTED_SERVER_SUPERVISOR_RUNTIME_SHA256": runtime_sha256,
-            "VIBECRAFTED_SERVER_SUPERVISOR_VERSION": PACKAGE_VERSION,
-            "VIBECRAFTED_SERVER_LAUNCHER_SHA256": launcher_sha256,
-            "VIBECRAFTED_TRIAGE_RUN": os.environ.get("VIBECRAFTED_TRIAGE_RUN", "1"),
-        },
+        "EnvironmentVariables": service_environment,
     }
     return plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=True)
 

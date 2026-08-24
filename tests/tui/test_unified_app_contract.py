@@ -797,6 +797,12 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert '"--terminal-host", terminalHost.path' in delegate
     assert '"--frame-helper", frameHelper.path' in delegate
     assert "JSONDecoder().decode(CanonicalRuntimeInstall.self" in delegate
+    # The installer returns POSIX paths, not URL strings. Decoding them directly
+    # as URL produces relative URLs whose `.path` passes file checks but which
+    # Foundation.Process rejects as an executableURL on macOS.
+    assert "container.decode(String.self, forKey: key)" in delegate
+    assert 'guard path.hasPrefix("/")' in delegate
+    assert "URL(fileURLWithPath: path)" in delegate
     # AppDelegate is the UI/process host, not a second installer implementation.
     assert "createDirectory(at:" not in delegate
     assert "copyItem(at:" not in delegate
@@ -3182,6 +3188,23 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     assert 'environment["VC_FRAME_SOCKET_DIR"] = socketRoot' in delegate
     assert 'environment["ZELLIJ_SOCKET_DIR"] = socketRoot' in delegate
     assert 'environment["VIBECRAFTED_LEGACY_VC_FRAME_SOCKET_DIR"]' in delegate
+
+
+def test_installed_deck_resolves_server_binary_and_site_from_its_generation() -> None:
+    deck = (REPO_ROOT / "scripts/vibecrafted").read_text(encoding="utf-8")
+    canonical = (
+        REPO_ROOT / "vibecrafted-core/vibecrafted_core/deck/vibecrafted"
+    ).read_bytes()
+
+    assert canonical == (REPO_ROOT / "scripts/vibecrafted").read_bytes()
+    assert "_runtime_payload_root()" in deck
+    assert 'server_bin="${runtime_root:+$runtime_root/bin/vc-server}"' in deck
+    assert 'site_root="${runtime_root:+$runtime_root/server/site}"' in deck
+    assert 'local server_bin="$HOME/.local/bin/vc-server"' not in deck
+    assert (
+        '"$script_dir/../vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh"'
+        in deck
+    )
 
 
 def test_primary_shell_exits_instead_of_reusing_pty_after_vc_start_failure(

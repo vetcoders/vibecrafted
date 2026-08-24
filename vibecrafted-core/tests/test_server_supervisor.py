@@ -295,6 +295,12 @@ def test_launch_agent_carries_the_installing_path_and_active_generation(
     assert payload["EnvironmentVariables"]["PATH"] == (
         f"{generation / 'bin'}:/opt/homebrew/bin:/usr/bin:/bin"
     )
+    assert payload["EnvironmentVariables"]["VIBECRAFTED_RUNTIME_ROOT"] == str(
+        generation
+    )
+    assert supervisor._child_environment(config.paths)[
+        "VIBECRAFTED_RUNTIME_ROOT"
+    ] == str(generation)
 
     # No active-runtime receipt: the installing PATH still survives whole.
     (config.paths.runtime_home / "active.json").unlink()
@@ -306,6 +312,8 @@ def test_launch_agent_carries_the_installing_path_and_active_generation(
     )
 
     assert payload["EnvironmentVariables"]["PATH"] == "/opt/homebrew/bin:/usr/bin:/bin"
+    assert "VIBECRAFTED_RUNTIME_ROOT" not in payload["EnvironmentVariables"]
+    assert "VIBECRAFTED_RUNTIME_ROOT" not in supervisor._child_environment(config.paths)
 
 
 def test_launch_agent_path_drops_empty_and_relative_segments(
