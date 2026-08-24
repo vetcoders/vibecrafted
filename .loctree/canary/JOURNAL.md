@@ -336,3 +336,76 @@ real and the capsule maintains it. Not both.
 
 Side receipts from the same probe: `scaffold-doctor` INSTALLED_NOT_ON_PATH;
 `vc-frame` DIRTY_BUILD_PROVENANCE (0.47.3+g017e3839.dirty); `voc` absent.
+
+---
+
+## Phase IV: the transplant doctrine and the shell-library reframe (2026-08-24)
+
+### Doctrine amendment (operator decision, 2026-08-24, morning)
+
+The operator ruled — citing the Sol precedent from the Night of the French
+Connection (9200 lines of an old engine under `git rm`, eleven minutes from
+order to commit) — that demolition cuts are gated **structurally, not by
+runtime greenness**:
+
+1. Before the cut: freeze the oracle/RED (public failing evidence + prism
+   baseline). Not after.
+2. Demolition (W0-C) does not run builds or runtime falsifiers. The gate is
+   negative and structural: the `git rm` manifest, zero old symbols/writers/
+   routes by the Loctree map, no unlisted competitors, an adequate margin.
+3. Dangling references and a red build are an allowed, documented state
+   ("compile-driven salvage" is forbidden in demolition briefs — the rush to
+   compile re-attaches the wrong falsifiers and risks leaving cancer or
+   cutting without margin).
+4. Only the rewire wave (W1) restores compilation and runtime tests. Machine
+   assembly order: parts first, wiring after; structure verified A→Z with the
+   Loctree map.
+
+This retroactively corrects Phase II's caution: refusing the shell-library cut
+"for lack of a live verifier" was compile-driven-salvage thinking.
+
+### The shell-library reframe (evidence, not the old thesis)
+
+Phase I called `runtime/scripts/lib` ↔ `runtime/shell/lib` whole-tree twins.
+The map says otherwise:
+
+- The trees serve two surfaces: `scripts/lib` = spawn/launcher machinery
+  (sourced by `runtime/scripts/common.sh`, consumed by the Python core;
+  `launcher-migration.md` is actively draining it into Python — three
+  responsibilities already moved). `shell/lib` = the operator-terminal
+  facade (self-described: "sourced only by the compatibility facade";
+  consumers: `vetcoders.sh`, `install-foundations.sh`,
+  `sync-vc-alias-runtime.sh`, the vc-* verbs).
+- `frontier.sh` ×2 is a **FALSE_PARALLEL**: same name, different powers
+  (spawn shell selection vs frontier config resolution). Rename candidate,
+  not a cut.
+- `ulimits.sh` is already resolved by delegation — but through a four-path
+  candidate chain (`shell/lib/ulimits.sh:9-12`), the same path-chain disease
+  cut from the deck in Phase II. Residual.
+- `vc_frame.sh` ×2 is the real patient: 1091 vs 880 lines, diff 1735,
+  **zero shared function names** (30 `spawn_*` vs 31 `_vetcoders_*`). Not
+  copies — two grammars for one power ("talk to vc-frame sessions/tabs"),
+  with the twinning documented inside: `shell/lib/vc_frame.sh:330` "G7 twin
+  of spawn_effective_operator_session", `:641` "G3 + G3b twin of
+  spawn_vc_frame_session_action", `:810` names the split (operator seat =
+  facade; skill workers = scripts/lib `spawn_launch`, G7 per-project host).
+
+Classification: ⚠ same responsibility in two modes with deliberately paired
+sub-behaviours (G3/G7). The demolition manifest is therefore **symbol-level,
+not file-level**: for each G-pair one side becomes the only implementation
+and the other calls it; the pair comments and the four-path chains go to
+zero. Oracle first: golden tests for G3 (session action + stderr
+disambiguation) and G7 (worker/operator session naming) — both currently
+exist only as comments pointing at each other.
+
+### Corrections issued to the install-contract plan (in komityw with Codex)
+
+`canary-install-contract-closure-v1` gets two operator-mandated corrections
+(appended to the briefs, attributed): W0-01 must not presume
+`tools/vibecrafted-current` exists on end-user machines (host evidence above)
+and must fail closed with the one-line contract error, not compute a path to
+a grave; W1-01 must decide the single owner of "which runtime is current"
+(`active.json` vs `vibecrafted-current`) and produce the loser's demolition
+manifest. Dispatch of W0-01 ∥ W0-02 is delegated to me by the operator
+("niczego nie będę robił, po to was mam"); the ⛔ STOP (push/merge/release)
+stays the operator's.
