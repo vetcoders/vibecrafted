@@ -409,3 +409,43 @@ a grave; W1-01 must decide the single owner of "which runtime is current"
 manifest. Dispatch of W0-01 ∥ W0-02 is delegated to me by the operator
 ("niczego nie będę robił, po to was mam"); the ⛔ STOP (push/merge/release)
 stays the operator's.
+
+### Consumer contract points (operator ask, 2026-08-24; evidence-checked)
+
+Fixed reference frame for every root/install cut — the consumer's seat, not
+the maintainer's:
+
+**Linux (tarball consumer)** — "the tarball works with no dump":
+
+- L1. Clean-machine truth: `tar xf` + install on a fresh Debian/Alpine(musl)
+  runner with no macOS-isms — no `xcrun`, no BSD `stat -f`/`sed -i ''`.
+  (Memory: the release gate has never executed its last step on either OS —
+  xcrun killed it on Linux, missing ripgrep on macos-15.)
+- L2. XDG grammar honored end-to-end: everything lands under
+  `${XDG_DATA_HOME:-~/.local/share}/vibecrafted` + `~/.local/bin`, and the
+  launchers are reachable from a bare `$PATH` without any GUI or capsule.
+- L3. **The throne must have a Linux writer.** `active.json` is written today
+  only by `AppDelegate.swift` (macOS DMG). If W1-01 crowns `active.json`,
+  the tarball/Makefile install must write it too; if it crowns
+  `vibecrafted-current`, the capsule must maintain it. A throne only one OS
+  can write is a competitor factory.
+- L4. Payload hygiene on the tarball equal to the DMG (`/Users/runner` leak
+  class), and binaries for gnu **and musl** (the lost-musl-target failure
+  from the Loctree worktrees must not repeat here).
+
+**Windows consumer** — "everything lands in their paths and is reachable":
+
+- W1. Production truth today: zero Windows path grammar (`APPDATA`/
+  `LOCALAPPDATA`/`USERPROFILE` — 28 regex hits, all docs/tests). Any claim of
+  Windows support is currently false; docs must say WSL2 explicitly or say
+  nothing.
+- W2. When native lands: data/runtime → `%LOCALAPPDATA%\vibecrafted`, config
+  → `%APPDATA%\vibecrafted`, launchers as `.cmd`/`.exe` on the user PATH —
+  `~/.local/bin` bash wrappers are unreachable there, and the whole bash
+  library layer does not exist. Which is one more proof for the
+  launcher-migration doctrine: Python/Rust must carry spawn alone.
+- W3. Interim honest path: WSL2 = the Linux tarball contract (L1–L4) plus a
+  documented `\\wsl$` reachability note. No pretending beyond that.
+
+These points bind W1-01 (rehearsal + throne decision) and every later root
+cut. A cut that satisfies the maintainer and fails L3 or W1 is not finished.
