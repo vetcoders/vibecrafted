@@ -144,10 +144,11 @@ removed and not backed up.
 - Retention _during_ normal operation. Uninstall now removes all generations, but
   nothing prunes them on a live machine — 25 provider generations and 6 releases
   still accumulate. That is a separate cut.
-- Fetch/install adapters for the required third-party payloads. The required set
-  is now explicit, but bundling/installing Loctree, AICX, PRView and ScreenScribe
-  is the next payload cut after deterministic uninstall; a DMG lacking them is
-  still incomplete and must not be described as the full product.
+- Publishing upstream PRView release archives. The carrier currently prebuilds
+  the exact crates.io release because the documented GitHub Release channel has
+  no assets. Customers still receive a ready binary and never need Cargo; the
+  upstream release channel should be repaired so a future carrier can verify
+  and embed its archive directly.
 - `$TMPDIR` test scratch. Owned by the test suite, not by the installer.
 
 _𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI_

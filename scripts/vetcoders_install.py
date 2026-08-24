@@ -14756,6 +14756,12 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
     )
     required = [
         generation / "bin/vibecrafted",
+        generation / "bin/loct",
+        generation / "bin/loctree-mcp",
+        generation / "bin/aicx",
+        generation / "bin/aicx-mcp",
+        generation / "bin/prview",
+        generation / "bin/screenscribe",
         generation / "bin/vc-frame",
         generation / "bin/vc-server",
         generation / "bin/vc-server-supervisor",

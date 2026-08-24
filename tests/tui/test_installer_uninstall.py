@@ -30,6 +30,12 @@ def _runtime_pack_fixture(root: Path) -> tuple[Path, Path, Path]:
     payload = root / "runtime-pack"
     for name in (
         "vibecrafted",
+        "loct",
+        "loctree-mcp",
+        "aicx",
+        "aicx-mcp",
+        "prview",
+        "screenscribe",
         "vc-server",
         "vc-server-supervisor",
         "vc-start",
@@ -152,6 +158,31 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     assert not crafted_home.exists()
     assert not (config_home / "vibecrafted").exists()
     assert app_root.exists()
+
+
+def test_runtime_pack_refuses_missing_required_agent_foundation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(home / "runtime"))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / "bin"))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    (payload / "bin/prview").unlink()
+
+    with pytest.raises(RuntimeError, match=r"Runtime Pack is incomplete: .*bin/prview"):
+        installer.cmd_runtime_install(
+            Namespace(
+                payload_root=str(payload),
+                app_root=str(terminal_host.parents[2]),
+                terminal_host=str(terminal_host),
+                frame_helper=str(frame_helper),
+            )
+        )
+
+    assert not (home / "bin/vibecrafted").exists()
 
 
 def test_runtime_pack_uninstall_preserves_locally_modified_managed_launcher(

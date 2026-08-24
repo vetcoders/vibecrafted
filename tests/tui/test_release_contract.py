@@ -166,6 +166,26 @@ def test_publication_boundary_step_still_asserts_both_channel_names() -> None:
         assert target in workflow, f"boundary step stopped covering {target}"
 
 
+def test_native_carrier_embeds_every_required_agent_foundation() -> None:
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    stager = (REPO_ROOT / "scripts/stage-runtime-foundations.sh").read_text(
+        encoding="utf-8"
+    )
+    installer = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(encoding="utf-8")
+
+    assert 'stage-runtime-foundations.sh" "$runtime/bin"' in builder
+    assert "'screenscribe==0.1.19'" in builder
+    assert '"$runtime/bin/screenscribe" --version' in builder
+    for command in ("loct", "loctree-mcp", "aicx", "aicx-mcp", "prview"):
+        assert command in stager
+        assert f'generation / "bin/{command}"' in installer
+    assert 'generation / "bin/screenscribe"' in installer
+    assert "runtime-foundations.json" in stager
+    assert "cargo install --locked" in stager
+
+
 def test_macos_publisher_cold_verifies_exact_uploaded_bytes() -> None:
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     publisher = (REPO_ROOT / "scripts/publish-vibecrafted-release.sh").read_text(

@@ -559,6 +559,8 @@ build_product() {
   printf '%s\n' "$RUNTIME_VERSION" \
     > "$runtime/vibecrafted-core/vibecrafted_core/VERSION"
   /bin/cp -R "$REPO_ROOT/config/." "$runtime/config/"
+  log "Embedding the complete Runtime Foundations payload"
+  "$REPO_ROOT/scripts/stage-runtime-foundations.sh" "$runtime/bin"
   mkdir -p "$runtime/server/site"
   /bin/cp -R "$server_site/." "$runtime/server/site/"
   # The Living Tree may contain ignored interpreter caches. They are never
@@ -578,7 +580,7 @@ build_product() {
   mkdir -p "$runtime/python" "$runtime/python-site"
   /bin/cp -RL "$python_home/." "$runtime/python/"
   uv pip install --python "$seed_python" --target "$runtime/python-site" \
-    'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7'
+    'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7' 'screenscribe==0.1.19'
   install_name_tool -id '@loader_path/libpython3.12.dylib' \
     "$runtime/python/lib/libpython3.12.dylib"
 
@@ -628,6 +630,18 @@ build_product() {
     "$REPO_ROOT/scripts/render-python-entrypoint-launchers.py" \
     --pyproject "$REPO_ROOT/vibecrafted-core/pyproject.toml" \
     --bin-dir "$runtime/bin"
+  # ScreenScribe is a required product tool delivered inside the same private
+  # Python as Vibecrafted. Its PyPI console script is deliberately discarded
+  # above because the generated shebang names the ephemeral build seed.
+  # shellcheck disable=SC2016
+  printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    'runtime_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"' \
+    'exec "$runtime_root/bin/python3" -c '\''from screenscribe.bootstrap import main; main()'\'' "$@"' \
+    > "$runtime/bin/screenscribe"
+  chmod 0755 "$runtime/bin/screenscribe"
+  "$runtime/bin/screenscribe" --version >/dev/null
 
   if find "$APP" -type l -print -quit | grep -q .; then
     die "assembled app contains symlinks"
