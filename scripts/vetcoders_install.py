@@ -14427,6 +14427,13 @@ def _load_runtime_install_receipt(path: Path) -> dict[str, Any]:
     return receipt
 
 
+def _checkpoint_runtime_install_receipt(
+    runtime_home: Path, receipt: Mapping[str, Any]
+) -> None:
+    """Persist recoverable ownership after each completed install mutation."""
+    _atomic_json_file(_runtime_receipt_path(runtime_home), dict(receipt))
+
+
 def _backup_runtime_collision(
     destination: Path, *, runtime_home: Path, receipt: dict[str, Any]
 ) -> None:
@@ -14440,6 +14447,9 @@ def _backup_runtime_collision(
     backup.parent.mkdir(parents=True, exist_ok=True)
     _copy_path_to_backup(destination, backup)
     backups[key] = str(backup)
+    # Persist the restore map before the caller replaces/removes the original.
+    # A killed installer can then still be reset by this same entrypoint.
+    _checkpoint_runtime_install_receipt(runtime_home, receipt)
 
 
 def _record_owned_file(receipt: dict[str, Any], path: Path) -> None:
@@ -14456,10 +14466,179 @@ def _write_runtime_owned_file(
     previous: dict[str, Any],
 ) -> None:
     previous_owned = previous.get("owned_files", {})
-    if _path_present(path) and str(path) not in previous_owned:
-        _backup_runtime_collision(path, runtime_home=runtime_home, receipt=receipt)
+    key = str(path)
+    if _path_present(path):
+        if key in previous_owned:
+            if (
+                path.is_symlink()
+                or not path.is_file()
+                or _sha256_path(path) != previous_owned[key]
+            ):
+                raise RuntimeError(
+                    f"managed runtime file changed since install: {path}"
+                )
+        else:
+            _backup_runtime_collision(path, runtime_home=runtime_home, receipt=receipt)
     _atomic_text(path, body, mode=mode)
     _record_owned_file(receipt, path)
+    _checkpoint_runtime_install_receipt(runtime_home, receipt)
+
+
+def _write_runtime_owned_symlink(
+    path: Path,
+    target: Path,
+    *,
+    runtime_home: Path,
+    receipt: dict[str, Any],
+    previous: dict[str, Any],
+) -> None:
+    """Atomically publish one receipted projection without losing a user collision."""
+    canonical_target = target.resolve(strict=True)
+    key = str(path)
+    previous_owned = previous.get("owned_symlinks", {})
+    if _path_present(path):
+        if key in previous_owned:
+            expected = Path(previous_owned[key]).resolve(strict=False)
+            if not path.is_symlink() or _symlink_target(path) != expected:
+                raise RuntimeError(
+                    f"managed runtime symlink changed since install: {path}"
+                )
+        else:
+            _backup_runtime_collision(path, runtime_home=runtime_home, receipt=receipt)
+            _remove_path(path)
+    _atomic_symlink(canonical_target, path)
+    receipt.setdefault("owned_symlinks", {})[key] = str(canonical_target)
+    _checkpoint_runtime_install_receipt(runtime_home, receipt)
+
+
+def _ensure_runtime_projection_directory(
+    path: Path, *, runtime_home: Path, receipt: dict[str, Any]
+) -> None:
+    """Create a real user projection directory and receipt only newly-created parents."""
+    home = Path.home().expanduser()
+    candidate = path.expanduser()
+    if not candidate.is_absolute():
+        raise RuntimeError(f"runtime projection path is not absolute: {path}")
+
+    # Normalize `..` without resolving symlinks, then walk every descendant of
+    # HOME.  Checking only the final directory is insufficient: `~/.agents`
+    # could itself point outside HOME while `~/.agents/skills` looks like a
+    # normal directory to pathlib.
+    normalized = Path(os.path.abspath(candidate))
+    try:
+        relative = normalized.relative_to(home)
+    except ValueError as exc:
+        raise RuntimeError(f"runtime projection escapes HOME: {path}") from exc
+
+    missing: list[Path] = []
+    cursor = home
+    for component in relative.parts:
+        cursor /= component
+        if cursor.is_symlink():
+            raise RuntimeError(
+                f"runtime projection ancestor must not be a symlink: {cursor}"
+            )
+        if cursor.exists() and not cursor.is_dir():
+            raise RuntimeError(f"runtime projection root is not a directory: {cursor}")
+        if not cursor.exists():
+            missing.append(cursor)
+    normalized.mkdir(parents=True, exist_ok=True)
+    owned = receipt.setdefault("owned_empty_dirs", [])
+    for directory in reversed(missing):
+        value = str(directory)
+        if value not in owned:
+            owned.append(value)
+    _checkpoint_runtime_install_receipt(runtime_home, receipt)
+
+
+def _install_runtime_agent_projections(
+    generation: Path,
+    *,
+    version: str,
+    runtime_home: Path,
+    receipt: dict[str, Any],
+    previous: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    """Project the immutable generation into the agent-native discovery surfaces."""
+    skills_root = generation / "vibecrafted-core/vibecrafted_core/skills"
+    skills = discover_skills(generation)
+    skill_names = [skill.name for skill in skills]
+    if not skill_names:
+        raise RuntimeError(
+            f"Runtime Pack contains no discoverable skills: {skills_root}"
+        )
+
+    runtimes = list(STANDARD_VIEW_RUNTIMES)
+    for runtime in runtimes:
+        view_root = runtime_skills_dir(runtime)
+        _ensure_runtime_projection_directory(
+            view_root, runtime_home=runtime_home, receipt=receipt
+        )
+        for source, relative in iter_skill_root_rule_files(skills_root):
+            _write_runtime_owned_file(
+                view_root / relative,
+                source.read_text(encoding="utf-8"),
+                mode=stat.S_IMODE(source.stat().st_mode),
+                runtime_home=runtime_home,
+                receipt=receipt,
+                previous=previous,
+            )
+        for skill in skills:
+            _write_runtime_owned_symlink(
+                view_root / skill.name,
+                skill,
+                runtime_home=runtime_home,
+                receipt=receipt,
+                previous=previous,
+            )
+
+        payloads = _agent_command_payloads(runtime)
+        if payloads:
+            commands_root = runtime_commands_dir(runtime)
+            _ensure_runtime_projection_directory(
+                commands_root, runtime_home=runtime_home, receipt=receipt
+            )
+            for filename, content in payloads.items():
+                _write_runtime_owned_file(
+                    commands_root / filename,
+                    content,
+                    mode=0o644,
+                    runtime_home=runtime_home,
+                    receipt=receipt,
+                    previous=previous,
+                )
+
+    now = datetime.now(timezone.utc).isoformat()
+    state = InstallState(
+        installed_at=now,
+        updated_at=now,
+        framework_version=version,
+        repo_commit="unknown",
+        repo_url="",
+        skills=skill_names,
+        runtimes=runtimes,
+        launcher_entries=_snapshot_launcher_entries(),
+        helper_files=[],
+        foundations={
+            foundation.name: {
+                "channel": "bundled" if foundation.name == "vc-frame" else "detected",
+                "path": foundation.is_installed() or "",
+            }
+            for foundation in FOUNDATIONS
+        },
+        product_tools=snapshot_product_tool_state(),
+        shell_helpers=False,
+        install_path=str(skills_root),
+    )
+    _write_runtime_owned_file(
+        vibecrafted_home() / STATE_FILE,
+        json.dumps(asdict(state), indent=2) + "\n",
+        mode=0o644,
+        runtime_home=runtime_home,
+        receipt=receipt,
+        previous=previous,
+    )
+    return skill_names, runtimes
 
 
 def _runtime_install_result(
@@ -14524,7 +14703,9 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         "roots": {name: str(path) for name, path in paths.items()},
         "roots_created": root_created,
         "owned_files": dict(previous.get("owned_files", {})),
+        "owned_symlinks": dict(previous.get("owned_symlinks", {})),
         "owned_dirs": list(previous.get("owned_dirs", [])),
+        "owned_empty_dirs": list(previous.get("owned_empty_dirs", [])),
         "backups": dict(previous.get("backups", {})),
     }
 
@@ -14538,6 +14719,13 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         paths["launcher_home"],
     ):
         directory.mkdir(parents=True, exist_ok=True)
+    _checkpoint_runtime_install_receipt(runtime_home, receipt)
+
+    if str(generation) not in receipt["owned_dirs"]:
+        # Claim the final destination before publication.  A crash after the
+        # atomic rename remains recoverable from the checkpointed receipt.
+        receipt["owned_dirs"].append(str(generation))
+        _checkpoint_runtime_install_receipt(runtime_home, receipt)
 
     if not generation.exists():
         staging = Path(tempfile.mkdtemp(prefix=f".{version}.staging-", dir=releases))
@@ -14560,8 +14748,6 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             if staging.exists():
                 shutil.rmtree(staging)
     _assert_runtime_tree_has_no_symlinks(generation)
-    if str(generation) not in receipt["owned_dirs"]:
-        receipt["owned_dirs"].append(str(generation))
 
     terminal_host = (
         Path(args.terminal_host).expanduser().resolve()
@@ -14577,16 +14763,38 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         generation / "bin/vc-workflow",
         terminal_host,
         generation / "config/alacritty/launch-primary-shell.zsh",
+        generation / "vibecrafted-core/vibecrafted_core/skills",
     ]
-    missing = [str(path) for path in required if not os.access(path, os.X_OK)]
+    missing = [
+        str(path)
+        for path in required
+        if not (
+            path.is_dir()
+            if path == generation / "vibecrafted-core/vibecrafted_core/skills"
+            else os.access(path, os.X_OK)
+        )
+    ]
     if missing:
         raise RuntimeError("Runtime Pack is incomplete: " + ", ".join(missing))
+
+    # `active.json`, the CLI, foundations, doctor, and agent views must all
+    # name the same immutable release.  `vibecrafted-current` is a stable
+    # projection for older consumers, never a second tools generation.
+    current_link = runtime_home / "tools/vibecrafted-current"
+    _write_runtime_owned_symlink(
+        current_link,
+        generation,
+        runtime_home=runtime_home,
+        receipt=receipt,
+        previous=previous,
+    )
 
     product_config = paths["product_config"]
     terminal_theme = product_config / "terminal-theme.toml"
     if not terminal_theme.exists():
         shutil.copy2(generation / "config/vc-terminal/themes/dark.toml", terminal_theme)
         receipt["owned_dirs"].append(str(terminal_theme))
+        _checkpoint_runtime_install_receipt(runtime_home, receipt)
     terminal_policy = generation / "config/vc-terminal/vibecrafted.toml"
     terminal_entry = (
         "# Generated by the Vibecrafted installer.\n"
@@ -14613,6 +14821,7 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             frame_config,
         )
         receipt["owned_dirs"].append(str(frame_config))
+        _checkpoint_runtime_install_receipt(runtime_home, receipt)
     shell_config = product_config / "shell"
     if shell_config.exists():
         if str(shell_config) not in previous.get("owned_dirs", []):
@@ -14626,6 +14835,7 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
     )
     if str(shell_config) not in receipt["owned_dirs"]:
         receipt["owned_dirs"].append(str(shell_config))
+    _checkpoint_runtime_install_receipt(runtime_home, receipt)
     _assert_runtime_tree_has_no_symlinks(product_config)
 
     bin_dir = generation / "bin"
@@ -14697,6 +14907,14 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             previous=previous,
         )
 
+    skill_names, runtime_views = _install_runtime_agent_projections(
+        generation,
+        version=version,
+        runtime_home=runtime_home,
+        receipt=receipt,
+        previous=previous,
+    )
+
     active = {
         "schema": "vibecrafted.active-runtime.v1",
         "version": version,
@@ -14719,6 +14937,9 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         paths=paths,
         terminal_host=terminal_host,
     )
+    result["tools_current"] = str(current_link)
+    result["skills"] = str(len(skill_names))
+    result["runtime_views"] = ",".join(runtime_views)
     print(json.dumps(result, sort_keys=True))
     return 0
 
@@ -14738,12 +14959,46 @@ def _receipt_path_is_allowed(path: Path, roots: Mapping[str, Path]) -> bool:
                 Path(f"/tmp/vc-frame-{os.getuid()}"),
             ]
         )
-    resolved = path.resolve(strict=False)
+    # Preserve the final component so a receipt cannot make an outside path
+    # appear managed merely by pointing its symlink into an allowed root.
+    resolved = _canonical_path_preserving_final_symlink(path)
     return any(
         resolved == root.resolve(strict=False)
         or _is_subpath(resolved, root.resolve(strict=False))
         for root in allowed
     )
+
+
+def _runtime_projection_roots() -> tuple[Path, ...]:
+    roots = [runtime_skills_dir(runtime) for runtime in STANDARD_VIEW_RUNTIMES]
+    roots.extend(
+        runtime_commands_dir(runtime)
+        for runtime in STANDARD_VIEW_RUNTIMES
+        if _agent_command_payloads(runtime)
+    )
+    return tuple(roots)
+
+
+def _receipt_projection_path_is_allowed(path: Path) -> bool:
+    """Allow only files below the exact agent discovery roots we project."""
+    canonical = _canonical_path_preserving_final_symlink(path)
+    return any(
+        canonical == root.resolve(strict=False)
+        or _is_subpath(canonical, root.resolve(strict=False))
+        for root in _runtime_projection_roots()
+    )
+
+
+def _receipt_empty_projection_dir_is_allowed(path: Path) -> bool:
+    """Empty-dir cleanup may also prune agent parents created by this install."""
+    home = Path.home().resolve(strict=False)
+    allowed: set[Path] = set()
+    for root in _runtime_projection_roots():
+        cursor = root.resolve(strict=False)
+        while cursor != home and _is_subpath(cursor, home):
+            allowed.add(cursor)
+            cursor = cursor.parent
+    return path.resolve(strict=False) in allowed
 
 
 def cmd_runtime_uninstall(args: argparse.Namespace) -> int:
@@ -14774,17 +15029,43 @@ def cmd_runtime_uninstall(args: argparse.Namespace) -> int:
     dry_run = bool(args.dry_run)
     actions: list[str] = []
     owned_files = receipt.get("owned_files", {})
+    owned_symlinks = receipt.get("owned_symlinks", {})
     for raw_path in owned_files:
-        if not _receipt_path_is_allowed(Path(raw_path), paths):
+        path = Path(raw_path)
+        if not (
+            _receipt_path_is_allowed(path, paths)
+            or _receipt_projection_path_is_allowed(path)
+        ):
             raise RuntimeError(f"receipt path escapes managed roots: {raw_path}")
+    for raw_path, raw_target in owned_symlinks.items():
+        path = Path(raw_path)
+        target = Path(raw_target).resolve(strict=False)
+        if not (
+            _receipt_path_is_allowed(path, paths)
+            or _receipt_projection_path_is_allowed(path)
+        ):
+            raise RuntimeError(f"receipt symlink escapes managed roots: {raw_path}")
+        releases = runtime_home / "releases"
+        if target != releases.resolve(strict=False) and not _is_subpath(
+            target, releases.resolve(strict=False)
+        ):
+            raise RuntimeError(f"receipt symlink target escapes releases: {raw_target}")
     for raw_path in receipt.get("owned_dirs", []):
         if not _receipt_path_is_allowed(Path(raw_path), paths):
             raise RuntimeError(f"receipt path escapes managed roots: {raw_path}")
+    for raw_path in receipt.get("owned_empty_dirs", []):
+        if not _receipt_empty_projection_dir_is_allowed(Path(raw_path)):
+            raise RuntimeError(
+                f"receipt empty directory escapes projection roots: {raw_path}"
+            )
     backup_root = runtime_home / ".installer-backups"
     for destination_raw, backup_raw in receipt.get("backups", {}).items():
         destination = Path(destination_raw)
         backup = Path(backup_raw)
-        if not _receipt_path_is_allowed(destination, paths):
+        if not (
+            _receipt_path_is_allowed(destination, paths)
+            or _receipt_projection_path_is_allowed(destination)
+        ):
             raise RuntimeError(
                 f"receipt restore path escapes managed roots: {destination}"
             )
@@ -14801,6 +15082,15 @@ def cmd_runtime_uninstall(args: argparse.Namespace) -> int:
         and not path.is_symlink()
         and _sha256_path(path) != installed_hash
     ]
+    conflicts.extend(
+        raw_path
+        for raw_path, raw_target in sorted(owned_symlinks.items())
+        if _path_present(path := Path(raw_path))
+        and (
+            not path.is_symlink()
+            or _symlink_target(path) != Path(raw_target).resolve(strict=False)
+        )
+    )
     if conflicts:
         result = {
             "schema": "vibecrafted.runtime-uninstall-result.v1",
@@ -14814,9 +15104,20 @@ def cmd_runtime_uninstall(args: argparse.Namespace) -> int:
     if not dry_run:
         _teardown_owned_runtime_for_uninstall(paths["crafted_home"], dry_run=False)
 
+    for raw_path in sorted(owned_symlinks, reverse=True):
+        path = Path(raw_path)
+        if not _path_present(path):
+            continue
+        actions.append(f"remove {path}")
+        if not dry_run:
+            _remove_path(path)
+
     for raw_path, installed_hash in sorted(owned_files.items(), reverse=True):
         path = Path(raw_path)
-        if not _receipt_path_is_allowed(path, paths):
+        if not (
+            _receipt_path_is_allowed(path, paths)
+            or _receipt_projection_path_is_allowed(path)
+        ):
             raise RuntimeError(f"receipt path escapes managed roots: {path}")
         if not _path_present(path):
             continue
@@ -14853,6 +15154,17 @@ def cmd_runtime_uninstall(args: argparse.Namespace) -> int:
             if not dry_run:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 _restore_path_from_backup(backup, destination)
+
+    for raw_path in sorted(
+        receipt.get("owned_empty_dirs", []),
+        key=lambda value: len(Path(value).parts),
+        reverse=True,
+    ):
+        path = Path(raw_path)
+        if path.is_dir() and not path.is_symlink() and not any(path.iterdir()):
+            actions.append(f"remove empty {path}")
+            if not dry_run:
+                path.rmdir()
 
     roots_created = receipt.get("roots_created", {})
     for name in ("product_config", "crafted_home", "runtime_home", "launcher_home"):

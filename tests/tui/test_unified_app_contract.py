@@ -777,7 +777,18 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "\t<key>LSUIElement</key>\n\t<true/>" in info
     assert 'withTitle: "Open Console"' in delegate
     assert 'withTitle: "Open vc-terminal"' in delegate
+    assert 'withTitle: "Restart Server"' in delegate
+    assert 'withTitle: "Server Diagnostics…"' in delegate
+    assert 'withTitle: "About Vibecrafted"' in delegate
+    assert 'withTitle: "Help"' in delegate
     assert 'withTitle: "Quit"' in delegate
+    assert 'appendingPathComponent("server/supervisor.status.json")' in delegate
+    assert 'title: "Server: RESTARTING…"' in delegate
+    assert 'process.arguments = ["server", "service", "reconcile"]' in delegate
+    assert "menu.delegate = self" in delegate
+    assert "statusRefreshTimer = Timer.scheduledTimer(" in delegate
+    assert "statusIcon(health:" in delegate
+    assert "health.color.setFill()" in delegate
     assert "process.isRunning" in delegate
     assert (
         "NSRunningApplication(processIdentifier: process.processIdentifier)?.activate(options: [])"

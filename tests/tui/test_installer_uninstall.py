@@ -49,6 +49,14 @@ def _runtime_pack_fixture(root: Path) -> tuple[Path, Path, Path]:
     shell = payload / "vibecrafted-core/vibecrafted_core/runtime/shell"
     shell.mkdir(parents=True)
     (shell / "vetcoders.sh").write_text("# shell\n", encoding="utf-8")
+    skills = payload / "vibecrafted-core/vibecrafted_core/skills"
+    for name in ("vc-audit", "vc-implement"):
+        skill = skills / name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(f"# {name}\n", encoding="utf-8")
+    (skills / "VERIFICATION_RULE.md").write_text(
+        "# Verification rule\n", encoding="utf-8"
+    )
     _write_executable(payload / "config/alacritty/launch-primary-shell.zsh")
     terminal_host = root / "Vibecrafted.app/Contents/Helpers/vc-terminal"
     frame_helper = root / "Vibecrafted.app/Contents/Helpers/vc-frame"
@@ -78,6 +86,11 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     launcher_home.mkdir(parents=True)
     original_launcher = launcher_home / "vc-start"
     original_launcher.write_text("operator-owned\n", encoding="utf-8")
+    operator_skill = home / ".codex/skills/vc-audit"
+    operator_skill.parent.mkdir(parents=True)
+    operator_skill.write_text("operator-owned skill\n", encoding="utf-8")
+    unrelated_skill = home / ".codex/skills/operator-private"
+    unrelated_skill.write_text("preserve me\n", encoding="utf-8")
     app_root = terminal_host.parents[2]
     install_args = Namespace(
         payload_root=str(payload),
@@ -93,8 +106,30 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     assert (generation / "bin/vc-frame").read_bytes() == frame_helper.read_bytes()
     assert (generation / "bin/vc-terminal").read_bytes() == terminal_host.read_bytes()
     assert (runtime_home / installer.RUNTIME_INSTALL_RECEIPT).is_file()
+    current = runtime_home / "tools/vibecrafted-current"
+    assert current.is_symlink()
+    assert current.resolve() == generation.resolve()
     assert "VIBECRAFTED_RUNTIME_ROOT=" in original_launcher.read_text(encoding="utf-8")
     assert (config_home / "vibecrafted/vc-frame/config.kdl").is_file()
+    for runtime in installer.STANDARD_VIEW_RUNTIMES:
+        for skill_name in ("vc-audit", "vc-implement"):
+            view = home / f".{runtime}/skills/{skill_name}"
+            assert view.is_symlink()
+            assert view.resolve() == (
+                generation / "vibecrafted-core/vibecrafted_core/skills" / skill_name
+            )
+        assert (home / f".{runtime}/skills/VERIFICATION_RULE.md").is_file()
+    for runtime, commands in installer.MARBLES_COMMANDS_BY_RUNTIME.items():
+        for command in commands:
+            assert installer.AGENT_COMMAND_MARKER in (
+                home / f".{runtime}/commands/{command}"
+            ).read_text(encoding="utf-8")
+    state = json.loads(
+        (crafted_home / installer.STATE_FILE).read_text(encoding="utf-8")
+    )
+    assert state["framework_version"] == "9.9.9+g12345678"
+    assert state["skills"] == ["vc-audit", "vc-implement"]
+    assert state["runtimes"] == installer.STANDARD_VIEW_RUNTIMES
 
     # The app calls the installer on every launch. Reconciliation must retain
     # first-install ownership so a later reset still returns to baseline.
@@ -108,6 +143,11 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     removed = json.loads(capsys.readouterr().out)
     assert removed["status"] == "removed"
     assert original_launcher.read_text(encoding="utf-8") == "operator-owned\n"
+    assert operator_skill.read_text(encoding="utf-8") == "operator-owned skill\n"
+    assert unrelated_skill.read_text(encoding="utf-8") == "preserve me\n"
+    assert not (home / ".agents").exists()
+    assert not (home / ".claude").exists()
+    assert not (home / ".codex/commands").exists()
     assert not runtime_home.exists()
     assert not crafted_home.exists()
     assert not (config_home / "vibecrafted").exists()
@@ -149,6 +189,207 @@ def test_runtime_pack_uninstall_preserves_locally_modified_managed_launcher(
     )
     assert (home / "runtime/releases/9.9.9+g12345678").is_dir()
     assert (home / "runtime" / installer.RUNTIME_INSTALL_RECEIPT).is_file()
+
+
+def test_runtime_pack_uninstall_refuses_modified_agent_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    runtime_home = home / "runtime"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / "bin"))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
+    monkeypatch.setattr(
+        installer, "_teardown_owned_runtime_for_uninstall", lambda *_args, **_kwargs: []
+    )
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    args = Namespace(
+        payload_root=str(payload),
+        app_root=str(terminal_host.parents[2]),
+        terminal_host=str(terminal_host),
+        frame_helper=str(frame_helper),
+    )
+    assert installer.cmd_runtime_install(args) == 0
+    capsys.readouterr()
+
+    projection = home / ".codex/skills/vc-audit"
+    projection.unlink()
+    projection.symlink_to(home / "operator-owned-target")
+
+    assert (
+        installer.cmd_runtime_uninstall(Namespace(dry_run=False, emit_result=True)) == 1
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "conflict"
+    assert str(projection) in result["conflicts"]
+    assert projection.is_symlink()
+    assert runtime_home.is_dir()
+
+
+def test_runtime_pack_install_refuses_symlinked_agent_projection_ancestor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    outside = tmp_path / "outside-agent-home"
+    runtime_home = home / "runtime"
+    home.mkdir()
+    outside.mkdir()
+    (home / ".agents").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / "bin"))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    args = Namespace(
+        payload_root=str(payload),
+        app_root=str(terminal_host.parents[2]),
+        terminal_host=str(terminal_host),
+        frame_helper=str(frame_helper),
+    )
+
+    with pytest.raises(
+        RuntimeError, match="runtime projection ancestor must not be a symlink"
+    ):
+        installer.cmd_runtime_install(args)
+
+    assert not any(outside.iterdir())
+    assert (home / ".agents").is_symlink()
+    assert (runtime_home / installer.RUNTIME_INSTALL_RECEIPT).is_file()
+
+
+def test_interrupted_runtime_pack_install_leaves_receipt_for_clean_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    runtime_home = home / "runtime"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / "bin"))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
+    monkeypatch.setattr(
+        installer, "_teardown_owned_runtime_for_uninstall", lambda *_args, **_kwargs: []
+    )
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    args = Namespace(
+        payload_root=str(payload),
+        app_root=str(terminal_host.parents[2]),
+        terminal_host=str(terminal_host),
+        frame_helper=str(frame_helper),
+    )
+    original = installer._write_runtime_owned_file
+
+    def interrupt_during_agent_projection(
+        path: Path, *args: object, **kwargs: object
+    ) -> None:
+        if path == home / ".claude/skills/VERIFICATION_RULE.md":
+            raise RuntimeError("injected onboarding interruption")
+        original(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        installer, "_write_runtime_owned_file", interrupt_during_agent_projection
+    )
+    with pytest.raises(RuntimeError, match="injected onboarding interruption"):
+        installer.cmd_runtime_install(args)
+
+    receipt = runtime_home / installer.RUNTIME_INSTALL_RECEIPT
+    assert receipt.is_file()
+    monkeypatch.setattr(installer, "_write_runtime_owned_file", original)
+    assert (
+        installer.cmd_runtime_uninstall(Namespace(dry_run=False, emit_result=True)) == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "removed"
+    assert not runtime_home.exists()
+    assert not (home / ".agents").exists()
+    assert not (home / ".claude").exists()
+    assert not (home / ".codex").exists()
+
+
+def test_interrupted_projection_publish_restores_checkpointed_collision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    runtime_home = home / "runtime"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / "bin"))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
+    monkeypatch.setattr(
+        installer, "_teardown_owned_runtime_for_uninstall", lambda *_args, **_kwargs: []
+    )
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    current = runtime_home / "tools/vibecrafted-current"
+    current.parent.mkdir(parents=True)
+    current.write_text("operator-owned current marker\n", encoding="utf-8")
+    args = Namespace(
+        payload_root=str(payload),
+        app_root=str(terminal_host.parents[2]),
+        terminal_host=str(terminal_host),
+        frame_helper=str(frame_helper),
+    )
+    original_symlink = installer._atomic_symlink
+
+    def interrupt_publish(_target: Path, path: Path) -> None:
+        if path == current:
+            raise RuntimeError("injected projection publication interruption")
+        original_symlink(_target, path)
+
+    monkeypatch.setattr(installer, "_atomic_symlink", interrupt_publish)
+    with pytest.raises(
+        RuntimeError, match="injected projection publication interruption"
+    ):
+        installer.cmd_runtime_install(args)
+
+    receipt_path = runtime_home / installer.RUNTIME_INSTALL_RECEIPT
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    backup = Path(receipt["backups"][str(current)])
+    assert backup.read_text(encoding="utf-8") == "operator-owned current marker\n"
+    assert not current.exists()
+
+    monkeypatch.setattr(installer, "_atomic_symlink", original_symlink)
+    assert (
+        installer.cmd_runtime_uninstall(Namespace(dry_run=False, emit_result=True)) == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "removed"
+    assert current.read_text(encoding="utf-8") == "operator-owned current marker\n"
+
+
+def test_runtime_pack_uninstall_rejects_projection_path_injected_into_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    runtime_home = home / "runtime"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / "bin"))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    args = Namespace(
+        payload_root=str(payload),
+        app_root=str(terminal_host.parents[2]),
+        terminal_host=str(terminal_host),
+        frame_helper=str(frame_helper),
+    )
+    assert installer.cmd_runtime_install(args) == 0
+    capsys.readouterr()
+
+    receipt_path = runtime_home / installer.RUNTIME_INSTALL_RECEIPT
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["owned_symlinks"][str(home / ".ssh/config")] = next(
+        iter(receipt["owned_symlinks"].values())
+    )
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="receipt symlink escapes managed roots"):
+        installer.cmd_runtime_uninstall(Namespace(dry_run=False, emit_result=True))
+    assert receipt_path.is_file()
 
 
 def test_runtime_pack_uninstall_rejects_tampered_backup_before_teardown(

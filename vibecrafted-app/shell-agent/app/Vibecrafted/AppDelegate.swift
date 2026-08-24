@@ -59,6 +59,48 @@ private struct CanonicalRuntimeInstall: Decodable {
   }
 }
 
+private struct ServerSupervisorSnapshot: Decodable {
+  struct ManagedPair: Decodable {
+    let guardianPID: Int?
+    let serverPID: Int?
+
+    enum CodingKeys: String, CodingKey {
+      case guardianPID = "guardian_pid"
+      case serverPID = "server_pid"
+    }
+  }
+
+  let state: String
+  let lastError: String?
+  let supervisorPID: Int?
+  let managedPair: ManagedPair?
+
+  enum CodingKeys: String, CodingKey {
+    case state
+    case lastError = "last_error"
+    case supervisorPID = "supervisor_pid"
+    case managedPair = "managed_pair"
+  }
+}
+
+private enum TrayServerHealth {
+  case checking
+  case healthy
+  case degraded
+  case failed
+  case stopped
+
+  var color: NSColor {
+    switch self {
+    case .checking: return .systemGray
+    case .healthy: return .systemGreen
+    case .degraded: return .systemOrange
+    case .failed: return .systemRed
+    case .stopped: return .systemGray
+    }
+  }
+}
+
 final class EventObserver: @unchecked Sendable, EventCallback {
   func onEvent(eventJson: String) {
     DispatchQueue.main.async {
@@ -73,10 +115,18 @@ final class EventObserver: @unchecked Sendable, EventCallback {
 }
 
 @MainActor
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   var mainWindow: MainWindowController?
   private var statusItem: NSStatusItem?
+  private var serverStatusMenuItem: NSMenuItem?
+  private var serverDetailMenuItem: NSMenuItem?
+  private var restartServerMenuItem: NSMenuItem?
+  private var trayBaseIcon: NSImage?
+  private var statusRefreshTimer: Timer?
   private var terminalProcess: Process?
+  private var serverActionProcess: Process?
+  private var canonicalInstall: CanonicalRuntimeInstall?
+  private var canonicalRuntimeEnvironment: [String: String]?
   private var workspaceLaunchFailureReported = false
   private var eyeReconcileProcess: Process?
   let eventObserver = EventObserver()
@@ -145,6 +195,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   func applicationWillTerminate(_ notification: Notification) {
+    statusRefreshTimer?.invalidate()
     NotificationManager.shared.clearHeartbeat(craftedHome: craftedHomeURL())
   }
 
@@ -175,12 +226,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         "Cannot publish the canonical Vibecrafted runtime: \(error.localizedDescription)")
       return
     }
+    canonicalInstall = install
 
     for required in [
       install.terminal, install.terminalHost, install.frame, install.start,
       install.primaryShell,
     ]
-      where !FileManager.default.isExecutableFile(
+    where !FileManager.default.isExecutableFile(
       atPath: required.path)
     {
       reportWorkspaceLaunchFailure(
@@ -235,6 +287,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       environment["VIBECRAFTED_LEGACY_VC_FRAME_SOCKET_DIR"] =
         "/\(temp)/vc-frame-\(getuid())"
     }
+    canonicalRuntimeEnvironment = environment
+    refreshServerStatus()
 
     let process = Process()
     process.executableURL = install.terminalHost
@@ -283,7 +337,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     var registrationError: Unmanaged<CFError>?
     if !CTFontManagerRegisterFontsForURL(font as CFURL, .session, &registrationError) {
-      let message = registrationError?.takeRetainedValue().localizedDescription
+      let message =
+        registrationError?.takeRetainedValue().localizedDescription
         ?? "CoreText rejected SpotMono.ttc"
       // A system-installed Spot Mono can already occupy the session scope.
       // Accept that case only when CoreText resolves the required family.
@@ -335,8 +390,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let python = runtime.appendingPathComponent("bin/python3")
     let installer = runtime.appendingPathComponent("scripts/vetcoders_install.py")
     for required in [python, installer]
-      where !FileManager.default.isExecutableFile(atPath: required.path)
-    {
+    where !FileManager.default.isExecutableFile(atPath: required.path) {
       throw NSError(
         domain: "io.vetcoders.vibecrafted.install", code: 1,
         userInfo: [
@@ -362,7 +416,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let result = output.fileHandleForReading.readDataToEndOfFile()
     let failure = errors.fileHandleForReading.readDataToEndOfFile()
     guard process.terminationStatus == 0 else {
-      let detail = String(data: failure.isEmpty ? result : failure, encoding: .utf8)?
+      let detail =
+        String(data: failure.isEmpty ? result : failure, encoding: .utf8)?
         .trimmingCharacters(in: .whitespacesAndNewlines)
         ?? "installer exited \(process.terminationStatus)"
       throw NSError(
@@ -404,22 +459,143 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let trayIcon = NSApp.applicationIconImage.copy() as? NSImage
     trayIcon?.size = NSSize(width: 18, height: 18)
     trayIcon?.accessibilityDescription = "Vibecrafted"
-    item.button?.image =
+    trayBaseIcon =
       trayIcon ?? NSImage(systemSymbolName: "hammer.fill", accessibilityDescription: "Vibecrafted")
+    item.button?.image = statusIcon(health: .checking)
     item.button?.imagePosition = .imageOnly
+    item.button?.toolTip = "Vibecrafted — checking server"
 
     let menu = NSMenu()
-    menu.addItem(
+    menu.delegate = self
+    let serverStatus = menu.addItem(withTitle: "Server: CHECKING…", action: nil, keyEquivalent: "")
+    serverStatus.isEnabled = false
+    serverStatusMenuItem = serverStatus
+    let serverDetail = menu.addItem(
+      withTitle: "Reading supervisor state…", action: nil, keyEquivalent: "")
+    serverDetail.isEnabled = false
+    serverDetailMenuItem = serverDetail
+    menu.addItem(.separator())
+    let console = menu.addItem(
       withTitle: "Open Console", action: #selector(openConsoleFromStatusItem), keyEquivalent: "")
-    menu.addItem(
+    console.target = self
+    let terminal = menu.addItem(
       withTitle: "Open vc-terminal", action: #selector(openTerminalFromStatusItem),
       keyEquivalent: "")
+    terminal.target = self
+    let restart = menu.addItem(
+      withTitle: "Restart Server", action: #selector(restartServerFromStatusItem),
+      keyEquivalent: "")
+    restart.target = self
+    restartServerMenuItem = restart
+    let diagnostics = menu.addItem(
+      withTitle: "Server Diagnostics…", action: #selector(showServerDiagnostics),
+      keyEquivalent: "")
+    diagnostics.target = self
+    menu.addItem(.separator())
+    menu.addItem(
+      withTitle: "About Vibecrafted",
+      action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+    let help = menu.addItem(
+      withTitle: "Help", action: #selector(showStatusItemHelp), keyEquivalent: "")
+    help.target = self
     menu.addItem(.separator())
     menu.addItem(
       withTitle: "Quit", action: #selector(NSApplication.terminate(_:)),
       keyEquivalent: "q")
     item.menu = menu
     statusItem = item
+    statusRefreshTimer = Timer.scheduledTimer(
+      timeInterval: 5, target: self, selector: #selector(refreshServerStatusFromTimer),
+      userInfo: nil, repeats: true)
+    refreshServerStatus()
+  }
+
+  func menuWillOpen(_ menu: NSMenu) {
+    refreshServerStatus()
+  }
+
+  @objc private func refreshServerStatusFromTimer() {
+    refreshServerStatus()
+  }
+
+  private func statusIcon(health: TrayServerHealth) -> NSImage? {
+    guard let base = trayBaseIcon else { return nil }
+    let size = NSSize(width: 18, height: 18)
+    let image = NSImage(size: size, flipped: false) { rect in
+      base.draw(in: rect)
+      let dotRect = NSRect(x: 11.5, y: 0.5, width: 6, height: 6)
+      NSColor.windowBackgroundColor.setFill()
+      NSBezierPath(ovalIn: dotRect.insetBy(dx: -1, dy: -1)).fill()
+      health.color.setFill()
+      NSBezierPath(ovalIn: dotRect).fill()
+      return true
+    }
+    image.isTemplate = false
+    image.accessibilityDescription = "Vibecrafted server status"
+    return image
+  }
+
+  private func supervisorStatusURL() -> URL? {
+    canonicalInstall?.craftedHome.appendingPathComponent("server/supervisor.status.json")
+  }
+
+  private func readSupervisorSnapshot() -> ServerSupervisorSnapshot? {
+    guard let url = supervisorStatusURL(), let data = try? Data(contentsOf: url) else {
+      return nil
+    }
+    return try? JSONDecoder().decode(ServerSupervisorSnapshot.self, from: data)
+  }
+
+  private func conciseServerReason(_ reason: String?) -> String? {
+    guard let firstLine = reason?.split(whereSeparator: \.isNewline).first else { return nil }
+    let plain = String(firstLine)
+      .replacingOccurrences(of: "\u{001B}[31m", with: "")
+      .replacingOccurrences(of: "\u{001B}[0m", with: "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !plain.isEmpty else { return nil }
+    return plain.count > 96 ? "\(plain.prefix(93))…" : plain
+  }
+
+  private func refreshServerStatus() {
+    guard canonicalInstall != nil else {
+      applyServerStatus(
+        title: "Server: WAITING FOR RUNTIME", detail: "Runtime onboarding has not completed",
+        health: .checking)
+      return
+    }
+    guard let snapshot = readSupervisorSnapshot() else {
+      applyServerStatus(
+        title: "Server: NOT INSTALLED", detail: "No supervisor status receipt",
+        health: .failed)
+      return
+    }
+
+    let state = snapshot.state.lowercased()
+    let pairHealthy =
+      snapshot.managedPair?.serverPID != nil && snapshot.managedPair?.guardianPID != nil
+    let health: TrayServerHealth
+    if state == "healthy" && pairHealthy {
+      health = .healthy
+    } else if state == "starting" || state == "stopping" {
+      health = .degraded
+    } else if state == "backoff" || state == "stop-failed" {
+      health = .failed
+    } else {
+      health = .stopped
+    }
+    let reason = conciseServerReason(snapshot.lastError)
+    let detail = reason ?? "Supervisor PID \(snapshot.supervisorPID.map(String.init) ?? "—")"
+    applyServerStatus(
+      title: "Server: \(snapshot.state.uppercased())", detail: detail, health: health)
+  }
+
+  private func applyServerStatus(title: String, detail: String, health: TrayServerHealth) {
+    serverStatusMenuItem?.title = title
+    serverDetailMenuItem?.title = detail
+    serverDetailMenuItem?.isHidden = detail.isEmpty
+    restartServerMenuItem?.isEnabled = serverActionProcess?.isRunning != true
+    statusItem?.button?.image = statusIcon(health: health)
+    statusItem?.button?.toolTip = "Vibecrafted — \(title)"
   }
 
   @objc private func openConsoleFromStatusItem() {
@@ -437,6 +613,80 @@ class AppDelegate: NSObject, NSApplicationDelegate {
       return
     }
     launchWorkspaceTerminal()
+  }
+
+  @objc private func restartServerFromStatusItem() {
+    guard serverActionProcess?.isRunning != true else { return }
+    guard let install = canonicalInstall, let environment = canonicalRuntimeEnvironment else {
+      reportWorkspaceLaunchFailure("Cannot restart the server before runtime onboarding completes")
+      return
+    }
+    let deck = install.root.appendingPathComponent("bin/vibecrafted")
+    guard FileManager.default.isExecutableFile(atPath: deck.path) else {
+      reportWorkspaceLaunchFailure("Canonical server launcher is missing: \(deck.path)")
+      return
+    }
+
+    let process = Process()
+    process.executableURL = deck
+    // Reconcile is the service-owner operation: it starts a stopped pair and
+    // replaces a stale supervisor generation without creating a second owner.
+    process.arguments = ["server", "service", "reconcile"]
+    process.environment = environment
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    do {
+      try process.run()
+      serverActionProcess = process
+      applyServerStatus(
+        title: "Server: RESTARTING…", detail: "Reconciling the installed supervisor",
+        health: .degraded)
+    } catch {
+      let alert = NSAlert()
+      alert.alertStyle = .critical
+      alert.messageText = "Vibecrafted could not restart the server"
+      alert.informativeText = error.localizedDescription
+      alert.runModal()
+    }
+  }
+
+  @objc private func showServerDiagnostics() {
+    let snapshot = readSupervisorSnapshot()
+    let alert = NSAlert()
+    alert.alertStyle = snapshot?.state.lowercased() == "healthy" ? .informational : .warning
+    alert.messageText = "Vibecrafted Server"
+    if let snapshot {
+      var lines = [
+        "State: \(snapshot.state.uppercased())",
+        "Supervisor PID: \(snapshot.supervisorPID.map(String.init) ?? "—")",
+        "Server PID: \(snapshot.managedPair?.serverPID.map(String.init) ?? "—")",
+        "Guardian PID: \(snapshot.managedPair?.guardianPID.map(String.init) ?? "—")",
+      ]
+      if let reason = conciseServerReason(snapshot.lastError) {
+        lines.append("Last error: \(reason)")
+      }
+      if let path = supervisorStatusURL()?.path {
+        lines.append("Status receipt: \(path)")
+      }
+      alert.informativeText = lines.joined(separator: "\n")
+    } else {
+      alert.informativeText = "No supervisor status receipt exists for the installed runtime."
+    }
+    alert.addButton(withTitle: "OK")
+    alert.addButton(withTitle: "Open Console")
+    if alert.runModal() == .alertSecondButtonReturn {
+      showMainWindowIfNeeded()
+    }
+  }
+
+  @objc private func showStatusItemHelp() {
+    let alert = NSAlert()
+    alert.alertStyle = .informational
+    alert.messageText = "Vibecrafted Help"
+    alert.informativeText =
+      "The tray dot reports the local server: green is healthy, orange is transitioning, red needs attention. Open Console for live runs, or Server Diagnostics for the exact supervisor receipt."
+    alert.addButton(withTitle: "OK")
+    alert.runModal()
   }
 
   private func buildMainMenu() {
