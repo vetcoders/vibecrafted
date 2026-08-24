@@ -476,3 +476,16 @@ Live probe corrects the consumer points above:
 Consumer point W2 upgraded: the Windows consumer's reachable surface is the
 native `.exe` set on `%PATH%` via cargo — the product install must land
 `vc-frame.exe` + a Windows `vibecrafted` entry the same way, not via bash.
+
+**Resolution of the missing exe** (aicx session `0e35d006`, 2026-08-20, read
+on the host): a runner-hardening + disk-cleanup session reclaimed 23.8 GB and
+deleted `target/` in loctree, aicx, **vc-frame** and mcp-server-loctree
+(7.4 GB). The Windows `vc-frame.exe` existed and worked; the artifact went
+with the cleanup, not with a port regression. Same session's standing facts:
+two self-hosted runners on the box (`Loctree.windows-pc` running as the
+operator's own account, org-wide — flagged there as the real risk; an
+orphaned `vetcoders-vc-frame` NetworkService runner), `C:\dev\ops\
+harden-runners.ps1` staged, toolchain profile-local to `mgad8`, no Docker,
+no WSL, and "slim profile is the only way aicx builds on Windows". The new
+cargo-start "untrusted mount point" failure post-dates that session —
+Bitdefender's dev-volume filter is the current rebuild blocker.
