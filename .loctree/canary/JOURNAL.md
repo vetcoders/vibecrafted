@@ -489,3 +489,24 @@ harden-runners.ps1` staged, toolchain profile-local to `mgad8`, no Docker,
 no WSL, and "slim profile is the only way aicx builds on Windows". The new
 cargo-start "untrusted mount point" failure post-dates that session —
 Bitdefender's dev-volume filter is the current rebuild blocker.
+
+### The "current runtime" throne is decided (W1-01, 2026-08-24)
+
+W1-01 (`impl-260824-125907-29023`, report validated) crowned
+**`tools/vibecrafted-current`** as the one owner of "which runtime is
+current"; `active.json` is scheduled for dismantling with **no sync layer**
+in between. Evidence held: unified gate 606 passed / 18 skipped on
+`ceb531f3`; portable artifact built and hashed
+(`dbe74a7222dd…b24acc`). Status honestly `partial`: same-SHA CI, musl and
+the signed DMG remain operator-gated.
+
+Consequence for the fork's installer↔DMG cut: `AppDelegate.
+installCanonicalRuntime` must **maintain `vibecrafted-current`** when it
+installs a capsule — otherwise the DMG machine grows the same ghost in
+reverse (my host evidence above becomes the permanent state). The consumer
+point L3 holds: `vetcoders_install.py` writes the crowned grammar on Linux
+and macOS alike.
+
+Operator buttons after this entry: review CI on `ceb531f3` (macOS portable +
+gate rehearsal on exactly that SHA), then W2-01 (Python↔Rust contract
+fixture) unlocks. W2-01 stays parked until then.
