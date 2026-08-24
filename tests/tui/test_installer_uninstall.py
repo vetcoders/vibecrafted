@@ -405,6 +405,70 @@ def test_retired_vc_frame_census_requires_exact_stable_same_user_argv0(
     )
 
 
+def test_owned_runtime_census_matches_product_processes_without_killing_editors(
+    tmp_path: Path, monkeypatch
+) -> None:
+    home = tmp_path / "home"
+    runtime_releases = home / "runtime/releases"
+    app_executable = Path("/Applications/Vibecrafted.app/Contents/MacOS/Vibecrafted")
+    births = {pid: (f"darwin:{pid}:1", os.geteuid(), 8) for pid in range(101, 107)}
+    births[106] = ("darwin:106:1", os.geteuid() + 1, 8)
+    arguments = {
+        101: (str(app_executable),),
+        102: (str(runtime_releases / "current/bin/vc-frame"), "--session", "test"),
+        103: ("/bin/bash", str(runtime_releases / "current/start.sh")),
+        104: (
+            "/Applications/Visual Studio Code.app/Contents/MacOS/Electron",
+            str(runtime_releases / "current/README.md"),
+        ),
+        105: (str(runtime_releases / "current/bin/vc-terminal"),),
+        106: (str(runtime_releases / "current/bin/vc-server"),),
+    }
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(home / "runtime"))
+    monkeypatch.setattr(installer.sys, "platform", "darwin")
+    monkeypatch.setattr(installer, "_darwin_process_ids", lambda: tuple(births))
+    monkeypatch.setattr(
+        installer, "_darwin_caller_ancestor_pids", lambda: frozenset({105})
+    )
+    monkeypatch.setattr(installer, "_darwin_process_birth", births.__getitem__)
+    monkeypatch.setattr(
+        installer,
+        "_darwin_process_arguments",
+        lambda pid, *, pointer_size: arguments[pid],
+    )
+
+    assert tuple(
+        record.pid for record in installer._owned_runtime_process_census()
+    ) == (
+        101,
+        102,
+        103,
+    )
+
+
+def test_darwin_parent_pid_uses_strict_ps_fallback_on_remote_login_eperm(
+    monkeypatch,
+) -> None:
+    class DeniedLibproc:
+        @staticmethod
+        def proc_pidinfo(*_args) -> int:
+            installer.ctypes.set_errno(installer.errno.EPERM)
+            return 0
+
+    monkeypatch.setattr(
+        installer, "_darwin_process_libraries", lambda: (DeniedLibproc(), object())
+    )
+    monkeypatch.setattr(
+        installer.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "  42\n", ""),
+    )
+
+    assert installer._darwin_process_parent_pid(101) == 42
+
+
 def test_terminate_retired_vc_frame_reproves_identity_before_signal(
     monkeypatch,
 ) -> None:
@@ -555,6 +619,50 @@ def test_runtime_teardown_uninstalls_owned_service_and_proves_quiescence(
     assert commands == [("service", "uninstall")]
 
 
+def test_runtime_teardown_terminates_owned_runtime_processes_and_proves_zero(
+    tmp_path: Path, monkeypatch
+) -> None:
+    shared_home = tmp_path / ".vibecrafted"
+    record = installer._RetiredVcFrameProcess(
+        101,
+        ("darwin:1:1", os.geteuid(), 8),
+        (str(tmp_path / "runtime/releases/current/bin/vc-frame"),),
+    )
+    censuses = iter(((record,), ()))
+    terminated: list[tuple[installer._RetiredVcFrameProcess, ...]] = []
+
+    monkeypatch.setattr(installer.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        installer, "_current_tools_link", lambda _home: tmp_path / "current"
+    )
+    monkeypatch.setattr(
+        installer,
+        "_tools_install_lease",
+        lambda _link, *, operation: nullcontext(9),
+    )
+    monkeypatch.setattr(
+        installer, "_inherited_tools_install_lease", lambda _descriptor: nullcontext()
+    )
+    monkeypatch.setattr(installer.os, "set_inheritable", lambda _fd, _value: None)
+    monkeypatch.setattr(installer, "_runtime_service_has_evidence", lambda _home: False)
+    monkeypatch.setattr(installer, "_retired_vc_frame_process_census", tuple)
+    monkeypatch.setattr(
+        installer, "_owned_runtime_process_census", lambda: next(censuses)
+    )
+    monkeypatch.setattr(
+        installer,
+        "_terminate_owned_runtime_processes",
+        lambda records: terminated.append(tuple(records)),
+    )
+
+    actions = installer._teardown_owned_runtime_for_uninstall(
+        shared_home, dry_run=False
+    )
+
+    assert actions == ("terminate 1 owned runtime process(es)",)
+    assert terminated == [(record,)]
+
+
 def test_runtime_teardown_does_not_probe_launcher_without_service_evidence(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -585,6 +693,38 @@ def test_runtime_teardown_does_not_probe_launcher_without_service_evidence(
         installer._teardown_owned_runtime_for_uninstall(shared_home, dry_run=False)
         == ()
     )
+
+
+def test_stale_supervisor_lock_is_not_runtime_service_evidence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    home = tmp_path / "home"
+    shared_home = home / ".vibecrafted"
+    lock_path = shared_home / "server/supervisor.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.touch(mode=0o600)
+    monkeypatch.setenv("HOME", str(home))
+
+    assert installer._runtime_service_has_evidence(shared_home) is False
+
+
+def test_held_supervisor_lock_is_runtime_service_evidence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    home = tmp_path / "home"
+    shared_home = home / ".vibecrafted"
+    lock_path = shared_home / "server/supervisor.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.touch(mode=0o600)
+    monkeypatch.setenv("HOME", str(home))
+
+    def held(_descriptor: int, operation: int) -> None:
+        if operation & installer.fcntl.LOCK_NB:
+            raise BlockingIOError
+
+    monkeypatch.setattr(installer.fcntl, "flock", held)
+
+    assert installer._runtime_service_has_evidence(shared_home) is True
 
 
 def test_cmd_uninstall_removes_release_contract_assets_with_managed_payload(

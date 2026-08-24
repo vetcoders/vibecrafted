@@ -3275,7 +3275,7 @@ class _RuntimeLaunchAgentBackup:
 
 @dataclass(frozen=True)
 class _RetiredVcFrameProcess:
-    """One same-user process proven to execute the retired vc-frame sibling."""
+    """One same-user process proven by stable birth identity and argv."""
 
     pid: int
     birth: tuple[str, int, int]
@@ -3656,20 +3656,47 @@ def _assert_runtime_loaded_service_owner(shared_home: Path) -> Path | None:
     return loaded_home
 
 
+def _runtime_supervisor_lock_is_held(shared_home: Path) -> bool:
+    """Distinguish a live supervisor lock from the harmless persistent lock inode."""
+    lock_path = shared_home / "server" / "supervisor.lock"
+    try:
+        descriptor = os.open(
+            lock_path,
+            os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # A foreign, unreadable, or symlinked lock remains actionable evidence;
+        # ownership validation must fail closed later instead of ignoring it.
+        return True
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
+            return True
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(descriptor)
+
+
 def _runtime_service_has_evidence(shared_home: Path) -> bool:
-    """True if any on-disk or launchd evidence suggests the runtime service is (or was)
-    installed.
-    """
+    """True if durable ownership or live-lock evidence suggests an installed service."""
     runtime_dir = shared_home / "server"
     evidence = (
         Path.home() / "Library" / "LaunchAgents" / f"{_RUNTIME_SERVICE_LABEL}.plist",
-        runtime_dir / "supervisor.lock",
         runtime_dir / "server.pid",
         runtime_dir / "guardian.pid",
         runtime_dir / "server.identity.json",
         runtime_dir / "guardian.identity.json",
     )
     if any(path.exists() or path.is_symlink() for path in evidence):
+        return True
+    if _runtime_supervisor_lock_is_held(shared_home):
         return True
     loaded_home = _runtime_loaded_service_home()
     return loaded_home == shared_home.resolve(strict=False)
@@ -4267,8 +4294,81 @@ def _retired_vc_frame_process_census() -> tuple[_RetiredVcFrameProcess, ...]:
     return tuple(sorted(records, key=lambda record: (record.pid, record.birth)))
 
 
+def _darwin_caller_ancestor_pids() -> frozenset[int]:
+    """Return this installer's process ancestry so teardown cannot kill its caller."""
+    ancestors: set[int] = set()
+    pid = os.getpid()
+    while pid > 1 and pid not in ancestors:
+        ancestors.add(pid)
+        try:
+            pid = _darwin_process_parent_pid(pid)
+        except ProcessLookupError:
+            break
+    return frozenset(ancestors)
+
+
+def _owned_runtime_process_roots() -> tuple[Path, ...]:
+    """Canonical executable roots whose live processes belong to this product."""
+    roots = [
+        vibecrafted_runtime_home() / "releases",
+        Path("/Applications/Vibecrafted.app"),
+        Path.home() / "Applications/Vibecrafted.app",
+    ]
+    return tuple(root.expanduser().resolve(strict=False) for root in roots)
+
+
+def _runtime_process_argv_is_owned(
+    argv: Sequence[str], *, roots: Sequence[Path]
+) -> bool:
+    """Match product executables, plus managed scripts run by a system shell."""
+    if not argv:
+        return False
+
+    def managed_path(raw: str) -> bool:
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            return False
+        resolved = candidate.resolve(strict=False)
+        return any(resolved == root or _is_subpath(resolved, root) for root in roots)
+
+    if managed_path(argv[0]):
+        return True
+    if Path(argv[0]).name not in {"bash", "dash", "sh", "zsh"}:
+        return False
+    return any(managed_path(argument) for argument in argv[1:])
+
+
+def _owned_runtime_process_census() -> tuple[_RetiredVcFrameProcess, ...]:
+    """Return stable same-user App, terminal, frame, server, and runtime shell processes."""
+    if sys.platform != "darwin":
+        return ()
+    process_ids = _darwin_process_ids()
+    if not process_ids:
+        return ()
+    excluded = _darwin_caller_ancestor_pids()
+    roots = _owned_runtime_process_roots()
+    records: list[_RetiredVcFrameProcess] = []
+    for pid in process_ids:
+        if pid in excluded:
+            continue
+        try:
+            first_birth = _darwin_process_birth(pid)
+            if first_birth[1] != os.geteuid():
+                continue
+            first_argv = _darwin_process_arguments(pid, pointer_size=first_birth[2])
+            second_argv = _darwin_process_arguments(pid, pointer_size=first_birth[2])
+            second_birth = _darwin_process_birth(pid)
+        except ProcessLookupError:
+            continue
+        if first_birth != second_birth or first_argv != second_argv:
+            raise OSError(f"Darwin process {pid} changed during runtime census")
+        if _runtime_process_argv_is_owned(first_argv, roots=roots):
+            records.append(_RetiredVcFrameProcess(pid, first_birth, first_argv))
+    return tuple(sorted(records, key=lambda record: (record.pid, record.birth)))
+
+
 def _retired_vc_frame_process_still_matches(record: _RetiredVcFrameProcess) -> bool:
-    """Re-prove birth identity and argv before signaling a retired process."""
+    """Re-prove birth identity and argv before signaling a managed process."""
     try:
         birth = _darwin_process_birth(record.pid)
         argv = _darwin_process_arguments(record.pid, pointer_size=birth[2])
@@ -4277,10 +4377,13 @@ def _retired_vc_frame_process_still_matches(record: _RetiredVcFrameProcess) -> b
     return birth == record.birth and argv == record.argv
 
 
-def _terminate_retired_vc_frame_processes(
-    records: Sequence[_RetiredVcFrameProcess], *, timeout_seconds: float = 5.0
+def _terminate_verified_runtime_processes(
+    records: Sequence[_RetiredVcFrameProcess],
+    *,
+    label: str,
+    timeout_seconds: float = 5.0,
 ) -> None:
-    """Terminate only re-verified retired processes and require a zero-leftover postcondition."""
+    """Terminate only re-verified processes and require a zero-leftover postcondition."""
     for record in records:
         if _retired_vc_frame_process_still_matches(record):
             try:
@@ -4313,7 +4416,27 @@ def _terminate_retired_vc_frame_processes(
         if pending:
             time.sleep(0.05)
     if pending:
-        raise OSError("retired vc-frame.real process remains after verified teardown")
+        raise OSError(f"{label} remains after verified teardown")
+
+
+def _terminate_retired_vc_frame_processes(
+    records: Sequence[_RetiredVcFrameProcess], *, timeout_seconds: float = 5.0
+) -> None:
+    _terminate_verified_runtime_processes(
+        records,
+        label="retired vc-frame.real process",
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _terminate_owned_runtime_processes(
+    records: Sequence[_RetiredVcFrameProcess], *, timeout_seconds: float = 5.0
+) -> None:
+    _terminate_verified_runtime_processes(
+        records,
+        label="owned runtime process",
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def _teardown_owned_runtime_for_uninstall(
@@ -4387,6 +4510,13 @@ def _teardown_owned_runtime_for_uninstall(
                         raise OSError(
                             "retired vc-frame.real processes remain after teardown"
                         )
+            owned = _owned_runtime_process_census()
+            if owned:
+                actions.append(f"terminate {len(owned)} owned runtime process(es)")
+                if not dry_run:
+                    _terminate_owned_runtime_processes(owned)
+                    if _owned_runtime_process_census():
+                        raise OSError("owned runtime processes remain after teardown")
     if dry_run and not lease_preexisting:
         # A dry run must leave the disk exactly as it found it. The real teardown
         # leaves the lease to the uninstall inventory, which removes it by name.
@@ -5325,6 +5455,55 @@ def _darwin_process_birth(pid: int) -> tuple[str, int, int]:
         int(info.pbi_uid),
         8 if int(info.pbi_flags) & _DARWIN_PROC_FLAG_LP64 else 4,
     )
+
+
+def _darwin_process_parent_pid(pid: int) -> int:
+    """Return a stable Darwin process parent PID, or raise when the process vanished."""
+    libproc, _ = _darwin_process_libraries()
+    info = _DarwinProcBSDInfo()
+    if ctypes.sizeof(info) != _DARWIN_PROC_BSDINFO_SIZE:
+        raise OSError("Darwin proc_bsdinfo ABI does not match the supported layout")
+    ctypes.set_errno(0)
+    received = libproc.proc_pidinfo(
+        pid,
+        _DARWIN_PROC_PIDTBSDINFO,
+        0,
+        ctypes.byref(info),
+        _DARWIN_PROC_BSDINFO_SIZE,
+    )
+    if received != _DARWIN_PROC_BSDINFO_SIZE:
+        observed_errno = ctypes.get_errno()
+        if received == 0 and observed_errno in {0, errno.ESRCH}:
+            raise ProcessLookupError(pid)
+        if observed_errno in {errno.EACCES, errno.EPERM}:
+            # macOS 27 can deny proc_pidinfo for the installer's own ancestry
+            # under a remote login. Keep libproc as the identity authority and
+            # use absolute ps only to build the conservative do-not-signal set.
+            result = subprocess.run(
+                ["/bin/ps", "-o", "ppid=", "-p", str(pid)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+                env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+            )
+            raw_parent = result.stdout.strip()
+            if result.returncode == 0 and re.fullmatch(r"[0-9]+", raw_parent):
+                return int(raw_parent)
+            if result.returncode == 1 and not raw_parent:
+                raise ProcessLookupError(pid)
+            detail = result.stderr.strip() or raw_parent or f"exit={result.returncode}"
+            raise OSError(f"cannot inspect Darwin process parent for {pid} ({detail})")
+        raise OSError(
+            f"cannot inspect Darwin process parent for {pid} (errno {observed_errno})"
+        )
+    if (
+        int(info.pbi_pid) != pid
+        or int(info.pbi_status) not in _DARWIN_STABLE_PROCESS_STATES
+        or int(info.pbi_flags) & _DARWIN_PROC_FLAG_INEXIT
+    ):
+        raise ProcessLookupError(pid)
+    return int(info.pbi_ppid)
 
 
 def _darwin_process_arguments(pid: int, *, pointer_size: int) -> tuple[str, ...]:
@@ -13870,6 +14049,7 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     runtime_evidence = sys.platform == "darwin" and (
         _runtime_service_has_evidence(shared_home)
         or bool(_retired_vc_frame_process_census())
+        or bool(_owned_runtime_process_census())
     )
     has_work = runtime_evidence or any(
         (record.action in {"remove", "edit"} and _path_present(record.path))
@@ -13899,9 +14079,7 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
 
     _print_uninstall_inventory(inventory)
     if runtime_evidence:
-        print(
-            "  teardown runtime: verified service plane and retired vc-frame processes"
-        )
+        print("  teardown runtime: verified service plane and owned runtime processes")
         print()
 
     if _IS_TTY and not dry_run:
