@@ -251,6 +251,20 @@ def test_the_ancestor_walk_stops_before_generic_system_roots() -> None:
         run_library('payload_hygiene_topmost_host_root "/Volumes/ws/a/b"').strip()
         == "/Volumes/ws"
     )
+    # `/private/tmp` is the realpath of `/tmp` on macOS — a directory every box
+    # has. A checkout built from under it must forbid its own scratch root, not
+    # the generic tmp: otherwise committed `/private/tmp` literals (test
+    # fixtures, tmp-normalization docs) flag every scratchpad build as a leak.
+    assert (
+        run_library('payload_hygiene_topmost_host_root "/private/tmp/solo"').strip()
+        == ""
+    )
+    assert (
+        run_library(
+            'payload_hygiene_topmost_host_root "/private/tmp/scratch/repo"'
+        ).strip()
+        == "/private/tmp/scratch"
+    )
 
 
 # The packer refuses any path carrying one of these components, so a literal
