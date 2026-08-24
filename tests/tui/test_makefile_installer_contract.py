@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -581,15 +582,19 @@ def test_install_manifest_post_install_uses_mirror_sync() -> None:
     assert "bash runtime/scripts/install-frontier-config.sh" not in text
 
 
-def test_make_install_stages_vc_frame_from_published_runtime() -> None:
+def test_make_install_executes_the_shell_owned_stable_root_contract(
+    tmp_path: Path,
+) -> None:
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     install_block = makefile.split("\ninstall:\n", 1)[1].split("\n# `make install`", 1)[
         0
     ]
+    install_tools_block = makefile.split("\ninstall-tools-held:\n", 1)[1].split(
+        "\n# install-all owns", 1
+    )[0]
 
     assert 'PYTHONPATH="$$stable_root/vibecrafted-core"' in install_block
     assert '"$$tool_python" -c' in install_block
-    assert "from runtime_paths import vibecrafted_tools_home" in install_block
     assert install_block.index('export PATH="$$HOME/.local/bin:$$PATH"') < (
         install_block.index("uv tool dir")
     )
@@ -597,10 +602,6 @@ def test_make_install_stages_vc_frame_from_published_runtime() -> None:
     assert install_block.index("install-bundle-tools") < install_block.index(
         'install-frontier-config.sh" --source "$$stable_root"'
     )
-    assert (
-        'stable_root="$${XDG_DATA_HOME:-$$HOME/.local/share}/vibecrafted/tools/'
-        'vibecrafted-current"'
-    ) in install_block
     assert (
         "from vibecrafted_core.vc_frame_delivery import wire_vc_frame_config"
     ) in install_block
@@ -611,6 +612,94 @@ def test_make_install_stages_vc_frame_from_published_runtime() -> None:
     assert install_block.index("skills and launchers") < install_block.index(
         "vc-frame config"
     )
+
+    # Execute the exact shared Make expressions in both production shell
+    # contexts. PYTHON is a guard: a regression to the deleted shim or any
+    # sys.path bootstrap trips it before the path can be accepted.
+    probe = tmp_path / "stable-root-probe.mk"
+    probe.write_text(
+        f"include {REPO_ROOT / 'Makefile'}\n"
+        "probe-install:\n"
+        "\t@bash -e -c '$(RESOLVE_STABLE_RUNTIME_ROOT); "
+        '$(REQUIRE_STAGED_RUNTIME_ROOT); printf "%s\\n" "$$stable_root"\'\n'
+        "probe-install-tools-held:\n"
+        "\t@set -eu; $(RESOLVE_STABLE_RUNTIME_ROOT); "
+        '$(REQUIRE_STAGED_RUNTIME_ROOT); printf "%s\\n" "$$stable_root"\n',
+        encoding="utf-8",
+    )
+    guard_marker = tmp_path / "python-was-called"
+    python_guard = tmp_path / "python-guard"
+    python_guard.write_text(
+        f"#!/bin/sh\nprintf called > {guard_marker}\nexit 91\n",
+        encoding="utf-8",
+    )
+    python_guard.chmod(0o755)
+
+    home = tmp_path / "home"
+    stable_root = home / ".local/share/vibecrafted/tools/vibecrafted-current"
+    (stable_root / "vibecrafted-core").mkdir(parents=True)
+    environment = {
+        **os.environ,
+        "HOME": str(home),
+        "PATH": "/usr/bin:/bin",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONPATH": "",
+        "VIBECRAFTED_INSTALL_NONINTERACTIVE": "1",
+    }
+    for name in (
+        "VIBECRAFTED_HOME",
+        "VIBECRAFTED_RUNTIME_HOME",
+        "VIBECRAFTED_TOOLS_HOME",
+        "XDG_DATA_HOME",
+    ):
+        environment.pop(name, None)
+
+    for target in ("probe-install", "probe-install-tools-held"):
+        result = subprocess.run(
+            [
+                "make",
+                "--no-print-directory",
+                "-f",
+                str(probe),
+                target,
+                f"PYTHON={python_guard}",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=environment,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == str(stable_root)
+    assert not guard_marker.exists(), "stable-root resolution must not invoke Python"
+
+    shutil.rmtree(stable_root)
+    for target in ("probe-install", "probe-install-tools-held"):
+        result = subprocess.run(
+            [
+                "make",
+                "--no-print-directory",
+                "-f",
+                str(probe),
+                target,
+                f"PYTHON={python_guard}",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=environment,
+        )
+        assert result.returncode != 0
+        assert "✗ current tools root drift: staged runtime missing at" in result.stderr
+        assert "→ fix: vibecrafted doctor --fix-legacy-bootstrap --fix-launchers" in (
+            result.stderr
+        )
+
+    for block in (install_block, install_tools_block):
+        assert "$(RESOLVE_STABLE_RUNTIME_ROOT)" in block
+        assert "from runtime_paths import vibecrafted_tools_home" not in block
 
 
 def test_installer_copies_skill_rules_to_fresh_skills_root(tmp_path: Path) -> None:
@@ -752,7 +841,7 @@ def test_install_all_installs_python_tools_with_uv_tool_install() -> None:
     """install-all owns Python console scripts through uv tool install.
 
     De-fragile contract: the uv-tool editable source is the STABLE runtime home
-    (resolved via runtime_paths -> vibecrafted-current), NEVER the dev-workspace
+    (resolved via the shell root throne -> vibecrafted-current), NEVER the dev-workspace
     checkout ($(SOURCE)). An editable install pointed at the checkout breaks the
     `vibecrafted` CLI the moment the dev tree switches to a branch without
     vibecrafted_core/cli.py. The MCP server is installed as its own tool, with
