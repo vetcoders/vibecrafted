@@ -26,6 +26,178 @@ def _write_executable(path: Path, body: str | None = None) -> None:
     path.chmod(0o755)
 
 
+def _runtime_pack_fixture(root: Path) -> tuple[Path, Path, Path]:
+    payload = root / "runtime-pack"
+    for name in (
+        "vibecrafted",
+        "vc-server",
+        "vc-server-supervisor",
+        "vc-start",
+        "vc-workflow",
+    ):
+        _write_executable(payload / "bin" / name)
+    (payload / "VERSION").write_text("9.9.9+g12345678\n", encoding="utf-8")
+    terminal_root = payload / "config/vc-terminal"
+    (terminal_root / "themes").mkdir(parents=True)
+    (terminal_root / "vibecrafted.toml").write_text("[window]\n", encoding="utf-8")
+    (terminal_root / "themes/dark.toml").write_text(
+        "[colors.primary]\nbackground = '#000000'\n", encoding="utf-8"
+    )
+    frame_config = payload / "vibecrafted-core/vibecrafted_core/config/vc-frame"
+    frame_config.mkdir(parents=True)
+    (frame_config / "config.kdl").write_text("// frame\n", encoding="utf-8")
+    shell = payload / "vibecrafted-core/vibecrafted_core/runtime/shell"
+    shell.mkdir(parents=True)
+    (shell / "vetcoders.sh").write_text("# shell\n", encoding="utf-8")
+    _write_executable(payload / "config/alacritty/launch-primary-shell.zsh")
+    terminal_host = root / "Vibecrafted.app/Contents/Helpers/vc-terminal"
+    frame_helper = root / "Vibecrafted.app/Contents/Helpers/vc-frame"
+    _write_executable(terminal_host)
+    _write_executable(frame_helper)
+    return payload, terminal_host, frame_helper
+
+
+def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    runtime_home = home / ".local/share/vibecrafted"
+    launcher_home = home / ".local/bin"
+    crafted_home = home / ".vibecrafted"
+    config_home = home / ".config"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(launcher_home))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(crafted_home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    monkeypatch.setattr(
+        installer, "_teardown_owned_runtime_for_uninstall", lambda *_args, **_kwargs: []
+    )
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+
+    launcher_home.mkdir(parents=True)
+    original_launcher = launcher_home / "vc-start"
+    original_launcher.write_text("operator-owned\n", encoding="utf-8")
+    app_root = terminal_host.parents[2]
+    install_args = Namespace(
+        payload_root=str(payload),
+        app_root=str(app_root),
+        terminal_host=str(terminal_host),
+        frame_helper=str(frame_helper),
+    )
+
+    assert installer.cmd_runtime_install(install_args) == 0
+    installed = json.loads(capsys.readouterr().out)
+    generation = runtime_home / "releases/9.9.9+g12345678"
+    assert Path(installed["root"]) == generation
+    assert (generation / "bin/vc-frame").read_bytes() == frame_helper.read_bytes()
+    assert (generation / "bin/vc-terminal").read_bytes() == terminal_host.read_bytes()
+    assert (runtime_home / installer.RUNTIME_INSTALL_RECEIPT).is_file()
+    assert "VIBECRAFTED_RUNTIME_ROOT=" in original_launcher.read_text(encoding="utf-8")
+    assert (config_home / "vibecrafted/vc-frame/config.kdl").is_file()
+
+    # The app calls the installer on every launch. Reconciliation must retain
+    # first-install ownership so a later reset still returns to baseline.
+    assert installer.cmd_runtime_install(install_args) == 0
+    capsys.readouterr()
+
+    (crafted_home / "runtime-created-state").write_text("owned\n", encoding="utf-8")
+    assert (
+        installer.cmd_runtime_uninstall(Namespace(dry_run=False, emit_result=True)) == 0
+    )
+    removed = json.loads(capsys.readouterr().out)
+    assert removed["status"] == "removed"
+    assert original_launcher.read_text(encoding="utf-8") == "operator-owned\n"
+    assert not runtime_home.exists()
+    assert not crafted_home.exists()
+    assert not (config_home / "vibecrafted").exists()
+    assert app_root.exists()
+
+
+def test_runtime_pack_uninstall_preserves_locally_modified_managed_launcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(home / "runtime"))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / "bin"))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
+    monkeypatch.setattr(
+        installer, "_teardown_owned_runtime_for_uninstall", lambda *_args, **_kwargs: []
+    )
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    args = Namespace(
+        payload_root=str(payload),
+        app_root=str(terminal_host.parents[2]),
+        terminal_host=str(terminal_host),
+        frame_helper=str(frame_helper),
+    )
+    assert installer.cmd_runtime_install(args) == 0
+    capsys.readouterr()
+    launcher = home / "bin/vc-start"
+    launcher.write_text("operator changed this after install\n", encoding="utf-8")
+
+    assert (
+        installer.cmd_runtime_uninstall(Namespace(dry_run=False, emit_result=True)) == 1
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "conflict"
+    assert str(launcher) in result["conflicts"]
+    assert (
+        launcher.read_text(encoding="utf-8") == "operator changed this after install\n"
+    )
+    assert (home / "runtime/releases/9.9.9+g12345678").is_dir()
+    assert (home / "runtime" / installer.RUNTIME_INSTALL_RECEIPT).is_file()
+
+
+def test_runtime_pack_uninstall_rejects_tampered_backup_before_teardown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    runtime_home = home / "runtime"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / "bin"))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
+    teardown_called = False
+
+    def mark_teardown(*_args, **_kwargs) -> list[str]:
+        nonlocal teardown_called
+        teardown_called = True
+        return []
+
+    monkeypatch.setattr(
+        installer, "_teardown_owned_runtime_for_uninstall", mark_teardown
+    )
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    launcher = home / "bin/vc-start"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("operator-owned\n", encoding="utf-8")
+    args = Namespace(
+        payload_root=str(payload),
+        app_root=str(terminal_host.parents[2]),
+        terminal_host=str(terminal_host),
+        frame_helper=str(frame_helper),
+    )
+    assert installer.cmd_runtime_install(args) == 0
+    capsys.readouterr()
+
+    receipt_path = runtime_home / installer.RUNTIME_INSTALL_RECEIPT
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["backups"][str(launcher)] = str(tmp_path / "outside-backup")
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="backup path escapes backup root"):
+        installer.cmd_runtime_uninstall(Namespace(dry_run=False, emit_result=True))
+
+    assert not teardown_called
+    assert launcher.read_text(encoding="utf-8") != "operator-owned\n"
+    assert (runtime_home / "releases/9.9.9+g12345678").is_dir()
+    assert receipt_path.is_file()
+
+
 def _setup_installed_surface(
     tmp_path: Path, monkeypatch
 ) -> tuple[Path, Path, Path, Path, Path]:

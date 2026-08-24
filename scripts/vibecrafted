@@ -5068,10 +5068,11 @@ cmd_uninstall() {
   # Bypass make for the same reason as cmd_doctor: prevent the
   # `make: Entering directory` and `*** Error N` traceback from
   # bleeding into the user-facing uninstall transcript.
-  local source_root="" installer=""
+  local source_root="" installer="" installer_python="python3"
   source_root="$(_repo_source_root 2>/dev/null || true)"
   for candidate in \
     "${source_root:+$source_root/scripts/vetcoders_install.py}" \
+    "${VIBECRAFTED_RUNTIME_ROOT:+$VIBECRAFTED_RUNTIME_ROOT/scripts/vetcoders_install.py}" \
     "$crafted_tools/scripts/vetcoders_install.py" \
     "$(_repo_root 2>/dev/null)/scripts/vetcoders_install.py"; do
     [[ -n "$candidate" && -f "$candidate" ]] && installer="$candidate" && break
@@ -5080,9 +5081,14 @@ cmd_uninstall() {
     printf '%b✗%b Uninstall installer not found.\n' "$_red" "$_reset" >&2
     return 1
   }
+  if [[ -n "${VIBECRAFTED_RUNTIME_ROOT:-}" \
+    && "$installer" == "$VIBECRAFTED_RUNTIME_ROOT/scripts/vetcoders_install.py" \
+    && -x "$VIBECRAFTED_RUNTIME_ROOT/bin/python3" ]]; then
+    installer_python="$VIBECRAFTED_RUNTIME_ROOT/bin/python3"
+  fi
   # Forward argv verbatim: swallowing flags here once turned
   # `vibecrafted uninstall --dry-run` into a real, unconfirmed teardown.
-  python3 "$installer" uninstall "$@"
+  "$installer_python" "$installer" uninstall "$@"
 }
 
 _fetch_channel_version() {

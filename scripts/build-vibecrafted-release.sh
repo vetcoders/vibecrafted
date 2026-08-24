@@ -539,6 +539,16 @@ build_product() {
   local canonical_deck="$REPO_ROOT/vibecrafted-core/vibecrafted_core/deck/vibecrafted"
   install -m 0755 "$canonical_deck" "$runtime/scripts/vibecrafted"
   install -m 0755 "$canonical_deck" "$runtime/bin/vibecrafted"
+  # The DMG carries the same installer used by source/CLI channels. The native
+  # app invokes its Runtime Pack mode; installed launchers invoke its uninstall
+  # mode. Keep the small import closure beside it so it runs under the bundled
+  # interpreter without reaching back into a checkout or the host Python.
+  install -m 0755 "$REPO_ROOT/scripts/vetcoders_install.py" \
+    "$runtime/scripts/vetcoders_install.py"
+  install -m 0644 "$REPO_ROOT/scripts/distribution_manifest.py" \
+    "$runtime/scripts/distribution_manifest.py"
+  install -m 0644 "$REPO_ROOT/scripts/installer_brand.py" \
+    "$runtime/scripts/installer_brand.py"
   /bin/cp -R "$REPO_ROOT/bin/." "$runtime/bin/"
   /bin/cp -R "$REPO_ROOT/vibecrafted-core/vibecrafted_core" \
     "$runtime/vibecrafted-core/"

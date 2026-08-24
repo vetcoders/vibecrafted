@@ -862,6 +862,9 @@ _LEGACY_RUNTIME_GENERATION_HASH_PATHS = frozenset(
 
 _RUNTIME_GENERATION_FIXTURE_SOURCES = {
     Path("VERSION"): Path("VERSION"),
+    Path("scripts/distribution_manifest.py"): Path("scripts/distribution_manifest.py"),
+    Path("scripts/installer_brand.py"): Path("scripts/installer_brand.py"),
+    Path("scripts/vetcoders_install.py"): Path("scripts/vetcoders_install.py"),
     Path("scripts/vibecrafted"): Path("scripts/vibecrafted"),
     Path(
         "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
@@ -889,7 +892,7 @@ def _write_release_contract_runtime_manifest(
     current_tools: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert len(_RUNTIME_GENERATION_FIXTURE_SOURCES) == 9
+    assert len(_RUNTIME_GENERATION_FIXTURE_SOURCES) == 12
     assert (
         frozenset(_RUNTIME_GENERATION_FIXTURE_SOURCES)
         == installer._RUNTIME_GENERATION_REQUIRED_HASHES

@@ -790,28 +790,23 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     ]
     assert "    false\n" in termination_handler
     assert "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty" in delegate
-    assert "config/alacritty/launch-primary-shell.zsh" in delegate
-    assert 'appendingPathComponent("releases", isDirectory: true)' in delegate
-    assert 'appendingPathComponent("active.json")' in delegate
-    assert 'generation.appendingPathComponent("bin/vc-start")' in delegate
-    assert "let runtimeEntries = try manager.contentsOfDirectory" in delegate
-    assert "launcherHome.appendingPathComponent(name)" in delegate
-    assert (
-        'launcherHome.appendingPathComponent("vc-terminal"), common: common, '
-        "executable: terminalHost" in delegate
-    )
-    assert 'generation.appendingPathComponent("bin/vc-server")' in delegate
-    assert 'generation.appendingPathComponent("bin/vc-guardian")' in delegate
-    assert 'generation.appendingPathComponent("bin/vc-server-supervisor")' in delegate
-    assert "rename(temporary.path, destination.path)" in delegate
-    assert "assertNoSymlinks(below: generation)" in delegate
+    assert 'appendingPathComponent("scripts/vetcoders_install.py")' in delegate
+    assert '"runtime-install"' in delegate
+    assert '"runtime-uninstall"' in delegate
+    assert '"--payload-root", runtime.path' in delegate
+    assert '"--terminal-host", terminalHost.path' in delegate
+    assert '"--frame-helper", frameHelper.path' in delegate
+    assert "JSONDecoder().decode(CanonicalRuntimeInstall.self" in delegate
+    # AppDelegate is the UI/process host, not a second installer implementation.
+    assert "createDirectory(at:" not in delegate
+    assert "copyItem(at:" not in delegate
+    assert "writeLauncher(" not in delegate
+    assert 'appendingPathComponent("active.json")' not in delegate
     # PATH composes: the signed generation wins, the caller's PATH survives behind
     # it. A hard-coded system-only PATH strips Homebrew/~/.local/bin/~/.cargo/bin
     # from every spawned agent CLI, so `#!/usr/bin/env` shebangs exit 127.
     assert 'environment["PATH"] = composedPath(' in delegate
     assert 'environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"' not in delegate
-    assert '"export PATH=\\"\\(shellDoubleQuoteBody(' in delegate
-    assert ':${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}\\""' in delegate
     assert '["server", "service", "reconcile"]' in delegate
     assert "shell-agent" not in delegate
     assert 'name = "vc-start"' in cargo
@@ -3132,6 +3127,9 @@ def test_unified_release_has_one_top_level_owner() -> None:
     assert "run_bundled_verifier release-output" in builder
     assert '"$verifier" -m vibecrafted_core.product_contract "$@"' in builder
     assert '"$runtime/vibecrafted-core/vibecrafted_core/VERSION"' in builder
+    assert '"$runtime/scripts/vetcoders_install.py"' in builder
+    assert '"$runtime/scripts/distribution_manifest.py"' in builder
+    assert '"$runtime/scripts/installer_brand.py"' in builder
     assert '"$REPO_ROOT/scripts/verify-vibecrafted-product.sh"' not in builder
     assert "--noprofile" not in builder  # vc-start, not the release shell, owns this
     assert "vc-frame.real" not in builder
@@ -3156,6 +3154,7 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     delegate = (
         REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted/AppDelegate.swift"
     ).read_text(encoding="utf-8")
+    installer = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(encoding="utf-8")
 
     assert 'family = "Spot Mono"' in terminal
     assert "size = 18.5" in terminal
@@ -3177,8 +3176,8 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     assert '"$0" "$@"' in primary_shell
     assert "process.executableURL = install.terminalHost" in delegate
     assert '"-e", install.primaryShell.path, install.start.path, "operator"' in delegate
-    assert 'productConfig.appendingPathComponent("terminal-entry.toml")' in delegate
-    assert 'productConfig.appendingPathComponent("terminal-theme.toml")' in delegate
+    assert 'product_config / "terminal-entry.toml"' in installer
+    assert 'product_config / "terminal-theme.toml"' in installer
     assert 'let socketRoot = "/tmp/vc-frame-\\(getuid())"' in delegate
     assert 'environment["VC_FRAME_SOCKET_DIR"] = socketRoot' in delegate
     assert 'environment["ZELLIJ_SOCKET_DIR"] = socketRoot' in delegate

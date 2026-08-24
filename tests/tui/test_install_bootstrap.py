@@ -32,6 +32,7 @@ FIXTURE_REQUIRED_FILES = {
     "install.ps1",
     "install.toml",
     "scripts/distribution_manifest.py",
+    "scripts/installer_brand.py",
     "scripts/vetcoders_install.py",
     "scripts/vibecrafted",
     "scripts/verify-vibecrafted-product.sh",

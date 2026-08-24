@@ -5,7 +5,7 @@ import os.log
 
 private let installLog = Logger(subsystem: "io.vetcoders.vibecrafted", category: "install")
 
-private struct CanonicalRuntimeInstall {
+private struct CanonicalRuntimeInstall: Decodable {
   let root: URL
   let terminal: URL
   let terminalHost: URL
@@ -17,6 +17,20 @@ private struct CanonicalRuntimeInstall {
   let runtimeHome: URL
   let configHome: URL
   let craftedHome: URL
+
+  enum CodingKeys: String, CodingKey {
+    case root
+    case terminal
+    case terminalHost = "terminal_host"
+    case frame
+    case start
+    case primaryShell = "primary_shell"
+    case terminalConfig = "terminal_config"
+    case frameConfig = "frame_config"
+    case runtimeHome = "runtime_home"
+    case configHome = "config_home"
+    case craftedHome = "crafted_home"
+  }
 }
 
 final class EventObserver: @unchecked Sendable, EventCallback {
@@ -51,6 +65,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   func applicationDidFinishLaunching(_ notification: Notification) {
+    if ProcessInfo.processInfo.arguments.contains("--uninstall") {
+      do {
+        try uninstallCanonicalRuntime()
+        exit(EXIT_SUCCESS)
+      } catch {
+        fputs("Vibecrafted uninstall failed: \(error)\n", stderr)
+        exit(EXIT_FAILURE)
+      }
+    }
     if ProcessInfo.processInfo.arguments.contains("--bootstrap-only") {
       do {
         let install = try installCanonicalRuntime()
@@ -251,254 +274,81 @@ class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   private func installCanonicalRuntime() throws -> CanonicalRuntimeInstall {
-    let manager = FileManager.default
-    let host = ProcessInfo.processInfo.environment
-    let home = host["HOME"] ?? manager.homeDirectoryForCurrentUser.path
-    let runtimeHome = URL(
-      fileURLWithPath:
-        host["VIBECRAFTED_RUNTIME_HOME"]
-        ?? host["XDG_DATA_HOME"].map { "\($0)/vibecrafted" }
-        ?? "\(home)/.local/share/vibecrafted", isDirectory: true)
-    let configHome = URL(
-      fileURLWithPath: host["XDG_CONFIG_HOME"] ?? "\(home)/.config", isDirectory: true)
-    let productConfig = configHome.appendingPathComponent("vibecrafted", isDirectory: true)
-    let craftedHome = URL(
-      fileURLWithPath: host["VIBECRAFTED_HOME"] ?? "\(home)/.vibecrafted", isDirectory: true)
-    let launcherHome = URL(
-      fileURLWithPath: host["VIBECRAFTED_LAUNCHER_BIN"] ?? "\(home)/.local/bin",
-      isDirectory: true)
-
     let appRoot = Bundle.main.bundleURL
-    let bundledRuntime = appRoot.appendingPathComponent(
+    let runtime = appRoot.appendingPathComponent(
       "Contents/Resources/runtime", isDirectory: true)
-    let versionURL = bundledRuntime.appendingPathComponent("VERSION")
-    let version = try String(contentsOf: versionURL, encoding: .utf8)
-      .trimmingCharacters(in: .whitespacesAndNewlines)
-    let allowed = CharacterSet(charactersIn: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.+_-")
-    guard !version.isEmpty, version.unicodeScalars.allSatisfy(allowed.contains) else {
-      throw NSError(
-        domain: "io.vetcoders.vibecrafted.install", code: 1,
-        userInfo: [NSLocalizedDescriptionKey: "invalid bundled VERSION: \(version)"])
-    }
-
-    let releases = runtimeHome.appendingPathComponent("releases", isDirectory: true)
-    let generation = releases.appendingPathComponent(version, isDirectory: true)
-    try manager.createDirectory(at: releases, withIntermediateDirectories: true)
-    try manager.createDirectory(at: productConfig, withIntermediateDirectories: true)
-    try manager.createDirectory(at: craftedHome, withIntermediateDirectories: true)
-    try manager.createDirectory(
-      at: craftedHome.appendingPathComponent("artifacts", isDirectory: true),
-      withIntermediateDirectories: true)
-    try manager.createDirectory(
-      at: craftedHome.appendingPathComponent("control_plane", isDirectory: true),
-      withIntermediateDirectories: true)
-    try manager.createDirectory(at: launcherHome, withIntermediateDirectories: true)
-
-    if !manager.fileExists(atPath: generation.path) {
-      let staging = releases.appendingPathComponent(
-        ".\(version).staging-\(UUID().uuidString)", isDirectory: true)
-      defer { try? manager.removeItem(at: staging) }
-      try manager.copyItem(at: bundledRuntime, to: staging)
-      let bin = staging.appendingPathComponent("bin", isDirectory: true)
-      try manager.createDirectory(at: bin, withIntermediateDirectories: true)
-      try manager.copyItem(
-        at: appRoot.appendingPathComponent(
-          "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"),
-        to: bin.appendingPathComponent("vc-terminal"))
-      try manager.copyItem(
-        at: appRoot.appendingPathComponent("Contents/Helpers/vc-frame"),
-        to: bin.appendingPathComponent("vc-frame"))
-      try assertNoSymlinks(below: staging)
-      try manager.moveItem(at: staging, to: generation)
-    }
-    try assertNoSymlinks(below: generation)
-    let bin = generation.appendingPathComponent("bin", isDirectory: true)
-
-    // The terminal policy and palettes are signed, version-bound inputs. The
-    // tiny entry file is regenerated on every launch and imports the current
-    // generation plus one product-owned mutable palette. We never read or
-    // mutate the user's Alacritty configuration.
-    let terminalPolicy = generation.appendingPathComponent(
-      "config/vc-terminal/vibecrafted.toml")
-    let terminalThemes = generation.appendingPathComponent(
-      "config/vc-terminal/themes", isDirectory: true)
-    let terminalTheme = productConfig.appendingPathComponent("terminal-theme.toml")
-    if !manager.fileExists(atPath: terminalTheme.path) {
-      try manager.copyItem(
-        at: terminalThemes.appendingPathComponent("dark.toml"), to: terminalTheme)
-    }
-    let terminalConfig = productConfig.appendingPathComponent("terminal-entry.toml")
-    let terminalEntry = """
-      # Generated by Vibecrafted.app. Do not point this at a private Alacritty config.
-      [general]
-      import = [
-        \(tomlBasicString(terminalPolicy.path)),
-        \(tomlBasicString(terminalTheme.path)),
-      ]
-      live_config_reload = true
-      """
-    try Data(terminalEntry.utf8).write(to: terminalConfig, options: .atomic)
-    let sourceFrameConfig = generation.appendingPathComponent(
-      "vibecrafted-core/vibecrafted_core/config/vc-frame", isDirectory: true)
-    let frameConfig = productConfig.appendingPathComponent("vc-frame", isDirectory: true)
-    if !manager.fileExists(atPath: frameConfig.path) {
-      try manager.copyItem(at: sourceFrameConfig, to: frameConfig)
-    }
-    let sourceShell = generation.appendingPathComponent(
-      "vibecrafted-core/vibecrafted_core/runtime/shell", isDirectory: true)
-    let productShell = productConfig.appendingPathComponent("shell", isDirectory: true)
-    // The shell helper layer is runtime code, not operator config. A
-    // copy-once projection froze an old parser here (`--run-id` unknown while
-    // the release already spoke it), so every install refreshes it in full.
-    if manager.fileExists(atPath: productShell.path) {
-      try manager.removeItem(at: productShell)
-    }
-    try manager.copyItem(at: sourceShell, to: productShell)
-    try assertNoSymlinks(below: productConfig)
-
-    let terminal = generation.appendingPathComponent("bin/vc-terminal")
     let terminalHost = appRoot.appendingPathComponent(
       "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty")
-    let frame = generation.appendingPathComponent("bin/vc-frame")
-    let start = generation.appendingPathComponent("bin/vc-start")
-    let primaryShell = generation.appendingPathComponent(
-      "config/alacritty/launch-primary-shell.zsh")
-    let deck = generation.appendingPathComponent("bin/vibecrafted")
-    let server = generation.appendingPathComponent("bin/vc-server")
-    let guardian = generation.appendingPathComponent("bin/vc-guardian")
-    let supervisor = generation.appendingPathComponent("bin/vc-server-supervisor")
-    let workflow = generation.appendingPathComponent("bin/vc-workflow")
-    for required in [
-      terminal, terminalHost, frame, start, primaryShell, deck, server, guardian,
-      supervisor, workflow,
-    ]
-      where !manager.isExecutableFile(atPath: required.path)
-    {
+    let frameHelper = appRoot.appendingPathComponent("Contents/Helpers/vc-frame")
+    let output = try runRuntimeInstaller(arguments: [
+      "runtime-install",
+      "--payload-root", runtime.path,
+      "--app-root", appRoot.path,
+      "--terminal-host", terminalHost.path,
+      "--frame-helper", frameHelper.path,
+    ])
+    do {
+      return try JSONDecoder().decode(CanonicalRuntimeInstall.self, from: output)
+    } catch {
       throw NSError(
         domain: "io.vetcoders.vibecrafted.install", code: 2,
-        userInfo: [NSLocalizedDescriptionKey: "runtime entry is not executable: \(required.path)"])
-    }
-
-    let common = [
-      "export XDG_CONFIG_HOME=\(shellQuote(configHome.path))",
-      "export VIBECRAFTED_HOME=\(shellQuote(craftedHome.path))",
-      "export VIBECRAFTED_RUNTIME_HOME=\(shellQuote(runtimeHome.path))",
-      "export VIBECRAFTED_RUNTIME_ROOT=\(shellQuote(generation.path))",
-      "export VIBECRAFTED_ROOT=\(shellQuote(generation.path))",
-      "export VIBECRAFTED_PYTHON=\(shellQuote(generation.appendingPathComponent("bin/python3").path))",
-      "export VIBECRAFTED_VC_FRAME_BIN=\(shellQuote(frame.path))",
-      "export VC_FRAME_CONFIG_DIR=\(shellQuote(frameConfig.path))",
-      // PATH is the one export that must compose instead of replace. A launcher
-      // that hard-codes the system set strips Homebrew, ~/.local/bin and
-      // ~/.cargo/bin from everything it spawns, so `#!/usr/bin/env node` CLIs
-      // exit 127. The generation still wins; the caller's PATH survives behind
-      // it, with the system set as the fallback when the caller has none.
-      "export PATH=\"\(shellDoubleQuoteBody(generation.appendingPathComponent("bin").path))"
-        + ":${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}\"",
-    ]
-    let runtimeEntries = try manager.contentsOfDirectory(
-      at: bin, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles])
-    for entry in runtimeEntries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
-      let name = entry.lastPathComponent
-      guard name != "python3", name != "vc-terminal" else { continue }
-      let values = try entry.resourceValues(forKeys: [.isRegularFileKey])
-      guard values.isRegularFile == true, manager.isExecutableFile(atPath: entry.path) else { continue }
-      try writeLauncher(
-        launcherHome.appendingPathComponent(name), common: common, executable: entry)
-    }
-    try writeLauncher(
-      launcherHome.appendingPathComponent("vc-terminal"), common: common, executable: terminalHost,
-      leadingArguments: ["--config-file", terminalConfig.path])
-
-    // Deck-verb wrappers. These public names have no runtime binary of their
-    // own — they are verbs of the bash deck. A plain `exec deck "$@"` shim (or
-    // a symlink onto one) loses the invoked name at the shebang boundary, so
-    // `vc-resume claude --session <id>` used to degrade into
-    // `vibecrafted claude --session <id>` ("Unknown mode"). Injecting the verb
-    // into the shim keeps launcher identity across any exec chain. Keep this
-    // map in lockstep with SHELL_WRAPPER_VERBS in vibecrafted_core/cli.py
-    // (tests/tui/test_keys.py pins the parity).
-    let deckVerbWrappers: [(name: String, verb: String)] = [
-      ("vc-help", "help"),
-      ("vc-init", "init"),
-      ("vc-dashboard", "dashboard"),
-      ("vc-dispatch", "dispatch"),
-      ("vc-resume", "resume"),
-      ("vc-justdo", "justdo"),
-      ("vc-doctor", "doctor"),
-      ("vc-status", "status"),
-      ("vc-update", "update"),
-      ("vc-receipt", "receipt"),
-      ("telemetry", "telemetry"),
-    ]
-    for wrapper in deckVerbWrappers
-      where !manager.isExecutableFile(atPath: bin.appendingPathComponent(wrapper.name).path)
-    {
-      try writeLauncher(
-        launcherHome.appendingPathComponent(wrapper.name), common: common, executable: deck,
-        leadingArguments: [wrapper.verb])
-    }
-
-    let active: [String: String] = [
-      "schema": "vibecrafted.active-runtime.v1",
-      "version": version,
-      "runtime_root": generation.path,
-      "app_root": appRoot.path,
-    ]
-    let activeData = try JSONSerialization.data(
-      withJSONObject: active, options: [.prettyPrinted, .sortedKeys])
-    try activeData.write(to: runtimeHome.appendingPathComponent("active.json"), options: .atomic)
-
-    return CanonicalRuntimeInstall(
-      root: generation, terminal: terminal, terminalHost: terminalHost, frame: frame,
-      start: start, primaryShell: primaryShell, terminalConfig: terminalConfig,
-      frameConfig: frameConfig, runtimeHome: runtimeHome, configHome: configHome,
-      craftedHome: craftedHome)
-  }
-
-  private func assertNoSymlinks(below root: URL) throws {
-    let keys: [URLResourceKey] = [.isSymbolicLinkKey]
-    if try root.resourceValues(forKeys: Set(keys)).isSymbolicLink == true {
-      throw NSError(
-        domain: "io.vetcoders.vibecrafted.install", code: 3,
         userInfo: [
           NSLocalizedDescriptionKey:
-            "symlink is forbidden: \(root.standardizedFileURL.path)"
+            "installer returned an invalid runtime result: \(error.localizedDescription)"
         ])
     }
-    guard let enumerator = FileManager.default.enumerator(
-      at: root, includingPropertiesForKeys: keys, options: [], errorHandler: nil)
-    else { return }
-    for case let item as URL in enumerator {
-      if try item.resourceValues(forKeys: Set(keys)).isSymbolicLink == true {
-        // The absolute path of the offending link is the only actionable part of
-        // this failure; it is what the operator has to delete or replace.
-        throw NSError(
-          domain: "io.vetcoders.vibecrafted.install", code: 3,
-          userInfo: [
-            NSLocalizedDescriptionKey:
-              "symlink is forbidden in runtime: \(item.standardizedFileURL.path)"
-          ])
-      }
+  }
+
+  private func uninstallCanonicalRuntime() throws {
+    _ = try runRuntimeInstaller(arguments: ["runtime-uninstall"])
+  }
+
+  private func runRuntimeInstaller(arguments: [String]) throws -> Data {
+    let runtime = Bundle.main.bundleURL.appendingPathComponent(
+      "Contents/Resources/runtime", isDirectory: true)
+    let python = runtime.appendingPathComponent("bin/python3")
+    let installer = runtime.appendingPathComponent("scripts/vetcoders_install.py")
+    for required in [python, installer]
+      where !FileManager.default.isExecutableFile(atPath: required.path)
+    {
+      throw NSError(
+        domain: "io.vetcoders.vibecrafted.install", code: 1,
+        userInfo: [
+          NSLocalizedDescriptionKey:
+            "signed Runtime Pack installer entry is missing: \(required.path)"
+        ])
     }
+
+    let process = Process()
+    let output = Pipe()
+    let errors = Pipe()
+    process.executableURL = python
+    process.arguments = [installer.path] + arguments
+    var environment = ProcessInfo.processInfo.environment
+    environment["PYTHONNOUSERSITE"] = "1"
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    process.environment = environment
+    process.standardOutput = output
+    process.standardError = errors
+    try process.run()
+    process.waitUntilExit()
+
+    let result = output.fileHandleForReading.readDataToEndOfFile()
+    let failure = errors.fileHandleForReading.readDataToEndOfFile()
+    guard process.terminationStatus == 0 else {
+      let detail = String(data: failure.isEmpty ? result : failure, encoding: .utf8)?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        ?? "installer exited \(process.terminationStatus)"
+      throw NSError(
+        domain: "io.vetcoders.vibecrafted.install",
+        code: Int(process.terminationStatus),
+        userInfo: [NSLocalizedDescriptionKey: detail])
+    }
+    return result
   }
 
-  private func shellQuote(_ value: String) -> String {
-    "'\(value.replacingOccurrences(of: "'", with: "'\"'\"'"))'"
-  }
-
-  /// Escape `value` for use *inside* a double-quoted shell word, where parameter
-  /// expansion must stay live for the rest of the word.
-  private func shellDoubleQuoteBody(_ value: String) -> String {
-    value
-      .replacingOccurrences(of: "\\", with: "\\\\")
-      .replacingOccurrences(of: "$", with: "\\$")
-      .replacingOccurrences(of: "`", with: "\\`")
-      .replacingOccurrences(of: "\"", with: "\\\"")
-  }
-
-  /// Signed generation bin first, then whatever PATH the caller already had;
-  /// the minimal system set only when the caller carried no PATH at all.
+  /// Signed generation bin first, then the inherited PATH; use the minimal
+  /// system set only when the caller carried no PATH at all.
   private func composedPath(generation: URL, inherited: String?) -> String {
     let tail = (inherited ?? "").isEmpty ? "/usr/bin:/bin:/usr/sbin:/sbin" : inherited!
     return "\(generation.appendingPathComponent("bin").path):\(tail)"
@@ -516,44 +366,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     alert.informativeText = message
     alert.addButton(withTitle: "OK")
     alert.runModal()
-  }
-
-  private func tomlBasicString(_ value: String) -> String {
-    let escaped = value
-      .replacingOccurrences(of: "\\", with: "\\\\")
-      .replacingOccurrences(of: "\"", with: "\\\"")
-    return "\"\(escaped)\""
-  }
-
-  private func writeLauncher(
-    _ destination: URL, common: [String], executable: URL, leadingArguments: [String] = []
-  ) throws {
-    let arguments = leadingArguments.map(shellQuote).joined(separator: " ")
-    let prefix = arguments.isEmpty ? "" : "\(arguments) "
-    let body =
-      (["#!/bin/bash", "set -euo pipefail"] + common
-        + [
-          // The deck's identity guard compares the DECLARED launcher path with
-          // the live process argv. The wrapper is that declared path, so it
-          // must ride through every exec into the final python argv — without
-          // this line vc-guardian failed capture-identity and `server start`
-          // rolled a healthy server back.
-          "export VIBECRAFTED_DECLARED_LAUNCHER=\"$0\"",
-          "exec \(shellQuote(executable.path)) \(prefix)\"$@\"",
-        ])
-      .joined(separator: "\n") + "\n"
-    let temporary = destination.deletingLastPathComponent().appendingPathComponent(
-      ".\(destination.lastPathComponent).new-\(UUID().uuidString)")
-    try body.write(to: temporary, atomically: true, encoding: .utf8)
-    try FileManager.default.setAttributes(
-      [.posixPermissions: 0o755], ofItemAtPath: temporary.path)
-    if rename(temporary.path, destination.path) != 0 {
-      let code = errno
-      try? FileManager.default.removeItem(at: temporary)
-      throw NSError(
-        domain: NSPOSIXErrorDomain, code: Int(code),
-        userInfo: [NSLocalizedDescriptionKey: "cannot atomically publish \(destination.path)"])
-    }
   }
 
   // MARK: - Main Menu

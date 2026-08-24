@@ -384,6 +384,7 @@ def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
     builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
         encoding="utf-8"
     )
+    installer = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(encoding="utf-8")
 
     assert 'family = "Spot Mono"' in terminal
     assert "size = 18.5" in terminal
@@ -396,10 +397,13 @@ def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
     assert "CTFontManagerRegisterFontsForURL" in app_delegate
     assert "kCTFontFamilyNameAttribute as String" in app_delegate
     assert 'CTFontDescriptorCreateWithNameAndSize("Spot Mono"' not in app_delegate
-    assert "let terminalPolicy = generation.appendingPathComponent" in app_delegate
-    assert 'productConfig.appendingPathComponent("terminal-entry.toml")' in app_delegate
-    assert 'productConfig.appendingPathComponent("terminal-theme.toml")' in app_delegate
-    assert 'productConfig.appendingPathComponent("terminal.toml")' not in app_delegate
+    assert (
+        'terminal_policy = generation / "config/vc-terminal/vibecrafted.toml"'
+        in installer
+    )
+    assert 'product_config / "terminal-entry.toml"' in installer
+    assert 'product_config / "terminal-theme.toml"' in installer
+    assert 'product_config / "terminal.toml"' not in installer
     assert (
         'install -m 0644 "$SPOT_MONO_FONT" "$resources/fonts/SpotMono.ttc"' in builder
     )

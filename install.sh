@@ -231,6 +231,7 @@ REQUIRED_FILES = frozenset(
         "install.ps1",
         "install.toml",
         "scripts/distribution_manifest.py",
+        "scripts/installer_brand.py",
         "scripts/vetcoders_install.py",
         "scripts/vibecrafted",
         "scripts/verify-vibecrafted-product.sh",

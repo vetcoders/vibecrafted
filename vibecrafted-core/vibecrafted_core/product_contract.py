@@ -107,7 +107,10 @@ RUNTIME_GENERATION_CANONICAL_CONFIG = (
 RUNTIME_GENERATION_REQUIRED_HASHES = frozenset(
     {
         "VERSION",
+        "scripts/distribution_manifest.py",
+        "scripts/installer_brand.py",
         "scripts/vibecrafted",
+        "scripts/vetcoders_install.py",
         RUNTIME_GENERATION_CANONICAL_CONFIG,
         RUNTIME_GENERATION_ENTRYPOINT,
         "vibecrafted-core/vibecrafted_core/product_contract.py",

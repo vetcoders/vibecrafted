@@ -9,13 +9,15 @@ has been upgraded since 3.7.x that manifest never saw `releases/`, `providers/`,
 
 This document inverts the question. Instead of listing what uninstall removes,
 it fixes **the required set**: the smallest collection of paths that must exist
-for each launcher and flow to work. Anything the framework writes that is not in
-the required set is a generation, a backup, a staging leftover, or a cache — and
-uninstall takes it off by **discovery**, matching known names and patterns rather
-than trusting a manifest.
+for each launcher and flow to work. Current Runtime Pack installs use a closed,
+hashed ownership receipt. Legacy/source installs still need discovery as a
+fallback because their historical manifests did not see the full product.
 
-Implementation: `_build_uninstall_inventory` and `_managed_tools_entry` in
-`scripts/vetcoders_install.py`. Regression coverage:
+Implementation: `cmd_runtime_install`, `cmd_runtime_uninstall`,
+`_build_uninstall_inventory`, and `_managed_tools_entry` in
+`scripts/vetcoders_install.py`. The exact same installer is embedded under
+`Vibecrafted.app/Contents/Resources/runtime/scripts/`; AppDelegate delegates to
+it and does not write the installation itself. Regression coverage:
 `tests/tui/test_installer_uninstall.py`, `tests/tui/test_installer_restore.py`.
 
 ## 1. The required set
@@ -30,13 +32,16 @@ Every row is load-bearing: delete it and the named flow stops working.
 | Tools generation  | exactly one `tools/vibecrafted-generation-<version>-<pid>-<nonce>/` — the one `vibecrafted-current` points at           | the Python package tree behind the pointer                                                              |
 | uv environments   | `<uv tool dir>/{vibecrafted, vibecrafted-mcp}`, `<uv tool dir>/vibecrafted-iterm2` where the iTerm2 plugin is installed | the interpreters the shims exec; owned by uv, not by us                                                 |
 | Active release    | `~/.local/share/vibecrafted/active.json` + the one `releases/<version>/` it names                                       | app/runtime handoff — `active.json` carries `runtime_root` and `app_root`                               |
+| Ownership receipt | `~/.local/share/vibecrafted/install-receipt.json`                                                                       | deterministic reset, collision restore, and locally-modified-file refusal                               |
+| Runtime installer | `<release>/scripts/vetcoders_install.py` plus its bundled import closure                                                | the same install/uninstall implementation for App and CLI                                               |
 | Provider          | `~/.local/share/vibecrafted/providers/vc-slack-agent/current` (symlink) + the one generation it names                   | `vc-slack` and the Slack bridge                                                                         |
 | Server assets     | `~/.local/share/vibecrafted/server/site/`                                                                               | the local dashboard/server surface                                                                      |
 | Skills store      | `<tools/vibecrafted-current>/vibecrafted-core/vibecrafted_core/skills/`                                                 | the one canonical copy of every skill                                                                   |
 | Skill projections | `~/.<runtime>/skills/<skill>` symlinks into the store, per installed runtime                                            | agents seeing the skills at all                                                                         |
 | Install state     | `~/.vibecrafted/.vc-install.json` (legacy installs: the same file next to the store)                                    | update/uninstall knowing what this install registered                                                   |
-| Frame config      | `~/.config/vc-frame/`, `~/.config/vetcoders/frontier/`                                                                  | `vc-frame` / `vc-start` cockpit                                                                         |
-| App bundle        | `/Applications/Vibecrafted.app`                                                                                         | the GUI; installed from the DMG, not by this installer                                                  |
+| Required tools    | `loct`, `loctree-mcp`, `aicx`, `prview`, `screenscribe` plus the `vc-*` projections                                     | complete agent product; missing Loctree/AICX is fail-closed, missing PRView/ScreenScribe is warned      |
+| Frame config      | `~/.config/vibecrafted/vc-frame/`, `~/.config/vetcoders/frontier/`                                                      | `vc-frame` / `vc-start` cockpit; no private top-level `~/.config/vc-frame`                              |
+| App bundle        | `/Applications/Vibecrafted.app` when the DMG channel is used                                                            | optional native transport/onboarding shell; CLI runtime must remain first-class without it              |
 
 Anything not in this table is disposable. In particular: **second and later
 generations are never required.** One tools generation, one release, one provider
@@ -56,8 +61,10 @@ generation. Every other generation is retained history with no consumer.
 | Providers               | `<runtime home>/providers/`                                                                                                                 | rebuilt from the payload on the next install                                                                             |
 | Server assets           | `<runtime home>/server/`                                                                                                                    | shipped inside the payload                                                                                               |
 | Active pointer          | `<runtime home>/active.json`                                                                                                                | meaningless once the release it names is gone                                                                            |
+| Runtime receipt         | `<runtime home>/install-receipt.json`, after its plan has been applied                                                                      | per-install ownership evidence, not durable operator data                                                                |
 | Framework config        | children of `~/.config/vibecrafted/` except `*.env`                                                                                         | generated: themes, shell fragments, plists                                                                               |
-| Frame config trees      | `~/.config/vc-frame/`, `~/.config/vetcoders/frontier/`                                                                                      | generated symlink farms plus their own `.bak*` / `.stale*` snapshots                                                     |
+| Frame config trees      | `~/.config/vibecrafted/vc-frame/`, legacy `~/.config/vc-frame/`, `~/.config/vetcoders/frontier/`                                            | generated config/symlink farms plus their own `.bak*` / `.stale*` snapshots                                              |
+| Server LaunchAgent      | `~/Library/LaunchAgents/io.vetcoders.vibecrafted.server.plist`                                                                              | product-owned supervisor definition; booted out before removal                                                           |
 | Launchd job (macOS)     | `~/Library/LaunchAgents/com.vetcoders.vibecrafted-slack-bridge.plist`                                                                       | provider service definition; a loaded job ends at logout or explicit bootout                                             |
 | iTerm2 profiles (macOS) | `~/Library/Application Support/iTerm2/DynamicProfiles/vibecrafted*.json`                                                                    | written by the iTerm2 plugin                                                                                             |
 | App support (macOS)     | `~/Library/Application Support/{io.vetcoders.vc-frame, com.vibecrafted.vc-board, com.vibecrafted.vc-term}`                                  | framework runtime state                                                                                                  |
@@ -74,7 +81,7 @@ the directory, and the inventory says so in its reason line.
 | Surface                                                            | Action   | Reason                                                                                 |
 | ------------------------------------------------------------------ | -------- | -------------------------------------------------------------------------------------- |
 | `~/.config/vibecrafted/*.env`                                      | preserve | operator secrets (Slack tokens and friends); never removed, never copied into a backup |
-| `~/.vibecrafted/{artifacts, control_plane, logs}`                  | preserve | operator data — runs, reports, transcripts. Not installer-owned at any version         |
+| pre-existing `~/.vibecrafted/{artifacts, control_plane, logs}`     | preserve | operator data outside a receipted clean-profile install                                |
 | `<runtime home>/bin/*`                                             | preserve | binary ownership is product-managed outside installer state                            |
 | Unrecognized `tools/` siblings                                     | preserve | not a Vibecrafted-managed payload name                                                 |
 | Unrecognized runtime-home children                                 | preserve | discovery has no evidence they are ours                                                |
@@ -84,9 +91,20 @@ the directory, and the inventory says so in its reason line.
 Rule: an unrecognized name is preserved. Discovery widens ownership by adding
 known names, never by claiming whatever it finds.
 
+For a clean profile where the Runtime Pack receipt says the installer created
+`~/.vibecrafted`, reset removes that whole root, including runtime state created
+after installation. If the root pre-existed, only proven owned children are
+removed; unrelated operator state remains.
+
 ## 4. Invariants
 
-**Backup before remove.** Every `remove` record passes through
+**Receipt installs refuse drift before remove.** Runtime Pack uninstall hashes
+every owned regular file before teardown. A locally modified launcher/config is
+a conflict and stops the operation before the service or generation is removed.
+Pre-install collisions are copied under `<runtime home>/.installer-backups/`
+and restored during a successful reset.
+
+**Legacy backup before remove.** Every discovery `remove` record passes through
 `create_teardown_backup`, which snapshots each present path into
 `~/.vibecrafted/backups/installer/<timestamp>/` with a `restore-manifest.json`
 and a self-contained `restore.py`. `vibecrafted restore` replays that manifest by
@@ -121,8 +139,10 @@ removed and not backed up.
 - Retention _during_ normal operation. Uninstall now removes all generations, but
   nothing prunes them on a live machine — 25 provider generations and 6 releases
   still accumulate. That is a separate cut.
-- Foundation tools (`loct`, `loctree`, `aicx`) and their `/usr/local/bin`
-  symlinks. Different owner, different installer.
+- Fetch/install adapters for the required third-party payloads. The required set
+  is now explicit, but bundling/installing Loctree, AICX, PRView and ScreenScribe
+  is the next payload cut after deterministic uninstall; a DMG lacking them is
+  still incomplete and must not be described as the full product.
 - `$TMPDIR` test scratch. Owned by the test suite, not by the installer.
 
 _𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI_
