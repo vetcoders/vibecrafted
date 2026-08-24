@@ -247,3 +247,66 @@ to fall.
 1 failed (PL-mirror freshness, red since `de3a017b` — fixed in 0b508a5e, module
 re-run 4 passed) · `make check` passed · pre-commit and pre-push green on every
 commit · focused suites for each cut listed in the commit bodies.
+
+---
+
+## Phase III: the roots cut was not finished (2026-08-24, Codex audit)
+
+Codex audited the twelve `[claude/canary]` commits under run
+`work-260824-034006-84440` and returned **PR #70 BLOCKED**. Two of the three
+blockers are mine. Recorded here because a cut without its failures written
+down is a report, not a journal.
+
+### P0 — the throne cut left two callers behind
+
+`6ef2386b` deleted `scripts/runtime_paths.py` as a competitor of
+`vibecrafted_core.runtime_paths`. Two Make expressions still import it:
+
+| Line           | Expression                                                                                                                           |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `Makefile:242` | `"vc-frame config"` step: `$(PYTHON) -c 'sys.path.insert(0, "$(SOURCE)/scripts"); from runtime_paths import vibecrafted_tools_home'` |
+| `Makefile:313` | `install-tools`: the same expression                                                                                                 |
+
+Fresh installation and the skill-loader matrix fail. Nothing in this repo's
+gates could see it: `make test` and `make check` never run `make install`.
+Green gates, broken product — the DoU case in its purest form.
+
+Worse, the test pinned the corpse. `tests/tui/test_makefile_installer_contract.py`
+asserts the literal string `"from runtime_paths import vibecrafted_tools_home"
+in install_block` — string truth, not execution truth. The assertion stayed
+green precisely _because_ the dead import was still written down.
+
+And the same file already carried a **third** way to compute the same root:
+`Makefile:241` spells `${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/tools/vibecrafted-current`
+literally. One power, three spellings, in one file.
+
+**The throne for a Makefile is the shell library**, `scripts/lib/runtime-roots.sh`
+:: `default_vibecrafted_tools_home` — not the Python module (which needs 3.11+,
+while `$(PYTHON)` is `scripts/project-python`) and not a by-path loader, which
+would be the sixth layer, not a fix. Reviving `scripts/runtime_paths.py` in any
+form is forbidden: it is a competitor that was already cut.
+
+Scope of the disease beyond this cut:
+`loct find --regex '(XDG_DATA_HOME|runtime_paths|vibecrafted_tools_home|vibecrafted/tools)'`
+= **283 occurrences across 99 files**. One power, ninety-nine addresses.
+
+### P1 — the env scrub proved less than it claimed
+
+`tests/tui/conftest.py` deletes the eight root variables, but the operator-mode
+test reaches the host through `bash -lc`, which re-reads the login profile.
+Locally 44/44 green; on a clean runner it fails. A local green that a clean
+machine cannot reproduce is a false green, and I reported it as evidence.
+
+### P1 inherited (not mine)
+
+macOS portable still leaks `/Users/runner` — pre-existing, listed in
+`dmg-leak-comes-from-prebuilt-wasm`.
+
+### Verdict
+
+The roots cut is **not finished**. It removed the competitors and left two
+callers pointing at the grave. Recorded as an open cut, not as a closed one.
+Plan with the falsification contract:
+`~/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0824/plans/canary-install-contract-closure-v1`
+(W0-01 repairs this without recreating the shim; the test must _execute_ both
+Make expressions instead of spelling them).
