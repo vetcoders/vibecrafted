@@ -449,3 +449,30 @@ the maintainer's:
 
 These points bind W1-01 (rehearsal + throne decision) and every later root
 cut. A cut that satisfies the maintainer and fails L3 or W1 is not finished.
+
+### Windows host evidence (2026-08-24, peer `windows`, C:\dev)
+
+Live probe corrects the consumer points above:
+
+- **The native port is real, WSL is not.** No WSL distro is installed. Rust
+  tools are built natively: `loct.exe`, `aicx.exe`, `aicx-mcp.exe` in
+  `%USERPROFILE%\.cargo\bin` (2026-08-14). `vc-frame` source carries a real
+  Windows port — `build.rs` handles the Windows linker + embeds the app icon,
+  `#[cfg(windows)]` in run_triage, commits `d9178281` "import synchronize
+  access right", `fb4ea861` "test(windows): serialize panic-hook probes".
+  So W3's "interim = WSL2" was wrong: the actual strategy on this machine is
+  native binaries; the gap is the bash launcher layer and the Python glue.
+- **But no `vc-frame.exe` exists anywhere on the machine** (profile and
+  Program Files searched). The port compiled once, the artifact is gone.
+- **Process start in C:\dev is blocked by a trust layer:** `cargo check`
+  fails to start with "untrusted mount point" while `git` runs in the same
+  cwd; `fsutil devdrv query` says developer volumes are AV-filter-protected
+  and a `Bitdefender Virtual Disk` volume is present. C:\dev dirs are plain
+  directories (no reparse points). Rebuilding vc-frame there needs the trust
+  question answered first (devdrv trust / AV exclusion — operator's call).
+- `C:\dev\vibecrafted` sits at `release/3.7.1` — a whole era behind 4.2.4;
+  `vc-frame` checkout at `c236a30e`. Windows never got the runtime-roots era.
+
+Consumer point W2 upgraded: the Windows consumer's reachable surface is the
+native `.exe` set on `%PATH%` via cargo — the product install must land
+`vc-frame.exe` + a Windows `vibecrafted` entry the same way, not via bash.
