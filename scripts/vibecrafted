@@ -883,7 +883,9 @@ cmd_dispatch_help() {
   printf '%bContract:%b\n' "$_bold" "$_reset"
   printf '  --doctor validates only and exits non-zero on dispatch-doctor errors.\n'
   printf '  --dry-run renders every worker prompt under reports_dir/dry-run without launching.\n'
-  printf '  Full dispatch writes tracker.md, journal.md, handoff.md, and dispatch-result.json.\n'
+  printf '  Full dispatch writes tracker.md and journal.md progressively from launch —\n'
+  printf '  watch those for live state; stdout stays silent until the run settles,\n'
+  printf '  then adds handoff.md and dispatch-result.json.\n'
   printf '  Exit code is the worker exit code when the worker fails.\n'
   printf '  Exit code 2 means the worker exited cleanly but the artifact contract failed.\n'
   printf '\n'

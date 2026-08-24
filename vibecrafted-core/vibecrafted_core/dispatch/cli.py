@@ -102,6 +102,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_id = args.resume or reserve_run_id("dispatch")
     artifacts_dir = _artifacts_dir(dispatch, run_id=run_id)
     _copy_validated_source(source, artifacts_dir)
+    # The supervisor is silent on stdout until the whole DAG settles; its live
+    # surface is tracker.md/journal.md, rewritten from second zero. Say so
+    # BEFORE launching, or every observer concludes the launch hung
+    # (measured: an agent waited on a mute handshake, 2026-08-24).
+    tracker_path = (
+        Path(dispatch.meta.tracker).expanduser()
+        if dispatch.meta.tracker
+        else artifacts_dir / "tracker.md"
+    )
+    if not args.json:
+        print(
+            f"dispatch launched: run_id={run_id}\n"
+            f"live state: tracker={tracker_path}\n"
+            f"live journal: {artifacts_dir / 'journal.md'}\n"
+            "stdout stays silent until the run settles — watch the tracker, "
+            "not this stream.",
+            flush=True,
+        )
     try:
         dispatch_result = run_dispatch(
             dispatch,
