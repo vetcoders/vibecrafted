@@ -1,87 +1,180 @@
 ---
 name: canary
-version: 0.1.0
+version: 2.0.0
 description: >
-  Ownership catalog of a repo: sense planes via loctree, one agent per dynamic
-  scope, add missing docstrings without logic changes, one supervisor commit,
-  then findings report for discussion. Use when the user asks to "canary",
-  "ownership catalog", "docstring sweep", "skataloguj repo", "repo atlas", or
-  runs /vc-canary / vibecrafted canary.
+  Radar konkurencji o prawdę w repo: wykrywa komponenty rywalizujące o tę
+  samą klasę prawdy (identity, autorstwo, redukcja, finality, delivery,
+  konfiguracja), zanim zatrują runtime. Cztery fazy: authority & freshness,
+  kandydaci strukturalni, radar równoległych implementacji, polaryzacja
+  ownership. Wyłącznie dowody i klasyfikacja — nigdy refaktor. Użyj, gdy
+  użytkownik prosi o "canary", "truth radar", "parallel implementation
+  radar", "truth collision", "semantic twins", "kto jest właścicielem
+  prawdy", "skataloguj repo", "ownership catalog", albo uruchamia
+  /vc-canary / vibecrafted canary.
 ---
 
 <!-- fleet-imperative: v3 -->
 
-> **Invocation for `vc-canary` (launcher `canary`)**
+> **Inwokacja `vc-canary` (launcher `canary`)**
 >
-> Same three-path _shape_ as the fleet — see
+> Ten sam trójścieżkowy _kształt_ co flota — patrz
 > [DELEGATION_MATRIX.md](../DELEGATION_MATRIX.md):
 >
-> | Path                    | Literal                                    |
-> | ----------------------- | ------------------------------------------ |
-> | 1. User-launched worker | `vibecrafted canary <agent>`               |
-> | 2. Interactive          | `/vc-canary` — execute **in this session** |
-> | 3. Agent-operator       | `vibecrafted canary <agent>` via dispatch  |
+> | Ścieżka                        | Literał                                     |
+> | ------------------------------ | ------------------------------------------- |
+> | 1. Worker odpalony przez usera | `vibecrafted canary <agent>`                |
+> | 2. Interaktywnie               | `/vc-canary` — wykonaj **w tej sesji**      |
+> | 3. Agent-operator              | `vibecrafted canary <agent>` przez dispatch |
 >
-> Root defaults to **`$PWD`**. Do not invent `vibecrafted workflow` as a stand-in.
+> Root domyślnie **`$PWD`**. Nie wymyślaj `vibecrafted workflow` jako zamiennika.
 
 <!-- /fleet-imperative -->
 
-# vc-canary — ownership catalog
+# vc-canary — radar konkurencji o prawdę
 
-## Overview
+## Misja
 
-Canary answers: _this repo needs a proper catalog, but first I must know
-**what** to catalog._ It builds a **repo-atlas** from loctree organs (not from
-`context --full`), spawns **one agent per scope** (variable N), adds missing
-docstrings only, commits once, then reports findings for discussion.
+Software generowany przez agentów psuje się w konkretny sposób: **lokalnie
+poprawne moduły powstają szybciej, niż system ustanawia globalne ownership
+semantyki.** Wynikiem nie jest zduplikowany kod — są nim komponenty
+konkurujące o tę samą klasę prawdy: pięć pojęć identity, dwa reducery
+dokumentu, pięć źródeł konfiguracji, dwudziestu aktywnych uczestników
+między wejściem a delivery.
 
-## Sense organ (mandatory)
+Canary odpowiada na jedno pytanie, per oś decyzji:
 
-| Question                     | Organ                      | How                                    |
-| ---------------------------- | -------------------------- | -------------------------------------- |
-| What planes exist?           | **repo-view / agent.json** | `canary_cli repo-view` / `atlas`       |
-| What files/units live there? | **snapshot** via stream    | `canary_cli atlas` → `inventory.jsonl` |
-| What hurts after?            | **findings**               | atlas copies `signals.json`            |
+> **Ile miejsc w tym repo może odpowiedzieć na to samo pytanie runtime —
+> i które z nich jest writerem, arbitrem, obserwatorem, projekcją?**
 
-**Forbidden as inventory:** `loct context --full` `structural.files` (hub ranking only).
-**Forbidden:** loading raw multi‑MB `snapshot.json` into the model context.
+Canary **wykrywa** wielowładzę. Nie zakłada, że wielowładza jest błędem:
+dwie implementacje mogą być legalne (runtime vs replay) — agent musi tę
+granicę **udowodnić**, nigdy uznać za oczywistą. Canary produkuje dowody
+i klasyfikację, **nigdy nie refaktoruje i nie proponuje decyzji tronowych
+jako findingów** — implementacja przychodzi po QC, w skillach tnących,
+na słowo operatora.
 
-## Quick Start
+Baza empiryczna: dwa niezależne produkcyjne systemy zbudowane przez
+agentów pokazały tę samą chorobę (jeden z nich: 5 pojęć identity,
+5 źródeł settings, 2 reducery dokumentu, prism 11/12), znalezioną tym
+samym protokołem.
 
-```bash
-cd /path/to/repo
-uv run --python 3.12 path/to/vc-canary/scripts/canary_cli.py atlas --refresh
-# → ./.loctree/atlas/repo-atlas.json + inventory.jsonl + coverage.json
+## Kanoniczna bramka orientacji
+
+Skonsumuj świeże dowody `vc-init` dla repo; jeśli ich brak, najpierw
+`vc-init`. Wyczuwanie planów przez goły grep, dokumentację albo „pamiętam
+to repo" zamiast organów Loctree to porażka procesu.
+
+**Zakazane jako inwentarz:** `loct context --full` `structural.files`
+(wyłącznie ranking hubów). **Zakazane:** ładowanie surowego, wielomegabajtowego
+`snapshot.json` do kontekstu modelu.
+
+## Phase 0 — Authority & freshness
+
+Żadnego radaru na nieświeżym drzewie. Zapisz, z pokwitowaniami:
+
+- dokładne repo, root, SHA HEAD; stan dirty-tree; worktree'y i zagnieżdżone
+  repozytoria;
+- pokrycie snapshotu Loctree: `canary_cli atlas --refresh` →
+  `./.loctree/atlas/` (`repo-atlas.json`, `inventory.jsonl`,
+  `coverage.json`); coverage `pass: true` wymagane, by iść dalej;
+- commity osiągalne lokalnie, ale nieobecne w genealogii HEAD
+  (`git cherry`, gałęzie tylko-lokalne/tylko-zdalne) — osierocona semantyka
+  to wejście radaru, nie ciekawostka.
+
+## Phase I — Strukturalni kandydaci semantyczni
+
+Przebieg wysokoskalowy: `loct repo-view`, drzewo, `focus`, `twins`,
+`crowd`, `hotspots`. Celem **nie** są findingi — jest nim lista
+kandydackich **osi decyzji**: klas prawdy, które to repo rozstrzyga,
+i plików, których nazwy/role sugerują więcej niż jednego rozstrzygającego.
+
+Powtarzające się klasy osi (wyprowadź własne dla repo; nie kopiuj tej
+listy ślepo): identity, korekta/autorstwo tekstu, wybór
+silnika/orkiestracji, redukcja dokumentu/stanu, formatowanie,
+finality/seal, delivery, precedencja konfiguracji, konkurenci
+epistemiczni (weryfikatorzy/replayery/raporty osądzające podobną prawdę
+bez pisania codziennego runtime).
+
+## Phase II — Radar Równoległych Implementacji
+
+Dla **każdej** osi schodź z pokwitowaniami:
+
+```
+find --discover → exact occurrences (literal coverage) → body
+→ slice / consumers → follow (trace / pipelines / events) → impact (when needed)
 ```
 
-Interactive:
+**Falsyfikacja nieobecności jest obowiązkowa.** Szerokie/semantyczne
+wyszukiwanie daje kandydatów; dopiero linia literal coverage („scanned X
+of Y files") dowodzi, gdzie decyzja _nie_ żyje. „Przeszukałem semantycznie
+i wygląda na jedno miejsce" to twierdzenie bez dowodu — dokładnie ten tryb
+porażki, przed którym ta faza chroni.
 
-```text
-/vc-canary
-```
+Sklasyfikuj każdą konkurującą parę:
 
-Worker:
+| Werdykt                | Znaczenie                                                          |
+| ---------------------- | ------------------------------------------------------------------ |
+| `SAME_SOURCE_OF_TRUTH` | oba sprowadzają się do jednej władzy; brak konkurencji             |
+| `INTENTIONAL_VARIANT`  | legalna równoległość (np. runtime vs replay) — granica udowodniona |
+| `DRIFTED_DUPLICATE`    | zaczęły równo, semantyka się rozjechała                            |
+| `BYPASS_PATH`          | druga ścieżka omija władzę na części wejść                         |
+| `FALSE_PARALLEL`       | wyglądało na równoległe strukturalnie; dowody to rozpuściły        |
 
-```bash
-vibecrafted canary claude --prompt 'Catalog this repo; agent pin default if unset'
-```
+Wagę runtime oznacz legendą:
 
-## Pipeline
+- 🔥 bezpośrednia kolizja w codziennym runtime
+- ⚠ ta sama odpowiedzialność w innym etapie lub trybie
+- ◌ konkurent offline/testowy/alternatywny
 
-1. **ORIENT** — `loct auto` (via `atlas --refresh`); coverage receipt.
-2. **SENSE** — read `repo-atlas.json` + `planes_hint` + hubs; **you** write
-   `./.loctree/canary/scopes.json` and one brief per scope
-   (`scopes/<id>.brief.md`). N is **not fixed** — e.g. `core`, `macos`,
-   `Makefile`, `scripts`.
-3. **FLEET** — 1 agent = 1 scope. Hybrid: N≤8 native; N>8 external.
-   Agent pin: user; else session defaults (claude Sonnet 5 / codex gpt-5.6-terra /
-   grok-4.5). Await = **session wake** ([await-arming](../vc-dispatch/references/await-arming.md)).
-4. **SETTLE** — merge catalogs; `diff-audit` (**no auto-revert** — examine why,
-   ask operator); compile/lint via plugin; **one** commit.
-5. **FINDINGS** — notes signals × `loct follow` / findings.json; only confirmed.
-6. **REPORT → DISCUSS → DECIDE** — no silent memex/aicx seed.
+## Phase III — Polaryzacja ownership
 
-## Utility scripts
+`loct prism` na ujęciach osi + ręczne rozstrzygnięcie. Dla każdej osi:
+ile miejsc może odpowiedzieć na pytanie runtime; kto jest **writerem**,
+kto **arbitrem**, kto **obserwatorem**, kto **projekcją**. Findingi rodzą
+się tutaj — nigdzie wcześniej — i każdy niesie klasyfikację:
+
+| Klasa          | Znaczenie                                                  |
+| -------------- | ---------------------------------------------------------- |
+| `CUT_BLOCKER`  | zatruwa codzienny runtime; blokuje planowane cuty          |
+| `CUT_COHERENT` | naprawa naturalnie składa się w już zaplanowany cut        |
+| `FOLLOW_UP`    | realne, niepilne; idzie do backlogu z dowodami             |
+| `OBSERVATION`  | wielowładza udowodniona jako legalna lub uśpiona; obserwuj |
+
+## Schemat dowodowy (per finding)
+
+Oś · konkurenci (`file:line`, LOC) · walczące symbole · werdykt pary ·
+znak legendy · klasyfikacja · dowód (wyjścia loct cytowane per organ) ·
+pokwitowanie falsyfikacji nieobecności (linia literal coverage). Finding
+bez któregokolwiek elementu jest kandydatem, nie findingiem.
+
+## Kontrakt journala
+
+Append-only `./.loctree/canary/JOURNAL.md` w docelowym repo. Każdy
+przebieg dopisuje: SHA HEAD, pokwitowania Phase 0, zbadane osie, findingi
+z dowodami, wyniki prism. Przebiegi nigdy nie nadpisują historii —
+journal pokazuje, co radar widział _na tym SHA_, nawet gdy późniejszy
+przebieg wie lepiej.
+
+## Report → discuss → decide (stop QC)
+
+Canary nie mutuje **żadnego kodu** i niczego nie sieje po cichu do
+memex/aicx. Wyjściem jest wpis w journalu + raport dla operatora. Decyzje
+tronowe, plany cięć i usunięcia dzieją się po dyskusji, we własnych
+skillach, z dowodami canary w załączniku. Test akceptacyjny każdej zmiany
+canary: przebieg na znanym studium przypadku i odtworzenie wcześniej
+ręcznych findingów **bez podpowiadania, gdzie patrzeć**.
+
+## Tryb floty (duże repozytoria)
+
+Jeden agent na oś (albo na scope karmiący osie), zmienne N z Phase I —
+nigdy stała liczba. Hybryda: N≤8 natywnie; N>8 zewnętrznie przez
+[await-arming](../../vc-dispatch/references/await-arming.md). Szablon
+briefu per-scope:
+[references/canary-agent-brief.md](../../vc-canary/references/canary-agent-brief.md).
+Pin agenta: user; inaczej ten launcher, który żyje w sesji, w kolejności
+`claude` · `codex` · `grok`.
+
+## Skrypty pomocnicze
 
 ```bash
 CLI="uv run --python 3.12 …/vc-canary/scripts/canary_cli.py"
@@ -89,41 +182,41 @@ CLI="uv run --python 3.12 …/vc-canary/scripts/canary_cli.py"
 $CLI snapshot-path --root .
 $CLI repo-view --root .
 $CLI atlas --root . --refresh
-$CLI merge-catalog --root .
-$CLI diff-audit --root .
 $CLI coverage --root .
 ```
 
-All writes go under `./.loctree/` (atlas + canary). Status on stdout; data in files.
+Wszystkie zapisy idą pod `./.loctree/` (atlas + canary). Status na stdout;
+dane w plikach.
 
-## Dependencies
+## Zależności
 
-| Skill / tool                | Why                             |
-| --------------------------- | ------------------------------- |
-| `loct` / loctree            | snapshot + repo-view + findings |
-| `vc-loctree`                | structural doctrine             |
-| `vc-dispatch` await-arming  | fleet wake, not log files       |
-| `vc-delegate` / `vc-agents` | hybrid native vs external       |
+| Skill / narzędzie           | Po co                                |
+| --------------------------- | ------------------------------------ |
+| `loct` / loctree            | snapshot, organy, prism, occurrences |
+| `vc-loctree`                | doktryna strukturalna                |
+| `vc-dispatch` await-arming  | budzenie floty, nie pliki logów      |
+| `vc-delegate` / `vc-agents` | hybryda natywni vs zewnętrzni        |
 
-## Agent pin defaults (when user silent)
+## Częste błędy
 
-Prefer whichever launcher is live in the session, in order:
-`claude` (Sonnet 5 class) · `codex` (gpt-5.6-terra class) · `grok` (grok-4.5).
+- Traktowanie każdej wielowładzy jako defektu (`INTENTIONAL_VARIANT`
+  z udowodnioną granicą to zdrowa odpowiedź)
+- Proponowanie refaktorów albo tronów wewnątrz przebiegu canary
+- Twierdzenie o nieobecności z wyszukiwania semantycznego bez literal
+  coverage
+- Raport na nieświeżym snapshocie albo ignorowanie stanu dirty/worktree
+- Nadpisywanie journala zamiast dopisywania
+- Używanie `loct-context-full.json` jako inwentarza plików
+- Stała liczba agentów zamiast osi z Phase I
 
-## Common mistakes
+## Weryfikacja przed handoffem
 
-- Using `loct-context-full.json` as the file inventory
-- Fixed agent count instead of scopes from sense
-- `( await > file ) &` false-armed await
-- Auto-revert on bad canary diff
-- Codescribe-style catalog without `role` / `authority` (Rust plugin must enforce)
-
-## Verify before the handoff
-
-See [VERIFICATION_RULE.md](../VERIFICATION_RULE.md). Green gates ≠ useful catalog.
-Coverage `pass: true` and non-empty inventory required before fleet.
+Patrz [VERIFICATION_RULE.md](../VERIFICATION_RULE.md). Zielone bramki ≠
+prawdziwy radar. Wymagane: coverage `pass: true`, każdy finding z pełnym
+schematem dowodowym i dopisany (nigdy przepisany) wpis w journalu.
 
 ---
 
-_Playbook evidence: canary-sweep rev2 + codescribe/vibecrafted field runs 2026-08-09.
-Skill-first atlas dogfoods loctree organs before native `loct atlas`._
+_Dowód polowy v2: 5 pojęć identity, 5 źródeł settings, 20 aktywnych
+uczestników między przechwyceniem a delivery — znalezione tym protokołem
+w produkcyjnym systemie zbudowanym przez agentów, 2026-08._

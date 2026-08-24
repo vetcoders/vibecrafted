@@ -1,27 +1,26 @@
-# `vc-canary` Flow
+# Przepływ `vc-canary`
 
 ```mermaid
 flowchart TD
-  A[$PWD] --> B[loct auto + canary_cli atlas]
+  A[$PWD] --> B[Phase 0: HEAD + dirty + worktrees + atlas --refresh]
   B --> C{coverage pass?}
   C -->|no| D[STOP + loctree-fail hak]
-  C -->|yes| E[SENSE: planes_hint + hubs → scopes.json]
-  E --> F[Fleet: 1 agent per scope]
-  F --> G[merge-catalog + diff-audit]
-  G --> H{suspicious deletions?}
-  H -->|yes| I[examine why + AskUser — no revert]
-  H -->|no| J[gates + one commit]
-  I --> J
-  J --> K[findings cross-check]
-  K --> L[report → discuss → decide]
+  C -->|yes| E[Phase I: repo-view / focus / twins / crowd / hotspots]
+  E --> F[candidate decision axes]
+  F --> G[Phase II: per axis — find --discover → occurrences → body → slice → follow]
+  G --> H[pair verdicts: SAME / VARIANT / DRIFTED / BYPASS / FALSE]
+  H --> I[Phase III: prism + writer/arbiter/observer/projection]
+  I --> J[findings: CUT_BLOCKER / CUT_COHERENT / FOLLOW_UP / OBSERVATION]
+  J --> K[append .loctree/canary/JOURNAL.md]
+  K --> L[report → discuss → decide — no code mutation]
 ```
 
 ## Kontrakt faz
 
-| Faza     | Pytanie                                 | Wyjście                          |
-| -------- | --------------------------------------- | -------------------------------- |
-| Atlas    | Czy inwentarz jest kompletny z receipt? | `.loctree/atlas/*`               |
-| Sense    | Które planes?                           | `scopes.json` + briefy           |
-| Fleet    | Czy każdy scope dowiózł katalog?        | `catalogs/<id>.json`             |
-| Settle   | Czy można bezpiecznie commitować?       | jeden commit albo hold operatora |
-| Findings | Co jest potwierdzonym sygnałem?         | `findings.json` + raport         |
+| Faza | Pytanie                                                     | Wyjście                                  |
+| ---- | ----------------------------------------------------------- | ---------------------------------------- |
+| 0    | Czy drzewo jest świeże i w pełni pokryte, z pokwitowaniami? | zapis HEAD/dirty/worktree + atlas        |
+| I    | Które klasy prawdy mogą mieć >1 autora?                     | kandydackie osie decyzji                 |
+| II   | Gdzie każda decyzja naprawdę żyje — udowodnione?            | werdykty par + falsyfikacja nieobecności |
+| III  | Kto jest writerem / arbitrem / obserwatorem / projekcją?    | sklasyfikowane findingi + wynik prism    |
+| QC   | Co decyduje operator?                                       | dopisany wpis journala + raport          |
