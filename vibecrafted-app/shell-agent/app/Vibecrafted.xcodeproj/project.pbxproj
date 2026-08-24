@@ -165,6 +165,7 @@
 				};
 			};
 			buildConfigurationList = 562EBA724EB39ABF14AC75F6 /* Build configuration list for PBXProject "Vibecrafted" */;
+			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -174,7 +175,6 @@
 			mainGroup = 3907FEAC328882CF9D256BA5;
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
-			productRefGroup = 7C875D8B1DE1322A5D94E60B /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
