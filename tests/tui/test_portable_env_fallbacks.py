@@ -29,7 +29,9 @@ def test_install_foundations_check_falls_back_to_home_without_vibecrafted_root(
 
     env = os.environ.copy()
     env["HOME"] = str(home)
-    env["PATH"] = BASE_PATH
+    # This test's world has NO loctree anywhere; a host with brew-installed
+    # loct in /opt/homebrew/bin must not satisfy the suite probe.
+    env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
     env.pop("VIBECRAFTED_ROOT", None)
     env.pop("VIBECRAFTED_HOME", None)
     env.pop("VIBECRAFTED_BIN", None)
