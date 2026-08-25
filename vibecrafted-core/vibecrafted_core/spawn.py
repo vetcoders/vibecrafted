@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import threading
@@ -81,6 +82,8 @@ class InteractiveWorkspaceLaunch:
     vibecrafted_session_id: str
     meta_path: Path
     receipt: dict[str, Any]
+    worktree_manager: Any | None = field(default=None, repr=False, compare=False)
+    worktree_geometry: Any | None = field(default=None, repr=False, compare=False)
 
 
 _PERMISSION_CONTRACT: dict[str, dict[str, tuple[tuple[str, ...], str] | None]] = {
@@ -340,6 +343,7 @@ def prepare_interactive_workspace_launch(
     run_id: str | None = None,
     executable: str | None = None,
     worker_pid: int | None = None,
+    publish: bool = True,
 ) -> InteractiveWorkspaceLaunch:
     """Resolve identity/root and publish truth only after launch preparation succeeds."""
     decision = resolve_provider_policy(provider, runtime, permissions, "interactive")
@@ -382,10 +386,12 @@ def prepare_interactive_workspace_launch(
         prompt_path.parent.mkdir(parents=True, exist_ok=True)
         prompt_path.write_text(prompt, encoding="utf-8")
         meta_path = run_dir / "meta.json"
+        owner_pid = int(worker_pid or os.getpid())
         receipt: dict[str, Any] = {
             "created_at": now_iso,
             "updated_at": now_iso,
-            "status": "active",
+            "started_at": now_iso,
+            "status": "active" if publish else "prepared",
             "run_id": effective_run_id,
             "agent": provider,
             "skill": "init",
@@ -396,25 +402,30 @@ def prepare_interactive_workspace_launch(
             "parent_root": str(parent),
             "effective_worktree_path": str(effective) if geometry else "",
             "input": str(prompt_path),
-            "worker_pid": int(worker_pid or os.getpid()),
-            "launcher_pid": int(worker_pid or os.getpid()),
-            "liveness": "active",
+            "owner_pid": owner_pid,
+            "launcher_pid": owner_pid,
+            "liveness": "active" if publish else "prepared",
             "executable": str(Path(resolved_executable).expanduser()),
             **identity.to_meta_fields(),
         }
+        if publish:
+            # Compatibility for direct preparation callers. The real interactive
+            # owner replaces this with the provider child PID after Popen succeeds.
+            receipt["worker_pid"] = owner_pid
         if geometry is not None:
             receipt.update(
                 branch=geometry.branch,
                 baseline_sha=geometry.baseline_sha,
                 artifact_path=geometry.artifact_path,
             )
-        _write_meta(meta_path, receipt)
-        append_event(
-            "lifecycle:active",
-            effective_run_id,
-            "interactive Agent Workspace is live",
-            {**receipt, "meta": str(meta_path), "identity_required": True},
-        )
+        if publish:
+            _write_meta(meta_path, receipt)
+            append_event(
+                "lifecycle:active",
+                effective_run_id,
+                "interactive Agent Workspace is live",
+                {**receipt, "meta": str(meta_path), "identity_required": True},
+            )
     except Exception:
         if manager is not None and geometry is not None:
             try:
@@ -439,6 +450,8 @@ def prepare_interactive_workspace_launch(
         vibecrafted_session_id=identity.vibecrafted_session_id,
         meta_path=meta_path,
         receipt=receipt,
+        worktree_manager=manager,
+        worktree_geometry=geometry,
     )
 
 
@@ -455,8 +468,8 @@ def launch_interactive_workspace(
     runtime: str,
     permissions: str,
     root: str | os.PathLike[str],
-) -> None:
-    """Prepare one workspace, then replace this process with the Agent TTY."""
+) -> int:
+    """Own one provider child while preserving the inherited interactive TTY."""
     command = interactive_policy_command(provider, prompt, runtime, permissions)
     child_env = os.environ.copy()
     resolved = _resolve_agent_command(provider, command, child_env)
@@ -467,7 +480,7 @@ def launch_interactive_workspace(
         selected_root=root,
         prompt=prompt,
         executable=resolved[0],
-        worker_pid=os.getpid(),
+        publish=False,
     )
     child_env.update(
         {
@@ -483,24 +496,183 @@ def launch_interactive_workspace(
         }
     )
     try:
-        os.chdir(launch.effective_root)
-        os.execvpe(resolved[0], resolved, child_env)
-    except OSError as exc:
-        receipt = {
-            **launch.receipt,
-            "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-            "status": "failed",
-            "liveness": "failed",
-            "error": str(exc),
-        }
-        _write_meta(launch.meta_path, receipt)
-        append_event(
-            "lifecycle:failed",
-            launch.run_id,
-            "interactive Agent Workspace exec failed",
-            {**receipt, "meta": str(launch.meta_path)},
+        # Omitting stdin/stdout/stderr is the contract: the provider inherits the
+        # wrapper's exact descriptors and controlling terminal. No PTY broker,
+        # pipe, or terminal-text parser sits between the User and provider.
+        child = subprocess.Popen(
+            resolved,
+            cwd=launch.effective_root,
+            env=child_env,
+        )
+    except (OSError, ValueError) as exc:
+        cleanup = _cleanup_unspawned_interactive_launch(launch)
+        _terminalize_interactive_launch(
+            launch,
+            launch.receipt,
+            status="failed",
+            exit_code=2,
+            terminal_reason="child_spawn_failed",
+            error=str(exc),
+            extra={"prepared_worktree_cleanup": cleanup},
         )
         raise
+
+    now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+    receipt = {
+        **launch.receipt,
+        "updated_at": now_iso,
+        "spawned_at": now_iso,
+        "status": "active",
+        "liveness": "active",
+        "owner_pid": os.getpid(),
+        "launcher_pid": os.getpid(),
+        "worker_pid": child.pid,
+    }
+    received_signal: list[int] = []
+    previous_handlers: dict[int, Any] = {}
+
+    def _forward_owner_signal(signum: int, _frame: Any) -> None:
+        if not received_signal:
+            received_signal.append(signum)
+        if child.poll() is None:
+            try:
+                child.send_signal(signum)
+            except ProcessLookupError:
+                pass
+
+    if threading.current_thread() is threading.main_thread():
+        for signum in (
+            signal.SIGINT,
+            signal.SIGTERM,
+            getattr(signal, "SIGHUP", signal.SIGTERM),
+        ):
+            if signum in previous_handlers:
+                continue
+            previous_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, _forward_owner_signal)
+
+    # Publish the mandatory roles immediately after successful child creation.
+    # Stronger process fingerprints are a subsequent best-effort enrichment.
+    _write_meta(launch.meta_path, receipt)
+    append_event(
+        "lifecycle:active",
+        launch.run_id,
+        "interactive Agent Workspace provider child is live",
+        {**receipt, "meta": str(launch.meta_path), "identity_required": True},
+    )
+    try:
+        from .process_control import process_identity_receipt
+
+        owner_identity = process_identity_receipt(os.getpid(), run_id=launch.run_id)
+        worker_identity = process_identity_receipt(child.pid, run_id=launch.run_id)
+        if owner_identity is not None:
+            receipt["owner_identity"] = owner_identity
+        if worker_identity is not None:
+            receipt["worker_identity"] = worker_identity
+        _write_meta(launch.meta_path, receipt)
+    except (OSError, RuntimeError, ValueError):
+        # PID + role truth remains mandatory; stronger identity is best-effort
+        # because a deterministic fast-exit provider may already be terminal.
+        pass
+    try:
+        provider_returncode = child.wait()
+    except Exception as exc:
+        if child.poll() is None:
+            child.terminate()
+            child.wait()
+        _terminalize_interactive_launch(
+            launch,
+            receipt,
+            status="failed",
+            exit_code=1,
+            terminal_reason="wrapper_exception",
+            error=str(exc),
+        )
+        raise
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+
+    shell_status = (
+        128 + abs(provider_returncode)
+        if provider_returncode < 0
+        else provider_returncode
+    )
+    if received_signal:
+        owner_signal = received_signal[0]
+        status = "cancelled"
+        terminal_reason = f"owner_signal:{signal.Signals(owner_signal).name}"
+        if shell_status == 0:
+            shell_status = 128 + owner_signal
+    elif provider_returncode < 0:
+        status = "cancelled"
+        terminal_reason = (
+            f"provider_signal:{signal.Signals(abs(provider_returncode)).name}"
+        )
+    elif provider_returncode == 0:
+        status = "completed"
+        terminal_reason = "provider_exit_zero"
+    else:
+        status = "failed"
+        terminal_reason = "provider_exit_nonzero"
+    _terminalize_interactive_launch(
+        launch,
+        receipt,
+        status=status,
+        exit_code=shell_status,
+        terminal_reason=terminal_reason,
+        exit_signal=abs(provider_returncode) if provider_returncode < 0 else None,
+    )
+    return shell_status
+
+
+def _cleanup_unspawned_interactive_launch(launch: InteractiveWorkspaceLaunch) -> str:
+    """Remove only the clean worktree prepared for a child that never existed."""
+    if launch.worktree_manager is None or launch.worktree_geometry is None:
+        return "not-applicable"
+    try:
+        return str(
+            launch.worktree_manager.cleanup(launch.worktree_geometry, settled=True)
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        return f"preserved:{exc}"
+
+
+def _terminalize_interactive_launch(
+    launch: InteractiveWorkspaceLaunch,
+    receipt: dict[str, Any],
+    *,
+    status: str,
+    exit_code: int,
+    terminal_reason: str,
+    exit_signal: int | None = None,
+    error: str = "",
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Atomically terminalize the same interactive receipt and event identity."""
+    completed_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    terminal = {
+        **receipt,
+        "updated_at": completed_at,
+        "completed_at": completed_at,
+        "status": status,
+        "liveness": "terminal",
+        "exit_code": int(exit_code),
+        "terminal_reason": terminal_reason,
+        **(extra or {}),
+    }
+    if exit_signal is not None:
+        terminal["exit_signal"] = signal.Signals(exit_signal).name
+    if error:
+        terminal["error"] = error
+    _write_meta(launch.meta_path, terminal)
+    append_event(
+        f"lifecycle:{status}",
+        launch.run_id,
+        f"interactive Agent Workspace terminal: {terminal_reason}",
+        {**terminal, "meta": str(launch.meta_path), "identity_required": True},
+    )
+    return terminal
 
 
 ANSI_PATTERN = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -2183,13 +2355,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "interactive-launch":
         try:
-            launch_interactive_workspace(
+            return launch_interactive_workspace(
                 args.provider, args.prompt, args.runtime, args.permissions, args.root
             )
         except (OSError, RuntimeError, ValueError) as exc:
             print(str(exc), file=sys.stderr)
             return 2
-        return 0
     if args.command == "policy-matrix":
         print(
             json.dumps(

@@ -520,6 +520,9 @@ pub struct RunStatus {
     pub current_loop: Option<i64>,
     #[serde(default)]
     pub total_loops: Option<i64>,
+    /// Explicit Vibecrafted lifecycle owner for supervised interactive runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_pid: Option<i64>,
     /// Durable worker process identity from supervisor metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_pid: Option<i64>,
@@ -1048,6 +1051,7 @@ impl LifecycleRun {
             session_id: String::new(),
             current_loop: None,
             total_loops: None,
+            owner_pid: None,
             worker_pid: None,
             worker_pgid: None,
             worker_alive: None,
@@ -1298,6 +1302,8 @@ pub struct AgentMeta {
     #[serde(default)]
     pub session_id: String,
     #[serde(default, deserialize_with = "de_coerced_int")]
+    pub owner_pid: Option<i64>,
+    #[serde(default, deserialize_with = "de_coerced_int")]
     pub worker_pid: Option<i64>,
     #[serde(default, deserialize_with = "de_coerced_int")]
     pub worker_pgid: Option<i64>,
@@ -1438,6 +1444,7 @@ impl AgentMeta {
             session_id: self.session_id.clone(),
             current_loop: None,
             total_loops: None,
+            owner_pid: self.owner_pid,
             worker_pid: self.worker_pid,
             worker_pgid: self.worker_pgid,
             worker_alive: self.worker_alive,
@@ -1533,6 +1540,7 @@ pub fn merge_status(existing: Option<RunStatus>, incoming: RunStatus) -> RunStat
         session_id: nonempty_or(&preferred.session_id, &other.session_id),
         current_loop: preferred.current_loop.or(other.current_loop),
         total_loops: preferred.total_loops.or(other.total_loops),
+        owner_pid: preferred.owner_pid.or(other.owner_pid),
         worker_pid: preferred.worker_pid.or(other.worker_pid),
         worker_pgid: preferred.worker_pgid.or(other.worker_pgid),
         worker_alive: preferred.worker_alive.or(other.worker_alive),

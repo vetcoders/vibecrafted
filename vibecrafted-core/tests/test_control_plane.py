@@ -710,6 +710,49 @@ def test_sync_state_keeps_run_live_when_worker_alive_despite_dead_launcher(
     assert "recovery_required" not in str(run.get("last_error") or "")
 
 
+@pytest.mark.parametrize(
+    ("owner_pid", "worker_pid", "terminal_reason"),
+    [
+        (999999999, os.getpid(), "owner_pid_gone"),
+        (os.getpid(), 999999999, "provider_pid_gone"),
+    ],
+)
+def test_sync_state_never_projects_interactive_run_live_when_either_role_is_dead(
+    owner_pid: int,
+    worker_pid: int,
+    terminal_reason: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUN_GC_GRACE_SECONDS", "999999999")
+    _write_meta(
+        home,
+        {
+            "run_id": f"interactive-{terminal_reason}",
+            "status": "active",
+            "agent": "codex",
+            "mode": "interactive",
+            "root": str(tmp_path),
+            "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "skill_code": "init",
+            "owner_pid": owner_pid,
+            "worker_pid": worker_pid,
+            "liveness": "active",
+        },
+    )
+
+    snapshot = control_plane.sync_state()
+    run = snapshot["recent_runs"][0]
+
+    assert run["state"] == "failed"
+    assert run["health"] == "final"
+    assert run["liveness"] == "pid_gone"
+    assert run["terminal_reason"] == terminal_reason
+    assert run["run_id"] not in {item["run_id"] for item in snapshot["active_runs"]}
+
+
 def test_sync_state_gc_terminalizes_old_stalled_dead_launcher(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

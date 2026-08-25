@@ -4,9 +4,12 @@ import io
 import itertools
 import json
 import os
+import pty
 import shlex
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -17,10 +20,56 @@ from vibecrafted_core.spawn import (
     RUNTIME_POLICIES,
     interactive_policy_command,
     interactive_workspace_command,
+    launch_interactive_workspace,
     main,
     prepare_interactive_workspace_launch,
     resolve_provider_policy,
 )
+
+
+def _fake_interactive_provider(path: Path) -> None:
+    path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, pathlib, sys, time\n"
+        "capture = pathlib.Path(os.environ['SMOKE_CAPTURE'])\n"
+        "capture.write_text(json.dumps({\n"
+        "  'pid': os.getpid(), 'stdin_tty': os.isatty(0),\n"
+        "  'stdout_tty': os.isatty(1), 'stderr_tty': os.isatty(2),\n"
+        "  'run_id': os.environ['VIBECRAFTED_RUN_ID'],\n"
+        "}) + '\\n', encoding='utf-8')\n"
+        "if os.environ.get('SMOKE_BLOCK') == '1':\n"
+        "  while True: time.sleep(0.05)\n"
+        "raise SystemExit(int(os.environ.get('SMOKE_EXIT', '0')))\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def _wait_for(path: Path, *, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.is_file():
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"timed out waiting for {path}")
+
+
+def _interactive_argv(repo: Path) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "vibecrafted_core.spawn",
+        "interactive-launch",
+        "codex",
+        "--runtime",
+        "local-native",
+        "--permissions",
+        "read-only",
+        "--root",
+        str(repo),
+        "--prompt",
+        "/vc-init",
+    ]
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -202,7 +251,217 @@ def test_interactive_worktree_execs_provider_inside_canonical_checkout(
     assert meta["effective_worktree_path"] == str(effective)
     assert meta["runtime_policy"] == "local-worktrees"
     assert meta["permission_policy"] == "read-only"
-    assert meta["liveness"] == "active"
+    assert meta["status"] == "completed"
+    assert meta["liveness"] == "terminal"
+    assert meta["exit_code"] == 0
+    assert meta["terminal_reason"] == "provider_exit_zero"
+
+
+def test_interactive_owner_keeps_distinct_live_provider_on_inherited_tty(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    _repo(repo)
+    capture = tmp_path / "provider.json"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _fake_interactive_provider(fake_bin / "codex")
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.update(
+        VIBECRAFTED_HOME=str(home),
+        VIBECRAFTED_RUNTIME_BIN=str(fake_bin),
+        SMOKE_CAPTURE=str(capture),
+        SMOKE_BLOCK="1",
+        PATH=str(fake_bin) + os.pathsep + env["PATH"],
+    )
+    master_fd, slave_fd = pty.openpty()
+    owner = subprocess.Popen(
+        _interactive_argv(repo),
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        start_new_session=True,
+    )
+    os.close(slave_fd)
+    try:
+        _wait_for(capture)
+        observed = json.loads(capture.read_text(encoding="utf-8"))
+        meta_path = (
+            home / "control_plane/runtime_runs" / observed["run_id"] / "meta.json"
+        )
+        _wait_for(meta_path)
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        assert observed["stdin_tty"] is True
+        assert observed["stdout_tty"] is True
+        assert observed["stderr_tty"] is True
+        assert meta["owner_pid"] == owner.pid
+        assert meta["worker_pid"] == observed["pid"]
+        assert meta["owner_pid"] != meta["worker_pid"]
+        assert meta["status"] == "active"
+        assert meta["liveness"] == "active"
+        os.kill(meta["owner_pid"], 0)
+        os.kill(meta["worker_pid"], 0)
+        owner.send_signal(signal.SIGTERM)
+        assert owner.wait(timeout=5) == 128 + signal.SIGTERM
+        terminal = json.loads(meta_path.read_text(encoding="utf-8"))
+        assert terminal["status"] == "cancelled"
+        assert terminal["terminal_reason"] == "owner_signal:SIGTERM"
+        with pytest.raises(ProcessLookupError):
+            os.kill(meta["worker_pid"], 0)
+    finally:
+        if owner.poll() is None:
+            owner.kill()
+            owner.wait()
+        os.close(master_fd)
+
+
+def test_interactive_nonzero_exit_terminalizes_and_returns_provider_status(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    _repo(repo)
+    capture = tmp_path / "provider.json"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _fake_interactive_provider(fake_bin / "codex")
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.update(
+        VIBECRAFTED_HOME=str(home),
+        VIBECRAFTED_RUNTIME_BIN=str(fake_bin),
+        SMOKE_CAPTURE=str(capture),
+        SMOKE_EXIT="7",
+        PATH=str(fake_bin) + os.pathsep + env["PATH"],
+    )
+
+    completed = subprocess.run(
+        _interactive_argv(repo),
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        check=False,
+    )
+
+    observed = json.loads(capture.read_text(encoding="utf-8"))
+    meta = json.loads(
+        (
+            home / "control_plane/runtime_runs" / observed["run_id"] / "meta.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert completed.returncode == 7
+    assert meta["status"] == "failed"
+    assert meta["liveness"] == "terminal"
+    assert meta["exit_code"] == 7
+    assert meta["terminal_reason"] == "provider_exit_nonzero"
+
+
+@pytest.mark.parametrize(
+    ("signum", "expected_status"),
+    [(signal.SIGINT, 128 + signal.SIGINT), (signal.SIGTERM, 128 + signal.SIGTERM)],
+)
+def test_interactive_owner_signal_terminalizes_without_surviving_child(
+    signum: int, expected_status: int, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    _repo(repo)
+    capture = tmp_path / "provider.json"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _fake_interactive_provider(fake_bin / "codex")
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.update(
+        VIBECRAFTED_HOME=str(home),
+        VIBECRAFTED_RUNTIME_BIN=str(fake_bin),
+        SMOKE_CAPTURE=str(capture),
+        SMOKE_BLOCK="1",
+        PATH=str(fake_bin) + os.pathsep + env["PATH"],
+    )
+    owner = subprocess.Popen(
+        _interactive_argv(repo),
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        _wait_for(capture)
+        observed = json.loads(capture.read_text(encoding="utf-8"))
+        meta_path = (
+            home / "control_plane/runtime_runs" / observed["run_id"] / "meta.json"
+        )
+        _wait_for(meta_path)
+        owner.send_signal(signum)
+        assert owner.wait(timeout=5) == expected_status
+        terminal = json.loads(meta_path.read_text(encoding="utf-8"))
+        assert terminal["status"] == "cancelled"
+        assert terminal["liveness"] == "terminal"
+        assert terminal["exit_code"] == expected_status
+        assert (
+            terminal["terminal_reason"] == f"owner_signal:{signal.Signals(signum).name}"
+        )
+        with pytest.raises(ProcessLookupError):
+            os.kill(observed["pid"], 0)
+    finally:
+        if owner.poll() is None:
+            owner.kill()
+            owner.wait()
+
+
+def test_child_spawn_failure_publishes_no_false_active_and_removes_clean_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibecrafted_core import spawn
+
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    _repo(repo)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    provider = fake_bin / "codex"
+    _fake_interactive_provider(provider)
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(fake_bin))
+    monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
+    real_prepare = spawn.prepare_interactive_workspace_launch
+    real_popen = spawn.subprocess.Popen
+
+    def prepare_then_break_spawn(*args: object, **kwargs: object):
+        prepared = real_prepare(*args, **kwargs)
+
+        def break_once(*_args: object, **_kwargs: object):
+            monkeypatch.setattr(spawn.subprocess, "Popen", real_popen)
+            raise OSError("spawn denied")
+
+        monkeypatch.setattr(
+            spawn.subprocess,
+            "Popen",
+            break_once,
+        )
+        return prepared
+
+    monkeypatch.setattr(
+        spawn, "prepare_interactive_workspace_launch", prepare_then_break_spawn
+    )
+
+    with pytest.raises(OSError, match="spawn denied"):
+        launch_interactive_workspace(
+            "codex", "/vc-init", "local-worktrees", "read-only", repo
+        )
+
+    meta_path = next((home / "control_plane/runtime_runs").glob("*/meta.json"))
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert meta["status"] == "failed"
+    assert meta["liveness"] == "terminal"
+    assert meta["terminal_reason"] == "child_spawn_failed"
+    assert meta["prepared_worktree_cleanup"] == "removed"
+    assert not Path(meta["effective_worktree_path"]).exists()
+    events = (home / "control_plane/events.jsonl").read_text(encoding="utf-8")
+    assert "lifecycle:active" not in events
 
 
 @pytest.mark.parametrize("kind", ["non-git", "dirty"])

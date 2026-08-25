@@ -460,6 +460,7 @@ impl ControlPlane {
             session_id: value("session_id"),
             current_loop: None,
             total_loops: None,
+            owner_pid: integer("owner_pid"),
             worker_pid: integer("worker_pid"),
             worker_pgid: integer("worker_pgid"),
             worker_alive: boolean("worker_alive"),
@@ -776,6 +777,7 @@ impl ControlPlane {
         events.retain(|event| !event_has_test_provenance(event, &self.home));
         let worker_pid_candidates: HashSet<(String, i64)> = events
             .iter()
+            .filter(|event| event_owner_pid(event).is_none_or(pid_is_alive))
             .flat_map(|event| event_worker_pids(event).map(|pid| (event.run_id.clone(), pid)))
             .collect();
         let live_worker_runs: HashSet<String> = worker_pid_candidates
@@ -816,6 +818,11 @@ impl ControlPlane {
             } else {
                 if run.worker_pid.is_some() || run.worker_pgid.is_some() {
                     run.worker_alive = Some(false);
+                }
+                if run.owner_pid.is_some() && run.worker_alive == Some(false) {
+                    run.health = "stalled".to_string();
+                    run.liveness = "pid_gone".to_string();
+                    run.recovery_required = true;
                 }
             }
             let await_run = !terminal
@@ -1024,6 +1031,11 @@ fn normalize_event(event: &Event, existing: Option<&RunStatus>, now: DateTime<Ut
         .get("worker_pgid")
         .and_then(coerce_int_value)
         .or_else(|| existing.and_then(|run| run.worker_pgid));
+    let owner_pid = event
+        .payload
+        .get("owner_pid")
+        .and_then(coerce_int_value)
+        .or_else(|| existing.and_then(|run| run.owner_pid));
     let payload_error = existing_string(&payload_string("error"), &payload_string("last_error"));
     let last_error = if !payload_error.is_empty() {
         payload_error
@@ -1112,6 +1124,7 @@ fn normalize_event(event: &Event, existing: Option<&RunStatus>, now: DateTime<Ut
         ),
         current_loop: existing.and_then(|run| run.current_loop),
         total_loops: existing.and_then(|run| run.total_loops),
+        owner_pid,
         worker_pid,
         worker_pgid,
         worker_alive: payload_bool("worker_alive")
@@ -1238,6 +1251,10 @@ fn event_worker_pids(event: &Event) -> impl Iterator<Item = i64> + '_ {
         .filter_map(coerce_int_value)
 }
 
+fn event_owner_pid(event: &Event) -> Option<i64> {
+    event.payload.get("owner_pid").and_then(coerce_int_value)
+}
+
 fn pid_is_alive(pid: i64) -> bool {
     if pid <= 0 {
         return false;
@@ -1349,12 +1366,18 @@ fn settlement_tui(value: &str) -> Option<SettlementTui> {
 
 fn enrich_run_status(run: &mut RunStatus, payload: &serde_json::Value, probe_worker_alive: bool) {
     if probe_worker_alive && (run.worker_pid.is_some() || run.worker_pgid.is_some()) {
-        run.worker_alive = Some(
+        let provider_alive =
             [run.worker_pid, run.worker_pgid]
                 .into_iter()
                 .flatten()
-                .any(pid_is_alive),
-        );
+                .any(pid_is_alive);
+        let owner_alive = run.owner_pid.is_none_or(pid_is_alive);
+        run.worker_alive = Some(provider_alive && owner_alive);
+        if run.owner_pid.is_some() && run.worker_alive == Some(false) && !run.is_terminal() {
+            run.health = "stalled".to_string();
+            run.liveness = "pid_gone".to_string();
+            run.recovery_required = true;
+        }
     }
 
     let settlement = payload
@@ -1431,12 +1454,18 @@ fn refresh_worker_liveness(run: &mut RunStatus) {
     if run.worker_pid.is_none() && run.worker_pgid.is_none() {
         return;
     }
-    run.worker_alive = Some(
+    let provider_alive =
         [run.worker_pid, run.worker_pgid]
             .into_iter()
             .flatten()
-            .any(pid_is_alive),
-    );
+            .any(pid_is_alive);
+    let owner_alive = run.owner_pid.is_none_or(pid_is_alive);
+    run.worker_alive = Some(provider_alive && owner_alive);
+    if run.owner_pid.is_some() && run.worker_alive == Some(false) && !run.is_terminal() {
+        run.health = "stalled".to_string();
+        run.liveness = "pid_gone".to_string();
+        run.recovery_required = true;
+    }
     let terminal = run.is_terminal();
     let await_run = !terminal
         && run
@@ -1592,6 +1621,7 @@ fn normalize_lock(path: &Path, now: DateTime<Utc>) -> Option<RunStatus> {
         session_id: String::new(),
         current_loop: None,
         total_loops: None,
+        owner_pid: None,
         worker_pid: None,
         worker_pgid: None,
         worker_alive: None,
@@ -1721,6 +1751,7 @@ impl MarblesState {
             session_id: String::new(),
             current_loop: self.current_loop,
             total_loops: self.total_loops,
+            owner_pid: None,
             worker_pid: None,
             worker_pgid: None,
             worker_alive: None,
@@ -2147,6 +2178,47 @@ mod tests {
         assert_eq!(view.settlement_counts.active, 1);
         assert_eq!(view.settlement_counts.total_settled, 0);
 
+        fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn interactive_owner_and_provider_must_both_be_live_for_active_projection() {
+        let home = temp_home("interactive-owner-liveness");
+        let runtime = home.join("control_plane/runtime_runs/interactive-owner-dead");
+        fs::create_dir_all(&runtime).expect("runtime run");
+        let now = Utc::now();
+        fs::write(
+            runtime.join("meta.json"),
+            serde_json::to_vec(&json!({
+                "run_id": "interactive-owner-dead",
+                "status": "active",
+                "agent": "codex",
+                "skill": "init",
+                "root": "/srv/checkout/vibecrafted",
+                "updated_at": now.to_rfc3339(),
+                "liveness": "active",
+                "owner_pid": 999999999_i64,
+                "worker_pid": std::process::id()
+            }))
+            .expect("meta json"),
+        )
+        .expect("meta");
+
+        let view = ControlPlane::new(&home).compute_view(now);
+        let run = view
+            .recent_runs
+            .iter()
+            .find(|run| run.run_id == "interactive-owner-dead")
+            .expect("interactive run remains inspectable");
+
+        assert_eq!(run.owner_pid, Some(999999999));
+        assert_eq!(run.worker_alive, Some(false));
+        assert!(
+            view.active_runs
+                .iter()
+                .all(|run| run.run_id != "interactive-owner-dead")
+        );
+        assert_eq!(view.settlement_counts.active, 0);
         fs::remove_dir_all(home).ok();
     }
 
