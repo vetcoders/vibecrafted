@@ -994,16 +994,19 @@ cmd_init_help() {
   printf '  Start an interactive repository orientation session with an agent.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted init [claude|codex|agy|junie|grok] [--runtime terminal|visible|plain] [--prompt "<context>"]\n'
+  printf '  vibecrafted init [claude|codex|agy|junie|grok] [--runtime terminal|visible|plain] [--policy-runtime local-native|local-worktrees|local-vm|cloud-soon] [--permissions bypass|auto|accept-edits|read-only] [--prompt "<context>"]\n'
   printf '  vc-init [claude|codex|agy|junie|grok]\n'
   printf '\n'
   printf '%bRuntime:%b\n' "$_bold" "$_reset"
   printf '  terminal  (default) open a tab in the vc-frame cockpit; falls back to plain when vc-frame is absent\n'
   printf '  plain     start the agent in this terminal, no cockpit needed\n'
+  printf '  Policy runtime defaults to local-native; unavailable runtimes fail closed.\n'
+  printf '  Permission support is provider-specific; unsupported cells are rejected.\n'
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted init claude\n'
   printf '  vibecrafted init claude --runtime plain\n'
+  printf '  vibecrafted init claude --runtime plain --policy-runtime local-native --permissions accept-edits\n'
   printf '  vc-init codex\n'
   printf '\n'
 }

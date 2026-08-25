@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import inspect
 import json
 import os
 import re
 import shlex
 import subprocess
+import sys
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -31,6 +33,247 @@ from .settlement import BareMarkdownError, require_bound_markdown
 from .telemetry import estimate_cost_usd
 
 EventCallback = Callable[[dict[str, Any]], None]
+
+POLICY_PROVIDERS = ("codex", "claude", "agy", "grok", "junie")
+RUNTIME_POLICIES = ("local-native", "local-worktrees", "local-vm", "cloud-soon")
+PERMISSION_POLICIES = ("bypass", "auto", "accept-edits", "read-only")
+POLICY_MODES = ("interactive", "headless")
+
+
+@dataclass(frozen=True)
+class ProviderPolicy:
+    """Canonical provider/runtime/permission decision shared by CLI and UI."""
+
+    provider: str
+    runtime: str
+    permissions: str
+    mode: str
+    supported: bool
+    flags: tuple[str, ...] = ()
+    behavior: str = ""
+    reason: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "runtime": self.runtime,
+            "permissions": self.permissions,
+            "mode": self.mode,
+            "supported": self.supported,
+            "status": "SUPPORTED" if self.supported else "UNSUPPORTED",
+            "flags": list(self.flags),
+            "behavior": self.behavior,
+            "reason": self.reason,
+        }
+
+
+_PERMISSION_CONTRACT: dict[str, dict[str, tuple[tuple[str, ...], str] | None]] = {
+    "codex": {
+        "bypass": (
+            ("--dangerously-bypass-approvals-and-sandbox",),
+            "all actions bypass approval and sandbox",
+        ),
+        "auto": (
+            ("--ask-for-approval", "on-request", "--sandbox", "workspace-write"),
+            "provider requests approval when needed",
+        ),
+        "accept-edits": None,
+        "read-only": (
+            ("--ask-for-approval", "never", "--sandbox", "read-only"),
+            "writes and escalations fail closed",
+        ),
+    },
+    "claude": {
+        "bypass": (
+            ("--permission-mode", "bypassPermissions"),
+            "all actions bypass permission prompts",
+        ),
+        "auto": (
+            ("--permission-mode", "auto"),
+            "provider selects when to request permission",
+        ),
+        "accept-edits": (
+            ("--permission-mode", "acceptEdits"),
+            "edits pass; other actions require permission and fail closed without an operator",
+        ),
+        "read-only": (
+            ("--permission-mode", "plan"),
+            "plan mode prevents edits and execution",
+        ),
+    },
+    "agy": {
+        "bypass": (
+            ("--dangerously-skip-permissions",),
+            "all actions bypass permission prompts",
+        ),
+        "auto": ((), "provider default permission prompts remain active"),
+        "accept-edits": (
+            ("--mode", "accept-edits"),
+            "edits pass; other actions require permission and fail closed without an operator",
+        ),
+        "read-only": (("--mode", "plan"), "plan mode prevents edits and execution"),
+    },
+    "grok": {
+        "bypass": (
+            ("--permission-mode", "bypassPermissions"),
+            "all actions bypass permission prompts",
+        ),
+        "auto": (
+            ("--permission-mode", "auto"),
+            "provider selects when to request permission",
+        ),
+        "accept-edits": (
+            ("--permission-mode", "acceptEdits"),
+            "edits pass; other actions require permission and fail closed without an operator",
+        ),
+        "read-only": (
+            ("--permission-mode", "plan"),
+            "plan mode prevents edits and execution",
+        ),
+    },
+    "junie": {
+        "bypass": (("--brave",), "interactive brave mode bypasses confirmations"),
+        "auto": ((), "provider default permission prompts remain active"),
+        "accept-edits": None,
+        "read-only": (
+            ("--plan",),
+            "interactive plan mode prevents edits and execution",
+        ),
+    },
+}
+
+
+def resolve_provider_policy(
+    provider: str,
+    runtime: str,
+    permissions: str,
+    mode: str,
+) -> ProviderPolicy:
+    """Resolve one policy cell without approximating unsupported semantics."""
+    if provider not in POLICY_PROVIDERS:
+        raise ValueError(f"unsupported provider: {provider}")
+    if runtime not in RUNTIME_POLICIES:
+        raise ValueError(f"unsupported runtime policy: {runtime}")
+    if permissions not in PERMISSION_POLICIES:
+        raise ValueError(f"unsupported permission policy: {permissions}")
+    if mode not in POLICY_MODES:
+        raise ValueError(f"unsupported policy mode: {mode}")
+    if runtime == "cloud-soon":
+        return ProviderPolicy(
+            provider,
+            runtime,
+            permissions,
+            mode,
+            False,
+            reason="cloud runtime is coming soon",
+        )
+    if runtime == "local-vm":
+        return ProviderPolicy(
+            provider,
+            runtime,
+            permissions,
+            mode,
+            False,
+            reason="Docker/Colima may be present, but canonical init has no VM entrypoint",
+        )
+    if runtime == "local-worktrees":
+        return ProviderPolicy(
+            provider,
+            runtime,
+            permissions,
+            mode,
+            False,
+            reason="git dispatch manages worktrees, but canonical init has no worktree cut contract",
+        )
+    cell = _PERMISSION_CONTRACT[provider][permissions]
+    if cell is None:
+        return ProviderPolicy(
+            provider,
+            runtime,
+            permissions,
+            mode,
+            False,
+            reason=f"{provider} exposes no native {permissions} policy",
+        )
+    if (
+        provider == "junie"
+        and mode == "headless"
+        and permissions in {"bypass", "read-only"}
+    ):
+        return ProviderPolicy(
+            provider,
+            runtime,
+            permissions,
+            mode,
+            False,
+            reason=f"junie {permissions} is interactive-only",
+        )
+    flags, behavior = cell
+    return ProviderPolicy(provider, runtime, permissions, mode, True, flags, behavior)
+
+
+def runtime_policy_capabilities(provider: str) -> dict[str, dict[str, Any]]:
+    """Report host substrate separately from canonical-launcher availability."""
+    provider_found = which(provider, path=agent_tool_search_path()) is not None
+    git_found = which("git") is not None
+    try:
+        from .dispatch.supervisor import run_dispatch
+
+        dispatch_manages_worktrees = (
+            "manage_worktrees" in inspect.signature(run_dispatch).parameters
+        )
+    except (ImportError, ValueError):
+        dispatch_manages_worktrees = False
+    worktree_substrate = git_found and dispatch_manages_worktrees
+    vm_found = which("docker") is not None or which("colima") is not None
+    return {
+        "local-native": {
+            "available": provider_found,
+            "reason": "" if provider_found else f"{provider} executable not found",
+        },
+        "local-worktrees": {
+            "available": False,
+            "substrate": worktree_substrate,
+            "reason": "no canonical init worktree cut"
+            if worktree_substrate
+            else "git/dispatch manage_worktrees unavailable",
+        },
+        "local-vm": {
+            "available": False,
+            "substrate": vm_found,
+            "reason": "no canonical VM entrypoint"
+            if vm_found
+            else "Docker/Colima is not detected",
+        },
+        "cloud-soon": {"available": False, "reason": "coming soon"},
+    }
+
+
+def interactive_policy_command(
+    provider: str, prompt: str, runtime: str, permissions: str
+) -> list[str]:
+    """Build one interactive argv from the canonical policy decision."""
+    decision = resolve_provider_policy(provider, runtime, permissions, "interactive")
+    if not decision.supported:
+        raise ValueError(decision.reason)
+    flags = list(decision.flags)
+    if provider == "claude":
+        return ["claude", "--verbose", *flags, prompt]
+    if provider == "codex":
+        return ["codex", *flags, prompt]
+    if provider == "agy":
+        return ["agy", *flags, "--add-dir", ".", "--prompt-interactive", prompt]
+    if provider == "junie":
+        return [
+            "junie",
+            *flags,
+            f"--prompt={prompt}",
+            "--project=.",
+            "--skip-update-check",
+            "--use-local-cache",
+        ]
+    return ["grok", "--cwd", ".", *flags, "--no-alt-screen", prompt]
+
 
 ANSI_PATTERN = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 SESSION_PATTERNS = (
@@ -156,22 +399,28 @@ def _default_command(agent: str, prompt: str) -> list[str]:
             "Use 'vibecrafted workflow agy --prompt ...' (or agy in other launchers). "
             "No execution path may launch the gemini binary."
         )
+    policy = resolve_provider_policy(
+        agent, "local-native", "auto" if agent == "junie" else "bypass", "headless"
+    )
+    if not policy.supported:
+        raise ValueError(policy.reason)
+    flags = list(policy.flags)
     if agent == "claude":
         return [
             "claude",
             "--print",
             "--verbose",
-            "--dangerously-skip-permissions",
+            *flags,
             prompt,
         ]
     if agent == "codex":
-        return ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", prompt]
+        return ["codex", "exec", *flags, prompt]
     if agent == "agy":
         # agy >= 1.1: --print takes the prompt as its value (Go flags) and
         # print mode does not read stdin; flags must precede it.
         return [
             "agy",
-            "--dangerously-skip-permissions",
+            *flags,
             "--add-dir",
             ".",
             "--print-timeout",
@@ -180,14 +429,21 @@ def _default_command(agent: str, prompt: str) -> list[str]:
             prompt,
         ]
     if agent == "junie":
-        return ["junie", "--task", prompt, "--project", ".", "--skip-update-check"]
+        return [
+            "junie",
+            *flags,
+            "--task",
+            prompt,
+            "--project",
+            ".",
+            "--skip-update-check",
+        ]
     if agent == "grok":
         return [
             "grok",
             "--cwd",
             ".",
-            "--permission-mode",
-            "bypassPermissions",
+            *flags,
             "--no-alt-screen",
             "--single",
             prompt,
@@ -202,6 +458,18 @@ def _stdin_command(agent: str) -> list[str]:
     on stdin so they do not leak through ps(1) or hit ARG_MAX.
     """
 
+    if agent == "gemini":
+        raise ValueError(
+            "gemini CLI is deprecated. Google Antigravity CLI (agy) is the replacement. "
+            "Use 'vibecrafted workflow agy --prompt ...' (or agy in other launchers). "
+            "No execution path may launch the gemini binary."
+        )
+    policy = resolve_provider_policy(
+        agent, "local-native", "auto" if agent == "junie" else "bypass", "headless"
+    )
+    if not policy.supported:
+        raise ValueError(policy.reason)
+    flags = list(policy.flags)
     if agent == "claude":
         return [
             "claude",
@@ -209,22 +477,16 @@ def _stdin_command(agent: str) -> list[str]:
             "--output-format",
             "stream-json",
             "--verbose",
-            "--dangerously-skip-permissions",
+            *flags,
         ]
     if agent == "codex":
         return [
             "codex",
             "exec",
             "--json",
-            "--dangerously-bypass-approvals-and-sandbox",
+            *flags,
             "-",
         ]
-    if agent == "gemini":
-        raise ValueError(
-            "gemini CLI is deprecated. Google Antigravity CLI (agy) is the replacement. "
-            "Use 'vibecrafted workflow agy --prompt ...' (or agy in other launchers). "
-            "No execution path may launch the gemini binary."
-        )
     if agent == "agy":
         # agy >= 1.1 print mode reads no stdin and --print requires a value;
         # a shell shim folds stdin into the flag. The prompt lands on the
@@ -233,7 +495,7 @@ def _stdin_command(agent: str) -> list[str]:
             "bash",
             "-c",
             (
-                "agy --dangerously-skip-permissions --add-dir . "
+                f"agy {shlex.join(flags)} --add-dir . "
                 '--print-timeout 30m --print "$(cat)"'
             ),
         ]
@@ -253,8 +515,7 @@ def _stdin_command(agent: str) -> list[str]:
             "grok",
             "--cwd",
             ".",
-            "--permission-mode",
-            "bypassPermissions",
+            *flags,
             "--no-alt-screen",
             "--output-format",
             "streaming-json",
@@ -1595,6 +1856,15 @@ def _build_parser() -> argparse.ArgumentParser:
     finish.add_argument("meta")
     finish.add_argument("status")
     finish.add_argument("exit_code", nargs="?", default="0")
+    policy = sub.add_parser(
+        "policy-command", help="Resolve the canonical interactive provider policy."
+    )
+    policy.add_argument("provider", choices=POLICY_PROVIDERS)
+    policy.add_argument("--runtime", choices=RUNTIME_POLICIES, default="local-native")
+    policy.add_argument("--permissions", choices=PERMISSION_POLICIES, default="bypass")
+    sub.add_parser(
+        "policy-matrix", help="Print the complete provider policy matrix as JSON."
+    )
     return parser
 
 
@@ -1637,6 +1907,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             agent=args.agent,
             skill=args.skill,
             claim_digest=os.environ.get(CLAIM_DIGEST_ENV, ""),
+        )
+        return 0
+    if args.command == "policy-command":
+        try:
+            command = interactive_policy_command(
+                args.provider, sys.stdin.read(), args.runtime, args.permissions
+            )
+        except ValueError as exc:
+            print(f"UNSUPPORTED: {exc}", file=sys.stderr)
+            return 2
+        print(shlex.join(command))
+        return 0
+    if args.command == "policy-matrix":
+        print(
+            json.dumps(
+                [
+                    resolve_provider_policy(p, r, q, m).as_dict()
+                    for p in POLICY_PROVIDERS
+                    for r in RUNTIME_POLICIES
+                    for q in PERMISSION_POLICIES
+                    for m in POLICY_MODES
+                ],
+                indent=2,
+            )
         )
         return 0
     return 2

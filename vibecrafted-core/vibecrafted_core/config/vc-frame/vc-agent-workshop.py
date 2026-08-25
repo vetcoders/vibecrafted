@@ -19,22 +19,47 @@ import time
 from pathlib import Path
 from typing import Any
 
+from vibecrafted_core.spawn import (
+    PERMISSION_POLICIES,
+    RUNTIME_POLICIES,
+    resolve_provider_policy,
+    runtime_policy_capabilities,
+)
+
 AGENTS = ("agy", "claude", "codex", "grok", "junie")
 # The accepted design leaves operator/partner unresolved.  Do not expose them
 # until their CLI contracts can guarantee an interactive TTY on this tab.
 RITUALS = ("init", "resume")
 
 
-def launch_argv(agent: str, ritual: str) -> list[str]:
+def launch_argv(
+    agent: str,
+    ritual: str,
+    runtime: str = "local-native",
+    permissions: str = "bypass",
+) -> list[str]:
     """Return the one canonical interactive command for a launcher choice."""
     if agent not in AGENTS:
         raise ValueError(f"unsupported agent: {agent}")
     if ritual not in RITUALS:
         raise ValueError(f"unsupported interactive ritual: {ritual}")
     if ritual == "init":
+        decision = resolve_provider_policy(agent, runtime, permissions, "interactive")
+        if not decision.supported:
+            raise ValueError(decision.reason)
         # `init` defaults to opening another vc-frame tab.  The workshop's law
         # is stricter: this exact floating panel becomes the Agent TTY.
-        return ["vibecrafted", "init", agent, "--runtime", "plain"]
+        return [
+            "vibecrafted",
+            "init",
+            agent,
+            "--runtime",
+            "plain",
+            "--policy-runtime",
+            runtime,
+            "--permissions",
+            permissions,
+        ]
     return ["vibecrafted", "resume", agent]
 
 
@@ -126,6 +151,21 @@ def _safe_addstr(
         pass
 
 
+def _dim_unavailable_choices(
+    window: curses.window,
+    row: int,
+    col: int,
+    choices: tuple[str, ...],
+    available: tuple[bool, ...],
+) -> None:
+    """Redraw disabled choice tokens with terminal-native dim styling."""
+    for choice, enabled in zip(choices, available, strict=True):
+        token = f"[{choice}]" if enabled else f"({choice})"
+        if not enabled:
+            _safe_addstr(window, row, col, token, curses.A_DIM)
+        col += len(token) + 1
+
+
 class Workshop:
     def __init__(self, window: curses.window, *, mode: str) -> None:
         self.window = window
@@ -134,6 +174,8 @@ class Workshop:
         self.row = 0
         self.agent = 2  # codex is the least surprising neutral default here
         self.ritual = 0
+        self.runtime = 0
+        self.permissions = 0
         self.path = str(Path.cwd())
         self.error = ""
         self.mouse_targets: list[tuple[int, int, int, int, str]] = []
@@ -236,7 +278,7 @@ class Workshop:
         height, width = self.window.getmaxyx()
         card_width = min(max(58, width - 4), 92)
         left = max(1, (width - card_width) // 2)
-        top = max(1, (height - 8) // 2)
+        top = max(1, (height - 10) // 2)
         inner = max(20, card_width - 4)
         _safe_addstr(
             self.window,
@@ -252,7 +294,29 @@ class Workshop:
             f"«{name}»" if index == self.ritual else f"[{name}]"
             for index, name in enumerate(RITUALS)
         )
-        rows = (agent_line, ritual_line, f"  path     {self.path}")
+        provider = AGENTS[self.agent]
+        capabilities = runtime_policy_capabilities(provider)
+        runtime_line = "  runtime  " + " ".join(
+            (f"«{name}»" if index == self.runtime else f"[{name}]")
+            if capabilities[name]["available"]
+            else f"({name})"
+            for index, name in enumerate(RUNTIME_POLICIES)
+        )
+        permission_line = "  permits  " + " ".join(
+            (f"«{name}»" if index == self.permissions else f"[{name}]")
+            if resolve_provider_policy(
+                provider, RUNTIME_POLICIES[self.runtime], name, "interactive"
+            ).supported
+            else f"({name})"
+            for index, name in enumerate(PERMISSION_POLICIES)
+        )
+        rows = (
+            agent_line,
+            ritual_line,
+            runtime_line,
+            permission_line,
+            f"  path     {self.path}",
+        )
         for index, line in enumerate(rows):
             attr = curses.A_REVERSE if index == self.row else 0
             _safe_addstr(
@@ -265,24 +329,58 @@ class Workshop:
                 + " │",
                 attr,
             )
-        _safe_addstr(
+        _dim_unavailable_choices(
+            self.window,
+            top + 3,
+            left + 2 + len("  runtime  "),
+            RUNTIME_POLICIES,
+            tuple(bool(capabilities[name]["available"]) for name in RUNTIME_POLICIES),
+        )
+        _dim_unavailable_choices(
             self.window,
             top + 4,
+            left + 2 + len("  permits  "),
+            PERMISSION_POLICIES,
+            tuple(
+                resolve_provider_policy(
+                    provider,
+                    RUNTIME_POLICIES[self.runtime],
+                    name,
+                    "interactive",
+                ).supported
+                for name in PERMISSION_POLICIES
+            ),
+        )
+        _safe_addstr(
+            self.window,
+            top + 6,
             left,
             "│ Enter = interactive TTY on this Agents tab".ljust(card_width - 1) + "│",
             curses.A_DIM,
         )
         _safe_addstr(
             self.window,
-            top + 5,
+            top + 7,
             left,
             "└─ ↑/↓ row · ←/→ choice · type path · Enter launch · Esc cancel "
             + "─" * max(0, card_width - 67)
             + "┘",
         )
+        unavailable = [
+            f"{name}: {capabilities[name]['reason']}"
+            for name in RUNTIME_POLICIES
+            if not capabilities[name]["available"]
+        ]
+        _safe_addstr(
+            self.window,
+            top + 8,
+            left,
+            "Unavailable — " + " · ".join(unavailable),
+            curses.A_DIM,
+        )
         if self.error:
             _safe_addstr(
-                self.window, min(height - 1, top + 7), left, self.error, curses.A_BOLD
+                self.window, min(height - 1, top + 9), left, self.error, curses.A_BOLD
             )
 
     def handle_home_key(self, key: int) -> None:
@@ -302,26 +400,64 @@ class Workshop:
         if key == 27:
             raise SystemExit(0)
         if key == curses.KEY_UP:
-            self.row = (self.row - 1) % 3
+            self.row = (self.row - 1) % 5
             return
         if key in (curses.KEY_DOWN, ord("\t")):
-            self.row = (self.row + 1) % 3
+            self.row = (self.row + 1) % 5
             return
         if key in (curses.KEY_LEFT, curses.KEY_RIGHT, ord(" ")):
             delta = -1 if key == curses.KEY_LEFT else 1
             if self.row == 0:
                 self.agent = (self.agent + delta) % len(AGENTS)
+                self._normalize_permission_choice()
             elif self.row == 1:
                 self.ritual = (self.ritual + delta) % len(RITUALS)
+            elif self.row == 2:
+                self._cycle_runtime(delta)
+            elif self.row == 3:
+                self._cycle_permissions(delta)
             return
         if key in (10, 13, curses.KEY_ENTER):
             self.launch()
             return
-        if self.row == 2:
+        if self.row == 4:
             if key in (curses.KEY_BACKSPACE, 127, 8):
                 self.path = self.path[:-1]
             elif 32 <= key <= 126:
                 self.path += chr(key)
+
+    def _cycle_runtime(self, delta: int) -> None:
+        capabilities = runtime_policy_capabilities(AGENTS[self.agent])
+        for _ in RUNTIME_POLICIES:
+            self.runtime = (self.runtime + delta) % len(RUNTIME_POLICIES)
+            name = RUNTIME_POLICIES[self.runtime]
+            if capabilities[name]["available"]:
+                return
+        self.error = "No runtime is available for this provider"
+
+    def _cycle_permissions(self, delta: int) -> None:
+        provider = AGENTS[self.agent]
+        runtime = RUNTIME_POLICIES[self.runtime]
+        for _ in PERMISSION_POLICIES:
+            self.permissions = (self.permissions + delta) % len(PERMISSION_POLICIES)
+            if resolve_provider_policy(
+                provider, runtime, PERMISSION_POLICIES[self.permissions], "interactive"
+            ).supported:
+                return
+        self.error = "No permission policy is available for this provider/runtime"
+
+    def _normalize_permission_choice(self) -> None:
+        provider = AGENTS[self.agent]
+        runtime = RUNTIME_POLICIES[self.runtime]
+        current = PERMISSION_POLICIES[self.permissions]
+        if resolve_provider_policy(provider, runtime, current, "interactive").supported:
+            return
+        for index, permissions in enumerate(PERMISSION_POLICIES):
+            if resolve_provider_policy(
+                provider, runtime, permissions, "interactive"
+            ).supported:
+                self.permissions = index
+                return
 
     def handle_mouse(self) -> None:
         try:
@@ -387,7 +523,16 @@ class Workshop:
     def launch(self) -> None:
         try:
             workspace = normalized_workspace(self.path)
-            argv = launch_argv(AGENTS[self.agent], RITUALS[self.ritual])
+            runtime_name = RUNTIME_POLICIES[self.runtime]
+            capability = runtime_policy_capabilities(AGENTS[self.agent])[runtime_name]
+            if not capability["available"]:
+                raise ValueError(str(capability["reason"]))
+            argv = launch_argv(
+                AGENTS[self.agent],
+                RITUALS[self.ritual],
+                runtime_name,
+                PERMISSION_POLICIES[self.permissions],
+            )
         except ValueError as exc:
             self.error = str(exc)
             return

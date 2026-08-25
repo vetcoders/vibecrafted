@@ -33,6 +33,8 @@ _vetcoders_contract_reset() {
   _vetcoders_contract_count=""
   _vetcoders_contract_depth=""
   _vetcoders_contract_runtime=""
+  _vetcoders_contract_policy_runtime=""
+  _vetcoders_contract_permissions=""
   _vetcoders_contract_root=""
   _vetcoders_contract_tail=""
   _vetcoders_contract_dry_run=""
@@ -118,6 +120,16 @@ _vetcoders_parse_contract() {
         shift
         [[ $# -gt 0 ]] || { echo "Missing value for --runtime" >&2; return 1; }
         _vetcoders_contract_runtime="$1"
+        ;;
+      --policy-runtime)
+        shift
+        [[ $# -gt 0 ]] || { echo "Missing value for --policy-runtime" >&2; return 1; }
+        _vetcoders_contract_policy_runtime="$1"
+        ;;
+      --permissions)
+        shift
+        [[ $# -gt 0 ]] || { echo "Missing value for --permissions" >&2; return 1; }
+        _vetcoders_contract_permissions="$1"
         ;;
       --root)
         shift

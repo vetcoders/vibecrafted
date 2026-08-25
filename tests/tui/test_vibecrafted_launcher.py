@@ -613,7 +613,7 @@ def test_init_codex_uses_interactive_tab_without_exec_mode(tmp_path: Path) -> No
     ("agent", "command_needle"),
     [
         ("agy", "agy --dangerously-skip-permissions --add-dir . --prompt-interactive "),
-        ("junie", "junie --task="),
+        ("junie", "junie --prompt="),
         (
             "grok",
             # Interactive TUI: positional prompt, NO --single (one-shot headless).

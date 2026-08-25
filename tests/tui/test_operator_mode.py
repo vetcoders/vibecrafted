@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -666,6 +667,9 @@ def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
     env["VIBECRAFTED_RUNTIME_BIN"] = str(bundled_bin)
     env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
+    # The test PATH intentionally excludes host tools; policy resolution is
+    # now a required core operation, so pin the current test interpreter.
+    env["VIBECRAFTED_PYTHON"] = sys.executable
     env["CAPTURE_FILE"] = str(capture_file)
     env["SESSION_STATE_FILE"] = str(session_state_file)
     env["VIBECRAFTED_OSASCRIPT_BIN"] = str(fake_bin / "osascript")
@@ -930,6 +934,7 @@ def test_vc_init_missing_vc_frame_message_has_fresh_install_path_hint(
     env["VIBECRAFTED_RUNTIME_BIN"] = str(runtime_home / "bin")
     env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
+    env["VIBECRAFTED_PYTHON"] = sys.executable
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)

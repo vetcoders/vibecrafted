@@ -52,6 +52,10 @@ def test_launcher_commands_keep_interactive_agent_in_this_panel() -> None:
         "codex",
         "--runtime",
         "plain",
+        "--policy-runtime",
+        "local-native",
+        "--permissions",
+        "bypass",
     ]
     assert workshop.launch_argv("claude", "resume") == [
         "vibecrafted",
@@ -60,6 +64,15 @@ def test_launcher_commands_keep_interactive_agent_in_this_panel() -> None:
     ]
     with pytest.raises(ValueError, match="interactive ritual"):
         workshop.launch_argv("codex", "operator")
+
+
+def test_launcher_refuses_unsupported_policy_instead_of_approximating() -> None:
+    workshop = _load()
+
+    with pytest.raises(ValueError, match="no native accept-edits"):
+        workshop.launch_argv("codex", "init", "local-native", "accept-edits")
+    with pytest.raises(ValueError, match="coming soon"):
+        workshop.launch_argv("claude", "init", "cloud-soon", "auto")
 
 
 def test_workspace_path_is_full_resolved_and_must_exist(tmp_path: Path) -> None:

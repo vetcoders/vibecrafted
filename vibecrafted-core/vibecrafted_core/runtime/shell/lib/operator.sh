@@ -57,35 +57,18 @@ _vetcoders_compose_init_prompt() {
 _vetcoders_init_command_text() {
   local tool="$1"
   local init_prompt="$2"
-  local quoted_prompt
-  quoted_prompt="$(_vetcoders_shell_quote "$init_prompt")"
-
-  case "$tool" in
-    claude)
-      printf 'claude --verbose --dangerously-skip-permissions %s' "$quoted_prompt"
-      ;;
-    codex)
-      printf 'codex --dangerously-bypass-approvals-and-sandbox %s' "$quoted_prompt"
-      ;;
-    gemini)
-      printf 'gemini -y -i %s' "$quoted_prompt"
-      ;;
-    agy)
-      printf 'agy --dangerously-skip-permissions --add-dir . --prompt-interactive %s' "$quoted_prompt"
-      ;;
-    junie)
-      printf 'junie --task=%s --project=. --skip-update-check --use-local-cache' "$quoted_prompt"
-      ;;
-    grok)
-      # Interactive TUI: positional PROMPT seeds the session and stays open.
-      # NEVER use --single here — that is one-shot headless (prints + exits).
-      printf 'grok --cwd . --permission-mode bypassPermissions --no-alt-screen %s' "$quoted_prompt"
-      ;;
-    *)
-      echo "Unsupported init agent: $tool" >&2
-      return 1
-      ;;
-  esac
+  local policy_runtime="${3:-local-native}"
+  local permissions="${4:-bypass}"
+  local python_spec py import_root
+  python_spec="$(_vetcoders_core_python_spec)" || return 1
+  py="${python_spec%%$'\t'*}"
+  import_root="${python_spec#*$'\t'}"
+  if [[ -n "$import_root" ]]; then
+    printf '%s' "$init_prompt" | PYTHONPATH="$import_root${PYTHONPATH:+:$PYTHONPATH}" \
+      "$py" -m vibecrafted_core.spawn policy-command "$tool" --runtime "$policy_runtime" --permissions "$permissions"
+  else
+    printf '%s' "$init_prompt" | "$py" -m vibecrafted_core.spawn policy-command "$tool" --runtime "$policy_runtime" --permissions "$permissions"
+  fi
 }
 
 # Operator-mode launcher helpers — parallel to init helpers above.
@@ -125,33 +108,5 @@ _vetcoders_compose_operator_prompt() {
 _vetcoders_operator_command_text() {
   local tool="$1"
   local operator_prompt="$2"
-  local quoted_prompt
-  quoted_prompt="$(_vetcoders_shell_quote "$operator_prompt")"
-
-  case "$tool" in
-    claude)
-      printf 'claude --verbose --dangerously-skip-permissions %s' "$quoted_prompt"
-      ;;
-    codex)
-      printf 'codex --dangerously-bypass-approvals-and-sandbox %s' "$quoted_prompt"
-      ;;
-    gemini)
-      printf 'gemini -y -i %s' "$quoted_prompt"
-      ;;
-    agy)
-      printf 'agy --dangerously-skip-permissions --add-dir . --prompt-interactive %s' "$quoted_prompt"
-      ;;
-    junie)
-      printf 'junie --task=%s --project=. --skip-update-check --use-local-cache' "$quoted_prompt"
-      ;;
-    grok)
-      # Same contract as vc-init: interactive TUI, not --single one-shot.
-      printf 'grok --cwd . --permission-mode bypassPermissions --no-alt-screen %s' "$quoted_prompt"
-      ;;
-    *)
-      echo "Unsupported operator agent: $tool" >&2
-      return 1
-      ;;
-  esac
+  _vetcoders_init_command_text "$tool" "$operator_prompt" "${3:-local-native}" "${4:-bypass}"
 }
-
