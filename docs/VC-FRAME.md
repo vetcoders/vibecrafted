@@ -117,13 +117,21 @@ simplified_ui true
 
 ### Operator layout = vibecrafted standard
 
-`layouts/operator.kdl` (vc-start) is the same file content as built-in
-`default_layout "vibecrafted"` (tabs **Start here** + **Shell**, no spaces in
-layout _filenames_; never `Vibecrafted Operator.kdl`):
+`layouts/operator.kdl` (vc-start) and built-in `default_layout "vibecrafted"`
+share the same product tabs: **Start here**, **Agents**, **Shell**, and **voc**
+(no spaces in layout _filenames_; never `Vibecrafted Operator.kdl`):
 
 - `default_tab_template` — compact-bar brand + **SESSIONS rail always** + status-bar
-- tab **Start here** — Mission Control (`about` / `guide_mode "mission-control"`)
-- tab **Shell** — operator work shell
+- tab **Start here** — product map (`about` / `guide_mode "mission-control"`)
+- tab **Agents** — Agent Workspaces dashboard; `[New agent]` creates an
+  interactive Agent TTY on this tab, while PANE + arrows walks its faces
+- tab **Shell** — workspace shell
+- tab **voc** — observation door for this workspace, never the launcher itself
+
+The interactive launcher deliberately exposes only contracts that stay in the
+current panel today: `init --runtime plain` and bare `resume`. The accepted
+design keeps `operator` / `partner` unresolved and `New dispatch` as a later,
+server-owned headless door; the UI must not fake those choices prematurely.
 
 No strider split on the entrypoint.
 

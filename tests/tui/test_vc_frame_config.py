@@ -136,9 +136,11 @@ def test_layout_tab_branding_matches_frame_contract() -> None:
     for layout_file in sorted(LAYOUTS_DIR.glob("*.kdl")):
         payload = layout_file.read_text(encoding="utf-8")
         if layout_file.name == "operator.kdl":
-            # Launch alias for default_layout "vibecrafted": Start here + Shell.
+            # Launch alias for default_layout "vibecrafted": product workspace tabs.
             assert 'tab name="Start here"' in payload
+            assert 'tab name="Agents"' in payload
             assert 'tab name="Shell"' in payload
+            assert 'tab name="voc"' in payload
             continue
         assert "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍." in payload, f"{layout_file.name} missing branded tab name"
 
@@ -154,11 +156,15 @@ def test_marbles_layout_is_operator_centric() -> None:
 
 def test_operator_layout_matches_vibecrafted_standard() -> None:
     """vc-start operator.kdl is the launch alias of default_layout vibecrafted:
-    Start here + Shell, SESSIONS rail on every tab, no strider, no spaced names."""
+    Start here + Agents + Shell + voc, SESSIONS rail on every tab, no strider."""
     payload = (LAYOUTS_DIR / "operator.kdl").read_text(encoding="utf-8")
     assert 'tab name="Start here"' in payload
+    assert 'tab name="Agents"' in payload
     assert 'tab name="Shell"' in payload
+    assert 'tab name="voc"' in payload
     assert 'guide_mode "mission-control"' in payload
+    assert "vc-agent-workshop.py" in payload
+    assert "vibecrafted tui" in payload
     assert "session-manager" in payload
     assert "rail true" in payload
     assert "default_tab_template" in payload
