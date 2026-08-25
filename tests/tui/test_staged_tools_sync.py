@@ -83,6 +83,10 @@ def _write_complete_source(
             1,
         )
     _write_executable(root / "scripts" / "vibecrafted", launcher)
+    _write_executable(
+        root / "bin" / "python3",
+        f'#!/bin/sh\nexec {installer.shlex_quote(str(Path(sys.executable).absolute()))} "$@"\n',
+    )
     _write_source_provenance_fixture(root)
 
 
@@ -6488,7 +6492,7 @@ def test_runtime_generation_doctor_rejects_launcher_from_old_generation(
 
     [finding] = installer._runtime_generation_contract_findings()
     assert finding.level == "fail"
-    assert "does not resolve to the current generation entrypoint" in finding.message
+    assert "neither resolves to nor wraps" in finding.message
 
 
 def test_chained_prepared_publish_keeps_last_verified_rollback_target(

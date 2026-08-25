@@ -99,7 +99,7 @@ RUNTIME_GENERATION_MANIFEST_NAME = "runtime-manifest.json"
 SOURCE_PROVENANCE_NAME = "source-provenance.json"
 SOURCE_PROVENANCE_SCHEMA = "vibecrafted.source-provenance.v2"
 SOURCE_PAYLOAD_SCHEMA = "vibecrafted.distribution-tree.v1"
-RUNTIME_GENERATION_ENTRYPOINT = "vibecrafted-core/vibecrafted_core/deck/vibecrafted"
+RUNTIME_GENERATION_ENTRYPOINT = "bin/vibecrafted"
 RUNTIME_GENERATION_PROJECTED_CONFIG = "runtime/generated/vc-frame/config.kdl"
 RUNTIME_GENERATION_CANONICAL_CONFIG = (
     "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
@@ -4006,7 +4006,7 @@ def _self_test() -> int:
                     "tree_sha256": "f" * 64,
                     "entry_count": 42,
                 },
-                "entrypoint": "vibecrafted-core/vibecrafted_core/deck/vibecrafted",
+                "entrypoint": RUNTIME_GENERATION_ENTRYPOINT,
                 "hashes": {
                     relative: f"{index:x}" * 64
                     for index, relative in enumerate(

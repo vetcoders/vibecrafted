@@ -250,12 +250,12 @@ def _build_parser() -> argparse.ArgumentParser:
     capabilities.add_argument("--json", action="store_true")
     config = sub.add_parser(
         "config",
-        help="install/wire packaged vc-frame config into the tools store and ~/.config/vc-frame",
+        help="install/wire packaged vc-frame config into ~/.config/vibecrafted/vc-frame",
     )
     config_sub = config.add_subparsers(dest="config_action")
     config_install = config_sub.add_parser(
         "install",
-        help="stage package config → tools store + wire ~/.config/vc-frame view",
+        help="stage package config → wire ~/.config/vibecrafted/vc-frame view",
     )
     config_install.add_argument(
         "--dry-run",

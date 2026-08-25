@@ -437,7 +437,7 @@ def _transaction_fixture(path: Path, macho_executable: Path) -> dict[str, Any]:
             "owner_repo": "vetcoders/vibecrafted",
             "source_revision": "8" * 40,
             "source_payload": _runtime_source_payload(),
-            "entrypoint": "vibecrafted-core/vibecrafted_core/deck/vibecrafted",
+            "entrypoint": contract.RUNTIME_GENERATION_ENTRYPOINT,
             "hashes": {
                 relative: f"{index:x}" * 64
                 for index, relative in enumerate(
@@ -1814,7 +1814,7 @@ def test_transaction_rejects_exact_legacy_four_hash_runtime_manifest(
             "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
         ],
         "vibecrafted-core/vibecrafted_core/deck/vibecrafted": manifest["hashes"][
-            "vibecrafted-core/vibecrafted_core/deck/vibecrafted"
+            contract.RUNTIME_GENERATION_ENTRYPOINT
         ],
     }
     _write_json(manifest_path, manifest)

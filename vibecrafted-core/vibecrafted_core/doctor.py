@@ -632,6 +632,41 @@ def _packaged_asset_findings() -> list[_Finding]:
     return findings
 
 
+def _config_entry_matches(candidate: Path, expected: Path) -> bool:
+    """True only for an unaliased physical copy with identical closed contents."""
+
+    def inventory(root: Path) -> dict[str, tuple[str, str]] | None:
+        if root.is_symlink():
+            return None
+        if root.is_file():
+            try:
+                return {".": ("file", hashlib.sha256(root.read_bytes()).hexdigest())}
+            except OSError:
+                return None
+        if not root.is_dir():
+            return None
+        entries: dict[str, tuple[str, str]] = {}
+        for path in sorted(root.rglob("*")):
+            if path.is_symlink():
+                return None
+            relative = path.relative_to(root).as_posix()
+            if path.is_dir():
+                entries[relative] = ("dir", "")
+            elif path.is_file():
+                try:
+                    entries[relative] = (
+                        "file",
+                        hashlib.sha256(path.read_bytes()).hexdigest(),
+                    )
+                except OSError:
+                    return None
+            else:
+                return None
+        return entries
+
+    return inventory(candidate) == inventory(expected) and candidate.exists()
+
+
 def _vc_frame_delivery_findings(
     *,
     home: Path | None = None,
@@ -695,6 +730,8 @@ def _vc_frame_delivery_findings(
     for name in ("config.kdl", "layouts", "themes"):
         path = view / name
         ch = classify_view_path(path, store_current=store_cfg, checkout=checkout)
+        if ch == "STALE-FILE" and _config_entry_matches(path, generated / name):
+            ch = "runtime-copy"
         channels.append(ch)
         if ch == "DANGLING":
             findings.append(
@@ -851,14 +888,9 @@ def _vc_frame_delivery_findings(
             )
         )
 
-    # Operator scripts + Super/Cmd contract on both projections. The runtime
-    # pins VC_FRAME_CONFIG_DIR to frontier first; a STALE-FILE composer there
-    # shadows every install that only rewires ~/.config/vc-frame.
-    frontier_cfg = froot / "vc-frame"
-    for projection, label in (
-        (view, "view"),
-        (frontier_cfg, "frontier"),
-    ):
+    # Operator scripts + Super/Cmd contract live beside the sole canonical
+    # product config. Legacy frontier paths are residue, never a second view.
+    for projection, label in ((view, "view"),):
         missing_scripts = [
             name
             for name in OPERATOR_SCRIPT_NAMES
@@ -867,7 +899,9 @@ def _vc_frame_delivery_findings(
         stale_scripts = [
             name
             for name in OPERATOR_SCRIPT_NAMES
-            if (projection / name).is_file() and not (projection / name).is_symlink()
+            if (projection / name).is_file()
+            and not (projection / name).is_symlink()
+            and not _config_entry_matches(projection / name, generated / name)
         ]
         if missing_scripts:
             findings.append(

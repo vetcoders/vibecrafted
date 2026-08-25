@@ -8,14 +8,13 @@ Delivery contract (plan vcframe-config-delivery):
   the published generation.
 - Ownership: config delivery never creates or flips the runtime-owned
   ``vibecrafted-current`` symlink.
-- Views (both must stay in lockstep — operator runtime pins frontier first):
-  1. ``$XDG_CONFIG_HOME/vc-frame/{config.kdl,layouts,themes,operator scripts}``
-  2. ``$XDG_CONFIG_HOME/vetcoders/frontier/vc-frame/…`` (``VC_FRAME_CONFIG_DIR``)
+- View: ``$XDG_CONFIG_HOME/vibecrafted/vc-frame/`` is the sole live config
+  directory. ``VC_FRAME_CONFIG_DIR`` pins every product entrypoint there.
 - Stage-time host adaptation: rewrite every shipped zsh entrypoint and select
   an available clipboard command.
 - Operator scripts (Composer / paste-stack / quick-cmd / …) are first-class
-  install artifacts, not hand-copied orphans. STALE-FILE copies under frontier
-  are backed up and re-wired on every delivery pass.
+  install artifacts, not hand-copied orphans. STALE-FILE copies in the canonical
+  product directory are backed up and re-wired on every delivery pass.
 """
 
 from __future__ import annotations
@@ -46,9 +45,8 @@ substitute_pane_shell = _vc_frame_staging.substitute_pane_shell
 _FENCE_BEGIN = "# >>> vibecrafted >>>"
 _FENCE_END = "# <<< vibecrafted <<<"
 
-# Shipped next to config.kdl. compact-bar / default keybinds prefer frontier paths
-# first — if install skips these, an old STALE-FILE on disk shadows the package
-# forever (see scaf-260805-triptych runtime diagnosis, 2026-08-07).
+# Shipped next to config.kdl. If install skips these, an old STALE-FILE in the
+# canonical product directory shadows the package forever.
 OPERATOR_SCRIPT_NAMES: tuple[str, ...] = (
     "auto-theme.sh",
     "vc-composer.sh",
@@ -114,14 +112,13 @@ def prefer_repo_vc_frame(env: dict[str, str] | None = None) -> bool:
 
 
 def vc_frame_user_config_dir(home: Path | None = None) -> Path:
-    """Directory bare vc-frame reads (respects XDG_CONFIG_HOME)."""
+    """The one product-owned vc-frame config directory."""
     if home is not None:
-        # Sandbox: treat HOME's .config unless XDG is set in env
         xdg = os.environ.get("XDG_CONFIG_HOME")
         if xdg:
-            return Path(xdg).expanduser() / "vc-frame"
-        return home / ".config" / "vc-frame"
-    return xdg_config_home() / "vc-frame"
+            return Path(xdg).expanduser() / "vibecrafted" / "vc-frame"
+        return home / ".config" / "vibecrafted" / "vc-frame"
+    return xdg_config_home() / "vibecrafted" / "vc-frame"
 
 
 def tools_current_path(tools_home: Path | None = None) -> Path:
@@ -315,7 +312,7 @@ def plan_delivery(
     Re-materializes host-adapted config from the package source into the published
     generation's package-owned ``runtime/generated/vc-frame`` (never mutating
     the source itself or the ``vibecrafted-current`` owner symlink), then wires
-    both the legacy view and frontier projections to point at that generation.
+    the sole canonical product view to that generation.
     """
     source = vc_frame_config_source()
     tools = tools_home if tools_home is not None else vibecrafted_tools_home()
@@ -393,24 +390,16 @@ def plan_delivery(
     # decides whether an existing owned link is current or needs migration.
     store_anchor = current
     store_current = store_anchor if not use_repo else current
-    # Two projections: legacy view + frontier (the path VC_FRAME_CONFIG_DIR
-    # pins via _vetcoders_pin_vc_frame_config_dir). Wiring only the view left
-    # frontier as STALE-FILE forever — scripts/config never refreshed.
-    projection_roots = (
+    _ = force_frontier  # retained CLI compatibility; no second live projection
+    _wire_projection(
         view_root,
-        frontier_root(home) / "vc-frame",
+        base,
+        force=force,
+        dry_run=dry_run,
+        actions=plan.actions,
+        store_current=store_current,
+        checkout=checkout,
     )
-    managed_frontier = frontier_root(home) / "vc-frame"
-    for projection in projection_roots:
-        _wire_projection(
-            projection,
-            base,
-            force=force or (force_frontier and projection == managed_frontier),
-            dry_run=dry_run,
-            actions=plan.actions,
-            store_current=store_current,
-            checkout=checkout,
-        )
     return plan
 
 
@@ -424,7 +413,7 @@ def _wire_projection(
     store_current: Path,
     checkout: Path | None,
 ) -> None:
-    """Wire one config projection (view or frontier) from the staged base."""
+    """Wire the canonical config projection from the staged base."""
     for name in _CORE_VIEW_NAMES:
         target = base / name
         if not target.exists() and not dry_run:

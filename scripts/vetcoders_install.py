@@ -38,6 +38,7 @@ import plistlib
 import re
 import runpy
 import select
+import shlex
 import shutil
 import signal
 import stat
@@ -1458,6 +1459,24 @@ def _restore_path_from_backup(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
+def _receipt_backup_path_is_allowed(backup: Path, backup_root: Path) -> bool:
+    """Validate the backup container without dereferencing its payload leaf.
+
+    Collision backups intentionally preserve symlinks.  Resolving `backup`
+    itself therefore follows an operator-owned symlink to its original target
+    and falsely makes a legitimate receipt look as if it escaped the backup
+    root.  Resolve the parent chain instead: a symlinked parent still fails
+    closed, while the final entry remains an opaque file/dir/symlink payload.
+    """
+    if not backup.is_absolute() or backup.name in {"", ".", ".."}:
+        return False
+    resolved_root = backup_root.resolve(strict=False)
+    resolved_parent = backup.parent.resolve(strict=False)
+    return resolved_parent == resolved_root or _is_subpath(
+        resolved_parent, resolved_root
+    )
+
+
 @dataclass(frozen=True)
 class ManagedPath:
     """One managed filesystem path slated for teardown, with the action to take and why."""
@@ -2607,6 +2626,32 @@ def _find_launcher_wrapper(name: str) -> Path | None:
     return None
 
 
+def _runtime_pack_launcher_target(launcher: Path, current_tools: Path) -> Path | None:
+    """Return a wrapper's executable when it enters the active receipted generation."""
+    try:
+        text = launcher.read_text(encoding="utf-8", errors="ignore")[:8192]
+        generation = current_tools.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    for line in reversed(text.splitlines()):
+        if not line.strip().startswith("exec "):
+            continue
+        try:
+            argv = shlex.split(line.strip())
+        except ValueError:
+            return None
+        if len(argv) < 2:
+            return None
+        try:
+            target = Path(argv[1]).resolve(strict=True)
+        except (OSError, RuntimeError):
+            return None
+        if target == generation or _is_subpath(target, generation):
+            return target
+        return None
+    return None
+
+
 def _uninstall_rc_entries() -> list[tuple[str, str]]:
     """The `(line, comment)` pairs this installer strips from rc files during cleanup/uninstall."""
     entries = [
@@ -2984,9 +3029,7 @@ _SOURCE_PROVENANCE_KEYS = frozenset(
 )
 _SOURCE_PAYLOAD_SCHEMA = "vibecrafted.distribution-tree.v1"
 _SOURCE_PAYLOAD_KEYS = frozenset({"schema", "algorithm", "tree_sha256", "entry_count"})
-_RUNTIME_GENERATION_ENTRYPOINT = Path(
-    "vibecrafted-core/vibecrafted_core/deck/vibecrafted"
-)
+_RUNTIME_GENERATION_ENTRYPOINT = Path("bin/vibecrafted")
 _RUNTIME_GENERATION_RUNTIME_ALIAS = Path("runtime")
 _RUNTIME_GENERATION_CANONICAL_RUNTIME = Path(
     "vibecrafted-core/vibecrafted_core/runtime"
@@ -4307,13 +4350,15 @@ def _darwin_caller_ancestor_pids() -> frozenset[int]:
     return frozenset(ancestors)
 
 
-def _owned_runtime_process_roots() -> tuple[Path, ...]:
+def _owned_runtime_process_roots(*, app_root: Path | None = None) -> tuple[Path, ...]:
     """Canonical executable roots whose live processes belong to this product."""
     roots = [
         vibecrafted_runtime_home() / "releases",
         Path("/Applications/Vibecrafted.app"),
         Path.home() / "Applications/Vibecrafted.app",
     ]
+    if app_root is not None:
+        roots.append(app_root)
     return tuple(root.expanduser().resolve(strict=False) for root in roots)
 
 
@@ -4338,7 +4383,9 @@ def _runtime_process_argv_is_owned(
     return any(managed_path(argument) for argument in argv[1:])
 
 
-def _owned_runtime_process_census() -> tuple[_RetiredVcFrameProcess, ...]:
+def _owned_runtime_process_census(
+    *, app_root: Path | None = None
+) -> tuple[_RetiredVcFrameProcess, ...]:
     """Return stable same-user App, terminal, frame, server, and runtime shell processes."""
     if sys.platform != "darwin":
         return ()
@@ -4346,7 +4393,7 @@ def _owned_runtime_process_census() -> tuple[_RetiredVcFrameProcess, ...]:
     if not process_ids:
         return ()
     excluded = _darwin_caller_ancestor_pids()
-    roots = _owned_runtime_process_roots()
+    roots = _owned_runtime_process_roots(app_root=app_root)
     records: list[_RetiredVcFrameProcess] = []
     for pid in process_ids:
         if pid in excluded:
@@ -4440,7 +4487,7 @@ def _terminate_owned_runtime_processes(
 
 
 def _teardown_owned_runtime_for_uninstall(
-    shared_home: Path, *, dry_run: bool
+    shared_home: Path, *, dry_run: bool, app_root: Path | None = None
 ) -> tuple[str, ...]:
     """Stop the owned service plane and retired vc-frame processes before deleting files."""
     if sys.platform != "darwin":
@@ -4510,12 +4557,12 @@ def _teardown_owned_runtime_for_uninstall(
                         raise OSError(
                             "retired vc-frame.real processes remain after teardown"
                         )
-            owned = _owned_runtime_process_census()
+            owned = _owned_runtime_process_census(app_root=app_root)
             if owned:
                 actions.append(f"terminate {len(owned)} owned runtime process(es)")
                 if not dry_run:
                     _terminate_owned_runtime_processes(owned)
-                    if _owned_runtime_process_census():
+                    if _owned_runtime_process_census(app_root=app_root):
                         raise OSError("owned runtime processes remain after teardown")
     if dry_run and not lease_preexisting:
         # A dry run must leave the disk exactly as it found it. The real teardown
@@ -8182,7 +8229,11 @@ def _materialize_vc_frame_generation(runtime_root: Path) -> None:
         destination / "layouts",
         destination / "themes",
     )
-    if not required[0].is_file() or any(not path.is_dir() for path in required[1:]):
+    if (
+        not required[0].is_file()
+        or not required[1].is_dir()
+        or not required[2].is_dir()
+    ):
         raise OSError(
             f"candidate runtime has incomplete materialized vc-frame config: "
             f"{destination}"
@@ -8572,8 +8623,9 @@ def _run_runtime_verifier_semantic_command(
     argv: Sequence[str],
     *,
     cache: Path,
+    python_executable: Path,
 ) -> subprocess.CompletedProcess[str]:
-    """Run one captured candidate CLI under an isolated Python import/cache environment."""
+    """Run one captured candidate CLI with the candidate runtime's own Python."""
     environment = os.environ.copy()
     for name in ("PYTHONHOME", "PYTHONPATH", "PYTHONPYCACHEPREFIX"):
         environment.pop(name, None)
@@ -8585,7 +8637,7 @@ def _run_runtime_verifier_semantic_command(
     )
     return subprocess.run(
         [
-            sys.executable,
+            str(python_executable),
             "-I",
             "-S",
             "-B",
@@ -8624,6 +8676,19 @@ def _assert_runtime_verifier_semantic_failure(
 
 def _validate_runtime_verifier_semantics(runtime_root: Path) -> None:
     """Validate captured candidate code/schema and exercise its real public entrypoints."""
+    runtime_python = runtime_root / "bin/python3"
+    if not runtime_python.is_file() or not os.access(runtime_python, os.X_OK):
+        raise OSError(f"candidate runtime Python is not executable: {runtime_python}")
+
+    def run_candidate(
+        argv: Sequence[str], *, cache: Path
+    ) -> subprocess.CompletedProcess[str]:
+        return _run_runtime_verifier_semantic_command(
+            argv,
+            cache=cache,
+            python_executable=runtime_python,
+        )
+
     captured: dict[Path, bytes] = {}
     for relative in sorted(_RUNTIME_GENERATION_REQUIRED_HASHES):
         try:
@@ -8666,7 +8731,7 @@ def _validate_runtime_verifier_semantics(runtime_root: Path) -> None:
         runner = snapshot / _RUNTIME_VERIFIER_RUNNER
         cache = temporary / "pycache"
 
-        generation_result = _run_runtime_verifier_semantic_command(
+        generation_result = run_candidate(
             [str(product), "runtime-generation", str(snapshot)],
             cache=cache,
         )
@@ -8684,9 +8749,7 @@ def _validate_runtime_verifier_semantics(runtime_root: Path) -> None:
                 + (f": {detail}" if detail else "")
             )
 
-        product_help = _run_runtime_verifier_semantic_command(
-            [str(product), "--help"], cache=cache
-        )
+        product_help = run_candidate([str(product), "--help"], cache=cache)
         if (
             product_help.returncode != 0
             or product_help.stderr
@@ -8697,9 +8760,7 @@ def _validate_runtime_verifier_semantics(runtime_root: Path) -> None:
         ):
             raise OSError("candidate product-contract --help surface is incomplete")
 
-        runner_help = _run_runtime_verifier_semantic_command(
-            [str(runner), "--help"], cache=cache
-        )
+        runner_help = run_candidate([str(runner), "--help"], cache=cache)
         if (
             runner_help.returncode != 0
             or runner_help.stderr
@@ -8717,7 +8778,7 @@ def _validate_runtime_verifier_semantics(runtime_root: Path) -> None:
         drifted_launcher = drift_snapshot / "scripts/vibecrafted"
         drifted_launcher.write_bytes(drifted_launcher.read_bytes() + b"\n# drift\n")
         _assert_runtime_verifier_semantic_failure(
-            _run_runtime_verifier_semantic_command(
+            run_candidate(
                 [
                     str(drift_snapshot / _RUNTIME_VERIFIER_PRODUCT),
                     "runtime-generation",
@@ -8758,7 +8819,7 @@ def _validate_runtime_verifier_semantics(runtime_root: Path) -> None:
             source_provenance_raw,
         )
         _assert_runtime_verifier_semantic_failure(
-            _run_runtime_verifier_semantic_command(
+            run_candidate(
                 [
                     str(legacy_snapshot / _RUNTIME_VERIFIER_PRODUCT),
                     "runtime-generation",
@@ -8780,7 +8841,7 @@ def _validate_runtime_verifier_semantics(runtime_root: Path) -> None:
             source_provenance_raw,
         )
         _assert_runtime_verifier_semantic_failure(
-            _run_runtime_verifier_semantic_command(
+            run_candidate(
                 [
                     str(open_snapshot / _RUNTIME_VERIFIER_PRODUCT),
                     "runtime-generation",
@@ -8793,7 +8854,7 @@ def _validate_runtime_verifier_semantics(runtime_root: Path) -> None:
         )
 
         _assert_runtime_verifier_semantic_failure(
-            _run_runtime_verifier_semantic_command(
+            run_candidate(
                 [str(product), "schema", str(snapshot / _RUNTIME_GENERATION_MANIFEST)],
                 cache=cache,
             ),
@@ -8833,9 +8894,7 @@ def _validate_runtime_verifier_semantics(runtime_root: Path) -> None:
         )
         for command, arguments, forbidden_output in runner_negative_commands:
             _assert_runtime_verifier_semantic_failure(
-                _run_runtime_verifier_semantic_command(
-                    [str(runner), command, *arguments], cache=cache
-                ),
+                run_candidate([str(runner), command, *arguments], cache=cache),
                 expected_code=_RUNTIME_VERIFIER_E_MISSING,
                 context=f"walk-around runner {command} missing input",
             )
@@ -8889,9 +8948,7 @@ def _validate_runtime_verifier_semantics(runtime_root: Path) -> None:
         )
         for command, arguments, forbidden_output in runner_invalid_commands:
             _assert_runtime_verifier_semantic_failure(
-                _run_runtime_verifier_semantic_command(
-                    [str(runner), command, *arguments], cache=cache
-                ),
+                run_candidate([str(runner), command, *arguments], cache=cache),
                 expected_code=_RUNTIME_VERIFIER_E_PROOF,
                 context=f"walk-around runner {command} invalid proof",
             )
@@ -9827,7 +9884,7 @@ MANIFEST_KEYS = frozenset({
     "schema", "version", "source_fingerprint", "owner_repo",
     "source_revision", "source_payload", "entrypoint", "hashes",
 })
-ENTRYPOINT = "vibecrafted-core/vibecrafted_core/deck/vibecrafted"
+ENTRYPOINT = "bin/vibecrafted"
 RUNTIME_ALIAS = "runtime"
 CANONICAL_RUNTIME = "vibecrafted-core/vibecrafted_core/runtime"
 PROJECTED_CONFIG = "runtime/generated/vc-frame/config.kdl"
@@ -10141,10 +10198,13 @@ def _secure_walkaround_launcher_issues(
     uv_tools_root = Path(
         os.environ.get("UV_TOOL_DIR", str(xdg_data_home() / "uv" / "tools"))
     ).expanduser()
-    expected_wrapper = _canonical_path_preserving_final_symlink(
+    expected_uv_wrapper = _canonical_path_preserving_final_symlink(
         uv_tools_root / "vibecrafted" / "bin" / SECURE_WALKAROUND_LAUNCHER
     )
-    if resolved_launcher != expected_wrapper:
+    expected_runtime_wrapper = _canonical_path_preserving_final_symlink(
+        vibecrafted_launcher_bin() / SECURE_WALKAROUND_LAUNCHER
+    )
+    if resolved_launcher not in {expected_uv_wrapper, expected_runtime_wrapper}:
         return [
             f"{SECURE_WALKAROUND_LAUNCHER}:corrupt:wrapper is outside managed tool roots"
         ]
@@ -10160,14 +10220,22 @@ def _secure_walkaround_launcher_issues(
         raw = _capture_runtime_bound_file(resolved_launcher)
     except OSError as exc:
         return [f"{SECURE_WALKAROUND_LAUNCHER}:corrupt:{exc}"]
-    interpreters = tuple(
-        _canonical_path_preserving_final_symlink(candidate)
-        for candidate in (
-            resolved_launcher.parent / "python",
-            resolved_launcher.parent / "python3",
+    if resolved_launcher == expected_runtime_wrapper:
+        runtime_python = current_tools / "bin/python3"
+        interpreters = (
+            (_canonical_path_preserving_final_symlink(runtime_python),)
+            if runtime_python.is_file() and os.access(runtime_python, os.X_OK)
+            else ()
         )
-        if candidate.is_file() and os.access(candidate, os.X_OK)
-    )
+    else:
+        interpreters = tuple(
+            _canonical_path_preserving_final_symlink(candidate)
+            for candidate in (
+                resolved_launcher.parent / "python",
+                resolved_launcher.parent / "python3",
+            )
+            if candidate.is_file() and os.access(candidate, os.X_OK)
+        )
     matching = [
         interpreter
         for interpreter in interpreters
@@ -10900,10 +10968,19 @@ def _runtime_generation_contract_findings() -> list[DoctorFinding]:
             "is missing or broken"
         )
     else:
-        if launcher_target != expected_launcher:
+        runtime_wrapper_target = _runtime_pack_launcher_target(launcher, current)
+        wrapper_matches = False
+        if runtime_wrapper_target is not None:
+            try:
+                wrapper_matches = _capture_runtime_bound_file(
+                    runtime_wrapper_target
+                ) == _capture_runtime_bound_file(expected_launcher)
+            except OSError:
+                wrapper_matches = False
+        if launcher_target != expected_launcher and not wrapper_matches:
             errors.append(
-                "canonical vibecrafted launcher does not resolve to the current "
-                "generation entrypoint"
+                "canonical vibecrafted launcher neither resolves to nor wraps the "
+                "current manifest-bound generation entrypoint"
             )
     if errors:
         return [
@@ -11063,9 +11140,10 @@ def _slack_provider_contract_findings() -> list[DoctorFinding]:
         except ModuleNotFoundError as exc:
             return [
                 DoctorFinding(
-                    "fail",
+                    "warn",
                     "slack-provider",
-                    f"Slack provider installer is missing: {exc}",
+                    f"Slack provider installer is not bundled: {exc}. External "
+                    "provider (vc-slack-agent) is optional",
                 )
             ]
     healthy, detail = provider.doctor()
@@ -11671,6 +11749,9 @@ def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
             continue
         if "uv" in resolved.parts and "tools" in resolved.parts:
             python_entrypoint_owners.add("uv tool")
+            continue
+        if _runtime_pack_launcher_target(launcher_path, current_link) is not None:
+            python_entrypoint_owners.add("runtime generation")
             continue
         if name == "vibecrafted":
             try:
@@ -14404,7 +14485,7 @@ def _runtime_launcher_body(
         f"export VIBECRAFTED_RUNTIME_ROOT={shlex_quote(str(generation))}",
         f"export VIBECRAFTED_ROOT={shlex_quote(str(generation))}",
         f"export VIBECRAFTED_PYTHON={shlex_quote(str(generation / 'bin/python3'))}",
-        f"export VIBECRAFTED_VC_FRAME_BIN={shlex_quote(str(generation / 'bin/vc-frame'))}",
+        f"export VIBECRAFTED_VC_FRAME_BIN={shlex_quote(str(generation / 'libexec/vc-frame'))}",
         f"export VC_FRAME_CONFIG_DIR={shlex_quote(str(frame_config))}",
         f'export PATH="{generation / "bin"}:${{PATH:-/usr/bin:/bin:/usr/sbin:/sbin}}"',
         'export VIBECRAFTED_DECLARED_LAUNCHER="$0"',
@@ -14740,8 +14821,32 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
                 )
                 (bin_dir / "vc-terminal").chmod(0o755)
             if args.frame_helper:
-                shutil.copy2(Path(args.frame_helper).expanduser(), bin_dir / "vc-frame")
+                libexec_dir = staging / "libexec"
+                libexec_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(
+                    Path(args.frame_helper).expanduser(), libexec_dir / "vc-frame"
+                )
+                (libexec_dir / "vc-frame").chmod(0o755)
+                shutil.copy2(
+                    staging / "scripts/vc-frame-product-entry.sh",
+                    bin_dir / "vc-frame",
+                )
                 (bin_dir / "vc-frame").chmod(0o755)
+            _materialize_vc_frame_generation(staging)
+            source_provenance = load_source_provenance(staging)
+            if source_provenance is None:
+                raise RuntimeError("Runtime Pack has no source-provenance.json")
+            _write_runtime_generation_manifest(
+                staging,
+                source_root=payload_root,
+                source_provenance=source_provenance,
+                install_version=version,
+            )
+            payload_errors = _runtime_generation_payload_errors(staging)
+            if payload_errors:
+                raise RuntimeError(
+                    "Runtime Pack generation is invalid: " + "; ".join(payload_errors)
+                )
             _assert_runtime_tree_has_no_symlinks(staging)
             os.replace(staging, generation)
         finally:
@@ -14763,6 +14868,7 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         generation / "bin/prview",
         generation / "bin/screenscribe",
         generation / "bin/vc-frame",
+        generation / "libexec/vc-frame",
         generation / "bin/vc-server",
         generation / "bin/vc-server-supervisor",
         generation / "bin/vc-start",
@@ -14821,13 +14927,19 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
     )
 
     frame_config = product_config / "vc-frame"
-    if not frame_config.exists():
-        shutil.copytree(
-            generation / "vibecrafted-core/vibecrafted_core/config/vc-frame",
-            frame_config,
-        )
+    if frame_config.exists():
+        if str(frame_config) not in previous.get("owned_dirs", []):
+            _backup_runtime_collision(
+                frame_config, runtime_home=runtime_home, receipt=receipt
+            )
+        _remove_path(frame_config)
+    shutil.copytree(
+        generation / "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame",
+        frame_config,
+    )
+    if str(frame_config) not in receipt["owned_dirs"]:
         receipt["owned_dirs"].append(str(frame_config))
-        _checkpoint_runtime_install_receipt(runtime_home, receipt)
+    _checkpoint_runtime_install_receipt(runtime_home, receipt)
     shell_config = product_config / "shell"
     if shell_config.exists():
         if str(shell_config) not in previous.get("owned_dirs", []):
@@ -14846,7 +14958,10 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
 
     bin_dir = generation / "bin"
     for entry in sorted(bin_dir.iterdir(), key=lambda item: item.name):
-        if entry.name in {"python3", "vc-terminal"} or not entry.is_file():
+        if (
+            entry.name in {"python3", "vc-terminal", SECURE_WALKAROUND_LAUNCHER}
+            or not entry.is_file()
+        ):
             continue
         if not os.access(entry, os.X_OK):
             continue
@@ -14867,6 +14982,21 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             receipt=receipt,
             previous=previous,
         )
+
+    verifier_launcher = paths["launcher_home"] / SECURE_WALKAROUND_LAUNCHER
+    verifier_body = _secure_walkaround_launcher_contents(
+        current_link,
+        generation / "bin/python3",
+        launcher_path=verifier_launcher,
+    ).decode("utf-8")
+    _write_runtime_owned_file(
+        verifier_launcher,
+        verifier_body,
+        mode=0o755,
+        runtime_home=runtime_home,
+        receipt=receipt,
+        previous=previous,
+    )
 
     terminal_launcher = paths["launcher_home"] / "vc-terminal"
     terminal_body = _runtime_launcher_body(
@@ -15007,6 +15137,21 @@ def _receipt_empty_projection_dir_is_allowed(path: Path) -> bool:
     return path.resolve(strict=False) in allowed
 
 
+def _receipt_app_root(receipt: Mapping[str, Any]) -> Path | None:
+    """Return the receipted GUI carrier root after a narrow product-name check."""
+    raw_root = str(receipt.get("app_root", "")).strip()
+    if not raw_root:
+        return None
+    root = Path(raw_root).expanduser()
+    if (
+        not root.is_absolute()
+        or root.suffix != ".app"
+        or not root.name.startswith("Vibecrafted")
+    ):
+        raise RuntimeError(f"receipt app root is not a Vibecrafted app: {raw_root}")
+    return root.resolve(strict=False)
+
+
 def cmd_runtime_uninstall(args: argparse.Namespace) -> int:
     """Undo one Runtime Pack install from its ownership receipt."""
     paths = _runtime_install_paths()
@@ -15075,11 +15220,7 @@ def cmd_runtime_uninstall(args: argparse.Namespace) -> int:
             raise RuntimeError(
                 f"receipt restore path escapes managed roots: {destination}"
             )
-        resolved_backup = backup.resolve(strict=False)
-        resolved_backup_root = backup_root.resolve(strict=False)
-        if resolved_backup != resolved_backup_root and not _is_subpath(
-            resolved_backup, resolved_backup_root
-        ):
+        if not _receipt_backup_path_is_allowed(backup, backup_root):
             raise RuntimeError(f"receipt backup path escapes backup root: {backup}")
     conflicts = [
         raw_path
@@ -15107,8 +15248,12 @@ def cmd_runtime_uninstall(args: argparse.Namespace) -> int:
         if getattr(args, "emit_result", True):
             print(json.dumps(result, sort_keys=True))
         return 1
-    if not dry_run:
-        _teardown_owned_runtime_for_uninstall(paths["crafted_home"], dry_run=False)
+    runtime_actions = _teardown_owned_runtime_for_uninstall(
+        paths["crafted_home"],
+        dry_run=dry_run,
+        app_root=_receipt_app_root(receipt),
+    )
+    actions.extend(runtime_actions)
 
     for raw_path in sorted(owned_symlinks, reverse=True):
         path = Path(raw_path)

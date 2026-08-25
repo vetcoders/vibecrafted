@@ -5,7 +5,7 @@
 # in the product environment, the Cargo prefix, or Vibecrafted's data root.
 #
 # Policy (goal: bare frame is backyard-safe):
-#   1. Always pin VC_FRAME_CONFIG_DIR to product frontier/view when present
+#   1. Always pin VC_FRAME_CONFIG_DIR to the canonical product config
 #      so bare attach gets the same Super binds, layouts, and scripts as vc-start.
 #   2. Product operator session names (vibecrafted / operator / default operator
 #      session) never launch without the product config root.
@@ -47,7 +47,9 @@ pin_darwin_socket_dir() {
   case "$(uname -s 2>/dev/null || true)" in
     Darwin)
       if [[ -z "${VC_FRAME_SOCKET_DIR:-}" && -z "${ZELLIJ_SOCKET_DIR:-}" ]]; then
-        export VC_FRAME_SOCKET_DIR="/tmp/vc-frame-$(id -u)"
+        local socket_uid
+        socket_uid="$(id -u)"
+        export VC_FRAME_SOCKET_DIR="/tmp/vc-frame-$socket_uid"
         export ZELLIJ_SOCKET_DIR="$VC_FRAME_SOCKET_DIR"
       fi
       ;;
@@ -56,15 +58,7 @@ pin_darwin_socket_dir() {
 
 pin_product_config() {
   local xdg="${XDG_CONFIG_HOME:-$HOME/.config}"
-  local frontier="$xdg/vetcoders/frontier/vc-frame"
-  local view="$xdg/vc-frame"
-  if [[ -f "${VC_FRAME_CONFIG_DIR:-}/config.kdl" ]]; then
-    return 0
-  fi
-  if [[ -f "$frontier/config.kdl" ]]; then
-    export VC_FRAME_CONFIG_DIR="$frontier"
-    return 0
-  fi
+  local view="$xdg/vibecrafted/vc-frame"
   if [[ -f "$view/config.kdl" ]]; then
     export VC_FRAME_CONFIG_DIR="$view"
     return 0

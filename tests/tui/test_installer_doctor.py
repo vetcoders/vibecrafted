@@ -5,6 +5,7 @@ import json
 import shutil
 import struct
 import subprocess
+import sys
 from argparse import Namespace
 from pathlib import Path
 
@@ -524,6 +525,10 @@ def test_cmd_doctor_fix_launchers_repairs_missing_wrappers(
     detached_source = tmp_path / "detached-source"
     installer.stage_distribution_payload(REPO_ROOT, detached_source, mirror=True)
     (detached_source / "VERSION").write_text("1.4.1-test\n", encoding="utf-8")
+    _write_executable(
+        detached_source / "bin/python3",
+        f'#!/bin/sh\nexec {installer.shlex_quote(str(Path(sys.executable).absolute()))} "$@"\n',
+    )
     _write_test_source_provenance(detached_source)
     monkeypatch.setattr(
         installer, "_doctor_launcher_source_root", lambda _store: detached_source
@@ -902,6 +907,13 @@ def _write_release_contract_runtime_manifest(
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(REPO_ROOT / source_relative, target)
 
+    runtime_python = current_tools / "bin/python3"
+    runtime_python.parent.mkdir(parents=True, exist_ok=True)
+    _write_executable(
+        runtime_python,
+        f'#!/bin/sh\nexec {installer.shlex_quote(str(Path(sys.executable).absolute()))} "$@"\n',
+    )
+
     provenance = _write_test_source_provenance(current_tools)
 
     monkeypatch.delenv("VIBECRAFTED_SOURCE_OWNER_REPO", raising=False)
@@ -912,6 +924,29 @@ def _write_release_contract_runtime_manifest(
         source_provenance=provenance,
         install_version=None,
     )
+
+
+def test_runtime_semantic_verifier_uses_candidate_interpreter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate_python = tmp_path / "runtime/bin/python3"
+    observed: list[str] = []
+
+    def fake_run(argv, **_kwargs):
+        observed.extend(str(part) for part in argv)
+        return subprocess.CompletedProcess(argv, 0, "ok\n", "")
+
+    monkeypatch.setattr(installer.subprocess, "run", fake_run)
+
+    installer._run_runtime_verifier_semantic_command(
+        ["product-contract.py", "--help"],
+        cache=tmp_path / "cache",
+        python_executable=candidate_python,
+    )
+
+    assert observed[0] == str(candidate_python)
+    assert observed[1:4] == ["-I", "-S", "-B"]
+    assert str(Path(sys.executable)) not in observed[:1]
 
 
 def test_installer_release_contract_assets_fail_closed_for_missing_or_exact_byte_drift(
@@ -1966,7 +2001,7 @@ def test_vc_frame_delivery_stale_file_fails_view(tmp_path, monkeypatch):
     home.mkdir()
     tools = home / ".local" / "share" / "vibecrafted" / "tools"
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
-    view = home / ".config" / "vc-frame"
+    view = home / ".config" / "vibecrafted" / "vc-frame"
     view.mkdir(parents=True)
     (view / "config.kdl").write_text('theme "choinka"\n', encoding="utf-8")
     (view / "layouts").mkdir()
@@ -2002,7 +2037,7 @@ def test_vc_frame_delivery_pane_shell_warn_when_zsh_missing_and_layouts_unsubsti
     tools = home / ".local" / "share" / "vibecrafted" / "tools"
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     # Unsubstituted layouts (dev-style view pointing at raw kdl with zsh)
-    view = home / ".config" / "vc-frame"
+    view = home / ".config" / "vibecrafted" / "vc-frame"
     layouts = view / "layouts"
     layouts.mkdir(parents=True)
     (view / "config.kdl").write_text(

@@ -864,6 +864,55 @@ def assert_source_payload_matches_provenance(
     return provenance
 
 
+def write_source_provenance_carrier(
+    source: str | Path,
+    output: str | Path,
+    *,
+    owner_repo: str | None = None,
+    source_revision: str | None = None,
+) -> dict[str, object]:
+    """Write only the canonical carrier proven by an exact source snapshot.
+
+    Native Runtime Packs need the same closed provenance record as the portable
+    archive, but they do not need a second materialized copy of the entire
+    source tree.  Deriving the carrier directly also prevents host metadata
+    writers (notably Finder's .DS_Store) from racing a transient staging tree.
+    """
+    source_root = Path(source).resolve(strict=False)
+    if not source_root.is_dir():
+        raise ManifestError(f"source root is not a directory: {source_root}")
+    provenance = assert_source_payload_matches_provenance(
+        source_root,
+        owner_repo=owner_repo,
+        source_revision=source_revision,
+    )
+    output_path = Path(os.path.abspath(output))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists() and not output_path.is_file():
+        raise ManifestError(
+            f"source provenance output must be a regular file: {output_path}"
+        )
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{output_path.name}.candidate-",
+            dir=output_path.parent,
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(_canonical_provenance_bytes(provenance))
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_path.chmod(0o644)
+        os.replace(temporary_path, output_path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    return provenance
+
+
 def _relative_path(value: str | Path) -> Path:
     """Normalize ``value`` to a relative Path, rejecting absolute or ``..`` paths."""
     relative = Path(value)
@@ -2184,7 +2233,7 @@ def publish_archive_candidate(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Build the CLI parser exposing the check/stage/archive subcommands."""
+    """Build the CLI parser exposing validation and carrier writers."""
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -2201,6 +2250,14 @@ def _build_parser() -> argparse.ArgumentParser:
     stage.add_argument("--owner-repo")
     stage.add_argument("--source-revision")
     stage.add_argument("--require-source-provenance", action="store_true")
+
+    carrier = subparsers.add_parser(
+        "carrier", help="Write a canonical source-provenance carrier"
+    )
+    carrier.add_argument("--source", required=True, type=Path)
+    carrier.add_argument("--output", required=True, type=Path)
+    carrier.add_argument("--owner-repo")
+    carrier.add_argument("--source-revision")
 
     archive = subparsers.add_parser("archive", help="Create a validated tarball")
     archive.add_argument("--source", required=True, type=Path)
@@ -2238,6 +2295,14 @@ def main(argv: list[str] | None = None) -> int:
                 require_source_provenance=args.require_source_provenance,
             )
             print(f"Payload staged: {args.destination}")
+        elif args.command == "carrier":
+            write_source_provenance_carrier(
+                args.source,
+                args.output,
+                owner_repo=args.owner_repo,
+                source_revision=args.source_revision,
+            )
+            print(f"Source provenance written: {args.output}")
         elif args.command == "archive":
             archive = create_archive(
                 args.source,

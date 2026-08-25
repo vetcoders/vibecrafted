@@ -185,6 +185,43 @@ def test_load_source_provenance_accepts_only_the_exact_closed_record(
     )
 
 
+def test_carrier_cli_uses_git_objects_without_materializing_host_junk(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    revision = _committed_git_source(source)
+    (source / ".DS_Store").write_bytes(b"ignored host metadata")
+    output = tmp_path / "carrier" / manifest.SOURCE_PROVENANCE_FILE
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "distribution_manifest.py"),
+            "carrier",
+            "--source",
+            str(source),
+            "--output",
+            str(output),
+            "--owner-repo",
+            SOURCE_OWNER_REPO,
+            "--source-revision",
+            revision,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["source_revision"] == revision
+    assert payload["owner_repo"] == SOURCE_OWNER_REPO
+    assert payload["payload"] == manifest._distribution_tree_record_from_git(
+        source, revision
+    )
+    assert output.stat().st_mode & 0o777 == 0o644
+
+
 @pytest.mark.parametrize(
     "payload",
     [

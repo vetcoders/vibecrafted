@@ -178,10 +178,16 @@ def test_native_carrier_embeds_every_required_agent_foundation() -> None:
     assert 'stage-runtime-foundations.sh" "$runtime/bin"' in builder
     assert "'screenscribe==0.1.19'" in builder
     assert '"$runtime/bin/screenscribe" --version' in builder
+    assert '"$runtime/source-provenance.json"' in builder
+    assert 'carrier --source "$REPO_ROOT"' in builder
+    assert "provenance_stage" not in builder
+    assert '"$runtime/scripts/vc-frame-product-entry.sh"' in builder
     for command in ("loct", "loctree-mcp", "aicx", "aicx-mcp", "prview"):
         assert command in stager
         assert f'generation / "bin/{command}"' in installer
     assert 'generation / "bin/screenscribe"' in installer
+    assert 'generation / "libexec/vc-frame"' in installer
+    assert "_write_runtime_generation_manifest(" in installer
     assert "runtime-foundations.json" in stager
     assert "OPENSSL_STATIC=1" in stager
     assert "PRView retains a non-system dynamic library dependency" in stager
@@ -556,6 +562,13 @@ def test_dirty_donors_are_a_release_flag_with_a_reaper_not_a_manual_ritual() -> 
     assert "trap cleanup EXIT INT TERM HUP" in builder
     assert "materialize_donor_snapshots" in builder
     assert "VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT" in builder
+
+    # Regenerated plugin assets are deterministic derived output. Their
+    # mutation must not make the binary claim that the immutable donor commit
+    # itself was dirty.
+    assert 'frame_release_sha="$(git_sha "$FRAME_REPO")"' in builder
+    assert 'VC_FRAME_GIT_SHA="$frame_release_sha"' in builder
+    assert "VC_FRAME_GIT_DIRTY=0" in builder
 
     # Reaping goes through git; `rm -rf` alone is what creates ghosts.
     assert "worktree add --detach" in library
