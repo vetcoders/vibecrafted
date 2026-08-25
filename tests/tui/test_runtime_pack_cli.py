@@ -338,9 +338,10 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
         == expected
     )
 
-    # The same canonical writer also accepts a release-built Linux payload;
-    # consumers never compile it. Missing helpers still fail through the
-    # common required-file contract below.
+    # Linux arm64 additionally requires the closed executable inventory that
+    # the native builder records from real produced bytes. A synthetic payload
+    # cannot be mislabeled as a complete Linux carrier merely because it has
+    # executable-shaped files.
     for relative in ("bin/vc-terminal", "bin/vc-frame", "libexec/vc-frame"):
         helper = runtime / relative
         helper.parent.mkdir(parents=True, exist_ok=True)
@@ -373,13 +374,9 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
         text=True,
         check=False,
     )
-    assert linux.returncode == 0, linux.stderr
-    with tarfile.open(linux_output, "r:gz") as archive:
-        provenance = json.load(
-            archive.extractfile("VibecraftedRuntime/runtime-pack-provenance.json")
-        )
-    assert provenance["platform"] == "linux"
-    assert provenance["architecture"] == "arm64"
+    assert linux.returncode != 0
+    assert "Linux arm64 Runtime Pack inventory is invalid" in linux.stderr
+    assert not linux_output.exists()
 
 
 def test_runtime_pack_archive_requires_release_signature(tmp_path: Path) -> None:

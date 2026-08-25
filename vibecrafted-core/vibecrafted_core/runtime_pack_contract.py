@@ -14,9 +14,27 @@ from typing import Any
 SCHEMA = "io.vetcoders.vibecrafted.runtime-pack-provenance.v1"
 PROVENANCE_NAME = "runtime-pack-provenance.json"
 SOURCE_PROVENANCE_NAME = "source-provenance.json"
+INVENTORY_NAME = "runtime-inventory.json"
 SOURCE_PROVENANCE_SCHEMA = "vibecrafted.source-provenance.v2"
 GIT_SHA = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
+LINUX_ARM64_EXECUTABLES = frozenset(
+    {
+        "vibecrafted",
+        "vc-server",
+        "loct",
+        "loctree",
+        "loctree-mcp",
+        "loctree-lsp",
+        "aicx",
+        "aicx-mcp",
+        "prview",
+        "screenscribe",
+        "vc-frame",
+        "vc-terminal",
+        "voc",
+    }
+)
 
 
 class RuntimePackContractError(RuntimeError):
@@ -94,6 +112,66 @@ def _source_provenance(root: Path, *, expected_revision: str) -> dict[str, Any]:
     return payload
 
 
+def _linux_arm64_inventory(root: Path) -> dict[str, Any]:
+    path = root / INVENTORY_NAME
+    try:
+        raw = path.read_text(encoding="utf-8")
+        inventory = json.loads(raw)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimePackContractError(
+            "Linux arm64 Runtime Pack inventory is invalid"
+        ) from exc
+    executables = inventory.get("executables") if isinstance(inventory, dict) else None
+    required_record = {
+        "name",
+        "path",
+        "sha256",
+        "version_argv",
+        "version_output",
+        "source_url",
+        "source_revision",
+        "source_archive_sha256",
+        "target",
+        "license",
+    }
+    if (
+        not isinstance(inventory, dict)
+        or set(inventory) != {"schema", "platform", "architecture", "executables"}
+        or inventory.get("schema") != "io.vetcoders.vibecrafted.runtime-inventory.v1"
+        or inventory.get("platform") != "linux"
+        or inventory.get("architecture") != "arm64"
+        or raw != _canonical_json(inventory)
+        or not isinstance(executables, list)
+        or {record.get("name") for record in executables if isinstance(record, dict)}
+        != LINUX_ARM64_EXECUTABLES
+    ):
+        raise RuntimePackContractError(
+            "Linux arm64 Runtime Pack inventory violates the closed schema"
+        )
+    for record in executables:
+        if (
+            not isinstance(record, dict)
+            or set(record) != required_record
+            or not all(
+                isinstance(record[field], str) and record[field]
+                for field in required_record - {"version_argv"}
+            )
+            or not isinstance(record["version_argv"], list)
+            or not all(
+                isinstance(item, str) and item for item in record["version_argv"]
+            )
+            or SHA256.fullmatch(record["sha256"]) is None
+            or SHA256.fullmatch(record["source_archive_sha256"]) is None
+            or record["target"] != "aarch64-unknown-linux-gnu"
+            or record["path"] != f"bin/{record['name']}"
+            or _sha256(root / record["path"]) != record["sha256"]
+        ):
+            raise RuntimePackContractError(
+                "Linux arm64 Runtime Pack executable inventory is invalid"
+            )
+    return inventory
+
+
 def write_provenance(
     root: str | Path,
     *,
@@ -118,6 +196,8 @@ def write_provenance(
     if not version or version != version.strip():
         raise RuntimePackContractError("Runtime Pack version is invalid")
     _source_provenance(payload_root, expected_revision=source_revision)
+    if platform == "linux" and architecture == "arm64":
+        _linux_arm64_inventory(payload_root)
     provenance = {
         "schema": SCHEMA,
         "carrier_basename": carrier_basename,
@@ -218,6 +298,8 @@ def verify_provenance(
                 f"Runtime Pack {field} disagrees with the selected release asset"
             )
     _source_provenance(payload_root, expected_revision=revisions["vibecrafted"])
+    if provenance["platform"] == "linux" and provenance["architecture"] == "arm64":
+        _linux_arm64_inventory(payload_root)
     observed = _payload_files(payload_root)
     if files != observed:
         raise RuntimePackContractError(

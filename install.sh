@@ -231,6 +231,7 @@ REQUIRED_FILES = frozenset(
         "install.ps1",
         "install.toml",
         "scripts/distribution_manifest.py",
+        "scripts/build-linux-arm64-runtime-pack.sh",
         "scripts/installer_brand.py",
         "scripts/vetcoders_install.py",
         "scripts/vibecrafted",
@@ -249,6 +250,9 @@ REQUIRED_FILES = frozenset(
         "vibecrafted-app/Cargo.lock",
         "vibecrafted-server/Cargo.toml",
         "vibecrafted-server/Cargo.lock",
+        "vibecrafted-vm/RuntimePack.Containerfile",
+        "vibecrafted-vm/runtime-entry.sh",
+        "vibecrafted-vm/runtime-provider-lock.json",
     }
 )
 REQUIRED_DIRECTORIES = frozenset(

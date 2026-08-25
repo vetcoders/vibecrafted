@@ -36,6 +36,7 @@ EXPECTED_REQUIRED = {
     "install.ps1",
     "install.toml",
     "scripts/distribution_manifest.py",
+    "scripts/build-linux-arm64-runtime-pack.sh",
     "scripts/vetcoders_install.py",
     "scripts/vibecrafted",
     "scripts/verify-vibecrafted-product.sh",
@@ -55,6 +56,9 @@ EXPECTED_REQUIRED = {
     "vibecrafted-app/Cargo.lock",
     "vibecrafted-server/Cargo.toml",
     "vibecrafted-server/Cargo.lock",
+    "vibecrafted-vm/RuntimePack.Containerfile",
+    "vibecrafted-vm/runtime-entry.sh",
+    "vibecrafted-vm/runtime-provider-lock.json",
 }
 
 

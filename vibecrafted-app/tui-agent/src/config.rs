@@ -55,6 +55,10 @@ pub fn parse_args() -> anyhow::Result<CliOptions> {
                 print_help();
                 std::process::exit(0);
             }
+            "--version" | "-V" => {
+                println!("voc {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             "--state-root" => {
                 let value = args
                     .next()

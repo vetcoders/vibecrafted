@@ -7,9 +7,13 @@ require() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
 [[ $# -eq 1 ]] || die "usage: $0 OUTPUT_BIN_DIR"
 OUTPUT_BIN_DIR="$1"
 LOCTREE_VERSION="0.14.4"
+LOCTREE_REVISION="3e9eb0a74cb3c043d740de5fe7d8c93985d0a876"
+LOCTREE_ARCHIVE_SHA256="cdf37cff13b423d9be916f74bb43bc5857729e64380d7bc2f16462568d74a5cb"
 AICX_VERSION="0.12.5"
 AICX_REVISION="ced57997dd97a2b08960f35e3a657d7b0c49a200"
+AICX_ARCHIVE_SHA256="ffc65ad6652ee0e240beb333f54d7372b607690dcf5f6c29eb68adee2aed58e7"
 PRVIEW_VERSION="0.6.0"
+LOCTREE_SOURCE_BUILD=0
 
 case "$(uname -s):$(uname -m)" in
   Darwin:arm64)
@@ -20,6 +24,14 @@ case "$(uname -s):$(uname -m)" in
     LOCTREE_PACKAGE="@loctree/loctree-linux-x64-gnu"
     EXE_SUFFIX=""
     ;;
+  Linux:aarch64|Linux:arm64)
+    # npm has no Linux arm64 platform package. Build the exact public release
+    # commit from a digest-pinned source archive instead of falling back to a
+    # sibling checkout or a mutable branch.
+    LOCTREE_PACKAGE=""
+    LOCTREE_SOURCE_BUILD=1
+    EXE_SUFFIX=""
+    ;;
   MINGW*:x86_64|MSYS*:x86_64|CYGWIN*:x86_64)
     LOCTREE_PACKAGE="@loctree/loctree-win32-x64-msvc"
     EXE_SUFFIX=".exe"
@@ -27,7 +39,26 @@ case "$(uname -s):$(uname -m)" in
   *) die "no complete Runtime Foundations payload for $(uname -s)/$(uname -m)" ;;
 esac
 
-for tool in git npm cargo python3; do require "$tool"; done
+[[ "${VIBECRAFTED_FOUNDATIONS_TARGET_PROBE:-0}" == 1 ]] && exit 0
+
+for tool in curl npm cargo python3; do require "$tool"; done
+
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    sha256sum "$1" | awk '{print $1}'
+  fi
+}
+
+fetch_source() {
+  local url="$1" expected="$2" archive="$3" destination="$4"
+  curl -fL --proto '=https' --tlsv1.2 "$url" -o "$archive"
+  [[ "$(sha256_file "$archive")" == "$expected" ]] \
+    || die "source archive checksum mismatch: $url"
+  mkdir -p "$destination"
+  tar -xzf "$archive" --strip-components=1 -C "$destination"
+}
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/vibecrafted-foundations.XXXXXX")"
 # Cleanup must never turn an otherwise complete carrier build into a release
@@ -42,22 +73,40 @@ mkdir -p "$OUTPUT_BIN_DIR" "$WORK/loctree" "$WORK/aicx" "$WORK/prview"
 # npm verifies the registry integrity for the exact platform package. Extract
 # only the native runtime files; Node and its global package tree are not part
 # of the installed product.
-npm pack "${LOCTREE_PACKAGE}@${LOCTREE_VERSION}" \
-  --pack-destination "$WORK/loctree" >/dev/null
-tar -xzf "$WORK/loctree"/*.tgz -C "$WORK/loctree"
-for name in loct loctree loctree-mcp loctree-lsp; do
-  install -m 0755 "$WORK/loctree/package/bin/${name}${EXE_SUFFIX}" \
-    "$OUTPUT_BIN_DIR/${name}${EXE_SUFFIX}"
-done
+if [[ "$LOCTREE_SOURCE_BUILD" == 1 ]]; then
+  fetch_source \
+    "https://codeload.github.com/Loctree/loctree/tar.gz/${LOCTREE_REVISION}" \
+    "$LOCTREE_ARCHIVE_SHA256" "$WORK/loctree/source.tar.gz" "$WORK/loctree/source"
+  LOCTREE_TARGET="$WORK/loctree/target"
+  CARGO_TARGET_DIR="$LOCTREE_TARGET" cargo build \
+    --manifest-path "$WORK/loctree/source/Cargo.toml" --release --locked \
+    -p loctree --bin loct --bin loctree
+  for package in loctree-mcp loctree-lsp; do
+    CARGO_TARGET_DIR="$LOCTREE_TARGET" cargo build \
+      --manifest-path "$WORK/loctree/source/Cargo.toml" --release --locked \
+      -p "$package"
+  done
+  for name in loct loctree loctree-mcp loctree-lsp; do
+    install -m 0755 "$LOCTREE_TARGET/release/$name" "$OUTPUT_BIN_DIR/$name"
+  done
+else
+  npm pack "${LOCTREE_PACKAGE}@${LOCTREE_VERSION}" \
+    --pack-destination "$WORK/loctree" >/dev/null
+  tar -xzf "$WORK/loctree"/*.tgz -C "$WORK/loctree"
+  for name in loct loctree loctree-mcp loctree-lsp; do
+    install -m 0755 "$WORK/loctree/package/bin/${name}${EXE_SUFFIX}" \
+      "$OUTPUT_BIN_DIR/${name}${EXE_SUFFIX}"
+  done
+fi
+rm -rf "$WORK/loctree"
 
 # The published 0.12.5 AICX archives are checksum-correct but retain their CI
 # builder's /Users path in both native binaries. Build the exact release commit
 # with path remaps instead of weakening payload hygiene or byte-patching signed
 # upstream artifacts. Customers still receive ready binaries and need no Rust.
-git clone --quiet --depth 1 --branch "v${AICX_VERSION}" \
-  https://github.com/Loctree/aicx.git "$WORK/aicx/source"
-[[ "$(git -C "$WORK/aicx/source" rev-parse HEAD)" == "$AICX_REVISION" ]] \
-  || die "AICX v${AICX_VERSION} does not resolve to pinned $AICX_REVISION"
+fetch_source \
+  "https://codeload.github.com/Loctree/aicx/tar.gz/${AICX_REVISION}" \
+  "$AICX_ARCHIVE_SHA256" "$WORK/aicx/source.tar.gz" "$WORK/aicx/source"
 AICX_TARGET="$WORK/aicx/target"
 NATIVE_REMAP_FLAGS="-ffile-prefix-map=$HOME=/usr/src/operator-home -ffile-prefix-map=$WORK/aicx/source=/usr/src/aicx"
 RUSTFLAGS="--remap-path-prefix=$HOME=/usr/src/operator-home --remap-path-prefix=$WORK/aicx/source=/usr/src/aicx" \
@@ -73,6 +122,7 @@ for name in aicx aicx-mcp; do
   [[ -f "$source_path" ]] || die "AICX build contains no ${name}${EXE_SUFFIX}"
   install -m 0755 "$source_path" "$OUTPUT_BIN_DIR/${name}${EXE_SUFFIX}"
 done
+rm -rf "$WORK/aicx"
 
 # PRView documents GitHub release binaries, but its release page currently has
 # no assets. Build the exact published crate once, during carrier assembly, so
@@ -118,7 +168,25 @@ for path in sorted(root.iterdir()):
 payload = {
     "schema": "io.vetcoders.vibecrafted.runtime-foundations.v1",
     "versions": versions,
-    "source_revisions": {"aicx": "ced57997dd97a2b08960f35e3a657d7b0c49a200"},
+    "source_revisions": {
+        "loctree": "3e9eb0a74cb3c043d740de5fe7d8c93985d0a876",
+        "aicx": "ced57997dd97a2b08960f35e3a657d7b0c49a200",
+    },
+    "source_archives": {
+        "loctree": {
+            "url": "https://codeload.github.com/Loctree/loctree/tar.gz/3e9eb0a74cb3c043d740de5fe7d8c93985d0a876",
+            "sha256": "cdf37cff13b423d9be916f74bb43bc5857729e64380d7bc2f16462568d74a5cb",
+        },
+        "aicx": {
+            "url": "https://codeload.github.com/Loctree/aicx/tar.gz/ced57997dd97a2b08960f35e3a657d7b0c49a200",
+            "sha256": "ffc65ad6652ee0e240beb333f54d7372b607690dcf5f6c29eb68adee2aed58e7",
+        },
+    },
+    "licenses": {
+        "loctree": "BUSL-1.1",
+        "aicx": "BUSL-1.1",
+        "prview": "BUSL-1.1",
+    },
     "files": files,
 }
 (root.parent / "runtime-foundations.json").write_text(
