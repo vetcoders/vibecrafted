@@ -2584,6 +2584,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "start",
             "stop",
             "status",
+            "logs",
             "uninstall",
         ),
     )
@@ -2745,9 +2746,9 @@ def _runtime_status(paths: SupervisorPaths) -> int:
 
 
 def _service_command(args: argparse.Namespace) -> int:
-    """Dispatch the `service` subcommand's action (status/install/reconcile/
-    restart/start/stop/uninstall), serializing mutating actions behind the
-    tools-install lease; prints a confirmation line and returns an exit code
+    """Dispatch the `service` subcommand's action (status/logs/install/
+    reconcile/restart/start/stop/uninstall), serializing mutating actions behind
+    the tools-install lease; prints a confirmation line and returns an exit code
     (status returns 1 unless every health field is green)."""
 
     _require_macos_service()
@@ -2768,6 +2769,19 @@ def _service_command(args: argparse.Namespace) -> int:
             )
             else 1
         )
+    if args.action == "logs":
+        payload = {
+            "directory": str(config.paths.server_dir),
+            "stdout": str(config.paths.stdout_log),
+            "stderr": str(config.paths.stderr_log),
+        }
+        if args.json:
+            print(json.dumps(payload, sort_keys=True))
+        else:
+            print(f"Directory: {payload['directory']}")
+            print(f"Stdout: {payload['stdout']}")
+            print(f"Stderr: {payload['stderr']}")
+        return 0
     with _ToolsInstallMutationLease(config.paths):
         if args.action in {"install", "reconcile"}:
             changed, restarted = install_and_reconcile_service(

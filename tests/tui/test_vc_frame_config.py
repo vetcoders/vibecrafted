@@ -162,7 +162,7 @@ def test_operator_layout_matches_vibecrafted_standard() -> None:
     assert 'tab name="Agents"' in payload
     assert 'tab name="Shell"' in payload
     assert 'tab name="voc"' in payload
-    assert 'guide_mode "mission-control"' in payload
+    assert "vc-start-here.py" in payload
     assert "vc-agent-workshop.py" in payload
     assert "vibecrafted tui" in payload
     assert "session-manager" in payload
@@ -182,9 +182,11 @@ def test_operator_layout_matches_vibecrafted_standard() -> None:
     assert "VibeCrafted" not in active
 
 
-def test_operator_layout_guide_and_shell_tabs() -> None:
+def test_operator_layout_start_here_and_shell_tabs() -> None:
     payload = (LAYOUTS_DIR / "operator.kdl").read_text(encoding="utf-8")
-    assert 'plugin location="about"' in payload
+    assert 'command="bash" name="Start Here"' in payload
+    assert 'plugin location="about"' not in payload
+    assert "vibecrafted config install --force" in payload
     assert 'name="Shell"' in payload
     # Shell wakes with banner then zsh (not bare suspended /bin/zsh).
     assert "exec zsh" in payload or "zsh -l" in payload

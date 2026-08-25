@@ -63,9 +63,18 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate, @un
 
   func handleOpenURLs(_ urls: [URL]) {
     for url in urls {
+      if Self.isConsoleURL(url) {
+        presentWindow?()
+        continue
+      }
       guard let target = Self.parseVibecraftedURL(url) else { continue }
       present(runId: target.runId, report: nil, preferReport: target.kind == "report")
     }
+  }
+
+  static func isConsoleURL(_ url: URL) -> Bool {
+    guard url.scheme == urlScheme else { return false }
+    return url.host == "console" && url.path == "/open"
   }
 
   static func parseVibecraftedURL(_ url: URL) -> (kind: String, runId: String)? {

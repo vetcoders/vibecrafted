@@ -845,21 +845,26 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "launchWorkspaceTerminal()" in launch_handler
     assert "showMainWindowIfNeeded()" not in launch_handler
     assert "\t<key>LSUIElement</key>\n\t<true/>" in info
-    assert 'withTitle: "VC Console"' in delegate
-    assert 'withTitle: "VC Terminal"' in delegate
+    assert 'withTitle: "Open VC Console"' in delegate
+    assert 'withTitle: "Open VC Terminal"' in delegate
     assert 'withTitle: "VC Server"' in delegate
+    assert 'withTitle: "Start"' in delegate
+    assert 'withTitle: "Stop"' in delegate
+    assert 'withTitle: "Restart"' in delegate
+    assert 'withTitle: "Open Logs"' in delegate
     assert 'withTitle: "Server Diagnostics…"' in delegate
-    assert 'withTitle: "About"' in delegate
-    assert 'withTitle: "Help"' in delegate
-    assert 'withTitle: "Quit"' in delegate
+    assert 'withTitle: "About Vibecrafted"' in delegate
+    assert 'withTitle: "Vibecrafted Help"' in delegate
+    assert 'withTitle: "Quit Vibecrafted"' in delegate
     assert "#selector(requestQuit)" in delegate
     assert 'process.arguments = ["status", "--activity", "--json"]' in delegate
     assert "func applicationShouldTerminate(" in delegate
     assert 'withTitle: "Cancel"' in delegate
     assert 'withTitle: "Quit Anyway"' in delegate
     assert 'appendingPathComponent("server/supervisor.status.json")' in delegate
-    assert 'title: "Server: RESTARTING…"' in delegate
-    assert 'process.arguments = ["server", "service", "reconcile"]' in delegate
+    assert "serverActionArguments(for: action)" in delegate
+    assert 'process.arguments = ["server", "service", "status", "--json"]' in delegate
+    assert 'process.arguments = ["server", "service", "logs", "--json"]' in delegate
     assert "menu.delegate = self" in delegate
     assert "statusRefreshTimer = Timer.scheduledTimer(" in delegate
     assert "statusIcon(health:" in delegate

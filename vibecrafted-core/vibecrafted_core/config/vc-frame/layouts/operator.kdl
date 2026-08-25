@@ -37,11 +37,8 @@ layout {
     }
 
     tab name="Start here" focus=true {
-        pane name="Start here" {
-            plugin location="about" {
-                guide_mode "mission-control"
-                pane_title "Start here — map of this workspace"
-            }
+        pane command="bash" name="Start Here" {
+            args "-lc" "root=\"${VC_FRAME_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame}\"; launcher=\"$root/vc-start-here.py\"; if [ -x \"$launcher\" ]; then exec \"$launcher\"; fi; printf '\\n  START HERE\\n\\n  Launcher missing: %s\\n  Run: vibecrafted config install --force\\n\\n' \"$launcher\"; exec \"${SHELL:-/bin/zsh}\" -l"
         }
     }
 

@@ -1435,6 +1435,42 @@ def test_linux_service_command_fails_closed_without_mutation(
     assert not (tmp_path / "operator" / "Library" / "LaunchAgents").exists()
 
 
+def test_service_logs_reports_canonical_owner_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    home = (tmp_path / "crafted-home").resolve()
+    runtime_home = (tmp_path / "runtime").resolve()
+    operator_home = (tmp_path / "operator").resolve()
+    monkeypatch.setattr(supervisor.sys, "platform", "darwin")
+
+    result = supervisor.main(
+        [
+            "service",
+            "logs",
+            "--json",
+            "--launcher",
+            str(launcher),
+            "--home",
+            str(home),
+            "--runtime-home",
+            str(runtime_home),
+            "--operator-home",
+            str(operator_home),
+        ]
+    )
+
+    assert result == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "directory": str(home / "server"),
+        "stdout": str(home / "server" / "supervisor.stdout.log"),
+        "stderr": str(home / "server" / "supervisor.stderr.log"),
+    }
+    assert not (operator_home / "Library" / "LaunchAgents").exists()
+
+
 def test_child_environment_is_a_minimal_nonsecret_allowlist(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

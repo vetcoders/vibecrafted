@@ -41,6 +41,9 @@ CARGO_LOCK_PACKAGES = {
 }
 PLUGIN_MANIFEST_RELATIVE = Path("plugin.json")
 RELEASE_TEXT_PROJECTIONS = {
+    Path("vibecrafted-app/shell-agent/app/project.yml"): re.compile(
+        r'^\s*MARKETING_VERSION:\s*"(?P<version>\d+\.\d+\.\d+)"', re.MULTILINE
+    ),
     Path("packaging/homebrew/Formula/vibecrafted.rb"): re.compile(
         r'^\s*version\s+"(?P<version>\d+\.\d+\.\d+)"', re.MULTILINE
     ),

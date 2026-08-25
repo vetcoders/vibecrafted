@@ -1083,7 +1083,7 @@ cmd_server_help() {
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted server [start|stop|status|open|doctor] [options]\n'
-  printf '  vibecrafted server service [install|start|stop|status|uninstall] [options]\n'
+  printf '  vibecrafted server service [install|reconcile|restart|start|stop|status|logs|uninstall] [options]\n'
   printf '\n'
   printf '%bOptions:%b\n' "$_bold" "$_reset"
   printf '  --port, -p <port>  Specify the port (default: 3024)\n'
@@ -1095,6 +1095,7 @@ cmd_server_help() {
   printf '  vibecrafted server service start\n'
   printf '  vibecrafted server status\n'
   printf '  vibecrafted server service stop\n'
+  printf '  vibecrafted server service logs --json\n'
   printf '\n'
 }
 

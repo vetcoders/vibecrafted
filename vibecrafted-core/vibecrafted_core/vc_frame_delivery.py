@@ -56,6 +56,7 @@ OPERATOR_SCRIPT_NAMES: tuple[str, ...] = (
     "vc-quick-cmd.sh",
     "vc-deck.sh",
     "vc-agent-workshop.py",
+    "vc-start-here.py",
 )
 
 _CORE_VIEW_NAMES: tuple[str, ...] = ("config.kdl", "layouts", "themes")

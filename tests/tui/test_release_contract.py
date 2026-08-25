@@ -328,7 +328,7 @@ def test_builder_emits_the_canonical_versioned_dmg_and_checksum() -> None:
     assert 'DMG_CHECKSUM="$DMG.sha256"' in builder
     assert 'LEGACY_DMG="$DIST_DIR/Vibecrafted.dmg"' in builder
     assert (
-        'RUNTIME_PACK_NAME="Vibecrafted_RuntimePack_${VERSION}-${RELEASE_DATE}-${ROOT_SHA:0:8}-${RUNTIME_PACK_PLATFORM}.tar.gz"'
+        'RUNTIME_PACK_NAME="Vibecrafted_RuntimePack_${VERSION}-${RELEASE_DATE}-${ROOT_SHA:0:8}-${RUNTIME_PACK_PLATFORM}-${RUNTIME_PACK_ARCHITECTURE}.tar.gz"'
         in builder
     )
     assert '"$REPO_ROOT/scripts/package-runtime-pack.sh"' in builder
@@ -437,6 +437,8 @@ def test_release_bundle_binds_the_vibecrafted_app_icon() -> None:
     icon = REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted/Vibecrafted.icns"
 
     assert "INFOPLIST_FILE: Vibecrafted/Info.plist" in project
+    assert 'MARKETING_VERSION: "4.3.0"' in project
+    assert '- "Vibecrafted.icns"' in project
     assert "<key>CFBundleIconFile</key>" in info_plist
     assert "<string>Vibecrafted.icns</string>" in info_plist
     assert 'plist["CFBundleIconFile"] = contract.PRODUCT_ICON_FILE' in manifest

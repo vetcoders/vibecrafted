@@ -21,6 +21,7 @@ targets:
           - "Bridge/vibecrafted_shell_ffiFFI.h"
           - "Bridge/vibecrafted_shell_ffiFFI.modulemap"
           - "Info.plist"
+          - "Vibecrafted.icns"
     preBuildScripts:
       - name: "Build Rust FFI"
         script: |
@@ -32,7 +33,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.vetcoders.vibecrafted
-        MARKETING_VERSION: "0.1.0"
+        MARKETING_VERSION: "4.3.0"
         CURRENT_PROJECT_VERSION: 1
         GENERATE_INFOPLIST_FILE: false
         INFOPLIST_FILE: Vibecrafted/Info.plist
