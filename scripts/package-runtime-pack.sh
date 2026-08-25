@@ -93,8 +93,8 @@ if find "$root" -type l -print -quit | grep -q .; then
   die "standalone Runtime Pack contains symlinks"
 fi
 for required in \
-  VERSION bin/python3 bin/vibecrafted bin/vc-terminal bin/vc-frame \
-  libexec/vc-frame scripts/vetcoders_install.py \
+  VERSION bin/python3 bin/vibecrafted bin/vc-start bin/vc-terminal bin/vc-frame \
+  libexec/vc-frame scripts/vibecrafted scripts/vetcoders_install.py \
   vibecrafted-core/vibecrafted_core/runtime_pack_contract.py; do
   [[ -e "$root/$required" ]] || die "standalone Runtime Pack is missing $required"
 done

@@ -35,6 +35,12 @@ LINUX_ARM64_EXECUTABLES = frozenset(
         "voc",
     }
 )
+RUNTIME_INSTALLER_EXECUTABLES = frozenset(
+    {
+        "bin/vc-start",
+        "scripts/vibecrafted",
+    }
+)
 
 
 class RuntimePackContractError(RuntimeError):
@@ -51,6 +57,21 @@ def _sha256(path: Path) -> str:
 
 def _canonical_json(payload: Mapping[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=True, sort_keys=True, indent=2) + "\n"
+
+
+def _runtime_installer_payload(root: Path) -> None:
+    for relative in RUNTIME_INSTALLER_EXECUTABLES:
+        path = root / relative
+        try:
+            mode = path.lstat().st_mode
+        except OSError as exc:
+            raise RuntimePackContractError(
+                f"Runtime Pack installer payload is missing {relative}"
+            ) from exc
+        if not stat.S_ISREG(mode) or stat.S_IMODE(mode) & 0o111 == 0:
+            raise RuntimePackContractError(
+                f"Runtime Pack installer payload is not executable: {relative}"
+            )
 
 
 def _validate_revision(value: str, *, field: str) -> str:
@@ -195,6 +216,7 @@ def write_provenance(
         raise RuntimePackContractError("carrier basename must be a .tar.gz basename")
     if not version or version != version.strip():
         raise RuntimePackContractError("Runtime Pack version is invalid")
+    _runtime_installer_payload(payload_root)
     _source_provenance(payload_root, expected_revision=source_revision)
     if platform == "linux" and architecture == "arm64":
         _linux_arm64_inventory(payload_root)
@@ -297,6 +319,7 @@ def verify_provenance(
             raise RuntimePackContractError(
                 f"Runtime Pack {field} disagrees with the selected release asset"
             )
+    _runtime_installer_payload(payload_root)
     _source_provenance(payload_root, expected_revision=revisions["vibecrafted"])
     if provenance["platform"] == "linux" and provenance["architecture"] == "arm64":
         _linux_arm64_inventory(payload_root)

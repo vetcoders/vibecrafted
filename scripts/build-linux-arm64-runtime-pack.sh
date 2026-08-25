@@ -60,8 +60,9 @@ rm -rf "$work/vc-frame" "$work/vc-frame.tar.gz"
 voc_target="$work/voc-target"
 CARGO_TARGET_DIR="$voc_target" cargo build --locked \
   --manifest-path "$repo_root/vibecrafted-app/Cargo.toml" \
-  --release -p voc --bin voc
+  --release -p voc --bin voc --bin vc-start
 install -m 0755 "$voc_target/release/voc" "$payload/bin/voc"
+install -m 0755 "$voc_target/release/vc-start" "$payload/bin/vc-start"
 rm -rf "$voc_target"
 
 server_build="$work/server-build"
@@ -74,13 +75,15 @@ rm -rf "$server_build"
 printf '%s\n' "$version" > "$payload/VERSION"
 install -m 0755 "$repo_root/vibecrafted-core/vibecrafted_core/deck/vibecrafted" \
   "$payload/bin/vibecrafted"
+install -m 0755 "$repo_root/scripts/vibecrafted" "$payload/scripts/vibecrafted"
 install -m 0755 "$repo_root/scripts/vetcoders_install.py" "$payload/scripts/vetcoders_install.py"
 install -m 0644 "$repo_root/scripts/distribution_manifest.py" "$payload/scripts/distribution_manifest.py"
 install -m 0644 "$repo_root/scripts/installer_brand.py" "$payload/scripts/installer_brand.py"
 install -m 0755 "$repo_root/scripts/vc-frame-product-entry.sh" "$payload/scripts/vc-frame-product-entry.sh"
 cp -R "$repo_root/bin/." "$payload/bin/"
 cp -R "$repo_root/vibecrafted-core/vibecrafted_core" "$payload/vibecrafted-core/"
-printf '%s\n' "$version" > "$payload/vibecrafted-core/vibecrafted_core/VERSION"
+printf '%s+g%.8s\n' "$version" "$source_revision" \
+  > "$payload/vibecrafted-core/vibecrafted_core/VERSION"
 cp -R "$repo_root/config/." "$payload/config/"
 
 python3 "$repo_root/scripts/distribution_manifest.py" carrier \

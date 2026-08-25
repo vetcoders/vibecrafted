@@ -88,6 +88,11 @@ def test_linux_arm64_builder_uses_pinned_public_inputs() -> None:
     assert "git clone" not in assembler
     assert 'voc_target="$work/voc-target"' in assembler
     assert 'CARGO_TARGET_DIR="$voc_target" cargo build --locked' in assembler
+    assert "--release -p voc --bin voc --bin vc-start" in assembler
+    assert (
+        'install -m 0755 "$voc_target/release/vc-start" '
+        '"$payload/bin/vc-start"' in assembler
+    )
     assert '"$repo_root/vibecrafted-app/target' not in assembler
     assert 'rm -rf "$work/vc-terminal" "$work/vc-terminal.tar.gz"' in assembler
     assert (
@@ -98,6 +103,11 @@ def test_linux_arm64_builder_uses_pinned_public_inputs() -> None:
     assert 'rm -rf "$work/vc-frame" "$work/vc-frame.tar.gz"' in assembler
     assert 'rm -rf "$voc_target"' in assembler
     assert 'rm -rf "$server_build"' in assembler
+    assert (
+        'install -m 0755 "$repo_root/scripts/vibecrafted" '
+        '"$payload/scripts/vibecrafted"' in assembler
+    )
+    assert 'printf \'%s+g%.8s\\n\' "$version" "$source_revision"' in assembler
 
     foundations = (REPO_ROOT / "scripts/stage-runtime-foundations.sh").read_text(
         encoding="utf-8"

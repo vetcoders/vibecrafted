@@ -209,6 +209,14 @@ def _runtime_pack_fixture(app: Path) -> str:
         payload = Path(temporary) / "VibecraftedRuntime"
         payload.mkdir()
         (payload / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+        launcher = payload / "scripts/vibecrafted"
+        launcher.parent.mkdir(parents=True)
+        launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+        launcher.chmod(0o755)
+        vc_start = payload / "bin/vc-start"
+        vc_start.parent.mkdir(parents=True)
+        vc_start.write_text("#!/bin/sh\n", encoding="utf-8")
+        vc_start.chmod(0o755)
         _write_json(
             payload / "source-provenance.json",
             {

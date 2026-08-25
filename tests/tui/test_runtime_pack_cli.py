@@ -9,7 +9,11 @@ import sys
 import tarfile
 from pathlib import Path
 
-from vibecrafted_core.runtime_pack_contract import write_provenance
+import pytest
+from vibecrafted_core.runtime_pack_contract import (
+    RuntimePackContractError,
+    write_provenance,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = REPO_ROOT / "scripts/install-runtime-pack.sh"
@@ -35,6 +39,7 @@ def _fake_runtime_payload(root: Path, capture: Path) -> None:
     python = root / "bin/python3"
     python.write_text(
         "#!/usr/bin/env bash\n"
+        "export PYTHONDONTWRITEBYTECODE=1\n"
         'if [[ "${1:-}" == "-m" ]]; then\n'
         f'  exec "{sys.executable}" "$@"\n'
         "fi\n"
@@ -42,7 +47,13 @@ def _fake_runtime_payload(root: Path, capture: Path) -> None:
         encoding="utf-8",
     )
     python.chmod(0o755)
+    vc_start = root / "bin/vc-start"
+    vc_start.write_text("#!/bin/sh\n", encoding="utf-8")
+    vc_start.chmod(0o755)
     (root / "scripts/vetcoders_install.py").write_text("# fixture\n", encoding="utf-8")
+    launcher = root / "scripts/vibecrafted"
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o755)
     capture.parent.mkdir(parents=True, exist_ok=True)
 
 
@@ -254,7 +265,9 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
     required = (
         "VERSION",
         "bin/python3",
+        "bin/vc-start",
         "bin/vibecrafted",
+        "scripts/vibecrafted",
         "scripts/vc-frame-product-entry.sh",
         "scripts/vetcoders_install.py",
     )
@@ -271,7 +284,7 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
                 f"{VERSION}\n" if relative == "VERSION" else "fixture\n",
                 encoding="utf-8",
             )
-        if relative.startswith("bin/"):
+        if relative.startswith("bin/") or relative == "scripts/vibecrafted":
             path.chmod(0o755)
     contract_dir = runtime / "vibecrafted-core/vibecrafted_core"
     contract_dir.mkdir(parents=True)
@@ -325,8 +338,10 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
         )
         assert "VibecraftedRuntime/bin/vc-terminal" in names
         assert "VibecraftedRuntime/bin/vc-frame" in names
+        assert "VibecraftedRuntime/bin/vc-start" in names
         assert "VibecraftedRuntime/libexec/vc-frame" in names
         assert "VibecraftedRuntime/runtime-pack-provenance.json" in names
+        assert "VibecraftedRuntime/scripts/vibecrafted" in names
         assert not any(
             member.issym() or member.islnk() for member in archive.getmembers()
         )
@@ -377,6 +392,52 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
     assert linux.returncode != 0
     assert "Linux arm64 Runtime Pack inventory is invalid" in linux.stderr
     assert not linux_output.exists()
+
+
+def test_runtime_pack_contract_rejects_missing_install_launcher(tmp_path: Path) -> None:
+    payload = tmp_path / "VibecraftedRuntime"
+    capture = tmp_path / "argv"
+    _fake_runtime_payload(payload, capture)
+    _source_provenance(payload)
+    (payload / "scripts/vibecrafted").unlink()
+
+    with pytest.raises(
+        RuntimePackContractError,
+        match="Runtime Pack installer payload is missing scripts/vibecrafted",
+    ):
+        write_provenance(
+            payload,
+            carrier_basename="Vibecrafted_RuntimePack_fixture.tar.gz",
+            version=VERSION,
+            platform="darwin",
+            architecture="arm64",
+            source_revision=SOURCE_SHA,
+            terminal_revision=TERMINAL_SHA,
+            frame_revision=FRAME_SHA,
+        )
+
+
+def test_runtime_pack_contract_rejects_missing_vc_start(tmp_path: Path) -> None:
+    payload = tmp_path / "VibecraftedRuntime"
+    capture = tmp_path / "argv"
+    _fake_runtime_payload(payload, capture)
+    _source_provenance(payload)
+    (payload / "bin/vc-start").unlink()
+
+    with pytest.raises(
+        RuntimePackContractError,
+        match="Runtime Pack installer payload is missing bin/vc-start",
+    ):
+        write_provenance(
+            payload,
+            carrier_basename="Vibecrafted_RuntimePack_fixture.tar.gz",
+            version=VERSION,
+            platform="darwin",
+            architecture="arm64",
+            source_revision=SOURCE_SHA,
+            terminal_revision=TERMINAL_SHA,
+            frame_revision=FRAME_SHA,
+        )
 
 
 def test_runtime_pack_archive_requires_release_signature(tmp_path: Path) -> None:
