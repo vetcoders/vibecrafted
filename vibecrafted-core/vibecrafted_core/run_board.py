@@ -13,9 +13,13 @@ import datetime as dt
 import json
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from .control_plane import ControlPlaneStorageError, sync_state
+from .runtime_paths import vibecrafted_home
+
+_LIFECYCLE_ACTIVITY_SCHEMA = "vibecrafted.lifecycle-activity.v1"
 
 _STATE_GLYPH = {
     "completed": "ok",
@@ -86,6 +90,48 @@ def collect_board(*, all_days: bool, limit: int) -> dict[str, Any]:
         "runs": runs[:limit] if limit > 0 else runs,
         "hidden": max(0, len(runs) - limit) if limit > 0 else 0,
         "settlement_counts": dict(board.get("settlement_counts") or {}),
+        "warnings": list(board.get("warnings") or []),
+    }
+
+
+def _is_canonical_worktree_lane(run: dict[str, Any]) -> bool:
+    root = str(run.get("root") or "").strip()
+    if not root:
+        return False
+    worktrees_root = (vibecrafted_home() / "worktrees").resolve(strict=False)
+    try:
+        Path(root).expanduser().resolve(strict=False).relative_to(worktrees_root)
+    except ValueError:
+        return False
+    return True
+
+
+def collect_lifecycle_activity() -> dict[str, Any]:
+    """Return every active/stalled lane without presentation filtering.
+
+    ``sync_state`` owns lifecycle classification. This projection deliberately
+    consumes only its canonical active/stalled buckets; it never reclassifies
+    recent rows by state, date, health text, or display limit.
+    """
+    board = sync_state()
+    seen: set[str] = set()
+    lanes: list[dict[str, Any]] = []
+    for bucket in ("active_runs", "stalled_runs"):
+        for raw_run in board.get(bucket) or []:
+            run = dict(raw_run)
+            run_id = str(run.get("run_id") or "")
+            if not run_id or run_id in seen:
+                continue
+            seen.add(run_id)
+            lanes.append(run)
+    lanes.sort(key=_sort_key, reverse=True)
+    return {
+        "schema_version": _LIFECYCLE_ACTIVITY_SCHEMA,
+        "summary": {
+            "lanes": len(lanes),
+            "worktrees": sum(_is_canonical_worktree_lane(run) for run in lanes),
+        },
+        "lanes": lanes,
         "warnings": list(board.get("warnings") or []),
     }
 
@@ -164,9 +210,20 @@ def status_main(argv: Sequence[str] | None = None) -> int:
         "--limit", type=int, default=12, help="rows to show (0 = no limit)"
     )
     parser.add_argument("--json", action="store_true", help="machine-readable output")
+    parser.add_argument(
+        "--activity",
+        action="store_true",
+        help="machine lifecycle truth: every active/stalled lane (requires --json)",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
+    if args.activity and not args.json:
+        parser.error("--activity requires --json")
     try:
-        result = collect_board(all_days=bool(args.all), limit=int(args.limit))
+        result = (
+            collect_lifecycle_activity()
+            if args.activity
+            else collect_board(all_days=bool(args.all), limit=int(args.limit))
+        )
     except ControlPlaneStorageError as exc:
         print(f"status: {exc}", file=sys.stderr)
         return 2

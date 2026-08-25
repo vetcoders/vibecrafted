@@ -783,7 +783,10 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert 'withTitle: "Help"' in delegate
     assert 'withTitle: "Quit"' in delegate
     assert "#selector(requestQuit)" in delegate
-    assert 'process.arguments = ["status", "--json"]' in delegate
+    assert 'process.arguments = ["status", "--activity", "--json"]' in delegate
+    assert "func applicationShouldTerminate(" in delegate
+    assert 'withTitle: "Cancel"' in delegate
+    assert 'withTitle: "Quit Anyway"' in delegate
     assert 'appendingPathComponent("server/supervisor.status.json")' in delegate
     assert 'title: "Server: RESTARTING…"' in delegate
     assert 'process.arguments = ["server", "service", "reconcile"]' in delegate

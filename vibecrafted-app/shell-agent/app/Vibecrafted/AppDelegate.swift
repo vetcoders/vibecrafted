@@ -83,16 +83,6 @@ private struct ServerSupervisorSnapshot: Decodable {
   }
 }
 
-private struct RuntimeStatusSnapshot: Decodable {
-  struct Run: Decodable {
-    let state: String
-    let health: String?
-    let root: String
-  }
-
-  let runs: [Run]
-}
-
 private enum TrayServerHealth {
   case checking
   case healthy
@@ -194,6 +184,32 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
     false
+  }
+
+  func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    switch activeRunSummary() {
+    case .available(let summary) where summary.lanes == 0:
+      return .terminateNow
+    case .available(let summary):
+      let alert = NSAlert()
+      alert.alertStyle = .warning
+      alert.messageText = "Active or stalled Vibecrafted lanes still need a control surface"
+      alert.informativeText =
+        "\(summary.lanes) active/stalled lane(s), including \(summary.worktrees) worktree-backed lane(s). Quitting the app does not make that work disappear, but removes its live control surface."
+      alert.addButton(withTitle: "Cancel")
+      alert.addButton(withTitle: "Quit Anyway")
+      return alert.runModal() == .alertSecondButtonReturn ? .terminateNow : .terminateCancel
+    case .unavailable(let reason):
+      installLog.error("Cannot inspect lifecycle truth before quit: \(reason, privacy: .public)")
+      let alert = NSAlert()
+      alert.alertStyle = .critical
+      alert.messageText = "Vibecrafted lifecycle truth is unavailable"
+      alert.informativeText =
+        "The canonical control plane could not confirm whether any lanes are active or stalled. Cancel to keep the live control surface, or quit explicitly anyway."
+      alert.addButton(withTitle: "Cancel")
+      alert.addButton(withTitle: "Quit Anyway")
+      return alert.runModal() == .alertSecondButtonReturn ? .terminateNow : .terminateCancel
+    }
   }
 
   func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
@@ -698,16 +714,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     alert.runModal()
   }
 
-  private func activeRunSummary() -> (lanes: Int, worktrees: Int)? {
+  private func activeRunSummary() -> RuntimeActivityTruth {
     guard let install = canonicalInstall, let environment = canonicalRuntimeEnvironment else {
-      return nil
+      return .unavailable("canonical runtime onboarding is incomplete")
     }
     let deck = install.root.appendingPathComponent("bin/vibecrafted")
-    guard FileManager.default.isExecutableFile(atPath: deck.path) else { return nil }
+    guard FileManager.default.isExecutableFile(atPath: deck.path) else {
+      return .unavailable("canonical lifecycle launcher is missing")
+    }
     let output = Pipe()
     let process = Process()
     process.executableURL = deck
-    process.arguments = ["status", "--json"]
+    process.arguments = ["status", "--activity", "--json"]
     process.environment = environment
     process.standardOutput = output
     process.standardError = FileHandle.nullDevice
@@ -715,34 +733,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       try process.run()
       let data = output.fileHandleForReading.readDataToEndOfFile()
       process.waitUntilExit()
-      guard process.terminationStatus == 0 else { return nil }
-      let status = try JSONDecoder().decode(RuntimeStatusSnapshot.self, from: data)
-      let active = status.runs.filter {
-        ["active", "running", "launching"].contains($0.state) || $0.health == "active"
-      }
-      let worktrees = active.filter { $0.root.contains("/.vibecrafted/worktrees/") }
-      return (active.count, worktrees.count)
+      return decodeRuntimeActivityTruth(data: data, terminationStatus: process.terminationStatus)
     } catch {
-      installLog.error("Cannot inspect active lanes before quit: \(error.localizedDescription, privacy: .public)")
-      return nil
+      return .unavailable(error.localizedDescription)
     }
   }
 
   @objc private func requestQuit() {
-    guard let summary = activeRunSummary(), summary.lanes > 0 else {
-      NSApp.terminate(nil)
-      return
-    }
-    let alert = NSAlert()
-    alert.alertStyle = .warning
-    alert.messageText = "Active Vibecrafted lanes are still running"
-    alert.informativeText =
-      "\(summary.lanes) active lane(s), including \(summary.worktrees) worktree-backed lane(s). Quitting the app does not make that work disappear, but removes its live control surface."
-    alert.addButton(withTitle: "Keep Running")
-    alert.addButton(withTitle: "Quit Anyway")
-    if alert.runModal() == .alertSecondButtonReturn {
-      NSApp.terminate(nil)
-    }
+    NSApp.terminate(nil)
   }
 
   private func buildMainMenu() {
