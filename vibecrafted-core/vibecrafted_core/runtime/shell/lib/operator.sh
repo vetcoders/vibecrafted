@@ -60,6 +60,7 @@ _vetcoders_init_command_text() {
   local policy_runtime="${3:-local-native}"
   local permissions="${4:-bypass}"
   local token_budget="${5:-safe}"
+  local operator_policy="${6:-none}"
   local python_spec py import_root
   python_spec="$(_vetcoders_core_python_spec)" || return 1
   py="${python_spec%%$'\t'*}"
@@ -67,9 +68,9 @@ _vetcoders_init_command_text() {
   if [[ -n "$import_root" ]]; then
     printf '%s' "$init_prompt" | VIBECRAFTED_INTERACTIVE_IMPORT_ROOT="$import_root" \
       PYTHONPATH="$import_root${PYTHONPATH:+:$PYTHONPATH}" \
-      "$py" -m vibecrafted_core.spawn interactive-command "$tool" --runtime "$policy_runtime" --permissions "$permissions" --token-budget "$token_budget" --root "${_vetcoders_contract_root:-$(_vetcoders_repo_root)}"
+      "$py" -m vibecrafted_core.spawn interactive-command "$tool" --runtime "$policy_runtime" --permissions "$permissions" --token-budget "$token_budget" --operator "$operator_policy" --root "${_vetcoders_contract_root:-$(_vetcoders_repo_root)}"
   else
-    printf '%s' "$init_prompt" | "$py" -m vibecrafted_core.spawn interactive-command "$tool" --runtime "$policy_runtime" --permissions "$permissions" --token-budget "$token_budget" --root "${_vetcoders_contract_root:-$(_vetcoders_repo_root)}"
+    printf '%s' "$init_prompt" | "$py" -m vibecrafted_core.spawn interactive-command "$tool" --runtime "$policy_runtime" --permissions "$permissions" --token-budget "$token_budget" --operator "$operator_policy" --root "${_vetcoders_contract_root:-$(_vetcoders_repo_root)}"
   fi
 }
 

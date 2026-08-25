@@ -45,6 +45,10 @@ POLICY_MODES = ("interactive", "headless")
 QUOTA_PRESET_TOKENS = 250_000
 QUOTA_MAX_TOKENS = 10_000_000
 QUOTA_EXHAUSTED_EXIT_CODE = 75
+OPERATOR_POLICIES = ("none", "auto", "claude")
+USER_OBSERVED_WARNING = (
+    "User-observed only: no Operator Agent is supervising this Agent Workspace."
+)
 
 
 @dataclass(frozen=True)
@@ -89,6 +93,29 @@ class QuotaPolicy:
             "token_budget": self.token_budget,
             "selection": self.selection,
             "warning": self.warning,
+        }
+
+
+@dataclass(frozen=True)
+class OperatorAgentPolicy:
+    """Typed decision for a distinct Operator Agent supervising one child Agent."""
+
+    selection: str
+    provider: str | None
+    permissions: str | None
+    supported: bool
+    warning: str = ""
+    reason: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "selection": self.selection,
+            "provider": self.provider,
+            "permissions": self.permissions,
+            "supported": self.supported,
+            "status": "SUPPORTED" if self.supported else "UNSUPPORTED",
+            "warning": self.warning,
+            "reason": self.reason,
         }
 
 
@@ -493,6 +520,7 @@ def interactive_workspace_command(
     permissions: str,
     root: str | os.PathLike[str],
     token_budget: str | int | None = None,
+    operator: str = "none",
 ) -> list[str]:
     """Build the portable wrapper argv used by the exact ``init`` route."""
     decision = resolve_provider_policy(provider, runtime, permissions, "interactive")
@@ -502,6 +530,9 @@ def interactive_workspace_command(
     capability = resolve_provider_usage_capability(provider)
     if not capability.supported:
         raise ValueError(capability.reason)
+    operator_policy = resolve_operator_agent_policy(operator, runtime=runtime)
+    if not operator_policy.supported:
+        raise ValueError(operator_policy.reason)
     command = [
         sys.executable,
         "-m",
@@ -514,6 +545,8 @@ def interactive_workspace_command(
         permissions,
         "--token-budget",
         quota.selection,
+        "--operator",
+        operator_policy.selection,
         "--root",
         str(Path(root).expanduser().resolve()),
         "--prompt",
@@ -526,6 +559,51 @@ def interactive_workspace_command(
             pythonpath = f"{pythonpath}{os.pathsep}{os.environ['PYTHONPATH']}"
         return ["env", f"PYTHONPATH={pythonpath}", *command]
     return command
+
+
+def resolve_operator_agent_policy(
+    selection: str | None,
+    *,
+    runtime: str,
+) -> OperatorAgentPolicy:
+    """Resolve the only supported supervision shape without silent fallback."""
+    normalized = (selection or "none").strip().lower()
+    if normalized not in OPERATOR_POLICIES:
+        return OperatorAgentPolicy(
+            selection=normalized,
+            provider=None,
+            permissions=None,
+            supported=False,
+            reason=(
+                f"unknown Operator Agent policy {normalized!r}; choose "
+                f"{', '.join(OPERATOR_POLICIES)}"
+            ),
+        )
+    if normalized == "none":
+        return OperatorAgentPolicy(
+            selection="none",
+            provider=None,
+            permissions=None,
+            supported=True,
+            warning=USER_OBSERVED_WARNING,
+        )
+    if runtime not in {"local-native", "local-worktrees"}:
+        return OperatorAgentPolicy(
+            selection=normalized,
+            provider=None,
+            permissions=None,
+            supported=False,
+            reason=(
+                f"Operator Agent supervision is unavailable for runtime {runtime}; "
+                "use local-native or local-worktrees"
+            ),
+        )
+    return OperatorAgentPolicy(
+        selection=normalized,
+        provider="claude",
+        permissions="accept-edits",
+        supported=True,
+    )
 
 
 def prepare_interactive_workspace_launch(
@@ -832,8 +910,22 @@ def launch_interactive_workspace(
     permissions: str,
     root: str | os.PathLike[str],
     token_budget: str | int | None = None,
+    operator: str = "none",
 ) -> int:
     """Own one provider child while preserving the inherited interactive TTY."""
+    operator_policy = resolve_operator_agent_policy(operator, runtime=runtime)
+    if not operator_policy.supported:
+        raise ValueError(operator_policy.reason)
+    if operator_policy.provider is not None:
+        return _launch_supervised_interactive_workspace(
+            provider=provider,
+            prompt=prompt,
+            runtime=runtime,
+            permissions=permissions,
+            root=root,
+            token_budget=token_budget,
+            operator_policy=operator_policy,
+        )
     quota = resolve_quota_policy(token_budget, runtime=runtime)
     child_env = os.environ.copy()
     provider_session_id = str(uuid.uuid4())
@@ -881,6 +973,8 @@ def launch_interactive_workspace(
             "VIBECRAFTED_BUILD_ID": str(launch.receipt["build_id"]["rendered"]),
             "VIBECRAFTED_PARENT_ROOT": launch.parent_root,
             "VIBECRAFTED_EFFECTIVE_ROOT": launch.effective_root,
+            "VIBECRAFTED_AGENT_ROLE": "agent",
+            "VIBECRAFTED_PROMPT_ROLE": prompt.splitlines()[0] if prompt else "",
         }
     )
     try:
@@ -915,6 +1009,14 @@ def launch_interactive_workspace(
         "owner_pid": os.getpid(),
         "launcher_pid": os.getpid(),
         "worker_pid": child.pid,
+        "role": "agent",
+        "prompt_role": prompt.splitlines()[0] if prompt else "",
+        "operator_policy": operator_policy.as_dict(),
+        "supervision": {
+            "mode": "user_observed",
+            "state": "not_configured",
+            "warning": operator_policy.warning,
+        },
     }
     received_signal: list[int] = []
     previous_handlers: dict[int, Any] = {}
@@ -1048,8 +1150,739 @@ def launch_interactive_workspace(
     return shell_status
 
 
+def _launch_supervised_interactive_workspace(
+    *,
+    provider: str,
+    prompt: str,
+    runtime: str,
+    permissions: str,
+    root: str | os.PathLike[str],
+    token_budget: str | int | None,
+    operator_policy: OperatorAgentPolicy,
+) -> int:
+    """Own one child and one distinct supervisor on the existing lifecycle throne."""
+    assert operator_policy.provider is not None
+    quota = resolve_quota_policy(token_budget, runtime=runtime)
+    base_env = os.environ.copy()
+    child_session_id = str(uuid.uuid4())
+    child_command = interactive_policy_command(
+        provider,
+        prompt,
+        runtime,
+        permissions,
+        provider_session_id=child_session_id,
+    )
+    child_resolved = _resolve_agent_command(provider, child_command, base_env)
+    child_capability = resolve_provider_usage_capability(
+        provider, executable=child_resolved[0]
+    )
+    if not child_capability.supported:
+        raise ValueError(child_capability.reason)
+    launch = prepare_interactive_workspace_launch(
+        provider=provider,
+        runtime=runtime,
+        permissions=permissions,
+        selected_root=root,
+        prompt=prompt,
+        executable=child_resolved[0],
+        publish=False,
+        quota_policy=quota,
+        usage_capability=child_capability,
+        provider_session_id=child_session_id,
+    )
+    try:
+        usage_reader = _ClaudeTranscriptUsage(
+            provider_session_id=child_session_id,
+            effective_root=launch.effective_root,
+            provider_version=child_capability.provider_version,
+            env=base_env,
+        )
+        from .workflow import reserve_run_id
+
+        operator_run_id = reserve_run_id("oper")
+        operator_session_id = str(uuid.uuid4())
+        relation_id = str(uuid.uuid4())
+        operator_run_dir = control_plane_home() / "runtime_runs" / operator_run_id
+        operator_run_dir.mkdir(parents=True, exist_ok=True)
+        operator_meta_path = operator_run_dir / "meta.json"
+        operator_prompt_path = operator_run_dir / "prompt.md"
+        protocol_path = operator_run_dir / "operator-protocol.jsonl"
+        operator_prompt = _operator_supervision_prompt(
+            child_run_id=launch.run_id,
+            child_meta_path=launch.meta_path,
+            relation_id=relation_id,
+            protocol_path=protocol_path,
+        )
+        operator_prompt_path.write_text(operator_prompt, encoding="utf-8")
+    except Exception:
+        _cleanup_unspawned_interactive_launch(launch)
+        raise
+
+    now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+    relation = {
+        "relation_id": relation_id,
+        "operator_run_id": operator_run_id,
+        "child_run_id": launch.run_id,
+        "state": "reserved",
+        "protocol": "operator-protocol-jsonl-v1",
+    }
+    child_receipt = {
+        **launch.receipt,
+        "updated_at": now_iso,
+        "status": "reserved",
+        "liveness": "reserved",
+        "role": "agent",
+        "prompt_role": prompt.splitlines()[0] if prompt else "",
+        "operator_policy": operator_policy.as_dict(),
+        "supervision": dict(relation),
+    }
+    operator_receipt = {
+        **launch.receipt,
+        "created_at": now_iso,
+        "updated_at": now_iso,
+        "started_at": now_iso,
+        "status": "reserved",
+        "liveness": "reserved",
+        "run_id": operator_run_id,
+        "agent": operator_policy.provider,
+        "skill": "operator",
+        "permission_policy": operator_policy.permissions,
+        "role": "operator",
+        "prompt_role": "/vc-operator",
+        "input": str(operator_prompt_path),
+        "provider_session_id": operator_session_id,
+        "operator_policy": operator_policy.as_dict(),
+        "supervision": dict(relation),
+        "measured_usage": {
+            "input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "messages": 0,
+        },
+    }
+    operator_command = interactive_policy_command(
+        operator_policy.provider,
+        operator_prompt,
+        runtime,
+        operator_policy.permissions or "accept-edits",
+        provider_session_id=operator_session_id,
+    )
+    operator_resolved = _resolve_agent_command(
+        operator_policy.provider, operator_command, base_env
+    )
+    operator_capability = resolve_provider_usage_capability(
+        operator_policy.provider, executable=operator_resolved[0]
+    )
+    if not operator_capability.supported:
+        _cleanup_unspawned_interactive_launch(launch)
+        raise ValueError(operator_capability.reason)
+    operator_receipt["usage_capability"] = operator_capability.as_dict()
+    # The pair is durably reserved and bidirectionally bound before either
+    # provider can become ACTIVE. There is no second relationship database.
+    try:
+        _write_meta(launch.meta_path, child_receipt)
+        _write_meta(operator_meta_path, operator_receipt)
+    except Exception:
+        launch.meta_path.unlink(missing_ok=True)
+        operator_meta_path.unlink(missing_ok=True)
+        _cleanup_unspawned_interactive_launch(launch)
+        raise
+    append_event(
+        "lifecycle:reserved",
+        launch.run_id,
+        "Agent reserved with Operator Agent relation",
+        {**child_receipt, "meta": str(launch.meta_path)},
+    )
+    append_event(
+        "lifecycle:reserved",
+        operator_run_id,
+        "Operator Agent reserved with child relation",
+        {**operator_receipt, "meta": str(operator_meta_path)},
+    )
+
+    operator_env = {
+        **base_env,
+        "VIBECRAFTED_RUN_ID": operator_run_id,
+        "VIBECRAFTED_SESSION_ID": launch.vibecrafted_session_id,
+        "VIBECRAFTED_WORKSPACE_ID": launch.workspace_id,
+        "VIBECRAFTED_WORKSPACE_INSTANCE_ID": str(
+            launch.receipt["workspace_instance_id"]
+        ),
+        "VIBECRAFTED_PARENT_ROOT": launch.parent_root,
+        "VIBECRAFTED_EFFECTIVE_ROOT": launch.effective_root,
+        "VIBECRAFTED_AGENT_ROLE": "operator",
+        "VIBECRAFTED_PROMPT_ROLE": "/vc-operator",
+        "VIBECRAFTED_SUPERVISION_RELATION_ID": relation_id,
+        "VIBECRAFTED_SUPERVISION_PEER_RUN_ID": launch.run_id,
+        "VIBECRAFTED_SUPERVISED_CHILD_META": str(launch.meta_path),
+        "VIBECRAFTED_OPERATOR_PROTOCOL": str(protocol_path),
+    }
+    try:
+        operator_log = (operator_run_dir / "provider.log").open("ab")
+        operator_child = subprocess.Popen(
+            operator_resolved,
+            cwd=launch.effective_root,
+            env=operator_env,
+            stdin=subprocess.DEVNULL,
+            stdout=operator_log,
+            stderr=subprocess.STDOUT,
+        )
+    except (OSError, ValueError) as exc:
+        if "operator_log" in locals():
+            operator_log.close()
+        cleanup = _cleanup_unspawned_interactive_launch(launch)
+        _terminalize_interactive_launch(
+            launch,
+            child_receipt,
+            status="failed",
+            exit_code=2,
+            terminal_reason="operator_spawn_failed",
+            error=str(exc),
+            extra={"prepared_worktree_cleanup": cleanup},
+        )
+        _terminalize_related_receipt(
+            operator_run_id,
+            operator_meta_path,
+            operator_receipt,
+            status="failed",
+            exit_code=2,
+            terminal_reason="operator_spawn_failed",
+            error=str(exc),
+        )
+        raise
+
+    child_env = {
+        **base_env,
+        "VIBECRAFTED_RUN_ID": launch.run_id,
+        "VIBECRAFTED_SESSION_ID": launch.vibecrafted_session_id,
+        "VIBECRAFTED_WORKSPACE_ID": launch.workspace_id,
+        "VIBECRAFTED_WORKSPACE_INSTANCE_ID": str(
+            launch.receipt["workspace_instance_id"]
+        ),
+        "VIBECRAFTED_BUILD_ID": str(launch.receipt["build_id"]["rendered"]),
+        "VIBECRAFTED_PARENT_ROOT": launch.parent_root,
+        "VIBECRAFTED_EFFECTIVE_ROOT": launch.effective_root,
+        "VIBECRAFTED_AGENT_ROLE": "agent",
+        "VIBECRAFTED_PROMPT_ROLE": prompt.splitlines()[0] if prompt else "",
+        "VIBECRAFTED_SUPERVISION_RELATION_ID": relation_id,
+        "VIBECRAFTED_SUPERVISION_PEER_RUN_ID": operator_run_id,
+    }
+    try:
+        # The User-facing child keeps the exact inherited descriptors and TTY.
+        child = subprocess.Popen(
+            child_resolved,
+            cwd=launch.effective_root,
+            env=child_env,
+        )
+    except (OSError, ValueError) as exc:
+        operator_code = _stop_owned_process(operator_child)
+        operator_log.close()
+        cleanup = _cleanup_unspawned_interactive_launch(launch)
+        _terminalize_interactive_launch(
+            launch,
+            child_receipt,
+            status="failed",
+            exit_code=2,
+            terminal_reason="child_spawn_failed",
+            error=str(exc),
+            extra={"prepared_worktree_cleanup": cleanup},
+        )
+        _terminalize_related_receipt(
+            operator_run_id,
+            operator_meta_path,
+            operator_receipt,
+            status="failed",
+            exit_code=_shell_status(operator_code),
+            terminal_reason="child_spawn_failed",
+            error=str(exc),
+        )
+        raise
+
+    if operator_child.poll() is not None:
+        child_code = _stop_owned_process(child)
+        operator_code = operator_child.returncode or 0
+        operator_log.close()
+        _terminalize_interactive_launch(
+            launch,
+            child_receipt,
+            status="failed",
+            exit_code=1,
+            terminal_reason="supervision_lost_before_active",
+            extra={"provider_exit_code": _shell_status(child_code)},
+        )
+        _terminalize_related_receipt(
+            operator_run_id,
+            operator_meta_path,
+            operator_receipt,
+            status="failed",
+            exit_code=_shell_status(operator_code),
+            terminal_reason="supervision_lost_before_active",
+        )
+        return 1
+
+    active_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    active_relation = {**relation, "state": "active"}
+    child_receipt.update(
+        updated_at=active_at,
+        spawned_at=active_at,
+        status="active",
+        liveness="active",
+        owner_pid=os.getpid(),
+        launcher_pid=os.getpid(),
+        worker_pid=child.pid,
+        supervision=active_relation,
+    )
+    operator_receipt.update(
+        updated_at=active_at,
+        spawned_at=active_at,
+        status="active",
+        liveness="active",
+        owner_pid=os.getpid(),
+        launcher_pid=os.getpid(),
+        worker_pid=operator_child.pid,
+        supervision=active_relation,
+    )
+    try:
+        _write_meta(launch.meta_path, child_receipt)
+        _write_meta(operator_meta_path, operator_receipt)
+        append_event(
+            "lifecycle:active",
+            launch.run_id,
+            "supervised interactive Agent Workspace child is live",
+            {
+                **child_receipt,
+                "meta": str(launch.meta_path),
+                "identity_required": True,
+            },
+        )
+        append_event(
+            "lifecycle:active",
+            operator_run_id,
+            "Operator Agent is supervising exact child",
+            {
+                **operator_receipt,
+                "meta": str(operator_meta_path),
+                "identity_required": True,
+            },
+        )
+    except Exception as exc:
+        child_code = _stop_owned_process(child)
+        operator_code = _stop_owned_process(operator_child)
+        operator_log.close()
+        _terminalize_interactive_launch(
+            launch,
+            child_receipt,
+            status="failed",
+            exit_code=1,
+            terminal_reason="active_publish_failed",
+            error=str(exc),
+            extra={"provider_exit_code": _shell_status(child_code)},
+        )
+        _terminalize_related_receipt(
+            operator_run_id,
+            operator_meta_path,
+            operator_receipt,
+            status="failed",
+            exit_code=_shell_status(operator_code),
+            terminal_reason="active_publish_failed",
+            error=str(exc),
+        )
+        raise
+
+    received_signal: list[int] = []
+    previous_handlers: dict[int, Any] = {}
+
+    def _forward_owner_signal(signum: int, _frame: Any) -> None:
+        if not received_signal:
+            received_signal.append(signum)
+        for owned_process in (child, operator_child):
+            if owned_process.poll() is None:
+                try:
+                    owned_process.send_signal(signum)
+                except ProcessLookupError:
+                    pass
+
+    if threading.current_thread() is threading.main_thread():
+        for signum in (
+            signal.SIGINT,
+            signal.SIGTERM,
+            getattr(signal, "SIGHUP", signal.SIGTERM),
+        ):
+            if signum in previous_handlers:
+                continue
+            previous_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, _forward_owner_signal)
+
+    quota_exhausted = False
+    supervision_lost = False
+    stop_actor_run_id = ""
+    protocol_offset = 0
+    provider_returncode = 0
+    try:
+        while True:
+            current_returncode = child.poll()
+            measured_usage = usage_reader.poll()
+            if measured_usage != child_receipt["measured_usage"]:
+                child_receipt["measured_usage"] = measured_usage
+                child_receipt["updated_at"] = dt.datetime.now(
+                    dt.timezone.utc
+                ).isoformat()
+                _write_meta(launch.meta_path, child_receipt)
+            events, protocol_offset = _poll_operator_protocol(
+                protocol_path, protocol_offset
+            )
+            for event in events:
+                _validate_operator_protocol_event(
+                    event,
+                    relation_id=relation_id,
+                    operator_run_id=operator_run_id,
+                    child_receipt=child_receipt,
+                )
+                if event["kind"] == "observation":
+                    operator_receipt["supervision"] = {
+                        **active_relation,
+                        "observation": {
+                            "child_run_id": launch.run_id,
+                            "child_status": child_receipt["status"],
+                            "child_worker_pid": child.pid,
+                            "measured_usage": child_receipt["measured_usage"],
+                            "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                        },
+                    }
+                    operator_receipt["updated_at"] = dt.datetime.now(
+                        dt.timezone.utc
+                    ).isoformat()
+                    _write_meta(operator_meta_path, operator_receipt)
+                elif current_returncode is None:
+                    stop_actor_run_id = operator_run_id
+                    append_event(
+                        "operator:stop-requested",
+                        launch.run_id,
+                        "Operator Agent requested bounded child stop",
+                        {
+                            "run_id": launch.run_id,
+                            "actor_run_id": operator_run_id,
+                            "relation_id": relation_id,
+                            "reason": event["reason"],
+                        },
+                    )
+                    provider_returncode = _stop_owned_process(child)
+                    break
+            if stop_actor_run_id:
+                break
+            if current_returncode is not None:
+                provider_returncode = current_returncode
+                break
+            operator_returncode = operator_child.poll()
+            if operator_returncode is not None:
+                provider_returncode = _stop_owned_process(child)
+                supervision_lost = not received_signal
+                break
+            if (
+                not received_signal
+                and quota.token_budget is not None
+                and measured_usage["total_tokens"] >= quota.token_budget
+            ):
+                quota_exhausted = True
+                provider_returncode = _stop_owned_process(child)
+                break
+            time.sleep(0.05)
+    except Exception as exc:
+        child_code = _stop_owned_process(child)
+        operator_code = _stop_owned_process(operator_child)
+        _terminalize_interactive_launch(
+            launch,
+            child_receipt,
+            status="failed",
+            exit_code=1,
+            terminal_reason="wrapper_exception",
+            error=str(exc),
+            extra={"provider_exit_code": _shell_status(child_code)},
+        )
+        _terminalize_related_receipt(
+            operator_run_id,
+            operator_meta_path,
+            operator_receipt,
+            status="failed",
+            exit_code=_shell_status(operator_code),
+            terminal_reason="wrapper_exception",
+            error=str(exc),
+        )
+        raise
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+
+    shell_status = _shell_status(provider_returncode)
+    if quota_exhausted:
+        status = "quota_exhausted"
+        terminal_reason = "quota_exhausted"
+        shell_status = QUOTA_EXHAUSTED_EXIT_CODE
+    elif received_signal:
+        owner_signal = received_signal[0]
+        status = "cancelled"
+        terminal_reason = f"owner_signal:{signal.Signals(owner_signal).name}"
+        shell_status = 128 + owner_signal
+    elif stop_actor_run_id:
+        status = "cancelled"
+        terminal_reason = "operator_policy_stop"
+        shell_status = 128 + signal.SIGTERM
+    elif supervision_lost:
+        status = "failed"
+        terminal_reason = "supervision_lost"
+        shell_status = 1
+    elif provider_returncode < 0:
+        status = "cancelled"
+        terminal_reason = (
+            f"provider_signal:{signal.Signals(abs(provider_returncode)).name}"
+        )
+    elif provider_returncode == 0:
+        status = "completed"
+        terminal_reason = "provider_exit_zero"
+    else:
+        status = "failed"
+        terminal_reason = "provider_exit_nonzero"
+    terminal_extra = {
+        "supervision": {**child_receipt["supervision"], "state": "terminal"}
+    }
+    if stop_actor_run_id:
+        terminal_extra["stop_actor_run_id"] = stop_actor_run_id
+    child_terminal = _terminalize_interactive_launch(
+        launch,
+        child_receipt,
+        status=status,
+        exit_code=shell_status,
+        terminal_reason=terminal_reason,
+        exit_signal=abs(provider_returncode) if provider_returncode < 0 else None,
+        extra=terminal_extra,
+    )
+    terminal_observation_confirmed = False
+    settlement_error = ""
+    if not supervision_lost and not received_signal and operator_child.poll() is None:
+        deadline = time.monotonic() + 1.0
+        try:
+            while time.monotonic() < deadline:
+                events, protocol_offset = _poll_operator_protocol(
+                    protocol_path, protocol_offset
+                )
+                for event in events:
+                    _validate_operator_protocol_event(
+                        event,
+                        relation_id=relation_id,
+                        operator_run_id=operator_run_id,
+                        child_receipt=child_terminal,
+                    )
+                    if event["kind"] == "observation":
+                        terminal_observation_confirmed = True
+                        operator_receipt["supervision"] = {
+                            **active_relation,
+                            "observation": {
+                                "child_run_id": launch.run_id,
+                                "child_status": child_terminal["status"],
+                                "child_worker_pid": child.pid,
+                                "measured_usage": child_terminal["measured_usage"],
+                                "observed_at": dt.datetime.now(
+                                    dt.timezone.utc
+                                ).isoformat(),
+                            },
+                        }
+                        _write_meta(operator_meta_path, operator_receipt)
+                if terminal_observation_confirmed or operator_child.poll() is not None:
+                    break
+                time.sleep(0.05)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            settlement_error = str(exc)
+    operator_code = _stop_owned_process(operator_child)
+    operator_log.close()
+    settled_worktree_cleanup = _cleanup_settled_interactive_launch(launch)
+    child_terminal["settled_worktree_cleanup"] = settled_worktree_cleanup
+    child_terminal["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    _write_meta(launch.meta_path, child_terminal)
+    if settled_worktree_cleanup != "not-applicable":
+        append_event(
+            "lifecycle:worktree-cleanup",
+            launch.run_id,
+            f"settled interactive worktree cleanup: {settled_worktree_cleanup}",
+            {
+                "run_id": launch.run_id,
+                "result": settled_worktree_cleanup,
+                "meta": str(launch.meta_path),
+            },
+        )
+    operator_failed = supervision_lost or bool(settlement_error)
+    _terminalize_related_receipt(
+        operator_run_id,
+        operator_meta_path,
+        operator_receipt,
+        status="failed" if operator_failed else "completed",
+        exit_code=_shell_status(operator_code) if operator_failed else 0,
+        terminal_reason=(
+            "supervision_lost"
+            if supervision_lost
+            else "operator_protocol_failed"
+            if settlement_error
+            else "child_settled"
+        ),
+        error=settlement_error,
+        extra={
+            "supervision": {
+                **operator_receipt["supervision"],
+                "state": "terminal",
+                "terminal_observation_confirmed": terminal_observation_confirmed,
+            }
+        },
+    )
+    return shell_status
+
+
+def _operator_supervision_prompt(
+    *, child_run_id: str, child_meta_path: Path, relation_id: str, protocol_path: Path
+) -> str:
+    return (
+        "/vc-operator\n"
+        "Supervise exactly one child Agent through structured lifecycle truth.\n"
+        f"child_run_id: {child_run_id}\n"
+        f"child_meta: {child_meta_path}\n"
+        f"relation_id: {relation_id}\n"
+        f"protocol_jsonl: {protocol_path}\n"
+        "Observe child status and measured_usage from child_meta. Write only typed "
+        "observation or bounded stop action JSON objects to protocol_jsonl. Remain "
+        "live until the child reaches terminal state. Never signal or reap the child.\n"
+    )
+
+
+def _poll_operator_protocol(
+    path: Path, offset: int
+) -> tuple[list[dict[str, Any]], int]:
+    if not path.exists():
+        return [], offset
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError("Operator Agent protocol must be a regular non-symlink file")
+    if path.stat().st_size < offset:
+        raise RuntimeError("Operator Agent protocol was truncated")
+    events: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        handle.seek(offset)
+        while True:
+            line_start = handle.tell()
+            line = handle.readline()
+            if not line:
+                break
+            if not line.endswith("\n"):
+                handle.seek(line_start)
+                break
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    "Operator Agent protocol contains invalid JSONL"
+                ) from exc
+            if not isinstance(event, dict):
+                raise TypeError("Operator Agent protocol event must be an object")
+            events.append(event)
+        return events, handle.tell()
+
+
+def _validate_operator_protocol_event(
+    event: dict[str, Any],
+    *,
+    relation_id: str,
+    operator_run_id: str,
+    child_receipt: dict[str, Any],
+) -> None:
+    if event.get("kind") not in {"observation", "action"}:
+        raise RuntimeError("Operator Agent protocol kind is unsupported")
+    if event.get("actor_run_id") != operator_run_id:
+        raise RuntimeError("Operator Agent protocol actor identity mismatch")
+    if event.get("child_run_id") != child_receipt["run_id"]:
+        raise RuntimeError("Operator Agent protocol child identity mismatch")
+    if event.get("relation_id") != relation_id:
+        raise RuntimeError("Operator Agent protocol relation identity mismatch")
+    if event["kind"] == "observation":
+        if event.get("child_status") != child_receipt["status"]:
+            raise RuntimeError("Operator Agent observation is not current child truth")
+        if event.get("child_worker_pid") != child_receipt["worker_pid"]:
+            raise RuntimeError(
+                "Operator Agent observation names a foreign child process"
+            )
+        if event.get("measured_usage") != child_receipt["measured_usage"]:
+            raise RuntimeError(
+                "Operator Agent observation usage is not exact child truth"
+            )
+        return
+    if event.get("action") not in {"stop", "cancel"}:
+        raise RuntimeError("Operator Agent action is outside the bounded policy")
+    if event.get("reason") not in {"operator_policy_stop", "operator_policy_cancel"}:
+        raise RuntimeError("Operator Agent action reason is outside the bounded policy")
+
+
+def _stop_owned_process(process: subprocess.Popen[Any]) -> int:
+    """Stop and reap one process from the existing wrapper owner only."""
+    current = process.poll()
+    if current is not None:
+        return current
+    process.terminate()
+    try:
+        return process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        return process.wait()
+
+
+def _shell_status(returncode: int) -> int:
+    return 128 + abs(returncode) if returncode < 0 else returncode
+
+
+def _terminalize_related_receipt(
+    run_id: str,
+    meta_path: Path,
+    receipt: dict[str, Any],
+    *,
+    status: str,
+    exit_code: int,
+    terminal_reason: str,
+    error: str = "",
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    completed_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    terminal = {
+        **receipt,
+        "updated_at": completed_at,
+        "completed_at": completed_at,
+        "status": status,
+        "liveness": "terminal",
+        "exit_code": int(exit_code),
+        "terminal_reason": terminal_reason,
+        **(extra or {}),
+    }
+    if error:
+        terminal["error"] = error
+    _write_meta(meta_path, terminal)
+    append_event(
+        f"lifecycle:{status}",
+        run_id,
+        f"Operator Agent terminal: {terminal_reason}",
+        {**terminal, "meta": str(meta_path), "identity_required": True},
+    )
+    return terminal
+
+
 def _cleanup_unspawned_interactive_launch(launch: InteractiveWorkspaceLaunch) -> str:
     """Remove only the clean worktree prepared for a child that never existed."""
+    if launch.worktree_manager is None or launch.worktree_geometry is None:
+        return "not-applicable"
+    try:
+        return str(
+            launch.worktree_manager.cleanup(launch.worktree_geometry, settled=True)
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        return f"preserved:{exc}"
+
+
+def _cleanup_settled_interactive_launch(launch: InteractiveWorkspaceLaunch) -> str:
+    """Delegate clean terminal worktree cleanup to the canonical manager."""
     if launch.worktree_manager is None or launch.worktree_geometry is None:
         return "not-applicable"
     try:
@@ -2695,6 +3528,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--permissions", choices=PERMISSION_POLICIES, default="bypass"
     )
     interactive_command.add_argument("--token-budget", default="safe")
+    interactive_command.add_argument(
+        "--operator", choices=OPERATOR_POLICIES, default="none"
+    )
     interactive_command.add_argument("--root", required=True)
     interactive_launch = sub.add_parser(
         "interactive-launch", help="Prepare and exec an interactive Agent Workspace."
@@ -2709,6 +3545,9 @@ def _build_parser() -> argparse.ArgumentParser:
     interactive_launch.add_argument("--root", required=True)
     interactive_launch.add_argument("--prompt", required=True)
     interactive_launch.add_argument("--token-budget", default="safe")
+    interactive_launch.add_argument(
+        "--operator", choices=OPERATOR_POLICIES, default="none"
+    )
     sub.add_parser(
         "policy-matrix", help="Print the complete provider policy matrix as JSON."
     )
@@ -2776,6 +3615,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.permissions,
                 args.root,
                 args.token_budget,
+                args.operator,
             )
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
@@ -2791,6 +3631,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.permissions,
                 args.root,
                 args.token_budget,
+                args.operator,
             )
         except (OSError, RuntimeError, ValueError) as exc:
             print(str(exc), file=sys.stderr)

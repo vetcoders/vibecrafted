@@ -56,6 +56,8 @@ def test_launcher_commands_keep_interactive_agent_in_this_panel() -> None:
         "local-native",
         "--permissions",
         "bypass",
+        "--operator",
+        "none",
     ]
     assert workshop.launch_argv("claude", "resume") == [
         "vibecrafted",
@@ -90,7 +92,7 @@ def test_runtime_help_preserves_product_truth_and_recommended_default() -> None:
     assert "one canonical worktree per Agent launch" in help_text
     assert "Maximum local concurrency" in help_text
     assert "unattended pipelines require an Operator Agent" in help_text
-    assert "H2b2 supervision is not configured" in help_text
+    assert "--operator auto or claude" in help_text
     assert "Coming in H2b3" in help_text
     assert "selected-workspace container launch and live proof" in help_text
     assert "Coming soon; disabled" in help_text

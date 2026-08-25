@@ -544,7 +544,7 @@ def test_init_claude_uses_interactive_tab_without_print_mode(
     env.pop("VC_FRAME_SESSION_NAME", None)
 
     subprocess.run(
-        ["bash", str(LAUNCHER), "init", "claude"],
+        ["bash", str(LAUNCHER), "init", "claude", "--operator", "auto"],
         check=True,
         cwd=REPO_ROOT,
         env=env,
@@ -561,7 +561,7 @@ def test_init_claude_uses_interactive_tab_without_print_mode(
     script_body = command_script.read_text(encoding="utf-8")
     assert (
         "vibecrafted_core.spawn interactive-launch claude --runtime local-native "
-        "--permissions bypass --token-budget safe --root"
+        "--permissions bypass --token-budget safe --operator auto --root"
     ) in script_body
     assert "/vc-init" in script_body
     assert " -p " not in script_body

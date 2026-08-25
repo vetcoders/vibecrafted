@@ -1863,6 +1863,13 @@ def _normalize_agent_meta(path: Path) -> RunStatus | None:
         "workspace_display_label",
         "worker_host_session",
         "worker_host_display",
+        # H2b2c — typed Operator Agent -> child Agent relationship truth.
+        "role",
+        "prompt_role",
+        "provider_session_id",
+        "operator_policy",
+        "supervision",
+        "stop_actor_run_id",
     ):
         if key in payload and payload.get(key) not in (None, ""):
             extra[key] = payload[key]

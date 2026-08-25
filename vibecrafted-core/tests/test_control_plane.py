@@ -217,6 +217,39 @@ def test_atomic_write_reports_actionable_degraded_mode_before_enospc(
     assert not target.exists()
 
 
+def test_agent_meta_projects_structured_operator_relationship(tmp_path: Path) -> None:
+    meta = tmp_path / "meta.json"
+    meta.write_text(
+        json.dumps(
+            {
+                "run_id": "init-child",
+                "status": "active",
+                "updated_at": "2026-08-25T12:00:00Z",
+                "role": "agent",
+                "prompt_role": "/vc-init",
+                "provider_session_id": "child-session",
+                "operator_policy": {
+                    "selection": "auto",
+                    "provider": "claude",
+                    "supported": True,
+                },
+                "supervision": {
+                    "relation_id": "relation-1",
+                    "operator_run_id": "oper-1",
+                    "child_run_id": "init-child",
+                    "state": "active",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    projected = control_plane._normalize_agent_meta(meta)
+    assert projected is not None
+    assert projected.extra["role"] == "agent"
+    assert projected.extra["operator_policy"]["provider"] == "claude"
+    assert projected.extra["supervision"]["operator_run_id"] == "oper-1"
+
+
 def test_operator_stop_is_sticky_over_late_failure_and_artifact_aliases(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

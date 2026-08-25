@@ -23,9 +23,10 @@ use chrono::{DateTime, Utc};
 use crate::events::EventStream;
 use crate::model::{
     AgentMeta, DeliverySealRef, Event, FINAL_STATES, Health, LifecycleRun, LifecycleRunSummary,
-    RECENT_RUN_LIMIT, RUN_STALL_SECONDS, RunStatus, SettlementBoard, SettlementTui,
-    SettlementVerdict, TrustReceiptV1, coerce_int_value, is_final_state, merge_status,
-    operator_session_name, parse_iso, skill_from_code, state_health,
+    OperatorAgentPolicyProjection, OperatorAgentProjection, RECENT_RUN_LIMIT, RUN_STALL_SECONDS,
+    RunStatus, SettlementBoard, SettlementTui, SettlementVerdict, SupervisionRelationProjection,
+    TrustReceiptV1, coerce_int_value, is_final_state, merge_status, operator_session_name,
+    parse_iso, skill_from_code, state_health,
 };
 
 /// Resolve `~`-prefixed paths against `$HOME`. Other paths pass through.
@@ -464,6 +465,7 @@ impl ControlPlane {
             worker_pid: integer("worker_pid"),
             worker_pgid: integer("worker_pgid"),
             worker_alive: boolean("worker_alive"),
+            operator_agent: meta.as_ref().and_then(operator_agent_projection),
             recovery_required: boolean("recovery_required").unwrap_or(false),
             stop_reason: value("stop_reason"),
             agent_session_id: value("agent_session_id"),
@@ -1129,6 +1131,7 @@ fn normalize_event(event: &Event, existing: Option<&RunStatus>, now: DateTime<Ut
         worker_pgid,
         worker_alive: payload_bool("worker_alive")
             .or_else(|| existing.and_then(|run| run.worker_alive)),
+        operator_agent: existing.and_then(|run| run.operator_agent.clone()),
         recovery_required: payload_bool("recovery_required")
             .unwrap_or_else(|| existing.is_some_and(|run| run.recovery_required)),
         stop_reason: existing_string(
@@ -1231,6 +1234,37 @@ fn json_scalar_string(value: &serde_json::Value) -> String {
         serde_json::Value::String(value) => value.clone(),
         other => other.to_string(),
     }
+}
+
+fn operator_agent_projection(payload: &serde_json::Value) -> Option<OperatorAgentProjection> {
+    let role = payload.get("role")?.as_str()?.to_string();
+    if role.is_empty() {
+        return None;
+    }
+    let policy: OperatorAgentPolicyProjection =
+        serde_json::from_value(payload.get("operator_policy")?.clone()).ok()?;
+    let supervision: SupervisionRelationProjection =
+        serde_json::from_value(payload.get("supervision")?.clone()).ok()?;
+    Some(OperatorAgentProjection {
+        role,
+        prompt_role: payload
+            .get("prompt_role")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        provider_session_id: payload
+            .get("provider_session_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        policy,
+        supervision,
+        stop_actor_run_id: payload
+            .get("stop_actor_run_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    })
 }
 
 fn event_has_test_provenance(event: &Event, home: &Path) -> bool {
@@ -1625,6 +1659,7 @@ fn normalize_lock(path: &Path, now: DateTime<Utc>) -> Option<RunStatus> {
         worker_pid: None,
         worker_pgid: None,
         worker_alive: None,
+        operator_agent: None,
         recovery_required: false,
         stop_reason: String::new(),
         agent_session_id: String::new(),
@@ -1755,6 +1790,7 @@ impl MarblesState {
             worker_pid: None,
             worker_pgid: None,
             worker_alive: None,
+            operator_agent: None,
             recovery_required: false,
             stop_reason: String::new(),
             agent_session_id: String::new(),

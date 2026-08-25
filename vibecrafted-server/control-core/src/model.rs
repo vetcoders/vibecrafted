@@ -490,6 +490,52 @@ pub struct RunControls {
 /// metadata. [`crate::read::ControlPlane`] then adds read-only process evidence
 /// and typed controls without mutating the Python-owned files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorAgentPolicyProjection {
+    pub selection: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<String>,
+    pub supported: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub warning: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupervisionRelationProjection {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub relation_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub operator_run_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub child_run_id: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub protocol: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub warning: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorAgentProjection {
+    pub role: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prompt_role: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub provider_session_id: String,
+    pub policy: OperatorAgentPolicyProjection,
+    pub supervision: SupervisionRelationProjection,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stop_actor_run_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunStatus {
     pub run_id: String,
     pub state: String,
@@ -536,6 +582,9 @@ pub struct RunStatus {
     /// an N-process probe storm.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_alive: Option<bool>,
+    /// Structured H2b2c relationship; absent on legacy and unsupervised runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_agent: Option<OperatorAgentProjection>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub recovery_required: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -1059,6 +1108,7 @@ impl LifecycleRun {
             worker_pid: None,
             worker_pgid: None,
             worker_alive: None,
+            operator_agent: None,
             recovery_required: false,
             stop_reason: String::new(),
             agent_session_id: String::new(),
@@ -1314,6 +1364,18 @@ pub struct AgentMeta {
     #[serde(default)]
     pub worker_alive: Option<bool>,
     #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub prompt_role: String,
+    #[serde(default)]
+    pub provider_session_id: String,
+    #[serde(default)]
+    pub operator_policy: Option<OperatorAgentPolicyProjection>,
+    #[serde(default)]
+    pub supervision: Option<SupervisionRelationProjection>,
+    #[serde(default)]
+    pub stop_actor_run_id: String,
+    #[serde(default)]
     pub recovery_required: bool,
     #[serde(default)]
     pub stop_reason: String,
@@ -1452,6 +1514,19 @@ impl AgentMeta {
             worker_pid: self.worker_pid,
             worker_pgid: self.worker_pgid,
             worker_alive: self.worker_alive,
+            operator_agent: match (&self.operator_policy, &self.supervision) {
+                (Some(policy), Some(supervision)) if !self.role.is_empty() => {
+                    Some(OperatorAgentProjection {
+                        role: self.role.clone(),
+                        prompt_role: self.prompt_role.clone(),
+                        provider_session_id: self.provider_session_id.clone(),
+                        policy: policy.clone(),
+                        supervision: supervision.clone(),
+                        stop_actor_run_id: self.stop_actor_run_id.clone(),
+                    })
+                }
+                _ => None,
+            },
             recovery_required: self.recovery_required,
             stop_reason: self.stop_reason.clone(),
             agent_session_id: self.agent_session_id.clone(),
@@ -1548,6 +1623,10 @@ pub fn merge_status(existing: Option<RunStatus>, incoming: RunStatus) -> RunStat
         worker_pid: preferred.worker_pid.or(other.worker_pid),
         worker_pgid: preferred.worker_pgid.or(other.worker_pgid),
         worker_alive: preferred.worker_alive.or(other.worker_alive),
+        operator_agent: preferred
+            .operator_agent
+            .clone()
+            .or_else(|| other.operator_agent.clone()),
         recovery_required: preferred.recovery_required || other.recovery_required,
         stop_reason: nonempty_or(&preferred.stop_reason, &other.stop_reason),
         agent_session_id: nonempty_or(&preferred.agent_session_id, &other.agent_session_id),
@@ -1583,10 +1662,42 @@ pub fn merge_status(existing: Option<RunStatus>, incoming: RunStatus) -> RunStat
     merged
 }
 
-
 #[cfg(test)]
 mod status_thread_tests {
     use super::*;
+
+    #[test]
+    fn agent_meta_projects_typed_operator_agent_relationship() {
+        let raw = serde_json::json!({
+            "run_id": "init-child",
+            "status": "active",
+            "updated_at": "2026-08-25T12:00:00Z",
+            "role": "agent",
+            "prompt_role": "/vc-init",
+            "provider_session_id": "child-session",
+            "operator_policy": {
+                "selection": "auto", "provider": "claude", "supported": true
+            },
+            "supervision": {
+                "relation_id": "relation-1", "operator_run_id": "oper-1",
+                "child_run_id": "init-child", "state": "active",
+                "protocol": "operator-protocol-jsonl-v1"
+            }
+        });
+        let meta: AgentMeta = serde_json::from_value(raw).expect("typed Agent meta");
+        let status = meta
+            .normalize(
+                DateTime::parse_from_rfc3339("2026-08-25T12:00:01Z")
+                    .unwrap()
+                    .to_utc(),
+            )
+            .expect("run projection");
+        let relationship = status.operator_agent.expect("Operator Agent projection");
+        assert_eq!(relationship.role, "agent");
+        assert_eq!(relationship.policy.provider.as_deref(), Some("claude"));
+        assert_eq!(relationship.supervision.operator_run_id, "oper-1");
+        assert_eq!(relationship.supervision.child_run_id, "init-child");
+    }
 
     #[test]
     fn delivery_axes_mid_flight_are_not_failed() {

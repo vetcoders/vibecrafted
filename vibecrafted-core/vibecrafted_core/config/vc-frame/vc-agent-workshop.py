@@ -20,8 +20,10 @@ from pathlib import Path
 from typing import Any
 
 from vibecrafted_core.spawn import (
+    OPERATOR_POLICIES,
     PERMISSION_POLICIES,
     RUNTIME_POLICIES,
+    resolve_operator_agent_policy,
     resolve_provider_policy,
     runtime_policy_capabilities,
 )
@@ -37,7 +39,7 @@ RUNTIME_HELP = {
     ),
     "local-worktrees": (
         "Safe recommended local default; one canonical worktree per Agent launch.",
-        "Maximum local concurrency; unattended pipelines require an Operator Agent; H2b2 supervision is not configured.",
+        "Maximum local concurrency; unattended pipelines require an Operator Agent via --operator auto or claude.",
     ),
     "local-vm": (
         "Coming in H2b3; disabled until selected-workspace container launch and live proof exist.",
@@ -52,6 +54,7 @@ def launch_argv(
     ritual: str,
     runtime: str = "local-native",
     permissions: str = "bypass",
+    operator: str = "none",
 ) -> list[str]:
     """Return the one canonical interactive command for a launcher choice."""
     if agent not in AGENTS:
@@ -62,6 +65,11 @@ def launch_argv(
         decision = resolve_provider_policy(agent, runtime, permissions, "interactive")
         if not decision.supported:
             raise ValueError(decision.reason)
+        if operator not in OPERATOR_POLICIES:
+            raise ValueError(f"unsupported Operator Agent policy: {operator}")
+        operator_decision = resolve_operator_agent_policy(operator, runtime=runtime)
+        if not operator_decision.supported:
+            raise ValueError(operator_decision.reason)
         # `init` defaults to opening another vc-frame tab.  The workshop's law
         # is stricter: this exact floating panel becomes the Agent TTY.
         return [
@@ -74,6 +82,8 @@ def launch_argv(
             runtime,
             "--permissions",
             permissions,
+            "--operator",
+            operator_decision.selection,
         ]
     if runtime != "local-native":
         raise ValueError(

@@ -20,11 +20,13 @@ from vibecrafted_core.spawn import (
     RUNTIME_POLICIES,
     ProviderUsageCapability,
     _ClaudeTranscriptUsage,
+    _validate_operator_protocol_event,
     interactive_policy_command,
     interactive_workspace_command,
     launch_interactive_workspace,
     main,
     prepare_interactive_workspace_launch,
+    resolve_operator_agent_policy,
     resolve_provider_policy,
     resolve_provider_usage_capability,
     resolve_quota_policy,
@@ -64,6 +66,41 @@ def _wait_for(path: Path, *, timeout: float = 5.0) -> None:
             return
         time.sleep(0.02)
     raise AssertionError(f"timed out waiting for {path}")
+
+
+def _fake_supervision_provider(path: Path) -> None:
+    path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, pathlib, sys, time\n"
+        "if '--help' in sys.argv:\n"
+        "  print('  --session-id <uuid>')\n"
+        "  raise SystemExit(0)\n"
+        "if '--version' in sys.argv:\n"
+        "  print('2.1.232 (Claude Code)')\n"
+        "  raise SystemExit(0)\n"
+        "role = os.environ['VIBECRAFTED_AGENT_ROLE']\n"
+        "capture = pathlib.Path(os.environ['SUPERVISION_CAPTURES']) / f'{role}.json'\n"
+        "capture.write_text(json.dumps({\n"
+        "  'pid': os.getpid(), 'role': role,\n"
+        "  'run_id': os.environ['VIBECRAFTED_RUN_ID'],\n"
+        "  'session_id': sys.argv[sys.argv.index('--session-id') + 1],\n"
+        "}) + '\\n', encoding='utf-8')\n"
+        "if role == 'agent' and os.environ.get('AGENT_WRITE_USAGE') == '1':\n"
+        "  session_id = sys.argv[sys.argv.index('--session-id') + 1]\n"
+        "  transcript = pathlib.Path(os.environ['CLAUDE_CONFIG_DIR']) / 'projects' / 'fixture' / f'{session_id}.jsonl'\n"
+        "  transcript.parent.mkdir(parents=True, exist_ok=True)\n"
+        "  transcript.write_text(json.dumps({\n"
+        "    'sessionId': session_id, 'cwd': os.getcwd(), 'version': '2.1.232',\n"
+        "    'message': {'id': 'quota-message', 'usage': {\n"
+        "      'input_tokens': 1, 'cache_creation_input_tokens': 0,\n"
+        "      'cache_read_input_tokens': 0, 'output_tokens': 1}}\n"
+        "  }) + '\\n', encoding='utf-8')\n"
+        "exit_key = 'OPERATOR_EXIT' if role == 'operator' else 'AGENT_EXIT'\n"
+        "if exit_key in os.environ: raise SystemExit(int(os.environ[exit_key]))\n"
+        "while True: time.sleep(0.05)\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
 
 
 def _interactive_argv(repo: Path) -> list[str]:
@@ -361,6 +398,567 @@ def test_interactive_owner_keeps_distinct_live_provider_on_inherited_tty(
             owner.kill()
             owner.wait()
         os.close(master_fd)
+
+
+@pytest.mark.parametrize("runtime", ["local-native", "local-worktrees"])
+def test_operator_auto_creates_distinct_supervising_agent_relationship(
+    runtime: str,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    _repo(repo)
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    provider = fake_bin / "claude"
+    provider.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, pathlib, sys, time\n"
+        "if '--help' in sys.argv:\n"
+        "  print('  --session-id <uuid>')\n"
+        "  raise SystemExit(0)\n"
+        "if '--version' in sys.argv:\n"
+        "  print('2.1.232 (Claude Code)')\n"
+        "  raise SystemExit(0)\n"
+        "role = os.environ['VIBECRAFTED_AGENT_ROLE']\n"
+        "session_id = sys.argv[sys.argv.index('--session-id') + 1]\n"
+        "capture = pathlib.Path(os.environ['SUPERVISION_CAPTURES']) / f'{role}.json'\n"
+        "capture.write_text(json.dumps({\n"
+        "  'pid': os.getpid(), 'role': role, 'session_id': session_id,\n"
+        "  'run_id': os.environ['VIBECRAFTED_RUN_ID'],\n"
+        "  'relation_id': os.environ['VIBECRAFTED_SUPERVISION_RELATION_ID'],\n"
+        "  'peer_run_id': os.environ['VIBECRAFTED_SUPERVISION_PEER_RUN_ID'],\n"
+        "  'prompt_role': '/vc-operator' if role == 'operator' else '/vc-init',\n"
+        "}) + '\\n', encoding='utf-8')\n"
+        "if role == 'operator':\n"
+        "  child_meta = pathlib.Path(os.environ['VIBECRAFTED_SUPERVISED_CHILD_META'])\n"
+        "  protocol = pathlib.Path(os.environ['VIBECRAFTED_OPERATOR_PROTOCOL'])\n"
+        "  while True:\n"
+        "    if child_meta.is_file():\n"
+        "      child = json.loads(child_meta.read_text(encoding='utf-8'))\n"
+        "      if child.get('status') == 'active' and child.get('worker_pid'): break\n"
+        "    time.sleep(0.01)\n"
+        "  protocol.write_text(json.dumps({\n"
+        "    'kind': 'observation', 'actor_run_id': os.environ['VIBECRAFTED_RUN_ID'],\n"
+        "    'child_run_id': child['run_id'], 'relation_id': child['supervision']['relation_id'],\n"
+        "    'child_status': child['status'], 'child_worker_pid': child['worker_pid'],\n"
+        "    'measured_usage': child['measured_usage'],\n"
+        "  }) + '\\n' + json.dumps({\n"
+        "    'kind': 'action', 'action': 'stop',\n"
+        "    'actor_run_id': os.environ['VIBECRAFTED_RUN_ID'],\n"
+        "    'child_run_id': child['run_id'], 'relation_id': child['supervision']['relation_id'],\n"
+        "    'reason': 'operator_policy_stop',\n"
+        "  }) + '\\n', encoding='utf-8')\n"
+        "  while True:\n"
+        "    child = json.loads(child_meta.read_text(encoding='utf-8'))\n"
+        "    if child.get('liveness') == 'terminal': break\n"
+        "    time.sleep(0.01)\n"
+        "  with protocol.open('a', encoding='utf-8') as handle:\n"
+        "    handle.write(json.dumps({\n"
+        "      'kind': 'observation', 'actor_run_id': os.environ['VIBECRAFTED_RUN_ID'],\n"
+        "      'child_run_id': child['run_id'], 'relation_id': child['supervision']['relation_id'],\n"
+        "      'child_status': child['status'], 'child_worker_pid': child['worker_pid'],\n"
+        "      'measured_usage': child['measured_usage'],\n"
+        "    }) + '\\n')\n"
+        "  raise SystemExit(0)\n"
+        "while True: time.sleep(0.05)\n",
+        encoding="utf-8",
+    )
+    provider.chmod(0o755)
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.update(
+        VIBECRAFTED_HOME=str(home),
+        VIBECRAFTED_RUNTIME_BIN=str(fake_bin),
+        SUPERVISION_CAPTURES=str(captures),
+        PATH=str(fake_bin) + os.pathsep + env["PATH"],
+    )
+    argv = _interactive_argv(repo)
+    argv[argv.index("--runtime") + 1] = runtime
+    owner = subprocess.Popen(
+        [*argv, "--operator", "auto"],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if (captures / "operator.json").is_file() and (
+                captures / "agent.json"
+            ).is_file():
+                break
+            if owner.poll() is not None:
+                _, stderr = owner.communicate()
+                raise AssertionError(
+                    f"operator=auto exited before two provider roles: "
+                    f"rc={owner.returncode}, stderr={stderr.strip()}"
+                )
+            time.sleep(0.02)
+        _wait_for(captures / "operator.json")
+        _wait_for(captures / "agent.json")
+        operator = json.loads((captures / "operator.json").read_text())
+        agent = json.loads((captures / "agent.json").read_text())
+        assert owner.wait(timeout=5) == 128 + signal.SIGTERM
+
+        assert operator["role"] == "operator"
+        assert agent["role"] == "agent"
+        for identity in ("pid", "session_id", "run_id"):
+            assert operator[identity] != agent[identity]
+        assert operator["relation_id"] == agent["relation_id"]
+        assert operator["peer_run_id"] == agent["run_id"]
+        assert agent["peer_run_id"] == operator["run_id"]
+
+        operator_meta = json.loads(
+            (
+                home / "control_plane/runtime_runs" / operator["run_id"] / "meta.json"
+            ).read_text()
+        )
+        agent_meta = json.loads(
+            (
+                home / "control_plane/runtime_runs" / agent["run_id"] / "meta.json"
+            ).read_text()
+        )
+        assert operator_meta["role"] == "operator"
+        assert operator_meta["permission_policy"] == "accept-edits"
+        assert agent_meta["role"] == "agent"
+        assert operator_meta["supervision"]["child_run_id"] == agent["run_id"]
+        assert agent_meta["supervision"]["operator_run_id"] == operator["run_id"]
+        assert (
+            operator_meta["supervision"]["observation"]["child_run_id"]
+            == agent["run_id"]
+        )
+        assert (
+            operator_meta["supervision"]["observation"]["child_status"] == "cancelled"
+        )
+        assert operator_meta["supervision"]["terminal_observation_confirmed"] is True
+        assert agent_meta["terminal_reason"] == "operator_policy_stop"
+        assert agent_meta["stop_actor_run_id"] == operator["run_id"]
+        assert operator_meta["terminal_reason"] == "child_settled"
+        assert operator_meta["root"] == agent_meta["root"]
+        assert (
+            subprocess.run(
+                ["git", "status", "--short"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            == ""
+        )
+        if runtime == "local-worktrees":
+            assert agent_meta["effective_worktree_path"] != str(repo)
+            assert not Path(agent_meta["effective_worktree_path"]).exists()
+            assert agent_meta["settled_worktree_cleanup"] == "removed"
+        events = [
+            json.loads(line)
+            for line in (home / "control_plane/events.jsonl").read_text().splitlines()
+        ]
+        relation_events = [
+            event
+            for event in events
+            if event["run_id"] in {operator["run_id"], agent["run_id"]}
+        ]
+        assert [event["kind"] for event in relation_events[:2]] == [
+            "lifecycle:reserved",
+            "lifecycle:reserved",
+        ]
+        assert all(
+            event["payload"]["supervision"]["relation_id"] == operator["relation_id"]
+            for event in relation_events[:2]
+        )
+        for pid in (operator["pid"], agent["pid"]):
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+    finally:
+        if owner.poll() is None:
+            owner.kill()
+            owner.wait()
+
+
+@pytest.mark.parametrize(
+    ("selection", "runtime", "supported", "provider"),
+    [
+        ("none", "local-native", True, None),
+        ("auto", "local-native", True, "claude"),
+        ("claude", "local-worktrees", True, "claude"),
+        ("auto", "local-vm", False, None),
+        ("claude", "cloud-soon", False, None),
+        ("codex", "local-native", False, None),
+    ],
+)
+def test_operator_policy_matrix_is_typed_and_fail_closed(
+    selection: str, runtime: str, supported: bool, provider: str | None
+) -> None:
+    policy = resolve_operator_agent_policy(selection, runtime=runtime)
+    assert policy.supported is supported
+    assert policy.provider == provider
+    assert policy.permissions == ("accept-edits" if provider == "claude" else None)
+    assert bool(policy.reason) is not supported
+    if selection == "none":
+        assert "User-observed only" in policy.warning
+
+
+def test_operator_none_is_explicit_and_spawns_no_hidden_supervisor(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    _repo(repo)
+    capture = tmp_path / "provider.json"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _fake_interactive_provider(fake_bin / "claude")
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.update(
+        VIBECRAFTED_HOME=str(home),
+        VIBECRAFTED_RUNTIME_BIN=str(fake_bin),
+        SMOKE_CAPTURE=str(capture),
+        PATH=str(fake_bin) + os.pathsep + env["PATH"],
+    )
+    completed = subprocess.run(
+        [*_interactive_argv(repo), "--operator", "none"],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        check=False,
+    )
+    assert completed.returncode == 0
+    metas = list((home / "control_plane/runtime_runs").glob("*/meta.json"))
+    assert len(metas) == 1
+    meta = json.loads(metas[0].read_text(encoding="utf-8"))
+    assert meta["role"] == "agent"
+    assert meta["operator_policy"]["selection"] == "none"
+    assert "User-observed only" in meta["supervision"]["warning"]
+
+
+@pytest.mark.parametrize(
+    ("exit_role", "exit_code", "child_reason", "operator_reason", "shell_status"),
+    [
+        ("agent", 0, "provider_exit_zero", "child_settled", 0),
+        ("agent", 9, "provider_exit_nonzero", "child_settled", 9),
+        ("operator", 7, "supervision_lost", "supervision_lost", 1),
+    ],
+)
+def test_supervised_terminal_semantics_settle_both_processes(
+    exit_role: str,
+    exit_code: int,
+    child_reason: str,
+    operator_reason: str,
+    shell_status: int,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    _repo(repo)
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _fake_supervision_provider(fake_bin / "claude")
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.update(
+        VIBECRAFTED_HOME=str(home),
+        VIBECRAFTED_RUNTIME_BIN=str(fake_bin),
+        SUPERVISION_CAPTURES=str(captures),
+        PATH=str(fake_bin) + os.pathsep + env["PATH"],
+    )
+    env["AGENT_EXIT" if exit_role == "agent" else "OPERATOR_EXIT"] = str(exit_code)
+    completed = subprocess.run(
+        [*_interactive_argv(repo), "--operator", "auto"],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        check=False,
+        timeout=10,
+    )
+    assert completed.returncode == shell_status
+    captured = {
+        role: json.loads((captures / f"{role}.json").read_text(encoding="utf-8"))
+        for role in ("operator", "agent")
+    }
+    metas = {
+        role: json.loads(
+            (
+                home
+                / "control_plane/runtime_runs"
+                / captured[role]["run_id"]
+                / "meta.json"
+            ).read_text(encoding="utf-8")
+        )
+        for role in ("operator", "agent")
+    }
+    assert metas["agent"]["terminal_reason"] == child_reason
+    assert metas["operator"]["terminal_reason"] == operator_reason
+    for role in ("operator", "agent"):
+        assert metas[role]["liveness"] == "terminal"
+        with pytest.raises(ProcessLookupError):
+            os.kill(captured[role]["pid"], 0)
+
+
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+def test_supervised_owner_signal_settles_operator_and_child(
+    signum: int, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    _repo(repo)
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _fake_supervision_provider(fake_bin / "claude")
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.update(
+        VIBECRAFTED_HOME=str(home),
+        VIBECRAFTED_RUNTIME_BIN=str(fake_bin),
+        SUPERVISION_CAPTURES=str(captures),
+        PATH=str(fake_bin) + os.pathsep + env["PATH"],
+    )
+    owner = subprocess.Popen(
+        [*_interactive_argv(repo), "--operator", "auto"],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        start_new_session=True,
+    )
+    _wait_for(captures / "operator.json")
+    _wait_for(captures / "agent.json")
+    captured = {
+        role: json.loads((captures / f"{role}.json").read_text())
+        for role in ("operator", "agent")
+    }
+    owner.send_signal(signum)
+    assert owner.wait(timeout=10) == 128 + signum
+    for role in ("operator", "agent"):
+        meta = json.loads(
+            (
+                home
+                / "control_plane/runtime_runs"
+                / captured[role]["run_id"]
+                / "meta.json"
+            ).read_text()
+        )
+        assert meta["liveness"] == "terminal"
+        expected = (
+            "child_settled"
+            if role == "operator"
+            else f"owner_signal:{signal.Signals(signum).name}"
+        )
+        assert meta["terminal_reason"] == expected
+        with pytest.raises(ProcessLookupError):
+            os.kill(captured[role]["pid"], 0)
+
+
+def test_supervised_quota_exhaustion_preserves_exit_75_and_settles_operator(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    _repo(repo)
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _fake_supervision_provider(fake_bin / "claude")
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.update(
+        VIBECRAFTED_HOME=str(home),
+        VIBECRAFTED_RUNTIME_BIN=str(fake_bin),
+        SUPERVISION_CAPTURES=str(captures),
+        CLAUDE_CONFIG_DIR=str(tmp_path / "claude-home"),
+        AGENT_WRITE_USAGE="1",
+        PATH=str(fake_bin) + os.pathsep + env["PATH"],
+    )
+    completed = subprocess.run(
+        [
+            *_interactive_argv(repo),
+            "--operator",
+            "auto",
+            "--token-budget",
+            "1",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        check=False,
+        timeout=10,
+    )
+    assert completed.returncode == 75
+    captured = {
+        role: json.loads((captures / f"{role}.json").read_text())
+        for role in ("operator", "agent")
+    }
+    agent_meta = json.loads(
+        (
+            home
+            / "control_plane/runtime_runs"
+            / captured["agent"]["run_id"]
+            / "meta.json"
+        ).read_text()
+    )
+    operator_meta = json.loads(
+        (
+            home
+            / "control_plane/runtime_runs"
+            / captured["operator"]["run_id"]
+            / "meta.json"
+        ).read_text()
+    )
+    assert agent_meta["terminal_reason"] == "quota_exhausted"
+    assert agent_meta["measured_usage"]["total_tokens"] == 2
+    assert operator_meta["terminal_reason"] == "child_settled"
+    for role in ("operator", "agent"):
+        with pytest.raises(ProcessLookupError):
+            os.kill(captured[role]["pid"], 0)
+
+
+def test_operator_protocol_rejects_foreign_stale_and_unbounded_truth() -> None:
+    child = {
+        "run_id": "init-child",
+        "status": "active",
+        "worker_pid": 123,
+        "measured_usage": {"total_tokens": 4},
+    }
+    valid = {
+        "kind": "observation",
+        "actor_run_id": "oper-1",
+        "child_run_id": "init-child",
+        "relation_id": "rel-1",
+        "child_status": "active",
+        "child_worker_pid": 123,
+        "measured_usage": {"total_tokens": 4},
+    }
+    _validate_operator_protocol_event(
+        valid,
+        relation_id="rel-1",
+        operator_run_id="oper-1",
+        child_receipt=child,
+    )
+    for mutation in (
+        {"actor_run_id": "oper-foreign"},
+        {"child_run_id": "init-newest"},
+        {"relation_id": "rel-stale"},
+        {"child_worker_pid": 999},
+        {"measured_usage": {"total_tokens": 3}},
+        {"kind": "action", "action": "restart", "reason": "operator_policy_stop"},
+    ):
+        event = {**valid, **mutation}
+        with pytest.raises(RuntimeError):
+            _validate_operator_protocol_event(
+                event,
+                relation_id="rel-1",
+                operator_run_id="oper-1",
+                child_receipt=child,
+            )
+
+
+@pytest.mark.parametrize("failed_spawn", ["operator", "agent"])
+def test_supervised_spawn_failure_has_no_false_active_or_orphan(
+    failed_spawn: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibecrafted_core import spawn
+
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    _repo(repo)
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _fake_supervision_provider(fake_bin / "claude")
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(fake_bin))
+    monkeypatch.setenv("SUPERVISION_CAPTURES", str(captures))
+    monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setattr(
+        spawn,
+        "resolve_provider_usage_capability",
+        lambda *_args, **_kwargs: _TEST_USAGE_CAPABILITY,
+    )
+    real_popen = spawn.subprocess.Popen
+    spawned_operator: list[subprocess.Popen[bytes]] = []
+
+    def fail_selected(*args: object, **kwargs: object):
+        environment = kwargs.get("env")
+        role = (
+            environment.get("VIBECRAFTED_AGENT_ROLE")
+            if isinstance(environment, dict)
+            else None
+        )
+        if role == failed_spawn:
+            raise OSError(f"{failed_spawn} spawn denied")
+        process = real_popen(*args, **kwargs)
+        spawned_operator.append(process)
+        return process
+
+    monkeypatch.setattr(spawn.subprocess, "Popen", fail_selected)
+    with pytest.raises(OSError, match=f"{failed_spawn} spawn denied"):
+        launch_interactive_workspace(
+            "claude",
+            "/vc-init",
+            "local-native",
+            "read-only",
+            repo,
+            operator="auto",
+        )
+    metas = [
+        json.loads(path.read_text())
+        for path in (home / "control_plane/runtime_runs").glob("*/meta.json")
+    ]
+    assert len(metas) == 2
+    assert all(meta["liveness"] == "terminal" for meta in metas)
+    assert all(meta["status"] == "failed" for meta in metas)
+    events = (home / "control_plane/events.jsonl").read_text()
+    assert "lifecycle:active" not in events
+    for process in spawned_operator:
+        assert process.poll() is not None
+
+
+def test_supervised_relation_reservation_write_failure_rolls_back_partial_truth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibecrafted_core import spawn
+
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    _repo(repo)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _fake_supervision_provider(fake_bin / "claude")
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(fake_bin))
+    monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setattr(
+        spawn,
+        "resolve_provider_usage_capability",
+        lambda *_args, **_kwargs: _TEST_USAGE_CAPABILITY,
+    )
+    real_write = spawn._write_meta
+    writes = 0
+
+    def fail_second(path: Path, payload: dict[str, object]) -> None:
+        nonlocal writes
+        writes += 1
+        if writes == 2:
+            raise OSError("second relation receipt denied")
+        real_write(path, payload)
+
+    monkeypatch.setattr(spawn, "_write_meta", fail_second)
+    with pytest.raises(OSError, match="second relation receipt denied"):
+        launch_interactive_workspace(
+            "claude",
+            "/vc-init",
+            "local-native",
+            "read-only",
+            repo,
+            operator="auto",
+        )
+    assert not list((home / "control_plane/runtime_runs").glob("*/meta.json"))
 
 
 def test_interactive_small_token_quota_stops_live_provider_with_distinct_truth(
