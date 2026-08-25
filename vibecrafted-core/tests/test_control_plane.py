@@ -239,6 +239,14 @@ def test_agent_meta_projects_structured_operator_relationship(tmp_path: Path) ->
                     "child_run_id": "init-child",
                     "state": "active",
                 },
+                "continuity": {
+                    "mode": "full-lineage",
+                    "lineage_id": "parent-run-1",
+                    "supported": True,
+                    "materialized": True,
+                    "context_sha256": "abc",
+                    "loop_sha256": "def",
+                },
             }
         ),
         encoding="utf-8",
@@ -248,6 +256,14 @@ def test_agent_meta_projects_structured_operator_relationship(tmp_path: Path) ->
     assert projected.extra["role"] == "agent"
     assert projected.extra["operator_policy"]["provider"] == "claude"
     assert projected.extra["supervision"]["operator_run_id"] == "oper-1"
+    assert projected.extra["continuity"] == {
+        "mode": "full-lineage",
+        "lineage_id": "parent-run-1",
+        "supported": True,
+        "materialized": True,
+        "context_sha256": "abc",
+        "loop_sha256": "def",
+    }
 
 
 def test_operator_stop_is_sticky_over_late_failure_and_artifact_aliases(

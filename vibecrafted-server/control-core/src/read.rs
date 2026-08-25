@@ -22,11 +22,11 @@ use chrono::{DateTime, Utc};
 
 use crate::events::EventStream;
 use crate::model::{
-    AgentMeta, DeliverySealRef, Event, FINAL_STATES, Health, LifecycleRun, LifecycleRunSummary,
-    OperatorAgentPolicyProjection, OperatorAgentProjection, RECENT_RUN_LIMIT, RUN_STALL_SECONDS,
-    RunStatus, SettlementBoard, SettlementTui, SettlementVerdict, SupervisionRelationProjection,
-    TrustReceiptV1, coerce_int_value, is_final_state, merge_status, operator_session_name,
-    parse_iso, skill_from_code, state_health,
+    AgentMeta, ContinuityPolicyProjection, DeliverySealRef, Event, FINAL_STATES, Health,
+    LifecycleRun, LifecycleRunSummary, OperatorAgentPolicyProjection, OperatorAgentProjection,
+    RECENT_RUN_LIMIT, RUN_STALL_SECONDS, RunStatus, SettlementBoard, SettlementTui,
+    SettlementVerdict, SupervisionRelationProjection, TrustReceiptV1, coerce_int_value,
+    is_final_state, merge_status, operator_session_name, parse_iso, skill_from_code, state_health,
 };
 
 /// Resolve `~`-prefixed paths against `$HOME`. Other paths pass through.
@@ -466,6 +466,7 @@ impl ControlPlane {
             worker_pgid: integer("worker_pgid"),
             worker_alive: boolean("worker_alive"),
             operator_agent: meta.as_ref().and_then(operator_agent_projection),
+            continuity: meta.as_ref().and_then(continuity_projection),
             recovery_required: boolean("recovery_required").unwrap_or(false),
             stop_reason: value("stop_reason"),
             agent_session_id: value("agent_session_id"),
@@ -1132,6 +1133,12 @@ fn normalize_event(event: &Event, existing: Option<&RunStatus>, now: DateTime<Ut
         worker_alive: payload_bool("worker_alive")
             .or_else(|| existing.and_then(|run| run.worker_alive)),
         operator_agent: existing.and_then(|run| run.operator_agent.clone()),
+        continuity: event
+            .payload
+            .get("continuity")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .or_else(|| existing.and_then(|run| run.continuity.clone())),
         recovery_required: payload_bool("recovery_required")
             .unwrap_or_else(|| existing.is_some_and(|run| run.recovery_required)),
         stop_reason: existing_string(
@@ -1265,6 +1272,10 @@ fn operator_agent_projection(payload: &serde_json::Value) -> Option<OperatorAgen
             .unwrap_or_default()
             .to_string(),
     })
+}
+
+fn continuity_projection(payload: &serde_json::Value) -> Option<ContinuityPolicyProjection> {
+    serde_json::from_value(payload.get("continuity")?.clone()).ok()
 }
 
 fn event_has_test_provenance(event: &Event, home: &Path) -> bool {
@@ -1660,6 +1671,7 @@ fn normalize_lock(path: &Path, now: DateTime<Utc>) -> Option<RunStatus> {
         worker_pgid: None,
         worker_alive: None,
         operator_agent: None,
+        continuity: None,
         recovery_required: false,
         stop_reason: String::new(),
         agent_session_id: String::new(),
@@ -1791,6 +1803,7 @@ impl MarblesState {
             worker_pgid: None,
             worker_alive: None,
             operator_agent: None,
+            continuity: None,
             recovery_required: false,
             stop_reason: String::new(),
             agent_session_id: String::new(),

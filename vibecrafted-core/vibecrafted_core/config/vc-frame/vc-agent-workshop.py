@@ -20,9 +20,11 @@ from pathlib import Path
 from typing import Any
 
 from vibecrafted_core.spawn import (
+    CONTINUITY_MODES,
     OPERATOR_POLICIES,
     PERMISSION_POLICIES,
     RUNTIME_POLICIES,
+    continuity_policy_capabilities,
     resolve_operator_agent_policy,
     resolve_provider_policy,
     runtime_policy_capabilities,
@@ -55,12 +57,16 @@ def launch_argv(
     runtime: str = "local-native",
     permissions: str = "bypass",
     operator: str = "none",
+    continuity: str = "fresh",
+    continuity_parent: str = "",
 ) -> list[str]:
     """Return the one canonical interactive command for a launcher choice."""
     if agent not in AGENTS:
         raise ValueError(f"unsupported agent: {agent}")
     if ritual not in RITUALS:
         raise ValueError(f"unsupported interactive ritual: {ritual}")
+    if continuity not in CONTINUITY_MODES:
+        raise ValueError(f"unsupported continuity policy: {continuity}")
     if ritual == "init":
         decision = resolve_provider_policy(agent, runtime, permissions, "interactive")
         if not decision.supported:
@@ -72,7 +78,7 @@ def launch_argv(
             raise ValueError(operator_decision.reason)
         # `init` defaults to opening another vc-frame tab.  The workshop's law
         # is stricter: this exact floating panel becomes the Agent TTY.
-        return [
+        command = [
             "vibecrafted",
             "init",
             agent,
@@ -84,7 +90,18 @@ def launch_argv(
             permissions,
             "--operator",
             operator_decision.selection,
+            "--continuity",
+            continuity,
         ]
+        if continuity == "bare-fork":
+            if not continuity_parent:
+                raise ValueError(
+                    "bare-fork requires an explicit parent provider-session id"
+                )
+            command.extend(["--parent-session", continuity_parent])
+        elif continuity == "full-lineage" and continuity_parent:
+            command.extend(["--continuity-parent", continuity_parent])
+        return command
     if runtime != "local-native":
         raise ValueError(
             "worktree resume supervision belongs to H2b2 and is not configured yet"
@@ -205,6 +222,8 @@ class Workshop:
         self.ritual = 0
         self.runtime = 1  # safe recommended local default when the provider supports it
         self.permissions = 0
+        self.continuity = 0
+        self.continuity_parent = ""
         self.path = str(Path.cwd())
         self.error = ""
         self.mouse_targets: list[tuple[int, int, int, int, str]] = []
@@ -218,6 +237,7 @@ class Workshop:
         self.window.keypad(True)
         self.window.timeout(500)
         self._normalize_runtime_choice()
+        self._normalize_continuity_choice()
         try:
             curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
         except curses.error:
@@ -308,7 +328,7 @@ class Workshop:
         height, width = self.window.getmaxyx()
         card_width = min(max(58, width - 4), 92)
         left = max(1, (width - card_width) // 2)
-        top = max(1, (height - 12) // 2)
+        top = max(1, (height - 15) // 2)
         inner = max(20, card_width - 4)
         _safe_addstr(
             self.window,
@@ -340,11 +360,24 @@ class Workshop:
             else f"({name})"
             for index, name in enumerate(PERMISSION_POLICIES)
         )
+        continuity_caps = continuity_policy_capabilities(
+            provider,
+            root=self.path,
+            explicit_parent=self.continuity_parent,
+        )
+        continuity_line = "  memory   " + " ".join(
+            (f"«{name}»" if index == self.continuity else f"[{name}]")
+            if continuity_caps[name]["available"]
+            else f"({name})"
+            for index, name in enumerate(CONTINUITY_MODES)
+        )
         rows = (
             agent_line,
             ritual_line,
             runtime_line,
             permission_line,
+            continuity_line,
+            f"  parent   {self.continuity_parent or '(none)'}",
             f"  path     {self.path}",
         )
         for index, line in enumerate(rows):
@@ -368,6 +401,15 @@ class Workshop:
         )
         _dim_unavailable_choices(
             self.window,
+            top + 5,
+            left + 2 + len("  memory   "),
+            CONTINUITY_MODES,
+            tuple(
+                bool(continuity_caps[name]["available"]) for name in CONTINUITY_MODES
+            ),
+        )
+        _dim_unavailable_choices(
+            self.window,
             top + 4,
             left + 2 + len("  permits  "),
             PERMISSION_POLICIES,
@@ -384,28 +426,28 @@ class Workshop:
         runtime_help = RUNTIME_HELP[RUNTIME_POLICIES[self.runtime]]
         _safe_addstr(
             self.window,
-            top + 6,
+            top + 8,
             left,
             ("│ " + _clip(runtime_help[0], inner)).ljust(card_width - 1) + "│",
             curses.A_DIM,
         )
         _safe_addstr(
             self.window,
-            top + 7,
+            top + 9,
             left,
             ("│ " + _clip(runtime_help[1], inner)).ljust(card_width - 1) + "│",
             curses.A_DIM,
         )
         _safe_addstr(
             self.window,
-            top + 8,
+            top + 10,
             left,
             "│ Enter = interactive TTY on this Agents tab".ljust(card_width - 1) + "│",
             curses.A_DIM,
         )
         _safe_addstr(
             self.window,
-            top + 9,
+            top + 11,
             left,
             "└─ ↑/↓ row · ←/→ choice · type path · Enter launch · Esc cancel "
             + "─" * max(0, card_width - 67)
@@ -418,14 +460,22 @@ class Workshop:
         ]
         _safe_addstr(
             self.window,
-            top + 10,
+            top + 12,
             left,
-            "Unavailable — " + " · ".join(unavailable),
+            "Unavailable — "
+            + " · ".join(
+                unavailable
+                + [
+                    f"{name}: {continuity_caps[name]['reason']}"
+                    for name in CONTINUITY_MODES
+                    if not continuity_caps[name]["available"]
+                ]
+            ),
             curses.A_DIM,
         )
         if self.error:
             _safe_addstr(
-                self.window, min(height - 1, top + 11), left, self.error, curses.A_BOLD
+                self.window, min(height - 1, top + 13), left, self.error, curses.A_BOLD
             )
 
     def handle_home_key(self, key: int) -> None:
@@ -445,10 +495,10 @@ class Workshop:
         if key == 27:
             raise SystemExit(0)
         if key == curses.KEY_UP:
-            self.row = (self.row - 1) % 5
+            self.row = (self.row - 1) % 7
             return
         if key in (curses.KEY_DOWN, ord("\t")):
-            self.row = (self.row + 1) % 5
+            self.row = (self.row + 1) % 7
             return
         if key in (curses.KEY_LEFT, curses.KEY_RIGHT, ord(" ")):
             delta = -1 if key == curses.KEY_LEFT else 1
@@ -456,21 +506,30 @@ class Workshop:
                 self.agent = (self.agent + delta) % len(AGENTS)
                 self._normalize_runtime_choice()
                 self._normalize_permission_choice()
+                self._normalize_continuity_choice()
             elif self.row == 1:
                 self.ritual = (self.ritual + delta) % len(RITUALS)
             elif self.row == 2:
                 self._cycle_runtime(delta)
             elif self.row == 3:
                 self._cycle_permissions(delta)
+            elif self.row == 4:
+                self._cycle_continuity(delta)
             return
         if key in (10, 13, curses.KEY_ENTER):
             self.launch()
             return
-        if self.row == 4:
+        if self.row in (5, 6):
             if key in (curses.KEY_BACKSPACE, 127, 8):
-                self.path = self.path[:-1]
+                if self.row == 5:
+                    self.continuity_parent = self.continuity_parent[:-1]
+                else:
+                    self.path = self.path[:-1]
             elif 32 <= key <= 126:
-                self.path += chr(key)
+                if self.row == 5:
+                    self.continuity_parent += chr(key)
+                else:
+                    self.path += chr(key)
 
     def _cycle_runtime(self, delta: int) -> None:
         capabilities = runtime_policy_capabilities(AGENTS[self.agent])
@@ -514,6 +573,25 @@ class Workshop:
             ).supported:
                 self.permissions = index
                 return
+
+    def _cycle_continuity(self, delta: int) -> None:
+        capabilities = continuity_policy_capabilities(
+            AGENTS[self.agent], root=self.path, explicit_parent=self.continuity_parent
+        )
+        for _ in CONTINUITY_MODES:
+            self.continuity = (self.continuity + delta) % len(CONTINUITY_MODES)
+            if capabilities[CONTINUITY_MODES[self.continuity]]["available"]:
+                return
+        self.error = "No continuity policy is currently materializable"
+
+    def _normalize_continuity_choice(self) -> None:
+        capabilities = continuity_policy_capabilities(
+            AGENTS[self.agent], root=self.path, explicit_parent=self.continuity_parent
+        )
+        if capabilities["full-lineage"]["available"]:
+            self.continuity = CONTINUITY_MODES.index("full-lineage")
+        else:
+            self.continuity = CONTINUITY_MODES.index("fresh")
 
     def handle_mouse(self) -> None:
         try:
@@ -583,11 +661,21 @@ class Workshop:
             capability = runtime_policy_capabilities(AGENTS[self.agent])[runtime_name]
             if not capability["available"]:
                 raise ValueError(str(capability["reason"]))
+            continuity_name = CONTINUITY_MODES[self.continuity]
+            continuity_capability = continuity_policy_capabilities(
+                AGENTS[self.agent],
+                root=workspace,
+                explicit_parent=self.continuity_parent,
+            )[continuity_name]
+            if not continuity_capability["available"]:
+                raise ValueError(str(continuity_capability["reason"]))
             argv = launch_argv(
                 AGENTS[self.agent],
                 RITUALS[self.ritual],
                 runtime_name,
                 PERMISSION_POLICIES[self.permissions],
+                continuity=continuity_name,
+                continuity_parent=self.continuity_parent,
             )
         except ValueError as exc:
             self.error = str(exc)

@@ -58,6 +58,8 @@ def test_launcher_commands_keep_interactive_agent_in_this_panel() -> None:
         "bypass",
         "--operator",
         "none",
+        "--continuity",
+        "fresh",
     ]
     assert workshop.launch_argv("claude", "resume") == [
         "vibecrafted",
@@ -66,6 +68,42 @@ def test_launcher_commands_keep_interactive_agent_in_this_panel() -> None:
     ]
     with pytest.raises(ValueError, match="interactive ritual"):
         workshop.launch_argv("codex", "operator")
+
+
+def test_launcher_projects_explicit_continuity_selection() -> None:
+    workshop = _load()
+
+    assert workshop.launch_argv(
+        "claude",
+        "init",
+        continuity="bare-fork",
+        continuity_parent="11111111-1111-4111-8111-111111111111",
+    )[-4:] == [
+        "--continuity",
+        "bare-fork",
+        "--parent-session",
+        "11111111-1111-4111-8111-111111111111",
+    ]
+    with pytest.raises(ValueError, match="explicit parent"):
+        workshop.launch_argv("claude", "init", continuity="bare-fork")
+    with pytest.raises(ValueError, match="unsupported continuity"):
+        workshop.launch_argv("claude", "init", continuity="latest")
+
+
+def test_launcher_exposes_exact_disabled_continuity_reasons(tmp_path: Path) -> None:
+    workshop = _load()
+
+    capabilities = workshop.continuity_policy_capabilities(
+        "claude", root=tmp_path, explicit_parent="", env={"PATH": ""}
+    )
+    assert capabilities["fresh"]["available"] is True
+    assert capabilities["fresh"]["reason"] == "no inherited memory is supplied"
+    assert capabilities["full-lineage"]["available"] is False
+    assert capabilities["full-lineage"]["reason"] == (
+        "no explicit/current parent lineage id"
+    )
+    assert capabilities["bare-fork"]["available"] is False
+    assert "expert-only" in capabilities["bare-fork"]["reason"]
 
 
 def test_launcher_refuses_unsupported_policy_instead_of_approximating() -> None:

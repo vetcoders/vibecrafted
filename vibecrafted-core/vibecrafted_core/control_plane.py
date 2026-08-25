@@ -1870,6 +1870,8 @@ def _normalize_agent_meta(path: Path) -> RunStatus | None:
         "operator_policy",
         "supervision",
         "stop_actor_run_id",
+        # H2b2d — bounded typed continuity receipt (never prompt bodies).
+        "continuity",
     ):
         if key in payload and payload.get(key) not in (None, ""):
             extra[key] = payload[key]

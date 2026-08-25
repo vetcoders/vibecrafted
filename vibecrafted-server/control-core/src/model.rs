@@ -503,6 +503,28 @@ pub struct OperatorAgentPolicyProjection {
     pub reason: String,
 }
 
+/// Public, bounded continuity receipt. Prompt bodies and local material paths
+/// stay private; only the selected policy, lineage identity, and content hashes
+/// cross the control-plane read boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContinuityPolicyProjection {
+    pub mode: String,
+    pub lineage_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub parent_provider_session_id: String,
+    pub supported: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+    #[serde(default)]
+    pub materialized: Option<bool>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub context_sha256: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub loop_sha256: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SupervisionRelationProjection {
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -585,6 +607,9 @@ pub struct RunStatus {
     /// Structured H2b2c relationship; absent on legacy and unsupervised runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_agent: Option<OperatorAgentProjection>,
+    /// Typed H2b2d continuity truth; absent on legacy and non-interactive runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuity: Option<ContinuityPolicyProjection>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub recovery_required: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -1109,6 +1134,7 @@ impl LifecycleRun {
             worker_pgid: None,
             worker_alive: None,
             operator_agent: None,
+            continuity: None,
             recovery_required: false,
             stop_reason: String::new(),
             agent_session_id: String::new(),
@@ -1372,6 +1398,8 @@ pub struct AgentMeta {
     #[serde(default)]
     pub operator_policy: Option<OperatorAgentPolicyProjection>,
     #[serde(default)]
+    pub continuity: Option<ContinuityPolicyProjection>,
+    #[serde(default)]
     pub supervision: Option<SupervisionRelationProjection>,
     #[serde(default)]
     pub stop_actor_run_id: String,
@@ -1527,6 +1555,7 @@ impl AgentMeta {
                 }
                 _ => None,
             },
+            continuity: self.continuity.clone(),
             recovery_required: self.recovery_required,
             stop_reason: self.stop_reason.clone(),
             agent_session_id: self.agent_session_id.clone(),
@@ -1627,6 +1656,10 @@ pub fn merge_status(existing: Option<RunStatus>, incoming: RunStatus) -> RunStat
             .operator_agent
             .clone()
             .or_else(|| other.operator_agent.clone()),
+        continuity: preferred
+            .continuity
+            .clone()
+            .or_else(|| other.continuity.clone()),
         recovery_required: preferred.recovery_required || other.recovery_required,
         stop_reason: nonempty_or(&preferred.stop_reason, &other.stop_reason),
         agent_session_id: nonempty_or(&preferred.agent_session_id, &other.agent_session_id),
@@ -1682,6 +1715,11 @@ mod status_thread_tests {
                 "relation_id": "relation-1", "operator_run_id": "oper-1",
                 "child_run_id": "init-child", "state": "active",
                 "protocol": "operator-protocol-jsonl-v1"
+            },
+            "continuity": {
+                "mode": "full-lineage", "lineage_id": "parent-run-1",
+                "supported": true, "status": "SUPPORTED",
+                "materialized": true, "context_sha256": "abc", "loop_sha256": "def"
             }
         });
         let meta: AgentMeta = serde_json::from_value(raw).expect("typed Agent meta");
@@ -1697,6 +1735,10 @@ mod status_thread_tests {
         assert_eq!(relationship.policy.provider.as_deref(), Some("claude"));
         assert_eq!(relationship.supervision.operator_run_id, "oper-1");
         assert_eq!(relationship.supervision.child_run_id, "init-child");
+        let continuity = status.continuity.expect("continuity projection");
+        assert_eq!(continuity.mode, "full-lineage");
+        assert_eq!(continuity.lineage_id, "parent-run-1");
+        assert_eq!(continuity.context_sha256, "abc");
     }
 
     #[test]

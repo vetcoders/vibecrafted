@@ -11,21 +11,27 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from vibecrafted_core.spawn import (
+    CONTINUITY_MODES,
     PERMISSION_POLICIES,
     POLICY_MODES,
     POLICY_PROVIDERS,
     RUNTIME_POLICIES,
+    ContinuityPolicy,
     ProviderUsageCapability,
     _ClaudeTranscriptUsage,
+    _fresh_child_environment,
+    _materialize_continuity,
     _validate_operator_protocol_event,
     interactive_policy_command,
     interactive_workspace_command,
     launch_interactive_workspace,
     main,
     prepare_interactive_workspace_launch,
+    resolve_continuity_policy,
     resolve_operator_agent_policy,
     resolve_provider_policy,
     resolve_provider_usage_capability,
@@ -50,6 +56,13 @@ def _fake_interactive_provider(path: Path) -> None:
         "  'stdout_tty': os.isatty(1), 'stderr_tty': os.isatty(2),\n"
         "  'run_id': os.environ['VIBECRAFTED_RUN_ID'],\n"
         "  'session_id': session_id,\n"
+        "  'argv': sys.argv[1:],\n"
+        "  'continuity_mode': os.environ['VIBECRAFTED_CONTINUITY_MODE'],\n"
+        "  'continuity_lineage_id': os.environ['VIBECRAFTED_CONTINUITY_LINEAGE_ID'],\n"
+        "  'inherited': {name: os.environ.get(name) for name in (\n"
+        "    'CODEX_SESSION_ID', 'CLAUDE_CODE_SESSION_ID',\n"
+        "    'VIBECRAFTED_LOOP_STATE_FILE', 'VIBECRAFTED_RESUME_CONTEXT',\n"
+        "    'AICX_CONTINUITY_FILE') if name in os.environ},\n"
         "}) + '\\n', encoding='utf-8')\n"
         "if os.environ.get('SMOKE_BLOCK') == '1':\n"
         "  while True: time.sleep(0.05)\n"
@@ -347,6 +360,11 @@ def test_interactive_owner_keeps_distinct_live_provider_on_inherited_tty(
         VIBECRAFTED_RUNTIME_BIN=str(fake_bin),
         SMOKE_CAPTURE=str(capture),
         SMOKE_BLOCK="1",
+        CODEX_SESSION_ID="stale-codex",
+        CLAUDE_CODE_SESSION_ID="stale-claude",
+        VIBECRAFTED_LOOP_STATE_FILE="/stale-loop",
+        VIBECRAFTED_RESUME_CONTEXT="/stale-pack",
+        AICX_CONTINUITY_FILE="/stale-aicx",
         PATH=str(fake_bin) + os.pathsep + env["PATH"],
     )
     master_fd, slave_fd = pty.openpty()
@@ -384,6 +402,11 @@ def test_interactive_owner_keeps_distinct_live_provider_on_inherited_tty(
         }
         assert meta["usage_capability"]["source"] == "claude-transcript-jsonl-v1"
         assert meta["provider_session_id"] == observed["session_id"]
+        assert observed["continuity_mode"] == "fresh"
+        assert observed["continuity_lineage_id"].startswith("fresh:")
+        assert observed["inherited"] == {}
+        assert "--resume" not in observed["argv"]
+        assert "--fork-session" not in observed["argv"]
         os.kill(meta["owner_pid"], 0)
         os.kill(meta["worker_pid"], 0)
         owner.send_signal(signal.SIGTERM)
@@ -540,6 +563,8 @@ def test_operator_auto_creates_distinct_supervising_agent_relationship(
         assert agent_meta["stop_actor_run_id"] == operator["run_id"]
         assert operator_meta["terminal_reason"] == "child_settled"
         assert operator_meta["root"] == agent_meta["root"]
+        assert operator_meta["continuity"] == agent_meta["continuity"]
+        assert operator_meta["continuity"]["mode"] == "fresh"
         assert (
             subprocess.run(
                 ["git", "status", "--short"],
@@ -1561,3 +1586,228 @@ def test_policy_cli_reads_the_same_contract(monkeypatch, capsys) -> None:
         "--no-alt-screen",
         "/vc-init",
     ]
+
+
+def test_interactive_command_requires_typed_continuity_selection(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """H2b2d fail-first: the canonical owner must accept explicit fresh truth."""
+    monkeypatch.setattr(sys, "stdin", io.StringIO("/vc-init"))
+    monkeypatch.setattr(
+        "vibecrafted_core.spawn.resolve_provider_usage_capability",
+        lambda _provider: _TEST_USAGE_CAPABILITY,
+    )
+
+    assert (
+        main(
+            [
+                "interactive-command",
+                "claude",
+                "--runtime",
+                "local-native",
+                "--permissions",
+                "read-only",
+                "--continuity",
+                "fresh",
+                "--root",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+    command = shlex.split(capsys.readouterr().out)
+    assert command[command.index("--continuity") + 1] == "fresh"
+
+
+def test_continuity_modes_are_exact_and_fresh_proves_scoped_absence() -> None:
+    assert CONTINUITY_MODES == ("full-lineage", "fresh", "bare-fork")
+    policy = resolve_continuity_policy("fresh", provider="claude", env={})
+    child = _fresh_child_environment(
+        {
+            "PATH": "/tools",
+            "HOME": "/user",
+            "CODEX_SESSION_ID": "current",
+            "VIBECRAFTED_LOOP_STATE_FILE": "/stale-loop",
+            "VIBECRAFTED_RESUME_CONTEXT": "/stale-pack",
+            "AICX_CONTINUITY_FILE": "/stale-aicx",
+        },
+        policy,
+    )
+    assert child == {"PATH": "/tools", "HOME": "/user"}
+
+
+def test_full_lineage_requires_explicit_parent_evidence() -> None:
+    with pytest.raises(ValueError, match="parent lineage id"):
+        resolve_continuity_policy("full-lineage", provider="claude", env={})
+    policy = resolve_continuity_policy(
+        "full-lineage",
+        provider="claude",
+        parent_lineage_id="run-parent-42",
+        env={},
+    )
+    assert policy.as_dict()["lineage_id"] == "run-parent-42"
+    assert not policy.parent_provider_session_id
+    command = interactive_policy_command(
+        "claude",
+        "/vc-init",
+        "local-native",
+        "read-only",
+        provider_session_id=_TEST_PROVIDER_SESSION_ID,
+        continuity_policy=policy,
+    )
+    assert command[command.index("--session-id") + 1] == _TEST_PROVIDER_SESSION_ID
+    assert "--resume" not in command
+    assert "--fork-session" not in command
+
+
+def test_bare_fork_rejects_missing_malformed_current_and_unsupported_parent(
+    monkeypatch,
+) -> None:
+    for parent in ("", "bad parent", "*"):
+        with pytest.raises(ValueError, match="well-formed"):
+            resolve_continuity_policy(
+                "bare-fork", provider="claude", parent_session_id=parent, env={}
+            )
+    with pytest.raises(ValueError, match="current provider session"):
+        resolve_continuity_policy(
+            "bare-fork",
+            provider="claude",
+            parent_session_id="same-session",
+            env={"CLAUDE_CODE_SESSION_ID": "same-session"},
+        )
+    with pytest.raises(ValueError, match="unsupported for agy"):
+        resolve_continuity_policy(
+            "bare-fork", provider="agy", parent_session_id="agy-parent", env={}
+        )
+
+
+def test_continuity_rejection_writes_terminal_truth_before_any_spawn(
+    tmp_path: Path, monkeypatch
+) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+
+    with pytest.raises(ValueError, match="well-formed"):
+        launch_interactive_workspace(
+            "claude",
+            "/vc-init",
+            "local-native",
+            "read-only",
+            repo,
+            continuity="bare-fork",
+        )
+
+    receipts = list((home / "control_plane/runtime_runs").glob("*/meta.json"))
+    assert len(receipts) == 1
+    receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+    assert receipt["status"] == "failed"
+    assert receipt["liveness"] == "terminal"
+    assert receipt["terminal_reason"] == "continuity_validation_failed"
+    assert receipt["continuity"]["supported"] is False
+    assert "worker_pid" not in receipt
+
+
+def test_confirmed_bare_fork_constructs_only_explicit_parent(monkeypatch) -> None:
+    from vibecrafted_core.continuity import capabilities
+
+    monkeypatch.setattr(
+        capabilities,
+        "probe",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            state=capabilities.PROBE_CONFIRMED, detail="confirmed"
+        ),
+    )
+    policy = resolve_continuity_policy(
+        "bare-fork",
+        provider="claude",
+        parent_session_id="parent-session-42",
+        env={},
+    )
+    command = interactive_policy_command(
+        "claude",
+        "/vc-init",
+        "local-native",
+        "read-only",
+        provider_session_id="11111111-1111-4111-8111-111111111111",
+        continuity_policy=policy,
+    )
+    assert command[command.index("--resume") + 1] == "parent-session-42"
+    assert "--fork-session" in command
+    assert "AICX" not in " ".join(command)
+
+
+def test_full_lineage_materializes_bounded_new_session_pack_and_active_loop(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from vibecrafted_core import aicx_session_chain
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    loop_path = repo / ".vibecrafted" / "operator-loop.local.md"
+    loop_path.parent.mkdir()
+    loop_path.write_text(
+        "---\nactive: true\niteration: 2\n---\n\nShip H2b2d.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("VIBECRAFTED_LOOP_STATE_FILE", str(loop_path))
+    monkeypatch.setattr("vibecrafted_core.spawn.which", lambda *_a, **_k: "/bin/aicx")
+
+    def assemble(**kwargs):
+        body = (
+            "# Resume continuity pack\n## Session catalog\nrow\n"
+            "## Continuity\n## NOW\ntruth\n## Operator instruction\nnew session\n"
+        )
+        kwargs["context_file"].parent.mkdir(parents=True, exist_ok=True)
+        kwargs["context_file"].write_text(body, encoding="utf-8")
+        kwargs["meta_file"].write_text("{}\n", encoding="utf-8")
+        return SimpleNamespace(
+            mode="new_session",
+            empty_kind="none",
+            session_count=2,
+            degradations=[],
+            body=body,
+        )
+
+    monkeypatch.setattr(aicx_session_chain, "assemble_resume_continuity_pack", assemble)
+    policy = ContinuityPolicy("full-lineage", "parent-run")
+    material = _materialize_continuity(
+        policy, provider="claude", root=repo, run_id="init-test", prompt="/vc-init"
+    )
+    assert "Start a new provider session; never attach" in material.prompt
+    assert material.context_sha256 and material.loop_sha256
+    assert material.receipt()["materialized"] is True
+
+
+def test_full_lineage_rejects_degraded_material_before_spawn(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from vibecrafted_core import aicx_session_chain
+
+    loop_path = tmp_path / "loop.md"
+    loop_path.write_text("---\nactive: true\n---\nGoal\n", encoding="utf-8")
+    monkeypatch.setenv("VIBECRAFTED_LOOP_STATE_FILE", str(loop_path))
+    monkeypatch.setattr("vibecrafted_core.spawn.which", lambda *_a, **_k: "/bin/aicx")
+
+    def degraded(**kwargs):
+        kwargs["context_file"].parent.mkdir(parents=True, exist_ok=True)
+        kwargs["context_file"].write_text("degraded", encoding="utf-8")
+        return SimpleNamespace(
+            mode="new_session",
+            empty_kind="empty_project",
+            session_count=0,
+            degradations=["stale"],
+            body="degraded",
+        )
+
+    monkeypatch.setattr(aicx_session_chain, "assemble_resume_continuity_pack", degraded)
+    with pytest.raises(ValueError, match="empty, stale, degraded"):
+        _materialize_continuity(
+            ContinuityPolicy("full-lineage", "parent-run"),
+            provider="claude",
+            root=tmp_path,
+            run_id="init-degraded",
+            prompt="/vc-init",
+        )

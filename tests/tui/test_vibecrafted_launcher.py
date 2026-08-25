@@ -561,10 +561,28 @@ def test_init_claude_uses_interactive_tab_without_print_mode(
     script_body = command_script.read_text(encoding="utf-8")
     assert (
         "vibecrafted_core.spawn interactive-launch claude --runtime local-native "
-        "--permissions bypass --token-budget safe --operator auto --root"
+        "--permissions bypass --token-budget safe --operator auto --continuity fresh --root"
     ) in script_body
     assert "/vc-init" in script_body
     assert " -p " not in script_body
+
+
+def test_init_shell_and_deck_accept_the_same_typed_continuity_flags() -> None:
+    expected = "--continuity full-lineage --continuity-parent <run-id>"
+    for launcher in (
+        LAUNCHER,
+        REPO_ROOT / "vibecrafted-core/vibecrafted_core/deck/vibecrafted",
+    ):
+        result = subprocess.run(
+            ["bash", str(launcher), "init", "--help"],
+            check=True,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        assert "--continuity full-lineage|fresh|bare-fork" in result.stdout
+        assert expected in result.stdout
+        assert "bare-fork is expert-only" in result.stdout
 
 
 def test_init_codex_fails_closed_without_measured_usage_capability(

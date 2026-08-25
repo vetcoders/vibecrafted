@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import inspect
 import json
 import os
@@ -46,6 +47,22 @@ QUOTA_PRESET_TOKENS = 250_000
 QUOTA_MAX_TOKENS = 10_000_000
 QUOTA_EXHAUSTED_EXIT_CODE = 75
 OPERATOR_POLICIES = ("none", "auto", "claude")
+CONTINUITY_MODES = ("full-lineage", "fresh", "bare-fork")
+_CONTINUITY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_INHERITED_CONTINUITY_ENV = (
+    "AICX_CONTEXT_FILE",
+    "AICX_CONTINUITY_FILE",
+    "CLAUDE_CODE_SESSION_ID",
+    "CODEX_SESSION_ID",
+    "VIBECRAFTED_OPERATOR_SESSION_ID",
+    "VIBECRAFTED_PARENT_RUN_ID",
+    "VIBECRAFTED_PARENT_SESSION_ID",
+    "VIBECRAFTED_RESUME_CONTEXT",
+    "VIBECRAFTED_RESUME_META",
+    "VIBECRAFTED_LOOP_STATE_FILE",
+    "VIBECRAFTED_LOOP_NR",
+    "SPAWN_LOOP_NR",
+)
 USER_OBSERVED_WARNING = (
     "User-observed only: no Operator Agent is supervising this Agent Workspace."
 )
@@ -116,6 +133,49 @@ class OperatorAgentPolicy:
             "status": "SUPPORTED" if self.supported else "UNSUPPORTED",
             "warning": self.warning,
             "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class ContinuityPolicy:
+    """One fail-closed continuity decision resolved before runtime truth."""
+
+    mode: str
+    lineage_id: str
+    parent_provider_session_id: str = ""
+    supported: bool = True
+    reason: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "lineage_id": self.lineage_id,
+            "parent_provider_session_id": self.parent_provider_session_id,
+            "supported": self.supported,
+            "status": "SUPPORTED" if self.supported else "UNSUPPORTED",
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class ContinuityMaterial:
+    """Private bounded transport material; receipts project hashes, not bodies."""
+
+    policy: ContinuityPolicy
+    prompt: str
+    context_path: str = ""
+    loop_state_path: str = ""
+    context_sha256: str = ""
+    loop_sha256: str = ""
+
+    def receipt(self) -> dict[str, Any]:
+        return {
+            **self.policy.as_dict(),
+            "context_sha256": self.context_sha256,
+            "loop_sha256": self.loop_sha256,
+            "materialized": bool(self.context_sha256 and self.loop_sha256)
+            if self.policy.mode == "full-lineage"
+            else True,
         }
 
 
@@ -269,6 +329,271 @@ def resolve_quota_policy(
     if budget > QUOTA_MAX_TOKENS:
         raise ValueError(f"token budget must not exceed {QUOTA_MAX_TOKENS}")
     return QuotaPolicy("bounded", budget, raw)
+
+
+def _validated_continuity_id(value: str, *, label: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized or not _CONTINUITY_ID.fullmatch(normalized):
+        raise ValueError(f"{label} must be one explicit, well-formed identifier")
+    return normalized
+
+
+def _ambient_parent_lineage(env: dict[str, str]) -> str:
+    for name in (
+        "VIBECRAFTED_RUN_ID",
+        "CODEX_SESSION_ID",
+        "CLAUDE_CODE_SESSION_ID",
+        "VIBECRAFTED_OPERATOR_SESSION_ID",
+    ):
+        candidate = str(env.get(name) or "").strip()
+        if candidate and _CONTINUITY_ID.fullmatch(candidate):
+            return candidate
+    return ""
+
+
+def resolve_continuity_policy(
+    selection: str | None,
+    *,
+    provider: str,
+    parent_session_id: str = "",
+    parent_lineage_id: str = "",
+    env: dict[str, str] | None = None,
+) -> ContinuityPolicy:
+    """Resolve one continuity mode without inferring a native session target."""
+    mode = str(selection or "fresh").strip().lower()
+    if mode not in CONTINUITY_MODES:
+        raise ValueError(
+            f"unknown continuity mode {mode!r}; choose {', '.join(CONTINUITY_MODES)}"
+        )
+    ambient = dict(os.environ if env is None else env)
+    if mode == "fresh":
+        if parent_session_id or parent_lineage_id:
+            raise ValueError(
+                "fresh continuity rejects parent session and lineage input"
+            )
+        return ContinuityPolicy(mode="fresh", lineage_id=f"fresh:{uuid.uuid4()}")
+    if mode == "full-lineage":
+        if parent_session_id:
+            raise ValueError("full-lineage never accepts a native parent session")
+        lineage = parent_lineage_id or _ambient_parent_lineage(ambient)
+        return ContinuityPolicy(
+            mode=mode,
+            lineage_id=_validated_continuity_id(lineage, label="parent lineage id"),
+        )
+
+    parent = _validated_continuity_id(
+        parent_session_id, label="bare-fork parent provider-session id"
+    )
+    if parent_lineage_id:
+        raise ValueError("bare-fork accepts only an explicit provider-session parent")
+    current_ids = {
+        str(ambient.get(name) or "").strip()
+        for name in (
+            "CODEX_SESSION_ID",
+            "CLAUDE_CODE_SESSION_ID",
+            "VIBECRAFTED_OPERATOR_SESSION_ID",
+            "VIBECRAFTED_PROVIDER_SESSION_ID",
+        )
+    }
+    if parent in current_ids:
+        raise ValueError("bare-fork parent is the current provider session")
+    from .continuity.capabilities import (
+        PROBE_CONFIRMED,
+        SUPPORTED,
+        capability_for,
+        probe,
+    )
+
+    capability = capability_for(provider)
+    if capability.native_fork != SUPPORTED:
+        raise ValueError(
+            f"bare-fork unsupported for {provider}: {capability.fork_runtime_restrictions}"
+        )
+    evidence = probe(provider, refresh=True)
+    if evidence.state != PROBE_CONFIRMED:
+        raise ValueError(
+            f"bare-fork capability probe did not confirm {provider}: {evidence.detail}"
+        )
+    return ContinuityPolicy(
+        mode=mode,
+        lineage_id=parent,
+        parent_provider_session_id=parent,
+    )
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _materialize_continuity(
+    policy: ContinuityPolicy,
+    *,
+    provider: str,
+    root: Path,
+    run_id: str,
+    prompt: str,
+) -> ContinuityMaterial:
+    if policy.mode != "full-lineage":
+        return ContinuityMaterial(policy=policy, prompt=prompt)
+    from .aicx_session_chain import (
+        CliSessionChain,
+        assemble_resume_continuity_pack,
+        pack_contains_recover_instruction,
+    )
+
+    loop_path = Path(
+        os.environ.get("VIBECRAFTED_LOOP_STATE_FILE", "").strip()
+        or root / ".vibecrafted" / "operator-loop.local.md"
+    ).expanduser()
+    try:
+        loop_text = loop_path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError) as exc:
+        raise ValueError(
+            f"full-lineage requires readable current LOOP state: {exc}"
+        ) from exc
+    lines = loop_text.splitlines()
+    fields: dict[str, str] = {}
+    prompt_start = 0
+    if lines[:1] == ["---"]:
+        for index, line in enumerate(lines[1:], start=1):
+            if line == "---":
+                prompt_start = index + 1
+                break
+            if ":" in line:
+                key, raw = line.split(":", 1)
+                fields[key.strip()] = raw.strip().strip('"')
+    loop_prompt = "\n".join(lines[prompt_start:]).strip()
+    if fields.get("active") != "true" or not loop_prompt:
+        raise ValueError(
+            "full-lineage requires an active LOOP with a non-empty durable goal"
+        )
+    aicx_bin = which("aicx", path=agent_tool_search_path())
+    if not aicx_bin:
+        raise ValueError("full-lineage requires the aicx executable")
+    run_dir = control_plane_home() / "runtime_runs" / run_id
+    context_path = run_dir / "continuity-pack.md"
+    meta_path = run_dir / "continuity-pack.meta.json"
+    pack = assemble_resume_continuity_pack(
+        agent=provider,
+        root=root,
+        hours=48,
+        context_file=context_path,
+        meta_file=meta_path,
+        chain=CliSessionChain(aicx_bin),
+    )
+    required_sections = (
+        "## Session catalog",
+        "## Continuity",
+        "## Operator instruction",
+    )
+    if (
+        pack.mode != "new_session"
+        or pack.empty_kind != "none"
+        or pack.session_count < 1
+        or pack.degradations
+        or not all(section in pack.body for section in required_sections)
+        or pack_contains_recover_instruction(pack.body)
+    ):
+        context_path.unlink(missing_ok=True)
+        meta_path.unlink(missing_ok=True)
+        raise ValueError(
+            "full-lineage continuity pack is empty, stale, degraded, or not new-session safe"
+        )
+    loop_copy = run_dir / "current-loop.md"
+    loop_copy.write_text(loop_text, encoding="utf-8")
+    bounded_prompt = (
+        f"{prompt}\n\n"
+        "Continuity mode: full-lineage. Start a new provider session; never attach.\n"
+        f"Read bounded AICX continuity: {context_path}\n"
+        f"Read durable current goal/LOOP: {loop_copy}\n"
+        f"Parent lineage evidence: {policy.lineage_id}\n"
+    )
+    return ContinuityMaterial(
+        policy=policy,
+        prompt=bounded_prompt,
+        context_path=str(context_path),
+        loop_state_path=str(loop_copy),
+        context_sha256=_sha256_file(context_path),
+        loop_sha256=_sha256_file(loop_copy),
+    )
+
+
+def _fresh_child_environment(
+    env: dict[str, str], policy: ContinuityPolicy
+) -> dict[str, str]:
+    child = dict(env)
+    if policy.mode == "fresh":
+        for name in _INHERITED_CONTINUITY_ENV:
+            child.pop(name, None)
+        for name in tuple(child):
+            if name.startswith(("VIBECRAFTED_RESUME_", "AICX_CONTINUITY_")):
+                child.pop(name, None)
+    return child
+
+
+def continuity_policy_capabilities(
+    provider: str,
+    *,
+    root: str | os.PathLike[str],
+    explicit_parent: str = "",
+    env: dict[str, str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Project exact selector availability without materializing or spawning."""
+    ambient = dict(os.environ if env is None else env)
+    root_path = Path(root).expanduser().resolve()
+    parent_lineage = explicit_parent or _ambient_parent_lineage(ambient)
+    loop_path = Path(
+        ambient.get("VIBECRAFTED_LOOP_STATE_FILE", "").strip()
+        or root_path / ".vibecrafted" / "operator-loop.local.md"
+    ).expanduser()
+    full_reason = ""
+    if not parent_lineage:
+        full_reason = "no explicit/current parent lineage id"
+    elif not loop_path.is_file():
+        full_reason = f"current LOOP state missing: {loop_path}"
+    elif which("aicx", path=agent_tool_search_path(ambient)) is None:
+        full_reason = "aicx executable not found"
+    else:
+        try:
+            loop_text = loop_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            full_reason = f"current LOOP unreadable: {exc}"
+        else:
+            if (
+                "active: true" not in loop_text
+                or not loop_text.split("---")[-1].strip()
+            ):
+                full_reason = "current LOOP is inactive or has no durable goal"
+    bare_reason = ""
+    if not explicit_parent:
+        bare_reason = "expert-only: provide an explicit parent provider-session id"
+    else:
+        try:
+            resolve_continuity_policy(
+                "bare-fork",
+                provider=provider,
+                parent_session_id=explicit_parent,
+                env=ambient,
+            )
+        except ValueError as exc:
+            bare_reason = str(exc)
+    return {
+        "full-lineage": {
+            "available": not full_reason,
+            "recommended": True,
+            "reason": full_reason,
+        },
+        "fresh": {
+            "available": True,
+            "recommended": False,
+            "reason": "no inherited memory is supplied",
+        },
+        "bare-fork": {
+            "available": not bare_reason,
+            "recommended": False,
+            "reason": bare_reason,
+        },
+    }
 
 
 def resolve_provider_usage_capability(
@@ -486,16 +811,25 @@ def interactive_policy_command(
     permissions: str,
     *,
     provider_session_id: str | None = None,
+    continuity_policy: ContinuityPolicy | None = None,
 ) -> list[str]:
     """Build one interactive argv from the canonical policy decision."""
     decision = resolve_provider_policy(provider, runtime, permissions, "interactive")
     if not decision.supported:
         raise ValueError(decision.reason)
     flags = list(decision.flags)
+    continuity = continuity_policy or ContinuityPolicy("fresh", "fresh:implicit")
     if provider == "claude":
         session_flags = (
             ["--session-id", provider_session_id] if provider_session_id else []
         )
+        if continuity.mode == "bare-fork":
+            session_flags = [
+                "--resume",
+                continuity.parent_provider_session_id,
+                "--fork-session",
+                *session_flags,
+            ]
         return ["claude", "--verbose", *flags, *session_flags, prompt]
     if provider == "codex":
         return ["codex", *flags, prompt]
@@ -510,7 +844,24 @@ def interactive_policy_command(
             "--skip-update-check",
             "--use-local-cache",
         ]
-    return ["grok", "--cwd", ".", *flags, "--no-alt-screen", prompt]
+    session_flags: list[str] = []
+    if continuity.mode == "bare-fork":
+        session_flags = [
+            "--resume",
+            continuity.parent_provider_session_id,
+            "--fork-session",
+        ]
+        if provider_session_id:
+            session_flags.extend(["--session-id", provider_session_id])
+    return [
+        "grok",
+        "--cwd",
+        ".",
+        *flags,
+        *session_flags,
+        "--no-alt-screen",
+        prompt,
+    ]
 
 
 def interactive_workspace_command(
@@ -521,6 +872,9 @@ def interactive_workspace_command(
     root: str | os.PathLike[str],
     token_budget: str | int | None = None,
     operator: str = "none",
+    continuity: str = "fresh",
+    parent_session_id: str = "",
+    parent_lineage_id: str = "",
 ) -> list[str]:
     """Build the portable wrapper argv used by the exact ``init`` route."""
     decision = resolve_provider_policy(provider, runtime, permissions, "interactive")
@@ -533,6 +887,12 @@ def interactive_workspace_command(
     operator_policy = resolve_operator_agent_policy(operator, runtime=runtime)
     if not operator_policy.supported:
         raise ValueError(operator_policy.reason)
+    continuity_policy = resolve_continuity_policy(
+        continuity,
+        provider=provider,
+        parent_session_id=parent_session_id,
+        parent_lineage_id=parent_lineage_id,
+    )
     command = [
         sys.executable,
         "-m",
@@ -547,11 +907,23 @@ def interactive_workspace_command(
         quota.selection,
         "--operator",
         operator_policy.selection,
+        "--continuity",
+        continuity_policy.mode,
         "--root",
         str(Path(root).expanduser().resolve()),
         "--prompt",
         prompt,
     ]
+    if continuity_policy.parent_provider_session_id:
+        command[command.index("--root") : command.index("--root")] = [
+            "--parent-session",
+            continuity_policy.parent_provider_session_id,
+        ]
+    elif continuity_policy.mode == "full-lineage":
+        command[command.index("--root") : command.index("--root")] = [
+            "--continuity-parent",
+            continuity_policy.lineage_id,
+        ]
     import_root = os.environ.get("VIBECRAFTED_INTERACTIVE_IMPORT_ROOT", "").strip()
     if import_root:
         pythonpath = import_root
@@ -620,6 +992,7 @@ def prepare_interactive_workspace_launch(
     quota_policy: QuotaPolicy | None = None,
     usage_capability: ProviderUsageCapability | None = None,
     provider_session_id: str | None = None,
+    continuity_material: ContinuityMaterial | None = None,
 ) -> InteractiveWorkspaceLaunch:
     """Resolve identity/root and publish truth only after launch preparation succeeds."""
     decision = resolve_provider_policy(provider, runtime, permissions, "interactive")
@@ -702,6 +1075,11 @@ def prepare_interactive_workspace_launch(
                 "messages": 0,
             },
             "provider_session_id": effective_provider_session_id,
+            "continuity": (
+                continuity_material.receipt()
+                if continuity_material is not None
+                else ContinuityPolicy("fresh", f"fresh:{uuid.uuid4()}").as_dict()
+            ),
             "root": str(effective),
             "parent_root": str(parent),
             "effective_worktree_path": str(effective) if geometry else "",
@@ -911,30 +1289,86 @@ def launch_interactive_workspace(
     root: str | os.PathLike[str],
     token_budget: str | int | None = None,
     operator: str = "none",
+    continuity: str = "fresh",
+    parent_session_id: str = "",
+    parent_lineage_id: str = "",
 ) -> int:
     """Own one provider child while preserving the inherited interactive TTY."""
     operator_policy = resolve_operator_agent_policy(operator, runtime=runtime)
     if not operator_policy.supported:
         raise ValueError(operator_policy.reason)
+    from .workflow import reserve_run_id
+
+    run_id = reserve_run_id("init")
+    try:
+        continuity_policy = resolve_continuity_policy(
+            continuity,
+            provider=provider,
+            parent_session_id=parent_session_id,
+            parent_lineage_id=parent_lineage_id,
+        )
+        continuity_material = _materialize_continuity(
+            continuity_policy,
+            provider=provider,
+            root=Path(root).expanduser().resolve(),
+            run_id=run_id,
+            prompt=prompt,
+        )
+    except ValueError as exc:
+        now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+        failed = {
+            "created_at": now_iso,
+            "updated_at": now_iso,
+            "completed_at": now_iso,
+            "status": "failed",
+            "liveness": "terminal",
+            "terminal_reason": "continuity_validation_failed",
+            "reason": str(exc),
+            "run_id": run_id,
+            "agent": provider,
+            "skill": "init",
+            "mode": "interactive",
+            "root": str(Path(root).expanduser().resolve()),
+            "continuity": {
+                "mode": str(continuity or "fresh"),
+                "lineage_id": str(parent_lineage_id or parent_session_id),
+                "supported": False,
+                "status": "UNSUPPORTED",
+                "reason": str(exc),
+            },
+        }
+        meta_path = control_plane_home() / "runtime_runs" / run_id / "meta.json"
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_meta(meta_path, failed)
+        append_event(
+            "lifecycle:failed",
+            run_id,
+            "continuity validation failed before provider spawn",
+            {**failed, "meta": str(meta_path)},
+        )
+        raise
     if operator_policy.provider is not None:
         return _launch_supervised_interactive_workspace(
             provider=provider,
-            prompt=prompt,
+            prompt=continuity_material.prompt,
             runtime=runtime,
             permissions=permissions,
             root=root,
             token_budget=token_budget,
             operator_policy=operator_policy,
+            run_id=run_id,
+            continuity_material=continuity_material,
         )
     quota = resolve_quota_policy(token_budget, runtime=runtime)
-    child_env = os.environ.copy()
+    child_env = _fresh_child_environment(os.environ.copy(), continuity_policy)
     provider_session_id = str(uuid.uuid4())
     command = interactive_policy_command(
         provider,
-        prompt,
+        continuity_material.prompt,
         runtime,
         permissions,
         provider_session_id=provider_session_id,
+        continuity_policy=continuity_policy,
     )
     resolved = _resolve_agent_command(provider, command, child_env)
     capability = resolve_provider_usage_capability(provider, executable=resolved[0])
@@ -945,12 +1379,14 @@ def launch_interactive_workspace(
         runtime=runtime,
         permissions=permissions,
         selected_root=root,
-        prompt=prompt,
+        prompt=continuity_material.prompt,
+        run_id=run_id,
         executable=resolved[0],
         publish=False,
         quota_policy=quota,
         usage_capability=capability,
         provider_session_id=provider_session_id,
+        continuity_material=continuity_material,
     )
     try:
         usage_reader = _ClaudeTranscriptUsage(
@@ -975,6 +1411,8 @@ def launch_interactive_workspace(
             "VIBECRAFTED_EFFECTIVE_ROOT": launch.effective_root,
             "VIBECRAFTED_AGENT_ROLE": "agent",
             "VIBECRAFTED_PROMPT_ROLE": prompt.splitlines()[0] if prompt else "",
+            "VIBECRAFTED_CONTINUITY_MODE": continuity_policy.mode,
+            "VIBECRAFTED_CONTINUITY_LINEAGE_ID": continuity_policy.lineage_id,
         }
     )
     try:
@@ -1159,11 +1597,14 @@ def _launch_supervised_interactive_workspace(
     root: str | os.PathLike[str],
     token_budget: str | int | None,
     operator_policy: OperatorAgentPolicy,
+    run_id: str,
+    continuity_material: ContinuityMaterial,
 ) -> int:
     """Own one child and one distinct supervisor on the existing lifecycle throne."""
     assert operator_policy.provider is not None
     quota = resolve_quota_policy(token_budget, runtime=runtime)
-    base_env = os.environ.copy()
+    continuity_policy = continuity_material.policy
+    base_env = _fresh_child_environment(os.environ.copy(), continuity_policy)
     child_session_id = str(uuid.uuid4())
     child_command = interactive_policy_command(
         provider,
@@ -1171,6 +1612,7 @@ def _launch_supervised_interactive_workspace(
         runtime,
         permissions,
         provider_session_id=child_session_id,
+        continuity_policy=continuity_policy,
     )
     child_resolved = _resolve_agent_command(provider, child_command, base_env)
     child_capability = resolve_provider_usage_capability(
@@ -1184,11 +1626,13 @@ def _launch_supervised_interactive_workspace(
         permissions=permissions,
         selected_root=root,
         prompt=prompt,
+        run_id=run_id,
         executable=child_resolved[0],
         publish=False,
         quota_policy=quota,
         usage_capability=child_capability,
         provider_session_id=child_session_id,
+        continuity_material=continuity_material,
     )
     try:
         usage_reader = _ClaudeTranscriptUsage(
@@ -1268,6 +1712,9 @@ def _launch_supervised_interactive_workspace(
         runtime,
         operator_policy.permissions or "accept-edits",
         provider_session_id=operator_session_id,
+        continuity_policy=ContinuityPolicy(
+            mode="fresh", lineage_id=continuity_policy.lineage_id
+        ),
     )
     operator_resolved = _resolve_agent_command(
         operator_policy.provider, operator_command, base_env
@@ -1318,6 +1765,8 @@ def _launch_supervised_interactive_workspace(
         "VIBECRAFTED_SUPERVISION_PEER_RUN_ID": launch.run_id,
         "VIBECRAFTED_SUPERVISED_CHILD_META": str(launch.meta_path),
         "VIBECRAFTED_OPERATOR_PROTOCOL": str(protocol_path),
+        "VIBECRAFTED_CONTINUITY_MODE": continuity_policy.mode,
+        "VIBECRAFTED_CONTINUITY_LINEAGE_ID": continuity_policy.lineage_id,
     }
     try:
         operator_log = (operator_run_dir / "provider.log").open("ab")
@@ -1368,6 +1817,8 @@ def _launch_supervised_interactive_workspace(
         "VIBECRAFTED_PROMPT_ROLE": prompt.splitlines()[0] if prompt else "",
         "VIBECRAFTED_SUPERVISION_RELATION_ID": relation_id,
         "VIBECRAFTED_SUPERVISION_PEER_RUN_ID": operator_run_id,
+        "VIBECRAFTED_CONTINUITY_MODE": continuity_policy.mode,
+        "VIBECRAFTED_CONTINUITY_LINEAGE_ID": continuity_policy.lineage_id,
     }
     try:
         # The User-facing child keeps the exact inherited descriptors and TTY.
@@ -3531,6 +3982,11 @@ def _build_parser() -> argparse.ArgumentParser:
     interactive_command.add_argument(
         "--operator", choices=OPERATOR_POLICIES, default="none"
     )
+    interactive_command.add_argument(
+        "--continuity", choices=CONTINUITY_MODES, default="fresh"
+    )
+    interactive_command.add_argument("--parent-session", default="")
+    interactive_command.add_argument("--continuity-parent", default="")
     interactive_command.add_argument("--root", required=True)
     interactive_launch = sub.add_parser(
         "interactive-launch", help="Prepare and exec an interactive Agent Workspace."
@@ -3548,6 +4004,11 @@ def _build_parser() -> argparse.ArgumentParser:
     interactive_launch.add_argument(
         "--operator", choices=OPERATOR_POLICIES, default="none"
     )
+    interactive_launch.add_argument(
+        "--continuity", choices=CONTINUITY_MODES, default="fresh"
+    )
+    interactive_launch.add_argument("--parent-session", default="")
+    interactive_launch.add_argument("--continuity-parent", default="")
     sub.add_parser(
         "policy-matrix", help="Print the complete provider policy matrix as JSON."
     )
@@ -3616,6 +4077,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.root,
                 args.token_budget,
                 args.operator,
+                args.continuity,
+                args.parent_session,
+                args.continuity_parent,
             )
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
@@ -3632,6 +4096,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.root,
                 args.token_budget,
                 args.operator,
+                args.continuity,
+                args.parent_session,
+                args.continuity_parent,
             )
         except (OSError, RuntimeError, ValueError) as exc:
             print(str(exc), file=sys.stderr)
