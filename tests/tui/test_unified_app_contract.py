@@ -775,13 +775,15 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "launchWorkspaceTerminal()" in launch_handler
     assert "showMainWindowIfNeeded()" not in launch_handler
     assert "\t<key>LSUIElement</key>\n\t<true/>" in info
-    assert 'withTitle: "Open Console"' in delegate
-    assert 'withTitle: "Open vc-terminal"' in delegate
-    assert 'withTitle: "Restart Server"' in delegate
+    assert 'withTitle: "VC Console"' in delegate
+    assert 'withTitle: "VC Terminal"' in delegate
+    assert 'withTitle: "VC Server"' in delegate
     assert 'withTitle: "Server Diagnostics…"' in delegate
-    assert 'withTitle: "About Vibecrafted"' in delegate
+    assert 'withTitle: "About"' in delegate
     assert 'withTitle: "Help"' in delegate
     assert 'withTitle: "Quit"' in delegate
+    assert "#selector(requestQuit)" in delegate
+    assert 'process.arguments = ["status", "--json"]' in delegate
     assert 'appendingPathComponent("server/supervisor.status.json")' in delegate
     assert 'title: "Server: RESTARTING…"' in delegate
     assert 'process.arguments = ["server", "service", "reconcile"]' in delegate

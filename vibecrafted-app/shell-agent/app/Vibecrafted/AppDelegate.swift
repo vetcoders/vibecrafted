@@ -83,6 +83,16 @@ private struct ServerSupervisorSnapshot: Decodable {
   }
 }
 
+private struct RuntimeStatusSnapshot: Decodable {
+  struct Run: Decodable {
+    let state: String
+    let health: String?
+    let root: String
+  }
+
+  let runs: [Run]
+}
+
 private enum TrayServerHealth {
   case checking
   case healthy
@@ -476,14 +486,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     serverDetailMenuItem = serverDetail
     menu.addItem(.separator())
     let console = menu.addItem(
-      withTitle: "Open Console", action: #selector(openConsoleFromStatusItem), keyEquivalent: "")
+      withTitle: "VC Console", action: #selector(openConsoleFromStatusItem), keyEquivalent: "")
     console.target = self
     let terminal = menu.addItem(
-      withTitle: "Open vc-terminal", action: #selector(openTerminalFromStatusItem),
+      withTitle: "VC Terminal", action: #selector(openTerminalFromStatusItem),
       keyEquivalent: "")
     terminal.target = self
     let restart = menu.addItem(
-      withTitle: "Restart Server", action: #selector(restartServerFromStatusItem),
+      withTitle: "VC Server", action: #selector(restartServerFromStatusItem),
       keyEquivalent: "")
     restart.target = self
     restartServerMenuItem = restart
@@ -493,15 +503,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     diagnostics.target = self
     menu.addItem(.separator())
     menu.addItem(
-      withTitle: "About Vibecrafted",
+      withTitle: "About",
       action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
     let help = menu.addItem(
       withTitle: "Help", action: #selector(showStatusItemHelp), keyEquivalent: "")
     help.target = self
     menu.addItem(.separator())
-    menu.addItem(
-      withTitle: "Quit", action: #selector(NSApplication.terminate(_:)),
-      keyEquivalent: "q")
+    let quit = menu.addItem(withTitle: "Quit", action: #selector(requestQuit), keyEquivalent: "q")
+    quit.target = self
     item.menu = menu
     statusItem = item
     statusRefreshTimer = Timer.scheduledTimer(
@@ -689,13 +698,60 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     alert.runModal()
   }
 
+  private func activeRunSummary() -> (lanes: Int, worktrees: Int)? {
+    guard let install = canonicalInstall, let environment = canonicalRuntimeEnvironment else {
+      return nil
+    }
+    let deck = install.root.appendingPathComponent("bin/vibecrafted")
+    guard FileManager.default.isExecutableFile(atPath: deck.path) else { return nil }
+    let output = Pipe()
+    let process = Process()
+    process.executableURL = deck
+    process.arguments = ["status", "--json"]
+    process.environment = environment
+    process.standardOutput = output
+    process.standardError = FileHandle.nullDevice
+    do {
+      try process.run()
+      let data = output.fileHandleForReading.readDataToEndOfFile()
+      process.waitUntilExit()
+      guard process.terminationStatus == 0 else { return nil }
+      let status = try JSONDecoder().decode(RuntimeStatusSnapshot.self, from: data)
+      let active = status.runs.filter {
+        ["active", "running", "launching"].contains($0.state) || $0.health == "active"
+      }
+      let worktrees = active.filter { $0.root.contains("/.vibecrafted/worktrees/") }
+      return (active.count, worktrees.count)
+    } catch {
+      installLog.error("Cannot inspect active lanes before quit: \(error.localizedDescription, privacy: .public)")
+      return nil
+    }
+  }
+
+  @objc private func requestQuit() {
+    guard let summary = activeRunSummary(), summary.lanes > 0 else {
+      NSApp.terminate(nil)
+      return
+    }
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "Active Vibecrafted lanes are still running"
+    alert.informativeText =
+      "\(summary.lanes) active lane(s), including \(summary.worktrees) worktree-backed lane(s). Quitting the app does not make that work disappear, but removes its live control surface."
+    alert.addButton(withTitle: "Keep Running")
+    alert.addButton(withTitle: "Quit Anyway")
+    if alert.runModal() == .alertSecondButtonReturn {
+      NSApp.terminate(nil)
+    }
+  }
+
   private func buildMainMenu() {
     let mainMenu = NSMenu()
 
     // Application menu
     let appMenu = NSMenu()
     appMenu.addItem(
-      withTitle: "About Vibecrafted",
+      withTitle: "About",
       action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
     appMenu.addItem(.separator())
     appMenu.addItem(
@@ -708,9 +764,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)),
       keyEquivalent: "")
     appMenu.addItem(.separator())
-    appMenu.addItem(
-      withTitle: "Quit Vibecrafted", action: #selector(NSApplication.terminate(_:)),
-      keyEquivalent: "q")
+    let appQuit = appMenu.addItem(
+      withTitle: "Quit Vibecrafted", action: #selector(requestQuit), keyEquivalent: "q")
+    appQuit.target = self
 
     let appMenuItem = NSMenuItem()
     appMenuItem.submenu = appMenu
