@@ -83,6 +83,7 @@ def _runtime_pack_fixture(root: Path) -> tuple[Path, Path, Path]:
         "vc-workflow",
     ):
         _write_executable(payload / "bin" / name)
+    _write_executable(payload / "vibecrafted-core/vibecrafted_core/deck/vibecrafted")
     (payload / "VERSION").write_text("9.9.9+g12345678\n", encoding="utf-8")
     terminal_root = payload / "config/vc-terminal"
     (terminal_root / "themes").mkdir(parents=True)

@@ -874,7 +874,9 @@ _RUNTIME_GENERATION_FIXTURE_SOURCES = {
     Path(
         "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
     ): Path("vibecrafted-core/vibecrafted_core/config/vc-frame/config.kdl"),
-    installer._RUNTIME_GENERATION_ENTRYPOINT: installer._RUNTIME_GENERATION_ENTRYPOINT,
+    installer._RUNTIME_GENERATION_ENTRYPOINT: Path(
+        "vibecrafted-core/vibecrafted_core/deck/vibecrafted"
+    ),
     Path("vibecrafted-core/vibecrafted_core/product_contract.py"): Path(
         "vibecrafted-core/vibecrafted_core/product_contract.py"
     ),

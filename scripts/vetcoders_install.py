@@ -8240,6 +8240,19 @@ def _materialize_vc_frame_generation(runtime_root: Path) -> None:
         )
 
 
+def _materialize_runtime_generation_entrypoint(runtime_root: Path) -> None:
+    """Publish the canonical command deck at the manifest-bound entrypoint."""
+    source = (
+        runtime_root / "vibecrafted-core" / "vibecrafted_core" / "deck" / "vibecrafted"
+    )
+    target = runtime_root / _RUNTIME_GENERATION_ENTRYPOINT
+    if not source.is_file():
+        raise OSError(f"candidate runtime has no canonical command deck: {source}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    target.chmod(0o755)
+
+
 def _runtime_active_text_files(runtime_root: Path) -> Iterator[Path]:
     """Yield every active (non-symlink) text config/script file under the runtime's watched
     roots.
@@ -9100,6 +9113,7 @@ def _sync_control_plane_tree_locked(
         if install_version:
             stamp_install_version(staging, install_version)
         _materialize_vc_frame_generation(staging)
+        _materialize_runtime_generation_entrypoint(staging)
         audit_errors = _runtime_generation_audit_errors(staging, source_root=src)
         if audit_errors:
             raise OSError("\n".join(audit_errors))
@@ -14837,6 +14851,7 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
                 )
                 (bin_dir / "vc-frame").chmod(0o755)
             _materialize_vc_frame_generation(staging)
+            _materialize_runtime_generation_entrypoint(staging)
             source_provenance = load_source_provenance(staging)
             if source_provenance is None:
                 raise RuntimeError("Runtime Pack has no source-provenance.json")

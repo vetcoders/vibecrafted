@@ -84,6 +84,9 @@ def _write_complete_source(
         )
     _write_executable(root / "scripts" / "vibecrafted", launcher)
     _write_executable(
+        root / "vibecrafted-core/vibecrafted_core/deck/vibecrafted", launcher
+    )
+    _write_executable(
         root / "bin" / "python3",
         f'#!/bin/sh\nexec {installer.shlex_quote(str(Path(sys.executable).absolute()))} "$@"\n',
     )
@@ -331,6 +334,10 @@ def _write_valid_runtime_generation(root: Path) -> None:
     deck.parent.mkdir(parents=True)
     deck.write_bytes((REPO_ROOT / "scripts" / "vibecrafted").read_bytes())
     deck.chmod(0o755)
+    runtime_deck = root / "bin" / "vibecrafted"
+    runtime_deck.parent.mkdir(parents=True)
+    runtime_deck.write_bytes(deck.read_bytes())
+    runtime_deck.chmod(0o755)
 
 
 def _write_runtime_launch_agent(
@@ -5994,9 +6001,7 @@ def test_runtime_generation_pointer_swap_never_removes_current(
     )
     assert manifest["schema"] == installer._RUNTIME_GENERATION_MANIFEST_SCHEMA
     assert manifest["version"] == "9.9.9+gtest"
-    assert manifest["entrypoint"] == (
-        "vibecrafted-core/vibecrafted_core/deck/vibecrafted"
-    )
+    assert manifest["entrypoint"] == installer._RUNTIME_GENERATION_ENTRYPOINT.as_posix()
     assert (manifest["owner_repo"], manifest["source_revision"]) == (
         source_provenance["owner_repo"],
         source_provenance["source_revision"],
@@ -6376,9 +6381,7 @@ def test_runtime_generation_doctor_verifies_manifest_and_launcher(
     )
     launcher = home / ".local" / "bin" / "vibecrafted"
     launcher.parent.mkdir(parents=True)
-    launcher.symlink_to(
-        current / "vibecrafted-core" / "vibecrafted_core" / "deck" / "vibecrafted"
-    )
+    launcher.symlink_to(current / installer._RUNTIME_GENERATION_ENTRYPOINT)
 
     findings = installer._runtime_generation_contract_findings()
     assert findings == [
@@ -6436,9 +6439,7 @@ def test_runtime_generation_doctor_rejects_deck_drift_and_incomplete_hashes(
     )
     launcher = home / ".local" / "bin" / "vibecrafted"
     launcher.parent.mkdir(parents=True)
-    launcher.symlink_to(
-        current / "vibecrafted-core" / "vibecrafted_core" / "deck" / "vibecrafted"
-    )
+    launcher.symlink_to(current / installer._RUNTIME_GENERATION_ENTRYPOINT)
     deck = generation / installer._RUNTIME_GENERATION_ENTRYPOINT
     original = deck.read_bytes()
     deck.write_bytes(original + b"\nexit 99\n")

@@ -524,7 +524,12 @@ def test_control_plane_staging_delegates_to_distribution_manifest(
     monkeypatch.setattr(
         installer,
         "_materialize_vc_frame_generation",
-        lambda runtime_root: seen.update(materialized=runtime_root),
+        lambda runtime_root: seen.update(frame_materialized=runtime_root),
+    )
+    monkeypatch.setattr(
+        installer,
+        "_materialize_runtime_generation_entrypoint",
+        lambda runtime_root: seen.update(entrypoint_materialized=runtime_root),
     )
     monkeypatch.setattr(
         installer,
@@ -548,7 +553,8 @@ def test_control_plane_staging_delegates_to_distribution_manifest(
     assert seen["mirror"] is True
     assert seen["require_source_provenance"] is True
     assert seen["manifest_source_provenance"] == source_provenance
-    assert seen["materialized"] == seen["destination"]
+    assert seen["frame_materialized"] == seen["destination"]
+    assert seen["entrypoint_materialized"] == seen["destination"]
     assert seen["manifested"] == seen["destination"]
     assert seen["validated"] == seen["destination"]
     assert (destination / "payload.txt").read_text(encoding="utf-8") == "validated\n"
