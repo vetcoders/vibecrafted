@@ -190,6 +190,10 @@ _STATES_CONTRADICTORY = frozenset(
         "blocked",
         "stalled",
         "timed_out",
+        # User-selected measured budget exhaustion is neither provider
+        # overload nor proof that the worker failed. Keep it out of the
+        # provider-error infra bucket and route it to operator attention.
+        "quota_exhausted",
         "ghost",
         "gc",
     }

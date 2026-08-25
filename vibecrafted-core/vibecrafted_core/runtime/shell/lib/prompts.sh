@@ -35,6 +35,7 @@ _vetcoders_contract_reset() {
   _vetcoders_contract_runtime=""
   _vetcoders_contract_policy_runtime=""
   _vetcoders_contract_permissions=""
+  _vetcoders_contract_token_budget=""
   _vetcoders_contract_root=""
   _vetcoders_contract_tail=""
   _vetcoders_contract_dry_run=""
@@ -130,6 +131,11 @@ _vetcoders_parse_contract() {
         shift
         [[ $# -gt 0 ]] || { echo "Missing value for --permissions" >&2; return 1; }
         _vetcoders_contract_permissions="$1"
+        ;;
+      --token-budget)
+        shift
+        [[ $# -gt 0 ]] || { echo "Missing value for --token-budget" >&2; return 1; }
+        _vetcoders_contract_token_budget="$1"
         ;;
       --root)
         shift

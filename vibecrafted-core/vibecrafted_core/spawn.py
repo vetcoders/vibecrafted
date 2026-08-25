@@ -13,8 +13,11 @@ import signal
 import subprocess
 import sys
 import threading
+import time
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from shutil import which
 from typing import Any
@@ -39,6 +42,9 @@ POLICY_PROVIDERS = ("codex", "claude", "agy", "grok", "junie")
 RUNTIME_POLICIES = ("local-native", "local-worktrees", "local-vm", "cloud-soon")
 PERMISSION_POLICIES = ("bypass", "auto", "accept-edits", "read-only")
 POLICY_MODES = ("interactive", "headless")
+QUOTA_PRESET_TOKENS = 250_000
+QUOTA_MAX_TOKENS = 10_000_000
+QUOTA_EXHAUSTED_EXIT_CODE = 75
 
 
 @dataclass(frozen=True)
@@ -69,6 +75,45 @@ class ProviderPolicy:
 
 
 @dataclass(frozen=True)
+class QuotaPolicy:
+    """Validated User-selected policy for one interactive provider session."""
+
+    kind: str
+    token_budget: int | None
+    selection: str
+    warning: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "token_budget": self.token_budget,
+            "selection": self.selection,
+            "warning": self.warning,
+        }
+
+
+@dataclass(frozen=True)
+class ProviderUsageCapability:
+    """Provider-specific proof that live usage can be attributed to one child."""
+
+    provider: str
+    supported: bool
+    source: str = ""
+    provider_version: str = ""
+    reason: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "supported": self.supported,
+            "status": "SUPPORTED" if self.supported else "UNSUPPORTED",
+            "source": self.source,
+            "provider_version": self.provider_version,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
 class InteractiveWorkspaceLaunch:
     """Durable parent/effective-root truth for one interactive Agent launch."""
 
@@ -82,6 +127,9 @@ class InteractiveWorkspaceLaunch:
     vibecrafted_session_id: str
     meta_path: Path
     receipt: dict[str, Any]
+    quota_policy: QuotaPolicy
+    usage_capability: ProviderUsageCapability
+    provider_session_id: str
     worktree_manager: Any | None = field(default=None, repr=False, compare=False)
     worktree_geometry: Any | None = field(default=None, repr=False, compare=False)
 
@@ -162,6 +210,122 @@ _PERMISSION_CONTRACT: dict[str, dict[str, tuple[tuple[str, ...], str] | None]] =
 }
 
 
+def resolve_quota_policy(
+    selection: str | int | None,
+    *,
+    runtime: str,
+    mode: str = "interactive",
+) -> QuotaPolicy:
+    """Validate one bounded or explicitly User-observed unlimited policy."""
+    raw = "safe" if selection is None else str(selection).strip().lower()
+    if not raw or raw == "safe":
+        return QuotaPolicy("bounded", QUOTA_PRESET_TOKENS, "safe")
+    if raw == "unlimited":
+        if mode != "interactive" or runtime != "local-native":
+            raise ValueError(
+                "unlimited quota is restricted to directly User-observed local-native sessions"
+            )
+        return QuotaPolicy(
+            "unlimited",
+            None,
+            "unlimited",
+            "User selected unlimited usage; Vibecrafted will measure but will not terminate on token usage",
+        )
+    try:
+        budget = int(raw, 10)
+    except ValueError as exc:
+        raise ValueError(
+            "token budget must be safe, unlimited, or a positive integer"
+        ) from exc
+    if budget <= 0:
+        raise ValueError("token budget must be a positive integer")
+    if budget > QUOTA_MAX_TOKENS:
+        raise ValueError(f"token budget must not exceed {QUOTA_MAX_TOKENS}")
+    return QuotaPolicy("bounded", budget, raw)
+
+
+def resolve_provider_usage_capability(
+    provider: str,
+    *,
+    executable: str | None = None,
+) -> ProviderUsageCapability:
+    """Probe the exact installed executable for an attributable live source."""
+    resolved = executable or which(provider, path=agent_tool_search_path())
+    if not resolved:
+        return ProviderUsageCapability(
+            provider, False, reason=f"{provider} executable not found"
+        )
+    resolved_path = str(Path(resolved).expanduser().resolve())
+    try:
+        stat = Path(resolved_path).stat()
+    except OSError as exc:
+        return ProviderUsageCapability(
+            provider, False, reason=f"cannot inspect {provider} executable: {exc}"
+        )
+    return _probe_provider_usage_capability(
+        provider, resolved_path, stat.st_mtime_ns, stat.st_size
+    )
+
+
+@lru_cache(maxsize=32)
+def _probe_provider_usage_capability(
+    provider: str,
+    executable: str,
+    _mtime_ns: int,
+    _size: int,
+) -> ProviderUsageCapability:
+    if provider != "claude":
+        return ProviderUsageCapability(
+            provider,
+            False,
+            reason=(
+                f"{provider} exposes no verified live, child-attributable, monotonic "
+                "usage side channel compatible with inherited interactive TTY"
+            ),
+        )
+    try:
+        version_result = subprocess.run(
+            [executable, "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        help_result = subprocess.run(
+            [executable, "--help"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return ProviderUsageCapability(
+            provider, False, reason=f"Claude capability probe failed: {exc}"
+        )
+    version = (version_result.stdout or version_result.stderr).splitlines()
+    version_text = version[0].strip() if version else ""
+    help_text = f"{help_result.stdout}\n{help_result.stderr}"
+    if version_result.returncode != 0 or not version_text:
+        return ProviderUsageCapability(
+            provider,
+            False,
+            reason="Claude version probe did not return exact version truth",
+        )
+    if help_result.returncode != 0 or "--session-id <uuid>" not in help_text:
+        return ProviderUsageCapability(
+            provider,
+            False,
+            provider_version=version_text,
+            reason="installed Claude does not expose --session-id <uuid>",
+        )
+    return ProviderUsageCapability(
+        provider,
+        True,
+        source="claude-transcript-jsonl-v1",
+        provider_version=version_text.split()[0],
+    )
+
+
 def resolve_provider_policy(
     provider: str,
     runtime: str,
@@ -233,7 +397,9 @@ def resolve_provider_policy(
 
 def runtime_policy_capabilities(provider: str) -> dict[str, dict[str, Any]]:
     """Report host substrate separately from canonical-launcher availability."""
-    provider_found = which(provider, path=agent_tool_search_path()) is not None
+    provider_executable = which(provider, path=agent_tool_search_path())
+    provider_found = provider_executable is not None
+    usage = resolve_provider_usage_capability(provider, executable=provider_executable)
     git_found = which("git") is not None
     try:
         from .dispatch.supervisor import run_dispatch
@@ -247,18 +413,32 @@ def runtime_policy_capabilities(provider: str) -> dict[str, dict[str, Any]]:
     vm_found = which("docker") is not None or which("colima") is not None
     return {
         "local-native": {
-            "available": provider_found,
-            "reason": "" if provider_found else f"{provider} executable not found",
+            "available": provider_found and usage.supported,
+            "usage_capability": usage.as_dict(),
+            "reason": (
+                ""
+                if provider_found and usage.supported
+                else (
+                    f"{provider} executable not found"
+                    if not provider_found
+                    else usage.reason
+                )
+            ),
         },
         "local-worktrees": {
-            "available": provider_found and worktree_substrate,
+            "available": provider_found and worktree_substrate and usage.supported,
             "substrate": worktree_substrate,
+            "usage_capability": usage.as_dict(),
             "reason": ""
-            if provider_found and worktree_substrate
+            if provider_found and worktree_substrate and usage.supported
             else (
                 f"{provider} executable not found"
                 if not provider_found
-                else "git/dispatch manage_worktrees unavailable"
+                else (
+                    "git/dispatch manage_worktrees unavailable"
+                    if not worktree_substrate
+                    else usage.reason
+                )
             ),
         },
         "local-vm": {
@@ -273,7 +453,12 @@ def runtime_policy_capabilities(provider: str) -> dict[str, dict[str, Any]]:
 
 
 def interactive_policy_command(
-    provider: str, prompt: str, runtime: str, permissions: str
+    provider: str,
+    prompt: str,
+    runtime: str,
+    permissions: str,
+    *,
+    provider_session_id: str | None = None,
 ) -> list[str]:
     """Build one interactive argv from the canonical policy decision."""
     decision = resolve_provider_policy(provider, runtime, permissions, "interactive")
@@ -281,7 +466,10 @@ def interactive_policy_command(
         raise ValueError(decision.reason)
     flags = list(decision.flags)
     if provider == "claude":
-        return ["claude", "--verbose", *flags, prompt]
+        session_flags = (
+            ["--session-id", provider_session_id] if provider_session_id else []
+        )
+        return ["claude", "--verbose", *flags, *session_flags, prompt]
     if provider == "codex":
         return ["codex", *flags, prompt]
     if provider == "agy":
@@ -304,11 +492,16 @@ def interactive_workspace_command(
     runtime: str,
     permissions: str,
     root: str | os.PathLike[str],
+    token_budget: str | int | None = None,
 ) -> list[str]:
     """Build the portable wrapper argv used by the exact ``init`` route."""
     decision = resolve_provider_policy(provider, runtime, permissions, "interactive")
     if not decision.supported:
         raise ValueError(decision.reason)
+    quota = resolve_quota_policy(token_budget, runtime=runtime)
+    capability = resolve_provider_usage_capability(provider)
+    if not capability.supported:
+        raise ValueError(capability.reason)
     command = [
         sys.executable,
         "-m",
@@ -319,6 +512,8 @@ def interactive_workspace_command(
         runtime,
         "--permissions",
         permissions,
+        "--token-budget",
+        quota.selection,
         "--root",
         str(Path(root).expanduser().resolve()),
         "--prompt",
@@ -344,6 +539,9 @@ def prepare_interactive_workspace_launch(
     executable: str | None = None,
     worker_pid: int | None = None,
     publish: bool = True,
+    quota_policy: QuotaPolicy | None = None,
+    usage_capability: ProviderUsageCapability | None = None,
+    provider_session_id: str | None = None,
 ) -> InteractiveWorkspaceLaunch:
     """Resolve identity/root and publish truth only after launch preparation succeeds."""
     decision = resolve_provider_policy(provider, runtime, permissions, "interactive")
@@ -355,6 +553,17 @@ def prepare_interactive_workspace_launch(
     resolved_executable = executable or which(provider, path=agent_tool_search_path())
     if not resolved_executable:
         raise ValueError(f"{provider} executable not found")
+    quota = quota_policy or resolve_quota_policy(None, runtime=runtime)
+    capability = usage_capability or resolve_provider_usage_capability(
+        provider, executable=resolved_executable
+    )
+    if not capability.supported:
+        raise ValueError(capability.reason)
+    effective_provider_session_id = provider_session_id or str(uuid.uuid4())
+    try:
+        uuid.UUID(effective_provider_session_id)
+    except ValueError as exc:
+        raise ValueError("provider session id must be a valid UUID") from exc
 
     from .dispatch.worktrees import (
         WorktreeContractError,
@@ -398,6 +607,23 @@ def prepare_interactive_workspace_launch(
             "mode": "interactive",
             "runtime_policy": runtime,
             "permission_policy": permissions,
+            "quota_policy": quota.as_dict(),
+            "quota_warning": quota.warning,
+            "usage_capability": capability.as_dict(),
+            "usage_measurement": {
+                "source": capability.source,
+                "attribution": "provider_session_id+cwd+provider_version+message_id",
+                "monotonic": True,
+            },
+            "measured_usage": {
+                "input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "messages": 0,
+            },
+            "provider_session_id": effective_provider_session_id,
             "root": str(effective),
             "parent_root": str(parent),
             "effective_worktree_path": str(effective) if geometry else "",
@@ -450,6 +676,9 @@ def prepare_interactive_workspace_launch(
         vibecrafted_session_id=identity.vibecrafted_session_id,
         meta_path=meta_path,
         receipt=receipt,
+        quota_policy=quota,
+        usage_capability=capability,
+        provider_session_id=effective_provider_session_id,
         worktree_manager=manager,
         worktree_geometry=geometry,
     )
@@ -462,17 +691,163 @@ def _git_output(root: Path, *args: str) -> str:
     return completed.stdout.strip() if completed.returncode == 0 else ""
 
 
+class _ClaudeTranscriptUsage:
+    """Incremental, exact-session reader for Claude's provider-owned JSONL."""
+
+    _FIELDS = (
+        "input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "output_tokens",
+    )
+
+    def __init__(
+        self,
+        *,
+        provider_session_id: str,
+        effective_root: str,
+        provider_version: str,
+        env: dict[str, str],
+    ) -> None:
+        configured = env.get("CLAUDE_CONFIG_DIR", "").strip()
+        base = (
+            Path(configured).expanduser()
+            if configured
+            else Path(env.get("HOME", str(Path.home()))).expanduser() / ".claude"
+        )
+        self.projects_root = (base / "projects").resolve()
+        self.provider_session_id = provider_session_id
+        self.effective_root = str(Path(effective_root).resolve())
+        self.provider_version = provider_version.split()[0]
+        self.path: Path | None = None
+        self.identity: tuple[int, int] | None = None
+        self.offset = 0
+        self.seen_message_ids: set[str] = set()
+        self.totals = {field: 0 for field in self._FIELDS}
+        self._reject_existing_source()
+
+    def _matching_paths(self) -> list[Path]:
+        if not self.projects_root.is_dir():
+            return []
+        return list(self.projects_root.rglob(f"{self.provider_session_id}.jsonl"))
+
+    def _reject_existing_source(self) -> None:
+        if self._matching_paths():
+            raise ValueError(
+                "provider session usage source already exists; refusing stale or reused session identity"
+            )
+
+    def _bind_path(self) -> bool:
+        matches = self._matching_paths()
+        if not matches:
+            return False
+        if len(matches) != 1:
+            raise RuntimeError("multiple provider usage sources claim one session id")
+        candidate = matches[0]
+        if candidate.is_symlink():
+            raise RuntimeError("provider usage source must not be a symlink")
+        resolved = candidate.resolve(strict=True)
+        if not resolved.is_relative_to(self.projects_root):
+            raise RuntimeError("provider usage source escaped provider projects root")
+        stat = resolved.stat()
+        if not resolved.is_file():
+            raise RuntimeError("provider usage source is not a regular file")
+        self.path = resolved
+        self.identity = (stat.st_dev, stat.st_ino)
+        return True
+
+    def poll(self) -> dict[str, int]:
+        if self.path is None and not self._bind_path():
+            return self.as_dict()
+        assert self.path is not None
+        stat = self.path.stat()
+        if self.identity != (stat.st_dev, stat.st_ino):
+            raise RuntimeError("provider usage source identity changed during the run")
+        if stat.st_size < self.offset:
+            raise RuntimeError("provider usage source was truncated during the run")
+        with self.path.open("r", encoding="utf-8") as handle:
+            handle.seek(self.offset)
+            while True:
+                line_start = handle.tell()
+                line = handle.readline()
+                if not line:
+                    break
+                if not line.endswith("\n"):
+                    handle.seek(line_start)
+                    break
+                self._consume_line(line)
+            self.offset = handle.tell()
+        return self.as_dict()
+
+    def _consume_line(self, line: str) -> None:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("provider usage source contains invalid JSONL") from exc
+        if not isinstance(event, dict):
+            raise TypeError("provider usage event must be a JSON object")
+        message = event.get("message")
+        if not isinstance(message, dict) or not isinstance(message.get("usage"), dict):
+            return
+        if event.get("sessionId") != self.provider_session_id:
+            raise RuntimeError("provider usage event belongs to a foreign session")
+        event_cwd = event.get("cwd")
+        if (
+            not isinstance(event_cwd, str)
+            or str(Path(event_cwd).resolve()) != self.effective_root
+        ):
+            raise RuntimeError("provider usage event belongs to a foreign workspace")
+        if event.get("version") != self.provider_version:
+            raise RuntimeError(
+                "provider usage event version differs from probed executable"
+            )
+        message_id = message.get("id")
+        if not isinstance(message_id, str) or not message_id:
+            raise RuntimeError("provider usage event has no attributable message id")
+        if message_id in self.seen_message_ids:
+            return
+        usage = message["usage"]
+        values: dict[str, int] = {}
+        for field_name in self._FIELDS:
+            value = usage.get(field_name, 0)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise RuntimeError(f"provider usage field {field_name} is invalid")
+            values[field_name] = value
+        self.seen_message_ids.add(message_id)
+        for field_name, value in values.items():
+            self.totals[field_name] += value
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            **self.totals,
+            "total_tokens": sum(self.totals.values()),
+            "messages": len(self.seen_message_ids),
+        }
+
+
 def launch_interactive_workspace(
     provider: str,
     prompt: str,
     runtime: str,
     permissions: str,
     root: str | os.PathLike[str],
+    token_budget: str | int | None = None,
 ) -> int:
     """Own one provider child while preserving the inherited interactive TTY."""
-    command = interactive_policy_command(provider, prompt, runtime, permissions)
+    quota = resolve_quota_policy(token_budget, runtime=runtime)
     child_env = os.environ.copy()
+    provider_session_id = str(uuid.uuid4())
+    command = interactive_policy_command(
+        provider,
+        prompt,
+        runtime,
+        permissions,
+        provider_session_id=provider_session_id,
+    )
     resolved = _resolve_agent_command(provider, command, child_env)
+    capability = resolve_provider_usage_capability(provider, executable=resolved[0])
+    if not capability.supported:
+        raise ValueError(capability.reason)
     launch = prepare_interactive_workspace_launch(
         provider=provider,
         runtime=runtime,
@@ -481,7 +856,20 @@ def launch_interactive_workspace(
         prompt=prompt,
         executable=resolved[0],
         publish=False,
+        quota_policy=quota,
+        usage_capability=capability,
+        provider_session_id=provider_session_id,
     )
+    try:
+        usage_reader = _ClaudeTranscriptUsage(
+            provider_session_id=provider_session_id,
+            effective_root=launch.effective_root,
+            provider_version=capability.provider_version,
+            env=child_env,
+        )
+    except Exception:
+        _cleanup_unspawned_interactive_launch(launch)
+        raise
     child_env.update(
         {
             "VIBECRAFTED_RUN_ID": launch.run_id,
@@ -574,12 +962,42 @@ def launch_interactive_workspace(
         # PID + role truth remains mandatory; stronger identity is best-effort
         # because a deterministic fast-exit provider may already be terminal.
         pass
+    quota_exhausted = False
+    provider_returncode: int
     try:
-        provider_returncode = child.wait()
+        while True:
+            current_returncode = child.poll()
+            measured_usage = usage_reader.poll()
+            if measured_usage != receipt["measured_usage"]:
+                receipt["measured_usage"] = measured_usage
+                receipt["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+                _write_meta(launch.meta_path, receipt)
+            if (
+                current_returncode is None
+                and not received_signal
+                and quota.token_budget is not None
+                and measured_usage["total_tokens"] >= quota.token_budget
+            ):
+                quota_exhausted = True
+                child.terminate()
+                try:
+                    provider_returncode = child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    provider_returncode = child.wait()
+                break
+            if current_returncode is not None:
+                provider_returncode = current_returncode
+                break
+            time.sleep(0.05)
     except Exception as exc:
         if child.poll() is None:
             child.terminate()
-            child.wait()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
         _terminalize_interactive_launch(
             launch,
             receipt,
@@ -598,7 +1016,11 @@ def launch_interactive_workspace(
         if provider_returncode < 0
         else provider_returncode
     )
-    if received_signal:
+    if quota_exhausted:
+        status = "quota_exhausted"
+        terminal_reason = "quota_exhausted"
+        shell_status = QUOTA_EXHAUSTED_EXIT_CODE
+    elif received_signal:
         owner_signal = received_signal[0]
         status = "cancelled"
         terminal_reason = f"owner_signal:{signal.Signals(owner_signal).name}"
@@ -2272,6 +2694,7 @@ def _build_parser() -> argparse.ArgumentParser:
     interactive_command.add_argument(
         "--permissions", choices=PERMISSION_POLICIES, default="bypass"
     )
+    interactive_command.add_argument("--token-budget", default="safe")
     interactive_command.add_argument("--root", required=True)
     interactive_launch = sub.add_parser(
         "interactive-launch", help="Prepare and exec an interactive Agent Workspace."
@@ -2285,6 +2708,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     interactive_launch.add_argument("--root", required=True)
     interactive_launch.add_argument("--prompt", required=True)
+    interactive_launch.add_argument("--token-budget", default="safe")
     sub.add_parser(
         "policy-matrix", help="Print the complete provider policy matrix as JSON."
     )
@@ -2346,7 +2770,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         prompt = sys.stdin.read()
         try:
             command = interactive_workspace_command(
-                args.provider, prompt, args.runtime, args.permissions, args.root
+                args.provider,
+                prompt,
+                args.runtime,
+                args.permissions,
+                args.root,
+                args.token_budget,
             )
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
@@ -2356,7 +2785,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "interactive-launch":
         try:
             return launch_interactive_workspace(
-                args.provider, args.prompt, args.runtime, args.permissions, args.root
+                args.provider,
+                args.prompt,
+                args.runtime,
+                args.permissions,
+                args.root,
+                args.token_budget,
             )
         except (OSError, RuntimeError, ValueError) as exc:
             print(str(exc), file=sys.stderr)

@@ -82,6 +82,7 @@ FINAL_STATES = {
     "contract_failed",
     "recovery_required",
     "timed_out",
+    "quota_exhausted",
     "gc",
     "ghost",
 }

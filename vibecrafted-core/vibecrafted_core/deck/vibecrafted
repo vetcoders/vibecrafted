@@ -994,7 +994,7 @@ cmd_init_help() {
   printf '  Start an interactive repository orientation session with an agent.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted init [claude|codex|agy|junie|grok] [--runtime terminal|visible|plain] [--policy-runtime local-native|local-worktrees|local-vm|cloud-soon] [--permissions bypass|auto|accept-edits|read-only] [--prompt "<context>"]\n'
+  printf '  vibecrafted init [claude|codex|agy|junie|grok] [--runtime terminal|visible|plain] [--policy-runtime local-native|local-worktrees|local-vm|cloud-soon] [--permissions bypass|auto|accept-edits|read-only] [--token-budget safe|unlimited|N] [--prompt "<context>"]\n'
   printf '  vc-init [claude|codex|agy|junie|grok]\n'
   printf '\n'
   printf '%bRuntime:%b\n' "$_bold" "$_reset"
@@ -1002,6 +1002,9 @@ cmd_init_help() {
   printf '  plain     start the agent in this terminal, no cockpit needed\n'
   printf '  Policy runtime defaults to local-native; unavailable runtimes fail closed.\n'
   printf '  Permission support is provider-specific; unsupported cells are rejected.\n'
+  printf '  Token budget defaults to safe (250000 measured tokens); N sets a bounded budget.\n'
+  printf '  unlimited is restricted to directly observed local-native sessions and still measures usage.\n'
+  printf '  Measured quota currently requires a verified Claude transcript capability; unsupported providers fail closed.\n'
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted init claude\n'

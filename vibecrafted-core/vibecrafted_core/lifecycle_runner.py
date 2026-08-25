@@ -71,13 +71,18 @@ def delivery_axes_for_receipt(
         "launching": ExecutionState.LAUNCHED,
         "running": ExecutionState.RUNNING,
         "completed": ExecutionState.EXITED,
+        "quota_exhausted": ExecutionState.INTERRUPTED,
     }.get(str(status), ExecutionState.FAILED)
     # The execution axis states what the PROCESS did, not what the artifact
     # gate concluded. A worker that exited 0 without a report is the contract's
     # exit_0_without_report specimen — needs_attention, never a fabricated
     # execution failure (which would settle x instead of n).
     exit_code = source.get("exit_code")
-    if isinstance(exit_code, int) and str(status) not in ("launching", "running"):
+    if isinstance(exit_code, int) and str(status) not in (
+        "launching",
+        "running",
+        "quota_exhausted",
+    ):
         execution_default = (
             ExecutionState.EXITED if exit_code == 0 else ExecutionState.FAILED
         )

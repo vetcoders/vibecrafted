@@ -24,6 +24,8 @@ def _write_fake_agent(bin_dir: Path, name: str, capture_file: Path) -> None:
             [
                 "#!/usr/bin/env bash",
                 "set -euo pipefail",
+                'if [[ "${1:-}" == "--help" ]]; then printf "  --session-id <uuid>\\n"; exit 0; fi',
+                'if [[ "${1:-}" == "--version" ]]; then printf "2.1.232 (Claude Code)\\n"; exit 0; fi',
                 'printf "%s\\n" "$@" > "$CAPTURE_FILE"',
             ]
         )
@@ -535,6 +537,7 @@ def test_init_claude_uses_interactive_tab_without_print_mode(
     env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session()
+    env["VIBECRAFTED_RUNTIME_BIN"] = str(fake_bin)
     # Sanitize real vc_frame env to prevent leaks from the host session.
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
@@ -558,13 +561,15 @@ def test_init_claude_uses_interactive_tab_without_print_mode(
     script_body = command_script.read_text(encoding="utf-8")
     assert (
         "vibecrafted_core.spawn interactive-launch claude --runtime local-native "
-        "--permissions bypass --root"
+        "--permissions bypass --token-budget safe --root"
     ) in script_body
     assert "/vc-init" in script_body
     assert " -p " not in script_body
 
 
-def test_init_codex_uses_interactive_tab_without_exec_mode(tmp_path: Path) -> None:
+def test_init_codex_fails_closed_without_measured_usage_capability(
+    tmp_path: Path,
+) -> None:
     home = tmp_path / "home"
     fake_bin = tmp_path / "bin"
     capture_file = tmp_path / "capture.log"
@@ -586,50 +591,35 @@ def test_init_codex_uses_interactive_tab_without_exec_mode(tmp_path: Path) -> No
     env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session()
+    env["VIBECRAFTED_RUNTIME_BIN"] = str(fake_bin)
     # Sanitize real vc_frame env to prevent leaks from the host session.
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
 
-    subprocess.run(
+    result = subprocess.run(
         ["bash", str(LAUNCHER), "init", "codex"],
-        check=True,
+        check=False,
         cwd=REPO_ROOT,
         env=env,
+        capture_output=True,
+        text=True,
     )
 
-    payload = capture_file.read_text(encoding="utf-8")
-    # When vc_frame operator session exists, spawn routes directly through vc_frame
-    # without opening a new terminal via osascript.
-    assert (
-        f"VC_FRAME --session {_expected_operator_session()} action new-tab" in payload
-    )
-
-    command_script = _spawned_command_script(payload)
-    script_body = command_script.read_text(encoding="utf-8")
-    assert (
-        "vibecrafted_core.spawn interactive-launch codex --runtime local-native "
-        "--permissions bypass --root"
-    ) in script_body
-    assert "/vc-init" in script_body
-    assert "codex exec" not in script_body
+    assert result.returncode == 1
+    assert "no verified live, child-attributable, monotonic usage" in result.stderr
+    payload = capture_file.read_text(encoding="utf-8") if capture_file.exists() else ""
+    assert "action new-tab" not in payload
 
 
 @pytest.mark.parametrize(
-    ("agent", "permissions"),
-    [
-        ("agy", "bypass"),
-        ("junie", "auto"),
-        ("grok", "bypass"),
-    ],
+    "agent",
+    ["agy", "junie", "grok"],
 )
-def test_init_fleet_agents_resolve_skill_init_helpers(
-    agent: str, permissions: str, tmp_path: Path
+def test_init_fleet_agents_fail_closed_without_measured_usage_capability(
+    agent: str, tmp_path: Path
 ) -> None:
-    """Regression: vibecrafted init <agent> must not fail with Missing helper
-    <agent>-skill-init. Fleet surface is five agents; wrappers for only
-    claude/codex used to brick agy/junie/grok at the launcher.
-    """
+    """Unsupported measured-quota cells stay visible but cannot launch."""
     home = tmp_path / "home"
     fake_bin = tmp_path / "bin"
     capture_file = tmp_path / "capture.log"
@@ -651,6 +641,7 @@ def test_init_fleet_agents_resolve_skill_init_helpers(
     env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session()
+    env["VIBECRAFTED_RUNTIME_BIN"] = str(fake_bin)
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
@@ -664,37 +655,14 @@ def test_init_fleet_agents_resolve_skill_init_helpers(
         text=True,
     )
 
-    assert result.returncode == 0, (
-        f"init {agent} failed:\nstdout={result.stdout}\nstderr={result.stderr}"
-    )
+    assert result.returncode == 1
     assert "Missing helper" not in result.stderr
-    assert f"{agent}-skill-init" not in result.stderr or "Missing helper" not in (
-        result.stdout + result.stderr
-    )
-
-    payload = capture_file.read_text(encoding="utf-8")
-    assert (
-        f"VC_FRAME --session {_expected_operator_session()} action new-tab" in payload
-    )
-
-    command_script = _spawned_command_script(payload)
-    script_body = command_script.read_text(encoding="utf-8")
-    assert (
-        f"vibecrafted_core.spawn interactive-launch {agent} --runtime local-native "
-        f"--permissions {permissions} --root"
-    ) in script_body
-    assert "/vc-init" in script_body
-    if agent == "grok":
-        assert " --single " not in script_body
-        assert "--single" not in script_body
+    assert "no verified live, child-attributable, monotonic usage" in result.stderr
+    payload = capture_file.read_text(encoding="utf-8") if capture_file.exists() else ""
+    assert "action new-tab" not in payload
 
 
-def test_init_grok_is_interactive_tui_not_single_shot(tmp_path: Path) -> None:
-    """Regression: vibecrafted init grok must open the TUI like codex/claude.
-
-    --single is one-shot headless (prints + exits). That belongs only to
-    fleet/await non-interactive lanes, never vc-init / bare resume.
-    """
+def test_init_grok_rejects_quota_before_any_single_shot_or_tab(tmp_path: Path) -> None:
     home = tmp_path / "home"
     fake_bin = tmp_path / "bin"
     capture_file = tmp_path / "capture.log"
@@ -716,6 +684,7 @@ def test_init_grok_is_interactive_tui_not_single_shot(tmp_path: Path) -> None:
     env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session()
+    env["VIBECRAFTED_RUNTIME_BIN"] = str(fake_bin)
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
@@ -728,17 +697,11 @@ def test_init_grok_is_interactive_tui_not_single_shot(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
     )
-    assert result.returncode == 0, result.stderr
-    script_body = _spawned_command_script(
-        capture_file.read_text(encoding="utf-8")
-    ).read_text(encoding="utf-8")
-    assert (
-        "vibecrafted_core.spawn interactive-launch grok --runtime local-native "
-        "--permissions bypass --root"
-    ) in script_body
-    assert "/vc-init" in script_body
-    assert "--single" not in script_body
-    assert "streaming-json" not in script_body
+    assert result.returncode == 1
+    assert "no verified live, child-attributable, monotonic usage" in result.stderr
+    payload = capture_file.read_text(encoding="utf-8") if capture_file.exists() else ""
+    assert "action new-tab" not in payload
+    assert "--single" not in payload
 
 
 def test_init_gemini_returns_actionable_agy_migration() -> None:

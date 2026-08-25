@@ -180,7 +180,9 @@ pub fn delivery_axes_for_receipt(
         | "paused"
         | "stalled" => ExecutionState::Running,
         "completed" | "closed" | "converged" | "report_validated" => ExecutionState::Exited,
-        "interrupted" | "stopped" | "killed_by_operator" => ExecutionState::Interrupted,
+        "interrupted" | "stopped" | "killed_by_operator" | "quota_exhausted" => {
+            ExecutionState::Interrupted
+        }
         "timed_out" => ExecutionState::TimedOut,
         "failed"
         | "blocked"
@@ -232,7 +234,7 @@ pub const ACTIVE_STATES: [&str; 13] = [
 ];
 
 /// Terminal states. Mirrors `control_plane.FINAL_STATES`.
-pub const FINAL_STATES: [&str; 14] = [
+pub const FINAL_STATES: [&str; 15] = [
     "report_validated",
     "completed",
     "closed",
@@ -245,6 +247,7 @@ pub const FINAL_STATES: [&str; 14] = [
     "contract_failed",
     "recovery_required",
     "timed_out",
+    "quota_exhausted",
     "gc",
     "ghost",
 ];
@@ -787,7 +790,7 @@ impl SettlementBoard {
 }
 
 fn is_unsettled_settlement_terminal(run: &RunStatus) -> bool {
-    const TERMINAL_STATES: [&str; 17] = [
+    const TERMINAL_STATES: [&str; 18] = [
         "report_validated",
         "completed",
         "closed",
@@ -800,6 +803,7 @@ fn is_unsettled_settlement_terminal(run: &RunStatus) -> bool {
         "contract_failed",
         "recovery_required",
         "timed_out",
+        "quota_exhausted",
         "gc",
         "ghost",
         "stalled",
@@ -1592,6 +1596,9 @@ mod status_thread_tests {
         assert_eq!(axes.execution_state, ExecutionState::TimedOut);
         let axes = delivery_axes_for_receipt("interrupted", None, None, None);
         assert_eq!(axes.execution_state, ExecutionState::Interrupted);
+        let axes = delivery_axes_for_receipt("quota_exhausted", None, None, None);
+        assert_eq!(axes.execution_state, ExecutionState::Interrupted);
+        assert!(is_final_state("quota_exhausted"));
         let axes = delivery_axes_for_receipt("failed", None, None, None);
         assert_eq!(axes.execution_state, ExecutionState::Failed);
         let axes = delivery_axes_for_receipt("completed", None, None, None);

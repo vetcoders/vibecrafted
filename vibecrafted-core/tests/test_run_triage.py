@@ -590,6 +590,7 @@ def test_death_after_real_work_is_not_a_clean_failure() -> None:
         "contract_failed",
         "ghost",
         "timed_out",
+        "quota_exhausted",
         "recovery_required",
         "blocked",
         "stalled",
