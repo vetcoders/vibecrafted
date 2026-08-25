@@ -14735,7 +14735,11 @@ def _runtime_install_result(
         "root": str(generation),
         "terminal": str(generation / "bin/vc-terminal"),
         "terminal_host": str(terminal_host),
-        "frame": str(generation / "bin/vc-frame"),
+        # AppDelegate exports this as VIBECRAFTED_VC_FRAME_BIN for the public
+        # product entry. Point it at the native provider, never back at the
+        # wrapper itself, or the first `vc-frame ls` recursively execs the
+        # wrapper forever.
+        "frame": str(generation / "libexec/vc-frame"),
         "start": str(generation / "bin/vc-start"),
         "primary_shell": str(generation / "config/alacritty/launch-primary-shell.zsh"),
         "terminal_config": str(product_config / "terminal-entry.toml"),

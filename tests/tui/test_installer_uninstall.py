@@ -167,6 +167,7 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     installed = json.loads(capsys.readouterr().out)
     generation = runtime_home / "releases/9.9.9+g12345678"
     assert Path(installed["root"]) == generation
+    assert Path(installed["frame"]) == generation / "libexec/vc-frame"
     assert "pin_darwin_socket_dir" in (generation / "bin/vc-frame").read_text(
         encoding="utf-8"
     )
