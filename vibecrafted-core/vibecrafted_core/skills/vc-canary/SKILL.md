@@ -1,6 +1,6 @@
 ---
 name: canary
-version: 2.0.0
+version: 2.1.0
 description: >
   Truth-competition radar for a repo: detect components competing for the
   same class of truth (identity, authorship, reduction, finality, delivery,
@@ -68,6 +68,19 @@ repo" instead of Loctree organs is a process failure.
 ranking only). **Forbidden:** loading raw multi‑MB `snapshot.json` into the
 model context.
 
+## One-instrument law
+
+Loctree is the **sole anatomical instrument**: `repo-view`, `focus`,
+`slice`, `impact`, `find` (discover/literal), occurrences, `body`,
+`follow`, `twins`, `crowd`, `hotspots` and `prism` are readouts of the same
+instrument. `canary_cli` may only aggregate, validate completeness and
+preserve Loctree evidence — never act as an independent source of
+architectural truth. `grep`/`rg`/`awk`/`sed`/filesystem `find`/raw snapshot
+rummaging are forbidden as inventory or absence evidence. When Loctree
+cannot answer a required question: append the exact failure to the target
+repo's `.loctree/loctree-fail.md`, classify the claim `UNRESOLVED`, and
+never paper over the gap with fallback evidence.
+
 ## Phase 0 — Authority & freshness
 
 No radar on a stale tree. Record, with receipts:
@@ -108,6 +121,13 @@ where a decision does _not_ live. "I searched semantically and it looks
 like one place" is an unproven claim — the exact failure mode this phase
 exists to prevent.
 
+An absence claim is admissible only when the quoted coverage receipt shows
+**all** of: `offset == 0` · `emitted == total` · `truncated == false` ·
+`universe.scan_complete == true` · relevant trust flags true. Census counts
+**references** (call sites, consumers), never definitions alone — a
+definition census once hid 141 call sites. No count may be quoted without
+its pinned snapshot fingerprint.
+
 Classify every competing pair:
 
 | Verdict                | Meaning                                                   |
@@ -138,12 +158,35 @@ nowhere earlier — and each carries a classification:
 | `FOLLOW_UP`    | real, not urgent; goes to backlog with evidence     |
 | `OBSERVATION`  | multi-authority proven legal or dormant; watch only |
 
+Every examined row additionally gets exactly one disposition:
+`authority_edge` (resolves to the presumed authority) ·
+`proven_non_runtime` (observer/projection/diagnostic with a proven
+boundary) · `obsolete_residue` (dead competitor; candidate for a later
+cut) · `UNRESOLVED` (Loctree evidence insufficient — recorded, never
+silently dropped). Do not invent an owner to make the graph complete.
+
 ## Evidence schema (per finding)
 
 Axis · competitors (`file:line`, LOC) · symbols at war · pair verdict ·
 legend mark · classification · proof (loct outputs cited by organ) ·
 absence-falsification receipt (the literal coverage line). A finding
 missing any element is a candidate, not a finding.
+
+## Run verdict & honest exit
+
+Every run returns exactly one verdict:
+
+| Verdict                      | Condition                                                                                                                                            |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AXES_CLOSED_CANDIDATE`      | zero `UNRESOLVED` rows; every retained executable edge resolves to one authority; zero bypasses; complete untruncated evidence under one fingerprint |
+| `AXES_OPEN`                  | anything less — say so plainly                                                                                                                       |
+| `INSTRUMENT_INCOMPLETE`      | Loctree could not cover the required questions (fail-log appended)                                                                                   |
+| `LAUNCHER_CONTRACT_CONFLICT` | inherited instructions demanded mutation or commits — stop, keep N=1, report                                                                         |
+
+Missing historical checkpoints stay `MISSING` — never reconstructed or
+interpolated. The report ends with the honest state line
+`BUILD/LINT/TEST/RUNTIME=NOT_ASSESSED`: canary is a mutation-free radar
+and green gates are outside its jurisdiction.
 
 ## Journal contract
 
@@ -174,9 +217,11 @@ Worktrees as a Living Tree Rule **Mode B formation** — the per-scope briefs
 are the written dispatch plan, the per-scope gates the pre-committed
 verifiers, scope domains disjoint, and the canary session the
 single-thread integrator. The **worker creates its own worktree** from the
-integration base (no launcher provisioning); it commits inside it; the
-integrator merges scope branches sequentially and collects artifacts from
-worktree disk before cleanup. Never park a parallel fleet in one shared
+integration base (no launcher provisioning) — pinned SHA as a frozen view,
+not a staging area: the radar is mutation-free, so there are no scope
+commits to merge; the integrator copies the per-axis evidence files
+(`.loctree/canary/axes/*.json`, gitignored) from every worktree before
+cleanup, with the worker's returned JSON as backstop. Never park a parallel fleet in one shared
 checkout (operator standing order, 2026-08-20). Every scope gets its own
 scratchpad subdirectory, named in the brief — flat shared tmp filenames
 collide between parallel scopes.
@@ -224,6 +269,12 @@ in files.
 - Overwriting the journal instead of appending
 - Using `loct-context-full.json` as the file inventory
 - Fixed agent count instead of axes from Phase I
+- Counting definitions instead of references (a definition census once hid
+  141 call sites)
+- Reconstructing or interpolating missing historical checkpoints instead
+  of recording `MISSING`
+- Dispatching the retired docstring-WRITE cataloger brief — canary mutates
+  no code (contract retired 2026-08-24)
 
 ## Verify before the handoff
 
