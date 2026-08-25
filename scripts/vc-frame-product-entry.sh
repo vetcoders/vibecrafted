@@ -17,24 +17,21 @@ resolve_real_bin() {
     printf '%s\n' "$VIBECRAFTED_VC_FRAME_BIN"
     return 0
   fi
+
+  local wrapper_dir
+  wrapper_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
   for candidate in \
+    "$wrapper_dir/../libexec/vc-frame" \
     "${HOME}/.cargo/bin/vc-frame" \
     "${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/bin/vc-frame" \
     "${HOME}/.local/share/vibecrafted/bin/vc-frame"
   do
-    if [[ -x "$candidate" ]]; then
-      # Skip if it is this wrapper (same path as argv0 when recursive).
-      if [[ -f "$candidate" ]] && ! head -1 "$candidate" 2>/dev/null | grep -q 'vc-frame-product-entry\|product choke'; then
-        # binary: no shebang
-        if ! head -c 2 "$candidate" 2>/dev/null | grep -q '#!'; then
-          printf '%s\n' "$candidate"
-          return 0
-        fi
-      fi
-      if file "$candidate" 2>/dev/null | grep -qi 'Mach-O\|ELF\|executable'; then
-        printf '%s\n' "$candidate"
-        return 0
-      fi
+    # Ambient shell wrappers are never a real vc-frame. In particular,
+    # ~/.local/share/vibecrafted/bin/vc-frame may resolve back to this product
+    # entry and recurse forever. Follow symlinks, but accept native code only.
+    if [[ -x "$candidate" ]] && file -Lb "$candidate" 2>/dev/null | grep -Eqi 'Mach-O|ELF'; then
+      printf '%s\n' "$candidate"
+      return 0
     fi
   done
   return 1
