@@ -28,6 +28,109 @@ use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
+const CHANGE_DEBOUNCE: Duration = Duration::from_millis(100);
+const RENDER_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+const OBSERVE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const WATCHER_FALLBACK_INTERVAL: Duration = Duration::from_secs(30);
+/// Watch events are debounced for 100 ms and serviced by the next UI poll.
+/// The one-second bound includes the default 250 ms tick and watcher delivery jitter.
+pub const MAX_CHANGE_LATENCY: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RefreshPlan {
+    control_plane: bool,
+    polarize: bool,
+    mission_control: bool,
+    rendered_runs: bool,
+    observe: bool,
+}
+
+#[derive(Debug)]
+struct RefreshScheduler {
+    state_watcher_active: bool,
+    artifact_watcher_active: bool,
+    state_dirty_since: Option<Instant>,
+    polarize_dirty_since: Option<Instant>,
+    mission_dirty_since: Option<Instant>,
+    last_control_plane: Instant,
+    last_artifacts: Instant,
+    last_rendered_runs: Instant,
+    last_observe: Instant,
+}
+
+impl RefreshScheduler {
+    fn new(now: Instant, state_watcher_active: bool, artifact_watcher_active: bool) -> Self {
+        Self {
+            state_watcher_active,
+            artifact_watcher_active,
+            state_dirty_since: None,
+            polarize_dirty_since: None,
+            mission_dirty_since: None,
+            last_control_plane: now,
+            last_artifacts: now,
+            last_rendered_runs: now,
+            last_observe: now,
+        }
+    }
+
+    fn mark_state_changed(&mut self, now: Instant) {
+        self.state_dirty_since.get_or_insert(now);
+    }
+
+    fn mark_artifacts_changed(&mut self, change: ArtifactChange, now: Instant) {
+        if change.polarize {
+            self.polarize_dirty_since.get_or_insert(now);
+        }
+        if change.mission_control {
+            self.mission_dirty_since.get_or_insert(now);
+        }
+    }
+
+    fn plan(&mut self, now: Instant) -> RefreshPlan {
+        let mut plan = RefreshPlan::default();
+        if due(self.state_dirty_since, now, CHANGE_DEBOUNCE)
+            || (!self.state_watcher_active
+                && now.duration_since(self.last_control_plane) >= WATCHER_FALLBACK_INTERVAL)
+        {
+            plan.control_plane = true;
+            self.state_dirty_since = None;
+            self.last_control_plane = now;
+        }
+        if due(self.polarize_dirty_since, now, CHANGE_DEBOUNCE)
+            || (!self.artifact_watcher_active
+                && now.duration_since(self.last_artifacts) >= WATCHER_FALLBACK_INTERVAL)
+        {
+            plan.polarize = true;
+            self.polarize_dirty_since = None;
+            self.last_artifacts = now;
+        }
+        if due(self.mission_dirty_since, now, CHANGE_DEBOUNCE) {
+            plan.mission_control = true;
+            self.mission_dirty_since = None;
+            self.last_artifacts = now;
+        }
+        if now.duration_since(self.last_rendered_runs) >= RENDER_REFRESH_INTERVAL {
+            plan.rendered_runs = !plan.control_plane;
+            self.last_rendered_runs = now;
+        }
+        if now.duration_since(self.last_observe) >= OBSERVE_REFRESH_INTERVAL {
+            plan.observe = true;
+            self.last_observe = now;
+        }
+        plan
+    }
+}
+
+fn due(since: Option<Instant>, now: Instant, delay: Duration) -> bool {
+    since.is_some_and(|changed_at| now.duration_since(changed_at) >= delay)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ArtifactChange {
+    polarize: bool,
+    mission_control: bool,
+}
+
 pub use app::{App, AppTab, DeepAction, DispatchFocus, LaunchFocus, QueueScope};
 pub use config::{AppConfig, CliOptions, build_config, parse_args};
 pub use launch::{LaunchCommand, LaunchKind};
@@ -58,21 +161,35 @@ fn run_app(config: AppConfig) -> anyhow::Result<()> {
 
     let result = (|| -> anyhow::Result<()> {
         let mut app = App::new(config)?;
-        let (watch_tx, watch_rx) = mpsc::channel();
-        let _watcher = match start_state_watcher(&app.config.state_root, watch_tx) {
+        let (state_tx, state_rx) = mpsc::channel();
+        let state_watcher = match start_state_watcher(&app.config.state_root, state_tx) {
             Ok(watcher) => Some(watcher),
             Err(error) => {
-                app.append_status(format!("watcher unavailable: {error}"));
+                app.append_status(format!("state watcher unavailable: {error}"));
                 None
             }
         };
-        let mut last_tick = Instant::now();
+        let (artifact_tx, artifact_rx) = mpsc::channel();
+        let artifact_watcher =
+            match start_artifact_watcher(&crate::polarize::vibecrafted_home(), artifact_tx) {
+                Ok(watcher) => Some(watcher),
+                Err(error) => {
+                    app.append_status(format!("artifact watcher unavailable: {error}"));
+                    None
+                }
+            };
+        let mut scheduler = RefreshScheduler::new(
+            Instant::now(),
+            state_watcher.is_some(),
+            artifact_watcher.is_some(),
+        );
         loop {
             terminal.draw(|frame| ui::draw(frame, &app))?;
+            let last_draw = Instant::now();
             let timeout = app
                 .config
                 .tick_rate
-                .checked_sub(last_tick.elapsed())
+                .checked_sub(last_draw.elapsed())
                 .unwrap_or(Duration::ZERO);
 
             if event::poll(timeout)?
@@ -82,9 +199,12 @@ fn run_app(config: AppConfig) -> anyhow::Result<()> {
                 break;
             }
 
-            let mut watched_change = false;
-            while watch_rx.try_recv().is_ok() {
-                watched_change = true;
+            let now = Instant::now();
+            while state_rx.try_recv().is_ok() {
+                scheduler.mark_state_changed(now);
+            }
+            while let Ok(change) = artifact_rx.try_recv() {
+                scheduler.mark_artifacts_changed(change, now);
             }
             let mut events = Vec::new();
             if let Some(sub) = &app.mux_subscriber {
@@ -96,16 +216,22 @@ fn run_app(config: AppConfig) -> anyhow::Result<()> {
                 for event in events {
                     app.handle_ipc_event(event);
                 }
-                watched_change = true;
             }
-            if watched_change {
-                app.refresh();
-                last_tick = Instant::now();
+            let plan = scheduler.plan(now);
+            if plan.control_plane {
+                app.refresh_control_plane();
             }
-
-            if last_tick.elapsed() >= app.config.tick_rate {
-                app.refresh();
-                last_tick = Instant::now();
+            if plan.polarize {
+                app.refresh_polarize();
+            }
+            if plan.control_plane || plan.mission_control || plan.polarize {
+                app.refresh_mission_control();
+            }
+            if plan.rendered_runs {
+                app.refresh_rendered_runs();
+            }
+            if plan.observe {
+                app.refresh_observe();
             }
         }
         Ok(())
@@ -744,6 +870,40 @@ fn start_state_watcher(path: &Path, tx: Sender<()>) -> anyhow::Result<Recommende
     Ok(watcher)
 }
 
+fn start_artifact_watcher(
+    path: &Path,
+    tx: Sender<ArtifactChange>,
+) -> anyhow::Result<RecommendedWatcher> {
+    let mut watcher = RecommendedWatcher::new(
+        move |event: notify::Result<notify::Event>| {
+            let Ok(event) = event else {
+                return;
+            };
+            let change = classify_artifact_change(&event.paths);
+            if change.polarize || change.mission_control {
+                let _ = tx.send(change);
+            }
+        },
+        NotifyConfig::default(),
+    )?;
+    watcher.watch(path, RecursiveMode::Recursive)?;
+    Ok(watcher)
+}
+
+fn classify_artifact_change(paths: &[PathBuf]) -> ArtifactChange {
+    ArtifactChange {
+        polarize: paths.iter().any(|path| {
+            path.components()
+                .any(|component| component.as_os_str() == "polarize")
+        }),
+        mission_control: paths.iter().any(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".meta.json"))
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -955,5 +1115,123 @@ mod tests {
             !lines.iter().any(|line| line.contains("readiness probe:")),
             "probe_error=None must not render an empty probe section: lines={lines:?}"
         );
+    }
+
+    #[test]
+    fn ui_ticks_do_not_schedule_expensive_projection_or_prism_discovery() {
+        let start = Instant::now();
+        let mut scheduler = RefreshScheduler::new(start, true, true);
+        let mut control_plane_refreshes = 0;
+        let mut prism_discoveries = 0;
+
+        for tick in 1..=400 {
+            let plan = scheduler.plan(start + Duration::from_millis(tick * 10));
+            control_plane_refreshes += usize::from(plan.control_plane);
+            prism_discoveries += usize::from(plan.polarize);
+        }
+
+        assert_eq!(control_plane_refreshes, 0);
+        assert_eq!(prism_discoveries, 0);
+    }
+
+    #[test]
+    fn changed_state_and_prism_are_scheduled_inside_the_documented_bound() {
+        let start = Instant::now();
+        let changed_at = start + Duration::from_secs(1);
+        let mut scheduler = RefreshScheduler::new(start, true, true);
+        scheduler.mark_state_changed(changed_at);
+        scheduler.mark_artifacts_changed(
+            ArtifactChange {
+                polarize: true,
+                mission_control: true,
+            },
+            changed_at,
+        );
+
+        let before_debounce = scheduler.plan(changed_at + CHANGE_DEBOUNCE / 2);
+        assert!(!before_debounce.control_plane);
+        assert!(!before_debounce.polarize);
+
+        let visible_at = changed_at + MAX_CHANGE_LATENCY;
+        let due = scheduler.plan(visible_at);
+        assert!(due.control_plane);
+        assert!(due.polarize);
+        assert!(due.mission_control);
+
+        let unchanged_tick = scheduler.plan(visible_at + Duration::from_millis(10));
+        assert!(!unchanged_tick.control_plane);
+        assert!(!unchanged_tick.polarize);
+        assert!(!unchanged_tick.mission_control);
+    }
+
+    #[test]
+    fn artifact_invalidation_ignores_unrelated_churn() {
+        let unrelated = classify_artifact_change(&[
+            PathBuf::from("/tmp/home/artifacts/run/transcript.log"),
+            PathBuf::from("/tmp/home/cache.json"),
+        ]);
+        assert_eq!(unrelated, ArtifactChange::default());
+
+        let relevant = classify_artifact_change(&[
+            PathBuf::from("/tmp/home/artifacts/project/polarize/run/prism.json"),
+            PathBuf::from("/tmp/home/artifacts/run/report.meta.json"),
+        ]);
+        assert!(relevant.polarize);
+        assert!(relevant.mission_control);
+    }
+
+    #[test]
+    fn explicit_refresh_bypasses_debounce_and_loads_new_control_plane_truth() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_root = dir.path().join("control_plane");
+        std::fs::create_dir_all(state_root.join("runs")).expect("runs dir");
+        std::fs::write(
+            state_root.join("runs/forced-refresh.json"),
+            r#"{
+                "run_id": "forced-refresh",
+                "agent": "codex",
+                "skill": "hydrate",
+                "state": "running",
+                "updated_at": "2026-08-25T21:27:30Z"
+            }"#,
+        )
+        .expect("run snapshot");
+
+        let now = Instant::now();
+        let mut scheduler = RefreshScheduler::new(now, true, true);
+        scheduler.mark_state_changed(now);
+        assert!(
+            !scheduler.plan(now).control_plane,
+            "change remains debounced"
+        );
+
+        let mut app = sample_app();
+        app.config.state_root = state_root;
+        app.refresh_control_plane();
+
+        assert!(
+            app.runs
+                .iter()
+                .any(|run| run.snapshot.run_id == "forced-refresh"),
+            "the explicit refresh path must load disk truth without waiting for the scheduler"
+        );
+    }
+
+    #[test]
+    fn render_only_refresh_preserves_selection_by_run_id() {
+        let mut app = sample_app();
+        app.selected = 1;
+        let expected = app.runs[1].snapshot.run_id.clone();
+        app.state.runs = app
+            .runs
+            .iter()
+            .rev()
+            .map(|run| run.snapshot.clone())
+            .collect();
+        app.state.retained_runs = app.state.runs.clone();
+
+        app.refresh_rendered_runs();
+
+        assert_eq!(app.selected_run().unwrap().snapshot.run_id, expected);
     }
 }

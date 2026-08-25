@@ -222,7 +222,7 @@ fn parse_band(raw: &str) -> Option<PolarizeBand> {
     }
 }
 
-fn vibecrafted_home() -> PathBuf {
+pub fn vibecrafted_home() -> PathBuf {
     if let Some(home) = env::var_os("VIBECRAFTED_HOME").filter(|value| !value.is_empty()) {
         return PathBuf::from(home);
     }

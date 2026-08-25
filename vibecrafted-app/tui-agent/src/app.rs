@@ -11,7 +11,9 @@ use crate::state::{ControlPlaneState, RenderedRun, RunKind, render_runs};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppTab {
@@ -235,20 +237,20 @@ pub struct App {
     pub artifact_title: String,
     pub artifact_lines: Vec<String>,
     /// Cached rmcp-mux supervisor snapshots (from
-    /// `crate::mux::current_summaries`). Refreshed on every `App::refresh`
-    /// so the Monitor tab can render MCP daemon health without doing IO
-    /// inside the draw path.
+    /// `crate::mux::current_summaries`). Refreshed from mux events and by an
+    /// explicit full refresh so drawing never performs IO.
     pub mux_summaries: Vec<crate::mux::MuxSummary>,
     pub mux_subscriber: Option<crate::mux::MuxSubscriber>,
     /// Cached polarize prism intents discovered under
     /// `$VIBECRAFTED_HOME/artifacts/**/polarize/<run_id>/prism.json`.
-    /// Refreshed with the run board so draw code remains pure rendering.
+    /// Refreshed when the artifact watcher observes a Polarize path or when
+    /// the operator explicitly requests a full refresh.
     pub polarize_intents: Vec<PolarizeIntent>,
     /// Cached Mission Control view derived from
     /// `~/.vibecrafted/artifacts/**/*.meta.json` plus live control-plane
-    /// runs. Built on every `refresh` so the dashboard tab can render
-    /// without doing IO inside the draw path. The artifact root is
-    /// resolved once via `mission_control::default_artifact_root()`.
+    /// runs. Rebuilt after relevant state/artifact changes so the dashboard
+    /// tab can render without doing IO inside the draw path. The artifact root
+    /// is resolved once via `mission_control::default_artifact_root()`.
     pub mission_control: MissionControlState,
     /// Selected panel index inside the Mission Control tab (0..7).
     pub mission_focus: usize,
@@ -263,6 +265,7 @@ impl App {
     pub fn new(config: AppConfig) -> anyhow::Result<Self> {
         let state = ControlPlaneState::load(&config.state_root)
             .unwrap_or_else(|_| ControlPlaneState::empty(&config.state_root));
+        trace_expensive_refresh("control_plane");
         let runs = render_runs(&state);
         let launch_runtime = config.launch_runtime;
         let mission_artifact_root = mission_control::default_artifact_root();
@@ -318,24 +321,55 @@ impl App {
     }
 
     pub fn refresh(&mut self) {
-        let state = ControlPlaneState::load(&self.config.state_root)
-            .unwrap_or_else(|_| ControlPlaneState::empty(&self.config.state_root));
-        self.state = state;
-        let mut runs = render_runs(&self.state);
-        apply_run_filters(&mut runs, self.queue_scope, &self.search_query);
-        self.runs = runs;
-        self.sync_selection();
+        self.refresh_control_plane();
         self.refresh_mux();
         self.refresh_polarize();
         self.refresh_mission_control();
         self.refresh_observe();
     }
 
-    /// Refresh the cached Mission Control view. Cheap on small artifact
-    /// trees (a few directories of `*.meta.json`); bounded on huge
-    /// trees by `mission_control::META_SCAN_CAP`. Called on every
-    /// `refresh()` so the dashboard surfaces stay live without doing
-    /// disk IO inside the draw path.
+    /// Reload the canonical control-plane projection after an invalidation.
+    /// Selection follows the stable run id across sorting/filter changes.
+    pub fn refresh_control_plane(&mut self) {
+        let selected_run_id = self.selected_run().map(|run| run.snapshot.run_id.clone());
+        let state = ControlPlaneState::load(&self.config.state_root)
+            .unwrap_or_else(|_| ControlPlaneState::empty(&self.config.state_root));
+        trace_expensive_refresh("control_plane");
+        self.state = state;
+        let mut runs = render_runs(&self.state);
+        apply_run_filters(&mut runs, self.queue_scope, &self.search_query);
+        self.runs = runs;
+        if let Some(run_id) = selected_run_id
+            && let Some(index) = self
+                .runs
+                .iter()
+                .position(|run| run.snapshot.run_id == run_id)
+        {
+            self.selected = index;
+        }
+        self.sync_selection();
+    }
+
+    /// Recompute only time-derived labels and filters from cached state.
+    /// This keeps ages and stale classifications moving without re-reading
+    /// the control-plane filesystem.
+    pub fn refresh_rendered_runs(&mut self) {
+        let selected_run_id = self.selected_run().map(|run| run.snapshot.run_id.clone());
+        let mut runs = render_runs(&self.state);
+        apply_run_filters(&mut runs, self.queue_scope, &self.search_query);
+        self.runs = runs;
+        if let Some(run_id) = selected_run_id
+            && let Some(index) = self
+                .runs
+                .iter()
+                .position(|run| run.snapshot.run_id == run_id)
+        {
+            self.selected = index;
+        }
+        self.sync_selection();
+    }
+
+    /// Refresh the remote Observe projection on its own bounded cadence.
     pub fn refresh_observe(&mut self) {
         let origin = self.config.server.clone();
         self.observe.origin = origin.clone();
@@ -445,6 +479,7 @@ impl App {
 
     pub fn refresh_polarize(&mut self) {
         self.polarize_intents = crate::polarize::current_intents(&self.config.launch_root);
+        trace_expensive_refresh("polarize");
     }
 
     pub fn handle_ipc_event(&mut self, _event: rmcp_mux::ipc::IpcEvent) {
@@ -514,7 +549,7 @@ impl App {
 
     pub fn toggle_filter(&mut self) {
         self.queue_scope = self.queue_scope.next();
-        self.refresh();
+        self.refresh_rendered_runs();
         self.append_status(format!(
             "queue scope: {} ({} runs visible)",
             self.queue_scope.label(),
@@ -524,13 +559,13 @@ impl App {
 
     pub fn set_search_query<S: Into<String>>(&mut self, query: S) {
         self.search_query = query.into();
-        self.refresh();
+        self.refresh_rendered_runs();
     }
 
     pub fn clear_search(&mut self) {
         if !self.search_query.is_empty() {
             self.search_query.clear();
-            self.refresh();
+            self.refresh_rendered_runs();
             self.append_status("search cleared");
         }
     }
@@ -1234,6 +1269,24 @@ impl App {
             env.insert("VC_FRAME_CONFIG_DIR".to_string(), config_dir);
         }
         env
+    }
+}
+
+fn trace_expensive_refresh(kind: &str) {
+    let Some(path) = std::env::var_os("VOC_REFRESH_TRACE_PATH").filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    let unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let line = serde_json::json!({
+        "kind": kind,
+        "unix_ms": unix_ms,
+    });
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{line}");
     }
 }
 
