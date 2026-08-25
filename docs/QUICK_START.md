@@ -15,11 +15,14 @@ wsl --install
 wsl bash -c 'curl -fsSL https://vibecrafted.io/install.sh | bash'
 ```
 
-**From source:**
+**macOS CLI, without the App:** download the Runtime Pack plus `.sha256` and
+`.sig` from the latest release, then:
 
 ```bash
 git clone https://github.com/vetcoders/vibecrafted.git
-cd vibecrafted && make install
+cd vibecrafted
+make install RUNTIME_PACK=../Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-darwin-<arch>.tar.gz
+make uninstall  # deterministic reset from the same receipt
 ```
 
 On macOS the intended end-user artifact is one signed and notarized
@@ -28,6 +31,10 @@ On macOS the intended end-user artifact is one signed and notarized
 verified against its adjacent `.dmg.sha256`. The build path is exercised and
 produces a signed, notarized, stapled artifact; until the release carrying it is
 published, use the bootstrap.
+
+Power users can skip the DMG and App entirely. The adjacent
+`Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-darwin-<arch>.tar.gz` is
+the same signed binary runtime that onboarding installs from the App.
 
 Everywhere else — Linux, WSL2, or macOS without the desktop app — take
 `Vibecrafted_<version>-<YYYYMMDD>-<sha8>-portable.tar.gz` from the same release
@@ -86,7 +93,10 @@ Use `vibecrafted help` for the full operator surface.
 
 ## Developer checkout path
 
-`make install`, `make install-auto` and the source bootstrap are the same
-runtime the public installer stages, plus the build, test and release targets.
+`make install` consumes a closed Runtime Pack. `make install-source` and
+`make install-auto` are the explicit compiler/source lane used by the portable
+carrier. On Linux/WSL, `make install` currently routes to that source lane until
+a native binary Runtime Pack exists. A developer checkout also exposes the
+build, test and release targets.
 Run `make help-dev` for the full inventory, or read
 [Build from source](public/getting-started/build-from-source.md).

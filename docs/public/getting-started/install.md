@@ -15,6 +15,7 @@ that matches your platform, then verify the result with `vibecrafted doctor`.
 | Channel                      | Platform             | What you get                                           | Status                                   |
 | ---------------------------- | -------------------- | ------------------------------------------------------ | ---------------------------------------- |
 | Signed `Vibecrafted.app` DMG | macOS 14+, arm64     | Full desktop product: terminal, frame, runtime, server | Build path complete; publication pending |
+| Signed Runtime Pack          | macOS 14+, per-arch  | Same prebuilt runtime without DMG/App                  | Built and signed with the DMG            |
 | Bootstrap `install.sh`       | macOS, Linux, WSL2   | Command deck, runtime, control plane, skills           | Published; CI-gated                      |
 | Source checkout              | macOS, Linux, WSL2   | Everything above plus build, test and release targets  | Published                                |
 | Container                    | anywhere Docker runs | Isolated operator runtime                              | Published                                |
@@ -106,6 +107,25 @@ shasum -a 256 -c Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg.sha256
 
 Drag `Vibecrafted.app` to Applications and launch it.
 
+## macOS CLI Runtime Pack
+
+The App is optional. The same release carries
+`Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-darwin-<arch>.tar.gz`, its
+`.sha256`, and detached `.sig`. It is built from the exact Runtime Pack inside
+the signed App and adds only the bundled terminal and native `vc-frame` helper.
+
+From a checkout:
+
+```bash
+make install RUNTIME_PACK=../Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-darwin-<arch>.tar.gz
+make uninstall
+```
+
+Both commands use the pack-owned Python and `vetcoders_install.py`. Installation
+writes one ownership receipt; uninstall refuses modified managed files, restores
+pre-existing collisions, and prunes only directories that receipt proves the
+installer created.
+
 Check what a given release actually carries:
 
 ```bash
@@ -117,7 +137,7 @@ tests: `make release` produces a Developer ID signed, notarized and stapled
 DMG with a signed `release-output.json`. Until the release carrying it is
 published, use the bootstrap channel above.
 
-## Portable channel — Linux, WSL2, macOS CLI
+## Portable source channel — Linux, WSL2, source fallback
 
 Apple notarization cannot reach these systems, so the same release carries a
 second canonically named artifact:
@@ -142,7 +162,7 @@ What the tarball is, and what it is not:
   digest over every entry, bound to the commit the release was cut from.
   `install.sh` re-validates that carrier before it stages anything.
 - It is **not** a prebuilt-binary bundle. The Rust cockpit binaries (`voc`,
-  `vc-admin`, `vc-server`) are still compiled locally by `make install`, so a
+  `vc-admin`, `vc-server`) are still compiled locally by `make install-source`, so a
   Rust toolchain remains a prerequisite on these systems. See the prerequisites
   section above.
 - On Windows this is the artifact you use _inside_ WSL2. There is no native

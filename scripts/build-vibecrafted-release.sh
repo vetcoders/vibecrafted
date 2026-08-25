@@ -66,6 +66,11 @@ DMG_NAME="Vibecrafted_${VERSION}-${RELEASE_DATE}-${ROOT_SHA:0:8}.dmg"
 DMG="$DIST_DIR/$DMG_NAME"
 DMG_CHECKSUM="$DMG.sha256"
 LEGACY_DMG="$DIST_DIR/Vibecrafted.dmg"
+RUNTIME_PACK_PLATFORM="darwin-$(uname -m | sed 's/^arm64$/arm64/; s/^aarch64$/arm64/; s/^x86_64$/x64/')"
+RUNTIME_PACK_NAME="Vibecrafted_RuntimePack_${VERSION}-${RELEASE_DATE}-${ROOT_SHA:0:8}-${RUNTIME_PACK_PLATFORM}.tar.gz"
+RUNTIME_PACK="$DIST_DIR/$RUNTIME_PACK_NAME"
+RUNTIME_PACK_CHECKSUM="$RUNTIME_PACK.sha256"
+RUNTIME_PACK_SIGNATURE="$RUNTIME_PACK.sig"
 KEYS="${KEYS:-$HOME/.keys}"
 SPOT_MONO_FONT="${VIBECRAFTED_SPOT_MONO_FONT:-$KEYS/fonts/SpotMono.ttc}"
 SIGNING_IDENTITY_FILE="$KEYS/signing-identity.txt"
@@ -741,6 +746,15 @@ emit_release_tuple() {
   )
 }
 
+emit_runtime_pack() {
+  log "Packaging the standalone Runtime Pack carrier"
+  rm -f "$RUNTIME_PACK" "$RUNTIME_PACK_CHECKSUM" "$RUNTIME_PACK_SIGNATURE"
+  "$REPO_ROOT/scripts/package-runtime-pack.sh" \
+    --app "$APP" --output "$RUNTIME_PACK"
+  /usr/bin/openssl dgst -sha256 -sign "$SIGNING_KEY" \
+    -out "$RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK"
+}
+
 if [[ "$MODE" == "notarize" ]]; then
   [[ -d "$APP" ]] || die "missing $APP; run make dmg-signed first"
   notarize_product
@@ -749,6 +763,7 @@ if [[ "$MODE" == "notarize" ]]; then
 fi
 
 build_product
+emit_runtime_pack
 [[ "$MODE" == "app" ]] && exit 0
 if [[ "$MODE" == "dmg" ]]; then
   create_dmg

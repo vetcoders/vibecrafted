@@ -3,11 +3,12 @@
 ## Public product
 
 - Owner: `vetcoders/vibecrafted`
-- Artifacts: two channels, one commit
+- Artifacts: three carriers, one commit
   - macOS desktop: `Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg`
+  - macOS CLI: `Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-darwin-<arch>.tar.gz`
   - every other system: `Vibecrafted_<version>-<YYYYMMDD>-<sha8>-portable.tar.gz`
 - App: `Vibecrafted.app`
-- Download: `https://github.com/vetcoders/vibecrafted/releases/latest` → `Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg` (macOS) or the `-portable.tar.gz` (Linux / WSL2 / macOS CLI)
+- Download: `https://github.com/vetcoders/vibecrafted/releases/latest` → DMG (macOS desktop), `RuntimePack_...tar.gz` (macOS CLI), or `-portable.tar.gz` (Linux / WSL2 / source fallback)
 - Embedded donors: `vc-terminal`, `vc-frame`
 - Entry: bundled `vc-start` with durable `workspace_id`
 
@@ -55,7 +56,12 @@ proves — is [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
 macOS: download the canonical `Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg` and
 its `.dmg.sha256` from the latest release, verify the checksum, and open the DMG.
 
-Linux, WSL2, or macOS without the desktop app: download
+macOS without the App: download
+`Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-darwin-<arch>.tar.gz` plus
+its `.sha256` and `.sig`, then run `make install RUNTIME_PACK=<downloaded-path>`.
+Reset with `make uninstall`; both buttons use the same receipted installer.
+
+Linux, WSL2, or the explicit source fallback: download
 `Vibecrafted_<version>-<YYYYMMDD>-<sha8>-portable.tar.gz` and its `.sha256` from
 the same release, verify the checksum, unpack, and run the packed `install.sh`.
 

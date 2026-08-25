@@ -2,9 +2,10 @@
 # Publish the installable Vibecrafted artifacts after a cold verification of the
 # exact bytes downloaded back from a draft GitHub Release.
 #
-# Two channels, one release, one commit:
-#   macOS desktop  -> the signed, notarized, stapled DMG
-#   every other OS -> the provenance-bound portable tarball install.sh consumes
+# Three carriers, one release, one commit:
+#   macOS desktop -> the signed, notarized, stapled DMG
+#   macOS CLI     -> the signed binary Runtime Pack embedded in that App
+#   other systems -> the provenance-bound portable source tarball
 # Each channel is verified against the bytes GitHub hands back, never against
 # the bytes this machine still has in dist/. The asset allowlist below stays
 # exact: a release that grew an asset nobody named is a release nobody audited.
@@ -29,7 +30,7 @@ die() {
   exit 1
 }
 
-for command_name in git gh uv shasum xcrun spctl hdiutil; do
+for command_name in git gh uv shasum openssl xcrun spctl hdiutil; do
   command -v "$command_name" >/dev/null 2>&1 || die "missing command: $command_name"
 done
 test "$(uname -s)" = "Darwin" || die "the notarized DMG publisher must run on macOS"
@@ -61,6 +62,26 @@ test -s "$DMG_CHECKSUM" || die "missing $DMG_CHECKSUM"
 )
 xcrun stapler validate "$DMG"
 spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
+
+RELEASE_DATE="${DMG_NAME#Vibecrafted_"${VERSION}"-}"
+RELEASE_DATE="${RELEASE_DATE%-"${HEAD_SHA:0:8}".dmg}"
+RUNTIME_PACK_PLATFORM="darwin-$(uname -m | sed 's/^arm64$/arm64/; s/^aarch64$/arm64/; s/^x86_64$/x64/')"
+RUNTIME_PACK_NAME="Vibecrafted_RuntimePack_${VERSION}-${RELEASE_DATE}-${HEAD_SHA:0:8}-${RUNTIME_PACK_PLATFORM}.tar.gz"
+RUNTIME_PACK="$DIST/$RUNTIME_PACK_NAME"
+RUNTIME_PACK_CHECKSUM="$RUNTIME_PACK.sha256"
+RUNTIME_PACK_SIGNATURE="$RUNTIME_PACK.sig"
+RUNTIME_PACK_PUBLIC_KEY="$ROOT/vibecrafted-core/vibecrafted_core/trust/vibecrafted-signing-v1.pub"
+test -s "$RUNTIME_PACK" || die "missing $RUNTIME_PACK; run make release first"
+test -s "$RUNTIME_PACK_CHECKSUM" || die "missing $RUNTIME_PACK_CHECKSUM"
+test -s "$RUNTIME_PACK_SIGNATURE" || die "missing $RUNTIME_PACK_SIGNATURE"
+test -s "$RUNTIME_PACK_PUBLIC_KEY" || die "missing trusted Runtime Pack public key"
+(
+  cd "$DIST"
+  shasum -a 256 -c "$(basename "$RUNTIME_PACK_CHECKSUM")"
+)
+openssl dgst -sha256 -verify "$RUNTIME_PACK_PUBLIC_KEY" \
+  -signature "$RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK" >/dev/null \
+  || die "Runtime Pack signature verification failed"
 
 # The portable channel carries no Apple ticket, so its identity claim is the
 # closed source-provenance carrier: an allowlisted tree whose digest names one
@@ -101,6 +122,9 @@ fi
 gh release upload "$TAG" --repo "$REPO" \
   "$DMG" \
   "$DMG_CHECKSUM" \
+  "$RUNTIME_PACK" \
+  "$RUNTIME_PACK_CHECKSUM" \
+  "$RUNTIME_PACK_SIGNATURE" \
   "$PORTABLE" \
   "$PORTABLE_CHECKSUM" \
   "$RELEASE_OUTPUT#release-output.json" \
@@ -114,6 +138,9 @@ gh release download "$TAG" --repo "$REPO" --dir "$DOWNLOAD_DIR"
 EXPECTED_ASSETS="$(printf '%s\n' \
   "$DMG_NAME" \
   "$DMG_NAME.sha256" \
+  "$RUNTIME_PACK_NAME" \
+  "$RUNTIME_PACK_NAME.sha256" \
+  "$RUNTIME_PACK_NAME.sig" \
   "$PORTABLE_NAME" \
   "$PORTABLE_NAME.sha256" \
   "release-output.json" \
@@ -122,6 +149,9 @@ ACTUAL_ASSETS="$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f -exec basename {} \; |
 test "$ACTUAL_ASSETS" = "$EXPECTED_ASSETS" || die "draft release contains unexpected assets"
 cmp "$DMG" "$DOWNLOAD_DIR/$DMG_NAME"
 cmp "$DMG_CHECKSUM" "$DOWNLOAD_DIR/$DMG_NAME.sha256"
+cmp "$RUNTIME_PACK" "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME"
+cmp "$RUNTIME_PACK_CHECKSUM" "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME.sha256"
+cmp "$RUNTIME_PACK_SIGNATURE" "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME.sig"
 cmp "$PORTABLE" "$DOWNLOAD_DIR/$PORTABLE_NAME"
 cmp "$PORTABLE_CHECKSUM" "$DOWNLOAD_DIR/$PORTABLE_NAME.sha256"
 cmp "$RELEASE_OUTPUT" "$DOWNLOAD_DIR/release-output.json"
@@ -129,8 +159,13 @@ cmp "$RELEASE_SIGNATURE" "$DOWNLOAD_DIR/release-output.json.sig"
 (
   cd "$DOWNLOAD_DIR"
   shasum -a 256 -c "$DMG_NAME.sha256"
+  shasum -a 256 -c "$RUNTIME_PACK_NAME.sha256"
   shasum -a 256 -c "$PORTABLE_NAME.sha256"
 )
+openssl dgst -sha256 -verify "$RUNTIME_PACK_PUBLIC_KEY" \
+  -signature "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME.sig" \
+  "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME" >/dev/null \
+  || die "downloaded Runtime Pack signature verification failed"
 
 uv run --project vibecrafted-core verify-vibecrafted-walkaround verify-release \
   --release-output "$DOWNLOAD_DIR/release-output.json" \
@@ -159,14 +194,37 @@ uv run python3 "$DISTRIBUTION_MANIFEST" check \
   --expected-source-revision "$HEAD_SHA"
 bash "$PORTABLE_UNPACK_DIR/$PORTABLE_ROOT_NAME/install.sh" --help >/dev/null
 
+# Exercise the exact downloaded binary carrier through both public CLI buttons
+# in an isolated HOME. The second button consumes the receipt written by the
+# first and must leave no private XDG/agent residue behind.
+RUNTIME_PACK_SMOKE_HOME="$DOWNLOAD_DIR/runtime-pack-home"
+mkdir -p "$RUNTIME_PACK_SMOKE_HOME"
+RUNTIME_PACK_SMOKE_ENV=(
+  HOME="$RUNTIME_PACK_SMOKE_HOME"
+  XDG_CONFIG_HOME="$RUNTIME_PACK_SMOKE_HOME/.config"
+  XDG_DATA_HOME="$RUNTIME_PACK_SMOKE_HOME/.local/share"
+  VIBECRAFTED_HOME="$RUNTIME_PACK_SMOKE_HOME/.vibecrafted"
+  VIBECRAFTED_RUNTIME_HOME="$RUNTIME_PACK_SMOKE_HOME/.local/share/vibecrafted"
+  VIBECRAFTED_LAUNCHER_BIN="$RUNTIME_PACK_SMOKE_HOME/.local/bin"
+)
+env "${RUNTIME_PACK_SMOKE_ENV[@]}" \
+  make --no-print-directory install RUNTIME_PACK="$DOWNLOAD_DIR/$RUNTIME_PACK_NAME"
+env "${RUNTIME_PACK_SMOKE_ENV[@]}" \
+  make --no-print-directory uninstall
+test -z "$(find "$RUNTIME_PACK_SMOKE_HOME" -mindepth 1 -print -quit)" \
+  || die "Runtime Pack install/uninstall left residue in isolated HOME"
+
 DMG_SHA="$(shasum -a 256 "$DOWNLOAD_DIR/$DMG_NAME" | awk '{print $1}')"
 DMG_SIZE="$(stat -f %z "$DOWNLOAD_DIR/$DMG_NAME")"
+RUNTIME_PACK_SHA="$(shasum -a 256 "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME" | awk '{print $1}')"
+RUNTIME_PACK_SIZE="$(stat -f %z "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME")"
 PORTABLE_SHA="$(shasum -a 256 "$DOWNLOAD_DIR/$PORTABLE_NAME" | awk '{print $1}')"
 PORTABLE_SIZE="$(stat -f %z "$DOWNLOAD_DIR/$PORTABLE_NAME")"
 PORTABLE_TREE_SHA="$(uv run python3 -c 'import json; print(json.load(open("dist/portable-output.json"))["provenance"]["tree_sha256"])')"
 VC_FRAME_SHA="$(uv run python3 -c 'import json; print(json.load(open("dist/release-output.json"))["source_revisions"]["vc-frame"])')"
 VC_TERMINAL_SHA="$(uv run python3 -c 'import json; print(json.load(open("dist/release-output.json"))["source_revisions"]["vc-terminal"])')"
 DOWNLOAD_URL="https://github.com/$REPO/releases/download/$TAG/$DMG_NAME"
+RUNTIME_PACK_URL="https://github.com/$REPO/releases/download/$TAG/$RUNTIME_PACK_NAME"
 PORTABLE_URL="https://github.com/$REPO/releases/download/$TAG/$PORTABLE_NAME"
 
 mkdir -p "$REPORT_DIR"
@@ -180,6 +238,7 @@ cat > "$REPORT" <<EOF
 - CodeQL: PASS; zero open alerts on \`main\` immediately before publication.
 - Signed release-output verification: PASS.
 - Apple notarization ticket, Gatekeeper assessment and staple validation: PASS on local and downloaded bytes.
+- Runtime Pack checksum, detached signature and isolated install/uninstall: PASS on downloaded bytes.
 - Portable channel source-provenance validation against \`$HEAD_SHA\`: PASS on downloaded bytes.
 
 ## 2. Exposed surface inventory
@@ -187,13 +246,14 @@ cat > "$REPORT" <<EOF
 | Surface | Bind / endpoint | Proxy / TLS | Auth boundary | Secret materialization |
 | --- | --- | --- | --- | --- |
 | Vibecrafted.app desktop UI | local process | none | logged-in macOS user | app-owned runtime environment |
-| Portable tarball install (Linux / WSL2 / macOS CLI) | none; \`install.sh\` publishes into the user-owned runtime home | not applicable | invoking user | user-owned runtime home, no host config rewrites |
+| Runtime Pack install (macOS CLI) | none; same immutable payload as the App | not applicable | invoking user | one receipted runtime/config layout |
+| Portable source install (Linux / WSL2 / explicit source fallback) | none; \`install.sh\` publishes into the user-owned runtime home | not applicable | invoking user | user-owned runtime home, no host config rewrites |
 | vc-server service | typed Vibecrafted settings; default loopback, operator may choose any host:port such as \`100.82.232.70:3025\` | operator-owned for non-loopback exposure | configured service policy | runtime service environment, never host config rewrites |
 | vc-frame web client | disabled unless explicitly configured | operator-owned | vc-frame auth boundary | runtime-only |
 
 ## 3. Deployment mode decision
 
-The shipped topology is one signed and notarized macOS desktop product plus one portable source distribution for every system Apple notarization cannot reach. \`Vibecrafted.app\` owns app/DMG/install/update and carries the complete runtime. \`vc-terminal\` is a deterministic embedded terminal substrate and \`vc-frame\` is the embedded session interior. The app sources its own XDG/runtime environment at startup and does not overwrite user terminal or vc-frame configuration. Rollback is replacement with the prior notarized Vibecrafted.app; live tmux/vc-frame session processes remain separate runtime state.
+The shipped topology is one runtime product with three carriers: a signed and notarized macOS desktop DMG, the same signed binary Runtime Pack for macOS CLI users, and one portable source distribution for systems Apple notarization cannot reach. \`Vibecrafted.app\` owns app/DMG/onboarding/update but does not own a second runtime. \`vc-terminal\` is a deterministic embedded terminal substrate and \`vc-frame\` is the embedded session interior. App onboarding and \`make install\` invoke the same receipted installer. Rollback is deterministic uninstall plus installation of the prior carrier; live session state remains separate runtime state.
 
 The portable channel is not a second product: it is the same commit, projected through the allowlisted distribution writer, carrying a closed \`source-provenance.json\` whose distribution-tree digest names that commit. It installs through \`install.sh --archive-file\`, which refuses a payload whose provenance does not close. Rollback is re-running the installer from the prior release asset.
 
@@ -215,7 +275,25 @@ Source tuple:
 - Mounted-DMG walk-around probes from downloaded bytes: PASS.
 - Stapler and Gatekeeper validation on downloaded bytes: PASS.
 
-### Portable channel (Linux / WSL2 / macOS CLI)
+### macOS CLI Runtime Pack
+
+- Source: [$RUNTIME_PACK_URL]($RUNTIME_PACK_URL)
+- SHA-256: \`$RUNTIME_PACK_SHA\`
+- Size: \`$RUNTIME_PACK_SIZE\` bytes
+- Downloaded tarball, checksum and detached signature byte-compared: PASS.
+- Signature verified with the bundled Vibecrafted release public key: PASS.
+- Isolated \`make install\` -> \`make uninstall\` left an empty HOME: PASS.
+
+Install from a checkout without installing the App:
+
+\`\`\`bash
+curl -fsSLO $RUNTIME_PACK_URL
+curl -fsSLO $RUNTIME_PACK_URL.sha256
+curl -fsSLO $RUNTIME_PACK_URL.sig
+make install RUNTIME_PACK=$RUNTIME_PACK_NAME
+\`\`\`
+
+### Portable source channel (Linux / WSL2 / source fallback)
 
 - Source: [$PORTABLE_URL]($PORTABLE_URL)
 - SHA-256: \`$PORTABLE_SHA\`
@@ -236,12 +314,13 @@ bash $PORTABLE_ROOT_NAME/install.sh
 
 ## Sign-off
 
-PASS — the release has exactly two canonically named installable artifacts built from one commit, \`$DMG_NAME\` for macOS desktop and \`$PORTABLE_NAME\` for every other system, and no donor repo owns a competing app, installer or update channel.
+PASS — the release has exactly three canonically named installable carriers built from one commit: \`$DMG_NAME\` for macOS desktop, \`$RUNTIME_PACK_NAME\` for macOS CLI, and \`$PORTABLE_NAME\` as the cross-platform source fallback. App and CLI consume one Runtime Pack authority; no donor repo owns a competing app, installer or update channel.
 EOF
 
 gh release edit "$TAG" --repo "$REPO" --notes-file "$REPORT" --draft=false --latest
 test "$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq .isDraft)" = "false"
 
-printf 'Published %s\nReport: %s\nDMG: %s bytes / %s\nPortable: %s\n  %s bytes / %s\n' \
+printf 'Published %s\nReport: %s\nDMG: %s bytes / %s\nRuntime Pack: %s\n  %s bytes / %s\nPortable: %s\n  %s bytes / %s\n' \
   "$DOWNLOAD_URL" "$REPORT" "$DMG_SIZE" "$DMG_SHA" \
+  "$RUNTIME_PACK_URL" "$RUNTIME_PACK_SIZE" "$RUNTIME_PACK_SHA" \
   "$PORTABLE_URL" "$PORTABLE_SIZE" "$PORTABLE_SHA"

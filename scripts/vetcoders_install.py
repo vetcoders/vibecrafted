@@ -14646,6 +14646,28 @@ def _ensure_runtime_projection_directory(
     _checkpoint_runtime_install_receipt(runtime_home, receipt)
 
 
+def _ensure_runtime_install_directory(
+    path: Path, *, runtime_home: Path, receipt: dict[str, Any]
+) -> None:
+    """Create an install root and receipt new HOME ancestors for final pruning.
+
+    Explicit XDG/runtime overrides may legitimately live outside HOME. Their
+    exact managed roots remain receipted, but we never claim their surrounding
+    filesystem. Inside HOME, the installer owns every directory it had to
+    create and can therefore remove those directories later if they are empty.
+    """
+    home = Path.home().expanduser()
+    normalized = Path(os.path.abspath(path.expanduser()))
+    try:
+        normalized.relative_to(home)
+    except ValueError:
+        normalized.mkdir(parents=True, exist_ok=True)
+        return
+    _ensure_runtime_projection_directory(
+        normalized, runtime_home=runtime_home, receipt=receipt
+    )
+
+
 def _install_runtime_agent_projections(
     generation: Path,
     *,
@@ -14817,7 +14839,9 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         paths["crafted_home"] / "control_plane",
         paths["launcher_home"],
     ):
-        directory.mkdir(parents=True, exist_ok=True)
+        _ensure_runtime_install_directory(
+            directory, runtime_home=runtime_home, receipt=receipt
+        )
     _checkpoint_runtime_install_receipt(runtime_home, receipt)
 
     if str(generation) not in receipt["owned_dirs"]:
@@ -15156,6 +15180,23 @@ def _receipt_empty_projection_dir_is_allowed(path: Path) -> bool:
     return path.resolve(strict=False) in allowed
 
 
+def _receipt_empty_dir_is_allowed(path: Path, roots: Mapping[str, Path]) -> bool:
+    """Allow receipted empty projection dirs and created HOME root ancestors."""
+    if _receipt_path_is_allowed(
+        path, roots
+    ) or _receipt_empty_projection_dir_is_allowed(path):
+        return True
+    home = Path.home().resolve(strict=False)
+    candidate = path.resolve(strict=False)
+    allowed: set[Path] = set()
+    for root in roots.values():
+        cursor = root.resolve(strict=False)
+        while cursor != home and _is_subpath(cursor, home):
+            allowed.add(cursor)
+            cursor = cursor.parent
+    return candidate in allowed
+
+
 def _receipt_app_root(receipt: Mapping[str, Any]) -> Path | None:
     """Return the receipted GUI carrier root after a narrow product-name check."""
     raw_root = str(receipt.get("app_root", "")).strip()
@@ -15224,7 +15265,7 @@ def cmd_runtime_uninstall(args: argparse.Namespace) -> int:
         if not _receipt_path_is_allowed(Path(raw_path), paths):
             raise RuntimeError(f"receipt path escapes managed roots: {raw_path}")
     for raw_path in receipt.get("owned_empty_dirs", []):
-        if not _receipt_empty_projection_dir_is_allowed(Path(raw_path)):
+        if not _receipt_empty_dir_is_allowed(Path(raw_path), paths):
             raise RuntimeError(
                 f"receipt empty directory escapes projection roots: {raw_path}"
             )
@@ -15325,17 +15366,6 @@ def cmd_runtime_uninstall(args: argparse.Namespace) -> int:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 _restore_path_from_backup(backup, destination)
 
-    for raw_path in sorted(
-        receipt.get("owned_empty_dirs", []),
-        key=lambda value: len(Path(value).parts),
-        reverse=True,
-    ):
-        path = Path(raw_path)
-        if path.is_dir() and not path.is_symlink() and not any(path.iterdir()):
-            actions.append(f"remove empty {path}")
-            if not dry_run:
-                path.rmdir()
-
     roots_created = receipt.get("roots_created", {})
     for name in ("product_config", "crafted_home", "runtime_home", "launcher_home"):
         root = paths[name]
@@ -15348,6 +15378,21 @@ def cmd_runtime_uninstall(args: argparse.Namespace) -> int:
         actions.append(f"remove {root}")
         if not dry_run:
             _remove_path(root)
+
+    # Remove root ancestors only after the exact owned roots are gone. Running
+    # this earlier leaves ~/.local/share and ~/.config behind even though the
+    # receipt proves that this installer created them.
+    for raw_path in sorted(
+        receipt.get("owned_empty_dirs", []),
+        key=lambda value: len(Path(value).parts),
+        reverse=True,
+    ):
+        path = Path(raw_path)
+        if dry_run and path.is_dir() and not path.is_symlink():
+            actions.append(f"remove if empty {path}")
+        elif path.is_dir() and not path.is_symlink() and not any(path.iterdir()):
+            actions.append(f"remove empty {path}")
+            path.rmdir()
 
     if not dry_run and receipt_path.exists():
         receipt_path.unlink()

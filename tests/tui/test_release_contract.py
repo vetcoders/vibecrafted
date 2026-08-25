@@ -27,7 +27,7 @@ INSTALL_PS1_SHA256 = "12c2ca5b95195a2fcee0f4987962fd35ec52dde85588c226f68bcab468
 ABSENT_FROM_MACOS_RUNNER_IMAGE = ("rg", "fd")
 
 
-def test_public_install_surfaces_name_both_release_channels() -> None:
+def test_public_install_surfaces_name_all_release_carriers() -> None:
     surfaces = (
         "README.md",
         "docs/QUICK_START.md",
@@ -37,6 +37,10 @@ def test_public_install_surfaces_name_both_release_channels() -> None:
         text = (REPO_ROOT / relative).read_text(encoding="utf-8")
         assert RELEASE_PAGE in text, f"{relative} must point to the unified release"
         assert "Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg" in text
+        assert (
+            "Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-darwin-<arch>.tar.gz"
+            in text
+        ), f"{relative} must name the macOS CLI Runtime Pack"
         # A non-macOS reader must find a version-pinned artifact on the same
         # page, not only a curl-pipe-bash line that tracks a moving branch.
         assert "Vibecrafted_<version>-<YYYYMMDD>-<sha8>-portable.tar.gz" in text, (
@@ -146,8 +150,8 @@ def test_tag_gate_only_calls_tools_its_own_runner_provides() -> None:
         )
 
 
-def test_publication_boundary_step_still_asserts_both_channel_names() -> None:
-    """The boundary step is the only thing pinning the six-asset shape.
+def test_publication_boundary_step_still_asserts_all_carrier_names() -> None:
+    """The boundary step pins the exact three-carrier release shape.
 
     Rewriting its matcher (rg -> grep) must not quietly drop what it matches:
     one canonically named DMG and one portable tarball, each resolved by the
@@ -157,9 +161,14 @@ def test_publication_boundary_step_still_asserts_both_channel_names() -> None:
 
     assert "Vibecrafted_.*YYYYMMDD|DMG_NAME|\\.dmg\\.sha256" in workflow
     assert "PORTABLE_NAME|portable\\.tar\\.gz|portable-output\\.json" in workflow
+    assert (
+        "RUNTIME_PACK_NAME|RuntimePack_.*tar\\.gz|install-runtime-pack\\.sh" in workflow
+    )
     for target in (
         "scripts/build-vibecrafted-release.sh",
         "scripts/build-portable-release.sh",
+        "scripts/package-runtime-pack.sh",
+        "scripts/install-runtime-pack.sh",
         "scripts/publish-vibecrafted-release.sh",
         "docs/RELEASE_KICKOFF.md",
     ):
@@ -230,6 +239,9 @@ def test_macos_publisher_cold_verifies_exact_uploaded_bytes() -> None:
     for entry in (
         '"$DMG_NAME"',
         '"$DMG_NAME.sha256"',
+        '"$RUNTIME_PACK_NAME"',
+        '"$RUNTIME_PACK_NAME.sha256"',
+        '"$RUNTIME_PACK_NAME.sig"',
         '"$PORTABLE_NAME"',
         '"$PORTABLE_NAME.sha256"',
         '"release-output.json"',
@@ -256,6 +268,20 @@ def test_macos_publisher_cold_verifies_the_portable_channel() -> None:
     assert (
         'bash "$PORTABLE_UNPACK_DIR/$PORTABLE_ROOT_NAME/install.sh" --help' in publisher
     )
+
+
+def test_macos_publisher_cold_verifies_runtime_pack_install_and_uninstall() -> None:
+    publisher = (REPO_ROOT / "scripts/publish-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'RUNTIME_PACK_NAME="Vibecrafted_RuntimePack_' in publisher
+    assert 'shasum -a 256 -c "$RUNTIME_PACK_NAME.sha256"' in publisher
+    assert 'openssl dgst -sha256 -verify "$RUNTIME_PACK_PUBLIC_KEY"' in publisher
+    assert 'cmp "$RUNTIME_PACK" "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME"' in publisher
+    assert "make --no-print-directory install RUNTIME_PACK=" in publisher
+    assert "make --no-print-directory uninstall" in publisher
+    assert 'find "$RUNTIME_PACK_SMOKE_HOME" -mindepth 1 -print -quit' in publisher
 
 
 def test_portable_builder_binds_one_commit_and_proves_its_own_bytes() -> None:
@@ -298,6 +324,12 @@ def test_builder_emits_the_canonical_versioned_dmg_and_checksum() -> None:
     assert 'printf \'%s\\n\' "$RUNTIME_VERSION" > "$runtime/VERSION"' in builder
     assert 'DMG_CHECKSUM="$DMG.sha256"' in builder
     assert 'LEGACY_DMG="$DIST_DIR/Vibecrafted.dmg"' in builder
+    assert (
+        'RUNTIME_PACK_NAME="Vibecrafted_RuntimePack_${VERSION}-${RELEASE_DATE}-${ROOT_SHA:0:8}-${RUNTIME_PACK_PLATFORM}.tar.gz"'
+        in builder
+    )
+    assert '"$REPO_ROOT/scripts/package-runtime-pack.sh"' in builder
+    assert '-out "$RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK"' in builder
     assert 'rm -f "$DMG_CHECKSUM" "$LEGACY_DMG"' in builder
     assert '/usr/bin/shasum -a 256 "$DMG_NAME"' in builder
     assert "-type d -name __pycache__" in builder

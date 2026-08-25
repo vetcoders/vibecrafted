@@ -233,8 +233,49 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     assert not (home / ".codex/commands").exists()
     assert not runtime_home.exists()
     assert not crafted_home.exists()
-    assert not (config_home / "vibecrafted").exists()
+    assert not config_home.exists()
+    # .local predated the install in this fixture because it carries an
+    # operator-owned ScreenScribe target. The installer must preserve it.
+    assert (home / ".local").is_dir()
     assert app_root.exists()
+
+
+def test_runtime_pack_uninstall_prunes_only_created_empty_xdg_parents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    runtime_home = home / ".local/share/vibecrafted"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / ".local/bin"))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / ".vibecrafted"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    monkeypatch.setattr(
+        installer, "_teardown_owned_runtime_for_uninstall", lambda *_args, **_kwargs: []
+    )
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    args = Namespace(
+        payload_root=str(payload),
+        app_root=str(terminal_host.parents[2]),
+        terminal_host=str(terminal_host),
+        frame_helper=str(frame_helper),
+    )
+
+    assert installer.cmd_runtime_install(args) == 0
+    capsys.readouterr()
+    assert (home / ".local/share/vibecrafted").is_dir()
+    assert (home / ".config/vibecrafted").is_dir()
+
+    assert (
+        installer.cmd_runtime_uninstall(Namespace(dry_run=False, emit_result=True)) == 0
+    )
+    capsys.readouterr()
+
+    assert not (home / ".local").exists()
+    assert not (home / ".config").exists()
+    assert not (home / ".agents").exists()
+    assert not (home / ".claude").exists()
+    assert not (home / ".codex").exists()
 
 
 def test_runtime_pack_refuses_missing_required_agent_foundation(
