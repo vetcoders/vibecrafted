@@ -194,6 +194,7 @@ def test_native_carrier_embeds_every_required_agent_foundation() -> None:
     assert "ced57997dd97a2b08960f35e3a657d7b0c49a200" in stager
     assert "remap-path-prefix" in stager
     assert "cargo install --locked" in stager
+    assert 'rm -rf "$WORK" 2>/dev/null || true' in stager
 
 
 def test_macos_publisher_cold_verifies_exact_uploaded_bytes() -> None:

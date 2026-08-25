@@ -30,7 +30,13 @@ esac
 for tool in git npm cargo python3; do require "$tool"; done
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/vibecrafted-foundations.XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT
+# Cleanup must never turn an otherwise complete carrier build into a release
+# failure. Finder/metadata services can recreate .DS_Store while rm is walking
+# a temporary tree on macOS, making rm report ENOTEMPTY after every binary has
+# already been staged successfully. The tree is disposable and remains under
+# the OS temporary root, so preserve the build result if best-effort cleanup
+# loses that race.
+trap 'rm -rf "$WORK" 2>/dev/null || true' EXIT
 mkdir -p "$OUTPUT_BIN_DIR" "$WORK/loctree" "$WORK/aicx" "$WORK/prview"
 
 # npm verifies the registry integrity for the exact platform package. Extract
