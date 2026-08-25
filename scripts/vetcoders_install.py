@@ -2577,6 +2577,7 @@ PYTHON_ENTRYPOINT_LAUNCHERS = [
 
 RELEASE_CONTRACT_PACKAGE_ASSETS = (
     "product_contract.py",
+    "runtime_pack_contract.py",
     "walkaround_runner.py",
     "schemas/unified_product.schema.v1.json",
     "trust/release-policy.v1.json",
@@ -3087,6 +3088,10 @@ _RUNTIME_RELEASE_DMG_PATTERN = (
     r"^Vibecrafted_[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?-"
     r"[0-9]{8}-[0-9a-f]{8}\.dmg$"
 )
+_RUNTIME_RELEASE_PACK_PATTERN = (
+    r"^Vibecrafted_RuntimePack_[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?-"
+    r"[0-9]{8}-[0-9a-f]{8}-darwin-(?:arm64|x64)\.tar\.gz$"
+)
 _RUNTIME_VERIFIER_SCHEMA_DEFS = frozenset(
     {
         "architecture",
@@ -3179,6 +3184,9 @@ _RUNTIME_VERIFIER_TYPED_OBJECT_SCHEMA_PATHS = frozenset(
         "$defs/releaseOutput/properties/outer_executable/properties/signer_policy",
         "$defs/releaseOutput/properties/code_resources",
         "$defs/releaseOutput/properties/dmg",
+        "$defs/releaseOutput/properties/runtime_pack",
+        "$defs/releaseOutput/properties/runtime_pack/properties/provenance",
+        "$defs/releaseOutput/properties/runtime_pack/properties/provenance/properties/source_revisions",
         "$defs/releaseOutput/properties/modules",
         "$defs/releaseOutput/properties/source_revisions",
         "$defs/releaseOutput/properties/notarization",
@@ -8598,6 +8606,18 @@ def _validate_runtime_verifier_schema(raw: bytes) -> None:
         ) from exc
     if dmg_pattern != _RUNTIME_RELEASE_DMG_PATTERN:
         raise OSError("candidate unified-product schema canonical DMG pattern drifted")
+    try:
+        runtime_pack_pattern = definitions["releaseOutput"]["properties"][
+            "runtime_pack"
+        ]["properties"]["path"]["pattern"]
+    except (KeyError, TypeError) as exc:
+        raise OSError(
+            "candidate unified-product schema has no canonical Runtime Pack path"
+        ) from exc
+    if runtime_pack_pattern != _RUNTIME_RELEASE_PACK_PATTERN:
+        raise OSError(
+            "candidate unified-product schema canonical Runtime Pack pattern drifted"
+        )
 
 
 def _write_runtime_verifier_snapshot(

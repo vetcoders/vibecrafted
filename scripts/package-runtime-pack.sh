@@ -5,6 +5,12 @@ die() { printf 'Runtime Pack packaging failed: %s\n' "$*" >&2; exit 1; }
 
 app=""
 output=""
+source_revision=""
+terminal_revision=""
+frame_revision=""
+version=""
+platform=""
+architecture=""
 while (($#)); do
   case "$1" in
     --app)
@@ -17,15 +23,29 @@ while (($#)); do
       output="$2"
       shift 2
       ;;
+    --source-revision|--terminal-revision|--frame-revision|--version|--platform|--architecture)
+      (($# >= 2)) || die "$1 requires a value"
+      case "$1" in
+        --source-revision) source_revision="$2" ;;
+        --terminal-revision) terminal_revision="$2" ;;
+        --frame-revision) frame_revision="$2" ;;
+        --version) version="$2" ;;
+        --platform) platform="$2" ;;
+        --architecture) architecture="$2" ;;
+      esac
+      shift 2
+      ;;
     --help|-h)
-      printf 'usage: %s --app <Vibecrafted.app> --output <RuntimePack.tar.gz>\n' "$0"
+      printf 'usage: %s --app <Vibecrafted.app> --output <RuntimePack.tar.gz> --source-revision <sha> --terminal-revision <sha> --frame-revision <sha> --version <version> --platform <platform> --architecture <arch>\n' "$0"
       exit 0
       ;;
     *) die "unknown argument: $1" ;;
   esac
 done
 
-[[ -n "$app" && -n "$output" ]] || die "--app and --output are required"
+for required_value in app output source_revision terminal_revision frame_revision version platform architecture; do
+  [[ -n "${!required_value}" ]] || die "--$required_value is required"
+done
 app_name="${app##*/}"
 app_parent="$(cd "$(dirname "$app")" 2>/dev/null && pwd)" \
   || die "cannot resolve app path: $app"
@@ -56,9 +76,21 @@ if find "$root" -type l -print -quit | grep -q .; then
 fi
 for required in \
   VERSION bin/python3 bin/vibecrafted bin/vc-terminal bin/vc-frame \
-  libexec/vc-frame scripts/vetcoders_install.py; do
+  libexec/vc-frame scripts/vetcoders_install.py \
+  vibecrafted-core/vibecrafted_core/runtime_pack_contract.py; do
   [[ -e "$root/$required" ]] || die "standalone Runtime Pack is missing $required"
 done
+
+PYTHONPATH="$root/vibecrafted-core" "$root/bin/python3" \
+  -m vibecrafted_core.runtime_pack_contract write \
+  --root "$root" \
+  --carrier-basename "$(basename "$output")" \
+  --version "$version" \
+  --platform "$platform" \
+  --architecture "$architecture" \
+  --source-revision "$source_revision" \
+  --terminal-revision "$terminal_revision" \
+  --frame-revision "$frame_revision" >/dev/null
 
 mkdir -p "$(dirname "$output")"
 candidate="$work/$(basename "$output")"

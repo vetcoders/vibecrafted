@@ -275,10 +275,13 @@ def test_macos_publisher_cold_verifies_runtime_pack_install_and_uninstall() -> N
         encoding="utf-8"
     )
 
-    assert 'RUNTIME_PACK_NAME="Vibecrafted_RuntimePack_' in publisher
+    assert '["runtime_pack"]["path"]' in publisher
     assert 'shasum -a 256 -c "$RUNTIME_PACK_NAME.sha256"' in publisher
     assert 'openssl dgst -sha256 -verify "$RUNTIME_PACK_PUBLIC_KEY"' in publisher
     assert 'cmp "$RUNTIME_PACK" "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME"' in publisher
+    assert publisher.count("--verify-only") == 2
+    assert '--expected-terminal-revision "$VC_TERMINAL_SHA"' in publisher
+    assert '--expected-frame-revision "$VC_FRAME_SHA"' in publisher
     assert "make --no-print-directory install RUNTIME_PACK=" in publisher
     assert "make --no-print-directory uninstall" in publisher
     assert 'find "$RUNTIME_PACK_SMOKE_HOME" -mindepth 1 -print -quit' in publisher
@@ -329,7 +332,10 @@ def test_builder_emits_the_canonical_versioned_dmg_and_checksum() -> None:
         in builder
     )
     assert '"$REPO_ROOT/scripts/package-runtime-pack.sh"' in builder
-    assert '-out "$RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK"' in builder
+    assert '-out "$EMBEDDED_RUNTIME_PACK_SIGNATURE" "$EMBEDDED_RUNTIME_PACK"' in builder
+    assert 'install -m 0644 "$EMBEDDED_RUNTIME_PACK" "$RUNTIME_PACK"' in builder
+    assert 'cmp "$EMBEDDED_RUNTIME_PACK" "$RUNTIME_PACK"' in builder
+    assert '--runtime-pack "$RUNTIME_PACK"' in builder
     assert 'rm -f "$DMG_CHECKSUM" "$LEGACY_DMG"' in builder
     assert '/usr/bin/shasum -a 256 "$DMG_NAME"' in builder
     assert "-type d -name __pycache__" in builder

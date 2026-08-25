@@ -71,6 +71,10 @@ RUNTIME_PACK_NAME="Vibecrafted_RuntimePack_${VERSION}-${RELEASE_DATE}-${ROOT_SHA
 RUNTIME_PACK="$DIST_DIR/$RUNTIME_PACK_NAME"
 RUNTIME_PACK_CHECKSUM="$RUNTIME_PACK.sha256"
 RUNTIME_PACK_SIGNATURE="$RUNTIME_PACK.sig"
+RUNTIME_PACK_RESOURCE_DIR="$APP/Contents/Resources/runtime-pack"
+EMBEDDED_RUNTIME_PACK="$RUNTIME_PACK_RESOURCE_DIR/$RUNTIME_PACK_NAME"
+EMBEDDED_RUNTIME_PACK_CHECKSUM="$EMBEDDED_RUNTIME_PACK.sha256"
+EMBEDDED_RUNTIME_PACK_SIGNATURE="$EMBEDDED_RUNTIME_PACK.sig"
 KEYS="${KEYS:-$HOME/.keys}"
 SPOT_MONO_FONT="${VIBECRAFTED_SPOT_MONO_FONT:-$KEYS/fonts/SpotMono.ttc}"
 SIGNING_IDENTITY_FILE="$KEYS/signing-identity.txt"
@@ -404,6 +408,27 @@ materialize_donor_snapshots() {
     || die "VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT is set; failing on purpose so the reaper is exercised"
 }
 
+embed_runtime_pack() {
+  log "Producing the canonical Runtime Pack carrier once inside Vibecrafted.app"
+  rm -rf "$RUNTIME_PACK_RESOURCE_DIR"
+  mkdir -p "$RUNTIME_PACK_RESOURCE_DIR"
+  install -m 0755 "$REPO_ROOT/scripts/install-runtime-pack.sh" \
+    "$RUNTIME_PACK_RESOURCE_DIR/install-runtime-pack.sh"
+  install -m 0644 \
+    "$REPO_ROOT/vibecrafted-core/vibecrafted_core/trust/vibecrafted-signing-v1.pub" \
+    "$RUNTIME_PACK_RESOURCE_DIR/vibecrafted-signing-v1.pub"
+  "$REPO_ROOT/scripts/package-runtime-pack.sh" \
+    --app "$APP" --output "$EMBEDDED_RUNTIME_PACK" \
+    --source-revision "$ROOT_SHA" \
+    --terminal-revision "$(git_sha "$TERMINAL_REPO")" \
+    --frame-revision "$(git_sha "$FRAME_REPO")" \
+    --version "$RUNTIME_VERSION" \
+    --platform "$RUNTIME_PACK_PLATFORM" \
+    --architecture "$(uname -m | sed 's/^aarch64$/arm64/; s/^x86_64$/x64/')"
+  /usr/bin/openssl dgst -sha256 -sign "$SIGNING_KEY" \
+    -out "$EMBEDDED_RUNTIME_PACK_SIGNATURE" "$EMBEDDED_RUNTIME_PACK"
+}
+
 build_product() {
   materialize_donor_snapshots
   require_clean_repo "$REPO_ROOT" vibecrafted
@@ -683,6 +708,7 @@ build_product() {
   log "Signing nested code and binding exact source receipts"
   sign_macho_tree
   sign_nested_app_bundles
+  embed_runtime_pack
   require_clean_repo "$REPO_ROOT" vibecrafted
   require_clean_repo "$TERMINAL_REPO" vc-terminal
   require_clean_repo "$FRAME_REPO" vc-frame ${FRAME_DERIVED+"${FRAME_DERIVED[@]}"}
@@ -735,7 +761,8 @@ notarize_product() {
 emit_release_tuple() {
   PYTHONPATH="$REPO_ROOT/vibecrafted-core" "$REPO_ROOT/scripts/project-python" \
     "$REPO_ROOT/scripts/unified_product_manifest.py" release \
-    --app "$APP" --dmg "$DMG" --output "$DIST_DIR/release-output.json"
+    --app "$APP" --dmg "$DMG" --runtime-pack "$RUNTIME_PACK" \
+    --output "$DIST_DIR/release-output.json"
   /usr/bin/openssl dgst -sha256 -sign "$SIGNING_KEY" \
     -out "$DIST_DIR/release-output.json.sig" "$DIST_DIR/release-output.json"
   run_bundled_verifier release-output \
@@ -747,16 +774,19 @@ emit_release_tuple() {
 }
 
 emit_runtime_pack() {
-  log "Packaging the standalone Runtime Pack carrier"
+  log "Projecting the exact App-embedded Runtime Pack bytes as the standalone asset"
   rm -f "$RUNTIME_PACK" "$RUNTIME_PACK_CHECKSUM" "$RUNTIME_PACK_SIGNATURE"
-  "$REPO_ROOT/scripts/package-runtime-pack.sh" \
-    --app "$APP" --output "$RUNTIME_PACK"
-  /usr/bin/openssl dgst -sha256 -sign "$SIGNING_KEY" \
-    -out "$RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK"
+  install -m 0644 "$EMBEDDED_RUNTIME_PACK" "$RUNTIME_PACK"
+  install -m 0644 "$EMBEDDED_RUNTIME_PACK_CHECKSUM" "$RUNTIME_PACK_CHECKSUM"
+  install -m 0644 "$EMBEDDED_RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK_SIGNATURE"
+  cmp "$EMBEDDED_RUNTIME_PACK" "$RUNTIME_PACK"
+  cmp "$EMBEDDED_RUNTIME_PACK_CHECKSUM" "$RUNTIME_PACK_CHECKSUM"
+  cmp "$EMBEDDED_RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK_SIGNATURE"
 }
 
 if [[ "$MODE" == "notarize" ]]; then
   [[ -d "$APP" ]] || die "missing $APP; run make dmg-signed first"
+  emit_runtime_pack
   notarize_product
   emit_release_tuple
   exit 0

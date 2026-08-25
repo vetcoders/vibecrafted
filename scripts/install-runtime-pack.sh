@@ -9,6 +9,13 @@ pack="${VIBECRAFTED_RUNTIME_PACK:-}"
 temporary=""
 operation="install"
 dry_run="0"
+verify_only="0"
+app_root=""
+terminal_host=""
+frame_helper=""
+expected_source_revision=""
+expected_terminal_revision=""
+expected_frame_revision=""
 
 cleanup() {
   if [[ -n "$temporary" && -d "$temporary" ]]; then
@@ -28,12 +35,28 @@ while (($#)); do
       operation="uninstall"
       shift
       ;;
+    --verify-only)
+      verify_only="1"
+      shift
+      ;;
+    --app-root|--terminal-host|--frame-helper|--expected-source-revision|--expected-terminal-revision|--expected-frame-revision)
+      (($# >= 2)) || die "$1 requires a path or revision"
+      case "$1" in
+        --app-root) app_root="$2" ;;
+        --terminal-host) terminal_host="$2" ;;
+        --frame-helper) frame_helper="$2" ;;
+        --expected-source-revision) expected_source_revision="$2" ;;
+        --expected-terminal-revision) expected_terminal_revision="$2" ;;
+        --expected-frame-revision) expected_frame_revision="$2" ;;
+      esac
+      shift 2
+      ;;
     --dry-run|-n)
       dry_run="1"
       shift
       ;;
     --help|-h)
-      printf 'usage: %s [--pack <Runtime Pack directory, Vibecrafted.app, or .tar.gz>] [--uninstall [--dry-run]]\n' "$0"
+      printf 'usage: %s [--pack <RuntimePack.tar.gz>] [--verify-only] [--expected-*-revision <sha>] [--app-root <Vibecrafted.app> --terminal-host <path> --frame-helper <path>] [--uninstall [--dry-run]]\n' "$0"
       exit 0
       ;;
     *) die "unknown argument: $1" ;;
@@ -42,6 +65,16 @@ done
 
 if [[ "$operation" == "install" && "$dry_run" == "1" ]]; then
   die "--dry-run is only valid with --uninstall"
+fi
+if [[ "$operation" == "uninstall" && "$verify_only" == "1" ]]; then
+  die "--verify-only cannot be combined with --uninstall"
+fi
+helper_argument_count=0
+[[ -n "$app_root" ]] && ((helper_argument_count += 1))
+[[ -n "$terminal_host" ]] && ((helper_argument_count += 1))
+[[ -n "$frame_helper" ]] && ((helper_argument_count += 1))
+if ((helper_argument_count != 0 && helper_argument_count != 3)); then
+  die "--app-root, --terminal-host and --frame-helper must be supplied together"
 fi
 
 if [[ "$operation" == "uninstall" ]]; then
@@ -73,19 +106,15 @@ if [[ "$operation" == "uninstall" ]]; then
 fi
 
 if [[ -z "$pack" ]]; then
-  if [[ -d "$REPO_ROOT/dist/Vibecrafted.app/Contents/Resources/runtime" ]]; then
-    pack="$REPO_ROOT/dist/Vibecrafted.app"
+  shopt -s nullglob
+  candidates=("$REPO_ROOT"/dist/Vibecrafted_RuntimePack_*.tar.gz)
+  shopt -u nullglob
+  if ((${#candidates[@]} == 1)); then
+    pack="${candidates[0]}"
+  elif ((${#candidates[@]} > 1)); then
+    die "multiple Runtime Packs in dist; set VIBECRAFTED_RUNTIME_PACK explicitly"
   else
-    shopt -s nullglob
-    candidates=("$REPO_ROOT"/dist/Vibecrafted_RuntimePack_*.tar.gz)
-    shopt -u nullglob
-    if ((${#candidates[@]} == 1)); then
-      pack="${candidates[0]}"
-    elif ((${#candidates[@]} > 1)); then
-      die "multiple Runtime Packs in dist; set VIBECRAFTED_RUNTIME_PACK explicitly"
-    else
-      die "no Runtime Pack found; set VIBECRAFTED_RUNTIME_PACK or run 'make runtime-pack'"
-    fi
+    die "no Runtime Pack found; set VIBECRAFTED_RUNTIME_PACK or run 'make runtime-pack'"
   fi
 fi
 
@@ -94,21 +123,9 @@ pack_parent="$(cd "$(dirname "$pack")" 2>/dev/null && pwd)" \
   || die "cannot resolve Runtime Pack path: $pack"
 pack="$pack_parent/$pack_name"
 
-app_root=""
-terminal_host=""
-frame_helper=""
 payload_root=""
 
-if [[ -d "$pack" ]]; then
-  if [[ "$pack" == *.app ]]; then
-    app_root="$pack"
-    payload_root="$pack/Contents/Resources/runtime"
-    terminal_host="$pack/Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
-    frame_helper="$pack/Contents/Helpers/vc-frame"
-  else
-    payload_root="$pack"
-  fi
-elif [[ -f "$pack" && "$pack" == *.tar.gz ]]; then
+if [[ -f "$pack" && "$pack" == *.tar.gz ]]; then
   command -v tar >/dev/null 2>&1 \
     || die "tar is required to extract a Runtime Pack archive"
   checksum="$pack.sha256"
@@ -161,7 +178,7 @@ elif [[ -f "$pack" && "$pack" == *.tar.gz ]]; then
     die "links are forbidden in extracted Runtime Pack archives"
   fi
 else
-  die "Runtime Pack is not a directory, app, or .tar.gz archive: $pack"
+  die "Runtime Pack must be the canonical .tar.gz carrier: $pack"
 fi
 
 [[ -d "$payload_root" ]] || die "runtime payload missing: $payload_root"
@@ -169,6 +186,24 @@ pack_python="$payload_root/bin/python3"
 pack_installer="$payload_root/scripts/vetcoders_install.py"
 [[ -x "$pack_python" ]] || die "Runtime Pack Python missing: $pack_python"
 [[ -f "$pack_installer" ]] || die "Runtime Pack installer missing: $pack_installer"
+contract_arguments=(
+  -m vibecrafted_core.runtime_pack_contract verify
+  --root "$payload_root"
+  --carrier-basename "$pack_name"
+)
+[[ -n "$expected_source_revision" ]] \
+  && contract_arguments+=(--expected-source-revision "$expected_source_revision")
+[[ -n "$expected_terminal_revision" ]] \
+  && contract_arguments+=(--expected-terminal-revision "$expected_terminal_revision")
+[[ -n "$expected_frame_revision" ]] \
+  && contract_arguments+=(--expected-frame-revision "$expected_frame_revision")
+contract_output="$(PYTHONPATH="$payload_root/vibecrafted-core" \
+  "$pack_python" "${contract_arguments[@]}")" \
+  || die "Runtime Pack internal provenance verification failed"
+if [[ "$verify_only" == "1" ]]; then
+  printf '%s\n' "$contract_output"
+  exit 0
+fi
 
 if [[ "$operation" == "uninstall" ]]; then
   arguments=(runtime-uninstall)
@@ -177,6 +212,12 @@ else
   arguments=(runtime-install --payload-root "$payload_root")
 fi
 if [[ "$operation" == "install" && -n "$app_root" ]]; then
+  app_root="$(cd "$app_root" && pwd -P)" \
+    || die "cannot resolve Vibecrafted.app root: $app_root"
+  terminal_host="$(cd "$(dirname "$terminal_host")" && pwd -P)/${terminal_host##*/}" \
+    || die "cannot resolve bundled terminal host"
+  frame_helper="$(cd "$(dirname "$frame_helper")" && pwd -P)/${frame_helper##*/}" \
+    || die "cannot resolve bundled vc-frame helper"
   [[ -x "$terminal_host" ]] || die "bundled terminal host missing: $terminal_host"
   [[ -x "$frame_helper" ]] || die "bundled vc-frame helper missing: $frame_helper"
   arguments+=(

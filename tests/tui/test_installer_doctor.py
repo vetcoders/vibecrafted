@@ -880,6 +880,9 @@ _RUNTIME_GENERATION_FIXTURE_SOURCES = {
     Path("vibecrafted-core/vibecrafted_core/product_contract.py"): Path(
         "vibecrafted-core/vibecrafted_core/product_contract.py"
     ),
+    Path("vibecrafted-core/vibecrafted_core/runtime_pack_contract.py"): Path(
+        "vibecrafted-core/vibecrafted_core/runtime_pack_contract.py"
+    ),
     Path("vibecrafted-core/vibecrafted_core/walkaround_runner.py"): Path(
         "vibecrafted-core/vibecrafted_core/walkaround_runner.py"
     ),
@@ -899,7 +902,7 @@ def _write_release_contract_runtime_manifest(
     current_tools: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert len(_RUNTIME_GENERATION_FIXTURE_SOURCES) == 12
+    assert len(_RUNTIME_GENERATION_FIXTURE_SOURCES) == 13
     assert (
         frozenset(_RUNTIME_GENERATION_FIXTURE_SOURCES)
         == installer._RUNTIME_GENERATION_REQUIRED_HASHES
@@ -1106,6 +1109,7 @@ def test_release_contract_inventory_names_runner_schema_policy_and_key() -> None
     assert "verify-vibecrafted-walkaround" in installer.PYTHON_ENTRYPOINT_LAUNCHERS
     assert installer.RELEASE_CONTRACT_PACKAGE_ASSETS == (
         "product_contract.py",
+        "runtime_pack_contract.py",
         "walkaround_runner.py",
         "schemas/unified_product.schema.v1.json",
         "trust/release-policy.v1.json",

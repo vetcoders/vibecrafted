@@ -535,6 +535,7 @@
         "outer_executable",
         "code_resources",
         "dmg",
+        "runtime_pack",
         "modules",
         "source_revisions",
         "notarization"
@@ -619,6 +620,45 @@
             },
             "sha256": { "$ref": "#/$defs/sha256" },
             "size": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "runtime_pack": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "embedded_path", "sha256", "size", "provenance"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "pattern": "^Vibecrafted_RuntimePack_[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?-[0-9]{8}-[0-9a-f]{8}-darwin-(?:arm64|x64)\\.tar\\.gz$"
+            },
+            "embedded_path": {
+              "type": "string",
+              "pattern": "^Contents/Resources/runtime-pack/Vibecrafted_RuntimePack_[^/]+\\.tar\\.gz$"
+            },
+            "sha256": { "$ref": "#/$defs/sha256" },
+            "size": { "type": "integer", "minimum": 1 },
+            "provenance": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "sha256", "version", "platform", "architecture", "source_revisions"],
+              "properties": {
+                "path": { "const": "runtime-pack-provenance.json" },
+                "sha256": { "$ref": "#/$defs/sha256" },
+                "version": { "type": "string", "minLength": 1 },
+                "platform": { "const": "darwin-arm64" },
+                "architecture": { "const": "arm64" },
+                "source_revisions": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["vibecrafted", "vc-terminal", "vc-frame"],
+                  "properties": {
+                    "vibecrafted": { "$ref": "#/$defs/gitSha" },
+                    "vc-terminal": { "$ref": "#/$defs/gitSha" },
+                    "vc-frame": { "$ref": "#/$defs/gitSha" }
+                  }
+                }
+              }
+            }
           }
         },
         "modules": {

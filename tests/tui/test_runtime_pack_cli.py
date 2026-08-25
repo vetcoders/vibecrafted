@@ -3,26 +3,121 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
+
+from vibecrafted_core.runtime_pack_contract import write_provenance
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = REPO_ROOT / "scripts/install-runtime-pack.sh"
 PACKAGER = REPO_ROOT / "scripts/package-runtime-pack.sh"
+SOURCE_SHA = "1" * 40
+TERMINAL_SHA = "2" * 40
+FRAME_SHA = "3" * 40
+VERSION = "4.3.0"
 
 
 def _fake_runtime_payload(root: Path, capture: Path) -> None:
     (root / "bin").mkdir(parents=True)
     (root / "scripts").mkdir(parents=True)
+    contract_dir = root / "vibecrafted-core/vibecrafted_core"
+    contract_dir.mkdir(parents=True)
+    (contract_dir / "__init__.py").write_text("", encoding="utf-8")
+    (contract_dir / "runtime_pack_contract.py").write_bytes(
+        (
+            REPO_ROOT / "vibecrafted-core/vibecrafted_core/runtime_pack_contract.py"
+        ).read_bytes()
+    )
+    (root / "VERSION").write_text(f"{VERSION}\n", encoding="utf-8")
     python = root / "bin/python3"
     python.write_text(
-        '#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$CAPTURE"\n',
+        "#!/usr/bin/env bash\n"
+        'if [[ "${1:-}" == "-m" ]]; then\n'
+        f'  exec "{sys.executable}" "$@"\n'
+        "fi\n"
+        'printf "%s\\n" "$@" > "$CAPTURE"\n',
         encoding="utf-8",
     )
     python.chmod(0o755)
     (root / "scripts/vetcoders_install.py").write_text("# fixture\n", encoding="utf-8")
     capture.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _source_provenance(root: Path, revision: str = SOURCE_SHA) -> None:
+    payload = {
+        "schema": "vibecrafted.source-provenance.v2",
+        "owner_repo": "vetcoders/vibecrafted",
+        "source_revision": revision,
+        "payload": {},
+    }
+    (root / "source-provenance.json").write_text(
+        json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+def _sealed_archive(
+    tmp_path: Path,
+    payload: Path,
+    *,
+    name: str = "Vibecrafted_RuntimePack_fixture.tar.gz",
+    source_revision: str = SOURCE_SHA,
+) -> tuple[Path, Path]:
+    archive = tmp_path / name
+    _source_provenance(payload, source_revision)
+    write_provenance(
+        payload,
+        carrier_basename=name,
+        version=VERSION,
+        platform="darwin-arm64",
+        architecture="arm64",
+        source_revision=source_revision,
+        terminal_revision=TERMINAL_SHA,
+        frame_revision=FRAME_SHA,
+    )
+    with tarfile.open(archive, "w:gz") as bundle:
+        bundle.add(payload, arcname="VibecraftedRuntime")
+    checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
+    archive.with_suffix(archive.suffix + ".sha256").write_text(
+        f"{checksum}  {archive.name}\n", encoding="utf-8"
+    )
+    private_key = tmp_path / "signing.key"
+    public_key = tmp_path / "signing.pub"
+    subprocess.run(
+        ["openssl", "genpkey", "-algorithm", "RSA", "-out", str(private_key)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "openssl",
+            "pkey",
+            "-in",
+            str(private_key),
+            "-pubout",
+            "-out",
+            str(public_key),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "openssl",
+            "dgst",
+            "-sha256",
+            "-sign",
+            str(private_key),
+            "-out",
+            str(archive) + ".sig",
+            str(archive),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return archive, public_key
 
 
 def _run(
@@ -38,23 +133,19 @@ def _run(
     )
 
 
-def test_runtime_pack_directory_uses_pack_owned_python(tmp_path: Path) -> None:
+def test_runtime_pack_rejects_directory_carrier(tmp_path: Path) -> None:
     payload = tmp_path / "VibecraftedRuntime"
     capture = tmp_path / "argv"
     _fake_runtime_payload(payload, capture)
 
     result = _run("--pack", str(payload), env={"CAPTURE": str(capture)})
 
-    assert result.returncode == 0, result.stderr
-    assert capture.read_text(encoding="utf-8").splitlines() == [
-        str(payload / "scripts/vetcoders_install.py"),
-        "runtime-install",
-        "--payload-root",
-        str(payload),
-    ]
+    assert result.returncode != 0
+    assert "canonical .tar.gz carrier" in result.stderr
+    assert not capture.exists()
 
 
-def test_runtime_pack_app_supplies_native_helpers(tmp_path: Path) -> None:
+def test_runtime_pack_rejects_app_as_carrier(tmp_path: Path) -> None:
     app = tmp_path / "Vibecrafted.app"
     payload = app / "Contents/Resources/runtime"
     capture = tmp_path / "argv"
@@ -68,19 +159,9 @@ def test_runtime_pack_app_supplies_native_helpers(tmp_path: Path) -> None:
 
     result = _run("--pack", str(app), env={"CAPTURE": str(capture)})
 
-    assert result.returncode == 0, result.stderr
-    assert capture.read_text(encoding="utf-8").splitlines() == [
-        str(payload / "scripts/vetcoders_install.py"),
-        "runtime-install",
-        "--payload-root",
-        str(payload),
-        "--app-root",
-        str(app),
-        "--terminal-host",
-        str(terminal),
-        "--frame-helper",
-        str(frame),
-    ]
+    assert result.returncode != 0
+    assert "canonical .tar.gz carrier" in result.stderr
+    assert not capture.exists()
 
 
 def test_runtime_uninstall_uses_installed_generation_tool(tmp_path: Path) -> None:
@@ -125,16 +206,25 @@ def test_runtime_uninstall_recovers_from_pack_when_projection_is_missing(
     capture = tmp_path / "argv"
     _fake_runtime_payload(payload, capture)
 
+    archive, public_key = _sealed_archive(tmp_path, payload)
     result = _run(
         "--uninstall",
         "--pack",
-        str(payload),
-        env={"HOME": str(home), "CAPTURE": str(capture)},
+        str(archive),
+        env={
+            "HOME": str(home),
+            "CAPTURE": str(capture),
+            "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY": str(public_key),
+        },
     )
 
     assert result.returncode == 0, result.stderr
     assert capture.read_text(encoding="utf-8").splitlines() == [
-        str(payload / "scripts/vetcoders_install.py"),
+        next(
+            line
+            for line in capture.read_text(encoding="utf-8").splitlines()
+            if line.endswith("scripts/vetcoders_install.py")
+        ),
         "runtime-uninstall",
     ]
 
@@ -161,9 +251,26 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
     for relative in required:
         path = runtime / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("fixture\n", encoding="utf-8")
+        if relative == "bin/python3":
+            path.write_text(
+                f'#!/usr/bin/env bash\nexec "{sys.executable}" "$@"\n',
+                encoding="utf-8",
+            )
+        else:
+            path.write_text(
+                f"{VERSION}\n" if relative == "VERSION" else "fixture\n",
+                encoding="utf-8",
+            )
         if relative.startswith("bin/"):
             path.chmod(0o755)
+    contract_dir = runtime / "vibecrafted-core/vibecrafted_core"
+    contract_dir.mkdir(parents=True)
+    (contract_dir / "__init__.py").write_text("", encoding="utf-8")
+    shutil.copy2(
+        REPO_ROOT / "vibecrafted-core/vibecrafted_core/runtime_pack_contract.py",
+        contract_dir / "runtime_pack_contract.py",
+    )
+    _source_provenance(runtime)
     terminal = app / "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
     frame = app / "Contents/Helpers/vc-frame"
     for helper in (terminal, frame):
@@ -173,7 +280,26 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
     output = tmp_path / "Vibecrafted_RuntimePack_fixture.tar.gz"
 
     result = subprocess.run(
-        ["bash", str(PACKAGER), "--app", str(app), "--output", str(output)],
+        [
+            "bash",
+            str(PACKAGER),
+            "--app",
+            str(app),
+            "--output",
+            str(output),
+            "--source-revision",
+            SOURCE_SHA,
+            "--terminal-revision",
+            TERMINAL_SHA,
+            "--frame-revision",
+            FRAME_SHA,
+            "--version",
+            VERSION,
+            "--platform",
+            "darwin-arm64",
+            "--architecture",
+            "arm64",
+        ],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
@@ -190,6 +316,7 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
         assert "VibecraftedRuntime/bin/vc-terminal" in names
         assert "VibecraftedRuntime/bin/vc-frame" in names
         assert "VibecraftedRuntime/libexec/vc-frame" in names
+        assert "VibecraftedRuntime/runtime-pack-provenance.json" in names
         assert not any(
             member.issym() or member.islnk() for member in archive.getmembers()
         )
@@ -227,47 +354,7 @@ def test_signed_archive_bootstraps_without_ambient_python_and_cleans_temp(
     payload = tmp_path / "source/VibecraftedRuntime"
     capture = tmp_path / "argv"
     _fake_runtime_payload(payload, capture)
-    archive = tmp_path / "Vibecrafted_RuntimePack_fixture.tar.gz"
-    with tarfile.open(archive, "w:gz") as bundle:
-        bundle.add(payload, arcname="VibecraftedRuntime")
-    checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
-    archive.with_suffix(archive.suffix + ".sha256").write_text(
-        f"{checksum}  {archive.name}\n", encoding="utf-8"
-    )
-    private_key = tmp_path / "signing.key"
-    public_key = tmp_path / "signing.pub"
-    subprocess.run(
-        ["openssl", "genpkey", "-algorithm", "RSA", "-out", str(private_key)],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        [
-            "openssl",
-            "pkey",
-            "-in",
-            str(private_key),
-            "-pubout",
-            "-out",
-            str(public_key),
-        ],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        [
-            "openssl",
-            "dgst",
-            "-sha256",
-            "-sign",
-            str(private_key),
-            "-out",
-            str(archive) + ".sig",
-            str(archive),
-        ],
-        check=True,
-        capture_output=True,
-    )
+    archive, public_key = _sealed_archive(tmp_path, payload)
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
     ambient_python = fake_bin / "python3"
@@ -293,3 +380,51 @@ def test_signed_archive_bootstraps_without_ambient_python_and_cleans_temp(
     assert arguments[3].startswith(str(extraction_home))
     assert arguments[0] == f"{arguments[3]}/scripts/vetcoders_install.py"
     assert not any(extraction_home.iterdir())
+
+
+def test_signed_carrier_rejects_expected_source_mismatch_before_installer(
+    tmp_path: Path,
+) -> None:
+    payload = tmp_path / "source/VibecraftedRuntime"
+    capture = tmp_path / "argv"
+    _fake_runtime_payload(payload, capture)
+    archive, public_key = _sealed_archive(tmp_path, payload)
+
+    result = _run(
+        "--pack",
+        str(archive),
+        "--expected-source-revision",
+        "4" * 40,
+        env={
+            "CAPTURE": str(capture),
+            "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY": str(public_key),
+        },
+    )
+
+    assert result.returncode != 0
+    assert "internal provenance verification failed" in result.stderr
+    assert not capture.exists()
+
+
+def test_signed_carrier_rejects_expected_donor_mismatch_before_installer(
+    tmp_path: Path,
+) -> None:
+    payload = tmp_path / "source/VibecraftedRuntime"
+    capture = tmp_path / "argv"
+    _fake_runtime_payload(payload, capture)
+    archive, public_key = _sealed_archive(tmp_path, payload)
+
+    result = _run(
+        "--pack",
+        str(archive),
+        "--expected-terminal-revision",
+        "5" * 40,
+        env={
+            "CAPTURE": str(capture),
+            "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY": str(public_key),
+        },
+    )
+
+    assert result.returncode != 0
+    assert "internal provenance verification failed" in result.stderr
+    assert not capture.exists()

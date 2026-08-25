@@ -10,6 +10,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -18,6 +19,7 @@ from typing import Any
 
 import pytest
 from vibecrafted_core import product_contract as contract
+from vibecrafted_core import runtime_pack_contract
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VERIFY_SCRIPT = REPO_ROOT / "scripts/verify-vibecrafted-product.sh"
@@ -200,6 +202,38 @@ def _module_fixture(
     return manifest
 
 
+def _runtime_pack_fixture(app: Path) -> str:
+    name = "Vibecrafted_RuntimePack_1.0.0-20260814-22222222-darwin-arm64.tar.gz"
+    embedded = app / "Contents/Resources/runtime-pack" / name
+    with tempfile.TemporaryDirectory(prefix="runtime-pack-fixture.") as temporary:
+        payload = Path(temporary) / "VibecraftedRuntime"
+        payload.mkdir()
+        (payload / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+        _write_json(
+            payload / "source-provenance.json",
+            {
+                "schema": runtime_pack_contract.SOURCE_PROVENANCE_SCHEMA,
+                "owner_repo": "vetcoders/vibecrafted",
+                "source_revision": "2" * 40,
+                "payload": {},
+            },
+        )
+        runtime_pack_contract.write_provenance(
+            payload,
+            carrier_basename=name,
+            version="1.0.0",
+            platform="darwin-arm64",
+            architecture="arm64",
+            source_revision="2" * 40,
+            terminal_revision="4" * 40,
+            frame_revision="6" * 40,
+        )
+        embedded.parent.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(embedded, "w:gz") as archive:
+            archive.add(payload, arcname="VibecraftedRuntime")
+    return name
+
+
 def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
     terminal_relative = "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
     for relative in (
@@ -323,6 +357,7 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
         entrypoint_name="frame",
         product_entry=frame_product_entry,
     )
+    runtime_pack_name = _runtime_pack_fixture(app)
     manifest = {
         "schema": contract.PRODUCT_SCHEMA,
         "product": contract.PRODUCT_NAME,
@@ -384,6 +419,11 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
                 kind="executable",
             ),
             _entry(app, contract._LAUNCH_PRIMARY_SHELL, kind="resource"),
+            _entry(
+                app,
+                f"Contents/Resources/runtime-pack/{runtime_pack_name}",
+                kind="resource",
+            ),
         ],
         "entrypoints": {
             "app": "Contents/MacOS/Vibecrafted",
@@ -551,6 +591,18 @@ def _release_output_fixture(
     }
     policy = contract._release_policy()
     executable = app / product["outer_bundle_code"]["path"]
+    runtime_pack_name = (
+        f"Vibecrafted_RuntimePack_{product['version']}-20260814-"
+        f"{product['git_sha'][:8]}-darwin-arm64.tar.gz"
+    )
+    embedded_runtime_pack = app / "Contents/Resources/runtime-pack" / runtime_pack_name
+    runtime_pack = root / runtime_pack_name
+    if runtime_pack.resolve() != embedded_runtime_pack.resolve():
+        shutil.copy2(embedded_runtime_pack, runtime_pack)
+    with tarfile.open(runtime_pack, "r:gz") as archive:
+        provenance_bytes = archive.extractfile(
+            f"VibecraftedRuntime/{runtime_pack_contract.PROVENANCE_NAME}"
+        ).read()
     payload = {
         "schema": contract.RELEASE_OUTPUT_SCHEMA,
         "signature_policy": {
@@ -589,6 +641,24 @@ def _release_output_fixture(
             "path": dmg.relative_to(root).as_posix(),
             "sha256": _sha256(dmg),
             "size": dmg.stat().st_size,
+        },
+        "runtime_pack": {
+            "path": runtime_pack_name,
+            "embedded_path": f"Contents/Resources/runtime-pack/{runtime_pack_name}",
+            "sha256": _sha256(runtime_pack),
+            "size": runtime_pack.stat().st_size,
+            "provenance": {
+                "path": runtime_pack_contract.PROVENANCE_NAME,
+                "sha256": hashlib.sha256(provenance_bytes).hexdigest(),
+                "version": product["version"],
+                "platform": "darwin-arm64",
+                "architecture": "arm64",
+                "source_revisions": {
+                    "vibecrafted": product["git_sha"],
+                    "vc-terminal": modules["vc-terminal"]["git_sha"],
+                    "vc-frame": modules["vc-frame"]["git_sha"],
+                },
+            },
         },
         "modules": {
             name: {
@@ -806,10 +876,19 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     ]
     assert "    false\n" in termination_handler
     assert "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty" in delegate
-    assert 'appendingPathComponent("scripts/vetcoders_install.py")' in delegate
-    assert '"runtime-install"' in delegate
-    assert '"runtime-uninstall"' in delegate
-    assert '"--payload-root", runtime.path' in delegate
+    assert 'appendingPathComponent("runtime-pack", isDirectory: true)' in delegate
+    assert 'appendingPathComponent("install-runtime-pack.sh")' in delegate
+    assert '"--expected-source-revision"' in delegate
+    assert (
+        'appendingPathComponent("runtime")'
+        not in delegate[
+            delegate.index("private func installCanonicalRuntime") : delegate.index(
+                "private func uninstallCanonicalRuntime"
+            )
+        ]
+    )
+    assert 'arguments: ["--uninstall"]' in delegate
+    assert '"--payload-root", runtime.path' not in delegate
     assert '"--terminal-host", terminalHost.path' in delegate
     assert '"--frame-helper", frameHelper.path' in delegate
     assert "JSONDecoder().decode(CanonicalRuntimeInstall.self" in delegate

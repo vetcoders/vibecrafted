@@ -63,10 +63,7 @@ test -s "$DMG_CHECKSUM" || die "missing $DMG_CHECKSUM"
 xcrun stapler validate "$DMG"
 spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
 
-RELEASE_DATE="${DMG_NAME#Vibecrafted_"${VERSION}"-}"
-RELEASE_DATE="${RELEASE_DATE%-"${HEAD_SHA:0:8}".dmg}"
-RUNTIME_PACK_PLATFORM="darwin-$(uname -m | sed 's/^arm64$/arm64/; s/^aarch64$/arm64/; s/^x86_64$/x64/')"
-RUNTIME_PACK_NAME="Vibecrafted_RuntimePack_${VERSION}-${RELEASE_DATE}-${HEAD_SHA:0:8}-${RUNTIME_PACK_PLATFORM}.tar.gz"
+RUNTIME_PACK_NAME="$(uv run python3 -c 'import json; print(json.load(open("dist/release-output.json"))["runtime_pack"]["path"])')"
 RUNTIME_PACK="$DIST/$RUNTIME_PACK_NAME"
 RUNTIME_PACK_CHECKSUM="$RUNTIME_PACK.sha256"
 RUNTIME_PACK_SIGNATURE="$RUNTIME_PACK.sig"
@@ -82,6 +79,15 @@ test -s "$RUNTIME_PACK_PUBLIC_KEY" || die "missing trusted Runtime Pack public k
 openssl dgst -sha256 -verify "$RUNTIME_PACK_PUBLIC_KEY" \
   -signature "$RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK" >/dev/null \
   || die "Runtime Pack signature verification failed"
+VC_FRAME_SHA="$(uv run python3 -c 'import json; print(json.load(open("dist/release-output.json"))["source_revisions"]["vc-frame"])')"
+VC_TERMINAL_SHA="$(uv run python3 -c 'import json; print(json.load(open("dist/release-output.json"))["source_revisions"]["vc-terminal"])')"
+VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY="$RUNTIME_PACK_PUBLIC_KEY" \
+  bash "$ROOT/scripts/install-runtime-pack.sh" \
+    --pack "$RUNTIME_PACK" \
+    --verify-only \
+    --expected-source-revision "$HEAD_SHA" \
+    --expected-terminal-revision "$VC_TERMINAL_SHA" \
+    --expected-frame-revision "$VC_FRAME_SHA" >/dev/null
 
 # The portable channel carries no Apple ticket, so its identity claim is the
 # closed source-provenance carrier: an allowlisted tree whose digest names one
@@ -166,6 +172,13 @@ openssl dgst -sha256 -verify "$RUNTIME_PACK_PUBLIC_KEY" \
   -signature "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME.sig" \
   "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME" >/dev/null \
   || die "downloaded Runtime Pack signature verification failed"
+VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY="$RUNTIME_PACK_PUBLIC_KEY" \
+  bash "$ROOT/scripts/install-runtime-pack.sh" \
+    --pack "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME" \
+    --verify-only \
+    --expected-source-revision "$HEAD_SHA" \
+    --expected-terminal-revision "$VC_TERMINAL_SHA" \
+    --expected-frame-revision "$VC_FRAME_SHA" >/dev/null
 
 uv run --project vibecrafted-core verify-vibecrafted-walkaround verify-release \
   --release-output "$DOWNLOAD_DIR/release-output.json" \
@@ -221,8 +234,6 @@ RUNTIME_PACK_SIZE="$(stat -f %z "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME")"
 PORTABLE_SHA="$(shasum -a 256 "$DOWNLOAD_DIR/$PORTABLE_NAME" | awk '{print $1}')"
 PORTABLE_SIZE="$(stat -f %z "$DOWNLOAD_DIR/$PORTABLE_NAME")"
 PORTABLE_TREE_SHA="$(uv run python3 -c 'import json; print(json.load(open("dist/portable-output.json"))["provenance"]["tree_sha256"])')"
-VC_FRAME_SHA="$(uv run python3 -c 'import json; print(json.load(open("dist/release-output.json"))["source_revisions"]["vc-frame"])')"
-VC_TERMINAL_SHA="$(uv run python3 -c 'import json; print(json.load(open("dist/release-output.json"))["source_revisions"]["vc-terminal"])')"
 DOWNLOAD_URL="https://github.com/$REPO/releases/download/$TAG/$DMG_NAME"
 RUNTIME_PACK_URL="https://github.com/$REPO/releases/download/$TAG/$RUNTIME_PACK_NAME"
 PORTABLE_URL="https://github.com/$REPO/releases/download/$TAG/$PORTABLE_NAME"

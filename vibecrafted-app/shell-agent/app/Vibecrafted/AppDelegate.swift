@@ -382,17 +382,46 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   private func installCanonicalRuntime() throws -> CanonicalRuntimeInstall {
     let appRoot = Bundle.main.bundleURL
-    let runtime = appRoot.appendingPathComponent(
-      "Contents/Resources/runtime", isDirectory: true)
+    let resources = appRoot.appendingPathComponent("Contents/Resources", isDirectory: true)
+    let carrierDirectory = resources.appendingPathComponent("runtime-pack", isDirectory: true)
+    let carriers = try FileManager.default.contentsOfDirectory(
+      at: carrierDirectory, includingPropertiesForKeys: nil
+    ).filter {
+      $0.lastPathComponent.hasPrefix("Vibecrafted_RuntimePack_") && $0.pathExtension == "gz"
+    }
+    guard carriers.count == 1 else {
+      throw NSError(
+        domain: "io.vetcoders.vibecrafted.install", code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "signed App must contain one Runtime Pack carrier"])
+    }
+    let manifestData = try Data(
+      contentsOf: resources.appendingPathComponent("product-manifest.json"))
+    guard
+      let manifest = try JSONSerialization.jsonObject(with: manifestData) as? [String: Any],
+      let sourceRevision = manifest["git_sha"] as? String,
+      let modules = manifest["modules"] as? [[String: Any]],
+      let terminalRevision = modules.first(where: { $0["module"] as? String == "vc-terminal" })?[
+        "git_sha"] as? String,
+      let frameRevision = modules.first(where: { $0["module"] as? String == "vc-frame" })?[
+        "git_sha"] as? String
+    else {
+      throw NSError(
+        domain: "io.vetcoders.vibecrafted.install", code: 1,
+        userInfo: [
+          NSLocalizedDescriptionKey: "signed product manifest has no Runtime Pack source tuple"
+        ])
+    }
     let terminalHost = appRoot.appendingPathComponent(
       "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty")
     let frameHelper = appRoot.appendingPathComponent("Contents/Helpers/vc-frame")
-    let output = try runRuntimeInstaller(arguments: [
-      "runtime-install",
-      "--payload-root", runtime.path,
+    let output = try runRuntimePackInstaller(arguments: [
+      "--pack", carriers[0].path,
       "--app-root", appRoot.path,
       "--terminal-host", terminalHost.path,
       "--frame-helper", frameHelper.path,
+      "--expected-source-revision", sourceRevision,
+      "--expected-terminal-revision", terminalRevision,
+      "--expected-frame-revision", frameRevision,
     ])
     do {
       return try JSONDecoder().decode(CanonicalRuntimeInstall.self, from: output)
@@ -407,32 +436,34 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   private func uninstallCanonicalRuntime() throws {
-    _ = try runRuntimeInstaller(arguments: ["runtime-uninstall"])
+    _ = try runRuntimePackInstaller(arguments: ["--uninstall"])
   }
 
-  private func runRuntimeInstaller(arguments: [String]) throws -> Data {
-    let runtime = Bundle.main.bundleURL.appendingPathComponent(
-      "Contents/Resources/runtime", isDirectory: true)
-    let python = runtime.appendingPathComponent("bin/python3")
-    let installer = runtime.appendingPathComponent("scripts/vetcoders_install.py")
-    for required in [python, installer]
-    where !FileManager.default.isExecutableFile(atPath: required.path) {
+  private func runRuntimePackInstaller(arguments: [String]) throws -> Data {
+    let carrierDirectory = Bundle.main.bundleURL.appendingPathComponent(
+      "Contents/Resources/runtime-pack", isDirectory: true)
+    let installer = carrierDirectory.appendingPathComponent("install-runtime-pack.sh")
+    let publicKey = carrierDirectory.appendingPathComponent("vibecrafted-signing-v1.pub")
+    guard FileManager.default.isExecutableFile(atPath: installer.path),
+      FileManager.default.fileExists(atPath: publicKey.path)
+    else {
       throw NSError(
         domain: "io.vetcoders.vibecrafted.install", code: 1,
         userInfo: [
           NSLocalizedDescriptionKey:
-            "signed Runtime Pack installer entry is missing: \(required.path)"
+            "signed Runtime Pack bootstrap or trust root is missing"
         ])
     }
 
     let process = Process()
     let output = Pipe()
     let errors = Pipe()
-    process.executableURL = python
+    process.executableURL = URL(fileURLWithPath: "/bin/bash")
     process.arguments = [installer.path] + arguments
     var environment = ProcessInfo.processInfo.environment
     environment["PYTHONNOUSERSITE"] = "1"
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment["VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY"] = publicKey.path
     process.environment = environment
     process.standardOutput = output
     process.standardError = errors
