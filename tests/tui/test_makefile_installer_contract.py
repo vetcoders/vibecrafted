@@ -171,6 +171,21 @@ def test_release_workflow_is_read_only_and_validates_the_exact_tag_source() -> N
     assert "gh release edit" not in workflow
 
 
+def test_portable_workflow_requires_runtime_pack_bootstrap_on_mac_and_linux() -> None:
+    workflow = (REPO_ROOT / ".github/workflows/portable.yml").read_text(
+        encoding="utf-8"
+    )
+    bootstrap = workflow.split("  curl-bootstrap:", 1)[1]
+
+    assert "if: github.event_name == 'merge_group'" not in bootstrap
+    assert "runner: macos-latest" in bootstrap
+    assert "runner: ubuntu-latest" in bootstrap
+    assert "test_runtime_pack_cli.py" in bootstrap
+    assert "test_install_bootstrap.py" in bootstrap
+    assert "cargo binstall" not in bootstrap
+    assert "build-essential" not in bootstrap
+
+
 def test_core_gate_isolated_from_the_previously_installed_runtime_stamp() -> None:
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     gate = makefile.split("\ntest-core:", 1)[1].split("\ndispatch-test:", 1)[0]
@@ -217,8 +232,8 @@ def test_makefile_keeps_install_as_terminal_first_front_door() -> None:
     )[0]
     assert 'VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)"' in install_block
     assert 'bash "$(RUNTIME_PACK_INSTALLER)"' in install_block
-    assert 'if [ "$$(uname -s)" = "Darwin" ]' in install_block
-    assert "$(MAKE) --no-print-directory install-source" in install_block
+    assert 'if [ "$$(uname -s)" = "Darwin" ]' not in install_block
+    assert "$(MAKE) --no-print-directory install-source" not in install_block
     assert "$(INSTALL_STEP)" not in install_block
 
     source_block = text.split("\ninstall-source:\n", 1)[1].split(
@@ -238,7 +253,7 @@ def test_makefile_keeps_install_as_terminal_first_front_door() -> None:
 
     # The curl/portable source bootstrap remains explicit and cannot silently
     # select a host or App Runtime Pack.
-    assert "install-auto: install-source" in text
+    assert "install-auto: install" in text
 
     # setup-dev opens the uv meta-installer in advanced mode. Advanced is an
     # interactive surface, so it never carries the auto-approve `--yes`.

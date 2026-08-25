@@ -71,7 +71,7 @@ def _sealed_archive(
         payload,
         carrier_basename=name,
         version=VERSION,
-        platform="darwin-arm64",
+        platform="darwin",
         architecture="arm64",
         source_revision=source_revision,
         terminal_revision=TERMINAL_SHA,
@@ -124,7 +124,17 @@ def _run(
     *arguments: str, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["bash", str(INSTALLER), *arguments],
+        [
+            "bash",
+            str(INSTALLER),
+            "--expected-version",
+            VERSION,
+            "--expected-platform",
+            "darwin",
+            "--expected-architecture",
+            "arm64",
+            *arguments,
+        ],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
@@ -296,7 +306,7 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
             "--version",
             VERSION,
             "--platform",
-            "darwin-arm64",
+            "darwin",
             "--architecture",
             "arm64",
         ],
@@ -327,6 +337,49 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
         .split()[0]
         == expected
     )
+
+    # The same canonical writer also accepts a release-built Linux payload;
+    # consumers never compile it. Missing helpers still fail through the
+    # common required-file contract below.
+    for relative in ("bin/vc-terminal", "bin/vc-frame", "libexec/vc-frame"):
+        helper = runtime / relative
+        helper.parent.mkdir(parents=True, exist_ok=True)
+        helper.write_text("#!/bin/sh\n", encoding="utf-8")
+        helper.chmod(0o755)
+    linux_output = tmp_path / "Vibecrafted_RuntimePack_fixture-linux-arm64.tar.gz"
+    linux = subprocess.run(
+        [
+            "bash",
+            str(PACKAGER),
+            "--payload-root",
+            str(runtime),
+            "--output",
+            str(linux_output),
+            "--source-revision",
+            SOURCE_SHA,
+            "--terminal-revision",
+            TERMINAL_SHA,
+            "--frame-revision",
+            FRAME_SHA,
+            "--version",
+            VERSION,
+            "--platform",
+            "linux",
+            "--architecture",
+            "arm64",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert linux.returncode == 0, linux.stderr
+    with tarfile.open(linux_output, "r:gz") as archive:
+        provenance = json.load(
+            archive.extractfile("VibecraftedRuntime/runtime-pack-provenance.json")
+        )
+    assert provenance["platform"] == "linux"
+    assert provenance["architecture"] == "arm64"
 
 
 def test_runtime_pack_archive_requires_release_signature(tmp_path: Path) -> None:
@@ -419,6 +472,30 @@ def test_signed_carrier_rejects_expected_donor_mismatch_before_installer(
         str(archive),
         "--expected-terminal-revision",
         "5" * 40,
+        env={
+            "CAPTURE": str(capture),
+            "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY": str(public_key),
+        },
+    )
+
+    assert result.returncode != 0
+    assert "internal provenance verification failed" in result.stderr
+    assert not capture.exists()
+
+
+def test_signed_carrier_rejects_selected_platform_mismatch_before_installer(
+    tmp_path: Path,
+) -> None:
+    payload = tmp_path / "source/VibecraftedRuntime"
+    capture = tmp_path / "argv"
+    _fake_runtime_payload(payload, capture)
+    archive, public_key = _sealed_archive(tmp_path, payload)
+
+    result = _run(
+        "--pack",
+        str(archive),
+        "--expected-platform",
+        "linux",
         env={
             "CAPTURE": str(capture),
             "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY": str(public_key),

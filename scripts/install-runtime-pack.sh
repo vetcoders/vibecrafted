@@ -16,6 +16,9 @@ frame_helper=""
 expected_source_revision=""
 expected_terminal_revision=""
 expected_frame_revision=""
+expected_version="$(tr -d '[:space:]' < "$REPO_ROOT/VERSION")"
+expected_platform=""
+expected_architecture=""
 
 cleanup() {
   if [[ -n "$temporary" && -d "$temporary" ]]; then
@@ -39,7 +42,7 @@ while (($#)); do
       verify_only="1"
       shift
       ;;
-    --app-root|--terminal-host|--frame-helper|--expected-source-revision|--expected-terminal-revision|--expected-frame-revision)
+    --app-root|--terminal-host|--frame-helper|--expected-source-revision|--expected-terminal-revision|--expected-frame-revision|--expected-version|--expected-platform|--expected-architecture)
       (($# >= 2)) || die "$1 requires a path or revision"
       case "$1" in
         --app-root) app_root="$2" ;;
@@ -48,6 +51,9 @@ while (($#)); do
         --expected-source-revision) expected_source_revision="$2" ;;
         --expected-terminal-revision) expected_terminal_revision="$2" ;;
         --expected-frame-revision) expected_frame_revision="$2" ;;
+        --expected-version) expected_version="$2" ;;
+        --expected-platform) expected_platform="$2" ;;
+        --expected-architecture) expected_architecture="$2" ;;
       esac
       shift 2
       ;;
@@ -65,6 +71,27 @@ done
 
 if [[ "$operation" == "install" && "$dry_run" == "1" ]]; then
   die "--dry-run is only valid with --uninstall"
+fi
+
+if [[ -z "$expected_platform" ]]; then
+  case "$(uname -s)" in
+    Darwin) expected_platform="darwin" ;;
+    Linux) expected_platform="linux" ;;
+    *) die "unsupported Runtime Pack platform: $(uname -s)" ;;
+  esac
+fi
+if [[ -z "$expected_architecture" ]]; then
+  case "$(uname -m)" in
+    x86_64|amd64)
+      if [[ "$expected_platform" == "darwin" ]]; then
+        expected_architecture="x64"
+      else
+        expected_architecture="x86_64"
+      fi
+      ;;
+    arm64|aarch64) expected_architecture="arm64" ;;
+    *) die "unsupported Runtime Pack architecture: $(uname -m)" ;;
+  esac
 fi
 if [[ "$operation" == "uninstall" && "$verify_only" == "1" ]]; then
   die "--verify-only cannot be combined with --uninstall"
@@ -107,14 +134,14 @@ fi
 
 if [[ -z "$pack" ]]; then
   shopt -s nullglob
-  candidates=("$REPO_ROOT"/dist/Vibecrafted_RuntimePack_*.tar.gz)
+  candidates=("$REPO_ROOT"/dist/Vibecrafted_RuntimePack_*-"$expected_platform"-"$expected_architecture".tar.gz)
   shopt -u nullglob
   if ((${#candidates[@]} == 1)); then
     pack="${candidates[0]}"
   elif ((${#candidates[@]} > 1)); then
     die "multiple Runtime Packs in dist; set VIBECRAFTED_RUNTIME_PACK explicitly"
   else
-    die "no Runtime Pack found; set VIBECRAFTED_RUNTIME_PACK or run 'make runtime-pack'"
+    die "no ${expected_platform}/${expected_architecture} Runtime Pack found; set VIBECRAFTED_RUNTIME_PACK to the prebuilt release asset"
   fi
 fi
 
@@ -197,6 +224,11 @@ contract_arguments=(
   && contract_arguments+=(--expected-terminal-revision "$expected_terminal_revision")
 [[ -n "$expected_frame_revision" ]] \
   && contract_arguments+=(--expected-frame-revision "$expected_frame_revision")
+contract_arguments+=(
+  --expected-version "$expected_version"
+  --expected-platform "$expected_platform"
+  --expected-architecture "$expected_architecture"
+)
 contract_output="$(PYTHONPATH="$payload_root/vibecrafted-core" \
   "$pack_python" "${contract_arguments[@]}")" \
   || die "Runtime Pack internal provenance verification failed"

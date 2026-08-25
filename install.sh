@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF_USAGE'
-Usage: install.sh [--gui] [--yes] [--runtime <horse>] [--ref <branch>] [--archive-url <url> | --archive-file <path>] [--tools-dir <dir>] [make-target]
+Usage: install.sh [--gui] [--yes] [--runtime <horse>] [--ref <branch>] [--archive-url <url> | --archive-file <path>] [--runtime-pack-url <url> | --runtime-pack-file <path>] [--tools-dir <dir>] [make-target]
 
 Verify a local 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. source snapshot, then run the transactional installer
 from that private candidate. The installer publishes into $HOME/.local/share/vibecrafted/tools.
@@ -1077,6 +1077,8 @@ default_ref="${VIBECRAFTED_REF:-main}"
 ref="$default_ref"
 archive_url=""
 archive_file=""
+runtime_pack_url=""
+runtime_pack_file=""
 tools_dir="$default_tools_dir"
 target="vibecrafted"
 use_gui=0
@@ -1111,6 +1113,16 @@ while [[ $# -gt 0 ]]; do
       [[ $# -gt 0 ]] || die "Missing value for --archive-file"
       archive_file="$1"
       ;;
+    --runtime-pack-url)
+      shift
+      [[ $# -gt 0 ]] || die "Missing value for --runtime-pack-url"
+      runtime_pack_url="$1"
+      ;;
+    --runtime-pack-file)
+      shift
+      [[ $# -gt 0 ]] || die "Missing value for --runtime-pack-file"
+      runtime_pack_file="$1"
+      ;;
     --tools-dir)
       shift
       [[ $# -gt 0 ]] || die "Missing value for --tools-dir"
@@ -1136,6 +1148,9 @@ esac
 if [[ -n "$archive_url" && -n "$archive_file" ]]; then
   die "Use either --archive-url or --archive-file, not both"
 fi
+if [[ -n "$runtime_pack_url" && -n "$runtime_pack_file" ]]; then
+  die "Use either --runtime-pack-url or --runtime-pack-file, not both"
+fi
 
 if [[ "$use_gui" == "1" && "$target" != "vibecrafted" ]]; then
   die "--gui can only be used with the default vibecrafted install target"
@@ -1157,20 +1172,22 @@ enforce_runtime_root_contract || exit 1
 if [[ -z "$archive_url" && -z "$archive_file" ]]; then
   # Resolve latest version from the channel manifest instead of hard-pinning.
   channel_url="https://vibecrafted.io/channel/${ref}.json"
-  resolved_url=""
+  resolved_urls=""
   if command -v curl >/dev/null 2>&1; then
-    resolved_url="$(curl -fsSL "$channel_url" 2>/dev/null \
-      | python3 -c "import sys,json; print(json.load(sys.stdin).get('archive_url',''))" 2>/dev/null)" || true
+    resolved_urls="$(curl -fsSL "$channel_url" 2>/dev/null \
+      | python3 -c "import sys,json; p=json.load(sys.stdin); print(p.get('archive_url','')+'\\t'+p.get('runtime_pack_url',''))" 2>/dev/null)" || true
   fi
-  if [[ -n "$resolved_url" ]]; then
+  IFS=$'\t' read -r resolved_url resolved_pack_url <<< "$resolved_urls"
+  if [[ -n "$resolved_url" && -n "$resolved_pack_url" ]]; then
     archive_url="$resolved_url"
+    runtime_pack_url="$resolved_pack_url"
     vinfo "Resolved from channel ($ref): $archive_url"
   else
     # Raw GitHub source archives do not carry the writer-bound v2 distribution
     # tree receipt.  Minting one after download would let candidate bytes attest
     # to themselves, so this legacy path is deliberately closed.  Release
     # authentication remains a named W4 blocker while signature fetch is soft.
-    die "Channel manifest has no archive_url; refusing the untrusted raw GitHub fallback (W4 release authentication blocker)"
+    die "Channel manifest must bind archive_url and runtime_pack_url; refusing the untrusted raw GitHub fallback and incomplete release tuple (W4 release authentication blocker)"
   fi
 fi
 
@@ -1222,9 +1239,13 @@ preflight_require_all() {
   exit 1
 }
 
-# git is consumed later by install-tools-held; without it the install used
-# to die mid-flight AFTER three green phases — it belongs in pre-flight.
-preflight_tools=(tar make python3 git)
+# The public Runtime Pack path needs only extraction, signature verification
+# and bootstrap Python. A local source-only fixture still needs make, but the
+# production channel never gains a compiler toolchain fallback.
+preflight_tools=(tar python3 openssl)
+if [[ -z "$runtime_pack_file" && -z "$runtime_pack_url" ]]; then
+  preflight_tools+=(make)
+fi
 if [[ -z "$archive_file" ]]; then
   preflight_tools+=(curl)
 fi
@@ -1236,6 +1257,11 @@ export VIBECRAFTED_TOOLS_HOME="$tools_dir"
 if [[ -n "$archive_file" ]]; then
   [[ -f "$archive_file" ]] || die "Archive file not found: $archive_file"
 fi
+if [[ -n "$runtime_pack_file" ]]; then
+  [[ -f "$runtime_pack_file" ]] || die "Runtime Pack file not found: $runtime_pack_file"
+  [[ -f "$runtime_pack_file.sha256" ]] || die "Runtime Pack checksum not found: $runtime_pack_file.sha256"
+  [[ -f "$runtime_pack_file.sig" ]] || die "Runtime Pack signature not found: $runtime_pack_file.sig"
+fi
 
 current_link="$tools_dir/vibecrafted-current"
 
@@ -1245,6 +1271,17 @@ mkdir -p "$tools_dir"
 
 tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/vibecrafted-bootstrap.XXXXXX")"
 trap 'rm -rf -- "$tmpdir"' EXIT
+
+selected_runtime_pack="$runtime_pack_file"
+if [[ -n "$runtime_pack_url" ]]; then
+  selected_runtime_pack="$tmpdir/$(basename "$runtime_pack_url")"
+  curl -fsSL "$runtime_pack_url" -o "$selected_runtime_pack"
+  curl -fsSL "$runtime_pack_url.sha256" -o "$selected_runtime_pack.sha256"
+  curl -fsSL "$runtime_pack_url.sig" -o "$selected_runtime_pack.sig"
+fi
+if [[ -z "$selected_runtime_pack" && -z "$archive_file" ]]; then
+  die "No Runtime Pack is bound to this public source candidate"
+fi
 
 # Candidate commands must return through this shell so the EXIT trap can remove
 # the private verified payload. Publication is owned by install-bundle-tools
@@ -1391,6 +1428,12 @@ if [[ "$target" == "vibecrafted" ]] && ! is_interactive_session; then
   done
 
   export VIBECRAFTED_RUNTIME="$runtime"
+  if [[ -n "$selected_runtime_pack" ]]; then
+    run_candidate_command env \
+      VIBECRAFTED_RUNTIME_PACK="$selected_runtime_pack" \
+      bash "$candidate_root/scripts/install-runtime-pack.sh" \
+      --expected-source-revision "$expected_revision"
+  fi
   run_candidate_command make --no-print-directory -C "$candidate_root" install-auto RUNTIME="$runtime"
 fi
 

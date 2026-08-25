@@ -143,6 +143,9 @@ def verify_provenance(
     expected_source_revision: str | None = None,
     expected_terminal_revision: str | None = None,
     expected_frame_revision: str | None = None,
+    expected_version: str | None = None,
+    expected_platform: str | None = None,
+    expected_architecture: str | None = None,
 ) -> dict[str, Any]:
     payload_root = Path(root).resolve(strict=True)
     path = payload_root / PROVENANCE_NAME
@@ -204,6 +207,16 @@ def verify_provenance(
             raise RuntimePackContractError(
                 f"Runtime Pack {name} revision disagrees with the expected release tuple"
             )
+    expected_identity = {
+        "version": expected_version,
+        "platform": expected_platform,
+        "architecture": expected_architecture,
+    }
+    for field, expected in expected_identity.items():
+        if expected is not None and provenance[field] != expected:
+            raise RuntimePackContractError(
+                f"Runtime Pack {field} disagrees with the selected release asset"
+            )
     _source_provenance(payload_root, expected_revision=revisions["vibecrafted"])
     observed = _payload_files(payload_root)
     if files != observed:
@@ -233,6 +246,9 @@ def main(argv: list[str] | None = None) -> int:
     verify.add_argument("--expected-source-revision")
     verify.add_argument("--expected-terminal-revision")
     verify.add_argument("--expected-frame-revision")
+    verify.add_argument("--expected-version")
+    verify.add_argument("--expected-platform")
+    verify.add_argument("--expected-architecture")
     args = parser.parse_args(argv)
     if args.command == "write":
         payload = write_provenance(
@@ -252,6 +268,9 @@ def main(argv: list[str] | None = None) -> int:
             expected_source_revision=args.expected_source_revision,
             expected_terminal_revision=args.expected_terminal_revision,
             expected_frame_revision=args.expected_frame_revision,
+            expected_version=args.expected_version,
+            expected_platform=args.expected_platform,
+            expected_architecture=args.expected_architecture,
         )
     print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
     return 0

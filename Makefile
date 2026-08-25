@@ -36,7 +36,7 @@ if [ ! -d "$$stable_root/vibecrafted-core" ]; then \
 fi
 endef
 
-.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release runtime-pack portable publish-release release-rehearsal gui-install wizard wizard-dev check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service server-smoke
+.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release runtime-pack portable publish-release release-rehearsal gui-install wizard wizard-dev check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate release-version-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service server-smoke
 
 help:
 	@printf "\n"
@@ -164,6 +164,7 @@ publish-release:
 	@zsh -ic 'cd "$(CURDIR)" && exec bash scripts/publish-vibecrafted-release.sh'
 
 unified-product-contract-gate:
+	@$(MAKE) --no-print-directory release-version-gate
 	@set -eu; \
 	uv run --project vibecrafted-core --with pytest python -m pytest \
 		tests/tui/test_unified_app_contract.py \
@@ -195,6 +196,9 @@ unified-product-contract-gate:
 		rc=0; env -u PYTHONPATH PYTHONNOUSERSITE=1 "$$runner" verify-release --release-output "$$tmp/release-output.json" --signature "$$tmp/release-output.json.sig" >/dev/null 2>&1 || rc=$$?; test "$$rc" -eq 22; \
 		rc=0; env -u PYTHONPATH PYTHONNOUSERSITE=1 "$$runner" walkaround --release-output "$$tmp/release-output.json" --signature "$$tmp/release-output.json.sig" --output "$$tmp/walkaround.json" >/dev/null 2>&1 || rc=$$?; test "$$rc" -eq 22; \
 		test ! -e "$$tmp/walkaround.json")
+
+release-version-gate:
+	@$(PYTHON) scripts/version_bump.py --check --file "$(VERSION_FILE)"
 
 tui-installer: init-hooks
 	@if ! command -v uv >/dev/null 2>&1; then \
@@ -274,15 +278,10 @@ endif
 # Headless entrypoint for install.sh (curl|bash). Mirrors the full
 # non-interactive install. Was previously undefined, so the piped
 # `curl ... | bash` path ran `make install-auto` as a silent no-op.
-install-auto: install-source
+install-auto: install
 
 install:
-	@if [ "$$(uname -s)" = "Darwin" ]; then \
-		VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)" bash "$(RUNTIME_PACK_INSTALLER)"; \
-	else \
-		printf 'Binary Runtime Pack is not published for %s yet; using the explicit source lane.\n' "$$(uname -s)"; \
-		$(MAKE) --no-print-directory install-source; \
-	fi
+	@VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)" bash "$(RUNTIME_PACK_INSTALLER)"
 
 # Explicit source/compiler lane retained for the portable Linux/WSL carrier.
 # It is not the normal customer installer: it may require Rust, cargo-leptos,

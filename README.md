@@ -196,9 +196,10 @@ make install-source
 make help-dev   # the full target surface
 ```
 
-Until Linux/WSL binary Runtime Packs are published, `make install` on those
-platforms routes to this same explicit source lane instead of looking for a
-Darwin artifact.
+`make install` never compiles a product for a stranger. It selects a closed
+Runtime Pack for the current platform and architecture; Linux and WSL2 use the
+Linux x86_64 or arm64 carrier. `make install-source` is the explicit maintainer
+lane and may require the full build toolchain.
 
 A Runtime Pack install gives you the complete headless runtime — `vibecrafted
 doctor`, every skill launcher, `observe`/`await`, reports and transcripts under

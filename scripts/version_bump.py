@@ -40,6 +40,57 @@ CARGO_LOCK_PACKAGES = {
     Path("vibecrafted-app/Cargo.lock"): ("control-core",),
 }
 PLUGIN_MANIFEST_RELATIVE = Path("plugin.json")
+RELEASE_TEXT_PROJECTIONS = {
+    Path("packaging/homebrew/Formula/vibecrafted.rb"): re.compile(
+        r'^\s*version\s+"(?P<version>\d+\.\d+\.\d+)"', re.MULTILINE
+    ),
+    Path("packaging/homebrew/Casks/vibecrafted-app.rb"): re.compile(
+        r'^\s*version\s+"(?P<version>\d+\.\d+\.\d+),', re.MULTILINE
+    ),
+}
+
+
+def check_version_declarations(version_file: Path) -> str:
+    """Fail when a packaged product projection drifts from root VERSION."""
+    current = version_file.read_text(encoding="utf-8").strip()
+    _parse_version(current)
+    projections = _version_projections(version_file)
+    if projections is None:
+        return current
+    pyprojects, packaged_versions, cargos = projections
+    declared: dict[Path, str] = {
+        path: _table_version(path.read_text(encoding="utf-8"), "project")
+        for path in pyprojects
+    }
+    declared.update(
+        {path: path.read_text(encoding="utf-8").strip() for path in packaged_versions}
+    )
+    declared.update(
+        {
+            path: _table_version(path.read_text(encoding="utf-8"), "package")
+            for path in cargos
+        }
+    )
+    plugin_path = version_file.parent / PLUGIN_MANIFEST_RELATIVE
+    if plugin_path.exists():
+        declared[plugin_path] = str(
+            json.loads(plugin_path.read_text(encoding="utf-8")).get("version", "")
+        )
+    for relative, pattern in RELEASE_TEXT_PROJECTIONS.items():
+        path = version_file.parent / relative
+        if not path.exists():
+            continue
+        match = pattern.search(path.read_text(encoding="utf-8"))
+        if match is None:
+            raise ValueError(f"version declaration missing: {path}")
+        declared[path] = match.group("version")
+    drift = {path: value for path, value in declared.items() if value != current}
+    if drift:
+        details = ", ".join(f"{path}={value}" for path, value in drift.items())
+        raise ValueError(
+            f"Version drift detected; expected {current} in every declaration: {details}"
+        )
+    return current
 
 
 def _parse_version(value: str) -> tuple[int, int, int]:
@@ -234,6 +285,17 @@ def update_version_declarations(version_file: Path, requested: str) -> tuple[str
         if plugin_path.exists():
             plugin_payload = json.loads(plugin_path.read_text(encoding="utf-8"))
             declared[plugin_path] = str(plugin_payload.get("version", ""))
+        release_texts: dict[Path, tuple[str, re.Pattern[str]]] = {}
+        for relative, pattern in RELEASE_TEXT_PROJECTIONS.items():
+            path = version_file.parent / relative
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8")
+            match = pattern.search(text)
+            if match is None:
+                raise ValueError(f"version declaration missing: {path}")
+            declared[path] = match.group("version")
+            release_texts[path] = (text, pattern)
         declared.update(
             {
                 path: _table_version(text, "package")
@@ -268,6 +330,14 @@ def update_version_declarations(version_file: Path, requested: str) -> tuple[str
         if plugin_payload is not None:
             plugin_payload["version"] = next_version
             updates[plugin_path] = json.dumps(plugin_payload, indent=2) + "\n"
+        for path, (text, pattern) in release_texts.items():
+            updates[path] = pattern.sub(
+                lambda match: match.group(0).replace(
+                    match.group("version"), next_version, 1
+                ),
+                text,
+                count=1,
+            )
         for relative, package_names in CARGO_LOCK_PACKAGES.items():
             lock_path = version_file.parent / relative
             if not lock_path.exists():
@@ -289,12 +359,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Bump VERSION and every packaged version declaration.",
     )
-    parser.add_argument("version", help="{patch|minor|major|x.y.z}")
+    parser.add_argument("version", nargs="?", help="{patch|minor|major|x.y.z}")
     parser.add_argument("--file", default="VERSION", help="VERSION file path")
+    parser.add_argument("--check", action="store_true", help="verify projections only")
     args = parser.parse_args()
 
     version_file = Path(args.file)
     try:
+        if args.check:
+            current = check_version_declarations(version_file)
+            print(f"Version projections agree: v{current}")
+            return 0
+        if args.version is None:
+            parser.error("version is required unless --check is used")
         current, next_version = update_version_declarations(version_file, args.version)
     except (OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)

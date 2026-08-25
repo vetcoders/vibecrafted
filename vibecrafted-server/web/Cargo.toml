@@ -1,6 +1,6 @@
 [package]
 name = "vibecrafted-server-web"
-version = "4.2.4"
+version = "4.3.0"
 edition = "2024"
 rust-version = "1.85.0"
 license = "BUSL-1.1"

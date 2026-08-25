@@ -66,8 +66,9 @@ DMG_NAME="Vibecrafted_${VERSION}-${RELEASE_DATE}-${ROOT_SHA:0:8}.dmg"
 DMG="$DIST_DIR/$DMG_NAME"
 DMG_CHECKSUM="$DMG.sha256"
 LEGACY_DMG="$DIST_DIR/Vibecrafted.dmg"
-RUNTIME_PACK_PLATFORM="darwin-$(uname -m | sed 's/^arm64$/arm64/; s/^aarch64$/arm64/; s/^x86_64$/x64/')"
-RUNTIME_PACK_NAME="Vibecrafted_RuntimePack_${VERSION}-${RELEASE_DATE}-${ROOT_SHA:0:8}-${RUNTIME_PACK_PLATFORM}.tar.gz"
+RUNTIME_PACK_PLATFORM="darwin"
+RUNTIME_PACK_ARCHITECTURE="$(uname -m | sed 's/^arm64$/arm64/; s/^aarch64$/arm64/; s/^x86_64$/x64/')"
+RUNTIME_PACK_NAME="Vibecrafted_RuntimePack_${VERSION}-${RELEASE_DATE}-${ROOT_SHA:0:8}-${RUNTIME_PACK_PLATFORM}-${RUNTIME_PACK_ARCHITECTURE}.tar.gz"
 RUNTIME_PACK="$DIST_DIR/$RUNTIME_PACK_NAME"
 RUNTIME_PACK_CHECKSUM="$RUNTIME_PACK.sha256"
 RUNTIME_PACK_SIGNATURE="$RUNTIME_PACK.sig"
@@ -424,7 +425,7 @@ embed_runtime_pack() {
     --frame-revision "$(git_sha "$FRAME_REPO")" \
     --version "$RUNTIME_VERSION" \
     --platform "$RUNTIME_PACK_PLATFORM" \
-    --architecture "$(uname -m | sed 's/^aarch64$/arm64/; s/^x86_64$/x64/')"
+    --architecture "$RUNTIME_PACK_ARCHITECTURE"
   /usr/bin/openssl dgst -sha256 -sign "$SIGNING_KEY" \
     -out "$EMBEDDED_RUNTIME_PACK_SIGNATURE" "$EMBEDDED_RUNTIME_PACK"
 }

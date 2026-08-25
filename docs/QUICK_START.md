@@ -93,10 +93,10 @@ Use `vibecrafted help` for the full operator surface.
 
 ## Developer checkout path
 
-`make install` consumes a closed Runtime Pack. `make install-source` and
-`make install-auto` are the explicit compiler/source lane used by the portable
-carrier. On Linux/WSL, `make install` currently routes to that source lane until
-a native binary Runtime Pack exists. A developer checkout also exposes the
+`make install` consumes a closed Runtime Pack selected for macOS or Linux and
+the host architecture. WSL2 consumes the matching Linux carrier and no default
+install silently compiles. `make install-source` is the explicit maintainer
+compiler lane. A developer checkout also exposes the
 build, test and release targets.
 Run `make help-dev` for the full inventory, or read
 [Build from source](public/getting-started/build-from-source.md).

@@ -359,6 +359,8 @@ def test_install_sh_blocks_raw_github_fallback_without_channel_archive(
     text = INSTALL_SH.read_text(encoding="utf-8")
 
     assert 'channel_url="https://vibecrafted.io/channel/${ref}.json"' in text
+    assert "p.get('runtime_pack_url','')" in text
+    assert "must bind archive_url and runtime_pack_url" in text
     assert "refusing the untrusted raw GitHub fallback" in text
     assert "W4 release authentication blocker" in text
     assert "archive/refs/heads/${ref}.tar.gz" not in text
