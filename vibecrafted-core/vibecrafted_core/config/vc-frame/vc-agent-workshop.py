@@ -30,6 +30,21 @@ AGENTS = ("agy", "claude", "codex", "grok", "junie")
 # The accepted design leaves operator/partner unresolved.  Do not expose them
 # until their CLI contracts can guarantee an interactive TTY on this tab.
 RITUALS = ("init", "resume")
+RUNTIME_HELP = {
+    "local-native": (
+        "Direct selected checkout; no isolation; full disk scope per provider permissions.",
+        "Shared checkout, no worktrees — for deliberate control.",
+    ),
+    "local-worktrees": (
+        "Safe recommended local default; one canonical worktree per Agent launch.",
+        "Maximum local concurrency; unattended pipelines require an Operator Agent; H2b2 supervision is not configured.",
+    ),
+    "local-vm": (
+        "Coming in H2b3; disabled until selected-workspace container launch and live proof exist.",
+        "",
+    ),
+    "cloud-soon": ("Coming soon; disabled.", ""),
+}
 
 
 def launch_argv(
@@ -60,6 +75,10 @@ def launch_argv(
             "--permissions",
             permissions,
         ]
+    if runtime != "local-native":
+        raise ValueError(
+            "worktree resume supervision belongs to H2b2 and is not configured yet"
+        )
     return ["vibecrafted", "resume", agent]
 
 
@@ -174,7 +193,7 @@ class Workshop:
         self.row = 0
         self.agent = 2  # codex is the least surprising neutral default here
         self.ritual = 0
-        self.runtime = 0
+        self.runtime = 1  # safe recommended local default when the provider supports it
         self.permissions = 0
         self.path = str(Path.cwd())
         self.error = ""
@@ -188,6 +207,7 @@ class Workshop:
         curses.cbreak()
         self.window.keypad(True)
         self.window.timeout(500)
+        self._normalize_runtime_choice()
         try:
             curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
         except curses.error:
@@ -278,7 +298,7 @@ class Workshop:
         height, width = self.window.getmaxyx()
         card_width = min(max(58, width - 4), 92)
         left = max(1, (width - card_width) // 2)
-        top = max(1, (height - 10) // 2)
+        top = max(1, (height - 12) // 2)
         inner = max(20, card_width - 4)
         _safe_addstr(
             self.window,
@@ -351,16 +371,31 @@ class Workshop:
                 for name in PERMISSION_POLICIES
             ),
         )
+        runtime_help = RUNTIME_HELP[RUNTIME_POLICIES[self.runtime]]
         _safe_addstr(
             self.window,
             top + 6,
+            left,
+            ("│ " + _clip(runtime_help[0], inner)).ljust(card_width - 1) + "│",
+            curses.A_DIM,
+        )
+        _safe_addstr(
+            self.window,
+            top + 7,
+            left,
+            ("│ " + _clip(runtime_help[1], inner)).ljust(card_width - 1) + "│",
+            curses.A_DIM,
+        )
+        _safe_addstr(
+            self.window,
+            top + 8,
             left,
             "│ Enter = interactive TTY on this Agents tab".ljust(card_width - 1) + "│",
             curses.A_DIM,
         )
         _safe_addstr(
             self.window,
-            top + 7,
+            top + 9,
             left,
             "└─ ↑/↓ row · ←/→ choice · type path · Enter launch · Esc cancel "
             + "─" * max(0, card_width - 67)
@@ -373,14 +408,14 @@ class Workshop:
         ]
         _safe_addstr(
             self.window,
-            top + 8,
+            top + 10,
             left,
             "Unavailable — " + " · ".join(unavailable),
             curses.A_DIM,
         )
         if self.error:
             _safe_addstr(
-                self.window, min(height - 1, top + 9), left, self.error, curses.A_BOLD
+                self.window, min(height - 1, top + 11), left, self.error, curses.A_BOLD
             )
 
     def handle_home_key(self, key: int) -> None:
@@ -409,6 +444,7 @@ class Workshop:
             delta = -1 if key == curses.KEY_LEFT else 1
             if self.row == 0:
                 self.agent = (self.agent + delta) % len(AGENTS)
+                self._normalize_runtime_choice()
                 self._normalize_permission_choice()
             elif self.row == 1:
                 self.ritual = (self.ritual + delta) % len(RITUALS)
@@ -445,6 +481,16 @@ class Workshop:
             ).supported:
                 return
         self.error = "No permission policy is available for this provider/runtime"
+
+    def _normalize_runtime_choice(self) -> None:
+        capabilities = runtime_policy_capabilities(AGENTS[self.agent])
+        current = RUNTIME_POLICIES[self.runtime]
+        if capabilities[current]["available"]:
+            return
+        for index, runtime in enumerate(RUNTIME_POLICIES):
+            if capabilities[runtime]["available"]:
+                self.runtime = index
+                return
 
     def _normalize_permission_choice(self) -> None:
         provider = AGENTS[self.agent]

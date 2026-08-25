@@ -556,7 +556,10 @@ def test_init_claude_uses_interactive_tab_without_print_mode(
 
     command_script = _spawned_command_script(payload)
     script_body = command_script.read_text(encoding="utf-8")
-    assert "claude --verbose --permission-mode bypassPermissions " in script_body
+    assert (
+        "vibecrafted_core.spawn interactive-launch claude --runtime local-native "
+        "--permissions bypass --root"
+    ) in script_body
     assert "/vc-init" in script_body
     assert " -p " not in script_body
 
@@ -604,25 +607,24 @@ def test_init_codex_uses_interactive_tab_without_exec_mode(tmp_path: Path) -> No
 
     command_script = _spawned_command_script(payload)
     script_body = command_script.read_text(encoding="utf-8")
-    assert "codex --dangerously-bypass-approvals-and-sandbox " in script_body
+    assert (
+        "vibecrafted_core.spawn interactive-launch codex --runtime local-native "
+        "--permissions bypass --root"
+    ) in script_body
     assert "/vc-init" in script_body
     assert "codex exec" not in script_body
 
 
 @pytest.mark.parametrize(
-    ("agent", "command_needle"),
+    ("agent", "permissions"),
     [
-        ("agy", "agy --dangerously-skip-permissions --add-dir . --prompt-interactive "),
-        ("junie", "junie --prompt="),
-        (
-            "grok",
-            # Interactive TUI: positional prompt, NO --single (one-shot headless).
-            "grok --cwd . --permission-mode bypassPermissions --no-alt-screen ",
-        ),
+        ("agy", "bypass"),
+        ("junie", "auto"),
+        ("grok", "bypass"),
     ],
 )
 def test_init_fleet_agents_resolve_skill_init_helpers(
-    agent: str, command_needle: str, tmp_path: Path
+    agent: str, permissions: str, tmp_path: Path
 ) -> None:
     """Regression: vibecrafted init <agent> must not fail with Missing helper
     <agent>-skill-init. Fleet surface is five agents; wrappers for only
@@ -677,7 +679,10 @@ def test_init_fleet_agents_resolve_skill_init_helpers(
 
     command_script = _spawned_command_script(payload)
     script_body = command_script.read_text(encoding="utf-8")
-    assert command_needle in script_body
+    assert (
+        f"vibecrafted_core.spawn interactive-launch {agent} --runtime local-native "
+        f"--permissions {permissions} --root"
+    ) in script_body
     assert "/vc-init" in script_body
     if agent == "grok":
         assert " --single " not in script_body
@@ -728,9 +733,9 @@ def test_init_grok_is_interactive_tui_not_single_shot(tmp_path: Path) -> None:
         capture_file.read_text(encoding="utf-8")
     ).read_text(encoding="utf-8")
     assert (
-        "grok --cwd . --permission-mode bypassPermissions --no-alt-screen"
-        in script_body
-    )
+        "vibecrafted_core.spawn interactive-launch grok --runtime local-native "
+        "--permissions bypass --root"
+    ) in script_body
     assert "/vc-init" in script_body
     assert "--single" not in script_body
     assert "streaming-json" not in script_body

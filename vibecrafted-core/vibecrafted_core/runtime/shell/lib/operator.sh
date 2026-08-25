@@ -64,10 +64,11 @@ _vetcoders_init_command_text() {
   py="${python_spec%%$'\t'*}"
   import_root="${python_spec#*$'\t'}"
   if [[ -n "$import_root" ]]; then
-    printf '%s' "$init_prompt" | PYTHONPATH="$import_root${PYTHONPATH:+:$PYTHONPATH}" \
-      "$py" -m vibecrafted_core.spawn policy-command "$tool" --runtime "$policy_runtime" --permissions "$permissions"
+    printf '%s' "$init_prompt" | VIBECRAFTED_INTERACTIVE_IMPORT_ROOT="$import_root" \
+      PYTHONPATH="$import_root${PYTHONPATH:+:$PYTHONPATH}" \
+      "$py" -m vibecrafted_core.spawn interactive-command "$tool" --runtime "$policy_runtime" --permissions "$permissions" --root "${_vetcoders_contract_root:-$(_vetcoders_repo_root)}"
   else
-    printf '%s' "$init_prompt" | "$py" -m vibecrafted_core.spawn policy-command "$tool" --runtime "$policy_runtime" --permissions "$permissions"
+    printf '%s' "$init_prompt" | "$py" -m vibecrafted_core.spawn interactive-command "$tool" --runtime "$policy_runtime" --permissions "$permissions" --root "${_vetcoders_contract_root:-$(_vetcoders_repo_root)}"
   fi
 }
 

@@ -73,6 +73,27 @@ def test_launcher_refuses_unsupported_policy_instead_of_approximating() -> None:
         workshop.launch_argv("codex", "init", "local-native", "accept-edits")
     with pytest.raises(ValueError, match="coming soon"):
         workshop.launch_argv("claude", "init", "cloud-soon", "auto")
+    with pytest.raises(ValueError, match="H2b2"):
+        workshop.launch_argv("claude", "resume", "local-worktrees", "auto")
+
+
+def test_runtime_help_preserves_product_truth_and_recommended_default() -> None:
+    workshop = _load()
+    help_text = " ".join(
+        line for detail in workshop.RUNTIME_HELP.values() for line in detail
+    )
+
+    assert "no isolation" in help_text
+    assert "full disk scope per provider permissions" in help_text
+    assert "Shared checkout, no worktrees" in help_text
+    assert "Safe recommended local default" in help_text
+    assert "one canonical worktree per Agent launch" in help_text
+    assert "Maximum local concurrency" in help_text
+    assert "unattended pipelines require an Operator Agent" in help_text
+    assert "H2b2 supervision is not configured" in help_text
+    assert "Coming in H2b3" in help_text
+    assert "selected-workspace container launch and live proof" in help_text
+    assert "Coming soon; disabled" in help_text
 
 
 def test_workspace_path_is_full_resolved_and_must_exist(tmp_path: Path) -> None:

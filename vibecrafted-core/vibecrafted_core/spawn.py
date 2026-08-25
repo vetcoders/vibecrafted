@@ -20,7 +20,7 @@ from typing import Any
 
 from .agent_dispatch import extract_session_id, sandbox_supported
 from .clock import utc_now_iso
-from .control_plane import ensure_session_id, normalize_run_root
+from .control_plane import control_plane_home, ensure_session_id, normalize_run_root
 from .events import append_event
 from .report_contract import (
     CLAIM_DIGEST_ENV,
@@ -65,6 +65,22 @@ class ProviderPolicy:
             "behavior": self.behavior,
             "reason": self.reason,
         }
+
+
+@dataclass(frozen=True)
+class InteractiveWorkspaceLaunch:
+    """Durable parent/effective-root truth for one interactive Agent launch."""
+
+    run_id: str
+    provider: str
+    runtime: str
+    permissions: str
+    parent_root: str
+    effective_root: str
+    workspace_id: str
+    vibecrafted_session_id: str
+    meta_path: Path
+    receipt: dict[str, Any]
 
 
 _PERMISSION_CONTRACT: dict[str, dict[str, tuple[tuple[str, ...], str] | None]] = {
@@ -176,14 +192,14 @@ def resolve_provider_policy(
             False,
             reason="Docker/Colima may be present, but canonical init has no VM entrypoint",
         )
-    if runtime == "local-worktrees":
+    if runtime == "local-worktrees" and mode != "interactive":
         return ProviderPolicy(
             provider,
             runtime,
             permissions,
             mode,
             False,
-            reason="git dispatch manages worktrees, but canonical init has no worktree cut contract",
+            reason="local worktrees are available only for interactive Agent Workspaces",
         )
     cell = _PERMISSION_CONTRACT[provider][permissions]
     if cell is None:
@@ -232,11 +248,15 @@ def runtime_policy_capabilities(provider: str) -> dict[str, dict[str, Any]]:
             "reason": "" if provider_found else f"{provider} executable not found",
         },
         "local-worktrees": {
-            "available": False,
+            "available": provider_found and worktree_substrate,
             "substrate": worktree_substrate,
-            "reason": "no canonical init worktree cut"
-            if worktree_substrate
-            else "git/dispatch manage_worktrees unavailable",
+            "reason": ""
+            if provider_found and worktree_substrate
+            else (
+                f"{provider} executable not found"
+                if not provider_found
+                else "git/dispatch manage_worktrees unavailable"
+            ),
         },
         "local-vm": {
             "available": False,
@@ -273,6 +293,214 @@ def interactive_policy_command(
             "--use-local-cache",
         ]
     return ["grok", "--cwd", ".", *flags, "--no-alt-screen", prompt]
+
+
+def interactive_workspace_command(
+    provider: str,
+    prompt: str,
+    runtime: str,
+    permissions: str,
+    root: str | os.PathLike[str],
+) -> list[str]:
+    """Build the portable wrapper argv used by the exact ``init`` route."""
+    decision = resolve_provider_policy(provider, runtime, permissions, "interactive")
+    if not decision.supported:
+        raise ValueError(decision.reason)
+    command = [
+        sys.executable,
+        "-m",
+        "vibecrafted_core.spawn",
+        "interactive-launch",
+        provider,
+        "--runtime",
+        runtime,
+        "--permissions",
+        permissions,
+        "--root",
+        str(Path(root).expanduser().resolve()),
+        "--prompt",
+        prompt,
+    ]
+    import_root = os.environ.get("VIBECRAFTED_INTERACTIVE_IMPORT_ROOT", "").strip()
+    if import_root:
+        pythonpath = import_root
+        if os.environ.get("PYTHONPATH"):
+            pythonpath = f"{pythonpath}{os.pathsep}{os.environ['PYTHONPATH']}"
+        return ["env", f"PYTHONPATH={pythonpath}", *command]
+    return command
+
+
+def prepare_interactive_workspace_launch(
+    *,
+    provider: str,
+    runtime: str,
+    permissions: str,
+    selected_root: str | os.PathLike[str],
+    prompt: str,
+    run_id: str | None = None,
+    executable: str | None = None,
+    worker_pid: int | None = None,
+) -> InteractiveWorkspaceLaunch:
+    """Resolve identity/root and publish truth only after launch preparation succeeds."""
+    decision = resolve_provider_policy(provider, runtime, permissions, "interactive")
+    if not decision.supported:
+        raise ValueError(decision.reason)
+    parent = Path(selected_root).expanduser().resolve()
+    if not parent.is_dir():
+        raise ValueError(f"selected workspace does not exist: {parent}")
+    resolved_executable = executable or which(provider, path=agent_tool_search_path())
+    if not resolved_executable:
+        raise ValueError(f"{provider} executable not found")
+
+    from .dispatch.worktrees import (
+        WorktreeContractError,
+        WorktreeGeometry,
+        WorktreeManager,
+    )
+    from .workflow import reserve_run_id
+    from .workspace_catalog import resolve_run_workspace_identity
+
+    effective_run_id = run_id or reserve_run_id("init")
+    geometry: WorktreeGeometry | None = None
+    effective = parent
+    manager: WorktreeManager | None = None
+    if runtime == "local-worktrees":
+        manager = WorktreeManager(parent)
+        baseline = _git_output(parent, "rev-parse", "HEAD")
+        if not baseline:
+            raise ValueError(f"selected workspace is not a git repository: {parent}")
+        geometry = manager.prepare_agent_launch(provider, effective_run_id, baseline)
+        effective = Path(geometry.worktree_path).resolve()
+
+    try:
+        identity = resolve_run_workspace_identity(
+            root=parent, env={}, create_if_missing=True
+        )
+        now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+        run_dir = control_plane_home() / "runtime_runs" / effective_run_id
+        prompt_path = run_dir / "prompt.md"
+        prompt_path.parent.mkdir(parents=True, exist_ok=True)
+        prompt_path.write_text(prompt, encoding="utf-8")
+        meta_path = run_dir / "meta.json"
+        receipt: dict[str, Any] = {
+            "created_at": now_iso,
+            "updated_at": now_iso,
+            "status": "active",
+            "run_id": effective_run_id,
+            "agent": provider,
+            "skill": "init",
+            "mode": "interactive",
+            "runtime_policy": runtime,
+            "permission_policy": permissions,
+            "root": str(effective),
+            "parent_root": str(parent),
+            "effective_worktree_path": str(effective) if geometry else "",
+            "input": str(prompt_path),
+            "worker_pid": int(worker_pid or os.getpid()),
+            "launcher_pid": int(worker_pid or os.getpid()),
+            "liveness": "active",
+            "executable": str(Path(resolved_executable).expanduser()),
+            **identity.to_meta_fields(),
+        }
+        if geometry is not None:
+            receipt.update(
+                branch=geometry.branch,
+                baseline_sha=geometry.baseline_sha,
+                artifact_path=geometry.artifact_path,
+            )
+        _write_meta(meta_path, receipt)
+        append_event(
+            "lifecycle:active",
+            effective_run_id,
+            "interactive Agent Workspace is live",
+            {**receipt, "meta": str(meta_path), "identity_required": True},
+        )
+    except Exception:
+        if manager is not None and geometry is not None:
+            try:
+                manager.cleanup(geometry, settled=True)
+            except (OSError, WorktreeContractError) as cleanup_exc:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "failed to remove unlaunched interactive worktree %s: %s",
+                    geometry.worktree_path,
+                    cleanup_exc,
+                )
+        raise
+    return InteractiveWorkspaceLaunch(
+        run_id=effective_run_id,
+        provider=provider,
+        runtime=runtime,
+        permissions=permissions,
+        parent_root=str(parent),
+        effective_root=str(effective),
+        workspace_id=identity.workspace_id,
+        vibecrafted_session_id=identity.vibecrafted_session_id,
+        meta_path=meta_path,
+        receipt=receipt,
+    )
+
+
+def _git_output(root: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", *args], cwd=root, check=False, capture_output=True, text=True
+    )
+    return completed.stdout.strip() if completed.returncode == 0 else ""
+
+
+def launch_interactive_workspace(
+    provider: str,
+    prompt: str,
+    runtime: str,
+    permissions: str,
+    root: str | os.PathLike[str],
+) -> None:
+    """Prepare one workspace, then replace this process with the Agent TTY."""
+    command = interactive_policy_command(provider, prompt, runtime, permissions)
+    child_env = os.environ.copy()
+    resolved = _resolve_agent_command(provider, command, child_env)
+    launch = prepare_interactive_workspace_launch(
+        provider=provider,
+        runtime=runtime,
+        permissions=permissions,
+        selected_root=root,
+        prompt=prompt,
+        executable=resolved[0],
+        worker_pid=os.getpid(),
+    )
+    child_env.update(
+        {
+            "VIBECRAFTED_RUN_ID": launch.run_id,
+            "VIBECRAFTED_SESSION_ID": launch.vibecrafted_session_id,
+            "VIBECRAFTED_WORKSPACE_ID": launch.workspace_id,
+            "VIBECRAFTED_WORKSPACE_INSTANCE_ID": str(
+                launch.receipt["workspace_instance_id"]
+            ),
+            "VIBECRAFTED_BUILD_ID": str(launch.receipt["build_id"]["rendered"]),
+            "VIBECRAFTED_PARENT_ROOT": launch.parent_root,
+            "VIBECRAFTED_EFFECTIVE_ROOT": launch.effective_root,
+        }
+    )
+    try:
+        os.chdir(launch.effective_root)
+        os.execvpe(resolved[0], resolved, child_env)
+    except OSError as exc:
+        receipt = {
+            **launch.receipt,
+            "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "status": "failed",
+            "liveness": "failed",
+            "error": str(exc),
+        }
+        _write_meta(launch.meta_path, receipt)
+        append_event(
+            "lifecycle:failed",
+            launch.run_id,
+            "interactive Agent Workspace exec failed",
+            {**receipt, "meta": str(launch.meta_path)},
+        )
+        raise
 
 
 ANSI_PATTERN = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -1862,6 +2090,29 @@ def _build_parser() -> argparse.ArgumentParser:
     policy.add_argument("provider", choices=POLICY_PROVIDERS)
     policy.add_argument("--runtime", choices=RUNTIME_POLICIES, default="local-native")
     policy.add_argument("--permissions", choices=PERMISSION_POLICIES, default="bypass")
+    interactive_command = sub.add_parser(
+        "interactive-command", help="Build the canonical interactive workspace wrapper."
+    )
+    interactive_command.add_argument("provider", choices=POLICY_PROVIDERS)
+    interactive_command.add_argument(
+        "--runtime", choices=RUNTIME_POLICIES, default="local-native"
+    )
+    interactive_command.add_argument(
+        "--permissions", choices=PERMISSION_POLICIES, default="bypass"
+    )
+    interactive_command.add_argument("--root", required=True)
+    interactive_launch = sub.add_parser(
+        "interactive-launch", help="Prepare and exec an interactive Agent Workspace."
+    )
+    interactive_launch.add_argument("provider", choices=POLICY_PROVIDERS)
+    interactive_launch.add_argument(
+        "--runtime", choices=RUNTIME_POLICIES, default="local-native"
+    )
+    interactive_launch.add_argument(
+        "--permissions", choices=PERMISSION_POLICIES, default="bypass"
+    )
+    interactive_launch.add_argument("--root", required=True)
+    interactive_launch.add_argument("--prompt", required=True)
     sub.add_parser(
         "policy-matrix", help="Print the complete provider policy matrix as JSON."
     )
@@ -1918,6 +2169,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"UNSUPPORTED: {exc}", file=sys.stderr)
             return 2
         print(shlex.join(command))
+        return 0
+    if args.command == "interactive-command":
+        prompt = sys.stdin.read()
+        try:
+            command = interactive_workspace_command(
+                args.provider, prompt, args.runtime, args.permissions, args.root
+            )
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        print(shlex.join(command))
+        return 0
+    if args.command == "interactive-launch":
+        try:
+            launch_interactive_workspace(
+                args.provider, args.prompt, args.runtime, args.permissions, args.root
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
         return 0
     if args.command == "policy-matrix":
         print(
