@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import plistlib
+import re
 import shutil
 import stat
 import struct
@@ -937,6 +938,48 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert 'let inherited_path = env::var("PATH").ok();' in launcher
     assert "inherited_path.as_deref()" in launcher
     assert "!entry.starts_with('/')" in launcher
+
+
+def test_status_menu_custom_actions_explicitly_target_app_delegate() -> None:
+    """Every AppDelegate selector wired into the status menu must set an explicit target.
+
+    LSUIElement apps have no key window, so responder-chain lookup can leave a
+    status-menu item greyed out; `.target = self` is the contract that keeps
+    every custom action live. NSApplication selectors resolve via the app
+    object itself and are exempt.
+    """
+    delegate = (
+        REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted/AppDelegate.swift"
+    ).read_text(encoding="utf-8")
+    status_menu = delegate[
+        delegate.index("private func buildStatusItem()") : delegate.index(
+            "@objc private func openConsoleFromStatusItem"
+        )
+    ]
+    wired = re.findall(
+        r"let (\w+) = \w+\.addItem\(\s*withTitle: \"([^\"]+)\",\s*action: #selector\((\w+)\)",
+        status_menu,
+    )
+    assert {selector for _, _, selector in wired} >= {
+        "openConsoleFromStatusItem",
+        "openTerminalFromStatusItem",
+        "startServerFromStatusItem",
+        "stopServerFromStatusItem",
+        "restartServerFromStatusItem",
+        "openServerLogsFromStatusItem",
+        "showServerDiagnostics",
+        "showStatusItemHelp",
+        "requestQuit",
+    }
+    for item_name, title, selector in wired:
+        assert f"{item_name}.target = self" in status_menu, (item_name, title, selector)
+    untargeted = re.findall(
+        r"\baddItem\(\s*withTitle: \"[^\"]+\",\s*action: #selector\((?!NSApplication\.)(\w+)\)",
+        status_menu,
+    )
+    assert sorted(untargeted) == sorted(selector for _, _, selector in wired), (
+        untargeted
+    )
 
 
 def test_tracked_product_source_contains_no_symlinks() -> None:
