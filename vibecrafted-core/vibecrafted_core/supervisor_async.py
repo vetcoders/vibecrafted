@@ -20,9 +20,10 @@ from .agent_stream import (
 )
 from .artifacts import ArtifactValidation, validate_artifacts
 from .control_plane import (
+    accepted_operator_stop_since,
     control_plane_home,
     ensure_session_id,
-    lookup_run,
+    event_resume_cursor,
     normalize_run_root,
 )
 from .events import append_event
@@ -238,20 +239,14 @@ def _origin_fields_from_env(env: Mapping[str, str] | None = None) -> dict[str, s
     return fields
 
 
-def _accepted_operator_stop(run_id: str) -> dict[str, object] | None:
+def _accepted_operator_stop(run_id: str, since_cursor: str) -> dict[str, object] | None:
     """Read the durable operator-stop authority after the worker exits."""
 
     try:
-        run = lookup_run(run_id)
+        run = accepted_operator_stop_since(run_id, since_cursor)
     except (OSError, RuntimeError, TypeError, ValueError):
         return None
-    if (
-        isinstance(run, dict)
-        and str(run.get("state") or "") == "stopped"
-        and run.get("operator_stop_accepted") is True
-    ):
-        return run
-    return None
+    return run
 
 
 def _cache_write_line(prefix: str, value: int | None) -> str:
@@ -410,6 +405,7 @@ class AsyncRunHandle:
     heartbeat_monotonic: float = 0.0
     worker_identity: dict[str, object] | None = None
     workspace_fields: dict[str, object] = field(default_factory=dict)
+    operator_stop_cursor: str = "0"
     operator_stopped: bool = False
     operator_stop_reason: str = ""
 
@@ -502,6 +498,7 @@ class AsyncSupervisor:
             agent, str(merged_env.get("VIBECRAFTED_MODEL_REQUESTED") or "")
         )
         started_at = _utc_now()
+        operator_stop_cursor = event_resume_cursor()
         if report_path is not None:
             from .report_contract import materialize_launcher_report_template
 
@@ -585,6 +582,7 @@ class AsyncSupervisor:
                 model_receipt.get("model_override_skip_reason") or ""
             ),
             workspace_fields=dict(workspace_fields),
+            operator_stop_cursor=operator_stop_cursor,
         )
         try:
             handle.pgid = os.getpgid(process.pid)
@@ -756,6 +754,7 @@ class AsyncSupervisor:
         operator_stop = await asyncio.to_thread(
             _accepted_operator_stop,
             handle.run_id,
+            handle.operator_stop_cursor,
         )
         if operator_stop is not None:
             handle.operator_stopped = True

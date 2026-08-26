@@ -801,6 +801,19 @@ impl ControlPlane {
             if event.kind == "settlement.changed" {
                 continue;
             }
+            // Python's `state` records are projection notifications. They can
+            // be appended after a fresher lifecycle event when a concurrent
+            // sync finishes from an older read boundary, so marked records
+            // must never become lifecycle authority in the Rust eye either.
+            if event.kind == "state"
+                && event
+                    .payload
+                    .get("projection_event")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+            {
+                continue;
+            }
             let existing = merged.iter().find(|run| run.run_id == event.run_id);
             let status = normalize_event(event, existing, now);
             absorb_status(&mut merged, status);
@@ -2257,6 +2270,60 @@ mod tests {
         assert_eq!(view.settlement_counts.active, 1);
         assert_eq!(view.settlement_counts.total_settled, 0);
 
+        fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn projection_notification_cannot_regress_newer_lifecycle_state() {
+        let home = temp_home("projection-notification-race");
+        let control_plane = home.join("control_plane");
+        fs::create_dir_all(&control_plane).expect("control plane");
+        let now = Utc::now();
+        let records = [
+            json!({
+                "ts": now.to_rfc3339(),
+                "run_id": "parity-projection-race",
+                "kind": "lifecycle:active",
+                "message": "process active",
+                "payload": {
+                    "state": "active",
+                    "root": "/srv/checkout/vibecrafted",
+                    "worker_pid": std::process::id(),
+                    "liveness": "pid_alive",
+                    "heartbeat_at": now.to_rfc3339()
+                }
+            }),
+            json!({
+                "ts": (now + Duration::milliseconds(1)).to_rfc3339(),
+                "run_id": "parity-projection-race",
+                "kind": "state",
+                "message": "parity-projection-race entered process_spawned",
+                "payload": {
+                    "projection_event": true,
+                    "previous_state": "created",
+                    "state": "process_spawned",
+                    "root": "/srv/checkout/vibecrafted",
+                    "liveness": "heartbeat"
+                }
+            }),
+        ];
+        let encoded = records
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(control_plane.join("events.jsonl"), format!("{encoded}\n"))
+            .expect("event stream");
+
+        let view = ControlPlane::new(&home).compute_view(now);
+        let run = view
+            .recent_runs
+            .iter()
+            .find(|run| run.run_id == "parity-projection-race")
+            .expect("projected run");
+
+        assert_eq!(run.state, "active");
+        assert_eq!(run.liveness, "pid_alive");
         fs::remove_dir_all(home).ok();
     }
 

@@ -9,7 +9,7 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 from vibecrafted_core import control_plane, process_control
@@ -843,6 +843,30 @@ def test_sync_state_settles_stale_pid_alive_only_after_qualified_identity_check(
         assert run.get("settlement_verdict") is None
 
 
+def test_worker_truth_valid_receipt_does_not_scan_fleet_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibecrafted_core import process_control
+
+    run_id = "impl-scoped-observation"
+    receipt = process_control.process_identity_receipt(os.getpid(), run_id=run_id)
+    assert receipt is not None
+
+    def reject_env_scan(*_args: object, **_kwargs: object) -> NoReturn:
+        raise AssertionError("scoped observation must not run ps axeww")
+
+    monkeypatch.setattr(process_control, "build_env_index", reject_env_scan)
+
+    assert control_plane._worker_process_truth(
+        {
+            "run_id": run_id,
+            "worker_pid": os.getpid(),
+            "worker_pgid": os.getpgid(os.getpid()),
+            "worker_identity": receipt,
+        }
+    ) == (True, "process_identity_current")
+
+
 def test_worker_truth_accepts_owned_native_child_in_canonical_pgid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1118,6 +1142,51 @@ def test_sync_state_active_truth_quarantines_pytest_events_and_separates_stalls(
         assert [run["run_id"] for run in replayed["stalled_runs"]] == [
             "definitely-missing"
         ]
+
+
+def test_projection_notification_cannot_regress_newer_lifecycle_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    run_id = "parity-projection-race"
+    now = dt.datetime.now(dt.timezone.utc)
+    control_plane._append_event(
+        {
+            "ts": now.isoformat(),
+            "run_id": run_id,
+            "kind": "lifecycle:active",
+            "message": "process active",
+            "payload": {
+                "state": "active",
+                "root": str(tmp_path),
+                "session_id": "session-projection-race",
+                "liveness": "pid_alive",
+                "heartbeat_at": now.isoformat(),
+            },
+        }
+    )
+    control_plane._append_event(
+        {
+            "ts": (now + dt.timedelta(milliseconds=1)).isoformat(),
+            "run_id": run_id,
+            "kind": "state",
+            "message": f"{run_id} entered process_spawned",
+            "payload": {
+                "projection_event": True,
+                "previous_state": "created",
+                "state": "process_spawned",
+                "root": str(tmp_path),
+                "session_id": "session-projection-race",
+                "liveness": "heartbeat",
+            },
+        }
+    )
+
+    run = control_plane.sync_state(only_run_id=run_id)["recent_runs"][0]
+
+    assert run["state"] == "active"
+    assert run["liveness"] == "pid_alive"
 
 
 def test_sync_state_reconciles_dead_launcher_success_evidence_to_completed(

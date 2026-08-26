@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 from vibecrafted_core import control_plane, dispatcher
 from vibecrafted_core import supervisor_async as supervisor_async_module
@@ -18,7 +19,7 @@ from vibecrafted_core.lifecycle_runner import (
     record_stage_worker_completion,
 )
 from vibecrafted_core.report_contract import CLAIM_DIGEST_ENV
-from vibecrafted_core.supervisor_async import AsyncSupervisor
+from vibecrafted_core.supervisor_async import AsyncRunHandle, AsyncSupervisor
 
 
 def _runtime_meta(tmp_path: Path, run_id: str) -> Path:
@@ -82,6 +83,79 @@ def test_async_supervisor_emits_lifecycle_and_validates_artifacts(
     assert "created" in states
     assert "process_spawned" in states
     assert "report_validated" in states
+
+
+def test_async_supervisor_completion_closes_owned_resources_without_live_reconcile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Terminal worker ownership must not reopen fleet-wide process discovery."""
+
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+
+    def reject_live_reconcile(*_args: object, **_kwargs: object) -> NoReturn:
+        raise AssertionError("terminal completion must not scan process inventory")
+
+    monkeypatch.setattr(control_plane, "_worker_process_truth", reject_live_reconcile)
+    script = tmp_path / "worker.py"
+    script.write_text("print('worker terminal')\n", encoding="utf-8")
+
+    async def exercise() -> tuple[AsyncRunHandle, list[asyncio.Task[object]]]:
+        handle = await AsyncSupervisor().run(
+            run_id="asup-terminal-owner",
+            command=[sys.executable, str(script)],
+            root=tmp_path,
+            require_report=False,
+        )
+        current = asyncio.current_task()
+        pending = [
+            task
+            for task in asyncio.all_tasks()
+            if task is not current and not task.done()
+        ]
+        return handle, pending
+
+    handle, pending = asyncio.run(exercise())
+
+    assert handle.exit_code == 0
+    assert handle.process.returncode == 0
+    assert handle.process.stdout is not None
+    assert handle.process.stdout.at_eof()
+    assert pending == []
+
+
+def test_async_supervisor_reads_operator_stop_from_its_event_range(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An accepted stop remains durable without a live-state board rebuild."""
+
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    script = tmp_path / "stopped-worker.py"
+    script.write_text(
+        "import os\n"
+        "from vibecrafted_core.control_plane import record_stop_transition\n"
+        "record_stop_transition(\n"
+        "    os.environ['VIBECRAFTED_RUN_ID'],\n"
+        "    accepted=True,\n"
+        "    reason='test_operator_stop',\n"
+        ")\n"
+        "print('stopped worker terminal')\n",
+        encoding="utf-8",
+    )
+
+    handle = asyncio.run(
+        AsyncSupervisor().run(
+            run_id="asup-stopped-owner",
+            command=[sys.executable, str(script)],
+            root=tmp_path,
+            require_report=False,
+        )
+    )
+
+    assert handle.exit_code == 0
+    assert handle.operator_stopped is True
+    assert handle.operator_stop_reason == "test_operator_stop"
+    assert handle.process.stdout is not None
+    assert handle.process.stdout.at_eof()
 
 
 def test_async_supervisor_persists_explicit_artifact_meta_outside_control_plane(

@@ -1468,6 +1468,12 @@ def _worker_process_truth(run: dict[str, Any]) -> tuple[bool, str]:
         expected_pid=worker_pid,
         expected_pgid=worker_pgid,
         expected_run_id=run_id,
+        # This is observational reconciliation, not a signal boundary. The
+        # persisted PID/PGID/start-token/command receipt is sufficient to prove
+        # the same process is still alive; a missing environment is explicitly
+        # non-dispositive. Avoid reopening a fleet-wide ``ps axeww`` scan for
+        # every scoped run projection.
+        env_index={},
     )
     if valid:
         owner_pid = _coerce_int(run.get("owner_pid"))
@@ -1484,6 +1490,7 @@ def _worker_process_truth(run: dict[str, Any]) -> tuple[bool, str]:
                 else None
             ),
             expected_run_id=run_id,
+            env_index={},
         )
         return owner_valid, owner_reason
 
@@ -2137,6 +2144,14 @@ def _merge_event_stream(
         # would resurrect an archived run as active/unknown on the next sync.
         if kind == SETTLEMENT_EVENT_KIND:
             continue
+        # ``state`` events emitted by _record_transition are projection
+        # notifications, not new lifecycle authority. A sync can read through
+        # PROCESS_SPAWNED while the dispatcher appends ACTIVE, then publish its
+        # older projection afterward; folding that later notification on the
+        # next pass would regress the durable lifecycle forever. Legacy state
+        # events remain readable when they do not carry this explicit marker.
+        if kind == "state" and payload.get("projection_event") is True:
+            continue
         message = str(event.get("message") or "")
         ts = _safe_iso(str(event.get("ts") or ""))
         existing = merged.get(run_id)
@@ -2779,6 +2794,7 @@ def _record_transition(
             "kind": "state",
             "message": message,
             "payload": {
+                "projection_event": True,
                 "previous_state": previous_state,
                 "state": current_state,
                 "agent": current.get("agent"),
@@ -3338,6 +3354,43 @@ def subscribe_events(
         if callback is None:
             return
         time.sleep(1.0)
+
+
+def event_resume_cursor() -> str:
+    """Return an opaque cursor at the durable end of the active event stream."""
+
+    return _active_event_resume_cursor()
+
+
+def accepted_operator_stop_since(
+    run_id: str, since_cursor: str | int | None
+) -> dict[str, Any] | None:
+    """Read one run's accepted stop authority without rebuilding live state.
+
+    Dispatch completion already owns terminal worker truth. Its only remaining
+    control-plane question is whether an operator stop won while that worker was
+    alive, so replay the append-only audit stream from the run's creation cursor
+    instead of invoking ``lookup_run`` and its process-inventory reconciliation.
+    """
+
+    target = str(run_id or "").strip()
+    if not target:
+        return None
+    # stop_run owns this same key from identity qualification through signal,
+    # grace observation, and the fsynced audit receipt. Waiting on that owner is
+    # the deterministic handoff: a terminal worker cannot race its supervisor
+    # into writing FAILED meta just before the stop receipt becomes visible.
+    with run_mutation_locks(control_plane_home(), run_id=target):
+        for event in subscribe_events(since_cursor, kinds={"audit:stop"}):
+            payload = event.payload
+            if (
+                event.run_id == target
+                and payload.get("accepted") is True
+                and str(payload.get("state") or "") == "stopped"
+                and payload.get("operator_stop_accepted") is True
+            ):
+                return dict(payload)
+    return None
 
 
 def _project_run_payload(
