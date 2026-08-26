@@ -25,7 +25,8 @@ scripts/installer/**/__pycache__/
 *.zip
 *.plugin
 *.sha256
-/.vibecrafted
+/.vibecrafted/*
+!/.vibecrafted/JOURNAL.md
 /tests/tui/__pycache__
 **/__pycache__/
 *.py[cod]

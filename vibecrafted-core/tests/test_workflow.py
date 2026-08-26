@@ -316,6 +316,38 @@ def _patch_launch_popen(
     monkeypatch.setattr(workflow.subprocess, "Popen", fake_popen)
 
 
+def _write_reserved_launch_record(
+    spec: workflow.WorkflowLaunchSpec,
+    *,
+    run_id: str,
+    owner_identity: dict[str, Any],
+) -> tuple[str, Path]:
+    key = workflow.launch_idempotency_key(spec)
+    workflow._write_launch_idempotency_record(
+        key,
+        {
+            "run_id": run_id,
+            "agent": spec.agent,
+            "skill": spec.skill,
+            "root": spec.root,
+            "state": "reserved",
+            "accepted": False,
+            "owner_pid": owner_identity.get("pid"),
+            "owner_identity": owner_identity,
+            "spec_digest": workflow._launch_spec_digest(spec),
+            "receipt": {
+                "run_id": run_id,
+                "agent": spec.agent,
+                "skill": spec.skill,
+                "root": spec.root,
+                "accepted": False,
+                "status": "reserved",
+            },
+        },
+    )
+    return key, workflow._launch_idempotency_path(key)
+
+
 def test_independent_identical_launches_create_distinct_runs_by_default(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -597,6 +629,91 @@ def test_ambiguous_reservation_owner_refuses_without_spawn_or_receipt_success(
     emitted = json.loads(capsys.readouterr().out)
     assert emitted["accepted"] is False
     assert emitted["status"] == "retryable_reservation_owner_ambiguous"
+
+
+@pytest.mark.parametrize(
+    "malform",
+    [
+        lambda receipt: receipt.pop("start_token"),
+        lambda receipt: receipt.pop("run_id"),
+        lambda receipt: receipt.__setitem__("command_sha256", "g" * 64),
+    ],
+    ids=["missing-start-token", "missing-run-id", "invalid-command-hash"],
+)
+def test_malformed_reservation_owner_receipt_fails_closed_on_real_launch_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    malform: Any,
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    monkeypatch.setenv(workflow.LAUNCH_IDEMPOTENCY_KEY_ENV, "malformed-owner")
+    source = _source_dir(tmp_path)
+    spec = workflow.normalize_launch_spec(
+        {"skill": "workflow", "agent": "claude", "prompt": "same brief"}, source
+    )
+    run_id = "malformed-reserved-run"
+    owner_identity = process_control.process_identity_receipt(
+        os.getpid(), run_id=run_id
+    )
+    assert owner_identity is not None
+    malform(owner_identity)
+    _key, record_path = _write_reserved_launch_record(
+        spec,
+        run_id=run_id,
+        owner_identity=owner_identity,
+    )
+    reservation_before = record_path.read_bytes()
+    monkeypatch.setattr(workflow, "_sweep_stale_runs", lambda: None)
+    monkeypatch.setattr(workflow, "lookup_run", lambda _run_id: None)
+    pops: list[object] = []
+    _patch_launch_popen(monkeypatch, pops)
+
+    result = workflow.launch_workflow(spec, source)
+
+    assert result["accepted"] is False
+    assert result["status"] == "retryable_reservation_owner_ambiguous"
+    assert result["reason"] == "process_identity_receipt_invalid"
+    assert result["retryable"] is True
+    assert result["run_id"] == run_id
+    assert pops == []
+    assert record_path.read_bytes() == reservation_before
+
+
+def test_complete_reservation_owner_receipt_with_recaptured_mismatch_is_reclaimed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    monkeypatch.setenv(workflow.LAUNCH_IDEMPOTENCY_KEY_ENV, "reused-owner-pid")
+    source = _source_dir(tmp_path)
+    spec = workflow.normalize_launch_spec(
+        {"skill": "workflow", "agent": "claude", "prompt": "same brief"}, source
+    )
+    run_id = "reused-owner-run"
+    owner_identity = process_control.process_identity_receipt(
+        os.getpid(), run_id=run_id
+    )
+    assert owner_identity is not None
+    owner_identity["command_sha256"] = "0" * 64
+    _write_reserved_launch_record(
+        spec,
+        run_id=run_id,
+        owner_identity=owner_identity,
+    )
+    monkeypatch.setattr(workflow, "_sweep_stale_runs", lambda: None)
+    monkeypatch.setattr(workflow, "lookup_run", lambda _run_id: None)
+    monkeypatch.setattr(
+        workflow,
+        "_stdin_command",
+        lambda _agent: [sys.executable, "-c", "pass"],
+    )
+    pops: list[object] = []
+    _patch_launch_popen(monkeypatch, pops)
+
+    result = workflow.launch_workflow(spec, source)
+
+    assert result["accepted"] is True
+    assert result["run_id"] == run_id
+    assert pops == [1]
 
 
 def test_phantom_dispatched_record_returns_retryable_fail_closed_receipt(
