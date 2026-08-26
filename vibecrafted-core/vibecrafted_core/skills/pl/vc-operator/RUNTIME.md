@@ -19,7 +19,7 @@ Postawa operatora tworzy lub konsumuje trwały stan dla orkiestracji floty:
 - metadane runu
 - transkrypt
 - tracker fal
-- dziennik tylko do dopisywania (append-only)
+- repozytoryjny Dziennik Operatora append-only
 - briefy workerów
 - karty uruchomienia i run ID
 - zamknięcia per fala
@@ -38,9 +38,11 @@ $VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/
   <timestamp>_<slug>.meta.json
 ```
 
-Sesja w trybie operatora może też trzymać `tracker.md`, `journal.md` oraz `briefs/`
-dla wielofalowego planu, ale te artefakty to dyscyplina postawy, a nie dowód, że
-istnieje publiczna komenda `vibecrafted operator`.
+Datowane raporty, trackery, transkrypty, briefy, zamknięcia i metadane runu to
+projekcje/evidence runu. Nie stają się drugim systemem dziennika. Jedynym
+kanonicznym stałym dziennikiem jest śledzony przez Git
+`<repo-root>/.vibecrafted/JOURNAL.md`; każdy inny repozytoryjny plik
+`.vibecrafted/` pozostaje ignorowanym stanem runtime'u.
 
 ## Pasy runtime'u
 
@@ -81,14 +83,14 @@ terminal_state:
   stopped_at_operator_button:
     requires:
       - wave tracker updated
-      - journal updated
+      - repozytoryjny JOURNAL.md zaktualizowany o materialne decyzje
       - reports and SHAs named
       - remaining unpermitted human action named
   completed_with_plan_permission:
     requires:
       - permission source named
       - tracker updated
-      - journal updated
+      - repozytoryjny JOURNAL.md zaktualizowany o materialne decyzje
       - reports and SHAs named
   blocked_with_evidence:
     requires:

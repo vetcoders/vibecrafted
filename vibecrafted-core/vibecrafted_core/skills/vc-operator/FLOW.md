@@ -30,7 +30,7 @@ flowchart TD
     P --> M
     N -->|green| Q[Verify reports, gates, branch, SHA]
     Q --> R[Scan landed commits for leaks/local-only material]
-    R --> T[Append tracker and journal]
+    R --> T[Update tracker and append material decisions to repo JOURNAL.md]
     T --> U[Synthesize wave close-out]
     U --> S
     S -->|yes| K
@@ -59,16 +59,20 @@ flowchart TD
 
 ## Operator Journal
 
-Operator mode keeps two living artifacts:
+Operator mode keeps two distinct truth surfaces:
 
-- `tracker.md` - wave status, checkbox state, run IDs, branches, SHAs, gates.
-- `journal.md` - append-only mission diary for decisions, stalls, recoveries,
-  framing shifts, and stop points.
+- dated trackers/reports under `$VIBECRAFTED_HOME/artifacts/...` - run state,
+  run IDs, branches, SHAs, gates, transcripts, and metadata.
+- `<repo-root>/.vibecrafted/JOURNAL.md` - the one permanent, append-only,
+  Git-tracked Operator Journal.
 
 The tracker lets the operator audit what landed without reading every report.
 The journal explains why the wave moved the way it did.
-Plan mutations and security guardrail incidents are journal entries, not
-memory-only explanations.
+Plan mutations, discovered-fix decisions, integrations, and security guardrail
+incidents are journal entries, not memory-only explanations. Dated artifacts
+are evidence projections, never alternative canonical journals. Only the
+Operator writes the journal; Workers surface falsifiable findings and stay
+inside their briefs.
 
 ## Routes
 
@@ -90,8 +94,8 @@ memory-only explanations.
 
 - Artifact root: `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/`
 - Tracker/result state: dispatch-specific files under the run artifact root
-- Journal/briefs/close-outs: operator-managed artifacts when the posture is
-  conducting a multi-wave plan
+- Canonical journal: `<repo-root>/.vibecrafted/JOURNAL.md`
+- Briefs/close-outs: dated operator-managed run projections
 - Lock: `$VIBECRAFTED_HOME/locks/<org>/<repo>/<run_id>.lock`
 
 ## Anti-Patterns
@@ -101,4 +105,8 @@ memory-only explanations.
 - Compressing wave status into "green" without SHAs and gate evidence.
 - Treating native subagents as external fleet dispatches.
 - Authoring worker achievements as operator achievements.
+- Personally implementing a discovered adjacent fix instead of deciding,
+  briefing, dispatching it into a dedicated worktree, verifying, and
+  integrating it.
+- Padding journal or handoff output with routine negative-work claims.
 - Continuing past an unpermitted operator button.

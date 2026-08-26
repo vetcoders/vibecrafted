@@ -1,40 +1,63 @@
 # `vc-operator` Journal
 
-The operator journal is an append-only mission diary for orchestration.
+The Operator Journal is the permanent, append-only repository decision record
+for orchestration.
 
-It records why waves were fired, paused, recovered, escalated, or stopped. It
-complements the wave tracker.
+It records material actions, decisions, evidence, risks, recoveries,
+integrations, and required acceptance gaps. It complements dated run evidence
+without duplicating it.
 
 ## Path
 
 ```text
-$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/operator/journal.md
+<repo-root>/.vibecrafted/JOURNAL.md
 ```
+
+This is the one canonical journal per repository. It is deliberately tracked
+by Git. Other files under repo-local `.vibecrafted/` remain ignored runtime
+state.
 
 Related artifact:
 
 ```text
-$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/operator/tracker.md
+$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/<run>/tracker.md
 ```
 
 ## Journal vs Tracker
 
-| Artifact     | Purpose                                                             |
-| ------------ | ------------------------------------------------------------------- |
-| `tracker.md` | current wave status, checkboxes, run IDs, branches, SHAs, gates     |
-| `journal.md` | decisions, role shifts, stalls, recovery logic, close-out reasoning |
+| Artifact                | Purpose                                                          |
+| ----------------------- | ---------------------------------------------------------------- |
+| dated tracker/report    | run state, run IDs, branches, SHAs, gates, transcripts, metadata |
+| repository `JOURNAL.md` | material Operator decisions and repository mission history       |
 
 The tracker answers "what landed?".
 The journal answers "why did the operator do that next?".
 
 ## Rules
 
-- Append only.
-- First entry declares operator posture and plan.
-- Every fire, await, notify, stall, recovery, escalation, close-out, and stop
-  point gets an entry.
-- Every plan mutation and security guardrail incident gets an entry.
-- Corrections are written as new entries.
+- Append only; corrections are new entries.
+- Only the active Operator writes this journal.
+- Record material dispatches, decisions, evidence, risks, recoveries,
+  integrations, security guardrails, and required acceptance gaps.
+- Record every material deviation from the current ITP or TD: an added,
+  skipped, or reordered cut; substrate change; recovery shape; cherry-pick or
+  integration; and its reason.
+- A justified recovery/fix cut may extend beyond the current ITP or TD when the
+  repository/runtime context supports it and the final goal remains coherent.
+- Existing trust-boundary stop points still apply.
+- Dated artifact reports, trackers, transcripts, and run metadata are
+  projections/evidence, not alternative journals.
+- Downstream agents append redacted framework findings to
+  `~/.vibecrafted/vibecrafted/vibecrafted-fail.md`.
+- A dispatched Worker stays inside its brief, gives the active Operator a
+  falsifiable finding, does not patch adjacent scope, and does not write this
+  journal.
+- The Operator judges the finding, records the decision, creates a bounded
+  brief, actively dispatches the fix into a dedicated worktree, verifies it,
+  and integrates it. The Operator does not personally implement a discovered
+  fix.
+- Do not record routine negative-work claims. Git, runtime metadata, receipts,
+  and reports already prove them.
 - Worker-facing closing rails do not appear in operator journal entries.
 - Do not collapse separate worker states into a vague wave status.
 
@@ -46,7 +69,7 @@ The journal answers "why did the operator do that next?".
 ```yaml
 operator_run:
   plan_name: ""
-  artifact_root: ""
+  repository: ""
   source_plan: ""
   init_evidence: ""
   stop_point: "operator button"
@@ -68,19 +91,6 @@ operator_run:
 - Run IDs:
 - Dependency state:
 - Await path:
-```
-
-## Await Entry
-
-```md
-## <timestamp> - await wave <n>
-
-- Completed:
-- Running:
-- Stalled:
-- Reports:
-- Gates:
-- Next:
 ```
 
 ## Recovery Entry
@@ -106,6 +116,22 @@ operator_run:
 - Final goal unchanged because:
 - Evidence:
 - Next:
+```
+
+Use this shape for added, skipped, or reordered cuts, substrate changes,
+recovery shape, and cherry-pick/integration decisions.
+
+## Discovered-Fix Entry
+
+```md
+## <timestamp> - discovered fix decision
+
+- Worker finding:
+- Operator decision and reason:
+- Bounded brief:
+- Dedicated worktree dispatch:
+- Verification and integration evidence:
+- Risk or acceptance gap:
 ```
 
 ## Security Guardrail Entry

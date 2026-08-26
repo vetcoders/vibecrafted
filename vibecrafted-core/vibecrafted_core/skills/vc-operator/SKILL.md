@@ -158,6 +158,14 @@ The operator agent owns:
 Workers own their slices. Authorship, reports, commits, and findings stay
 attached to the workers who produced them.
 
+A dispatched Worker stays inside its brief. When it discovers an adjacent
+product or framework defect, it surfaces a falsifiable finding to the active
+Operator and does not patch the adjacent scope or write the Operator Journal.
+The Operator judges whether a fix is warranted, records the decision, creates a
+bounded brief, dispatches the cut into a dedicated worktree, verifies it, and
+integrates it. The Operator conducts discovered fixes; it does not personally
+implement them.
+
 ## The Brief-Gate — never dispatch a shell (scaffold-doctor)
 
 Before firing ANY wave, the plan MUST pass the **scaffold-doctor** gate: every cut in the wave
@@ -201,7 +209,7 @@ write the handoff instead of improvising authority.
 12. Scan landed commits for secrets, personal data, local-only paths, local
     network topology, IP addresses, and internal documents.
 13. Use recovery dispatch on stalls; never blind restart.
-14. Append tracker and journal.
+14. Update the tracker and append material decisions to the canonical journal.
 15. Synthesize wave close-out.
 16. Continue or stop at the unpermitted operator button.
 
@@ -239,19 +247,30 @@ projection must not stop the run.
 
 ## Plan Mutation Allowance
 
-The operator may skip, add, reorder, or regroup prompts, and may cherry-pick
-between active wave branches, when doing so does not change the final goal. Each
-change must be recorded in `journal.md` with what changed and why.
+Repository or runtime context may justify a recovery/fix cut beyond the current
+ITP or TD when the final goal remains coherent. The Operator may skip, add,
+reorder, or regroup cuts and may cherry-pick between active wave branches under
+that same invariant. Record every material deviation in
+`<repo-root>/.vibecrafted/JOURNAL.md`: added, skipped, or reordered cuts;
+substrate changes; recovery shape; cherry-pick or integration; security
+guardrails; and the reason. Existing trust-boundary stop points still apply.
 
 ## Journal And Tracker
 
-Operator mode keeps two living artifacts:
+Operator mode keeps two distinct truth surfaces:
 
-- `tracker.md` - wave status table, checkboxes, run IDs, SHAs, gate state.
-- `journal.md` - append-only mission diary for decisions, stalls, recoveries,
-  role shifts, and stop points.
+- dated trackers and reports under `$VIBECRAFTED_HOME/artifacts/...` - run
+  projections and evidence such as wave state, run IDs, SHAs, and gates.
+- `<repo-root>/.vibecrafted/JOURNAL.md` - the one permanent, append-only,
+  Git-tracked Operator Journal for the repository.
 
-Both are operator-internal artifacts. They do not carry worker closing rails.
+Only the Operator writes the journal. Downstream agents append redacted
+framework findings to the central
+`~/.vibecrafted/vibecrafted/vibecrafted-fail.md` intake; dispatched Workers
+surface scoped findings to the active Operator. Dated reports, trackers,
+transcripts, and run metadata are evidence, never alternative canonical
+journals. Journal and operator output record material actions, decisions,
+evidence, risks, and required acceptance gaps, not routine negative-work claims.
 
 See [JOURNAL.md](JOURNAL.md).
 

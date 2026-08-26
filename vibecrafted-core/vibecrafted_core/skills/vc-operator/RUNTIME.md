@@ -20,7 +20,7 @@ The operator posture creates or consumes durable state for fleet orchestration:
 - run metadata
 - transcript
 - wave tracker
-- append-only journal
+- the repository-local, append-only Operator Journal
 - worker briefs
 - launch cards and run IDs
 - per-wave close-outs
@@ -39,9 +39,11 @@ $VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/
   <timestamp>_<slug>.meta.json
 ```
 
-An operator-mode session may also keep `tracker.md`, `journal.md`, and
-`briefs/` for a multi-wave plan, but those artifacts are posture discipline, not
-proof that a public `vibecrafted operator` command exists.
+Dated reports, trackers, transcripts, briefs, close-outs, and run metadata are
+run projections/evidence. They do not become a second journal system. The one
+canonical permanent journal is the Git-tracked
+`<repo-root>/.vibecrafted/JOURNAL.md`; every other repo-local `.vibecrafted/`
+file remains ignored runtime state.
 
 ## Runtime Lanes
 
@@ -82,14 +84,14 @@ terminal_state:
   stopped_at_operator_button:
     requires:
       - wave tracker updated
-      - journal updated
+      - repository JOURNAL.md updated with material decisions
       - reports and SHAs named
       - remaining unpermitted human action named
   completed_with_plan_permission:
     requires:
       - permission source named
       - tracker updated
-      - journal updated
+      - repository JOURNAL.md updated with material decisions
       - reports and SHAs named
   blocked_with_evidence:
     requires:
