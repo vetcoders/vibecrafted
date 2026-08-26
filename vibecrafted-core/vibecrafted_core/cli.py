@@ -34,6 +34,7 @@ from .workflow import (
     manual_resume_session,
     normalize_launch_spec,
     operator_continue_run,
+    recover_launch_receipt,
 )
 
 AGENTS = {"claude", "codex", "agy", "junie", "grok", "swarm"}
@@ -566,6 +567,56 @@ def _print_launch_receipt(payload: dict[str, Any]) -> None:
         f"await (ARM NOW, supervisor-side): vibecrafted await {agent} --run-id {run_id}"
     )
     print("=====================================================================")
+
+
+def _emit_launch_result(result: dict[str, Any], *, json_mode: bool) -> int:
+    """Write exactly one launch receipt to stdout. Never exit 0 on empty stdout.
+
+    Diagnostics go to stderr. A run that already mutated control-plane state
+    must still emit ``run_id`` so a retry can resolve it instead of guessing.
+    """
+    from .workflow import _json_plain, machine_launch_receipt
+
+    receipt = machine_launch_receipt(result)
+    run_id = str(receipt.get("run_id") or "")
+    if json_mode:
+        payload = _json_plain(result)
+        if not isinstance(payload, dict):
+            payload = {}
+        payload.update(receipt)
+        try:
+            text = json.dumps(payload, ensure_ascii=False, indent=2)
+        except (TypeError, ValueError):
+            text = json.dumps(receipt, ensure_ascii=False, indent=2)
+        if not str(text).strip():
+            print("error: launch produced an empty receipt", file=sys.stderr)
+            if run_id:
+                print(f"run_id: {run_id}", file=sys.stderr)
+            return _EX_TEMPFAIL if run_id else 1
+        try:
+            sys.stdout.write(text if text.endswith("\n") else f"{text}\n")
+            sys.stdout.flush()
+        except BrokenPipeError:
+            print(
+                f"error: stdout closed after launch; run_id={run_id or 'unknown'}",
+                file=sys.stderr,
+            )
+            return _EX_TEMPFAIL if run_id else 1
+    else:
+        try:
+            _print_launch_receipt(result)
+            sys.stdout.flush()
+        except BrokenPipeError:
+            print(
+                f"error: stdout closed after launch; run_id={run_id or 'unknown'}",
+                file=sys.stderr,
+            )
+            return _EX_TEMPFAIL if run_id else 1
+        _watch_launch_startup(result)
+    if receipt["accepted"] and not run_id:
+        print("error: accepted launch missing run_id", file=sys.stderr)
+        return 1
+    return 0 if receipt["accepted"] else 1
 
 
 # Parity contract with the shell launcher's `spawn_watch_startup`
@@ -1656,13 +1707,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             command=str(args.command), agent=args.agent, message=str(exc)
         )
         return 2
-    result = launch_workflow(spec, source_dir)
-    if args.json:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    else:
-        _print_launch_receipt(result)
-        _watch_launch_startup(result)
-    return 0 if result.get("accepted") else 1
+    try:
+        result = launch_workflow(spec, source_dir)
+    except (OSError, TypeError, ValueError, RuntimeError) as exc:
+        print(
+            f"error: launch raised {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        recovered = recover_launch_receipt(spec)
+        if recovered and recovered.get("run_id"):
+            result = recovered
+        else:
+            result = {
+                "accepted": False,
+                "run_id": "",
+                "agent": spec.agent,
+                "skill": spec.skill,
+                "root": spec.root,
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+    return _emit_launch_result(result, json_mode=bool(args.json))
 
 
 if __name__ == "__main__":  # pragma: no cover

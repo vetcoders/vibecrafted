@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Self
 
 import pytest
 from vibecrafted_core import control_plane, process_control, spawn, trust, workflow
@@ -243,6 +243,132 @@ def test_launch_workflow_returns_pid_and_logs_spawn(
         "sync": "deferred",
         "run_id": payload["run_id"],
     }
+
+
+class _AliveProc:
+    pid = 4242
+
+    def wait(self) -> int:
+        return 0
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+
+def _patch_launch_popen(
+    monkeypatch: pytest.MonkeyPatch,
+    pops: list[object],
+    *,
+    boom: bool = False,
+) -> None:
+    real_popen = subprocess.Popen
+
+    def fake_popen(*args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("start_new_session"):
+            pops.append(1)
+            if boom:
+                raise OSError("dispatcher vanished after reservation")
+            return _AliveProc()
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(workflow.subprocess, "Popen", fake_popen)
+
+
+def test_one_logical_launch_creates_one_run_and_replays_on_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    source = _source_dir(tmp_path)
+    spec = workflow.normalize_launch_spec(
+        {"skill": "workflow", "agent": "claude", "prompt": "same brief"},
+        source,
+    )
+    pops: list[object] = []
+    _patch_launch_popen(monkeypatch, pops)
+    monkeypatch.setattr(
+        workflow,
+        "_stdin_command",
+        lambda _agent: [sys.executable, "-c", "pass"],
+    )
+
+    first = workflow.launch_workflow(spec, source)
+    second = workflow.launch_workflow(spec, source)
+
+    assert first["accepted"] is True
+    assert first["run_id"]
+    assert len(pops) == 1
+    assert second["run_id"] == first["run_id"]
+    assert second.get("replayed") is True
+    assert second["accepted"] is True
+    assert second.get("idempotency_key")
+
+
+def test_spawn_exception_after_run_id_does_not_mint_sibling_while_live(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    source = _source_dir(tmp_path)
+    spec = workflow.normalize_launch_spec(
+        {"skill": "workflow", "agent": "claude", "prompt": "same brief"},
+        source,
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_stdin_command",
+        lambda _agent: [sys.executable, "-c", "pass"],
+    )
+    pops: list[object] = []
+    _patch_launch_popen(monkeypatch, pops, boom=True)
+
+    first = workflow.launch_workflow(spec, source)
+    assert first["accepted"] is False
+    assert first["run_id"]
+    assert len(pops) == 1
+
+    _patch_launch_popen(monkeypatch, pops, boom=False)
+    second = workflow.launch_workflow(spec, source)
+
+    # Failed launches are retryable; a later successful retry may mint a new
+    # run. The incident class is empty success of a *live* launch.
+    assert second["accepted"] is True
+    assert len(pops) == 2
+    assert second["run_id"] != first["run_id"]
+
+
+def test_viewer_exception_after_spawn_still_returns_receipt_for_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    source = _source_dir(tmp_path)
+    spec = workflow.normalize_launch_spec(
+        {"skill": "workflow", "agent": "claude", "prompt": "same brief"},
+        source,
+    )
+    pops: list[object] = []
+    _patch_launch_popen(monkeypatch, pops)
+    monkeypatch.setattr(
+        workflow,
+        "_stdin_command",
+        lambda _agent: [sys.executable, "-c", "pass"],
+    )
+
+    def boom_viewer(**_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("live viewer exploded")
+
+    monkeypatch.setattr(workflow, "open_live_viewer", boom_viewer)
+
+    first = workflow.launch_workflow(spec, source)
+    second = workflow.launch_workflow(spec, source)
+
+    assert first["accepted"] is True
+    assert first["run_id"]
+    assert first["live_viewer"]["status"] == "failed"
+    assert len(pops) == 1
+    assert second["run_id"] == first["run_id"]
+    assert second.get("replayed") is True
 
 
 def test_launch_workflow_preseeds_machine_owned_claim_digest(

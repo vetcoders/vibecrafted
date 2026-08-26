@@ -1584,7 +1584,13 @@ def lifecycle_main(workflow_id: str, argv: Sequence[str] | None = None) -> int:
         )
     )
     if args.json:
-        print(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                state, ensure_ascii=False, indent=2, sort_keys=True, default=str
+            ),
+            flush=True,
+        )
     else:
         _print_lifecycle_receipt(state)
+        sys.stdout.flush()
     return 0 if state.get("status") in {"launching", "completed"} else 1
