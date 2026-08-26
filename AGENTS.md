@@ -105,6 +105,87 @@ Repeated reports are signal, not noise.
 
 ---
 
+# Vibecrafted Feedback Loop
+
+For external users and downstream adopters, the canonical intake channel for
+Vibecrafted failures is:
+
+`~/.vibecrafted/vibecrafted/vibecrafted-fail.md`
+
+Use it for framework bugs, runtime mismatches, packaging or install failures,
+missing agent or provider support, observability gaps, UX problems, misleading
+help or documentation, and cases that forced a fallback. Append enough redacted
+evidence for the Vibecrafted team to reproduce and prioritize the failure.
+
+Inside this repository, the route depends on the agent role, not on whether the
+finding happens to fit the current task:
+
+- A dispatched Worker stays inside its brief. It captures enough evidence to
+  make the failure falsifiable and surfaces the finding to the active Operator;
+  it does not opportunistically patch adjacent scope, launch another fleet, or
+  append the downstream intake log.
+- The Operator autonomously decides whether the finding warrants a repair,
+  using the wider repository, runtime, plan, and User context available in the
+  current thread. If it does, the Operator records the decision in the
+  canonical operator `journal.md`, creates a bounded brief, actively dispatches
+  the repair into a dedicated worktree, verifies the result, and integrates it.
+  The Operator conducts the fix; it does not implement the discovered product
+  repair personally. This recovery cut may extend the active plan when the
+  Operator judges it necessary, while normal trust-boundary stop points still
+  apply.
+- Agents working in downstream repositories use this file as intake. They do
+  not enter the Vibecrafted checkout and patch it incidentally.
+
+Before logging, capture the active `vibecrafted --version`, active runtime root
+and generation, source checkout SHA when relevant, exact command and error, and
+whether the failure belongs to source, installed-runtime, packaging, or
+substrate truth. Verify executable and runtime provenance first; do not let PATH
+shadowing create a false report.
+
+### Rules
+
+- Never recreate, truncate, overwrite, reorganize, or deduplicate the log.
+- Always append at the end. Repeated reports are prioritization signal.
+- On macOS, keep the canonical file protected with the `uappnd` filesystem
+  flag. On platforms without that flag, the application-level append-only
+  contract still applies.
+- Never include secrets, tokens, credentials, PII or PHI, full private prompts,
+  customer payloads, or raw session data. Redact them and describe their shape.
+- For downstream intake, if an automatic helper is unavailable, append
+  manually. Missing tooling is not a reason to skip a legitimate blocked
+  finding.
+- Triage the backlog periodically. Settle a finding by appending a new entry
+  that references the original and records `fixed`, `superseded`, or
+  `cannot-reproduce` with evidence. Never edit or delete the historical entry.
+
+## Permanent Operator Journal
+
+Every active Operator maintains one append-only journal rooted in the current
+repository:
+
+```text
+<repo-root>/.vibecrafted/JOURNAL.md
+```
+
+The repository-local `.vibecrafted/` directory is runtime state and remains
+ignored by Git except for `JOURNAL.md`, which is deliberately tracked as the
+durable decision history for this repo. Do not introduce date-partitioned
+canonical journals or a second journal system. Run-specific reports and
+trackers may project or reference it, but they do not replace it. Record
+material dispatches, awaits, stalls, recoveries, integrations, close-outs,
+security guardrails, and every meaningful deviation from the active
+Implementation Task Plan (ITP) or Task Definition (TD), including added,
+skipped, reordered, or re-substrated cuts and why the final goal remains
+coherent.
+
+Journal actions and decisions, not negative activity. Do not record that an
+agent did not edit a file, did not switch a branch, or did not create a commit.
+Runtime metadata, Git, reports, and receipts already provide that provenance.
+Worker closing rails and routine non-actions do not belong in the operator
+journal.
+
+---
+
 # Why This Matters
 
 Loctree changes agent work from:
@@ -129,6 +210,34 @@ The goal is:
 ---
 
 # Agent Behavior Standard
+
+## Selected Implementation Substrate
+
+A single active implementation lane defaults to the shared Living Tree.
+Workers do not opportunistically create or switch branches or worktrees.
+
+Parallel fleet work uses the substrate explicitly selected by the User,
+launcher, or wave contract:
+
+- When `local worktrees` (`local-worktrees`) is selected, or the User explicitly
+  orders isolated worktrees, every worker receives its own dedicated branch and
+  worktree. The integrator alone lands those changes into the target branch.
+  Sibling sessions must not touch the main checkout.
+- Fleet worktrees live under
+  `${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/worktrees`, which defaults to
+  `~/.vibecrafted/worktrees`. They do not live inside the repository checkout
+  or under `/tmp`. Tests may select an isolated `VIBECRAFTED_HOME`.
+- When `local native` (`local-native`) or the shared Living Tree is explicitly
+  selected, parallel workers adapt to the same live tree. They re-read before
+  editing, stage only their owned files, and use the repository's commit-safe
+  discipline.
+
+The explicit current User or runtime selection wins over remembered doctrine or
+stale session history. Never infer the active mode merely from the existence of
+old worktrees.
+
+In either mode, re-read files after drift, do not revert another contributor's
+work, keep staging narrow, and never use a blind reset to recover state.
 
 ## Work From Structure Before Text
 
@@ -814,7 +923,8 @@ Implementation lives in `vibecrafted-server/web/src/scaffold/mod.rs`
 
 ## Handoff Format
 
-Every completed task should end with:
+Every completed task should report material state with these headings when they
+carry information:
 
 ### Summary
 
@@ -825,6 +935,12 @@ Every completed task should end with:
 ### Verification Not Performed
 
 ### Risks Or Follow-Up
+
+`Verification Not Performed` is only for a required acceptance surface that
+remains genuinely unverified and changes the risk or next move. Omit empty
+headings and incidental non-actions. Do not report that a file was not edited,
+a branch was not switched, or a commit was not created; repository telemetry
+already answers those questions.
 
 ---
 
