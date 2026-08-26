@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import io
 import json
@@ -83,6 +84,13 @@ def _write_complete_source(
             1,
         )
     _write_executable(root / "scripts" / "vibecrafted", launcher)
+    _write_executable(
+        root / "vibecrafted-core/vibecrafted_core/deck/vibecrafted", launcher
+    )
+    _write_executable(
+        root / "bin" / "python3",
+        f'#!/bin/sh\nexec {installer.shlex_quote(str(Path(sys.executable).absolute()))} "$@"\n',
+    )
     _write_source_provenance_fixture(root)
 
 
@@ -327,6 +335,10 @@ def _write_valid_runtime_generation(root: Path) -> None:
     deck.parent.mkdir(parents=True)
     deck.write_bytes((REPO_ROOT / "scripts" / "vibecrafted").read_bytes())
     deck.chmod(0o755)
+    runtime_deck = root / "bin" / "vibecrafted"
+    runtime_deck.parent.mkdir(parents=True)
+    runtime_deck.write_bytes(deck.read_bytes())
+    runtime_deck.chmod(0o755)
 
 
 def _write_runtime_launch_agent(
@@ -5990,9 +6002,7 @@ def test_runtime_generation_pointer_swap_never_removes_current(
     )
     assert manifest["schema"] == installer._RUNTIME_GENERATION_MANIFEST_SCHEMA
     assert manifest["version"] == "9.9.9+gtest"
-    assert manifest["entrypoint"] == (
-        "vibecrafted-core/vibecrafted_core/deck/vibecrafted"
-    )
+    assert manifest["entrypoint"] == installer._RUNTIME_GENERATION_ENTRYPOINT.as_posix()
     assert (manifest["owner_repo"], manifest["source_revision"]) == (
         source_provenance["owner_repo"],
         source_provenance["source_revision"],
@@ -6076,6 +6086,54 @@ def test_runtime_generation_rejects_final_bound_path_swap_before_pointer(
     assert state["swapped"] is True
     assert current.resolve() == old_target.resolve()
     assert not list(current.parent.glob("vibecrafted-generation-9.9.9+gpath-swap-*"))
+
+
+def test_owned_temporary_cleanup_race_preserves_primary_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_rmtree = installer.shutil.rmtree
+    calls = 0
+
+    def late_metadata_once(path: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            ambient = Path(path) / "runtime/.DS_Store"
+            ambient.parent.mkdir(parents=True, exist_ok=True)
+            ambient.write_text("ambient\n", encoding="utf-8")
+            raise OSError(errno.ENOTEMPTY, "Directory not empty", str(path))
+        real_rmtree(path)
+
+    monkeypatch.setattr(installer.shutil, "rmtree", late_metadata_once)
+    monkeypatch.setattr(installer.tempfile, "tempdir", str(tmp_path))
+
+    with (
+        pytest.raises(OSError, match="file changed while it was captured"),
+        installer._owned_temporary_directory(prefix="verifier-race-"),
+    ):
+        raise OSError("file changed while it was captured")
+
+    assert calls == 2
+    assert not list(tmp_path.glob("verifier-race-*"))
+
+
+def test_owned_temporary_cleanup_does_not_suppress_unrelated_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(installer.tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(
+        installer.shutil,
+        "rmtree",
+        lambda _path: (_ for _ in ()).throw(PermissionError("cleanup denied")),
+    )
+
+    with (
+        pytest.raises(PermissionError, match="cleanup denied"),
+        installer._owned_temporary_directory(prefix="verifier-denied-"),
+    ):
+        pass
 
 
 def test_runtime_generation_rejects_active_source_checkout_reference(
@@ -6372,9 +6430,7 @@ def test_runtime_generation_doctor_verifies_manifest_and_launcher(
     )
     launcher = home / ".local" / "bin" / "vibecrafted"
     launcher.parent.mkdir(parents=True)
-    launcher.symlink_to(
-        current / "vibecrafted-core" / "vibecrafted_core" / "deck" / "vibecrafted"
-    )
+    launcher.symlink_to(current / installer._RUNTIME_GENERATION_ENTRYPOINT)
 
     findings = installer._runtime_generation_contract_findings()
     assert findings == [
@@ -6432,9 +6488,7 @@ def test_runtime_generation_doctor_rejects_deck_drift_and_incomplete_hashes(
     )
     launcher = home / ".local" / "bin" / "vibecrafted"
     launcher.parent.mkdir(parents=True)
-    launcher.symlink_to(
-        current / "vibecrafted-core" / "vibecrafted_core" / "deck" / "vibecrafted"
-    )
+    launcher.symlink_to(current / installer._RUNTIME_GENERATION_ENTRYPOINT)
     deck = generation / installer._RUNTIME_GENERATION_ENTRYPOINT
     original = deck.read_bytes()
     deck.write_bytes(original + b"\nexit 99\n")
@@ -6488,7 +6542,7 @@ def test_runtime_generation_doctor_rejects_launcher_from_old_generation(
 
     [finding] = installer._runtime_generation_contract_findings()
     assert finding.level == "fail"
-    assert "does not resolve to the current generation entrypoint" in finding.message
+    assert "neither resolves to nor wraps" in finding.message
 
 
 def test_chained_prepared_publish_keeps_last_verified_rollback_target(

@@ -5,8 +5,10 @@
 //
 //
 // Tabs:
-//   "Start here"  — first-run map (about mission-control): chrome, rail, keys
+//   "Start here"  — first-run product map
+//   "Agents"      — one workspace, interactive Agent faces and New agent card
 //   "Shell"       — work shell with banner + zsh (not a silent suspended pane)
+//   "voc"         — eyes for the current workspace, not a launcher
 //
 // Contract: every tab keeps the left Sessions rail (default_tab_template).
 //
@@ -35,18 +37,27 @@ layout {
     }
 
     tab name="Start here" focus=true {
-        pane name="Start here" {
-            plugin location="about" {
-                guide_mode "mission-control"
-                pane_title "Start here — map of this workspace"
-            }
+        pane command="bash" name="Start Here" {
+            args "-lc" "root=\"${VC_FRAME_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame}\"; launcher=\"$root/vc-start-here.py\"; if [ -x \"$launcher\" ]; then exec \"$launcher\"; fi; printf '\\n  START HERE\\n\\n  Launcher missing: %s\\n  Run: vibecrafted config install --force\\n\\n' \"$launcher\"; exec \"${SHELL:-/bin/zsh}\" -l"
+        }
+    }
+
+    tab name="Agents" {
+        pane command="bash" name="Agent Workspaces" {
+            args "-lc" "root=\"${VC_FRAME_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame}\"; launcher=\"$root/vc-agent-workshop.py\"; if [ -x \"$launcher\" ]; then exec \"$launcher\" home; fi; printf '\\n  AGENT WORKSPACES\\n\\n  Launcher missing: %s\\n  Run: vibecrafted config install --force\\n\\n' \"$launcher\"; exec \"${SHELL:-/bin/zsh}\" -l"
         }
     }
 
     tab name="Shell" hide_floating_panes=true {
         // Banner then interactive zsh — wakes immediately (no suspended Enter void).
         pane command="bash" name="Shell" {
-            args "-lc" "printf '\\n  VIBECRAFTED · Shell\\n\\n  Your work shell — the Guide lives on tab 1.\\n\\n  First commands:\\n    vibecrafted start     open / attach operator flow\\n    vibecrafted help      list CLI surfaces\\n\\n  Chrome, always on screen:\\n    left rail   sessions / agent rooms — click a name to jump\\n    top row     tabs of this session: Start here | Shell\\n    Ctrl+t 1    back to the Guide\\n\\n'; exec zsh -l"
+            args "-lc" "printf '\\n  VIBECRAFTED · Shell\\n\\n  Your work shell — Agent Workspaces lives on the Agents tab.\\n\\n  First commands:\\n    vibecrafted start     open / attach workspace\\n    vibecrafted help      list CLI surfaces\\n\\n  Chrome, always on screen:\\n    left rail   workspaces / Agent rooms — click a name to jump\\n    top row     Start here | Agents | Shell | voc\\n    Ctrl+t 1    back to Start here\\n\\n'; exec zsh -l"
+        }
+    }
+
+    tab name="voc" hide_floating_panes=true {
+        pane command="bash" name="voc" {
+            args "-lc" "if command -v voc >/dev/null 2>&1; then exec voc; elif command -v vibecrafted >/dev/null 2>&1; then exec vibecrafted tui; fi; printf '\\n  voc is not installed in this Runtime Pack.\\n\\n'; exec \"${SHELL:-/bin/zsh}\" -l"
         }
     }
 

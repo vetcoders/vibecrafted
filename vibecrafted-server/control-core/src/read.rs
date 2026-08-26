@@ -22,10 +22,11 @@ use chrono::{DateTime, Utc};
 
 use crate::events::EventStream;
 use crate::model::{
-    AgentMeta, DeliverySealRef, Event, FINAL_STATES, Health, LifecycleRun, LifecycleRunSummary,
+    AgentMeta, ContinuityPolicyProjection, DeliverySealRef, Event, FINAL_STATES, Health,
+    LifecycleRun, LifecycleRunSummary, OperatorAgentPolicyProjection, OperatorAgentProjection,
     RECENT_RUN_LIMIT, RUN_STALL_SECONDS, RunStatus, SettlementBoard, SettlementTui,
-    SettlementVerdict, TrustReceiptV1, coerce_int_value, is_final_state, merge_status,
-    operator_session_name, parse_iso, skill_from_code, state_health,
+    SettlementVerdict, SupervisionRelationProjection, TrustReceiptV1, coerce_int_value,
+    is_final_state, merge_status, operator_session_name, parse_iso, skill_from_code, state_health,
 };
 
 /// Resolve `~`-prefixed paths against `$HOME`. Other paths pass through.
@@ -460,9 +461,14 @@ impl ControlPlane {
             session_id: value("session_id"),
             current_loop: None,
             total_loops: None,
+            owner_pid: integer("owner_pid"),
             worker_pid: integer("worker_pid"),
             worker_pgid: integer("worker_pgid"),
             worker_alive: boolean("worker_alive"),
+            process_truth: value("process_truth"),
+            process_truth_reason: value("process_truth_reason"),
+            operator_agent: meta.as_ref().and_then(operator_agent_projection),
+            continuity: meta.as_ref().and_then(continuity_projection),
             recovery_required: boolean("recovery_required").unwrap_or(false),
             stop_reason: value("stop_reason"),
             agent_session_id: value("agent_session_id"),
@@ -776,6 +782,7 @@ impl ControlPlane {
         events.retain(|event| !event_has_test_provenance(event, &self.home));
         let worker_pid_candidates: HashSet<(String, i64)> = events
             .iter()
+            .filter(|event| event_owner_pid(event).is_none_or(pid_is_alive))
             .flat_map(|event| event_worker_pids(event).map(|pid| (event.run_id.clone(), pid)))
             .collect();
         let live_worker_runs: HashSet<String> = worker_pid_candidates
@@ -816,6 +823,11 @@ impl ControlPlane {
             } else {
                 if run.worker_pid.is_some() || run.worker_pgid.is_some() {
                     run.worker_alive = Some(false);
+                }
+                if run.owner_pid.is_some() && run.worker_alive == Some(false) {
+                    run.health = "stalled".to_string();
+                    run.liveness = "pid_gone".to_string();
+                    run.recovery_required = true;
                 }
             }
             let await_run = !terminal
@@ -1024,6 +1036,11 @@ fn normalize_event(event: &Event, existing: Option<&RunStatus>, now: DateTime<Ut
         .get("worker_pgid")
         .and_then(coerce_int_value)
         .or_else(|| existing.and_then(|run| run.worker_pgid));
+    let owner_pid = event
+        .payload
+        .get("owner_pid")
+        .and_then(coerce_int_value)
+        .or_else(|| existing.and_then(|run| run.owner_pid));
     let payload_error = existing_string(&payload_string("error"), &payload_string("last_error"));
     let last_error = if !payload_error.is_empty() {
         payload_error
@@ -1112,10 +1129,30 @@ fn normalize_event(event: &Event, existing: Option<&RunStatus>, now: DateTime<Ut
         ),
         current_loop: existing.and_then(|run| run.current_loop),
         total_loops: existing.and_then(|run| run.total_loops),
+        owner_pid,
         worker_pid,
         worker_pgid,
         worker_alive: payload_bool("worker_alive")
             .or_else(|| existing.and_then(|run| run.worker_alive)),
+        process_truth: existing_string(
+            &payload_string("process_truth"),
+            existing
+                .map(|run| run.process_truth.as_str())
+                .unwrap_or_default(),
+        ),
+        process_truth_reason: existing_string(
+            &payload_string("process_truth_reason"),
+            existing
+                .map(|run| run.process_truth_reason.as_str())
+                .unwrap_or_default(),
+        ),
+        operator_agent: existing.and_then(|run| run.operator_agent.clone()),
+        continuity: event
+            .payload
+            .get("continuity")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .or_else(|| existing.and_then(|run| run.continuity.clone())),
         recovery_required: payload_bool("recovery_required")
             .unwrap_or_else(|| existing.is_some_and(|run| run.recovery_required)),
         stop_reason: existing_string(
@@ -1220,6 +1257,41 @@ fn json_scalar_string(value: &serde_json::Value) -> String {
     }
 }
 
+fn operator_agent_projection(payload: &serde_json::Value) -> Option<OperatorAgentProjection> {
+    let role = payload.get("role")?.as_str()?.to_string();
+    if role.is_empty() {
+        return None;
+    }
+    let policy: OperatorAgentPolicyProjection =
+        serde_json::from_value(payload.get("operator_policy")?.clone()).ok()?;
+    let supervision: SupervisionRelationProjection =
+        serde_json::from_value(payload.get("supervision")?.clone()).ok()?;
+    Some(OperatorAgentProjection {
+        role,
+        prompt_role: payload
+            .get("prompt_role")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        provider_session_id: payload
+            .get("provider_session_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        policy,
+        supervision,
+        stop_actor_run_id: payload
+            .get("stop_actor_run_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+fn continuity_projection(payload: &serde_json::Value) -> Option<ContinuityPolicyProjection> {
+    serde_json::from_value(payload.get("continuity")?.clone()).ok()
+}
+
 fn event_has_test_provenance(event: &Event, home: &Path) -> bool {
     if is_pytest_temp_path(home) {
         return false;
@@ -1236,6 +1308,10 @@ fn event_worker_pids(event: &Event) -> impl Iterator<Item = i64> + '_ {
         .into_iter()
         .filter_map(|key| event.payload.get(key))
         .filter_map(coerce_int_value)
+}
+
+fn event_owner_pid(event: &Event) -> Option<i64> {
+    event.payload.get("owner_pid").and_then(coerce_int_value)
 }
 
 fn pid_is_alive(pid: i64) -> bool {
@@ -1348,13 +1424,22 @@ fn settlement_tui(value: &str) -> Option<SettlementTui> {
 }
 
 fn enrich_run_status(run: &mut RunStatus, payload: &serde_json::Value, probe_worker_alive: bool) {
-    if probe_worker_alive && (run.worker_pid.is_some() || run.worker_pgid.is_some()) {
-        run.worker_alive = Some(
-            [run.worker_pid, run.worker_pgid]
-                .into_iter()
-                .flatten()
-                .any(pid_is_alive),
-        );
+    if probe_worker_alive && run.is_terminal() {
+        // Canonical terminal meta/event truth outranks retained pid_alive and a
+        // recycled PID.  The read-only server never resurrects a settled run.
+        run.worker_alive = Some(false);
+    } else if probe_worker_alive && (run.worker_pid.is_some() || run.worker_pgid.is_some()) {
+        let provider_alive = [run.worker_pid, run.worker_pgid]
+            .into_iter()
+            .flatten()
+            .any(pid_is_alive);
+        let owner_alive = run.owner_pid.is_none_or(pid_is_alive);
+        run.worker_alive = Some(provider_alive && owner_alive);
+        if run.owner_pid.is_some() && run.worker_alive == Some(false) && !run.is_terminal() {
+            run.health = "stalled".to_string();
+            run.liveness = "pid_gone".to_string();
+            run.recovery_required = true;
+        }
     }
 
     let settlement = payload
@@ -1428,15 +1513,26 @@ fn enrich_run_status(run: &mut RunStatus, payload: &serde_json::Value, probe_wor
 }
 
 fn refresh_worker_liveness(run: &mut RunStatus) {
+    if run.is_terminal() {
+        run.worker_alive = Some(false);
+        let retry = run.controls.as_ref().is_some_and(|controls| controls.retry);
+        run.set_controls(false, false, retry);
+        return;
+    }
     if run.worker_pid.is_none() && run.worker_pgid.is_none() {
         return;
     }
-    run.worker_alive = Some(
-        [run.worker_pid, run.worker_pgid]
-            .into_iter()
-            .flatten()
-            .any(pid_is_alive),
-    );
+    let provider_alive = [run.worker_pid, run.worker_pgid]
+        .into_iter()
+        .flatten()
+        .any(pid_is_alive);
+    let owner_alive = run.owner_pid.is_none_or(pid_is_alive);
+    run.worker_alive = Some(provider_alive && owner_alive);
+    if run.owner_pid.is_some() && run.worker_alive == Some(false) && !run.is_terminal() {
+        run.health = "stalled".to_string();
+        run.liveness = "pid_gone".to_string();
+        run.recovery_required = true;
+    }
     let terminal = run.is_terminal();
     let await_run = !terminal
         && run
@@ -1592,9 +1688,14 @@ fn normalize_lock(path: &Path, now: DateTime<Utc>) -> Option<RunStatus> {
         session_id: String::new(),
         current_loop: None,
         total_loops: None,
+        owner_pid: None,
         worker_pid: None,
         worker_pgid: None,
         worker_alive: None,
+        process_truth: String::new(),
+        process_truth_reason: String::new(),
+        operator_agent: None,
+        continuity: None,
         recovery_required: false,
         stop_reason: String::new(),
         agent_session_id: String::new(),
@@ -1721,9 +1822,18 @@ impl MarblesState {
             session_id: String::new(),
             current_loop: self.current_loop,
             total_loops: self.total_loops,
+            owner_pid: None,
             worker_pid: None,
             worker_pgid: None,
             worker_alive: None,
+            process_truth: if terminal {
+                "terminal".to_string()
+            } else {
+                String::new()
+            },
+            process_truth_reason: String::new(),
+            operator_agent: None,
+            continuity: None,
             recovery_required: false,
             stop_reason: String::new(),
             agent_session_id: String::new(),
@@ -2147,6 +2257,47 @@ mod tests {
         assert_eq!(view.settlement_counts.active, 1);
         assert_eq!(view.settlement_counts.total_settled, 0);
 
+        fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn interactive_owner_and_provider_must_both_be_live_for_active_projection() {
+        let home = temp_home("interactive-owner-liveness");
+        let runtime = home.join("control_plane/runtime_runs/interactive-owner-dead");
+        fs::create_dir_all(&runtime).expect("runtime run");
+        let now = Utc::now();
+        fs::write(
+            runtime.join("meta.json"),
+            serde_json::to_vec(&json!({
+                "run_id": "interactive-owner-dead",
+                "status": "active",
+                "agent": "codex",
+                "skill": "init",
+                "root": "/srv/checkout/vibecrafted",
+                "updated_at": now.to_rfc3339(),
+                "liveness": "active",
+                "owner_pid": 999999999_i64,
+                "worker_pid": std::process::id()
+            }))
+            .expect("meta json"),
+        )
+        .expect("meta");
+
+        let view = ControlPlane::new(&home).compute_view(now);
+        let run = view
+            .recent_runs
+            .iter()
+            .find(|run| run.run_id == "interactive-owner-dead")
+            .expect("interactive run remains inspectable");
+
+        assert_eq!(run.owner_pid, Some(999999999));
+        assert_eq!(run.worker_alive, Some(false));
+        assert!(
+            view.active_runs
+                .iter()
+                .all(|run| run.run_id != "interactive-owner-dead")
+        );
+        assert_eq!(view.settlement_counts.active, 0);
         fs::remove_dir_all(home).ok();
     }
 

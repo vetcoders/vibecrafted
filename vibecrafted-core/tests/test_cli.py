@@ -27,6 +27,25 @@ def _accepted_launch_payload() -> dict[str, object]:
     }
 
 
+def _stub_server_observation(
+    monkeypatch: pytest.MonkeyPatch, run: dict[str, object]
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "resolve_server_run_id",
+        lambda _agent, run_id, *, last: run_id or (str(run["run_id"]) if last else ""),
+    )
+    monkeypatch.setattr(
+        cli,
+        "observe_run_from_server",
+        lambda _run_id: {
+            "schema": "vibecrafted.run-observation.v1",
+            "found": True,
+            "run": run,
+        },
+    )
+
+
 def test_root_cli_without_command_returns_product_help(capsys) -> None:
     assert cli.main([]) == 0
 
@@ -86,13 +105,21 @@ def test_core_parser_accepts_the_short_prompt_and_file_flags() -> None:
 def test_workflow_prompt_stdin_stays_out_of_argv_and_temp_files(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    capsys,
 ) -> None:
     seen: dict[str, object] = {}
 
     def fake_launch(spec, source_dir):
         seen["spec"] = spec
         seen["source_dir"] = source_dir
-        return {"accepted": True, "run_id": "impl-stdin-1"}
+        return {
+            "accepted": True,
+            "run_id": "impl-stdin-1",
+            "agent": spec.agent,
+            "skill": spec.skill,
+            "root": spec.root,
+            "status": "launching",
+        }
 
     monkeypatch.setattr(cli, "launch_workflow", fake_launch)
     monkeypatch.setattr(cli.sys, "stdin", io.StringIO("secret prompt from stdin"))
@@ -114,6 +141,12 @@ def test_workflow_prompt_stdin_stays_out_of_argv_and_temp_files(
     spec = seen["spec"]
     assert spec.prompt == "secret prompt from stdin"
     assert spec.file == ""
+    body = json.loads(capsys.readouterr().out)
+    assert body["run_id"] == "impl-stdin-1"
+    assert body["accepted"] is True
+    assert body["agent"] == "codex"
+    assert body["root"] == str(tmp_path)
+    assert body["status"] == "launching"
 
 
 def test_review_from_home_uses_selected_workspace(
@@ -658,14 +691,10 @@ def test_blocked_launch_receipt_prints_reasons_inline(capsys) -> None:
 
 
 def test_root_cli_agent_observe_accepts_receipt_command(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(
-        cli, "sync_state", lambda: {"active_runs": [], "recent_runs": []}
-    )
-    monkeypatch.setattr(
-        cli,
-        "lookup_run",
-        lambda run_id: {
-            "run_id": run_id,
+    _stub_server_observation(
+        monkeypatch,
+        {
+            "run_id": "impl-1",
             "state": "process_spawned",
             "agent": "codex",
             "skill": "implement",
@@ -683,14 +712,10 @@ def test_root_cli_agent_observe_accepts_receipt_command(monkeypatch, capsys) -> 
 
 
 def test_root_cli_swarm_observe_accepts_research_receipt(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(
-        cli, "sync_state", lambda: {"active_runs": [], "recent_runs": []}
-    )
-    monkeypatch.setattr(
-        cli,
-        "lookup_run",
-        lambda run_id: {
-            "run_id": run_id,
+    _stub_server_observation(
+        monkeypatch,
+        {
+            "run_id": "rese-1",
             "state": "process_spawned",
             "agent": "swarm",
             "skill": "research",
@@ -708,14 +733,10 @@ def test_root_cli_swarm_observe_accepts_research_receipt(monkeypatch, capsys) ->
 def test_root_cli_observe_hides_stale_error_after_report_validated(
     monkeypatch, capsys
 ) -> None:
-    monkeypatch.setattr(
-        cli, "sync_state", lambda: {"active_runs": [], "recent_runs": []}
-    )
-    monkeypatch.setattr(
-        cli,
-        "lookup_run",
-        lambda run_id: {
-            "run_id": run_id,
+    _stub_server_observation(
+        monkeypatch,
+        {
+            "run_id": "rese-1",
             "state": "report_validated",
             "agent": "swarm",
             "skill": "research",
@@ -742,14 +763,10 @@ def test_root_cli_agent_observe_prints_transcript_tail(
         "\n".join(f"line {idx}" for idx in range(1, 66)) + "\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(
-        cli, "sync_state", lambda: {"active_runs": [], "recent_runs": []}
-    )
-    monkeypatch.setattr(
-        cli,
-        "lookup_run",
-        lambda run_id: {
-            "run_id": run_id,
+    _stub_server_observation(
+        monkeypatch,
+        {
+            "run_id": "impl-1",
             "state": "stalled",
             "agent": "codex",
             "skill": "implement",
@@ -779,14 +796,10 @@ def test_root_cli_agent_observe_renders_json_transcript_tail(
         '{"type":"result","result":"done","usage":{"input_tokens":10,"cache_read_input_tokens":4,"output_tokens":2},"total_cost_usd":0.01}\n',
         encoding="utf-8",
     )
-    monkeypatch.setattr(
-        cli, "sync_state", lambda: {"active_runs": [], "recent_runs": []}
-    )
-    monkeypatch.setattr(
-        cli,
-        "lookup_run",
-        lambda run_id: {
-            "run_id": run_id,
+    _stub_server_observation(
+        monkeypatch,
+        {
+            "run_id": "impl-1",
             "state": "report_validated",
             "agent": "claude",
             "skill": "implement",
@@ -816,14 +829,10 @@ def test_root_cli_agent_observe_recovers_model_when_tail_starts_after_init(
         '{"type":"assistant","session_id":"claude-sess","message":{"model":"claude-opus-4-8","content":[{"type":"text","text":"late body"}]}}\n',
         encoding="utf-8",
     )
-    monkeypatch.setattr(
-        cli, "sync_state", lambda: {"active_runs": [], "recent_runs": []}
-    )
-    monkeypatch.setattr(
-        cli,
-        "lookup_run",
-        lambda run_id: {
-            "run_id": run_id,
+    _stub_server_observation(
+        monkeypatch,
+        {
+            "run_id": "impl-1",
             "state": "report_validated",
             "agent": "claude",
             "skill": "implement",
@@ -854,14 +863,10 @@ def test_root_cli_agent_observe_uses_codex_config_model(
         '{"type":"item.completed","item":{"type":"agent_message","text":"codex body"}}\n',
         encoding="utf-8",
     )
-    monkeypatch.setattr(
-        cli, "sync_state", lambda: {"active_runs": [], "recent_runs": []}
-    )
-    monkeypatch.setattr(
-        cli,
-        "lookup_run",
-        lambda run_id: {
-            "run_id": run_id,
+    _stub_server_observation(
+        monkeypatch,
+        {
+            "run_id": "impl-1",
             "state": "report_validated",
             "agent": "codex",
             "skill": "implement",
@@ -890,15 +895,13 @@ def test_root_cli_agent_await_accepts_receipt_command(monkeypatch, capsys) -> No
         "latest_transcript": "/tmp/transcript.log",
     }
     monkeypatch.setattr(
-        cli, "sync_state", lambda: {"active_runs": [], "recent_runs": []}
+        cli, "resolve_server_run_id", lambda *_args, **_kwargs: "impl-1"
     )
-    monkeypatch.setattr(cli, "lookup_run", lambda _run_id: run)
-    # The verb must block through the ONE canonical loop — the CLI's own job
-    # is only the exit-code/print mapping of its verdict.
     monkeypatch.setattr(
         cli,
-        "await_run",
+        "await_run_from_server",
         lambda run_id, **_kwargs: {
+            "outcome": "terminal",
             "run_id": run_id,
             "found": True,
             "completed": True,
@@ -912,7 +915,6 @@ def test_root_cli_agent_await_accepts_receipt_command(monkeypatch, capsys) -> No
     assert cli.main(["codex", "await", "--run-id", "impl-1", "--timeout", "0"]) == 0
 
     out = capsys.readouterr().out
-    assert "await: initial status" in out
     assert "await: completed" in out
     assert "state:      report_validated" in out
 
@@ -934,15 +936,13 @@ def test_root_cli_agent_await_fails_dead_stale_worker(
         "latest_transcript": str(transcript),
     }
     monkeypatch.setattr(
-        cli, "sync_state", lambda: {"active_runs": [], "recent_runs": []}
+        cli, "resolve_server_run_id", lambda *_args, **_kwargs: "impl-1"
     )
-    monkeypatch.setattr(cli, "lookup_run", lambda _run_id: run)
-    # Dead + no movement is the canonical loop's idle_stall verdict — the CLI
-    # maps it to a nonzero exit with the final run status printed.
     monkeypatch.setattr(
         cli,
-        "await_run",
+        "await_run_from_server",
         lambda run_id, **_kwargs: {
+            "outcome": "idle_stall",
             "run_id": run_id,
             "found": True,
             "completed": False,
@@ -988,13 +988,13 @@ def test_root_cli_agent_await_rejects_completed_payload_when_worker_alive(
         "latest_transcript": "/tmp/transcript.log",
     }
     monkeypatch.setattr(
-        cli, "sync_state", lambda: {"active_runs": [], "recent_runs": []}
+        cli, "resolve_server_run_id", lambda *_args, **_kwargs: "impl-live"
     )
-    monkeypatch.setattr(cli, "lookup_run", lambda _run_id: run)
     monkeypatch.setattr(
         cli,
-        "await_run",
+        "await_run_from_server",
         lambda run_id, **_kwargs: {
+            "outcome": "evidence_disagreement",
             "run_id": run_id,
             "found": True,
             "completed": True,
@@ -1011,6 +1011,79 @@ def test_root_cli_agent_await_rejects_completed_payload_when_worker_alive(
     captured = capsys.readouterr()
     assert "non-terminal completion disagreement" in captured.err
     assert "state:      running" in captured.out
+
+
+def test_root_cli_agent_await_server_unavailable_fails_closed_without_local_poller(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.setattr(
+        cli, "resolve_server_run_id", lambda *_args, **_kwargs: "impl-1"
+    )
+    monkeypatch.setattr(
+        cli,
+        "await_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("private control-plane await loop must not run")
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cli,
+        "await_run_from_server",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            cli.ServerObservationError("vc-server unavailable at 127.0.0.1:9")
+        ),
+    )
+
+    assert cli.main(["codex", "await", "--run-id", "impl-1"]) == 2
+
+    assert "vc-server unavailable" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("outcome", ["idle_stall", "hard_cap"])
+def test_root_cli_agent_await_json_names_distinct_timeout_axes(
+    outcome: str, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.setattr(
+        cli, "resolve_server_run_id", lambda *_args, **_kwargs: "impl-1"
+    )
+    monkeypatch.setattr(
+        cli,
+        "await_run_from_server",
+        lambda run_id, **_kwargs: {
+            "schema": "vibecrafted.run-await-verdict.v1",
+            "outcome": outcome,
+            "reason": outcome,
+            "run_id": run_id,
+            "found": True,
+            "completed": False,
+            "timed_out": True,
+            "idle_timeout_seconds": 7.0,
+            "hard_cap_seconds": 11.0,
+            "run": {"run_id": run_id, "state": "running"},
+        },
+    )
+
+    assert (
+        cli.main(
+            [
+                "codex",
+                "await",
+                "--run-id",
+                "impl-1",
+                "--timeout",
+                "7",
+                "--hard-cap",
+                "11",
+                "--json",
+            ]
+        )
+        == 1
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["outcome"] == outcome
+    assert payload["idle_timeout_seconds"] == 7.0
+    assert payload["hard_cap_seconds"] == 11.0
 
 
 def test_root_cli_doctor_routes_to_installer_doctor(monkeypatch, capsys) -> None:
@@ -1329,3 +1402,119 @@ def test_startup_watch_survives_a_null_accepted_field(tmp_path, capsys, monkeypa
     )
 
     assert "Not logged in" in capsys.readouterr().err
+
+
+def test_json_launch_prints_one_parseable_receipt_even_with_unserializable_extras(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    launches = []
+
+    def fake_launch(spec, _source_dir):
+        launches.append(spec)
+        return {
+            "accepted": True,
+            "run_id": "work-260826-json-1",
+            "agent": spec.agent,
+            "skill": spec.skill,
+            "root": spec.root,
+            "status": "launching",
+            "weird": object(),
+        }
+
+    monkeypatch.setattr(cli, "launch_workflow", fake_launch)
+
+    rc = cli.main(
+        [
+            "workflow",
+            "claude",
+            "--prompt",
+            "one invocation one run",
+            "--json",
+            "--root",
+            str(tmp_path),
+        ]
+    )
+
+    assert rc == 0
+    assert len(launches) == 1
+    captured = capsys.readouterr()
+    assert captured.out.strip()
+    body = json.loads(captured.out)
+    assert body["run_id"] == "work-260826-json-1"
+    assert body["agent"] == "claude"
+    assert body["skill"] == "workflow"
+    assert body["root"] == str(tmp_path)
+    assert body["accepted"] is True
+    assert body["status"] == "launching"
+    assert "schema" in body
+
+
+def test_json_launch_exception_after_run_created_emits_recovered_receipt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    def fake_launch(_spec, _source_dir):
+        raise RuntimeError("viewer exploded after spawn")
+
+    def fake_recover(spec):
+        return {
+            "accepted": True,
+            "run_id": "work-260826-recovered",
+            "agent": spec.agent,
+            "skill": spec.skill,
+            "root": spec.root,
+            "status": "launching",
+            "replayed": True,
+        }
+
+    monkeypatch.setattr(cli, "launch_workflow", fake_launch)
+    monkeypatch.setattr(cli, "recover_launch_receipt", fake_recover)
+
+    rc = cli.main(
+        [
+            "workflow",
+            "claude",
+            "--prompt",
+            "same brief",
+            "--json",
+            "--root",
+            str(tmp_path),
+        ]
+    )
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "viewer exploded after spawn" in captured.err
+    body = json.loads(captured.out)
+    assert body["run_id"] == "work-260826-recovered"
+    assert body["accepted"] is True
+    assert body["replayed"] is True
+    assert body["agent"] == "claude"
+
+
+def test_json_launch_never_returns_empty_success_without_run_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "launch_workflow",
+        lambda _spec, _source: {"accepted": True, "status": "launching"},
+    )
+
+    rc = cli.main(
+        [
+            "workflow",
+            "claude",
+            "--prompt",
+            "missing id",
+            "--json",
+            "--root",
+            str(tmp_path),
+        ]
+    )
+
+    assert rc != 0
+    captured = capsys.readouterr()
+    body = json.loads(captured.out)
+    assert body["accepted"] is True
+    assert body["run_id"] == ""
+    assert "missing run_id" in captured.err

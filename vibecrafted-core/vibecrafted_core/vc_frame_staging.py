@@ -18,6 +18,7 @@ _DEFAULT_ZSH_RE = re.compile(r'default_shell\s+"zsh"')
 _EXEC_ZSH_RE = re.compile(r"exec\s+(?:/bin/)?zsh\s+-l")
 _COPY_PBCOPY_RE = re.compile(r'copy_command\s+"pbcopy"')
 _PBCOPY_STDIN_RE = re.compile(r"\bpbcopy(?=\s*<)")
+_EXECUTABLE_CONFIG_NAMES = frozenset({"vc-agent-workshop.py", "vc-start-here.py"})
 
 
 def resolve_pane_shell(path_env: str | None = None) -> str:
@@ -124,7 +125,7 @@ def materialize_vc_frame_config(
                 )
             else:
                 shutil.copy2(source_file, destination_file)
-            if name.endswith(".sh"):
+            if name.endswith(".sh") or name in _EXECUTABLE_CONFIG_NAMES:
                 mode = destination_file.stat().st_mode
                 destination_file.chmod(
                     mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH

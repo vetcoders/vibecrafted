@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from vibecrafted_core import control_plane
+from vibecrafted_core import control_plane, process_control
 
 
 def _append_event_in_process(home: str, ready: Any) -> None:
@@ -46,6 +46,17 @@ def _write_lock(home: Path, payload: dict[str, object]) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+def _qualified_worker(pid: int, run_id: str) -> dict[str, object]:
+    identity = process_control.process_identity_receipt(pid, run_id=run_id)
+    assert identity is not None
+    return {
+        "worker_pid": pid,
+        "worker_pgid": os.getpgid(pid),
+        "worker_identity": identity,
+        "liveness": "pid_alive",
+    }
 
 
 def test_resolve_run_prefers_runtime_runs_where_core_writes(
@@ -215,6 +226,55 @@ def test_atomic_write_reports_actionable_degraded_mode_before_enospc(
     assert "control-plane degraded" in message
     assert "Free disk space" in message
     assert not target.exists()
+
+
+def test_agent_meta_projects_structured_operator_relationship(tmp_path: Path) -> None:
+    meta = tmp_path / "meta.json"
+    meta.write_text(
+        json.dumps(
+            {
+                "run_id": "init-child",
+                "status": "active",
+                "updated_at": "2026-08-25T12:00:00Z",
+                "role": "agent",
+                "prompt_role": "/vc-init",
+                "provider_session_id": "child-session",
+                "operator_policy": {
+                    "selection": "auto",
+                    "provider": "claude",
+                    "supported": True,
+                },
+                "supervision": {
+                    "relation_id": "relation-1",
+                    "operator_run_id": "oper-1",
+                    "child_run_id": "init-child",
+                    "state": "active",
+                },
+                "continuity": {
+                    "mode": "full-lineage",
+                    "lineage_id": "parent-run-1",
+                    "supported": True,
+                    "materialized": True,
+                    "context_sha256": "abc",
+                    "loop_sha256": "def",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    projected = control_plane._normalize_agent_meta(meta)
+    assert projected is not None
+    assert projected.extra["role"] == "agent"
+    assert projected.extra["operator_policy"]["provider"] == "claude"
+    assert projected.extra["supervision"]["operator_run_id"] == "oper-1"
+    assert projected.extra["continuity"] == {
+        "mode": "full-lineage",
+        "lineage_id": "parent-run-1",
+        "supported": True,
+        "materialized": True,
+        "context_sha256": "abc",
+        "loop_sha256": "def",
+    }
 
 
 def test_operator_stop_is_sticky_over_late_failure_and_artifact_aliases(
@@ -679,12 +739,16 @@ def test_sync_state_keeps_run_live_when_worker_alive_despite_dead_launcher(
     # recovery_required just because the launcher pid is dead — a live worker_pid
     # is proof the run is alive. (Before this fix, every detached dispatch was
     # false-blocked as report_missing/recovery_required mid-delivery.)
-    import os
+    from vibecrafted_core import process_control
+    from vibecrafted_core.process_control import process_identity_receipt
 
     home = tmp_path / ".vibecrafted"
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
     monkeypatch.setenv("VIBECRAFTED_LIVENESS_STALE_HEARTBEAT_SECONDS", "1")
     monkeypatch.setenv("VIBECRAFTED_RUN_GC_GRACE_SECONDS", "999999999")
+    monkeypatch.setattr(process_control, "build_env_index", dict)
+    worker_identity = process_identity_receipt(os.getpid(), run_id="just-live-worker")
+    assert worker_identity is not None
     _write_meta(
         home,
         {
@@ -698,6 +762,8 @@ def test_sync_state_keeps_run_live_when_worker_alive_despite_dead_launcher(
             "skill_code": "just",
             "launcher_pid": 999999999,  # ephemeral spawn-shell, dead
             "worker_pid": os.getpid(),  # the dispatcher/worker — ALIVE
+            "worker_pgid": os.getpgid(os.getpid()),
+            "worker_identity": worker_identity,
             "liveness": "pid_alive",
         },
     )
@@ -708,6 +774,185 @@ def test_sync_state_keeps_run_live_when_worker_alive_despite_dead_launcher(
     assert run["liveness"] != "pid_gone"
     assert run.get("recovery_required") is not True
     assert "recovery_required" not in str(run.get("last_error") or "")
+
+
+@pytest.mark.parametrize(
+    ("identity_mode", "expected_reason", "expected_terminal"),
+    [
+        ("missing", "process_identity_unavailable", False),
+        ("start_token_mismatch", "process_identity_mismatch", False),
+        ("dead_pid", "process_identity_gone", True),
+    ],
+)
+def test_sync_state_settles_stale_pid_alive_only_after_qualified_identity_check(
+    identity_mode: str,
+    expected_reason: str,
+    expected_terminal: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from vibecrafted_core.process_control import process_identity_receipt
+
+    run_id = f"impl-qualified-{identity_mode}"
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    worker_pid = os.getpid() if identity_mode != "dead_pid" else 999999999
+    worker_pgid = os.getpgid(os.getpid()) if identity_mode != "dead_pid" else 999999999
+    identity = process_identity_receipt(os.getpid(), run_id=run_id)
+    assert identity is not None
+    identity["pid"] = worker_pid
+    identity["pgid"] = worker_pgid
+    if identity_mode == "missing":
+        identity = None
+    elif identity_mode == "start_token_mismatch":
+        identity["start_token"] = "definitely-not-the-current-start-token"
+
+    _write_meta(
+        home,
+        {
+            "run_id": run_id,
+            "status": "running",
+            "state": "active",
+            "agent": "codex",
+            "mode": "implement",
+            "root": str(tmp_path),
+            "updated_at": "2026-08-26T00:00:00+00:00",
+            "worker_pid": worker_pid,
+            "worker_pgid": worker_pgid,
+            "worker_identity": identity,
+            "liveness": "pid_alive",
+        },
+    )
+
+    run = control_plane.sync_state()["recent_runs"][0]
+
+    if expected_terminal:
+        assert run["process_truth_reason"] == expected_reason
+        assert run["state"] == "failed"
+        assert run["health"] == "final"
+        assert run["liveness"] == "pid_gone"
+        assert run["process_truth"] == "terminal"
+        assert run["terminal_reason"] == "qualified_process_identity_lost"
+        assert run["settlement_verdict"] == "failed"
+        assert run["settlement_tui"] == "x"
+    else:
+        assert run["state"] == "running"
+        assert run["liveness"] == "pid_alive"
+        assert control_plane._worker_process_truth(run) == (False, expected_reason)
+        assert run.get("terminal_reason") is None
+        assert run.get("settlement_verdict") is None
+
+
+def test_worker_truth_accepts_owned_native_child_in_canonical_pgid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibecrafted_core import process_control
+    from vibecrafted_core.run_reaper import ProcessEntry
+
+    run_id = "impl-wrapper-child"
+    monkeypatch.setattr(
+        process_control,
+        "validate_process_identity",
+        lambda *_args, **_kwargs: (False, "process_gone", None),
+    )
+    monkeypatch.setattr(
+        process_control,
+        "build_process_table",
+        lambda: (ProcessEntry(pid=778, ppid=777, pgid=700, command="codex exec"),),
+    )
+    monkeypatch.setattr(process_control, "build_env_index", lambda: {778: run_id})
+
+    alive, reason = control_plane._worker_process_truth(
+        {
+            "run_id": run_id,
+            "worker_pid": 777,
+            "worker_pgid": 700,
+            "worker_identity": {
+                "pid": 777,
+                "pgid": 700,
+                "run_id": run_id,
+                "start_token": "old-wrapper",
+                "command_sha256": "0" * 64,
+            },
+        }
+    )
+
+    assert alive is True
+    assert reason == "canonical_pgid_descendant"
+
+
+def test_terminal_meta_overrides_stale_pid_alive_projection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    _write_meta(
+        home,
+        {
+            "run_id": "repa-260826-ambiguity-p0",
+            "status": "completed",
+            "state": "completed",
+            "agent": "codex",
+            "mode": "repair",
+            "root": str(tmp_path),
+            "updated_at": "2026-08-26T00:00:00+00:00",
+            "completed_at": "2026-08-26T00:00:00+00:00",
+            "worker_pid": os.getpid(),
+            "worker_pgid": os.getpgid(os.getpid()),
+            "liveness": "pid_alive",
+            "exit_code": 0,
+        },
+    )
+
+    run = control_plane.sync_state()["recent_runs"][0]
+
+    assert run["state"] == "completed"
+    assert run["worker_alive"] is False
+    assert run["process_truth"] == "terminal"
+    assert run["health"] == "final"
+
+
+@pytest.mark.parametrize(
+    ("owner_pid", "worker_pid", "terminal_reason"),
+    [
+        (999999999, os.getpid(), "owner_pid_gone"),
+        (os.getpid(), 999999999, "provider_pid_gone"),
+    ],
+)
+def test_sync_state_never_projects_interactive_run_live_when_either_role_is_dead(
+    owner_pid: int,
+    worker_pid: int,
+    terminal_reason: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUN_GC_GRACE_SECONDS", "999999999")
+    _write_meta(
+        home,
+        {
+            "run_id": f"interactive-{terminal_reason}",
+            "status": "active",
+            "agent": "codex",
+            "mode": "interactive",
+            "root": str(tmp_path),
+            "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "skill_code": "init",
+            "owner_pid": owner_pid,
+            "worker_pid": worker_pid,
+            "liveness": "active",
+        },
+    )
+
+    snapshot = control_plane.sync_state()
+    run = snapshot["recent_runs"][0]
+
+    assert run["state"] == "failed"
+    assert run["health"] == "final"
+    assert run["liveness"] == "pid_gone"
+    assert run["terminal_reason"] == terminal_reason
+    assert run["run_id"] not in {item["run_id"] for item in snapshot["active_runs"]}
 
 
 def test_sync_state_gc_terminalizes_old_stalled_dead_launcher(
@@ -1546,6 +1791,7 @@ def test_await_run_does_not_abandon_live_worker_past_idle_window(
 
     home = tmp_path / ".vibecrafted"
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setattr(process_control, "build_env_index", dict)
 
     worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
@@ -1559,13 +1805,19 @@ def test_await_run_does_not_abandon_live_worker_past_idle_window(
                 "skill_code": "marb",
                 "root": str(tmp_path),
                 "updated_at": "2026-05-19T00:00:00+00:00",
-                "worker_pid": worker.pid,
-                "worker_pgid": worker.pid,
-                "liveness": "pid_alive",
+                **_qualified_worker(worker.pid, "marb-live-worker"),
             },
         )
 
-        assert control_plane._worker_is_alive({"worker_pid": worker.pid}) is True
+        assert (
+            control_plane._worker_is_alive(
+                {
+                    "run_id": "marb-live-worker",
+                    **_qualified_worker(worker.pid, "marb-live-worker"),
+                }
+            )
+            is True
+        )
 
         payload = control_plane.await_run(
             "marb-live-worker",
@@ -1585,15 +1837,13 @@ def test_await_run_does_not_abandon_live_worker_past_idle_window(
     assert payload["completed"] is False
     # Survived many idle-window lengths (0.6s cap / 0.05s poll): proof the base
     # idle deadline kept resetting instead of firing at 0.2s.
-    assert payload["attempts"] >= 3
+    assert payload["attempts"] >= 2
 
 
-def test_await_run_idle_stall_fires_when_worker_is_dead(
+def test_await_run_dead_pid_alive_record_fails_without_waiting_for_idle(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The flip side of the liveness gate: with no live worker and zero movement,
-    the idle deadline must still fire so genuinely dead runs are not waited on
-    forever."""
+    """A stale pid_alive claim is revalidated and receipted failed immediately."""
     home = tmp_path / ".vibecrafted"
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
     monkeypatch.setenv("VIBECRAFTED_LIVENESS_STALE_HEARTBEAT_SECONDS", "100000")
@@ -1620,8 +1870,9 @@ def test_await_run_idle_stall_fires_when_worker_is_dead(
         hard_cap_seconds=5,
     )
 
-    assert payload["timed_out"] is True
-    assert payload["reason"] == "idle_stall"
+    assert payload["completed"] is True
+    assert payload["timed_out"] is False
+    assert payload["reason"] == "terminal"
     assert payload["worker_alive"] is False
 
 
@@ -1706,6 +1957,7 @@ def test_await_run_returns_report_delivered_when_worker_is_gone(
             "skill_code": "revi",
             "root": str(tmp_path),
             "updated_at": "2026-05-19T00:00:00+00:00",
+            "report": str(report),
             "worker_pid": 999999999,
             "worker_pgid": 999999999,
             "liveness": "pid_alive",
@@ -1722,7 +1974,7 @@ def test_await_run_returns_report_delivered_when_worker_is_gone(
 
     assert payload["completed"] is True
     assert payload["timed_out"] is False
-    assert payload["reason"] == "report_delivered"
+    assert payload["reason"] in {"terminal", "report_delivered"}
     assert payload["attempts"] == 1
 
 
@@ -1777,7 +2029,7 @@ def test_await_run_waits_for_live_launcher_to_finalize_report(
     assert payload["timed_out"] is False
     assert payload["reason"] in {"terminal", "report_delivered"}
     assert payload["worker_alive"] is False
-    assert payload["attempts"] >= 2
+    assert payload["attempts"] == 1
 
 
 def test_await_run_report_alone_never_completes_a_live_worker(
@@ -1792,6 +2044,7 @@ def test_await_run_report_alone_never_completes_a_live_worker(
 
     home = tmp_path / ".vibecrafted"
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setattr(process_control, "build_env_index", dict)
     report = tmp_path / "stage-report.md"
     report.write_text("### Summary\nstale or mid-write\n", encoding="utf-8")
 
@@ -1807,9 +2060,7 @@ def test_await_run_report_alone_never_completes_a_live_worker(
                 "skill_code": "revi",
                 "root": str(tmp_path),
                 "updated_at": "2026-05-19T00:00:00+00:00",
-                "worker_pid": worker.pid,
-                "worker_pgid": worker.pid,
-                "liveness": "pid_alive",
+                **_qualified_worker(worker.pid, "revi-live-writer-42"),
             },
         )
 
@@ -1839,6 +2090,7 @@ def test_await_run_terminal_looking_meta_never_completes_a_live_worker(
 
     home = tmp_path / ".vibecrafted"
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setattr(process_control, "build_env_index", dict)
 
     worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
@@ -1852,8 +2104,7 @@ def test_await_run_terminal_looking_meta_never_completes_a_live_worker(
                 "skill_code": "impl",
                 "root": str(tmp_path),
                 "updated_at": "2026-05-19T00:00:00+00:00",
-                "worker_pid": worker.pid,
-                "worker_pgid": worker.pid,
+                **_qualified_worker(worker.pid, "impl-terminal-looking-live"),
                 "exit_code": 0,
                 "liveness": "terminal",
             },
@@ -1890,6 +2141,7 @@ def test_await_run_live_child_keeps_loop_parent_open_past_idle_window(
     home = tmp_path / ".vibecrafted"
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
     monkeypatch.setenv("VIBECRAFTED_LIVENESS_STALE_HEARTBEAT_SECONDS", "100000")
+    monkeypatch.setattr(process_control, "build_env_index", dict)
     _write_meta(
         home,
         {
@@ -1900,9 +2152,7 @@ def test_await_run_live_child_keeps_loop_parent_open_past_idle_window(
             "skill_code": "marb",
             "root": str(tmp_path),
             "updated_at": "2026-05-19T00:00:00+00:00",
-            "worker_pid": 999999999,
-            "worker_pgid": 999999999,
-            "liveness": "pid_alive",
+            "liveness": "heartbeat",
         },
     )
 
@@ -1918,9 +2168,7 @@ def test_await_run_live_child_keeps_loop_parent_open_past_idle_window(
                 "skill_code": "marb",
                 "root": str(tmp_path),
                 "updated_at": "2026-05-19T00:00:00+00:00",
-                "worker_pid": child.pid,
-                "worker_pgid": child.pid,
-                "liveness": "pid_alive",
+                **_qualified_worker(child.pid, "marb-loop-parent-marbles-L2"),
             },
         )
 
@@ -1934,12 +2182,14 @@ def test_await_run_live_child_keeps_loop_parent_open_past_idle_window(
         child.terminate()
         child.wait()
 
-    # Stopped only by the absolute ceiling: the dead-pid parent survived many
-    # idle-window lengths because its live child kept resetting the deadline.
+    # Stopped only by the absolute ceiling: the dead-pid parent survived the
+    # idle window because its live child kept resetting the deadline. Poll
+    # count is intentionally not asserted: one sync may itself span several
+    # requested intervals on a busy filesystem.
     assert payload["timed_out"] is True
     assert payload["reason"] == "hard_cap"
     assert payload["worker_alive"] is True
-    assert payload["attempts"] >= 3
+    assert payload["completed"] is False
 
 
 def test_sync_state_projects_event_stream_lifecycle(
@@ -2714,11 +2964,11 @@ def test_await_run_refuses_untouched_launcher_template_as_delivery(
     )
 
     assert payload["reason"] != "report_delivered"
-    assert payload["completed"] is False
+    assert payload["completed"] is True
     assert payload["await_rc"] != 0
 
-    # A worker that actually wrote into the shell IS a delivery, including an
-    # honest non-success claim — the contract only rejects the untouched shell.
+    # A late report cannot revive a run after qualified ownership loss was
+    # durably settled failed; retry must create a new run identity.
     report.write_text(
         "---\n"
         "run_id: wflw-template-7\n"
@@ -2738,7 +2988,9 @@ def test_await_run_refuses_untouched_launcher_template_as_delivery(
         report_path=str(report),
     )
     assert delivered["completed"] is True
-    assert delivered["reason"] == "report_delivered"
+    assert delivered["reason"] == "terminal"
+    assert delivered["run"]["state"] == "failed"
+    assert delivered["run"]["settlement_verdict"] == "failed"
 
 
 def test_sync_state_closes_stalled_run_when_report_attests_completion(

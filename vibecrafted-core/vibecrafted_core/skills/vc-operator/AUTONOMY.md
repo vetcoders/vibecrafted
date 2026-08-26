@@ -64,9 +64,17 @@ You **can** perform any of these if it doesn't change the final goal:
   Wave C parallel because of speedup considerations)
 - Skipping, adding or re-ordering prompts in the plan because conditions changed
   or the wave revealed a missing slice
+- Adding a recovery/fix cut beyond the current ITP or TD when repository/runtime
+  context justifies it and the final goal remains coherent
 - Cherry-picking from another branch into the active wave chain
 
-## For all these allowances you must note in the Operator's Journal what changed, what was skipped, what was added, what was re-ordered or cherry-picked and why.
+## For all these allowances append to `<repo-root>/.vibecrafted/JOURNAL.md` what changed, what was skipped, added, reordered, or cherry-picked, any substrate or integration change, and why.
+
+When a Worker surfaces an adjacent defect, the Operator decides whether a fix
+is warranted, journals that decision, creates a bounded brief, dispatches the
+cut into a dedicated worktree, verifies it, and integrates it. The Operator
+does not personally implement the discovered fix. Trust-boundary hard stops
+continue to apply.
 
 ## Free moves — no approval needed
 
@@ -142,10 +150,10 @@ their declaration>
 - [x] e2e check ran in `<browser/themes/etc.>`
 - [x] Backlog close-out entry written: `<path>`
 
-### 4) What's NOT done (deliberately)
+### 4) Required acceptance gaps
 
-- [ ] PR creation / merge into `<trunk>`
-- [ ] `<any other operator-side action>`
+- [ ] `<material gap that must be accepted or closed before the button>`
+- [ ] `<required operator decision, if any>`
 
 ### 5) One-step button press
 
@@ -158,9 +166,9 @@ gh pr create --base develop --title "..." --body-file ...
 - `<anything that could surprise the reviewer>`
 ````
 
-The operator reads section 4 and presses the corresponding buttons. Each
-button press flips a `[ ]` to `[x]` in the operator's eye, even if the
-file itself is never re-edited. Convention is for human scanning.
+Section 4 contains only material acceptance gaps. Do not pad it with routine
+negative-work claims; runtime metadata, Git, receipts, and reports already
+prove those facts.
 
 ---
 

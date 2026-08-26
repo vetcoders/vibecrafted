@@ -230,16 +230,21 @@ prompt = "unpinned cut"
   expect = { contains = "ok" }
 """,
     )
-    captured: dict[str, str] = {}
+    captured: dict[str, object] = {}
 
     def fake_launch_workflow(spec, _base_dir, *, env=None):
         captured[spec.agent] = spec.model
         assert env is not None
+        captured[f"{spec.agent}_idempotency"] = env.get(
+            workflow.LAUNCH_IDEMPOTENCY_KEY_ENV
+        )
         return {"accepted": True, "run_id": "r", "pid": 1, "report": ""}
 
     monkeypatch.setattr(supervisor_module, "launch_workflow", fake_launch_workflow)
 
-    launch = workflow_cell_launcher(dispatch, source_dir=tmp_path)
+    launch = workflow_cell_launcher(
+        dispatch, source_dir=tmp_path, dispatch_run_id="dispatch-stable-1"
+    )
     launch(dispatch.cuts[0], "pinned cut", "initial")
     launch(dispatch.cuts[1], "unpinned cut", "initial")
 
@@ -247,6 +252,12 @@ prompt = "unpinned cut"
     # cut forwards an empty pin (account default is a deliberate non-decision).
     assert captured["codex"] == "test-codex-model"
     assert captured["claude"] == ""
+    assert captured["codex_idempotency"] == (
+        "dispatch:dispatch-stable-1:cut:c1:attempt:initial"
+    )
+    assert captured["claude_idempotency"] == (
+        "dispatch:dispatch-stable-1:cut:c2:attempt:initial"
+    )
 
 
 def test_passing_cuts_flip_to_verified_and_emit_artifacts(tmp_path: Path) -> None:

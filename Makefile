@@ -36,13 +36,13 @@ if [ ! -d "$$stable_root/vibecrafted-core" ]; then \
 fi
 endef
 
-.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release portable publish-release release-rehearsal gui-install wizard wizard-dev check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate payload-hygiene install install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service server-smoke
+.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release runtime-pack portable publish-release release-rehearsal gui-install wizard wizard-dev check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate exact-release-contract-gate release-version-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service server-smoke
 
 help:
 	@printf "\n"
 	@printf "  \033[1m\033[38;5;173m⚒  𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. %s\033[0m\n" "$$(cat $(VERSION_FILE) 2>/dev/null || echo dev)"
 	@printf "\n"
-	@printf "  make install      \033[2mGuided install\033[0m\n"
+	@printf "  make install      \033[2mInstall the receipted Runtime Pack\033[0m\n"
 	@printf "  make doctor       \033[2mHealth check\033[0m\n"
 	@printf "  make update       \033[2mPull latest + reinstall\033[0m\n"
 	@printf "  make uninstall    \033[2mReverse the install\033[0m\n"
@@ -59,7 +59,7 @@ help-dev:
 	@printf "\n"
 	@printf "  \033[1m\033[38;5;173m⚒  𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. dev targets\033[0m\n"
 	@printf "\n"
-	@printf "  \033[1minstall\033[0m   install · install-auto · install-all · install-python-tools · install-vendored-binaries · install-app-binaries · install-server · install-server-service · install-hammerspoon\n"
+	@printf "  \033[1minstall\033[0m   install · install-source · install-auto · install-all · install-python-tools · install-vendored-binaries · install-app-binaries · install-server · install-server-service · install-hammerspoon\n"
 	@printf "            skills · helpers · setup-dev · wizard · wizard-dev · gui-install · dry-run · restore\n"
 	@printf "            migrate · migrate-dry · foundations · foundations-check · bundle · bundle-check\n"
 	@printf "  \033[1mtests\033[0m     test · test-core · test-skills · test-install · test-parity · test-vc-frame · test-iterm2-migrate\n"
@@ -79,6 +79,9 @@ vibecrafted: install
 
 RELEASE_SCRIPT := scripts/build-vibecrafted-release.sh
 PORTABLE_SCRIPT := scripts/build-portable-release.sh
+RUNTIME_PACK_INSTALLER := scripts/install-runtime-pack.sh
+RUNTIME_PACK_PACKAGER := scripts/package-runtime-pack.sh
+RUNTIME_PACK ?=
 KEYS ?= $(HOME)/.keys
 # Extra builder flags, e.g. RELEASE_FLAGS=--snapshot-donors to build from
 # detached worktrees at each donor HEAD instead of refusing a dirty donor.
@@ -106,6 +109,19 @@ notarize:
 
 release:
 	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" $${=VC_RELEASE_FLAGS}'
+
+# Build the standalone macOS CLI carrier from the exact same Runtime Pack bytes
+# embedded in Vibecrafted.app. The packager adds only the two native helpers
+# that AppDelegate normally supplies from Contents/Helpers.
+runtime-pack: app
+	@version="$$(tr -d '[:space:]' < VERSION)"; \
+	revision="$$(git rev-parse --short=8 HEAD)"; \
+	date="$${VIBECRAFTED_RELEASE_DATE:-$$(date -u +%Y%m%d)}"; \
+	arch="$$(uname -m | sed 's/^arm64$$/arm64/; s/^aarch64$$/arm64/; s/^x86_64$$/x64/')"; \
+	output="dist/Vibecrafted_RuntimePack_$${version}-$${date}-$${revision}-darwin-$${arch}.tar.gz"; \
+	test -s "$$output" \
+		|| { echo 'release builder produced no standalone Runtime Pack' >&2; exit 1; }; \
+	printf '%s\n' "$$output"
 
 # The portable channel needs no signing identity and no notary account: it is a
 # provenance-bound source distribution, so it builds anywhere git and python3 do.
@@ -148,6 +164,7 @@ publish-release:
 	@zsh -ic 'cd "$(CURDIR)" && exec bash scripts/publish-vibecrafted-release.sh'
 
 unified-product-contract-gate:
+	@$(MAKE) --no-print-directory release-version-gate
 	@set -eu; \
 	uv run --project vibecrafted-core --with pytest python -m pytest \
 		tests/tui/test_unified_app_contract.py \
@@ -179,6 +196,27 @@ unified-product-contract-gate:
 		rc=0; env -u PYTHONPATH PYTHONNOUSERSITE=1 "$$runner" verify-release --release-output "$$tmp/release-output.json" --signature "$$tmp/release-output.json.sig" >/dev/null 2>&1 || rc=$$?; test "$$rc" -eq 22; \
 		rc=0; env -u PYTHONPATH PYTHONNOUSERSITE=1 "$$runner" walkaround --release-output "$$tmp/release-output.json" --signature "$$tmp/release-output.json.sig" --output "$$tmp/walkaround.json" >/dev/null 2>&1 || rc=$$?; test "$$rc" -eq 22; \
 		test ! -e "$$tmp/walkaround.json")
+
+# Exact signed-distribution boundary. Unlike the source-only unified gate, this
+# intentionally requires a complete release tuple already produced in dist/.
+# Running the verifier twice proves the same immutable bytes remain valid after
+# the first mount/probe cycle and catches mutable host metadata or stale inner
+# Runtime Pack foundation hashes before upload.
+EXACT_RELEASE_OUTPUT ?= dist/release-output.json
+EXACT_RELEASE_SIGNATURE ?= dist/release-output.json.sig
+exact-release-contract-gate:
+	@test -f "$(EXACT_RELEASE_OUTPUT)" || { echo "missing $(EXACT_RELEASE_OUTPUT)" >&2; exit 2; }
+	@test -f "$(EXACT_RELEASE_SIGNATURE)" || { echo "missing $(EXACT_RELEASE_SIGNATURE)" >&2; exit 2; }
+	@set -eu; \
+	for pass in 1 2; do \
+		env -u PYTHONPATH PYTHONNOUSERSITE=1 uv run --project vibecrafted-core \
+			verify-vibecrafted-walkaround verify-release \
+			--release-output "$(EXACT_RELEASE_OUTPUT)" \
+			--signature "$(EXACT_RELEASE_SIGNATURE)" >/dev/null; \
+	done
+
+release-version-gate:
+	@$(PYTHON) scripts/version_bump.py --check --file "$(VERSION_FILE)"
 
 tui-installer: init-hooks
 	@if ! command -v uv >/dev/null 2>&1; then \
@@ -261,6 +299,13 @@ endif
 install-auto: install
 
 install:
+	@VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)" bash "$(RUNTIME_PACK_INSTALLER)"
+
+# Explicit source/compiler lane retained for the portable Linux/WSL carrier.
+# It is not the normal customer installer: it may require Rust, cargo-leptos,
+# sibling donors, and platform targets. macOS CLI/App install the exact same
+# closed Runtime Pack through `make install` and AppDelegate respectively.
+install-source:
 	@mkdir -p "$(HOME)/.vibecrafted"
 	@: > "$(INSTALL_LOG)"
 	@printf "Installing Vibecrafted\n"
@@ -276,9 +321,8 @@ install:
 	  printf "\nVibecrafted is ready (headless: the vc-frame cockpit is not installed; vc-start needs it).\n\nStart here:\n  export PATH=\"\$$HOME/.local/bin:\$$PATH\"\n  vibecrafted doctor\n  vibecrafted implement claude --prompt \"describe this repo\"\n  vibecrafted await claude --last\n\nLog:\n  ~/.vibecrafted/install.log\n"; \
 	fi
 
-# `make install` calls `install-python-tools`; it was an empty .PHONY name
-# (no recipe) so the uv-tool install never ran during `make install`. Alias it
-# to the real recipe.
+# The explicit source/compiler lane calls `install-python-tools`; retain the
+# alias for that portable residual without putting it back on `make install`.
 install-python-tools: install-tools
 
 # Full install keeps the installer, runtime publication, Python-tool replacement,
@@ -622,7 +666,7 @@ update:
 	fi
 
 uninstall:
-	@$(PYTHON) $(INSTALLER) uninstall
+	@VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)" bash "$(RUNTIME_PACK_INSTALLER)" --uninstall
 
 restore:
 	@$(PYTHON) $(INSTALLER) restore

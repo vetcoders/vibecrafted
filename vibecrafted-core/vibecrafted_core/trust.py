@@ -1280,6 +1280,13 @@ def _nested_settlement(settlement: Settlement) -> dict[str, Any]:
     }
 
 
+_SUPERSEDED_AWAIT_PROJECTION = {
+    "await_rc": None,
+    "await_outcome": "",
+    "await_settled_at": "",
+}
+
+
 def _trust_projection_fields(
     settlement: Settlement,
     receipt: TrustReceiptV1,
@@ -1287,6 +1294,10 @@ def _trust_projection_fields(
     """Build the flat field set written onto run meta/snapshot to project a trust settlement."""
     return {
         **settlement.to_payload(),
+        # A Trust settlement supersedes transient await supervision. Keep the
+        # clear operation explicit so update() removes stale top-level fields
+        # from both meta and retained snapshots during crash recovery.
+        **_SUPERSEDED_AWAIT_PROJECTION,
         "run_id": receipt.run_id,
         "root": receipt.repo_root,
         "repo_root": receipt.repo_root,
@@ -1469,7 +1480,12 @@ def _can_complete_projection(
             if fields is None:
                 return True
             return all(
-                key not in payload or payload.get(key) == value
+                (
+                    key in _SUPERSEDED_AWAIT_PROJECTION
+                    and value == _SUPERSEDED_AWAIT_PROJECTION[key]
+                )
+                or key not in payload
+                or payload.get(key) == value
                 for key, value in fields.items()
             )
         if prior_receipt.settlement_revision > previous_revision:

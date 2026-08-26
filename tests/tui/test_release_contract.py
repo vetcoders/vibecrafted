@@ -27,7 +27,7 @@ INSTALL_PS1_SHA256 = "12c2ca5b95195a2fcee0f4987962fd35ec52dde85588c226f68bcab468
 ABSENT_FROM_MACOS_RUNNER_IMAGE = ("rg", "fd")
 
 
-def test_public_install_surfaces_name_both_release_channels() -> None:
+def test_public_install_surfaces_name_all_release_carriers() -> None:
     surfaces = (
         "README.md",
         "docs/QUICK_START.md",
@@ -37,6 +37,10 @@ def test_public_install_surfaces_name_both_release_channels() -> None:
         text = (REPO_ROOT / relative).read_text(encoding="utf-8")
         assert RELEASE_PAGE in text, f"{relative} must point to the unified release"
         assert "Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg" in text
+        assert (
+            "Vibecrafted_RuntimePack_<version>-<YYYYMMDD>-<sha8>-darwin-<arch>.tar.gz"
+            in text
+        ), f"{relative} must name the macOS CLI Runtime Pack"
         # A non-macOS reader must find a version-pinned artifact on the same
         # page, not only a curl-pipe-bash line that tracks a moving branch.
         assert "Vibecrafted_<version>-<YYYYMMDD>-<sha8>-portable.tar.gz" in text, (
@@ -146,8 +150,8 @@ def test_tag_gate_only_calls_tools_its_own_runner_provides() -> None:
         )
 
 
-def test_publication_boundary_step_still_asserts_both_channel_names() -> None:
-    """The boundary step is the only thing pinning the six-asset shape.
+def test_publication_boundary_step_still_asserts_all_carrier_names() -> None:
+    """The boundary step pins the exact three-carrier release shape.
 
     Rewriting its matcher (rg -> grep) must not quietly drop what it matches:
     one canonically named DMG and one portable tarball, each resolved by the
@@ -157,13 +161,49 @@ def test_publication_boundary_step_still_asserts_both_channel_names() -> None:
 
     assert "Vibecrafted_.*YYYYMMDD|DMG_NAME|\\.dmg\\.sha256" in workflow
     assert "PORTABLE_NAME|portable\\.tar\\.gz|portable-output\\.json" in workflow
+    assert (
+        "RUNTIME_PACK_NAME|RuntimePack_.*tar\\.gz|install-runtime-pack\\.sh" in workflow
+    )
     for target in (
         "scripts/build-vibecrafted-release.sh",
         "scripts/build-portable-release.sh",
+        "scripts/package-runtime-pack.sh",
+        "scripts/install-runtime-pack.sh",
         "scripts/publish-vibecrafted-release.sh",
         "docs/RELEASE_KICKOFF.md",
     ):
         assert target in workflow, f"boundary step stopped covering {target}"
+
+
+def test_native_carrier_embeds_every_required_agent_foundation() -> None:
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    stager = (REPO_ROOT / "scripts/stage-runtime-foundations.sh").read_text(
+        encoding="utf-8"
+    )
+    installer = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(encoding="utf-8")
+
+    assert 'stage-runtime-foundations.sh" "$runtime/bin"' in builder
+    assert "'screenscribe==0.1.19'" in builder
+    assert '"$runtime/bin/screenscribe" --version' in builder
+    assert '"$runtime/source-provenance.json"' in builder
+    assert 'carrier --source "$REPO_ROOT"' in builder
+    assert "provenance_stage" not in builder
+    assert '"$runtime/scripts/vc-frame-product-entry.sh"' in builder
+    for command in ("loct", "loctree-mcp", "aicx", "aicx-mcp", "prview"):
+        assert command in stager
+        assert f'generation / "bin/{command}"' in installer
+    assert 'generation / "bin/screenscribe"' in installer
+    assert 'generation / "libexec/vc-frame"' in installer
+    assert "_write_runtime_generation_manifest(" in installer
+    assert "runtime-foundations.json" in stager
+    assert "OPENSSL_STATIC=1" in stager
+    assert "PRView retains a non-system dynamic library dependency" in stager
+    assert "ced57997dd97a2b08960f35e3a657d7b0c49a200" in stager
+    assert "remap-path-prefix" in stager
+    assert "cargo install --locked" in stager
+    assert 'rm -rf "$WORK" 2>/dev/null || true' in stager
 
 
 def test_macos_publisher_cold_verifies_exact_uploaded_bytes() -> None:
@@ -199,6 +239,9 @@ def test_macos_publisher_cold_verifies_exact_uploaded_bytes() -> None:
     for entry in (
         '"$DMG_NAME"',
         '"$DMG_NAME.sha256"',
+        '"$RUNTIME_PACK_NAME"',
+        '"$RUNTIME_PACK_NAME.sha256"',
+        '"$RUNTIME_PACK_NAME.sig"',
         '"$PORTABLE_NAME"',
         '"$PORTABLE_NAME.sha256"',
         '"release-output.json"',
@@ -225,6 +268,23 @@ def test_macos_publisher_cold_verifies_the_portable_channel() -> None:
     assert (
         'bash "$PORTABLE_UNPACK_DIR/$PORTABLE_ROOT_NAME/install.sh" --help' in publisher
     )
+
+
+def test_macos_publisher_cold_verifies_runtime_pack_install_and_uninstall() -> None:
+    publisher = (REPO_ROOT / "scripts/publish-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert '["runtime_pack"]["path"]' in publisher
+    assert 'shasum -a 256 -c "$RUNTIME_PACK_NAME.sha256"' in publisher
+    assert 'openssl dgst -sha256 -verify "$RUNTIME_PACK_PUBLIC_KEY"' in publisher
+    assert 'cmp "$RUNTIME_PACK" "$DOWNLOAD_DIR/$RUNTIME_PACK_NAME"' in publisher
+    assert publisher.count("--verify-only") == 2
+    assert '--expected-terminal-revision "$VC_TERMINAL_SHA"' in publisher
+    assert '--expected-frame-revision "$VC_FRAME_SHA"' in publisher
+    assert "make --no-print-directory install RUNTIME_PACK=" in publisher
+    assert "make --no-print-directory uninstall" in publisher
+    assert 'find "$RUNTIME_PACK_SMOKE_HOME" -mindepth 1 -print -quit' in publisher
 
 
 def test_portable_builder_binds_one_commit_and_proves_its_own_bytes() -> None:
@@ -267,6 +327,20 @@ def test_builder_emits_the_canonical_versioned_dmg_and_checksum() -> None:
     assert 'printf \'%s\\n\' "$RUNTIME_VERSION" > "$runtime/VERSION"' in builder
     assert 'DMG_CHECKSUM="$DMG.sha256"' in builder
     assert 'LEGACY_DMG="$DIST_DIR/Vibecrafted.dmg"' in builder
+    assert (
+        'RUNTIME_PACK_NAME="Vibecrafted_RuntimePack_${VERSION}-${RELEASE_DATE}-${ROOT_SHA:0:8}-${RUNTIME_PACK_PLATFORM}.tar.gz"'
+        in builder
+    )
+    assert 'RUNTIME_PACK_PLATFORM="darwin-arm64"' in builder
+    assert (
+        'printf \'%s\\n\' "$RUNTIME_VERSION" > "$RUNTIME_PACK_RESOURCE_DIR/VERSION"'
+        in builder
+    )
+    assert '"$REPO_ROOT/scripts/package-runtime-pack.sh"' in builder
+    assert '-out "$EMBEDDED_RUNTIME_PACK_SIGNATURE" "$EMBEDDED_RUNTIME_PACK"' in builder
+    assert 'install -m 0644 "$EMBEDDED_RUNTIME_PACK" "$RUNTIME_PACK"' in builder
+    assert 'cmp "$EMBEDDED_RUNTIME_PACK" "$RUNTIME_PACK"' in builder
+    assert '--runtime-pack "$RUNTIME_PACK"' in builder
     assert 'rm -f "$DMG_CHECKSUM" "$LEGACY_DMG"' in builder
     assert '/usr/bin/shasum -a 256 "$DMG_NAME"' in builder
     assert "-type d -name __pycache__" in builder
@@ -278,6 +352,86 @@ def test_builder_emits_the_canonical_versioned_dmg_and_checksum() -> None:
     assert '"$REPO_ROOT/scripts/render-python-entrypoint-launchers.py"' in builder
     assert '"$REPO_ROOT/vibecrafted-core/pyproject.toml"' in builder
     assert '"$runtime/runtime"' not in builder
+
+
+def test_runtime_pack_signing_happens_after_final_copy_and_before_archive() -> None:
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    packager = (REPO_ROOT / "scripts/package-runtime-pack.sh").read_text(
+        encoding="utf-8"
+    )
+
+    copied = packager.index('install -m 0755 "$terminal" "$root/bin/vc-terminal"')
+    signed = packager.index('sign_macho_tree "$root"')
+    verified = packager.index('verify_macho_tree "$root" 1')
+    foundations = packager.index("refresh-foundations")
+    inventoried = packager.index("vibecrafted_core.runtime_pack_contract write")
+    archived = packager.index('-czf "$candidate"')
+    assert copied < signed < verified < foundations < inventoried < archived
+
+    assert '--codesign-identity "$SIGNING_IDENTITY"' in builder
+    assert (
+        'packager_codesign_args+=(--codesign-keychain "$TEMP_KEYCHAIN_PATH")' in builder
+    )
+    embedded_preflight = builder.index(
+        'verify_runtime_pack_macho_signatures "$EMBEDDED_RUNTIME_PACK"'
+    )
+    carrier_signature = builder.index(
+        '-out "$EMBEDDED_RUNTIME_PACK_SIGNATURE" "$EMBEDDED_RUNTIME_PACK"'
+    )
+    assert embedded_preflight < carrier_signature
+
+
+def test_exact_release_gate_is_release_only_and_repeats_the_repo_verifier() -> None:
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    source_workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(
+        encoding="utf-8"
+    )
+    release_workflow = (REPO_ROOT / ".github/workflows/release-dmg.yml").read_text(
+        encoding="utf-8"
+    )
+    exact_gate = makefile.split("exact-release-contract-gate:", 1)[1].split(
+        "\nrelease-version-gate:", 1
+    )[0]
+
+    assert "for pass in 1 2" in exact_gate
+    assert "verify-vibecrafted-walkaround verify-release" in exact_gate
+    assert "run: make exact-release-contract-gate" in release_workflow
+    assert "exact-release-contract-gate" not in source_workflow
+
+
+def test_notary_authentication_never_puts_the_password_in_process_argv() -> None:
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    notary_function = builder[
+        builder.index("notary_submit() {") : builder.index("strip_debug_stabs() {")
+    ]
+
+    assert '--keychain-profile "$NOTARY_PROFILE"' in notary_function
+    assert '--key "$NOTARY_API_KEY_PATH"' in notary_function
+    assert "--password" not in notary_function
+    assert "NOTARY_PASSWORD" not in notary_function
+    assert 'source "$NOTARY_ENV"' not in notary_function
+    assert 'notarytool store-credentials "$fallback_profile"' in notary_function
+    assert "if [[ ! -t 0 || ! -t 1 ]]; then" in notary_function
+    assert "raw Apple-ID notarization credentials are not accepted headlessly" in (
+        notary_function
+    )
+
+
+def test_xcodegen_project_is_generated_from_one_tracked_source() -> None:
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    ignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+    assert (REPO_ROOT / "vibecrafted-app/shell-agent/app/project.yml").is_file()
+    assert "/vibecrafted-app/shell-agent/app/Vibecrafted.xcodeproj/" in ignore
+    assert (
+        'git -C "$REPO_ROOT" ls-files --error-unmatch "$generated_project"' in builder
+    )
+    assert "generated Xcode project must not be tracked" in builder
 
 
 def test_release_entrypoint_renderer_uses_manifest_and_preserves_existing(
@@ -355,6 +509,8 @@ def test_release_bundle_binds_the_vibecrafted_app_icon() -> None:
     icon = REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted/Vibecrafted.icns"
 
     assert "INFOPLIST_FILE: Vibecrafted/Info.plist" in project
+    assert 'MARKETING_VERSION: "4.3.0"' in project
+    assert '- "Vibecrafted.icns"' in project
     assert "<key>CFBundleIconFile</key>" in info_plist
     assert "<string>Vibecrafted.icns</string>" in info_plist
     assert 'plist["CFBundleIconFile"] = contract.PRODUCT_ICON_FILE' in manifest
@@ -384,6 +540,7 @@ def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
     builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
         encoding="utf-8"
     )
+    installer = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(encoding="utf-8")
 
     assert 'family = "Spot Mono"' in terminal
     assert "size = 18.5" in terminal
@@ -396,10 +553,13 @@ def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
     assert "CTFontManagerRegisterFontsForURL" in app_delegate
     assert "kCTFontFamilyNameAttribute as String" in app_delegate
     assert 'CTFontDescriptorCreateWithNameAndSize("Spot Mono"' not in app_delegate
-    assert "let terminalPolicy = generation.appendingPathComponent" in app_delegate
-    assert 'productConfig.appendingPathComponent("terminal-entry.toml")' in app_delegate
-    assert 'productConfig.appendingPathComponent("terminal-theme.toml")' in app_delegate
-    assert 'productConfig.appendingPathComponent("terminal.toml")' not in app_delegate
+    assert (
+        'terminal_policy = generation / "config/vc-terminal/vibecrafted.toml"'
+        in installer
+    )
+    assert 'product_config / "terminal-entry.toml"' in installer
+    assert 'product_config / "terminal-theme.toml"' in installer
+    assert 'product_config / "terminal.toml"' not in installer
     assert (
         'install -m 0644 "$SPOT_MONO_FONT" "$resources/fonts/SpotMono.ttc"' in builder
     )
@@ -515,6 +675,13 @@ def test_dirty_donors_are_a_release_flag_with_a_reaper_not_a_manual_ritual() -> 
     assert "trap cleanup EXIT INT TERM HUP" in builder
     assert "materialize_donor_snapshots" in builder
     assert "VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT" in builder
+
+    # Regenerated plugin assets are deterministic derived output. Their
+    # mutation must not make the binary claim that the immutable donor commit
+    # itself was dirty.
+    assert 'frame_release_sha="$(git_sha "$FRAME_REPO")"' in builder
+    assert 'VC_FRAME_GIT_SHA="$frame_release_sha"' in builder
+    assert "VC_FRAME_GIT_DIRTY=0" in builder
 
     # Reaping goes through git; `rm -rf` alone is what creates ghosts.
     assert "worktree add --detach" in library

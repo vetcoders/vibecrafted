@@ -22,7 +22,7 @@
 # Directories every macOS or Linux box has. An ancestor walk must stop here: a
 # payload that mentions `/Users` or `/Volumes` says nothing about who built it,
 # and forbidding one would flag every legitimate path reference in the tree.
-_PAYLOAD_HYGIENE_GENERIC_ROOTS=$'/\n/Applications\n/Library\n/System\n/Users\n/Volumes\n/home\n/media\n/mnt\n/opt\n/private\n/private/var\n/srv\n/tmp\n/usr\n/var'
+_PAYLOAD_HYGIENE_GENERIC_ROOTS=$'/\n/Applications\n/Library\n/System\n/Users\n/Volumes\n/home\n/media\n/mnt\n/opt\n/private\n/private/tmp\n/private/var\n/srv\n/tmp\n/usr\n/var'
 
 # payload_hygiene_topmost_host_root <absolute-path>
 #

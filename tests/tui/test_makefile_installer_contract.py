@@ -171,6 +171,21 @@ def test_release_workflow_is_read_only_and_validates_the_exact_tag_source() -> N
     assert "gh release edit" not in workflow
 
 
+def test_portable_workflow_requires_runtime_pack_bootstrap_on_mac_and_linux() -> None:
+    workflow = (REPO_ROOT / ".github/workflows/portable.yml").read_text(
+        encoding="utf-8"
+    )
+    bootstrap = workflow.split("  curl-bootstrap:", 1)[1]
+
+    assert "if: github.event_name == 'merge_group'" not in bootstrap
+    assert "runner: macos-latest" in bootstrap
+    assert "runner: ubuntu-latest" in bootstrap
+    assert "test_runtime_pack_cli.py" in bootstrap
+    assert "test_install_bootstrap.py" in bootstrap
+    assert "cargo binstall" not in bootstrap
+    assert "build-essential" not in bootstrap
+
+
 def test_core_gate_isolated_from_the_previously_installed_runtime_stamp() -> None:
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     gate = makefile.split("\ntest-core:", 1)[1].split("\ndispatch-test:", 1)[0]
@@ -189,12 +204,9 @@ def test_bootstrap_help_requires_canonical_provenance_archives() -> None:
 
 
 def test_makefile_keeps_install_as_terminal_first_front_door() -> None:
-    """Contract: `make install` is the terminal-native human front door — a
-    compact, log-quiet step runner that greets, walks the canonical install
-    steps through $(INSTALL_STEP), and ends by pointing at `vc-start`.
-    `make install-auto` is the unattended automation path that reuses the same
-    front door, and `make setup-dev` opens the uv meta-installer in advanced
-    mode.
+    """Contract: `make install` consumes the same immutable Runtime Pack as
+    the native App. The historical compiler lane remains explicit as
+    `make install-source` for the portable source carrier only.
 
     Every recipe that bootstraps uv (setup-dev, install-all, tui-installer)
     must keep the uv bootstrap and the `uv run` invocation inside one shell
@@ -206,32 +218,41 @@ def test_makefile_keeps_install_as_terminal_first_front_door() -> None:
 
     # CLI_PRODUCT_SPEC §6.5: `make help` is the six-target deck; everything
     # else lives in `make help-dev`.
-    assert "make install      \\033[2mGuided install" in text
+    assert "make install      \\033[2mInstall the receipted Runtime Pack" in text
     assert "make doctor       \\033[2mHealth check" in text
     assert "dev targets: make help-dev" in text
     assert "help-dev:" in text
     assert "make skills" not in text.split("help:", 1)[1].split("\nvibecrafted:", 1)[0]
     assert "vibecrafted: install" in text
 
-    # The front door is the compact step runner: it greets, walks the canonical
-    # install steps through $(INSTALL_STEP), and ends by pointing at vc-start.
+    # The product front door delegates to the Runtime Pack-owned interpreter
+    # and installer. It must never compile foundations or donors itself.
     install_block = text.split("\ninstall:\n", 1)[1].split(
-        "\ninstall-python-tools:", 1
+        "\n# Explicit source/compiler lane", 1
     )[0]
-    assert 'printf "Installing Vibecrafted\\n"' in install_block
+    assert 'VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)"' in install_block
+    assert 'bash "$(RUNTIME_PACK_INSTALLER)"' in install_block
+    assert 'if [ "$$(uname -s)" = "Darwin" ]' not in install_block
+    assert "$(MAKE) --no-print-directory install-source" not in install_block
+    assert "$(INSTALL_STEP)" not in install_block
+
+    source_block = text.split("\ninstall-source:\n", 1)[1].split(
+        "\n# The explicit source/compiler lane", 1
+    )[0]
+    assert 'printf "Installing Vibecrafted\\n"' in source_block
     for label in (
         "foundations",
         "skills and launchers",
         "runtime tools",
         "app binaries",
     ):
-        assert f'$(INSTALL_STEP) "{label}"' in install_block, (
-            f"front door must walk the `{label}` install step via $(INSTALL_STEP)"
+        assert f'$(INSTALL_STEP) "{label}"' in source_block, (
+            f"source lane must walk the `{label}` install step via $(INSTALL_STEP)"
         )
-    assert "vc-start" in install_block
+    assert "vc-start" in source_block
 
-    # install-auto is the unattended path: it reuses the same front door rather
-    # than forking a second installer recipe.
+    # The curl/portable source bootstrap remains explicit and cannot silently
+    # select a host or App Runtime Pack.
     assert "install-auto: install" in text
 
     # setup-dev opens the uv meta-installer in advanced mode. Advanced is an
@@ -524,7 +545,12 @@ def test_control_plane_staging_delegates_to_distribution_manifest(
     monkeypatch.setattr(
         installer,
         "_materialize_vc_frame_generation",
-        lambda runtime_root: seen.update(materialized=runtime_root),
+        lambda runtime_root: seen.update(frame_materialized=runtime_root),
+    )
+    monkeypatch.setattr(
+        installer,
+        "_materialize_runtime_generation_entrypoint",
+        lambda runtime_root: seen.update(entrypoint_materialized=runtime_root),
     )
     monkeypatch.setattr(
         installer,
@@ -548,7 +574,8 @@ def test_control_plane_staging_delegates_to_distribution_manifest(
     assert seen["mirror"] is True
     assert seen["require_source_provenance"] is True
     assert seen["manifest_source_provenance"] == source_provenance
-    assert seen["materialized"] == seen["destination"]
+    assert seen["frame_materialized"] == seen["destination"]
+    assert seen["entrypoint_materialized"] == seen["destination"]
     assert seen["manifested"] == seen["destination"]
     assert seen["validated"] == seen["destination"]
     assert (destination / "payload.txt").read_text(encoding="utf-8") == "validated\n"
@@ -582,13 +609,13 @@ def test_install_manifest_post_install_uses_mirror_sync() -> None:
     assert "bash runtime/scripts/install-frontier-config.sh" not in text
 
 
-def test_make_install_executes_the_shell_owned_stable_root_contract(
+def test_make_install_source_executes_the_shell_owned_stable_root_contract(
     tmp_path: Path,
 ) -> None:
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
-    install_block = makefile.split("\ninstall:\n", 1)[1].split("\n# `make install`", 1)[
-        0
-    ]
+    install_block = makefile.split("\ninstall-source:\n", 1)[1].split(
+        "\n# The explicit source/compiler lane", 1
+    )[0]
     install_tools_block = makefile.split("\ninstall-tools-held:\n", 1)[1].split(
         "\n# install-all owns", 1
     )[0]
@@ -1372,7 +1399,9 @@ def test_make_install_verifies_server_supervisor_entrypoint() -> None:
 
 def test_make_install_enables_service_after_server_payload() -> None:
     text = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
-    install_block = text.split("\ninstall:\n", 1)[1].split("\n# `make install`", 1)[0]
+    install_block = text.split("\ninstall-source:\n", 1)[1].split(
+        "\n# The explicit source/compiler lane", 1
+    )[0]
     held_block = text.split("\ninstall-tools-held:\n", 1)[1].split(
         "\n# install-all owns", 1
     )[0]

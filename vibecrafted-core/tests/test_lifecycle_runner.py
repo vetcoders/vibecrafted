@@ -18,6 +18,7 @@ from vibecrafted_core.lifecycle_runner import (
     LifecycleRunner,
     LifecycleRunSpec,
     LifecycleSupervisor,
+    _lifecycle_stage_run_id,
     record_stage_worker_completion,
 )
 from vibecrafted_core.workflows.model import WorkflowManifest, WorkflowStage
@@ -117,6 +118,14 @@ def test_lifecycle_runner_honors_reserved_parent_run_id(
     assert state["run_id"] == "parent-session-123"
     assert Path(state["state_path"]).parent.name == "parent-session-123"
     assert state["stages"][0]["launch"]["run_id"] == "child-implement"
+
+
+def test_lifecycle_stage_identity_is_stable_per_attempt_not_content() -> None:
+    first = _lifecycle_stage_run_id("parent-1", "implement", 0)
+
+    assert first == _lifecycle_stage_run_id("parent-1", "implement", 0)
+    assert first != _lifecycle_stage_run_id("parent-2", "implement", 0)
+    assert first != _lifecycle_stage_run_id("parent-1", "implement", 1)
 
 
 def test_lifecycle_runner_preserves_terminal_stage_failure(

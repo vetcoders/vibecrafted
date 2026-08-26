@@ -8,11 +8,11 @@
 
 #![cfg(unix)]
 
-use std::collections::BTreeMap;
-use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 fn get_message(e: &voc::LaunchRunError) -> String {
     if let voc::LaunchRunError::Exec { message, .. } = e {
         message.clone()
@@ -53,71 +53,102 @@ fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|err| err.into_inner())
 }
 
-const FAKE_SCRIPT: &str = r#"#!/bin/sh
-case "${1:-}" in
-  list-sessions)
-    if [ -n "${FAKE_VISIBLE_FILE:-}" ] && [ -f "${FAKE_VISIBLE_FILE}" ]; then
-      cat "${FAKE_VISIBLE_FILE}"
-    fi
-    case "${FAKE_PROBE_BEHAVIOR:-ok}" in
-      err) echo "probe config not found" >&2; exit 2 ;;
-      *) exit 0 ;;
-    esac
-    ;;
-  --session)
-    NAME="$2"
-    case "${FAKE_INTERACTIVE_BEHAVIOR:-hang}" in
-      quick-success) exit 0 ;;
-      quick-failure) echo "interactive boom" >&2; exit 7 ;;
-      visible-before-exit)
-        if [ -n "${FAKE_VISIBLE_FILE:-}" ]; then
-          echo "$NAME" > "${FAKE_VISIBLE_FILE}"
-        fi
-        sleep 0.10
-        exit 0
-        ;;
-      *) sleep 30 ;;
-    esac
-    ;;
-  *) exit 0 ;;
-esac
-"#;
+#[derive(Clone, Copy)]
+enum ChildBehavior {
+    QuickSuccess,
+    VisibleUntilReleased,
+    AwaitDeadline,
+}
+
+#[derive(Clone, Copy)]
+enum ProbeBehavior {
+    Ok,
+    Error,
+}
 
 struct FakeVcFrame {
     _tmp: TempDir,
     program: PathBuf,
-    visible_file: PathBuf,
+    probe_observed_fifo: PathBuf,
+    exit_fifo: PathBuf,
 }
 
-fn fake_vc_frame() -> FakeVcFrame {
+fn shell_quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"))
+}
+
+fn create_fifo(path: &Path) {
+    let output = Command::new("mkfifo")
+        .arg(path)
+        .output()
+        .expect("run mkfifo for fake vc_frame handshake");
+    assert!(
+        output.status.success(),
+        "mkfifo failed for {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn fake_vc_frame(child_behavior: ChildBehavior, probe_behavior: ProbeBehavior) -> FakeVcFrame {
     let tmp = tempfile::tempdir().expect("tempdir");
     let program = tmp.path().join("vc_frame.sh");
     let visible_file = tmp.path().join("visible.txt");
-    fs::write(&program, FAKE_SCRIPT).expect("write fake vc_frame");
+    let probe_observed_fifo = tmp.path().join("probe-observed.fifo");
+    let exit_fifo = tmp.path().join("exit.fifo");
+    create_fifo(&probe_observed_fifo);
+    create_fifo(&exit_fifo);
+
+    let child_case = match child_behavior {
+        ChildBehavior::QuickSuccess => "exit 0".to_string(),
+        ChildBehavior::VisibleUntilReleased => format!(
+            "printf '%s\\n' \"$NAME\" > {}; IFS= read -r _release < {}",
+            shell_quote(&visible_file),
+            shell_quote(&exit_fifo)
+        ),
+        ChildBehavior::AwaitDeadline => {
+            format!("IFS= read -r _release < {}", shell_quote(&exit_fifo))
+        }
+    };
+    let probe_case = match probe_behavior {
+        ProbeBehavior::Ok => "exit 0",
+        ProbeBehavior::Error => "echo 'probe config not found' >&2; exit 2",
+    };
+    let script = format!(
+        r#"#!/bin/sh
+VISIBLE_FILE={visible_file}
+PROBE_OBSERVED_FIFO={probe_observed_fifo}
+case "${{1:-}}" in
+  list-sessions)
+    if [ -f "$VISIBLE_FILE" ]; then
+      cat "$VISIBLE_FILE"
+      cat "$VISIBLE_FILE" > "$PROBE_OBSERVED_FIFO"
+    fi
+    {probe_case}
+    ;;
+  --session)
+    NAME="$2"
+    {child_case}
+    ;;
+  *) exit 0 ;;
+esac
+"#,
+        visible_file = shell_quote(&visible_file),
+        probe_observed_fifo = shell_quote(&probe_observed_fifo),
+    );
+    fs::write(&program, script).expect("write fake vc_frame");
     let mut perms = fs::metadata(&program).expect("metadata").permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&program, perms).expect("chmod +x");
     FakeVcFrame {
         _tmp: tmp,
         program,
-        visible_file,
+        probe_observed_fifo,
+        exit_fifo,
     }
 }
 
-fn build_command(
-    program: &Path,
-    session: &str,
-    visible_file: &Path,
-    interactive: &str,
-    probe: &str,
-) -> LaunchCommand {
-    let mut env: BTreeMap<String, OsString> = BTreeMap::new();
-    env.insert(
-        "FAKE_VISIBLE_FILE".to_string(),
-        visible_file.as_os_str().to_owned(),
-    );
-    env.insert("FAKE_INTERACTIVE_BEHAVIOR".to_string(), interactive.into());
-    env.insert("FAKE_PROBE_BEHAVIOR".to_string(), probe.into());
+fn build_command(program: &Path, session: &str) -> LaunchCommand {
     LaunchCommand {
         program: program.to_path_buf(),
         args: vec![
@@ -126,21 +157,45 @@ fn build_command(
             "--layout-string".into(),
             "noop".into(),
         ],
-        env,
+        env: Default::default(),
     }
+}
+
+fn run_visible_then_exit_case(session: &str) {
+    let fake = fake_vc_frame(ChildBehavior::VisibleUntilReleased, ProbeBehavior::Ok);
+    let command = build_command(&fake.program, session);
+    let child = command
+        .spawn_interactive_with_stderr()
+        .expect("spawn fake vc_frame");
+    let observed_fifo = fake.probe_observed_fifo.clone();
+    let exit_fifo = fake.exit_fifo.clone();
+    let expected_session = session.to_string();
+    let handshake = std::thread::spawn(move || {
+        let mut observed = String::new();
+        File::open(&observed_fifo)
+            .expect("open readiness acknowledgement")
+            .read_to_string(&mut observed)
+            .expect("read readiness acknowledgement");
+        OpenOptions::new()
+            .write(true)
+            .open(&exit_fifo)
+            .expect("open child exit signal")
+            .write_all(b"exit\n")
+            .expect("release visible fake child");
+        assert_eq!(observed.trim(), expected_session);
+    });
+
+    let output = wait_for_interactive_launch(&command, child)
+        .expect("visible session should converge to success");
+    assert!(output.status.success(), "fake child should exit zero");
+    handshake.join().expect("visible launch handshake");
 }
 
 #[test]
 fn quick_child_exit_before_visibility_reports_session_exited() {
-    let fake = fake_vc_frame();
+    let fake = fake_vc_frame(ChildBehavior::QuickSuccess, ProbeBehavior::Ok);
     let session = "vc-op-fake-quickexit";
-    let command = build_command(
-        &fake.program,
-        session,
-        &fake.visible_file,
-        "quick-success",
-        "ok",
-    );
+    let command = build_command(&fake.program, session);
     let child = command
         .spawn_interactive_with_stderr()
         .expect("spawn fake vc_frame");
@@ -160,34 +215,33 @@ fn quick_child_exit_before_visibility_reports_session_exited() {
 
 #[test]
 fn visible_session_then_child_exits_returns_success() {
-    let fake = fake_vc_frame();
-    let session = "vc-op-fake-slow";
-    let command = build_command(
-        &fake.program,
-        session,
-        &fake.visible_file,
-        "visible-before-exit",
-        "ok",
-    );
-    let child = command
-        .spawn_interactive_with_stderr()
-        .expect("spawn fake vc_frame");
-    let started = Instant::now();
-    let result = wait_for_interactive_launch(&command, child);
-    let elapsed = started.elapsed();
-    let output = result.expect("visible session should converge to success");
-    assert!(output.status.success(), "fake child should exit zero");
-    assert!(
-        elapsed < READINESS_DEADLINE + Duration::from_secs(2),
-        "visible-session test took too long: {elapsed:?}"
-    );
+    run_visible_then_exit_case("vc-op-fake-visible");
+}
+
+#[test]
+fn visible_before_exit_is_isolated_under_repetition_and_concurrency() {
+    const WORKERS: usize = 8;
+    const ITERATIONS_PER_WORKER: usize = 8;
+
+    let workers: Vec<_> = (0..WORKERS)
+        .map(|worker| {
+            std::thread::spawn(move || {
+                for iteration in 0..ITERATIONS_PER_WORKER {
+                    run_visible_then_exit_case(&format!("vc-op-fake-visible-{worker}-{iteration}"));
+                }
+            })
+        })
+        .collect();
+    for worker in workers {
+        worker.join().expect("concurrent visible launch worker");
+    }
 }
 
 #[test]
 fn deadline_kills_child_when_session_never_visible() {
-    let fake = fake_vc_frame();
+    let fake = fake_vc_frame(ChildBehavior::AwaitDeadline, ProbeBehavior::Ok);
     let session = "vc-op-fake-hang";
-    let command = build_command(&fake.program, session, &fake.visible_file, "hang", "ok");
+    let command = build_command(&fake.program, session);
     let child = command
         .spawn_interactive_with_stderr()
         .expect("spawn fake vc_frame");
@@ -205,19 +259,19 @@ fn deadline_kills_child_when_session_never_visible() {
         "session name must appear in the error: {}",
         get_message(&error)
     );
-    // Deadline is 2s; killing must release us soon after. Allow 5s slack
-    // for slow CI runners.
+    // Killing the directly blocked shell must release us soon after the
+    // product deadline; there is no timed grandchild left to mask failure.
     assert!(
         elapsed < READINESS_DEADLINE + Duration::from_secs(5),
-        "deadline test should not hang for the full 30s sleep: {elapsed:?}"
+        "deadline test should reap the blocked fixture promptly: {elapsed:?}"
     );
 }
 
 #[test]
 fn probe_failure_surfaces_in_launch_error() {
-    let fake = fake_vc_frame();
+    let fake = fake_vc_frame(ChildBehavior::AwaitDeadline, ProbeBehavior::Error);
     let session = "vc-op-fake-probe-err";
-    let command = build_command(&fake.program, session, &fake.visible_file, "hang", "err");
+    let command = build_command(&fake.program, session);
     let child = command
         .spawn_interactive_with_stderr()
         .expect("spawn fake vc_frame");

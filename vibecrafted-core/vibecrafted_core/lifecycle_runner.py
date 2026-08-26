@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -57,6 +58,16 @@ AwaitWorkflow = Callable[[dict[str, Any]], dict[str, Any]]
 LIFECYCLE_SCHEMA_ID = "vibecrafted.lifecycle.v1"
 
 
+def _lifecycle_stage_run_id(
+    lifecycle_run_id: str, stage_id: str, occurrence: int
+) -> str:
+    """Return a stable explicit child identity for one lifecycle stage attempt."""
+    material = f"{lifecycle_run_id}\n{stage_id}\n{occurrence}"
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+    prefix = re.sub(r"[^A-Za-z0-9._-]+", "-", stage_id).strip("-._") or "stage"
+    return f"{prefix[:24]}-{digest}"
+
+
 def delivery_axes_for_receipt(
     status: str, payload: dict[str, Any] | None = None
 ) -> dict[str, str]:
@@ -71,13 +82,18 @@ def delivery_axes_for_receipt(
         "launching": ExecutionState.LAUNCHED,
         "running": ExecutionState.RUNNING,
         "completed": ExecutionState.EXITED,
+        "quota_exhausted": ExecutionState.INTERRUPTED,
     }.get(str(status), ExecutionState.FAILED)
     # The execution axis states what the PROCESS did, not what the artifact
     # gate concluded. A worker that exited 0 without a report is the contract's
     # exit_0_without_report specimen — needs_attention, never a fabricated
     # execution failure (which would settle x instead of n).
     exit_code = source.get("exit_code")
-    if isinstance(exit_code, int) and str(status) not in ("launching", "running"):
+    if isinstance(exit_code, int) and str(status) not in (
+        "launching",
+        "running",
+        "quota_exhausted",
+    ):
         execution_default = (
             ExecutionState.EXITED if exit_code == 0 else ExecutionState.FAILED
         )
@@ -910,6 +926,11 @@ class LifecycleRunner:
             model=model,
             lifecycle_state_path=str(state_path or ""),
             claim_digest=claim_digest_for_text(source_prompt),
+            run_id=_lifecycle_stage_run_id(
+                lifecycle_run_id,
+                stage.id,
+                len(previous_reports),
+            ),
         )
         commit_before = _git_head(root)
         git_before = _git_status(root)
@@ -1579,7 +1600,13 @@ def lifecycle_main(workflow_id: str, argv: Sequence[str] | None = None) -> int:
         )
     )
     if args.json:
-        print(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                state, ensure_ascii=False, indent=2, sort_keys=True, default=str
+            ),
+            flush=True,
+        )
     else:
         _print_lifecycle_receipt(state)
+        sys.stdout.flush()
     return 0 if state.get("status") in {"launching", "completed"} else 1

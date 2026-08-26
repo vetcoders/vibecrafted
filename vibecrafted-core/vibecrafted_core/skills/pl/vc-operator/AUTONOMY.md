@@ -65,9 +65,16 @@ tego w bieżącej sesji, **nie wolno ci** wykonać żadnej z tych rzeczy:
   równoległą Falę C ze względu na przyspieszenie)
 - pomijanie, dodawanie lub przestawianie promptów w planie, bo warunki się zmieniły
   albo fala ujawniła brakujący slice
+- dodawanie cięcia odzyskiwania/poprawki poza bieżącym ITP lub TD, gdy uzasadnia
+  je kontekst repozytorium/runtime'u, a finalny cel pozostaje spójny
 - cherry-pickowanie z innej gałęzi do aktywnego łańcucha fali
 
-## Przy wszystkich tych dozwoleniach musisz odnotować w Dzienniku Operatora, co się zmieniło, co zostało pominięte, co dodane, co przestawione lub cherry-pickowane i dlaczego.
+## Przy wszystkich tych dozwoleniach dopisz do `<repo-root>/.vibecrafted/JOURNAL.md`, co się zmieniło, co pominięto, dodano, przestawiono lub cherry-pickowano, każdą zmianę substratu lub integracji, i dlaczego.
+
+Gdy Worker przekazuje sąsiedni defekt, Operator decyduje, czy poprawka jest
+zasadna, zapisuje decyzję w dzienniku, tworzy bounded brief, dispatchuje cięcie
+do dedykowanego worktree, weryfikuje je i integruje. Operator nie implementuje
+osobiście odkrytej poprawki. Hard-stopy granic zaufania nadal obowiązują.
 
 ## Wolne ruchy — bez zgody
 
@@ -144,10 +151,10 @@ jego deklaracji>
 - [x] e2e check uruchomiony w `<browser/themes/etc.>`
 - [x] Wpis zamknięcia backlogu napisany: `<path>`
 
-### 4) Co NIE jest zrobione (celowo)
+### 4) Wymagane luki akceptacji
 
-- [ ] Utworzenie PR / merge do `<trunk>`
-- [ ] `<jakiekolwiek inne działanie po stronie operatora>`
+- [ ] `<materialna luka, którą trzeba zaakceptować lub zamknąć przed guzikiem>`
+- [ ] `<wymagana decyzja operatora, jeśli istnieje>`
 
 ### 5) Jednokrokowe wciśnięcie guzika
 
@@ -160,9 +167,9 @@ gh pr create --base develop --title "..." --body-file ...
 - `<cokolwiek, co mogłoby zaskoczyć reviewera>`
 ````
 
-Operator czyta sekcję 4 i wciska odpowiednie guziki. Każde wciśnięcie guzika
-przerzuca `[ ]` na `[x]` w oczach operatora, nawet jeśli sam plik nigdy nie
-zostanie ponownie wyedytowany. Konwencja służy ludzkiemu skanowaniu.
+Sekcja 4 zawiera wyłącznie materialne luki akceptacji. Nie wypełniaj jej
+rutynowymi twierdzeniami o pracy niewykonanej; metadane runtime'u, Git, receipty
+i raporty już dowodzą tych faktów.
 
 ---
 

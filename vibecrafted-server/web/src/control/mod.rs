@@ -24,6 +24,10 @@
 //!   `completed`).
 //! * `GET /api/control/runs/{run_id}` — a single run, or `404` JSON. Same axis
 //!   / seal projection as the list route.
+//! * `GET /api/control/runs/{run_id}/observe` — versioned one-shot qualified
+//!   run observation. It never creates a persistent monitor.
+//! * `GET /api/control/runs/{run_id}/await` — blocking subscription fan-in to
+//!   one ephemeral monitor per canonical control-plane home plus run id.
 //! * `GET /api/control/runs/{run_id}/transcript` — bounded, no-store tail of
 //!   the canonical `transcript.human.log` used by the live run detail view.
 //! * `GET /api/control/lifecycle` — lifecycle run summaries, newest-first.
@@ -35,6 +39,8 @@
 
 #[cfg(feature = "ssr")]
 mod events_sse;
+#[cfg(feature = "ssr")]
+mod run_observation;
 
 #[cfg(feature = "ssr")]
 pub mod api {
@@ -55,6 +61,7 @@ pub mod api {
     use serde_json::json;
 
     use super::events_sse::events_sse;
+    use super::run_observation::{await_run as await_run_observation, observe as observe_run};
 
     const STATE_CACHE_TTL: Duration = Duration::from_secs(15);
 
@@ -76,6 +83,11 @@ pub mod api {
             .route("/api/control/state", get(state))
             .route("/api/control/dashboard", get(crate::app::dashboard_api))
             .route("/api/control/runs", get(runs))
+            .route("/api/control/runs/{run_id}/observe", get(observe_run))
+            .route(
+                "/api/control/runs/{run_id}/await",
+                get(await_run_observation),
+            )
             .route("/api/control/runs/{run_id}/transcript", get(transcript))
             .route("/api/control/runs/{run_id}", get(run))
             .route("/api/control/lifecycle", get(lifecycle))

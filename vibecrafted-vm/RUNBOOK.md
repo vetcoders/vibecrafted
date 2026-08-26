@@ -1,5 +1,11 @@
 # vc-workspace — Runbook dla teamu / Team Runbook
 
+> **Personal-dev legacy surface only.** This runbook describes the optional
+> broad-mount compose/wizard workflow. It is not the hardened Runtime Pack
+> carrier, not a security boundary, and not the Workshop `local-vm` selector
+> backend. Set `VC_PERSONAL_DEV_IMAGE` explicitly before using it. For the
+> exact carrier build, use [`README.md`](README.md).
+
 > **PL:** Praktyczny przewodnik dla pierwszych użytkowników. Co się spodziewać, jak używać, co kontrolować, gdzie szukać pomocy.
 >
 > **EN:** Practical guide for first-time users. What to expect, how to use it, what's tunable, where to get help.

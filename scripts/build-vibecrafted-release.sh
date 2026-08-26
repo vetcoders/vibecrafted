@@ -66,6 +66,18 @@ DMG_NAME="Vibecrafted_${VERSION}-${RELEASE_DATE}-${ROOT_SHA:0:8}.dmg"
 DMG="$DIST_DIR/$DMG_NAME"
 DMG_CHECKSUM="$DMG.sha256"
 LEGACY_DMG="$DIST_DIR/Vibecrafted.dmg"
+RUNTIME_PACK_PLATFORM="darwin-arm64"
+RUNTIME_PACK_ARCHITECTURE="$(uname -m | sed 's/^arm64$/arm64/; s/^aarch64$/arm64/; s/^x86_64$/x64/')"
+[[ "$RUNTIME_PACK_ARCHITECTURE" == "arm64" ]] \
+  || die "Vibecrafted.app release currently supports only darwin-arm64"
+RUNTIME_PACK_NAME="Vibecrafted_RuntimePack_${VERSION}-${RELEASE_DATE}-${ROOT_SHA:0:8}-${RUNTIME_PACK_PLATFORM}.tar.gz"
+RUNTIME_PACK="$DIST_DIR/$RUNTIME_PACK_NAME"
+RUNTIME_PACK_CHECKSUM="$RUNTIME_PACK.sha256"
+RUNTIME_PACK_SIGNATURE="$RUNTIME_PACK.sig"
+RUNTIME_PACK_RESOURCE_DIR="$APP/Contents/Resources/runtime-pack"
+EMBEDDED_RUNTIME_PACK="$RUNTIME_PACK_RESOURCE_DIR/$RUNTIME_PACK_NAME"
+EMBEDDED_RUNTIME_PACK_CHECKSUM="$EMBEDDED_RUNTIME_PACK.sha256"
+EMBEDDED_RUNTIME_PACK_SIGNATURE="$EMBEDDED_RUNTIME_PACK.sig"
 KEYS="${KEYS:-$HOME/.keys}"
 SPOT_MONO_FONT="${VIBECRAFTED_SPOT_MONO_FONT:-$KEYS/fonts/SpotMono.ttc}"
 SIGNING_IDENTITY_FILE="$KEYS/signing-identity.txt"
@@ -145,6 +157,8 @@ export SWIFT_PREFIX_MAP
 . "$REPO_ROOT/scripts/lib/donor-snapshot.sh"
 # shellcheck source=/dev/null
 . "$REPO_ROOT/scripts/lib/payload-hygiene.sh"
+# shellcheck source=/dev/null
+. "$REPO_ROOT/scripts/lib/macho-signing.sh"
 
 cleanup() {
   # Host-wide resources first. The keychain session mutates state that outlives
@@ -311,26 +325,35 @@ notary_submit() {
       --wait --timeout 30m
     return
   fi
-  [[ -f "$NOTARY_ENV" ]] || die "NOTARY_PROFILE is unset and $NOTARY_ENV is missing"
-  # shellcheck disable=SC1090
-  source "$NOTARY_ENV"
-  : "${NOTARY_APPLE_ID:?NOTARY_APPLE_ID missing}"
-  : "${NOTARY_TEAM_ID:?NOTARY_TEAM_ID missing}"
-  : "${NOTARY_PASSWORD:?NOTARY_PASSWORD missing}"
-  xcrun notarytool submit "$artifact" --apple-id "$NOTARY_APPLE_ID" \
-    --team-id "$NOTARY_TEAM_ID" --password "$NOTARY_PASSWORD" \
+  if [[ -n "${NOTARY_API_KEY_PATH:-}" || -n "${NOTARY_API_KEY_ID:-}" || -n "${NOTARY_API_ISSUER:-}" ]]; then
+    : "${NOTARY_API_KEY_PATH:?NOTARY_API_KEY_PATH missing}"
+    : "${NOTARY_API_KEY_ID:?NOTARY_API_KEY_ID missing}"
+    : "${NOTARY_API_ISSUER:?NOTARY_API_ISSUER missing}"
+    [[ -f "$NOTARY_API_KEY_PATH" ]] \
+      || die "Notary API private key is missing: $NOTARY_API_KEY_PATH"
+    xcrun notarytool submit "$artifact" --key "$NOTARY_API_KEY_PATH" \
+      --key-id "$NOTARY_API_KEY_ID" --issuer "$NOTARY_API_ISSUER" \
+      --wait --timeout 30m
+    return
+  fi
+  [[ -f "$NOTARY_ENV" ]] \
+    || die "NOTARY_PROFILE is unset; store credentials in Keychain first"
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    die "raw Apple-ID notarization credentials are not accepted headlessly; create a Keychain profile and set NOTARY_PROFILE"
+  fi
+  local apple_id team_id fallback_profile
+  apple_id="$(sed -n 's/^NOTARY_APPLE_ID=//p' "$NOTARY_ENV" | head -n1)"
+  team_id="$(sed -n 's/^NOTARY_TEAM_ID=//p' "$NOTARY_ENV" | head -n1)"
+  [[ "$apple_id" =~ ^[^[:space:]@]+@[^[:space:]@]+$ ]] \
+    || die "NOTARY_APPLE_ID in $NOTARY_ENV is invalid"
+  [[ "$team_id" =~ ^[[:alnum:]]{10}$ ]] \
+    || die "NOTARY_TEAM_ID in $NOTARY_ENV is invalid"
+  fallback_profile="${NOTARY_FALLBACK_PROFILE:-vibecrafted-notary}"
+  log "Storing Apple-ID notarization credentials through the secure Keychain prompt"
+  xcrun notarytool store-credentials "$fallback_profile" \
+    --apple-id "$apple_id" --team-id "$team_id"
+  xcrun notarytool submit "$artifact" --keychain-profile "$fallback_profile" \
     --wait --timeout 30m
-}
-
-sign_macho_tree() {
-  local outer="$APP/Contents/MacOS/Vibecrafted" candidate
-  while IFS= read -r -d '' candidate; do
-    [[ "$candidate" != "$outer" ]] || continue
-    if /usr/bin/file -b "$candidate" | grep -q 'Mach-O'; then
-      codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
-        "${CODESIGN_KEYCHAIN_ARGS[@]}" "$candidate"
-    fi
-  done < <(find "$APP/Contents" -type f -print0)
 }
 
 # Debug stabs are the producer no compiler flag reaches. rustc's
@@ -399,6 +422,35 @@ materialize_donor_snapshots() {
     || die "VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT is set; failing on purpose so the reaper is exercised"
 }
 
+embed_runtime_pack() {
+  local -a packager_codesign_args=(--codesign-identity "$SIGNING_IDENTITY")
+  if [[ -n "$TEMP_KEYCHAIN_PATH" ]]; then
+    packager_codesign_args+=(--codesign-keychain "$TEMP_KEYCHAIN_PATH")
+  fi
+  log "Producing the canonical Runtime Pack carrier once inside Vibecrafted.app"
+  rm -rf "$RUNTIME_PACK_RESOURCE_DIR"
+  mkdir -p "$RUNTIME_PACK_RESOURCE_DIR"
+  install -m 0755 "$REPO_ROOT/scripts/install-runtime-pack.sh" \
+    "$RUNTIME_PACK_RESOURCE_DIR/install-runtime-pack.sh"
+  printf '%s\n' "$RUNTIME_VERSION" > "$RUNTIME_PACK_RESOURCE_DIR/VERSION"
+  install -m 0644 \
+    "$REPO_ROOT/vibecrafted-core/vibecrafted_core/trust/vibecrafted-signing-v1.pub" \
+    "$RUNTIME_PACK_RESOURCE_DIR/vibecrafted-signing-v1.pub"
+  "$REPO_ROOT/scripts/package-runtime-pack.sh" \
+    --app "$APP" --output "$EMBEDDED_RUNTIME_PACK" \
+    --source-revision "$ROOT_SHA" \
+    --terminal-revision "$(git_sha "$TERMINAL_REPO")" \
+    --frame-revision "$(git_sha "$FRAME_REPO")" \
+    --version "$RUNTIME_VERSION" \
+    --platform "$RUNTIME_PACK_PLATFORM" \
+    --architecture "$RUNTIME_PACK_ARCHITECTURE" \
+    "${packager_codesign_args[@]}"
+  verify_runtime_pack_macho_signatures "$EMBEDDED_RUNTIME_PACK" \
+    || die "embedded Runtime Pack contains an invalid or unsigned Mach-O"
+  /usr/bin/openssl dgst -sha256 -sign "$SIGNING_KEY" \
+    -out "$EMBEDDED_RUNTIME_PACK_SIGNATURE" "$EMBEDDED_RUNTIME_PACK"
+}
+
 build_product() {
   materialize_donor_snapshots
   require_clean_repo "$REPO_ROOT" vibecrafted
@@ -442,7 +494,16 @@ build_product() {
   # so the baked path would be both useless and a host-path leak (measured
   # 2026-08-19: 1 hit in Contents/Helpers/vc-frame). Pin it to the same root
   # the source remap advertises; the freshness probe then reports NoCheckout.
+  # `plugins-assets` deliberately rewrites tracked derived blobs in the
+  # detached snapshot.  That does not make the source revision dirty: the
+  # regenerated bytes are checked by plugins-parity and the release receipt is
+  # bound to the immutable snapshot HEAD.  Resolve that identity before Cargo
+  # asks zellij-utils/build.rs to inspect the derived-output mutation.
+  local frame_release_sha
+  frame_release_sha="$(git_sha "$FRAME_REPO")"
   CARGO_PROFILE_RELEASE_STRIP=false \
+    VC_FRAME_GIT_SHA="$frame_release_sha" \
+    VC_FRAME_GIT_DIRTY=0 \
     VC_FRAME_SOURCE_MANIFEST_DIR=/usr/src/vc-frame/zellij-utils \
     make -C "$FRAME_REPO" release-binary
   local frame_source="$FRAME_REPO/target/release/vc-frame"
@@ -464,6 +525,10 @@ build_product() {
   [[ -d "$server_site/pkg" ]] || die "Vibecrafted Server hydrated site is missing"
 
   log "Building the single Swift host app"
+  local generated_project="vibecrafted-app/shell-agent/app/Vibecrafted.xcodeproj"
+  if git -C "$REPO_ROOT" ls-files --error-unmatch "$generated_project" >/dev/null 2>&1; then
+    die "generated Xcode project must not be tracked; project.yml is the source of truth"
+  fi
   make -C "$REPO_ROOT/vibecrafted-app/shell-agent" bindings xcode
   rm -rf "$BUILD_DIR/DerivedData" "$APP"
   mkdir -p "$BUILD_DIR" "$DIST_DIR"
@@ -539,12 +604,32 @@ build_product() {
   local canonical_deck="$REPO_ROOT/vibecrafted-core/vibecrafted_core/deck/vibecrafted"
   install -m 0755 "$canonical_deck" "$runtime/scripts/vibecrafted"
   install -m 0755 "$canonical_deck" "$runtime/bin/vibecrafted"
+  # The DMG carries the same installer used by source/CLI channels. The native
+  # app invokes its Runtime Pack mode; installed launchers invoke its uninstall
+  # mode. Keep the small import closure beside it so it runs under the bundled
+  # interpreter without reaching back into a checkout or the host Python.
+  install -m 0755 "$REPO_ROOT/scripts/vetcoders_install.py" \
+    "$runtime/scripts/vetcoders_install.py"
+  install -m 0644 "$REPO_ROOT/scripts/distribution_manifest.py" \
+    "$runtime/scripts/distribution_manifest.py"
+  install -m 0644 "$REPO_ROOT/scripts/installer_brand.py" \
+    "$runtime/scripts/installer_brand.py"
+  install -m 0755 "$REPO_ROOT/scripts/vc-frame-product-entry.sh" \
+    "$runtime/scripts/vc-frame-product-entry.sh"
+  # A native Runtime Pack needs only the closed carrier, not a second copy of
+  # the source distribution. Derive it directly from immutable Git objects so
+  # ignored host metadata cannot race a temporary materialized payload.
+  "$REPO_ROOT/scripts/project-python" "$REPO_ROOT/scripts/distribution_manifest.py" \
+    carrier --source "$REPO_ROOT" --output "$runtime/source-provenance.json" \
+    --owner-repo vetcoders/vibecrafted --source-revision "$ROOT_SHA"
   /bin/cp -R "$REPO_ROOT/bin/." "$runtime/bin/"
   /bin/cp -R "$REPO_ROOT/vibecrafted-core/vibecrafted_core" \
     "$runtime/vibecrafted-core/"
   printf '%s\n' "$RUNTIME_VERSION" \
     > "$runtime/vibecrafted-core/vibecrafted_core/VERSION"
   /bin/cp -R "$REPO_ROOT/config/." "$runtime/config/"
+  log "Embedding the complete Runtime Foundations payload"
+  "$REPO_ROOT/scripts/stage-runtime-foundations.sh" "$runtime/bin"
   mkdir -p "$runtime/server/site"
   /bin/cp -R "$server_site/." "$runtime/server/site/"
   # The Living Tree may contain ignored interpreter caches. They are never
@@ -564,7 +649,7 @@ build_product() {
   mkdir -p "$runtime/python" "$runtime/python-site"
   /bin/cp -RL "$python_home/." "$runtime/python/"
   uv pip install --python "$seed_python" --target "$runtime/python-site" \
-    'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7'
+    'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7' 'screenscribe==0.1.19'
   install_name_tool -id '@loader_path/libpython3.12.dylib' \
     "$runtime/python/lib/libpython3.12.dylib"
 
@@ -614,6 +699,18 @@ build_product() {
     "$REPO_ROOT/scripts/render-python-entrypoint-launchers.py" \
     --pyproject "$REPO_ROOT/vibecrafted-core/pyproject.toml" \
     --bin-dir "$runtime/bin"
+  # ScreenScribe is a required product tool delivered inside the same private
+  # Python as Vibecrafted. Its PyPI console script is deliberately discarded
+  # above because the generated shebang names the ephemeral build seed.
+  # shellcheck disable=SC2016
+  printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    'runtime_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"' \
+    'exec "$runtime_root/bin/python3" -c '\''from screenscribe.bootstrap import main; main()'\'' "$@"' \
+    > "$runtime/bin/screenscribe"
+  chmod 0755 "$runtime/bin/screenscribe"
+  "$runtime/bin/screenscribe" --version >/dev/null
 
   if find "$APP" -type l -print -quit | grep -q .; then
     die "assembled app contains symlinks"
@@ -631,8 +728,9 @@ build_product() {
   assert_payload_is_anonymous "$APP" "Vibecrafted.app"
 
   log "Signing nested code and binding exact source receipts"
-  sign_macho_tree
+  sign_macho_tree "$APP/Contents" "$APP/Contents/MacOS/Vibecrafted"
   sign_nested_app_bundles
+  embed_runtime_pack
   require_clean_repo "$REPO_ROOT" vibecrafted
   require_clean_repo "$TERMINAL_REPO" vc-terminal
   require_clean_repo "$FRAME_REPO" vc-frame ${FRAME_DERIVED+"${FRAME_DERIVED[@]}"}
@@ -669,6 +767,8 @@ create_dmg() {
 
 notarize_product() {
   local app_zip="$BUILD_DIR/Vibecrafted.app.zip"
+  verify_runtime_pack_macho_signatures "$EMBEDDED_RUNTIME_PACK" \
+    || die "refusing notarization: embedded Runtime Pack Mach-O preflight failed"
   rm -f "$app_zip"
   /usr/bin/ditto -c -k --keepParent "$APP" "$app_zip"
   notary_submit "$app_zip"
@@ -685,7 +785,8 @@ notarize_product() {
 emit_release_tuple() {
   PYTHONPATH="$REPO_ROOT/vibecrafted-core" "$REPO_ROOT/scripts/project-python" \
     "$REPO_ROOT/scripts/unified_product_manifest.py" release \
-    --app "$APP" --dmg "$DMG" --output "$DIST_DIR/release-output.json"
+    --app "$APP" --dmg "$DMG" --runtime-pack "$RUNTIME_PACK" \
+    --output "$DIST_DIR/release-output.json"
   /usr/bin/openssl dgst -sha256 -sign "$SIGNING_KEY" \
     -out "$DIST_DIR/release-output.json.sig" "$DIST_DIR/release-output.json"
   run_bundled_verifier release-output \
@@ -696,14 +797,27 @@ emit_release_tuple() {
   )
 }
 
+emit_runtime_pack() {
+  log "Projecting the exact App-embedded Runtime Pack bytes as the standalone asset"
+  rm -f "$RUNTIME_PACK" "$RUNTIME_PACK_CHECKSUM" "$RUNTIME_PACK_SIGNATURE"
+  install -m 0644 "$EMBEDDED_RUNTIME_PACK" "$RUNTIME_PACK"
+  install -m 0644 "$EMBEDDED_RUNTIME_PACK_CHECKSUM" "$RUNTIME_PACK_CHECKSUM"
+  install -m 0644 "$EMBEDDED_RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK_SIGNATURE"
+  cmp "$EMBEDDED_RUNTIME_PACK" "$RUNTIME_PACK"
+  cmp "$EMBEDDED_RUNTIME_PACK_CHECKSUM" "$RUNTIME_PACK_CHECKSUM"
+  cmp "$EMBEDDED_RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK_SIGNATURE"
+}
+
 if [[ "$MODE" == "notarize" ]]; then
   [[ -d "$APP" ]] || die "missing $APP; run make dmg-signed first"
+  emit_runtime_pack
   notarize_product
   emit_release_tuple
   exit 0
 fi
 
 build_product
+emit_runtime_pack
 [[ "$MODE" == "app" ]] && exit 0
 if [[ "$MODE" == "dmg" ]]; then
   create_dmg

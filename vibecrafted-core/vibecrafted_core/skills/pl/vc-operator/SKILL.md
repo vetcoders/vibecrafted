@@ -157,6 +157,13 @@ Agent operatora jest właścicielem:
 Workerzy są właścicielami swoich slice'ów. Autorstwo, raporty, commity i findingi
 pozostają przypisane do workerów, którzy je wytworzyli.
 
+Zdispatchowany Worker pozostaje wewnątrz briefu. Gdy odkryje sąsiedni defekt
+produktu lub frameworka, przekazuje aktywnemu Operatorowi falsyfikowalny finding
+i nie poprawia sąsiedniego scope'u ani nie pisze do Dziennika Operatora.
+Operator ocenia, czy poprawka jest zasadna, zapisuje decyzję, tworzy bounded
+brief, dispatchuje cięcie do dedykowanego worktree, weryfikuje je i integruje.
+Operator prowadzi odkryte poprawki; nie implementuje ich osobiście.
+
 ## Brief-Gate — nigdy nie dispatchuj wydmuszki (scaffold-doctor)
 
 Przed odpaleniem JAKIEJKOLWIEK fali plan MUSI przejść bramkę **scaffold-doctor**: każde
@@ -205,7 +212,7 @@ autorytet.
 12. Przeskanuj wylądowane commity pod kątem sekretów, danych osobowych, ścieżek
     lokalnych, lokalnej topologii sieci, adresów IP i dokumentów wewnętrznych.
 13. Przy zacięciach użyj dispatchu odzyskiwania; nigdy nie restartuj na ślepo.
-14. Dopisz do trackera i dziennika.
+14. Zaktualizuj tracker i dopisz materialne decyzje do kanonicznego dziennika.
 15. Zsyntetyzuj zamknięcie fali.
 16. Kontynuuj lub zatrzymaj się przy niedozwolonym operator button.
 
@@ -243,19 +250,33 @@ projektować, a zamknięcie projekcji nie może zatrzymać runu.
 
 ## Dopuszczalność mutacji planu
 
-Operator może pominąć, dodać, przestawić lub przegrupować prompty oraz może cherry-pickować
-między aktywnymi gałęziami fal, o ile nie zmienia to finalnego celu. Każda zmiana musi
-być zapisana w `journal.md` z tym, co się zmieniło i dlaczego.
+Kontekst repozytorium lub runtime'u może uzasadniać cięcie odzyskiwania/poprawki
+wykraczające poza bieżący ITP lub TD, jeśli finalny cel pozostaje spójny.
+Operator może według tego samego niezmiennika pomijać, dodawać, przestawiać lub
+przegrupowywać cięcia oraz cherry-pickować między aktywnymi gałęziami fal.
+Zapisz każde materialne odchylenie w
+`<repo-root>/.vibecrafted/JOURNAL.md`: dodane, pominięte lub przestawione
+cięcie; zmianę substratu; kształt odzyskiwania; cherry-pick lub integrację;
+guardrail bezpieczeństwa; oraz powód. Istniejące punkty stopu na granicach
+zaufania nadal obowiązują.
 
 ## Dziennik i tracker
 
-Tryb operatora utrzymuje dwa żywe artefakty:
+Tryb operatora utrzymuje dwie różne powierzchnie prawdy:
 
-- `tracker.md` - tabela statusu fal, checkboxy, run ID, SHA, stan bramek.
-- `journal.md` - dziennik misji tylko do dopisywania dla decyzji, zacięć, odzyskań,
-  przesunięć ról i punktów stopu.
+- datowane trackery i raporty pod `$VIBECRAFTED_HOME/artifacts/...` - projekcje
+  runu i evidence, takie jak stan fali, run ID, SHA i bramki.
+- `<repo-root>/.vibecrafted/JOURNAL.md` - jeden stały, append-only,
+  śledzony przez Git Dziennik Operatora dla repozytorium.
 
-Oba to artefakty wewnętrzne operatora. Nie noszą klamr zamykających workera.
+Tylko Operator pisze do dziennika. Agenci downstream dopisują zredagowane
+findingi frameworka do centralnego intake
+`~/.vibecrafted/vibecrafted/vibecrafted-fail.md`; zdispatchowani Workerzy
+przekazują findingi ze swojego scope'u aktywnemu Operatorowi. Datowane raporty,
+trackery, transkrypty i metadane runu są evidence, nigdy alternatywnymi
+kanonicznymi dziennikami. Dziennik i output Operatora zapisują materialne
+działania, decyzje, evidence, ryzyka i wymagane luki akceptacji, nie rutynowe
+raportowanie pracy niewykonanej.
 
 Zobacz [JOURNAL.md](JOURNAL.md).
 

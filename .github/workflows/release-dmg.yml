@@ -14,7 +14,7 @@ name: Release DMG (hosted macOS)
 #   VC_CERT_PASSWORD       password of that .p12
 #   VC_SIGNING_IDENTITY    "Developer ID Application: <name> (<team>)"
 #   VC_SIGNING_KEY         vibecrafted-signing.key (release-output signature)
-#   VC_NOTARY_APPLE_ID / VC_NOTARY_TEAM_ID / VC_NOTARY_PASSWORD  notarytool
+#   VC_NOTARY_API_KEY_B64 / VC_NOTARY_API_KEY_ID / VC_NOTARY_API_ISSUER  notarytool
 #   VC_FONT_PASSPHRASE     decrypts assets/fonts/SpotMono.ttc.enc (licensed font, AES-256-CBC/PBKDF2)
 #
 # 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
@@ -116,13 +116,13 @@ jobs:
           VC_CERT_PASSWORD: ${{ secrets.VC_CERT_PASSWORD }}
           VC_SIGNING_IDENTITY: ${{ secrets.VC_SIGNING_IDENTITY }}
           VC_SIGNING_KEY: ${{ secrets.VC_SIGNING_KEY }}
-          VC_NOTARY_APPLE_ID: ${{ secrets.VC_NOTARY_APPLE_ID }}
-          VC_NOTARY_TEAM_ID: ${{ secrets.VC_NOTARY_TEAM_ID }}
-          VC_NOTARY_PASSWORD: ${{ secrets.VC_NOTARY_PASSWORD }}
+          VC_NOTARY_API_KEY_B64: ${{ secrets.VC_NOTARY_API_KEY_B64 }}
+          VC_NOTARY_API_KEY_ID: ${{ secrets.VC_NOTARY_API_KEY_ID }}
+          VC_NOTARY_API_ISSUER: ${{ secrets.VC_NOTARY_API_ISSUER }}
           VC_FONT_PASSPHRASE: ${{ secrets.VC_FONT_PASSPHRASE }}
         run: |
           set -euo pipefail
-          for v in VC_CERT_P12_B64 VC_CERT_PASSWORD VC_SIGNING_IDENTITY VC_SIGNING_KEY VC_NOTARY_APPLE_ID VC_NOTARY_TEAM_ID VC_NOTARY_PASSWORD VC_FONT_PASSPHRASE; do
+          for v in VC_CERT_P12_B64 VC_CERT_PASSWORD VC_SIGNING_IDENTITY VC_SIGNING_KEY VC_NOTARY_API_KEY_B64 VC_NOTARY_API_KEY_ID VC_NOTARY_API_ISSUER VC_FONT_PASSPHRASE; do
             [[ -n "${!v:-}" ]] || { echo "::error::missing secret $v"; exit 1; }
           done
           [[ -n "${PAYLOAD_HYGIENE_EXTRA_LITERALS//[[:space:]]/}" ]] \
@@ -133,8 +133,7 @@ jobs:
           printf '%s\n' "$VC_CERT_PASSWORD" > "$KEYS/cert_password.txt"
           printf '%s\n' "$VC_SIGNING_IDENTITY" > "$KEYS/signing-identity.txt"
           printf '%s\n' "$VC_SIGNING_KEY" > "$KEYS/vibecrafted-signing.key"
-          printf 'NOTARY_APPLE_ID=%s\nNOTARY_TEAM_ID=%s\nNOTARY_PASSWORD=%s\n' \
-            "$VC_NOTARY_APPLE_ID" "$VC_NOTARY_TEAM_ID" "$VC_NOTARY_PASSWORD" > "$KEYS/.notary.env"
+          printf '%s' "$VC_NOTARY_API_KEY_B64" | base64 --decode > "$KEYS/notary-api-key.p8"
           openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
             -in vibecrafted/assets/fonts/SpotMono.ttc.enc -out "$KEYS/fonts/SpotMono.ttc" \
             -pass env:VC_FONT_PASSPHRASE
@@ -153,6 +152,9 @@ jobs:
         working-directory: vibecrafted
         env:
           VIBECRAFTED_KEYCHAIN_SEARCH_LIST: "1"
+          NOTARY_API_KEY_PATH: ${{ github.workspace }}/.keys/notary-api-key.p8
+          NOTARY_API_KEY_ID: ${{ secrets.VC_NOTARY_API_KEY_ID }}
+          NOTARY_API_ISSUER: ${{ secrets.VC_NOTARY_API_ISSUER }}
           # --snapshot-donors: the tracked zellij-utils/assets/plugins/*.wasm
           # blobs are build output of whichever machine last ran
           # `make plugins-assets` (run #5 measured 411 operator-home paths
@@ -165,6 +167,10 @@ jobs:
           rustup show active-toolchain || true
           make release RELEASE_FLAGS="$RELEASE_FLAGS" KEYS="$KEYS"
           ls -la dist/*.dmg dist/*.dmg.sha256 dist/release-output.json
+
+      - name: Verify the exact signed release tuple twice
+        working-directory: vibecrafted
+        run: make exact-release-contract-gate
 
       - name: Walk the shipped DMG through the hygiene gate once more
         working-directory: vibecrafted

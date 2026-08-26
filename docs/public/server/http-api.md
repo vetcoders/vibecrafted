@@ -9,25 +9,56 @@ order: 20
 
 The server exposes the control plane as a small JSON API on
 `http://127.0.0.1:3024`. Every control route is a read over
-`~/.vibecrafted/control_plane/` (or `$VIBECRAFTED_HOME`); nothing under
-`/api/control/*` writes.
+`~/.vibecrafted/control_plane/` (or `$VIBECRAFTED_HOME`). `vc-server` never
+writes durable run state. Observation may ask the canonical Python writer to
+revalidate qualified process identity; only that writer may issue a receipted
+`active -> failed` transition.
 
 ## Endpoints
 
-| Method | Path                              | Purpose                                                                  |
-| ------ | --------------------------------- | ------------------------------------------------------------------------ |
-| GET    | `/api/health`                     | Constant-time process readiness. Never scans the control plane.          |
-| GET    | `/api/control/state`              | Cached state view: active/recent runs, warnings, event tail, settlement. |
-| GET    | `/api/control/runs`               | Every run snapshot, newest-first.                                        |
-| GET    | `/api/control/runs/{run_id}`      | One run by id, or a `404` JSON body.                                     |
-| GET    | `/api/control/lifecycle`          | Lifecycle run summaries, newest-first.                                   |
-| GET    | `/api/control/lifecycle/{run_id}` | Full nested lifecycle state with per-run and per-stage axes.             |
-| GET    | `/api/control/events`             | Server-Sent Events stream of the control-plane event log.                |
+| Method | Path                                 | Purpose                                                                  |
+| ------ | ------------------------------------ | ------------------------------------------------------------------------ |
+| GET    | `/api/health`                        | Constant-time process readiness. Never scans the control plane.          |
+| GET    | `/api/control/state`                 | Cached state view: active/recent runs, warnings, event tail, settlement. |
+| GET    | `/api/control/runs`                  | Every run snapshot, newest-first.                                        |
+| GET    | `/api/control/runs/{run_id}`         | One run by id, or a `404` JSON body.                                     |
+| GET    | `/api/control/runs/{run_id}/observe` | Versioned one-shot observation; never arms a monitor.                    |
+| GET    | `/api/control/runs/{run_id}/await`   | Shared blocking subscription for the run.                                |
+| GET    | `/api/control/lifecycle`             | Lifecycle run summaries, newest-first.                                   |
+| GET    | `/api/control/lifecycle/{run_id}`    | Full nested lifecycle state with per-run and per-stage axes.             |
+| GET    | `/api/control/events`                | Server-Sent Events stream of the control-plane event log.                |
 
 Run payloads serialise the delivery-proof axes (`execution_state`,
 `proof_state`, `delivery_state`) and `seal` only when the snapshot or kernel
 receipt carries them. Absent axes stay absent — a `completed` state is never
 promoted into a delivery claim.
+
+## Run observation v1
+
+`GET /api/control/runs/{run_id}/observe` returns
+`vibecrafted.run-observation.v1`: identity, canonical control-plane home,
+terminality, qualified process truth, the typed run projection, report and
+transcript references, and explicit monitor/AICX witness availability.
+Repeated or concurrent observe calls remain one-shot and do not grow the await
+registry.
+
+`GET /api/control/runs/{run_id}/await` returns
+`vibecrafted.run-await-verdict.v1`. Subscribers fan into one ephemeral monitor
+per control-plane home plus run id. Terminal settlement wakes every subscriber
+with the same observation; the monitor then closes. Last-subscriber disconnect
+starts a short cleanup grace and never mutates the run.
+
+Query parameters:
+
+- `idle_timeout`: resettable idle window in seconds (default `300`);
+- `hard_cap`: optional absolute wall-clock cap in seconds;
+- `interval`: accepted for client grammar compatibility; the server owns the
+  shared polling cadence.
+
+Structured outcomes are `terminal`, `not_found`, `idle_stall`, `hard_cap`,
+`evidence_disagreement`, and `server_unavailable`. Timeout and conflict
+responses retain their JSON verdict even when the HTTP status is `408` or
+`409`.
 
 ## Health
 

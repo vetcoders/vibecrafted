@@ -5,6 +5,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 4.3.0 — prepared, not published
+
+### Changed
+
+- The root `VERSION` is the mechanical product-version authority for the core,
+  MCP, server, plugin and staged package metadata; the release gate rejects
+  drift before a carrier is built.
+- `make install` and the non-interactive bootstrap lane consume a signed,
+  provenance-closed Runtime Pack on macOS, Linux and WSL2. Maintainers can
+  still choose the explicitly named `make install-source` compiler lane.
+- Runtime Pack selection is platform/architecture specific and rejects a
+  carrier whose embedded version, platform, architecture or source/donor tuple
+  disagrees with the selected release asset.
+
+### Distribution status
+
+- v4.3.0 carrier metadata covers macOS plus Linux x86_64 and arm64. Publication,
+  production signing/notarization and the live channel update remain release
+  operator actions; this entry does not claim those outward steps occurred.
+
 > **4.2.0 scope — measured truths, finished seams.** Release integrity from the
 > donor snapshot through to the payload a stranger downloads, and one identity
 > order shared by every surface that reads a run.

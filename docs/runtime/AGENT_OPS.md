@@ -10,8 +10,9 @@ no-await lifecycle, subagents, watchers) and what actually fixes it.
 After dispatch, arm `vibecrafted await <agent> --run-id <id>` immediately,
 supervisor-side. Control-plane JSON, report files, transcripts, panes, and
 scheduled wakeups are diagnostic only, not wake signals. Hedging await with
-ad-hoc pollers/watchers is a Class 3 violation; fix `control_plane.await_run`,
-do not normalize the hedge.
+ad-hoc pollers/watchers is a Class 3 violation; fix the `vc-server` await hub,
+do not normalize the hedge. `--timeout` is an idle window; add `--hard-cap`
+when the caller requires an absolute deadline.
 
 Liveness is always a 3-signal decision before declaring a run done: confirm (1)
 the await verdict, (2) terminal state in run meta, and (3) worker pid dead; when
@@ -305,12 +306,14 @@ contract gap, not by agent paranoia.
 
 ### Mechanism (five confirmed gaps, all fixed at the source)
 
-1. **A third private await loop**: `cli._agent_await`'s human path had its own
+1. **A private await loop per client**: `cli._agent_await`'s human path had its own
    inline loop treating `--timeout` as an ABSOLUTE wall clock — it abandoned
-   demonstrably-working runs at 300 s. Fixed: the verb now blocks through the
-   one canonical `control_plane.await_run` (liveness-aware idle window), with
-   an `on_poll` callback for progress printing. There must be exactly ONE
-   await loop in the runtime; a new inline loop is this class reborn.
+   demonstrably-working runs at 300 s. A later 2026-08-26 incident multiplied
+   the canonical Python function into fourteen independent processes for one
+   run. Fixed: CLI and MCP now subscribe to the existing `vc-server` hub, which
+   owns exactly one ephemeral monitor per canonical home plus run id. Python
+   remains the sole durable writer and settlement authority. A new client-side
+   loop is this class reborn.
 2. **Loop parents look dead while children work**: marbles/polarize rounds are
    sequenced deterministically (next round fires on the previous child
    PROCESS EXIT + artifact validation in `workflow_runtime.run_marbles`), but

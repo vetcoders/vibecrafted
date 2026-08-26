@@ -79,6 +79,11 @@ TERMINAL_STATES = {
     "timed_out",
     "ghost",
 }
+LAUNCH_IDEMPOTENCY_SCHEMA = "vibecrafted.launch-idempotency.v1"
+LAUNCH_IDEMPOTENCY_KEY_ENV = "VIBECRAFTED_LAUNCH_IDEMPOTENCY_KEY"
+LAUNCH_IDEMPOTENCY_MAX_TERMINAL_RECORDS = 2048
+LAUNCH_IDEMPOTENCY_TERMINAL_TTL_SECONDS = 30 * 24 * 60 * 60
+LAUNCH_RECEIPT_SCHEMA = "vibecrafted.launch_receipt.v1"
 
 
 @dataclass(frozen=True)
@@ -1903,6 +1908,472 @@ def _launch_tracking_payload(
     }
 
 
+def _json_plain(value: Any) -> Any:
+    """Reduce a launch payload to JSON-serializable builtins."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_plain(item) for item in value]
+    return str(value)
+
+
+def machine_launch_receipt(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the one stdout-safe launch receipt operators and agents parse."""
+    accepted = bool(payload.get("accepted"))
+    status = str(
+        payload.get("status")
+        or ("launching" if accepted else payload.get("reason") or "rejected")
+    )
+    agent = str(payload.get("agent") or "")
+    return {
+        "schema": LAUNCH_RECEIPT_SCHEMA,
+        "run_id": str(payload.get("run_id") or ""),
+        "agent": agent,
+        "skill": str(payload.get("skill") or ""),
+        "root": str(payload.get("root") or ""),
+        "accepted": accepted,
+        "status": status,
+        "replayed": bool(payload.get("replayed")),
+        "idempotency_key": str(payload.get("idempotency_key") or ""),
+    }
+
+
+def _launch_idempotency_enabled() -> bool:
+    """Whether one logical launch may reuse a live run instead of minting a sibling."""
+    raw = str(os.environ.get("VIBECRAFTED_LAUNCH_IDEMPOTENCY", "1")).strip().lower()
+    return raw not in {"0", "false", "off", "no"}
+
+
+def launch_idempotency_key(
+    spec: WorkflowLaunchSpec, *, env: dict[str, str] | None = None
+) -> str:
+    """Return caller-supplied launch identity, or ``""`` for a fresh invocation.
+
+    Byte-identical content is never operator-intention identity. Transports may
+    supply the existing ``VIBECRAFTED_LAUNCH_IDEMPOTENCY_KEY`` across retries;
+    an explicit ``spec.run_id`` is also a stable caller-owned identity.
+    """
+    source = os.environ if env is None else env
+    override = str(source.get(LAUNCH_IDEMPOTENCY_KEY_ENV) or "").strip()
+    if override:
+        return override
+    run_id = str(spec.run_id or "").strip()
+    return f"run-id:{run_id}" if run_id else ""
+
+
+def _launch_spec_digest(spec: WorkflowLaunchSpec) -> str:
+    """Bind one explicit invocation identity to secret-safe launch semantics."""
+    prompt = _source_prompt(spec)
+    material = {
+        **spec.to_payload(),
+        "prompt": "",
+        "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        "root": str(Path(spec.root or "").expanduser().resolve(strict=False)),
+    }
+    encoded = json.dumps(material, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _launch_idempotency_registry() -> Path:
+    """Directory for launch-idempotency records under the control-plane home."""
+    registry = control_plane_home() / "launch_idempotency"
+    registry.mkdir(parents=True, exist_ok=True)
+    return registry
+
+
+def _launch_idempotency_path(key: str) -> Path:
+    """Content-addressed path for one launch fingerprint."""
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return _launch_idempotency_registry() / f"{digest}.json"
+
+
+def _read_launch_idempotency_record(key: str) -> dict[str, Any]:
+    """Read one launch-idempotency record, or ``{}`` when absent/invalid."""
+    if not key:
+        return {}
+    path = _launch_idempotency_path(key)
+    payload = _read_json_object(path)
+    if not payload:
+        return {}
+    if payload.get("schema") != LAUNCH_IDEMPOTENCY_SCHEMA:
+        return {}
+    if str(payload.get("idempotency_key") or "") != key:
+        return {}
+    return payload
+
+
+def _write_launch_idempotency_record(key: str, payload: dict[str, Any]) -> None:
+    """Atomically persist a launch-idempotency record for ``key``."""
+    if not key:
+        return
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    record = {
+        "schema": LAUNCH_IDEMPOTENCY_SCHEMA,
+        "idempotency_key": key,
+        "run_id": str(payload.get("run_id") or ""),
+        "agent": str(payload.get("agent") or ""),
+        "skill": str(payload.get("skill") or ""),
+        "root": str(payload.get("root") or ""),
+        "state": str(payload.get("state") or "reserved"),
+        "accepted": bool(payload.get("accepted")),
+        "owner_pid": int(payload.get("owner_pid") or os.getpid()),
+        "owner_identity": _json_plain(payload.get("owner_identity")),
+        "spec_digest": str(payload.get("spec_digest") or ""),
+        "receipt": _json_plain(payload.get("receipt") or {}),
+        "updated_at": now,
+    }
+    with run_mutation_locks(control_plane_home(), run_id="launch-idempotency-registry"):
+        if payload.get("created_at"):
+            record["created_at"] = str(payload["created_at"])
+        else:
+            existing = _read_launch_idempotency_record(key)
+            record["created_at"] = str(existing.get("created_at") or now)
+        atomic_write_json(_launch_idempotency_path(key), record)
+
+
+def _prune_launch_idempotency_registry(*, now: float | None = None) -> int:
+    """Bound failed/terminal history without deleting live or ambiguous claims."""
+    with run_mutation_locks(control_plane_home(), run_id="launch-idempotency-registry"):
+        registry = _launch_idempotency_registry()
+        current_time = time.time() if now is None else now
+        eligible: list[tuple[float, Path]] = []
+        for path in registry.glob("*.json"):
+            payload = _read_json_object(path)
+            state = str(payload.get("state") or "")
+            if state == "failed":
+                pass
+            elif state == "dispatched":
+                run_id = str(payload.get("run_id") or "")
+                run = lookup_run(run_id) if run_id else None
+                if run is None or not _run_is_terminal(run):
+                    continue
+            else:
+                continue
+            try:
+                modified_at = path.stat().st_mtime
+            except OSError:
+                continue
+            eligible.append((modified_at, path))
+
+        eligible.sort(key=lambda item: item[0], reverse=True)
+        removed = 0
+        for index, (modified_at, path) in enumerate(eligible):
+            expired = (
+                current_time - modified_at > LAUNCH_IDEMPOTENCY_TERMINAL_TTL_SECONDS
+            )
+            over_limit = index >= LAUNCH_IDEMPOTENCY_MAX_TERMINAL_RECORDS
+            if not expired and not over_limit:
+                continue
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                continue
+            removed += 1
+        return removed
+
+
+def _replay_launch_payload(record: dict[str, Any], *, status: str) -> dict[str, Any]:
+    """Rebuild a launch receipt from a stored idempotency record."""
+    stored = dict(record.get("receipt") or {})
+    run_id = str(stored.get("run_id") or record.get("run_id") or "")
+    payload = {
+        **stored,
+        "run_id": run_id,
+        "agent": str(stored.get("agent") or record.get("agent") or ""),
+        "skill": str(stored.get("skill") or record.get("skill") or ""),
+        "root": str(stored.get("root") or record.get("root") or ""),
+        "accepted": bool(stored.get("accepted", record.get("accepted"))),
+        "status": str(stored.get("status") or status),
+        "replayed": True,
+        "idempotency_key": str(record.get("idempotency_key") or ""),
+        "message": str(
+            stored.get("message") or f"Replayed launch for {run_id or 'existing run'}"
+        ),
+    }
+    return payload
+
+
+def _retryable_launch_payload(
+    record: dict[str, Any], *, status: str, reason: str
+) -> dict[str, Any]:
+    """Return a structured refusal for an identity that lacks launch proof."""
+    stored = dict(record.get("receipt") or {})
+    return {
+        **stored,
+        "run_id": str(stored.get("run_id") or record.get("run_id") or ""),
+        "agent": str(stored.get("agent") or record.get("agent") or ""),
+        "skill": str(stored.get("skill") or record.get("skill") or ""),
+        "root": str(stored.get("root") or record.get("root") or ""),
+        "accepted": False,
+        "status": status,
+        "retryable": True,
+        "replayed": False,
+        "idempotency_key": str(record.get("idempotency_key") or ""),
+        "reason": reason,
+        "message": reason,
+    }
+
+
+def _canonical_run_launch_payload(
+    record: dict[str, Any], run: dict[str, Any]
+) -> dict[str, Any]:
+    """Recover acceptance only from a canonical run with qualified liveness."""
+    stored = dict(record.get("receipt") or {})
+    run_id = str(run.get("run_id") or record.get("run_id") or "")
+    payload = {
+        **stored,
+        "run_id": run_id,
+        "agent": str(run.get("agent") or record.get("agent") or ""),
+        "skill": str(run.get("skill") or record.get("skill") or ""),
+        "root": str(run.get("root") or record.get("root") or ""),
+        "accepted": True,
+        "status": str(run.get("state") or "launching"),
+        "replayed": True,
+        "recovered": True,
+        "idempotency_key": str(record.get("idempotency_key") or ""),
+        "message": f"Recovered canonical launch for {run_id}",
+    }
+    for field in (
+        "report",
+        "transcript",
+        "meta",
+        "launcher_pid",
+        "launcher_identity",
+        "worker_pid",
+        "worker_identity",
+    ):
+        if run.get(field) is not None:
+            payload[field] = _json_plain(run[field])
+    return payload
+
+
+def _classify_record_owner(record: dict[str, Any]) -> tuple[str, str]:
+    """Classify reservation ownership without turning ambiguity into staleness."""
+    run_id = str(record.get("run_id") or "")
+    try:
+        owner_pid = int(record.get("owner_pid") or 0)
+    except (TypeError, ValueError):
+        return "ambiguous", "process_identity_invalid"
+    receipt = record.get("owner_identity")
+    if owner_pid <= 0 or not isinstance(receipt, dict):
+        return "ambiguous", "process_identity_unavailable"
+    expected_pgid = receipt.get("pgid")
+    try:
+        pgid = int(expected_pgid) if expected_pgid is not None else None
+    except (TypeError, ValueError):
+        return "ambiguous", "process_identity_invalid"
+    current, reason, _identity = validate_process_identity(
+        receipt,
+        expected_pid=owner_pid,
+        expected_pgid=pgid,
+        expected_run_id=run_id,
+    )
+    if current:
+        return "current", reason or "process_identity_current"
+    if reason in {
+        "process_identity_gone",
+        "process_identity_mismatch",
+        "process_run_id_mismatch",
+    }:
+        return "stale", reason
+    return "ambiguous", reason or "process_identity_unknown"
+
+
+def _run_has_current_process_proof(run_id: str, run: dict[str, Any]) -> bool:
+    """Require a current canonical worker/launcher identity for active replay."""
+    for prefix in ("worker", "launcher"):
+        receipt = run.get(f"{prefix}_identity")
+        if not isinstance(receipt, dict):
+            continue
+        raw_pid = run.get(f"{prefix}_pid") or receipt.get("pid")
+        try:
+            pid = int(raw_pid or 0)
+            pgid = int(receipt.get("pgid") or 0)
+        except (TypeError, ValueError):
+            continue
+        current, _reason, _identity = validate_process_identity(
+            receipt,
+            expected_pid=pid,
+            expected_pgid=pgid or None,
+            expected_run_id=run_id,
+        )
+        if current:
+            return True
+    return False
+
+
+def _replay_launch_if_current(record: dict[str, Any]) -> dict[str, Any] | None:
+    """Return a replay receipt when retrying would mint a sibling of a live launch."""
+    if not record:
+        return None
+    run_id = str(record.get("run_id") or "")
+    if not run_id:
+        return None
+    state = str(record.get("state") or "")
+    if state == "reserved":
+        owner_state, owner_reason = _classify_record_owner(record)
+        if owner_state == "current":
+            return _retryable_launch_payload(
+                record,
+                status="reservation_in_progress",
+                reason="launch reservation is owned by another live invocation",
+            )
+        run = lookup_run(run_id)
+        if run is not None and (
+            _run_is_terminal(run) or _run_has_current_process_proof(run_id, run)
+        ):
+            return _canonical_run_launch_payload(record, run)
+        if owner_state == "ambiguous":
+            return _retryable_launch_payload(
+                record,
+                status="retryable_reservation_owner_ambiguous",
+                reason=owner_reason,
+            )
+        if run is None:
+            return None
+        return _retryable_launch_payload(
+            record,
+            status="retryable_unproven_liveness",
+            reason="reserved run exists but has no current canonical process proof",
+        )
+    if state != "dispatched":
+        return None
+    run = lookup_run(run_id)
+    if run is None:
+        return _retryable_launch_payload(
+            record,
+            status="retryable_unknown_run",
+            reason="idempotent run is unknown to control_plane",
+        )
+    if _run_is_terminal(run):
+        return _replay_launch_payload(
+            record, status=str(run.get("state") or "completed")
+        )
+    stored_receipt = dict(record.get("receipt") or {})
+    if not (
+        _run_has_current_process_proof(run_id, run)
+        or _run_has_current_process_proof(run_id, stored_receipt)
+    ):
+        return _retryable_launch_payload(
+            record,
+            status="retryable_unproven_liveness",
+            reason="idempotent run has no current canonical process proof",
+        )
+    return _replay_launch_payload(record, status=str(run.get("state") or "launching"))
+
+
+def _claim_launch_idempotency(
+    spec: WorkflowLaunchSpec, key: str, *, spec_digest: str
+) -> tuple[dict[str, Any] | None, str]:
+    """Under the caller lock: replay a live launch or reserve one run id."""
+    existing = _read_launch_idempotency_record(key)
+    existing_digest = str(existing.get("spec_digest") or "")
+    if existing and existing_digest != spec_digest:
+        raise ValueError("idempotency identity conflicts with a different launch spec")
+    replay = _replay_launch_if_current(existing)
+    if replay is not None:
+        if replay.get("accepted") and str(existing.get("state") or "") == "reserved":
+            replay = _finish_launch_idempotency(key, replay, spec_digest=spec_digest)
+        return replay, str(existing.get("run_id") or "")
+    reuse = ""
+    if str(existing.get("state") or "") == "reserved":
+        reuse = str(existing.get("run_id") or "")
+    run_id = str(spec.run_id or reuse or "") or reserve_run_id(spec.skill)
+    _write_launch_idempotency_record(
+        key,
+        {
+            "run_id": run_id,
+            "agent": spec.agent,
+            "skill": spec.skill,
+            "root": spec.root,
+            "state": "reserved",
+            "accepted": False,
+            "owner_pid": os.getpid(),
+            "owner_identity": process_identity_receipt(os.getpid(), run_id=run_id),
+            "spec_digest": spec_digest,
+            "receipt": {
+                "run_id": run_id,
+                "agent": spec.agent,
+                "skill": spec.skill,
+                "root": spec.root,
+                "accepted": False,
+                "status": "reserved",
+            },
+        },
+    )
+    return None, run_id
+
+
+def _finish_launch_idempotency(
+    key: str, payload: dict[str, Any], *, spec_digest: str = ""
+) -> dict[str, Any]:
+    """Persist the launch receipt onto the fingerprint, then return it."""
+    if not key:
+        return payload
+    accepted = bool(payload.get("accepted"))
+    result = {**payload, "idempotency_key": key}
+    _write_launch_idempotency_record(
+        key,
+        {
+            "run_id": str(result.get("run_id") or ""),
+            "agent": str(result.get("agent") or ""),
+            "skill": str(result.get("skill") or ""),
+            "root": str(result.get("root") or ""),
+            "state": "dispatched" if accepted else "failed",
+            "accepted": accepted,
+            "owner_pid": os.getpid(),
+            "owner_identity": process_identity_receipt(
+                os.getpid(), run_id=str(result.get("run_id") or "")
+            ),
+            "spec_digest": spec_digest,
+            "receipt": _json_plain(result),
+        },
+    )
+    _prune_launch_idempotency_registry()
+    return result
+
+
+def recover_launch_receipt(
+    spec: WorkflowLaunchSpec, *, env: dict[str, str] | None = None
+) -> dict[str, Any] | None:
+    """Return a stored receipt for ``spec`` when a prior launch already reserved a run."""
+    if not _launch_idempotency_enabled():
+        return None
+    key = launch_idempotency_key(spec, env=env)
+    if not key:
+        return None
+    record = _read_launch_idempotency_record(key)
+    expected_digest = _launch_spec_digest(spec)
+    if record and str(record.get("spec_digest") or "") != expected_digest:
+        return _retryable_launch_payload(
+            record,
+            status="idempotency_conflict",
+            reason="idempotency identity conflicts with a different launch spec",
+        )
+    if not record.get("run_id"):
+        return None
+    replay = _replay_launch_if_current(record)
+    if replay is not None:
+        return replay
+    stored = dict(record.get("receipt") or {})
+    run_id = str(stored.get("run_id") or record.get("run_id") or "")
+    if not run_id:
+        return None
+    stored["run_id"] = run_id
+    stored["replayed"] = True
+    stored["idempotency_key"] = key
+    dispatched = str(record.get("state") or "") == "dispatched"
+    stored["accepted"] = bool(record.get("accepted")) and dispatched
+    stored.setdefault("status", "launching" if stored["accepted"] else "failed")
+    return stored
+
+
 def launch_workflow(
     spec: WorkflowLaunchSpec,
     source_dir: str | Path,
@@ -1960,7 +2431,29 @@ def launch_workflow(
                 raise
             # not a git repository / stubbed subprocess / unreadable context → allow
 
-    run_id = spec.run_id or reserve_run_id(spec.skill)
+    idem_key = ""
+    idem_spec_digest = ""
+    claimed_run_id = ""
+    if _launch_idempotency_enabled():
+        effective_identity_env = dict(os.environ)
+        if env:
+            effective_identity_env.update(env)
+        idem_key = launch_idempotency_key(spec, env=effective_identity_env)
+    if idem_key:
+        idem_spec_digest = _launch_spec_digest(spec)
+        digest = hashlib.sha256(idem_key.encode("utf-8")).hexdigest()
+        with run_mutation_locks(
+            control_plane_home(),
+            run_id=f"lidem-{digest[:24]}",
+            idempotency_key=idem_key,
+        ):
+            replay, claimed_run_id = _claim_launch_idempotency(
+                spec, idem_key, spec_digest=idem_spec_digest
+            )
+            if replay is not None:
+                return replay
+
+    run_id = spec.run_id or claimed_run_id or reserve_run_id(spec.skill)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
         raise ValueError("run_id must be a safe 1-128 character identifier")
     artifacts = _run_artifact_paths(run_id)
@@ -2022,21 +2515,26 @@ def launch_workflow(
     try:
         worker_command = _resolve_agent_command(spec.agent, worker_command, merged_env)
     except FileNotFoundError as exc:
-        return {
-            "accepted": False,
-            "message": f"Failed to launch {spec.skill}: {exc}",
-            "error": f"{type(exc).__name__}: {exc}",
-            "worker_command": worker_command,
-            "run_id": run_id,
-            "agent": spec.agent,
-            "skill": spec.skill,
-            "root": spec.root,
-            "report": str(report_path),
-            "transcript": str(artifacts["transcript"]),
-            "meta": str(artifacts["meta"]),
-            "prompt_file": str(prompt_path),
-            "control_plane": {"sync": "deferred", "run_id": run_id},
-        }
+        return _finish_launch_idempotency(
+            idem_key,
+            {
+                "accepted": False,
+                "message": f"Failed to launch {spec.skill}: {exc}",
+                "error": f"{type(exc).__name__}: {exc}",
+                "worker_command": worker_command,
+                "run_id": run_id,
+                "agent": spec.agent,
+                "skill": spec.skill,
+                "root": spec.root,
+                "status": "failed",
+                "report": str(report_path),
+                "transcript": str(artifacts["transcript"]),
+                "meta": str(artifacts["meta"]),
+                "prompt_file": str(prompt_path),
+                "control_plane": {"sync": "deferred", "run_id": run_id},
+            },
+            spec_digest=idem_spec_digest,
+        )
     launch_tracking = _launch_tracking_payload(launch_meta)
     model_receipt = _model_override_receipt(spec.agent, spec.model)
     if spec.model and runtime_kind == "supervised_research":
@@ -2250,25 +2748,33 @@ def launch_workflow(
                             **model_receipt,
                         },
                     )
-                    return {
-                        "accepted": False,
-                        "message": f"Failed to launch {spec.skill}: {host.error}",
-                        "command": command,
-                        "worker_command": worker_command,
-                        "dispatch_command": dispatch_command,
-                        "transport": transport,
-                        "command_script": str(command_script or ""),
-                        "launch_log": str(launch_log),
-                        "spec": safe_spec,
-                        "error": host.error,
-                        "last_error": host.error,
-                        "run_id": run_id,
-                        "operator_session": operator_session,
-                        **launch_tracking,
-                        "retry_of": retry_of,
-                        **model_receipt,
-                        "control_plane": sync_state(),
-                    }
+                    return _finish_launch_idempotency(
+                        idem_key,
+                        {
+                            "accepted": False,
+                            "message": f"Failed to launch {spec.skill}: {host.error}",
+                            "command": command,
+                            "worker_command": worker_command,
+                            "dispatch_command": dispatch_command,
+                            "transport": transport,
+                            "command_script": str(command_script or ""),
+                            "launch_log": str(launch_log),
+                            "spec": safe_spec,
+                            "error": host.error,
+                            "last_error": host.error,
+                            "run_id": run_id,
+                            "agent": spec.agent,
+                            "skill": spec.skill,
+                            "root": spec.root,
+                            "status": "failed",
+                            "operator_session": operator_session,
+                            **launch_tracking,
+                            "retry_of": retry_of,
+                            **model_receipt,
+                            "control_plane": sync_state(),
+                        },
+                        spec_digest=idem_spec_digest,
+                    )
                 launcher_pid = host.pid
             else:
                 proc = subprocess.Popen(
@@ -2332,23 +2838,31 @@ def launch_workflow(
                     **model_receipt,
                 },
             )
-            return {
-                "accepted": False,
-                "message": f"Failed to launch {spec.skill}: {exc}",
-                "command": command,
-                "worker_command": worker_command,
-                "dispatch_command": dispatch_command,
-                "transport": transport,
-                "command_script": str(command_script or ""),
-                "launch_log": str(launch_log),
-                "spec": safe_spec,
-                "error": f"{type(exc).__name__}: {exc}",
-                "run_id": run_id,
-                **launch_tracking,
-                "retry_of": retry_of,
-                **model_receipt,
-                "control_plane": sync_state(),
-            }
+            return _finish_launch_idempotency(
+                idem_key,
+                {
+                    "accepted": False,
+                    "message": f"Failed to launch {spec.skill}: {exc}",
+                    "command": command,
+                    "worker_command": worker_command,
+                    "dispatch_command": dispatch_command,
+                    "transport": transport,
+                    "command_script": str(command_script or ""),
+                    "launch_log": str(launch_log),
+                    "spec": safe_spec,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "run_id": run_id,
+                    "agent": spec.agent,
+                    "skill": spec.skill,
+                    "root": spec.root,
+                    "status": "failed",
+                    **launch_tracking,
+                    "retry_of": retry_of,
+                    **model_receipt,
+                    "control_plane": sync_state(),
+                },
+                spec_digest=idem_spec_digest,
+            )
         append_event(
             kind="launch",
             run_id=run_id,
@@ -2394,15 +2908,22 @@ def launch_workflow(
         # bucket, not a worker tab. A vc-frame transport already owns a tab of
         # its own, so only the detached path gets one.
         if transport == "headless":
-            live_viewer = open_live_viewer(
-                run_id=run_id,
-                agent=spec.agent,
-                root=spec.root,
-                launch_dir=launch_dir,
-                transcript_path=artifacts["transcript"],
-                meta_path=artifacts["meta"],
-                env=merged_env,
-            )
+            try:
+                live_viewer = open_live_viewer(
+                    run_id=run_id,
+                    agent=spec.agent,
+                    root=spec.root,
+                    launch_dir=launch_dir,
+                    transcript_path=artifacts["transcript"],
+                    meta_path=artifacts["meta"],
+                    env=merged_env,
+                )
+            except (OSError, ValueError, RuntimeError) as exc:
+                live_viewer = _live_viewer_receipt(
+                    "failed",
+                    reason=f"{type(exc).__name__}: {exc}",
+                    run_id=run_id,
+                )
             handle.write(
                 json.dumps({"ts": stamp, "event": "live_viewer", **live_viewer}) + "\n"
             )
@@ -2411,48 +2932,52 @@ def launch_workflow(
                 "skipped", reason=f"transport_{transport}", run_id=run_id
             )
 
-    return {
-        "live_viewer": live_viewer,
-        "accepted": True,
-        "message": f"Launched {spec.skill} via Vibecrafted core runtime.",
-        "command": command,
-        "dispatch_command": dispatch_command,
-        "worker_command": worker_command,
-        "transport": transport,
-        "command_script": str(command_script or ""),
-        "pid": launcher_pid,
-        "launcher_identity": launcher_identity,
-        "run_id": run_id,
-        "agent": spec.agent,
-        "skill": spec.skill,
-        "root": spec.root,
-        "dispatch": 0,
-        "status": "launching",
-        "control": str(run_snapshot_dir() / f"{run_id}.json"),
-        "report": str(report_path),
-        "transcript": str(artifacts["transcript"]),
-        "meta": str(artifacts["meta"]),
-        "prompt_file": str(prompt_path),
-        "session_id": session_id,
-        "operator_session": operator_session,
-        "control_plane_identity": {
+    return _finish_launch_idempotency(
+        idem_key,
+        {
+            "live_viewer": live_viewer,
+            "accepted": True,
+            "message": f"Launched {spec.skill} via Vibecrafted core runtime.",
+            "command": command,
+            "dispatch_command": dispatch_command,
+            "worker_command": worker_command,
+            "transport": transport,
+            "command_script": str(command_script or ""),
+            "pid": launcher_pid,
+            "launcher_identity": launcher_identity,
             "run_id": run_id,
+            "agent": spec.agent,
+            "skill": spec.skill,
+            "root": spec.root,
+            "dispatch": 0,
+            "status": "launching",
+            "control": str(run_snapshot_dir() / f"{run_id}.json"),
+            "report": str(report_path),
+            "transcript": str(artifacts["transcript"]),
+            "meta": str(artifacts["meta"]),
+            "prompt_file": str(prompt_path),
             "session_id": session_id,
             "operator_session": operator_session,
+            "control_plane_identity": {
+                "run_id": run_id,
+                "session_id": session_id,
+                "operator_session": operator_session,
+            },
+            "workflow": _workflow_metadata(spec.skill),
+            **model_receipt,
+            **launch_tracking,
+            "retry_of": retry_of,
+            "launch_log": str(launch_log),
+            "spec": safe_spec,
+            # Launch acceptance is already durable in the event stream, run meta,
+            # and dispatcher process. A global board reconciliation here can block
+            # on an unrelated run and turn a successful launch into a traceback.
+            # Reconciliation belongs to observe/await/board readers, never the
+            # launch acknowledgement path.
+            "control_plane": {"sync": "deferred", "run_id": run_id},
         },
-        "workflow": _workflow_metadata(spec.skill),
-        **model_receipt,
-        **launch_tracking,
-        "retry_of": retry_of,
-        "launch_log": str(launch_log),
-        "spec": safe_spec,
-        # Launch acceptance is already durable in the event stream, run meta,
-        # and dispatcher process. A global board reconciliation here can block
-        # on an unrelated run and turn a successful launch into a traceback.
-        # Reconciliation belongs to observe/await/board readers, never the
-        # launch acknowledgement path.
-        "control_plane": {"sync": "deferred", "run_id": run_id},
-    }
+        spec_digest=idem_spec_digest,
+    )
 
 
 def stop_run(

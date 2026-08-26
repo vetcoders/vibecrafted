@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import control_plane, cron, ui
+from . import control_plane, ui
 from .clock import utc_now_z
 
 
@@ -121,6 +121,10 @@ def command_deck() -> str:
 
 def _framework_heartbeat(*, root: Path, run_id: str, then_cmd: str = "") -> int:
     """Fire one immediate ``vibecrafted cron tick`` heartbeat for a running worker."""
+    # cron imports default_state_file from this module. Keep the reverse edge
+    # lazy so importing ship/loop in a fresh interpreter cannot form a cycle.
+    from . import cron
+
     argv = [
         "tick",
         "--root",

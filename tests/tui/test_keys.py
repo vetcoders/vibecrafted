@@ -335,22 +335,7 @@ def test_app_installer_writes_deck_verb_wrappers() -> None:
     the shim itself. Without it `vc-resume claude --session <id>` degraded to
     `vibecrafted claude --session <id>` ("Unknown mode: --session").
     """
-    import re
-
     from vibecrafted_core import cli
-
-    swift = (
-        Path(__file__).resolve().parents[2]
-        / "vibecrafted-app"
-        / "shell-agent"
-        / "app"
-        / "Vibecrafted"
-        / "AppDelegate.swift"
-    ).read_text(encoding="utf-8")
-
-    block = swift.split("deckVerbWrappers", 1)[1]
-    block = block.split("for wrapper in deckVerbWrappers", 1)[0]
-    pairs = dict(re.findall(r'\("([a-z-]+)", "([a-z]+)"\)', block))
 
     # vc-start ships as a real runtime binary; the installer's bin guard skips
     # it dynamically, so the static verb list intentionally leaves it out.
@@ -359,4 +344,4 @@ def test_app_installer_writes_deck_verb_wrappers() -> None:
         for name, verb in cli.SHELL_WRAPPER_VERBS.items()
         if name != "vc-start"
     }
-    assert pairs == expected
+    assert vetcoders_install._RUNTIME_WRAPPER_VERBS == expected

@@ -27,6 +27,11 @@ raport, opcjonalnie zacommituj, jeśli realne zmiany mieszczą się w scope, zat
 preferuj najmniejszą decyzję, która domyka slice. Zacieśniaj scope przez
 wnioskowanie, a nie przez przepytywanie, ale nigdy go nie rozszerzaj.
 
+**Sąsiedni finding**: przekaż aktywnemu Operatorowi falsyfikowalny finding.
+Nie poprawiaj oportunistycznie sąsiedniego scope'u i nie pisz do
+`<repo-root>/.vibecrafted/JOURNAL.md`. Zredagowane findingi frameworka trafiają
+też do centralnego intake `~/.vibecrafted/vibecrafted/vibecrafted-fail.md`.
+
 **Rekursja**: zabroniona. Żadnego `/vc-agents` z wnętrza workera. Natywny
 Task / `vc-delegate` do zrównoleglenia wewnątrz twojego slice'a jest dozwolony.
 
@@ -67,6 +72,11 @@ Zobacz [`AUTONOMY.md`](AUTONOMY.md) po pełny harmonogram hard-stopów.
 **Prędkość decyzji**: ostrożne tempo, weryfikuj-potem-naprzód. Każda fala lądująca
 na zielono zarabia prawo do odpalenia kolejnej fali. Dispatch odzyskiwania to
 _standardowe_ narzędzie — nie ponawianie.
+
+**Odkryta poprawka**: oceń, czy finding uzasadnia działanie, zapisz decyzję w
+repozytoryjnym Dzienniku Operatora, wyrenderuj bounded brief, aktywnie dispatchuj
+go do dedykowanego worktree, zweryfikuj i zintegruj. Prowadź poprawkę; nie
+implementuj jej osobiście.
 
 **Rekursja**: ta karta jest _jedyną_, która autoryzuje dispatch fala-po-fali.
 Ale to wciąż _operator_ (człowiek) jest tym, który wybrał ten

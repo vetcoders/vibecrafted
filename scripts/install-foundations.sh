@@ -112,13 +112,10 @@ binary_runs() {
   "$bin" --version >/dev/null 2>&1 || "$bin" --help >/dev/null 2>&1
 }
 
-# Live config dirs the product actually reads (frontier first — VC_FRAME_CONFIG_DIR).
+# Sole live vc-frame config directory owned by the product.
 _vcframe_config_roots() {
   local xdg="${XDG_CONFIG_HOME:-$HOME/.config}"
-  printf '%s\n' \
-    "${VC_FRAME_CONFIG_DIR:-}" \
-    "$xdg/vetcoders/frontier/vc-frame" \
-    "$xdg/vc-frame"
+  printf '%s\n' "$xdg/vibecrafted/vc-frame"
 }
 
 # COCKPIT READY — hard product spine after binary is on PATH.
@@ -164,7 +161,7 @@ verify_vcframe_cockpit() {
   done < <(_vcframe_config_roots)
 
   if [[ -z "$cfg_root" ]]; then
-    warn "cockpit: no live config.kdl under frontier or ~/.config/vc-frame"
+    warn "cockpit: no live config.kdl under ~/.config/vibecrafted/vc-frame"
     warn "  fix: vibecrafted config install   # or checkout stage_vc_frame_config"
     fails=1
   else

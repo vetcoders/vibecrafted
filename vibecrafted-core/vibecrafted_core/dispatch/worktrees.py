@@ -140,6 +140,27 @@ class WorktreeManager:
         self._validate_target(root)
         return geometry
 
+    def prepare_agent_launch(
+        self, provider: str, launch_id: str, baseline_sha: str
+    ) -> WorktreeGeometry:
+        """Create one clean per-Agent interactive checkout through this owner."""
+        observed_root = _git(self.main_repo, "rev-parse", "--show-toplevel")
+        if not observed_root or Path(observed_root).resolve() != self.main_repo:
+            raise WorktreeContractError(
+                f"selected workspace is not a git repository root: {self.main_repo}"
+            )
+        observed_head = _git(self.main_repo, "rev-parse", "HEAD")
+        if not observed_head or observed_head != baseline_sha:
+            raise WorktreeContractError(
+                "selected workspace HEAD changed before worktree creation; retry the launch"
+            )
+        dirty = _git(self.main_repo, "status", "--porcelain")
+        if dirty:
+            raise WorktreeContractError(
+                f"local worktrees require a clean selected workspace: {dirty}"
+            )
+        return self.prepare(f"{provider}-{launch_id}", baseline_sha)
+
     def validate(self, geometry: WorktreeGeometry) -> None:
         """Revalidate a receipt's geometry before launch or resume."""
         if geometry.integrator_exclusive:

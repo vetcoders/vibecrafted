@@ -4,15 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import plistlib
 import stat
 import subprocess
+import tarfile
 from pathlib import Path
 from typing import Any
 
 from vibecrafted_core import product_contract as contract
+from vibecrafted_core import runtime_pack_contract
 
 
 def _write(path: Path, payload: dict[str, Any], *, canonical: bool = False) -> None:
@@ -232,6 +235,31 @@ def produce_release(args: argparse.Namespace) -> None:
     executable = app / product["outer_bundle_code"]["path"]
     signer = contract._codesign_release_evidence(app)
     policy = contract._release_policy()
+    runtime_pack = args.runtime_pack.resolve()
+    embedded_runtime_pack = app / "Contents/Resources/runtime-pack" / runtime_pack.name
+    if (
+        runtime_pack.stat().st_size != embedded_runtime_pack.stat().st_size
+        or contract._sha256(runtime_pack) != contract._sha256(embedded_runtime_pack)
+    ):
+        raise SystemExit(
+            "standalone Runtime Pack bytes differ from the App-embedded carrier"
+        )
+    with tarfile.open(runtime_pack, "r:gz") as archive:
+        member = archive.getmember(
+            f"VibecraftedRuntime/{runtime_pack_contract.PROVENANCE_NAME}"
+        )
+        extracted = archive.extractfile(member)
+        if extracted is None:
+            raise SystemExit("Runtime Pack provenance cannot be read")
+        provenance_raw = extracted.read()
+    provenance = json.loads(provenance_raw.decode("utf-8"))
+    expected_revisions = {
+        "vibecrafted": product["git_sha"],
+        "vc-terminal": modules["vc-terminal"]["git_sha"],
+        "vc-frame": modules["vc-frame"]["git_sha"],
+    }
+    if provenance.get("source_revisions") != expected_revisions:
+        raise SystemExit("Runtime Pack provenance disagrees with the product sources")
     payload = {
         "schema": contract.RELEASE_OUTPUT_SCHEMA,
         "signature_policy": {
@@ -270,6 +298,20 @@ def produce_release(args: argparse.Namespace) -> None:
             "path": dmg.name,
             "sha256": contract._sha256(dmg),
             "size": dmg.stat().st_size,
+        },
+        "runtime_pack": {
+            "path": runtime_pack.name,
+            "embedded_path": (f"Contents/Resources/runtime-pack/{runtime_pack.name}"),
+            "sha256": contract._sha256(runtime_pack),
+            "size": runtime_pack.stat().st_size,
+            "provenance": {
+                "path": runtime_pack_contract.PROVENANCE_NAME,
+                "sha256": hashlib.sha256(provenance_raw).hexdigest(),
+                "version": provenance["version"],
+                "platform": provenance["platform"],
+                "architecture": provenance["architecture"],
+                "source_revisions": provenance["source_revisions"],
+            },
         },
         "modules": {
             name: {
@@ -321,6 +363,7 @@ def main() -> int:
     release = commands.add_parser("release")
     release.add_argument("--app", type=Path, required=True)
     release.add_argument("--dmg", type=Path, required=True)
+    release.add_argument("--runtime-pack", type=Path, required=True)
     release.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "app":

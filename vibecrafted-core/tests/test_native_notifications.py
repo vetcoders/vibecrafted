@@ -33,3 +33,10 @@ def test_notification_manager_owns_user_notification_center() -> None:
     assert "OPEN_RUN" in source
     assert "OPEN_REPORT" in source
     assert "native_app.pid" in source
+
+
+def test_notification_manager_accepts_start_here_console_deep_link() -> None:
+    source = NOTIFICATION_MANAGER.read_text(encoding="utf-8")
+    assert 'url.host == "console"' in source
+    assert 'url.path == "/open"' in source
+    assert "presentWindow?()" in source

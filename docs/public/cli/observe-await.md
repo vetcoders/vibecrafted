@@ -10,7 +10,9 @@ order: 40
 Every dispatch creates a run in the control plane, identified by a run id
 such as `impl-<timestamp>-<id>` or `scaf-<timestamp>-<id>`. The run — not the
 terminal tab, not the process — is the unit of truth. Two verbs follow it:
-`observe` reads what a run produced; `await` blocks until it lands.
+`observe` reads what a run produced; `await` blocks until it lands. Both are
+clients of the existing `vc-server`; they do not start private filesystem
+pollers in each CLI process.
 
 ## The two verbs
 
@@ -29,11 +31,23 @@ vibecrafted implement codex --prompt "Ship <task>"
 vibecrafted await codex --run-id impl-<timestamp>-<id>
 ```
 
-`await` is liveness-aware: it aggregates child-run movement for looping
-workflows (a marbles parent freezes between rounds while its children work),
-and it returns `completed` with reason `report_delivered` as soon as a
-non-empty report exists — a worker that wrote its report and exited is done
-even if metadata lags.
+`observe` is a one-shot server read. It never creates an await monitor.
+`await` subscribes to a shared in-memory monitor keyed by canonical
+control-plane home plus run id. Twenty clients for one run still produce one
+underlying revalidation/read loop; disconnecting one client removes only its
+subscription.
+
+`--timeout` is an **idle window**, not a wall-clock deadline. It resets while
+the shared observation moves or qualified worker ownership remains live. Use
+`--hard-cap` when the caller needs an absolute bound:
+
+```bash
+vibecrafted await codex --run-id <id> --timeout 25 --hard-cap 120
+```
+
+JSON names the two outcomes separately as `idle_stall` and `hard_cap`. Human
+output uses the same names. If `vc-server` is absent, the command fails loudly
+and quickly; it never falls back to `vibecrafted_core.control_plane.await_run`.
 
 Do not hedge `await` with manual sleep/poll/process monitors. If you feel the
 need to double-guard it, that is a bug report against the runtime contract,
@@ -64,10 +78,12 @@ delivery.
 
 Before declaring a run done, reconcile:
 
-1. **The await verdict** — `await` returned success for the run id.
+1. **The await verdict** — the server returned a terminal verdict for the run id.
 2. **Terminal state in run meta** — the run record shows a terminal state
    (`completed`, `failed`), not `active` or `stalled`.
-3. **Worker process death** — the worker pid is gone.
+3. **Qualified process truth** — PID, PGID, start token, command identity and
+   run id agree, or the canonical PGID contains a child explicitly owned by
+   that run. PID existence alone is never enough.
 
 When a report path was promised, add a fourth check: the report file exists
 and is non-empty.
@@ -96,8 +112,9 @@ Failure signatures worth knowing:
   same brief; briefs are idempotent.
 - **Mid-flight death**: transcript frozen, pid gone — stop and refire; the
   run record stays as evidence.
-- **Meta lag**: report written but state stuck `active` — the delivered
-  report wins; `await` recognizes it as `report_delivered`.
+- **Evidence disagreement**: canonical state and current qualified process
+  evidence disagree — the observation fails closed and names the disagreement;
+  neither the server nor `vc-monitor` fabricates settlement.
 
 ## Settled runs
 

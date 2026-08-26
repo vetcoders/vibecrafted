@@ -25,7 +25,8 @@ scripts/installer/**/__pycache__/
 *.zip
 *.plugin
 *.sha256
-/.vibecrafted
+/.vibecrafted/*
+!/.vibecrafted/JOURNAL.md
 /tests/tui/__pycache__
 **/__pycache__/
 *.py[cod]
@@ -55,6 +56,7 @@ vibecrafted-io-link
 !/.loctree/canary/
 /.antigravitycli
 /vibecrafted-server/target
+/vibecrafted-app/shell-agent/app/Vibecrafted.xcodeproj/
 /docs/plans
 /.air
 /.venv/

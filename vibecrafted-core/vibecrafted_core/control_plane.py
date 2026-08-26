@@ -38,6 +38,7 @@ from .report_contract import (
     CLAIM_FAILED,
     CLAIM_PARTIAL,
     validate_report_file,
+    worker_authored_report,
 )
 from .run_mutation import run_mutation_locks
 from .runtime_paths import vibecrafted_home
@@ -82,6 +83,7 @@ FINAL_STATES = {
     "contract_failed",
     "recovery_required",
     "timed_out",
+    "quota_exhausted",
     "gc",
     "ghost",
 }
@@ -1073,6 +1075,35 @@ def _reconcile_dead_launcher(run: dict[str, Any]) -> dict[str, Any]:
     liveness = str(result.get("liveness") or "")
     if state in FINAL_STATES:
         return result
+    owner_pid = _coerce_int(result.get("owner_pid"))
+    if owner_pid is not None:
+        owner_alive = _pid_is_alive(owner_pid)
+        provider_alive = any(
+            _pid_is_alive(pid)
+            for pid in (
+                _coerce_int(result.get("worker_pid")),
+                _coerce_int(result.get("worker_pgid")),
+            )
+            if pid is not None
+        )
+        if owner_alive and provider_alive:
+            return result
+        now = _now().isoformat()
+        result["state"] = "failed"
+        result["health"] = "final"
+        result["liveness"] = "pid_gone"
+        result["completed_at"] = str(result.get("completed_at") or now)
+        result["updated_at"] = now
+        result["exit_code"] = _coerce_int(result.get("exit_code")) or 1
+        result["terminal_reason"] = (
+            "owner_pid_gone" if not owner_alive else "provider_pid_gone"
+        )
+        result["recovery_required"] = True
+        result["last_error"] = _append_last_error(
+            str(result.get("last_error") or ""),
+            "interactive lifecycle owner/provider identity is no longer live",
+        )
+        return result
     # P0: a dead/absent launcher pid is NOT proof the run died. The launcher is an
     # ephemeral spawn-shell that exits right after forking the detached dispatcher;
     # for headless/detached dispatch it is gone within seconds while the dispatcher
@@ -1080,7 +1111,8 @@ def _reconcile_dead_launcher(run: dict[str, Any]) -> dict[str, Any]:
     # still alive, the run is live regardless of the launcher pid, exit_code, or
     # stale terminal-looking metadata — reconciling it to success/stalled/recovery
     # here makes await capable of rc=0 on a live worker.
-    if _worker_is_alive(result):
+    worker_alive, process_reason = _worker_process_truth(result)
+    if worker_alive:
         return result
     if _has_success_evidence(result):
         return _reconcile_successful_terminal(result)
@@ -1114,6 +1146,40 @@ def _reconcile_dead_launcher(run: dict[str, Any]) -> dict[str, Any]:
     if state not in ACTIVE_STATES - {"paused"}:
         return result
     if liveness == "pid_alive":
+        has_worker_target = any(
+            _coerce_int(result.get(key)) is not None
+            for key in ("worker_pid", "worker_pgid")
+        )
+        if has_worker_target:
+            # An unqualified receipt is authority to refuse a signal, not proof
+            # that a still-existing process has exited.  The launcher may be
+            # between worker exit and its atomic terminal-meta write, and a
+            # caller such as ``stop_run`` must still get the precise identity
+            # mismatch rather than a synthetic ``run_terminal``.  Only settle
+            # identity loss once both the recorded worker PID and the launcher
+            # are gone; qualified same-PGID descendants already returned above.
+            worker_pid = _coerce_int(result.get("worker_pid"))
+            if (worker_pid is not None and _pid_is_alive(worker_pid)) or (
+                launcher_pid is not None and _pid_is_alive(launcher_pid)
+            ):
+                return result
+            now = _now().isoformat()
+            result["state"] = "failed"
+            result["health"] = "final"
+            result["liveness"] = "pid_gone"
+            result["process_truth"] = "ghost"
+            result["process_truth_reason"] = process_reason
+            result["completed_at"] = str(result.get("completed_at") or now)
+            result["updated_at"] = now
+            result["exit_code"] = _coerce_int(result.get("exit_code")) or 1
+            result["terminal_reason"] = "qualified_process_identity_lost"
+            result["recovery_required"] = True
+            result["last_error"] = _append_last_error(
+                str(result.get("last_error") or ""),
+                "active run lost qualified PID/PGID/start-token/run-id ownership "
+                f"({process_reason}); receipted active→failed",
+            )
+            return result
         if launcher_pid is None or _pid_is_alive(launcher_pid):
             return result
     else:
@@ -1225,6 +1291,26 @@ def _report_attests_completion(run: dict[str, Any]) -> bool:
     return str(verdict.fields.get("status") or "").strip().lower() in CLAIM_COMPLETED
 
 
+def _delivered_report_claims_completion(run: dict[str, Any]) -> bool:
+    """True when a non-template delivered report carries a success claim.
+
+    A claim alone never seals execution.  This helper is used only after
+    qualified worker evidence is gone, so process exit plus a worker-written
+    report are the independent signals.  It preserves legacy reports that
+    predate ``finalized``/``claim`` without accepting the launcher's untouched
+    frontmatter shell or a blocked/failed/partial claim as success.
+    """
+    report = str(run.get("latest_report") or "").strip()
+    if not report:
+        return False
+    verdict = validate_report_file(report, require_frontmatter=False)
+    if "report_missing" in verdict.errors:
+        return False
+    if not worker_authored_report(verdict.fields, verdict.body):
+        return False
+    return verdict.claim_status in CLAIM_COMPLETED
+
+
 def _has_success_evidence(run: dict[str, Any]) -> bool:
     """True when any independent signal (state, exit 0, completed_at, terminal
     liveness, or a self-attesting report) proves the run finished successfully."""
@@ -1242,7 +1328,7 @@ def _has_success_evidence(run: dict[str, Any]) -> bool:
         return True
     if str(run.get("liveness") or "") == "terminal":
         return True
-    return _report_attests_completion(run)
+    return _report_attests_completion(run) or _delivered_report_claims_completion(run)
 
 
 def _reconcile_successful_terminal(run: dict[str, Any]) -> dict[str, Any]:
@@ -1263,6 +1349,9 @@ def _reconcile_successful_terminal(run: dict[str, Any]) -> dict[str, Any]:
     result["completed_at"] = completed_at
     result["updated_at"] = completed_at
     result.pop("recovery_required", None)
+    if result.get("artifact_ok") is True and not result.get("artifact_errors"):
+        result["artifact_gate"] = "validated"
+    result["operator_state"] = "completed"
     # Empty string matches _reconcile_repaired_report_terminal; consumers treat
     # blank last_error as absent.
     result["last_error"] = ""
@@ -1351,18 +1440,67 @@ def _has_signal_target(run: dict[str, Any]) -> bool:
 
 
 def _worker_is_alive(run: dict[str, Any]) -> bool:
-    """True when the run's worker process (or its group leader) is still alive.
+    """Return current qualified worker ownership, never PID existence alone."""
+    return _worker_process_truth(run)[0]
 
-    Distinct from ``_has_signal_target`` (which only checks that a pid VALUE is
-    present): this checks actual OS liveness. The liveness reconciler uses it so
-    a run is never marked recovery_required merely because the ephemeral launcher
-    pid died while the worker keeps running and delivering.
+
+def _worker_process_truth(run: dict[str, Any]) -> tuple[bool, str]:
+    """Validate persisted PID/PGID/start-token/run-id ownership.
+
+    A wrapper may exit while its implementation child remains in the canonical
+    process group.  That child counts only when the kernel environment still
+    binds it to this run; an arbitrary process sharing a recycled PGID does not.
     """
-    for key in ("worker_pid", "worker_pgid"):
-        pid = _coerce_int(run.get(key))
-        if pid is not None and _pid_is_alive(pid):
-            return True
-    return False
+    from .process_control import (
+        build_env_index,
+        build_process_table,
+        validate_process_identity,
+    )
+
+    run_id = str(run.get("run_id") or "").strip()
+    worker_pid = _coerce_int(run.get("worker_pid"))
+    worker_pgid = _coerce_int(run.get("worker_pgid"))
+    receipt = run.get("worker_identity")
+    if not run_id or worker_pid is None or worker_pgid is None:
+        return False, "qualified_identity_unavailable"
+    valid, reason, _identity = validate_process_identity(
+        receipt if isinstance(receipt, dict) else None,
+        expected_pid=worker_pid,
+        expected_pgid=worker_pgid,
+        expected_run_id=run_id,
+    )
+    if valid:
+        owner_pid = _coerce_int(run.get("owner_pid"))
+        if owner_pid is None:
+            return True, reason
+        owner_valid, owner_reason, _owner = validate_process_identity(
+            run.get("owner_identity")
+            if isinstance(run.get("owner_identity"), dict)
+            else None,
+            expected_pid=owner_pid,
+            expected_pgid=_coerce_int(
+                (run.get("owner_identity") or {}).get("pgid")
+                if isinstance(run.get("owner_identity"), dict)
+                else None
+            ),
+            expected_run_id=run_id,
+        )
+        return owner_valid, owner_reason
+
+    # The canonical worker can be a short-lived wrapper around the real native
+    # provider.  Preserve ownership only for a same-PGID child whose environment
+    # independently names this run.
+    try:
+        table = build_process_table()
+        env_index = build_env_index()
+    except OSError:
+        return False, reason
+    if any(
+        entry.pgid == worker_pgid and env_index.get(entry.pid) == run_id
+        for entry in table
+    ):
+        return True, "canonical_pgid_descendant"
+    return False, reason
 
 
 def _await_process_is_alive(run: dict[str, Any]) -> bool:
@@ -1801,10 +1939,14 @@ def _normalize_agent_meta(path: Path) -> RunStatus | None:
         "native_resume",
         "resume_idempotency_key",
         "worker_command",
+        "owner_pid",
+        "owner_identity",
         "worker_pid",
         "worker_pgid",
         "worker_identity",
         "launcher_identity",
+        "terminal_reason",
+        "exit_signal",
         "heartbeat_at",
         "meta",
         "artifact_ok",
@@ -1824,6 +1966,15 @@ def _normalize_agent_meta(path: Path) -> RunStatus | None:
         "workspace_display_label",
         "worker_host_session",
         "worker_host_display",
+        # H2b2c — typed Operator Agent -> child Agent relationship truth.
+        "role",
+        "prompt_role",
+        "provider_session_id",
+        "operator_policy",
+        "supervision",
+        "stop_actor_run_id",
+        # H2b2d — bounded typed continuity receipt (never prompt bodies).
+        "continuity",
     ):
         if key in payload and payload.get(key) not in (None, ""):
             extra[key] = payload[key]
@@ -2065,6 +2216,8 @@ def _merge_event_stream(
             "resume_settlement_revision",
             "resume_trust_receipt_id",
             "worker_command",
+            "owner_pid",
+            "owner_identity",
             "worker_pid",
             "worker_pgid",
             "worker_identity",
@@ -2086,6 +2239,8 @@ def _merge_event_stream(
             "stop_already_dead",
             "stop_alive_after_grace",
             "stop_grace_seconds",
+            "terminal_reason",
+            "exit_signal",
             # Durable workspace identity must survive event-stream refreshes;
             # otherwise a later generic `state` event erases the identity
             # carried by lifecycle:created/active.
@@ -3272,6 +3427,13 @@ def _project_run_payload(
     # launch window is covered independently by a fresh heartbeat.
     has_live_process = _worker_is_alive(payload)
     payload["worker_alive"] = has_live_process
+    payload["process_truth"] = (
+        "terminal"
+        if _run_is_terminal(payload)
+        else "live"
+        if has_live_process
+        else str(payload.get("process_truth") or "unknown")
+    )
     if _run_is_terminal(payload):
         payload["health"] = "final"
     elif state == "stalled":

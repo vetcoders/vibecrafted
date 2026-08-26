@@ -22,6 +22,42 @@ from vibecrafted_mcp import server, synthesis
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.fixture(autouse=True)
+def _server_observation_contract_stub(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep MCP unit tests isolated while exercising the server-client seam."""
+
+    def observe(run_id: str) -> dict[str, Any]:
+        run = server._control_plane.lookup_run(run_id)
+        terminal = server._run_terminal(run)
+        return {
+            "schema": "vibecrafted.run-observation.v1",
+            "run_id": run_id,
+            "control_plane": str(server._control_plane.control_plane_home()),
+            "found": run is not None,
+            "terminal": terminal,
+            "worker_alive": False if terminal else None,
+            "process_truth": "terminal" if terminal else "unknown",
+            "evidence_disagreement": False,
+            "run": run,
+        }
+
+    def await_run(run_id: str, **kwargs: Any) -> dict[str, Any]:
+        observation = observe(run_id)
+        return {
+            **observation,
+            "schema": "vibecrafted.run-await-verdict.v1",
+            "outcome": "terminal" if observation["terminal"] else "idle_stall",
+            "reason": "terminal" if observation["terminal"] else "idle_stall",
+            "completed": observation["terminal"],
+            "timed_out": not observation["terminal"],
+            "idle_timeout_seconds": kwargs["idle_timeout_seconds"],
+            "hard_cap_seconds": kwargs["hard_cap_seconds"],
+        }
+
+    monkeypatch.setattr(server._server_observation, "observe_run", observe)
+    monkeypatch.setattr(server._server_observation, "await_run", await_run)
+
+
 def test_version_matches_repository_contract() -> None:
     expected = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
     pyproject = tomllib.loads(
@@ -371,6 +407,31 @@ def test_observe_reports_missing_when_run_not_on_disk_yet(tmp_path: Path) -> Non
     assert payload["found"] is False
     assert payload["state"] == "missing"
     assert payload["transcript"]["bytes"] == 0
+
+
+def test_mcp_observe_wait_argument_never_creates_a_private_poll_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / ".vibecrafted"
+    (home / "control_plane").mkdir(parents=True)
+    calls = 0
+    original = server._server_observation.observe_run
+
+    def counted(run_id: str) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return original(run_id)
+
+    monkeypatch.setattr(server._server_observation, "observe_run", counted)
+
+    payload = server._observe_run(
+        "ghost-run",
+        home=str(home),
+        wait_seconds=30,
+    )
+
+    assert calls == 1
+    assert payload["wait_semantics"] == "one_shot; use vc_await_run for blocking"
 
 
 def test_vc_loct_capabilities_routes_to_core(monkeypatch: pytest.MonkeyPatch) -> None:

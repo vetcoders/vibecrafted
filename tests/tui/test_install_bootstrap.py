@@ -32,6 +32,8 @@ FIXTURE_REQUIRED_FILES = {
     "install.ps1",
     "install.toml",
     "scripts/distribution_manifest.py",
+    "scripts/build-linux-arm64-runtime-pack.sh",
+    "scripts/installer_brand.py",
     "scripts/vetcoders_install.py",
     "scripts/vibecrafted",
     "scripts/verify-vibecrafted-product.sh",
@@ -49,6 +51,9 @@ FIXTURE_REQUIRED_FILES = {
     "vibecrafted-app/Cargo.lock",
     "vibecrafted-server/Cargo.toml",
     "vibecrafted-server/Cargo.lock",
+    "vibecrafted-vm/RuntimePack.Containerfile",
+    "vibecrafted-vm/runtime-entry.sh",
+    "vibecrafted-vm/runtime-provider-lock.json",
 }
 FIXTURE_REQUIRED_SURFACES = {
     "bin/vc-workflow",
@@ -358,6 +363,8 @@ def test_install_sh_blocks_raw_github_fallback_without_channel_archive(
     text = INSTALL_SH.read_text(encoding="utf-8")
 
     assert 'channel_url="https://vibecrafted.io/channel/${ref}.json"' in text
+    assert "p.get('runtime_pack_url','')" in text
+    assert "must bind archive_url and runtime_pack_url" in text
     assert "refusing the untrusted raw GitHub fallback" in text
     assert "W4 release authentication blocker" in text
     assert "archive/refs/heads/${ref}.tar.gz" not in text

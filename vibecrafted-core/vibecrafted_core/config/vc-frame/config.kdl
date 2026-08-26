@@ -148,10 +148,9 @@ keybinds {
             };
         }
         // Command Composer (spec 1.2 §A): Super+e / Cmd+E. Alt+e unbound so
-        // macOS Option types Polish `ę`. Prefers installed vc-composer.sh on
-        // frontier (install must project it — never leave a STALE-FILE there).
+        // macOS Option types Polish `ę`. Uses the one installed product config.
         bind "Super e" {
-            Run "sh" "-c" "if [ -x \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vetcoders/frontier/vc-frame/vc-composer.sh\"; elif [ -x \"${HOME}/.config/vc-frame/vc-composer.sh\" ]; then \"${HOME}/.config/vc-frame/vc-composer.sh\"; else f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' -c 'set nowrap' -c 'set textwidth=0' -c 'set sidescroll=1' -c 'nnoremap <silent> <F2> :set wrap! wrap?<CR>' \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"; fi" {
+            Run "sh" "-c" "if [ -x \"${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame/vc-composer.sh\" ]; then \"${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame/vc-composer.sh\"; else f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' -c 'set nowrap' -c 'set textwidth=0' -c 'set sidescroll=1' -c 'nnoremap <silent> <F2> :set wrap! wrap?<CR>' \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"; fi" {
                 floating true
                 close_on_exit true
                 name "✍ Composer · ⧉ Paste stack"
@@ -197,7 +196,7 @@ keybinds {
     // Was Ctrl+Shift+c (dead without CSI-u); relocated to pane mode as 'y' (yank).
     pane {
         bind "y" {
-            Run "bash" "-lc" "$HOME/.config/vetcoders/frontier/vc-frame/copy-scrollback.sh" {
+            Run "bash" "-lc" "${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame/copy-scrollback.sh" {
                 close_on_exit true
                 floating true
                 name "copy-pane-scrollback"
@@ -255,7 +254,7 @@ keybinds {
     // block merges into the built-in scroll mode).
     scroll {
         bind "y" {
-            Run "bash" "-lc" "$HOME/.config/vetcoders/frontier/vc-frame/copy-scrollback.sh" {
+            Run "bash" "-lc" "${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame/copy-scrollback.sh" {
                 close_on_exit true
                 floating true
                 name "copy-scrollback"

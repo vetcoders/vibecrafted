@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shlex
+import shutil
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -640,6 +641,38 @@ def test_delivery_reads_package_owned_runtime_generation(
     )
 
 
+def test_delivery_accepts_exact_physical_runtime_pack_config(
+    tmp_path: Path, monkeypatch
+) -> None:
+    tools, generation, home = _truth_sandbox(tmp_path, monkeypatch)
+    generated = (
+        generation
+        / "vibecrafted-core"
+        / "vibecrafted_core"
+        / "runtime"
+        / "generated"
+        / "vc-frame"
+    )
+    (generated / "themes").mkdir()
+    for name in doctor.OPERATOR_SCRIPT_NAMES:
+        (generated / name).write_text(f"#!/bin/sh\n# {name}\n", encoding="utf-8")
+    view = home / ".config" / "vibecrafted" / "vc-frame"
+    view.parent.mkdir(parents=True)
+    shutil.copytree(generated, view)
+
+    findings = doctor._vc_frame_delivery_findings(home=home, tools_home=tools)
+
+    relevant = [
+        finding
+        for finding in findings
+        if finding.component == "vc-frame:view"
+        or finding.component == "vc-frame:operator-scripts:view"
+    ]
+    assert relevant
+    assert all(finding.level == "ok" for finding in relevant)
+    assert any("runtime-copy" in finding.message for finding in relevant)
+
+
 def test_truth_drift_fails_when_generation_disagrees_with_itself(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -694,7 +727,7 @@ def test_truth_drift_fails_on_projection_into_parked_generation(
         / "vc-frame"
     )
     _seed_truth(parked_generated)
-    view = home / ".config" / "vc-frame"
+    view = home / ".config" / "vibecrafted" / "vc-frame"
     view.mkdir(parents=True)
     (view / "config.kdl").symlink_to(parked_generated / "config.kdl")
 

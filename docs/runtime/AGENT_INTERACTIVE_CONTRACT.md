@@ -60,6 +60,9 @@ every provider — bare resume stays interactive.
 - Always **interactive-only** (`terminal` / `visible`).
 - Seed prompt: `/vc-init` (+ optional operator text).
 - Grok: positional PROMPT, **no** `--single`, **no** `streaming-json`.
+- Policy flags are `--policy-runtime local-native|local-worktrees|local-vm|cloud-soon`
+  and `--permissions bypass|auto|accept-edits|read-only`. The canonical matrix
+  lives in `vibecrafted_core.spawn`; unsupported provider cells fail closed.
 
 ### `vibecrafted resume <agent>`
 

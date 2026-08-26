@@ -33,6 +33,13 @@ _vetcoders_contract_reset() {
   _vetcoders_contract_count=""
   _vetcoders_contract_depth=""
   _vetcoders_contract_runtime=""
+  _vetcoders_contract_policy_runtime=""
+  _vetcoders_contract_permissions=""
+  _vetcoders_contract_token_budget=""
+  _vetcoders_contract_operator=""
+  _vetcoders_contract_continuity=""
+  _vetcoders_contract_parent_session=""
+  _vetcoders_contract_continuity_parent=""
   _vetcoders_contract_root=""
   _vetcoders_contract_tail=""
   _vetcoders_contract_dry_run=""
@@ -118,6 +125,41 @@ _vetcoders_parse_contract() {
         shift
         [[ $# -gt 0 ]] || { echo "Missing value for --runtime" >&2; return 1; }
         _vetcoders_contract_runtime="$1"
+        ;;
+      --policy-runtime)
+        shift
+        [[ $# -gt 0 ]] || { echo "Missing value for --policy-runtime" >&2; return 1; }
+        _vetcoders_contract_policy_runtime="$1"
+        ;;
+      --permissions)
+        shift
+        [[ $# -gt 0 ]] || { echo "Missing value for --permissions" >&2; return 1; }
+        _vetcoders_contract_permissions="$1"
+        ;;
+      --token-budget)
+        shift
+        [[ $# -gt 0 ]] || { echo "Missing value for --token-budget" >&2; return 1; }
+        _vetcoders_contract_token_budget="$1"
+        ;;
+      --operator)
+        shift
+        [[ $# -gt 0 ]] || { echo "Missing value for --operator" >&2; return 1; }
+        _vetcoders_contract_operator="$1"
+        ;;
+      --continuity)
+        shift
+        [[ $# -gt 0 ]] || { echo "Missing value for --continuity" >&2; return 1; }
+        _vetcoders_contract_continuity="$1"
+        ;;
+      --parent-session)
+        shift
+        [[ $# -gt 0 ]] || { echo "Missing value for --parent-session" >&2; return 1; }
+        _vetcoders_contract_parent_session="$1"
+        ;;
+      --continuity-parent)
+        shift
+        [[ $# -gt 0 ]] || { echo "Missing value for --continuity-parent" >&2; return 1; }
+        _vetcoders_contract_continuity_parent="$1"
         ;;
       --root)
         shift

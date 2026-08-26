@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -666,6 +667,9 @@ def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
     env["VIBECRAFTED_RUNTIME_BIN"] = str(bundled_bin)
     env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
+    # The test PATH intentionally excludes host tools; policy resolution is
+    # now a required core operation, so pin the current test interpreter.
+    env["VIBECRAFTED_PYTHON"] = sys.executable
     env["CAPTURE_FILE"] = str(capture_file)
     env["SESSION_STATE_FILE"] = str(session_state_file)
     env["VIBECRAFTED_OSASCRIPT_BIN"] = str(fake_bin / "osascript")
@@ -930,6 +934,7 @@ def test_vc_init_missing_vc_frame_message_has_fresh_install_path_hint(
     env["VIBECRAFTED_RUNTIME_BIN"] = str(runtime_home / "bin")
     env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
+    env["VIBECRAFTED_PYTHON"] = sys.executable
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
@@ -980,7 +985,8 @@ def test_explicit_terminal_marbles_from_operator_mode_spawns_fresh_tab(
     env["VC_FRAME"] = "operator"
     env["VIBECRAFTED_RUN_ID"] = "marb-014520"
     env["VIBECRAFTED_MARBLES_RUN_ID"] = "marb-014520"
-    expected_session = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
+    expected_session = _expected_operator_session()
+    run_scoped_session = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
     env["VC_FRAME_SESSION_NAME"] = expected_session
     subprocess.run(
         [
@@ -999,8 +1005,8 @@ def test_explicit_terminal_marbles_from_operator_mode_spawns_fresh_tab(
     )
 
     payload = capture_file.read_text(encoding="utf-8").splitlines()
-    # One marbles run owns a dedicated host session. Its first surface is a
-    # fresh marbles tab, never a pane in the operator's active session.
+    # The interactive rail is the human User place. The marbles run owns a
+    # fresh tab in that place; its run id must never rename the place itself.
     assert payload[:4] == [
         "--session",
         expected_session,
@@ -1010,6 +1016,7 @@ def test_explicit_terminal_marbles_from_operator_mode_spawns_fresh_tab(
     assert "--name" in payload
     assert "marbles" in " ".join(payload) or "marb-014520" in payload
     assert expected_session in payload
+    assert run_scoped_session not in payload
 
 
 def test_explicit_terminal_marbles_inside_vc_frame_prefers_bundled_vc_frame(
@@ -1034,7 +1041,8 @@ def test_explicit_terminal_marbles_inside_vc_frame_prefers_bundled_vc_frame(
     env["VC_FRAME"] = "operator"
     env["VIBECRAFTED_RUN_ID"] = "marb-014520"
     env["VIBECRAFTED_MARBLES_RUN_ID"] = "marb-014520"
-    expected_session = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
+    expected_session = _expected_operator_session()
+    run_scoped_session = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
     env["VC_FRAME_SESSION_NAME"] = expected_session
 
     result = subprocess.run(
@@ -1059,8 +1067,10 @@ def test_explicit_terminal_marbles_inside_vc_frame_prefers_bundled_vc_frame(
     assert result.returncode == 0
     assert result.stderr == ""
     payload = capture_file.read_text(encoding="utf-8")
-    # Bundled vc-frame must create the tab in the dedicated marbles host.
+    # Bundled vc-frame must create the run tab in the human User place without
+    # allowing the run id to become a second session authority.
     assert f"--session\n{expected_session}\naction\nnew-tab\n" in payload
+    assert run_scoped_session not in payload
     assert result.stdout.endswith(f"PATH={os.defpath}\n")
 
 
@@ -1485,13 +1495,13 @@ def test_vc_dashboard_recreates_dead_run_id_session_without_layout_suffix(
     env["CAPTURE_FILE"] = str(capture_file)
     env["SESSION_STATE_FILE"] = str(session_state_file)
     env["VIBECRAFTED_RUN_ID"] = "marb-014520"
-    env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
+    env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session()
     env["VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME"] = "1"
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
     # Scrub any operator-session context leaked from a running operator shell so
-    # the dashboard resolves the run-id session rather than the ambient one.
+    # the dashboard resolves the canonical User place rather than ambient state.
     env.pop("VIBECRAFTED_OPERATOR_SESSION", None)
     env.pop("VIBECRAFTED_OPERATOR_MODE", None)
 
@@ -1505,7 +1515,8 @@ def test_vc_dashboard_recreates_dead_run_id_session_without_layout_suffix(
     )
 
     payload = capture_file.read_text(encoding="utf-8")
-    expected_session = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
+    expected_session = _expected_operator_session()
+    run_scoped_session = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
     # Dead sessions are preserved; a fresh recovery session gets the layout.
     created = re.search(r"creating '([^']+)'", result.stderr)
     assert created is not None
@@ -1516,6 +1527,7 @@ def test_vc_dashboard_recreates_dead_run_id_session_without_layout_suffix(
     assert f"--session {recovery_session}" in payload
     assert "--new-session-with-layout" in payload
     assert f"{expected_session}-marbles" not in payload
+    assert run_scoped_session not in payload
 
 
 def test_explicit_terminal_skill_bootstraps_operator_session_before_spawning(
@@ -1597,14 +1609,14 @@ def test_skill_bootstraps_fresh_operator_session_when_existing_one_is_dead(
     env["SESSION_STATE_FILE"] = str(session_state_file)
     env["VIBECRAFTED_OSASCRIPT_BIN"] = str(fake_bin / "osascript")
     env["VIBECRAFTED_RUN_ID"] = "fwup-014520"
-    env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
+    env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session()
     # This test exercises the real dead-session recreate path; allow it without a TTY.
     env["VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME"] = "1"
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
     # Scrub any operator-session context leaked from a running operator shell so
-    # the runtime recreates the dead run-id session instead of reusing the ambient one.
+    # the runtime recovers the dead User place instead of reusing ambient state.
     env.pop("VIBECRAFTED_OPERATOR_SESSION", None)
     env.pop("VIBECRAFTED_OPERATOR_MODE", None)
 
@@ -1625,7 +1637,8 @@ def test_skill_bootstraps_fresh_operator_session_when_existing_one_is_dead(
         check=False,
     )
 
-    expected_session = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
+    expected_session = _expected_operator_session()
+    run_scoped_session = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
     assert result.returncode == 0
     created = re.search(r"creating '([^']+)'", result.stderr)
     assert created is not None
@@ -1647,6 +1660,7 @@ def test_skill_bootstraps_fresh_operator_session_when_existing_one_is_dead(
         in payload
     )
     assert "--new-session-with-layout" in payload and recovery_session in payload
+    assert run_scoped_session not in payload
     assert "OSA " not in payload
 
 

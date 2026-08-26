@@ -247,13 +247,13 @@ pub(crate) async fn dashboard_api() -> axum::Json<DashboardData> {
     axum::Json(load_dashboard_data())
 }
 
-#[cfg(not(feature = "ssr"))]
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
 std::thread_local! {
     static CLIENT_DASHBOARD: std::cell::RefCell<Option<DashboardData>> =
         const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(not(feature = "ssr"))]
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
 fn store_client_dashboard(data: DashboardData) {
     if data == DashboardData::default() {
         return;
@@ -261,12 +261,12 @@ fn store_client_dashboard(data: DashboardData) {
     CLIENT_DASHBOARD.with(|slot| *slot.borrow_mut() = Some(data));
 }
 
-#[cfg(not(feature = "ssr"))]
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
 fn client_dashboard_now() -> Option<DashboardData> {
     CLIENT_DASHBOARD.with(|slot| slot.borrow().clone())
 }
 
-#[cfg(feature = "hydrate")]
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
 fn read_embedded_dashboard() -> Option<DashboardData> {
     let document = web_sys::window()?.document()?;
     let json = document
@@ -276,7 +276,7 @@ fn read_embedded_dashboard() -> Option<DashboardData> {
     decode_dashboard_embed(&json)
 }
 
-#[cfg(feature = "hydrate")]
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
 fn hydrate_dashboard_cache() {
     if client_dashboard_now().is_some() {
         return;
@@ -286,7 +286,7 @@ fn hydrate_dashboard_cache() {
     }
 }
 
-#[cfg(feature = "hydrate")]
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
 async fn fetch_dashboard() -> Option<DashboardData> {
     use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::JsFuture;
@@ -308,7 +308,7 @@ async fn fetch_dashboard() -> Option<DashboardData> {
     Some(data)
 }
 
-#[cfg(feature = "hydrate")]
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
 fn refresh_client_dashboard() {
     leptos::task::spawn_local(async {
         let _ = fetch_dashboard().await;
@@ -337,7 +337,7 @@ fn control_dashboard(
     .into_any()
 }
 
-#[cfg(feature = "hydrate")]
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
 fn control_dashboard(
     render: impl Fn(DashboardData) -> AnyView + Clone + Send + Sync + 'static,
 ) -> AnyView {
@@ -609,7 +609,7 @@ pub fn shell(_options: leptos::config::LeptosOptions) -> impl IntoView {
 #[component]
 pub fn App() -> impl IntoView {
     leptos_meta::provide_meta_context();
-    #[cfg(feature = "hydrate")]
+    #[cfg(all(feature = "hydrate", not(feature = "ssr")))]
     hydrate_dashboard_cache();
 
     view! {
@@ -913,7 +913,6 @@ mod tests {
     use std::io::ErrorKind;
     use std::net::SocketAddr;
     use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use axum::body::{Body, to_bytes};
@@ -933,7 +932,7 @@ mod tests {
     use crate::control::api::{control_routes, state_payload};
     use crate::theme::provide_theme_context;
 
-    static DASHBOARD_ENV_LOCK: Mutex<()> = Mutex::new(());
+    static DASHBOARD_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn temp_home() -> PathBuf {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
@@ -1216,9 +1215,7 @@ mod tests {
 
     #[tokio::test]
     async fn dashboard_http_route_returns_ssr_payload_not_default() {
-        let _guard = DASHBOARD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = DASHBOARD_ENV_LOCK.lock().await;
         let home = temp_home();
         let runs_dir = home.join("control_plane/runs");
         fs::create_dir_all(&runs_dir).expect("runs dir");
