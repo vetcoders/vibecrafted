@@ -911,10 +911,7 @@ def test_install_all_installs_python_tools_with_uv_tool_install() -> None:
         "v._install_launcher(Path(sys.argv[1]), dry_run=False, update_rc=False)"
         in python_tools_block
     )
-    assert (
-        "$$stable_root/vibecrafted-core/vibecrafted_core/deck/vibecrafted"
-        in python_tools_block
-    )
+    assert "$$stable_root/bin/vibecrafted" in python_tools_block
     assert 'if [ "$$entrypoint" = "vibecrafted" ]' in python_tools_block
     assert "vibecrafted-mcp" in (
         REPO_ROOT / "vibecrafted-mcp" / "pyproject.toml"

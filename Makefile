@@ -417,7 +417,7 @@ install-tools-held:
 		fi; \
 		resolved_real="$$($(PYTHON) -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$$resolved")"; \
 		if [ "$$entrypoint" = "vibecrafted" ]; then \
-			expected_path="$$stable_root/vibecrafted-core/vibecrafted_core/deck/vibecrafted"; \
+			expected_path="$$stable_root/bin/vibecrafted"; \
 		else \
 			expected_path="$$tool_root/bin/$$entrypoint"; \
 		fi; \
