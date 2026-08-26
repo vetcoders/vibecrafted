@@ -8248,6 +8248,24 @@ def _materialize_vc_frame_generation(runtime_root: Path) -> None:
         )
 
 
+def _materialize_runtime_generation_vc_frame_entry(runtime_root: Path) -> None:
+    """Publish the vc-frame product-entry wrapper as ``bin/vc-frame`` of the generation.
+
+    The wrapper resolves the real vc-frame binary at run time, so it needs no
+    host-specific baking; carrying it inside every generation keeps the public
+    ``~/.local/bin/vc-frame`` symlink valid across republishes. Writing it into
+    a *published* generation afterwards (the old foundations-installer habit)
+    mutated an immutable generation and vanished on the next publish.
+    """
+    source = runtime_root / "scripts" / "vc-frame-product-entry.sh"
+    target = runtime_root / "bin" / "vc-frame"
+    if not source.is_file():
+        raise OSError(f"candidate runtime has no vc-frame product entry: {source}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    target.chmod(0o755)
+
+
 def _materialize_runtime_generation_entrypoint(runtime_root: Path) -> None:
     """Publish the canonical command deck at the manifest-bound entrypoint."""
     source = (
@@ -9149,6 +9167,7 @@ def _sync_control_plane_tree_locked(
             stamp_install_version(staging, install_version)
         _materialize_vc_frame_generation(staging)
         _materialize_runtime_generation_entrypoint(staging)
+        _materialize_runtime_generation_vc_frame_entry(staging)
         audit_errors = _runtime_generation_audit_errors(staging, source_root=src)
         if audit_errors:
             raise OSError("\n".join(audit_errors))
@@ -12876,18 +12895,18 @@ def _cmd_install_verbose(args: argparse.Namespace, repo_root: Path) -> int:
 def _launcher_symlink_target(repo_root: Path) -> Path:
     """Resolve what ~/.local/bin/vibecrafted should point at.
 
-    The host launcher always enters the immutable installed generation. Python
-    tooling may still live in its uv environment, but it is an implementation
-    dependency of the deck, never the user-facing runtime owner.
+    The host launcher always enters the immutable installed generation through
+    its manifest-bound entrypoint (``bin/vibecrafted``, hashed in
+    ``runtime-manifest.json``) — the same file the runtime-generation doctor
+    check verifies. Python tooling may still live in its uv environment, but it
+    is an implementation dependency of the deck, never the user-facing runtime
+    owner.
     """
     _ = repo_root
     return (
         vibecrafted_tools_home()
         / "vibecrafted-current"
-        / "vibecrafted-core"
-        / "vibecrafted_core"
-        / "deck"
-        / "vibecrafted"
+        / _RUNTIME_GENERATION_ENTRYPOINT
     )
 
 

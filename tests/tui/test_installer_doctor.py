@@ -803,6 +803,11 @@ def test_install_launcher_does_not_overwrite_unmanaged_dev_wrapper(
         installed_deck,
         (REPO_ROOT / "scripts" / "vibecrafted").read_text(encoding="utf-8"),
     )
+    installed_entrypoint = (
+        runtime_home / "tools" / "vibecrafted-current" / "bin" / "vibecrafted"
+    )
+    installed_entrypoint.parent.mkdir(parents=True, exist_ok=True)
+    _write_executable(installed_entrypoint, installed_deck.read_text(encoding="utf-8"))
 
     installer._install_launcher(source_root, dry_run=False, update_rc=False)
 
