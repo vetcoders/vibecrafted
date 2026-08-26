@@ -142,6 +142,12 @@ elif [[ -n "$codesign_keychain" ]]; then
   die "--codesign-keychain requires --codesign-identity"
 fi
 
+# Signing above takes minutes; Finder writes .DS_Store into any staging
+# directory the operator happens to have open. That metadata is never a
+# product input, so sweep it once more at the last sanctioned mutation point.
+# Any file that appears after this line still fails the closed inventory.
+find "$root" -type f -name '.DS_Store' -delete
+
 # stage-runtime-foundations records source-built bytes before the release
 # builder signs Mach-O files. This pack staging tree is the final byte owner,
 # so rebind the manifest only after the last signing mutation and fail closed
