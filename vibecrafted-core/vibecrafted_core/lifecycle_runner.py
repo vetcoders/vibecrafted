@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -55,6 +56,16 @@ from .workflows.registry import (
 LaunchWorkflow = Callable[[WorkflowLaunchSpec, str | Path], dict[str, Any]]
 AwaitWorkflow = Callable[[dict[str, Any]], dict[str, Any]]
 LIFECYCLE_SCHEMA_ID = "vibecrafted.lifecycle.v1"
+
+
+def _lifecycle_stage_run_id(
+    lifecycle_run_id: str, stage_id: str, occurrence: int
+) -> str:
+    """Return a stable explicit child identity for one lifecycle stage attempt."""
+    material = f"{lifecycle_run_id}\n{stage_id}\n{occurrence}"
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+    prefix = re.sub(r"[^A-Za-z0-9._-]+", "-", stage_id).strip("-._") or "stage"
+    return f"{prefix[:24]}-{digest}"
 
 
 def delivery_axes_for_receipt(
@@ -915,6 +926,11 @@ class LifecycleRunner:
             model=model,
             lifecycle_state_path=str(state_path or ""),
             claim_digest=claim_digest_for_text(source_prompt),
+            run_id=_lifecycle_stage_run_id(
+                lifecycle_run_id,
+                stage.id,
+                len(previous_reports),
+            ),
         )
         commit_before = _git_head(root)
         git_before = _git_status(root)

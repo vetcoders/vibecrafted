@@ -19,6 +19,7 @@ from typing import Any
 
 from vibecrafted_core.delivery.model import ExecutionEnvelope
 from vibecrafted_core.workflow import (
+    LAUNCH_IDEMPOTENCY_KEY_ENV,
     WorkflowLaunchSpec,
     launch_workflow,
     reserve_run_id,
@@ -115,7 +116,10 @@ class DispatchResult:
 
 
 def workflow_cell_launcher(
-    dispatch: Dispatch, *, source_dir: str | Path | None = None
+    dispatch: Dispatch,
+    *,
+    source_dir: str | Path | None = None,
+    dispatch_run_id: str = "",
 ) -> CellLauncher:
     """Production launcher: every cell goes through the existing
     `launch_workflow` runtime — the dispatch layer never spawns its own
@@ -145,6 +149,10 @@ def workflow_cell_launcher(
             "VIBECRAFTED_DISPATCH_SCHEDULER_SLOT": str(cut.scheduler_slot),
             "VIBECRAFTED_DISPATCH_INTEGRATOR": str(cut.integrator).lower(),
         }
+        if dispatch_run_id:
+            runtime_env[LAUNCH_IDEMPOTENCY_KEY_ENV] = (
+                f"dispatch:{dispatch_run_id}:cut:{cut.id}:attempt:{kind}"
+            )
         if cut.target_path:
             runtime_env["CARGO_TARGET_DIR"] = cut.target_path
         result = launch_workflow(spec, base_dir, env=runtime_env)
@@ -193,7 +201,9 @@ class DispatchSupervisor:
         )
         self.worktrees = WorktreeManager(self.repo) if self.manage_worktrees else None
         self.launcher = launcher or workflow_cell_launcher(
-            dispatch, source_dir=source_dir
+            dispatch,
+            source_dir=source_dir,
+            dispatch_run_id=self.run_id,
         )
         self._sleep = sleep
         self._io_lock = threading.RLock()
