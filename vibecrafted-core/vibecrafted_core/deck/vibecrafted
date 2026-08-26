@@ -461,9 +461,28 @@ _dispatcher_core_dir() {
 
 # Resolve the interpreter that owns vibecrafted_core by reading the shebang
 # from the uv-tool shim on PATH, since it carries the correct uv python.
+# An inherited VIBECRAFTED_PYTHON is honoured only when it lives inside the
+# generation this deck serves (vibecrafted-current). A product session pins it
+# to the release generation, whose bin/python3 wrapper overwrites PYTHONPATH
+# with its own vibecrafted-core; running this generation's core through it
+# loads a foreign core + installer and yields phantom doctor findings.
+_vibecrafted_python_owned_by_current() {
+  local candidate="$1" candidate_real current_real deck_real
+  [[ -d "$crafted_tools" ]] || return 0
+  current_real="$(cd "$crafted_tools" 2>/dev/null && pwd -P)" || return 1
+  # Only an *installed* deck (living inside vibecrafted-current) is exposed to
+  # a foreign product-session interpreter; a checkout deck keeps honouring an
+  # explicit VIBECRAFTED_PYTHON (dev runs, tests).
+  deck_real="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)" || return 0
+  [[ "$deck_real" == "$current_real" || "$deck_real" == "$current_real/"* ]] || return 0
+  candidate_real="$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P)/$(basename "$candidate")" || return 1
+  [[ "$candidate_real" == "$current_real/"* ]]
+}
+
 _vibecrafted_python() {
   local resolved shebang py
-  if [[ -n "${VIBECRAFTED_PYTHON:-}" && -x "$VIBECRAFTED_PYTHON" ]]; then
+  if [[ -n "${VIBECRAFTED_PYTHON:-}" && -x "$VIBECRAFTED_PYTHON" ]] \
+    && _vibecrafted_python_owned_by_current "$VIBECRAFTED_PYTHON"; then
     printf '%s\n' "$VIBECRAFTED_PYTHON"
     return 0
   fi
