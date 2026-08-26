@@ -460,8 +460,16 @@ def test_transport_env_argument_supplies_canonical_retry_identity(
     assert len(pops) == 1
 
 
-def test_reserved_record_never_replays_accepted_and_pid_reuse_is_reclaimed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    "stale_reason",
+    [
+        "process_identity_gone",
+        "process_identity_mismatch",
+        "process_run_id_mismatch",
+    ],
+)
+def test_reserved_record_reclaims_only_proven_stale_owner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stale_reason: str
 ) -> None:
     monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
     monkeypatch.setenv(workflow.LAUNCH_IDEMPOTENCY_KEY_ENV, "transport-attempt-1")
@@ -479,12 +487,23 @@ def test_reserved_record_never_replays_accepted_and_pid_reuse_is_reclaimed(
             "root": spec.root,
             "state": "reserved",
             "accepted": False,
-            "owner_pid": 1,
+            "owner_pid": 424242,
+            "owner_identity": {
+                "pid": 424242,
+                "pgid": 424242,
+                "start_token": "original-owner",
+                "command_sha256": "a" * 64,
+                "run_id": "reserved-run-1",
+            },
             "spec_digest": workflow._launch_spec_digest(spec),
             "receipt": {"accepted": False, "status": "reserved"},
         },
     )
-    monkeypatch.setattr(workflow, "_pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        workflow,
+        "validate_process_identity",
+        lambda *_args, **_kwargs: (False, stale_reason, None),
+    )
     monkeypatch.setattr(
         workflow,
         "_stdin_command",
@@ -498,6 +517,86 @@ def test_reserved_record_never_replays_accepted_and_pid_reuse_is_reclaimed(
     assert result["accepted"] is True
     assert result["run_id"] == "reserved-run-1"
     assert len(pops) == 1
+
+
+@pytest.mark.parametrize(
+    "ambiguous_reason",
+    [
+        "process_identity_permission_ambiguous",
+        "process_identity_unavailable",
+        "process_identity_unreadable",
+        "process_identity_unknown",
+    ],
+)
+def test_ambiguous_reservation_owner_refuses_without_spawn_or_receipt_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    ambiguous_reason: str,
+) -> None:
+    from vibecrafted_core.cli import _emit_launch_result
+
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    monkeypatch.setenv(workflow.LAUNCH_IDEMPOTENCY_KEY_ENV, "ambiguous-owner")
+    source = _source_dir(tmp_path)
+    spec = workflow.normalize_launch_spec(
+        {"skill": "workflow", "agent": "claude", "prompt": "same brief"}, source
+    )
+    key = workflow.launch_idempotency_key(spec)
+    workflow._write_launch_idempotency_record(
+        key,
+        {
+            "run_id": "ambiguous-reserved-run",
+            "agent": spec.agent,
+            "skill": spec.skill,
+            "root": spec.root,
+            "state": "reserved",
+            "accepted": False,
+            "owner_pid": 424242,
+            "owner_identity": {
+                "pid": 424242,
+                "pgid": 424242,
+                "start_token": "unreadable-owner",
+                "command_sha256": "a" * 64,
+                "run_id": "ambiguous-reserved-run",
+            },
+            "spec_digest": workflow._launch_spec_digest(spec),
+            "receipt": {
+                "run_id": "ambiguous-reserved-run",
+                "agent": spec.agent,
+                "skill": spec.skill,
+                "root": spec.root,
+                "accepted": False,
+                "status": "reserved",
+            },
+        },
+    )
+    record_path = workflow._launch_idempotency_path(key)
+    reservation_before = record_path.read_bytes()
+    monkeypatch.setattr(workflow, "_sweep_stale_runs", lambda: None)
+    monkeypatch.setattr(workflow, "lookup_run", lambda _run_id: None)
+    monkeypatch.setattr(
+        workflow,
+        "validate_process_identity",
+        lambda *_args, **_kwargs: (False, ambiguous_reason, None),
+    )
+    pops: list[object] = []
+    _patch_launch_popen(monkeypatch, pops)
+
+    result = workflow.launch_workflow(spec, source)
+
+    assert result["accepted"] is False
+    assert result["status"] == "retryable_reservation_owner_ambiguous"
+    assert result["reason"] == ambiguous_reason
+    assert result["retryable"] is True
+    assert result["run_id"] == "ambiguous-reserved-run"
+    assert pops == []
+    assert record_path.read_bytes() == reservation_before
+    assert workflow.machine_launch_receipt(result)["accepted"] is False
+    assert _emit_launch_result(result, json_mode=True) == 1
+    emitted = json.loads(capsys.readouterr().out)
+    assert emitted["accepted"] is False
+    assert emitted["status"] == "retryable_reservation_owner_ambiguous"
 
 
 def test_phantom_dispatched_record_returns_retryable_fail_closed_receipt(
@@ -641,15 +740,16 @@ def test_stale_reservation_recovers_canonical_live_run_without_respawn(
             "launcher_identity": {"pid": os.getpid(), "pgid": os.getpgrp()},
         },
     )
-    identity_checks = iter([False, True])
+    identity_checks = iter(
+        [
+            (False, "process_identity_gone", None),
+            (True, "process_identity_current", None),
+        ]
+    )
     monkeypatch.setattr(
         workflow,
         "validate_process_identity",
-        lambda *_args, **_kwargs: (
-            next(identity_checks),
-            "process_identity_current",
-            None,
-        ),
+        lambda *_args, **_kwargs: next(identity_checks),
     )
     pops: list[object] = []
     _patch_launch_popen(monkeypatch, pops)

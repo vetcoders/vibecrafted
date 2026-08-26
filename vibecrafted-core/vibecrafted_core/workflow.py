@@ -2153,25 +2153,36 @@ def _canonical_run_launch_payload(
     return payload
 
 
-def _record_owner_is_current(record: dict[str, Any]) -> bool:
-    """Qualify a reservation owner by full process identity, never PID alone."""
+def _classify_record_owner(record: dict[str, Any]) -> tuple[str, str]:
+    """Classify reservation ownership without turning ambiguity into staleness."""
     run_id = str(record.get("run_id") or "")
-    owner_pid = int(record.get("owner_pid") or 0)
+    try:
+        owner_pid = int(record.get("owner_pid") or 0)
+    except (TypeError, ValueError):
+        return "ambiguous", "process_identity_invalid"
     receipt = record.get("owner_identity")
     if owner_pid <= 0 or not isinstance(receipt, dict):
-        return False
+        return "ambiguous", "process_identity_unavailable"
     expected_pgid = receipt.get("pgid")
     try:
         pgid = int(expected_pgid) if expected_pgid is not None else None
     except (TypeError, ValueError):
-        return False
-    current, _reason, _identity = validate_process_identity(
+        return "ambiguous", "process_identity_invalid"
+    current, reason, _identity = validate_process_identity(
         receipt,
         expected_pid=owner_pid,
         expected_pgid=pgid,
         expected_run_id=run_id,
     )
-    return current
+    if current:
+        return "current", reason or "process_identity_current"
+    if reason in {
+        "process_identity_gone",
+        "process_identity_mismatch",
+        "process_run_id_mismatch",
+    }:
+        return "stale", reason
+    return "ambiguous", reason or "process_identity_unknown"
 
 
 def _run_has_current_process_proof(run_id: str, run: dict[str, Any]) -> bool:
@@ -2206,17 +2217,26 @@ def _replay_launch_if_current(record: dict[str, Any]) -> dict[str, Any] | None:
         return None
     state = str(record.get("state") or "")
     if state == "reserved":
-        if _record_owner_is_current(record):
+        owner_state, owner_reason = _classify_record_owner(record)
+        if owner_state == "current":
             return _retryable_launch_payload(
                 record,
                 status="reservation_in_progress",
                 reason="launch reservation is owned by another live invocation",
             )
         run = lookup_run(run_id)
+        if run is not None and (
+            _run_is_terminal(run) or _run_has_current_process_proof(run_id, run)
+        ):
+            return _canonical_run_launch_payload(record, run)
+        if owner_state == "ambiguous":
+            return _retryable_launch_payload(
+                record,
+                status="retryable_reservation_owner_ambiguous",
+                reason=owner_reason,
+            )
         if run is None:
             return None
-        if _run_is_terminal(run) or _run_has_current_process_proof(run_id, run):
-            return _canonical_run_launch_payload(record, run)
         return _retryable_launch_payload(
             record,
             status="retryable_unproven_liveness",
