@@ -212,13 +212,18 @@ def test_python_resolver_ignores_inherited_python_from_another_generation(
     owned_python.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
     owned_python.chmod(0o755)
 
+    # The public command is a symlink into the generation; the deck must
+    # resolve its own file, not the directory the symlink sits in.
+    public_launcher = fake_bin / "vibecrafted"
+    public_launcher.symlink_to(launcher_copy)
+
     def resolve(inherited: Path) -> Path:
         env = os.environ.copy()
         env["PATH"] = f"{fake_bin}:/usr/bin:/bin"
         env["VIBECRAFTED_TOOLS_HOME"] = str(tools_home)
         env["VIBECRAFTED_PYTHON"] = str(inherited)
         result = subprocess.run(
-            ["bash", "-c", f'source "{launcher_copy}"; _vibecrafted_python'],
+            ["bash", "-c", f'source "{public_launcher}"; _vibecrafted_python'],
             cwd=REPO_ROOT,
             env=env,
             capture_output=True,
