@@ -954,6 +954,31 @@ def test_runtime_semantic_verifier_uses_candidate_interpreter(
     assert str(Path(sys.executable)) not in observed[:1]
 
 
+def test_runtime_verifier_python_falls_back_only_when_no_interpreter_is_carried(
+    tmp_path: Path,
+) -> None:
+    source_staged = tmp_path / "staged"
+    (source_staged / "bin").mkdir(parents=True)
+    assert installer._runtime_verifier_python(source_staged) == Path(sys.executable)
+
+    carried = tmp_path / "pack"
+    carried_python = carried / "bin/python3"
+    carried_python.parent.mkdir(parents=True)
+    carried_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    carried_python.chmod(0o755)
+    assert installer._runtime_verifier_python(carried) == carried_python
+
+    carried_python.chmod(0o644)
+    with pytest.raises(OSError, match="not executable"):
+        installer._runtime_verifier_python(carried)
+
+    dangling = tmp_path / "dangling"
+    (dangling / "bin").mkdir(parents=True)
+    (dangling / "bin/python3").symlink_to(tmp_path / "missing-interpreter")
+    with pytest.raises(OSError, match="not executable"):
+        installer._runtime_verifier_python(dangling)
+
+
 def test_installer_release_contract_assets_fail_closed_for_missing_or_exact_byte_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

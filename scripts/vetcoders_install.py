@@ -8707,11 +8707,26 @@ def _assert_runtime_verifier_semantic_failure(
         )
 
 
-def _validate_runtime_verifier_semantics(runtime_root: Path) -> None:
-    """Validate captured candidate code/schema and exercise its real public entrypoints."""
+def _runtime_verifier_python(runtime_root: Path) -> Path:
+    """Pick the interpreter that verifies a candidate generation.
+
+    A Runtime Pack carries its own ``bin/python3`` and must be verified with it.
+    A source-staged generation carries none: its interpreter is the uv tool
+    environment bound *after* publication (``uv tool install --editable``), so
+    the installer's own interpreter verifies the captured bytes.  A carried
+    interpreter that cannot execute is a broken pack, never a fallback case.
+    """
     runtime_python = runtime_root / "bin/python3"
+    if not runtime_python.exists() and not runtime_python.is_symlink():
+        return Path(sys.executable)
     if not runtime_python.is_file() or not os.access(runtime_python, os.X_OK):
         raise OSError(f"candidate runtime Python is not executable: {runtime_python}")
+    return runtime_python
+
+
+def _validate_runtime_verifier_semantics(runtime_root: Path) -> None:
+    """Validate captured candidate code/schema and exercise its real public entrypoints."""
+    runtime_python = _runtime_verifier_python(runtime_root)
 
     def run_candidate(
         argv: Sequence[str], *, cache: Path
