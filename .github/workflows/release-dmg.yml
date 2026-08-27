@@ -109,7 +109,6 @@ jobs:
           # Vibecrafted Server shell (leptos); version matches the operator machine
           cargo install --locked cargo-leptos@0.3.7
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
-
       - name: Materialize signing keys from secrets
         env:
           VC_CERT_P12_B64: ${{ secrets.VC_CERT_P12_B64 }}

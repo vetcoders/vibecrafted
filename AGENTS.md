@@ -754,7 +754,7 @@ We ship.
 
 ### Checks Requiring Secrets Or External Services
 
-- DMG signing/notarization (Developer ID + notary credentials), `gh` for the release-gate probe, vibecrafted-io deploy — operator buttons, never run by workers. ***
+- DMG signing/notarization (Developer ID + notary credentials), `gh` for the release-gate probe, vibecrafted-io deploy — operator buttons, never run by workers. \*\*\*
 
 ## Safety Boundaries
 

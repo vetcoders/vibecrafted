@@ -375,7 +375,7 @@ The map says otherwise:
   responsibilities already moved). `shell/lib` = the operator-terminal
   facade (self-described: "sourced only by the compatibility facade";
   consumers: `vetcoders.sh`, `install-foundations.sh`,
-  `sync-vc-alias-runtime.sh`, the vc-* verbs).
+  `sync-vc-alias-runtime.sh`, the vc-\* verbs).
 - `frontier.sh` ×2 is a **FALSE_PARALLEL**: same name, different powers
   (spawn shell selection vs frontier config resolution). Rename candidate,
   not a cut.
