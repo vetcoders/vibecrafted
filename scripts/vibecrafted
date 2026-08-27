@@ -1363,9 +1363,35 @@ _server_launcher_path() {
 
 _server_supervisor_binary() {
   local candidate=""
+  local sibling=""
+  local uv_dir=""
+  local user_bin=""
   candidate="$(command -v vc-server-supervisor 2>/dev/null || true)"
-  [[ -n "$candidate" && -x "$candidate" ]] || return 1
-  _realpath_quiet "$candidate"
+  if [[ -n "$candidate" && -x "$candidate" ]]; then
+    _realpath_quiet "$candidate"
+    return 0
+  fi
+  # Headless PATH often lacks the user bin that a login shell prepends.
+  # Prefer the generation next to this deck, then the uv tool env, then
+  # the XDG user bin — never a single frozen pin of one absolute path.
+  sibling="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/vc-server-supervisor"
+  if [[ -x "$sibling" ]]; then
+    _realpath_quiet "$sibling"
+    return 0
+  fi
+  if command -v uv >/dev/null 2>&1; then
+    uv_dir="$(uv tool dir --color never 2>/dev/null || true)"
+    if [[ -n "$uv_dir" && -x "$uv_dir/vibecrafted/bin/vc-server-supervisor" ]]; then
+      _realpath_quiet "$uv_dir/vibecrafted/bin/vc-server-supervisor"
+      return 0
+    fi
+  fi
+  user_bin="${XDG_BIN_HOME:-${HOME}/.local/bin}/vc-server-supervisor"
+  if [[ -x "$user_bin" ]]; then
+    _realpath_quiet "$user_bin"
+    return 0
+  fi
+  return 1
 }
 
 _server_supervisor_cli() {
@@ -1421,8 +1447,9 @@ _server_supervisor_cli() {
       # written into ProgramArguments. Its sibling launcher is the only valid
       # service entrypoint, so PATH cannot mix two installed generations.
       env -u PYTHONHOME -u PYTHONPATH \
+        PATH="$(dirname "$supervisor_bin"):${PATH:-}" \
         "$supervisor_bin" "${command_args[@]}" "${common_args[@]}"
-      return
+      return $?
       ;;
     manual-stop)
       launcher="$(_server_launcher_path 2>/dev/null || true)"
@@ -3884,6 +3911,7 @@ cmd_server() {
       ;;
     service)
       _server_supervisor_cli service "$@"
+      return $?
       ;;
     open)
       local status_file

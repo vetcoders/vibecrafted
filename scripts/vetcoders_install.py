@@ -3294,6 +3294,8 @@ class _RuntimeServiceStatus:
         This is the stable degraded shape install must drain (supervisor live
         in backoff, pair_healthy false, often with an orphaned listener). It is
         not a pure mid-start race: identity is known enough to call service stop.
+        A running pair under a stale launcher SHA is the same class: owned,
+        drainable, never foreign.
         """
         if self.healthy or self.quiescent:
             return False
@@ -3309,9 +3311,25 @@ class _RuntimeServiceStatus:
         )
 
     @property
+    def stale_identity(self) -> bool:
+        """Owned supervisor is live, but the published identity is not current."""
+        if self.healthy or self.quiescent:
+            return False
+        return (
+            self.installed
+            and self.loaded
+            and self.supervisor_live
+            and self.supervisor_verified
+            and self.supervisor_service_managed
+            and self.supervisor_pid is not None
+            and self.supervisor_pid > 0
+            and not self.build_current
+        )
+
+    @property
     def needs_drain(self) -> bool:
         """Install must stop this service before publication fences close."""
-        return self.healthy or self.reclaimable
+        return self.healthy or self.reclaimable or self.stale_identity
 
 
 @dataclass(frozen=True)
@@ -4362,6 +4380,7 @@ def _owned_runtime_process_roots(*, app_root: Path | None = None) -> tuple[Path,
     """Canonical executable roots whose live processes belong to this product."""
     roots = [
         vibecrafted_runtime_home() / "releases",
+        vibecrafted_tools_home(),
         Path("/Applications/Vibecrafted.app"),
         Path.home() / "Applications/Vibecrafted.app",
     ]
@@ -4492,6 +4511,201 @@ def _terminate_owned_runtime_processes(
         label="owned runtime process",
         timeout_seconds=timeout_seconds,
     )
+
+
+_FRAMEWORK_ORPHAN_PROCESS_NAMES = {
+    "vc-server",
+    "vc-server-supervisor",
+    "vc-frame",
+    "vc-frame.real",
+    "vibecrafted-server",
+    "vibecrafted-server-web",
+}
+_AGENT_SESSION_PROCESS_NAMES = {
+    "agy",
+    "claude",
+    "codex",
+    "gemini",
+    "grok",
+    "junie",
+    "qwen",
+}
+
+
+def _argv_is_agent_session(argv: Sequence[str]) -> bool:
+    """True when argv names an agent CLI, which install must never signal."""
+    return any(Path(argument).name in _AGENT_SESSION_PROCESS_NAMES for argument in argv)
+
+
+def _argv_is_framework_orphan(argv: Sequence[str]) -> bool:
+    """True when argv names a framework-owned generation process."""
+    names = {Path(argument).name for argument in argv}
+    if names & _FRAMEWORK_ORPHAN_PROCESS_NAMES:
+        return True
+    joined = " ".join(argv)
+    return "vibecrafted_core.server_supervisor" in joined or "vc-server" in joined
+
+
+def _launch_agent_identity_matches_published_binaries(
+    shared_home: Path,
+    backup: _RuntimeLaunchAgentBackup | None = None,
+) -> bool:
+    """True when the LaunchAgent hashes still match the files it names.
+
+    After uv publishes a new supervisor onto a stable path, the plist still
+    carries the previous SHA/version. Loading that definition is EX_CONFIG.
+    Prefer the in-transaction backup so tests never read the operator plist.
+    """
+    _ = shared_home
+    encoded = None if backup is None else backup.contents
+    if backup is None:
+        path = _runtime_launch_agent_path()
+        try:
+            encoded = path.read_bytes()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+    if encoded is None:
+        return True
+    try:
+        payload = plistlib.loads(encoded)
+    except (plistlib.InvalidFileException, ValueError, TypeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    environment = payload.get("EnvironmentVariables")
+    if not isinstance(environment, dict):
+        return False
+    supervisor_raw = environment.get("VIBECRAFTED_SERVER_SUPERVISOR_PATH")
+    supervisor_digest = environment.get("VIBECRAFTED_SERVER_SUPERVISOR_SHA256")
+    launcher_digest = environment.get("VIBECRAFTED_SERVER_LAUNCHER_SHA256")
+    if not isinstance(supervisor_raw, str) or not supervisor_raw:
+        return False
+    supervisor = Path(supervisor_raw).expanduser()
+    try:
+        actual_supervisor = _sha256_path(supervisor)
+    except OSError:
+        return False
+    if (
+        not isinstance(supervisor_digest, str)
+        or len(supervisor_digest) != 64
+        or actual_supervisor != supervisor_digest
+    ):
+        return False
+    arguments = payload.get("ProgramArguments")
+    launcher: Path | None = None
+    if isinstance(arguments, list):
+        try:
+            launcher_index = arguments.index("--launcher") + 1
+            launcher_raw = arguments[launcher_index]
+        except (ValueError, IndexError):
+            launcher_raw = ""
+        if isinstance(launcher_raw, str) and launcher_raw:
+            launcher = Path(launcher_raw).expanduser()
+    if launcher is None:
+        return isinstance(launcher_digest, str) and len(launcher_digest) == 64
+    try:
+        actual_launcher = _sha256_path(launcher)
+    except OSError:
+        return False
+    return (
+        isinstance(launcher_digest, str)
+        and len(launcher_digest) == 64
+        and actual_launcher == launcher_digest
+    )
+
+
+def _stale_framework_search_roots(keep_generation: Path) -> tuple[Path, ...]:
+    """Roots that may host stale generations, scoped to the published tree.
+
+    Never include the operator Applications bundle or an unrelated runtime
+    home: tests isolate TOOLS_HOME, and a live host must only reap processes
+    from the runtime that this install just published.
+    """
+    keep = keep_generation.resolve(strict=False)
+    tools_home = vibecrafted_tools_home().resolve(strict=False)
+    runtime_home = vibecrafted_runtime_home().resolve(strict=False)
+    roots = [tools_home]
+    if _is_subpath(keep, runtime_home):
+        roots.append((runtime_home / "releases").resolve(strict=False))
+    return tuple(roots)
+
+
+def _argv_lives_under(argv: Sequence[str], roots: Sequence[Path]) -> bool:
+    for argument in argv:
+        candidate = Path(argument)
+        if not candidate.is_absolute():
+            continue
+        resolved = candidate.resolve(strict=False)
+        if any(resolved == root or _is_subpath(resolved, root) for root in roots):
+            return True
+    return False
+
+
+def _retire_stale_framework_generations(
+    shared_home: Path,
+    *,
+    keep_generation: Path | None,
+    keep_pids: Sequence[int] = (),
+) -> None:
+    """Terminate owned framework processes from generations other than `keep`.
+
+    Never signals agent-session CLIs. A green install must not leave vc-server
+    / vc-frame from a previous release tree alive.
+    """
+    _ = shared_home
+    if sys.platform != "darwin":
+        return
+    if keep_generation is None:
+        # Without a published generation there is no keep-set; refuse to
+        # signal every owned framework process on the host.
+        return
+    keep = keep_generation.resolve(strict=False)
+    search_roots = _stale_framework_search_roots(keep)
+    kept = {pid for pid in keep_pids if pid > 0}
+
+    def collect() -> list[_RetiredVcFrameProcess]:
+        records: list[_RetiredVcFrameProcess] = []
+        process_ids = _darwin_process_ids()
+        excluded = _darwin_caller_ancestor_pids()
+        for pid in process_ids:
+            if pid in excluded or pid in kept:
+                continue
+            try:
+                first_birth = _darwin_process_birth(pid)
+                if first_birth[1] != os.geteuid():
+                    continue
+                first_argv = _darwin_process_arguments(pid, pointer_size=first_birth[2])
+                second_argv = _darwin_process_arguments(
+                    pid, pointer_size=first_birth[2]
+                )
+                second_birth = _darwin_process_birth(pid)
+            except ProcessLookupError:
+                continue
+            if first_birth != second_birth or first_argv != second_argv:
+                raise OSError(f"Darwin process {pid} changed during runtime census")
+            if _argv_is_agent_session(first_argv):
+                continue
+            if not _argv_is_framework_orphan(first_argv):
+                continue
+            if not _argv_lives_under(first_argv, search_roots):
+                continue
+            if _argv_lives_under(first_argv, (keep,)):
+                continue
+            records.append(_RetiredVcFrameProcess(pid, first_birth, first_argv))
+        return records
+
+    stale = collect()
+    if not stale:
+        return
+    _terminate_owned_runtime_processes(stale)
+    remaining = collect()
+    if remaining:
+        pids = ", ".join(str(record.pid) for record in remaining)
+        raise OSError(
+            "stale framework generation processes remain after install: " + pids
+        )
 
 
 def _teardown_owned_runtime_for_uninstall(
@@ -4788,20 +5002,15 @@ def _runtime_service_snapshot(
         # This is exactly the reclaimable state that service stop is designed
         # to drain before publication.
         return launcher, status, pair_state
+    if status.reclaimable and pair_state == "running":
+        # A healthy pair under a stale launcher SHA reports pair_healthy=false
+        # while Server/Guardian are RUNNING. That is reconcilable ownership,
+        # not a foreign identity: the next install drains and republishes.
+        return launcher, status, pair_state
     if pair_state != "stopped":
         # Reclaimable supervisors still report Server/Guardian STOPPED while
-        # an orphan may hold the port; only true RUNNING disagreement is fatal.
-        if status.reclaimable and pair_state == "running":
-            # A single snapshot cannot tell a stable degrade (supervisor in
-            # backoff over an orphan pair) from a pair that is mid-start and
-            # about to flip pair_healthy.  Only time separates them: raise the
-            # convergent transition so the activation wait loop keeps
-            # observing until its deadline, which then fails closed with the
-            # last observation.  One-shot callers still see an OSError.
-            raise _RuntimeServiceTransition(
-                "runtime service reports a non-healthy running pair; "
-                "refusing install handoff until the pair is stopped or healthy"
-            )
+        # an orphan may hold the port; remaining RUNNING disagreement is a
+        # mid-start race, not a drainable identity.
         # The two probes above are taken at different moments; across a
         # launchd (re)start they can legitimately disagree for an instant.
         # Convergent transition: still fail-closed for one-shot callers,
@@ -6238,15 +6447,23 @@ def run_with_tools_install_lease(
                                 "launchd mutation gate closed"
                             )
                         if snapshot is not None:
-                            if lifecycle_deck is None:
+                            # Bundle-installed services do not publish
+                            # tools/vibecrafted-current. An owned launchd job
+                            # is still reconcilable: drain it, then source
+                            # publication creates the generation.
+                            if (
+                                lifecycle_deck is None
+                                and snapshot[1].needs_drain
+                                and not _assert_runtime_launchd_job_owned(shared_home)
+                            ):
                                 raise OSError(
-                                    "runtime service exists without an exact current "
-                                    "lifecycle generation"
+                                    "runtime service exists without an owned "
+                                    "launchd job or current lifecycle generation"
                                 )
-                            # Healthy managed pairs and reclaimable degraded
-                            # supervisors (live/owned, pair down) both must drain
-                            # before publication. Pure mid-start races still raise
-                            # _RuntimeServiceTransition at decode time.
+                            # Healthy managed pairs, reclaimable degraded
+                            # supervisors, and stale-launcher running pairs
+                            # all drain before publication. Pure mid-start
+                            # races still raise _RuntimeServiceTransition.
                             service_was_active = snapshot[1].needs_drain
                         # A quiescent old launcher can still receive a
                         # concurrent `service install`; fence every validated
@@ -6441,8 +6658,22 @@ def run_with_tools_install_lease(
                         )
                         return child_returncode
 
+                    published_identity_stale = False
+                    if darwin_service and child_returncode == 0:
+                        published_identity_stale = (
+                            not _launch_agent_identity_matches_published_binaries(
+                                shared_home,
+                                launch_agent_backup,
+                            )
+                        )
+                        if published_identity_stale:
+                            # uv already replaced the supervisor on the stable
+                            # path. Re-enabling the old plist is EX_CONFIG.
+                            # Hold the label disabled until reconcile writes
+                            # the matching identity, including crash-exit.
+                            gate.retain_disabled()
                     activation_attempted = darwin_service and (
-                        service_was_active or ensure_service
+                        service_was_active or ensure_service or published_identity_stale
                     )
                     handoff_target_to_seal: Path | None = None
                     try:
@@ -6546,10 +6777,16 @@ def run_with_tools_install_lease(
                                         "install child completed without a prepared "
                                         "runtime generation handoff"
                                     )
-                            if ensure_service:
+                            if activation_attempted:
                                 gate.commit_enabled_state()
                     except BaseException as exc:
-                        rollback_was_already_unsafe = gate.retention_required
+                        # Identity-hold after uv publish keeps launchd disabled
+                        # so a stale plist cannot EX_CONFIG-loop. Pointer
+                        # rollback remains safe: the previous generation tree
+                        # is still on disk.
+                        rollback_was_already_unsafe = (
+                            gate.retention_required and not published_identity_stale
+                        )
                         gate.retain_disabled()
                         if handoff_target_to_seal is not None and (
                             _tools_handoff_is_complete_current(
@@ -6626,6 +6863,28 @@ def run_with_tools_install_lease(
                         ) from exc
 
                     _discard_runtime_payload_backup(payload_backup)
+                    if darwin_service:
+                        keep_generation = _symlink_target(current_link)
+                        keep_pids: tuple[int, ...] = ()
+                        try:
+                            final = _runtime_service_snapshot(shared_home)
+                        except (
+                            OSError,
+                            subprocess.SubprocessError,
+                            _RuntimeServiceTransition,
+                        ):
+                            final = None
+                        if (
+                            final is not None
+                            and final[1].supervisor_pid is not None
+                            and final[1].supervisor_pid > 0
+                        ):
+                            keep_pids = (final[1].supervisor_pid,)
+                        _retire_stale_framework_generations(
+                            shared_home,
+                            keep_generation=keep_generation,
+                            keep_pids=keep_pids,
+                        )
                     return 0
     except TimeoutError as exc:
         print(f"[install-tools] FATAL: {exc}", file=sys.stderr)

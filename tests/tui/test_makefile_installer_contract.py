@@ -1542,4 +1542,13 @@ def test_launcher_does_not_pin_stale_supervisor_binary() -> None:
     resolver = launcher.split("_server_supervisor_binary() {", 1)[1].split("\n}", 1)[0]
 
     assert "command -v vc-server-supervisor" in resolver
+    assert "uv tool dir" in resolver
+    assert "XDG_BIN_HOME" in resolver
     assert "$HOME/.local/bin/vc-server-supervisor" not in resolver
+
+
+def test_launcher_service_status_returns_ex_config_when_supervisor_missing() -> None:
+    launcher = (REPO_ROOT / "scripts" / "vibecrafted").read_text(encoding="utf-8")
+    assert "return 78" in launcher.split("_server_supervisor_cli() {", 1)[1][:1800]
+    service_arm = launcher.split("\n    service)\n", 1)[1]
+    assert "return $?" in service_arm.split(";;", 1)[0]
