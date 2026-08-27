@@ -179,7 +179,17 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     assert current.is_symlink()
     assert current.resolve() == generation.resolve()
     assert "VIBECRAFTED_RUNTIME_ROOT=" in original_launcher.read_text(encoding="utf-8")
-    assert (config_home / "vibecrafted/vc-frame/config.kdl").is_file()
+    product_config = config_home / "vibecrafted"
+    assert (product_config / "vc-frame/config.kdl").is_file()
+    assert (product_config / "terminal-policy.toml").read_text(encoding="utf-8") == (
+        "[window]\n"
+    )
+    terminal_entry = (product_config / "terminal-entry.toml").read_text(
+        encoding="utf-8"
+    )
+    assert str(product_config / "terminal-policy.toml") in terminal_entry
+    assert str(product_config / "terminal-theme.toml") in terminal_entry
+    assert str(generation / "config/vc-terminal/vibecrafted.toml") not in terminal_entry
     for runtime in installer.STANDARD_VIEW_RUNTIMES:
         for skill_name in ("vc-audit", "vc-implement"):
             view = home / f".{runtime}/skills/{skill_name}"

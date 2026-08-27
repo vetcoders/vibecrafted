@@ -554,9 +554,11 @@ def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
     assert "kCTFontFamilyNameAttribute as String" in app_delegate
     assert 'CTFontDescriptorCreateWithNameAndSize("Spot Mono"' not in app_delegate
     assert (
-        'terminal_policy = generation / "config/vc-terminal/vibecrafted.toml"'
+        'terminal_policy_source = generation / "config/vc-terminal/vibecrafted.toml"'
         in installer
     )
+    assert 'terminal_policy = product_config / "terminal-policy.toml"' in installer
+    assert 'terminal_policy_source.read_text(encoding="utf-8")' in installer
     assert 'product_config / "terminal-entry.toml"' in installer
     assert 'product_config / "terminal-theme.toml"' in installer
     assert 'product_config / "terminal.toml"' not in installer

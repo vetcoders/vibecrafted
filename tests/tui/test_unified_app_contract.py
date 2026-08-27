@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import plistlib
+import re
 import shutil
 import stat
 import struct
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import tomllib
 from vibecrafted_core import product_contract as contract
 from vibecrafted_core import runtime_pack_contract
 
@@ -3421,7 +3423,39 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     assert 'cyan    = "#56949f"' in light
     assert "live_config_reload = true" in terminal
     assert "save_to_clipboard = true" in terminal
-    assert 'command = "open"' in terminal
+    terminal_policy = tomllib.loads(terminal)
+    enabled_hints = terminal_policy["hints"]["enabled"]
+    assert enabled_hints[0]["command"] == "/usr/bin/open"
+    assert enabled_hints[0]["hyperlinks"] is True
+    path_hint = enabled_hints[1]
+    assert path_hint["hyperlinks"] is False
+    assert path_hint["mouse"] == {"enabled": True, "mods": "Command"}
+    assert path_hint["command"]["program"] == "/bin/zsh"
+    path_command = path_hint["command"]["args"][1]
+    assert "exec /usr/bin/open" in path_command
+    path_pattern = re.compile(path_hint["regex"])
+    for rendered_path in (
+        "/Volumes/vc-workspace/README.md",
+        "~/Documents/proof.pdf",
+        "./report.md:12",
+        "../report.md:12:3",
+        "config/vc-terminal/vibecrafted.toml:57",
+    ):
+        assert path_pattern.fullmatch(rendered_path), rendered_path
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        target = Path(temp_dir) / "proof.md"
+        target.touch()
+        probe = path_command.replace(
+            'exec /usr/bin/open -- "$target"', 'printf %s "$target"'
+        )
+        result = subprocess.run(
+            ["/bin/zsh", "-lc", probe, f"{target}:12:3"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert result.stdout == str(target)
     assert 'mods = "Command"' in terminal
     assert 'key = "Period"' in terminal
     assert 'mods = "Command|Shift"' in terminal
@@ -3433,6 +3467,7 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     assert "process.executableURL = install.terminalHost" in delegate
     assert '"-e", install.primaryShell.path, install.start.path, "operator"' in delegate
     assert 'product_config / "terminal-entry.toml"' in installer
+    assert 'product_config / "terminal-policy.toml"' in installer
     assert 'product_config / "terminal-theme.toml"' in installer
     assert 'let socketRoot = "/tmp/vc-frame-\\(getuid())"' in delegate
     assert 'environment["VC_FRAME_SOCKET_DIR"] = socketRoot' in delegate
