@@ -14603,6 +14603,36 @@ def _backup_runtime_collision(
     _checkpoint_runtime_install_receipt(runtime_home, receipt)
 
 
+def _backup_runtime_drift(
+    destination: Path, *, runtime_home: Path, receipt: dict[str, Any]
+) -> Path:
+    """Preserve an operator-diverged managed path before the installer reclaims it.
+
+    Drift backups are content-addressed and live apart from the `original`
+    collision tree: `backups` carries over between installs and would
+    early-return, silently dropping the operator's newest divergent copy.
+    """
+    token = hashlib.sha256(str(destination).encode("utf-8")).hexdigest()[:20]
+    marker = _sha256_path(destination)[:12] if destination.is_file() else "nonfile"
+    backup = (
+        runtime_home
+        / ".installer-backups"
+        / "drift"
+        / f"{token}-{marker}-{destination.name}"
+    )
+    if not _path_present(backup):
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        _copy_path_to_backup(destination, backup)
+    receipt.setdefault("drift_backups", {})[str(destination)] = str(backup)
+    _checkpoint_runtime_install_receipt(runtime_home, receipt)
+    print(
+        f"[runtime-install] managed path diverged since install; "
+        f"reclaimed {destination} (divergent copy: {backup})",
+        file=sys.stderr,
+    )
+    return backup
+
+
 def _record_owned_file(receipt: dict[str, Any], path: Path) -> None:
     receipt.setdefault("owned_files", {})[str(path)] = _sha256_path(path)
 
@@ -14625,9 +14655,12 @@ def _write_runtime_owned_file(
                 or not path.is_file()
                 or _sha256_path(path) != previous_owned[key]
             ):
-                raise RuntimeError(
-                    f"managed runtime file changed since install: {path}"
-                )
+                # A repair/upgrade install must not be blocked by the very
+                # divergence it exists to fix: keep the operator's copy
+                # restorable, then reclaim ownership.
+                _backup_runtime_drift(path, runtime_home=runtime_home, receipt=receipt)
+                if path.is_dir() and not path.is_symlink():
+                    _remove_path(path)
         else:
             _backup_runtime_collision(path, runtime_home=runtime_home, receipt=receipt)
     _atomic_text(path, body, mode=mode)
@@ -14651,9 +14684,9 @@ def _write_runtime_owned_symlink(
         if key in previous_owned:
             expected = Path(previous_owned[key]).resolve(strict=False)
             if not path.is_symlink() or _symlink_target(path) != expected:
-                raise RuntimeError(
-                    f"managed runtime symlink changed since install: {path}"
-                )
+                # Same repair doctrine as owned files: preserve, then reclaim.
+                _backup_runtime_drift(path, runtime_home=runtime_home, receipt=receipt)
+                _remove_path(path)
         else:
             _backup_runtime_collision(path, runtime_home=runtime_home, receipt=receipt)
             _remove_path(path)

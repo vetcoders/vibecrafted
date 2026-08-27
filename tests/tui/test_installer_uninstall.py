@@ -350,6 +350,58 @@ def test_runtime_pack_uninstall_preserves_locally_modified_managed_launcher(
     assert (home / "runtime" / installer.RUNTIME_INSTALL_RECEIPT).is_file()
 
 
+def test_runtime_pack_reinstall_reclaims_drifted_managed_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    runtime_home = home / "runtime"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / "bin"))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    args = Namespace(
+        payload_root=str(payload),
+        app_root=str(terminal_host.parents[2]),
+        terminal_host=str(terminal_host),
+        frame_helper=str(frame_helper),
+    )
+    assert installer.cmd_runtime_install(args) == 0
+    capsys.readouterr()
+
+    # An operator tweaks their terminal config and retargets a projection;
+    # the next (repair/upgrade) install must reclaim both instead of dying.
+    terminal_entry = home / "config/vibecrafted/terminal-entry.toml"
+    canonical_entry = terminal_entry.read_text(encoding="utf-8")
+    drifted_entry = canonical_entry + "# operator font tweak\n"
+    terminal_entry.write_text(drifted_entry, encoding="utf-8")
+    projection = home / ".codex/skills/vc-audit"
+    assert projection.is_symlink()
+    projection.unlink()
+    projection.symlink_to(home / "operator-owned-target")
+
+    assert installer.cmd_runtime_install(args) == 0
+    captured = capsys.readouterr()
+    assert "diverged since install" in captured.err
+
+    assert terminal_entry.read_text(encoding="utf-8") == canonical_entry
+    assert projection.is_symlink()
+    assert projection.resolve() == (
+        runtime_home
+        / "releases/9.9.9+g12345678/vibecrafted-core/vibecrafted_core/skills/vc-audit"
+    )
+    receipt = json.loads(
+        (runtime_home / installer.RUNTIME_INSTALL_RECEIPT).read_text(encoding="utf-8")
+    )
+    drift_backups = receipt["drift_backups"]
+    entry_backup = Path(drift_backups[str(terminal_entry)])
+    assert entry_backup.read_text(encoding="utf-8") == drifted_entry
+    projection_backup = Path(drift_backups[str(projection)])
+    assert projection_backup.is_symlink()
+    assert projection_backup.readlink() == home / "operator-owned-target"
+
+
 def test_runtime_pack_uninstall_refuses_modified_agent_projection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
