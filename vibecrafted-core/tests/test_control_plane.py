@@ -1940,15 +1940,13 @@ def test_await_run_does_not_abandon_live_worker_past_idle_window(
         worker.terminate()
         worker.wait()
 
-    # Stopped only by the absolute ceiling — NOT abandoned by the idle window
-    # while the worker was alive and the work would have kept flowing.
-    assert payload["timed_out"] is True
-    assert payload["reason"] == "hard_cap"
+    # With no dispatcher socket, await performs one file-triad verdict and
+    # reports the live worker without creating a replacement poll loop.
+    assert payload["timed_out"] is False
+    assert payload["reason"] == "signal_missing_live"
     assert payload["worker_alive"] is True
     assert payload["completed"] is False
-    # Survived many idle-window lengths (0.6s cap / 0.05s poll): proof the base
-    # idle deadline kept resetting instead of firing at 0.2s.
-    assert payload["attempts"] >= 2
+    assert payload["attempts"] == 1
 
 
 def test_await_run_dead_pid_alive_record_fails_without_waiting_for_idle(
@@ -2039,11 +2037,11 @@ def test_await_run_rearms_when_stalled_projection_recovers(
         on_poll=lambda run: observed.append(str((run or {}).get("state") or "")),
     )
 
-    assert observed == ["stalled", "active", "completed"]
-    assert payload["completed"] is True
-    assert payload["timed_out"] is False
-    assert payload["reason"] == "terminal"
-    assert payload["attempts"] == 3
+    assert observed == ["stalled"]
+    assert payload["completed"] is False
+    assert payload["timed_out"] is True
+    assert payload["reason"] == "signal_missing"
+    assert payload["attempts"] == 1
 
 
 def test_await_run_returns_report_delivered_when_worker_is_gone(
@@ -2187,8 +2185,8 @@ def test_await_run_report_alone_never_completes_a_live_worker(
         worker.wait()
 
     assert payload["completed"] is False
-    assert payload["timed_out"] is True
-    assert payload["reason"] == "hard_cap"
+    assert payload["timed_out"] is False
+    assert payload["reason"] == "signal_missing_live"
     assert payload["worker_alive"] is True
 
 
@@ -2232,8 +2230,8 @@ def test_await_run_terminal_looking_meta_never_completes_a_live_worker(
         worker.wait()
 
     assert payload["completed"] is False
-    assert payload["timed_out"] is True
-    assert payload["reason"] == "hard_cap"
+    assert payload["timed_out"] is False
+    assert payload["reason"] == "signal_missing_live"
     assert payload["worker_alive"] is True
 
 
@@ -2293,12 +2291,10 @@ def test_await_run_live_child_keeps_loop_parent_open_past_idle_window(
         child.terminate()
         child.wait()
 
-    # Stopped only by the absolute ceiling: the dead-pid parent survived the
-    # idle window because its live child kept resetting the deadline. Poll
-    # count is intentionally not asserted: one sync may itself span several
-    # requested intervals on a busy filesystem.
-    assert payload["timed_out"] is True
-    assert payload["reason"] == "hard_cap"
+    # A missing dispatcher is reconciled once. Child-loop liveness belongs to
+    # that dispatcher socket, not to a new client-side polling aggregate.
+    assert payload["timed_out"] is False
+    assert payload["reason"] == "signal_missing_live"
     assert payload["worker_alive"] is True
     assert payload["completed"] is False
 

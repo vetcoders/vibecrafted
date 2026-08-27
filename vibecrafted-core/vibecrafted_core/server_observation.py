@@ -1,13 +1,11 @@
-"""Client for the vc-server-owned run observation contract.
+"""Run observation clients.
 
-The CLI is deliberately a thin HTTP client.  It never falls back to
-``control_plane.await_run``: a missing server is an explicit product failure,
-not permission to create another private filesystem poller.
+Dashboard/observe reads stay on vc-server. ``await`` is a local UDS subscriber:
+the dispatcher owns wake delivery and durable control-plane files own truth.
 """
 
 from __future__ import annotations
 
-import http.client
 import json
 import urllib.error
 import urllib.parse
@@ -94,60 +92,12 @@ def await_run(
     hard_cap_seconds: float | None,
     interval_seconds: float,
 ) -> dict[str, Any]:
-    """Subscribe to the server's shared monitor and return its verdict."""
-    encoded = urllib.parse.quote(run_id, safe="")
-    query: dict[str, str] = {
-        "idle_timeout": str(max(float(idle_timeout_seconds), 0.0)),
-        "interval": str(max(float(interval_seconds), 0.1)),
-    }
-    if hard_cap_seconds is not None:
-        query["hard_cap"] = str(max(float(hard_cap_seconds), 0.0))
-    path = f"/api/control/runs/{encoded}/await?{urllib.parse.urlencode(query)}"
-    # Connect with a short explicit budget, then hand deadline ownership to the
-    # server.  ``urllib`` has one timeout for both phases, which would turn the
-    # idle window into an accidental client-side wall-clock cap.
-    origin = urllib.parse.urlsplit(_origin())
-    if origin.scheme not in {"http", "https"} or not origin.hostname:
-        raise ServerObservationError(f"invalid vc-server origin: {_origin()}")
-    connection_type = (
-        http.client.HTTPSConnection
-        if origin.scheme == "https"
-        else http.client.HTTPConnection
+    """Subscribe directly to the dispatcher signal channel."""
+    from .control_plane import await_run as await_control_plane_run
+
+    return await_control_plane_run(
+        run_id,
+        timeout_seconds=idle_timeout_seconds,
+        interval_seconds=interval_seconds,
+        hard_cap_seconds=hard_cap_seconds,
     )
-    connection = connection_type(origin.hostname, origin.port, timeout=3.0)
-    try:
-        connection.connect()
-        if connection.sock is not None:
-            read_timeout = (
-                max(float(hard_cap_seconds), 0.0) + 5.0
-                if hard_cap_seconds is not None
-                else None
-            )
-            connection.sock.settimeout(read_timeout)
-        prefix = origin.path.rstrip("/")
-        connection.request(
-            "GET", f"{prefix}{path}", headers={"Accept": "application/json"}
-        )
-        response = connection.getresponse()
-        body = response.read()
-    except (TimeoutError, OSError, http.client.HTTPException) as exc:
-        raise ServerObservationError(
-            f"vc-server unavailable at {_origin()}: {type(exc).__name__}: {exc}"
-        ) from exc
-    finally:
-        connection.close()
-    try:
-        payload = json.loads(body)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ServerObservationError(
-            "vc-server returned invalid observation JSON"
-        ) from exc
-    if response.status in {404, 408, 409, 503} and isinstance(payload, dict):
-        return payload
-    if response.status >= 400:
-        raise ServerObservationError(
-            f"vc-server observation endpoint returned HTTP {response.status}"
-        )
-    if not isinstance(payload, dict):
-        raise ServerObservationError("vc-server returned a non-object observation")
-    return payload

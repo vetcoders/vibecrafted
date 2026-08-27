@@ -1013,31 +1013,24 @@ def test_root_cli_agent_await_rejects_completed_payload_when_worker_alive(
     assert "state:      running" in captured.out
 
 
-def test_root_cli_agent_await_server_unavailable_fails_closed_without_local_poller(
+def test_root_cli_agent_await_does_not_require_server(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     monkeypatch.setattr(
-        cli, "resolve_server_run_id", lambda *_args, **_kwargs: "impl-1"
-    )
-    monkeypatch.setattr(
-        cli,
-        "await_run",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("private control-plane await loop must not run")
-        ),
-        raising=False,
-    )
-    monkeypatch.setattr(
         cli,
         "await_run_from_server",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            cli.ServerObservationError("vc-server unavailable at 127.0.0.1:9")
-        ),
+        lambda run_id, **_kwargs: {
+            "run_id": run_id,
+            "completed": True,
+            "outcome": "terminal",
+            "reason": "terminal",
+            "worker_alive": False,
+            "run": {"run_id": run_id, "state": "completed", "exit_code": 0},
+        },
     )
 
-    assert cli.main(["codex", "await", "--run-id", "impl-1"]) == 2
-
-    assert "vc-server unavailable" in capsys.readouterr().err
+    assert cli.main(["codex", "await", "--run-id", "impl-1"]) == 0
+    assert "await: completed" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("outcome", ["idle_stall", "hard_cap"])

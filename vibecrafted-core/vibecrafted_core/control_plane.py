@@ -41,6 +41,7 @@ from .report_contract import (
     worker_authored_report,
 )
 from .run_mutation import run_mutation_locks
+from .run_signal import wait_for_run_signal
 from .runtime_paths import vibecrafted_home
 from .settlement import (
     SETTLEMENT_EVENT_KIND,
@@ -4143,139 +4144,144 @@ def await_run(
     report_path: str | None = None,
     on_poll: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
-    """Liveness-aware bounded wait for a run using control-plane state only.
+    """Block on the dispatcher UDS, then reconcile one durable file verdict.
 
-    ``timeout_seconds`` is an IDLE deadline, not a blind wall clock: it RESETS
-    whenever the run shows movement (transcript growth, state/heartbeat/token
-    advance) or the worker process is demonstrably alive (``_worker_is_alive``).
-    A run is only abandoned (``timed_out``) on a genuine stall — the idle window
-    elapsing with zero movement AND no live worker — or, when configured, the
-    optional ``hard_cap_seconds`` absolute ceiling. This stops the orchestrator
-    from killing a marbles loop that is still doing real work (~13 min single
-    marble) just because a fixed wall-clock budget expired.
+    The socket is notification only. A terminal line or EOF wakes this call;
+    meta/snapshot/report files decide the returned state. If the socket is
+    absent or stale, the same triad is checked exactly once — no private poller
+    and no dependency on vc-server or ``control-plane-revalidate``.
 
-    Two more truths keep this the ONE await nobody has to second-guess:
-
-    - A non-empty report file (``report_path`` argument, else the run's own
-      ``latest_report``) from a worker that is GONE is the handoff itself —
-      return ``completed`` with ``reason: report_delivered`` immediately
-      instead of idling out a full window on the corpse. While the worker is
-      alive the report alone never completes the wait: it may be mid-write,
-      or a stale leftover from a previous attempt on the same announced path.
-    - Movement and liveness aggregate the run's CHILD runs (marbles/polarize
-      loop rounds live in separate ``<parent>-…-L<n>`` records), so a working
-      child keeps the parent's await open even while the parent record is
-      frozen between rounds.
-
-    ``on_poll`` (when given) is called once per poll with the latest run
-    projection — for callers that print progress while blocking.
+    ``interval_seconds`` and ``on_poll`` remain accepted for API compatibility;
+    neither creates a polling loop.
     """
     target = str(run_id or "").strip()
     if not target:
         raise ValueError("run_id is required")
-
-    idle_window = max(float(timeout_seconds), 0.0)
-    interval_seconds = max(float(interval_seconds), 0.1)
     hard_cap = _resolve_await_hard_cap(hard_cap_seconds)
+    signal = wait_for_run_signal(target, timeout=hard_cap)
+    kind = str(signal.get("kind") or "missing")
 
-    start = time.monotonic()
-    idle_deadline = start + idle_window
-    hard_deadline = start + hard_cap if hard_cap is not None else None
-    previous_fingerprint: tuple[Any, ...] | None = None
-    attempts = 0
+    runtime_meta_path = _runtime_run_dir(target) / "meta.json"
+    runtime_meta = _read_json(runtime_meta_path)
+    snapshot = _read_json(_snapshot_path(target))
     last_run: dict[str, Any] | None = None
+    child_runs: list[dict[str, Any]] = []
+    if snapshot:
+        last_run = dict(snapshot)
+    if runtime_meta:
+        if last_run is None:
+            last_run = {}
+        last_run.update(runtime_meta)
+        last_run["run_id"] = target
+        last_run["meta"] = str(runtime_meta_path)
+        last_run["state"] = str(
+            runtime_meta.get("state") or runtime_meta.get("status") or "unknown"
+        )
+        last_run["latest_report"] = str(
+            runtime_meta.get("report") or runtime_meta.get("latest_report") or ""
+        )
+        last_run["latest_transcript"] = str(
+            runtime_meta.get("transcript")
+            or runtime_meta.get("latest_transcript")
+            or ""
+        )
+    if last_run is None and kind == "terminal":
+        last_run = {
+            "run_id": target,
+            "state": str(signal.get("state") or "completed"),
+            "exit_code": _coerce_int(signal.get("exit")),
+            "latest_report": str(signal.get("report") or ""),
+            "settlement": str(signal.get("settlement") or ""),
+            "liveness": "terminal",
+        }
+    elif last_run is None and kind != "missing":
+        # Legacy/non-dispatcher records get one reconciliation pass, never a loop.
+        try:
+            projected = sync_state(only_run_id=target)
+        except OSError:
+            projected = {}
+        last_run = _select_run(projected, target) if projected else None
 
-    while True:
-        attempts += 1
-        # Scoped to the awaited run (+ its child rounds): a 5s await poll must
-        # not rebuild the whole board under the shared lock every tick.
-        snapshot = sync_state(only_run_id=target)
-        last_run = _select_run(snapshot, target)
-        if on_poll is not None:
-            on_poll(last_run)
-        children = _await_child_runs(snapshot, target)
-        worker_alive = bool(
+    if kind == "missing":
+        # One scoped reconciliation materializes legacy artifact meta and its
+        # settlement event. This is a single triad read, never a wake loop.
+        try:
+            projected = sync_state(only_run_id=target)
+        except OSError:
+            projected = {}
+        projected_run = _select_run(projected, target) if projected else None
+        if projected_run is not None:
+            last_run = projected_run
+        child_runs = _await_child_runs(projected, target) if projected else []
+
+    if on_poll is not None:
+        on_poll(last_run)
+
+    if kind == "timeout":
+        worker_alive = bool(last_run and _await_process_is_alive(last_run))
+        return _finalize_await_result(
+            target,
+            last_run,
+            completed=False,
+            timed_out=True,
+            reason="hard_cap",
+            worker_alive=worker_alive,
+            attempts=1,
+        )
+
+    dispatcher_gone = kind in {"terminal", "eof"}
+    worker_alive = bool(
+        not dispatcher_gone
+        and (
             (last_run is not None and _await_process_is_alive(last_run))
-            or any(_await_process_is_alive(child) for child in children)
+            or any(_await_process_is_alive(child) for child in child_runs)
         )
-        if last_run is not None and _run_is_terminal(last_run) and not worker_alive:
-            return _finalize_await_result(
-                target,
-                last_run,
-                completed=True,
-                timed_out=False,
-                reason="terminal",
-                worker_alive=False,
-                attempts=attempts,
-            )
-
-        delivered_report = str(
-            report_path or (last_run.get("latest_report") if last_run else "") or ""
-        ).strip()
-        # Worker death is the handoff seal: a LIVE worker may still be
-        # mid-write, and the announced path can hold a stale report from a
-        # previous attempt (stage retries reuse artifact paths) — returning
-        # `completed` on it reported exit 0 for a still-working run.
-        if (
-            delivered_report
-            and _report_file_written(delivered_report)
-            and not worker_alive
-        ):
-            return _finalize_await_result(
-                target,
-                last_run,
-                completed=True,
-                timed_out=False,
-                reason="report_delivered",
-                worker_alive=False,
-                attempts=attempts,
-            )
-
-        now = time.monotonic()
-        fingerprint = (
-            _await_progress_fingerprint(last_run),
-            tuple(
-                sorted(
-                    (str(child.get("run_id") or ""),)
-                    + _await_progress_fingerprint(child)
-                    for child in children
-                )
-            ),
+    )
+    delivered_report = str(
+        report_path
+        or (last_run or {}).get("latest_report")
+        or signal.get("report")
+        or ""
+    ).strip()
+    terminal = bool(last_run and _run_is_terminal(last_run))
+    completed = bool(
+        not worker_alive
+        and (
+            dispatcher_gone
+            or terminal
+            or (delivered_report and _report_file_written(delivered_report))
         )
-        moved = fingerprint != previous_fingerprint
-        previous_fingerprint = fingerprint
-        # Real activity or a live worker keeps the idle window open: never
-        # abandon a run that is demonstrably making progress or alive.
-        if moved or worker_alive:
-            idle_deadline = now + idle_window
+    )
+    if completed:
+        reason = "terminal" if kind == "terminal" or terminal else kind
+        if reason == "missing" and delivered_report:
+            reason = "report_delivered"
+        result = _finalize_await_result(
+            target,
+            last_run,
+            completed=True,
+            timed_out=False,
+            reason=reason,
+            worker_alive=False,
+            attempts=1,
+        )
+        result["outcome"] = "terminal"
+        result["signal_kind"] = kind
+        result["signal_ts"] = str(signal.get("ts") or "")
+        return result
 
-        if hard_deadline is not None and now >= hard_deadline:
-            return _finalize_await_result(
-                target,
-                last_run,
-                completed=False,
-                timed_out=True,
-                reason="hard_cap",
-                worker_alive=worker_alive,
-                attempts=attempts,
-            )
-        if now >= idle_deadline and not worker_alive:
-            return _finalize_await_result(
-                target,
-                last_run,
-                completed=False,
-                timed_out=True,
-                reason="idle_stall",
-                worker_alive=worker_alive,
-                attempts=attempts,
-            )
-
-        sleep_for = interval_seconds
-        if hard_deadline is not None:
-            sleep_for = min(sleep_for, max(hard_deadline - now, 0.0))
-        if not worker_alive:
-            sleep_for = min(sleep_for, max(idle_deadline - now, 0.0))
-        time.sleep(max(sleep_for, 0.0))
+    result = _finalize_await_result(
+        target,
+        last_run,
+        completed=False,
+        timed_out=not worker_alive,
+        reason="signal_missing_live" if worker_alive else "signal_missing",
+        worker_alive=worker_alive,
+        attempts=1,
+    )
+    result["outcome"] = "live" if worker_alive else "missing"
+    result["signal_kind"] = kind
+    return result
 
 
 def run_liveness(run_id: str) -> dict[str, Any]:

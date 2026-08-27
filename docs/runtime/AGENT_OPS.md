@@ -306,14 +306,14 @@ contract gap, not by agent paranoia.
 
 ### Mechanism (five confirmed gaps, all fixed at the source)
 
-1. **A private await loop per client**: `cli._agent_await`'s human path had its own
-   inline loop treating `--timeout` as an ABSOLUTE wall clock — it abandoned
-   demonstrably-working runs at 300 s. A later 2026-08-26 incident multiplied
-   the canonical Python function into fourteen independent processes for one
-   run. Fixed: CLI and MCP now subscribe to the existing `vc-server` hub, which
-   owns exactly one ephemeral monitor per canonical home plus run id. Python
-   remains the sole durable writer and settlement authority. A new client-side
-   loop is this class reborn.
+1. **A private await loop per client**: `cli._agent_await` once polled files and
+   later routed wake delivery through HTTP → vc-server → subprocess → deck.
+   The latter failed when `control-plane-revalidate` was absent from the deck,
+   reporting a live run as disappeared. Fixed 2026-08-28: the dispatcher owns
+   one Unix stream socket per run and fans JSON-line heartbeats/one terminal
+   event to every connected awaiter. Clients block in `connect()` + `read()`;
+   a late client receives the last event replay. No client or server poll loop
+   owns time, and vc-server is optional for wake delivery.
 2. **Loop parents look dead while children work**: marbles/polarize rounds are
    sequenced deterministically (next round fires on the previous child
    PROCESS EXIT + artifact validation in `workflow_runtime.run_marbles`), but
@@ -356,11 +356,15 @@ the whole answer. If an agent feels the need to double-guard await with a
 manual monitor, treat that as a Class 3 bug report against the runtime — fix
 the contract, do not normalize the hedge.
 
-The operational verdict is deliberately redundant: await verdict, terminal run
-meta, and worker pid death must converge before "done" leaves the supervisor.
-Report presence is a fourth promised-artifact check, not a replacement for
-liveness. Two agreeing signals can justify recovery or cautious next action;
-three signals are the bar for done.
+The operational verdict is deliberately redundant. The first signal is now the
+dispatcher socket: terminal JSON wakes normally; EOF means the dispatcher died
+and is terminal by definition. The durable triad then decides truth exactly
+once: terminal run meta, dispatcher/worker death, and an authored report when
+the run promised one. The socket is never an SSOT and carries no settlement
+authority. A missing/refused orphan socket is treated exactly like no socket;
+the file triad is read once, never polled. `observe` and dashboards may still
+use vc-server HTTP, but `await` must work while vc-server and the legacy deck
+verb are absent.
 
 ---
 

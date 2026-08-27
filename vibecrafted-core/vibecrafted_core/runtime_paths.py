@@ -6,6 +6,7 @@ callers never hardcode a user's layout; ``resolve_env_path`` is the shared knob.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -77,6 +78,18 @@ def vibecrafted_home() -> Path:
     if os.environ.get("VIBECRAFTED_HOME"):
         return Path(os.environ["VIBECRAFTED_HOME"]).expanduser()
     return Path.home() / ".vibecrafted"
+
+
+def run_signal_socket_path(run_id: str) -> Path:
+    """Short, home-scoped Unix socket path for one dispatcher run.
+
+    Darwin limits ``sun_path`` to 104 bytes.  Hashing both the configured
+    Vibecrafted home and run id keeps isolated test/operator homes distinct
+    without leaking long workspace paths into the socket address.
+    """
+    identity = f"{vibecrafted_home().resolve()}\0{run_id}".encode()
+    digest = hashlib.sha256(identity).hexdigest()[:24]
+    return Path("/tmp") / f"vc-cp-{os.getuid()}" / f"{digest}.sock"
 
 
 def vibecrafted_backups_home() -> Path:

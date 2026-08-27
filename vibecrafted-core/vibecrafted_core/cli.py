@@ -1119,7 +1119,7 @@ def _observe_resolved(run_id: str, *, json_output: bool) -> int:
 
 
 def _agent_await(agent: str, argv: Sequence[str]) -> int:
-    """Subscribe to the one vc-server monitor for a control-plane run."""
+    """Subscribe to the dispatcher UDS; vc-server is not part of wake delivery."""
     parser = argparse.ArgumentParser(prog=f"vibecrafted await {agent}")
     parser.add_argument("--run-id", default="")
     parser.add_argument("--last", action="store_true")
@@ -1145,24 +1145,29 @@ def _agent_await(agent: str, argv: Sequence[str]) -> int:
     )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(list(argv))
-    try:
-        run_id = resolve_server_run_id(agent, args.run_id, last=args.last)
-    except ServerObservationError as exc:
-        print(f"await: {exc}", file=sys.stderr)
-        return 2
+    run_id = str(args.run_id or "").strip()
+    if not run_id and args.last:
+        state = sync_state()
+        candidates = list(state.get("active_runs") or []) + list(
+            state.get("recent_runs") or []
+        )
+        run_id = next(
+            (
+                str(run.get("run_id") or "")
+                for run in candidates
+                if str(run.get("agent") or "") == agent
+            ),
+            "",
+        )
     if not run_id:
         print("No run found. Pass --run-id or --last.", file=sys.stderr)
         return 1
-    try:
-        result = await_run_from_server(
-            run_id,
-            idle_timeout_seconds=args.timeout,
-            interval_seconds=args.interval,
-            hard_cap_seconds=args.hard_cap,
-        )
-    except ServerObservationError as exc:
-        print(f"await: {exc}", file=sys.stderr)
-        return 2
+    result = await_run_from_server(
+        run_id,
+        idle_timeout_seconds=args.timeout,
+        interval_seconds=args.interval,
+        hard_cap_seconds=args.hard_cap,
+    )
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         final_run = result.get("run")

@@ -8,7 +8,7 @@ import os
 import signal
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -418,9 +418,14 @@ class AsyncRunHandle:
 class AsyncSupervisor:
     """Async orchestrator: spawns one agent process per run, streams and settles it."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        signal_sink: Callable[[str, str], None] | None = None,
+    ) -> None:
         """Initialize an empty run-id -> AsyncRunHandle registry."""
         self._runs: dict[str, AsyncRunHandle] = {}
+        self._signal_sink = signal_sink
 
     def get(self, run_id: str) -> AsyncRunHandle | None:
         """Look up a tracked run handle by id, or None if unknown to this instance."""
@@ -1255,3 +1260,10 @@ class AsyncSupervisor:
             message=message,
             payload=event_payload,
         )
+        if self._signal_sink is not None:
+            try:
+                self._signal_sink(run_id, state.value)
+            except (OSError, RuntimeError):
+                # Durable files own truth. A broken wake transport must never
+                # corrupt or abort the supervised lifecycle.
+                pass
