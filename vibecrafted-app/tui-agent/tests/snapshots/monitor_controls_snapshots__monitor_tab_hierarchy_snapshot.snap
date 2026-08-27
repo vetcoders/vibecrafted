@@ -1,0 +1,44 @@
+---
+source: tui-agent/tests/monitor_controls_snapshots.rs
+expression: text
+---
+Vibecrafted Operator Console  runs: 2 | active 1 | stalled 1
+workspace: vibecrafted  |  active 1  stalled 1  |  scope: live  |  Monitor
+┌Surface───────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ Monitor live 2 │ Dispatch workflow/claude │ Controls 10 │ Mission 0|0                                                │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌Monitor pulse─────────────────────────┐┌Selection─────────────────────────────┐┌Filter────────────────────────────────┐
+│2 runs visible                        ││implement · codex · vibecrafted       ││live scope                            │
+│1 active · 1 stalled                  ││active  impl-1                        ││f cycles live/history/all             │
+│                                      ││                                      ││                                      │
+└──────────────────────────────────────┘└──────────────────────────────────────┘└──────────────────────────────────────┘
+┌Live · this workspace────────────────────┐┌Run dossier────────────────────────────────────────────────────────────────┐
+│▶ active  implement · codex · vibecrafted││run: implement · codex · vibecrafted                                       │
+│  stalled  review · claude · vibecrafted ││id: impl-1                                                                 │
+│                                         ││status: active (running)                                                   │
+│                                         ││age: 1m ago                                                                │
+│                                         ││operator_session: operator-1                                               │
+│                                         ││session_id: sess-impl-1                                                    │
+│                                         ││workspace: /work/vetcoders/vibecrafted                                     │
+│                                         ││report: /work/vetcoders/vibecrafted/report.md                              │
+│                                         ││transcript: /work/vetcoders/vibecrafted/transcript.human.log               │
+│                                         ││                                                                           │
+│                                         ││Attach hint: vibecrafted dashboard attach operator-1                       │
+│                                         ││vc-frame hint: vc-frame attach operator-1                                  │
+│                                         ││Resume hint: vibecrafted resume codex                                      │
+│                                         ││                                                                           │
+│                                         ││State root: /fixture/state                                                 │
+│                                         │└───────────────────────────────────────────────────────────────────────────┘
+│                                         │┌Recent timeline────────────────────────────────────────────────────────────┐
+│                                         ││No recent events for this run.                                             │
+│                                         ││                                                                           │
+│                                         ││                                                                           │
+│                                         ││                                                                           │
+│                                         ││                                                                           │
+│                                         ││                                                                           │
+│                                         ││                                                                           │
+│                                         ││                                                                           │
+└─────────────────────────────────────────┘└───────────────────────────────────────────────────────────────────────────┘
+Monitor: ↑/↓ runs  / search  f scope  x archive  d controls  ? help
+Global: q quit  r refresh  a cycle agent  v cycle runtime  y copy  Ctrl+L clear search  ? help
+state root: /fixture/state

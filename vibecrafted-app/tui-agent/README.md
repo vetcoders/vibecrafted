@@ -37,11 +37,14 @@ canonical `control_plane` path is missing, so older layouts keep loading.
 ## Refresh cadence
 
 The 250 ms UI tick redraws cached state only. Expensive control-plane
-projection and Polarize prism discovery are invalidated by filesystem events,
-debounced for 100 ms, and scheduled within one second at the default tick rate.
-Observe polling runs independently every two seconds. If a filesystem watcher
-cannot start, its affected surface falls back to a 30-second refresh. Pressing
-`r` always bypasses the scheduler and forces a complete refresh.
+projection and Polarize prism discovery are invalidated by filesystem events on
+the projection files (`events.jsonl`, `runs/*.json`) and `artifacts/`,
+debounced for 100 ms, and skipped when the projection revision is unchanged.
+Transcript appends under `runtime_runs/` do not recompute the board. Observe
+polling (Observe view only) starts at two seconds and backs off to 30 seconds
+when the server is offline. If a filesystem watcher cannot start, its affected
+surface falls back to a 30-second refresh. Pressing `r` always bypasses the
+scheduler and forces a complete refresh.
 
 For an isolated performance proof, set `VOC_REFRESH_TRACE_PATH` to record one
 JSONL row after each control-plane projection and Polarize discovery. Leave it

@@ -21,12 +21,15 @@ use crossterm::terminal::{
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use std::collections::hash_map::DefaultHasher;
+use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 const CHANGE_DEBOUNCE: Duration = Duration::from_millis(100);
 const RENDER_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -56,6 +59,7 @@ struct RefreshScheduler {
     last_artifacts: Instant,
     last_rendered_runs: Instant,
     last_observe: Instant,
+    observe_failures: u32,
 }
 
 impl RefreshScheduler {
@@ -70,6 +74,7 @@ impl RefreshScheduler {
             last_artifacts: now,
             last_rendered_runs: now,
             last_observe: now,
+            observe_failures: 0,
         }
     }
 
@@ -84,6 +89,21 @@ impl RefreshScheduler {
         if change.mission_control {
             self.mission_dirty_since.get_or_insert(now);
         }
+    }
+
+    fn note_observe_result(&mut self, ok: bool) {
+        if ok {
+            self.observe_failures = 0;
+        } else {
+            self.observe_failures = self.observe_failures.saturating_add(1).min(4);
+        }
+    }
+
+    fn observe_interval(&self) -> Duration {
+        let shift = self.observe_failures.min(4);
+        OBSERVE_REFRESH_INTERVAL
+            .saturating_mul(1 << shift)
+            .min(WATCHER_FALLBACK_INTERVAL)
     }
 
     fn plan(&mut self, now: Instant) -> RefreshPlan {
@@ -113,7 +133,7 @@ impl RefreshScheduler {
             plan.rendered_runs = !plan.control_plane;
             self.last_rendered_runs = now;
         }
-        if now.duration_since(self.last_observe) >= OBSERVE_REFRESH_INTERVAL {
+        if now.duration_since(self.last_observe) >= self.observe_interval() {
             plan.observe = true;
             self.last_observe = now;
         }
@@ -170,19 +190,20 @@ fn run_app(config: AppConfig) -> anyhow::Result<()> {
             }
         };
         let (artifact_tx, artifact_rx) = mpsc::channel();
-        let artifact_watcher =
-            match start_artifact_watcher(&crate::polarize::vibecrafted_home(), artifact_tx) {
-                Ok(watcher) => Some(watcher),
-                Err(error) => {
-                    app.append_status(format!("artifact watcher unavailable: {error}"));
-                    None
-                }
-            };
+        let artifact_root = artifact_watch_root(&crate::polarize::vibecrafted_home());
+        let artifact_watcher = match start_artifact_watcher(&artifact_root, artifact_tx) {
+            Ok(watcher) => Some(watcher),
+            Err(error) => {
+                app.append_status(format!("artifact watcher unavailable: {error}"));
+                None
+            }
+        };
         let mut scheduler = RefreshScheduler::new(
             Instant::now(),
             state_watcher.is_some(),
             artifact_watcher.is_some(),
         );
+        let mut last_projection = projection_revision(&app.config.state_root);
         loop {
             terminal.draw(|frame| ui::draw(frame, &app))?;
             let last_draw = Instant::now();
@@ -219,7 +240,11 @@ fn run_app(config: AppConfig) -> anyhow::Result<()> {
             }
             let plan = scheduler.plan(now);
             if plan.control_plane {
-                app.refresh_control_plane();
+                let revision = projection_revision(&app.config.state_root);
+                if revision != last_projection {
+                    app.refresh_control_plane();
+                    last_projection = revision;
+                }
             }
             if plan.polarize {
                 app.refresh_polarize();
@@ -230,8 +255,9 @@ fn run_app(config: AppConfig) -> anyhow::Result<()> {
             if plan.rendered_runs {
                 app.refresh_rendered_runs();
             }
-            if plan.observe {
-                app.refresh_observe();
+            if plan.observe && app.config.view == crate::observe::ConsoleView::Observe {
+                let ok = app.refresh_observe();
+                scheduler.note_observe_result(ok);
             }
         }
         Ok(())
@@ -861,12 +887,21 @@ fn launch_error(error: impl Into<anyhow::Error>) -> LaunchRunError {
 
 fn start_state_watcher(path: &Path, tx: Sender<()>) -> anyhow::Result<RecommendedWatcher> {
     let mut watcher = RecommendedWatcher::new(
-        move |_| {
-            let _ = tx.send(());
+        move |event: notify::Result<notify::Event>| {
+            let Ok(event) = event else {
+                return;
+            };
+            if event.paths.iter().any(|candidate| is_projection_path(candidate)) {
+                let _ = tx.send(());
+            }
         },
         NotifyConfig::default(),
     )?;
-    watcher.watch(path, RecursiveMode::Recursive)?;
+    for root in control_plane_watch_roots(path) {
+        if root.exists() {
+            watcher.watch(&root, RecursiveMode::NonRecursive)?;
+        }
+    }
     Ok(watcher)
 }
 
@@ -893,14 +928,100 @@ fn start_artifact_watcher(
 fn classify_artifact_change(paths: &[PathBuf]) -> ArtifactChange {
     ArtifactChange {
         polarize: paths.iter().any(|path| {
-            path.components()
-                .any(|component| component.as_os_str() == "polarize")
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == "prism.json")
+                && path
+                    .components()
+                    .any(|component| component.as_os_str() == "polarize")
         }),
         mission_control: paths.iter().any(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.ends_with(".meta.json"))
         }),
+    }
+}
+
+fn artifact_watch_root(home: &Path) -> PathBuf {
+    home.join("artifacts")
+}
+
+fn control_plane_watch_roots(state_root: &Path) -> Vec<PathBuf> {
+    vec![
+        state_root.to_path_buf(),
+        state_root.join("runs"),
+        state_root.join("runs").join(".archived"),
+        state_root.join("runtime_runs"),
+    ]
+}
+
+fn is_projection_path(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if name.ends_with(".log") || name.ends_with(".tmp") {
+        return false;
+    }
+    if name == "events.jsonl" {
+        return true;
+    }
+    if name.ends_with(".json") {
+        return !path
+            .components()
+            .any(|component| component.as_os_str() == "runtime_runs");
+    }
+    path.components()
+        .any(|component| component.as_os_str() == "runtime_runs")
+}
+
+fn projection_revision(root: &Path) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    hash_mtime(&root.join("events.jsonl"), &mut hasher);
+    hash_dir_entries(&root.join("runs"), &mut hasher);
+    hash_dir_entries(&root.join("runs").join(".archived"), &mut hasher);
+    hash_dir_names(&root.join("runtime_runs"), &mut hasher);
+    hasher.finish()
+}
+
+fn hash_mtime(path: &Path, hasher: &mut DefaultHasher) {
+    path.hash(hasher);
+    let modified = fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    modified.hash(hasher);
+}
+
+fn hash_dir_entries(path: &Path, hasher: &mut DefaultHasher) {
+    path.hash(hasher);
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    let mut names = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .collect::<Vec<_>>();
+    names.sort();
+    for file in names {
+        hash_mtime(&file, hasher);
+    }
+}
+
+fn hash_dir_names(path: &Path, hasher: &mut DefaultHasher) {
+    path.hash(hasher);
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    let mut names = entries
+        .flatten()
+        .map(|entry| entry.file_name())
+        .collect::<Vec<_>>();
+    names.sort();
+    names.len().hash(hasher);
+    for name in names {
+        name.hash(hasher);
     }
 }
 
@@ -911,6 +1032,7 @@ mod tests {
     use crate::state::{ControlPlaneState, RenderedRun, RunKind, RunSnapshot};
 
     fn sample_run(run_id: &str, agent: &str, session: &str) -> RenderedRun {
+        let now = chrono::Utc::now();
         RenderedRun {
             snapshot: RunSnapshot {
                 run_id: run_id.to_string(),
@@ -920,9 +1042,9 @@ mod tests {
                 mode: Some("implement".to_string()),
                 state: Some("running".to_string()),
                 status: None,
-                started_at: Some("2026-04-19T10:00:00Z".to_string()),
-                updated_at: Some("2026-04-19T10:01:00Z".to_string()),
-                last_heartbeat: Some("2026-04-19T10:01:30Z".to_string()),
+                started_at: Some((now - chrono::Duration::minutes(2)).to_rfc3339()),
+                updated_at: Some((now - chrono::Duration::minutes(1)).to_rfc3339()),
+                last_heartbeat: Some(now.to_rfc3339()),
                 root: Some(format!("/tmp/{run_id}")),
                 operator_session: Some(session.to_string()),
                 latest_report: Some(format!("/tmp/{run_id}/report.md")),
@@ -1181,19 +1303,108 @@ mod tests {
     }
 
     #[test]
+    fn transcript_churn_does_not_invalidate_the_control_plane_projection() {
+        assert!(!is_projection_path(&PathBuf::from(
+            "/tmp/control_plane/runtime_runs/impl-1/transcript.log"
+        )));
+        assert!(!is_projection_path(&PathBuf::from(
+            "/tmp/control_plane/runtime_runs/impl-1/transcript.human.log"
+        )));
+        assert!(is_projection_path(&PathBuf::from(
+            "/tmp/control_plane/events.jsonl"
+        )));
+        assert!(is_projection_path(&PathBuf::from(
+            "/tmp/control_plane/runs/impl-1.json"
+        )));
+        assert!(is_projection_path(&PathBuf::from(
+            "/tmp/control_plane/runtime_runs/impl-1"
+        )));
+    }
+
+    #[test]
+    fn projection_revision_ignores_transcript_appends() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("control_plane");
+        let run_dir = root.join("runtime_runs").join("impl-1");
+        std::fs::create_dir_all(root.join("runs")).expect("runs");
+        std::fs::create_dir_all(&run_dir).expect("runtime run");
+        std::fs::write(root.join("events.jsonl"), "{}\n").expect("events");
+        std::fs::write(
+            root.join("runs/impl-1.json"),
+            r#"{"run_id":"impl-1","state":"running"}"#,
+        )
+        .expect("snapshot");
+        std::fs::write(run_dir.join("transcript.log"), "hello\n").expect("transcript");
+        let before = projection_revision(&root);
+        std::fs::write(run_dir.join("transcript.log"), "hello\nworld\n").expect("append");
+        assert_eq!(before, projection_revision(&root));
+        std::fs::write(root.join("events.jsonl"), "{}\n{}\n").expect("events grew");
+        assert_ne!(before, projection_revision(&root));
+    }
+
+    #[test]
+    fn control_plane_and_artifact_watch_roots_are_disjoint() {
+        let home = PathBuf::from("/tmp/vc-home");
+        let state = home.join("control_plane");
+        let artifact = artifact_watch_root(&home);
+        for root in control_plane_watch_roots(&state) {
+            assert_ne!(root, artifact);
+            assert!(!artifact.starts_with(&root));
+            assert!(!root.starts_with(&artifact));
+        }
+    }
+
+    #[test]
+    fn dropping_the_state_watcher_disconnects_the_channel() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (tx, rx) = mpsc::channel();
+        let watcher = start_state_watcher(dir.path(), tx).expect("watcher");
+        drop(watcher);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+                | Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        // After drop the notify callback is gone; a later send path cannot exist.
+        assert!(
+            rx.recv_timeout(Duration::from_millis(50))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn observe_polling_backs_off_after_failures_and_resets_on_success() {
+        let start = Instant::now();
+        let mut scheduler = RefreshScheduler::new(start, true, true);
+        scheduler.note_observe_result(false);
+        scheduler.note_observe_result(false);
+        assert_eq!(scheduler.observe_interval(), Duration::from_secs(8));
+        let idle = scheduler.plan(start + Duration::from_secs(4));
+        assert!(!idle.observe);
+        let due = scheduler.plan(start + Duration::from_secs(8));
+        assert!(due.observe);
+        scheduler.note_observe_result(true);
+        assert_eq!(scheduler.observe_interval(), OBSERVE_REFRESH_INTERVAL);
+    }
+
+    #[test]
     fn explicit_refresh_bypasses_debounce_and_loads_new_control_plane_truth() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state_root = dir.path().join("control_plane");
         std::fs::create_dir_all(state_root.join("runs")).expect("runs dir");
+        let heartbeat = chrono::Utc::now().to_rfc3339();
         std::fs::write(
             state_root.join("runs/forced-refresh.json"),
-            r#"{
+            format!(
+                r#"{{
                 "run_id": "forced-refresh",
                 "agent": "codex",
                 "skill": "hydrate",
                 "state": "running",
-                "updated_at": "2026-08-25T21:27:30Z"
-            }"#,
+                "updated_at": "{heartbeat}",
+                "last_heartbeat": "{heartbeat}"
+            }}"#
+            ),
         )
         .expect("run snapshot");
 
