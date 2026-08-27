@@ -263,6 +263,46 @@ class RepositoryClaimRegistry:
             stale_claims=[item for item in claims if item["owner_liveness"] != "alive"],
         )
 
+    def check(
+        self,
+        *,
+        repo: str | Path,
+        paths: Iterable[str],
+        run_id: str = "",
+        session_id: str = "",
+    ) -> dict[str, Any]:
+        """Check paths against live foreign claims without creating a second ledger."""
+        identity = canonical_repo_identity(repo)
+        requested = normalize_owned_paths(paths, identity["worktree_root"])
+        timestamp = self._now()
+        emitted: list[tuple[str, str, dict[str, Any]]] = []
+        with self._locked_registry() as registry:
+            reclaimed = self._reclaim_dead_locked(registry, timestamp, emitted)
+            overlaps = self._conflicts_locked(
+                registry, identity["repo_key"], requested, timestamp
+            )
+            own_claims: list[dict[str, Any]] = []
+            conflicts: list[dict[str, Any]] = []
+            for claim in overlaps:
+                is_owner = bool(
+                    run_id
+                    and session_id
+                    and claim.get("run_id") == run_id
+                    and claim.get("session_id") == session_id
+                )
+                (own_claims if is_owner else conflicts).append(claim)
+            result = _result(
+                not conflicts,
+                "check",
+                repo_identity=identity["repo_identity"],
+                requested_paths=list(requested),
+                own_claims=own_claims,
+                conflicts=conflicts,
+                reclaimed=reclaimed,
+            )
+        self._emit_all(emitted)
+        return result
+
     def health(self, *, repo: str | Path | None = None) -> dict[str, Any]:
         """Doctor projection naming stale owners and impossible stored overlaps."""
         result = self.list(repo=repo)
@@ -629,7 +669,7 @@ def _identity_defaults(args: argparse.Namespace) -> tuple[str, str, str]:
         or os.environ.get("CODEX_SESSION_ID", "")
         or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     )
-    agent = args.agent or os.environ.get("VIBECRAFTED_AGENT", "")
+    agent = getattr(args, "agent", "") or os.environ.get("VIBECRAFTED_AGENT", "")
     return run_id, session_id, agent
 
 
@@ -660,6 +700,14 @@ def _build_parser() -> argparse.ArgumentParser:
     status.add_argument("claim_id")
     listing = sub.add_parser("list", help="list active and stale claims")
     listing.add_argument("--repo", default="")
+    check = sub.add_parser(
+        "check", help="refuse paths owned by another live Living Tree session"
+    )
+    check.add_argument("paths", nargs="+")
+    check.add_argument("--repo", default=".")
+    check.add_argument("--run-id", default="")
+    check.add_argument("--session-id", default="")
+    check.add_argument("--agent", default="")
     release = sub.add_parser("release", help="release one owned claim immediately")
     release.add_argument("claim_id")
     release.add_argument("--run-id", default="")
@@ -701,6 +749,14 @@ def claims_cli_main(argv: Sequence[str] | None = None) -> int:
             result = registry.status(args.claim_id)
         elif args.action == "list":
             result = registry.list(repo=args.repo or None)
+        elif args.action == "check":
+            run_id, session_id, _agent = _identity_defaults(args)
+            result = registry.check(
+                repo=args.repo,
+                paths=args.paths,
+                run_id=run_id,
+                session_id=session_id,
+            )
         elif args.action == "release":
             run_id, session_id, _agent = _identity_defaults(args)
             result = registry.release(
@@ -732,6 +788,9 @@ def _print_human(result: dict[str, Any]) -> None:
     if result.get("conflicts"):
         for conflict in result["conflicts"]:
             print(f"claim conflict: {_conflict_text(conflict)}", file=sys.stderr)
+        return
+    if result.get("action") == "check":
+        print("claim check: staged paths are not owned by another live session")
         return
     claim = result.get("claim")
     if isinstance(claim, dict):

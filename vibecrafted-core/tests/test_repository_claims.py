@@ -130,6 +130,41 @@ def test_non_overlapping_claims_coexist_and_live_owner_survives_zero_grace(
     assert len(registry.list(repo=repo)["claims"]) == 2
 
 
+def test_check_separates_own_claim_from_foreign_commit_conflict(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    registry = RepositoryClaimRegistry(root=tmp_path / "claims", emit_events=False)
+    registry.acquire(
+        repo=repo,
+        owned_paths=("src/a.py",),
+        run_id="run-owner",
+        session_id="session-owner",
+        agent="codex",
+    )
+
+    own = registry.check(
+        repo=repo,
+        paths=("src/a.py",),
+        run_id="run-owner",
+        session_id="session-owner",
+    )
+    foreign = registry.check(
+        repo=repo,
+        paths=("src/a.py",),
+        run_id="run-other",
+        session_id="session-other",
+    )
+
+    assert own["ok"] is True
+    assert len(own["own_claims"]) == 1
+    assert own["conflicts"] == []
+    assert foreign["ok"] is False
+    assert foreign["own_claims"] == []
+    assert foreign["conflicts"][0]["run_id"] == "run-owner"
+
+
 def test_linked_worktrees_share_logical_repository_identity(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     linked = tmp_path / "linked"
@@ -333,6 +368,25 @@ def test_public_cli_json_round_trip(tmp_path: Path, monkeypatch, capsys) -> None
     assert root_cli.main(["claims", "--json", "list", "--repo", str(repo)]) == 0
     listing = json.loads(capsys.readouterr().out)
     assert [claim["claim_id"] for claim in listing["claims"]] == [claim_id]
+
+    assert (
+        root_cli.main(
+            [
+                "claims",
+                "--json",
+                "check",
+                "--repo",
+                str(repo),
+                "--run-id",
+                "cli-run",
+                "--session-id",
+                "cli-session",
+                "src/a.py",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["action"] == "check"
 
     assert (
         root_cli.main(
