@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
-from vibecrafted_core.dispatch.doctor import diagnose_file, main
+from vibecrafted_core.dispatch.doctor import diagnose_file, diagnose_runtime, main
+from vibecrafted_core.dispatch.schema import parse_dispatch
+from vibecrafted_core.repository_claims import RepositoryClaimRegistry
 
 FIXTURES = Path(__file__).parent / "fixtures"
 INVALID = FIXTURES / "invalid"
@@ -109,3 +112,41 @@ def test_dispatch_doctor_cli_returns_zero_for_valid_fixture(
     captured = capsys.readouterr()
     assert code == 0
     assert captured.out.strip() == "dispatch-doctor: ok"
+
+
+def test_dispatch_doctor_names_stale_claim_owner_and_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    RepositoryClaimRegistry(emit_events=False).acquire(
+        repo=repo,
+        owned_paths=("src",),
+        run_id="stale-run",
+        session_id="stale-session",
+        agent="codex",
+        pid=999_999_999,
+    )
+    dispatch = parse_dispatch(
+        f'''schema = "vibecrafted.dispatch.v1"
+[meta]
+repo = "{repo}"
+[[cuts]]
+id = "doctor"
+agent = "codex"
+workflow = "implement"
+prompt = "doctor"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = {{ contains = "ok" }}
+'''
+    )
+
+    errors = diagnose_runtime(dispatch)
+
+    stale = next(error for error in errors if "stale mutation claim" in error.message)
+    assert "stale-run/stale-session" in stale.message
+    assert "paths src" in stale.message
+    assert "is dead" in stale.message

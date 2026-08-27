@@ -396,6 +396,7 @@ Commands:
   status               Today's agent activity
   doctor               Installation health — pass/fail
   receipt              Delivery/runtime receipt (source ↔ installed)
+  claims               Atomic Living Tree path claims (acquire|heartbeat|status|list|release)
   settlements          Read-only f/x/n ledger query (summary|list|inspect)
   update               Update to the latest release
   help [topic|--all]   This deck · full reference
