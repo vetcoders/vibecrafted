@@ -75,6 +75,7 @@ TERMINAL_STATES = {
     "report_invalid",
     "contract_failed",
     "closed",
+    "settled",
     "stopped",
     "timed_out",
     "ghost",
@@ -1991,6 +1992,37 @@ def _launch_idempotency_path(key: str) -> Path:
     return _launch_idempotency_registry() / f"{digest}.json"
 
 
+def _archive_launch_idempotency_record(
+    key: str,
+    record: dict[str, Any],
+    *,
+    replacement_spec_digest: str,
+) -> Path:
+    """Preserve a terminal stale claim before reserving its identity again."""
+    key_digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    record_digest = hashlib.sha256(
+        json.dumps(_json_plain(record), sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    archived_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    target = (
+        _launch_idempotency_registry()
+        / "archive"
+        / f"{key_digest}-{time.time_ns()}-{record_digest[:16]}.json"
+    )
+    atomic_write_json(
+        target,
+        {
+            **_json_plain(record),
+            "archived_at": archived_at,
+            "archive_reason": "terminal_stale_spec_replaced",
+            "replacement_spec_digest": replacement_spec_digest,
+        },
+    )
+    return target
+
+
 def _read_launch_idempotency_record(key: str) -> dict[str, Any]:
     """Read one launch-idempotency record, or ``{}`` when absent/invalid."""
     if not key:
@@ -2274,8 +2306,38 @@ def _claim_launch_idempotency(
     """Under the caller lock: replay a live launch or reserve one run id."""
     existing = _read_launch_idempotency_record(key)
     existing_digest = str(existing.get("spec_digest") or "")
-    if existing and existing_digest != spec_digest:
+    if existing and not existing_digest:
         raise ValueError("idempotency identity conflicts with a different launch spec")
+    if existing and existing_digest != spec_digest:
+        run_id = str(existing.get("run_id") or "")
+        run = lookup_run(run_id) if run_id else None
+        owner_state, owner_reason = _classify_record_owner(existing)
+        run_is_current = bool(
+            run is not None and _run_has_current_process_proof(run_id, run)
+        )
+        if owner_state == "current" or run_is_current:
+            raise ValueError(
+                "idempotency identity conflicts with a different launch spec"
+            )
+        if run is not None and _run_is_terminal(run) and owner_state == "stale":
+            _archive_launch_idempotency_record(
+                key,
+                existing,
+                replacement_spec_digest=spec_digest,
+            )
+            existing = {}
+        else:
+            return (
+                _retryable_launch_payload(
+                    existing,
+                    status="retryable_idempotency_spec_conflict_unproven",
+                    reason=(
+                        "idempotency spec changed without terminal stale ownership proof: "
+                        f"{owner_reason}"
+                    ),
+                ),
+                run_id,
+            )
     replay = _replay_launch_if_current(existing)
     if replay is not None:
         if replay.get("accepted") and str(existing.get("state") or "") == "reserved":

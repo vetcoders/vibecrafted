@@ -458,6 +458,109 @@ def test_same_explicit_run_id_retries_once_and_conflicting_spec_fails_closed(
         workflow.launch_workflow(conflict, source)
 
 
+@pytest.mark.parametrize("terminal_state", ["failed", "settled", "stopped"])
+def test_terminal_dead_dispatch_claim_archives_changed_spec_and_relaunches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, terminal_state: str
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    monkeypatch.setenv(
+        workflow.LAUNCH_IDEMPOTENCY_KEY_ENV,
+        "dispatch:disp-260827-192011-21650:cut:W1-T4:attempt:initial",
+    )
+    source = _source_dir(tmp_path)
+    old_spec = workflow.normalize_launch_spec(
+        {
+            "skill": "workflow",
+            "agent": "claude",
+            "prompt": "old baseline bee134f3",
+        },
+        source,
+    )
+    new_spec = workflow.normalize_launch_spec(
+        {
+            "skill": "workflow",
+            "agent": "claude",
+            "prompt": "recovered baseline 6822f3af",
+        },
+        source,
+    )
+    key = workflow.launch_idempotency_key(old_spec)
+    old_digest = workflow._launch_spec_digest(old_spec)
+    workflow._write_launch_idempotency_record(
+        key,
+        {
+            "run_id": "failed-cut-attempt-initial",
+            "agent": old_spec.agent,
+            "skill": old_spec.skill,
+            "root": old_spec.root,
+            "state": "dispatched",
+            "accepted": True,
+            "owner_pid": 424242,
+            "owner_identity": {
+                "pid": 424242,
+                "pgid": 424242,
+                "start_token": "dead-dispatch-owner",
+                "command_sha256": "a" * 64,
+                "run_id": "failed-cut-attempt-initial",
+            },
+            "spec_digest": old_digest,
+            "receipt": {
+                "run_id": "failed-cut-attempt-initial",
+                "agent": old_spec.agent,
+                "skill": old_spec.skill,
+                "root": old_spec.root,
+                "accepted": True,
+                "status": "launching",
+            },
+        },
+    )
+    monkeypatch.setattr(workflow, "_sweep_stale_runs", lambda: None)
+    monkeypatch.setattr(
+        workflow,
+        "lookup_run",
+        lambda run_id: (
+            {
+                "run_id": run_id,
+                "state": terminal_state,
+                "liveness": "terminal",
+                "exit_code": 1,
+            }
+            if run_id == "failed-cut-attempt-initial"
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "validate_process_identity",
+        lambda *_args, **_kwargs: (False, "process_identity_gone", None),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_stdin_command",
+        lambda _agent: [sys.executable, "-c", "pass"],
+    )
+    pops: list[object] = []
+    _patch_launch_popen(monkeypatch, pops)
+
+    result = workflow.launch_workflow(new_spec, source)
+
+    assert result["accepted"] is True
+    assert result["run_id"] != "failed-cut-attempt-initial"
+    assert len(pops) == 1
+    current = workflow._read_launch_idempotency_record(key)
+    assert current["run_id"] == result["run_id"]
+    assert current["spec_digest"] == workflow._launch_spec_digest(new_spec)
+    archives = list(
+        (workflow._launch_idempotency_registry() / "archive").glob("*.json")
+    )
+    assert len(archives) == 1
+    archived = json.loads(archives[0].read_text(encoding="utf-8"))
+    assert archived["run_id"] == "failed-cut-attempt-initial"
+    assert archived["spec_digest"] == old_digest
+    assert archived["archive_reason"] == "terminal_stale_spec_replaced"
+    assert archived["replacement_spec_digest"] == current["spec_digest"]
+
+
 def test_transport_env_argument_supplies_canonical_retry_identity(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
