@@ -12,7 +12,7 @@ LOCTREE_ARCHIVE_SHA256="cdf37cff13b423d9be916f74bb43bc5857729e64380d7bc2f1646256
 AICX_VERSION="0.12.5"
 AICX_REVISION="ced57997dd97a2b08960f35e3a657d7b0c49a200"
 AICX_ARCHIVE_SHA256="ffc65ad6652ee0e240beb333f54d7372b607690dcf5f6c29eb68adee2aed58e7"
-PRVIEW_VERSION="0.6.0"
+PRVIEW_VERSION="0.7.0"
 LOCTREE_SOURCE_BUILD=0
 
 case "$(uname -s):$(uname -m)" in
@@ -98,7 +98,7 @@ else
       "$OUTPUT_BIN_DIR/${name}${EXE_SUFFIX}"
   done
 fi
-rm -rf "$WORK/loctree"
+rm -rf "$WORK/loctree" 2>/dev/null || true
 
 # The published 0.12.5 AICX archives are checksum-correct but retain their CI
 # builder's /Users path in both native binaries. Build the exact release commit
@@ -122,7 +122,7 @@ for name in aicx aicx-mcp; do
   [[ -f "$source_path" ]] || die "AICX build contains no ${name}${EXE_SUFFIX}"
   install -m 0755 "$source_path" "$OUTPUT_BIN_DIR/${name}${EXE_SUFFIX}"
 done
-rm -rf "$WORK/aicx"
+rm -rf "$WORK/aicx" 2>/dev/null || true
 
 # PRView documents GitHub release binaries, but its release page currently has
 # no assets. Build the exact published crate once, during carrier assembly, so

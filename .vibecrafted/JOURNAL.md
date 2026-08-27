@@ -85,3 +85,55 @@ belong here.
 - Remaining falsifier: release-output platform naming may still disagree
   (`darwin` producer versus `darwin-arm64` schema). Fresh `vc-trust` must judge
   this exact HEAD before lifecycle progression or artifact publication.
+
+## 2026-08-26T23:15:00+02:00 — throne removed from the launcher bin; DMG chain field-hardened (claude/interactive, dragon)
+
+- Field failure chain (one operator Mac, one day): installed app from
+  `8127f312` failed first-run publish on umask-rewritten `python-site/.lock`
+  mode (pre-`-xpzf` installer); rebuilt candidates then failed twice on
+  host-stamped `.DS_Store` during pack staging and once during app-side
+  extraction verify — sweeps lose that race, four distinct hits.
+- Cuts on `fix/launcher-ownership-no-public-names` (base: candidate v4
+  `bee134f3`): `c57ca8eb` staging sweep at the provenance boundary;
+  `f5b333bb` launcher ownership — the runtime install publishes only the
+  Vibecrafted namespace (`vc-*`, `vibecrafted*`, `vibecraft`, `telemetry`),
+  bundled public tools (loct, loctree*, aicx*, prview, screenscribe) stay
+  generation-private and surface globally only as `vibecrafted-<name>`,
+  receipted bare-name shims are reclaimed strictly by path+digest, vendored
+  foundations prefer a pre-existing PATH install, bundled PRView 0.6.0→0.7.0;
+  `a9d26ce0` post-extraction sweep; `a64dd3e4` contract change — the closed
+  inventory skips `FORBIDDEN_PAYLOAD_NAMES` on write and verify instead of
+  failing (my doctrinal call: tar excludes the name, so it never ships and
+  the reject gate protected no signed bytes while killing valid installs).
+- Proof: DMG `Vibecrafted_4.3.0-20260826-a64dd3e4` built and installed with
+  default `/var/folders` TMPDIR; Dock launch clean; no bare hijack shims;
+  PATH truth restored to npm loctree 0.14.4 / aicx 0.12.5 (stale cargo
+  builds removed via `cargo uninstall` on operator order).
+- Incidents owned: swapping the app bundle under a live workspace killed the
+  operator's 5-agent session (frame server died with its client — REGRESSION
+  vs ~4.0.0 detached behavior, P0 in need-decisions); upgrade lost the
+  operator `[server]` config (rebuilt `config.toml` → 100.82.232.70:3025,
+  LaunchAgent reconciled, P0: install must preserve/seed the config);
+  32 orphaned `vc-frame --server` zombies spawned a ~95%-CPU `ps` storm —
+  cleared by operator `vc-frame da --force`.
+- Standing operator order: NEVER ship or install a non-notarized build.
+  Headless notarization requires the Keychain profile
+  `NOTARY_PROFILE=vibecrafted-notary` (created and Apple-validated on
+  dragon); raw Apple-ID credentials are rejected without a TTY.
+
+## 2026-08-27T16:12:00+02:00 — launcher ownership regression recovered into active lineage
+
+- Drift: the 2026-08-26 launcher-ownership cut and its journal/doctrine commit
+  remained only on `origin/fix/launcher-ownership-no-public-names`; the active
+  installer again published bare public foundation names and shadowed Cargo
+  `prview 0.7.0` with bundled `0.6.0`.
+- Decision: recover the complete namespace contract into the active lineage,
+  not a PRView-only exception. Public tools remain generation-private and are
+  exposed only as `vibecrafted-<name>`; repair restores a displaced public
+  command only when the old Vibecrafted shim still matches its receipt digest.
+- Safety boundary: carrier assembly was interrupted before install when the
+  regression was found. No service restart, runtime reconciliation, or worker
+  mutation is allowed while the operator's dispatch fleet is active.
+- Additional runtime finding: inherited `VIBECRAFTED_DECLARED_LAUNCHER` made
+  Start Here falsely report a healthy current server pair as needing attention;
+  fixed and checkpointed in `994a2bf2` with a focused regression test.

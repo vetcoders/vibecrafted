@@ -136,7 +136,7 @@ sources = {
     "vc-terminal": (f"https://codeload.github.com/vetcoders/vc-terminal/tar.gz/{os.environ['TERMINAL_REVISION']}", os.environ["TERMINAL_REVISION"], "3cd6670c4a80c589b945ed1b45c1f033c80745ceb34d3466e9476a1c3eeb0f71", "Apache-2.0"),
     "vc-frame": (f"https://codeload.github.com/vetcoders/vc-frame/tar.gz/{os.environ['FRAME_REVISION']}", os.environ["FRAME_REVISION"], "55851e094b91d3b41712edcdc66d69f97da5859118395fee497bb104714b125c", "MIT"),
     "screenscribe": ("https://files.pythonhosted.org/packages/a2/8e/53e22fc84d28246c0316ab03bd26904fd80c545170466bd2cb926204f965/screenscribe-0.1.19-py3-none-any.whl", "0.1.19", "9988fe819443e2b47d949e737e1325bc755b31c18f1348a5b7b709c7cf155323", "BUSL-1.1"),
-    "prview": ("https://crates.io/api/v1/crates/prview/0.6.0/download", "0.6.0", "c952a333d0c481509f30f520fd10d1016d814832e317bfd2bc2fdc34f1ecfc02", "BUSL-1.1"),
+    "prview": ("https://crates.io/api/v1/crates/prview/0.7.0/download", "0.7.0", "528eacb0115aadb9a15d5a7c9422b2ece860ad3bf4cb51182c7866a7f4cb9748", "BUSL-1.1"),
 }
 owners = {
     "vibecrafted": "vibecrafted", "vc-server": "vibecrafted", "voc": "vibecrafted",

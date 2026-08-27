@@ -313,6 +313,118 @@ def test_runtime_pack_refuses_missing_required_agent_foundation(
     assert not (home / "bin/vibecrafted").exists()
 
 
+def test_runtime_launcher_public_name_never_claims_foreign_tools() -> None:
+    for own in (
+        "vc-start",
+        "vc-server-supervisor",
+        "vibecrafted",
+        "vibecrafted-resume",
+        "vibecraft",
+        "telemetry",
+    ):
+        assert installer._runtime_launcher_public_name(own) == own
+    for foreign in (
+        "loct",
+        "loctree",
+        "loctree-lsp",
+        "loctree-mcp",
+        "aicx",
+        "aicx-mcp",
+        "prview",
+        "screenscribe",
+    ):
+        assert (
+            installer._runtime_launcher_public_name(foreign) == f"vibecrafted-{foreign}"
+        )
+
+
+def test_runtime_pack_restores_public_owner_when_retiring_old_bare_shim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    runtime_home = home / "runtime"
+    launcher_home = home / "bin"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(launcher_home))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    args = Namespace(
+        payload_root=str(payload),
+        app_root=str(terminal_host.parents[2]),
+        terminal_host=str(terminal_host),
+        frame_helper=str(frame_helper),
+    )
+    public_prview = launcher_home / "prview"
+    original_body = "#!/bin/sh\necho operator-prview\n"
+    _write_executable(public_prview, original_body)
+
+    # Reproduce an older installer that published every bundled executable
+    # under its bare public name.
+    with monkeypatch.context() as legacy:
+        legacy.setattr(installer, "_runtime_launcher_public_name", lambda name: name)
+        assert installer.cmd_runtime_install(args) == 0
+    capsys.readouterr()
+    assert "VIBECRAFTED_RUNTIME_ROOT=" in public_prview.read_text(encoding="utf-8")
+
+    # A current repair install retires only its own wrapper and restores the
+    # public command that existed before Vibecrafted claimed the name.
+    assert installer.cmd_runtime_install(args) == 0
+    capsys.readouterr()
+    assert public_prview.read_text(encoding="utf-8") == original_body
+    generation = runtime_home / "releases/9.9.9+g12345678"
+    assert (generation / "bin/prview").is_file()
+    private_alias = launcher_home / "vibecrafted-prview"
+    assert str(generation / "bin/prview") in private_alias.read_text(encoding="utf-8")
+    receipt = json.loads(
+        (runtime_home / installer.RUNTIME_INSTALL_RECEIPT).read_text(encoding="utf-8")
+    )
+    assert str(public_prview) not in receipt["owned_files"]
+    assert str(private_alias) in receipt["owned_files"]
+    assert str(public_prview) not in receipt["backups"]
+
+
+def test_runtime_pack_forgets_already_removed_old_bare_shim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    runtime_home = home / "runtime"
+    launcher_home = home / "bin"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(launcher_home))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    args = Namespace(
+        payload_root=str(payload),
+        app_root=str(terminal_host.parents[2]),
+        terminal_host=str(terminal_host),
+        frame_helper=str(frame_helper),
+    )
+
+    with monkeypatch.context() as legacy:
+        legacy.setattr(installer, "_runtime_launcher_public_name", lambda name: name)
+        assert installer.cmd_runtime_install(args) == 0
+    capsys.readouterr()
+    public_prview = launcher_home / "prview"
+    public_prview.unlink()
+
+    assert installer.cmd_runtime_install(args) == 0
+    capsys.readouterr()
+    assert not public_prview.exists()
+    receipt = json.loads(
+        (runtime_home / installer.RUNTIME_INSTALL_RECEIPT).read_text(encoding="utf-8")
+    )
+    assert str(public_prview) not in receipt["owned_files"]
+    assert str(launcher_home / "vibecrafted-prview") in receipt["owned_files"]
+
+
 def test_runtime_pack_uninstall_preserves_locally_modified_managed_launcher(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

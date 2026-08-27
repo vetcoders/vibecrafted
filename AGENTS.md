@@ -316,6 +316,43 @@ Do not claim confidence you have not earned.
 
 ---
 
+# Release And Install Doctrine
+
+## Never Ship Non-Notarized
+
+Operator standing order (2026-08-26). Every macOS build handed to a person is
+notarized and stapled — `--no-notarize` exists only for pipeline debugging,
+never for an artifact anyone installs. Headless notarization uses a Keychain
+profile (`NOTARY_PROFILE`, e.g. `vibecrafted-notary`); raw Apple-ID
+credentials are rejected without a TTY. An unnotarized app makes Gatekeeper
+re-assess thousands of runtime binaries on first execution (observed:
+`syspolicyd` at 192% CPU).
+
+## Own Only Your Namespace
+
+The runtime install publishes launchers only for names Vibecrafted owns
+(`vc-*`, `vibecrafted*`, `vibecraft`, `telemetry`). Bundled public tools
+(loct, loctree*, aicx*, prview, screenscribe) stay generation-private and
+surface globally only as `vibecrafted-<name>`. Never overwrite another
+product's command; reclaim old bare-name shims strictly by receipt
+path+digest. A vendored foundation fills a gap — a pre-existing PATH install
+always wins.
+
+## Host Metadata Is Not Payload
+
+`.DS_Store` is stamped by the host faster than any sweep can win the race.
+The carrier tar excludes it, the closed inventory skips it on write and
+verify; every other rejection (symlinks, digest/size/mode drift) stays
+fail-closed. Do not reintroduce a hard reject for names that can never ship.
+
+## Upgrades Preserve The Operator
+
+An install must never lose operator-owned state: `[server]` config
+(`~/.config/vibecrafted/config.toml`, e.g. a Tailscale bind), live frame
+sessions (the frame server must outlive its client — detached, reattachable),
+and running agents. Replacing the app bundle under a live workspace is an
+operator-gated action.
+
 # The Vibecrafted Manifesto
 
 ## We Do Not Treat AI Like Magic

@@ -429,13 +429,15 @@ def install_or_find_foundation(
 
     Returns `(path, source)` where source is 'bundled', 'pre-existing', or 'not-installed'.
     """
-    bundled = install_foundation_from_bundle(foundation, repo_root, dry_run=dry_run)
-    if bundled:
-        return str(bundled), "bundled"
-
+    # A standalone installation owns the public command. The vendored payload
+    # fills a gap; it never replaces another product with the bundled version.
     found = foundation.is_installed()
     if found:
         return found, "pre-existing"
+
+    bundled = install_foundation_from_bundle(foundation, repo_root, dry_run=dry_run)
+    if bundled:
+        return str(bundled), "bundled"
     return "", "not-installed"
 
 
@@ -14735,6 +14737,8 @@ _RUNTIME_WRAPPER_VERBS = {
     "vc-status": "status",
     "vc-update": "update",
 }
+_RUNTIME_NAMESPACE_PREFIXES = ("vc-", "vibecrafted")
+_RUNTIME_NAMESPACE_NAMES = {"vibecraft", "telemetry"}
 
 
 def _runtime_install_paths() -> dict[str, Path]:
@@ -14924,6 +14928,73 @@ def _write_runtime_owned_file(
             _backup_runtime_collision(path, runtime_home=runtime_home, receipt=receipt)
     _atomic_text(path, body, mode=mode)
     _record_owned_file(receipt, path)
+    _checkpoint_runtime_install_receipt(runtime_home, receipt)
+
+
+def _runtime_launcher_public_name(name: str) -> str:
+    """Map a generation executable into the namespace Vibecrafted may publish."""
+    base = name.lower()
+    if base.startswith(_RUNTIME_NAMESPACE_PREFIXES) or base in _RUNTIME_NAMESPACE_NAMES:
+        return name
+    return f"vibecrafted-{name}"
+
+
+def _reclaim_foreign_launcher_names(
+    bin_dir: Path,
+    launcher_home: Path,
+    *,
+    runtime_home: Path,
+    receipt: dict[str, Any],
+    previous: Mapping[str, Any],
+) -> None:
+    """Reclaim only byte-identical bare shims written by an older generation."""
+    previous_owned = previous.get("owned_files", {})
+    for entry in sorted(bin_dir.iterdir(), key=lambda item: item.name):
+        if (
+            not entry.is_file()
+            or _runtime_launcher_public_name(entry.name) == entry.name
+        ):
+            continue
+        stale = launcher_home / entry.name
+        stale_key = str(stale)
+        previous_hash = previous_owned.get(stale_key)
+        if previous_hash is None:
+            continue
+        backup_raw = receipt.setdefault("backups", {}).get(stale_key)
+        if not _path_present(stale):
+            receipt.setdefault("owned_files", {}).pop(stale_key, None)
+            if backup_raw:
+                backup = Path(backup_raw)
+                if not _receipt_backup_path_is_allowed(
+                    backup, runtime_home / ".installer-backups"
+                ):
+                    raise RuntimeError(
+                        f"receipt backup path escapes backup root: {backup}"
+                    )
+                if _path_present(backup):
+                    _restore_path_from_backup(backup, stale)
+                    _remove_path(backup)
+                receipt.setdefault("backups", {}).pop(stale_key, None)
+            continue
+        if (
+            stale.is_symlink()
+            or not stale.is_file()
+            or _sha256_path(stale) != previous_hash
+        ):
+            continue
+
+        _remove_path(stale)
+        receipt.setdefault("owned_files", {}).pop(stale_key, None)
+        backup_raw = receipt.setdefault("backups", {}).pop(stale_key, None)
+        if backup_raw:
+            backup = Path(backup_raw)
+            if not _receipt_backup_path_is_allowed(
+                backup, runtime_home / ".installer-backups"
+            ):
+                raise RuntimeError(f"receipt backup path escapes backup root: {backup}")
+            if _path_present(backup):
+                _restore_path_from_backup(backup, stale)
+                _remove_path(backup)
     _checkpoint_runtime_install_receipt(runtime_home, receipt)
 
 
@@ -15365,7 +15436,7 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             continue
         if not os.access(entry, os.X_OK):
             continue
-        destination = paths["launcher_home"] / entry.name
+        destination = paths["launcher_home"] / _runtime_launcher_public_name(entry.name)
         body = _runtime_launcher_body(
             generation=generation,
             config_home=paths["config_home"],
@@ -15382,6 +15453,13 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             receipt=receipt,
             previous=previous,
         )
+    _reclaim_foreign_launcher_names(
+        bin_dir,
+        paths["launcher_home"],
+        runtime_home=runtime_home,
+        receipt=receipt,
+        previous=previous,
+    )
 
     verifier_launcher = paths["launcher_home"] / SECURE_WALKAROUND_LAUNCHER
     verifier_body = _secure_walkaround_launcher_contents(
