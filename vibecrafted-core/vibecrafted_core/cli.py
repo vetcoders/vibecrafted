@@ -222,6 +222,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("dispatch", help="run or validate a dispatch plan")
+    claims = sub.add_parser("claims", help="atomic local repository-mutation claims")
+    claims.add_argument(
+        "claims_argv",
+        nargs=argparse.REMAINDER,
+        help="claims subcommand args (see vibecrafted claims --help)",
+    )
     revalidate = sub.add_parser("control-plane-revalidate", help=argparse.SUPPRESS)
     revalidate.add_argument("--run-id", required=True)
     revalidate.add_argument("--json", action="store_true")
@@ -1313,6 +1319,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     python_commands = {
         "acp",
         "capabilities",
+        "claims",
         "config",
         "control-plane-revalidate",
         "dispatch",
@@ -1386,6 +1393,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .dispatch.cli import main as dispatch_main
 
         return dispatch_main(raw_args[1:])
+    if raw_args and raw_args[0] == "claims":
+        from .repository_claims import claims_cli_main
+
+        return claims_cli_main(raw_args[1:])
     if raw_args and raw_args[0] == "control-plane-revalidate":
         parser = _build_parser()
         args = parser.parse_args(raw_args)

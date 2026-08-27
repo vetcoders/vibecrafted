@@ -113,10 +113,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if not args.json:
         print(
-            f"dispatch launched: run_id={run_id}\n"
+            f"dispatch admission started: run_id={run_id}\n"
             f"live state: tracker={tracker_path}\n"
             f"live journal: {artifacts_dir / 'journal.md'}\n"
-            "stdout stays silent until the run settles — watch the tracker, "
+            "no worker is accepted until envelope and path-claim admission pass; "
+            "then stdout stays silent until the run settles — watch the tracker, "
             "not this stream.",
             flush=True,
         )

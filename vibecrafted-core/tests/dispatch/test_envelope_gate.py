@@ -20,6 +20,7 @@ from vibecrafted_core.delivery.model import ExecutionEnvelope
 from vibecrafted_core.dispatch.model import STATE_FAILED, STATE_VERIFIED, Dispatch
 from vibecrafted_core.dispatch.schema import DispatchSchemaError, parse_dispatch
 from vibecrafted_core.dispatch.supervisor import CellRun, DispatchSupervisor
+from vibecrafted_core.repository_claims import RepositoryClaimRegistry
 
 FAST_AWAIT = "await = { poll_s = 0.02, timeout_min = 1.0 }"
 ORIGIN_URL = "git@github.com:vetcoders/fixture.git"
@@ -270,12 +271,53 @@ def run_gate(
 
 def test_matching_envelope_admits_spawn(gate_env: dict[str, Path]) -> None:
     launcher = BashCells(reports_dir=gate_env["reports"])
-    _supervisor, result = run_gate(
+    supervisor, result = run_gate(
         gate_env, envelope_toml(gate_env["repo"], gate_env["brief"]), launcher
     )
 
     assert launcher.launches == [("c1", "initial")]
     assert result.states["c1"] == STATE_VERIFIED
+    receipt = supervisor._receipt_store.cut("c1")
+    assert receipt["mutation_claim_id"]
+    assert receipt["mutation_claim_released_at"]
+
+
+def test_active_path_claim_refuses_dispatch_before_spawn_and_records_receipt(
+    gate_env: dict[str, Path],
+) -> None:
+    registry = RepositoryClaimRegistry(
+        root=gate_env["artifacts"] / "shared-claims", emit_events=False
+    )
+    incumbent = registry.acquire(
+        repo=gate_env["repo"],
+        owned_paths=("owned",),
+        run_id="incumbent-run",
+        session_id="incumbent-session",
+        agent="codex",
+    )
+    dispatch = parse(gate_env, envelope_toml(gate_env["repo"], gate_env["brief"]))
+    launcher = SpyLauncher()
+    supervisor = DispatchSupervisor(
+        dispatch,
+        launcher=launcher,
+        artifacts_dir=gate_env["artifacts"],
+        sleep=lambda _s: None,
+    )
+    supervisor._claim_registry = registry
+
+    result = supervisor.run()
+    receipt = supervisor._receipt_store.cut("c1")
+
+    assert launcher.launches == []
+    assert result.states["c1"] == STATE_FAILED
+    assert receipt["state"] == "failed"
+    assert receipt["acceptance"] == "ownership-conflict"
+    assert receipt["claim_conflicts"][0]["run_id"] == "incumbent-run"
+    assert receipt["claim_conflicts"][0]["session_id"] == "incumbent-session"
+    assert receipt["claim_conflicts"][0]["overlapping_paths"] == [
+        {"requested": "owned/module.py", "owned": "owned"}
+    ]
+    assert incumbent["claim"]["claim_id"]
 
 
 def test_brief_digest_mismatch_blocks_before_spawn(gate_env: dict[str, Path]) -> None:
