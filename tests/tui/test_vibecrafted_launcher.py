@@ -3144,6 +3144,62 @@ def test_server_service_uses_one_installed_generation(tmp_path: Path) -> None:
     assert not capture_file.exists()
 
 
+def test_server_service_prefers_declared_public_identity_over_generation_path(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    public_bin = home / ".local" / "bin"
+    generation_bin = tmp_path / "generation" / "bin"
+    launcher_copy = tmp_path / "vibecrafted-deck"
+    capture_file = tmp_path / "supervisor-args.txt"
+
+    public_bin.mkdir(parents=True)
+    generation_bin.mkdir(parents=True)
+    _write_trimmed_launcher(launcher_copy)
+
+    for bin_dir, marker in ((public_bin, "public"), (generation_bin, "generation")):
+        launcher = bin_dir / "vibecrafted"
+        launcher.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        launcher.chmod(0o755)
+        supervisor = bin_dir / "vc-server-supervisor"
+        supervisor.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            f'printf "{marker}\\n" > "$CAPTURE_FILE"\n'
+            'printf "%s\\n" "$@" >> "$CAPTURE_FILE"\n',
+            encoding="utf-8",
+        )
+        supervisor.chmod(0o755)
+
+    declared_launcher = public_bin / "vibecrafted"
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "PATH": f"{generation_bin}:{public_bin}:/usr/bin:/bin",
+        "CAPTURE_FILE": str(capture_file),
+        "VIBECRAFTED_DECLARED_LAUNCHER": str(declared_launcher),
+    }
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'source "{launcher_copy}"; _server_supervisor_cli service status --json',
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = capture_file.read_text(encoding="utf-8").splitlines()
+    assert payload[0] == "public"
+    assert payload[payload.index("--launcher") + 1] == str(declared_launcher.resolve())
+    assert payload[payload.index("--supervisor-bin") + 1] == str(
+        (public_bin / "vc-server-supervisor").resolve()
+    )
+
+
 def test_server_service_preserves_high_installer_lease_fd_through_launcher(
     tmp_path: Path,
 ) -> None:

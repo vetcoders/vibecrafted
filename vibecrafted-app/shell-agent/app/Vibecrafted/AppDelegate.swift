@@ -7,6 +7,7 @@ private let installLog = Logger(subsystem: "io.vetcoders.vibecrafted", category:
 
 private struct CanonicalRuntimeInstall: Decodable {
   let root: URL
+  let launcher: URL
   let terminal: URL
   let terminalHost: URL
   let frame: URL
@@ -20,6 +21,7 @@ private struct CanonicalRuntimeInstall: Decodable {
 
   enum CodingKeys: String, CodingKey {
     case root
+    case launcher
     case terminal
     case terminalHost = "terminal_host"
     case frame
@@ -46,6 +48,7 @@ private struct CanonicalRuntimeInstall: Decodable {
     }
 
     root = try fileURL(.root)
+    launcher = try fileURL(.launcher)
     terminal = try fileURL(.terminal)
     terminalHost = try fileURL(.terminalHost)
     frame = try fileURL(.frame)
@@ -275,6 +278,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     environment["VIBECRAFTED_RUNTIME_HOME"] = install.runtimeHome.path
     environment["VIBECRAFTED_RUNTIME_ROOT"] = install.root.path
     environment["VIBECRAFTED_ROOT"] = install.root.path
+    environment["VIBECRAFTED_DECLARED_LAUNCHER"] = install.launcher.path
     environment["VIBECRAFTED_PYTHON"] = install.root.appendingPathComponent("bin/python3").path
     environment["VIBECRAFTED_VC_FRAME_BIN"] = install.frame.path
     environment["VC_FRAME_CONFIG_DIR"] = install.frameConfig.path

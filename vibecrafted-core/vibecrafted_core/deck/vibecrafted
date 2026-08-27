@@ -1368,9 +1368,21 @@ _server_launcher_path() {
 
 _server_supervisor_binary() {
   local candidate=""
+  local declared_launcher="${VIBECRAFTED_DECLARED_LAUNCHER:-}"
   local sibling=""
   local uv_dir=""
   local user_bin=""
+  # Public install wrappers declare the launcher whose digest is bound into
+  # the LaunchAgent receipt. Resolve its sibling supervisor before PATH: a
+  # generation-first PATH otherwise pairs the generation deck with a public
+  # service identity and manufactures build-current=no / pair-healthy=no.
+  if [[ "$declared_launcher" == /* && -x "$declared_launcher" ]]; then
+    sibling="$(dirname "$declared_launcher")/vc-server-supervisor"
+    if [[ -x "$sibling" ]]; then
+      _realpath_quiet "$sibling"
+      return 0
+    fi
+  fi
   candidate="$(command -v vc-server-supervisor 2>/dev/null || true)"
   if [[ -n "$candidate" && -x "$candidate" ]]; then
     _realpath_quiet "$candidate"

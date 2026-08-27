@@ -15188,6 +15188,7 @@ def _runtime_install_result(
     return {
         "schema": "vibecrafted.runtime-install-result.v1",
         "root": str(generation),
+        "launcher": str(paths["launcher_home"] / "vibecrafted"),
         "terminal": str(generation / "bin/vc-terminal"),
         "terminal_host": str(terminal_host),
         # AppDelegate exports this as VIBECRAFTED_VC_FRAME_BIN for the public
