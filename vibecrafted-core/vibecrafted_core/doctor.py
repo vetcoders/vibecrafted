@@ -90,22 +90,35 @@ def _vc_frame_launcher_findings(
                 "macOS sockaddr_un. Re-run the foundations installer.",
             )
         ]
+    pin_owner = path
     if "pin_darwin_socket_dir" not in head:
-        return [
-            _Finding(
-                "fail",
-                "vc-frame:path",
-                f"vc-frame on PATH ({path}) is a wrapper without the Darwin "
-                "/tmp socket pin. Update scripts/vc-frame-product-entry.sh "
-                "and reinstall the product entry.",
-            )
-        ]
+        exec_target = _launcher_exec_target(head)
+        runtime_home = _runtime_home_root()
+        target_head = ""
+        if exec_target is not None and _is_inside(exec_target, runtime_home):
+            try:
+                target_head = exec_target.read_text(encoding="utf-8", errors="ignore")[
+                    :4096
+                ]
+            except OSError:
+                target_head = ""
+        if "pin_darwin_socket_dir" not in target_head:
+            return [
+                _Finding(
+                    "fail",
+                    "vc-frame:path",
+                    f"vc-frame on PATH ({path}) is a wrapper without the Darwin "
+                    "/tmp socket pin. Update scripts/vc-frame-product-entry.sh "
+                    "and reinstall the product entry.",
+                )
+            ]
+        pin_owner = exec_target
     kind = "symlink" if path.is_symlink() else "file"
     return [
         _Finding(
             "ok",
             "vc-frame:path",
-            f"product wrapper on PATH ({kind} {path} -> {target})",
+            f"product wrapper on PATH ({kind} {path} -> {target}; pin={pin_owner})",
         )
     ]
 

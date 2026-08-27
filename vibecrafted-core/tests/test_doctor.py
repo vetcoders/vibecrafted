@@ -256,6 +256,31 @@ def test_vc_frame_launcher_finding_ok_for_pinned_wrapper(tmp_path: Path) -> None
     assert "product wrapper" in finding.message
 
 
+def test_vc_frame_launcher_finding_follows_runtime_owned_wrapper_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_home = tmp_path / "share/vibecrafted"
+    target = runtime_home / "releases/4.3.0+gfixture/bin/vc-frame"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "#!/usr/bin/env bash\npin_darwin_socket_dir() { :; }\n", encoding="utf-8"
+    )
+    target.chmod(0o755)
+    wrapper = tmp_path / "bin/vc-frame"
+    wrapper.parent.mkdir()
+    wrapper.write_text(
+        f'#!/bin/bash\nexec {shlex.quote(str(target))} "$@"\n', encoding="utf-8"
+    )
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+
+    finding = doctor._vc_frame_launcher_findings(which=lambda _name: str(wrapper))[0]
+
+    assert finding.level == "ok"
+    assert finding.component == "vc-frame:path"
+    assert f"pin={target}" in finding.message
+
+
 def _stamped_uv_shim(tmp_path: Path) -> Path:
     """A healthy PATH winner: the uv-tool python entrypoint."""
     shim = tmp_path / "bin" / "vibecrafted"
