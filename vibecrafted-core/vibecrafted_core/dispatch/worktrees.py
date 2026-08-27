@@ -35,6 +35,16 @@ class WorktreeGeometry:
         return asdict(self)
 
 
+def _same_filesystem_location(left: str | Path, right: str | Path) -> bool:
+    """Compare existing paths by identity, including case aliases on macOS."""
+    if not str(left).strip() or not str(right).strip():
+        return False
+    try:
+        return Path(left).samefile(right)
+    except OSError:
+        return Path(left).resolve() == Path(right).resolve()
+
+
 def repo_identity(repo: str | Path) -> tuple[str, str]:
     """Resolve a stable ``(org, repo)`` from origin, with local fallbacks."""
     root = Path(repo).expanduser().resolve()
@@ -145,7 +155,7 @@ class WorktreeManager:
     ) -> WorktreeGeometry:
         """Create one clean per-Agent interactive checkout through this owner."""
         observed_root = _git(self.main_repo, "rev-parse", "--show-toplevel")
-        if not observed_root or Path(observed_root).resolve() != self.main_repo:
+        if not _same_filesystem_location(observed_root, self.main_repo):
             raise WorktreeContractError(
                 f"selected workspace is not a git repository root: {self.main_repo}"
             )
@@ -176,7 +186,7 @@ class WorktreeManager:
             raise WorktreeContractError(f"active recovery worktree is missing: {root}")
         observed_root = _git(root, "rev-parse", "--show-toplevel")
         observed_branch = _git(root, "branch", "--show-current")
-        if not observed_root or Path(observed_root).resolve() != root.resolve():
+        if not _same_filesystem_location(observed_root, root):
             raise WorktreeContractError(
                 f"active recovery root is not a registered worktree: {root}"
             )
@@ -234,7 +244,7 @@ class WorktreeManager:
             raise WorktreeContractError(f"worker worktree is missing: {root}")
         observed_root = _git(root, "rev-parse", "--show-toplevel")
         observed_branch = _git(root, "branch", "--show-current")
-        if Path(observed_root).resolve() != root.resolve():
+        if not _same_filesystem_location(observed_root, root):
             raise WorktreeContractError(
                 f"worker root is not the registered worktree: {root}"
             )
