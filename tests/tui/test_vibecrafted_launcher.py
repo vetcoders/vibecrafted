@@ -183,6 +183,38 @@ def test_python_resolver_skips_bash_product_launchers(tmp_path: Path) -> None:
     assert Path(result.stdout.strip()) == fake_python
 
 
+def test_python_resolver_prefers_own_runtime_python(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    runtime_bin = runtime_root / "bin"
+    runtime_bin.mkdir(parents=True)
+    (runtime_root / "server/site").mkdir(parents=True)
+    launcher_copy = runtime_bin / "vibecrafted"
+    _write_trimmed_launcher(launcher_copy)
+    runtime_python = runtime_bin / "python3"
+    runtime_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    runtime_python.chmod(0o755)
+    runtime_server = runtime_bin / "vc-server"
+    runtime_server.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    runtime_server.chmod(0o755)
+
+    ambient_bin = tmp_path / "ambient-bin"
+    ambient_bin.mkdir()
+    ambient_python = ambient_bin / "python3"
+    ambient_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    ambient_python.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", "-c", f'source "{launcher_copy}"; _vibecrafted_python'],
+        cwd=tmp_path,
+        env={**os.environ, "PATH": f"{ambient_bin}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert Path(result.stdout.strip()) == runtime_python
+
+
 def _write_fake_command(bin_dir: Path, name: str, capture_file: Path) -> None:
     script_names = [name]
     if name == "vc-frame":

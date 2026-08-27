@@ -462,9 +462,14 @@ _dispatcher_core_dir() {
 # Resolve the interpreter that owns vibecrafted_core by reading the shebang
 # from the uv-tool shim on PATH, since it carries the correct uv python.
 _vibecrafted_python() {
-  local resolved shebang py
+  local resolved shebang py runtime_root
   if [[ -n "${VIBECRAFTED_PYTHON:-}" && -x "$VIBECRAFTED_PYTHON" ]]; then
     printf '%s\n' "$VIBECRAFTED_PYTHON"
+    return 0
+  fi
+  runtime_root="$(_runtime_payload_root 2>/dev/null || true)"
+  if [[ -n "$runtime_root" && -x "$runtime_root/bin/python3" ]]; then
+    printf '%s\n' "$runtime_root/bin/python3"
     return 0
   fi
   for resolved in \
