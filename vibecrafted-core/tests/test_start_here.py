@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 from vibecrafted_core.vc_frame_staging import materialize_vc_frame_config
 
@@ -94,6 +94,39 @@ def test_start_here_readiness_is_truthful_and_actionable() -> None:
         "missing",
         "Vibecrafted launcher is missing — reinstall the Runtime Pack",
     )
+
+
+def test_start_here_does_not_leak_parent_launcher_claim_to_status(
+    monkeypatch,
+) -> None:
+    start_here = _load()
+    healthy = {
+        "installed": True,
+        "loaded": True,
+        "supervisor_live": True,
+        "supervisor_verified": True,
+        "supervisor_service_managed": True,
+        "build_current": True,
+        "pair_healthy": True,
+    }
+    observed_environment = None
+
+    monkeypatch.setenv("VIBECRAFTED_DECLARED_LAUNCHER", "/managed/bin/vc-start")
+    monkeypatch.setattr(start_here.shutil, "which", lambda name: f"/managed/bin/{name}")
+
+    def fake_run(argv, **kwargs):
+        nonlocal observed_environment
+        observed_environment = kwargs["env"]
+        return SimpleNamespace(stdout=__import__("json").dumps(healthy))
+
+    monkeypatch.setattr(start_here.subprocess, "run", fake_run)
+
+    assert start_here.probe_readiness() == (
+        "ready",
+        "VC Server is healthy — this workspace is ready",
+    )
+    assert observed_environment is not None
+    assert "VIBECRAFTED_DECLARED_LAUNCHER" not in observed_environment
 
 
 def test_start_here_mouse_targets_the_same_actions_as_keyboard() -> None:

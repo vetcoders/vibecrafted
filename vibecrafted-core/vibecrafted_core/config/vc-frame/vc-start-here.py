@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import curses
 import json
+import os
 import shutil
 import subprocess
 from typing import Any
@@ -97,11 +98,17 @@ def probe_readiness() -> tuple[str, str]:
         return readiness_from_service_payload(
             None, deck_available=deck is not None, frame_available=frame is not None
         )
+    child_environment = os.environ.copy()
+    # This pane is launched below the generated vc-start wrapper.  Its launcher
+    # declaration belongs to vc-start, not to the nested vibecrafted status
+    # command; inheriting it makes an otherwise current server pair look stale.
+    child_environment.pop("VIBECRAFTED_DECLARED_LAUNCHER", None)
     try:
         result = subprocess.run(
             [deck, "server", "service", "status", "--json"],
             check=False,
             capture_output=True,
+            env=child_environment,
             text=True,
             timeout=2.0,
         )
