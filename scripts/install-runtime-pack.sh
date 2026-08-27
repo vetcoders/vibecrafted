@@ -24,9 +24,25 @@ expected_platform=""
 expected_architecture=""
 
 cleanup() {
+  local status=$?
+  local attempt
   if [[ -n "$temporary" && -d "$temporary" ]]; then
-    rm -rf -- "$temporary"
+    # Finder/metadata services can recreate .DS_Store while a large extracted
+    # pack is being removed.  Cleanup is best-effort bookkeeping after the
+    # installer has already emitted its result; it must neither turn a healthy
+    # publication into exit 2 nor give up after the first transient ENOTEMPTY.
+    for attempt in 1 2 3; do
+      if rm -rf -- "$temporary" 2>/dev/null; then
+        break
+      fi
+      sleep 0.05
+    done
+    if [[ -d "$temporary" ]]; then
+      printf 'Runtime Pack install warning: could not remove temporary directory: %s\n' \
+        "$temporary" >&2
+    fi
   fi
+  return "$status"
 }
 trap cleanup EXIT INT TERM HUP
 

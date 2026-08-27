@@ -307,6 +307,69 @@ def test_makefile_keeps_install_as_terminal_first_front_door() -> None:
     assert "INSTALLER_HOST_TAG := $(shell uname -s" in text
 
 
+def test_runtime_pack_cleanup_retries_without_overwriting_success(
+    tmp_path: Path,
+) -> None:
+    installer_text = (REPO_ROOT / "scripts/install-runtime-pack.sh").read_text(
+        encoding="utf-8"
+    )
+    cleanup_body = installer_text.split("cleanup() {", 1)[1].split(
+        "\n}\ntrap cleanup", 1
+    )[0]
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    count_file = tmp_path / "rm-count"
+    fake_rm = fake_bin / "rm"
+    fake_rm.write_text(
+        """#!/usr/bin/env bash
+set -eu
+count=0
+if [[ -f "$RM_COUNT" ]]; then count="$(<"$RM_COUNT")"; fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$RM_COUNT"
+if (( count == 1 )); then
+  touch "${!#}/.DS_Store"
+  exit 1
+fi
+exec /bin/rm "$@"
+""",
+        encoding="utf-8",
+    )
+    fake_rm.chmod(0o755)
+
+    residual = tmp_path / "vibecrafted-runtime-pack.fixture"
+    residual.mkdir()
+    harness = tmp_path / "cleanup-harness.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f'temporary="{residual}"\n'
+        "cleanup() {"
+        f"{cleanup_body}\n"
+        "}\n"
+        "trap cleanup EXIT INT TERM HUP\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        ["bash", str(harness)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "RM_COUNT": str(count_file),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert count_file.read_text(encoding="utf-8").strip() == "2"
+    assert not residual.exists()
+
+
 def test_installer_environment_is_host_scoped_outside_checkout(
     tmp_path: Path,
 ) -> None:
