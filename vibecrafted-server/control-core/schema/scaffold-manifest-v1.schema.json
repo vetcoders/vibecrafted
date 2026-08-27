@@ -23,6 +23,7 @@
             "enum": [
               "driver",
               "wave-atlas",
+              "dispatch",
               "brief",
               "design-doc",
               "traceability",
@@ -32,7 +33,7 @@
               "other"
             ]
           },
-          "path": { "type": "string", "pattern": "^[^/\\\\].*\\.md$" },
+          "path": { "type": "string", "pattern": "^[^/\\\\].*(\\.md|\\.dispatch\\.toml)$" },
           "editable": { "type": "boolean" },
           "required": { "type": "boolean" },
           "dependencies": {

@@ -71,6 +71,7 @@ pub type ScaffoldResult<T> = Result<T, ScaffoldError>;
 pub enum ScaffoldArtifactRole {
     Driver,
     WaveAtlas,
+    Dispatch,
     Brief,
     DesignDoc,
     Traceability,
@@ -86,6 +87,7 @@ impl ScaffoldArtifactRole {
         match self {
             Self::Driver => "driver",
             Self::WaveAtlas => "wave-atlas",
+            Self::Dispatch => "dispatch",
             Self::Brief => "brief",
             Self::DesignDoc => "design-doc",
             Self::Traceability => "traceability",
@@ -432,7 +434,7 @@ impl ScaffoldArtifactStore {
                     skipped.push(ScaffoldCatalogSkip {
                         plan_root: root.display().to_string(),
                         reason: format!(
-                            "manifest unreadable: {error} — check schema_version, plan_id/org/repo/day, and role enum (driver|wave-atlas|brief|design-doc|traceability|tracker|falsification|report|other). Note: use role \"other\" for MISSION.md — \"mission\" is not a valid manifest role."
+                            "manifest unreadable: {error} — check schema_version, plan_id/org/repo/day, and role enum (driver|wave-atlas|dispatch|brief|design-doc|traceability|tracker|falsification|report|other). Note: use role \"other\" for MISSION.md — \"mission\" is not a valid manifest role."
                         ),
                         guessed_plan_id: path
                             .parent()
@@ -1791,7 +1793,9 @@ fn validate_manifest_plan(root: &Path, manifest: &ScaffoldManifest) -> ScaffoldD
                         );
                     }
                     if let Ok(content) = fs::read_to_string(&path) {
-                        validate_frontmatter(artifact, &content, &mut errors);
+                        if artifact.role != ScaffoldArtifactRole::Dispatch {
+                            validate_frontmatter(artifact, &content, &mut errors);
+                        }
                         validate_role_contract(artifact, &content, &mut errors);
                         if artifact.role == ScaffoldArtifactRole::Brief {
                             validate_brief_naming(artifact, &mut errors);
@@ -2347,7 +2351,34 @@ fn brief_needs_design(content: &str) -> bool {
 }
 
 fn declared_path(root: &Path, artifact: &ScaffoldArtifactDeclaration) -> ScaffoldResult<PathBuf> {
-    Ok(root.join(validate_relative_markdown_path(&artifact.path)?))
+    Ok(root.join(validate_relative_artifact_path(
+        &artifact.path,
+        artifact.role,
+    )?))
+}
+
+fn validate_relative_artifact_path(
+    relative: &str,
+    role: ScaffoldArtifactRole,
+) -> ScaffoldResult<PathBuf> {
+    if role == ScaffoldArtifactRole::Dispatch {
+        if relative.is_empty() || Path::new(relative).is_absolute() || relative.contains('\\') {
+            return Err(ScaffoldError::UnsafePath {
+                message: "refusing unsafe scaffold dispatch path".into(),
+            });
+        }
+        let path = Path::new(relative);
+        let safe_components = path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)));
+        if !safe_components || !relative.ends_with(".dispatch.toml") {
+            return Err(ScaffoldError::UnsafePath {
+                message: "refusing unsafe or non-dispatch scaffold artifact path".into(),
+            });
+        }
+        return Ok(path.to_path_buf());
+    }
+    validate_relative_markdown_path(relative)
 }
 
 fn validate_relative_markdown_path(relative: &str) -> ScaffoldResult<PathBuf> {
@@ -2746,6 +2777,17 @@ mod tests {
         assert_eq!(
             validate_relative_markdown_path("briefs/cut.md").expect("safe"),
             PathBuf::from("briefs/cut.md")
+        );
+        assert_eq!(
+            validate_relative_artifact_path(
+                "plan-a.dispatch.toml",
+                ScaffoldArtifactRole::Dispatch,
+            )
+            .expect("safe dispatch"),
+            PathBuf::from("plan-a.dispatch.toml")
+        );
+        assert!(
+            validate_relative_artifact_path("plan-a.toml", ScaffoldArtifactRole::Dispatch).is_err()
         );
     }
 

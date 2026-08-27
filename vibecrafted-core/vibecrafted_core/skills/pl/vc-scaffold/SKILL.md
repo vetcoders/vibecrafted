@@ -95,6 +95,20 @@ przeszukiwaniem. Używaj AICX do kontekstu intencji i sesji. Używaj rg/grep jak
 fallbacku lub lokalnej lupy, nie jako zamiennika mapowania strukturalnego. Jeśli Loctree
 zawiedzie lub przeoczy jakąś powierzchnię, dopisz feedback do `~/.vibecrafted/loctree/loctree-fail.md`.
 
+## Bramka wywiadu z founderem (HARD-BLOCK)
+
+Scaffold jest founder-first, więc nie może wymyślać intencji foundera. Przed Shape zapisz we
+frontmatterze planu i sekcji Orient jeden z dwóch rodzajów dowodu:
+
+1. konkretne istniejące źródło wywiadu (journal operatora, sesja/ekstrakt AICX albo brief foundera),
+   wraz ze ścieżką/session ID i decyzjami naprawdę z niego odzyskanymi; albo
+2. odpowiedzi foundera zebrane w bieżącej rozmowie.
+
+Jeśli nie istnieje żaden z nich, zadaj founderowi brakujące pytania produktowe przed napisaniem
+planu architektury. „Wywiad nie był potrzebny", „task był jasny" i „niezapytanie nie zaszkodziło"
+to zakazane samowyłączenia. Ta bramka jest intake'em discovery; nie legalizuje dwudziestu pytań
+w środku scaffoldu, gdy decyzje są już uchwycone.
+
 ## Pozycja w pipelinie
 
 ```
@@ -175,9 +189,11 @@ MUSI zawierać wszystkie pięć:
    następne; dlaczego para jest **SEQUENCE** (współdzielona domena plików → konflikt Living Tree) vs **PARALLEL**
    (rozłączne domeny → bezpieczne współbieżnie); i gdzie siedzi każdy **⛔ operator-button STOP** (push/merge,
    decyzje produktowe). Graf bez `why` to diagram, nie driver.
-3. **Gotowe komendy** — dokładna linia launchera następnego stage'u (np. `vibecrafted implement <agent> --file <brief>`, nigdy fałszywy generyczny skill) dla
-   KAŻDEGO pozostałego cięcia, w kolejności dispatchu, otagowana SEQUENCE / PARALLEL / STOP, każda z następującą po niej
-   komendą verify per cięcie. Człowiek wkleja je verbatim, jeśli pętla padnie.
+3. **Gotowe przekazanie** — dokładnie jeden blok walidacji poziomu planu dla kanonicznego
+   `<plan-id>.dispatch.toml` (doctor + dry-run), a potem przekazanie A→Z do `/vc-ship`. `/vc-ship`
+   jest właścicielem startu i resume; DAG jest właścicielem kolejności cięć i dozwolonej
+   równoległości. Nie zamieniaj DRIVER-a w listę launcherów per cięcie i nie ucz ręcznego
+   sekwencjonowania `vibecrafted workflow ... --prompt`.
 4. **Alfabet stanów + reguła `[ ]→[x]`, odtworzone verbatim** (lustro Pomiaru):
    `[ ]` todo · `[~]` running · `[?]` done-unverified · `[!]` blocked · `[x]` verifier-green.
    **Tylko delivery-verifier przerzuca `[~]→[x]`; twierdzenie agenta NIGDY samo nie dochodzi do `[x]`.**
@@ -193,9 +209,63 @@ Utwórz jeden root planu pod
 `manifest.json`. Schema version `"1"` deklaruje `plan_id`, `org`, `repo`, `day` i uporządkowaną
 tablicę `artifacts`. Każdy wpis artefaktu deklaruje stabilne `id`, jawną `role`, względną `path`,
 `editable` i `required`; opcjonalne `dependencies` zawierają ID artefaktów. Obsługiwane role:
-`driver`, `wave-atlas`, `brief`, `design-doc`, `traceability`, `tracker`, `falsification`, `report`,
+`driver`, `wave-atlas`, `dispatch`, `brief`, `design-doc`, `traceability`, `tracker`, `falsification`, `report`,
 `other`. Zarejestruj każdy wygenerowany artefakt przed przekazaniem. Nazwy plików nigdy nie wyznaczają
 roli. Nie twórz lustra `operator/`, kopii kompatybilności, aliasu nazwy ani symlinka.
+
+### 5.7 Frontmatter YAML na KAŻDYM artefakcie (HARD-GATE — zero gołego markdownu)
+
+Każdy markdownowy artefakt produkowany przez ten skill — MISSION, ATLAS, DRIVER, tracker,
+falsyfikacja, każdy brief i każdy design doc — zaczyna się frontmatterem YAML, bez wyjątków:
+
+```yaml
+---
+plan_id: <plan_id>
+run_id: <run scaffoldu, gdy działa pod lifecycle>
+session_id: <session_id agenta z aicx albo nazwy surowego .jsonl>
+role: driver | wave-atlas | brief | tracker | falsification | design-doc | mission | other
+agent: <agent autor>
+date: YYYY-MM-DD
+project: <org>/<repo>
+---
+```
+
+To bramka proweniencji, retrievalu i settlementu, nie dekoracja. Pakiet mieszający artefakty z
+frontmatterem i bez niego odpada tak samo jak pakiet z brakującym briefem.
+
+### 5.8 `<plan-id>.dispatch.toml` (HARD-GATE — kontrakt wykonania czytelny dla supervisora)
+
+Każdy scaffold, także jednocięciowy, kończy się `<plan-id>.dispatch.toml` ze schematem
+`vibecrafted.dispatch.v1`. Koduje pełny zbiór cięć, nazwane fazy, krawędzie `depends_on`, jawnie
+dozwoloną równoległość, tożsamość agenta i workflow, ścieżki briefów per cięcie, politykę commitów
+oraz delivery-verifiery. Zarejestruj go w `manifest.json` z rolą `dispatch`. ID cięć i ścieżki
+briefów MUSZĄ pokrywać każde wykonywalne cięcie atlasu dokładnie raz; drugi scheduler jest zakazany.
+Udowodnij artefakt przed przekazaniem:
+
+```bash
+vibecrafted dispatch <absolutny-root-planu>/<plan-id>.dispatch.toml --doctor
+vibecrafted dispatch <absolutny-root-planu>/<plan-id>.dispatch.toml --dry-run --json
+```
+
+Po walidacji przekaż dokładnie ten artefakt do `/vc-ship`. `/vc-ship` jest jedyną normalną ścieżką
+A→Z do startu, nadzoru, recovery i ukończenia wielocięciowego scaffoldu; bezpośrednie komendy
+start/resume dispatchera są wnętrzem supervisora, nie instrukcją operatorską scaffoldu.
+
+Nie ucz operatora ręcznego pisania TOML ani wklejania po jednej komendzie
+`vibecrafted workflow <agent> --prompt ...` na task. Ręczne launchery per cięcie nie należą do
+**Running This Plan** ani normalnej ścieżki DRIVER-a. Ograniczona notatka awaryjna może użyć
+bezpośredniego dispatchera albo launchu per cięcie wyłącznie po nazwaniu awarii `/vc-ship`/supervisora
+i powodu niedostępności normalnej drogi; musi zapisać dowód powrotu kontroli i nie może tworzyć
+drugiego systemu wykonania.
+
+### Plany z compile embargo
+
+Jeśli plan odracza bramki compile/test podczas kształtowania architektury, stosuj fazowo-świadomy
+kontrakt recovery z `references/compile-embargo.md`. Embargo nigdy nie legalizuje `--no-verify`,
+nie osłabia commit-message/security i nie zostawia po cichu jedynego zaakceptowanego punktu recovery
+lokalnie. Plan musi wskazać repo-owned mechanizm polityk, który potrafi odroczyć tylko nazwane bramki
+fazy; bez niego embargo jest zablokowane, dopóki prerequisite go nie wdroży albo praca nie zostanie
+podzielona na zwykłe hook-clean cięcia.
 
 ### 6. Serwuj i przeglądaj (edytowalne artefakty przez vibecrafted-server)
 
@@ -237,6 +307,8 @@ to wyzwala recovery-vector** (fallback/failover/handsoff). Pełen alfabet + mark
 ## Reguły krytyczne
 
 - **Research-first to hard-block, nie poprawka.** Żadnego planu z pamięci; wyprowadź z prawdy repo/runtime.
+- **Wywiad z founderem albo dowód — bez samowyłączenia.** Wskaż journal/AICX/brief z decyzjami
+  foundera albo zapytaj przed Shape.
 - **Brief na każde cięcie — bez wyjątków.** Briefy per cięcie to hard-gate (Faza 5). Plan,
   którego cięcia nie mają briefów, to wydmuszka; scaffold-doctor odmawia przekazania.
 - **DRIVER.md — bez wyjątków (Faza 5.5).** Driver przekazania operatora (pełne ścieżki · graf z adnotacją
@@ -250,6 +322,8 @@ to wyzwala recovery-vector** (fallback/failover/handsoff). Pełen alfabet + mark
 - **manifest.json jest obowiązkowy.** To jedyny inwentarz artefaktów i kontrakt ról. Żadne lustro
   `operator/`, duplikat, inferencja roli z nazwy ani symlink kompatybilności nie może stać się drugą
   zapisywalną prawdą.
+- **Artefakt `.dispatch.toml` jest obowiązkowy.** Zwaliduj `vibecrafted.dispatch.v1` przez dispatcher doctor i
+  przekaż wielocięciowe wykonanie do `/vc-ship`; ręczne workflow per task to tylko awaryjne recovery.
 - **Serwuj, nie przesłuchuj.** Renderuj edytowalne artefakty i przeglądaj je przez `vibecrafted-server`;
   operator edytuje plan, a nie odpowiada na dwadzieścia pytań w trakcie scaffoldu.
 - **Mierz, nie twierdź.** Cięcie jest gotowe, gdy jego verifier jest zielony, nigdy gdy agent tak mówi.
@@ -270,7 +344,9 @@ to wyzwala recovery-vector** (fallback/failover/handsoff). Pełen alfabet + mark
 ## Odniesienia
 
 - **vc-init** — bootstrapuje kontekst agenta po scaffoldowaniu (checkpoint orientacji).
-- **vc-implement** (alias **vc-justdo**) / **vc-workflow** — fazy WRITE, które konsumują plany scaffoldu.
+- **vc-ship** — jedyny normalny wykonawca A→Z wielocięciowego artefaktu dispatch scaffoldu.
+- **vc-implement** / **vc-workflow** — ograniczone komórki WRITE wybierane wewnątrz kontraktu dispatchu.
+  **vc-justdo** — samodzielna postawa, nie alias implement.
 - **vc-review · vc-followup · vc-audit · vc-dou** — fazy READ, które falsyfikują każdy artefakt WRITE.
 - **vc-operator** — czyta kolumnę `state` planu i prowadzi dispatch (trigger/stop).
 - **vc-research** — triple-agentowy research dla niewiadomych znalezionych podczas Orient/Falsify.
@@ -278,6 +354,9 @@ to wyzwala recovery-vector** (fallback/failover/handsoff). Pełen alfabet + mark
 ## Antywzorce
 
 - Planowanie przed checkpointem orientacji (komponowanie architektury z pamięci = cichy dryf).
+- Shape bez odpowiedzi foundera albo wskazanego wcześniejszego wywiadu.
+- Sekcja „Running This Plan" złożona z ręcznych komend workflow per task.
+- Compile embargo zapisane jako push-ban albo pozwolenie na `--no-verify`.
 - 50-stronicowy design doc zamiast ostrego, mierzalnego planu.
 - Proza zamiast kolumny `state` — operator nie odpali trigger/stop na prozie.
 - Traktowanie twierdzenia `[~]` agenta jak `[x]` bez verifiera (pułapka optymizmu).
@@ -290,6 +369,8 @@ to wyzwala recovery-vector** (fallback/failover/handsoff). Pełen alfabet + mark
 - **`references/cadence.md`** — cadence read/write VC-ship (kolejność, WRITE/READ, przekazanie, reguły planowania).
 - **`references/output-shapes.md`** — trzy kształty skali + 12-sekcyjny szablon dispatchu + tracker.
 - **`references/plan-template.md`** — format wyjścia SCAFFOLD.md (teraz z Vector + state + verifier).
+- **`references/compile-embargo.md`** — fazowo-świadomy, zdalnie odzyskiwalny kontrakt embarga bez
+  obchodzenia hooków.
 
 ---
 

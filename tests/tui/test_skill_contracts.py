@@ -77,3 +77,38 @@ def test_vc_operator_uses_one_repository_local_operator_journal() -> None:
     assert "routine negative-work claims" in corpus
     assert "What's NOT done (deliberately)" not in corpus
     assert re.search(r"\bOpera\b", all_operator_docs) is None
+
+
+def test_vc_scaffold_emits_dispatch_and_preserves_embargo_recovery_contract() -> None:
+    skills = REPO_ROOT / "vibecrafted-core/vibecrafted_core/skills"
+    variants = [skills / "vc-scaffold", skills / "pl/vc-scaffold"]
+
+    for scaffold in variants:
+        skill = (scaffold / "SKILL.md").read_text(encoding="utf-8")
+        flow = (scaffold / "FLOW.md").read_text(encoding="utf-8")
+        template = (scaffold / "references/plan-template.md").read_text(
+            encoding="utf-8"
+        )
+        embargo = (scaffold / "references/compile-embargo.md").read_text(
+            encoding="utf-8"
+        )
+        corpus = f"{skill}\n{flow}\n{template}\n{embargo}"
+
+        assert 'schema = "vibecrafted.dispatch.v1"' in corpus
+        assert ".dispatch.toml" in skill
+        assert "/vc-ship" in flow
+        assert "/vc-ship" in template
+        assert "--doctor" in template
+        assert (
+            "Emergency manual fallback" in template
+            or "Awaryjny fallback ręczny" in template
+        )
+        assert "founder_interview_evidence:" in template
+        assert "AICX" in skill
+        assert "--no-verify" in embargo
+        assert "embargo/<plan-id>" in embargo
+        assert "policy-aware" in embargo
+        assert (
+            "forbidden in every phase" in embargo
+            or "zabronione w każdej fazie" in embargo
+        )

@@ -104,8 +104,13 @@ fn published_schema_and_fixture_match_the_typed_model() {
     assert_eq!(manifest.schema_version, "1");
     assert_eq!(manifest.artifacts[2].role, ScaffoldArtifactRole::Brief);
     assert_eq!(manifest.artifacts[2].dependencies, ["driver", "atlas"]);
+    assert_eq!(manifest.artifacts[3].role, ScaffoldArtifactRole::Dispatch);
+    assert_eq!(
+        manifest.artifacts[3].path,
+        "aicx-product-convergence-v1.dispatch.toml"
+    );
     assert!(SCAFFOLD_MANIFEST_SCHEMA_JSON.contains("\"wave-atlas\""));
-    assert_eq!(path_pattern, r"^[^/\\].*\.md$");
+    assert_eq!(path_pattern, r"^[^/\\].*(\.md|\.dispatch\.toml)$");
 }
 
 #[test]
