@@ -737,6 +737,25 @@ def test_signed_archive_bootstraps_without_ambient_python_and_cleans_temp(
     ambient_python = fake_bin / "python3"
     ambient_python.write_text("#!/bin/sh\nexit 97\n", encoding="utf-8")
     ambient_python.chmod(0o755)
+    ambient_tar = fake_bin / "tar"
+    ambient_tar.write_text(
+        """#!/usr/bin/env bash
+set -eu
+/usr/bin/tar "$@"
+if [[ " $* " == *" -xpzf "* ]]; then
+  previous=""
+  for argument in "$@"; do
+    if [[ "$previous" == "-C" ]]; then
+      touch "$argument/VibecraftedRuntime/.DS_Store"
+      break
+    fi
+    previous="$argument"
+  done
+fi
+""",
+        encoding="utf-8",
+    )
+    ambient_tar.chmod(0o755)
     extraction_home = tmp_path / "extract"
     extraction_home.mkdir()
 
@@ -755,6 +774,7 @@ def test_signed_archive_bootstraps_without_ambient_python_and_cleans_temp(
     arguments = capture.read_text(encoding="utf-8").splitlines()
     assert arguments[1:3] == ["runtime-install", "--payload-root"]
     assert arguments[3].startswith(str(extraction_home))
+    assert Path(arguments[3]).parent.name.startswith(".vibecrafted-runtime-pack.")
     assert arguments[0] == f"{arguments[3]}/scripts/vetcoders_install.py"
     assert not any(extraction_home.iterdir())
 

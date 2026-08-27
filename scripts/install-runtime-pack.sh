@@ -196,7 +196,10 @@ if [[ -f "$pack" && "$pack" == *.tar.gz ]]; then
     || die "openssl is required to verify the Runtime Pack signature"
   openssl dgst -sha256 -verify "$public_key" -signature "$signature" "$pack" >/dev/null 2>&1 \
     || die "Runtime Pack signature verification failed"
-  temporary="$(mktemp -d "${TMPDIR:-/tmp}/vibecrafted-runtime-pack.XXXXXX")"
+  # Keep the extraction root hidden. Finder can otherwise discover the
+  # short-lived directory and create .DS_Store while provenance is being
+  # verified or while cleanup is removing the payload.
+  temporary="$(mktemp -d "${TMPDIR:-/tmp}/.vibecrafted-runtime-pack.XXXXXX")"
   tar -tzf "$pack" >/dev/null \
     || die "Runtime Pack archive cannot be listed"
   archive_root=""
@@ -204,6 +207,7 @@ if [[ -f "$pack" && "$pack" == *.tar.gz ]]; then
     [[ -n "$member" ]] || die "Runtime Pack archive contains an empty member"
     case "$member" in
       /*|../*|*/../*|*/..) die "unsafe Runtime Pack archive member: $member" ;;
+      .DS_Store|*/.DS_Store) die "Runtime Pack archive contains mutable host metadata: $member" ;;
     esac
     member_root="${member%%/*}"
     [[ -n "$member_root" ]] || die "Runtime Pack archive has no root directory"
@@ -224,6 +228,10 @@ if [[ -f "$pack" && "$pack" == *.tar.gz ]]; then
   # signed bytes' metadata before the pack verifies itself.
   tar -xpzf "$pack" -C "$temporary" \
     || die "Runtime Pack archive extraction failed"
+  # The signed archive listing above is the carrier truth. Any .DS_Store that
+  # appears only after extraction was injected by the host and must not turn a
+  # repeat install into a provenance failure.
+  find "$temporary" -type f -name .DS_Store -delete
   payload_root="$temporary/$archive_root"
   if find "$payload_root" -type l -print -quit | grep -q .; then
     die "links are forbidden in extracted Runtime Pack archives"
