@@ -996,6 +996,7 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "launchWorkspaceTerminal()" in launch_handler
     assert "showMainWindowIfNeeded()" not in launch_handler
     assert "\t<key>LSUIElement</key>\n\t<true/>" in info
+    assert "\t<key>NSQuitAlwaysKeepsWindows</key>\n\t<false/>" in info
     assert 'withTitle: "Open VC Console"' in delegate
     assert 'withTitle: "Open VC Terminal"' in delegate
     assert 'withTitle: "VC Server"' in delegate
