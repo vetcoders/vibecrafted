@@ -11,8 +11,9 @@ flowchart TD
   G --> H[pair verdicts: SAME / VARIANT / DRIFTED / BYPASS / FALSE]
   H --> I[Phase III: prism + writer/arbiter/observer/projection]
   I --> J[findings: CUT_BLOCKER / CUT_COHERENT / FOLLOW_UP / OBSERVATION]
-  J --> K[append .loctree/canary/JOURNAL.md]
-  K --> L[report → discuss → decide — no code mutation]
+  J --> V[werdykt przebiegu: AXES_CLOSED_CANDIDATE / AXES_OPEN / INSTRUMENT_INCOMPLETE / LAUNCHER_CONTRACT_CONFLICT]
+  V --> K[append .loctree/canary/JOURNAL.md]
+  K --> L[raport + BUILD/LINT/TEST/RUNTIME=NOT_ASSESSED → discuss → decide — zero mutacji kodu]
 ```
 
 ## Kontrakt faz

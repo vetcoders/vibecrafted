@@ -987,9 +987,7 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     launcher = (REPO_ROOT / "vibecrafted-app/tui-agent/src/bin/vc_start.rs").read_text(
         encoding="utf-8"
     )
-    installer = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(
-        encoding="utf-8"
-    )
+    installer = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(encoding="utf-8")
 
     launch_handler = delegate[
         delegate.index("func applicationDidFinishLaunching") : delegate.index(
@@ -1039,7 +1037,10 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert 'appendingPathComponent("runtime-pack", isDirectory: true)' in delegate
     assert 'appendingPathComponent("install-runtime-pack.sh")' in delegate
     assert '"--expected-source-revision"' in delegate
-    assert 'environment["VIBECRAFTED_DECLARED_LAUNCHER"] = install.launcher.path' in delegate
+    assert (
+        'environment["VIBECRAFTED_DECLARED_LAUNCHER"] = install.launcher.path'
+        in delegate
+    )
     assert '"launcher": str(paths["launcher_home"] / "vibecrafted")' in installer
     assert (
         'appendingPathComponent("runtime")'

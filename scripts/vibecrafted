@@ -459,17 +459,33 @@ _dispatcher_core_dir() {
   return 1
 }
 
-# Resolve the interpreter that owns vibecrafted_core by reading the shebang
-# from the uv-tool shim on PATH, since it carries the correct uv python.
+# An installed deck may inherit VIBECRAFTED_PYTHON from a different product
+# generation. Accept it only when it belongs to this deck's current generation;
+# checkout decks keep the explicit development override.
+_vibecrafted_python_owned_by_current() {
+  local candidate="$1" candidate_real current_real deck_real
+  [[ -d "$crafted_tools" ]] || return 0
+  current_real="$(cd "$crafted_tools" 2>/dev/null && pwd -P)" || return 1
+  deck_real="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null)" || return 0
+  deck_real="$(cd "$(dirname "$deck_real")" 2>/dev/null && pwd -P)" || return 0
+  [[ "$deck_real" == "$current_real" || "$deck_real" == "$current_real/"* ]] || return 0
+  candidate_real="$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P)/$(basename "$candidate")" || return 1
+  [[ "$candidate_real" == "$current_real/"* ]]
+}
+
+# Resolve the interpreter that owns vibecrafted_core. A Runtime Pack's own
+# interpreter wins; a source generation falls through to an owned override or
+# the uv-tool shim shebang on PATH.
 _vibecrafted_python() {
   local resolved shebang py runtime_root
-  if [[ -n "${VIBECRAFTED_PYTHON:-}" && -x "$VIBECRAFTED_PYTHON" ]]; then
-    printf '%s\n' "$VIBECRAFTED_PYTHON"
-    return 0
-  fi
   runtime_root="$(_runtime_payload_root 2>/dev/null || true)"
   if [[ -n "$runtime_root" && -x "$runtime_root/bin/python3" ]]; then
     printf '%s\n' "$runtime_root/bin/python3"
+    return 0
+  fi
+  if [[ -n "${VIBECRAFTED_PYTHON:-}" && -x "$VIBECRAFTED_PYTHON" ]] \
+    && _vibecrafted_python_owned_by_current "$VIBECRAFTED_PYTHON"; then
+    printf '%s\n' "$VIBECRAFTED_PYTHON"
     return 0
   fi
   for resolved in \

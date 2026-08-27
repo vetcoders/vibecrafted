@@ -617,6 +617,11 @@ def test_control_plane_staging_delegates_to_distribution_manifest(
     )
     monkeypatch.setattr(
         installer,
+        "_materialize_runtime_generation_vc_frame_entry",
+        lambda runtime_root: seen.update(vc_frame_entry_materialized=runtime_root),
+    )
+    monkeypatch.setattr(
+        installer,
         "_write_runtime_generation_manifest",
         lambda runtime_root, **kwargs: seen.update(
             manifested=runtime_root,
@@ -639,6 +644,7 @@ def test_control_plane_staging_delegates_to_distribution_manifest(
     assert seen["manifest_source_provenance"] == source_provenance
     assert seen["frame_materialized"] == seen["destination"]
     assert seen["entrypoint_materialized"] == seen["destination"]
+    assert seen["vc_frame_entry_materialized"] == seen["destination"]
     assert seen["manifested"] == seen["destination"]
     assert seen["validated"] == seen["destination"]
     assert (destination / "payload.txt").read_text(encoding="utf-8") == "validated\n"
@@ -969,10 +975,7 @@ def test_install_all_installs_python_tools_with_uv_tool_install() -> None:
         "v._install_launcher(Path(sys.argv[1]), dry_run=False, update_rc=False)"
         in python_tools_block
     )
-    assert (
-        "$$stable_root/vibecrafted-core/vibecrafted_core/deck/vibecrafted"
-        in python_tools_block
-    )
+    assert "$$stable_root/bin/vibecrafted" in python_tools_block
     assert 'if [ "$$entrypoint" = "vibecrafted" ]' in python_tools_block
     assert "vibecrafted-mcp" in (
         REPO_ROOT / "vibecrafted-mcp" / "pyproject.toml"
@@ -1031,14 +1034,17 @@ def test_install_all_covers_app_binaries_as_real_files() -> None:
     server_build_block = makefile.split("\nbuild-server-release:", 1)[1].split(
         "\ninstall-server-payload:", 1
     )[0]
-    assert "cargo leptos build --release" in server_build_block
+    assert '"$$cargo_bin" leptos build --release' in server_build_block
+    assert "rustup which cargo" in server_build_block
+    assert "rustup target list --installed" in server_build_block
+    assert "FATAL: wasm32 target missing" in server_build_block
     assert "SERVER_BUILD_TARGET := $(CARGO_BUILD_ROOT)/vibecrafted-server" in makefile
     assert "SERVER_BUILD_SITE_ROOT := $(SERVER_BUILD_TARGET)/site" in makefile
     assert 'CARGO_TARGET_DIR="$(SERVER_BUILD_TARGET)"' in server_build_block
     assert 'LEPTOS_SITE_ROOT="$(SERVER_BUILD_SITE_ROOT)"' in server_build_block
     assert '--bin-cargo-args="--locked"' in server_build_block
     assert '--lib-cargo-args="--locked"' in server_build_block
-    assert "cargo tree --locked -p wasm-bindgen --depth 0 --prefix none" in (
+    assert '"$$cargo_bin" tree --locked -p wasm-bindgen --depth 0 --prefix none' in (
         server_build_block
     )
     assert "tomllib" not in server_build_block
@@ -1407,6 +1413,10 @@ def test_make_install_verifies_server_supervisor_entrypoint() -> None:
     )
     assert "uv tool uninstall" not in install_tools_block
     assert "run_with_tools_install_lease" in install_tools_block
+    assert "preflight_source_runtime_candidate" in install_tools_block
+    assert install_tools_block.index("preflight_source_runtime_candidate") < (
+        install_tools_block.index("run_with_tools_install_lease")
+    )
     assert "INSTALL_TOOLS_SERVICE_POLICY ?= preserve" in text
     assert 'service_policy=os.environ["VIBECRAFTED_INSTALL_SERVICE_POLICY"]' in (
         install_tools_block

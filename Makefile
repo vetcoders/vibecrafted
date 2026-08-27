@@ -345,7 +345,7 @@ install-bundle-tools:
 	else \
 		echo "[server] cargo not found — preserving the installed server payload" >&2; \
 	fi; \
-	VIBECRAFTED_INSTALL_SERVICE_POLICY="$(INSTALL_SERVER_SERVICE_POLICY)" VIBECRAFTED_INSTALL_SERVER_PAYLOAD="$$payload" VIBECRAFTED_INSTALL_SERVER_BIN_DIR="$(BIN_DIR)" VIBECRAFTED_INSTALL_SERVER_SITE_ROOT="$(SERVER_INSTALL_SITE_ROOT)" $(PYTHON) -c 'import os, sys; from pathlib import Path; sys.path.insert(0, "$(SOURCE)/scripts"); import vetcoders_install as v; bin_dir = Path(os.environ["VIBECRAFTED_INSTALL_SERVER_BIN_DIR"]); payload = (bin_dir / "$(SERVER_BIN)", bin_dir / "$(SERVER_COMPAT_BIN)", Path(os.environ["VIBECRAFTED_INSTALL_SERVER_SITE_ROOT"])) if os.environ.get("VIBECRAFTED_INSTALL_SERVER_PAYLOAD") == "1" else (); service_policy = os.environ["VIBECRAFTED_INSTALL_SERVICE_POLICY"]; raise SystemExit(v.run_with_tools_install_lease(v.vibecrafted_home(), sys.argv[1:], service_policy=service_policy, runtime_payload_paths=payload))' "$(MAKE)" --no-print-directory install-tools-held INSTALL_BUNDLE=1 INSTALL_SERVER_PAYLOAD="$$payload"
+	VIBECRAFTED_INSTALL_SERVICE_POLICY="$(INSTALL_SERVER_SERVICE_POLICY)" VIBECRAFTED_INSTALL_SERVER_PAYLOAD="$$payload" VIBECRAFTED_INSTALL_SERVER_BIN_DIR="$(BIN_DIR)" VIBECRAFTED_INSTALL_SERVER_SITE_ROOT="$(SERVER_INSTALL_SITE_ROOT)" $(PYTHON) -c 'import os, sys; from pathlib import Path; sys.path.insert(0, "$(SOURCE)/scripts"); import vetcoders_install as v; bin_dir = Path(os.environ["VIBECRAFTED_INSTALL_SERVER_BIN_DIR"]); payload = (bin_dir / "$(SERVER_BIN)", bin_dir / "$(SERVER_COMPAT_BIN)", Path(os.environ["VIBECRAFTED_INSTALL_SERVER_SITE_ROOT"])) if os.environ.get("VIBECRAFTED_INSTALL_SERVER_PAYLOAD") == "1" else (); service_policy = os.environ["VIBECRAFTED_INSTALL_SERVICE_POLICY"]; v.preflight_source_runtime_candidate(Path("$(SOURCE)")); raise SystemExit(v.run_with_tools_install_lease(v.vibecrafted_home(), sys.argv[1:], service_policy=service_policy, runtime_payload_paths=payload))' "$(MAKE)" --no-print-directory install-tools-held INSTALL_BUNDLE=1 INSTALL_SERVER_PAYLOAD="$$payload"
 endif
 
 # De-fragile contract: the uv-tool editable source is the STABLE runtime home
@@ -362,7 +362,7 @@ install-tools:
 	@printf '%s\n' '[install-tools] dry-run: acquire lease and run install-tools-held'
 else
 install-tools:
-	@VIBECRAFTED_INSTALL_SERVICE_POLICY="$(INSTALL_TOOLS_SERVICE_POLICY)" $(PYTHON) -c 'import os, sys; sys.path.insert(0, "$(SOURCE)/scripts"); import vetcoders_install as v; raise SystemExit(v.run_with_tools_install_lease(v.vibecrafted_home(), sys.argv[1:], service_policy=os.environ["VIBECRAFTED_INSTALL_SERVICE_POLICY"]))' "$(MAKE)" --no-print-directory install-tools-held
+	@VIBECRAFTED_INSTALL_SERVICE_POLICY="$(INSTALL_TOOLS_SERVICE_POLICY)" $(PYTHON) -c 'import os, sys; from pathlib import Path; sys.path.insert(0, "$(SOURCE)/scripts"); import vetcoders_install as v; v.preflight_source_runtime_candidate(Path("$(SOURCE)")); raise SystemExit(v.run_with_tools_install_lease(v.vibecrafted_home(), sys.argv[1:], service_policy=os.environ["VIBECRAFTED_INSTALL_SERVICE_POLICY"]))' "$(MAKE)" --no-print-directory install-tools-held
 endif
 
 # Internal continuation. The outer target waits for this submake while retaining
@@ -435,7 +435,7 @@ install-tools-held:
 		fi; \
 		resolved_real="$$($(PYTHON) -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$$resolved")"; \
 		if [ "$$entrypoint" = "vibecrafted" ]; then \
-			expected_path="$$stable_root/vibecrafted-core/vibecrafted_core/deck/vibecrafted"; \
+			expected_path="$$stable_root/bin/vibecrafted"; \
 		else \
 			expected_path="$$tool_root/bin/$$entrypoint"; \
 		fi; \
@@ -979,12 +979,26 @@ build-server-release:
 		exit 0; \
 	fi; \
 	set -e; \
+	if ! command -v rustup >/dev/null 2>&1; then \
+		echo "[server] FATAL: rustup is required; refusing an ambient cargo toolchain" >&2; \
+		exit 1; \
+	fi; \
+	cargo_bin="$$(rustup which cargo 2>/dev/null)"; \
+	if [ -z "$$cargo_bin" ] || [ ! -x "$$cargo_bin" ]; then \
+		echo "[server] FATAL: rustup could not resolve an executable cargo" >&2; \
+		exit 1; \
+	fi; \
+	if ! rustup target list --installed | grep -Fx 'wasm32-unknown-unknown' >/dev/null; then \
+		echo "[server] FATAL: wasm32 target missing from the rustup toolchain" >&2; \
+		echo "[server] repair: rustup target add wasm32-unknown-unknown" >&2; \
+		exit 1; \
+	fi; \
 	if ! command -v cargo-leptos >/dev/null 2>&1; then \
 		echo "[server] FATAL: cargo-leptos is required to build the interactive server shell" >&2; \
 		exit 1; \
 	fi; \
 	if command -v wasm-bindgen >/dev/null 2>&1; then \
-		lock_version="$$(cd "$(SERVER_DIR)" && cargo tree --locked -p wasm-bindgen --depth 0 --prefix none | awk 'NR == 1 { sub(/^v/, "", $$2); print $$2 }')"; \
+		lock_version="$$(cd "$(SERVER_DIR)" && "$$cargo_bin" tree --locked -p wasm-bindgen --depth 0 --prefix none | awk 'NR == 1 { sub(/^v/, "", $$2); print $$2 }')"; \
 		if [ -z "$$lock_version" ]; then \
 			echo "[server] FATAL: could not resolve wasm-bindgen version from Cargo.lock" >&2; \
 			exit 1; \
@@ -998,7 +1012,7 @@ build-server-release:
 	fi; \
 	echo "[server] building release package + hydration assets ($(SERVER_PACKAGE))"; \
 	mkdir -p "$(SERVER_BUILD_TARGET)"; \
-	ulimit -f unlimited; ( cd $(SERVER_DIR) && CARGO_TARGET_DIR="$(SERVER_BUILD_TARGET)" LEPTOS_SITE_ROOT="$(SERVER_BUILD_SITE_ROOT)" cargo leptos build --release --bin-cargo-args="--locked" --lib-cargo-args="--locked" ); \
+	ulimit -f unlimited; ( cd $(SERVER_DIR) && PATH="$$(dirname "$$cargo_bin"):$$PATH" CARGO_TARGET_DIR="$(SERVER_BUILD_TARGET)" LEPTOS_SITE_ROOT="$(SERVER_BUILD_SITE_ROOT)" "$$cargo_bin" leptos build --release --bin-cargo-args="--locked" --lib-cargo-args="--locked" ); \
 	if [ ! -x "$(SERVER_BUILD_TARGET)/release/$(SERVER_PACKAGE)" ] || [ ! -d "$(SERVER_BUILD_SITE_ROOT)/pkg" ]; then \
 		echo "[server] FATAL: cargo-leptos did not produce the server + site package" >&2; \
 		exit 1; \

@@ -678,8 +678,12 @@ install_vc_frame_product_wrapper() {
   current="$tools_home/vibecrafted-current"
   if [[ -d "$current" ]]; then
     gen="$(cd "$current" && pwd -P)"
-    mkdir -p "$gen/bin"
-    install -m 0755 "$wrapper_src" "$gen/bin/vc-frame"
+    # Generations are immutable and carry bin/vc-frame since publication
+    # materializes it; only a pre-materialization generation gets the copy.
+    if [[ ! -x "$gen/bin/vc-frame" ]]; then
+      mkdir -p "$gen/bin"
+      install -m 0755 "$wrapper_src" "$gen/bin/vc-frame"
+    fi
     ln -sfn "$current/bin/vc-frame" "$dest"
     ok "product vc-frame entry installed: $dest -> $current/bin/vc-frame (real=$real)"
   else

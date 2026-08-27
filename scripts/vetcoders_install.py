@@ -5294,6 +5294,27 @@ def activate_runtime_service_after_install(
         )
 
 
+def _runtime_service_already_restored(
+    shared_home: Path,
+    *,
+    launch_agent_backup: _RuntimeLaunchAgentBackup | None,
+) -> bool:
+    """Recognize an exact old pair that launchd revived before rollback began."""
+    if launch_agent_backup is None:
+        return False
+    handoff = _read_tools_handoff(shared_home)
+    if handoff is None or not handoff["old_target"]:
+        return False
+    current_target = _symlink_target(_current_tools_link(shared_home))
+    old_target = Path(handoff["old_target"]).resolve(strict=False)
+    if current_target != old_target:
+        return False
+    if _capture_runtime_launch_agent_backup(shared_home) != launch_agent_backup:
+        return False
+    snapshot = _runtime_service_snapshot(shared_home)
+    return snapshot is not None and snapshot[1].healthy
+
+
 def rollback_runtime_install(
     shared_home: Path,
     *,
@@ -5325,6 +5346,14 @@ def rollback_runtime_install(
         else nullcontext(launchd_gate)
     )
     with gate_context as gate:
+        if darwin_service_attempted and _runtime_service_already_restored(
+            shared_home,
+            launch_agent_backup=launch_agent_backup,
+        ):
+            # launchd can revive the exact old pair after a failed handoff.
+            # Its current pointer, plist bytes, and healthy identity all agree;
+            # draining it again would turn a proven rollback into an outage.
+            return False
         if darwin_service_attempted:
             gate.disable()
             try:
@@ -8522,6 +8551,17 @@ def _materialize_runtime_generation_entrypoint(runtime_root: Path) -> None:
     target.chmod(0o755)
 
 
+def _materialize_runtime_generation_vc_frame_entry(runtime_root: Path) -> None:
+    """Carry the stable vc-frame product wrapper in every immutable generation."""
+    source = runtime_root / "scripts" / "vc-frame-product-entry.sh"
+    target = runtime_root / "bin" / "vc-frame"
+    if not source.is_file():
+        raise OSError(f"candidate runtime has no vc-frame product entry: {source}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    target.chmod(0o755)
+
+
 def _runtime_active_text_files(runtime_root: Path) -> Iterator[Path]:
     """Yield every active (non-symlink) text config/script file under the runtime's watched
     roots.
@@ -9003,11 +9043,19 @@ def _owned_temporary_directory(*, prefix: str) -> Iterator[Path]:
             )
 
 
-def _validate_runtime_verifier_semantics(runtime_root: Path) -> None:
-    """Validate captured candidate code/schema and exercise its real public entrypoints."""
+def _runtime_verifier_python(runtime_root: Path) -> Path:
+    """Use a carried interpreter when present, otherwise the source installer's."""
     runtime_python = runtime_root / "bin/python3"
+    if not runtime_python.exists() and not runtime_python.is_symlink():
+        return Path(sys.executable)
     if not runtime_python.is_file() or not os.access(runtime_python, os.X_OK):
         raise OSError(f"candidate runtime Python is not executable: {runtime_python}")
+    return runtime_python
+
+
+def _validate_runtime_verifier_semantics(runtime_root: Path) -> None:
+    """Validate captured candidate code/schema and exercise its real public entrypoints."""
+    runtime_python = _runtime_verifier_python(runtime_root)
 
     def run_candidate(
         argv: Sequence[str], *, cache: Path
@@ -9369,6 +9417,51 @@ def _canonical_runtime_source_provenance(
     }
 
 
+def _prepare_runtime_generation_candidate(
+    src: Path, staging: Path, *, install_version: str | None
+) -> None:
+    """Run every offline candidate check before any runtime service drain."""
+    source_provenance = stage_distribution_payload(
+        src,
+        staging,
+        mirror=True,
+        require_source_provenance=True,
+    )
+    if source_provenance is None:
+        raise OSError("candidate staging returned no required source provenance")
+    if install_version:
+        stamp_install_version(staging, install_version)
+    _materialize_vc_frame_generation(staging)
+    _materialize_runtime_generation_entrypoint(staging)
+    _materialize_runtime_generation_vc_frame_entry(staging)
+    audit_errors = _runtime_generation_audit_errors(staging, source_root=src)
+    if audit_errors:
+        raise OSError("\n".join(audit_errors))
+    _write_runtime_generation_manifest(
+        staging,
+        source_root=src,
+        source_provenance=source_provenance,
+        install_version=install_version,
+    )
+    payload_errors = _runtime_generation_payload_errors(staging)
+    if payload_errors:
+        raise OSError(
+            "candidate runtime failed pre-publish validation:\n"
+            + "\n".join(payload_errors)
+        )
+
+
+def preflight_source_runtime_candidate(src: Path) -> None:
+    """Prove a source candidate without touching pointers, launchd, or live services."""
+    with tempfile.TemporaryDirectory(prefix="vibecrafted-runtime-preflight-") as raw:
+        staging = Path(raw) / "candidate"
+        _prepare_runtime_generation_candidate(
+            src,
+            staging,
+            install_version=get_install_version(src),
+        )
+
+
 def _sync_control_plane_tree_locked(
     src: Path,
     dst: Path,
@@ -9376,10 +9469,7 @@ def _sync_control_plane_tree_locked(
     mirror: bool,
     install_version: str | None,
 ) -> Path:
-    """Stage, materialize, audit, manifest, and atomically publish a new runtime generation
-    under the tools-install lease; rolls back the staging/generation directories on any failure
-    before the pointer swap.
-    """
+    """Stage, validate, and atomically publish under the tools-install lease."""
     _ = mirror  # staged runtime is always an exact distribution payload
     if dst.exists() and not dst.is_symlink():
         raise OSError(
@@ -9419,33 +9509,11 @@ def _sync_control_plane_tree_locked(
         )
     pointer_swapped = False
     try:
-        source_provenance = stage_distribution_payload(
+        _prepare_runtime_generation_candidate(
             src,
             staging,
-            mirror=True,
-            require_source_provenance=True,
-        )
-        if source_provenance is None:
-            raise OSError("candidate staging returned no required source provenance")
-        if install_version:
-            stamp_install_version(staging, install_version)
-        _materialize_vc_frame_generation(staging)
-        _materialize_runtime_generation_entrypoint(staging)
-        audit_errors = _runtime_generation_audit_errors(staging, source_root=src)
-        if audit_errors:
-            raise OSError("\n".join(audit_errors))
-        _write_runtime_generation_manifest(
-            staging,
-            source_root=src,
-            source_provenance=source_provenance,
             install_version=install_version,
         )
-        payload_errors = _runtime_generation_payload_errors(staging)
-        if payload_errors:
-            raise OSError(
-                "candidate runtime failed pre-publish validation:\n"
-                + "\n".join(payload_errors)
-            )
         staging.rename(generation)
         handoff = {
             "schema": _TOOLS_HANDOFF_SCHEMA,
@@ -13166,10 +13234,7 @@ def _launcher_symlink_target(repo_root: Path) -> Path:
     return (
         vibecrafted_tools_home()
         / "vibecrafted-current"
-        / "vibecrafted-core"
-        / "vibecrafted_core"
-        / "deck"
-        / "vibecrafted"
+        / _RUNTIME_GENERATION_ENTRYPOINT
     )
 
 
@@ -15296,6 +15361,7 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
                 (bin_dir / "vc-frame").chmod(0o755)
             _materialize_vc_frame_generation(staging)
             _materialize_runtime_generation_entrypoint(staging)
+            _materialize_runtime_generation_vc_frame_entry(staging)
             source_provenance = load_source_provenance(staging)
             if source_provenance is None:
                 raise RuntimeError("Runtime Pack has no source-provenance.json")
