@@ -1144,6 +1144,48 @@ def test_sync_state_active_truth_quarantines_pytest_events_and_separates_stalls(
         ]
 
 
+def test_sync_state_never_resurrects_guardian_settlement_as_stalled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    now = dt.datetime(2026, 8, 27, 12, 0, tzinfo=dt.timezone.utc)
+    monkeypatch.setattr(control_plane, "_now", lambda: now)
+    events = home / "control_plane" / "events.jsonl"
+    events.parent.mkdir(parents=True)
+    events.write_text(
+        json.dumps(
+            {
+                "ts": (now - dt.timedelta(days=8)).isoformat(),
+                "run_id": "guardian-settled",
+                "kind": "spawn-update",
+                "payload": {
+                    "agent": "guardian",
+                    "skill": "settlement",
+                    "mode": "n",
+                    "state": "settled",
+                    "health": "stalled",
+                    "liveness": "heartbeat",
+                    "heartbeat_at": (now - dt.timedelta(days=8)).isoformat(),
+                    "verdict": "needs_attention",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    snapshot = control_plane.sync_state()
+    run = next(
+        run for run in snapshot["recent_runs"] if run["run_id"] == "guardian-settled"
+    )
+
+    assert run["state"] == "settled"
+    assert run["health"] == "final"
+    assert run["run_id"] not in {item["run_id"] for item in snapshot["active_runs"]}
+    assert run["run_id"] not in {item["run_id"] for item in snapshot["stalled_runs"]}
+
+
 def test_projection_notification_cannot_regress_newer_lifecycle_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

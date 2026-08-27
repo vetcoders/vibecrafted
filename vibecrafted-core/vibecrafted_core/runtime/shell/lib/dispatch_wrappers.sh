@@ -179,7 +179,7 @@ _vetcoders_skill() {
   local inherited_run_lock
   inherited_run_id="$(_vetcoders_effective_run_id 2>/dev/null || true)"
   inherited_run_lock="$(_vetcoders_effective_run_lock 2>/dev/null || true)"
-  _vetcoders_parse_contract "$@" || return 1
+  _vetcoders_parse_skill_contract "$@" || return 1
   if [[ "$skill" == "polarize" && -n "$_vetcoders_contract_count" ]]; then
     _vetcoders_polarize_loop "$tool" "$@"
     return
@@ -252,6 +252,7 @@ _vetcoders_skill() {
   local spawn_args=(--runtime "$runtime")
   [[ -z "$_vetcoders_contract_dry_run" ]] || spawn_args+=(--dry-run)
   [[ -n "$_vetcoders_contract_root" ]] && spawn_args+=(--root "$_vetcoders_contract_root")
+  [[ -n "$_vetcoders_contract_model" ]] && spawn_args+=(--model "$_vetcoders_contract_model")
   if [[ "$skill" == "polarize" && "$prism_band" =~ ^(pass|doctrine)$ ]]; then
     local dispatch_output dispatch_status agent_log session_uuid
     agent_log="$(_vetcoders_store_dir "$root")/polarize/$run_id/${tool}.stdout.log"

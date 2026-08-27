@@ -71,6 +71,10 @@ ACTIVE_STATES = {
     "stalled",
 }
 FINAL_STATES = {
+    # Guardian settlement is a durable outcome, never worker liveness.  Treating
+    # it as an unknown lifecycle state lets the heartbeat projector age it into
+    # the stalled bucket and resurrect closed history as a live operator alert.
+    "settled",
     "report_validated",
     "completed",
     "closed",

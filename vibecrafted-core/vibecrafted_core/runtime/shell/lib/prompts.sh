@@ -33,6 +33,7 @@ _vetcoders_contract_reset() {
   _vetcoders_contract_count=""
   _vetcoders_contract_depth=""
   _vetcoders_contract_runtime=""
+  _vetcoders_contract_model=""
   _vetcoders_contract_policy_runtime=""
   _vetcoders_contract_permissions=""
   _vetcoders_contract_token_budget=""
@@ -126,6 +127,15 @@ _vetcoders_parse_contract() {
         [[ $# -gt 0 ]] || { echo "Missing value for --runtime" >&2; return 1; }
         _vetcoders_contract_runtime="$1"
         ;;
+      --model)
+        if [[ -z "${_vetcoders_contract_allow_model:-}" ]]; then
+          printf 'Unknown flag: %s (flags go before --prompt; use -- for literal text)\n' "$1" >&2
+          return 1
+        fi
+        shift
+        [[ $# -gt 0 ]] || { echo "Missing value for --model" >&2; return 1; }
+        _vetcoders_contract_model="$1"
+        ;;
       --policy-runtime)
         shift
         [[ $# -gt 0 ]] || { echo "Missing value for --policy-runtime" >&2; return 1; }
@@ -192,6 +202,17 @@ _vetcoders_parse_contract() {
   if [[ -z "$_vetcoders_contract_prompt" && -n "$_vetcoders_contract_tail" ]]; then
     _vetcoders_contract_prompt="$_vetcoders_contract_tail"
   fi
+}
+
+# Skill launchers own model selection. Keep the shared parser fail-closed for
+# init/resume/operator call sites, while allowing documented skill syntax such
+# as `vibecrafted audit claude --model claude-opus-5 --file brief.md`.
+_vetcoders_parse_skill_contract() {
+  _vetcoders_contract_allow_model=1
+  _vetcoders_parse_contract "$@"
+  local status=$?
+  unset _vetcoders_contract_allow_model
+  return "$status"
 }
 
 _vetcoders_effective_runtime() {

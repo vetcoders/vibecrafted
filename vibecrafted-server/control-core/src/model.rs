@@ -221,7 +221,10 @@ pub const ACTIVE_STATES: [&str; 13] = [
 ];
 
 /// Terminal states. Mirrors `control_plane.FINAL_STATES`.
-pub const FINAL_STATES: [&str; 15] = [
+pub const FINAL_STATES: [&str; 16] = [
+    // Guardian settlement is a durable outcome, never worker liveness. Keeping
+    // it outside this set lets old settlement heartbeats masquerade as stalls.
+    "settled",
     "report_validated",
     "completed",
     "closed",

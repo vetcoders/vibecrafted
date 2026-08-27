@@ -2274,6 +2274,60 @@ mod tests {
     }
 
     #[test]
+    fn guardian_settlement_is_terminal_and_never_enters_stalled_runs() {
+        let home = temp_home("guardian-settlement-terminal");
+        let runs = home.join("control_plane/runs");
+        fs::create_dir_all(&runs).expect("runs");
+        let now = Utc::now();
+        let snapshot = json!({
+            "run_id": "guardian-settled",
+            "agent": "guardian",
+            "skill": "settlement",
+            "mode": "n",
+            "root": "",
+            "operator_session": "guardian-settled",
+            "latest_report": "",
+            "latest_transcript": "",
+            "last_error": "",
+            "state": "settled",
+            "health": "stalled",
+            "source": "event-stream",
+            "lock_present": false,
+            "liveness": "heartbeat",
+            "updated_at": (now - Duration::days(8)).to_rfc3339(),
+            "started_at": (now - Duration::days(8)).to_rfc3339(),
+            "settlement_verdict": "needs_attention",
+            "settlement_tui": "n"
+        });
+        fs::write(
+            runs.join("guardian-settled.json"),
+            serde_json::to_vec_pretty(&snapshot).unwrap(),
+        )
+        .expect("settled snapshot");
+
+        let view = ControlPlane::new(&home).compute_view(now);
+        let run = view
+            .recent_runs
+            .iter()
+            .find(|run| run.run_id == "guardian-settled")
+            .expect("settled run remains inspectable as recent truth");
+
+        assert_eq!(run.state, "settled");
+        assert_eq!(run.health, "final");
+        assert!(
+            view.active_runs
+                .iter()
+                .all(|run| run.run_id != "guardian-settled")
+        );
+        assert!(
+            view.stalled_runs
+                .iter()
+                .all(|run| run.run_id != "guardian-settled")
+        );
+        fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
     fn projection_notification_cannot_regress_newer_lifecycle_state() {
         let home = temp_home("projection-notification-race");
         let control_plane = home.join("control_plane");
