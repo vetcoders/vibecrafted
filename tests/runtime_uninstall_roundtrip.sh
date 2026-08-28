@@ -30,6 +30,7 @@ sandbox_env=(
   "VIBECRAFTED_RUNTIME_HOME=$sandbox_home/.local/share/vibecrafted"
   "VIBECRAFTED_TOOLS_HOME=$sandbox_home/.local/share/vibecrafted/tools"
   "VIBECRAFTED_LAUNCHER_BIN=$sandbox_home/.local/bin"
+  "VC_FRAME_SOCKET_DIR=$sandbox_tmp/vc-frame-$(id -u)"
   "VIBECRAFTED_INSTALL_NONINTERACTIVE=1"
   "INSTALL_SERVER_SERVICE_POLICY=isolated"
   "CARGO_TARGET_DIR=$repo_root/target/codex-runtime-uninstall-roundtrip"

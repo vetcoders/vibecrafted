@@ -15629,6 +15629,11 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
 
     paths = _runtime_install_paths()
     runtime_home = paths["runtime_home"]
+    _refuse_runtime_pack_downgrade(
+        payload_root,
+        runtime_home,
+        allow_older=bool(getattr(args, "allow_older_runtime", False)),
+    )
     receipt_path = _runtime_receipt_path(runtime_home)
     previous = _load_runtime_install_receipt(receipt_path)
     previous_roots = {
@@ -15969,6 +15974,102 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
     return 0
 
 
+def _vc_frame_socket_dir() -> Path:
+    """The vc-frame session socket namespace this install owns.
+
+    Keyed by uid, not by ``$HOME`` — so a sandboxed install (``env -i HOME=…``)
+    must set ``VC_FRAME_SOCKET_DIR`` or it would tear down the *host* namespace
+    and orphan every live session on the machine.
+    """
+    override = os.environ.get("VC_FRAME_SOCKET_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path(f"/tmp/vc-frame-{os.getuid()}")
+
+
+RUNTIME_PACK_PROVENANCE_NAME = "runtime-pack-provenance.json"
+
+
+def _load_runtime_pack_provenance(root: Path) -> dict[str, Any]:
+    path = root / RUNTIME_PACK_PROVENANCE_NAME
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _runtime_pack_build_date(provenance: Mapping[str, Any]) -> str:
+    """``YYYYMMDD`` from ``carrier_basename`` (``…_4.3.0-20260827-3bbe57a2-…``)."""
+    match = re.search(
+        r"-(\d{8})-[0-9a-f]{7,40}-", str(provenance.get("carrier_basename", ""))
+    )
+    return match.group(1) if match else ""
+
+
+def _runtime_pack_downgrade(
+    candidate: Mapping[str, Any], active: Mapping[str, Any]
+) -> list[str]:
+    """Explain why installing ``candidate`` over ``active`` is a downgrade.
+
+    Empty list = not a downgrade (or not decidable). Build dates are the only
+    orderable evidence a Runtime Pack carries; component revisions are listed so
+    the founder sees *which* tool would go backwards (2026-08-27: a self-install
+    replaced vc-frame f7755692 with 915ca04e and orphaned 12 live sessions).
+    """
+    cand_date = _runtime_pack_build_date(candidate)
+    active_date = _runtime_pack_build_date(active)
+    if not cand_date or not active_date or cand_date >= active_date:
+        return []
+    reasons = [
+        (
+            f"candidate Runtime Pack {candidate.get('version', '?')} was built {cand_date}, "
+            f"active generation {active.get('version', '?')} was built {active_date}"
+        )
+    ]
+    cand_rev = candidate.get("source_revisions") or {}
+    active_rev = active.get("source_revisions") or {}
+    for component in sorted(set(cand_rev) | set(active_rev)):
+        before, after = active_rev.get(component), cand_rev.get(component)
+        if before and after and before != after:
+            reasons.append(f"{component}: {before[:8]} -> {after[:8]}")
+    return reasons
+
+
+def _refuse_runtime_pack_downgrade(
+    payload_root: Path, runtime_home: Path, *, allow_older: bool
+) -> None:
+    active_path = runtime_home / "active.json"
+    if not active_path.is_file():
+        return
+    try:
+        active = json.loads(active_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    active_root = Path(str(active.get("runtime_root") or ""))
+    if not active_root.is_dir():
+        return
+    reasons = _runtime_pack_downgrade(
+        _load_runtime_pack_provenance(payload_root),
+        _load_runtime_pack_provenance(active_root),
+    )
+    if not reasons:
+        return
+    detail = "\n  ".join(reasons)
+    if allow_older:
+        print(
+            f"warning: installing an older Runtime Pack (--allow-older-runtime):\n  {detail}"
+        )
+        return
+    raise RuntimeError(
+        "refusing to replace a newer active runtime with an older Runtime Pack "
+        "(an upgrade never takes the founder's tools backwards; "
+        "pass --allow-older-runtime to do it on purpose):\n  " + detail
+    )
+
+
 def _receipt_path_is_allowed(path: Path, roots: Mapping[str, Path]) -> bool:
     allowed = [
         roots["runtime_home"],
@@ -15981,7 +16082,7 @@ def _receipt_path_is_allowed(path: Path, roots: Mapping[str, Path]) -> bool:
             [
                 Path.home() / "Library/LaunchAgents",
                 Path.home() / "Library/Caches/io.vetcoders.vc-frame",
-                Path(f"/tmp/vc-frame-{os.getuid()}"),
+                _vc_frame_socket_dir(),
             ]
         )
     # Preserve the final component so a receipt cannot make an outside path
@@ -16194,7 +16295,7 @@ def cmd_runtime_uninstall(args: argparse.Namespace) -> int:
         runtime_surfaces = [
             Path.home() / "Library/LaunchAgents/io.vetcoders.vibecrafted.server.plist",
             Path.home() / "Library/Caches/io.vetcoders.vc-frame",
-            Path(f"/tmp/vc-frame-{os.getuid()}"),
+            _vc_frame_socket_dir(),
         ]
         for path in runtime_surfaces:
             if _path_present(path):
@@ -16434,6 +16535,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_runtime_install.add_argument("--app-root")
     p_runtime_install.add_argument("--terminal-host")
     p_runtime_install.add_argument("--frame-helper")
+    p_runtime_install.add_argument(
+        "--allow-older-runtime",
+        action="store_true",
+        help="Install a Runtime Pack built before the active generation (explicit downgrade)",
+    )
 
     p_runtime_uninstall = sub.add_parser(
         "runtime-uninstall", help="Undo the receipted Runtime Pack install"

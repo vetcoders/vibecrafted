@@ -176,3 +176,16 @@ removed and not backed up.
 - `$TMPDIR` test scratch. Owned by the test suite, not by the installer.
 
 _𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI_
+
+## 5. Two guards added 2026-08-28 (dragon incident)
+
+- **Socket namespace is uid-keyed.** `/tmp/vc-frame-<uid>` belongs to the
+  machine, not to `$HOME`. Uninstall resolves it through
+  `_vc_frame_socket_dir()`, which honours `VC_FRAME_SOCKET_DIR`; every sandboxed
+  round-trip (`tests/runtime_uninstall_roundtrip.sh`) sets that variable so a
+  test never unlinks the founder's live sessions.
+- **An upgrade never takes tools backwards.** `runtime-install` compares the
+  candidate's `runtime-pack-provenance.json` build date with the active
+  generation's and refuses an older pack, naming every component revision that
+  would regress (`vc-frame: f7755692 -> 915ca04e` is the 2026-08-27 case that
+  orphaned 12 live sessions). `--allow-older-runtime` makes a downgrade explicit.

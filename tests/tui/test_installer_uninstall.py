@@ -2104,3 +2104,131 @@ def test_cmd_uninstall_names_every_uv_environment_it_will_not_touch(
         assert (environment / "uv-receipt.toml").is_file()
         assert str(environment) in output
     assert "uv tool uninstall" in output
+
+
+def test_vc_frame_socket_dir_is_uid_keyed_unless_overridden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("VC_FRAME_SOCKET_DIR", raising=False)
+    assert installer._vc_frame_socket_dir() == Path(f"/tmp/vc-frame-{os.getuid()}")
+    override = tmp_path / "sockets"
+    monkeypatch.setenv("VC_FRAME_SOCKET_DIR", str(override))
+    assert installer._vc_frame_socket_dir() == override
+
+
+def test_runtime_uninstall_never_tears_down_host_socket_dir_under_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A sandboxed uninstall (env -i HOME=…) must not orphan the host's live sessions.
+
+    2026-08-28: the socket namespace is keyed by uid, not HOME, so a test
+    round-trip on a founder machine would unlink every live vc-frame socket.
+    """
+    home = tmp_path / "home"
+    runtime_home = home / ".local/share/vibecrafted"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / ".local/bin"))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / ".vibecrafted"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    sandbox_sockets = tmp_path / "sockets" / f"vc-frame-{os.getuid()}"
+    sandbox_sockets.mkdir(parents=True)
+    monkeypatch.setenv("VC_FRAME_SOCKET_DIR", str(sandbox_sockets))
+    monkeypatch.setattr(
+        installer, "_teardown_owned_runtime_for_uninstall", lambda *_args, **_kwargs: []
+    )
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    args = Namespace(
+        payload_root=str(payload),
+        app_root=str(terminal_host.parents[2]),
+        terminal_host=str(terminal_host),
+        frame_helper=str(frame_helper),
+    )
+    assert installer.cmd_runtime_install(args) == 0
+    capsys.readouterr()
+
+    assert (
+        installer.cmd_runtime_uninstall(Namespace(dry_run=True, emit_result=True)) == 0
+    )
+    preview = json.loads(capsys.readouterr().out)
+    actions = "\n".join(preview["actions"])
+    host_socket_dir = f"/tmp/vc-frame-{os.getuid()}"
+    assert host_socket_dir not in actions
+    if os.name == "posix" and os.uname().sysname == "Darwin":
+        assert f"remove {sandbox_sockets}" in preview["actions"]
+
+
+def _provenance(version: str, build_date: str, **revisions: str) -> dict[str, object]:
+    return {
+        "schema": "io.vetcoders.vibecrafted.runtime-pack-provenance.v1",
+        "version": version,
+        "carrier_basename": f"Vibecrafted_RuntimePack_4.3.0-{build_date}-{version.split('+g')[-1]}-darwin-arm64.tar.gz",
+        "source_revisions": dict(revisions),
+    }
+
+
+def test_runtime_pack_downgrade_is_named_per_component() -> None:
+    active = _provenance(
+        "4.3.0+g3bbe57a2",
+        "20260827",
+        **{"vc-frame": "f7755692" * 5, "vibecrafted": "3bbe57a2" * 5},
+    )
+    older = _provenance(
+        "4.3.0+ga64dd3e4",
+        "20260826",
+        **{"vc-frame": "915ca04e" * 5, "vibecrafted": "a64dd3e4" * 5},
+    )
+    reasons = installer._runtime_pack_downgrade(older, active)
+    assert reasons[0].startswith(
+        "candidate Runtime Pack 4.3.0+ga64dd3e4 was built 20260826"
+    )
+    assert "vc-frame: f7755692 -> 915ca04e" in reasons
+    assert installer._runtime_pack_downgrade(active, older) == []
+    assert installer._runtime_pack_downgrade(active, active) == []
+    assert installer._runtime_pack_downgrade({}, active) == []
+
+
+def test_runtime_install_refuses_older_pack_unless_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runtime_home = tmp_path / "runtime"
+    active_root = runtime_home / "releases" / "4.3.0+g3bbe57a2"
+    active_root.mkdir(parents=True)
+    (active_root / installer.RUNTIME_PACK_PROVENANCE_NAME).write_text(
+        json.dumps(
+            _provenance("4.3.0+g3bbe57a2", "20260827", **{"vc-frame": "f" * 40})
+        ),
+        encoding="utf-8",
+    )
+    (runtime_home / "active.json").write_text(
+        json.dumps({"runtime_root": str(active_root), "version": "4.3.0+g3bbe57a2"}),
+        encoding="utf-8",
+    )
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / installer.RUNTIME_PACK_PROVENANCE_NAME).write_text(
+        json.dumps(
+            _provenance("4.3.0+ga64dd3e4", "20260826", **{"vc-frame": "9" * 40})
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        RuntimeError, match="refusing to replace a newer active runtime"
+    ):
+        installer._refuse_runtime_pack_downgrade(
+            candidate, runtime_home, allow_older=False
+        )
+
+    installer._refuse_runtime_pack_downgrade(candidate, runtime_home, allow_older=True)
+    assert "installing an older Runtime Pack" in capsys.readouterr().out
+
+    newer = tmp_path / "newer"
+    newer.mkdir()
+    (newer / installer.RUNTIME_PACK_PROVENANCE_NAME).write_text(
+        json.dumps(
+            _provenance("4.3.0+g68ad3906", "20260827", **{"vc-frame": "f" * 40})
+        ),
+        encoding="utf-8",
+    )
+    installer._refuse_runtime_pack_downgrade(newer, runtime_home, allow_older=False)
