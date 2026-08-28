@@ -715,6 +715,16 @@ We ship.
 
 # Repository-Specific Instructions
 
+## Operator journal
+
+Founder decision 2026-08-28: the operator decision log is **not in git**.
+
+Path: `.vibecrafted/THE_JOURNAL.md` (gitignored). Former name
+`.vibecrafted/JOURNAL.md` is retired. Do not recreate it. Do not commit it.
+
+Read it at session start. Append material Operator decisions. Workers do not
+write here.
+
 ## Project Identity
 
 | Field                      | Value |
@@ -749,7 +759,7 @@ We ship.
 
 ### Before Editing
 
--
+- Read `.vibecrafted/THE_JOURNAL.md` before a course change a later agent must inherit.
 
 ### Before Refactoring
 

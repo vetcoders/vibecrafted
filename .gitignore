@@ -26,7 +26,7 @@ scripts/installer/**/__pycache__/
 *.plugin
 *.sha256
 /.vibecrafted/*
-!/.vibecrafted/JOURNAL.md
+# Founder 2026-08-28: operator log is THE_JOURNAL.md here, untracked. Pointer: AGENTS.md.
 /tests/tui/__pycache__
 **/__pycache__/
 *.py[cod]
