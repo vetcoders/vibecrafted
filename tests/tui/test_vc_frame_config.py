@@ -164,6 +164,8 @@ def test_operator_layout_matches_vibecrafted_standard() -> None:
     assert 'tab name="voc"' in payload
     assert "vc-start-here.py" in payload
     assert "vc-agent-workshop.py" in payload
+    assert "VIBECRAFTED_PYTHON" in payload
+    assert "$HOME/.local/bin/voc" in payload
     assert "vibecrafted tui" in payload
     assert "session-manager" in payload
     assert "rail true" in payload

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
 from pathlib import Path
 from types import ModuleType
 
@@ -165,3 +167,56 @@ def test_dashboard_projects_only_human_agent_faces_from_agents_tab() -> None:
         "codex · resume · vibecrafted",
         "claude · init · vibecrafted",
     ]
+
+
+def _host_python_without_core() -> Path | None:
+    for candidate in (Path("/opt/homebrew/bin/python3"), Path("/usr/bin/python3")):
+        if not candidate.is_file():
+            continue
+        probe = subprocess.run(
+            [str(candidate), "-c", "import vibecrafted_core"],
+            capture_output=True,
+            env={**os.environ, "PYTHONPATH": "", "PYTHONNOUSERSITE": "1"},
+            check=False,
+        )
+        if probe.returncode != 0:
+            return candidate
+    return None
+
+
+def test_workshop_reexecs_generation_python_when_host_lacks_core(
+    tmp_path: Path,
+) -> None:
+    """Agents tab used env python3; generation python3 is the only one with core."""
+    host = _host_python_without_core()
+    if host is None:
+        pytest.skip("no host python3 that lacks vibecrafted_core")
+    log = tmp_path / "generation.log"
+    stub = tmp_path / "generation-python"
+    stub.write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$0" "$@" > "{log}"\nexit 0\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env["PYTHONNOUSERSITE"] = "1"
+    env["VIBECRAFTED_PYTHON"] = str(stub)
+    env["PATH"] = "/usr/bin:/bin"
+    result = subprocess.run(
+        [str(host), str(SCRIPT), "home"],
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    recorded = log.read_text(encoding="utf-8")
+    assert str(stub) in recorded
+    assert "home" in recorded
+
+
+def test_ensure_generation_python_is_noop_when_core_imports() -> None:
+    workshop = _load()
+    workshop.ensure_generation_python()

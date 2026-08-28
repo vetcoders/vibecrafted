@@ -19,6 +19,41 @@ import time
 from pathlib import Path
 from typing import Any
 
+
+def ensure_generation_python() -> None:
+    """Re-exec the Runtime Pack interpreter when host python3 lacks core.
+
+    vc-frame panes often run ``#!/usr/bin/env python3`` (Homebrew 3.14 on this
+    host).  Generation ``bin/python3`` is a wrapper that sets PYTHONPATH onto
+    the receipted ``vibecrafted-core``.  Prefer ``VIBECRAFTED_PYTHON``, then
+    ``$VIBECRAFTED_RUNTIME_ROOT/bin/python3``.
+    """
+    try:
+        import vibecrafted_core  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        return
+    wanted = os.environ.get("VIBECRAFTED_PYTHON", "").strip()
+    if not wanted:
+        root = (
+            os.environ.get("VIBECRAFTED_RUNTIME_ROOT")
+            or os.environ.get("VIBECRAFTED_ROOT")
+            or ""
+        ).strip()
+        if root:
+            wanted = str(Path(root) / "bin" / "python3")
+    if wanted and os.access(wanted, os.X_OK):
+        os.execv(wanted, [wanted, *sys.argv])
+    raise SystemExit(
+        "vc-agent-workshop: no module named 'vibecrafted_core'; "
+        "set VIBECRAFTED_PYTHON to the generation python3 "
+        "(or run through vc-start so the Runtime Pack is on PATH)"
+    )
+
+
+ensure_generation_python()
+
 from vibecrafted_core.spawn import (
     CONTINUITY_MODES,
     OPERATOR_POLICIES,

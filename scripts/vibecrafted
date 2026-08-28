@@ -555,11 +555,22 @@ _operator_tui_dir() {
 _resolve_voc_binary() {
   # Canonical product binary is `voc` (make install-app-binaries). Prefer an
   # installed real file, then a local release/debug build, then legacy names.
+  # vc-frame `bash -lc` panes often lack ~/.local/bin on PATH — still look there.
   local app_dir candidate
   if candidate="$(command -v voc 2>/dev/null)" && [[ -n "$candidate" && -x "$candidate" ]]; then
     printf '%s\n' "$candidate"
     return 0
   fi
+  for candidate in \
+    "${VIBECRAFTED_LAUNCHER_BIN:-$HOME/.local/bin}/voc" \
+    "$HOME/.local/bin/voc" \
+    "${VIBECRAFTED_RUNTIME_BIN:-}/voc" \
+    "${VIBECRAFTED_RUNTIME_ROOT:-}/bin/voc"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
   app_dir="$(_voc_app_dir 2>/dev/null || true)"
   if [[ -n "$app_dir" ]]; then
     for candidate in \

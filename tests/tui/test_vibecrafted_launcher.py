@@ -1632,6 +1632,51 @@ def test_tui_uses_voc_from_path_when_local_build_missing(
     assert f"--deck {current_root / 'scripts' / 'vibecrafted'}" in tui_args
 
 
+def test_tui_uses_home_local_voc_when_login_path_omits_it(
+    tmp_path: Path,
+) -> None:
+    """vc-frame bash -lc often has no ~/.local/bin; tui must still find voc."""
+    home = tmp_path / "home"
+    launcher = home / ".local" / "bin" / "vibecrafted"
+    current_root = (
+        home / ".local" / "share" / "vibecrafted" / "tools" / "vibecrafted-current"
+    )
+    fake_bin = tmp_path / "bin"
+    python_capture = tmp_path / "python3-calls.txt"
+    tui_capture = tmp_path / "tui-calls.txt"
+
+    home.mkdir(parents=True)
+    fake_bin.mkdir()
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    launcher.write_text(LAUNCHER.read_text(encoding="utf-8"), encoding="utf-8")
+    launcher.chmod(0o755)
+    (current_root / "scripts").mkdir(parents=True, exist_ok=True)
+    (current_root / "VERSION").write_text("0.0.0-test\n", encoding="utf-8")
+    _write_fake_core_package(current_root)
+    (current_root / "scripts" / "vibecrafted").write_text(
+        "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8"
+    )
+    _write_fake_python3(fake_bin, python_capture)
+    _write_capture_script(home / ".local" / "bin" / "voc", tui_capture)
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env.pop("VIBECRAFTED_LAUNCHER_BIN", None)
+    env.pop("VIBECRAFTED_RUNTIME_ROOT", None)
+    env.pop("VIBECRAFTED_RUNTIME_BIN", None)
+    env["PATH"] = f"{fake_bin}:/bin:/usr/bin"
+    env["CAPTURE_FILE"] = str(python_capture)
+
+    subprocess.run(
+        ["bash", str(launcher), "tui", "--runtime", "headless"],
+        check=True,
+        cwd=tmp_path,
+        env=env,
+    )
+
+    tui_args = tui_capture.read_text(encoding="utf-8")
+    assert "--runtime headless" in tui_args
+
+
 def test_gui_help_exposes_local_server_flags() -> None:
     result = subprocess.run(
         [str(LAUNCHER), "gui", "--help"],
