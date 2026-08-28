@@ -790,13 +790,7 @@ def test_install_launcher_does_not_overwrite_unmanaged_dev_wrapper(
 
     _pin_canonical_runtime_roots(monkeypatch, home, crafted_home)
     installed_deck = (
-        runtime_home
-        / "tools"
-        / "vibecrafted-current"
-        / "vibecrafted-core"
-        / "vibecrafted_core"
-        / "deck"
-        / "vibecrafted"
+        runtime_home / "tools" / "vibecrafted-current" / "bin" / "vibecrafted"
     )
     installed_deck.parent.mkdir(parents=True, exist_ok=True)
     _write_executable(
@@ -952,6 +946,29 @@ def test_runtime_semantic_verifier_uses_candidate_interpreter(
     assert observed[0] == str(candidate_python)
     assert observed[1:4] == ["-I", "-S", "-B"]
     assert str(Path(sys.executable)) not in observed[:1]
+
+
+def test_runtime_verifier_python_falls_back_only_when_none_is_carried(
+    tmp_path: Path,
+) -> None:
+    source_staged = tmp_path / "staged"
+    (source_staged / "bin").mkdir(parents=True)
+    assert installer._runtime_verifier_python(source_staged) == Path(sys.executable)
+
+    carried = tmp_path / "pack/bin/python3"
+    carried.parent.mkdir(parents=True)
+    _write_executable(carried, "#!/bin/sh\nexit 0\n")
+    assert installer._runtime_verifier_python(carried.parents[1]) == carried
+
+    carried.chmod(0o644)
+    with pytest.raises(OSError, match="not executable"):
+        installer._runtime_verifier_python(carried.parents[1])
+
+    dangling_root = tmp_path / "dangling"
+    (dangling_root / "bin").mkdir(parents=True)
+    (dangling_root / "bin/python3").symlink_to(tmp_path / "missing")
+    with pytest.raises(OSError, match="not executable"):
+        installer._runtime_verifier_python(dangling_root)
 
 
 def test_installer_release_contract_assets_fail_closed_for_missing_or_exact_byte_drift(

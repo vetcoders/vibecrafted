@@ -215,6 +215,47 @@ def test_python_resolver_prefers_own_runtime_python(tmp_path: Path) -> None:
     assert Path(result.stdout.strip()) == runtime_python
 
 
+def test_python_resolver_rejects_foreign_generation_override(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    tools_home = tmp_path / "tools"
+    current_gen = tools_home / "vibecrafted-generation-current"
+    foreign_gen = tmp_path / "releases/foreign"
+    launcher_copy = current_gen / "bin/vibecrafted"
+    for directory in (fake_bin, launcher_copy.parent, foreign_gen / "bin"):
+        directory.mkdir(parents=True)
+    (tools_home / "vibecrafted-current").symlink_to(current_gen)
+    _write_trimmed_launcher(launcher_copy)
+    public_launcher = fake_bin / "vibecrafted"
+    public_launcher.symlink_to(launcher_copy)
+
+    shim_python = fake_bin / "python3"
+    shim_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    shim_python.chmod(0o755)
+    shim = fake_bin / "vc-server-supervisor"
+    shim.write_text(f"#!{shim_python}\n", encoding="utf-8")
+    shim.chmod(0o755)
+    foreign_python = foreign_gen / "bin/python3"
+    foreign_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    foreign_python.chmod(0o755)
+
+    environment = {
+        **os.environ,
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "VIBECRAFTED_TOOLS_HOME": str(tools_home),
+        "VIBECRAFTED_PYTHON": str(foreign_python),
+    }
+    result = subprocess.run(
+        ["bash", "-c", f'source "{public_launcher}"; _vibecrafted_python'],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert Path(result.stdout.strip()) == shim_python
+
+
 def _write_fake_command(bin_dir: Path, name: str, capture_file: Path) -> None:
     script_names = [name]
     if name == "vc-frame":

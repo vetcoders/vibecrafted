@@ -947,6 +947,220 @@ def test_cmd_uninstall_aborts_file_removal_when_runtime_teardown_fails(
     assert (home / ".local" / "bin" / "vibecrafted").exists()
 
 
+def test_cmd_uninstall_classifies_state_home_and_removes_only_runtime_state(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _home, crafted_home, _store, _helper, _zshrc = _setup_installed_surface(
+        tmp_path, monkeypatch
+    )
+    monkeypatch.setattr(
+        installer,
+        "_uninstall_control_state",
+        lambda _home: (
+            {"control_plane": str(crafted_home / "control_plane"), "active_runs": []},
+            "",
+        ),
+    )
+
+    runtime_paths: list[Path] = []
+    for name in installer._runtime_paths.VIBECRAFTED_HOME_RUNTIME_STATE:
+        path = crafted_home / name
+        if path.suffix or name in {"START_HERE.md", "install.log", ".DS_Store"}:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("runtime\n", encoding="utf-8")
+        else:
+            path.mkdir(parents=True, exist_ok=True)
+            (path / "state.json").write_text("{}\n", encoding="utf-8")
+        runtime_paths.append(path)
+
+    founder_paths: list[Path] = []
+    for name in installer._runtime_paths.VIBECRAFTED_HOME_FOUNDER_DATA:
+        path = crafted_home / name
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "keep.md").write_text("Founder\n", encoding="utf-8")
+        founder_paths.append(path)
+    unknown = crafted_home / "export.png"
+    unknown.write_bytes(b"founder-export")
+
+    assert installer.cmd_uninstall(Namespace(dry_run=True)) == 0
+    dry_output = capsys.readouterr().out
+    plan = json.loads([line for line in dry_output.splitlines() if line][-1])
+    assert plan["schema"] == "vibecrafted.uninstall-plan.v1"
+    assert set(plan["classes"]) == {"runtime-state", "founder-data", "unknown"}
+    assert str(crafted_home / "control_plane") in plan["classes"]["runtime-state"]
+    assert str(crafted_home / "artifacts") in plan["classes"]["founder-data"]
+    assert str(unknown) in plan["classes"]["unknown"]
+    assert str(crafted_home / "skills") in plan["classes"]["unknown"]
+    assert all(path.exists() for path in runtime_paths)
+
+    assert installer.cmd_uninstall(Namespace(dry_run=False)) == 0
+    capsys.readouterr()
+    assert all(not path.exists() for path in runtime_paths)
+    assert all((path / "keep.md").is_file() for path in founder_paths)
+    assert unknown.read_bytes() == b"founder-export"
+
+
+def test_cmd_uninstall_refuses_active_runs_before_any_mutation(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _home, crafted_home, store_path, helper_file, _zshrc = _setup_installed_surface(
+        tmp_path, monkeypatch
+    )
+    monkeypatch.setattr(
+        installer,
+        "_uninstall_control_state",
+        lambda _home: (
+            {
+                "control_plane": str(crafted_home / "control_plane"),
+                "active_runs": [{"run_id": "work-live-1", "agent": "codex"}],
+            },
+            "",
+        ),
+    )
+    monkeypatch.setattr(
+        installer,
+        "create_teardown_backup",
+        lambda _inventory: (_ for _ in ()).throw(AssertionError("must not back up")),
+    )
+    monkeypatch.setattr(
+        installer,
+        "_teardown_owned_runtime_for_uninstall",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("must not quiesce")
+        ),
+    )
+
+    assert installer.cmd_uninstall(Namespace(dry_run=False, drain=False)) == 1
+    output = capsys.readouterr().out
+    assert "work-live-1" in output
+    assert '"status": "refused-active-runs"' in output
+    assert (store_path / "vc-init").is_dir()
+    assert helper_file.is_file()
+
+
+def test_cmd_uninstall_drain_precedes_runtime_quiesce(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _home, crafted_home, _store, _helper, _zshrc = _setup_installed_surface(
+        tmp_path, monkeypatch
+    )
+    events: list[str] = []
+    monkeypatch.setattr(
+        installer,
+        "_uninstall_control_state",
+        lambda _home: (
+            {
+                "control_plane": str(crafted_home / "control_plane"),
+                "active_runs": [{"run_id": "work-live-2", "agent": "codex"}],
+            },
+            "",
+        ),
+    )
+
+    def drain(_home: Path, runs, *, timeout_seconds: float):
+        assert [run["run_id"] for run in runs] == ["work-live-2"]
+        assert timeout_seconds == 7
+        events.append("drain")
+        return ["work-live-2"], ""
+
+    def teardown(_home: Path, *, dry_run: bool) -> tuple[str, ...]:
+        assert not dry_run
+        events.append("quiesce")
+        return ("quiesce",)
+
+    monkeypatch.setattr(installer, "_drain_uninstall_runs", drain)
+    monkeypatch.setattr(installer, "_teardown_owned_runtime_for_uninstall", teardown)
+
+    assert (
+        installer.cmd_uninstall(Namespace(dry_run=False, drain=True, drain_timeout=7))
+        == 0
+    )
+    assert events == ["drain", "quiesce"]
+
+
+def test_drain_signals_each_run_then_waits_for_matching_board(
+    tmp_path: Path, monkeypatch
+) -> None:
+    shared_home = tmp_path / ".vibecrafted"
+    launcher = tmp_path / "vibecrafted"
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    requested: list[str] = []
+    monkeypatch.setattr(installer, "_uninstall_launcher", lambda: launcher)
+    monkeypatch.setattr(
+        installer,
+        "_request_uninstall_run_stop",
+        lambda _launcher, run, *, timeout_seconds: (
+            requested.append(run["run_id"]) or ""
+        ),
+    )
+    monkeypatch.setattr(
+        installer,
+        "_uninstall_control_state",
+        lambda _home: (
+            {"control_plane": str(shared_home / "control_plane"), "active_runs": []},
+            "",
+        ),
+    )
+
+    stopped, error = installer._drain_uninstall_runs(
+        shared_home,
+        [
+            {"run_id": "work-a", "agent": "codex"},
+            {"run_id": "work-b", "agent": "claude"},
+        ],
+        timeout_seconds=1,
+    )
+
+    assert error == ""
+    assert stopped == ["work-a", "work-b"]
+    assert requested == stopped
+
+
+def test_uninstall_control_state_rejects_another_home(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @staticmethod
+        def read() -> bytes:
+            return json.dumps(
+                {
+                    "control_plane": str(tmp_path / "founder-home/control_plane"),
+                    "active_runs": [{"run_id": "do-not-stop", "agent": "codex"}],
+                }
+            ).encode()
+
+    monkeypatch.setattr(
+        installer.urllib.request, "urlopen", lambda *_args, **_kwargs: Response()
+    )
+
+    payload, warning = installer._uninstall_control_state(tmp_path / "sandbox-home")
+
+    assert payload is None
+    assert "identity mismatch" in warning
+
+
+def test_uninstall_control_state_rejects_non_http_url(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("VC_SERVER_URL", f"file://{tmp_path}")
+    monkeypatch.setattr(
+        installer.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: pytest.fail("non-http URL must not be opened"),
+    )
+
+    payload, warning = installer._uninstall_control_state(tmp_path / "home")
+
+    assert payload is None
+    assert warning == "control-plane URL must be credential-free http(s)"
+
+
 def test_cmd_uninstall_treats_unlinked_retired_process_as_runtime_work(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1598,7 +1812,15 @@ def test_deck_launcher_forwards_uninstall_argv(tmp_path, monkeypatch) -> None:
     env["PATH"] = f"{fake_bin}:{env['PATH']}"
     env["CAPTURE_FILE"] = str(capture)
     result = subprocess.run(
-        ["bash", str(deck), "uninstall", "--dry-run"],
+        [
+            "bash",
+            str(deck),
+            "uninstall",
+            "--dry-run",
+            "--drain",
+            "--drain-timeout",
+            "9",
+        ],
         check=False,
         env=env,
         cwd=repo_root,
@@ -1608,7 +1830,13 @@ def test_deck_launcher_forwards_uninstall_argv(tmp_path, monkeypatch) -> None:
     )
     assert result.returncode == 0, result.stderr
     argv = capture.read_text(encoding="utf-8").splitlines()
-    assert argv[-2:] == ["uninstall", "--dry-run"], argv
+    assert argv[-5:] == [
+        "uninstall",
+        "--dry-run",
+        "--drain",
+        "--drain-timeout",
+        "9",
+    ], argv
 
 
 def _latest_backup_paths() -> set[Path]:
@@ -1876,3 +2104,206 @@ def test_cmd_uninstall_names_every_uv_environment_it_will_not_touch(
         assert (environment / "uv-receipt.toml").is_file()
         assert str(environment) in output
     assert "uv tool uninstall" in output
+
+
+def test_vc_frame_socket_dir_is_uid_keyed_unless_overridden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("VC_FRAME_SOCKET_DIR", raising=False)
+    assert installer._vc_frame_socket_dir() == Path(f"/tmp/vc-frame-{os.getuid()}")
+    override = tmp_path / "sockets"
+    monkeypatch.setenv("VC_FRAME_SOCKET_DIR", str(override))
+    assert installer._vc_frame_socket_dir() == override
+
+
+def test_runtime_uninstall_never_tears_down_host_socket_dir_under_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A sandboxed uninstall (env -i HOME=…) must not orphan the host's live sessions.
+
+    2026-08-28: the socket namespace is keyed by uid, not HOME, so a test
+    round-trip on a founder machine would unlink every live vc-frame socket.
+    """
+    home = tmp_path / "home"
+    runtime_home = home / ".local/share/vibecrafted"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / ".local/bin"))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / ".vibecrafted"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    sandbox_sockets = tmp_path / "sockets" / f"vc-frame-{os.getuid()}"
+    sandbox_sockets.mkdir(parents=True)
+    monkeypatch.setenv("VC_FRAME_SOCKET_DIR", str(sandbox_sockets))
+    monkeypatch.setattr(
+        installer, "_teardown_owned_runtime_for_uninstall", lambda *_args, **_kwargs: []
+    )
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    args = Namespace(
+        payload_root=str(payload),
+        app_root=str(terminal_host.parents[2]),
+        terminal_host=str(terminal_host),
+        frame_helper=str(frame_helper),
+    )
+    assert installer.cmd_runtime_install(args) == 0
+    capsys.readouterr()
+
+    assert (
+        installer.cmd_runtime_uninstall(Namespace(dry_run=True, emit_result=True)) == 0
+    )
+    preview = json.loads(capsys.readouterr().out)
+    actions = "\n".join(preview["actions"])
+    host_socket_dir = f"/tmp/vc-frame-{os.getuid()}"
+    assert host_socket_dir not in actions
+    if os.name == "posix" and os.uname().sysname == "Darwin":
+        assert f"remove {sandbox_sockets}" in preview["actions"]
+
+
+def _provenance(version: str, build_date: str, **revisions: str) -> dict[str, object]:
+    return {
+        "schema": "io.vetcoders.vibecrafted.runtime-pack-provenance.v1",
+        "version": version,
+        "carrier_basename": f"Vibecrafted_RuntimePack_4.3.0-{build_date}-{version.split('+g')[-1]}-darwin-arm64.tar.gz",
+        "source_revisions": dict(revisions),
+    }
+
+
+def test_runtime_pack_downgrade_is_named_per_component() -> None:
+    active = _provenance(
+        "4.3.0+g3bbe57a2",
+        "20260827",
+        **{"vc-frame": "f7755692" * 5, "vibecrafted": "3bbe57a2" * 5},
+    )
+    older = _provenance(
+        "4.3.0+ga64dd3e4",
+        "20260826",
+        **{"vc-frame": "915ca04e" * 5, "vibecrafted": "a64dd3e4" * 5},
+    )
+    reasons = installer._runtime_pack_downgrade(older, active)
+    assert reasons[0].startswith(
+        "candidate Runtime Pack 4.3.0+ga64dd3e4 was built 20260826"
+    )
+    assert "vc-frame: f7755692 -> 915ca04e" in reasons
+    assert installer._runtime_pack_downgrade(active, older) == []
+    assert installer._runtime_pack_downgrade(active, active) == []
+    assert installer._runtime_pack_downgrade({}, active) == []
+
+
+def test_runtime_install_refuses_older_pack_unless_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runtime_home = tmp_path / "runtime"
+    active_root = runtime_home / "releases" / "4.3.0+g3bbe57a2"
+    active_root.mkdir(parents=True)
+    (active_root / installer.RUNTIME_PACK_PROVENANCE_NAME).write_text(
+        json.dumps(
+            _provenance("4.3.0+g3bbe57a2", "20260827", **{"vc-frame": "f" * 40})
+        ),
+        encoding="utf-8",
+    )
+    (runtime_home / "active.json").write_text(
+        json.dumps({"runtime_root": str(active_root), "version": "4.3.0+g3bbe57a2"}),
+        encoding="utf-8",
+    )
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / installer.RUNTIME_PACK_PROVENANCE_NAME).write_text(
+        json.dumps(
+            _provenance("4.3.0+ga64dd3e4", "20260826", **{"vc-frame": "9" * 40})
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        RuntimeError, match="refusing to replace a newer active runtime"
+    ):
+        installer._refuse_runtime_pack_downgrade(
+            candidate, runtime_home, allow_older=False
+        )
+
+    installer._refuse_runtime_pack_downgrade(candidate, runtime_home, allow_older=True)
+    assert "installing an older Runtime Pack" in capsys.readouterr().out
+
+    newer = tmp_path / "newer"
+    newer.mkdir()
+    (newer / installer.RUNTIME_PACK_PROVENANCE_NAME).write_text(
+        json.dumps(
+            _provenance("4.3.0+g68ad3906", "20260827", **{"vc-frame": "f" * 40})
+        ),
+        encoding="utf-8",
+    )
+    installer._refuse_runtime_pack_downgrade(newer, runtime_home, allow_older=False)
+
+
+def _write_run_meta(shared_home: Path, run_id: str, **meta) -> None:
+    run_dir = shared_home / "control_plane" / "runtime_runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+
+def test_active_uninstall_runs_drops_ghosts_proven_by_dispatcher_meta(
+    tmp_path: Path,
+) -> None:
+    shared_home = tmp_path / ".vibecrafted"
+    _write_run_meta(
+        shared_home, "work-done", status="completed", worker_pid=os.getpid()
+    )
+    _write_run_meta(shared_home, "work-dead", status="active", worker_pid=2**22 - 7)
+    _write_run_meta(
+        shared_home,
+        "rese-live",
+        status="active",
+        worker_pid=os.getpid(),
+        worker_pgid=os.getpgid(0),
+        agent="swarm",
+    )
+    ghosts: list[tuple[str, str]] = []
+    payload = {
+        "active_runs": [
+            {"run_id": "work-done", "agent": "codex"},
+            {"run_id": "work-dead", "agent": "claude"},
+            {"run_id": "work-nometa", "agent": "codex"},
+            {"run_id": "rese-live", "agent": "swarm"},
+        ]
+    }
+
+    runs = installer._active_uninstall_runs(payload, shared_home, ghosts=ghosts)
+
+    assert [run["run_id"] for run in runs] == ["work-nometa", "rese-live"]
+    assert runs[1]["worker_pgid"] == str(os.getpgid(0))
+    assert dict(ghosts) == {
+        "work-done": "meta status completed",
+        "work-dead": f"worker pid {2**22 - 7} is dead",
+    }
+    # Without a state home the board is trusted verbatim (fail-closed).
+    assert len(installer._active_uninstall_runs(payload)) == 4
+
+
+def test_request_uninstall_run_stop_signals_swarm_process_group(
+    tmp_path: Path, monkeypatch
+) -> None:
+    launcher = tmp_path / "vibecrafted"
+    launcher.write_text("#!/bin/sh\nexit 7\n", encoding="utf-8")
+    signalled: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        installer.os, "killpg", lambda pgid, sig: signalled.append((pgid, sig))
+    )
+    monkeypatch.setattr(
+        installer.subprocess,
+        "run",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("deck must not be asked to stop swarm")
+        ),
+    )
+
+    assert (
+        installer._request_uninstall_run_stop(
+            launcher,
+            {"run_id": "rese-1", "agent": "swarm", "worker_pgid": "4242"},
+            timeout_seconds=1,
+        )
+        == ""
+    )
+    assert signalled == [(4242, installer.signal.SIGTERM)]
+    assert "no worker_pgid" in installer._request_uninstall_run_stop(
+        launcher, {"run_id": "rese-2", "agent": "swarm"}, timeout_seconds=1
+    )

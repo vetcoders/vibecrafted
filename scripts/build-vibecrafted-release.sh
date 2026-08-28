@@ -90,6 +90,27 @@ SIGNING_IDENTITY=""
 TEMP_KEYCHAIN_PATH=""
 SIGNING_KEYCHAIN_LABEL="vibecrafted-signing-$$"
 CODESIGN_KEYCHAIN_ARGS=()
+# The host toolchain is part of the release contract. Apple `strip` shipped in
+# Xcode 27 beta writes a mis-aligned LINKEDIT string pool into chained-fixups
+# dylibs (every dylib once MACOSX_DEPLOYMENT_TARGET >= 12); dyld on macOS 27
+# refuses them and rustc reports the dependency-free proc-macros
+# (`rustversion`, `paste`) as `error[E0463]: can't find crate`. MEASURED
+# 2026-08-28 on dragon with xcode-select pointing at ~/Downloads/Xcode-beta.app;
+# the same tree under /Applications/Xcode.app (26.6) builds clean. A beta
+# Xcode is therefore refused unless the operator opts in explicitly.
+XCODE_DEVELOPER_DIR="${DEVELOPER_DIR:-$(xcode-select -p 2>/dev/null || true)}"
+if [[ -z "$XCODE_DEVELOPER_DIR" || ! -d "$XCODE_DEVELOPER_DIR" ]]; then
+  echo "FATAL: no usable Xcode developer dir (xcode-select -p / DEVELOPER_DIR)" >&2
+  exit 1
+fi
+if [[ "$XCODE_DEVELOPER_DIR" == *[Bb]eta* && -z "${VIBECRAFTED_ALLOW_BETA_XCODE:-}" ]]; then
+  echo "FATAL: release refuses a beta Xcode toolchain: $XCODE_DEVELOPER_DIR" >&2
+  echo "       repair: DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer make release" >&2
+  echo "       (or sudo xcode-select -s /Applications/Xcode.app; VIBECRAFTED_ALLOW_BETA_XCODE=1 overrides)" >&2
+  exit 1
+fi
+export DEVELOPER_DIR="$XCODE_DEVELOPER_DIR"
+echo "==> Xcode developer dir: $DEVELOPER_DIR ($(xcrun --find strip 2>/dev/null || echo 'strip: unresolved'))"
 export MACOSX_DEPLOYMENT_TARGET=14.0
 # Release payloads must not remember the operator account, Cargo registry, or
 # living checkout locations through compiler metadata.

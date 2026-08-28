@@ -63,7 +63,7 @@ history with no consumer.
 | Providers                | `<runtime home>/providers/`                                                                                                                 | rebuilt from the payload on the next install                                                                             |
 | Server assets            | `<runtime home>/server/`                                                                                                                    | shipped inside the payload                                                                                               |
 | Active pointer           | `<runtime home>/active.json`                                                                                                                | meaningless once the release it names is gone                                                                            |
-| Runtime receipt          | `<runtime home>/install-receipt.json`, after its plan has been applied                                                                      | per-install ownership evidence, not durable operator data                                                                |
+| Runtime receipt          | `<runtime home>/install-receipt.json`, after its plan has been applied                                                                      | per-install ownership evidence, not durable Founder data                                                                 |
 | Framework config         | children of `~/.config/vibecrafted/` except `*.env`                                                                                         | generated: themes, shell fragments, plists                                                                               |
 | Frame config trees       | `~/.config/vibecrafted/vc-frame/`, legacy `~/.config/vc-frame/`, `~/.config/vetcoders/frontier/`                                            | generated config/symlink farms plus their own `.bak*` / `.stale*` snapshots                                              |
 | Server LaunchAgent       | `~/Library/LaunchAgents/io.vetcoders.vibecrafted.server.plist`                                                                              | product-owned supervisor definition; booted out before removal                                                           |
@@ -80,23 +80,43 @@ the directory, and the inventory says so in its reason line.
 
 ## 3. Preserved, and why
 
-| Surface                                                            | Action   | Reason                                                                                 |
-| ------------------------------------------------------------------ | -------- | -------------------------------------------------------------------------------------- |
-| `~/.config/vibecrafted/*.env`                                      | preserve | operator secrets (Slack tokens and friends); never removed, never copied into a backup |
-| pre-existing `~/.vibecrafted/{artifacts, control_plane, logs}`     | preserve | operator data outside a receipted clean-profile install                                |
-| `<runtime home>/bin/*`                                             | preserve | binary ownership is product-managed outside installer state                            |
-| Unrecognized `tools/` siblings                                     | preserve | not a Vibecrafted-managed payload name                                                 |
-| Unrecognized runtime-home children                                 | preserve | discovery has no evidence they are ours                                                |
-| `<uv tool dir>/{vibecrafted, vibecrafted-mcp, vibecrafted-iterm2}` | preserve | uv owns them; the printed plan tells the operator to run `uv tool uninstall`           |
-| `/Applications/Vibecrafted.app`                                    | preserve | installed from the DMG; removed by dragging to Trash                                   |
+| Surface                                                            | Action   | Reason                                                                                |
+| ------------------------------------------------------------------ | -------- | ------------------------------------------------------------------------------------- |
+| `~/.config/vibecrafted/*.env`                                      | preserve | Founder secrets (Slack tokens and friends); never removed, never copied into a backup |
+| pre-existing Founder-data children listed below                    | preserve | durable Founder work and generated artifacts                                          |
+| `<runtime home>/bin/*`                                             | preserve | binary ownership is product-managed outside installer state                           |
+| Unrecognized `tools/` siblings                                     | preserve | not a Vibecrafted-managed payload name                                                |
+| Unrecognized runtime-home children                                 | preserve | discovery has no evidence they are ours                                               |
+| `<uv tool dir>/{vibecrafted, vibecrafted-mcp, vibecrafted-iterm2}` | preserve | uv owns them; the printed plan tells the Founder to run `uv tool uninstall`           |
+| `/Applications/Vibecrafted.app`                                    | preserve | installed from the DMG; removed by dragging to Trash                                  |
 
-Rule: an unrecognized name is preserved. Discovery widens ownership by adding
-known names, never by claiming whatever it finds.
+Rule: an unrecognized name is preserved and printed. Discovery widens ownership
+by adding known names, never by claiming whatever it finds.
 
 For a clean profile where the Runtime Pack receipt says the installer created
 `~/.vibecrafted`, reset removes that whole root, including runtime state created
-after installation. If the root pre-existed, only proven owned children are
-removed; unrelated operator state remains.
+after installation. If the root pre-existed, its direct children are classified
+by the canonical grammar below.
+
+### Runtime state under `~/.vibecrafted`
+
+`vibecrafted_core/runtime_paths.py` is the only source of truth for these
+classes. The host-Python installer loads that file directly; it does not import
+`vibecrafted_core/__init__.py` and does not keep a second name list.
+
+| Class             | Direct child names                                                                                                                                                                       | Uninstall action                         |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| **runtime-state** | `control_plane/`, `server/`, `foundation/`, `locks/`, `runtime/`, `install-transactions/`, `recovery/`, `tmp/`, `logs/`, `.vc-install.json`, `START_HERE.md`, `install.log`, `.DS_Store` | remove after backup and active-run guard |
+| **founder-data**  | `artifacts/`, `inbox/`, `reports/`, `plans/`, `prompts/`, `specs/`, `backups/`, `worktrees/`, `monitor/`, `charter/`, `trust/`, `loctree/`, `vibecrafted/`, `.git/`, `.loctree/`         | preserve                                 |
+| **unknown**       | every other direct child, including loose Founder files such as PDF/PNG exports                                                                                                          | preserve and print in the plan           |
+
+Before any wet mutation, the product reads `GET /api/control/state` and accepts
+the response only when its `control_plane` identity matches this exact
+`VIBECRAFTED_HOME`. Active run IDs refuse a normal uninstall. `--drain` asks the
+public `vibecrafted stop <agent> --run-id <id>` verb to stop each qualified run,
+waits for the same board to report zero active runs, and only then enters runtime
+quiesce and filesystem teardown. A mismatched server response is never allowed
+to drain another home.
 
 ## 4. Invariants
 
@@ -115,7 +135,7 @@ cleanup, and they are removed with `rmdir` semantics only when empty.
 and a self-contained `restore.py`. `vibecrafted restore` replays that manifest by
 absolute path. New surfaces added to the inventory inherit this for free — there
 is no removal path that bypasses the backup pass. Preserved paths (secrets,
-operator data) are never copied into a backup, so a teardown kit never becomes a
+Founder data) are never copied into a backup, so a teardown kit never becomes a
 secret leak.
 
 **Uninstall converges.** A second run over a torn-down install must print
@@ -156,3 +176,16 @@ removed and not backed up.
 - `$TMPDIR` test scratch. Owned by the test suite, not by the installer.
 
 _𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI_
+
+## 5. Two guards added 2026-08-28 (dragon incident)
+
+- **Socket namespace is uid-keyed.** `/tmp/vc-frame-<uid>` belongs to the
+  machine, not to `$HOME`. Uninstall resolves it through
+  `_vc_frame_socket_dir()`, which honours `VC_FRAME_SOCKET_DIR`; every sandboxed
+  round-trip (`tests/runtime_uninstall_roundtrip.sh`) sets that variable so a
+  test never unlinks the founder's live sessions.
+- **An upgrade never takes tools backwards.** `runtime-install` compares the
+  candidate's `runtime-pack-provenance.json` build date with the active
+  generation's and refuses an older pack, naming every component revision that
+  would regress (`vc-frame: f7755692 -> 915ca04e` is the 2026-08-27 case that
+  orphaned 12 live sessions). `--allow-older-runtime` makes a downgrade explicit.

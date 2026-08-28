@@ -1,6 +1,6 @@
 ---
 name: canary
-version: 2.0.0
+version: 2.1.0
 description: >
   Radar konkurencji o prawdę w repo: wykrywa komponenty rywalizujące o tę
   samą klasę prawdy (identity, autorstwo, redukcja, finality, delivery,
@@ -70,6 +70,20 @@ kandydatów na osie. Wyczuwanie planów przez goły grep, dokumentację albo
 (wyłącznie ranking hubów). **Zakazane:** ładowanie surowego, wielomegabajtowego
 `snapshot.json` do kontekstu modelu.
 
+## Prawo jednego instrumentu
+
+Loctree jest **jedynym instrumentem anatomicznym**: `repo-view`, `focus`,
+`slice`, `impact`, `find` (discover/literal), occurrences, `body`,
+`follow`, `twins`, `crowd`, `hotspots` i `prism` to odczyty tego samego
+instrumentu. `canary_cli` może wyłącznie agregować, walidować kompletność
+i utrwalać dowody Loctree — nigdy nie jest niezależnym źródłem prawdy
+architektonicznej. `grep`/`rg`/`awk`/`sed`/systemowy `find`/grzebanie
+w surowym snapshocie są zakazane jako inwentarz albo dowód nieobecności.
+Gdy Loctree nie umie odpowiedzieć na wymagane pytanie: dopisz dokładną
+porażkę do `.loctree/loctree-fail.md` docelowego repo, sklasyfikuj
+twierdzenie jako `UNRESOLVED` i nigdy nie zaklejaj luki dowodem
+zastępczym.
+
 ## Phase 0 — Authority & freshness
 
 Żadnego radaru na nieświeżym drzewie. Zapisz, z pokwitowaniami:
@@ -112,6 +126,14 @@ of Y files") dowodzi, gdzie decyzja _nie_ żyje. „Przeszukałem semantycznie
 i wygląda na jedno miejsce" to twierdzenie bez dowodu — dokładnie ten tryb
 porażki, przed którym ta faza chroni.
 
+Twierdzenie o nieobecności jest dopuszczalne tylko wtedy, gdy zacytowane
+pokwitowanie coverage pokazuje **wszystkie** warunki: `offset == 0` ·
+`emitted == total` · `truncated == false` · `universe.scan_complete ==
+true` · odpowiednie flagi zaufania prawdziwe. Cenzus liczy **referencje**
+(call sites, konsumentów), nigdy same definicje — cenzus definicji ukrył
+kiedyś 141 miejsc wywołań. Żadnej liczby bez przypiętego fingerprinta
+snapshotu.
+
 Sklasyfikuj każdą konkurującą parę:
 
 | Werdykt                | Znaczenie                                                          |
@@ -142,12 +164,35 @@ się tutaj — nigdzie wcześniej — i każdy niesie klasyfikację:
 | `FOLLOW_UP`    | realne, niepilne; idzie do backlogu z dowodami             |
 | `OBSERVATION`  | wielowładza udowodniona jako legalna lub uśpiona; obserwuj |
 
+Każdy zbadany wiersz dostaje dodatkowo dokładnie jedną dyspozycję:
+`authority_edge` (sprowadza się do domniemanej władzy) ·
+`proven_non_runtime` (obserwator/projekcja/diagnostyka z udowodnioną
+granicą) · `obsolete_residue` (martwy konkurent; kandydat do późniejszego
+cuta) · `UNRESOLVED` (dowody Loctree niewystarczające — zapisane, nigdy
+po cichu porzucone). Nie wymyślaj właściciela, żeby domknąć graf.
+
 ## Schemat dowodowy (per finding)
 
 Oś · konkurenci (`file:line`, LOC) · walczące symbole · werdykt pary ·
 znak legendy · klasyfikacja · dowód (wyjścia loct cytowane per organ) ·
 pokwitowanie falsyfikacji nieobecności (linia literal coverage). Finding
 bez któregokolwiek elementu jest kandydatem, nie findingiem.
+
+## Werdykt przebiegu i uczciwe wyjście
+
+Każdy przebieg zwraca dokładnie jeden werdykt:
+
+| Werdykt                      | Warunek                                                                                                                                                            |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `AXES_CLOSED_CANDIDATE`      | zero wierszy `UNRESOLVED`; każda zachowana krawędź wykonywalna sprowadza się do jednej władzy; zero bypassów; kompletne, nieucięte dowody pod jednym fingerprintem |
+| `AXES_OPEN`                  | cokolwiek mniej — powiedz to wprost                                                                                                                                |
+| `INSTRUMENT_INCOMPLETE`      | Loctree nie pokrył wymaganych pytań (fail-log dopisany)                                                                                                            |
+| `LAUNCHER_CONTRACT_CONFLICT` | odziedziczone instrukcje żądały mutacji lub commitów — stop, zostań przy N=1, raportuj                                                                             |
+
+Brakujące historyczne punkty kontrolne pozostają `MISSING` — nigdy nie są
+rekonstruowane ani interpolowane. Raport kończy się linią uczciwego stanu
+`BUILD/LINT/TEST/RUNTIME=NOT_ASSESSED`: canary jest radarem bez mutacji,
+a zielone bramki leżą poza jego jurysdykcją.
 
 ## Kontrakt journala
 
@@ -179,9 +224,12 @@ jako **formacja Mode B** Living Tree Rule — briefy per-scope są spisanym
 planem dispatchu, bramki per-scope wcześniej zadeklarowanymi verifierami,
 domeny scope'ów rozłączne, a sesja canary jednowątkowym integratorem.
 **Worker sam tworzy swój worktree** od bazy integracji (launcher niczego
-nie provisionuje); commituje w jego wnętrzu; integrator merguje gałęzie
-scope'ów sekwencyjnie i zbiera artefakty z dysku worktree przed
-sprzątaniem. Nigdy nie parkuj równoległej floty w jednym wspólnym
+nie provisionuje) — przypięte SHA jako zamrożony widok, nie poczekalnia
+zmian: radar jest wolny od mutacji, więc nie ma commitów scope'ów do
+mergowania; integrator kopiuje pliki dowodowe per-oś
+(`.loctree/canary/axes/*.json`, gitignored) z każdego worktree przed
+sprzątaniem, a zwrócony JSON workera jest zabezpieczeniem. Nigdy nie
+parkuj równoległej floty w jednym wspólnym
 checkoucie (stałe polecenie operatora, 2026-08-20). Każdy scope dostaje
 własny podkatalog scratchpadu, nazwany w briefie — płaskie wspólne nazwy
 w tmp kolidują między równoległymi scope'ami.
@@ -231,6 +279,12 @@ dane w plikach.
 - Nadpisywanie journala zamiast dopisywania
 - Używanie `loct-context-full.json` jako inwentarza plików
 - Stała liczba agentów zamiast osi z Phase I
+- Liczenie definicji zamiast referencji (cenzus definicji ukrył kiedyś
+  141 miejsc wywołań)
+- Rekonstruowanie albo interpolowanie brakujących historycznych punktów
+  kontrolnych zamiast zapisania `MISSING`
+- Dispatch wycofanego briefu docstring-WRITE katalogera — canary nie
+  mutuje kodu (kontrakt wycofany 2026-08-24)
 
 ## Weryfikacja przed handoffem
 

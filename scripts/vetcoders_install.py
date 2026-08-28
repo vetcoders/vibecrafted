@@ -47,6 +47,9 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
@@ -107,6 +110,7 @@ vibecrafted_tools_home = _runtime_paths.vibecrafted_tools_home
 vibecrafted_home = _runtime_paths.vibecrafted_home
 xdg_data_home = _runtime_paths.xdg_data_home
 xdg_config_home = _runtime_paths.xdg_config_home
+classify_vibecrafted_home_child = _runtime_paths.classify_vibecrafted_home_child
 stage_distribution_payload = _distribution_manifest.stage_payload
 distribution_path_is_forbidden = _distribution_manifest.path_is_forbidden
 assert_source_payload_matches_provenance = (
@@ -5294,6 +5298,27 @@ def activate_runtime_service_after_install(
         )
 
 
+def _runtime_service_already_restored(
+    shared_home: Path,
+    *,
+    launch_agent_backup: _RuntimeLaunchAgentBackup | None,
+) -> bool:
+    """Recognize an exact old pair that launchd revived before rollback began."""
+    if launch_agent_backup is None:
+        return False
+    handoff = _read_tools_handoff(shared_home)
+    if handoff is None or not handoff["old_target"]:
+        return False
+    current_target = _symlink_target(_current_tools_link(shared_home))
+    old_target = Path(handoff["old_target"]).resolve(strict=False)
+    if current_target != old_target:
+        return False
+    if _capture_runtime_launch_agent_backup(shared_home) != launch_agent_backup:
+        return False
+    snapshot = _runtime_service_snapshot(shared_home)
+    return snapshot is not None and snapshot[1].healthy
+
+
 def rollback_runtime_install(
     shared_home: Path,
     *,
@@ -5325,6 +5350,14 @@ def rollback_runtime_install(
         else nullcontext(launchd_gate)
     )
     with gate_context as gate:
+        if darwin_service_attempted and _runtime_service_already_restored(
+            shared_home,
+            launch_agent_backup=launch_agent_backup,
+        ):
+            # launchd can revive the exact old pair after a failed handoff.
+            # Its current pointer, plist bytes, and healthy identity all agree;
+            # draining it again would turn a proven rollback into an outage.
+            return False
         if darwin_service_attempted:
             gate.disable()
             try:
@@ -8522,6 +8555,17 @@ def _materialize_runtime_generation_entrypoint(runtime_root: Path) -> None:
     target.chmod(0o755)
 
 
+def _materialize_runtime_generation_vc_frame_entry(runtime_root: Path) -> None:
+    """Carry the stable vc-frame product wrapper in every immutable generation."""
+    source = runtime_root / "scripts" / "vc-frame-product-entry.sh"
+    target = runtime_root / "bin" / "vc-frame"
+    if not source.is_file():
+        raise OSError(f"candidate runtime has no vc-frame product entry: {source}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    target.chmod(0o755)
+
+
 def _runtime_active_text_files(runtime_root: Path) -> Iterator[Path]:
     """Yield every active (non-symlink) text config/script file under the runtime's watched
     roots.
@@ -9003,11 +9047,19 @@ def _owned_temporary_directory(*, prefix: str) -> Iterator[Path]:
             )
 
 
-def _validate_runtime_verifier_semantics(runtime_root: Path) -> None:
-    """Validate captured candidate code/schema and exercise its real public entrypoints."""
+def _runtime_verifier_python(runtime_root: Path) -> Path:
+    """Use a carried interpreter when present, otherwise the source installer's."""
     runtime_python = runtime_root / "bin/python3"
+    if not runtime_python.exists() and not runtime_python.is_symlink():
+        return Path(sys.executable)
     if not runtime_python.is_file() or not os.access(runtime_python, os.X_OK):
         raise OSError(f"candidate runtime Python is not executable: {runtime_python}")
+    return runtime_python
+
+
+def _validate_runtime_verifier_semantics(runtime_root: Path) -> None:
+    """Validate captured candidate code/schema and exercise its real public entrypoints."""
+    runtime_python = _runtime_verifier_python(runtime_root)
 
     def run_candidate(
         argv: Sequence[str], *, cache: Path
@@ -9369,6 +9421,51 @@ def _canonical_runtime_source_provenance(
     }
 
 
+def _prepare_runtime_generation_candidate(
+    src: Path, staging: Path, *, install_version: str | None
+) -> None:
+    """Run every offline candidate check before any runtime service drain."""
+    source_provenance = stage_distribution_payload(
+        src,
+        staging,
+        mirror=True,
+        require_source_provenance=True,
+    )
+    if source_provenance is None:
+        raise OSError("candidate staging returned no required source provenance")
+    if install_version:
+        stamp_install_version(staging, install_version)
+    _materialize_vc_frame_generation(staging)
+    _materialize_runtime_generation_entrypoint(staging)
+    _materialize_runtime_generation_vc_frame_entry(staging)
+    audit_errors = _runtime_generation_audit_errors(staging, source_root=src)
+    if audit_errors:
+        raise OSError("\n".join(audit_errors))
+    _write_runtime_generation_manifest(
+        staging,
+        source_root=src,
+        source_provenance=source_provenance,
+        install_version=install_version,
+    )
+    payload_errors = _runtime_generation_payload_errors(staging)
+    if payload_errors:
+        raise OSError(
+            "candidate runtime failed pre-publish validation:\n"
+            + "\n".join(payload_errors)
+        )
+
+
+def preflight_source_runtime_candidate(src: Path) -> None:
+    """Prove a source candidate without touching pointers, launchd, or live services."""
+    with tempfile.TemporaryDirectory(prefix="vibecrafted-runtime-preflight-") as raw:
+        staging = Path(raw) / "candidate"
+        _prepare_runtime_generation_candidate(
+            src,
+            staging,
+            install_version=get_install_version(src),
+        )
+
+
 def _sync_control_plane_tree_locked(
     src: Path,
     dst: Path,
@@ -9376,10 +9473,7 @@ def _sync_control_plane_tree_locked(
     mirror: bool,
     install_version: str | None,
 ) -> Path:
-    """Stage, materialize, audit, manifest, and atomically publish a new runtime generation
-    under the tools-install lease; rolls back the staging/generation directories on any failure
-    before the pointer swap.
-    """
+    """Stage, validate, and atomically publish under the tools-install lease."""
     _ = mirror  # staged runtime is always an exact distribution payload
     if dst.exists() and not dst.is_symlink():
         raise OSError(
@@ -9419,33 +9513,11 @@ def _sync_control_plane_tree_locked(
         )
     pointer_swapped = False
     try:
-        source_provenance = stage_distribution_payload(
+        _prepare_runtime_generation_candidate(
             src,
             staging,
-            mirror=True,
-            require_source_provenance=True,
-        )
-        if source_provenance is None:
-            raise OSError("candidate staging returned no required source provenance")
-        if install_version:
-            stamp_install_version(staging, install_version)
-        _materialize_vc_frame_generation(staging)
-        _materialize_runtime_generation_entrypoint(staging)
-        audit_errors = _runtime_generation_audit_errors(staging, source_root=src)
-        if audit_errors:
-            raise OSError("\n".join(audit_errors))
-        _write_runtime_generation_manifest(
-            staging,
-            source_root=src,
-            source_provenance=source_provenance,
             install_version=install_version,
         )
-        payload_errors = _runtime_generation_payload_errors(staging)
-        if payload_errors:
-            raise OSError(
-                "candidate runtime failed pre-publish validation:\n"
-                + "\n".join(payload_errors)
-            )
         staging.rename(generation)
         handoff = {
             "schema": _TOOLS_HANDOFF_SCHEMA,
@@ -13166,10 +13238,7 @@ def _launcher_symlink_target(repo_root: Path) -> Path:
     return (
         vibecrafted_tools_home()
         / "vibecrafted-current"
-        / "vibecrafted-core"
-        / "vibecrafted_core"
-        / "deck"
-        / "vibecrafted"
+        / _RUNTIME_GENERATION_ENTRYPOINT
     )
 
 
@@ -14056,6 +14125,31 @@ def _build_uninstall_inventory(
         seen[key] = len(records)
         records.append(ManagedPath(kind, normalized, action, reason))
 
+    if shared_home.is_dir():
+        for child in sorted(shared_home.iterdir(), key=lambda item: item.name):
+            ownership = classify_vibecrafted_home_child(child)
+            if ownership == "runtime-state":
+                add(
+                    ownership,
+                    child,
+                    "remove",
+                    "reproducible Vibecrafted runtime/control state",
+                )
+            elif ownership == "founder-data":
+                add(
+                    ownership,
+                    child,
+                    "preserve",
+                    "Founder data and generated artifacts are retained",
+                )
+            else:
+                add(
+                    ownership,
+                    child,
+                    "preserve",
+                    "unknown state-home child; discovery never assumes ownership",
+                )
+
     resolved_store = store_path.resolve(strict=False)
     managed_tools_root = vibecrafted_tools_home().resolve(strict=False)
     legacy_store_root = (shared_home / "skills").resolve(strict=False)
@@ -14278,13 +14372,6 @@ def _build_uninstall_inventory(
             "installed from the DMG; remove by dragging to Trash",
         )
 
-    for name in ("artifacts", "control_plane", "logs"):
-        add(
-            "operator-data",
-            shared_home / name,
-            "preserve",
-            "operator history/data is retained intentionally",
-        )
     return records
 
 
@@ -14389,6 +14476,262 @@ def _apply_uninstall_inventory(
     return applied, preserved, failures
 
 
+def _uninstall_control_state(
+    shared_home: Path, *, timeout_seconds: float = 2.0
+) -> tuple[dict[str, Any] | None, str]:
+    """Read the server-owned run board only when it belongs to this state home."""
+
+    origin = (
+        os.environ.get("VC_SERVER_URL")
+        or os.environ.get("VIBECRAFTED_SERVER_URL")
+        or "http://127.0.0.1:3024"
+    ).rstrip("/")
+    parsed_origin = urllib.parse.urlsplit(origin)
+    if (
+        parsed_origin.scheme not in {"http", "https"}
+        or not parsed_origin.hostname
+        or parsed_origin.username
+        or parsed_origin.password
+    ):
+        return None, "control-plane URL must be credential-free http(s)"
+    request = urllib.request.Request(
+        f"{origin}/api/control/state",
+        headers={"Accept": "application/json"},
+        method="GET",
+    )
+    try:
+        # The origin is restricted above to credential-free HTTP(S); urllib is
+        # retained to avoid adding a host-installer dependency.
+        with (
+            urllib.request.urlopen(  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+                request, timeout=timeout_seconds
+            ) as response
+        ):
+            payload = json.loads(response.read().decode("utf-8"))
+    except (
+        OSError,
+        UnicodeDecodeError,
+        ValueError,
+        urllib.error.URLError,
+    ) as exc:
+        return None, f"control-plane state unavailable at {origin}: {exc}"
+    if not isinstance(payload, dict):
+        return None, f"control-plane state at {origin} is not a JSON object"
+    reported_home = str(payload.get("control_plane", "")).strip()
+    expected_home = (shared_home / "control_plane").resolve(strict=False)
+    if not reported_home:
+        return None, f"control-plane state at {origin} omitted control_plane identity"
+    actual_home = Path(reported_home).expanduser().resolve(strict=False)
+    if actual_home != expected_home:
+        detail = f"control-plane state identity mismatch: expected {expected_home}, got {actual_home}"
+        return None, detail
+    return payload, ""
+
+
+_UNINSTALL_TERMINAL_RUN_STATES = frozenset(
+    {"completed", "failed", "stopped", "cancelled", "canceled", "died", "settled"}
+)
+
+
+def _uninstall_run_meta(shared_home: Path | None, run_id: str) -> dict[str, Any]:
+    """Read the dispatcher-owned run meta for one run id, or an empty mapping."""
+
+    if shared_home is None or not re.fullmatch(r"[A-Za-z0-9._-]+", run_id):
+        return {}
+    meta_path = shared_home / "control_plane" / "runtime_runs" / run_id / "meta.json"
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _uninstall_run_is_ghost(meta: Mapping[str, Any]) -> str:
+    """Return why the board entry is a settled ghost, or "" when it may be live.
+
+    The server-owned board replays retained snapshots, so it keeps reporting
+    runs whose dispatcher meta is already terminal or whose worker is dead
+    (MEASURED 2026-08-28: 7/7 "active" runs on dragon were ghosts and the
+    drain died on `stop swarm`). A run without meta stays active: teardown
+    fails closed on unknown liveness.
+    """
+
+    if not meta:
+        return ""
+    status = str(meta.get("status", "")).strip().lower()
+    if status in _UNINSTALL_TERMINAL_RUN_STATES:
+        return f"meta status {status}"
+    pid = meta.get("worker_pid") or meta.get("pid")
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return ""
+    if pid_int <= 0:
+        return ""
+    try:
+        os.kill(pid_int, 0)
+    except ProcessLookupError:
+        return f"worker pid {pid_int} is dead"
+    except PermissionError:
+        return ""
+    except OSError:
+        return ""
+    return ""
+
+
+def _active_uninstall_runs(
+    payload: Mapping[str, Any] | None,
+    shared_home: Path | None = None,
+    *,
+    ghosts: list[tuple[str, str]] | None = None,
+) -> list[dict[str, str]]:
+    """Return the typed run identity needed for refusal and civilized drain.
+
+    Board entries whose dispatcher meta proves settlement are dropped and
+    reported through ``ghosts`` as ``(run_id, reason)`` pairs.
+    """
+
+    if not payload:
+        return []
+    active = payload.get("active_runs", [])
+    if not isinstance(active, list):
+        return []
+    runs: list[dict[str, str]] = []
+    for raw in active:
+        if not isinstance(raw, Mapping):
+            continue
+        run_id = str(raw.get("run_id", "")).strip()
+        if not run_id:
+            continue
+        meta = _uninstall_run_meta(shared_home, run_id)
+        reason = _uninstall_run_is_ghost(meta)
+        if reason:
+            if ghosts is not None:
+                ghosts.append((run_id, reason))
+            continue
+        agent = str(raw.get("agent", "")).strip() or str(meta.get("agent", "")).strip()
+        run = {"run_id": run_id, "agent": agent}
+        pgid = meta.get("worker_pgid")
+        if isinstance(pgid, int) and pgid > 0:
+            run["worker_pgid"] = str(pgid)
+        runs.append(run)
+    return runs
+
+
+def _uninstall_launcher() -> Path | None:
+    """Resolve the exact public deck that owns stop requests during drain."""
+
+    candidates = (
+        os.environ.get("VIBECRAFTED_UNINSTALL_LAUNCHER", ""),
+        os.environ.get("VIBECRAFTED_DECLARED_LAUNCHER", ""),
+        str(vibecrafted_launcher_bin() / "vibecrafted"),
+        shutil.which("vibecrafted") or "",
+    )
+    for raw in candidates:
+        if raw and (candidate := Path(raw).expanduser()).is_file():
+            return candidate.resolve(strict=False)
+    return None
+
+
+def _request_uninstall_run_stop(
+    launcher: Path, run: Mapping[str, str], *, timeout_seconds: float
+) -> str:
+    """Ask the product stop verb to signal one qualified run; return an error string."""
+
+    run_id = str(run.get("run_id", "")).strip()
+    agent = str(run.get("agent", "")).strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", run_id):
+        return f"unsafe run_id in active-run state: {run_id!r}"
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", agent):
+        return f"active run {run_id} has no drainable agent identity"
+    if agent == "swarm":
+        # The deck has no `stop swarm` verb; the research parent owns its lanes
+        # through one process group recorded by the dispatcher.
+        try:
+            pgid = int(run.get("worker_pgid", ""))
+        except (TypeError, ValueError):
+            return f"{run_id}: swarm run has no worker_pgid to drain"
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            return ""
+        except OSError as exc:
+            return f"{run_id}: swarm stop failed: {exc}"
+        return ""
+    try:
+        result = subprocess.run(
+            [str(launcher), "stop", agent, "--run-id", run_id],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=max(1.0, min(timeout_seconds, 60.0)),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"{run_id}: stop request failed: {exc}"
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        return f"{run_id}: stop request exited {result.returncode}: {detail}"
+    return ""
+
+
+def _drain_uninstall_runs(
+    shared_home: Path,
+    active_runs: Sequence[Mapping[str, str]],
+    *,
+    timeout_seconds: float,
+) -> tuple[list[str], str]:
+    """Signal every reported run, then wait for the matching board to become empty."""
+
+    launcher = _uninstall_launcher()
+    if launcher is None:
+        return [], "cannot drain: the public vibecrafted launcher was not found"
+    stopped: list[str] = []
+    for run in active_runs:
+        error = _request_uninstall_run_stop(
+            launcher, run, timeout_seconds=timeout_seconds
+        )
+        if error:
+            return stopped, error
+        stopped.append(str(run["run_id"]))
+    deadline = time.monotonic() + timeout_seconds
+    remaining = [dict(run) for run in active_runs]
+    last_error = ""
+    while time.monotonic() < deadline:
+        payload, last_error = _uninstall_control_state(shared_home)
+        if payload is not None:
+            remaining = _active_uninstall_runs(payload, shared_home)
+            if not remaining:
+                return stopped, ""
+        time.sleep(0.25)
+    ids = ", ".join(run["run_id"] for run in remaining) or "unknown"
+    suffix = f" ({last_error})" if last_error else ""
+    return stopped, f"drain timed out with active runs: {ids}{suffix}"
+
+
+def _uninstall_home_classes(shared_home: Path) -> dict[str, list[str]]:
+    """Return a stable three-class manifest for direct state-home children."""
+
+    classes = {"runtime-state": [], "founder-data": [], "unknown": []}
+    if not shared_home.is_dir():
+        return classes
+    for child in sorted(shared_home.iterdir(), key=lambda item: item.name):
+        classes[classify_vibecrafted_home_child(child)].append(str(child))
+    return classes
+
+
+def _runtime_uninstall_result(
+    args: argparse.Namespace, result: Mapping[str, Any]
+) -> None:
+    """Publish a Runtime Pack result to an internal sink and/or stdout."""
+
+    sink = getattr(args, "result_sink", None)
+    if isinstance(sink, dict):
+        sink.clear()
+        sink.update(result)
+    if getattr(args, "emit_result", True):
+        print(json.dumps(dict(result), sort_keys=True))
+
+
 def cmd_uninstall(args: argparse.Namespace) -> int:
     """Run `vibecrafted uninstall`: build the inventory, confirm interactively, back up
     everything first, then apply the removal/edit plan and report results.
@@ -14403,17 +14746,48 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         # Preserve that one-way uninstall migration without recreating the
         # legacy store for current installs.
         store_path = legacy_store
-    dry_run = args.dry_run
+    dry_run = bool(getattr(args, "dry_run", False))
+    drain = bool(getattr(args, "drain", False))
+    drain_timeout = float(getattr(args, "drain_timeout", 30.0))
+    if drain_timeout <= 0:
+        raise ValueError("--drain-timeout must be greater than zero")
+    control_state, control_state_warning = _uninstall_control_state(shared_home)
+    ghost_runs: list[tuple[str, str]] = []
+    active_runs = _active_uninstall_runs(control_state, shared_home, ghosts=ghost_runs)
+    home_classes = _uninstall_home_classes(shared_home)
     runtime_receipt = _runtime_receipt_path(vibecrafted_runtime_home())
+    runtime_preview: dict[str, Any] = {
+        "schema": "vibecrafted.runtime-uninstall-result.v1",
+        "status": "absent",
+        "actions": [],
+        "conflicts": [],
+    }
     if runtime_receipt.is_file():
         runtime_exit = cmd_runtime_uninstall(
-            argparse.Namespace(dry_run=dry_run, emit_result=False)
+            argparse.Namespace(
+                dry_run=True,
+                emit_result=False,
+                result_sink=runtime_preview,
+            )
         )
         if runtime_exit != 0:
             print(
                 red("Runtime Pack uninstall stopped on locally modified managed files.")
             )
             print(dim(f"  receipt: {runtime_receipt}"))
+            print(
+                json.dumps(
+                    {
+                        "schema": "vibecrafted.uninstall-plan.v1",
+                        "status": "conflict",
+                        "classes": home_classes,
+                        "active_runs": [run["run_id"] for run in active_runs],
+                        "actions": [],
+                        "conflicts": runtime_preview.get("conflicts", []),
+                    },
+                    sort_keys=True,
+                )
+            )
             return runtime_exit
     bundle = set(_known_bundle_names())
     helper_file = _helper_target_path()
@@ -14463,14 +14837,19 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         or bool(_retired_vc_frame_process_census())
         or bool(_owned_runtime_process_census())
     )
-    has_work = runtime_evidence or any(
-        (record.action in {"remove", "edit"} and _path_present(record.path))
-        or (
-            record.action == "remove-if-empty"
-            and record.path.is_dir()
-            and not any(record.path.iterdir())
+    has_work = (
+        bool(active_runs)
+        or bool(runtime_preview.get("actions"))
+        or runtime_evidence
+        or any(
+            (record.action in {"remove", "edit"} and _path_present(record.path))
+            or (
+                record.action == "remove-if-empty"
+                and record.path.is_dir()
+                and not any(record.path.iterdir())
+            )
+            for record in inventory
         )
-        for record in inventory
     )
 
     print(f"\n{bold('𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Uninstall')}\n")
@@ -14486,10 +14865,41 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
             print("  Preserved intentionally:")
             for record in preserved:
                 print(f"    {record.path} — {record.reason}")
+        if control_state_warning:
+            print(f"  {WARN} {control_state_warning}")
         print()
+        print(
+            json.dumps(
+                {
+                    "schema": "vibecrafted.uninstall-plan.v1",
+                    "status": "dry-run" if dry_run else "absent",
+                    "classes": home_classes,
+                    "active_runs": [],
+                    "actions": [],
+                    "conflicts": [],
+                },
+                sort_keys=True,
+            )
+        )
         return 0
 
     _print_uninstall_inventory(inventory)
+    if control_state_warning:
+        print(f"  {WARN} {control_state_warning}")
+        print()
+    if ghost_runs:
+        print(dim("Settled runs still replayed by the control-plane board (ignored):"))
+        for ghost_id, reason in ghost_runs:
+            print(dim(f"  {ghost_id} — {reason}"))
+        print()
+    if active_runs:
+        print(red(bold("Active control-plane runs:")))
+        for run in active_runs:
+            agent = f" ({run['agent']})" if run["agent"] else ""
+            print(f"  {run['run_id']}{agent}")
+        if dry_run:
+            print("  A wet uninstall would refuse without --drain.")
+        print()
     if runtime_evidence:
         print("  teardown runtime: verified service plane and owned runtime processes")
         print()
@@ -14500,6 +14910,41 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
             return 0
         print()
 
+    if not dry_run and active_runs and not drain:
+        print(red(bold("Uninstall refused: active runs must settle first.")))
+        print("  Re-run with --drain to request a civilized stop before teardown.")
+        print()
+        print(
+            json.dumps(
+                {
+                    "schema": "vibecrafted.uninstall-plan.v1",
+                    "status": "refused-active-runs",
+                    "classes": home_classes,
+                    "active_runs": [run["run_id"] for run in active_runs],
+                    "actions": [],
+                    "conflicts": [],
+                },
+                sort_keys=True,
+            )
+        )
+        return 1
+
+    if not dry_run and active_runs:
+        print(bold("Draining active runs..."))
+        stopped, drain_error = _drain_uninstall_runs(
+            shared_home,
+            active_runs,
+            timeout_seconds=drain_timeout,
+        )
+        for run_id in stopped:
+            print(f"  stop requested: {run_id}")
+        if drain_error:
+            print(red(f"  {drain_error}"))
+            print()
+            return 1
+        print(f"  {OK} control plane reports zero active runs")
+        print()
+
     backup_ts = None
     if not dry_run:
         print(bold("Saving external restore kit..."))
@@ -14507,6 +14952,23 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         if backup_ts:
             print(f"  {OK} {_backup_root(store_path) / backup_ts}")
         print()
+
+    runtime_result = runtime_preview
+    if runtime_receipt.is_file() and not dry_run:
+        runtime_result = {}
+        runtime_exit = cmd_runtime_uninstall(
+            argparse.Namespace(
+                dry_run=False,
+                emit_result=False,
+                result_sink=runtime_result,
+            )
+        )
+        if runtime_exit != 0:
+            print(red("Runtime Pack uninstall stopped before legacy discovery."))
+            print(dim(f"  receipt: {runtime_receipt}"))
+            if backup_ts:
+                print(f"  Restore with: {_restore_command(backup_ts)}")
+            return runtime_exit
 
     try:
         runtime_actions = _teardown_owned_runtime_for_uninstall(
@@ -14535,6 +14997,23 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
             for record in preserved:
                 print(f"  {record.kind}: {record.path} — {record.reason}")
         print()
+        plan_actions = list(runtime_preview.get("actions", []))
+        plan_actions.extend(runtime_actions)
+        plan_actions.extend(f"{record.action} {record.path}" for record in applied)
+        print(
+            json.dumps(
+                {
+                    "schema": "vibecrafted.uninstall-plan.v1",
+                    "status": "dry-run",
+                    "classes": home_classes,
+                    "active_runs": [run["run_id"] for run in active_runs],
+                    "requires_drain": bool(active_runs),
+                    "actions": plan_actions,
+                    "conflicts": runtime_preview.get("conflicts", []),
+                },
+                sort_keys=True,
+            )
+        )
         return 0
 
     if failures:
@@ -14562,6 +15041,22 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         print(f"  {_restore_command(backup_ts)}")
     print(green(bold("Uninstall complete.")))
     print()
+    completed_actions = list(runtime_result.get("actions", []))
+    completed_actions.extend(runtime_actions)
+    completed_actions.extend(f"{record.action} {record.path}" for record in applied)
+    print(
+        json.dumps(
+            {
+                "schema": "vibecrafted.uninstall-plan.v1",
+                "status": "removed",
+                "classes": home_classes,
+                "active_runs": [run["run_id"] for run in active_runs],
+                "actions": completed_actions,
+                "conflicts": runtime_result.get("conflicts", []),
+            },
+            sort_keys=True,
+        )
+    )
     return 0
 
 
@@ -15220,6 +15715,11 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
 
     paths = _runtime_install_paths()
     runtime_home = paths["runtime_home"]
+    _refuse_runtime_pack_downgrade(
+        payload_root,
+        runtime_home,
+        allow_older=bool(getattr(args, "allow_older_runtime", False)),
+    )
     receipt_path = _runtime_receipt_path(runtime_home)
     previous = _load_runtime_install_receipt(receipt_path)
     previous_roots = {
@@ -15296,6 +15796,7 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
                 (bin_dir / "vc-frame").chmod(0o755)
             _materialize_vc_frame_generation(staging)
             _materialize_runtime_generation_entrypoint(staging)
+            _materialize_runtime_generation_vc_frame_entry(staging)
             source_provenance = load_source_provenance(staging)
             if source_provenance is None:
                 raise RuntimeError("Runtime Pack has no source-provenance.json")
@@ -15559,6 +16060,102 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
     return 0
 
 
+def _vc_frame_socket_dir() -> Path:
+    """The vc-frame session socket namespace this install owns.
+
+    Keyed by uid, not by ``$HOME`` — so a sandboxed install (``env -i HOME=…``)
+    must set ``VC_FRAME_SOCKET_DIR`` or it would tear down the *host* namespace
+    and orphan every live session on the machine.
+    """
+    override = os.environ.get("VC_FRAME_SOCKET_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path(f"/tmp/vc-frame-{os.getuid()}")
+
+
+RUNTIME_PACK_PROVENANCE_NAME = "runtime-pack-provenance.json"
+
+
+def _load_runtime_pack_provenance(root: Path) -> dict[str, Any]:
+    path = root / RUNTIME_PACK_PROVENANCE_NAME
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _runtime_pack_build_date(provenance: Mapping[str, Any]) -> str:
+    """``YYYYMMDD`` from ``carrier_basename`` (``…_4.3.0-20260827-3bbe57a2-…``)."""
+    match = re.search(
+        r"-(\d{8})-[0-9a-f]{7,40}-", str(provenance.get("carrier_basename", ""))
+    )
+    return match.group(1) if match else ""
+
+
+def _runtime_pack_downgrade(
+    candidate: Mapping[str, Any], active: Mapping[str, Any]
+) -> list[str]:
+    """Explain why installing ``candidate`` over ``active`` is a downgrade.
+
+    Empty list = not a downgrade (or not decidable). Build dates are the only
+    orderable evidence a Runtime Pack carries; component revisions are listed so
+    the founder sees *which* tool would go backwards (2026-08-27: a self-install
+    replaced vc-frame f7755692 with 915ca04e and orphaned 12 live sessions).
+    """
+    cand_date = _runtime_pack_build_date(candidate)
+    active_date = _runtime_pack_build_date(active)
+    if not cand_date or not active_date or cand_date >= active_date:
+        return []
+    reasons = [
+        (
+            f"candidate Runtime Pack {candidate.get('version', '?')} was built {cand_date}, "
+            f"active generation {active.get('version', '?')} was built {active_date}"
+        )
+    ]
+    cand_rev = candidate.get("source_revisions") or {}
+    active_rev = active.get("source_revisions") or {}
+    for component in sorted(set(cand_rev) | set(active_rev)):
+        before, after = active_rev.get(component), cand_rev.get(component)
+        if before and after and before != after:
+            reasons.append(f"{component}: {before[:8]} -> {after[:8]}")
+    return reasons
+
+
+def _refuse_runtime_pack_downgrade(
+    payload_root: Path, runtime_home: Path, *, allow_older: bool
+) -> None:
+    active_path = runtime_home / "active.json"
+    if not active_path.is_file():
+        return
+    try:
+        active = json.loads(active_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    active_root = Path(str(active.get("runtime_root") or ""))
+    if not active_root.is_dir():
+        return
+    reasons = _runtime_pack_downgrade(
+        _load_runtime_pack_provenance(payload_root),
+        _load_runtime_pack_provenance(active_root),
+    )
+    if not reasons:
+        return
+    detail = "\n  ".join(reasons)
+    if allow_older:
+        print(
+            f"warning: installing an older Runtime Pack (--allow-older-runtime):\n  {detail}"
+        )
+        return
+    raise RuntimeError(
+        "refusing to replace a newer active runtime with an older Runtime Pack "
+        "(an upgrade never takes the founder's tools backwards; "
+        "pass --allow-older-runtime to do it on purpose):\n  " + detail
+    )
+
+
 def _receipt_path_is_allowed(path: Path, roots: Mapping[str, Path]) -> bool:
     allowed = [
         roots["runtime_home"],
@@ -15571,7 +16168,7 @@ def _receipt_path_is_allowed(path: Path, roots: Mapping[str, Path]) -> bool:
             [
                 Path.home() / "Library/LaunchAgents",
                 Path.home() / "Library/Caches/io.vetcoders.vc-frame",
-                Path(f"/tmp/vc-frame-{os.getuid()}"),
+                _vc_frame_socket_dir(),
             ]
         )
     # Preserve the final component so a receipt cannot make an outside path
@@ -15655,15 +16252,15 @@ def cmd_runtime_uninstall(args: argparse.Namespace) -> int:
     receipt_path = _runtime_receipt_path(runtime_home)
     receipt = _load_runtime_install_receipt(receipt_path)
     if not receipt:
-        if getattr(args, "emit_result", True):
-            print(
-                json.dumps(
-                    {
-                        "schema": "vibecrafted.runtime-uninstall-result.v1",
-                        "status": "absent",
-                    }
-                )
-            )
+        _runtime_uninstall_result(
+            args,
+            {
+                "schema": "vibecrafted.runtime-uninstall-result.v1",
+                "status": "absent",
+                "actions": [],
+                "conflicts": [],
+            },
+        )
         return 0
     recorded_roots = {
         name: Path(value) for name, value in receipt.get("roots", {}).items()
@@ -15741,8 +16338,7 @@ def cmd_runtime_uninstall(args: argparse.Namespace) -> int:
             "actions": [],
             "conflicts": conflicts,
         }
-        if getattr(args, "emit_result", True):
-            print(json.dumps(result, sort_keys=True))
+        _runtime_uninstall_result(args, result)
         return 1
     runtime_actions = _teardown_owned_runtime_for_uninstall(
         paths["crafted_home"],
@@ -15785,7 +16381,7 @@ def cmd_runtime_uninstall(args: argparse.Namespace) -> int:
         runtime_surfaces = [
             Path.home() / "Library/LaunchAgents/io.vetcoders.vibecrafted.server.plist",
             Path.home() / "Library/Caches/io.vetcoders.vc-frame",
-            Path(f"/tmp/vc-frame-{os.getuid()}"),
+            _vc_frame_socket_dir(),
         ]
         for path in runtime_surfaces:
             if _path_present(path):
@@ -15847,8 +16443,7 @@ def cmd_runtime_uninstall(args: argparse.Namespace) -> int:
         "actions": actions,
         "conflicts": conflicts,
     }
-    if getattr(args, "emit_result", True):
-        print(json.dumps(result, sort_keys=True))
+    _runtime_uninstall_result(args, result)
     return 1 if conflicts else 0
 
 
@@ -15998,6 +16593,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_uninstall.add_argument(
         "--dry-run", "-n", action="store_true", help="Show what would be done"
     )
+    p_uninstall.add_argument(
+        "--drain",
+        action="store_true",
+        help="Stop active control-plane runs and wait for settlement before teardown",
+    )
+    p_uninstall.add_argument(
+        "--drain-timeout",
+        type=float,
+        default=30.0,
+        metavar="SECONDS",
+        help="Maximum time to wait for --drain (default: 30)",
+    )
 
     # restore
     p_restore = sub.add_parser("restore", help="Restore pre-install state from backup")
@@ -16014,6 +16621,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_runtime_install.add_argument("--app-root")
     p_runtime_install.add_argument("--terminal-host")
     p_runtime_install.add_argument("--frame-helper")
+    p_runtime_install.add_argument(
+        "--allow-older-runtime",
+        action="store_true",
+        help="Install a Runtime Pack built before the active generation (explicit downgrade)",
+    )
 
     p_runtime_uninstall = sub.add_parser(
         "runtime-uninstall", help="Undo the receipted Runtime Pack install"

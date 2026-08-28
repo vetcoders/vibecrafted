@@ -23,7 +23,13 @@ def _write_installed_runtime_deck(home: Path) -> Path:
     deck.parent.mkdir(parents=True, exist_ok=True)
     deck.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
     deck.chmod(0o755)
-    return deck
+    # The public launcher enters the generation through its manifest-bound
+    # entrypoint, a byte-identical copy of the deck.
+    entrypoint = deck.parents[3] / "bin" / "vibecrafted"
+    entrypoint.parent.mkdir(parents=True, exist_ok=True)
+    entrypoint.write_text(deck.read_text(encoding="utf-8"), encoding="utf-8")
+    entrypoint.chmod(0o755)
+    return entrypoint
 
 
 def test_read_framework_version_reads_version_file(tmp_path: Path) -> None:

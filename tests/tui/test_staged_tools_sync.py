@@ -2592,6 +2592,77 @@ def test_runtime_cutover_rollback_drains_new_before_restoring_old_service(
     assert receipt["state"] == "rolled-back"
 
 
+def test_rollback_recognizes_exact_old_pair_resurrected_by_launchd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    shared_home = home / ".vibecrafted"
+    tools = home / ".local/share/vibecrafted/tools"
+    old_target = tools / "vibecrafted-generation-old"
+    new_target = tools / "vibecrafted-generation-new"
+    current = tools / "vibecrafted-current"
+    launcher = home / ".local/bin/vibecrafted"
+    _write_valid_runtime_generation(old_target)
+    _write_valid_runtime_generation(new_target)
+    current.parent.mkdir(parents=True, exist_ok=True)
+    current.symlink_to(old_target.name)
+    _write_executable(launcher, "#!/usr/bin/env bash\nexit 0\n")
+    _write_runtime_launch_agent(home, shared_home, launcher)
+    installer._atomic_json_file(
+        installer._tools_handoff_path(current),
+        {
+            "schema": installer._TOOLS_HANDOFF_SCHEMA,
+            "state": "prepared",
+            "old_target": str(old_target),
+            "new_target": str(new_target),
+            "prepared_at": datetime.now(timezone.utc).isoformat(),
+            "published_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(shared_home))
+    monkeypatch.setenv("VIBECRAFTED_TOOLS_HOME", str(tools))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(launcher.parent))
+    monkeypatch.setattr(installer.sys, "platform", "darwin")
+    _mock_runtime_launchd_gate(monkeypatch)
+    backup = installer._capture_runtime_launch_agent_backup(shared_home)
+    healthy = installer._RuntimeServiceStatus(
+        installed=True,
+        loaded=True,
+        supervisor_live=True,
+        supervisor_verified=True,
+        supervisor_service_managed=True,
+        build_current=True,
+        pair_healthy=True,
+        supervisor_pid=4040,
+    )
+    monkeypatch.setattr(
+        installer,
+        "_runtime_service_snapshot",
+        lambda _shared_home: (launcher, healthy, "running"),
+    )
+    monkeypatch.setattr(
+        installer,
+        "prepare_runtime_service_for_install",
+        lambda *_args, **_kwargs: pytest.fail(
+            "exact restored pair must not be drained"
+        ),
+    )
+
+    with installer._tools_install_lease(
+        current, operation="test-launchd-restored-pair"
+    ) as descriptor:
+        monkeypatch.setenv(installer._TOOLS_INSTALL_LEASE_ENV, str(descriptor))
+        assert not installer.rollback_runtime_install(
+            shared_home,
+            service_was_active=True,
+            service_activation_attempted=True,
+            launch_agent_backup=backup,
+        )
+
+    assert current.resolve() == old_target.resolve()
+
+
 def test_inactive_service_activation_failure_restores_exact_dormant_plist(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

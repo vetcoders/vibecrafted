@@ -399,6 +399,7 @@ Commands:
   claims               Atomic Living Tree path claims (acquire|heartbeat|status|list|release)
   settlements          Read-only f/x/n ledger query (summary|list|inspect)
   update               Update to the latest release
+  uninstall            Remove runtime; preserve Founder data and unknowns
   help [topic|--all]   This deck · full reference
 
 Ship cycle:
@@ -411,6 +412,7 @@ Examples:
   vibecrafted init claude
   vibecrafted implement codex -p "Ship dark mode"
   vibecrafted marbles claude -p "Loop until clean"
+  vibecrafted uninstall --dry-run
 
 Words:
   run        one dispatched agent job; its report + transcript live under ~/.vibecrafted
