@@ -14528,8 +14528,68 @@ def _uninstall_control_state(
     return payload, ""
 
 
-def _active_uninstall_runs(payload: Mapping[str, Any] | None) -> list[dict[str, str]]:
-    """Return the typed run identity needed for refusal and civilized drain."""
+_UNINSTALL_TERMINAL_RUN_STATES = frozenset(
+    {"completed", "failed", "stopped", "cancelled", "canceled", "died", "settled"}
+)
+
+
+def _uninstall_run_meta(shared_home: Path | None, run_id: str) -> dict[str, Any]:
+    """Read the dispatcher-owned run meta for one run id, or an empty mapping."""
+
+    if shared_home is None or not re.fullmatch(r"[A-Za-z0-9._-]+", run_id):
+        return {}
+    meta_path = shared_home / "control_plane" / "runtime_runs" / run_id / "meta.json"
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _uninstall_run_is_ghost(meta: Mapping[str, Any]) -> str:
+    """Return why the board entry is a settled ghost, or "" when it may be live.
+
+    The server-owned board replays retained snapshots, so it keeps reporting
+    runs whose dispatcher meta is already terminal or whose worker is dead
+    (MEASURED 2026-08-28: 7/7 "active" runs on dragon were ghosts and the
+    drain died on `stop swarm`). A run without meta stays active: teardown
+    fails closed on unknown liveness.
+    """
+
+    if not meta:
+        return ""
+    status = str(meta.get("status", "")).strip().lower()
+    if status in _UNINSTALL_TERMINAL_RUN_STATES:
+        return f"meta status {status}"
+    pid = meta.get("worker_pid") or meta.get("pid")
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return ""
+    if pid_int <= 0:
+        return ""
+    try:
+        os.kill(pid_int, 0)
+    except ProcessLookupError:
+        return f"worker pid {pid_int} is dead"
+    except PermissionError:
+        return ""
+    except OSError:
+        return ""
+    return ""
+
+
+def _active_uninstall_runs(
+    payload: Mapping[str, Any] | None,
+    shared_home: Path | None = None,
+    *,
+    ghosts: list[tuple[str, str]] | None = None,
+) -> list[dict[str, str]]:
+    """Return the typed run identity needed for refusal and civilized drain.
+
+    Board entries whose dispatcher meta proves settlement are dropped and
+    reported through ``ghosts`` as ``(run_id, reason)`` pairs.
+    """
 
     if not payload:
         return []
@@ -14543,12 +14603,18 @@ def _active_uninstall_runs(payload: Mapping[str, Any] | None) -> list[dict[str, 
         run_id = str(raw.get("run_id", "")).strip()
         if not run_id:
             continue
-        runs.append(
-            {
-                "run_id": run_id,
-                "agent": str(raw.get("agent", "")).strip(),
-            }
-        )
+        meta = _uninstall_run_meta(shared_home, run_id)
+        reason = _uninstall_run_is_ghost(meta)
+        if reason:
+            if ghosts is not None:
+                ghosts.append((run_id, reason))
+            continue
+        agent = str(raw.get("agent", "")).strip() or str(meta.get("agent", "")).strip()
+        run = {"run_id": run_id, "agent": agent}
+        pgid = meta.get("worker_pgid")
+        if isinstance(pgid, int) and pgid > 0:
+            run["worker_pgid"] = str(pgid)
+        runs.append(run)
     return runs
 
 
@@ -14578,6 +14644,20 @@ def _request_uninstall_run_stop(
         return f"unsafe run_id in active-run state: {run_id!r}"
     if not re.fullmatch(r"[A-Za-z0-9._-]+", agent):
         return f"active run {run_id} has no drainable agent identity"
+    if agent == "swarm":
+        # The deck has no `stop swarm` verb; the research parent owns its lanes
+        # through one process group recorded by the dispatcher.
+        try:
+            pgid = int(run.get("worker_pgid", ""))
+        except (TypeError, ValueError):
+            return f"{run_id}: swarm run has no worker_pgid to drain"
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            return ""
+        except OSError as exc:
+            return f"{run_id}: swarm stop failed: {exc}"
+        return ""
     try:
         result = subprocess.run(
             [str(launcher), "stop", agent, "--run-id", run_id],
@@ -14619,7 +14699,7 @@ def _drain_uninstall_runs(
     while time.monotonic() < deadline:
         payload, last_error = _uninstall_control_state(shared_home)
         if payload is not None:
-            remaining = _active_uninstall_runs(payload)
+            remaining = _active_uninstall_runs(payload, shared_home)
             if not remaining:
                 return stopped, ""
         time.sleep(0.25)
@@ -14672,7 +14752,8 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     if drain_timeout <= 0:
         raise ValueError("--drain-timeout must be greater than zero")
     control_state, control_state_warning = _uninstall_control_state(shared_home)
-    active_runs = _active_uninstall_runs(control_state)
+    ghost_runs: list[tuple[str, str]] = []
+    active_runs = _active_uninstall_runs(control_state, shared_home, ghosts=ghost_runs)
     home_classes = _uninstall_home_classes(shared_home)
     runtime_receipt = _runtime_receipt_path(vibecrafted_runtime_home())
     runtime_preview: dict[str, Any] = {
@@ -14805,6 +14886,11 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     _print_uninstall_inventory(inventory)
     if control_state_warning:
         print(f"  {WARN} {control_state_warning}")
+        print()
+    if ghost_runs:
+        print(dim("Settled runs still replayed by the control-plane board (ignored):"))
+        for ghost_id, reason in ghost_runs:
+            print(dim(f"  {ghost_id} — {reason}"))
         print()
     if active_runs:
         print(red(bold("Active control-plane runs:")))

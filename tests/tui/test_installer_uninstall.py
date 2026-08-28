@@ -2232,3 +2232,78 @@ def test_runtime_install_refuses_older_pack_unless_allowed(
         encoding="utf-8",
     )
     installer._refuse_runtime_pack_downgrade(newer, runtime_home, allow_older=False)
+
+
+def _write_run_meta(shared_home: Path, run_id: str, **meta) -> None:
+    run_dir = shared_home / "control_plane" / "runtime_runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+
+def test_active_uninstall_runs_drops_ghosts_proven_by_dispatcher_meta(
+    tmp_path: Path,
+) -> None:
+    shared_home = tmp_path / ".vibecrafted"
+    _write_run_meta(
+        shared_home, "work-done", status="completed", worker_pid=os.getpid()
+    )
+    _write_run_meta(shared_home, "work-dead", status="active", worker_pid=2**22 - 7)
+    _write_run_meta(
+        shared_home,
+        "rese-live",
+        status="active",
+        worker_pid=os.getpid(),
+        worker_pgid=os.getpgid(0),
+        agent="swarm",
+    )
+    ghosts: list[tuple[str, str]] = []
+    payload = {
+        "active_runs": [
+            {"run_id": "work-done", "agent": "codex"},
+            {"run_id": "work-dead", "agent": "claude"},
+            {"run_id": "work-nometa", "agent": "codex"},
+            {"run_id": "rese-live", "agent": "swarm"},
+        ]
+    }
+
+    runs = installer._active_uninstall_runs(payload, shared_home, ghosts=ghosts)
+
+    assert [run["run_id"] for run in runs] == ["work-nometa", "rese-live"]
+    assert runs[1]["worker_pgid"] == str(os.getpgid(0))
+    assert dict(ghosts) == {
+        "work-done": "meta status completed",
+        "work-dead": f"worker pid {2**22 - 7} is dead",
+    }
+    # Without a state home the board is trusted verbatim (fail-closed).
+    assert len(installer._active_uninstall_runs(payload)) == 4
+
+
+def test_request_uninstall_run_stop_signals_swarm_process_group(
+    tmp_path: Path, monkeypatch
+) -> None:
+    launcher = tmp_path / "vibecrafted"
+    launcher.write_text("#!/bin/sh\nexit 7\n", encoding="utf-8")
+    signalled: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        installer.os, "killpg", lambda pgid, sig: signalled.append((pgid, sig))
+    )
+    monkeypatch.setattr(
+        installer.subprocess,
+        "run",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("deck must not be asked to stop swarm")
+        ),
+    )
+
+    assert (
+        installer._request_uninstall_run_stop(
+            launcher,
+            {"run_id": "rese-1", "agent": "swarm", "worker_pgid": "4242"},
+            timeout_seconds=1,
+        )
+        == ""
+    )
+    assert signalled == [(4242, installer.signal.SIGTERM)]
+    assert "no worker_pgid" in installer._request_uninstall_run_stop(
+        launcher, {"run_id": "rese-2", "agent": "swarm"}, timeout_seconds=1
+    )
