@@ -137,3 +137,16 @@ belong here.
 - Additional runtime finding: inherited `VIBECRAFTED_DECLARED_LAUNCHER` made
   Start Here falsely report a healthy current server pair as needing attention;
   fixed and checkpointed in `994a2bf2` with a focused regression test.
+
+## 2026-08-28 05:00 — Founder: „odinstalować musi umieć `vibecrafted` samodzielnie (mój must-be)"; „Ty robisz inline na forku"
+
+- Receipted uninstall (linia recovery, `c7eca02d…3950d4b7`) nie ma w v5 HEAD — żyje w `integ/v5-plus-recovery-runtime`/`47e6977e`. Dispatch codex `work-260828-031724-36386` → `4c1d5ada`: `vibecrafted uninstall` publiczny, trzy klasy dzieci `~/.vibecrafted` (runtime-state/founder-data/unknown), odmowa pod aktywnymi runami + `--drain`, sandbox round-trip.
+- Inline (claude): strażnik downgrade'u + `VC_FRAME_SOCKET_DIR` (integ), lifecycle log App (v5). Dowody i sprawca-nieznany w fail-ledgerze (wpis 2026-08-28 04:15).
+- Guziki Foundera: merge `integ/v5-plus-recovery-runtime` do v5, realny `vibecrafted uninstall --dry-run` → uninstall → `make install-source`; App z lifecycle logiem wchodzi dopiero z nowym releasem.
+
+## 2026-08-28 08:39+02:00 — grok: unite on feature branch only (not trunk)
+
+- Merged `integ/v5-plus-recovery-runtime` (`4f7d7f6e`) into `fix/v430-dispatcher-shutdown-race-v5` as `28beb38f`. Parents: `6a249ad0` + `4f7d7f6e`. `runtime_paths.py` is the union (UDS `run_signal_socket_path` + uninstall `classify_vibecrafted_home_child`).
+- Tests: `5483e38d`. Focused pytest green (UDS wake + classify/refuse/`--drain`).
+- `main` unchanged at `4d6d2e9b`. Host uninstall / `make install-source` not run. Installed runtime remains `4.3.0+ga64dd3e4`.
+- Remaining Founder buttons: live `vibecrafted uninstall --dry-run` → uninstall → `make install-source`; App lifecycle log ships with a new release.
