@@ -220,3 +220,57 @@ def test_workshop_reexecs_generation_python_when_host_lacks_core(
 def test_ensure_generation_python_is_noop_when_core_imports() -> None:
     workshop = _load()
     workshop.ensure_generation_python()
+
+
+def test_generation_python_candidates_prefer_env_then_uv_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workshop = _load()
+    data = tmp_path / "data"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(data))
+    monkeypatch.setenv("VIBECRAFTED_PYTHON", "/tmp/explicit-python")
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.delenv("VIBECRAFTED_ROOT", raising=False)
+    candidates = workshop._generation_python_candidates()
+    assert candidates[0] == "/tmp/explicit-python"
+    assert str(tmp_path / "runtime" / "bin" / "python3") in candidates
+    assert str(data / "uv" / "tools" / "vibecrafted" / "bin" / "python3") in candidates
+    assert str(data / "uv" / "tools" / "vibecrafted" / "bin" / "python") in candidates
+
+
+def test_workshop_reexecs_uv_tools_python_when_env_unset(tmp_path: Path) -> None:
+    """Source-lane panes have no VIBECRAFTED_PYTHON; uv venv has core."""
+    host = _host_python_without_core()
+    if host is None:
+        pytest.skip("no host python3 that lacks vibecrafted_core")
+    log = tmp_path / "uv.log"
+    uv_bin = tmp_path / "data" / "uv" / "tools" / "vibecrafted" / "bin"
+    uv_bin.mkdir(parents=True)
+    stub = uv_bin / "python3"
+    stub.write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$0" "$@" > "{log}"\nexit 0\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env.pop("VIBECRAFTED_PYTHON", None)
+    env.pop("VIBECRAFTED_RUNTIME_ROOT", None)
+    env.pop("VIBECRAFTED_ROOT", None)
+    env["PYTHONNOUSERSITE"] = "1"
+    env["HOME"] = str(tmp_path)
+    env["XDG_DATA_HOME"] = str(tmp_path / "data")
+    env["PATH"] = "/usr/bin:/bin"
+    result = subprocess.run(
+        [str(host), str(SCRIPT), "home"],
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    recorded = log.read_text(encoding="utf-8")
+    assert str(stub) in recorded
+    assert "home" in recorded

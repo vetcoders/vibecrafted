@@ -20,13 +20,56 @@ from pathlib import Path
 from typing import Any
 
 
+def _generation_python_candidates() -> list[str]:
+    """Interpreters that can import vibecrafted_core without host PYTHONPATH.
+
+    vc-frame ``bash -lc`` panes do not inherit the deck wrapper.  Match
+    ``spawn_python_bin`` in runtime/scripts/lib/meta.sh: env override, then the
+    uv tool venv, then generation ``bin/python3``.  Never fall through to
+    Homebrew ``python3`` — that is the 3.14 ModuleNotFoundError class.
+    """
+    home = Path.home()
+    data = Path(os.environ.get("XDG_DATA_HOME") or (home / ".local" / "share"))
+    ordered: list[str] = []
+    wanted = os.environ.get("VIBECRAFTED_PYTHON", "").strip()
+    if wanted:
+        ordered.append(wanted)
+    for key in ("VIBECRAFTED_RUNTIME_ROOT", "VIBECRAFTED_ROOT"):
+        root = os.environ.get(key, "").strip()
+        if root:
+            ordered.append(str(Path(root) / "bin" / "python3"))
+    ordered.extend(
+        (
+            str(data / "uv" / "tools" / "vibecrafted" / "bin" / "python3"),
+            str(data / "uv" / "tools" / "vibecrafted" / "bin" / "python"),
+            str(data / "uv" / "tools" / "vibecrafted-core" / "bin" / "python3"),
+            str(
+                data
+                / "vibecrafted"
+                / "tools"
+                / "vibecrafted-current"
+                / "bin"
+                / "python3"
+            ),
+        )
+    )
+    seen: set[str] = set()
+    unique: list[str] = []
+    for item in ordered:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        unique.append(item)
+    return unique
+
+
 def ensure_generation_python() -> None:
-    """Re-exec the Runtime Pack interpreter when host python3 lacks core.
+    """Re-exec a generation/uv interpreter when host python3 lacks core.
 
     vc-frame panes often run ``#!/usr/bin/env python3`` (Homebrew 3.14 on this
     host).  Generation ``bin/python3`` is a wrapper that sets PYTHONPATH onto
-    the receipted ``vibecrafted-core``.  Prefer ``VIBECRAFTED_PYTHON``, then
-    ``$VIBECRAFTED_RUNTIME_ROOT/bin/python3``.
+    the receipted ``vibecrafted-core``.  Source-lane tools installs have no
+    ``bin/python3``; the uv tool venv does.
     """
     try:
         import vibecrafted_core  # noqa: F401
@@ -34,16 +77,12 @@ def ensure_generation_python() -> None:
         pass
     else:
         return
-    wanted = os.environ.get("VIBECRAFTED_PYTHON", "").strip()
-    if not wanted:
-        root = (
-            os.environ.get("VIBECRAFTED_RUNTIME_ROOT")
-            or os.environ.get("VIBECRAFTED_ROOT")
-            or ""
-        ).strip()
-        if root:
-            wanted = str(Path(root) / "bin" / "python3")
-    if wanted and os.access(wanted, os.X_OK):
+    here = os.path.realpath(sys.executable)
+    for wanted in _generation_python_candidates():
+        if not os.access(wanted, os.X_OK):
+            continue
+        if os.path.realpath(wanted) == here:
+            continue
         os.execv(wanted, [wanted, *sys.argv])
     raise SystemExit(
         "vc-agent-workshop: no module named 'vibecrafted_core'; "

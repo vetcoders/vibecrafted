@@ -81,6 +81,48 @@ def test_pane_python_reexecs_generation_interpreter(tmp_path: Path) -> None:
     assert "home" in recorded
 
 
+def test_pane_python_reexecs_uv_tools_python_when_env_unset(tmp_path: Path) -> None:
+    runner = (
+        Path(__file__).resolve().parents[1]
+        / "vibecrafted_core"
+        / "config"
+        / "vc-frame"
+        / "pane-python"
+    )
+    log = tmp_path / "ran.log"
+    uv_bin = tmp_path / "data" / "uv" / "tools" / "vibecrafted" / "bin"
+    uv_bin.mkdir(parents=True)
+    stub = uv_bin / "python"
+    stub.write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$0" "$@" > "{log}"\nexit 0\n',
+        encoding="utf-8",
+    )
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    script = tmp_path / "vc-start-here.py"
+    script.write_text("#!/bin/sh\nexit 42\n", encoding="utf-8")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    env = os.environ.copy()
+    env.pop("VIBECRAFTED_PYTHON", None)
+    env.pop("VIBECRAFTED_RUNTIME_ROOT", None)
+    env.pop("VIBECRAFTED_ROOT", None)
+    env["HOME"] = str(tmp_path)
+    env["XDG_DATA_HOME"] = str(tmp_path / "data")
+    env["PATH"] = "/usr/bin:/bin"
+    result = subprocess.run(
+        ["bash", str(runner), str(script), "home"],
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    recorded = log.read_text(encoding="utf-8")
+    assert str(stub) in recorded
+    assert str(script) in recorded
+    assert "home" in recorded
+
+
 def test_start_here_routes_to_existing_product_owners() -> None:
     start_here = _load()
 

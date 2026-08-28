@@ -13,11 +13,20 @@ if [[ -z "$launcher" || ! -x "$launcher" ]]; then
   exec "${SHELL:-/bin/zsh}" -l
 fi
 
-py="${VIBECRAFTED_PYTHON:-}"
-if [[ -z "$py" && -n "${VIBECRAFTED_RUNTIME_ROOT:-}" && -x "${VIBECRAFTED_RUNTIME_ROOT}/bin/python3" ]]; then
-  py="${VIBECRAFTED_RUNTIME_ROOT}/bin/python3"
-fi
-if [[ -n "$py" && -x "$py" ]]; then
+# Same candidate order as spawn_python_bin (meta.sh). vc-frame bash -lc panes
+# do not inherit the deck wrapper; Homebrew python3 cannot import core.
+data="${XDG_DATA_HOME:-$HOME/.local/share}"
+candidates=(
+  "${VIBECRAFTED_PYTHON:-}"
+  "${VIBECRAFTED_RUNTIME_ROOT:+${VIBECRAFTED_RUNTIME_ROOT}/bin/python3}"
+  "${VIBECRAFTED_ROOT:+${VIBECRAFTED_ROOT}/bin/python3}"
+  "$data/uv/tools/vibecrafted/bin/python3"
+  "$data/uv/tools/vibecrafted/bin/python"
+  "$data/uv/tools/vibecrafted-core/bin/python3"
+  "$data/vibecrafted/tools/vibecrafted-current/bin/python3"
+)
+for py in "${candidates[@]}"; do
+  [[ -n "$py" && -x "$py" ]] || continue
   exec "$py" "$launcher" "$@"
-fi
+done
 exec "$launcher" "$@"
