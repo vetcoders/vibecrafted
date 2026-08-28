@@ -983,14 +983,17 @@ build-server-release:
 		echo "[server] FATAL: rustup is required; refusing an ambient cargo toolchain" >&2; \
 		exit 1; \
 	fi; \
-	cargo_bin="$$(rustup which cargo 2>/dev/null)"; \
+	cargo_bin="$$(cd "$(SERVER_DIR)" && rustup which cargo 2>/dev/null)"; \
 	if [ -z "$$cargo_bin" ] || [ ! -x "$$cargo_bin" ]; then \
-		echo "[server] FATAL: rustup could not resolve an executable cargo" >&2; \
+		echo "[server] FATAL: rustup could not resolve an executable cargo for $(SERVER_DIR)/rust-toolchain.toml" >&2; \
+		echo "[server] repair: cd $(SERVER_DIR) && rustup show active-toolchain" >&2; \
 		exit 1; \
 	fi; \
-	if ! rustup target list --installed | grep -Fx 'wasm32-unknown-unknown' >/dev/null; then \
-		echo "[server] FATAL: wasm32 target missing from the rustup toolchain" >&2; \
-		echo "[server] repair: rustup target add wasm32-unknown-unknown" >&2; \
+	toolchain="$$(cd "$(SERVER_DIR)" && rustup show active-toolchain 2>/dev/null | awk '{print $$1}')"; \
+	echo "[server] toolchain: $$toolchain (pinned by $(SERVER_DIR)/rust-toolchain.toml)"; \
+	if ! (cd "$(SERVER_DIR)" && rustup target list --installed | grep -Fx 'wasm32-unknown-unknown' >/dev/null); then \
+		echo "[server] FATAL: wasm32 target missing from toolchain $$toolchain" >&2; \
+		echo "[server] repair: cd $(SERVER_DIR) && rustup target add wasm32-unknown-unknown" >&2; \
 		exit 1; \
 	fi; \
 	if ! command -v cargo-leptos >/dev/null 2>&1; then \
@@ -1012,7 +1015,14 @@ build-server-release:
 	fi; \
 	echo "[server] building release package + hydration assets ($(SERVER_PACKAGE))"; \
 	mkdir -p "$(SERVER_BUILD_TARGET)"; \
-	ulimit -f unlimited; ( cd $(SERVER_DIR) && PATH="$$(dirname "$$cargo_bin"):$$PATH" CARGO_TARGET_DIR="$(SERVER_BUILD_TARGET)" LEPTOS_SITE_ROOT="$(SERVER_BUILD_SITE_ROOT)" "$$cargo_bin" leptos build --release --bin-cargo-args="--locked" --lib-cargo-args="--locked" ); \
+	ulimit -f unlimited; \
+	leptos_rc=0; \
+	( cd $(SERVER_DIR) && PATH="$$(dirname "$$cargo_bin"):$$PATH" CARGO_TARGET_DIR="$(SERVER_BUILD_TARGET)" LEPTOS_SITE_ROOT="$(SERVER_BUILD_SITE_ROOT)" "$$cargo_bin" leptos build --release --bin-cargo-args="--locked" --lib-cargo-args="--locked" ) || leptos_rc=$$?; \
+	if [ "$$leptos_rc" -ne 0 ]; then \
+		echo "[server] FATAL: cargo-leptos build failed (rc=$$leptos_rc) on toolchain $$toolchain" >&2; \
+		echo "[server] if the wasm link step failed with rust-lld/LC_RPATH errors: the toolchain is broken, not the code — see $(SERVER_DIR)/rust-toolchain.toml" >&2; \
+		exit "$$leptos_rc"; \
+	fi; \
 	if [ ! -x "$(SERVER_BUILD_TARGET)/release/$(SERVER_PACKAGE)" ] || [ ! -d "$(SERVER_BUILD_SITE_ROOT)/pkg" ]; then \
 		echo "[server] FATAL: cargo-leptos did not produce the server + site package" >&2; \
 		exit 1; \

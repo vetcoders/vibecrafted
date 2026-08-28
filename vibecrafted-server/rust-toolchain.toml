@@ -1,0 +1,9 @@
+# Pinned on purpose (2026-08-28): rustup stable 1.98.0 ships rust-lld /
+# rust-objcopy with a broken LC_RPATH on macOS (@loader_path/../lib while
+# libLLVM.dylib lives in lib/), so the Leptos hydration wasm no longer links.
+# 1.85–1.97 are known good; nightly is broken the same way. vc-frame pins
+# 1.95.0 for the same reason. Keep `rust-version` in Cargo.toml ≤ this channel.
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
