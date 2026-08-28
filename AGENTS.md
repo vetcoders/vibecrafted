@@ -320,7 +320,7 @@ Do not claim confidence you have not earned.
 
 ## Never Ship Non-Notarized
 
-Operator standing order (2026-08-26). Every macOS build handed to a person is
+Founder standing order (2026-08-26). Every macOS build handed to a person is
 notarized and stapled — `--no-notarize` exists only for pipeline debugging,
 never for an artifact anyone installs. Headless notarization uses a Keychain
 profile (`NOTARY_PROFILE`, e.g. `vibecrafted-notary`); raw Apple-ID
@@ -345,13 +345,13 @@ The carrier tar excludes it, the closed inventory skips it on write and
 verify; every other rejection (symlinks, digest/size/mode drift) stays
 fail-closed. Do not reintroduce a hard reject for names that can never ship.
 
-## Upgrades Preserve The Operator
+## Upgrades Preserve The Founder
 
-An install must never lose operator-owned state: `[server]` config
+An install must never lose Founder-owned state: `[server]` config
 (`~/.config/vibecrafted/config.toml`, e.g. a Tailscale bind), live frame
 sessions (the frame server must outlive its client — detached, reattachable),
 and running agents. Replacing the app bundle under a live workspace is an
-operator-gated action.
+Founder-gated action.
 
 # The Vibecrafted Manifesto
 
@@ -446,7 +446,7 @@ Reality decides what survives.
 
 ## Native Discovery Before Delivery Language
 
-The operator's fastest discovery language is the language in which the thought
+The Founder's fastest discovery language is the language in which the thought
 arrives. For this team, Polish is often the shortest path from intuition to
 shape. Do not force premature English polish while the idea is still forming.
 
@@ -460,14 +460,14 @@ Only translate into English delivery text once the shape and proof obligations
 are clear. Product intuition is not less professional because it arrived in
 Polish; it is discovery signal.
 
-## Operator Echo Packets
+## Founder Echo Packets
 
 The default conversation is the chat. Do not invent a permanent second channel.
-When the operator explicitly sends `!echo '<text>'`, however, treat the echoed
-text as operator input, not as shell-log noise.
+When the Founder explicitly sends `!echo '<text>'`, however, treat the echoed
+text as Founder input, not as shell-log noise.
 
-For Codex, an echo packet is the reliable realtime operator transport. If it
-appears, Codex can trust that the operator deliberately sent that packet now,
+For Codex, an echo packet is the reliable realtime Founder transport. If it
+appears, Codex can trust that the Founder deliberately sent that packet now,
 even when the packet quotes or comments on earlier chat. Other Codex
 interactive channels can arrive late, be replayed after compaction, or be
 surfaced only when the agent returns from await/observe; they do not carry the
@@ -480,7 +480,7 @@ delivery semantics.
 
 Still read the content. An echo can be a command, correction, quote, delayed
 commentary on an earlier chat message, or confirmation. But the transport itself
-is not random send time: `echo` is the low-latency operator lane.
+is not random send time: `echo` is the low-latency Founder lane.
 
 ---
 
@@ -791,7 +791,7 @@ We ship.
 
 ### Checks Requiring Secrets Or External Services
 
-- DMG signing/notarization (Developer ID + notary credentials), `gh` for the release-gate probe, vibecrafted-io deploy — operator buttons, never run by workers. \*\*\*
+- DMG signing/notarization (Developer ID + notary credentials), `gh` for the release-gate probe, vibecrafted-io deploy — Founder buttons, never run by workers. \*\*\*
 
 ## Safety Boundaries
 
@@ -883,7 +883,7 @@ SHACE, Marbles, Loctree Mapping, PSCD, and the Vibecrafted operating language ar
 See `docs/runtime/OMNI_OBSERVER_SLACK_GATEWAY.md` — **polarized (L3 sealed)**:
 control_plane sole durable truth; server+MCP = eyes (projections);
 bot = mouth/ear; workers = hands. Unit green ≠ Slack green (STALE
-bridge / empty allowlist = operator residual, not architecture debt).
+bridge / empty allowlist = Founder residual, not architecture debt).
 Hydrate residual pack (slack-agent): `deploy/OPERATOR_SMOKE_CARD.md`,
 `npm run doctor`, `npm run install:launchagent`.
 Parent: `docs/adr/0002-unified-operator-ownership.md` (`run-lifecycle` →
