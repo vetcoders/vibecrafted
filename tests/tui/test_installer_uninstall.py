@@ -998,6 +998,10 @@ def test_cmd_uninstall_classifies_state_home_and_removes_only_runtime_state(
     assert all(not path.exists() for path in runtime_paths)
     assert all((path / "keep.md").is_file() for path in founder_paths)
     assert unknown.read_bytes() == b"founder-export"
+    # Union with v5 UDS: installer-loaded runtime_paths still owns the socket path.
+    sock = installer._runtime_paths.run_signal_socket_path("union-uninstall")
+    assert len(os.fsencode(sock)) < 104
+    assert sock.name.endswith(".sock")
 
 
 def test_cmd_uninstall_refuses_active_runs_before_any_mutation(

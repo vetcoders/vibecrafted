@@ -13,7 +13,10 @@ from pathlib import Path
 
 from vibecrafted_core import control_plane, server_observation
 from vibecrafted_core.run_signal import RunSignalServer, wait_for_run_signal
-from vibecrafted_core.runtime_paths import run_signal_socket_path
+from vibecrafted_core.runtime_paths import (
+    classify_vibecrafted_home_child,
+    run_signal_socket_path,
+)
 
 
 def _wait_for(path: Path, *, present: bool = True, timeout: float = 5.0) -> None:
@@ -410,3 +413,16 @@ def test_real_dispatchers_long_home_use_distinct_mac_safe_sun_paths(
     signal_b = dt.datetime.fromisoformat(str(result_b["signal_ts"]))
     assert (returned_a - signal_a).total_seconds() < 0.1
     assert (returned_b - signal_b).total_seconds() < 0.1
+
+
+def test_united_runtime_paths_keep_uds_socket_and_home_child_classes(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Merge union: UDS socket path and uninstall home classes share one module."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    assert classify_vibecrafted_home_child("control_plane") == "runtime-state"
+    assert classify_vibecrafted_home_child("artifacts") == "founder-data"
+    assert classify_vibecrafted_home_child("mystery-export") == "unknown"
+    path = run_signal_socket_path("union-uds")
+    assert len(os.fsencode(path)) < 104
+    assert path.name.endswith(".sock")
