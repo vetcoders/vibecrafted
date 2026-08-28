@@ -1087,6 +1087,8 @@ cmd_uninstall_help() {
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted uninstall\n'
+  printf '  vibecrafted uninstall --dry-run\n'
+  printf '  vibecrafted uninstall --drain [--drain-timeout <seconds>]\n'
   printf '  vibecrafted remove\n'
   printf '\n'
 }
@@ -4363,6 +4365,7 @@ cmd_help() {
   printf '  %bdoctor%b               Installation health — pass/fail\n' "$_cyan" "$_reset"
   printf '  %breceipt%b              Delivery/runtime receipt (source ↔ installed)\n' "$_cyan" "$_reset"
   printf '  %bupdate%b               Update to the latest release\n' "$_cyan" "$_reset"
+  printf '  %buninstall%b            Remove runtime; preserve Founder data and unknowns\n' "$_cyan" "$_reset"
   printf '  %bhelp%b [topic|--all]   This deck · full reference\n' "$_cyan" "$_reset"
   printf '\n'
   printf '%bShip cycle:%b\n' "$_bold" "$_reset"
@@ -4375,6 +4378,7 @@ cmd_help() {
   printf '  vibecrafted init claude\n'
   printf '  vibecrafted implement codex -p "Ship dark mode"\n'
   printf '  vibecrafted marbles claude -p "Loop until clean"\n'
+  printf '  vibecrafted uninstall --dry-run\n'
   printf '\n'
   printf '%bWords:%b\n' "$_bold" "$_reset"
   printf '  run        one dispatched agent job; its report + transcript live under ~/.vibecrafted\n'
@@ -5187,7 +5191,8 @@ cmd_uninstall() {
   fi
   # Forward argv verbatim: swallowing flags here once turned
   # `vibecrafted uninstall --dry-run` into a real, unconfirmed teardown.
-  "$installer_python" "$installer" uninstall "$@"
+  VIBECRAFTED_UNINSTALL_LAUNCHER="${VIBECRAFTED_DECLARED_LAUNCHER:-$0}" \
+    "$installer_python" "$installer" uninstall "$@"
 }
 
 _fetch_channel_version() {

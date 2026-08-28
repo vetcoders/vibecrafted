@@ -10,6 +10,64 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
+# Direct children of ``vibecrafted_home()`` have one product-wide ownership
+# class.  Keep this grammar here: the host-Python installer loads this module by
+# file, while the runtime imports it normally.  Unknown names are intentionally
+# absent and therefore preserved by uninstall discovery.
+VIBECRAFTED_HOME_RUNTIME_STATE = frozenset(
+    {
+        "control_plane",
+        "server",
+        "foundation",
+        "locks",
+        "runtime",
+        "install-transactions",
+        "recovery",
+        "tmp",
+        "logs",
+        ".vc-install.json",
+        "START_HERE.md",
+        "install.log",
+        ".DS_Store",
+    }
+)
+
+VIBECRAFTED_HOME_FOUNDER_DATA = frozenset(
+    {
+        "artifacts",
+        "inbox",
+        "reports",
+        "plans",
+        "prompts",
+        "specs",
+        "backups",
+        "worktrees",
+        "monitor",
+        "charter",
+        "trust",
+        "loctree",
+        "vibecrafted",
+        ".git",
+        ".loctree",
+    }
+)
+
+
+def classify_vibecrafted_home_child(child: str | Path) -> str:
+    """Classify one direct state-home child for product uninstall.
+
+    ``runtime-state`` is reproducible process/control state and is removed.
+    ``founder-data`` is durable human/generated work and is preserved.
+    Every unrecognized name is ``unknown`` and is preserved visibly.
+    """
+
+    name = Path(child).name
+    if name in VIBECRAFTED_HOME_RUNTIME_STATE:
+        return "runtime-state"
+    if name in VIBECRAFTED_HOME_FOUNDER_DATA:
+        return "founder-data"
+    return "unknown"
+
 
 def read_version_file(root: str | Path) -> str:
     """Read ``<root>/VERSION`` verbatim, or ``"unknown"`` when it is absent."""
