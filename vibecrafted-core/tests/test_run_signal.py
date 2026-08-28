@@ -4,6 +4,7 @@ import datetime as dt
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -27,8 +28,11 @@ def _dispatcher(
     run_id: str,
     *,
     delay: float = 0.15,
+    home: Path | None = None,
+    heartbeat_lines: int = 0,
 ) -> tuple[subprocess.Popen[str], Path, Path]:
-    home = tmp_path / "home"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    home = home or tmp_path / "home"
     meta = home / "control_plane" / "runtime_runs" / run_id / "meta.json"
     report = tmp_path / f"{run_id}.md"
     transcript = tmp_path / f"{run_id}.log"
@@ -36,6 +40,7 @@ def _dispatcher(
     worker = (
         "import os,time; from pathlib import Path; "
         f"time.sleep({delay!r}); "
+        f"[(print('pulse-' + str(i) + '-' + ('x' * 1024), flush=True)) for i in range({heartbeat_lines})]; "
         "Path(os.environ['VIBECRAFTED_REPORT_PATH']).write_text("
         "'---\\nrun_id: "
         + run_id
@@ -76,6 +81,21 @@ def _dispatcher(
     return process, meta, report
 
 
+def _wait_for_owner_token(path: Path, *, not_token: str = "") -> dict[str, object]:
+    owner_path = path.with_suffix(".owner.json")
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            owner = json.loads(owner_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            time.sleep(0.01)
+            continue
+        if owner.get("start_token") and owner.get("start_token") != not_token:
+            return owner
+        time.sleep(0.01)
+    raise AssertionError(f"owner token did not change: {owner_path}")
+
+
 def test_run_signal_fans_out_and_replays_terminal(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
     run_id = "signal-replay"
@@ -85,7 +105,7 @@ def test_run_signal_fans_out_and_replays_terminal(monkeypatch, tmp_path: Path) -
             threading.Thread(
                 target=lambda: results.append(wait_for_run_signal(run_id)), daemon=True
             )
-            for _ in range(2)
+            for _ in range(3)
         ]
         for client in clients:
             client.start()
@@ -95,7 +115,7 @@ def test_run_signal_fans_out_and_replays_terminal(monkeypatch, tmp_path: Path) -
             client.join(timeout=1)
         replay = wait_for_run_signal(run_id)
 
-    assert len(results) == 2
+    assert len(results) == 3
     assert all(result["kind"] == "terminal" for result in results)
     assert replay["kind"] == "terminal"
     assert not run_signal_socket_path(run_id).exists()
@@ -148,7 +168,9 @@ def test_sigkill_wakes_existing_client_on_eof_and_stale_socket_is_absent(
     process.wait(timeout=5)
     client.join(timeout=1)
 
-    assert result["completed"] is True
+    assert result["completed"] is False
+    assert result["worker_alive"] is False
+    assert result["reason"] == "signal_invalidated"
     assert result["signal_kind"] == "eof"
     # SIGKILL cannot unlink; a refused orphan is treated as missing, never hung.
     started = time.monotonic()
@@ -206,3 +228,185 @@ def test_await_ignores_missing_server_and_deck_verb(
 
     assert result["completed"] is True
     assert result["signal_kind"] == "missing"
+
+
+def test_real_dispatcher_drops_backpressured_client_without_stalling_terminal(
+    monkeypatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    run_id = "signal-backpressure-drop"
+    process, _meta, _report = _dispatcher(
+        tmp_path, run_id, delay=0.25, heartbeat_lines=1000
+    )
+    socket_path = run_signal_socket_path(run_id)
+    slow = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    slow.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+    try:
+        _wait_for(socket_path)
+        slow.connect(str(socket_path))
+        result = control_plane.await_run(run_id, hard_cap_seconds=5)
+        returned_at = dt.datetime.now(dt.timezone.utc)
+        stdout, stderr = process.communicate(timeout=5)
+    finally:
+        slow.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+    assert process.returncode == 0, (stdout, stderr)
+    assert "dropped run-signal client after backpressure" in stderr
+    assert result["completed"] is True
+    assert result["signal_kind"] == "terminal"
+    signal_at = dt.datetime.fromisoformat(str(result["signal_ts"]))
+    assert (returned_at - signal_at).total_seconds() < 0.1
+
+
+def test_real_dispatcher_client_buffers_partial_jsonl_frame_byte_by_byte(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    run_id = "signal-partial-frame"
+    process, _meta, _report = _dispatcher(tmp_path, run_id, delay=0.1)
+    socket_path = run_signal_socket_path(run_id)
+    try:
+        _wait_for(socket_path)
+        result = wait_for_run_signal(run_id, timeout=5, read_size=1)
+        returned_at = dt.datetime.now(dt.timezone.utc)
+        stdout, stderr = process.communicate(timeout=5)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+    assert process.returncode == 0, (stdout, stderr)
+    assert result["kind"] == "terminal"
+    assert result["dispatcher_pid"] == process.pid
+    assert result["start_token"]
+    signal_at = dt.datetime.fromisoformat(str(result["ts"]))
+    assert (returned_at - signal_at).total_seconds() < 0.1
+
+
+def test_real_dispatcher_replacement_changes_identity_and_reclaims_dead_owner(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    run_id = "signal-identity-replacement"
+    first, _meta, _report = _dispatcher(tmp_path, run_id, delay=0.8)
+    socket_path = run_signal_socket_path(run_id)
+    _wait_for(socket_path)
+    first_owner = _wait_for_owner_token(socket_path)
+    first_result: dict[str, object] = {}
+    client = threading.Thread(
+        target=lambda: first_result.update(wait_for_run_signal(run_id, timeout=5)),
+        daemon=True,
+    )
+    client.start()
+    time.sleep(0.05)
+    os.kill(first.pid, signal.SIGKILL)
+    first.wait(timeout=5)
+    client.join(timeout=1)
+    assert first_result["kind"] == "eof"
+    assert first_result["start_token"] == first_owner["start_token"]
+
+    replacement, _meta2, _report2 = _dispatcher(tmp_path, run_id, delay=0.1)
+    replacement_owner = _wait_for_owner_token(
+        socket_path, not_token=str(first_owner["start_token"])
+    )
+    try:
+        verdict = control_plane.await_run(run_id, hard_cap_seconds=5)
+        returned_at = dt.datetime.now(dt.timezone.utc)
+        stdout, stderr = replacement.communicate(timeout=5)
+    finally:
+        if replacement.poll() is None:
+            replacement.kill()
+            replacement.wait(timeout=5)
+
+    assert replacement.returncode == 0, (stdout, stderr)
+    assert replacement_owner["dispatcher_pid"] == replacement.pid
+    assert replacement_owner["start_token"] != first_owner["start_token"]
+    assert verdict["completed"] is True
+    assert verdict["signal_kind"] == "terminal"
+    assert verdict["run"]["run_id"] == run_id
+    signal_at = dt.datetime.fromisoformat(str(verdict["signal_ts"]))
+    assert (returned_at - signal_at).total_seconds() < 0.1
+    time.sleep(0.85)  # the first dispatcher-owned worker was intentionally orphaned
+
+
+def test_real_dispatcher_refuses_foreign_live_socket_without_unlink(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    run_id = "signal-owner-check-unlink"
+    socket_path = run_signal_socket_path(run_id)
+    socket_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    foreign = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    foreign.bind(str(socket_path))
+    foreign.listen()
+    try:
+        process, _meta, _report = _dispatcher(tmp_path, run_id, delay=0.1)
+        _stdout, stderr = process.communicate(timeout=5)
+        assert process.returncode != 0
+        assert "refusing to unlink unowned/foreign run signal socket" in stderr
+        assert socket_path.exists()
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            probe.connect(str(socket_path))
+        finally:
+            probe.close()
+    finally:
+        foreign.close()
+        socket_path.unlink(missing_ok=True)
+
+
+def test_real_dispatchers_long_home_use_distinct_mac_safe_sun_paths(
+    monkeypatch, tmp_path: Path
+) -> None:
+    run_id = "signal-sun-path-long-home"
+    home_a = tmp_path / ("a" * 140) / ("x" * 40)
+    home_b = tmp_path / ("b" * 140) / ("x" * 40)
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home_a))
+    path_a = run_signal_socket_path(run_id)
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home_b))
+    path_b = run_signal_socket_path(run_id)
+    assert len(os.fsencode(home_a / "control_plane" / f"{run_id}.sock")) > 104
+    assert len(os.fsencode(path_a)) < 104
+    assert len(os.fsencode(path_b)) < 104
+    assert path_a != path_b
+
+    first, _meta_a, _report_a = _dispatcher(
+        tmp_path / "first", run_id, delay=0.1, home=home_a
+    )
+    try:
+        monkeypatch.setenv("VIBECRAFTED_HOME", str(home_a))
+        _wait_for(path_a)
+        result_a = control_plane.await_run(run_id, hard_cap_seconds=5)
+        returned_a = dt.datetime.now(dt.timezone.utc)
+        first_output = first.communicate(timeout=5)
+    finally:
+        if first.poll() is None:
+            first.kill()
+            first.wait(timeout=5)
+
+    second, _meta_b, _report_b = _dispatcher(
+        tmp_path / "second", run_id, delay=0.1, home=home_b
+    )
+    try:
+        monkeypatch.setenv("VIBECRAFTED_HOME", str(home_b))
+        _wait_for(path_b)
+        result_b = control_plane.await_run(run_id, hard_cap_seconds=5)
+        returned_b = dt.datetime.now(dt.timezone.utc)
+        second_output = second.communicate(timeout=5)
+    finally:
+        if second.poll() is None:
+            second.kill()
+            second.wait(timeout=5)
+
+    assert first.returncode == 0, first_output
+    assert second.returncode == 0, second_output
+    assert result_a["completed"] is True
+    assert result_b["completed"] is True
+    signal_a = dt.datetime.fromisoformat(str(result_a["signal_ts"]))
+    signal_b = dt.datetime.fromisoformat(str(result_b["signal_ts"]))
+    assert (returned_a - signal_a).total_seconds() < 0.1
+    assert (returned_b - signal_b).total_seconds() < 0.1

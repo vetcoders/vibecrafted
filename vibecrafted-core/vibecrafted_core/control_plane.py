@@ -4185,16 +4185,7 @@ def await_run(
             or runtime_meta.get("latest_transcript")
             or ""
         )
-    if last_run is None and kind == "terminal":
-        last_run = {
-            "run_id": target,
-            "state": str(signal.get("state") or "completed"),
-            "exit_code": _coerce_int(signal.get("exit")),
-            "latest_report": str(signal.get("report") or ""),
-            "settlement": str(signal.get("settlement") or ""),
-            "liveness": "terminal",
-        }
-    elif last_run is None and kind != "missing":
+    if last_run is None and kind != "missing":
         # Legacy/non-dispatcher records get one reconciliation pass, never a loop.
         try:
             projected = sync_state(only_run_id=target)
@@ -4229,9 +4220,10 @@ def await_run(
             attempts=1,
         )
 
-    dispatcher_gone = kind in {"terminal", "eof"}
+    signal_woke = kind in {"terminal", "eof", "identity_changed"}
+    terminal = bool(last_run and _run_is_terminal(last_run))
     worker_alive = bool(
-        not dispatcher_gone
+        not (terminal and kind == "terminal")
         and (
             (last_run is not None and _await_process_is_alive(last_run))
             or any(_await_process_is_alive(child) for child in child_runs)
@@ -4243,17 +4235,12 @@ def await_run(
         or signal.get("report")
         or ""
     ).strip()
-    terminal = bool(last_run and _run_is_terminal(last_run))
+    report_written = bool(delivered_report and _report_file_written(delivered_report))
     completed = bool(
-        not worker_alive
-        and (
-            dispatcher_gone
-            or terminal
-            or (delivered_report and _report_file_written(delivered_report))
-        )
+        not worker_alive and last_run is not None and (terminal or report_written)
     )
     if completed:
-        reason = "terminal" if kind == "terminal" or terminal else kind
+        reason = "terminal" if terminal else kind
         if reason == "missing" and delivered_report:
             reason = "report_delivered"
         result = _finalize_await_result(
@@ -4275,7 +4262,15 @@ def await_run(
         last_run,
         completed=False,
         timed_out=not worker_alive,
-        reason="signal_missing_live" if worker_alive else "signal_missing",
+        reason=(
+            "signal_invalidated_live"
+            if worker_alive and signal_woke
+            else "signal_missing_live"
+            if worker_alive
+            else "signal_invalidated"
+            if signal_woke
+            else "signal_missing"
+        ),
         worker_alive=worker_alive,
         attempts=1,
     )

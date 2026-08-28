@@ -357,14 +357,19 @@ manual monitor, treat that as a Class 3 bug report against the runtime — fix
 the contract, do not normalize the hedge.
 
 The operational verdict is deliberately redundant. The first signal is now the
-dispatcher socket: terminal JSON wakes normally; EOF means the dispatcher died
-and is terminal by definition. The durable triad then decides truth exactly
-once: terminal run meta, dispatcher/worker death, and an authored report when
-the run promised one. The socket is never an SSOT and carries no settlement
-authority. A missing/refused orphan socket is treated exactly like no socket;
-the file triad is read once, never polled. `observe` and dashboards may still
-use vc-server HTTP, but `await` must work while vc-server and the legacy deck
-verb are absent.
+dispatcher socket. Every transport outcome has the same consequence:
+
+```
+socket event | EOF | ENOENT | ECONNREFUSED → wake/invalidate → odczyt triady → werdykt
+```
+
+EOF proves only that the dispatcher connection disappeared; it is never a
+terminal verdict. The durable triad decides truth exactly once: terminal run
+meta, dispatcher/worker death, and an authored report when the run promised
+one. The socket is never an SSOT and carries no settlement authority. A
+missing/refused orphan socket is treated exactly like no socket; the file triad
+is read once, never polled. `observe` and dashboards may still use vc-server
+HTTP, but `await` must work while vc-server and the legacy deck verb are absent.
 
 ---
 

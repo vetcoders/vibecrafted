@@ -948,6 +948,14 @@ class AsyncSupervisor:
                 if tee_output and display_text:
                     sys.stdout.buffer.write(display_text.encode("utf-8"))
                     sys.stdout.buffer.flush()
+                # Socket heartbeats are ephemeral flow-control signals, not
+                # durable lifecycle events. Pulse on every output line so a
+                # busy worker proves movement without inflating events.jsonl.
+                if self._signal_sink is not None:
+                    try:
+                        self._signal_sink(handle.run_id, handle.state.value)
+                    except (OSError, RuntimeError):
+                        pass
                 if not handle.first_output_seen:
                     handle.first_output_seen = True
                     handle.heartbeat_monotonic = time.monotonic()
