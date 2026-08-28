@@ -5,6 +5,50 @@ import os.log
 
 private let installLog = Logger(subsystem: "io.vetcoders.vibecrafted", category: "install")
 
+/// Durable lifecycle trail. `os_log` is not retained by the unified log store
+/// for this app (2026-08-28: two App deaths left zero entries), so every
+/// launch/quit/signal/child-exit also lands in `<crafted home>/logs/app-lifecycle.log`.
+private func lifecycleLog(_ event: String) {
+  let stamp = ISO8601DateFormatter().string(from: Date())
+  let line = "\(stamp) pid=\(getpid()) \(event)\n"
+  installLog.notice("\(event, privacy: .public)")
+  let host = ProcessInfo.processInfo.environment
+  let home = host["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
+  let crafted = host["VIBECRAFTED_HOME"] ?? "\(home)/.vibecrafted"
+  let logDir = URL(fileURLWithPath: crafted, isDirectory: true).appendingPathComponent("logs")
+  let logURL = logDir.appendingPathComponent("app-lifecycle.log")
+  do {
+    try FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
+    if !FileManager.default.fileExists(atPath: logURL.path) {
+      FileManager.default.createFile(atPath: logURL.path, contents: nil)
+    }
+    let handle = try FileHandle(forWritingTo: logURL)
+    defer { try? handle.close() }
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data(line.utf8))
+  } catch {
+    installLog.error("lifecycle log write failed: \(error.localizedDescription, privacy: .public)")
+  }
+}
+
+@MainActor private var lifecycleSignalSources: [DispatchSourceSignal] = []
+
+/// SIGTERM/SIGHUP/SIGINT bypass `applicationShouldTerminate`; without this the
+/// App dies silently and its vc-terminal child goes with it. Log the signal,
+/// then quit through AppKit so `applicationWillTerminate` still runs.
+@MainActor private func installLifecycleSignalHandlers() {
+  for (signalNumber, name) in [(SIGTERM, "SIGTERM"), (SIGHUP, "SIGHUP"), (SIGINT, "SIGINT")] {
+    signal(signalNumber, SIG_IGN)
+    let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
+    source.setEventHandler {
+      lifecycleLog("signal \(name) received; terminating via AppKit")
+      NSApp.terminate(nil)
+    }
+    source.resume()
+    lifecycleSignalSources.append(source)
+  }
+}
+
 private struct CanonicalRuntimeInstall: Decodable {
   let root: URL
   let launcher: URL
@@ -140,6 +184,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       }
     }
 
+    installLifecycleSignalHandlers()
+    let launchArgs = ProcessInfo.processInfo.arguments.dropFirst().joined(separator: " ")
+    let launchedByLS = ProcessInfo.processInfo.environment["__CFBundleIdentifier"] != nil
+    lifecycleLog(
+      "launch ppid=\(getppid()) launchedByLS=\(launchedByLS) args=[\(launchArgs)]")
+
     buildMainMenu()
     buildStatusItem()
     startNativeNotifications()
@@ -166,10 +216,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    let reply = decideTermination()
+    lifecycleLog("applicationShouldTerminate -> \(reply == .terminateNow ? "terminateNow" : "terminateCancel")")
+    return reply
+  }
+
+  private func decideTermination() -> NSApplication.TerminateReply {
     switch activeRunSummary() {
     case .available(let summary) where summary.lanes == 0:
+      lifecycleLog("quit requested with 0 active/stalled lanes")
       return .terminateNow
     case .available(let summary):
+      lifecycleLog(
+        "quit requested with \(summary.lanes) active/stalled lane(s), \(summary.worktrees) worktree-backed; asking")
       let alert = NSAlert()
       alert.alertStyle = .warning
       alert.messageText = "Active or stalled Vibecrafted lanes still need a control surface"
@@ -180,6 +239,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       return alert.runModal() == .alertSecondButtonReturn ? .terminateNow : .terminateCancel
     case .unavailable(let reason):
       installLog.error("Cannot inspect lifecycle truth before quit: \(reason, privacy: .public)")
+      lifecycleLog("quit requested but lifecycle truth unavailable: \(reason); asking")
       let alert = NSAlert()
       alert.alertStyle = .critical
       alert.messageText = "Vibecrafted lifecycle truth is unavailable"
@@ -200,6 +260,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   func applicationWillTerminate(_ notification: Notification) {
+    let terminalState =
+      terminalProcess.map { $0.isRunning ? "vc-terminal pid=\($0.processIdentifier) still running" : "vc-terminal already exited" }
+      ?? "no vc-terminal"
+    lifecycleLog("applicationWillTerminate; \(terminalState)")
     statusRefreshTimer?.invalidate()
     NotificationManager.shared.clearHeartbeat(craftedHome: craftedHomeURL())
   }
@@ -303,10 +367,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       "-e", install.primaryShell.path, install.start.path, "operator",
     ]
     process.environment = environment
+    process.terminationHandler = { finished in
+      let how = finished.terminationReason == .uncaughtSignal ? "signal" : "exit"
+      lifecycleLog(
+        "vc-terminal pid=\(finished.processIdentifier) ended by \(how) status=\(finished.terminationStatus)")
+    }
     do {
       try process.run()
       terminalProcess = process
+      lifecycleLog("vc-terminal launched pid=\(process.processIdentifier) host=\(install.terminalHost.lastPathComponent) generation=\(install.root.lastPathComponent)")
     } catch {
+      lifecycleLog("vc-terminal launch failed: \(error.localizedDescription)")
       reportWorkspaceLaunchFailure(
         "Failed to launch bundled vc-terminal: \(error.localizedDescription)")
     }
