@@ -511,6 +511,9 @@ install-app-binaries:
 	for bin in $(APP_BINARIES); do \
 		rm -f "$(BIN_DIR)/$$bin"; \
 		install -m 0755 "$(APP_BUILD_TARGET)/release/$$bin" "$(BIN_DIR)/$$bin"; \
+		if [ -n "$${VIBECRAFTED_RUNTIME_ROOT:-}" ] && [ -d "$${VIBECRAFTED_RUNTIME_ROOT}/bin" ]; then \
+			install -m 0755 "$(APP_BUILD_TARGET)/release/$$bin" "$${VIBECRAFTED_RUNTIME_ROOT}/bin/$$bin"; \
+		fi; \
 	done; \
 	echo "[app] installed: $(APP_BINARIES) -> $(BIN_DIR)"
 

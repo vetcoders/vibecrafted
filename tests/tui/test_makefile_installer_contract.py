@@ -1024,6 +1024,7 @@ def test_install_all_covers_app_binaries_as_real_files() -> None:
         'install -m 0755 "$(APP_BUILD_TARGET)/release/$$bin" "$(BIN_DIR)/$$bin"'
         in app_block
     )
+    assert "VIBECRAFTED_RUNTIME_ROOT" in app_block
     assert "$(APP_DIR)/target" not in app_block
 
     assert "make --no-print-directory install-vendored-binaries" in manifest

@@ -55,6 +55,7 @@ OPERATOR_SCRIPT_NAMES: tuple[str, ...] = (
     "scrollback-select.sh",
     "vc-quick-cmd.sh",
     "vc-deck.sh",
+    "pane-python",
     "vc-agent-workshop.py",
     "vc-start-here.py",
 )

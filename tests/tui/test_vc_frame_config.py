@@ -164,6 +164,7 @@ def test_operator_layout_matches_vibecrafted_standard() -> None:
     assert 'tab name="voc"' in payload
     assert "vc-start-here.py" in payload
     assert "vc-agent-workshop.py" in payload
+    assert "pane-python" in payload
     assert "VIBECRAFTED_PYTHON" in payload
     assert "$HOME/.local/bin/voc" in payload
     assert "vibecrafted tui" in payload
@@ -184,10 +185,19 @@ def test_operator_layout_matches_vibecrafted_standard() -> None:
     assert "VibeCrafted" not in active
 
 
+def test_dashboard_and_marbles_probe_packaged_mission_control() -> None:
+    """Runtime Pack helpers live under vibecrafted_core/runtime, not ~/.vibecrafted/runtime."""
+    for name in ("dashboard.kdl", "marbles.kdl"):
+        payload = (LAYOUTS_DIR / name).read_text(encoding="utf-8")
+        assert "vibecrafted-core/vibecrafted_core/runtime" in payload, name
+        assert "vc-operator/mission-control/" in payload, name
+
+
 def test_operator_layout_start_here_and_shell_tabs() -> None:
     payload = (LAYOUTS_DIR / "operator.kdl").read_text(encoding="utf-8")
     assert 'command="bash" name="Start Here"' in payload
     assert 'plugin location="about"' not in payload
+    assert "pane-python" in payload
     assert "vibecrafted config install --force" in payload
     assert 'name="Shell"' in payload
     # Shell wakes with banner then zsh (not bare suspended /bin/zsh).

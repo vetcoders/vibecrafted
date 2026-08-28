@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Exec a vc-frame pane Python script with the Runtime Pack interpreter.
+# Host `env python3` (Homebrew) does not import vibecrafted_core.
+set -euo pipefail
+
+launcher="${1:-}"
+if [[ $# -gt 0 ]]; then
+  shift
+fi
+
+if [[ -z "$launcher" || ! -x "$launcher" ]]; then
+  printf '\n  Pane launcher missing: %s\n  Run: vibecrafted config install --force\n\n' "${launcher:-<none>}" >&2
+  exec "${SHELL:-/bin/zsh}" -l
+fi
+
+py="${VIBECRAFTED_PYTHON:-}"
+if [[ -z "$py" && -n "${VIBECRAFTED_RUNTIME_ROOT:-}" && -x "${VIBECRAFTED_RUNTIME_ROOT}/bin/python3" ]]; then
+  py="${VIBECRAFTED_RUNTIME_ROOT}/bin/python3"
+fi
+if [[ -n "$py" && -x "$py" ]]; then
+  exec "$py" "$launcher" "$@"
+fi
+exec "$launcher" "$@"

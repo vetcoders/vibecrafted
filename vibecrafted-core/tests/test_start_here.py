@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import stat
+import subprocess
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -38,6 +41,44 @@ def test_start_here_is_shipped_and_keeps_executable_mode(tmp_path: Path) -> None
     installed = destination / SCRIPT.name
     assert installed.is_file()
     assert installed.stat().st_mode & 0o111
+    pane_python = destination / "pane-python"
+    assert pane_python.is_file()
+    assert pane_python.stat().st_mode & 0o111
+
+
+def test_pane_python_reexecs_generation_interpreter(tmp_path: Path) -> None:
+    runner = (
+        Path(__file__).resolve().parents[1]
+        / "vibecrafted_core"
+        / "config"
+        / "vc-frame"
+        / "pane-python"
+    )
+    log = tmp_path / "ran.log"
+    stub = tmp_path / "generation-python"
+    stub.write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$0" "$@" > "{log}"\nexit 0\n',
+        encoding="utf-8",
+    )
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    script = tmp_path / "vc-start-here.py"
+    script.write_text("#!/bin/sh\nexit 42\n", encoding="utf-8")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    env = os.environ.copy()
+    env["VIBECRAFTED_PYTHON"] = str(stub)
+    result = subprocess.run(
+        ["bash", str(runner), str(script), "home"],
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    recorded = log.read_text(encoding="utf-8")
+    assert str(stub) in recorded
+    assert str(script) in recorded
+    assert "home" in recorded
 
 
 def test_start_here_routes_to_existing_product_owners() -> None:
