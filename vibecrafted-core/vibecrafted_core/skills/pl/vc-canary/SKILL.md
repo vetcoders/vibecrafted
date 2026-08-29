@@ -243,7 +243,7 @@ natywnie; N>8 zewnętrznie przez
 briefu per-scope:
 [references/canary-agent-brief.md](../../vc-canary/references/canary-agent-brief.md).
 Pin agenta: user; inaczej ten launcher, który żyje w sesji, w kolejności
-`claude` · `codex` · `grok`.
+`claude` · `codex` · `grok` · `cursor`.
 
 ## Skrypty pomocnicze
 

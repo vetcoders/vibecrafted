@@ -31,7 +31,7 @@ per Vector oraz recovery-vectory dla stanów STOP.
 ```markdown
 ---
 prompt_id: <slug>
-agent: <claude|codex|gemini>
+agent: <claude|codex|gemini|cursor>
 skill: <vc-implement|...>
 wave: <Wn>            target_repo: <repo>      baseline_branch: <living-tree>
 authored_by: <agent> <agents@vetcoders.io>     report_path: <path>

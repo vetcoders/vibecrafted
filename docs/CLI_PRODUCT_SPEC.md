@@ -121,7 +121,7 @@ Ship cycle:
   scaffold → implement → review → workflow → followup → marbles → audit → polarize → dou → hydrate → release
   14 more skills: vibecrafted help --all
 
-Agents:  claude · codex · gemini · agy · junie · grok
+Agents:  claude · codex · gemini · agy · junie · grok · cursor
 
 Examples:
   vibecrafted init claude

@@ -10,7 +10,7 @@ order: 10
 The `vibecrafted` CLI has one grammar with two shapes: management commands
 (`vibecrafted <command>`) and skill launchers (`vibecrafted <skill> <agent>`).
 Every launcher dispatches a tracked run for one of the fleet agents —
-claude · codex · agy · junie · grok — and every run leaves a report,
+claude · codex · agy · junie · grok · cursor — and every run leaves a report,
 a transcript, and control-plane state you can query afterwards.
 
 ## Command anatomy
@@ -59,7 +59,8 @@ Every skill launcher accepts the same flag contract:
 | `--session <id>`       | Session ID for `vibecrafted resume`        |
 
 `--verbose` is a global option for detailed output. Model overrides exist for
-claude (`--model`) and codex (`-m`); other agents run their defaults.
+claude (`--model`), codex (`-m`) and cursor (`--model`); other agents run
+their defaults.
 
 ## Action-first agent modes
 

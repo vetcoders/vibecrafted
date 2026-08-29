@@ -526,6 +526,7 @@ fn launch_selected(app: &mut App) -> anyhow::Result<()> {
         let client_kind = match app.selected_agent() {
             "claude" => rmcp_mux::ipc::ClientKind::Claude,
             "codex" => rmcp_mux::ipc::ClientKind::Codex,
+            "cursor" => rmcp_mux::ipc::ClientKind::Cursor,
             "gemini" => rmcp_mux::ipc::ClientKind::Gemini,
             "junie" => rmcp_mux::ipc::ClientKind::Junie,
             other => rmcp_mux::ipc::ClientKind::Generic {

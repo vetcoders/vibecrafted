@@ -234,7 +234,7 @@ external via
 [await-arming](../vc-dispatch/references/await-arming.md). Per-scope brief
 template: [references/canary-agent-brief.md](references/canary-agent-brief.md).
 Agent pin: user; else whichever launcher is live, in order
-`claude` · `codex` · `grok`.
+`claude` · `codex` · `grok` · `cursor`.
 
 ## Utility scripts
 

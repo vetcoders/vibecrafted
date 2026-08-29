@@ -119,7 +119,7 @@ parent_run_id: <id|null>
 skill: <vc-workflow|vc-marbles|vc-audit|...>
 phase: <scaffold|implement|review|workflow|followup|marbles|audit|polarize|dou|hydrate|release>
 mode: <READ|WRITE|META>
-agent: <codex|claude|gemini|junie|agy|grok>
+agent: <codex|claude|gemini|junie|agy|grok|cursor>
 project_root: <abs-path>
 branch_head: <branch@sha>
 artifact_root: <abs-path>

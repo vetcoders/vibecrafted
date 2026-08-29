@@ -1452,8 +1452,8 @@ pub fn default_prompt(kind: LaunchKind) -> String {
     }
 }
 
-pub fn agents() -> [&'static str; 3] {
-    ["claude", "codex", "gemini"]
+pub fn agents() -> [&'static str; 4] {
+    ["claude", "codex", "gemini", "cursor"]
 }
 
 fn apply_run_filters(

@@ -61,7 +61,7 @@ Allowed product vocabulary (these are public concepts, keep them): Living Tree,
 Read–Write cadence, control plane, omni-observer, baton, marbles, polarize,
 Definition of Undone (DoU), delivery receipt, runtime generation/capsule,
 settlement ledger (f/x/n), vc-frame, vc-start, agents: claude · codex · agy ·
-junie · grok.
+junie · grok · cursor.
 
 ## Truth discipline
 

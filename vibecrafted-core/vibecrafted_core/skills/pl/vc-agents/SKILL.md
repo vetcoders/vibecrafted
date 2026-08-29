@@ -178,7 +178,7 @@ Nie może na nią działać.
 ```markdown
 ---
 run_id: <generated-unique-id>
-agent: <claude|codex|gemini|agy|junie|grok>
+agent: <claude|codex|gemini|agy|junie|grok|cursor>
 skill: vc-agents
 project: <repo-name>
 status: <pending|in-progress|completed|failed>

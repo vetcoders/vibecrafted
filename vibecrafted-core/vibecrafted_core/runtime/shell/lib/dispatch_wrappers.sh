@@ -73,6 +73,18 @@ grok-implement() {
   _vetcoders_spawn_plan grok implement "$1" --runtime "$(_vetcoders_default_runtime)"
 }
 
+cursor-review() {
+  _vetcoders_spawn_plan cursor review "$1" --runtime "$(_vetcoders_default_runtime)"
+}
+
+cursor-plan() {
+  _vetcoders_spawn_plan cursor plan "$1" --runtime "$(_vetcoders_default_runtime)"
+}
+
+cursor-implement() {
+  _vetcoders_spawn_plan cursor implement "$1" --runtime "$(_vetcoders_default_runtime)"
+}
+
 codex-research() {
   _vetcoders_spawn_plan codex research "$1" --runtime "$(_vetcoders_default_runtime)"
 }
@@ -97,6 +109,10 @@ grok-research() {
   _vetcoders_spawn_plan grok research "$1" --runtime "$(_vetcoders_default_runtime)"
 }
 
+cursor-research() {
+  _vetcoders_spawn_plan cursor research "$1" --runtime "$(_vetcoders_default_runtime)"
+}
+
 codex-prompt() {
   _vetcoders_prompt codex implement "$@"
 }
@@ -119,6 +135,10 @@ junie-prompt() {
 
 grok-prompt() {
   _vetcoders_prompt grok implement "$@"
+}
+
+cursor-prompt() {
+  _vetcoders_prompt cursor implement "$@"
 }
 
 codex-observe() {
@@ -167,6 +187,14 @@ grok-observe() {
 
 grok-await() {
   _vetcoders_await grok "$@"
+}
+
+cursor-observe() {
+  _vetcoders_observe cursor "$@"
+}
+
+cursor-await() {
+  _vetcoders_await cursor "$@"
 }
 
 _vetcoders_skill() {

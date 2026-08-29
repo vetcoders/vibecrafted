@@ -103,6 +103,10 @@ def _infer_agent(command: Sequence[str]) -> str:
     if not command:
         return "agent"
     name = Path(str(command[0])).name
+    # Fleet key is `cursor` but the spawned binary is `cursor-agent`
+    # (spawn.AGENT_BINARY_NAMES); fold the binary back onto the fleet key.
+    if name == "cursor-agent":
+        return "cursor"
     if name in {"claude", "codex", "agy", "junie", "grok", "cursor"}:
         return name
     if name in {"python", "python3"}:

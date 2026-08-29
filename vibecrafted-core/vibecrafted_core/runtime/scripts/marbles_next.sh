@@ -523,7 +523,7 @@ reason: invalid_ancestor_agent
 'ancestor.md' requested an invalid agent for loop $loop_nr.
 
 - Invalid agent: ${invalid_agent:-<empty>}
-- Expected: claude, codex, agy, junie, or grok
+- Expected: claude, codex, agy, junie, grok, or cursor
 - GOD: $god_plan
 - ANCESTOR: $ancestor_plan
 CONV
@@ -639,6 +639,9 @@ PY
     agy)    nohup agy --conversation "$sid" --prompt-interactive "$prompt" >/dev/null 2>&1 & ;;
     junie)  nohup junie --session-id="$sid" --resume --task="$prompt" --project=. --skip-update-check >/dev/null 2>&1 & ;;
     grok)   nohup grok --resume "$sid" --cwd . --permission-mode bypassPermissions --no-alt-screen --single "$prompt" >/dev/null 2>&1 & ;;
+    # cursor-agent headless `-p --resume <id>` is UNVERIFIED (continuity
+    # capabilities fail closed until proven) — never background a maybe-dead lane.
+    cursor) printf '    ⚠ cursor headless resume is unverified — skipping verification\n' ;;
     *) printf '    ⚠ Unknown loop agent %s — skipping verification\n' "$loop_agent" ;;
   esac
 }
@@ -1005,7 +1008,7 @@ printf '    ↳ steering: %s\n' "$_steering_source"
 # Consume the mtime signal so the next round sees only changes made by this child.
 _consume_ancestor_mtime_signal
 
-if [[ ! "$next_agent" =~ ^(claude|codex|agy|junie|grok)$ ]]; then
+if [[ ! "$next_agent" =~ ^(claude|codex|agy|junie|grok|cursor)$ ]]; then
   rm -f "$next_plan_tmp"
   _write_invalid_ancestor_failure "$next" "$next_agent"
   exit 0

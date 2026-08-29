@@ -88,7 +88,7 @@ _cyan='\033[36m'
 _red='\033[31m'
 _reset='\033[0m'
 
-_agents=(claude codex agy junie grok)
+_agents=(claude codex agy junie grok cursor)
 _modes=(implement research review plan prompt observe await stop resume)
 _skills=(audit canary decorate delegate dou followup guard hydrate implement intents justdo marbles ownership partner polarize prune release research review scaffold trust workflow)
 
@@ -214,10 +214,20 @@ PY
 _has_agent() {
   local candidate="${1:-}"
   case "$candidate" in
-    claude|codex|agy|junie|grok) return 0 ;;
+    claude|codex|agy|junie|grok|cursor) return 0 ;;
     gemini) return 1 ;;  # deprecated - see migration error below
     *) return 1 ;;
   esac
+}
+
+# Fleet agent key → installed CLI binary when they differ (mirrors
+# spawn.AGENT_BINARY_NAMES: key stays the UX name, binary is cursor-agent).
+_agent_cli_binary() {
+  local cli="${1:-}"
+  case "${1:-}" in
+    cursor) cli="cursor-agent" ;;
+  esac
+  printf '%s' "$cli"
 }
 
 # A missing agent CLI is the stranger's first-use cliff: `init` used to answer
@@ -225,9 +235,15 @@ _has_agent() {
 # hand over the one command that closes it.
 _require_agent_cli() {
   local agent="${1:-}"
-  command -v "$agent" >/dev/null 2>&1 && return 0
-  local staged="$crafted_agent_bin/$agent"
-  printf '%b✗%b %s CLI is not available.\n' "$_red" "$_reset" "$agent" >&2
+  local binary
+  binary="$(_agent_cli_binary "$agent")"
+  command -v "$binary" >/dev/null 2>&1 && return 0
+  local staged="$crafted_agent_bin/$binary"
+  if [[ "$binary" == "$agent" ]]; then
+    printf '%b✗%b %s CLI is not available.\n' "$_red" "$_reset" "$agent" >&2
+  else
+    printf '%b✗%b %s CLI (%s) is not available.\n' "$_red" "$_reset" "$agent" "$binary" >&2
+  fi
   if [[ -e "$staged" ]]; then
     printf '  Found at %s but it is not executable from here.\n' "$staged" >&2
     printf '  Fix: chmod +x %s\n' "$staged" >&2
@@ -239,6 +255,7 @@ _require_agent_cli() {
       junie) printf '    npm install -g @jetbrains/junie\n' >&2 ;;
       grok) printf '    npm install -g @xai-official/grok\n' >&2 ;;
       agy) printf '    install Google Antigravity CLI, then: agy install\n' >&2 ;;
+      cursor) printf '    curl https://cursor.com/install -fsS | bash\n' >&2 ;;
     esac
     printf '  Or check the whole fleet: vibecrafted doctor\n' >&2
   fi
@@ -680,7 +697,7 @@ _print_ship_path() {
 
 cmd_skill_help() {
   local skill="$1"
-  local agent="${2:-<claude|codex|agy|junie|grok>}"
+  local agent="${2:-<claude|codex|agy|junie|grok|cursor>}"
   local wrapper="vc-$skill"
   local display_skill="$skill"
   local version=""
@@ -987,9 +1004,9 @@ cmd_resume_help() {
   printf '  Resume a stopped control-plane run, a provider session, or AICX continuity.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted resume <claude|codex|agy|junie|grok> --run-id <work-...> [flags]\n'
-  printf '  vibecrafted resume <claude|codex|agy|junie|grok> --session <provider-uuid> [flags]\n'
-  printf '  vibecrafted resume <claude|codex|agy|junie|grok> [flags]\n'
+  printf '  vibecrafted resume <claude|codex|agy|junie|grok|cursor> --run-id <work-...> [flags]\n'
+  printf '  vibecrafted resume <claude|codex|agy|junie|grok|cursor> --session <provider-uuid> [flags]\n'
+  printf '  vibecrafted resume <claude|codex|agy|junie|grok|cursor> [flags]\n'
   printf '\n'
   printf '%bAfter stop:%b\n' "$_bold" "$_reset"
   printf '  Stop kills the process group. There is no same-PGID restart.\n'
@@ -1028,8 +1045,8 @@ cmd_init_help() {
   printf '  Start an interactive repository orientation session with an agent.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted init [claude|codex|agy|junie|grok] [--runtime terminal|visible|plain] [--policy-runtime local-native|local-worktrees|local-vm|cloud-soon] [--permissions bypass|auto|accept-edits|read-only] [--token-budget safe|unlimited|N] [--continuity full-lineage|fresh|bare-fork] [--prompt "<context>"]\n'
-  printf '  vc-init [claude|codex|agy|junie|grok]\n'
+  printf '  vibecrafted init [claude|codex|agy|junie|grok|cursor] [--runtime terminal|visible|plain] [--policy-runtime local-native|local-worktrees|local-vm|cloud-soon] [--permissions bypass|auto|accept-edits|read-only] [--token-budget safe|unlimited|N] [--continuity full-lineage|fresh|bare-fork] [--prompt "<context>"]\n'
+  printf '  vc-init [claude|codex|agy|junie|grok|cursor]\n'
   printf '\n'
   printf '%bRuntime:%b\n' "$_bold" "$_reset"
   printf '  terminal  (default) open a tab in the vc-frame cockpit; falls back to plain when vc-frame is absent\n'
@@ -1150,8 +1167,8 @@ cmd_telemetry_help() {
   printf '  Smoke the marbles telemetry path through the installed command deck.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  telemetry smoke [--agent <claude|codex|agy|junie|grok>] [--count <n>] [--root <path>] [--no-watch|--watch]\n'
-  printf '  vibecrafted telemetry smoke [--agent <claude|codex|agy|junie|grok>] [--count <n>] [--root <path>] [--no-watch|--watch]\n'
+  printf '  telemetry smoke [--agent <claude|codex|agy|junie|grok|cursor>] [--count <n>] [--root <path>] [--no-watch|--watch]\n'
+  printf '  vibecrafted telemetry smoke [--agent <claude|codex|agy|junie|grok|cursor>] [--count <n>] [--root <path>] [--no-watch|--watch]\n'
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
   printf '  telemetry smoke --count 1 --no-watch\n'
@@ -4278,7 +4295,7 @@ cmd_help() {
   case "$topic" in
     ""|-h|--help)
       ;;
-    claude|codex|agy|junie|grok)
+    claude|codex|agy|junie|grok|cursor)
       cmd_agent_help "$topic"
       return
       ;;
@@ -4405,7 +4422,7 @@ cmd_help() {
   printf '  scaffold → implement → review → workflow → followup → marbles → audit → polarize → dou → hydrate → release\n'
   printf '  %b14 more skills: vibecrafted help --all%b\n' "$_dim" "$_reset"
   printf '\n'
-  printf '%bAgents:%b  claude · codex · agy · junie · grok\n' "$_bold" "$_reset"
+  printf '%bAgents:%b  claude · codex · agy · junie · grok · cursor\n' "$_bold" "$_reset"
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted init claude\n'
@@ -4488,7 +4505,7 @@ cmd_help_full() {
   printf '  %bvibecrafted tui%b                       Rust operator console over shared state\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted server%b <action>           Manage local control-plane viewer server\n' "$_cyan" "$_reset"
   printf '\n'
-  printf '%b  Agents: claude · codex · agy · junie · grok%b\n' "$_bold" "$_reset"
+  printf '%b  Agents: claude · codex · agy · junie · grok · cursor%b\n' "$_bold" "$_reset"
   printf '\n'
   printf '%b=== ADDITIONAL SKILLS ===%b\n' "$_bold" "$_reset"
   printf '\n'
@@ -5519,7 +5536,7 @@ cmd_lifecycle() {
 
 cmd_lifecycle_help() {
   local verb="$1"
-  local agent="${2:-<claude|codex|agy|junie|grok>}"
+  local agent="${2:-<claude|codex|agy|junie|grok|cursor>}"
   local description=""
   local flags="--last|--run-id <id>"
   case "$verb" in
@@ -5857,7 +5874,7 @@ main() {
     version|--version|-v) printf 'vibecrafted %s\n' "$(_version)" ;;
     agents) cmd_agents "$@" ;;
     swarm) cmd_swarm "$@" ;;
-    claude|codex|gemini|agy|junie|grok)
+    claude|codex|gemini|agy|junie|grok|cursor)
       local action="${1:-<action>}"
       printf '%b✗%b Agent-first grammar was removed: vibecrafted %s %s\n' "$_red" "$_reset" "$cmd" "$action" >&2
       if [[ "$action" == "<action>" ]] || _is_help_flag "$action"; then

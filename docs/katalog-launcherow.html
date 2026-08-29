@@ -127,7 +127,7 @@ footer{margin-top:70px;padding-top:20px;border-top:1px solid var(--line);color:v
 <b>vibecrafted &lt;skill&gt; &lt;agent&gt;</b> [-p &lt;prompt&gt; | -f &lt;file&gt;]  # workflow z agentem zewnętrznym
 <b>vibecrafted &lt;agent&gt; &lt;mode&gt;</b> &lt;plan.md&gt;                 # tryb plan-based per agent
 <b>vc-&lt;skill&gt;</b> &lt;agent&gt; [flags]                          # skrót; identyczny kontrakt</pre>
-    <p class="extra" style="margin-top:10px">Agenci: <code>claude</code> · <code>codex</code> · <code>agy</code> · <code>junie</code> · <code>grok</code> (<code>gemini</code> przyjmowany, zdeprecjonowany na rzecz agy).</p>
+    <p class="extra" style="margin-top:10px">Agenci: <code>claude</code> · <code>codex</code> · <code>agy</code> · <code>junie</code> · <code>grok</code> · <code>cursor</code> (<code>gemini</code> przyjmowany, zdeprecjonowany na rzecz agy).</p>
   </div>
 </section>
 
@@ -255,7 +255,7 @@ vibecrafted delegate &lt;agent&gt; [flags]</pre></div>
 
 <section id="agenci">
   <h2>Tryby agentowe — jednolita matryca ×6 agentów</h2>
-  <p class="lede"><code>vibecrafted &lt;agent&gt; &lt;mode&gt;</code> — identyczny szablon dla claude / codex / agy / junie / grok (gemini → agy).</p>
+  <p class="lede"><code>vibecrafted &lt;agent&gt; &lt;mode&gt;</code> — identyczny szablon dla claude / codex / agy / junie / grok / cursor (gemini → agy).</p>
   <div class="tbl-wrap"><table>
     <thead><tr><th>tryb</th><th>argument</th><th>rola</th></tr></thead>
     <tbody>
@@ -277,7 +277,7 @@ vibecrafted delegate &lt;agent&gt; [flags]</pre></div>
   <div class="grid">
     <div class="card"><h3>init <span class="badge b-mgmt">MGMT</span></h3>
       <p class="role">Interaktywna orientacja agenta w repo: historia, oczy (Loctree), weryfikacja gruntu.</p>
-      <pre>vibecrafted init [claude|codex|agy|junie|grok]
+      <pre>vibecrafted init [claude|codex|agy|junie|grok|cursor]
 vc-init [agent]</pre></div>
     <div class="card"><h3>resume <span class="badge b-mgmt">MGMT</span></h3>
       <p class="role">Trzy tryby: wznowienie zatrzymanego runa control-plane, natywne wznowienie sesji providera, albo pakiet ciągłości AICX (48 h) bez id.</p>

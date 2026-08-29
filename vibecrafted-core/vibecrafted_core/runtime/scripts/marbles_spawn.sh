@@ -65,7 +65,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$agent" ]] || spawn_die "Missing --agent"
-[[ "$agent" =~ ^(claude|codex|agy|junie|grok)$ ]] || spawn_die "Invalid agent: $agent"
+[[ "$agent" =~ ^(claude|codex|agy|junie|grok|cursor)$ ]] || spawn_die "Invalid agent: $agent"
 spawn_validate_runtime "$runtime"
 spawn_require_positive_int "$count" "--count"
 spawn_rotation_validate_mode "$rotation"

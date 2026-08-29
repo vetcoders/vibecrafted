@@ -7,7 +7,7 @@ source "$SCRIPT_DIR/common.sh"
 
 usage() {
   cat <<'EOF_USAGE'
-Usage: await.sh [claude|codex|agy|junie|grok] [--last] [--run-id <id>] [--research] [--auto-synthesize] [--describe] [--interval <sec>] [--timeout <sec>] [--startup-grace <sec>] [targets...]
+Usage: await.sh [claude|codex|agy|junie|grok|cursor] [--last] [--run-id <id>] [--research] [--auto-synthesize] [--describe] [--interval <sec>] [--timeout <sec>] [--startup-grace <sec>] [targets...]
 
 Targets may be:
   - *.meta.json
@@ -44,7 +44,7 @@ from pathlib import Path
 
 def usage() -> None:
     print(
-        "Usage: await.sh [claude|codex|agy|junie|grok] [--last] [--run-id <id>] "
+        "Usage: await.sh [claude|codex|agy|junie|grok|cursor] [--last] [--run-id <id>] "
         "[--research] [--auto-synthesize] [--describe] [--interval <sec>] [--timeout <sec>] "
         "[--startup-grace <sec>] [targets...]"
     )

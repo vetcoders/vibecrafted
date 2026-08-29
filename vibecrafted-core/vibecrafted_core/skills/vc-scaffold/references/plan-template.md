@@ -5,7 +5,7 @@ Use this template for planning output. Strip out the comments in your actual out
 ```markdown
 ---
 run_id: <generated-unique-id>
-agent: <claude|codex|gemini>
+agent: <claude|codex|gemini|cursor>
 skill: <vc-scaffold|vc-workflow|vc-implement>
 project: <repo-name>
 status: pending
