@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import subprocess
+import sys
 from pathlib import Path
 from types import ModuleType
 
@@ -187,10 +188,15 @@ def _host_python_without_core() -> Path | None:
 def test_workshop_reexecs_generation_python_when_host_lacks_core(
     tmp_path: Path,
 ) -> None:
-    """Agents tab used env python3; generation python3 is the only one with core."""
+    """Agents tab used env python3; generation python3 is the only one with core.
+
+    Runs a materialized copy (no core tree around it): an in-tree script now
+    imports its own tree's core and never reaches the re-exec lane."""
     host = _host_python_without_core()
     if host is None:
         pytest.skip("no host python3 that lacks vibecrafted_core")
+    materialized = tmp_path / "vc-agent-workshop.py"
+    materialized.write_text(SCRIPT.read_text(encoding="utf-8"), encoding="utf-8")
     log = tmp_path / "generation.log"
     stub = tmp_path / "generation-python"
     stub.write_text(
@@ -204,7 +210,7 @@ def test_workshop_reexecs_generation_python_when_host_lacks_core(
     env["VIBECRAFTED_PYTHON"] = str(stub)
     env["PATH"] = "/usr/bin:/bin"
     result = subprocess.run(
-        [str(host), str(SCRIPT), "home"],
+        [str(host), str(materialized), "home"],
         env=env,
         cwd=tmp_path,
         capture_output=True,
@@ -220,6 +226,35 @@ def test_workshop_reexecs_generation_python_when_host_lacks_core(
 def test_ensure_generation_python_is_noop_when_core_imports() -> None:
     workshop = _load()
     workshop.ensure_generation_python()
+
+
+def test_workshop_prefers_core_from_its_own_tree(tmp_path: Path) -> None:
+    """Source-lane skew guard: an ambient PYTHONPATH pointing at an older
+    installed generation must not supply the core for a workshop script that
+    lives in a newer tree — the launcher UI and the policy tables must come
+    from one tree or they disagree at runtime (the `unsupported provider:
+    cursor` crash class). A stub core lacking the required symbols stands in
+    for the stale generation: if the script imported it, module load would
+    fail before argparse."""
+    stale = tmp_path / "stale-generation"
+    stub_pkg = stale / "vibecrafted_core"
+    stub_pkg.mkdir(parents=True)
+    (stub_pkg / "__init__.py").write_text("", encoding="utf-8")
+    (stub_pkg / "spawn.py").write_text(
+        "# stale generation: no resolve_provider_policy\n", encoding="utf-8"
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(stale)
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--help"],
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "launcher" in result.stdout
 
 
 def test_generation_python_candidates_prefer_env_then_uv_tools(
@@ -240,10 +275,15 @@ def test_generation_python_candidates_prefer_env_then_uv_tools(
 
 
 def test_workshop_reexecs_uv_tools_python_when_env_unset(tmp_path: Path) -> None:
-    """Source-lane panes have no VIBECRAFTED_PYTHON; uv venv has core."""
+    """Source-lane panes have no VIBECRAFTED_PYTHON; uv venv has core.
+
+    Runs a materialized copy (no core tree around it): an in-tree script now
+    imports its own tree's core and never reaches the re-exec lane."""
     host = _host_python_without_core()
     if host is None:
         pytest.skip("no host python3 that lacks vibecrafted_core")
+    materialized = tmp_path / "vc-agent-workshop.py"
+    materialized.write_text(SCRIPT.read_text(encoding="utf-8"), encoding="utf-8")
     log = tmp_path / "uv.log"
     uv_bin = tmp_path / "data" / "uv" / "tools" / "vibecrafted" / "bin"
     uv_bin.mkdir(parents=True)
@@ -263,7 +303,7 @@ def test_workshop_reexecs_uv_tools_python_when_env_unset(tmp_path: Path) -> None
     env["XDG_DATA_HOME"] = str(tmp_path / "data")
     env["PATH"] = "/usr/bin:/bin"
     result = subprocess.run(
-        [str(host), str(SCRIPT), "home"],
+        [str(host), str(materialized), "home"],
         env=env,
         cwd=tmp_path,
         capture_output=True,
