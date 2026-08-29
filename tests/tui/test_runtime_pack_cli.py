@@ -13,6 +13,7 @@ import pytest
 from vibecrafted_core.runtime_pack_contract import (
     REQUIRED_FOUNDATION_EXECUTABLES,
     RuntimePackContractError,
+    verify_provenance,
     write_provenance,
 )
 
@@ -710,27 +711,37 @@ def test_runtime_pack_contract_rejects_dead_vc_frame_wrapper_only(
         )
 
 
-def test_runtime_pack_contract_rejects_mutable_host_metadata(tmp_path: Path) -> None:
+def test_runtime_pack_contract_ignores_mutable_host_metadata(tmp_path: Path) -> None:
+    """Host services stamp .DS_Store into live trees faster than any sweep.
+
+    The carrier tar excludes the name, so it can never ship: the closed
+    inventory skips it on both write and verify instead of failing a valid
+    payload, and never records it in provenance.
+    """
     payload = tmp_path / "VibecraftedRuntime"
     capture = tmp_path / "argv"
     _fake_runtime_payload(payload, capture)
     _source_provenance(payload)
     (payload / ".DS_Store").write_bytes(b"mutable Finder metadata")
+    (payload / "bin/.DS_Store").write_bytes(b"mutable Finder metadata")
 
-    with pytest.raises(
-        RuntimePackContractError,
-        match="Runtime Pack payload contains mutable host metadata: .DS_Store",
-    ):
-        write_provenance(
-            payload,
-            carrier_basename="Vibecrafted_RuntimePack_fixture.tar.gz",
-            version=VERSION,
-            platform="darwin-arm64",
-            architecture="arm64",
-            source_revision=SOURCE_SHA,
-            terminal_revision=TERMINAL_SHA,
-            frame_revision=FRAME_SHA,
-        )
+    provenance = write_provenance(
+        payload,
+        carrier_basename="Vibecrafted_RuntimePack_fixture.tar.gz",
+        version=VERSION,
+        platform="darwin-arm64",
+        architecture="arm64",
+        source_revision=SOURCE_SHA,
+        terminal_revision=TERMINAL_SHA,
+        frame_revision=FRAME_SHA,
+    )
+    recorded = {entry["path"] for entry in provenance["payload"]["files"]}
+    assert not any(name.endswith(".DS_Store") for name in recorded)
+
+    verified = verify_provenance(
+        payload, carrier_basename="Vibecrafted_RuntimePack_fixture.tar.gz"
+    )
+    assert verified["payload"]["files"] == provenance["payload"]["files"]
 
 
 def test_runtime_pack_contract_rejects_post_manifest_foundation_mutation(

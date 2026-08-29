@@ -230,9 +230,12 @@ def _payload_files(root: Path) -> list[dict[str, Any]]:
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root).as_posix()
         if path.name in FORBIDDEN_PAYLOAD_NAMES:
-            raise RuntimePackContractError(
-                f"Runtime Pack payload contains mutable host metadata: {relative}"
-            )
+            # Host metadata services stamp .DS_Store into live trees faster
+            # than any pre-walk sweep can win the race. The carrier tar
+            # excludes these names, so they can never ship and never carry
+            # signed bytes: skip them instead of failing an otherwise valid
+            # payload, and never record them in provenance.
+            continue
         if path.is_symlink():
             raise RuntimePackContractError(
                 f"Runtime Pack payload contains a symlink: {relative}"
