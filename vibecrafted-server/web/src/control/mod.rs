@@ -36,7 +36,13 @@
 //! * `GET /api/control/events` — Server-Sent Events stream of `events.jsonl`
 //!   from a client-held cursor (`?since=` / `Last-Event-ID`), with `: ping`
 //!   keepalives. Read-only; see [`events_sse`].
+//! * `GET /api/control/caretaker` — the published `vibecrafted.caretaker.v1`
+//!   envelope (server identity, observability, resume backlog, control-plane
+//!   upkeep) wrapped in transport-level freshness. Answering it is itself the
+//!   liveness proof; see [`caretaker`].
 
+#[cfg(feature = "ssr")]
+mod caretaker;
 #[cfg(feature = "ssr")]
 mod events_sse;
 #[cfg(feature = "ssr")]
@@ -60,6 +66,7 @@ pub mod api {
     use serde::Serialize;
     use serde_json::json;
 
+    use super::caretaker::caretaker;
     use super::events_sse::events_sse;
     use super::run_observation::{await_run as await_run_observation, observe as observe_run};
 
@@ -93,6 +100,7 @@ pub mod api {
             .route("/api/control/lifecycle", get(lifecycle))
             .route("/api/control/lifecycle/{run_id}", get(lifecycle_run))
             .route("/api/control/events", get(events_sse))
+            .route("/api/control/caretaker", get(caretaker))
     }
 
     /// Cheap liveness/readiness contract for the local process supervisor.
