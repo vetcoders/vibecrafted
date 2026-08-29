@@ -4968,6 +4968,17 @@ cmd_settlements() {
     "$(_vibecrafted_python)" -m vibecrafted_core.cli settlements "$@"
 }
 
+cmd_control_plane_revalidate() {
+  local core_dir
+  core_dir="$(_core_module_dir 2>/dev/null || true)"
+  [[ -n "$core_dir" ]] || {
+    printf '%b✗%b Vibecrafted Core module not found.\n' "$_red" "$_reset" >&2
+    return 1
+  }
+  PYTHONPATH="$core_dir${PYTHONPATH:+:$PYTHONPATH}" \
+    "$(_vibecrafted_python)" -m vibecrafted_core.cli control-plane-revalidate "$@"
+}
+
 cmd_workspace() {
   local core_dir
   core_dir="$(_core_module_dir 2>/dev/null || true)"
@@ -5830,6 +5841,7 @@ main() {
     tui) cmd_tui "$@" ;;
     doctor|check) cmd_doctor "$@" ;;
     receipt) cmd_receipt "$@" ;;
+    control-plane-revalidate) cmd_control_plane_revalidate "$@" ;;
     workspace) cmd_workspace "$@" ;;
     scaffold-doctor) cmd_scaffold_doctor "$@" ;;
     dashboard|mc|mission-control|sessions) cmd_dashboard "$@" ;;
