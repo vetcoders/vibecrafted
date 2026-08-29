@@ -461,6 +461,58 @@ def test_vc_loct_capabilities_routes_to_core(monkeypatch: pytest.MonkeyPatch) ->
     assert captured["timeout"] == 2.0
 
 
+def test_vc_caretaker_projects_the_published_envelope(tmp_path: Path) -> None:
+    """MCP reads the same published bytes; it never builds a second truth."""
+    from vibecrafted_core import caretaker as _caretaker
+
+    home = tmp_path / ".vibecrafted"
+    plane = home / "control_plane"
+    for child in ("runs", "runtime_runs", "lifecycle_runs"):
+        (plane / child).mkdir(parents=True)
+    (plane / "events.jsonl").write_text("", encoding="utf-8")
+    envelope = _caretaker.build_caretaker_snapshot(
+        home=home, control_plane=plane, probe=False
+    )
+    _caretaker.publish_caretaker_snapshot(envelope, control_plane=plane)
+
+    from fastmcp import Client
+
+    mcp = server.build_server()
+
+    async def _call() -> Any:
+        async with Client(mcp) as client:
+            return await client.call_tool("vc_caretaker", {"home": str(home)})
+
+    payload = _run(_call()).data
+    assert payload["published"] is True
+    assert payload["stale"] is False
+    assert payload["snapshot"]["schema"] == "vibecrafted.caretaker.v1"
+    # The verdict crosses verbatim — deriving a second opinion here would be
+    # the truth competition the envelope exists to end.
+    assert payload["snapshot"]["verdict"] == envelope["verdict"]
+    assert payload["snapshot"]["actions"] == envelope["actions"]
+
+
+def test_vc_caretaker_reports_absence_honestly(tmp_path: Path) -> None:
+    """Never-published is a named condition, not an exception or a fake OK."""
+    home = tmp_path / ".vibecrafted"
+    (home / "control_plane").mkdir(parents=True)
+
+    from fastmcp import Client
+
+    mcp = server.build_server()
+
+    async def _call() -> Any:
+        async with Client(mcp) as client:
+            return await client.call_tool("vc_caretaker", {"home": str(home)})
+
+    payload = _run(_call()).data
+    assert payload["published"] is False
+    assert payload["stale"] is True
+    assert "not published" in payload["reason"]
+    assert payload["snapshot"] is None
+
+
 def test_vc_launch_delegates_to_core_workflow(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

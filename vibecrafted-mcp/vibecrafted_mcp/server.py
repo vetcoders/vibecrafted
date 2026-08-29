@@ -28,6 +28,9 @@ from vibecrafted_core import (
     capabilities as _capabilities,
 )
 from vibecrafted_core import (
+    caretaker as _caretaker,
+)
+from vibecrafted_core import (
     control_plane as _control_plane,
 )
 from vibecrafted_core import (
@@ -623,6 +626,23 @@ def build_server() -> Any:
         """
         with _override_vibecrafted_home(home):
             return _control_plane.sync_state()
+
+    @mcp.tool(annotations={"readOnlyHint": True})
+    def vc_caretaker(home: str | None = None) -> dict[str, Any]:
+        """The one caretaker truth: the published server/observability envelope.
+
+        Projects the ``vibecrafted.caretaker.v1`` envelope exactly as the
+        runtime published it (``vibecrafted server caretaker``) and as
+        ``GET /api/control/caretaker`` serves it — server identity, derived
+        verdict, supervision actions, resume backlog, control-plane upkeep —
+        with publication freshness attached. This tool never builds the
+        envelope and never re-derives health: MCP is eyes, not the heartbeat.
+        ``published=false`` with a reason is an honest answer, not an error.
+
+        Token budget: ~2-6k tokens depending on resume backlog size.
+        """
+        with _override_vibecrafted_home(home):
+            return _caretaker.read_caretaker_snapshot()
 
     def _launch_workflow(
         skill: str = "workflow",

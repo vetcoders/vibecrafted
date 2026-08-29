@@ -1029,9 +1029,14 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "func applicationShouldTerminate(" in delegate
     assert 'withTitle: "Cancel"' in delegate
     assert 'withTitle: "Quit Anyway"' in delegate
-    assert 'appendingPathComponent("server/supervisor.status.json")' in delegate
+    # One caretaker/control_plane truth: the tray derives server health from the
+    # caretaker verb, never from a second health JSON read in Swift.
+    assert "process.arguments = serverCaretakerArguments()" in delegate
+    assert 'appendingPathComponent("server/supervisor.status.json")' not in delegate
     assert "serverActionArguments(for: action)" in delegate
-    assert 'process.arguments = ["server", "service", "status", "--json"]' in delegate
+    assert (
+        'process.arguments = ["server", "service", "status", "--json"]' not in delegate
+    )
     assert 'process.arguments = ["server", "service", "logs", "--json"]' in delegate
     assert "menu.delegate = self" in delegate
     assert "statusRefreshTimer = Timer.scheduledTimer(" in delegate
