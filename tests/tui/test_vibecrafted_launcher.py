@@ -3787,7 +3787,13 @@ def test_launcher_server_help_and_invalid_verb() -> None:
         text=True,
     )
     assert "Manage the local control-plane viewer server" in result_help.stdout
-    assert "vibecrafted server [start|stop|status|open|doctor]" in result_help.stdout
+    assert (
+        "vibecrafted server [start|stop|status|open|doctor|caretaker]"
+        in result_help.stdout
+    )
+    # `caretaker` is the one-truth surface: advertising it in usage is what makes
+    # it discoverable instead of an undocumented verb only the tray knows about.
+    assert "vibecrafted server caretaker --json" in result_help.stdout
 
     result_invalid = subprocess.run(
         [str(LAUNCHER), "server", "invalidaction"],
@@ -3797,6 +3803,48 @@ def test_launcher_server_help_and_invalid_verb() -> None:
     )
     assert result_invalid.returncode != 0
     assert "Unknown server action: invalidaction" in result_invalid.stderr
+
+
+def test_launcher_server_caretaker_emits_one_versioned_envelope(
+    tmp_path: Path,
+) -> None:
+    """`server caretaker --json` is the single truth a tray can render.
+
+    The verb must produce one schema-stamped envelope carrying all four
+    caretaker sections plus a derived verdict, and it must publish those exact
+    bytes into the control plane so `GET /api/control/caretaker` serves the same
+    thing. Any consumer that has to fuse a second source has lost the property.
+    """
+    home = tmp_path / "crafted"
+    (home / "control_plane").mkdir(parents=True)
+    env = dict(os.environ)
+    env["VIBECRAFTED_HOME"] = str(home)
+    env.pop("PYTHONPATH", None)
+
+    result = subprocess.run(
+        [str(LAUNCHER), "server", "caretaker", "--no-probe", "--json"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["schema"] == "vibecrafted.caretaker.v1"
+    assert set(payload) >= {
+        "server",
+        "observability",
+        "resumeability",
+        "maintenance",
+        "verdict",
+    }
+    # Unprobed liveness may never be optimistically rendered as healthy.
+    assert payload["verdict"]["health"] == "unknown"
+
+    published = home / "control_plane" / "caretaker.json"
+    assert published.is_file(), "the verb must publish for the server to serve"
+    assert json.loads(published.read_text(encoding="utf-8")) == payload
 
 
 CANONICAL_DECK = REPO_ROOT / "vibecrafted-core/vibecrafted_core/deck/vibecrafted"

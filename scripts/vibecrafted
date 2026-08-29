@@ -1124,7 +1124,7 @@ cmd_server_help() {
   printf '  Persistent service management is macOS launchd-only in this release.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted server [start|stop|status|open|doctor] [options]\n'
+  printf '  vibecrafted server [start|stop|status|open|doctor|caretaker] [options]\n'
   printf '  vibecrafted server service [install|reconcile|restart|start|stop|status|logs|uninstall] [options]\n'
   printf '\n'
   printf '%bOptions:%b\n' "$_bold" "$_reset"
@@ -1138,6 +1138,7 @@ cmd_server_help() {
   printf '  vibecrafted server status\n'
   printf '  vibecrafted server service stop\n'
   printf '  vibecrafted server service logs --json\n'
+  printf '  vibecrafted server caretaker --json\n'
   printf '\n'
 }
 
@@ -4171,6 +4172,27 @@ cmd_server() {
         printf "\n%b✗%b Server and guardian doctor check failed.\n" "$_red" "$_reset" >&2
         return 1
       fi
+      ;;
+    caretaker)
+      # The one caretaker truth. Builds the `vibecrafted.caretaker.v1` envelope
+      # (server identity + observability + resume backlog + control-plane
+      # upkeep), publishes it into the control plane so
+      # `GET /api/control/caretaker` serves the same bytes, and prints the
+      # already-derived verdict. Readers render that verdict; none re-derive it,
+      # which is what keeps the tray, the CLI and the HTTP surface from drifting
+      # into three opinions about one server.
+      local core_dir publish_flag="--publish" caretaker_arg
+      for caretaker_arg in "$@"; do
+        [[ "$caretaker_arg" == "--read" ]] && publish_flag=""
+      done
+      core_dir="$(_core_module_dir 2>/dev/null || true)"
+      [[ -n "$core_dir" ]] || {
+        printf '%b✗%b Vibecrafted Core module not found.\n' "$_red" "$_reset" >&2
+        return 1
+      }
+      PYTHONPATH="$core_dir${PYTHONPATH:+:$PYTHONPATH}" \
+        "$(_vibecrafted_python)" -m vibecrafted_core.caretaker \
+        ${publish_flag:+"$publish_flag"} "$@"
       ;;
     *)
       printf "%b✗%b Unknown server action: %s\n" "$_red" "$_reset" "$verb" >&2
