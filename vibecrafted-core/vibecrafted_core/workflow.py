@@ -56,7 +56,7 @@ from .workflows import registry as workflow_registry
 
 SUPPORTED_WORKFLOWS = workflow_registry.SUPPORTED_WORKFLOWS
 WORKFLOW_ALIASES = workflow_registry.WORKFLOW_ALIASES
-SUPPORTED_AGENTS = {"claude", "codex", "agy", "junie", "grok", "swarm"}
+SUPPORTED_AGENTS = {"claude", "codex", "agy", "junie", "grok", "cursor", "swarm"}
 SUPPORTED_RUNTIMES = {"headless", "terminal", "visible"}
 _TERMINAL_ORIGIN_ENV = {
     "VIBECRAFTED_WORKER_SESSION",

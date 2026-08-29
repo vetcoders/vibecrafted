@@ -47,7 +47,7 @@ from .workflow import (
     recover_launch_receipt,
 )
 
-AGENTS = {"claude", "codex", "agy", "junie", "grok", "swarm"}
+AGENTS = {"claude", "codex", "agy", "junie", "grok", "cursor", "swarm"}
 RESEARCH_ARITY = {"uno": 1, "duo": 2, "trio": 3}
 LAUNCHERS = (
     "audit",

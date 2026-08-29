@@ -18,7 +18,7 @@ from .events import append_event
 from .package_resources import deck_path, package_root, runtime_path
 from .spawn import Supervisor
 
-AGENTS = {"claude", "codex", "agy", "junie", "grok"}
+AGENTS = {"claude", "codex", "agy", "junie", "grok", "cursor"}
 SUCCESS_STATES = {"report_validated", "completed", "closed"}
 SKILL_PREFIX = {
     "agents": "agnt",

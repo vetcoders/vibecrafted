@@ -247,6 +247,8 @@ class AgentStreamParser:
             return f"cd {root_text} && junie --resume --session-id {session}"
         if self.agent == "grok":
             return f"cd {root_text} && grok --resume {session}"
+        if self.agent == "cursor":
+            return f"cd {root_text} && cursor-agent --resume {session}"
         return f"cd {root_text} && vc-resume --session {session}"
 
     def _scan_text(self, text: str) -> None:
@@ -319,6 +321,8 @@ class AgentStreamParser:
         if cached_input is None:
             cached_input = usage.get("cacheReadInputTokens")
         if cached_input is None:
+            cached_input = usage.get("cacheReadTokens")
+        if cached_input is None:
             cached_input = usage.get("cacheInputTokens")
         if cached_input is None:
             cached_input = usage.get("cached_prompt_tokens")
@@ -326,6 +330,8 @@ class AgentStreamParser:
         cache_write = usage.get("cache_creation_input_tokens")
         if cache_write is None:
             cache_write = usage.get("cacheCreateTokens")
+        if cache_write is None:
+            cache_write = usage.get("cacheWriteTokens")
         if cache_write is not None:
             self.tokens_cache_write = (self.tokens_cache_write or 0) + _as_int(
                 cache_write
@@ -401,7 +407,11 @@ class AgentStreamParser:
 
     def _format_json_event(self, event: dict[str, Any]) -> str:
         """Dispatch a decoded JSON event to the formatter for ``self.agent``."""
-        if self.agent in {"claude", "agy"}:
+        if self.agent in {"claude", "agy", "cursor"}:
+            if self.agent == "cursor":
+                thinking = self._format_cursor_thinking(event)
+                if thinking is not None:
+                    return thinking
             return self._format_claude_event(event)
         if self.agent == "codex":
             return self._format_codex_event(event)
@@ -411,6 +421,15 @@ class AgentStreamParser:
             return self._format_junie_event(event)
         if self.agent == "grok":
             return self._format_grok_event(event)
+        return ""
+
+    def _format_cursor_thinking(self, event: dict[str, Any]) -> str | None:
+        """Render cursor-agent stream-json thinking deltas; None if not a thinking event."""
+        if str(event.get("type") or "") != "thinking":
+            return None
+        text = str(event.get("text") or "")
+        if str(event.get("subtype") or "") == "delta" and text:
+            return f"\x1b[2m{text}\x1b[0m"
         return ""
 
     def _format_claude_event(self, event: dict[str, Any]) -> str:
