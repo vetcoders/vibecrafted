@@ -243,7 +243,29 @@ def test_vc_frame_launcher_finding_flags_raw_binary(tmp_path: Path) -> None:
 
 
 def test_vc_frame_launcher_finding_ok_for_pinned_wrapper(tmp_path: Path) -> None:
-    wrapper = tmp_path / "vc-frame"
+    wrapper = tmp_path / "bin" / "vc-frame"
+    wrapper.parent.mkdir()
+    wrapper.write_text(
+        "#!/usr/bin/env bash\npin_darwin_socket_dir() { :; }\n",
+        encoding="utf-8",
+    )
+    native = tmp_path / "libexec" / "vc-frame"
+    native.parent.mkdir()
+    native.write_bytes(b"\xcf\xfa\xed\xfe" + b"\x00" * 32)
+    native.chmod(0o755)
+
+    finding = doctor._vc_frame_launcher_findings(which=lambda _name: str(wrapper))[0]
+
+    assert finding.level == "ok"
+    assert finding.component == "vc-frame:path"
+    assert "product wrapper" in finding.message
+
+
+def test_vc_frame_launcher_finding_fails_for_dead_product_wrapper(
+    tmp_path: Path,
+) -> None:
+    wrapper = tmp_path / "bin" / "vc-frame"
+    wrapper.parent.mkdir()
     wrapper.write_text(
         "#!/usr/bin/env bash\npin_darwin_socket_dir() { :; }\n",
         encoding="utf-8",
@@ -251,9 +273,9 @@ def test_vc_frame_launcher_finding_ok_for_pinned_wrapper(tmp_path: Path) -> None
 
     finding = doctor._vc_frame_launcher_findings(which=lambda _name: str(wrapper))[0]
 
-    assert finding.level == "ok"
+    assert finding.level == "fail"
     assert finding.component == "vc-frame:path"
-    assert "product wrapper" in finding.message
+    assert "no native vc-frame" in finding.message
 
 
 def test_vc_frame_launcher_finding_follows_runtime_owned_wrapper_chain(
@@ -266,6 +288,10 @@ def test_vc_frame_launcher_finding_follows_runtime_owned_wrapper_chain(
         "#!/usr/bin/env bash\npin_darwin_socket_dir() { :; }\n", encoding="utf-8"
     )
     target.chmod(0o755)
+    native = target.parent.parent / "libexec" / "vc-frame"
+    native.parent.mkdir()
+    native.write_bytes(b"\xcf\xfa\xed\xfe" + b"\x00" * 32)
+    native.chmod(0o755)
     wrapper = tmp_path / "bin/vc-frame"
     wrapper.parent.mkdir()
     wrapper.write_text(
@@ -761,6 +787,23 @@ def test_truth_drift_fails_on_projection_into_parked_generation(
     stale = [finding for finding in findings if finding.level == "fail"]
     assert len(stale) == 1
     assert "parked generation" in stale[0].message
+
+
+def test_truth_drift_fails_on_projection_into_checkout(
+    tmp_path: Path, monkeypatch
+) -> None:
+    tools, _, home = _truth_sandbox(tmp_path, monkeypatch)
+    checkout = tmp_path / "repo/config/vc-frame"
+    _seed_truth(checkout)
+    view = home / ".config" / "vibecrafted" / "vc-frame"
+    view.mkdir(parents=True)
+    (view / "config.kdl").symlink_to(checkout / "config.kdl")
+
+    findings = doctor._vc_frame_truth_drift_findings(home=home, tools_home=tools)
+
+    escaped = [finding for finding in findings if finding.level == "fail"]
+    assert len(escaped) == 1
+    assert "escape the active immutable Runtime Pack" in escaped[0].message
 
 
 def test_doctor_summary_counts_findings() -> None:

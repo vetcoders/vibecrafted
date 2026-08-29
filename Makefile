@@ -110,10 +110,10 @@ notarize:
 release:
 	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" $${=VC_RELEASE_FLAGS}'
 
-# Build the standalone macOS CLI carrier from the exact same Runtime Pack bytes
-# embedded in Vibecrafted.app. The packager adds only the two native helpers
-# that AppDelegate normally supplies from Contents/Helpers.
-runtime-pack: app
+# Build the standalone macOS Runtime Pack directly from source and native donor
+# inputs. Vibecrafted.app consumes this carrier; it is not the carrier's source.
+runtime-pack:
+	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --runtime-pack-only $${=VC_RELEASE_FLAGS}'
 	@version="$$(tr -d '[:space:]' < VERSION)"; \
 	revision="$$(git rev-parse --short=8 HEAD)"; \
 	date="$${VIBECRAFTED_RELEASE_DATE:-$$(date -u +%Y%m%d)}"; \
@@ -489,6 +489,10 @@ install-vendored-binaries:
 		src="$(VENDORED_FOUNDATION_DIR)/$$bin"; \
 		if [ ! -f "$$src" ]; then \
 			echo "[vendor] $$bin not present in $(VENDORED_FOUNDATION_DIR); keeping external fallback"; \
+			continue; \
+		fi; \
+		if existing="$$(command -v "$$bin" 2>/dev/null)" && [ -n "$$existing" ]; then \
+			echo "[vendor] preserving pre-existing $$bin -> $$existing (fill-gap policy; never downgrade)"; \
 			continue; \
 		fi; \
 		install -m 0755 "$$src" "$(BIN_DIR)/$$bin"; \

@@ -1005,6 +1005,12 @@ def test_install_all_covers_app_binaries_as_real_files() -> None:
         in makefile
     )
     assert "bin/vendor/$(HOST_VENDOR_PLATFORM)" in makefile
+    vendor_block = makefile.split("\ninstall-vendored-binaries:", 1)[1].split(
+        "\n# Degrade like the vendored lane", 1
+    )[0]
+    assert 'command -v "$$bin"' in vendor_block
+    assert "preserving pre-existing" in vendor_block
+    assert "fill-gap policy; never downgrade" in vendor_block
     assert "APP_BINARIES := voc vc-admin" in makefile
     assert "SERVER_PACKAGE := vibecrafted-server-web" in makefile
     assert "SERVER_BIN  := vc-server" in makefile
@@ -1626,3 +1632,12 @@ def test_launcher_service_status_returns_ex_config_when_supervisor_missing() -> 
     assert "return 78" in launcher.split("_server_supervisor_cli() {", 1)[1][:1800]
     service_arm = launcher.split("\n    service)\n", 1)[1]
     assert "return $?" in service_arm.split(";;", 1)[0]
+
+
+def test_runtime_pack_is_built_without_app_or_dmg_dependency() -> None:
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    target = makefile.split("\nruntime-pack:\n", 1)[1].split("\n\n", 1)[0]
+
+    assert "--runtime-pack-only" in target
+    assert "runtime-pack: app" not in makefile
+    assert "$(RELEASE_SCRIPT)" in target

@@ -338,6 +338,21 @@ def _runtime_pack_fixture(app: Path) -> str:
         vc_start.parent.mkdir(parents=True)
         vc_start.write_text("#!/bin/sh\n", encoding="utf-8")
         vc_start.chmod(0o755)
+        frame_wrapper = payload / "bin/vc-frame"
+        frame_wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+        frame_wrapper.chmod(0o755)
+        native_frame = payload / "libexec/vc-frame"
+        native_frame.parent.mkdir(parents=True)
+        native_frame.write_bytes(b"\xcf\xfa\xed\xfe" + b"\x00" * 32)
+        native_frame.chmod(0o755)
+        frame_config = payload / runtime_pack_contract.VC_FRAME_CONFIG_ROOT
+        (frame_config / "layouts").mkdir(parents=True)
+        (frame_config / "themes").mkdir()
+        (frame_config / "config.kdl").write_text("fixture\n", encoding="utf-8")
+        (frame_config / "layouts/operator.kdl").write_text(
+            "fixture\n", encoding="utf-8"
+        )
+        (frame_config / "themes/default.kdl").write_text("fixture\n", encoding="utf-8")
         foundation_files: dict[str, str] = {}
         for executable_name in sorted(
             runtime_pack_contract.REQUIRED_FOUNDATION_EXECUTABLES

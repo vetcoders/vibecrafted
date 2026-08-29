@@ -25,13 +25,13 @@ expected_architecture=""
 
 cleanup() {
   local status=$?
-  local attempt
+  local _attempt
   if [[ -n "$temporary" && -d "$temporary" ]]; then
     # Finder/metadata services can recreate .DS_Store while a large extracted
     # pack is being removed.  Cleanup is best-effort bookkeeping after the
     # installer has already emitted its result; it must neither turn a healthy
     # publication into exit 2 nor give up after the first transient ENOTEMPTY.
-    for attempt in 1 2 3; do
+    for _attempt in 1 2 3; do
       if rm -rf -- "$temporary" 2>/dev/null; then
         break
       fi
@@ -291,10 +291,12 @@ if [[ "$operation" == "install" && -n "$app_root" ]]; then
     || die "cannot resolve bundled vc-frame helper"
   [[ -x "$terminal_host" ]] || die "bundled terminal host missing: $terminal_host"
   [[ -x "$frame_helper" ]] || die "bundled vc-frame helper missing: $frame_helper"
+  cmp -s "$terminal_host" "$payload_root/bin/vc-terminal" \
+    || die "App terminal helper disagrees with the signed Runtime Pack"
+  cmp -s "$frame_helper" "$payload_root/libexec/vc-frame" \
+    || die "App vc-frame helper disagrees with the signed Runtime Pack"
   arguments+=(
     --app-root "$app_root"
-    --terminal-host "$terminal_host"
-    --frame-helper "$frame_helper"
   )
 fi
 

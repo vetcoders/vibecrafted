@@ -113,6 +113,17 @@ def _vc_frame_launcher_findings(
                 )
             ]
         pin_owner = exec_target
+    native = pin_owner.parent.parent / "libexec" / "vc-frame"
+    if not _is_native_executable(native):
+        return [
+            _Finding(
+                "fail",
+                "vc-frame:path",
+                f"product wrapper on PATH resolves through {pin_owner}, but its "
+                f"generation has no native vc-frame at {native}. The wrapper is "
+                "not a usable installation; install a complete Runtime Pack.",
+            )
+        ]
     kind = "symlink" if path.is_symlink() else "file"
     return [
         _Finding(
@@ -121,6 +132,24 @@ def _vc_frame_launcher_findings(
             f"product wrapper on PATH ({kind} {path} -> {target}; pin={pin_owner})",
         )
     ]
+
+
+def _is_native_executable(path: Path) -> bool:
+    """Recognise the native provider without executing a potentially live TUI."""
+    try:
+        if not path.is_file() or not os.access(path, os.X_OK):
+            return False
+        magic = path.read_bytes()[:4]
+    except OSError:
+        return False
+    return magic == b"\x7fELF" or magic in {
+        b"\xca\xfe\xba\xbe",
+        b"\xbe\xba\xfe\xca",
+        b"\xfe\xed\xfa\xce",
+        b"\xce\xfa\xed\xfe",
+        b"\xfe\xed\xfa\xcf",
+        b"\xcf\xfa\xed\xfe",
+    }
 
 
 def _uv_tool_shim() -> Path:
@@ -1134,6 +1163,7 @@ def _vc_frame_truth_drift_findings(
         frontier_root(home) / "vc-frame",
     )
     stale: list[Path] = []
+    escaped: list[Path] = []
     for root in projection_roots:
         if not root.is_dir():
             continue
@@ -1148,6 +1178,8 @@ def _vc_frame_truth_drift_findings(
                 current_real
             ):
                 stale.append(path)
+            elif not target.is_relative_to(current_real):
+                escaped.append(path)
     if stale:
         listed = ", ".join(str(path) for path in stale[:4])
         findings.append(
@@ -1159,7 +1191,19 @@ def _vc_frame_truth_drift_findings(
                 f"{' …' if len(stale) > 4 else ''} — re-run `vibecrafted update`",
             )
         )
-    else:
+    if escaped:
+        listed = ", ".join(str(path) for path in escaped[:4])
+        findings.append(
+            _Finding(
+                "fail",
+                "vc-frame:truth",
+                f"{len(escaped)} projection link(s) escape the active immutable "
+                f"Runtime Pack (for example into a checkout): {listed}"
+                f"{' …' if len(escaped) > 4 else ''} — reinstall the complete "
+                "Runtime Pack",
+            )
+        )
+    if not stale and not escaped:
         findings.append(
             _Finding(
                 "ok",

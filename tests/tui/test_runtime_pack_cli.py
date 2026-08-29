@@ -76,8 +76,26 @@ def _fake_runtime_payload(root: Path, capture: Path) -> None:
     launcher = root / "scripts/vibecrafted"
     launcher.write_text("#!/bin/sh\n", encoding="utf-8")
     launcher.chmod(0o755)
+    _seed_vc_frame_product_payload(root)
     _foundation_manifest(root)
     capture.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _seed_vc_frame_product_payload(root: Path) -> None:
+    wrapper = root / "bin/vc-frame"
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    native = root / "libexec/vc-frame"
+    native.parent.mkdir(parents=True, exist_ok=True)
+    native.write_bytes(b"\xcf\xfa\xed\xfe" + b"\x00" * 32)
+    native.chmod(0o755)
+    config = root / "vibecrafted-core/vibecrafted_core/config/vc-frame"
+    (config / "layouts").mkdir(parents=True, exist_ok=True)
+    (config / "themes").mkdir()
+    (config / "config.kdl").write_text("fixture\n", encoding="utf-8")
+    (config / "layouts/operator.kdl").write_text("fixture\n", encoding="utf-8")
+    (config / "themes/default.kdl").write_text("fixture\n", encoding="utf-8")
 
 
 def _source_provenance(root: Path, revision: str = SOURCE_SHA) -> None:
@@ -369,6 +387,65 @@ def test_final_app_carrier_installer_uses_its_bound_version_truth(
     assert (carrier / "VERSION").read_text(encoding="utf-8") == f"{VERSION}\n"
 
 
+def test_app_helpers_can_verify_but_cannot_replace_signed_pack_bytes(
+    tmp_path: Path,
+) -> None:
+    payload = tmp_path / "source/VibecraftedRuntime"
+    capture = tmp_path / "argv"
+    _fake_runtime_payload(payload, capture)
+    terminal = payload / "bin/vc-terminal"
+    terminal.write_text("#!/bin/sh\n# signed terminal\n", encoding="utf-8")
+    terminal.chmod(0o755)
+    archive, public_key = _sealed_archive(tmp_path, payload)
+    app = tmp_path / "Vibecrafted.app"
+    app_terminal = app / "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
+    app_frame = app / "Contents/Helpers/vc-frame"
+    app_terminal.parent.mkdir(parents=True)
+    app_frame.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(terminal, app_terminal)
+    shutil.copy2(payload / "libexec/vc-frame", app_frame)
+
+    result = _run(
+        "--pack",
+        str(archive),
+        "--app-root",
+        str(app),
+        "--terminal-host",
+        str(app_terminal),
+        "--frame-helper",
+        str(app_frame),
+        env={
+            "CAPTURE": str(capture),
+            "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY": str(public_key),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    argv = capture.read_text(encoding="utf-8").splitlines()
+    assert "--app-root" in argv
+    assert "--terminal-host" not in argv
+    assert "--frame-helper" not in argv
+
+    app_frame.write_bytes(b"foreign app frame")
+    rejected = _run(
+        "--pack",
+        str(archive),
+        "--app-root",
+        str(app),
+        "--terminal-host",
+        str(app_terminal),
+        "--frame-helper",
+        str(app_frame),
+        env={
+            "CAPTURE": str(capture),
+            "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY": str(public_key),
+        },
+    )
+
+    assert rejected.returncode != 0
+    assert "App vc-frame helper disagrees" in rejected.stderr
+
+
 def test_runtime_uninstall_uses_installed_generation_tool(tmp_path: Path) -> None:
     home = tmp_path / "home"
     runtime_home = home / ".local/share/vibecrafted"
@@ -444,8 +521,7 @@ def test_runtime_pack_rejects_an_unresolvable_path(tmp_path: Path) -> None:
 
 
 def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> None:
-    app = tmp_path / "Vibecrafted.app"
-    runtime = app / "Contents/Resources/runtime"
+    runtime = tmp_path / "runtime-payload"
     required = (
         "VERSION",
         "bin/python3",
@@ -482,20 +558,18 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
     )
     _foundation_manifest(runtime)
     _source_provenance(runtime)
-    terminal = app / "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
-    frame = app / "Contents/Helpers/vc-frame"
-    for helper in (terminal, frame):
-        helper.parent.mkdir(parents=True, exist_ok=True)
-        helper.write_text("#!/bin/sh\n", encoding="utf-8")
-        helper.chmod(0o755)
+    _seed_vc_frame_product_payload(runtime)
+    terminal = runtime / "bin/vc-terminal"
+    terminal.write_text("#!/bin/sh\n", encoding="utf-8")
+    terminal.chmod(0o755)
     output = tmp_path / "Vibecrafted_RuntimePack_fixture.tar.gz"
 
     result = subprocess.run(
         [
             "bash",
             str(PACKAGER),
-            "--app",
-            str(app),
+            "--payload-root",
+            str(runtime),
             "--output",
             str(output),
             "--source-revision",
@@ -558,6 +632,7 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
         helper.parent.mkdir(parents=True, exist_ok=True)
         helper.write_text("#!/bin/sh\n", encoding="utf-8")
         helper.chmod(0o755)
+    (runtime / "libexec/vc-frame").write_bytes(b"\x7fELF" + b"\x00" * 32)
     linux_output = tmp_path / "Vibecrafted_RuntimePack_fixture-linux-arm64.tar.gz"
     linux = subprocess.run(
         [
@@ -601,6 +676,28 @@ def test_runtime_pack_contract_rejects_missing_install_launcher(tmp_path: Path) 
         RuntimePackContractError,
         match="Runtime Pack installer payload is missing scripts/vibecrafted",
     ):
+        write_provenance(
+            payload,
+            carrier_basename="Vibecrafted_RuntimePack_fixture.tar.gz",
+            version=VERSION,
+            platform="darwin-arm64",
+            architecture="arm64",
+            source_revision=SOURCE_SHA,
+            terminal_revision=TERMINAL_SHA,
+            frame_revision=FRAME_SHA,
+        )
+
+
+def test_runtime_pack_contract_rejects_dead_vc_frame_wrapper_only(
+    tmp_path: Path,
+) -> None:
+    payload = tmp_path / "VibecraftedRuntime"
+    capture = tmp_path / "argv"
+    _fake_runtime_payload(payload, capture)
+    _source_provenance(payload)
+    (payload / "libexec/vc-frame").unlink()
+
+    with pytest.raises(RuntimePackContractError, match="native vc-frame is missing"):
         write_provenance(
             payload,
             carrier_basename="Vibecrafted_RuntimePack_fixture.tar.gz",

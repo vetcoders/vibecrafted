@@ -58,6 +58,7 @@ REQUIRED_FOUNDATION_EXECUTABLES = frozenset(
     }
 )
 FORBIDDEN_PAYLOAD_NAMES = frozenset({".DS_Store"})
+VC_FRAME_CONFIG_ROOT = Path("vibecrafted-core/vibecrafted_core/config/vc-frame")
 
 
 class RuntimePackContractError(RuntimeError):
@@ -89,6 +90,58 @@ def _runtime_installer_payload(root: Path) -> None:
             raise RuntimePackContractError(
                 f"Runtime Pack installer payload is not executable: {relative}"
             )
+
+
+def _native_executable(path: Path) -> bool:
+    try:
+        mode = path.lstat().st_mode
+        magic = path.read_bytes()[:4]
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(mode)
+        and stat.S_IMODE(mode) & 0o111 != 0
+        and (
+            magic == b"\x7fELF"
+            or magic
+            in {
+                b"\xca\xfe\xba\xbe",
+                b"\xbe\xba\xfe\xca",
+                b"\xfe\xed\xfa\xce",
+                b"\xce\xfa\xed\xfe",
+                b"\xfe\xed\xfa\xcf",
+                b"\xcf\xfa\xed\xfe",
+            }
+        )
+    )
+
+
+def _runtime_product_payload(root: Path) -> None:
+    """Close the carrier: a product wrapper without its frame is not a pack."""
+    native_frame = root / "libexec/vc-frame"
+    if not _native_executable(native_frame):
+        raise RuntimePackContractError(
+            "Runtime Pack native vc-frame is missing or is not Mach-O/ELF: "
+            "libexec/vc-frame"
+        )
+    wrapper = root / "bin/vc-frame"
+    try:
+        wrapper_mode = wrapper.lstat().st_mode
+    except OSError as exc:
+        raise RuntimePackContractError(
+            "Runtime Pack product wrapper is missing bin/vc-frame"
+        ) from exc
+    if not stat.S_ISREG(wrapper_mode) or stat.S_IMODE(wrapper_mode) & 0o111 == 0:
+        raise RuntimePackContractError(
+            "Runtime Pack product wrapper is not executable: bin/vc-frame"
+        )
+    config = root / VC_FRAME_CONFIG_ROOT
+    required = (config / "config.kdl", config / "layouts", config / "themes")
+    if not required[0].is_file() or not all(path.is_dir() for path in required[1:]):
+        raise RuntimePackContractError(
+            "Runtime Pack canonical vc-frame config is incomplete under "
+            f"{VC_FRAME_CONFIG_ROOT.as_posix()}"
+        )
 
 
 def _runtime_foundations(root: Path, *, verify_hashes: bool = True) -> dict[str, Any]:
@@ -313,6 +366,7 @@ def write_provenance(
     if not version or version != version.strip():
         raise RuntimePackContractError("Runtime Pack version is invalid")
     _runtime_installer_payload(payload_root)
+    _runtime_product_payload(payload_root)
     _runtime_foundations(payload_root)
     _source_provenance(payload_root, expected_revision=source_revision)
     if platform != f"{platform.rsplit('-', 1)[0]}-{architecture}":
@@ -421,6 +475,7 @@ def verify_provenance(
                 f"Runtime Pack {field} disagrees with the selected release asset"
             )
     _runtime_installer_payload(payload_root)
+    _runtime_product_payload(payload_root)
     _runtime_foundations(payload_root)
     _source_provenance(payload_root, expected_revision=revisions["vibecrafted"])
     if provenance["platform"] != (

@@ -26,11 +26,12 @@ SNAPSHOT_DONORS=0
 for argument in "$@"; do
   case "$argument" in
     --app-only) MODE="app" ;;
+    --runtime-pack-only) MODE="runtime-pack" ;;
     --no-notarize) MODE="dmg" ;;
     --notarize-only) MODE="notarize" ;;
     --snapshot-donors) SNAPSHOT_DONORS=1 ;;
     *)
-      echo "usage: $0 [--app-only|--no-notarize|--notarize-only] [--snapshot-donors]" >&2
+      echo "usage: $0 [--app-only|--runtime-pack-only|--no-notarize|--notarize-only] [--snapshot-donors]" >&2
       exit 2
       ;;
   esac
@@ -78,6 +79,7 @@ RUNTIME_PACK_RESOURCE_DIR="$APP/Contents/Resources/runtime-pack"
 EMBEDDED_RUNTIME_PACK="$RUNTIME_PACK_RESOURCE_DIR/$RUNTIME_PACK_NAME"
 EMBEDDED_RUNTIME_PACK_CHECKSUM="$EMBEDDED_RUNTIME_PACK.sha256"
 EMBEDDED_RUNTIME_PACK_SIGNATURE="$EMBEDDED_RUNTIME_PACK.sig"
+RUNTIME_PAYLOAD="$BUILD_DIR/runtime-pack-payload/VibecraftedRuntime"
 KEYS="${KEYS:-$HOME/.keys}"
 SPOT_MONO_FONT="${VIBECRAFTED_SPOT_MONO_FONT:-$KEYS/fonts/SpotMono.ttc}"
 SIGNING_IDENTITY_FILE="$KEYS/signing-identity.txt"
@@ -243,14 +245,21 @@ prepare_signing_identity() {
     || die "Developer ID identity is not available in the keychain"
 }
 
-for command in cargo codesign file git hdiutil install_name_tool make otool strip uv xcodebuild xcodegen xcrun; do
+for command in cargo codesign file git install_name_tool make otool strip uv; do
   require "$command"
 done
+if [[ "$MODE" != "runtime-pack" ]]; then
+  for command in hdiutil xcodebuild xcodegen xcrun; do
+    require "$command"
+  done
+fi
 [[ -f "$SIGNING_IDENTITY_FILE" ]] || die "missing $SIGNING_IDENTITY_FILE"
-[[ -f "$SPOT_MONO_FONT" ]] || die "missing licensed Spot Mono input: $SPOT_MONO_FONT"
-LC_ALL=C file -b "$SPOT_MONO_FONT" \
-  | grep -Eq '(OpenType|TrueType) font collection data' \
-  || die "Spot Mono input is not an OpenType/TrueType font collection"
+if [[ "$MODE" != "runtime-pack" ]]; then
+  [[ -f "$SPOT_MONO_FONT" ]] || die "missing licensed Spot Mono input: $SPOT_MONO_FONT"
+  LC_ALL=C file -b "$SPOT_MONO_FONT" \
+    | grep -Eq '(OpenType|TrueType) font collection data' \
+    || die "Spot Mono input is not an OpenType/TrueType font collection"
+fi
 prepare_signing_identity
 
 git_sha() { git -C "$1" rev-parse HEAD; }
@@ -443,12 +452,30 @@ materialize_donor_snapshots() {
     || die "VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT is set; failing on purpose so the reaper is exercised"
 }
 
-embed_runtime_pack() {
+produce_runtime_pack() {
   local -a packager_codesign_args=(--codesign-identity "$SIGNING_IDENTITY")
   if [[ -n "$TEMP_KEYCHAIN_PATH" ]]; then
     packager_codesign_args+=(--codesign-keychain "$TEMP_KEYCHAIN_PATH")
   fi
-  log "Producing the canonical Runtime Pack carrier once inside Vibecrafted.app"
+  log "Producing the canonical standalone Runtime Pack"
+  rm -f "$RUNTIME_PACK" "$RUNTIME_PACK_CHECKSUM" "$RUNTIME_PACK_SIGNATURE"
+  "$REPO_ROOT/scripts/package-runtime-pack.sh" \
+    --payload-root "$RUNTIME_PAYLOAD" --output "$RUNTIME_PACK" \
+    --source-revision "$ROOT_SHA" \
+    --terminal-revision "$(git_sha "$TERMINAL_REPO")" \
+    --frame-revision "$(git_sha "$FRAME_REPO")" \
+    --version "$RUNTIME_VERSION" \
+    --platform "$RUNTIME_PACK_PLATFORM" \
+    --architecture "$RUNTIME_PACK_ARCHITECTURE" \
+    "${packager_codesign_args[@]}"
+  verify_runtime_pack_macho_signatures "$RUNTIME_PACK" \
+    || die "standalone Runtime Pack contains an invalid or unsigned Mach-O"
+  /usr/bin/openssl dgst -sha256 -sign "$SIGNING_KEY" \
+    -out "$RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK"
+}
+
+embed_runtime_pack() {
+  log "Embedding the exact standalone Runtime Pack bytes in Vibecrafted.app"
   rm -rf "$RUNTIME_PACK_RESOURCE_DIR"
   mkdir -p "$RUNTIME_PACK_RESOURCE_DIR"
   install -m 0755 "$REPO_ROOT/scripts/install-runtime-pack.sh" \
@@ -457,19 +484,113 @@ embed_runtime_pack() {
   install -m 0644 \
     "$REPO_ROOT/vibecrafted-core/vibecrafted_core/trust/vibecrafted-signing-v1.pub" \
     "$RUNTIME_PACK_RESOURCE_DIR/vibecrafted-signing-v1.pub"
-  "$REPO_ROOT/scripts/package-runtime-pack.sh" \
-    --app "$APP" --output "$EMBEDDED_RUNTIME_PACK" \
-    --source-revision "$ROOT_SHA" \
-    --terminal-revision "$(git_sha "$TERMINAL_REPO")" \
-    --frame-revision "$(git_sha "$FRAME_REPO")" \
-    --version "$RUNTIME_VERSION" \
-    --platform "$RUNTIME_PACK_PLATFORM" \
-    --architecture "$RUNTIME_PACK_ARCHITECTURE" \
-    "${packager_codesign_args[@]}"
+  install -m 0644 "$RUNTIME_PACK" "$EMBEDDED_RUNTIME_PACK"
+  install -m 0644 "$RUNTIME_PACK_CHECKSUM" "$EMBEDDED_RUNTIME_PACK_CHECKSUM"
+  install -m 0644 "$RUNTIME_PACK_SIGNATURE" "$EMBEDDED_RUNTIME_PACK_SIGNATURE"
+  cmp "$RUNTIME_PACK" "$EMBEDDED_RUNTIME_PACK"
+  cmp "$RUNTIME_PACK_CHECKSUM" "$EMBEDDED_RUNTIME_PACK_CHECKSUM"
+  cmp "$RUNTIME_PACK_SIGNATURE" "$EMBEDDED_RUNTIME_PACK_SIGNATURE"
   verify_runtime_pack_macho_signatures "$EMBEDDED_RUNTIME_PACK" \
     || die "embedded Runtime Pack contains an invalid or unsigned Mach-O"
-  /usr/bin/openssl dgst -sha256 -sign "$SIGNING_KEY" \
-    -out "$EMBEDDED_RUNTIME_PACK_SIGNATURE" "$EMBEDDED_RUNTIME_PACK"
+}
+
+materialize_runtime_payload() {
+  local runtime="$1"
+  local terminal_source="$2"
+  local frame_source="$3"
+  local start_source="$4"
+  local server_source="$5"
+  local server_site="$6"
+  local canonical_deck python_seed seed_python python_home
+
+  log "Materializing the App-independent Runtime Pack payload"
+  rm -rf "$runtime"
+  mkdir -p "$runtime/bin" "$runtime/libexec" "$runtime/scripts" \
+    "$runtime/vibecrafted-core" "$runtime/config" "$runtime/server/site"
+  printf '%s\n' "$RUNTIME_VERSION" > "$runtime/VERSION"
+  canonical_deck="$REPO_ROOT/vibecrafted-core/vibecrafted_core/deck/vibecrafted"
+  install -m 0755 "$canonical_deck" "$runtime/scripts/vibecrafted"
+  install -m 0755 "$canonical_deck" "$runtime/bin/vibecrafted"
+  install -m 0755 "$REPO_ROOT/scripts/vetcoders_install.py" \
+    "$runtime/scripts/vetcoders_install.py"
+  install -m 0644 "$REPO_ROOT/scripts/distribution_manifest.py" \
+    "$runtime/scripts/distribution_manifest.py"
+  install -m 0644 "$REPO_ROOT/scripts/installer_brand.py" \
+    "$runtime/scripts/installer_brand.py"
+  install -m 0755 "$REPO_ROOT/scripts/vc-frame-product-entry.sh" \
+    "$runtime/scripts/vc-frame-product-entry.sh"
+  "$REPO_ROOT/scripts/project-python" "$REPO_ROOT/scripts/distribution_manifest.py" \
+    carrier --source "$REPO_ROOT" --output "$runtime/source-provenance.json" \
+    --owner-repo vetcoders/vibecrafted --source-revision "$ROOT_SHA"
+  /bin/cp -R "$REPO_ROOT/bin/." "$runtime/bin/"
+  /bin/cp -R "$REPO_ROOT/vibecrafted-core/vibecrafted_core" \
+    "$runtime/vibecrafted-core/"
+  printf '%s\n' "$RUNTIME_VERSION" \
+    > "$runtime/vibecrafted-core/vibecrafted_core/VERSION"
+  /bin/cp -R "$REPO_ROOT/config/." "$runtime/config/"
+  "$REPO_ROOT/scripts/stage-runtime-foundations.sh" "$runtime/bin"
+  /bin/cp -R "$server_site/." "$runtime/server/site/"
+  install -m 0755 "$start_source" "$runtime/bin/vc-start"
+  install -m 0755 "$server_source" "$runtime/bin/vc-server"
+  install -m 0755 "$server_source" "$runtime/bin/vibecrafted-server-web"
+  install -m 0755 "$terminal_source" "$runtime/bin/vc-terminal"
+  install -m 0755 "$frame_source" "$runtime/libexec/vc-frame"
+  install -m 0755 "$runtime/scripts/vc-frame-product-entry.sh" \
+    "$runtime/bin/vc-frame"
+
+  find "$runtime/vibecrafted-core" \
+    -type d -name __pycache__ -prune -exec rm -rf {} +
+  find "$runtime/vibecrafted-core" \
+    -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+
+  log "Embedding a private Python runtime; no shell profile or host Python is used"
+  python_seed="$(mktemp -d "$BUILD_DIR/python-seed.XXXXXX")"
+  uv python install 3.12.3 --install-dir "$python_seed" --no-bin
+  seed_python="$(find "$python_seed" -type f -path '*/bin/python3.12' -print -quit)"
+  [[ -n "$seed_python" ]] || die "uv did not produce the requested CPython"
+  python_home="$(cd "$(dirname "$seed_python")/.." && pwd)"
+  mkdir -p "$runtime/python" "$runtime/python-site"
+  /bin/cp -RL "$python_home/." "$runtime/python/"
+  uv pip install --python "$seed_python" --target "$runtime/python-site" \
+    'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7' 'screenscribe==0.1.19'
+  install_name_tool -id '@loader_path/libpython3.12.dylib' \
+    "$runtime/python/lib/libpython3.12.dylib"
+  rm -rf "$runtime/python-site/bin"
+  normalize_embedded_python_paths "$runtime" "$python_seed"
+
+  find "$runtime" -type f -name '*.pyc' -delete
+  find "$runtime" -depth -type d -name __pycache__ -empty -delete
+  find "$runtime" -type f -name '.DS_Store' -delete
+  # shellcheck disable=SC2016
+  printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    'runtime_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"' \
+    'export PYTHONNOUSERSITE=1' \
+    'export PYTHONDONTWRITEBYTECODE=1' \
+    'export PYTHONPATH="$runtime_root/vibecrafted-core:$runtime_root/python-site"' \
+    'exec "$runtime_root/python/bin/python3.12" "$@"' \
+    > "$runtime/bin/python3"
+  chmod 0755 "$runtime/bin/python3"
+  "$REPO_ROOT/scripts/project-python" \
+    "$REPO_ROOT/scripts/render-python-entrypoint-launchers.py" \
+    --pyproject "$REPO_ROOT/vibecrafted-core/pyproject.toml" \
+    --bin-dir "$runtime/bin"
+  # shellcheck disable=SC2016
+  printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    'runtime_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"' \
+    'exec "$runtime_root/bin/python3" -c '\''from screenscribe.bootstrap import main; main()'\'' "$@"' \
+    > "$runtime/bin/screenscribe"
+  chmod 0755 "$runtime/bin/screenscribe"
+  "$runtime/bin/screenscribe" --version >/dev/null
+
+  /usr/bin/strip -S "$runtime/bin/vc-terminal" "$runtime/libexec/vc-frame"
+  if find "$runtime" -type l -print -quit | grep -q .; then
+    die "Runtime Pack payload contains symlinks"
+  fi
+  assert_payload_is_anonymous "$runtime" "Runtime Pack payload"
 }
 
 build_product() {
@@ -545,6 +666,12 @@ build_product() {
   [[ -x "$server_source" ]] || die "Vibecrafted Server release binary is missing"
   [[ -d "$server_site/pkg" ]] || die "Vibecrafted Server hydrated site is missing"
 
+  materialize_runtime_payload "$RUNTIME_PAYLOAD" \
+    "$terminal_source" "$frame_source" "$start_source" \
+    "$server_source" "$server_site"
+  produce_runtime_pack
+  [[ "$MODE" == "runtime-pack" ]] && return
+
   log "Building the single Swift host app"
   local generated_project="vibecrafted-app/shell-agent/app/Vibecrafted.xcodeproj"
   if git -C "$REPO_ROOT" ls-files --error-unmatch "$generated_project" >/dev/null 2>&1; then
@@ -587,10 +714,11 @@ build_product() {
   install -m 0644 "$SPOT_MONO_FONT" "$resources/fonts/SpotMono.ttc"
   remove_ambient_swift_rpath
 
-  log "Embedding product modules and the checkout-free runtime"
+  log "Embedding the already-materialized Runtime Pack payload"
   local runtime="$resources/runtime"
   local terminal_app="$APP/Contents/Helpers/vc-terminal.app"
-  mkdir -p "$APP/Contents/Helpers" "$resources/terminal" "$runtime/bin"
+  mkdir -p "$APP/Contents/Helpers" "$resources/terminal"
+  /usr/bin/ditto "$RUNTIME_PAYLOAD" "$runtime"
   /usr/bin/ditto "$TERMINAL_REPO/extra/osx/vc-terminal.app" "$terminal_app"
   mkdir -p "$terminal_app/Contents/MacOS" "$terminal_app/Contents/Resources"
   install -m 0755 "$terminal_source" "$terminal_app/Contents/MacOS/alacritty"
@@ -603,9 +731,6 @@ build_product() {
     "$terminal_app/Contents/Info.plist")" == "alacritty.icns" ]] \
     || die "vc-terminal helper bundle icon contract is invalid"
   install -m 0755 "$frame_source" "$APP/Contents/Helpers/vc-frame"
-  install -m 0755 "$start_source" "$runtime/bin/vc-start"
-  install -m 0755 "$server_source" "$runtime/bin/vc-server"
-  install -m 0755 "$server_source" "$runtime/bin/vibecrafted-server-web"
 
   # Rust 1.95 applies profile `strip = true` while compiling host proc-macros,
   # which makes crates such as include_dir and vte_generate_state_changes
@@ -620,118 +745,6 @@ build_product() {
     "$APP/Contents/Helpers/vc-frame"
   install -m 0644 "$REPO_ROOT/config/vc-terminal/vibecrafted.toml" \
     "$resources/terminal/vibecrafted.toml"
-  printf '%s\n' "$RUNTIME_VERSION" > "$runtime/VERSION"
-  mkdir -p "$runtime/scripts" "$runtime/vibecrafted-core" "$runtime/config"
-  local canonical_deck="$REPO_ROOT/vibecrafted-core/vibecrafted_core/deck/vibecrafted"
-  install -m 0755 "$canonical_deck" "$runtime/scripts/vibecrafted"
-  install -m 0755 "$canonical_deck" "$runtime/bin/vibecrafted"
-  # The DMG carries the same installer used by source/CLI channels. The native
-  # app invokes its Runtime Pack mode; installed launchers invoke its uninstall
-  # mode. Keep the small import closure beside it so it runs under the bundled
-  # interpreter without reaching back into a checkout or the host Python.
-  install -m 0755 "$REPO_ROOT/scripts/vetcoders_install.py" \
-    "$runtime/scripts/vetcoders_install.py"
-  install -m 0644 "$REPO_ROOT/scripts/distribution_manifest.py" \
-    "$runtime/scripts/distribution_manifest.py"
-  install -m 0644 "$REPO_ROOT/scripts/installer_brand.py" \
-    "$runtime/scripts/installer_brand.py"
-  install -m 0755 "$REPO_ROOT/scripts/vc-frame-product-entry.sh" \
-    "$runtime/scripts/vc-frame-product-entry.sh"
-  # A native Runtime Pack needs only the closed carrier, not a second copy of
-  # the source distribution. Derive it directly from immutable Git objects so
-  # ignored host metadata cannot race a temporary materialized payload.
-  "$REPO_ROOT/scripts/project-python" "$REPO_ROOT/scripts/distribution_manifest.py" \
-    carrier --source "$REPO_ROOT" --output "$runtime/source-provenance.json" \
-    --owner-repo vetcoders/vibecrafted --source-revision "$ROOT_SHA"
-  /bin/cp -R "$REPO_ROOT/bin/." "$runtime/bin/"
-  /bin/cp -R "$REPO_ROOT/vibecrafted-core/vibecrafted_core" \
-    "$runtime/vibecrafted-core/"
-  printf '%s\n' "$RUNTIME_VERSION" \
-    > "$runtime/vibecrafted-core/vibecrafted_core/VERSION"
-  /bin/cp -R "$REPO_ROOT/config/." "$runtime/config/"
-  log "Embedding the complete Runtime Foundations payload"
-  "$REPO_ROOT/scripts/stage-runtime-foundations.sh" "$runtime/bin"
-  mkdir -p "$runtime/server/site"
-  /bin/cp -R "$server_site/." "$runtime/server/site/"
-  # The Living Tree may contain ignored interpreter caches. They are never
-  # product inputs: adjacent verifier bytecode could shadow the signed source.
-  find "$runtime/vibecrafted-core" \
-    -type d -name __pycache__ -prune -exec rm -rf {} +
-  find "$runtime/vibecrafted-core" \
-    -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
-
-  log "Embedding a private Python runtime; no shell profile or host Python is used"
-  local python_seed seed_python python_home
-  python_seed="$(mktemp -d "$BUILD_DIR/python-seed.XXXXXX")"
-  uv python install 3.12.3 --install-dir "$python_seed" --no-bin
-  seed_python="$(find "$python_seed" -type f -path '*/bin/python3.12' -print -quit)"
-  [[ -n "$seed_python" ]] || die "uv did not produce the requested CPython"
-  python_home="$(cd "$(dirname "$seed_python")/.." && pwd)"
-  mkdir -p "$runtime/python" "$runtime/python-site"
-  /bin/cp -RL "$python_home/." "$runtime/python/"
-  uv pip install --python "$seed_python" --target "$runtime/python-site" \
-    'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7' 'screenscribe==0.1.19'
-  install_name_tool -id '@loader_path/libpython3.12.dylib' \
-    "$runtime/python/lib/libpython3.12.dylib"
-
-  # pip writes each console script with a shebang naming the interpreter it
-  # installed against — here, the mktemp seed under $BUILD_DIR that this build
-  # deletes on its way out. MEASURED on the 4.1.0 payload:
-  # runtime/python-site/bin/jsonschema opens with an exec line pointing at
-  # .../python-seed.ZOVHSX/.../bin/python3.12, a path no customer has. So this
-  # directory was never merely a leak: it shipped scripts that cannot run.
-  #
-  # Deleted rather than rewritten, because nothing invokes it. python-site goes
-  # on PYTHONPATH and never on PATH, and every shipped command is rendered into
-  # runtime/bin from pyproject.toml a few lines below.
-  rm -rf "$runtime/python-site/bin"
-
-  # CPython records the prefix it was installed under in `sysconfig`, and uv's
-  # distribution is no exception: 27 occurrences of the same ephemeral seed
-  # directory in runtime/python/lib/python3.12/_sysconfigdata__darwin_darwin.py.
-  # Those values are consulted only when compiling a C extension, which the
-  # shipped runtime never does, so rewriting the literal is honest — and the
-  # rewrite is confined to files that decode as UTF-8. A Mach-O naming the seed
-  # would need a length-preserving patch, so it is deliberately left alone and
-  # left for the payload gate to catch; measured on 4.1.0, no binary does.
-  normalize_embedded_python_paths "$runtime" "$python_seed"
-
-  find "$runtime" -type f -name '*.pyc' -delete
-  find "$runtime" -depth -type d -name __pycache__ -empty -delete
-  find "$runtime" -type f -name '.DS_Store' -delete
-  # These literals are the relocatable wrapper payload and expand only when
-  # the installed wrapper runs inside Vibecrafted.app.
-  # shellcheck disable=SC2016
-  printf '%s\n' \
-    '#!/bin/bash' \
-    'set -euo pipefail' \
-    'runtime_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"' \
-    'export PYTHONNOUSERSITE=1' \
-    'export PYTHONDONTWRITEBYTECODE=1' \
-    'export PYTHONPATH="$runtime_root/vibecrafted-core:$runtime_root/python-site"' \
-    'exec "$runtime_root/python/bin/python3.12" "$@"' \
-    > "$runtime/bin/python3"
-  chmod 0755 "$runtime/bin/python3"
-  # pyproject.toml is the one public Python-command manifest. Preserve curated
-  # native/shell implementations already present in bin and fill every missing
-  # console script from that manifest so the app bootstrap cannot silently
-  # omit a shipped command such as vc-git.
-  "$REPO_ROOT/scripts/project-python" \
-    "$REPO_ROOT/scripts/render-python-entrypoint-launchers.py" \
-    --pyproject "$REPO_ROOT/vibecrafted-core/pyproject.toml" \
-    --bin-dir "$runtime/bin"
-  # ScreenScribe is a required product tool delivered inside the same private
-  # Python as Vibecrafted. Its PyPI console script is deliberately discarded
-  # above because the generated shebang names the ephemeral build seed.
-  # shellcheck disable=SC2016
-  printf '%s\n' \
-    '#!/bin/bash' \
-    'set -euo pipefail' \
-    'runtime_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"' \
-    'exec "$runtime_root/bin/python3" -c '\''from screenscribe.bootstrap import main; main()'\'' "$@"' \
-    > "$runtime/bin/screenscribe"
-  chmod 0755 "$runtime/bin/screenscribe"
-  "$runtime/bin/screenscribe" --version >/dev/null
 
   if find "$APP" -type l -print -quit | grep -q .; then
     die "assembled app contains symlinks"
@@ -818,12 +831,13 @@ emit_release_tuple() {
   )
 }
 
-emit_runtime_pack() {
-  log "Projecting the exact App-embedded Runtime Pack bytes as the standalone asset"
-  rm -f "$RUNTIME_PACK" "$RUNTIME_PACK_CHECKSUM" "$RUNTIME_PACK_SIGNATURE"
-  install -m 0644 "$EMBEDDED_RUNTIME_PACK" "$RUNTIME_PACK"
-  install -m 0644 "$EMBEDDED_RUNTIME_PACK_CHECKSUM" "$RUNTIME_PACK_CHECKSUM"
-  install -m 0644 "$EMBEDDED_RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK_SIGNATURE"
+verify_runtime_pack_projection() {
+  log "Verifying App carries the exact standalone Runtime Pack bytes"
+  [[ -s "$RUNTIME_PACK" ]] || die "standalone Runtime Pack is missing: $RUNTIME_PACK"
+  [[ -s "$RUNTIME_PACK_CHECKSUM" ]] \
+    || die "standalone Runtime Pack checksum is missing: $RUNTIME_PACK_CHECKSUM"
+  [[ -s "$RUNTIME_PACK_SIGNATURE" ]] \
+    || die "standalone Runtime Pack signature is missing: $RUNTIME_PACK_SIGNATURE"
   cmp "$EMBEDDED_RUNTIME_PACK" "$RUNTIME_PACK"
   cmp "$EMBEDDED_RUNTIME_PACK_CHECKSUM" "$RUNTIME_PACK_CHECKSUM"
   cmp "$EMBEDDED_RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK_SIGNATURE"
@@ -831,14 +845,15 @@ emit_runtime_pack() {
 
 if [[ "$MODE" == "notarize" ]]; then
   [[ -d "$APP" ]] || die "missing $APP; run make dmg-signed first"
-  emit_runtime_pack
+  verify_runtime_pack_projection
   notarize_product
   emit_release_tuple
   exit 0
 fi
 
 build_product
-emit_runtime_pack
+[[ "$MODE" == "runtime-pack" ]] && exit 0
+verify_runtime_pack_projection
 [[ "$MODE" == "app" ]] && exit 0
 if [[ "$MODE" == "dmg" ]]; then
   create_dmg

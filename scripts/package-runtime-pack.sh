@@ -7,7 +7,6 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 . "$REPO_ROOT/scripts/lib/macho-signing.sh"
 
-app=""
 payload_root=""
 output=""
 source_revision=""
@@ -20,11 +19,6 @@ codesign_identity=""
 codesign_keychain=""
 while (($#)); do
   case "$1" in
-    --app)
-      (($# >= 2)) || die "--app requires a path"
-      app="$2"
-      shift 2
-      ;;
     --payload-root)
       (($# >= 2)) || die "--payload-root requires a path"
       payload_root="$2"
@@ -58,7 +52,7 @@ while (($#)); do
       shift 2
       ;;
     --help|-h)
-      printf 'usage: %s (--app <Vibecrafted.app> | --payload-root <dir>) --output <RuntimePack.tar.gz> --source-revision <sha> --terminal-revision <sha> --frame-revision <sha> --version <version> --platform <platform> --architecture <arch> [--codesign-identity <identity> [--codesign-keychain <path>]]\n' "$0"
+      printf 'usage: %s --payload-root <dir> --output <RuntimePack.tar.gz> --source-revision <sha> --terminal-revision <sha> --frame-revision <sha> --version <version> --platform <platform> --architecture <arch> [--codesign-identity <identity> [--codesign-keychain <path>]]\n' "$0"
       exit 0
       ;;
     *) die "unknown argument: $1" ;;
@@ -68,42 +62,15 @@ done
 for required_value in output source_revision terminal_revision frame_revision version platform architecture; do
   [[ -n "${!required_value}" ]] || die "--$required_value is required"
 done
-if [[ -n "$app" && -n "$payload_root" ]]; then
-  die "--app and --payload-root are mutually exclusive"
-fi
-if [[ -z "$app" && -z "$payload_root" ]]; then
-  die "one of --app or --payload-root is required"
-fi
+[[ -n "$payload_root" ]] || die "--payload-root is required"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/vibecrafted-runtime-pack-build.XXXXXX")"
 trap 'rm -rf -- "$work"' EXIT INT TERM HUP
 root="$work/VibecraftedRuntime"
 mkdir -p "$root"
-if [[ -n "$app" ]]; then
-  app_name="${app##*/}"
-  app_parent="$(cd "$(dirname "$app")" 2>/dev/null && pwd)" \
-    || die "cannot resolve app path: $app"
-  app="$app_parent/$app_name"
-  runtime="$app/Contents/Resources/runtime"
-  terminal="$app/Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
-  frame="$app/Contents/Helpers/vc-frame"
-  [[ -d "$runtime" ]] || die "app has no Runtime Pack payload: $runtime"
-  [[ -x "$terminal" ]] || die "app has no terminal host: $terminal"
-  [[ -x "$frame" ]] || die "app has no vc-frame helper: $frame"
-  if command -v ditto >/dev/null 2>&1; then
-    /usr/bin/ditto "$runtime" "$root"
-  else
-    cp -R "$runtime/." "$root/"
-  fi
-  install -m 0755 "$terminal" "$root/bin/vc-terminal"
-  mkdir -p "$root/libexec"
-  install -m 0755 "$frame" "$root/libexec/vc-frame"
-  install -m 0755 "$root/scripts/vc-frame-product-entry.sh" "$root/bin/vc-frame"
-else
-  payload_root="$(cd "$payload_root" 2>/dev/null && pwd -P)" \
-    || die "cannot resolve payload root"
-  cp -R "$payload_root/." "$root/"
-fi
+payload_root="$(cd "$payload_root" 2>/dev/null && pwd -P)" \
+  || die "cannot resolve payload root"
+cp -R "$payload_root/." "$root/"
 
 # Finder metadata is mutable host state, not product input. Remove it at the
 # final byte-owner boundary; the closed provenance writer below rejects a race

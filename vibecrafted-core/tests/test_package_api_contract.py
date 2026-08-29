@@ -37,6 +37,31 @@ def test_lazy_workflow_exports_load_on_demand() -> None:
     assert callable(vibecrafted_core.vibecrafted_launcher)
 
 
+def test_bare_package_import_does_not_preload_control_plane() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-W",
+            "error",
+            "-c",
+            (
+                "import sys, vibecrafted_core; "
+                "assert 'vibecrafted_core.control_plane' not in sys.modules"
+            ),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            **__import__("os").environ,
+            "PYTHONPATH": str(CORE_ROOT),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_lazy_access_caches_into_module_globals() -> None:
     # Second access must return the same object the lazy loader cached.
     first = vibecrafted_core.normalize_launch_spec

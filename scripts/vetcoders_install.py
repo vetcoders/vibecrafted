@@ -15677,7 +15677,6 @@ def _runtime_install_result(
     generation: Path,
     app_root: Path | None,
     paths: Mapping[str, Path],
-    terminal_host: Path,
 ) -> dict[str, str]:
     product_config = paths["product_config"]
     return {
@@ -15685,7 +15684,7 @@ def _runtime_install_result(
         "root": str(generation),
         "launcher": str(paths["launcher_home"] / "vibecrafted"),
         "terminal": str(generation / "bin/vc-terminal"),
-        "terminal_host": str(terminal_host),
+        "terminal_host": str(generation / "bin/vc-terminal"),
         # AppDelegate exports this as VIBECRAFTED_VC_FRAME_BIN for the public
         # product entry. Point it at the native provider, never back at the
         # wrapper itself, or the first `vc-frame ls` recursively execs the
@@ -15718,7 +15717,6 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
     _refuse_runtime_pack_downgrade(
         payload_root,
         runtime_home,
-        allow_older=bool(getattr(args, "allow_older_runtime", False)),
     )
     receipt_path = _runtime_receipt_path(runtime_home)
     previous = _load_runtime_install_receipt(receipt_path)
@@ -15777,23 +15775,6 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             shutil.copytree(payload_root, staging)
             bin_dir = staging / "bin"
             bin_dir.mkdir(parents=True, exist_ok=True)
-            if args.terminal_host:
-                shutil.copy2(
-                    Path(args.terminal_host).expanduser(), bin_dir / "vc-terminal"
-                )
-                (bin_dir / "vc-terminal").chmod(0o755)
-            if args.frame_helper:
-                libexec_dir = staging / "libexec"
-                libexec_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(
-                    Path(args.frame_helper).expanduser(), libexec_dir / "vc-frame"
-                )
-                (libexec_dir / "vc-frame").chmod(0o755)
-                shutil.copy2(
-                    staging / "scripts/vc-frame-product-entry.sh",
-                    bin_dir / "vc-frame",
-                )
-                (bin_dir / "vc-frame").chmod(0o755)
             _materialize_vc_frame_generation(staging)
             _materialize_runtime_generation_entrypoint(staging)
             _materialize_runtime_generation_vc_frame_entry(staging)
@@ -15818,11 +15799,7 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
                 shutil.rmtree(staging)
     _assert_runtime_tree_has_no_symlinks(generation)
 
-    terminal_host = (
-        Path(args.terminal_host).expanduser().resolve()
-        if args.terminal_host
-        else generation / "bin/vc-terminal"
-    )
+    terminal_host = generation / "bin/vc-terminal"
     required = [
         generation / "bin/vibecrafted",
         generation / "bin/loct",
@@ -16051,7 +16028,6 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         generation=generation,
         app_root=app_root,
         paths=paths,
-        terminal_host=terminal_host,
     )
     result["tools_current"] = str(current_link)
     result["skills"] = str(len(skill_names))
@@ -16124,9 +16100,7 @@ def _runtime_pack_downgrade(
     return reasons
 
 
-def _refuse_runtime_pack_downgrade(
-    payload_root: Path, runtime_home: Path, *, allow_older: bool
-) -> None:
+def _refuse_runtime_pack_downgrade(payload_root: Path, runtime_home: Path) -> None:
     active_path = runtime_home / "active.json"
     if not active_path.is_file():
         return
@@ -16144,15 +16118,9 @@ def _refuse_runtime_pack_downgrade(
     if not reasons:
         return
     detail = "\n  ".join(reasons)
-    if allow_older:
-        print(
-            f"warning: installing an older Runtime Pack (--allow-older-runtime):\n  {detail}"
-        )
-        return
     raise RuntimeError(
         "refusing to replace a newer active runtime with an older Runtime Pack "
-        "(an upgrade never takes the founder's tools backwards; "
-        "pass --allow-older-runtime to do it on purpose):\n  " + detail
+        "(an upgrade never takes the Founder's tools backwards):\n  " + detail
     )
 
 
@@ -16619,13 +16587,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     p_runtime_install.add_argument("--payload-root", required=True)
     p_runtime_install.add_argument("--app-root")
-    p_runtime_install.add_argument("--terminal-host")
-    p_runtime_install.add_argument("--frame-helper")
-    p_runtime_install.add_argument(
-        "--allow-older-runtime",
-        action="store_true",
-        help="Install a Runtime Pack built before the active generation (explicit downgrade)",
-    )
 
     p_runtime_uninstall = sub.add_parser(
         "runtime-uninstall", help="Undo the receipted Runtime Pack install"

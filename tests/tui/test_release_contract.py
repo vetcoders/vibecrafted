@@ -337,8 +337,8 @@ def test_builder_emits_the_canonical_versioned_dmg_and_checksum() -> None:
         in builder
     )
     assert '"$REPO_ROOT/scripts/package-runtime-pack.sh"' in builder
-    assert '-out "$EMBEDDED_RUNTIME_PACK_SIGNATURE" "$EMBEDDED_RUNTIME_PACK"' in builder
-    assert 'install -m 0644 "$EMBEDDED_RUNTIME_PACK" "$RUNTIME_PACK"' in builder
+    assert '-out "$RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK"' in builder
+    assert 'install -m 0644 "$RUNTIME_PACK" "$EMBEDDED_RUNTIME_PACK"' in builder
     assert 'cmp "$EMBEDDED_RUNTIME_PACK" "$RUNTIME_PACK"' in builder
     assert '--runtime-pack "$RUNTIME_PACK"' in builder
     assert 'rm -f "$DMG_CHECKSUM" "$LEGACY_DMG"' in builder
@@ -362,7 +362,7 @@ def test_runtime_pack_signing_happens_after_final_copy_and_before_archive() -> N
         encoding="utf-8"
     )
 
-    copied = packager.index('install -m 0755 "$terminal" "$root/bin/vc-terminal"')
+    copied = packager.index('cp -R "$payload_root/." "$root/"')
     signed = packager.index('sign_macho_tree "$root"')
     verified = packager.index('verify_macho_tree "$root" 1')
     foundations = packager.index("refresh-foundations")
@@ -370,17 +370,31 @@ def test_runtime_pack_signing_happens_after_final_copy_and_before_archive() -> N
     archived = packager.index('-czf "$candidate"')
     assert copied < signed < verified < foundations < inventoried < archived
 
+    producer = builder.split("produce_runtime_pack() {", 1)[1].split(
+        "\nembed_runtime_pack() {", 1
+    )[0]
+    materializer = builder.split("materialize_runtime_payload() {", 1)[1].split(
+        "\nbuild_product() {", 1
+    )[0]
+    embed = builder.split("embed_runtime_pack() {", 1)[1].split(
+        "\nmaterialize_runtime_payload() {", 1
+    )[0]
+    assert '--payload-root "$RUNTIME_PAYLOAD"' in producer
+    assert '--app "$APP"' not in producer
+    assert (
+        'install -m 0755 "$terminal_source" "$runtime/bin/vc-terminal"' in materializer
+    )
+    assert 'install -m 0755 "$frame_source" "$runtime/libexec/vc-frame"' in materializer
+    assert 'install -m 0644 "$RUNTIME_PACK" "$EMBEDDED_RUNTIME_PACK"' in embed
     assert '--codesign-identity "$SIGNING_IDENTITY"' in builder
     assert (
         'packager_codesign_args+=(--codesign-keychain "$TEMP_KEYCHAIN_PATH")' in builder
     )
-    embedded_preflight = builder.index(
-        'verify_runtime_pack_macho_signatures "$EMBEDDED_RUNTIME_PACK"'
+    standalone_preflight = builder.index(
+        'verify_runtime_pack_macho_signatures "$RUNTIME_PACK"'
     )
-    carrier_signature = builder.index(
-        '-out "$EMBEDDED_RUNTIME_PACK_SIGNATURE" "$EMBEDDED_RUNTIME_PACK"'
-    )
-    assert embedded_preflight < carrier_signature
+    carrier_signature = builder.index('-out "$RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK"')
+    assert standalone_preflight < carrier_signature
 
 
 def test_exact_release_gate_is_release_only_and_repeats_the_repo_verifier() -> None:
@@ -701,9 +715,14 @@ def test_dirty_donors_are_a_release_flag_with_a_reaper_not_a_manual_ritual() -> 
     # $(touch /tmp/proof)'` created the file, because zsh evaluates command
     # substitution while building the exec's argv. (A `;` lands after `exec`
     # and never runs — the vector is narrower than it looks, and real.)
-    for flag in ("--app-only", "--no-notarize", "--notarize-only"):
+    for flag in (
+        "--app-only",
+        "--runtime-pack-only",
+        "--no-notarize",
+        "--notarize-only",
+    ):
         assert f"{flag} $${{=VC_RELEASE_FLAGS}}" in makefile, flag
-    assert makefile.count("VC_RELEASE_FLAGS='$(RELEASE_FLAGS)'") == 4
+    assert makefile.count("VC_RELEASE_FLAGS='$(RELEASE_FLAGS)'") == 5
     # The only place $(RELEASE_FLAGS) may still be expanded is that leading
     # environment assignment. Nothing after `zsh -ic` may name it, because
     # everything after `zsh -ic` is source.
