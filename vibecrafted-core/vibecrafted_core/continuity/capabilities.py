@@ -288,6 +288,42 @@ CAPABILITIES: Mapping[str, ProviderCapability] = {
             "shared Living Tree — both forbidden for recovery"
         ),
     ),
+    "cursor": ProviderCapability(
+        agent="cursor",
+        execution=EXECUTABLE,
+        session_id_shape=_SESSION_TOKEN,
+        session_id_sources=(
+            "stream_json_init_event",
+            "transcript_session_line",
+            "run_meta",
+        ),
+        interactive_resume=SUPPORTED,
+        noninteractive_resume=UNVERIFIED,
+        native_fork=UNSUPPORTED,
+        fork_runtime_restrictions="no fork surface in cursor-agent 2026.08.x",
+        prompt_transport="stdin",
+        session_identity_event=(
+            "stream-json `system`/`init` event carrying `session_id`"
+        ),
+        cwd_safety=(
+            "runs in invocation cwd; `--workspace` overrides; no "
+            "checkout-mutating flags"
+        ),
+        resume_preserves_cache=None,
+        forbidden_flags=(),
+        probe_recipe=ProbeRecipe(
+            cli="cursor-agent",
+            required_markers=("--resume", "--print", "--output-format"),
+        ),
+        notes=(
+            "cursor-agent 2026.08.25-3e8eec8 probed on host 2026-08-29: "
+            "agent key is `cursor`, binary is `cursor-agent`; `-p` accepts "
+            "prompt on argv or stdin; `--output-format stream-json` emits "
+            "claude-shaped init/assistant/result events. Interactive "
+            "`--resume [chatId]` exists; headless `-p --resume <id>` is "
+            "UNVERIFIED — core native resume fails closed until proven"
+        ),
+    ),
 }
 
 

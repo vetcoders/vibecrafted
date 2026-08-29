@@ -160,7 +160,7 @@ additional_tools = "Additional tools"
 [diagnostics.commands]
 foundations = ["loctree-mcp", "aicx-mcp", "prview", "screenscribe"]
 toolchains = ["python3", "node", "git", "rsync"]
-agents = ["claude", "codex", "agy", "junie", "grok"]
+agents = ["claude", "codex", "agy", "junie", "grok", "cursor"]
 additional_tools = ["mise", "starship", "atuin", "zoxide"]
 
 [diagnostics.paths]

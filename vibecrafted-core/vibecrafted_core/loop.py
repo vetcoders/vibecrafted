@@ -428,11 +428,12 @@ def cmd_await_run(args: argparse.Namespace) -> int:
         "agy",
         "junie",
         "grok",
+        "cursor",
         "opencode",
     }:
         ui.err(
             f"unknown agent: {args.agent}",
-            fix="use one of: claude · codex · gemini · agy · junie · grok · opencode",
+            fix="use one of: claude · codex · gemini · agy · junie · grok · cursor · opencode",
         )
         return 1
     if not args.run_id:
@@ -497,11 +498,12 @@ def cmd_spanko(args: argparse.Namespace) -> int:
         "agy",
         "junie",
         "grok",
+        "cursor",
         "opencode",
     }:
         ui.err(
             f"unknown agent: {args.agent}",
-            fix="use one of: claude · codex · gemini · agy · junie · grok · opencode",
+            fix="use one of: claude · codex · gemini · agy · junie · grok · cursor · opencode",
         )
         return 1
     if not args.run_id:

@@ -104,7 +104,7 @@ from vibecrafted_core.spawn import (
     runtime_policy_capabilities,
 )
 
-AGENTS = ("agy", "claude", "codex", "grok", "junie")
+AGENTS = ("agy", "claude", "codex", "cursor", "grok", "junie")
 # The accepted design leaves operator/partner unresolved.  Do not expose them
 # until their CLI contracts can guarantee an interactive TTY on this tab.
 RITUALS = ("init", "resume")

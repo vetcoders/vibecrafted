@@ -23,7 +23,7 @@ from .lifecycle_runner import (
     run_lifecycle,
 )
 
-SUPPORTED_AGENTS = {"claude", "codex", "gemini", "agy", "junie", "grok"}
+SUPPORTED_AGENTS = {"claude", "codex", "gemini", "agy", "junie", "grok", "cursor"}
 
 DEFAULT_SHIP_PROMPT = (
     "Run the full Vibecrafted lifecycle for this repository. Load Context Atlas, "

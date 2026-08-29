@@ -65,7 +65,7 @@ targets: list[str] = []
 i = 0
 while i < len(argv):
     arg = argv[i]
-    if arg in {"claude", "codex", "agy", "junie", "grok"} and not agent:
+    if arg in {"claude", "codex", "agy", "junie", "grok", "cursor"} and not agent:
         agent = arg
     elif arg == "--last":
         use_last = True

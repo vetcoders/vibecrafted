@@ -473,6 +473,8 @@ def _looks_vc_family(command: str) -> bool:
         "agy ",
         "junie",
         "grok",
+        "cursor",
+        "cursor-agent",
         "mlx",
         "lbrx-stt",
         "ollama",

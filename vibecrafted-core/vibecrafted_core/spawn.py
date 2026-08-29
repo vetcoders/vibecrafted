@@ -39,7 +39,12 @@ from .telemetry import estimate_cost_usd
 
 EventCallback = Callable[[dict[str, Any]], None]
 
-POLICY_PROVIDERS = ("codex", "claude", "agy", "grok", "junie")
+POLICY_PROVIDERS = ("codex", "claude", "agy", "grok", "junie", "cursor")
+# Fleet agent key → installed CLI binary when they differ (key stays the UX
+# name: `vibecrafted implement cursor`, binary remains `cursor-agent`).
+AGENT_BINARY_NAMES: dict[str, str] = {
+    "cursor": "cursor-agent",
+}
 RUNTIME_POLICIES = ("local-native", "local-worktrees", "local-vm", "cloud-soon")
 PERMISSION_POLICIES = ("bypass", "auto", "accept-edits", "read-only")
 POLICY_MODES = ("interactive", "headless")
@@ -48,6 +53,13 @@ QUOTA_MAX_TOKENS = 10_000_000
 QUOTA_EXHAUSTED_EXIT_CODE = 75
 OPERATOR_POLICIES = ("none", "auto", "claude")
 CONTINUITY_MODES = ("full-lineage", "fresh", "bare-fork")
+
+
+def agent_cli_name(agent: str) -> str:
+    """Return the PATH binary for a fleet agent key (identity when unset)."""
+    return AGENT_BINARY_NAMES.get(agent, agent)
+
+
 _CONTINUITY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _INHERITED_CONTINUITY_ENV = (
     "AICX_CONTEXT_FILE",
@@ -292,6 +304,21 @@ _PERMISSION_CONTRACT: dict[str, dict[str, tuple[tuple[str, ...], str] | None]] =
         "read-only": (
             ("--plan",),
             "interactive plan mode prevents edits and execution",
+        ),
+    },
+    "cursor": {
+        "bypass": (
+            ("--force", "--trust"),
+            "force-allow commands and trust the workspace without prompts",
+        ),
+        "auto": (
+            ("--trust",),
+            "trust workspace; provider default permission prompts remain active",
+        ),
+        "accept-edits": None,
+        "read-only": (
+            ("--mode", "ask", "--trust"),
+            "ask mode is read-only Q&A; no edits or execution",
         ),
     },
 }
@@ -602,7 +629,9 @@ def resolve_provider_usage_capability(
     executable: str | None = None,
 ) -> ProviderUsageCapability:
     """Probe the exact installed executable for an attributable live source."""
-    resolved = executable or which(provider, path=agent_tool_search_path())
+    resolved = executable or which(
+        agent_cli_name(provider), path=agent_tool_search_path()
+    )
     if not resolved:
         return ProviderUsageCapability(
             provider, False, reason=f"{provider} executable not found"
@@ -749,7 +778,7 @@ def resolve_provider_policy(
 
 def runtime_policy_capabilities(provider: str) -> dict[str, dict[str, Any]]:
     """Report host substrate separately from canonical-launcher availability."""
-    provider_executable = which(provider, path=agent_tool_search_path())
+    provider_executable = which(agent_cli_name(provider), path=agent_tool_search_path())
     provider_found = provider_executable is not None
     usage = resolve_provider_usage_capability(provider, executable=provider_executable)
     git_found = which("git") is not None
@@ -844,24 +873,37 @@ def interactive_policy_command(
             "--skip-update-check",
             "--use-local-cache",
         ]
-    session_flags: list[str] = []
-    if continuity.mode == "bare-fork":
-        session_flags = [
-            "--resume",
-            continuity.parent_provider_session_id,
-            "--fork-session",
-        ]
+    if provider == "cursor":
+        session_flags: list[str] = []
+        if continuity.mode == "bare-fork":
+            # Interactive resume exists; bare-fork is unsupported — fail closed
+            # rather than invent a fork flag the CLI does not expose.
+            raise ValueError(
+                "cursor native fork is unsupported; use fresh or interactive --resume"
+            )
         if provider_session_id:
-            session_flags.extend(["--session-id", provider_session_id])
-    return [
-        "grok",
-        "--cwd",
-        ".",
-        *flags,
-        *session_flags,
-        "--no-alt-screen",
-        prompt,
-    ]
+            session_flags = ["--resume", provider_session_id]
+        return ["cursor-agent", *flags, *session_flags, prompt]
+    if provider == "grok":
+        session_flags = []
+        if continuity.mode == "bare-fork":
+            session_flags = [
+                "--resume",
+                continuity.parent_provider_session_id,
+                "--fork-session",
+            ]
+            if provider_session_id:
+                session_flags.extend(["--session-id", provider_session_id])
+        return [
+            "grok",
+            "--cwd",
+            ".",
+            *flags,
+            *session_flags,
+            "--no-alt-screen",
+            prompt,
+        ]
+    raise ValueError(f"unsupported provider: {provider}")
 
 
 def interactive_workspace_command(
@@ -2554,6 +2596,15 @@ def _default_command(agent: str, prompt: str) -> list[str]:
             "--single",
             prompt,
         ]
+    if agent == "cursor":
+        return [
+            "cursor-agent",
+            "-p",
+            "--output-format",
+            "stream-json",
+            *flags,
+            prompt,
+        ]
     raise ValueError(f"unsupported agent: {agent}")
 
 
@@ -2628,6 +2679,14 @@ def _stdin_command(agent: str) -> list[str]:
             "--prompt-file",
             "/dev/stdin",
         ]
+    if agent == "cursor":
+        return [
+            "cursor-agent",
+            "-p",
+            "--output-format",
+            "stream-json",
+            *flags,
+        ]
     raise ValueError(f"unsupported agent: {agent}")
 
 
@@ -2646,26 +2705,33 @@ def _resolve_agent_command(
     resolved = list(command)
     if not resolved:
         raise ValueError("agent command must not be empty")
-    direct_provider = resolved[0] == agent
+    cli_name = agent_cli_name(agent)
+    argv0_name = Path(resolved[0]).name
+    direct_provider = argv0_name in {agent, cli_name}
     shell_provider = (
         len(resolved) >= 3
         and Path(resolved[0]).name == "bash"
         and resolved[1] == "-c"
-        and re.match(rf"^{re.escape(agent)}(?=\s)", resolved[2]) is not None
+        and (
+            re.match(rf"^{re.escape(agent)}(?=\s)", resolved[2]) is not None
+            or re.match(rf"^{re.escape(cli_name)}(?=\s)", resolved[2]) is not None
+        )
     )
     if not direct_provider and not shell_provider:
         return resolved
     search_path = agent_tool_search_path(environment)
-    executable = which(agent, path=search_path)
+    executable = which(cli_name, path=search_path)
     if executable is None:
         raise FileNotFoundError(
-            f"provider executable '{agent}' not found on canonical agent tool PATH"
+            f"provider executable '{cli_name}' (agent key '{agent}') not found "
+            "on canonical agent tool PATH"
         )
     if direct_provider:
         resolved[0] = executable
     else:
+        pattern = rf"^({re.escape(agent)}|{re.escape(cli_name)})(?=\s)"
         resolved[2] = re.sub(
-            rf"^{re.escape(agent)}(?=\s)",
+            pattern,
             shlex.quote(executable),
             resolved[2],
             count=1,

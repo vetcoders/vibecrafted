@@ -1287,7 +1287,7 @@ def test_every_runtime_permission_provider_mode_cell_is_explicit() -> None:
         )
     ]
 
-    assert len(cells) == 5 * 4 * 4 * 2
+    assert len(cells) == len(POLICY_PROVIDERS) * 4 * 4 * 2
     assert all(cell.behavior or cell.reason for cell in cells)
     assert all(cell.supported != bool(cell.reason) for cell in cells)
 

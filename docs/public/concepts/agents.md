@@ -22,6 +22,7 @@ model with helpers.
 | `agy`    | Google Antigravity (successor to the retired Gemini lane) |
 | `junie`  | JetBrains Junie                                           |
 | `grok`   | xAI Grok                                                  |
+| `cursor` | Cursor Agent CLI (`cursor-agent`)                         |
 
 Agent CLIs are installed and authenticated separately from the framework;
 `vibecrafted doctor` reports which ones are available on your machine. The
@@ -65,7 +66,7 @@ The commit trailer names the actual executor of the work:
 Authored-By: <agent> <agents@vetcoders.io>
 ```
 
-where `<agent>` is `claude`, `codex`, `agy`, `junie`, or `grok` — one line
+where `<agent>` is `claude`, `codex`, `agy`, `junie`, `grok`, or `cursor` — one line
 per agent for collaborative commits. The rules:
 
 - The signature belongs to the agent that **executed** the plan, not the

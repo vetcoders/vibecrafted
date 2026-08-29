@@ -179,7 +179,7 @@ and read by `run_triage` for SESSIONS board f/x/n triangulation.
 ```yaml
 ---
 run_id: <generated-unique-id>
-agent: <claude|codex|agy|junie|grok|system>
+agent: <claude|codex|agy|junie|grok|cursor|system>
 skill: <vc-skill-name>
 project: <repo-name>
 status: <pending|in-progress|completed|failed|blocked|partial>
