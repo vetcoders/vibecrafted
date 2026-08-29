@@ -36,7 +36,7 @@ if [ ! -d "$$stable_root/vibecrafted-core" ]; then \
 fi
 endef
 
-.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release runtime-pack portable publish-release release-rehearsal gui-install wizard wizard-dev check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate exact-release-contract-gate release-version-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service server-smoke
+.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release runtime-pack portable publish-release release-rehearsal gui-install wizard wizard-dev check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate exact-release-contract-gate release-version-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service reconcile-server-service server-smoke
 
 help:
 	@printf "\n"
@@ -300,6 +300,7 @@ install-auto: install
 
 install:
 	@VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)" bash "$(RUNTIME_PACK_INSTALLER)"
+	@$(MAKE) --no-print-directory reconcile-server-service
 
 # Explicit source/compiler lane retained for the portable Linux/WSL carrier.
 # It is not the normal customer installer: it may require Rust, cargo-leptos,
@@ -320,6 +321,7 @@ install-source:
 	else \
 	  printf "\nVibecrafted is ready (headless: the vc-frame cockpit is not installed; vc-start needs it).\n\nStart here:\n  export PATH=\"\$$HOME/.local/bin:\$$PATH\"\n  vibecrafted doctor\n  vibecrafted implement claude --prompt \"describe this repo\"\n  vibecrafted await claude --last\n\nLog:\n  ~/.vibecrafted/install.log\n"; \
 	fi
+	@$(MAKE) --no-print-directory reconcile-server-service
 
 # The explicit source/compiler lane calls `install-python-tools`; retain the
 # alias for that portable residual without putting it back on `make install`.
@@ -1098,6 +1100,31 @@ install-server-service:
 	(cd / && "$$launcher" server service install); \
 	echo "[server-service] restarting after server binary and asset replacement..."; \
 	(cd / && "$$launcher" server service restart)
+
+# Post-install drift healer for lanes that replace the launcher without the
+# managed installer transaction (`make install` via install-runtime-pack.sh,
+# `install-source`). Reconciles the installed LaunchAgent against the freshly
+# published runtime so a reboot never meets a stale-identity refusal. Never
+# enables supervision on machines that have not opted in (no plist -> no-op).
+reconcile-server-service:
+	@if [ "$$(uname -s)" != "Darwin" ]; then \
+		echo "[server-service] launchd not available — skipping service reconcile"; \
+		exit 0; \
+	fi; \
+	plist="$$HOME/Library/LaunchAgents/io.vetcoders.vibecrafted.server.plist"; \
+	if [ ! -f "$$plist" ]; then \
+		echo "[server-service] no installed LaunchAgent — skipping reconcile (supervision not opted in)"; \
+		exit 0; \
+	fi; \
+	export PATH="$(BIN_DIR):$$PATH"; \
+	unset PYTHONPATH; \
+	launcher="$$(command -v vibecrafted 2>/dev/null || true)"; \
+	if [ -z "$$launcher" ] || [ ! -x "$$launcher" ]; then \
+		echo "[server-service] vibecrafted launcher unavailable — skipping reconcile" >&2; \
+		exit 0; \
+	fi; \
+	echo "[server-service] reconciling installed LaunchAgent with the published runtime..."; \
+	(cd / && "$$launcher" server service reconcile)
 
 server-smoke: install-server
 	@echo "[server-smoke] Run 1/3" && bash tests/server_smoke.sh
