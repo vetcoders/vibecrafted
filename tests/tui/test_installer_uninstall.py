@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import plistlib
 import subprocess
 from argparse import Namespace
 from contextlib import nullcontext
@@ -10,6 +11,26 @@ from pathlib import Path
 import pytest
 
 from scripts import vetcoders_install as installer
+
+
+def _legacy_shim_public_name(name: str) -> str:
+    """The superseded naming: foreign tools surfaced as `vibecrafted-<name>`."""
+    lowered = name.lower()
+    if lowered.startswith(("vc-", "vibecrafted")) or lowered in {
+        "vibecraft",
+        "telemetry",
+    }:
+        return name
+    return f"vibecrafted-{name}"
+
+
+def _complete_runtime_pack_fixture(payload: Path) -> None:
+    """The v5 Runtime Pack inversion requires `libexec/vc-frame` and
+    `bin/vc-terminal`; the shared fixture predates it (known-red on this
+    base). Complete it locally so these tests exercise the reclaim path
+    instead of the fixture gap."""
+    _write_executable(payload / "libexec" / "vc-frame")
+    _write_executable(payload / "bin" / "vc-terminal")
 
 
 @pytest.fixture(autouse=True)
@@ -333,9 +354,10 @@ def test_runtime_launcher_public_name_never_claims_foreign_tools() -> None:
         "prview",
         "screenscribe",
     ):
-        assert (
-            installer._runtime_launcher_public_name(foreign) == f"vibecrafted-{foreign}"
-        )
+        # Public foundations are the user's own products: never shadowed by a
+        # vendored copy, never wrapped into a `vibecrafted-*` shim on the
+        # user's PATH. The vendored binary stays generation-private.
+        assert installer._runtime_launcher_public_name(foreign) is None
 
 
 def test_runtime_pack_restores_public_owner_when_retiring_old_bare_shim(
@@ -352,6 +374,7 @@ def test_runtime_pack_restores_public_owner_when_retiring_old_bare_shim(
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
     payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    _complete_runtime_pack_fixture(payload)
     args = Namespace(
         payload_root=str(payload),
         app_root=str(terminal_host.parents[2]),
@@ -377,13 +400,15 @@ def test_runtime_pack_restores_public_owner_when_retiring_old_bare_shim(
     assert public_prview.read_text(encoding="utf-8") == original_body
     generation = runtime_home / "releases/9.9.9+g12345678"
     assert (generation / "bin/prview").is_file()
+    # The vendored copy stays generation-private: no `vibecrafted-*` wrapper
+    # is published onto the user's PATH.
     private_alias = launcher_home / "vibecrafted-prview"
-    assert str(generation / "bin/prview") in private_alias.read_text(encoding="utf-8")
+    assert not private_alias.exists()
     receipt = json.loads(
         (runtime_home / installer.RUNTIME_INSTALL_RECEIPT).read_text(encoding="utf-8")
     )
     assert str(public_prview) not in receipt["owned_files"]
-    assert str(private_alias) in receipt["owned_files"]
+    assert str(private_alias) not in receipt["owned_files"]
     assert str(public_prview) not in receipt["backups"]
 
 
@@ -401,6 +426,7 @@ def test_runtime_pack_forgets_already_removed_old_bare_shim(
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
     payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    _complete_runtime_pack_fixture(payload)
     args = Namespace(
         payload_root=str(payload),
         app_root=str(terminal_host.parents[2]),
@@ -422,7 +448,126 @@ def test_runtime_pack_forgets_already_removed_old_bare_shim(
         (runtime_home / installer.RUNTIME_INSTALL_RECEIPT).read_text(encoding="utf-8")
     )
     assert str(public_prview) not in receipt["owned_files"]
-    assert str(launcher_home / "vibecrafted-prview") in receipt["owned_files"]
+    assert str(launcher_home / "vibecrafted-prview") not in receipt["owned_files"]
+
+
+def test_runtime_pack_retires_legacy_vibecrafted_shim_aliases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A previous generation published `vibecrafted-<tool>` wrappers onto the
+    user's PATH. The current one must retire them (receipt-gated,
+    byte-identical) so no stale shim surface lingers."""
+    home = tmp_path / "home"
+    runtime_home = home / "runtime"
+    launcher_home = home / "bin"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(launcher_home))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    _complete_runtime_pack_fixture(payload)
+    args = Namespace(
+        payload_root=str(payload),
+        app_root=str(terminal_host.parents[2]),
+        terminal_host=str(terminal_host),
+        frame_helper=str(frame_helper),
+    )
+
+    with monkeypatch.context() as legacy:
+        legacy.setattr(
+            installer, "_runtime_launcher_public_name", _legacy_shim_public_name
+        )
+        assert installer.cmd_runtime_install(args) == 0
+    capsys.readouterr()
+    alias = launcher_home / "vibecrafted-prview"
+    assert alias.is_file()
+
+    assert installer.cmd_runtime_install(args) == 0
+    capsys.readouterr()
+
+    assert not alias.exists()
+    assert not (launcher_home / "vibecrafted-loct").exists()
+    receipt = json.loads(
+        (runtime_home / installer.RUNTIME_INSTALL_RECEIPT).read_text(encoding="utf-8")
+    )
+    assert str(alias) not in receipt["owned_files"]
+    # Own-namespace launchers survive the retirement sweep.
+    assert (launcher_home / "vc-start").is_file()
+    assert str(launcher_home / "vc-start") in receipt["owned_files"]
+
+
+def test_runtime_install_repoints_foundation_launchagent_off_retired_shim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The incident that priced this doctrine: a foundation LaunchAgent bound
+    to a Vibecrafted shim dangles (launchd exit 78) once the shim is retired.
+    The install that retires the path must repoint the dependent at the
+    user's own PATH install — never at another Vibecrafted-owned path."""
+    home = tmp_path / "home"
+    runtime_home = home / "runtime"
+    launcher_home = home / "bin"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(launcher_home))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
+    monkeypatch.setattr(installer.sys, "platform", "darwin")
+    launchctl_calls: list[tuple[str, ...]] = []
+
+    def fake_launchctl(*args: str):  # never loaded: no kick, no host contact
+        launchctl_calls.append(tuple(args))
+
+    monkeypatch.setattr(installer, "_launchctl_quiet", fake_launchctl)
+
+    user_bin = tmp_path / "user-bin"
+    user_bin.mkdir()
+    user_loctree_mcp = user_bin / "loctree-mcp"
+    _write_executable(user_loctree_mcp)
+    monkeypatch.setenv("PATH", f"{user_bin}:/usr/bin:/bin")
+
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    _complete_runtime_pack_fixture(payload)
+    args = Namespace(
+        payload_root=str(payload),
+        app_root=str(terminal_host.parents[2]),
+        terminal_host=str(terminal_host),
+        frame_helper=str(frame_helper),
+    )
+
+    with monkeypatch.context() as legacy:
+        legacy.setattr(
+            installer, "_runtime_launcher_public_name", _legacy_shim_public_name
+        )
+        assert installer.cmd_runtime_install(args) == 0
+    capsys.readouterr()
+    shim = launcher_home / "vibecrafted-loctree-mcp"
+    assert shim.is_file()
+
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    plist_path = agents / "io.vibecrafted.test.loctree-mcp.plist"
+    plist_path.write_bytes(
+        plistlib.dumps(
+            {
+                "Label": "io.vibecrafted.test.loctree-mcp",
+                "ProgramArguments": [str(shim), "--serve"],
+            }
+        )
+    )
+
+    assert installer.cmd_runtime_install(args) == 0
+    captured = capsys.readouterr()
+
+    assert not shim.exists()
+    rewritten = plistlib.loads(plist_path.read_bytes())
+    assert rewritten["ProgramArguments"][0] == str(user_loctree_mcp)
+    assert "repointed" in captured.err
+    assert not any(call[0] in {"bootout", "bootstrap"} for call in launchctl_calls)
 
 
 def test_runtime_pack_uninstall_preserves_locally_modified_managed_launcher(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import plistlib
 import shutil
 import struct
 import subprocess
@@ -62,80 +63,109 @@ def _pin_canonical_runtime_roots(monkeypatch, home: Path, crafted_home: Path) ->
     monkeypatch.setenv("VIBECRAFTED_HOME", str(crafted_home))
 
 
-def test_install_foundation_from_bundle_copies_platform_payload(
+def test_install_or_find_foundation_prefers_preexisting_path_install(
     tmp_path: Path, monkeypatch
 ) -> None:
+    """The user's own PATH install always wins."""
+    foundation = next(f for f in installer.FOUNDATIONS if f.name == "loct")
+    user_bin = tmp_path / "bin"
+    user_bin.mkdir()
+    user_loct = user_bin / "loct"
+    _write_executable(user_loct, "#!/bin/sh\nexit 0\n")
+    monkeypatch.setenv("PATH", f"{user_bin}:/usr/bin:/bin")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    assert installer.install_or_find_foundation(foundation) == (
+        str(user_loct),
+        "pre-existing",
+    )
+
+
+def test_install_or_find_foundation_never_copies_vendored_payload_to_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A missing foundation stays missing even when a vendored payload exists:
+    the canonical upstream release is the fix, not our copy on the user's
+    PATH. Vendored binaries stay generation-private."""
     repo_root = tmp_path / "bundle"
-    bin_dir = tmp_path / "bin"
     vendor_dir = repo_root / "bin" / "vendor" / "darwin-arm64"
     vendor_dir.mkdir(parents=True)
-    monkeypatch.setattr(installer, "detect_vendor_platform", lambda: "darwin-arm64")
-
-    foundations = [
-        f
-        for f in installer.FOUNDATIONS
-        if f.name in installer.VENDORED_FOUNDATION_BINARIES
-    ]
-    assert {f.name for f in foundations} == {
-        "aicx",
-        "aicx-mcp",
-        "loct",
-        "loctree-mcp",
-        "vc-frame",
-    }
-
-    for foundation in foundations:
-        name = installer.VENDORED_FOUNDATION_BINARIES[foundation.name]
-        _write_executable(
-            vendor_dir / name,
-            f"#!/usr/bin/env bash\nprintf '{name} 0.0.0-test\\n'\n",
-        )
-
-    installed = [
-        installer.install_foundation_from_bundle(f, repo_root, bin_dir=bin_dir)
-        for f in foundations
-    ]
-
-    assert {path.name for path in installed if path is not None} == {
-        "aicx",
-        "aicx-mcp",
-        "loct",
-        "loctree-mcp",
-        "vc-frame",
-    }
-    for path in installed:
-        assert path is not None
-        assert path.is_file()
-        assert path.stat().st_mode & 0o111
-        assert subprocess.run([str(path), "--version"], check=False).returncode == 0
-
-
-def test_install_foundation_from_bundle_ignores_platform_mismatch(
-    tmp_path: Path, monkeypatch
-) -> None:
-    repo_root = tmp_path / "bundle"
-    bin_dir = tmp_path / "bin"
-    linux_dir = repo_root / "bin" / "vendor" / "linux-x64"
-    linux_dir.mkdir(parents=True)
-    _write_executable(
-        linux_dir / "vc-frame",
-        "#!/usr/bin/env bash\nprintf 'wrong platform\\n'\n",
-    )
-    monkeypatch.setattr(installer, "detect_vendor_platform", lambda: "darwin-arm64")
+    _write_executable(vendor_dir / "loct", "#!/bin/sh\nexit 0\n")
     monkeypatch.setattr(installer.shutil, "which", lambda _name: None)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
-    foundation = next(f for f in installer.FOUNDATIONS if f.name == "vc-frame")
+    foundation = next(f for f in installer.FOUNDATIONS if f.name == "loct")
 
-    assert (
-        installer.install_foundation_from_bundle(foundation, repo_root, bin_dir=bin_dir)
-        is None
+    assert installer.install_or_find_foundation(foundation) == ("", "not-installed")
+    assert not (tmp_path / "home" / ".local" / "bin" / "loct").exists()
+
+
+def test_doctor_runtime_receipt_findings_flag_drift_and_missing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Receipt/disk drift must be visible to doctor: files the installer owns
+    are compared against the receipted digest."""
+    runtime_home = tmp_path / "runtime"
+    runtime_home.mkdir()
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    owned = tmp_path / "bin" / "vc-start"
+    owned.parent.mkdir()
+    owned.write_text("#!/bin/sh\noriginal\n", encoding="utf-8")
+    digest = installer._sha256_path(owned)
+    gone = tmp_path / "bin" / "vc-gone"
+    receipt_path = runtime_home / installer.RUNTIME_INSTALL_RECEIPT
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "schema": installer.RUNTIME_INSTALL_SCHEMA,
+                "owned_files": {str(owned): digest, str(gone): "0" * 64},
+            }
+        ),
+        encoding="utf-8",
     )
-    assert not (bin_dir / "vc-frame").exists()
-    assert installer.install_or_find_foundation(foundation, repo_root) == (
-        "",
-        "not-installed",
+    owned.write_text("#!/bin/sh\ndrifted\n", encoding="utf-8")
+
+    findings = installer._doctor_runtime_receipt_findings()
+
+    assert [finding.level for finding in findings] == ["warn"]
+    assert "drifted" in findings[0].message
+    assert "missing" in findings[0].message
+
+    receipt_path.write_text(
+        json.dumps({"schema": installer.RUNTIME_INSTALL_SCHEMA, "owned_files": {}}),
+        encoding="utf-8",
     )
+    assert [
+        finding.level for finding in installer._doctor_runtime_receipt_findings()
+    ] == ["ok"]
+
+
+def test_doctor_foundation_service_findings_flag_dangling_plist(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A foundation LaunchAgent whose program vanished must surface as a
+    failure — that is the launchd exit-78 incident class."""
+    home = tmp_path / "home"
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(tmp_path / "runtime"))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(tmp_path / "bin"))
+    monkeypatch.setattr(installer.sys, "platform", "darwin")
+    plist_path = agents / "io.vibecrafted.test.loctree-mcp.plist"
+    plist_path.write_bytes(
+        plistlib.dumps(
+            {
+                "Label": "io.vibecrafted.test.loctree-mcp",
+                "ProgramArguments": [str(tmp_path / "gone" / "loctree-mcp")],
+            }
+        )
+    )
+
+    findings = installer._doctor_foundation_service_findings()
+
+    assert [finding.level for finding in findings] == ["fail"]
+    assert "dangling" in findings[0].message
 
 
 def test_run_doctor_smokes_helper_and_launcher_runtime(
