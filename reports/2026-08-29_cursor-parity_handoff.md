@@ -1,132 +1,143 @@
-# Handoff — Cursor fleet parity cut (attempt A) · cursor/workflow/server-caretaker
+# Cursor Fleet Parity — Attempt C Handoff
 
-**Date:** 2026-08-29
-**Branch:** `cursor/workflow/server-caretaker`
-**Baseline HEAD (pre-cut):** `12f3031d8afcea1316b3df1b0c57a1c81a5f977f` (tip of `origin/fix/v430-dispatcher-shutdown-race-v5` + two landed control-plane commits)
-**Worktree:** `~/.vibecrafted/worktrees/vetcoders/vibecrafted/2026_0829/server-caretaker`
-**Agent:** cursor (Kimi), attempt A of best-of-3
+Date: 2026-08-29
+Branch: cursor/workflow/server-caretaker (rebased onto `origin/fix/v430-dispatcher-shutdown-race-v5` = PR #72 merge `0a5eaaea`)
+Gate: `vibecrafted-core/tests/test_cursor_parity.py` — **52/52 green**
 
-## Mandate
+## Method
 
-Full parity of the `cursor` agent with `codex`/`claude` across every vibecrafted
-workflow surface, on top of the merged Cut B (PR #72). Semantic audit, smallest
-coherent change per surface, parity pinned by tests.
+Test-first: a parity gate enumerating every workflow/agent-acceptance surface
+was written red, then each surface was flipped green with the smallest
+semantic change. Audit rule per surface: hardcoded list → add cursor;
+registry-derived → fix at registry; prose/docs → extend the enumeration;
+example/default/storage-path → leave.
 
-## Living-tree note
-
-This worktree was actively worked by a concurrent cursor agent during the cut
-(control-plane revalidate commits `28d858bd`/`12f3031d` landed; a parallel set of
-uncommitted parity edits appeared mid-flight: deck agent lists, `help_surface`
-registry-derived selector, `schema.py` policy marker, `supervisor_async` binary
-fold, `wrappers` usage, `cursor_spawn.sh`, marbles/observe/await/meta scripts,
-SKILL.md fleet enumerations, mux/tray/FFI `ClientKind::Cursor`, and the umbrella
-test `test_cursor_parity.py`). Those edits were inspected, found correct, adopted,
-and completed here. Unrelated in-flight work (`AGENTS.md` namespace doctrine,
-`scripts/vetcoders_install.py` rework, `tests/tui/test_installer_{doctor,uninstall}.py`)
-was deliberately left uncommitted for its owner.
+This cut shares the branch with a concurrent parity worker (deck, help
+surface, installer, runtime scripts, VM wizard lanes). Surfaces below are
+marked with the lane that landed them; the gate pins the combined tree.
 
 ## Parity matrix
 
-### Python core
+### Python acceptance registries
 
-| Surface                                                                                                       | Status                  | Evidence                                                                                                        |
-| ------------------------------------------------------------------------------------------------------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `workflow.py` / `cli.py` / `wrappers.py` / `ship.py` agent registries                                         | already-done (Cut B)    | `test_cursor_parity.py::test_python_registries_accept_cursor`                                                   |
-| `spawn.py` policy, binary pin (`cursor-agent`), stdin transport                                               | already-done (Cut B)    | `test_cursor_fleet_adapter.py`                                                                                  |
-| `agent_stream.py` claude-shaped stream parsing                                                                | already-done (Cut B)    | fleet adapter tests                                                                                             |
-| `research_config.py`, `agent_dispatch.py`, `process_control.py`, `loop.py`, `supervisor_async.py` fleet lists | already-done (Cut B)    | parity umbrella                                                                                                 |
-| `supervisor_async._infer_agent` `cursor-agent` → `cursor` fold                                                | fixed-in-this-cut       | `test_supervisor_infers_cursor_key_from_cursor_agent_binary`                                                    |
-| `help_surface.py` `AGENT_SELECTOR` / fleet line derived from `SUPPORTED_AGENTS`                               | fixed-in-this-cut       | `test_help_surface_agent_selector_includes_cursor`, `test_every_workflow_help_renders_cursor_in_selector`       |
-| `wrappers.py` vc-* usage line                                                                                 | fixed-in-this-cut       | `test_wrapper_usage_line_includes_cursor`                                                                       |
-| `dispatch/schema.py` `/.cursor/` provider-root policy marker                                                  | fixed-in-this-cut       | `test_dispatch_policy_rejects_cursor_runtime_root` (source + behavioral)                                        |
-| `workflow_runtime.NATIVE_RESUME_AGENTS`                                                                       | not-applicable (sealed) | headless `-p --resume` is UNVERIFIED → fail-closed; pinned by `test_native_resume_stays_fail_closed_for_cursor` |
-| `dispatch/supervisor.py` legacy `.claude/worktrees/<id>` recovery                                             | not-applicable          | historical storage path; renaming breaks recovery lookups                                                       |
-| `lifecycle_runner.py`                                                                                         | already-done            | choices derive from `SUPPORTED_AGENTS` (Cut B)                                                                  |
-| `run_board.py` hint examples, `stage_cast.py` docstrings, `workflows/model.py` `default_agent="claude"`       | not-applicable          | illustrative prose / single product default, not agent enumerations                                             |
+| Surface                                      | Status                  | Evidence                                                                                                             |
+| -------------------------------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `workflow.SUPPORTED_AGENTS`                  | already-done (Cut B)    | `test_python_registries_accept_cursor`                                                                               |
+| `ship.SUPPORTED_AGENTS`                      | already-done (Cut B)    | same                                                                                                                 |
+| `wrappers.AGENTS`                            | already-done (Cut B)    | same                                                                                                                 |
+| `cli.AGENTS`                                 | already-done (Cut B)    | same                                                                                                                 |
+| `spawn.POLICY_PROVIDERS`                     | already-done (Cut B)    | same                                                                                                                 |
+| `agent_dispatch.sandbox_supported("cursor")` | already-done (Cut B)    | same                                                                                                                 |
+| `research_config.SUPPORTED_RESEARCH_AGENTS`  | already-done (Cut B)    | same                                                                                                                 |
+| `supervisor_async._infer_agent` binary fold  | fixed-in-this-cut       | `cursor-agent` argv[0] now folds to fleet key `cursor`; `test_supervisor_infers_cursor_key_from_cursor_agent_binary` |
+| `workflow_runtime.NATIVE_RESUME_AGENTS`      | not-applicable (sealed) | headless `-p --resume` UNVERIFIED → fail-closed; pinned by `test_native_resume_stays_fail_closed_for_cursor`         |
 
-### Shell deck + runtime
+### Help surfaces
 
-| Surface                                                                                                                                                      | Status            | Evidence                                                                                                                                        |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `scripts/vibecrafted` + `vibecrafted_core/deck/vibecrafted` (byte-identical) `_agents`, `_has_agent`, help texts, agent-first grammar, `help cursor` routing | fixed-in-this-cut | `test_deck_*` (5 tests incl. behavioral `init cursor` gate)                                                                                     |
-| deck `_require_agent_cli` probes `cursor-agent` (not the editor CLI `cursor`) + install hint                                                                 | fixed-in-this-cut | `test_deck_probes_cursor_agent_binary_not_editor_cli`, `test_deck_init_accepts_cursor_and_names_cursor_agent_binary`                            |
-| `runtime/scripts/cursor_spawn.sh` (new) — headless `-p` stdin, stream-json tee, `--force --trust`, salvage hooks, agent_stream filter                        | fixed-in-this-cut | `test_agy_junie_pipeline.py::test_cursor_spawn_dry_run_uses_stream_json_stdin_contract`                                                         |
-| `runtime/shell/lib/dispatch.sh` — 26 `cursor-*` / `cursor-skill-*` helpers, `_vetcoders_has_agent`, usage strings                                            | fixed-in-this-cut | shellcheck via `make check`; helper resolution is by-name (`${agent}-skill-${skill}`)                                                           |
-| `runtime/shell/lib/dispatch_wrappers.sh` — cursor review/plan/implement/research/prompt/observe/await                                                        | fixed-in-this-cut | `make check`                                                                                                                                    |
-| `runtime/shell/lib/skill_shortcuts.sh` — `cursor-dou`, `cursor-hydrate`                                                                                      | fixed-in-this-cut | `make check`                                                                                                                                    |
-| `runtime/shell/lib/marbles.sh` — cursor fresh-session command (headless + interactive), vc-resume usage                                                      | fixed-in-this-cut | `make check`                                                                                                                                    |
-| `runtime/scripts/marbles_next.sh` — agent validation, verification-resume guard (cursor fail-closed with explicit warning)                                   | fixed-in-this-cut | parity umbrella deck/script gates                                                                                                               |
-| `runtime/scripts/marbles_spawn.sh` agent regex                                                                                                               | fixed-in-this-cut | `make check`                                                                                                                                    |
-| `runtime/scripts/observe.sh`, `await.sh` usage + case                                                                                                        | fixed-in-this-cut | `make check`                                                                                                                                    |
-| `runtime/scripts/lib/meta.sh` `CURSOR_MODEL` identity candidate                                                                                              | fixed-in-this-cut | `make check`                                                                                                                                    |
-| `runtime/vc-research/shell/research.sh` agent cases + supported-agents messages + `--synthesizer` gate                                                       | fixed-in-this-cut | `make check`                                                                                                                                    |
-| `runtime/scripts/skills_sync.sh` default tool set + `~/.cursor/skills` view                                                                                  | fixed-in-this-cut | `make check`                                                                                                                                    |
-| `runtime/scripts/lib/rotation.sh` marbles rotation pool `[codex, claude, agy]`                                                                               | not-applicable    | default cycle membership is a product decision (same class as research default trio); cursor is accepted as seed/agent everywhere rotation runs |
-| `runtime/scripts/lib/prompt.sh` codex report contract                                                                                                        | not-applicable    | provider-specific contract; cursor emits claude-shaped events                                                                                   |
-| `runtime/vc-marbles/orchestrator/*` stop-hook                                                                                                                | not-applicable    | Claude Code-specific integration                                                                                                                |
-| `claude_spawn.sh`, `vc_frame.sh`, `prompts.sh`, `util.sh` mentions                                                                                           | not-applicable    | provider-specific file / illustrative comments                                                                                                  |
+| Surface                                       | Status                          | Evidence                                                                                                     |
+| --------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `help_surface.AGENT_SELECTOR` / `AGENTS_LINE` | fixed-in-this-cut (worker lane) | derived from `SUPPORTED_AGENTS` via `_FLEET_AGENT_ORDER`; `test_help_surface_agent_selector_includes_cursor` |
+| Every `WORKFLOW_HELP` topic render            | fixed-in-this-cut (worker lane) | `test_every_workflow_help_renders_cursor_in_selector` (research/paste are agent-free by design)              |
+| `wrappers` usage line (`vc-*` entry points)   | fixed-in-this-cut               | `test_wrapper_usage_line_includes_cursor`                                                                    |
 
-### Rust (vibecrafted-app workspace)
+### Shell deck (canonical + mirror, byte-identical)
 
-| Surface                                                                                          | Status               | Evidence                                                   |
-| ------------------------------------------------------------------------------------------------ | -------------------- | ---------------------------------------------------------- |
-| `tui-agent/src/app.rs` `agents()` picker                                                         | fixed-in-this-cut    | `test_tui_agent_picker_offers_cursor`                      |
-| `tui-agent/src/skills_catalog.rs` `SkillAgent::Cursor` (label/from_cli_token/resolved_cli_token) | fixed-in-this-cut    | `test_tui_skills_catalog_resolves_cursor_token`            |
-| `tui-agent/src/procs/model.rs` `FamilyTag::Cursor` + classify + unit test                        | fixed-in-this-cut    | `test_tui_process_family_tags_cursor`, `cargo test -p voc` |
-| `tui-agent/src/lib.rs` launch verify-gate mapping                                                | fixed-in-this-cut    | `test_mux_ipc_client_kind_has_cursor_variant`              |
-| `mux-agent` `ClientKind::Cursor` + handlers → `HostKind::Cursor`                                 | already-done (Cut B) | parity umbrella source gate                                |
-| `tray-agent/src/ipc_client.rs` Cursor arm                                                        | fixed-in-this-cut    | `cargo clippy -D warnings`, `cargo test -p tray-agent`     |
-| `shell-agent/ffi` `FfiClientKind::Cursor` + conversions                                          | fixed-in-this-cut    | `cargo test -p vibecrafted-shell-ffi`                      |
-| remaining `"claude"` hits in `mission_control.rs`/`observe.rs`/`ui.rs`/`control-core/read.rs`    | not-applicable       | test fixtures, not enumerations                            |
+| Surface                                              | Status                          | Evidence                                                                                                        |
+| ---------------------------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `_agents` acceptance gate + `_has_agent`             | fixed-in-this-cut (worker lane) | `test_deck_agent_acceptance_gate_lists_cursor`                                                                  |
+| CLI probe maps `cursor` → `cursor-agent` binary      | fixed-in-this-cut (worker lane) | `test_deck_probes_cursor_agent_binary_not_editor_cli` (`command -v cursor` is the editor, not the fleet binary) |
+| Missing-CLI error names the probed binary            | fixed-in-this-cut               | `test_deck_init_accepts_cursor_and_names_cursor_agent_binary` (behavioral, restricted PATH)                     |
+| Help texts / fleet dotted line / `help cursor` topic | fixed-in-this-cut (worker lane) | `test_deck_help_*` (behavioral)                                                                                 |
+| Canonical ↔ mirror byte identity                     | fixed-in-this-cut               | `test_deck_mirror_is_byte_identical_to_canonical`                                                               |
 
-### Install / GUI / VM / containers
+### Dispatch policy
 
-| Surface                                                                               | Status            | Evidence                                                                                                                                                               |
-| ------------------------------------------------------------------------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `install.toml` diagnostics probe `cursor-agent`                                       | fixed-in-this-cut | `test_install_diagnostics_probe_cursor_agent_binary`                                                                                                                   |
-| `scripts/installer_gui.py` `AGENT_COMMANDS` + launcher agent dropdown                 | fixed-in-this-cut | `test_installer_gui_launcher_offers_cursor`, `tests/tui/test_installer_gui.py` (104 passed with doctor)                                                                |
-| `scripts/install-foundations.sh` cursor-agent install hint                            | fixed-in-this-cut | `make check`                                                                                                                                                           |
-| `vibecrafted-vm/wizard` `cursor_sessions` mount (~/.cursor, EN+PL labels, default ON) | fixed-in-this-cut | `py_compile`, `strings.json` parse                                                                                                                                     |
-| `vibecrafted-vm/entry.sh` readiness probe `cursor-agent`                              | fixed-in-this-cut | `make check`                                                                                                                                                           |
-| `docker/entrypoint.sh` exec allowlist `cursor-agent`                                  | fixed-in-this-cut | `make check`                                                                                                                                                           |
-| `plugins/iterm2` triggers                                                             | not-applicable    | triggers match the retired `<Agent> <skill> started` banner nothing prints anymore; set already lacks agy/junie/grok — needs a banner-format rewrite, not a cursor row |
+| Surface                                          | Status            | Evidence                                                                                                                             |
+| ------------------------------------------------ | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `dispatch/schema.py` recovery-only runtime roots | fixed-in-this-cut | `/.cursor/` joins `/.claude/` `/.codex/` `/.gemini/`; behavioral doctor rejects `$HOME/.cursor/reports` like `$HOME/.claude/reports` |
 
-### Skills + docs enumerations (EN + PL)
+### Rust operator surfaces
 
-| Surface                                                                                                                                                                                                                                             | Status                                                            |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| `vc-agents`, `vc-workflow`, `vc-research`, `vc-trust`, `vc-canary`, `vc-dispatch` SKILL.md fleet enumerations                                                                                                                                       | fixed-in-this-cut                                                 |
-| `vc-operator/references/agent-control-contract.md`                                                                                                                                                                                                  | fixed-in-this-cut                                                 |
-| `vc-release/references/release-report-template.md`                                                                                                                                                                                                  | fixed-in-this-cut                                                 |
-| `vc-research/references/synthesis-template.md` (incl. prose example line)                                                                                                                                                                           | fixed-in-this-cut                                                 |
-| `vc-scaffold` plan-template / output-shapes / plans/HOWTO                                                                                                                                                                                           | fixed-in-this-cut                                                 |
-| docs: CLI_PRODUCT_SPEC, FOUNDATION, RUNBOOK, _CONTRACT, cli-overview (+ cursor `--model` override), getting-started overview + first-run (+ install table), security, skills-catalog, faq, katalog-launcherow.html, operator/FLEET_DISPATCH_RUNBOOK | fixed-in-this-cut                                                 |
-| research default trio `claude codex agy` (SKILL.md prose, research.sh builtin, research.yaml.example)                                                                                                                                               | not-applicable — product default, cursor selectable in every lane |
+| Surface                                                              | Status                          | Evidence                                                          |
+| -------------------------------------------------------------------- | ------------------------------- | ----------------------------------------------------------------- |
+| `mux-agent` `ClientKind::Cursor` + handler map to `HostKind::Cursor` | fixed-in-this-cut (worker lane) | `test_mux_ipc_client_kind_has_cursor_variant` + cargo clippy/test |
+| `tui-agent` agent picker `agents()`                                  | fixed-in-this-cut (worker lane) | `test_tui_agent_picker_offers_cursor`                             |
+| `tui-agent` `SkillAgent::Cursor` token round-trip                    | fixed-in-this-cut (worker lane) | `test_tui_skills_catalog_resolves_cursor_token`                   |
+| `tui-agent` process `FamilyTag::Cursor` classify                     | fixed-in-this-cut (worker lane) | `test_tui_process_family_tags_cursor`                             |
+| `tui-agent` `launch_selected` cursor → `ClientKind::Cursor`          | fixed-in-this-cut               | duplicate arm from concurrent edit removed; clippy clean          |
+| `tray-agent` `client_label` Cursor arm                               | fixed-in-this-cut               | exhaustive-match compile gate                                     |
+| `shell-agent` FFI `FfiClientKind::Cursor` + both `From` directions   | fixed-in-this-cut               | uniffi enum; exhaustive-match compile gate                        |
 
-All of the above pinned by `test_skill_agent_enumerations_include_cursor` (20 files)
-and `test_docs_fleet_enumerations_include_cursor` (9 files).
+### Runtime scripts
+
+| Surface                                                                                                     | Status                          | Evidence                                                                                                                                                                                                                      |
+| ----------------------------------------------------------------------------------------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cursor_spawn.sh` headless wrapper                                                                          | fixed-in-this-cut (worker lane) | `cursor-agent -p --output-format stream-json --force --trust`, stdin prompt, transcript tee, salvage reports; pinned by `test_cursor_spawn_dry_run_uses_stream_json_stdin_contract` in `tests/tui/test_agy_junie_pipeline.py` |
+| `await.sh` / `observe.sh` / `marbles_next.sh` / `meta.sh` / `marbles_spawn.sh` agent lists + `CURSOR_MODEL` | fixed-in-this-cut (worker lane) | deck/help behavioral tests + pipeline dry-run meta test now loops cursor                                                                                                                                                      |
+| `shell/lib/dispatch.sh`, `dispatch_wrappers.sh`, `skill_shortcuts.sh`, `core.sh`                            | fixed-in-this-cut (worker lane) | `make check` shellcheck + pipeline tests                                                                                                                                                                                      |
+
+### Skills fleet enumerations (EN + PL)
+
+| Surface                                                        | Status            | Evidence                                                                |
+| -------------------------------------------------------------- | ----------------- | ----------------------------------------------------------------------- |
+| `vc-agents`, `vc-operator/agent-control-contract`, `vc-trust`  | fixed-in-this-cut | `test_skill_agent_enumerations_include_cursor` (20 files parameterized) |
+| `vc-release` report template, `vc-research` synthesis template | fixed-in-this-cut | same                                                                    |
+| `vc-scaffold` plan-template / output-shapes / HOWTO            | fixed-in-this-cut | same                                                                    |
+| `vc-workflow`, `vc-research` SKILL.md frontmatter enums        | fixed-in-this-cut | same                                                                    |
+
+### Docs fleet enumerations
+
+| Surface                                                                                                                    | Status               | Evidence                                                                                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `docs/CLI_PRODUCT_SPEC.md`, `FOUNDATION.md`, `RUNBOOK.md`                                                                  | fixed-in-this-cut    | `test_docs_fleet_enumerations_include_cursor`                                                                                                             |
+| `docs/public/{cli/cli-overview, getting-started/overview, reference/security, skills/skills-catalog, troubleshooting/faq}` | fixed-in-this-cut    | same                                                                                                                                                      |
+| `docs/katalog-launcherow.html` (PL)                                                                                        | fixed-in-this-cut    | same                                                                                                                                                      |
+| `docs/runtime/CONTRACT.md`, `docs/public/concepts/agents.md`                                                               | already-done (Cut B) | same                                                                                                                                                      |
+| `docs/adr/0003-*`, `docs/runtime/OPERATOR_LANE.md`, `docs/operations/RUNBOOK.md`                                           | not-applicable       | existed only on the pre-rebase integration tip; absent from the PR #72 base                                                                               |
+| RUNBOOK model-override sentence                                                                                            | fixed-in-this-cut    | reworded to flag-granularity truth ("other agents run their defaults"), matching cli-overview phrasing; cursor override is `CURSOR_MODEL` env, not a flag |
+
+### Install / diagnostics / VM
+
+| Surface                                                                                       | Status                          | Evidence                                             |
+| --------------------------------------------------------------------------------------------- | ------------------------------- | ---------------------------------------------------- |
+| `install.toml` diagnostics probe `cursor-agent`                                               | fixed-in-this-cut (worker lane) | `test_install_diagnostics_probe_cursor_agent_binary` |
+| `installer_gui.AGENT_COMMANDS` + launcher defaults offer cursor                               | fixed-in-this-cut (worker lane) | `test_installer_gui_launcher_offers_cursor`          |
+| `vetcoders_install.py` `AGENT_RUNTIMES` + binary map                                          | fixed-in-this-cut (worker lane) | doctor tests                                         |
+| `vibecrafted-vm` wizard: `cursor-agent` probe, `~/.cursor` session persistence (EN+PL), mount | fixed-in-this-cut (worker lane) | diff review; VM boot not run                         |
+
+### Not acceptance lists (audited, intentionally untouched)
+
+- `dispatch/supervisor.py` `.claude/worktrees` — storage layout for Mode B cuts, all agents.
+- `stage_cast.py`, `lifecycle_runner.py` docstring examples (`audit=claude,grok`).
+- `run_board.py` getting-started hint lines (single-agent examples).
+- `workflows/model.py` `default_agent = "claude"` — a default, not a gate.
+- `plugins/iterm2` triggers — no in-repo emission of Cursor-specific patterns.
+- Skills/docs lines using `claude` alone as the example agent (`vibecrafted init claude` etc.) — examples, not enumerations.
+- `CLI_PRODUCT_SPEC.md` v3.1.0 sample installer output block — historical sample, refreshing it would falsify what that installer printed.
 
 ## Verification performed
 
-- `make check` — green (ruff/prettier/semgrep on changed files, shellcheck 172 files, zsh -n)
-- `pytest vibecrafted-core/tests/test_cursor_parity.py` — **52 passed** (isolated `VIBECRAFTED_HOME`, `env -u PYTHONPATH`)
-- Focused core suite (parity + fleet adapter + help_surface + wrappers + supervisor_async + workflow + workflow_runtime + capabilities + dispatch/) — 405 passed, 4 failed **pre-existing** (fail identically on pristine `git archive HEAD`: `test_async_supervisor_reads_operator_stop_from_its_event_range`, `test_explicit_transport_retry_replays_across_processes`, `test_launch_workflow_preseeds_machine_owned_claim_digest`, `test_launch_workflow_artifact_paths_are_terminal_truth`)
-- `pytest tests/tui/test_installer_gui.py tests/tui/test_installer_doctor.py` — 104 passed (separate invocation, isolated HOME)
-- `pytest tests/tui/test_agy_junie_pipeline.py` — 9 passed (incl. new cursor spawn dry-run contract)
-- `cargo clippy --workspace --all-features -- -D warnings` — clean
-- `cargo test -p voc -p rmcp-mux -p tray-agent -p vibecrafted-shell-ffi` — all green (incl. new `FamilyTag::Cursor` classify assertion)
-- `vibecrafted-vm/wizard`: `py_compile` + `strings.json` JSON parse
+- `test_cursor_parity.py`: **52/52 passed** (isolated `VIBECRAFTED_HOME`, `env -u PYTHONPATH`).
+- `tests/tui/test_agy_junie_pipeline.py`: **9/9 passed**, incl. new cursor dry-run contract + cursor added to deck-help and dry-run-meta loops.
+- `make check`: green (ruff, prettier, semgrep, shellcheck on 172 shell files).
+- Focused `vibecrafted-core` modules (`test_wrappers`, `test_help_surface`, `test_supervisor_async`, `test_cursor_fleet_adapter`, `test_cli`, parity): **205 passed, 1 pre-existing red** (below).
+- Focused `tests/tui` installer modules: **155 passed, 13 pre-existing reds** (below).
+- `cargo clippy --workspace --all-features -- -D warnings`: clean.
+- `cargo test --workspace`: all suites `ok`, 0 failed.
+
+## Pre-existing reds (attributed against pristine HEAD via `git archive` snapshot)
+
+- `test_supervisor_async.py::test_async_supervisor_reads_operator_stop_from_its_event_range` — fails identically at HEAD on this host (child process exit 1); untouched by this cut (`_infer_agent` fold is unreachable from that path).
+- `test_installer_uninstall.py` — 13 failures present identically at HEAD; the concurrent installer's rework additionally _fixed_ 2 further HEAD reds (`..._forgets_already_removed_old_bare_shim`, `..._restores_public_owner_when_retiring_old_bare_shim`).
 
 ## Verification not performed
 
-- Live `cursor-agent` end-to-end run (headless implement + interactive resume) on a real repo — requires the installed CLI and a Founder-gated workspace; the dry-run launcher contract is pinned instead.
-- Swift consumer of the regenerated UniFFI bindings (`FfiClientKind::Cursor`) — bindings regenerate at app build time; no Swift source change needed for an added enum variant.
-- Full `vibecrafted-core/tests` suite (only focused modules per cut scope).
+- No live `cursor-agent` headless spawn from this worktree's code (binary gate is probed, spawn contract pinned via dry-run only). Live dogfood runs by the operator harness were observed in flight against this branch during the cut.
+- VM wizard boot (`vibecrafted-vm`) — diff-reviewed only.
+- DMG/signing/notarization, release gates — Founder buttons per doctrine.
 
 ## Risks / follow-up
 
-- `NATIVE_RESUME_AGENTS` stays fail-closed for cursor until headless `-p --resume <chatId>` is proven on host; proving it flips one frozenset + one test.
-- iTerm2 trigger pack targets a retired banner format for ALL agents — rewrite against the current `𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. · <agent>-<mode>` banner is a separate cut.
-- Marbles rotation pool and research default trio remain `codex/claude/agy` by product default; promoting cursor into default cycles is a Founder decision, one line each.
-- 4 pre-existing red tests listed above are unattributed to this cut (identical on pristine HEAD) — recommend a HAK ticket.
-- Concurrent worker's unrelated WIP (install doctrine: `AGENTS.md`, `vetcoders_install.py`, `test_installer_{doctor,uninstall}.py`) left uncommitted in the worktree by design.
+- `NATIVE_RESUME_AGENTS` stays fail-closed for cursor until headless `-p --resume` is proven on host; the parity gate pins the exception so it cannot silently flip.
+- `FfiClientKind` gained a variant — Swift shell bindings regenerate from uniffi; next app build picks it up.
+- A sibling stash (`stash@{0}`, server-caretaker control-plane-revalidate WIP) belongs to the concurrent worker's other lane and was deliberately left untouched.

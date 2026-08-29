@@ -343,105 +343,19 @@ class Foundation:
         return " | ".join(hints)
 
 
-VENDORED_FOUNDATION_BINARIES = {
-    "aicx": "aicx",
-    "aicx-mcp": "aicx-mcp",
-    "loct": "loct",
-    "loctree-mcp": "loctree-mcp",
-    "vc-frame": "vc-frame",
-}
+def install_or_find_foundation(foundation: Foundation) -> tuple[str, str]:
+    """Resolve `foundation` from the user's own PATH install — nothing else.
 
+    The user's install always wins and is never shadowed, wrapped, or moved.
+    When the user has no install, the fix is the tool's canonical upstream
+    release (see `install_hint()`), never a vendored copy or wrapper from us:
+    vendored payloads stay generation-private for the runtime's internal use.
 
-def detect_vendor_platform() -> str | None:
-    """Return this host's `<os>-<arch>` platform slug (darwin/linux, arm64/x64), or None if
-    unknown.
+    Returns `(path, source)` where source is 'pre-existing' or 'not-installed'.
     """
-    try:
-        uname = os.uname()
-    except AttributeError:
-        return None
-
-    os_name = {"Darwin": "darwin", "Linux": "linux"}.get(
-        uname.sysname, uname.sysname.lower()
-    )
-    arch = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64"}.get(
-        uname.machine, uname.machine
-    )
-    return f"{os_name}-{arch}"
-
-
-def vendored_foundation_dir(repo_root: Path) -> Path | None:
-    """Path to this platform's vendored foundation binaries under the repo, or None if
-    undetected.
-    """
-    platform = detect_vendor_platform()
-    if not platform:
-        return None
-    return repo_root / "bin" / "vendor" / platform
-
-
-def install_foundation_from_bundle(
-    foundation: Foundation,
-    repo_root: Path,
-    bin_dir: Path | None = None,
-    dry_run: bool = False,
-) -> Path | None:
-    """Copy a vendored foundation binary from the repo's bin/vendor payload into `bin_dir`.
-
-    Returns the installed path, or None when no vendored binary exists for this
-    foundation/platform (falls back to PATH discovery in the caller).
-    """
-    vendor_name = VENDORED_FOUNDATION_BINARIES.get(foundation.name)
-    if not vendor_name:
-        return None
-
-    vendor_dir = vendored_foundation_dir(repo_root)
-    if vendor_dir is None:
-        return None
-
-    src = vendor_dir / vendor_name
-    if not src.is_file():
-        return None
-
-    target_dir = bin_dir or (Path.home() / ".local" / "bin")
-    dst = target_dir / vendor_name
-    if dry_run:
-        return dst
-
-    target_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dst)
-    dst.chmod(0o755)
-
-    result = subprocess.run(
-        [str(dst), "--version"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
-        suffix = f": {detail}" if detail else ""
-        print(f"  {WARN} {vendor_name} copied but version check failed{suffix}")
-    return dst
-
-
-def install_or_find_foundation(
-    foundation: Foundation, repo_root: Path, dry_run: bool = False
-) -> tuple[str, str]:
-    """Install `foundation` from the bundled vendor payload, else fall back to an
-    existing PATH install.
-
-    Returns `(path, source)` where source is 'bundled', 'pre-existing', or 'not-installed'.
-    """
-    # A standalone installation owns the public command. The vendored payload
-    # fills a gap; it never replaces another product with the bundled version.
     found = foundation.is_installed()
     if found:
         return found, "pre-existing"
-
-    bundled = install_foundation_from_bundle(foundation, repo_root, dry_run=dry_run)
-    if bundled:
-        return str(bundled), "bundled"
     return "", "not-installed"
 
 
@@ -680,7 +594,9 @@ def _is_writable(path: Path) -> bool:
         return False
 
 
-AGENT_RUNTIMES = ["codex", "claude", "agy", "junie", "grok"]
+AGENT_RUNTIMES = ["codex", "claude", "agy", "junie", "grok", "cursor"]
+# Fleet agent key → PATH binary when they differ (cursor's CLI is cursor-agent).
+AGENT_RUNTIME_BINARIES = {"cursor": "cursor-agent"}
 SYMLINK_TARGETS = ["agents"]
 # gemini kept in CHOICES only for legacy .gemini data dir compat (no active runtime)
 SYMLINK_TARGET_CHOICES = [
@@ -691,6 +607,7 @@ SYMLINK_TARGET_CHOICES = [
     "agy",
     "junie",
     "grok",
+    "cursor",
 ]
 SHADOWED_SKILL_VIEW_RUNTIMES = ("claude", "codex")
 # Claude Code and Codex CLIs read only their own ~/.claude/skills and
@@ -922,7 +839,7 @@ def detect_agent_runtimes() -> dict[str, str | None]:
     """Check which agent CLIs are available."""
     result = {}
     for rt in AGENT_RUNTIMES:
-        result[rt] = shutil.which(rt)
+        result[rt] = shutil.which(AGENT_RUNTIME_BINARIES.get(rt, rt))
     return result
 
 
@@ -11762,6 +11679,96 @@ def _release_contract_asset_issues(
     return sorted(set(issues))
 
 
+def _doctor_runtime_receipt_findings() -> list[DoctorFinding]:
+    """Compare the runtime install receipt against what is actually on disk.
+
+    Receipt/disk drift is how stale launchers and retired-path dependents stay
+    invisible; doctor must see it. Emits nothing when no runtime receipt
+    exists (source-only installs never wrote one).
+    """
+    receipt_path = _runtime_receipt_path(_runtime_install_paths()["runtime_home"])
+    if not receipt_path.is_file():
+        return []
+    try:
+        receipt = _load_runtime_install_receipt(receipt_path)
+    except RuntimeError as exc:
+        return [DoctorFinding("warn", "runtime-receipt", str(exc))]
+    missing: list[str] = []
+    drifted: list[str] = []
+    for key, digest in receipt.get("owned_files", {}).items():
+        path = Path(key)
+        if not _path_present(path):
+            missing.append(key)
+        elif path.is_symlink() or not path.is_file() or _sha256_path(path) != digest:
+            drifted.append(key)
+    findings: list[DoctorFinding] = []
+    if missing or drifted:
+        detail: list[str] = []
+        if drifted:
+            detail.append(f"{len(drifted)} drifted ({', '.join(drifted[:3])})")
+        if missing:
+            detail.append(f"{len(missing)} missing ({', '.join(missing[:3])})")
+        findings.append(
+            DoctorFinding(
+                "warn",
+                "runtime-receipt",
+                "receipt/disk drift: "
+                + "; ".join(detail)
+                + " — repair with `make install`",
+            )
+        )
+    else:
+        findings.append(
+            DoctorFinding("ok", "runtime-receipt", "receipted files match disk")
+        )
+    return findings
+
+
+def _doctor_foundation_service_findings() -> list[DoctorFinding]:
+    """Surface foundation LaunchAgents that dangle or point at our paths.
+
+    A foundation service must resolve to the user's own install. Pointing at a
+    generation-private or retired Vibecrafted path is how a reboot meets a
+    dead service (launchd exit 78).
+    """
+    findings: list[DoctorFinding] = []
+    for plist_path, payload in _foundation_service_dependent_plists():
+        label = str(payload.get("Label") or plist_path.stem)
+        arguments = [str(value) for value in (payload.get("ProgramArguments") or [])]
+        program = payload.get("Program") or (arguments[0] if arguments else "")
+        program = str(program)
+        if not program:
+            continue
+        runtime_home = _runtime_install_paths()["runtime_home"]
+        launcher_home = _runtime_install_paths()["launcher_home"]
+        if not Path(program).exists():
+            findings.append(
+                DoctorFinding(
+                    "fail",
+                    f"foundation-service:{label}",
+                    f"dangling: {program} does not exist — install the tool's "
+                    "canonical release and re-register the service",
+                )
+            )
+        elif _path_is_under(Path(program), runtime_home) or (
+            Path(program).parent == launcher_home
+            and Path(program).name.startswith("vibecrafted-")
+        ):
+            findings.append(
+                DoctorFinding(
+                    "warn",
+                    f"foundation-service:{label}",
+                    f"points at Vibecrafted-owned path {program} — the user's "
+                    "PATH install should win; repoint and kick the service",
+                )
+            )
+        else:
+            findings.append(
+                DoctorFinding("ok", f"foundation-service:{label}", f"-> {program}")
+            )
+    return findings
+
+
 def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
     """Run full installation health check."""
     findings: list[DoctorFinding] = []
@@ -12027,6 +12034,10 @@ def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
 
     # 5b. Runtime horse selected by install.sh --runtime / make install RUNTIME=...
     findings.append(doctor_runtime_finding())
+
+    # 5c. Runtime receipt vs disk, and foundation service dependents.
+    findings.extend(_doctor_runtime_receipt_findings())
+    findings.extend(_doctor_foundation_service_findings())
 
     # 6. Shell helpers
     helper_file = _helper_target_path()
@@ -12908,17 +12919,13 @@ def _cmd_install_verbose(args: argparse.Namespace, repo_root: Path) -> int:
                     print(bold("Runtime Foundations:"))
                     missing_foundations: list[Foundation] = []
                     for f in FOUNDATIONS:
-                        path, channel = install_or_find_foundation(
-                            f, repo_root, dry_run=dry_run
-                        )
+                        path, channel = install_or_find_foundation(f)
                         installed_foundations[f.name] = {
                             "channel": channel,
                             "path": path,
                         }
                         if path:
                             print(f"  {OK} {f.name} -> {dim(path)}")
-                            if channel == "bundled":
-                                print(f"       {dim('installed from bundled payload')}")
                             print(f"       {dim(f.description)}")
                         elif f.required:
                             print(f"  {MISS} {f.name} — {f.description}")
@@ -12975,9 +12982,7 @@ def _cmd_install_verbose(args: argparse.Namespace, repo_root: Path) -> int:
                 # Post-wizard setup
                 for f in FOUNDATIONS:
                     if f.name not in installed_foundations:
-                        path, channel = install_or_find_foundation(
-                            f, repo_root, dry_run=dry_run
-                        )
+                        path, channel = install_or_find_foundation(f)
                         installed_foundations[f.name] = {
                             "channel": channel,
                             "path": path,
@@ -13476,7 +13481,7 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
         # Log foundations
         print("Runtime Foundations:")
         for f in FOUNDATIONS:
-            path, channel = install_or_find_foundation(f, repo_root, dry_run=dry_run)
+            path, channel = install_or_find_foundation(f)
             installed_foundations[f.name] = {
                 "channel": channel,
                 "path": path,
@@ -15426,12 +15431,43 @@ def _write_runtime_owned_file(
     _checkpoint_runtime_install_receipt(runtime_home, receipt)
 
 
-def _runtime_launcher_public_name(name: str) -> str:
-    """Map a generation executable into the namespace Vibecrafted may publish."""
+def _runtime_launcher_public_name(name: str) -> str | None:
+    """Map a generation executable into the namespace Vibecrafted may publish.
+
+    Returns None for foreign tools (loct/loctree/aicx/prview/screenscribe):
+    public foundations are the user's own products. The user's PATH install
+    always wins, a missing tool comes from its canonical upstream release, and
+    the vendored copy stays generation-private for the runtime's internal use.
+    Vibecrafted is a guest on the operator's machine — it never publishes
+    `vibecrafted-<tool>` wrapper shims onto the user's PATH.
+    """
     base = name.lower()
     if base.startswith(_RUNTIME_NAMESPACE_PREFIXES) or base in _RUNTIME_NAMESPACE_NAMES:
         return name
-    return f"vibecrafted-{name}"
+    return None
+
+
+def _runtime_published_launcher_names(bin_dir: Path) -> set[str]:
+    """Launcher names the current install publishes into the launcher home."""
+    names = {"vc-terminal", SECURE_WALKAROUND_LAUNCHER, *_RUNTIME_WRAPPER_VERBS}
+    for entry in bin_dir.iterdir():
+        if not entry.is_file() or not os.access(entry, os.X_OK):
+            continue
+        public = _runtime_launcher_public_name(entry.name)
+        if public is not None:
+            names.add(public)
+    return names
+
+
+def _restore_receipt_collision_backup(
+    stale: Path, backup_raw: str, *, runtime_home: Path
+) -> None:
+    backup = Path(backup_raw)
+    if not _receipt_backup_path_is_allowed(backup, runtime_home / ".installer-backups"):
+        raise RuntimeError(f"receipt backup path escapes backup root: {backup}")
+    if _path_present(backup):
+        _restore_path_from_backup(backup, stale)
+        _remove_path(backup)
 
 
 def _reclaim_foreign_launcher_names(
@@ -15441,56 +15477,199 @@ def _reclaim_foreign_launcher_names(
     runtime_home: Path,
     receipt: dict[str, Any],
     previous: Mapping[str, Any],
-) -> None:
-    """Reclaim only byte-identical bare shims written by an older generation."""
+) -> list[Path]:
+    """Retire launchers a previous generation published but this one no longer
+    publishes — legacy bare shims and `vibecrafted-<tool>` wrappers alike.
+
+    Receipt-gated: only paths the previous receipt owns are considered. A
+    byte-identical file is removed and its collision backup (if any) restored,
+    so the pre-Vibecrafted owner of a public name resurfaces. A bare foreign
+    name whose bytes moved on is left untouched — that is the user's own
+    install now (canonical releases land there), and the user's PATH install
+    always wins. A retired name inside the Vibecrafted namespace is ours under
+    any drift: divergent bytes are preserved under `.installer-backups/drift`
+    and the wrapper is removed, so no stale `vibecrafted-*` surface lingers.
+
+    Returns the retired paths so the caller can repoint their dependents.
+    """
+    published = _runtime_published_launcher_names(bin_dir)
     previous_owned = previous.get("owned_files", {})
-    for entry in sorted(bin_dir.iterdir(), key=lambda item: item.name):
-        if (
-            not entry.is_file()
-            or _runtime_launcher_public_name(entry.name) == entry.name
-        ):
-            continue
-        stale = launcher_home / entry.name
-        stale_key = str(stale)
-        previous_hash = previous_owned.get(stale_key)
-        if previous_hash is None:
+    retired: list[Path] = []
+    for stale_key in sorted(previous_owned):
+        stale = Path(stale_key)
+        if stale.parent != launcher_home or stale.name in published:
             continue
         backup_raw = receipt.setdefault("backups", {}).get(stale_key)
         if not _path_present(stale):
             receipt.setdefault("owned_files", {}).pop(stale_key, None)
             if backup_raw:
-                backup = Path(backup_raw)
-                if not _receipt_backup_path_is_allowed(
-                    backup, runtime_home / ".installer-backups"
-                ):
-                    raise RuntimeError(
-                        f"receipt backup path escapes backup root: {backup}"
-                    )
-                if _path_present(backup):
-                    _restore_path_from_backup(backup, stale)
-                    _remove_path(backup)
+                _restore_receipt_collision_backup(
+                    stale, backup_raw, runtime_home=runtime_home
+                )
                 receipt.setdefault("backups", {}).pop(stale_key, None)
             continue
-        if (
-            stale.is_symlink()
-            or not stale.is_file()
-            or _sha256_path(stale) != previous_hash
-        ):
+        identical = (
+            not stale.is_symlink()
+            and stale.is_file()
+            and _sha256_path(stale) == previous_owned[stale_key]
+        )
+        ours_regardless = (
+            stale.name.startswith(_RUNTIME_NAMESPACE_PREFIXES)
+            or stale.name in _RUNTIME_NAMESPACE_NAMES
+        )
+        if not identical and not ours_regardless:
             continue
-
+        if not identical:
+            _backup_runtime_drift(stale, runtime_home=runtime_home, receipt=receipt)
+            if stale.is_dir() and not stale.is_symlink():
+                _remove_path(stale)
+                retired.append(stale)
+                receipt.setdefault("owned_files", {}).pop(stale_key, None)
+                continue
         _remove_path(stale)
+        retired.append(stale)
         receipt.setdefault("owned_files", {}).pop(stale_key, None)
         backup_raw = receipt.setdefault("backups", {}).pop(stale_key, None)
         if backup_raw:
-            backup = Path(backup_raw)
-            if not _receipt_backup_path_is_allowed(
-                backup, runtime_home / ".installer-backups"
-            ):
-                raise RuntimeError(f"receipt backup path escapes backup root: {backup}")
-            if _path_present(backup):
-                _restore_path_from_backup(backup, stale)
-                _remove_path(backup)
+            _restore_receipt_collision_backup(
+                stale, backup_raw, runtime_home=runtime_home
+            )
     _checkpoint_runtime_install_receipt(runtime_home, receipt)
+    return retired
+
+
+_FOUNDATION_TOOL_NAMES = (
+    "loct",
+    "loctree",
+    "loctree-lsp",
+    "loctree-mcp",
+    "aicx",
+    "aicx-mcp",
+    "prview",
+    "screenscribe",
+)
+
+
+def _path_is_under(path: Path, root: Path) -> bool:
+    try:
+        Path(os.path.abspath(path)).relative_to(os.path.abspath(root))
+        return True
+    except ValueError:
+        return False
+
+
+def _foundation_service_dependent_plists() -> list[tuple[Path, dict[str, Any]]]:
+    """LaunchAgent plists whose program is a public foundation tool.
+
+    These services belong to the foundation products (written by their own
+    installers). Vibecrafted reads them only to reconcile pointers that
+    reference paths it owns or retired — a reclaim must never leave a
+    dependent dangling.
+    """
+    agents = Path.home() / "Library" / "LaunchAgents"
+    if sys.platform != "darwin" or not agents.is_dir():
+        return []
+    dependents: list[tuple[Path, dict[str, Any]]] = []
+    for plist_path in sorted(agents.glob("*.plist")):
+        try:
+            with plist_path.open("rb") as handle:
+                payload = plistlib.load(handle)
+        except (OSError, plistlib.InvalidFileException, ValueError, TypeError):
+            continue
+        label = str(payload.get("Label") or "")
+        if label.startswith(("io.vetcoders.", "com.vibecrafted.")):
+            # Our own services are reconciled by their own lanes.
+            continue
+        arguments = payload.get("ProgramArguments") or []
+        program = payload.get("Program") or (arguments[0] if arguments else "")
+        program_name = Path(str(program)).name
+        if program_name.removeprefix("vibecrafted-") in _FOUNDATION_TOOL_NAMES:
+            dependents.append((plist_path, payload))
+    return dependents
+
+
+def _launchctl_quiet(*args: str) -> subprocess.CompletedProcess[bytes] | None:
+    """launchctl that never raises: absent binary or failed call both read as None."""
+    try:
+        return subprocess.run(["launchctl", *args], check=False, capture_output=True)
+    except OSError:
+        return None
+
+
+def _repoint_foundation_service_dependents(
+    retired: Sequence[Path],
+    *,
+    launcher_home: Path,
+    runtime_home: Path,
+) -> list[str]:
+    """Repoint foundation LaunchAgents off retired or Vibecrafted-owned paths.
+
+    The user's own PATH install always wins as the repoint target. A service
+    that is not loaded is never bootstrapped; a dangling pointer we did not
+    own is reported, not rewritten. Returns human-readable actions taken.
+    """
+    if sys.platform != "darwin":
+        return []
+    retired_set = {str(path) for path in retired}
+    actions: list[str] = []
+    for plist_path, payload in _foundation_service_dependent_plists():
+        arguments = [str(value) for value in (payload.get("ProgramArguments") or [])]
+        if not arguments:
+            continue
+        program = arguments[0]
+        tool = Path(program).name.removeprefix("vibecrafted-")
+        owned_by_us = (
+            program in retired_set
+            or _path_is_under(Path(program), runtime_home)
+            or (
+                Path(program).parent == launcher_home
+                and tool.startswith("vibecrafted-")
+            )
+        )
+        dangling = not Path(program).exists()
+        if not owned_by_us:
+            if dangling:
+                print(
+                    f"[runtime-install] {plist_path.name}: {program} is dangling; "
+                    "install the tool's canonical release and re-register the service",
+                    file=sys.stderr,
+                )
+            continue
+        replacement = shutil.which(tool)
+        if replacement and _path_is_under(Path(replacement), runtime_home):
+            replacement = None
+        if replacement is None:
+            print(
+                f"[runtime-install] {plist_path.name}: {program} is Vibecrafted-owned "
+                f"but no user install of {tool} is on PATH; install the canonical "
+                "release, then re-register the service",
+                file=sys.stderr,
+            )
+            continue
+        if Path(replacement) == Path(program):
+            continue
+        arguments[0] = replacement
+        payload["ProgramArguments"] = arguments
+        if payload.get("Program"):
+            payload["Program"] = replacement
+        temporary = plist_path.with_name(f".{plist_path.name}.new-{os.getpid()}")
+        with temporary.open("wb") as handle:
+            plistlib.dump(payload, handle, fmt=plistlib.FMT_XML)
+        temporary.chmod(0o644)
+        os.replace(temporary, plist_path)
+        label = str(payload.get("Label") or plist_path.stem)
+        domain = f"gui/{os.getuid()}"
+        probe = _launchctl_quiet("print", f"{domain}/{label}")
+        loaded = probe is not None and probe.returncode == 0
+        if loaded:
+            _launchctl_quiet("bootout", f"{domain}/{label}")
+            _launchctl_quiet("bootstrap", domain, str(plist_path))
+        actions.append(f"{label}: {program} -> {replacement}")
+        print(
+            f"[runtime-install] repointed {plist_path.name}: {program} -> {replacement}",
+            file=sys.stderr,
+        )
+    return actions
 
 
 def _write_runtime_owned_symlink(
@@ -15915,7 +16094,11 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             continue
         if not os.access(entry, os.X_OK):
             continue
-        destination = paths["launcher_home"] / _runtime_launcher_public_name(entry.name)
+        public_name = _runtime_launcher_public_name(entry.name)
+        if public_name is None:
+            # Foreign foundation tool: generation-private, never published.
+            continue
+        destination = paths["launcher_home"] / public_name
         body = _runtime_launcher_body(
             generation=generation,
             config_home=paths["config_home"],
@@ -15932,12 +16115,17 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             receipt=receipt,
             previous=previous,
         )
-    _reclaim_foreign_launcher_names(
+    retired_launchers = _reclaim_foreign_launcher_names(
         bin_dir,
         paths["launcher_home"],
         runtime_home=runtime_home,
         receipt=receipt,
         previous=previous,
+    )
+    _repoint_foundation_service_dependents(
+        retired_launchers,
+        launcher_home=paths["launcher_home"],
+        runtime_home=runtime_home,
     )
 
     verifier_launcher = paths["launcher_home"] / SECURE_WALKAROUND_LAUNCHER
