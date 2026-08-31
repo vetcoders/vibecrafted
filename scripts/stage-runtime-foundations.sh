@@ -9,9 +9,9 @@ OUTPUT_BIN_DIR="$1"
 LOCTREE_VERSION="0.14.4"
 LOCTREE_REVISION="3e9eb0a74cb3c043d740de5fe7d8c93985d0a876"
 LOCTREE_ARCHIVE_SHA256="cdf37cff13b423d9be916f74bb43bc5857729e64380d7bc2f16462568d74a5cb"
-AICX_VERSION="0.12.5"
-AICX_REVISION="ced57997dd97a2b08960f35e3a657d7b0c49a200"
-AICX_ARCHIVE_SHA256="ffc65ad6652ee0e240beb333f54d7372b607690dcf5f6c29eb68adee2aed58e7"
+AICX_VERSION="0.12.6"
+AICX_REVISION="215b8060fc56f3968e5a9a83a85cba845149a8bf"
+AICX_ARCHIVE_SHA256="6a207d9c8ef82de919eb62db3d50294613e394416c3e28f1b7c5ac44a0151fb9"
 PRVIEW_VERSION="0.7.0"
 LOCTREE_SOURCE_BUILD=0
 
@@ -100,10 +100,10 @@ else
 fi
 rm -rf "$WORK/loctree" 2>/dev/null || true
 
-# The published 0.12.5 AICX archives are checksum-correct but retain their CI
-# builder's /Users path in both native binaries. Build the exact release commit
-# with path remaps instead of weakening payload hygiene or byte-patching signed
-# upstream artifacts. Customers still receive ready binaries and need no Rust.
+# The published AICX binaries retain their CI builder's /Users path in both
+# native binaries. Build the exact digest-pinned source revision with path
+# remaps instead of weakening payload hygiene or byte-patching upstream
+# artifacts. Customers still receive ready binaries and need no Rust.
 fetch_source \
   "https://codeload.github.com/Loctree/aicx/tar.gz/${AICX_REVISION}" \
   "$AICX_ARCHIVE_SHA256" "$WORK/aicx/source.tar.gz" "$WORK/aicx/source"
@@ -152,7 +152,9 @@ fi
 "$OUTPUT_BIN_DIR/aicx${EXE_SUFFIX}" --version | grep -F "$AICX_VERSION" >/dev/null
 "$OUTPUT_BIN_DIR/prview${EXE_SUFFIX}" --version | grep -F "$PRVIEW_VERSION" >/dev/null
 
-python3 - "$OUTPUT_BIN_DIR" "$LOCTREE_VERSION" "$AICX_VERSION" "$PRVIEW_VERSION" <<'PY'
+python3 - "$OUTPUT_BIN_DIR" "$LOCTREE_VERSION" "$AICX_VERSION" "$PRVIEW_VERSION" \
+  "$LOCTREE_REVISION" "$LOCTREE_ARCHIVE_SHA256" \
+  "$AICX_REVISION" "$AICX_ARCHIVE_SHA256" <<'PY'
 import hashlib
 import json
 import os
@@ -161,6 +163,8 @@ from pathlib import Path
 
 root = Path(sys.argv[1])
 versions = {"loctree": sys.argv[2], "aicx": sys.argv[3], "prview": sys.argv[4]}
+loctree_revision, loctree_archive_sha256 = sys.argv[5:7]
+aicx_revision, aicx_archive_sha256 = sys.argv[7:9]
 files = {}
 for path in sorted(root.iterdir()):
     if path.is_file() and os.access(path, os.X_OK):
@@ -169,17 +173,17 @@ payload = {
     "schema": "io.vetcoders.vibecrafted.runtime-foundations.v1",
     "versions": versions,
     "source_revisions": {
-        "loctree": "3e9eb0a74cb3c043d740de5fe7d8c93985d0a876",
-        "aicx": "ced57997dd97a2b08960f35e3a657d7b0c49a200",
+        "loctree": loctree_revision,
+        "aicx": aicx_revision,
     },
     "source_archives": {
         "loctree": {
-            "url": "https://codeload.github.com/Loctree/loctree/tar.gz/3e9eb0a74cb3c043d740de5fe7d8c93985d0a876",
-            "sha256": "cdf37cff13b423d9be916f74bb43bc5857729e64380d7bc2f16462568d74a5cb",
+            "url": f"https://codeload.github.com/Loctree/loctree/tar.gz/{loctree_revision}",
+            "sha256": loctree_archive_sha256,
         },
         "aicx": {
-            "url": "https://codeload.github.com/Loctree/aicx/tar.gz/ced57997dd97a2b08960f35e3a657d7b0c49a200",
-            "sha256": "ffc65ad6652ee0e240beb333f54d7372b607690dcf5f6c29eb68adee2aed58e7",
+            "url": f"https://codeload.github.com/Loctree/aicx/tar.gz/{aicx_revision}",
+            "sha256": aicx_archive_sha256,
         },
     },
     "licenses": {
