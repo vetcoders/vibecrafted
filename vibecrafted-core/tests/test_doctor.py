@@ -467,7 +467,7 @@ def test_server_supervision_finding_proves_current_managed_pair() -> None:
     ]
 
 
-def test_server_supervision_uses_service_launcher_not_public_deck(
+def test_server_supervision_uses_canonical_launcher_not_stale_uv_tool(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -500,7 +500,7 @@ def test_server_supervision_uses_service_launcher_not_public_deck(
     )
 
     assert findings[0].level == "ok"
-    assert captured["launcher"] == service_launcher
+    assert captured["launcher"] == Path("/runtime/generation/deck/vibecrafted")
 
 
 def test_server_supervision_finding_fails_closed_for_stale_pair() -> None:

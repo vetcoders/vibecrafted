@@ -131,6 +131,34 @@ def test_parse_installed_provenance_refuses_without_sha() -> None:
     assert p["installed_sha"]["value"] == "unknown"
 
 
+def test_runtime_foundation_provenance_uses_verified_manifest_sha(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "4.3.0+gdeadbee"
+    binary = root / "bin" / "aicx"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"aicx-binary")
+    digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+    revision = "215b8060fc56f3968e5a9a83a85cba845149a8bf"
+    (root / "runtime-foundations.json").write_text(
+        json.dumps(
+            {
+                "schema": "io.vetcoders.vibecrafted.runtime-foundations.v1",
+                "source_revisions": {"aicx": revision},
+                "files": {"aicx": digest},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proof = rr._runtime_foundation_provenance(str(binary), foundation="aicx")
+
+    assert proof is not None
+    assert proof["installed_sha"] == revision
+    assert proof["installed_dirty"] is False
+    assert proof["sha_source"] == "runtime_foundations"
+
+
 def test_parse_dirty_false_is_not_dirty_build() -> None:
     """loct banner includes ``dirty=false`` — must not trip DIRTY_BUILD."""
     line = (

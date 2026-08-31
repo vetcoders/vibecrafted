@@ -525,9 +525,11 @@ def _server_supervision_findings(
         status_reader = status_reader or service_status
 
     try:
-        service_launcher = _uv_tool_shim()
-        if not service_launcher.is_file():
-            service_launcher = Path(resolved_launcher)
+        # The launcher that wins PATH is the installed runtime authority.  A
+        # leftover uv-tool shim may point at an older generation and must not
+        # make doctor inspect a different service identity than the public
+        # `vibecrafted server service status` command.
+        service_launcher = Path(resolved_launcher)
         config = config_factory(launcher=service_launcher)
         status = status_reader(config)
     except (
