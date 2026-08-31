@@ -80,9 +80,13 @@ def _runtime_pack_fixture(root: Path) -> tuple[Path, Path, Path]:
         "vc-server",
         "vc-server-supervisor",
         "vc-start",
+        "vc-terminal",
         "vc-workflow",
     ):
         _write_executable(payload / "bin" / name)
+    _write_executable(
+        payload / "libexec/vc-frame", "#!/bin/sh\necho runtime-pack-frame\n"
+    )
     _write_executable(payload / "vibecrafted-core/vibecrafted_core/deck/vibecrafted")
     (payload / "VERSION").write_text("9.9.9+g12345678\n", encoding="utf-8")
     terminal_root = payload / "config/vc-terminal"
@@ -113,8 +117,11 @@ def _runtime_pack_fixture(root: Path) -> tuple[Path, Path, Path]:
     _write_executable(payload / "config/alacritty/launch-primary-shell.zsh")
     terminal_host = root / "Vibecrafted.app/Contents/Helpers/vc-terminal"
     frame_helper = root / "Vibecrafted.app/Contents/Helpers/vc-frame"
-    _write_executable(terminal_host)
-    _write_executable(frame_helper)
+    # Deliberately differ from the carrier payload. The current installer may
+    # receive an App root for ownership receipts, but native runtime bytes must
+    # already live in the Runtime Pack and must never be injected from the App.
+    _write_executable(terminal_host, "#!/bin/sh\necho app-terminal-helper\n")
+    _write_executable(frame_helper, "#!/bin/sh\necho app-frame-helper\n")
     return payload, terminal_host, frame_helper
 
 
@@ -172,8 +179,14 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     assert "pin_darwin_socket_dir" in (generation / "bin/vc-frame").read_text(
         encoding="utf-8"
     )
-    assert (generation / "libexec/vc-frame").read_bytes() == frame_helper.read_bytes()
-    assert (generation / "bin/vc-terminal").read_bytes() == terminal_host.read_bytes()
+    assert (generation / "libexec/vc-frame").read_bytes() == (
+        payload / "libexec/vc-frame"
+    ).read_bytes()
+    assert (generation / "bin/vc-terminal").read_bytes() == (
+        payload / "bin/vc-terminal"
+    ).read_bytes()
+    assert (generation / "libexec/vc-frame").read_bytes() != frame_helper.read_bytes()
+    assert (generation / "bin/vc-terminal").read_bytes() != terminal_host.read_bytes()
     assert (runtime_home / installer.RUNTIME_INSTALL_RECEIPT).is_file()
     current = runtime_home / "tools/vibecrafted-current"
     assert current.is_symlink()
@@ -2192,8 +2205,8 @@ def test_runtime_pack_downgrade_is_named_per_component() -> None:
     assert installer._runtime_pack_downgrade({}, active) == []
 
 
-def test_runtime_install_refuses_older_pack_unless_allowed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_runtime_install_always_refuses_older_pack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runtime_home = tmp_path / "runtime"
     active_root = runtime_home / "releases" / "4.3.0+g3bbe57a2"
@@ -2220,12 +2233,7 @@ def test_runtime_install_refuses_older_pack_unless_allowed(
     with pytest.raises(
         RuntimeError, match="refusing to replace a newer active runtime"
     ):
-        installer._refuse_runtime_pack_downgrade(
-            candidate, runtime_home, allow_older=False
-        )
-
-    installer._refuse_runtime_pack_downgrade(candidate, runtime_home, allow_older=True)
-    assert "installing an older Runtime Pack" in capsys.readouterr().out
+        installer._refuse_runtime_pack_downgrade(candidate, runtime_home)
 
     newer = tmp_path / "newer"
     newer.mkdir()
@@ -2235,7 +2243,7 @@ def test_runtime_install_refuses_older_pack_unless_allowed(
         ),
         encoding="utf-8",
     )
-    installer._refuse_runtime_pack_downgrade(newer, runtime_home, allow_older=False)
+    installer._refuse_runtime_pack_downgrade(newer, runtime_home)
 
 
 def _write_run_meta(shared_home: Path, run_id: str, **meta) -> None:
