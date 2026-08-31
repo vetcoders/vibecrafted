@@ -507,7 +507,16 @@ def _server_supervision_findings(
             )
         ]
 
-    resolved_launcher = which("vibecrafted")
+    # The public wrapper records the launcher used before it prepends the
+    # immutable generation's bin directory to PATH and execs the Python CLI.
+    # Re-running `which` after that handoff finds the inner deck, whose hash is
+    # intentionally different from the LaunchAgent's declared launcher.
+    declared_launcher = os.environ.get("VIBECRAFTED_DECLARED_LAUNCHER", "").strip()
+    resolved_launcher = (
+        declared_launcher
+        if declared_launcher and Path(declared_launcher).is_file()
+        else which("vibecrafted")
+    )
     if not resolved_launcher:
         return [
             _Finding(

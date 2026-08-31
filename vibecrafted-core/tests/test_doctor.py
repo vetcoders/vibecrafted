@@ -467,7 +467,7 @@ def test_server_supervision_finding_proves_current_managed_pair() -> None:
     ]
 
 
-def test_server_supervision_uses_canonical_launcher_not_stale_uv_tool(
+def test_server_supervision_uses_declared_public_launcher_after_wrapper_exec(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -491,6 +491,10 @@ def test_server_supervision_uses_canonical_launcher_not_stale_uv_tool(
         return kwargs
 
     monkeypatch.setattr(doctor, "_uv_tool_shim", lambda: service_launcher)
+    public_launcher = tmp_path / "public" / "vibecrafted"
+    public_launcher.parent.mkdir(parents=True)
+    public_launcher.write_text("#!/bin/bash\n", encoding="utf-8")
+    monkeypatch.setenv("VIBECRAFTED_DECLARED_LAUNCHER", str(public_launcher))
 
     findings = doctor._server_supervision_findings(
         platform="darwin",
@@ -500,7 +504,7 @@ def test_server_supervision_uses_canonical_launcher_not_stale_uv_tool(
     )
 
     assert findings[0].level == "ok"
-    assert captured["launcher"] == Path("/runtime/generation/deck/vibecrafted")
+    assert captured["launcher"] == public_launcher
 
 
 def test_server_supervision_finding_fails_closed_for_stale_pair() -> None:
