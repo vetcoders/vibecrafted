@@ -206,7 +206,8 @@ def test_native_carrier_embeds_every_required_agent_foundation() -> None:
     assert "runtime-foundations.json" in stager
     assert "OPENSSL_STATIC=1" in stager
     assert "PRView retains a non-system dynamic library dependency" in stager
-    assert "ced57997dd97a2b08960f35e3a657d7b0c49a200" in stager
+    assert '"$AICX_REVISION" "$AICX_ARCHIVE_SHA256" <<\'PY\'' in stager
+    assert '"aicx": aicx_revision' in stager
     assert "remap-path-prefix" in stager
     assert "cargo install --locked" in stager
     assert 'rm -rf "$WORK" 2>/dev/null || true' in stager
