@@ -1636,6 +1636,38 @@ def test_terminal_triage_exhausts_bounded_retry_budget(
     )
 
 
+def test_full_terminal_triage_quarantine_archives_oldest_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(guardian_module, "vibecrafted_home", lambda: tmp_path)
+    monkeypatch.setattr(guardian_module, "TERMINAL_TRIAGE_QUARANTINE_CAPACITY", 2)
+    quarantine = guardian_module._terminal_triage_quarantine_root()
+    oldest = quarantine / "oldest.dead-letter.json"
+    newest = quarantine / "newest.dead-letter.json"
+    oldest.write_bytes(b"oldest evidence\n")
+    newest.write_bytes(b"newer evidence\n")
+    os.utime(oldest, ns=(1, 1))
+    os.utime(newest, ns=(2, 2))
+
+    outbox = guardian_module._persist_terminal_triage_outbox("run-overflow")
+    record = guardian_module._read_terminal_triage_outbox(outbox)
+    assert guardian_module._dead_letter_terminal_triage_outbox_locked(
+        record,
+        "runtime_meta_unavailable",
+    )
+
+    assert not outbox.exists()
+    assert not oldest.exists()
+    assert newest.exists()
+    assert len(list(quarantine.glob("*.dead-letter.json"))) == 2
+    archived = list(
+        guardian_module._terminal_triage_quarantine_archive_root().iterdir()
+    )
+    assert len(archived) == 1
+    assert archived[0].read_bytes() == b"oldest evidence\n"
+
+
 def test_terminal_triage_scheduler_uses_one_coalescing_background_worker(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

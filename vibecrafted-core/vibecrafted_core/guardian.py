@@ -2226,6 +2226,15 @@ def _terminal_triage_quarantine_root() -> Path:
     return root
 
 
+def _terminal_triage_quarantine_archive_root() -> Path:
+    """Return the append-only archive for evidence retired from the hot quarantine."""
+    root = (
+        vibecrafted_home() / "control_plane" / "guardian" / "triage-quarantine-archive"
+    )
+    _ensure_private_directory(root)
+    return root
+
+
 def _terminal_triage_outbox_path(run_id: str) -> Path:
     """Return the digest-named outbox file path for `run_id`."""
     candidate = _canonical_triage_run_id(run_id)
@@ -2241,6 +2250,80 @@ def _terminal_triage_quarantine_has_capacity(root: Path) -> bool:
         if count >= TERMINAL_TRIAGE_QUARANTINE_CAPACITY:
             return False
     return True
+
+
+def _ensure_terminal_triage_quarantine_capacity_locked(root: Path) -> bool:
+    """Archive oldest evidence until the bounded hot quarantine has one free slot.
+
+    The quarantine is an operator-facing working set, not the only copy of the
+    evidence.  Previously, reaching its cap permanently pinned poison jobs in
+    the retry outbox and emitted one CRITICAL line per job every sweep.  Moving
+    the oldest entries to a separate append-only archive preserves every byte
+    while restoring forward progress.
+    """
+
+    capacity = TERMINAL_TRIAGE_QUARANTINE_CAPACITY
+    if capacity <= 0:
+        return False
+
+    entries: list[tuple[int, str, Path]] = []
+    for index, entry in enumerate(root.iterdir(), start=1):
+        if index > TERMINAL_TRIAGE_OUTBOX_SCAN_LIMIT:
+            LOGGER.critical(
+                "terminal triage quarantine archive scan exceeded hard limit %s",
+                TERMINAL_TRIAGE_OUTBOX_SCAN_LIMIT,
+            )
+            return False
+        try:
+            modified_at_ns = entry.lstat().st_mtime_ns
+        except OSError as exc:
+            LOGGER.critical(
+                "terminal triage quarantine evidence cannot be inspected at %s: %s",
+                entry,
+                exc,
+            )
+            return False
+        entries.append((modified_at_ns, entry.name, entry))
+
+    archive_count = len(entries) - capacity + 1
+    if archive_count <= 0:
+        return True
+
+    archive_root = _terminal_triage_quarantine_archive_root()
+    archived = 0
+    for _modified_at_ns, name, source in sorted(entries)[:archive_count]:
+        safe_name = "".join(
+            character
+            if character.isascii() and (character.isalnum() or character in "._-")
+            else "_"
+            for character in name
+        )[:96]
+        digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
+        destination = archive_root / (
+            f"{time.time_ns()}-{digest}-{secrets.token_hex(4)}-{safe_name}.archived"
+        )
+        try:
+            os.replace(source, destination)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            LOGGER.critical(
+                "terminal triage quarantine evidence could not be archived %s: %s",
+                source,
+                exc,
+            )
+            return False
+        archived += 1
+
+    _fsync_directory(archive_root)
+    _fsync_directory(root)
+    LOGGER.warning(
+        "terminal triage archived %s oldest quarantine entr%s to %s",
+        archived,
+        "y" if archived == 1 else "ies",
+        archive_root,
+    )
+    return _terminal_triage_quarantine_has_capacity(root)
 
 
 def _quarantine_terminal_triage_outbox_locked(path: Path) -> bool:
@@ -2262,7 +2345,7 @@ def _quarantine_terminal_triage_outbox_locked(path: Path) -> bool:
         return False
 
     quarantine_root = _terminal_triage_quarantine_root()
-    if not _terminal_triage_quarantine_has_capacity(quarantine_root):
+    if not _ensure_terminal_triage_quarantine_capacity_locked(quarantine_root):
         LOGGER.critical(
             "terminal triage quarantine is full; invalid evidence remains at %s",
             path,
@@ -2533,7 +2616,7 @@ def _dead_letter_terminal_triage_outbox_locked(
 
     outbox_path = _terminal_triage_outbox_path(record.run_id)
     quarantine_root = _terminal_triage_quarantine_root()
-    if not _terminal_triage_quarantine_has_capacity(quarantine_root):
+    if not _ensure_terminal_triage_quarantine_capacity_locked(quarantine_root):
         LOGGER.critical(
             "terminal triage quarantine is full; poison job remains at %s",
             outbox_path,
