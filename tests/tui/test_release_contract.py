@@ -184,7 +184,13 @@ def test_native_carrier_embeds_every_required_agent_foundation() -> None:
     )
     installer = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(encoding="utf-8")
 
-    assert 'stage-runtime-foundations.sh" "$runtime/bin"' in builder
+    foundation_stage = builder.index('stage-runtime-foundations.sh" "$runtime/bin"')
+    for required_runtime_install in (
+        '"$runtime/bin/vc-start"',
+        '"$runtime/bin/vc-server"',
+        '"$runtime/bin/vibecrafted-server-web"',
+    ):
+        assert builder.index(required_runtime_install) < foundation_stage
     assert "'screenscribe==0.1.19'" in builder
     assert '"$runtime/bin/screenscribe" --version' in builder
     assert '"$runtime/source-provenance.json"' in builder

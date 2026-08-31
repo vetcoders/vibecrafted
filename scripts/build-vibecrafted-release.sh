@@ -528,7 +528,6 @@ materialize_runtime_payload() {
   printf '%s\n' "$RUNTIME_VERSION" \
     > "$runtime/vibecrafted-core/vibecrafted_core/VERSION"
   /bin/cp -R "$REPO_ROOT/config/." "$runtime/config/"
-  "$REPO_ROOT/scripts/stage-runtime-foundations.sh" "$runtime/bin"
   /bin/cp -R "$server_site/." "$runtime/server/site/"
   install -m 0755 "$start_source" "$runtime/bin/vc-start"
   install -m 0755 "$server_source" "$runtime/bin/vc-server"
@@ -537,6 +536,9 @@ materialize_runtime_payload() {
   install -m 0755 "$frame_source" "$runtime/libexec/vc-frame"
   install -m 0755 "$runtime/scripts/vc-frame-product-entry.sh" \
     "$runtime/bin/vc-frame"
+  # The foundation manifest is a closed inventory of the complete executable
+  # surface. Generate it only after every required runtime executable exists.
+  "$REPO_ROOT/scripts/stage-runtime-foundations.sh" "$runtime/bin"
 
   find "$runtime/vibecrafted-core" \
     -type d -name __pycache__ -prune -exec rm -rf {} +
