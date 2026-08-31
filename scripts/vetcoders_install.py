@@ -12251,6 +12251,14 @@ def run_doctor(store_path: Path, state: InstallState) -> list[DoctorFinding]:
     # 7. Spawn pipeline smoke: validate common.sh sources cleanly and key functions exist
     common_sh = None
     for cand in [
+        current_link.resolve()
+        / "vibecrafted-core"
+        / "vibecrafted_core"
+        / "runtime"
+        / "scripts"
+        / "common.sh"
+        if current_link.exists()
+        else None,
         current_link.resolve() / "runtime" / "scripts" / "common.sh"
         if current_link.exists()
         else None,

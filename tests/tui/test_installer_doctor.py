@@ -1445,7 +1445,9 @@ def test_run_doctor_spawn_e2e_supplies_full_meta_arguments(
     helper_dir = config_home / "vetcoders"
     source_root = runtime_tools / "vibecrafted-main"
     current_link = runtime_tools / "vibecrafted-current"
-    scripts_dir = source_root / "skills" / "vc-agents" / "scripts"
+    scripts_dir = (
+        source_root / "vibecrafted-core" / "vibecrafted_core" / "runtime" / "scripts"
+    )
 
     store_path.mkdir(parents=True)
     helper_dir.mkdir(parents=True)
