@@ -15582,6 +15582,35 @@ def _ensure_runtime_install_directory(
     )
 
 
+def _ensure_runtime_lifecycle_log(
+    crafted_home: Path, *, runtime_home: Path, receipt: dict[str, Any]
+) -> Path:
+    """Initialize the App lifecycle trail without claiming its mutable data.
+
+    The Runtime Pack installer owns the directory contract. The App is only a
+    writer, and uninstall must preserve the accumulated lifecycle evidence.
+    """
+    log_directory = crafted_home / "logs"
+    _ensure_runtime_install_directory(
+        log_directory, runtime_home=runtime_home, receipt=receipt
+    )
+    lifecycle_log = log_directory / "app-lifecycle.log"
+    if _path_present(lifecycle_log):
+        if lifecycle_log.is_symlink() or not lifecycle_log.is_file():
+            raise RuntimeError(
+                f"runtime lifecycle log is not a regular file: {lifecycle_log}"
+            )
+        return lifecycle_log
+    try:
+        lifecycle_log.touch(mode=0o600, exist_ok=False)
+    except FileExistsError:
+        if lifecycle_log.is_symlink() or not lifecycle_log.is_file():
+            raise RuntimeError(
+                f"runtime lifecycle log is not a regular file: {lifecycle_log}"
+            )
+    return lifecycle_log
+
+
 def _install_runtime_agent_projections(
     generation: Path,
     *,
@@ -15760,6 +15789,9 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         _ensure_runtime_install_directory(
             directory, runtime_home=runtime_home, receipt=receipt
         )
+    _ensure_runtime_lifecycle_log(
+        paths["crafted_home"], runtime_home=runtime_home, receipt=receipt
+    )
     _checkpoint_runtime_install_receipt(runtime_home, receipt)
 
     if str(generation) not in receipt["owned_dirs"]:

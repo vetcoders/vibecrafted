@@ -1078,6 +1078,7 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "URL(fileURLWithPath: path)" in delegate
     # AppDelegate is the UI/process host, not a second installer implementation.
     assert "createDirectory(at:" not in delegate
+    assert "createFile(atPath:" not in delegate
     assert "copyItem(at:" not in delegate
     assert "writeLauncher(" not in delegate
     assert 'appendingPathComponent("active.json")' not in delegate

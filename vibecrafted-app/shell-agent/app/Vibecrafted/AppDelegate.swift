@@ -5,9 +5,9 @@ import os.log
 
 private let installLog = Logger(subsystem: "io.vetcoders.vibecrafted", category: "install")
 
-/// Durable lifecycle trail. `os_log` is not retained by the unified log store
-/// for this app (2026-08-28: two App deaths left zero entries), so every
-/// launch/quit/signal/child-exit also lands in `<crafted home>/logs/app-lifecycle.log`.
+/// Durable lifecycle trail. The Runtime Pack installer owns initialization of
+/// `<crafted home>/logs/app-lifecycle.log`; the UI host only appends events to
+/// that canonical file and never becomes a second installer implementation.
 private func lifecycleLog(_ event: String) {
   let stamp = ISO8601DateFormatter().string(from: Date())
   let line = "\(stamp) pid=\(getpid()) \(event)\n"
@@ -18,10 +18,6 @@ private func lifecycleLog(_ event: String) {
   let logDir = URL(fileURLWithPath: crafted, isDirectory: true).appendingPathComponent("logs")
   let logURL = logDir.appendingPathComponent("app-lifecycle.log")
   do {
-    try FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
-    if !FileManager.default.fileExists(atPath: logURL.path) {
-      FileManager.default.createFile(atPath: logURL.path, contents: nil)
-    }
     let handle = try FileHandle(forWritingTo: logURL)
     defer { try? handle.close() }
     try handle.seekToEnd()

@@ -13,6 +13,31 @@ INSTALL_RUNTIME = REPO_ROOT / "scripts" / "install-runtime.sh"
 FOUNDATIONS_SCRIPT = REPO_ROOT / "scripts" / "install-foundations.sh"
 
 
+def test_runtime_installer_initializes_and_preserves_app_lifecycle_log(
+    tmp_path: Path,
+) -> None:
+    runtime_home = tmp_path / "runtime"
+    runtime_home.mkdir()
+    crafted_home = tmp_path / ".vibecrafted"
+    receipt: dict[str, object] = {"owned_empty_dirs": []}
+
+    lifecycle_log = vetcoders_install._ensure_runtime_lifecycle_log(
+        crafted_home, runtime_home=runtime_home, receipt=receipt
+    )
+
+    assert lifecycle_log == crafted_home / "logs" / "app-lifecycle.log"
+    assert lifecycle_log.is_file()
+    assert str(lifecycle_log) not in receipt.get("owned_files", {})
+
+    lifecycle_log.write_text("durable evidence\n", encoding="utf-8")
+    assert (
+        vetcoders_install._ensure_runtime_lifecycle_log(
+            crafted_home, runtime_home=runtime_home, receipt=receipt
+        ).read_text(encoding="utf-8")
+        == "durable evidence\n"
+    )
+
+
 def test_install_runtime_none_is_noop(tmp_path: Path) -> None:
     env = os.environ.copy()
     env["HOME"] = str(tmp_path)
