@@ -8,8 +8,9 @@ let installLog = Logger(subsystem: "io.vetcoders.vibecrafted", category: "instal
 /// for this app (2026-08-28: two App deaths left zero entries), so every
 /// launch/quit/signal/child-exit also lands in `<crafted home>/logs/app-lifecycle.log`.
 ///
-/// This is supervision evidence, not installer behavior: the only directory it
-/// creates is the app's own log folder under the crafted home.
+/// The Runtime Pack installer owns initialization of that canonical file; the
+/// UI host only appends events to it and never becomes a second installer
+/// implementation (no directory or file creation here).
 func lifecycleLog(_ event: String) {
   let stamp = ISO8601DateFormatter().string(from: Date())
   let line = "\(stamp) pid=\(getpid()) \(event)\n"
@@ -20,10 +21,6 @@ func lifecycleLog(_ event: String) {
   let logDir = URL(fileURLWithPath: crafted, isDirectory: true).appendingPathComponent("logs")
   let logURL = logDir.appendingPathComponent("app-lifecycle.log")
   do {
-    try FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
-    if !FileManager.default.fileExists(atPath: logURL.path) {
-      FileManager.default.createFile(atPath: logURL.path, contents: nil)
-    }
     let handle = try FileHandle(forWritingTo: logURL)
     defer { try? handle.close() }
     try handle.seekToEnd()
