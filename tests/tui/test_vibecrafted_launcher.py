@@ -1183,6 +1183,60 @@ def test_repo_launcher_is_directly_executable() -> None:
     assert "telemetry smoke" not in result.stdout
 
 
+def test_deck_dispatches_control_plane_revalidate_to_core(tmp_path: Path) -> None:
+    """Contract: vc-server's observe/await path shells out to
+    `vibecrafted control-plane-revalidate --run-id <id> --json` as its canonical
+    writer revalidation. If the deck gates that verb out of dispatch, every
+    observe degrades to HTTP 503 (writer_exit_1) while the run is healthy.
+    The verb is plumbing: it must dispatch to the core, and stay out of help.
+    """
+    home = tmp_path / "home"
+    launcher = home / ".local" / "bin" / "vibecrafted"
+    current_root = (
+        home / ".local" / "share" / "vibecrafted" / "tools" / "vibecrafted-current"
+    )
+    fake_bin = tmp_path / "bin"
+    capture_file = tmp_path / "python3-calls.txt"
+
+    home.mkdir(parents=True)
+    fake_bin.mkdir()
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    launcher.write_text(LAUNCHER.read_text(encoding="utf-8"), encoding="utf-8")
+    launcher.chmod(0o755)
+    current_root.mkdir(parents=True)
+    (current_root / "VERSION").write_text("0.0.0-test\n", encoding="utf-8")
+    _write_fake_core_package(current_root)
+    _write_fake_python3(fake_bin, capture_file)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["PATH"] = f"{fake_bin}:/usr/bin:/bin"
+    env["CAPTURE_FILE"] = str(capture_file)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(launcher),
+            "control-plane-revalidate",
+            "--run-id",
+            "run-x",
+            "--json",
+        ],
+        check=True,
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "not in the command deck" not in result.stdout
+    payload = capture_file.read_text(encoding="utf-8")
+    assert (
+        "-m vibecrafted_core.cli control-plane-revalidate --run-id run-x --json"
+        in payload
+    )
+
+
 def test_installed_deck_version_is_owned_by_deck_not_checkout_cwd(
     tmp_path: Path,
 ) -> None:

@@ -112,7 +112,7 @@ fi
 
 # ── Verify framework readiness ────────────────────────────────────────────
 log "Framework readiness probe:"
-for tool in aicx aicx-mcp loct loctree-mcp claude codex gemini uv vc_frame starship; do
+for tool in aicx aicx-mcp loct loctree-mcp claude codex gemini cursor-agent uv vc_frame starship; do
     if command -v "$tool" >/dev/null 2>&1; then
         version="$("$tool" --version 2>&1 | head -1 | head -c 60)"
         ok "$tool — $version"

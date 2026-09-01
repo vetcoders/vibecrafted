@@ -254,7 +254,7 @@ def supervised_skill_main(skill: str, argv: Sequence[str] | None = None) -> int:
         return handle.wait()
     if not args or args[0] not in AGENTS:
         print(
-            f"Usage: vc-{skill} <claude|codex|agy|junie|grok> [--prompt <text>|--file <path>]",
+            f"Usage: vc-{skill} <claude|codex|agy|junie|grok|cursor> [--prompt <text>|--file <path>]",
             file=sys.stderr,
         )
         return 2

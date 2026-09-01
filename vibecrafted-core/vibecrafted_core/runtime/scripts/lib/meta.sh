@@ -72,7 +72,8 @@ spawn_detect_model_identity() {
     "${CLAUDE_MODEL:-}" \
     "${CODEX_MODEL:-}" \
     "${GEMINI_MODEL:-}" \
-    "${GROK_MODEL:-}"
+    "${GROK_MODEL:-}" \
+    "${CURSOR_MODEL:-}"
   do
     candidate="$(spawn_clean_model "$candidate")"
     if [[ -n "$candidate" ]]; then

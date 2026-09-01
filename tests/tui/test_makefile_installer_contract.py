@@ -203,6 +203,32 @@ def test_bootstrap_help_requires_canonical_provenance_archives() -> None:
     assert "scripts/distribution_manifest.py archive" in usage
 
 
+def test_install_paths_reconcile_server_service_after_launcher_replacement() -> None:
+    """Contract: every launcher-replacing install front door ends with
+    `reconcile-server-service`, so a stale LaunchAgent identity never survives
+    an install. Post-reboot OFFLINE caused by hash drift is a product defect,
+    not an operator chore. The reconcile target itself must stay a no-op
+    unless supervision was explicitly opted into (plist present)."""
+    text = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+
+    install_block = text.split("\ninstall:\n", 1)[1].split(
+        "\n# Explicit source/compiler lane", 1
+    )[0]
+    assert "$(MAKE) --no-print-directory reconcile-server-service" in install_block
+
+    source_block = text.split("\ninstall-source:\n", 1)[1].split(
+        "\n# The explicit source/compiler lane", 1
+    )[0]
+    assert "$(MAKE) --no-print-directory reconcile-server-service" in source_block
+
+    reconcile_block = text.split("\nreconcile-server-service:\n", 1)[1].split(
+        "\n\n", 1
+    )[0]
+    assert 'if [ "$$(uname -s)" != "Darwin" ]' in reconcile_block
+    assert "io.vetcoders.vibecrafted.server.plist" in reconcile_block
+    assert "server service reconcile" in reconcile_block
+
+
 def test_makefile_keeps_install_as_terminal_first_front_door() -> None:
     """Contract: `make install` consumes the same immutable Runtime Pack as
     the native App. The historical compiler lane remains explicit as

@@ -11,6 +11,7 @@ pub enum FamilyTag {
     Grok,
     Codex,
     Claude,
+    Cursor,
     Agy,
     Junie,
     Mlx,
@@ -30,6 +31,7 @@ impl FamilyTag {
             Self::Grok => "grok",
             Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::Cursor => "cursor",
             Self::Agy => "agy",
             Self::Junie => "junie",
             Self::Mlx => "mlx",
@@ -67,6 +69,8 @@ impl FamilyTag {
             Self::Junie
         } else if blob.contains("grok") {
             Self::Grok
+        } else if blob.contains("cursor") {
+            Self::Cursor
         } else if blob.contains("vibecrafted") || blob.contains(".vibecrafted") {
             Self::Vibecrafted
         } else {
@@ -184,6 +188,10 @@ mod tests {
         assert_eq!(
             FamilyTag::classify("node", "codex exec --json"),
             FamilyTag::Codex
+        );
+        assert_eq!(
+            FamilyTag::classify("cursor-agent", "cursor-agent -p --output-format stream-json"),
+            FamilyTag::Cursor
         );
         assert_eq!(FamilyTag::classify("bash", "ls"), FamilyTag::Other);
     }

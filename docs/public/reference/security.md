@@ -45,7 +45,7 @@ The framework's state lives on your machine, not on a vendor server:
 | Plans, reports, transcripts    | `~/.vibecrafted/artifacts/<org>/<repo>/<date>/`        |
 | Installed runtime              | `~/.local/share/vibecrafted/`                          |
 
-The agent CLIs themselves (claude, codex, agy, junie, grok) talk to their
+The agent CLIs themselves (claude, codex, agy, junie, grok, cursor) talk to their
 vendors' APIs under their own terms; Vibecrafted orchestrates them but
 adds no additional telemetry backend of its own.
 

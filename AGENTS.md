@@ -332,11 +332,15 @@ re-assess thousands of runtime binaries on first execution (observed:
 
 The runtime install publishes launchers only for names Vibecrafted owns
 (`vc-*`, `vibecrafted*`, `vibecraft`, `telemetry`). Bundled public tools
-(loct, loctree*, aicx*, prview, screenscribe) stay generation-private and
-surface globally only as `vibecrafted-<name>`. Never overwrite another
-product's command; reclaim old bare-name shims strictly by receipt
-path+digest. A vendored foundation fills a gap — a pre-existing PATH install
-always wins.
+(loct, loctree*, aicx*, prview, screenscribe) stay generation-private, full
+stop — never a `vibecrafted-<name>` wrapper on the user's PATH. Vibecrafted
+is a guest on the operator's machine, not its landlord: the user's own PATH
+install always wins, and when a foundation is missing the fix is its
+canonical upstream release (e.g. `curl -fsSL https://loct.io/install.sh |
+sh`), not a vendored copy or shim from us. Never overwrite another product's
+command; reclaim retired launchers strictly by receipt path+digest, restore
+collision backups, and never leave dependents (LaunchAgents, MCP configs)
+dangling.
 
 ## Host Metadata Is Not Payload
 

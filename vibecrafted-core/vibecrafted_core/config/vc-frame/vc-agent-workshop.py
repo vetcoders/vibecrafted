@@ -91,6 +91,15 @@ def ensure_generation_python() -> None:
     )
 
 
+# Self-consistency: when this script runs from inside a core source tree
+# (worktree or installed generation), the core must come from the SAME tree.
+# Ambient PYTHONPATH can otherwise resolve an older/newer installed generation
+# while the launcher UI is this tree's — the "unsupported provider" crash class.
+# Materialized frame-config copies fail the guard and keep the re-exec path.
+_SCRIPT_CORE_TREE = Path(__file__).resolve().parents[3]
+if (_SCRIPT_CORE_TREE / "vibecrafted_core" / "__init__.py").is_file():
+    sys.path.insert(0, str(_SCRIPT_CORE_TREE))
+
 ensure_generation_python()
 
 from vibecrafted_core.spawn import (

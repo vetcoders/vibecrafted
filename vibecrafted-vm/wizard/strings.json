@@ -153,6 +153,10 @@
         "pl": "~/.gemini/ — sesje Gemini (persistent)",
         "en": "~/.gemini/ — Gemini sessions (persistent)"
       },
+      "cursor_sessions": {
+        "pl": "~/.cursor/ — sesje Cursor (persistent)",
+        "en": "~/.cursor/ — Cursor sessions (persistent)"
+      },
       "vibecrafted_artifacts": {
         "pl": "~/.vibecrafted/ — artefakty vibecrafted (plany, raporty)",
         "en": "~/.vibecrafted/ — vibecrafted artifacts (plans, reports)"

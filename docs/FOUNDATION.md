@@ -134,7 +134,7 @@ The recommended install order:
 1. `Vibecrafted.app` from the signed and notarized canonical versioned DMG
 2. Foundation binaries via **prebuilt-first** (`make foundations` — prefers
    release/npm/crates/PyPI paths; cargo only after preflight)
-3. Agent CLIs (claude, codex, agy, junie, grok)
+3. Agent CLIs (claude, codex, agy, junie, grok, cursor)
 4. PRView (recommended for review workflows)
 5. Screenscribe (recommended for visual verification)
 

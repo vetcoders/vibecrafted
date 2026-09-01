@@ -144,6 +144,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private var serverActionProcess: Process?
   private var serverActionInFlight: ServerLifecycleAction?
   private var serverUtilityProcess: Process?
+  /// The last caretaker envelope bytes the status poll brought back. The menu,
+  /// the diagnostics alert and the action in-flight state all render from this
+  /// one reading — never from a second, privately-fused source.
+  private var lastCaretakerData: Data?
   private var canonicalInstall: CanonicalRuntimeInstall?
   private var canonicalRuntimeEnvironment: [String: String]?
   private var workspaceLaunchFailureReported = false
@@ -655,34 +659,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     return image
   }
 
-  private func supervisorStatusURL() -> URL? {
-    canonicalInstall?.craftedHome.appendingPathComponent("server/supervisor.status.json")
-  }
-
-  private func readSupervisorSnapshot() -> ServerSupervisorSnapshot? {
-    supervisorData().flatMap { try? JSONDecoder().decode(ServerSupervisorSnapshot.self, from: $0) }
-  }
-
-  private func supervisorData() -> Data? {
-    guard let url = supervisorStatusURL() else { return nil }
-    return try? Data(contentsOf: url)
-  }
-
-  private func conciseServerReason(_ reason: String?) -> String? {
-    guard let firstLine = reason?.split(whereSeparator: \.isNewline).first else { return nil }
-    let plain = String(firstLine)
-      .replacingOccurrences(of: "\u{001B}[31m", with: "")
-      .replacingOccurrences(of: "\u{001B}[0m", with: "")
-      .trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !plain.isEmpty else { return nil }
-    return plain.count > 96 ? "\(plain.prefix(93))…" : plain
-  }
-
   private func refreshServerStatus() {
     guard let install = canonicalInstall, let environment = canonicalRuntimeEnvironment else {
       applyServerMenuState(
         deriveServerMenuState(
-          supervisorData: nil, serviceData: nil, actionInFlight: nil, runtimeReady: false))
+          caretakerData: nil, actionInFlight: nil, runtimeReady: false))
       return
     }
     guard serverStatusProcess?.isRunning != true else { return }
@@ -690,28 +671,33 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     guard FileManager.default.isExecutableFile(atPath: deck.path) else {
       applyServerMenuState(
         deriveServerMenuState(
-          supervisorData: supervisorData(), serviceData: nil,
+          caretakerData: nil,
           actionInFlight: serverActionInFlight, runtimeReady: true))
       return
     }
 
+    // One verb, one truth: the caretaker builds the envelope, publishes it for
+    // every other reader (the HTTP route serves the same bytes), and prints the
+    // already-derived verdict. The tray renders; it never re-derives.
     let output = Pipe()
     let errors = Pipe()
     let process = Process()
     process.executableURL = deck
-    process.arguments = ["server", "service", "status", "--json"]
+    process.arguments = serverCaretakerArguments()
     process.environment = environment
     process.standardOutput = output
     process.standardError = errors
     process.terminationHandler = { [weak self] _ in
-      let serviceData = output.fileHandleForReading.readDataToEndOfFile()
+      let caretakerData = output.fileHandleForReading.readDataToEndOfFile()
       DispatchQueue.main.async { [weak self] in
         guard let self else { return }
         self.serverStatusProcess = nil
+        if !caretakerData.isEmpty {
+          self.lastCaretakerData = caretakerData
+        }
         self.applyServerMenuState(
           deriveServerMenuState(
-            supervisorData: self.supervisorData(),
-            serviceData: serviceData.isEmpty ? nil : serviceData,
+            caretakerData: caretakerData.isEmpty ? self.lastCaretakerData : caretakerData,
             actionInFlight: self.serverActionInFlight,
             runtimeReady: true))
       }
@@ -722,7 +708,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     } catch {
       applyServerMenuState(
         deriveServerMenuState(
-          supervisorData: supervisorData(), serviceData: nil,
+          caretakerData: lastCaretakerData,
           actionInFlight: serverActionInFlight, runtimeReady: true))
     }
   }
@@ -817,7 +803,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       serverActionInFlight = action
       applyServerMenuState(
         deriveServerMenuState(
-          supervisorData: supervisorData(), serviceData: nil,
+          caretakerData: lastCaretakerData,
           actionInFlight: action, runtimeReady: true))
     } catch {
       let alert = NSAlert()
@@ -884,27 +870,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   @objc private func showServerDiagnostics() {
-    let snapshot = readSupervisorSnapshot()
+    let envelope = decodeCaretakerEnvelope(data: lastCaretakerData)
     let alert = NSAlert()
-    alert.alertStyle = snapshot?.state.lowercased() == "healthy" ? .informational : .warning
+    alert.alertStyle = envelope?.verdict?.health == "healthy" ? .informational : .warning
     alert.messageText = "Vibecrafted Server"
-    if let snapshot {
-      var lines = [
-        "State: \(snapshot.state.uppercased())",
-        "Supervisor PID: \(snapshot.supervisorPID.map(String.init) ?? "—")",
-        "Server PID: \(snapshot.managedPair?.serverPID.map(String.init) ?? "—")",
-        "Guardian PID: \(snapshot.managedPair?.guardianPID.map(String.init) ?? "—")",
-      ]
-      if let reason = conciseServerReason(snapshot.lastError) {
-        lines.append("Last error: \(reason)")
-      }
-      if let path = supervisorStatusURL()?.path {
-        lines.append("Status receipt: \(path)")
-      }
-      alert.informativeText = lines.joined(separator: "\n")
-    } else {
-      alert.informativeText = "No supervisor status receipt exists for the installed runtime."
-    }
+    alert.informativeText = caretakerDiagnosticsLines(data: lastCaretakerData)
+      .joined(separator: "\n")
     alert.addButton(withTitle: "OK")
     alert.addButton(withTitle: "Open Console")
     if alert.runModal() == .alertSecondButtonReturn {

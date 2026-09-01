@@ -44,6 +44,7 @@ AGENT_PACKAGES=(
 
 AGENT_MANUAL_INSTALLS=(
   "agy|Install Google Antigravity CLI from its vendor distribution, then run: agy install"
+  "cursor-agent|Install the Cursor CLI: curl https://cursor.com/install -fsS | bash"
 )
 
 # Script/source resolution (used by the bundled-toolchain attempt).

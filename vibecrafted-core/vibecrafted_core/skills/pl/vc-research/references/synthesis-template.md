@@ -20,7 +20,7 @@ run_id: <generated-unique-id>
 skill: vc-research
 project: <repo-name>
 status: completed
-operator_synthesis_by: <claude|codex|gemini|operator>
+operator_synthesis_by: <claude|codex|gemini|cursor|operator>
 source_reports:
   - claude_<run_id>.md
   - codex_<run_id>.md
@@ -63,7 +63,7 @@ Jeśli któregoś raportu nie dało się przeczytać w całości, ta synteza MUS
 #### S1: <stwierdzenie sygnału, głosem agenta>
 
 **Source**: `gemini_<run_id>.md:L78-92`
-**Why others missed it**: <claude nie poruszył Q3; codex poruszył, ale dał złą odpowiedź, ponieważ…; itd.>
+**Why others missed it**: <claude nie poruszył Q3; codex poruszył, ale dał złą odpowiedź, ponieważ…; cursor przekroczył timeout; itd.>
 **Operator's verdict**: **amplify** | **flag for follow-up** | **acknowledge & reject**
 **Reasoning**: <jeśli amplify: dlaczego sygnał jest słuszny, a widok convergent niekompletny. Jeśli flag: jaki eksperyment / dalszy research to rozstrzygnie. Jeśli reject: co konkretnie w rozumowaniu sygnału zawodzi, z referencją do evidence z repo albo nazwanej wiedzy zewnętrznej — nigdy na pałę.>
 

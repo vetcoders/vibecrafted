@@ -40,11 +40,17 @@
 //!   envelope (server identity, observability, resume backlog, control-plane
 //!   upkeep) wrapped in transport-level freshness. Answering it is itself the
 //!   liveness proof; see [`caretaker`].
+//! * `GET /api/control/observability` — the split-observability index: logs,
+//!   metrics and the run board named as projections of this one control plane
+//!   (with their routes and source paths), never as independent stores; see
+//!   [`observability`].
 
 #[cfg(feature = "ssr")]
 mod caretaker;
 #[cfg(feature = "ssr")]
 mod events_sse;
+#[cfg(feature = "ssr")]
+mod observability;
 #[cfg(feature = "ssr")]
 mod run_observation;
 
@@ -68,6 +74,7 @@ pub mod api {
 
     use super::caretaker::caretaker;
     use super::events_sse::events_sse;
+    use super::observability::observability;
     use super::run_observation::{await_run as await_run_observation, observe as observe_run};
 
     const STATE_CACHE_TTL: Duration = Duration::from_secs(15);
@@ -101,6 +108,7 @@ pub mod api {
             .route("/api/control/lifecycle/{run_id}", get(lifecycle_run))
             .route("/api/control/events", get(events_sse))
             .route("/api/control/caretaker", get(caretaker))
+            .route("/api/control/observability", get(observability))
     }
 
     /// Cheap liveness/readiness contract for the local process supervisor.

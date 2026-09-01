@@ -39,6 +39,14 @@ as missing, never rendered as healthy.
 :mod:`vibecrafted_core.server_config`. This module composes them; it never
 re-implements them. A second classifier would be exactly the truth competition
 the framework exists to prevent.
+
+**Actions are derived once, next to the verdict.** The verdict answers "how is
+the server doing?"; :func:`build_actions_section` answers the inevitable
+follow-up "so what can I do about it?" from the *same* fused server section.
+A tray that ANDed its own booleans into button state would be a second truth
+with pixels on, so the envelope carries ``enabled`` plus a ``reason`` for
+every supervision verb — an honest disabled-with-reason beats a greyed-out
+mystery.
 """
 
 from __future__ import annotations
@@ -195,6 +203,27 @@ def supervisor_receipt_path(*, home: Path | None = None) -> Path:
     return root / "server" / "supervisor.status.json"
 
 
+def server_log_projection(*, home: Path | None = None) -> dict[str, Any]:
+    """Where the server leg writes its logs, as a named projection.
+
+    The tray used to spawn a third subprocess (``server service logs --json``)
+    just to learn three paths that are deterministic from the crafted home.
+    Naming them here makes logs one more projection a reader can render
+    without a second source of truth — and ``available`` says whether any
+    supervisor output exists at all.
+    """
+    root = home if home is not None else _crafted_home()
+    server_dir = root / "server"
+    available = server_dir.is_dir()
+    return {
+        "available": available,
+        "directory": str(server_dir),
+        "stdout": str(server_dir / "supervisor.stdout.log"),
+        "stderr": str(server_dir / "supervisor.stderr.log"),
+        "reason": "" if available else f"no supervisor log directory: {server_dir}",
+    }
+
+
 # --------------------------------------------------------------------------
 # Section: server
 # --------------------------------------------------------------------------
@@ -282,6 +311,7 @@ def build_server_section(
             "version": "",
         },
         "service": None,
+        "logs": server_log_projection(home=home),
     }
 
     try:
@@ -636,8 +666,18 @@ def derive_verdict(snapshot: Mapping[str, Any]) -> dict[str, Any]:
             if isinstance(row, Mapping)
         )
 
+    # ``server_state`` is the fused lifecycle fact of the server leg, kept
+    # machine-readable so a consumer maps tone without parsing the header:
+    # running / unknown / not_installed / stopped / down. "stopped" matters
+    # apart from "down": a receipt whose terminal state is ``stopped`` was
+    # written by a supervisor that *completed* a stop and exited, so it never
+    # refreshes again — staleness means nothing for a terminal receipt, and an
+    # intentional stop must not read as a crash.
+    receipt_state = str(server.get("state") or "")
+
     if bool(liveness.get("reachable")):
         health = HEALTHY
+        server_state = "running"
         header = f"VC Server: HEALTHY{suffix}"
         pid = server.get("supervisor_pid")
         detail = f"Supervisor PID {pid}" if pid else "Answering /api/health"
@@ -658,18 +698,24 @@ def derive_verdict(snapshot: Mapping[str, Any]) -> dict[str, Any]:
             )
     elif not liveness.get("probed"):
         health = UNKNOWN
+        server_state = "unknown"
         header = f"VC Server: UNKNOWN{suffix}"
         detail = "Liveness was not probed for this snapshot"
     elif isinstance(service, Mapping) and service.get("installed") is False:
         health = UNAVAILABLE
+        server_state = "not_installed"
         header = f"VC Server: NOT INSTALLED{suffix}"
         detail = "Install the canonical VC Server service first"
-    elif isinstance(service, Mapping) and service.get("loaded") is False:
+    elif (isinstance(service, Mapping) and service.get("loaded") is False) or (
+        receipt.get("present") and receipt_state == "stopped"
+    ):
         health = UNAVAILABLE
+        server_state = "stopped"
         header = f"VC Server: STOPPED{suffix}"
         detail = "Service is intentionally stopped"
     else:
         health = UNAVAILABLE
+        server_state = "down"
         header = f"VC Server: UNREACHABLE{suffix}"
         detail = (
             _concise(server.get("last_error"))
@@ -701,9 +747,115 @@ def derive_verdict(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "health": health,
         "server_health": server_health,
+        "server_state": server_state,
         "header": header,
         "detail": detail,
         "findings": findings,
+    }
+
+
+# --------------------------------------------------------------------------
+# Actions
+# --------------------------------------------------------------------------
+
+
+def build_actions_section(server: Mapping[str, Any]) -> dict[str, Any]:
+    """The supervision verbs a tray may offer, derived once from fused facts.
+
+    Button state computed in a view layer is a second health truth with pixels
+    on. Every verb therefore carries ``enabled`` plus a ``reason`` when it is
+    not offered, so a menu can render an honest disabled-with-reason instead of
+    guessing from raw receipt fields. When the optional service payload is
+    present it refines the call (a loaded-but-silent service wants restart,
+    not start); without it, receipt state and liveness carry the decision.
+    """
+    server = server if isinstance(server, Mapping) else {}
+    endpoint = server.get("endpoint")
+    endpoint = endpoint if isinstance(endpoint, Mapping) else {}
+    endpoint_url = str(endpoint.get("url") or "")
+    liveness = server.get("liveness")
+    liveness = liveness if isinstance(liveness, Mapping) else {}
+    probed = bool(liveness.get("probed"))
+    reachable = bool(liveness.get("reachable"))
+    receipt = server.get("receipt")
+    receipt = receipt if isinstance(receipt, Mapping) else {}
+    receipt_present = bool(receipt.get("present"))
+    receipt_state = str(server.get("state") or "")
+    service = server.get("service")
+    service = service if isinstance(service, Mapping) else None
+    installed = service.get("installed") if service is not None else None
+    loaded = service.get("loaded") if service is not None else None
+    logs = server.get("logs")
+    logs = logs if isinstance(logs, Mapping) else {}
+
+    not_installed = installed is False
+    stopped = not reachable and (
+        loaded is False or (receipt_present and receipt_state == "stopped")
+    )
+
+    def _verb(enabled: bool, reason: str = "", **extra: Any) -> dict[str, Any]:
+        row: dict[str, Any] = {"enabled": enabled, "reason": reason}
+        row.update(extra)
+        return row
+
+    if not_installed:
+        start = _verb(False, "the canonical service is not installed")
+    elif reachable:
+        start = _verb(False, "the server is already answering")
+    elif not probed:
+        start = _verb(False, "liveness was not probed for this snapshot")
+    elif loaded is True:
+        start = _verb(False, "the service is loaded but not answering; restart it")
+    else:
+        start = _verb(True)
+
+    if reachable:
+        stop = _verb(True)
+    elif stopped:
+        stop = _verb(False, "the service is already stopped")
+    elif not probed:
+        stop = _verb(False, "liveness was not probed for this snapshot")
+    else:
+        stop = _verb(False, "the endpoint is not answering")
+
+    if not_installed:
+        restart = _verb(False, "the canonical service is not installed")
+    elif reachable:
+        restart = _verb(True)
+    elif stopped:
+        restart = _verb(False, "the service is stopped; start it instead")
+    elif not probed:
+        restart = _verb(False, "liveness was not probed for this snapshot")
+    elif receipt_present:
+        # A supervisor ran here, so restart stays the recovery verb even while
+        # the endpoint is silent.
+        restart = _verb(True)
+    else:
+        restart = _verb(False, "no supervisor has published a receipt here")
+
+    if not endpoint_url:
+        open_console = _verb(False, "no endpoint is configured")
+    elif reachable or not probed:
+        open_console = _verb(True, url=endpoint_url)
+    else:
+        open_console = _verb(
+            False, f"the server is not answering {endpoint_url}", url=endpoint_url
+        )
+
+    if logs.get("available"):
+        open_logs = _verb(
+            True,
+            paths={key: logs.get(key) for key in ("directory", "stdout", "stderr")},
+        )
+    else:
+        open_logs = _verb(False, str(logs.get("reason") or "no supervisor logs yet"))
+
+    return {
+        "start": start,
+        "stop": stop,
+        "restart": restart,
+        "open_console": open_console,
+        "open_logs": open_logs,
     }
 
 
@@ -723,14 +875,16 @@ def build_caretaker_snapshot(
 ) -> dict[str, Any]:
     """Compose the whole caretaker envelope. Never raises."""
     plane = control_plane if control_plane is not None else _control_plane_home()
+    server_section = build_server_section(home=home, probe=probe, service=service)
     snapshot: dict[str, Any] = {
         "schema": CARETAKER_SCHEMA,
         "generated_at": _utc_now().isoformat(),
         "control_plane": str(plane),
-        "server": build_server_section(home=home, probe=probe, service=service),
+        "server": server_section,
         "observability": build_observability_section(control_plane=plane),
         "resumeability": build_resumeability_section(roots=roots, limit=resume_limit),
         "maintenance": build_maintenance_section(control_plane=plane),
+        "actions": build_actions_section(server_section),
     }
     snapshot["verdict"] = derive_verdict(snapshot)
     return snapshot

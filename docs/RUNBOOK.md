@@ -54,8 +54,8 @@ Notes that save time:
 
 - `vibecrafted start` is an **alias for `vibecrafted dashboard`** (vc-frame
   operator layout). It is optional and is _not_ the entry point.
-- Agents: `claude · codex · agy · junie · grok`. Model override exists only
-  for claude (`--model`) and codex (`-m`); grok always runs its default.
+- Agents: `claude · codex · agy · junie · grok · cursor`. Model override exists only
+  for claude (`--model`) and codex (`-m`); other agents run their defaults.
 - Every skill also installs a `vc-<skill>` shortcut.
 
 ## 2. Dispatch grammar (one public shape, one engine)

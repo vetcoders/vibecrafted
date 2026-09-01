@@ -122,7 +122,7 @@ prompt_id: <slug>-<YYYYMMDD>
 wave: <A|B|C|D>
 position: <1..N within wave>
 mandate: /<skill>
-recommended_agent: <claude|codex|gemini>
+recommended_agent: <claude|codex|gemini|cursor>
 parent_branch: <branch>@<sha>
 result_branch: feat/<slug>
 depends_on: [<prompt_ids>]

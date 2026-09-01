@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 pub enum SkillAgent {
     Claude,
     Codex,
+    Cursor,
     Gemini,
     Any,
 }
@@ -16,6 +17,7 @@ impl SkillAgent {
         match self {
             SkillAgent::Claude => "claude",
             SkillAgent::Codex => "codex",
+            SkillAgent::Cursor => "cursor",
             SkillAgent::Gemini => "gemini",
             SkillAgent::Any => "any",
         }
@@ -26,6 +28,7 @@ impl SkillAgent {
             "claude" => SkillAgent::Claude,
             "gemini" => SkillAgent::Gemini,
             "codex" => SkillAgent::Codex,
+            "cursor" => SkillAgent::Cursor,
             _ => SkillAgent::Any,
         }
     }
@@ -34,9 +37,11 @@ impl SkillAgent {
         match self {
             SkillAgent::Claude => "claude",
             SkillAgent::Codex => "codex",
+            SkillAgent::Cursor => "cursor",
             SkillAgent::Gemini => "gemini",
             SkillAgent::Any => match fallback {
                 SkillAgent::Claude => "claude",
+                SkillAgent::Cursor => "cursor",
                 SkillAgent::Gemini => "gemini",
                 _ => "codex",
             },

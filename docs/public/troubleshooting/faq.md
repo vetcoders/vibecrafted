@@ -45,7 +45,7 @@ git checkout. Re-run the installer and confirm `vibecrafted version` and
 ## Agents and skills
 
 **What is the difference between a skill and an agent?**
-An agent is the runtime that does the work (claude, codex, agy, junie, grok).
+An agent is the runtime that does the work (claude, codex, agy, junie, grok, cursor).
 A skill is the workflow protocol that tells the agent how to behave for a
 specific engineering phase.
 

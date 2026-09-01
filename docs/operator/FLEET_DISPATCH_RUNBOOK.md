@@ -46,7 +46,7 @@ vibecrafted <workflow> <agent> --file briefs/<N>-<cut>_<slug>.md   # e.g. vibecr
 vibecrafted <workflow> <agent> --prompt '<inline intent>'
 ```
 
-- `agent` ∈ {codex, claude, agy, junie, grok}. Pick via the **why-matrix** (gemini deprecated; agy for Google-family)
+- `agent` ∈ {codex, claude, agy, junie, grok, cursor}. Pick via the **why-matrix** (gemini deprecated; agy for Google-family)
   **codex = precision/surgery** (contract-gated refactors, exact edits), **claude = forensics/audit**
   (deep unknowns, bug hunts), **agy = Google-family (antigravity rewire; gemini deprecated)** (architecture leaps, simplification).
 - Headless (non-TTY agent bash) **degrades to in-repo dispatch automatically**. A launch receipt

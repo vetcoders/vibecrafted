@@ -476,7 +476,13 @@ def _doctor_policy_errors(dispatch: Dispatch) -> list[str]:
         normalized = value.replace("\\", "/")
         if value and any(
             marker in normalized
-            for marker in ("/.claude/", "/.codex/", "/.gemini/", "/.vibecrafted/")
+            for marker in (
+                "/.claude/",
+                "/.codex/",
+                "/.gemini/",
+                "/.cursor/",
+                "/.vibecrafted/",
+            )
         ):
             errors.append(
                 f"{field}: provider-specific or repo-local runtime roots are recovery-only; new writes use ~/.vibecrafted/artifacts"

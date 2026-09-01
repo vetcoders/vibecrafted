@@ -330,7 +330,7 @@ def test_read_reports_absence_and_corruption_distinctly(tmp_path: Path) -> None:
 def test_envelope_sections_are_all_present_and_schema_stamped(
     tmp_path: Path,
 ) -> None:
-    """Every reader can rely on the same four sections plus a verdict."""
+    """Every reader can rely on the same sections plus verdict and actions."""
     plane = _plane(tmp_path)
     home = _receipt(tmp_path)
 
@@ -347,9 +347,135 @@ def test_envelope_sections_are_all_present_and_schema_stamped(
         "observability",
         "resumeability",
         "maintenance",
+        "actions",
         "verdict",
     }
     for name in ("server", "observability", "resumeability", "maintenance"):
         assert "available" in snapshot[name], name
         assert "reason" in snapshot[name], name
     assert json.loads(json.dumps(snapshot)) == snapshot, "envelope must be JSON-clean"
+
+
+def test_stopped_receipt_reads_as_stopped_not_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An intentional stop is not a crash and must not wear red.
+
+    A supervisor that completes a stop writes ``state: stopped`` and exits, so
+    that receipt never refreshes again. Reading its staleness as failure would
+    punish the operator for a deliberate act; the verdict names it STOPPED and
+    the actions offer start, not restart.
+    """
+    plane = _plane(tmp_path)
+    home = _receipt(tmp_path, state="stopped", supervisor_pid=None)
+    _reachable(
+        monkeypatch, reachable=False, reason="ConnectionRefusedError: [Errno 61]"
+    )
+
+    snapshot = caretaker.build_caretaker_snapshot(home=home, control_plane=plane)
+    verdict = snapshot["verdict"]
+
+    assert verdict["health"] == caretaker.UNAVAILABLE
+    assert verdict["server_state"] == "stopped"
+    assert "STOPPED" in verdict["header"]
+    assert "intentionally stopped" in verdict["detail"]
+    assert "server_unreachable" not in {f["code"] for f in verdict["findings"]}
+
+    actions = snapshot["actions"]
+    assert actions["start"]["enabled"] is True
+    assert actions["stop"]["enabled"] is False
+    assert "already stopped" in actions["stop"]["reason"]
+    assert actions["restart"]["enabled"] is False
+    assert "start it instead" in actions["restart"]["reason"]
+
+
+def test_actions_follow_the_fused_facts_when_serving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A serving server is not offered start; console opens by URL."""
+    plane = _plane(tmp_path)
+    home = _receipt(tmp_path)
+    _reachable(monkeypatch, reachable=True)
+
+    snapshot = caretaker.build_caretaker_snapshot(home=home, control_plane=plane)
+    verdict = snapshot["verdict"]
+    actions = snapshot["actions"]
+
+    assert verdict["server_state"] == "running"
+    assert actions["start"]["enabled"] is False
+    assert "already answering" in actions["start"]["reason"]
+    assert actions["stop"]["enabled"] is True
+    assert actions["restart"]["enabled"] is True
+    assert actions["open_console"]["enabled"] is True
+    assert actions["open_console"]["url"] == "http://127.0.0.1:3024"
+    # The fixture home carries a server/ directory, so logs are a real
+    # projection with paths, not a subprocess away.
+    assert actions["open_logs"]["enabled"] is True
+    assert actions["open_logs"]["paths"]["directory"].endswith("server")
+
+
+def test_actions_when_server_is_down_offer_start_and_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Down-with-a-receipt: start and restart are the honest recovery verbs."""
+    plane = _plane(tmp_path)
+    home = _receipt(tmp_path, state="backoff", last_error="worker failed")
+    _reachable(
+        monkeypatch, reachable=False, reason="ConnectionRefusedError: [Errno 61]"
+    )
+
+    snapshot = caretaker.build_caretaker_snapshot(home=home, control_plane=plane)
+    verdict = snapshot["verdict"]
+    actions = snapshot["actions"]
+
+    assert verdict["health"] == caretaker.UNAVAILABLE
+    assert verdict["server_state"] == "down"
+    assert actions["start"]["enabled"] is True
+    assert actions["stop"]["enabled"] is False
+    assert "not answering" in actions["stop"]["reason"]
+    assert actions["restart"]["enabled"] is True
+    assert actions["open_console"]["enabled"] is False
+    assert "not answering" in actions["open_console"]["reason"]
+
+
+def test_actions_are_honest_when_nothing_was_probed(tmp_path: Path) -> None:
+    """An unprobed snapshot disables lifecycle verbs with the reason why."""
+    plane = _plane(tmp_path)
+    home = _receipt(tmp_path)
+
+    snapshot = caretaker.build_caretaker_snapshot(
+        home=home, control_plane=plane, probe=False
+    )
+    actions = snapshot["actions"]
+
+    assert snapshot["verdict"]["server_state"] == "unknown"
+    for verb in ("start", "stop", "restart"):
+        assert actions[verb]["enabled"] is False, verb
+        assert "not probed" in actions[verb]["reason"], verb
+    # Opening the console is still offered: there is no evidence of death.
+    assert actions["open_console"]["enabled"] is True
+
+
+def test_logs_projection_is_named_and_honest(tmp_path: Path) -> None:
+    """Logs are a deterministic projection of the crafted home, not a guess."""
+    plane = _plane(tmp_path)
+    home = tmp_path / "bare-home"
+    home.mkdir()
+
+    snapshot = caretaker.build_caretaker_snapshot(
+        home=home, control_plane=plane, probe=False
+    )
+    logs = snapshot["server"]["logs"]
+
+    assert logs["available"] is False
+    assert logs["directory"].endswith("server")
+    assert logs["stdout"].endswith("supervisor.stdout.log")
+    assert "no supervisor log directory" in logs["reason"]
+    assert snapshot["actions"]["open_logs"]["enabled"] is False
+
+    (home / "server").mkdir()
+    snapshot = caretaker.build_caretaker_snapshot(
+        home=home, control_plane=plane, probe=False
+    )
+    assert snapshot["server"]["logs"]["available"] is True
+    assert snapshot["actions"]["open_logs"]["enabled"] is True

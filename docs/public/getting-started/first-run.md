@@ -19,7 +19,7 @@ vibecrafted init claude
 
 `init` recovers intent through AICX, maps the living tree through Loctree, and
 checks runtime truth before any work begins. Substitute any agent you have
-installed: `claude`, `codex`, `agy`, `junie`, `grok`.
+installed: `claude`, `codex`, `agy`, `junie`, `grok`, `cursor`.
 
 ## When an agent CLI is missing
 
@@ -46,6 +46,7 @@ The known install commands are:
 | `junie`  | `npm install -g @jetbrains/junie`                  |
 | `grok`   | `npm install -g @xai-official/grok`                |
 | `agy`    | install Google Antigravity CLI, then `agy install` |
+| `cursor` | `curl https://cursor.com/install -fsS \| bash`     |
 
 ### Two failures, two answers
 

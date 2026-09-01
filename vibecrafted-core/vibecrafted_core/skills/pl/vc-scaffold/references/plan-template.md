@@ -5,7 +5,7 @@ Użyj tego szablonu jako wyjścia planowania. W swoim faktycznym wyjściu wytnij
 ```markdown
 ---
 run_id: <generated-unique-id>
-agent: <claude|codex|gemini>
+agent: <claude|codex|gemini|cursor>
 skill: <vc-scaffold|vc-workflow|vc-implement>
 project: <repo-name>
 status: pending

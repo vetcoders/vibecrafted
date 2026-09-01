@@ -1418,7 +1418,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_run_status(run, include_tail=False)
         else:
             print(f"run not found: {args.run_id}", file=sys.stderr)
-        return 0 if run is not None else 1
+        # Exit contract: 0 means the canonical writer performed the lookup and
+        # the payload is the answer (`found` true/false). vc-server maps any
+        # non-zero exit to "writer unavailable" (HTTP 503), so a legitimately
+        # absent run must not exit 1 — that is a clean 404, not a disagreement.
+        return 0
     if raw_args and raw_args[0] == "stop":
         from .wrappers import stop_main
 

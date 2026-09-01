@@ -11,9 +11,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .package_resources import skills_path
+from .workflow import SUPPORTED_AGENTS
 from .workflows.registry import workflow_definition, workflow_manifest
 
-AGENT_SELECTOR = "<claude|codex|agy|junie|grok>"
+# Canonical fleet display order. Membership is derived from SUPPORTED_AGENTS so
+# a fleet change lands here automatically; `swarm` is a research meta-lane, not
+# a provider CLI, so it never appears in agent selectors.
+_FLEET_AGENT_ORDER = ("claude", "codex", "agy", "junie", "grok", "cursor")
+FLEET_AGENTS = tuple(agent for agent in _FLEET_AGENT_ORDER if agent in SUPPORTED_AGENTS)
+AGENT_SELECTOR = "<" + "|".join(FLEET_AGENTS) + ">"
+AGENTS_LINE = " · ".join(FLEET_AGENTS)
 
 
 @dataclass(frozen=True)
@@ -406,7 +413,7 @@ Ship cycle:
   {cycle}
   More workflows: vibecrafted help --all
 
-Agents:  claude · codex · agy · junie · grok
+Agents:  {AGENTS_LINE}
 
 Examples:
   vibecrafted init claude
