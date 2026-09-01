@@ -165,7 +165,7 @@ pub const CATALOG: &[SkillEntry] = &[
     SkillEntry {
         slug: "vc-partner",
         display: "Partner",
-        one_line: "Executive debugging partner",
+        one_line: "Shared steering at the operator's side",
         default_agent: SkillAgent::Any,
         accepts: SkillPayloadKind::PromptOrFile,
     },

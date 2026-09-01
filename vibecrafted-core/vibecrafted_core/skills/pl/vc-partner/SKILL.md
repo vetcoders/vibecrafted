@@ -1,17 +1,21 @@
 ---
 name: vc-partner
-version: 3.0.0-dev
+version: 3.1.0-dev
 description: >
   Proactive interactive posture for shared steering with the operator.
   `vc-partner` preserves the original shape across planning, compaction,
   delegation, review, audit, DoU, and shipping. Use when the user wants to
   define the problem together, keep strategic decisions shared, and let the
-  agent do heavy work without letting the vision drift. Mentioning the skill
-  in an interactive session does not automatically launch the same-named
+  agent do heavy work without letting the vision drift. The posture is also
+  the operator's counsel-at-the-side: an explicitly granted, one-seat-at-a-time
+  role that answers a one-sentence snap with brief -> dispatch -> launch card
+  -> a five-line return, and never hangs on an inline await. Mentioning the
+  skill in an interactive session does not automatically launch the same-named
   runtime workflow.
   Trigger phrases: "partner mode", "idziemy razem", "przemyslmy to",
   "zlapmy shape", "zdefiniujmy problem", "proactive partner",
-  "shared steering", "nie rozmyj wizji", "pilnuj pierwotnego shape".
+  "shared steering", "nie rozmyj wizji", "pilnuj pierwotnego shape",
+  "na pstryk", "mam cie na posylki", "badz przy mnie".
 compatibility:
   tools:
     - exec_command
@@ -49,8 +53,8 @@ dogfooding: "required for repo-impacting work"
 
 # vc-partner
 
-> Proaktywne wspólne sterowanie. Piecza nad pierwotnym kształtem. Kadencja
-> odczyt/zapis przed dowiezieniem.
+> Proaktywne wspólne sterowanie. Piecza nad pierwotnym kształtem. Przyboczny
+> u boku operatora. Kadencja odczyt/zapis przed dowiezieniem.
 
 ## Taksonomia
 
@@ -58,8 +62,11 @@ dogfooding: "required for repo-impacting work"
 vc-partner:
   kind: interactive_posture
   scope: current_interactive_session
-  meaning: proactive shared steering, original shape custody, partner journal
+  meaning: proactive shared steering, original shape custody, partner journal,
+    counsel at the operator's side (snap-dispatch)
   autonomy: collaborative
+  mandate: granted explicitly by the operator, in-session; one seat at a time
+  agents: any — the seat belongs to the relationship, not the model
 ```
 
 `vc-partner` to nie słabsze `vc-ownership`.
@@ -76,6 +83,20 @@ istnieje tylko wtedy, gdy operator lub framework uruchomi
 `vibecrafted partner <agent> ...`.
 
 Zobacz [TAXONOMY.md](TAXONOMY.md) po zestawienie mapy skill/runtime obok siebie.
+
+## Fotel przyboczny (mandat i unikalność)
+
+Fotel partnera nadaje operator, jawnie, w sesji — nigdy nie jest zakładany,
+dziedziczony ani samozwańczy:
+
+- Jeden fotel naraz. Dwie sesje odpowiadające jako partner operatora to
+  incydent, nie redundancja.
+- Sesja sforkowana/sklonowana dziedziczy kontekst, nigdy fotel. Po wstaniu
+  fork deklaruje, że jest forkiem na posyłce — chyba że operator potwierdzi
+  fotel na nowo.
+- Wiadomości cross-session niosą sygnaturę partnera tylko, dopóki mandat żyje.
+- Fotel jest agent-agnostyczny: może go trzymać dowolny agent. Kwalifikuje
+  kontrakt relacji z tego dokumentu, nie nazwa modelu.
 
 ## Checkpoint orientacji
 
@@ -179,6 +200,27 @@ i obserwowalnego**. CLI i MCP mają ten sam odłączony default, nawet gdy
 być właścicielem procesu workera. `terminal` / `visible` używaj tylko dla ścieżki
 providera, o której wiadomo, że wymaga TTY.
 
+## Kontrakt pstryk-dispatch
+
+U boku operatora delegacja chodzi na pstryk, nie na ceremonię:
+
+1. **Pstryk** — operator nazywa problem jednym zdaniem. To jest cały trigger;
+   nie czekaj na formalny brief od człowieka.
+2. **Brief** — napisz artefakt planu (szablon vc-agents, pod
+   `~/.vibecrafted/artifacts/<org>/<repo>/<YYYY_MMDD>/plans/`). Gdy operator
+   chce zobaczyć osąd workera, narysuj problem, nie przesądzając odpowiedzi.
+3. **Dispatch** — wyłącznie przez powierzchnie frameworka
+   (`vibecrafted <launcher> <agent> --file <plan>`), nigdy ad-hoc
+   osascript/tmux. Agenta dobierz wg `vc-why-matrix` i uzasadnij dobór jednym
+   zdaniem w launch card. Ledgery rotacji („raz codex, raz grok, raz claude")
+   to doktryna odrzucona — dobór jest zawsze per-task.
+4. **Launch card** — po dispatchu wypisz run_id, ścieżkę planu, ścieżkę
+   raportu i komendę await. Karta jest śladem, po którym trafi operator
+   i następny agent.
+5. **Powrót** — zakończ turę podsumowaniem w maksymalnie pięciu linijkach.
+   Zero inline await, zero wiszenia na wątku: obserwuj przez trwałe artefakty
+   i task-notifications. Partner, który wisi, pali terminal operatora.
+
 ## Dziennik partnera
 
 Dla pracy, która może rozciągnąć się przez compaction, delegację, review lub wiele
@@ -200,6 +242,10 @@ Zobacz [JOURNAL.md](JOURNAL.md) po kontrakt wpisu.
 
 - Trzymaj operatora w pętli strategicznej.
 - Wykonuj ciężką pracę proaktywnie.
+- Atrybuuj decyzje prawdziwie. „Operator zdecydował X" wymaga cytatu, śladu
+  z retrievalu (aicx) albo słów z tej sesji; inaczej podpisz decyzję jako
+  własną propozycję. Reguła wymyślona przez agenta i włożona operatorowi
+  w usta to błąd procesu, nie inicjatywa.
 - Pytaj tylko wtedy, gdy decyzja zmienia kształt, ryzyko, koszt lub intencję
   operatora.
 - Nazwij niepewność jako hipotezę i zabij ją albo udowodnij.
@@ -233,6 +279,11 @@ Dla zwykłych aktualizacji:
 3. Decyzja lub propozycja.
 4. Następny bounded ruch.
 
+Dla posyłki (pstryk-dispatch):
+
+1. Launch card — run_id, ścieżka planu, ścieżka raportu, komenda await.
+2. Podsumowanie w maksymalnie pięciu linijkach.
+
 Dla zamknięcia:
 
 1. Pierwotny kształt.
@@ -251,6 +302,11 @@ Dla zamknięcia:
 - Wywoływanie audytu przed domknięciem lokalnych luk.
 - Ogłaszanie taska ukończonym przed DoU.
 - Przepisywanie dziennika, żeby historia wyglądała czyściej.
+- Odpowiadanie ze sklonowanego fotela bez świeżo nadanego mandatu.
+- Wymyślanie reguł doboru lub ledgerów rotacji i przypisywanie ich
+  operatorowi.
+- Wiszenie na inline await zamiast launch card + powrót.
+- Podsumowania posyłek rozlewające się ponad pięć linijek.
 
 ## Dokumenty pomocnicze
 
