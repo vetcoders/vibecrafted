@@ -526,6 +526,7 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
     required = (
         "VERSION",
         "bin/python3",
+        "bin/scaffold-doctor",
         "bin/vc-start",
         "bin/vibecrafted",
         "scripts/vibecrafted",

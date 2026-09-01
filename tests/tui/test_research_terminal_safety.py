@@ -60,6 +60,13 @@ def test_vc_research_terminal_without_session_degrades_to_headless(
     env["VIBECRAFTED_HOME"] = str(crafted_home)
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env["VETCODERS_SPAWN_RUNTIME"] = "terminal"
+    # Hermetic vc-frame: the shell helpers re-prepend the bundled runtime bin
+    # ahead of PATH (_vetcoders_path_with_bundled_bin_priority), so on a host
+    # with an installed runtime and a LIVE vc-frame session the real binary
+    # would beat the stub and report a session — no degradation, red test.
+    empty_runtime_bin = tmp_path / "empty-runtime-bin"
+    empty_runtime_bin.mkdir()
+    env["VIBECRAFTED_RUNTIME_BIN"] = str(empty_runtime_bin)
     for ambient in (
         "VC_FRAME",
         "VC_FRAME_PANE_ID",
@@ -77,7 +84,7 @@ def test_vc_research_terminal_without_session_degrades_to_headless(
             (
                 f'export PATH="{stub_bin}:$PATH"; '
                 f'source "{HELPER_SCRIPT}"; '
-                f'source "{REPO_ROOT}/runtime/vc-research/shell/research.sh"; '
+                f'source "{REPO_ROOT}/vibecrafted-core/vibecrafted_core/runtime/vc-research/shell/research.sh"; '
                 f'_vetcoders_research --root "{root}" --prompt "probe terminal safety"; '
                 'rc=$?; echo "SHELL-ALIVE rc=$rc"; exit $rc'
             ),
