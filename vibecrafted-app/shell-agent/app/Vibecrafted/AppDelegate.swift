@@ -137,6 +137,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private var stopServerMenuItem: NSMenuItem?
   private var restartServerMenuItem: NSMenuItem?
   private var openServerLogsMenuItem: NSMenuItem?
+  private var runtimePackStatusMenuItem: NSMenuItem?
+  private var runtimePackDetailMenuItem: NSMenuItem?
+  private var revealRuntimeHomeMenuItem: NSMenuItem?
+  private var openControlPlaneMenuItem: NSMenuItem?
+  private var copyRuntimeIdentityMenuItem: NSMenuItem?
+  private var signedCarrierRevisions: (source: String, terminal: String, frame: String)?
   private var trayBaseIcon: NSImage?
   private var statusRefreshTimer: Timer?
   private var terminalProcess: Process?
@@ -358,6 +364,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         "/\(temp)/vc-frame-\(getuid())"
     }
     canonicalRuntimeEnvironment = environment
+    applyRuntimePackMenuState()
     refreshServerStatus()
 
     let process = Process()
@@ -462,6 +469,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
           NSLocalizedDescriptionKey: "signed product manifest has no Runtime Pack source tuple"
         ])
     }
+    signedCarrierRevisions = (sourceRevision, terminalRevision, frameRevision)
     let terminalHost = appRoot.appendingPathComponent(
       "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty")
     let frameHelper = appRoot.appendingPathComponent("Contents/Helpers/vc-frame")
@@ -616,6 +624,36 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       keyEquivalent: "")
     diagnostics.target = self
     menu.addItem(.separator())
+    // Runtime Pack supervision: the pack is the product carrier and this App
+    // consumes it, so the tray shows the live generation and its drift against
+    // the signed carrier instead of hiding the runtime behind the server dot.
+    let runtimePackStatus = menu.addItem(
+      withTitle: "Runtime Pack: WAITING FOR RUNTIME", action: nil, keyEquivalent: "")
+    runtimePackStatus.isEnabled = false
+    runtimePackStatusMenuItem = runtimePackStatus
+    let runtimePackDetail = menu.addItem(
+      withTitle: "Runtime onboarding has not completed", action: nil, keyEquivalent: "")
+    runtimePackDetail.isEnabled = false
+    runtimePackDetailMenuItem = runtimePackDetail
+    let runtimePackOwner = menu.addItem(withTitle: "Runtime Pack", action: nil, keyEquivalent: "")
+    let runtimePackMenu = NSMenu(title: "Runtime Pack")
+    let revealHome = runtimePackMenu.addItem(
+      withTitle: "Reveal Runtime Home", action: #selector(revealRuntimeHomeFromStatusItem),
+      keyEquivalent: "")
+    revealHome.target = self
+    revealRuntimeHomeMenuItem = revealHome
+    let openControlPlane = runtimePackMenu.addItem(
+      withTitle: "Open Control Plane", action: #selector(openControlPlaneFromStatusItem),
+      keyEquivalent: "")
+    openControlPlane.target = self
+    openControlPlaneMenuItem = openControlPlane
+    let copyIdentity = runtimePackMenu.addItem(
+      withTitle: "Copy Runtime Identity", action: #selector(copyRuntimeIdentityFromStatusItem),
+      keyEquivalent: "")
+    copyIdentity.target = self
+    copyRuntimeIdentityMenuItem = copyIdentity
+    runtimePackOwner.submenu = runtimePackMenu
+    menu.addItem(.separator())
     menu.addItem(
       withTitle: "About Vibecrafted",
       action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
@@ -724,6 +762,47 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       canonicalInstall != nil && serverUtilityProcess?.isRunning != true
     statusItem?.button?.image = statusIcon(health: state.health)
     statusItem?.button?.toolTip = "Vibecrafted — \(state.header)"
+    applyRuntimePackMenuState()
+  }
+
+  private func applyRuntimePackMenuState() {
+    let state = deriveRuntimePackMenuState(
+      generation: canonicalInstall?.root.lastPathComponent,
+      signedSourceRevision: signedCarrierRevisions?.source,
+      runtimeReady: canonicalInstall != nil)
+    runtimePackStatusMenuItem?.title = state.header
+    runtimePackDetailMenuItem?.title = state.detail
+    runtimePackDetailMenuItem?.isHidden = state.detail.isEmpty
+    revealRuntimeHomeMenuItem?.isEnabled = state.actionsEnabled
+    openControlPlaneMenuItem?.isEnabled = state.actionsEnabled
+    copyRuntimeIdentityMenuItem?.isEnabled = state.actionsEnabled
+  }
+
+  @objc private func revealRuntimeHomeFromStatusItem() {
+    guard let install = canonicalInstall else { return }
+    NSWorkspace.shared.open(install.runtimeHome)
+  }
+
+  @objc private func openControlPlaneFromStatusItem() {
+    guard let install = canonicalInstall else { return }
+    let controlPlane = install.craftedHome.appendingPathComponent(
+      "control_plane", isDirectory: true)
+    NSWorkspace.shared.open(
+      FileManager.default.fileExists(atPath: controlPlane.path)
+        ? controlPlane : install.craftedHome)
+  }
+
+  @objc private func copyRuntimeIdentityFromStatusItem() {
+    guard let install = canonicalInstall else { return }
+    let blob = runtimeIdentityBlob(
+      generation: install.root.lastPathComponent,
+      sourceRevision: signedCarrierRevisions?.source,
+      terminalRevision: signedCarrierRevisions?.terminal,
+      frameRevision: signedCarrierRevisions?.frame,
+      runtimeHome: install.runtimeHome.path,
+      configHome: install.configHome.path)
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(blob, forType: .string)
   }
 
   @objc private func openConsoleFromStatusItem() {
@@ -888,7 +967,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     alert.alertStyle = .informational
     alert.messageText = "Vibecrafted Help"
     alert.informativeText =
-      "The tray dot reports VC Server: green is healthy, amber is transitioning, red needs attention, and gray is stopped. Open VC Console for live runs; VC Server actions always route through the installed service owner."
+      "The tray dot reports VC Server: green is healthy, amber is transitioning, red needs attention, and gray is stopped. The Runtime Pack section shows the installed generation and whether it matches this App's signed carrier — amber drift means the runtime moved ahead and the App should be updated to re-sync. Open VC Console for live runs; VC Server actions always route through the installed service owner."
     alert.addButton(withTitle: "OK")
     alert.runModal()
   }
