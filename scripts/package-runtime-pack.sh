@@ -82,6 +82,7 @@ if find "$root" -type l -print -quit | grep -q .; then
 fi
 for required in \
   VERSION bin/python3 bin/vibecrafted bin/vc-start bin/vc-terminal bin/vc-frame \
+  bin/scaffold-doctor \
   libexec/vc-frame scripts/vibecrafted scripts/vetcoders_install.py \
   vibecrafted-core/vibecrafted_core/runtime_pack_contract.py; do
   [[ -e "$root/$required" ]] || die "standalone Runtime Pack is missing $required"

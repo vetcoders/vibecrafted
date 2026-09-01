@@ -57,10 +57,10 @@ def code_repos() -> list[Path]:
     override = os.environ.get("VC_RELOCATE_REPOS", "").strip()
     if override:
         return [Path(p) for p in override.split(os.pathsep) if p.strip()]
-    return [
-        Path("/Volumes/vc-workspace/vetcoders/vibecrafted-suite/vibecrafted"),
-        Path("/Volumes/vc-workspace/Loctree/aicx"),
-    ]
+    # No baked-in machine defaults: a shipped payload must not name any
+    # operator's checkout (payload-hygiene refuses host literals). Without
+    # VC_RELOCATE_REPOS only ~/.vibecrafted (appended by the caller) travels.
+    return []
 
 
 def _sh(args: list[str], cwd: Path | None = None) -> str:
@@ -90,7 +90,7 @@ def active_leases(home: Path) -> list[dict]:
 
 
 def _cursor_project_cwd(slug: str) -> str:
-    # slug: Users-polyversai-vibecrafted -> /Users/polyversai/vibecrafted (best effort)
+    # slug: Users-vetcoder-vibecrafted -> /Users/vetcoder/vibecrafted (best effort)
     parts = slug.split("-")
     for i in range(1, len(parts)):
         candidate = Path("/" + "/".join(parts[:i]) + "/" + "-".join(parts[i:]))
@@ -117,7 +117,7 @@ def resume_commands(provider: str, sid: str, cwd: str) -> tuple[str, str]:
 
 def collect_sessions(now: float, max_age_s: float, home: Path) -> list[dict]:
     sessions: list[dict] = []
-    lease_sids = {l.get("provider_session_id") for l in active_leases(home)}
+    lease_sids = {lease.get("provider_session_id") for lease in active_leases(home)}
 
     for provider, rel_store in PROVIDER_STORES.items():
         root = home / rel_store
@@ -247,9 +247,9 @@ def do_snapshot(
 
     lease_dir = snap_dir / "codescribe/leases"
     lease_dir.mkdir(parents=True, exist_ok=True)
-    for l in leases:
-        (lease_dir / f"{l.get('lease_id', 'unknown')}.json").write_text(
-            json.dumps(l, indent=2)
+    for lease in leases:
+        (lease_dir / f"{lease.get('lease_id', 'unknown')}.json").write_text(
+            json.dumps(lease, indent=2)
         )
 
     wt_dir = snap_dir / "worktrees"

@@ -872,6 +872,9 @@ def is_legacy_operator_session_name(name: str) -> bool:
     return bool(_LEGACY_OPERATOR_SESSION_RE.fullmatch((name or "").strip()))
 
 
+_MKTEMP_LABEL_RE = re.compile(r"(?i)^tmp\.[A-Za-z0-9._-]*$")
+
+
 def _place_label_for_workspace(
     *,
     display_label: str = "",
@@ -881,6 +884,11 @@ def _place_label_for_workspace(
     raw = (
         (display_label or "").strip() or Path(canonical_root or "").name or "workspace"
     )
+    # A workspace catalogued from a mktemp scratch dir must not surface the
+    # tmp basename ("Tmp.VzTJxd4S0l") as the human rail label — that name is
+    # noise, not a place (Founder, 2026-09-01). Fall back to the product name.
+    if _MKTEMP_LABEL_RE.fullmatch(raw):
+        raw = "vibecrafted"
     return _sanitize_worker_host_label(raw, max_len=max_len)
 
 

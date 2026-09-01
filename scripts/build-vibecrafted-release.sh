@@ -501,6 +501,7 @@ materialize_runtime_payload() {
   local start_source="$4"
   local server_source="$5"
   local server_site="$6"
+  local scaffold_doctor_source="$7"
   local canonical_deck python_seed seed_python python_home
 
   log "Materializing the App-independent Runtime Pack payload"
@@ -532,6 +533,7 @@ materialize_runtime_payload() {
   install -m 0755 "$start_source" "$runtime/bin/vc-start"
   install -m 0755 "$server_source" "$runtime/bin/vc-server"
   install -m 0755 "$server_source" "$runtime/bin/vibecrafted-server-web"
+  install -m 0755 "$scaffold_doctor_source" "$runtime/bin/scaffold-doctor"
   install -m 0755 "$terminal_source" "$runtime/bin/vc-terminal"
   install -m 0755 "$frame_source" "$runtime/libexec/vc-frame"
   install -m 0755 "$runtime/scripts/vc-frame-product-entry.sh" \
@@ -668,9 +670,17 @@ build_product() {
   [[ -x "$server_source" ]] || die "Vibecrafted Server release binary is missing"
   [[ -d "$server_site/pkg" ]] || die "Vibecrafted Server hydrated site is missing"
 
+  log "Building the scaffold-doctor gate binary from control-core"
+  (cd "$REPO_ROOT/vibecrafted-server" \
+    && CARGO_TARGET_DIR="$server_build_root/vibecrafted-server" \
+      cargo build --release --locked -p control-core --bin scaffold-doctor)
+  local scaffold_doctor_source="$server_build_root/vibecrafted-server/release/scaffold-doctor"
+  [[ -x "$scaffold_doctor_source" ]] || die "scaffold-doctor release binary is missing"
+  chmod 0755 "$scaffold_doctor_source"
+
   materialize_runtime_payload "$RUNTIME_PAYLOAD" \
     "$terminal_source" "$frame_source" "$start_source" \
-    "$server_source" "$server_site"
+    "$server_source" "$server_site" "$scaffold_doctor_source"
   produce_runtime_pack
   [[ "$MODE" == "runtime-pack" ]] && return
 
