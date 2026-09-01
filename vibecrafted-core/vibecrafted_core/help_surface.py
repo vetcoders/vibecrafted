@@ -400,6 +400,7 @@ Commands:
   <skill> <agent>      Run a workflow with an agent
   resume <agent>       Continue a stopped run (--run-id) or a provider session
   resume-session       Continue an exact provider session as a tracked run
+  relocate             Snapshot open sessions + worktrees for a machine move (snapshot|restore)
   status               Today's agent activity
   doctor               Installation health — pass/fail
   receipt              Delivery/runtime receipt (source ↔ installed)

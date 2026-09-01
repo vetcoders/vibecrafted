@@ -1333,6 +1333,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "procs",
         "reap",
         "receipt",
+        "relocate",
         "resume-session",
         "settle",
         "settlements",
@@ -1423,6 +1424,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         # non-zero exit to "writer unavailable" (HTTP 503), so a legitimately
         # absent run must not exit 1 — that is a clean 404, not a disagreement.
         return 0
+    if raw_args and raw_args[0] == "relocate":
+        from .relocate import main as relocate_main
+
+        return relocate_main(raw_args[1:])
     if raw_args and raw_args[0] == "stop":
         from .wrappers import stop_main
 
