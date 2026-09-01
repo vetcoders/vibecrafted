@@ -109,7 +109,9 @@ def test_registry_exposes_trust_as_read_only_and_guard_as_enforcer() -> None:
 def test_core_command_deck_exposes_trust_and_guard_launchers(capsys) -> None:
     assert cli.main(["trust", "--help"]) == 0
     trust_out = capsys.readouterr().out
-    assert "vibecrafted trust <claude|codex|agy|junie|grok>" in trust_out
+    # Agent alternation mirrors the vc-trust SKILL.md invocation canon
+    # (cursor joined the fleet with full parity in 8373c26f).
+    assert "vibecrafted trust <claude|codex|agy|junie|grok|cursor>" in trust_out
     assert "version 1.0.0 · READ" in trust_out
 
     assert cli.main(["guard", "--help"]) == 0

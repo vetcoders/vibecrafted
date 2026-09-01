@@ -130,8 +130,10 @@ def test_restore_skips_existing(tmp_path: Path) -> None:
 
 
 def test_code_repos_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Without the override there are no baked-in machine defaults: a shipped
+    # payload must not name any operator's checkout (payload-hygiene refuses
+    # host literals), so only ~/.vibecrafted — appended by the caller — travels.
     monkeypatch.delenv("VC_RELOCATE_REPOS", raising=False)
-    defaults = relocate.code_repos()
-    assert any("vibecrafted-suite" in str(p) for p in defaults)
+    assert relocate.code_repos() == []
     monkeypatch.setenv("VC_RELOCATE_REPOS", f"/srv/a{os.pathsep}/srv/b")
     assert relocate.code_repos() == [Path("/srv/a"), Path("/srv/b")]

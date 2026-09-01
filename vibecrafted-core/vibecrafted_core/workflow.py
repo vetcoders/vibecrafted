@@ -1399,8 +1399,15 @@ def await_launch_truth(
         launch_payload.get("transcript") or run.get("latest_transcript") or ""
     )
     meta_path = str(launch_payload.get("meta") or run.get("meta") or "")
+    # The await verdict outranks the returned projection: finalize snapshots
+    # can lag a just-written terminal meta (the documented "meta stuck
+    # active/stalled after real completion" skew), so an await that settled on
+    # reason == "terminal" is terminal even when the projection has not
+    # caught up yet.
     terminal = (
-        bool(awaited.get("completed")) and _run_is_terminal(run) and not worker_alive
+        bool(awaited.get("completed"))
+        and not worker_alive
+        and (await_reason == "terminal" or _run_is_terminal(run))
     )
     terminal_evidence = terminal or (
         bool(awaited.get("completed"))
@@ -1410,6 +1417,18 @@ def await_launch_truth(
 
     meta_payload: dict[str, Any] = {}
     if terminal:
+        if str(run.get("liveness") or "") != "terminal":
+            # The event-stream projection lags the launcher-written runtime
+            # meta (it only saw process_spawned/heartbeat), so once the await
+            # verdict is terminal, close the run through the canonical
+            # success reconciler before persisting terminal meta.
+            from .control_plane import (
+                _has_success_evidence,
+                _reconcile_successful_terminal,
+            )
+
+            if _has_success_evidence(run):
+                run = _reconcile_successful_terminal(run)
         meta_payload = _write_terminal_meta(
             run_id=run_id,
             run=run,

@@ -4116,7 +4116,22 @@ def _finalize_await_result(
                     snapshot,
                 )
                 if committed:
-                    last_run = committed
+                    # The board snapshot can lag a just-written terminal meta
+                    # (the documented meta-stuck-after-completion skew); the
+                    # truth the caller reconciled from live runtime meta must
+                    # not be degraded by the persistence hop. Await/settlement
+                    # verdict fields we just persisted keep the committed
+                    # values; everything else prefers the fresher read.
+                    merged = dict(committed)
+                    for key, value in (last_run or {}).items():
+                        if key == "settlement" or key in await_fields:
+                            continue
+                        if value in (None, ""):
+                            continue
+                        if key == "state" and str(value) == "unknown":
+                            continue
+                        merged[key] = value
+                    last_run = merged
         except OSError:
             pass
 
@@ -4144,139 +4159,175 @@ def await_run(
     report_path: str | None = None,
     on_poll: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> dict[str, Any]:
-    """Block on the dispatcher UDS, then reconcile one durable file verdict.
+    """Block on the dispatcher UDS, then reconcile durable file verdicts.
 
     The socket is notification only. A terminal line or EOF wakes this call;
-    meta/snapshot/report files decide the returned state. If the socket is
-    absent or stale, the same triad is checked exactly once — no private poller
-    and no dependency on vc-server or ``control-plane-revalidate``.
+    meta/snapshot/report files decide the returned state. When the socket is
+    absent (or closed early) while the launcher/worker is DEMONSTRABLY ALIVE,
+    the await re-arms itself — signal wait, then one triad read — until the
+    process dies or the re-arm budget (``hard_cap_seconds``, else
+    ``timeout_seconds``) lapses. Returning early with a live process would
+    force every supervisor into ad-hoc hedge polling, which AGENT_OPS names a
+    Class 3 violation with the fix pointed at this function.
 
-    ``interval_seconds`` and ``on_poll`` remain accepted for API compatibility;
-    neither creates a polling loop.
+    ``on_poll`` remains accepted for API compatibility; ``interval_seconds``
+    only paces liveness re-checks while no socket exists.
     """
     target = str(run_id or "").strip()
     if not target:
         raise ValueError("run_id is required")
     hard_cap = _resolve_await_hard_cap(hard_cap_seconds)
-    signal = wait_for_run_signal(target, timeout=hard_cap)
-    kind = str(signal.get("kind") or "missing")
+    try:
+        rearm_interval = max(float(interval_seconds), 0.01)
+    except (TypeError, ValueError):
+        rearm_interval = 5.0
+    rearm_budget = hard_cap
+    if rearm_budget is None:
+        try:
+            rearm_budget = max(float(timeout_seconds), 0.0)
+        except (TypeError, ValueError):
+            rearm_budget = 300.0
+    rearm_deadline = time.monotonic() + rearm_budget if rearm_budget > 0 else None
 
-    runtime_meta_path = _runtime_run_dir(target) / "meta.json"
-    runtime_meta = _read_json(runtime_meta_path)
-    snapshot = _read_json(_snapshot_path(target))
-    last_run: dict[str, Any] | None = None
-    child_runs: list[dict[str, Any]] = []
-    if snapshot:
-        last_run = dict(snapshot)
-    if runtime_meta:
-        if last_run is None:
-            last_run = {}
-        last_run.update(runtime_meta)
-        last_run["run_id"] = target
-        last_run["meta"] = str(runtime_meta_path)
-        last_run["state"] = str(
-            runtime_meta.get("state") or runtime_meta.get("status") or "unknown"
+    while True:
+        signal = wait_for_run_signal(target, timeout=hard_cap)
+        kind = str(signal.get("kind") or "missing")
+
+        runtime_meta_path = _runtime_run_dir(target) / "meta.json"
+        runtime_meta = _read_json(runtime_meta_path)
+        snapshot = _read_json(_snapshot_path(target))
+        last_run: dict[str, Any] | None = None
+        child_runs: list[dict[str, Any]] = []
+        if snapshot:
+            last_run = dict(snapshot)
+        if runtime_meta:
+            if last_run is None:
+                last_run = {}
+            # A null in the runtime meta must not erase knowledge the board
+            # projection already holds (the launcher writes meta with
+            # launcher_pid: null while the spawn event carries the real pid;
+            # losing it here blinds the live-launcher grace below).
+            last_run.update({k: v for k, v in runtime_meta.items() if v is not None})
+            last_run["run_id"] = target
+            last_run["meta"] = str(runtime_meta_path)
+            last_run["state"] = str(
+                runtime_meta.get("state") or runtime_meta.get("status") or "unknown"
+            )
+            last_run["latest_report"] = str(
+                runtime_meta.get("report") or runtime_meta.get("latest_report") or ""
+            )
+            last_run["latest_transcript"] = str(
+                runtime_meta.get("transcript")
+                or runtime_meta.get("latest_transcript")
+                or ""
+            )
+        if last_run is None and kind != "missing":
+            # Legacy/non-dispatcher records get one reconciliation pass per wake.
+            try:
+                projected = sync_state(only_run_id=target)
+            except OSError:
+                projected = {}
+            last_run = _select_run(projected, target) if projected else None
+
+        if kind == "missing":
+            # One scoped reconciliation materializes legacy artifact meta and
+            # its settlement event — a single triad read per wake, not a poller.
+            try:
+                projected = sync_state(only_run_id=target)
+            except OSError:
+                projected = {}
+            projected_run = _select_run(projected, target) if projected else None
+            if projected_run is not None:
+                last_run = projected_run
+            child_runs = _await_child_runs(projected, target) if projected else []
+
+        if on_poll is not None:
+            on_poll(last_run)
+
+        if kind == "timeout":
+            worker_alive = bool(last_run and _await_process_is_alive(last_run))
+            return _finalize_await_result(
+                target,
+                last_run,
+                completed=False,
+                timed_out=True,
+                reason="hard_cap",
+                worker_alive=worker_alive,
+                attempts=1,
+            )
+
+        signal_woke = kind in {"terminal", "eof", "identity_changed"}
+        terminal = bool(last_run and _run_is_terminal(last_run))
+        worker_alive = bool(
+            not (terminal and kind == "terminal")
+            and (
+                (last_run is not None and _await_process_is_alive(last_run))
+                or any(_await_process_is_alive(child) for child in child_runs)
+            )
         )
-        last_run["latest_report"] = str(
-            runtime_meta.get("report") or runtime_meta.get("latest_report") or ""
-        )
-        last_run["latest_transcript"] = str(
-            runtime_meta.get("transcript")
-            or runtime_meta.get("latest_transcript")
+        delivered_report = str(
+            report_path
+            or (last_run or {}).get("latest_report")
+            or signal.get("report")
             or ""
+        ).strip()
+        report_written = bool(
+            delivered_report and _report_file_written(delivered_report)
         )
-    if last_run is None and kind != "missing":
-        # Legacy/non-dispatcher records get one reconciliation pass, never a loop.
-        try:
-            projected = sync_state(only_run_id=target)
-        except OSError:
-            projected = {}
-        last_run = _select_run(projected, target) if projected else None
-
-    if kind == "missing":
-        # One scoped reconciliation materializes legacy artifact meta and its
-        # settlement event. This is a single triad read, never a wake loop.
-        try:
-            projected = sync_state(only_run_id=target)
-        except OSError:
-            projected = {}
-        projected_run = _select_run(projected, target) if projected else None
-        if projected_run is not None:
-            last_run = projected_run
-        child_runs = _await_child_runs(projected, target) if projected else []
-
-    if on_poll is not None:
-        on_poll(last_run)
-
-    if kind == "timeout":
-        worker_alive = bool(last_run and _await_process_is_alive(last_run))
-        return _finalize_await_result(
-            target,
-            last_run,
-            completed=False,
-            timed_out=True,
-            reason="hard_cap",
-            worker_alive=worker_alive,
-            attempts=1,
+        completed = bool(
+            not worker_alive and last_run is not None and (terminal or report_written)
         )
+        if completed:
+            reason = "terminal" if terminal else kind
+            if reason == "missing" and delivered_report:
+                reason = "report_delivered"
+            result = _finalize_await_result(
+                target,
+                last_run,
+                completed=True,
+                timed_out=False,
+                reason=reason,
+                worker_alive=False,
+                attempts=1,
+            )
+            result["outcome"] = "terminal"
+            result["signal_kind"] = kind
+            result["signal_ts"] = str(signal.get("ts") or "")
+            return result
 
-    signal_woke = kind in {"terminal", "eof", "identity_changed"}
-    terminal = bool(last_run and _run_is_terminal(last_run))
-    worker_alive = bool(
-        not (terminal and kind == "terminal")
-        and (
-            (last_run is not None and _await_process_is_alive(last_run))
-            or any(_await_process_is_alive(child) for child in child_runs)
-        )
-    )
-    delivered_report = str(
-        report_path
-        or (last_run or {}).get("latest_report")
-        or signal.get("report")
-        or ""
-    ).strip()
-    report_written = bool(delivered_report and _report_file_written(delivered_report))
-    completed = bool(
-        not worker_alive and last_run is not None and (terminal or report_written)
-    )
-    if completed:
-        reason = "terminal" if terminal else kind
-        if reason == "missing" and delivered_report:
-            reason = "report_delivered"
+        if (
+            kind in {"missing", "eof"}
+            and worker_alive
+            and rearm_deadline is not None
+            and time.monotonic() + rearm_interval <= rearm_deadline
+        ):
+            # No socket to block on, but the launcher/worker is demonstrably
+            # alive: a mid-finalize return here would hand the supervisor a
+            # premature "not completed" and force hedge polling. Re-arm the
+            # canonical wait until the process dies or the budget lapses.
+            time.sleep(rearm_interval)
+            continue
+
         result = _finalize_await_result(
             target,
             last_run,
-            completed=True,
-            timed_out=False,
-            reason=reason,
-            worker_alive=False,
+            completed=False,
+            timed_out=not worker_alive,
+            reason=(
+                "signal_invalidated_live"
+                if worker_alive and signal_woke
+                else "signal_missing_live"
+                if worker_alive
+                else "signal_invalidated"
+                if signal_woke
+                else "signal_missing"
+            ),
+            worker_alive=worker_alive,
             attempts=1,
         )
-        result["outcome"] = "terminal"
+        result["outcome"] = "live" if worker_alive else "missing"
         result["signal_kind"] = kind
-        result["signal_ts"] = str(signal.get("ts") or "")
         return result
-
-    result = _finalize_await_result(
-        target,
-        last_run,
-        completed=False,
-        timed_out=not worker_alive,
-        reason=(
-            "signal_invalidated_live"
-            if worker_alive and signal_woke
-            else "signal_missing_live"
-            if worker_alive
-            else "signal_invalidated"
-            if signal_woke
-            else "signal_missing"
-        ),
-        worker_alive=worker_alive,
-        attempts=1,
-    )
-    result["outcome"] = "live" if worker_alive else "missing"
-    result["signal_kind"] = kind
-    return result
 
 
 def run_liveness(run_id: str) -> dict[str, Any]:
