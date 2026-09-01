@@ -503,6 +503,55 @@ def verify_provenance(
     return provenance
 
 
+def _macho_uuid(path: Path) -> str | None:
+    """LC_UUID of a thin 64-bit little-endian Mach-O, or None.
+
+    The UUID identifies the compilation product and is never rewritten by
+    codesign, so two differently-signed copies of the same build share it.
+    """
+    import struct
+
+    try:
+        with path.open("rb") as fh:
+            header = fh.read(32)
+            if len(header) < 32:
+                return None
+            if struct.unpack("<I", header[:4])[0] != 0xFEEDFACF:
+                return None
+            ncmds = struct.unpack("<I", header[16:20])[0]
+            for _ in range(ncmds):
+                cmd_header = fh.read(8)
+                if len(cmd_header) < 8:
+                    return None
+                cmd, cmdsize = struct.unpack("<II", cmd_header)
+                if cmdsize < 8:
+                    return None
+                body = fh.read(cmdsize - 8)
+                if cmd == 0x1B:  # LC_UUID
+                    return body[:16].hex()
+    except OSError:
+        return None
+    return None
+
+
+def helpers_agree(app_copy: Path, pack_copy: Path) -> bool:
+    """True when the App helper and the pack binary are the same product.
+
+    Byte equality stopped being possible once the pack's binaries gained
+    their own Developer ID signatures (the App helper is bundle-signed, the
+    pack copy bare-signed — different CodeDirectories, same code), so equal
+    bytes pass fastest and otherwise both files must be Mach-O sharing one
+    LC_UUID. A non-Mach-O impostor has no UUID and fails closed.
+    """
+    try:
+        if app_copy.read_bytes() == pack_copy.read_bytes():
+            return True
+    except OSError:
+        return False
+    app_uuid = _macho_uuid(app_copy)
+    return app_uuid is not None and app_uuid == _macho_uuid(pack_copy)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
@@ -510,6 +559,9 @@ def main(argv: list[str] | None = None) -> int:
     verify = commands.add_parser("verify")
     refresh_foundations = commands.add_parser("refresh-foundations")
     refresh_foundations.add_argument("--root", type=Path, required=True)
+    agree = commands.add_parser("helpers-agree")
+    agree.add_argument("--app-copy", type=Path, required=True)
+    agree.add_argument("--pack-copy", type=Path, required=True)
     for command in (write, verify):
         command.add_argument("--root", type=Path, required=True)
         command.add_argument("--carrier-basename", required=True)
@@ -526,6 +578,8 @@ def main(argv: list[str] | None = None) -> int:
     verify.add_argument("--expected-platform")
     verify.add_argument("--expected-architecture")
     args = parser.parse_args(argv)
+    if args.command == "helpers-agree":
+        return 0 if helpers_agree(args.app_copy, args.pack_copy) else 1
     if args.command == "refresh-foundations":
         payload = refresh_runtime_foundations(args.root)
     elif args.command == "write":

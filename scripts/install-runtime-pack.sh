@@ -291,9 +291,18 @@ if [[ "$operation" == "install" && -n "$app_root" ]]; then
     || die "cannot resolve bundled vc-frame helper"
   [[ -x "$terminal_host" ]] || die "bundled terminal host missing: $terminal_host"
   [[ -x "$frame_helper" ]] || die "bundled vc-frame helper missing: $frame_helper"
-  cmp -s "$terminal_host" "$payload_root/bin/vc-terminal" \
+  # Same compilation product, signature-agnostic: byte equality stopped being
+  # possible when the pack's binaries gained their own Developer ID signatures
+  # (the App helper is bundle-signed, the pack copy bare-signed — different
+  # CodeDirectories, same code), so the contract module compares LC_UUID when
+  # the bytes differ. A non-Mach-O impostor has no UUID and fails closed.
+  PYTHONPATH="$payload_root/vibecrafted-core" "$pack_python" \
+    -m vibecrafted_core.runtime_pack_contract helpers-agree \
+    --app-copy "$terminal_host" --pack-copy "$payload_root/bin/vc-terminal" \
     || die "App terminal helper disagrees with the signed Runtime Pack"
-  cmp -s "$frame_helper" "$payload_root/libexec/vc-frame" \
+  PYTHONPATH="$payload_root/vibecrafted-core" "$pack_python" \
+    -m vibecrafted_core.runtime_pack_contract helpers-agree \
+    --app-copy "$frame_helper" --pack-copy "$payload_root/libexec/vc-frame" \
     || die "App vc-frame helper disagrees with the signed Runtime Pack"
   arguments+=(
     --app-root "$app_root"
