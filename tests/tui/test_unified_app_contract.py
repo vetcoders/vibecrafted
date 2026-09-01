@@ -1110,6 +1110,155 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "!entry.starts_with('/')" in launcher
 
 
+def test_tray_menu_supervises_runtime_pack_carrier_drift() -> None:
+    app_dir = REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted"
+    delegate = (app_dir / "AppDelegate.swift").read_text(encoding="utf-8")
+    policy = (app_dir / "RuntimePackMenuPolicy.swift").read_text(encoding="utf-8")
+    lifecycle = (app_dir / "LifecycleLog.swift").read_text(encoding="utf-8")
+
+    # The tray supervises the Runtime Pack carrier, not just the server: the
+    # live generation is a first-class status line and the submenu carries the
+    # supervision actions (reveal home, open control plane, copy identity).
+    assert 'withTitle: "Runtime Pack"' in delegate
+    assert 'withTitle: "Reveal Runtime Home"' in delegate
+    assert 'withTitle: "Open Control Plane"' in delegate
+    assert 'withTitle: "Copy Runtime Identity"' in delegate
+    assert "#selector(revealRuntimeHomeFromStatusItem)" in delegate
+    assert "#selector(openControlPlaneFromStatusItem)" in delegate
+    assert "#selector(copyRuntimeIdentityFromStatusItem)" in delegate
+    assert "NSWorkspace.shared.open(install.runtimeHome)" in delegate
+    assert '"control_plane", isDirectory: true' in delegate
+    assert "NSPasteboard.general.setString(blob, forType: .string)" in delegate
+    # Menu state derives through the pure policy, wired from the status refresh
+    # path so opening the tray always shows current drift truth.
+    assert "deriveRuntimePackMenuState(" in delegate
+    assert "applyRuntimePackMenuState()" in delegate
+    assert (
+        "signedCarrierRevisions = (sourceRevision, terminalRevision, frameRevision)"
+        in delegate
+    )
+    assert "generation: canonicalInstall?.root.lastPathComponent" in delegate
+    # The policy owns the drift rule: generation `X.Y.Z+g<sha>` vs the signed
+    # carrier's full manifest revision; drift is amber (runtime-first upgrades
+    # are legitimate), never silent.
+    assert "func generationRevisionToken(_ generation: String) -> String?" in policy
+    assert (
+        "func runtimePackMatchesCarrier(generation: String, signedSourceRevision: String) -> Bool"
+        in policy
+    )
+    assert "func deriveRuntimePackMenuState(" in policy
+    assert "func runtimeIdentityBlob(" in policy
+    assert 'generation.range(of: "+g", options: .backwards)' in policy
+    assert "signedSourceRevision.lowercased().hasPrefix(token)" in policy
+    assert "Matches this App's signed carrier" in policy
+    assert "the installed runtime moved; update the App to re-sync" in policy
+    # The durable lifecycle trail is supervision evidence, but it is not
+    # installer behavior: it lives in its own unit so the AppDelegate hub stays
+    # a UI/process host (the contract above forbids createDirectory there).
+    assert "func lifecycleLog(_ event: String)" in lifecycle
+    assert 'appendingPathComponent("app-lifecycle.log")' in lifecycle
+    assert "func installLifecycleSignalHandlers()" in lifecycle
+    assert "installLifecycleSignalHandlers()" in delegate
+    assert "lifecycleLog(" in delegate
+    assert "createDirectory(at:" not in delegate
+
+
+def test_runtime_pack_menu_policy_swift_behavior(tmp_path: Path) -> None:
+    swiftc = shutil.which("swiftc")
+    if swiftc is None:
+        pytest.skip("swiftc is unavailable")
+    policy = (
+        REPO_ROOT
+        / "vibecrafted-app/shell-agent/app/Vibecrafted/RuntimePackMenuPolicy.swift"
+    )
+    # Top-level expressions are only allowed in a file named main.swift.
+    harness = tmp_path / "main.swift"
+    harness.write_text(
+        """
+import Foundation
+
+enum TrayServerHealth: String {
+  case checking
+  case healthy
+  case transitioning
+  case failed
+  case neutral
+}
+
+func expect(_ condition: Bool, _ label: String) {
+  if !condition { fatalError(label) }
+}
+
+let fullSha = "0a5eaaea607d07c3dcac1bb321c502d41273e1e0"
+
+let waiting = deriveRuntimePackMenuState(
+  generation: nil, signedSourceRevision: nil, runtimeReady: false)
+expect(waiting.header == "Runtime Pack: WAITING FOR RUNTIME", "waiting header")
+expect(waiting.health == .checking, "waiting health")
+expect(!waiting.actionsEnabled, "waiting actions disabled")
+
+let unknown = deriveRuntimePackMenuState(
+  generation: nil, signedSourceRevision: fullSha, runtimeReady: true)
+expect(unknown.header == "Runtime Pack: UNKNOWN", "unknown header")
+expect(unknown.health == .neutral, "unknown health")
+expect(unknown.actionsEnabled, "unknown actions enabled")
+
+let synced = deriveRuntimePackMenuState(
+  generation: "4.4.0+g0a5eaaea", signedSourceRevision: fullSha, runtimeReady: true)
+expect(synced.header == "Runtime Pack: 4.4.0+g0a5eaaea", "synced header")
+expect(synced.detail == "Matches this App's signed carrier", "synced detail")
+expect(synced.health == .healthy, "synced health")
+expect(synced.actionsEnabled, "synced actions enabled")
+
+let drifted = deriveRuntimePackMenuState(
+  generation: "4.4.0+gdeadbeef", signedSourceRevision: fullSha, runtimeReady: true)
+expect(drifted.header == "Runtime Pack: 4.4.0+gdeadbeef", "drift header")
+expect(drifted.detail.contains("Carrier expects 0a5eaaea"), "drift detail names carrier")
+expect(drifted.health == .transitioning, "drift is amber, not red")
+expect(drifted.actionsEnabled, "drift actions enabled")
+
+let unstamped = deriveRuntimePackMenuState(
+  generation: "4.4.0+UNSTAMPED", signedSourceRevision: fullSha, runtimeReady: true)
+expect(unstamped.health == .neutral, "unstamped health")
+expect(unstamped.detail == "Installed generation carries no source stamp", "unstamped detail")
+
+expect(generationRevisionToken("4.4.0+g0a5eaaea") == "0a5eaaea", "token extraction")
+expect(generationRevisionToken("4.4.0+UNSTAMPED") == nil, "unstamped token")
+expect(runtimePackMatchesCarrier(
+  generation: "4.4.0+g0a5eaaea", signedSourceRevision: fullSha), "carrier match")
+expect(!runtimePackMatchesCarrier(
+  generation: "4.4.0+gdeadbeef", signedSourceRevision: fullSha), "carrier mismatch")
+
+let blob = runtimeIdentityBlob(
+  generation: "4.4.0+g0a5eaaea", sourceRevision: fullSha,
+  terminalRevision: "78d62bb9", frameRevision: "c29b899c",
+  runtimeHome: "/Users/o/.local/share/vibecrafted",
+  configHome: "/Users/o/.config/vibecrafted")
+expect(blob.contains("vibecrafted-runtime: 4.4.0+g0a5eaaea"), "blob generation")
+expect(blob.contains("carrier-source: \\(fullSha)"), "blob source")
+expect(blob.contains("carrier-vc-terminal: 78d62bb9"), "blob terminal")
+expect(blob.contains("carrier-vc-frame: c29b899c"), "blob frame")
+expect(blob.contains("runtime-home: /Users/o/.local/share/vibecrafted"), "blob home")
+expect(blob.contains("config-home: /Users/o/.config/vibecrafted"), "blob config")
+print("runtime-pack-policy-ok")
+""",
+        encoding="utf-8",
+    )
+    binary = tmp_path / "runtime-pack-policy-check"
+    compile_result = subprocess.run(
+        [swiftc, "-O", "-o", str(binary), str(policy), str(harness)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert compile_result.returncode == 0, compile_result.stderr
+    run_result = subprocess.run(
+        [str(binary)], check=False, capture_output=True, text=True
+    )
+    assert run_result.returncode == 0, run_result.stderr
+    assert run_result.stdout.strip() == "runtime-pack-policy-ok"
+
+
 def test_tracked_product_source_contains_no_symlinks() -> None:
     index = subprocess.check_output(["git", "ls-files", "-s"], cwd=REPO_ROOT, text=True)
     tracked_symlinks = [
