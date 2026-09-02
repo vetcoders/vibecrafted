@@ -57,6 +57,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
+from xml.parsers.expat import ExpatError
 
 try:
     _distribution_manifest = importlib.import_module("distribution_manifest")
@@ -15582,7 +15583,13 @@ def _foundation_service_dependent_plists() -> list[tuple[Path, dict[str, Any]]]:
         try:
             with plist_path.open("rb") as handle:
                 payload = plistlib.load(handle)
-        except (OSError, plistlib.InvalidFileException, ValueError, TypeError):
+        except (
+            OSError,
+            plistlib.InvalidFileException,
+            ExpatError,
+            ValueError,
+            TypeError,
+        ):
             continue
         label = str(payload.get("Label") or "")
         if label.startswith(("io.vetcoders.", "com.vibecrafted.")):
