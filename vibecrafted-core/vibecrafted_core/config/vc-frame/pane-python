@@ -27,6 +27,7 @@ candidates=(
 )
 for py in "${candidates[@]}"; do
   [[ -n "$py" && -x "$py" ]] || continue
+  # shellcheck disable=SC2093  # This wrapper intentionally becomes the selected interpreter.
   exec "$py" "$launcher" "$@"
 done
 exec "$launcher" "$@"

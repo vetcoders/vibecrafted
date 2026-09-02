@@ -15,7 +15,7 @@ import socket
 import stat
 import sys
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Self
@@ -484,6 +484,7 @@ def wait_for_run_signal(
     *,
     timeout: float | None = None,
     read_size: int = 65536,
+    _on_event: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Block for a terminal JSON line; return ``kind=missing|eof`` for reconciliation."""
     path = run_signal_socket_path(run_id)
@@ -496,17 +497,32 @@ def wait_for_run_signal(
     try:
         try:
             client.connect(str(path))
-        except (FileNotFoundError, ConnectionRefusedError, OSError):
+        except TimeoutError:
+            raise
+        except OSError:
             return {"kind": "missing", "run_id": run_id}
         buffer = bytearray()
         identity: tuple[int, str] | None = None
+
+        def eof_result() -> dict[str, Any]:
+            result: dict[str, Any] = {"kind": "eof", "run_id": run_id}
+            if identity is not None:
+                result["dispatcher_pid"], result["start_token"] = identity
+            return result
+
         while True:
-            chunk = client.recv(read_size)
+            try:
+                chunk = client.recv(read_size)
+            except TimeoutError:
+                raise
+            except OSError:
+                # A dispatcher killed before accept() drains the queued UNIX
+                # connection can reset it instead of producing a zero-byte
+                # read. Both are wake-only transport loss and require the same
+                # durable reconciliation path.
+                return eof_result()
             if not chunk:
-                result: dict[str, Any] = {"kind": "eof", "run_id": run_id}
-                if identity is not None:
-                    result["dispatcher_pid"], result["start_token"] = identity
-                return result
+                return eof_result()
             buffer.extend(chunk)
             if len(buffer) > _MAX_EVENT_BYTES:
                 return {"kind": "eof", "run_id": run_id}
@@ -528,6 +544,8 @@ def wait_for_run_signal(
                 ):
                     continue
                 event_identity = (dispatcher_pid, start_token)
+                if _on_event is not None:
+                    _on_event(event)
                 if identity is None:
                     identity = event_identity
                 elif identity != event_identity:

@@ -104,6 +104,7 @@ def _isolate_darwin_install(
     monkeypatch.setattr(installer.sys, "platform", "darwin")
     monkeypatch.setattr(installer, "_runtime_launch_agent_path", lambda: plist)
     monkeypatch.setattr(installer, "_darwin_process_ids", lambda: ())
+    monkeypatch.setattr(installer, "_darwin_caller_ancestor_pids", lambda: frozenset())
     monkeypatch.setattr(
         installer, "_assert_runtime_launchd_job_owned", lambda _home: True
     )

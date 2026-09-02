@@ -188,7 +188,7 @@ python3 "$repo_root/scripts/distribution_manifest.py" archive \
 # The portable sandbox shares the operator's launchd user domain. Install the
 # complete payload without claiming or mutating the host's fixed service label.
 if ! HOME="$bootstrap_home" XDG_CONFIG_HOME="$bootstrap_config_dir" VIBECRAFTED_HOME="$bootstrap_home/.vibecrafted" INSTALL_SERVER_SERVICE_POLICY=isolated \
-  bash "$repo_root/install.sh" --archive-file "$bootstrap_archive"; then
+  bash "$repo_root/install.sh" --archive-file "$bootstrap_archive" install-source; then
   print_installer_logs "$bootstrap_home"
   die "root install.sh bootstrap failed"
 fi
@@ -196,8 +196,8 @@ fi
 require_symlink "$bootstrap_home/.local/share/vibecrafted/tools/vibecrafted-current"
 require_file "$bootstrap_home/.local/share/vibecrafted/tools/vibecrafted-current/Makefile"
 require_file "$bootstrap_home/.local/share/vibecrafted/tools/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/codex_spawn.sh"
-# Runtime contract (test_install_all_paths_do_not_install_shell_helpers_by_default):
-# the default install lane (install.sh -> make install-auto -> make install) installs
+# Source-lane contract (test_install_all_paths_do_not_install_shell_helpers_by_default):
+# the explicit portable maintainer lane (install.sh -> make install-source) installs
 # tools and views but does NOT wire the legacy shell helpers or touch shell rc files.
 # Shell-helper generation is an explicit opt-in, exercised by the `--with-shell`
 # install smoke below, so the bootstrap does not assert vc-skills.sh here.
