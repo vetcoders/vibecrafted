@@ -69,3 +69,29 @@ częściowa: runtime przestawiony na 4.3.0+gfde0fbe3, reszta przerwana.
   Usługa na tym hoście NIE zatrzymana (sesja Foundera żyje na tym runtime).
 - Pre-commit semgrep i pre-push (cały tree) przekraczają 2-min limit harnessu —
   commit/push idą odłączone (`nohup`) z monitorem.
+
+## 2026-09-02T08:20:00+02:00 — stos 4.3.0-hotfix: #76 → #77 → #78; #77 zsynchronizowany, tick storm ma fix (PR #78)
+
+Sesja resume bez jawnego zlecenia (wejście „Primary" = urwany wklej pakietu ciągłości;
+pakiet 06:44 dotyczył host-a, ten z 04:06 — vibecrafted). Decyzja moja: zamknąć
+to, co od wpisu 07:05 zmieniło się na GitHubie, i zostawić Founderowi jeden guzik.
+
+- **PR #78** (`agent/fix-supervisor-healthy-loop`, Monika/codex, 11 commitów, stacked na #76)
+  to fix tick-stormu z raportu `2026-09-02-supervisor-tick-storm-430.md`: supervisor
+  najpierw sonduje parę (`server supervisor-pair-health` = 1 bash + 1 python), `server
+  start` woła tylko przy braku dowodu; interwał 1 s zachowany; sonda przerywalna na stop.
+  Deck ≡ scripts (bajt w bajt, sprawdzone). Review lokalne, bez komentarzy na PR.
+- **PR #76** urósł fd95a9d4 → fea43671 (8 commitów, wyłącznie hardening CI/testów run-signal;
+  treści #77 nie skonsumował). **PR #77** stał na starym fd95a9d4 → portable red na obu OS:
+  Linux SC2093 (`pane-python`, naprawione w #76 a233cd0f), macOS `claude executable not
+  found` w `test_operator_mode.py` (naprawione w #76 0e3a6ab6/690eb3d5). Odziedziczone, nie moje.
+- Sync #77: merge czubka #76 (`b6241ebc`, zero konfliktów, bez force-push — ten sam wzór co
+  #78). Pre-commit ruff-format złożył jedno wywołanie `read_text()` z 690eb3d5 na jedną linię;
+  CI nie ma kroku `ruff format --check`, więc to artefakt hooka, nie bloker #76. Baza #77
+  przestawiona na `agent/fix-runtime-plist-expat` (diff = tylko własna zmiana).
+  Testy instalatora w worktree gałęzi: 196 passed (2:46) przez `uv run --with pytest`.
+- Kolejność dla Foundera: merge #76 → #77 → #78 na `fix/v430-dispatcher-shutdown-race-v5`,
+  dopiero potem tag `v4.3.0` i `make release` z nowego HEAD (artefakty w `dist/` nadal
+  nazywają `fde0fbe3`). Portable CI dla fea43671 i ecf95053 w toku od 07:27.
+- Hook `commit-msg` odrzuca typ `merge(...)` i wymaga trailerów `session_id`/`time`/`runtime`;
+  merge commit poszedł jako `chore(install)`.
