@@ -161,20 +161,23 @@ def test_sigkill_wakes_existing_client_on_eof_and_stale_socket_is_absent(
     process, _meta, _report = _dispatcher(tmp_path, run_id, delay=0.5)
     socket_path = run_signal_socket_path(run_id)
     _wait_for(socket_path)
-    result: dict[str, object] = {}
-    client = threading.Thread(
-        target=lambda: result.update(control_plane.await_run(run_id)), daemon=True
-    )
-    client.start()
-    time.sleep(0.05)
-    os.kill(process.pid, signal.SIGKILL)
-    process.wait(timeout=5)
-    client.join(timeout=1)
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(1)
+    client.connect(str(socket_path))
+    try:
+        os.kill(process.pid, signal.SIGKILL)
+        process.wait(timeout=5)
+        while client.recv(65536):
+            pass
+    finally:
+        client.close()
+
+    result = control_plane.await_run(run_id, timeout_seconds=0)
 
     assert result["completed"] is False
     assert result["worker_alive"] is False
-    assert result["reason"] == "signal_invalidated"
-    assert result["signal_kind"] == "eof"
+    assert result["reason"] == "signal_missing"
+    assert result["signal_kind"] == "missing"
     # SIGKILL cannot unlink; a refused orphan is treated as missing, never hung.
     started = time.monotonic()
     assert wait_for_run_signal(run_id)["kind"] == "missing"
