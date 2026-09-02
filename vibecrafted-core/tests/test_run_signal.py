@@ -199,7 +199,7 @@ def test_sigkill_wakes_await_on_eof_and_stale_socket_is_absent(
     time.sleep(0.55)  # the test-owned worker exits without being signalled
 
 
-def test_connection_reset_is_an_eof_wake(monkeypatch, tmp_path: Path) -> None:
+def test_connection_reset_is_an_eof_wake(monkeypatch) -> None:
     class ResetClient:
         def settimeout(self, _timeout: float) -> None:
             pass
@@ -217,7 +217,7 @@ def test_connection_reset_is_an_eof_wake(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         run_signal,
         "run_signal_socket_path",
-        lambda _run_id: tmp_path / "reset.sock",
+        lambda _run_id: Path("/tmp/vc-run-signal-reset.sock"),
     )
 
     assert run_signal.wait_for_run_signal("signal-reset", timeout=1) == {
@@ -231,9 +231,30 @@ def test_dispatcher_sigterm_unlinks_socket(monkeypatch, tmp_path: Path) -> None:
     run_id = "signal-dispatcher-term"
     process, _meta, _report = _dispatcher(tmp_path, run_id, delay=0.3)
     socket_path = run_signal_socket_path(run_id)
-    _wait_for(socket_path)
+    _wait_for_owner_token(socket_path)
+    accepted = threading.Event()
+    results: list[dict[str, object]] = []
+    client = threading.Thread(
+        target=lambda: results.append(
+            wait_for_run_signal(
+                run_id,
+                _on_event=lambda _event: accepted.set(),
+            )
+        ),
+        daemon=True,
+    )
+    client.start()
+    assert accepted.wait(timeout=5), "dispatcher never accepted the signal client"
     process.terminate()
     process.wait(timeout=5)
+    client.join(timeout=5)
+    assert not client.is_alive()
+    assert len(results) == 1
+    result = results[0]
+    assert result["kind"] == "eof"
+    assert result["run_id"] == run_id
+    assert result["dispatcher_pid"] == process.pid
+    assert isinstance(result["start_token"], str)
     _wait_for(socket_path, present=False)
     time.sleep(0.35)  # the test-owned worker exits without being signalled
 
