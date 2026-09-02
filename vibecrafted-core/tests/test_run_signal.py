@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 from vibecrafted_core import control_plane, run_signal, server_observation
@@ -226,6 +227,82 @@ def test_connection_reset_is_an_eof_wake(monkeypatch) -> None:
         "kind": "eof",
         "run_id": "signal-reset",
     }
+
+
+def test_connect_timeout_preserves_hard_cap_outcome(monkeypatch) -> None:
+    class TimeoutClient:
+        def settimeout(self, _timeout: float) -> None:
+            pass
+
+        def connect(self, _path: str) -> None:
+            raise TimeoutError("connect deadline expired")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(run_signal.socket, "socket", lambda *_args: TimeoutClient())
+    monkeypatch.setattr(
+        run_signal,
+        "run_signal_socket_path",
+        lambda _run_id: Path("/tmp/vc-run-signal-timeout.sock"),
+    )
+
+    assert run_signal.wait_for_run_signal("signal-timeout", timeout=1) == {
+        "kind": "timeout",
+        "run_id": "signal-timeout",
+    }
+
+
+def test_identity_change_notifies_valid_event_observer(monkeypatch) -> None:
+    first = {
+        "schema": run_signal.SCHEMA,
+        "run_id": "signal-replaced",
+        "kind": "heartbeat",
+        "dispatcher_pid": 100,
+        "start_token": "first",
+    }
+    replacement = {
+        **first,
+        "dispatcher_pid": 200,
+        "start_token": "replacement",
+    }
+    payload = (
+        json.dumps(first).encode() + b"\n" + json.dumps(replacement).encode() + b"\n"
+    )
+
+    class ReplacedClient:
+        def connect(self, _path: str) -> None:
+            pass
+
+        def recv(self, _read_size: int) -> bytes:
+            nonlocal payload
+            chunk, payload = payload, b""
+            return chunk
+
+        def close(self) -> None:
+            pass
+
+    observed: list[Mapping[str, object]] = []
+    monkeypatch.setattr(run_signal.socket, "socket", lambda *_args: ReplacedClient())
+    monkeypatch.setattr(
+        run_signal,
+        "run_signal_socket_path",
+        lambda _run_id: Path("/tmp/vc-run-signal-replaced.sock"),
+    )
+
+    result = run_signal.wait_for_run_signal(
+        "signal-replaced", _on_event=observed.append
+    )
+
+    assert result == {
+        "kind": "identity_changed",
+        "run_id": "signal-replaced",
+        "dispatcher_pid": 200,
+        "start_token": "replacement",
+        "previous_dispatcher_pid": 100,
+        "previous_start_token": "first",
+    }
+    assert observed == [first, replacement]
 
 
 def test_dispatcher_sigterm_unlinks_socket(monkeypatch, tmp_path: Path) -> None:

@@ -497,7 +497,9 @@ def wait_for_run_signal(
     try:
         try:
             client.connect(str(path))
-        except (FileNotFoundError, ConnectionRefusedError, OSError):
+        except TimeoutError:
+            raise
+        except OSError:
             return {"kind": "missing", "run_id": run_id}
         buffer = bytearray()
         identity: tuple[int, str] | None = None
@@ -542,6 +544,8 @@ def wait_for_run_signal(
                 ):
                     continue
                 event_identity = (dispatcher_pid, start_token)
+                if _on_event is not None:
+                    _on_event(event)
                 if identity is None:
                     identity = event_identity
                 elif identity != event_identity:
@@ -553,8 +557,6 @@ def wait_for_run_signal(
                         "previous_dispatcher_pid": identity[0],
                         "previous_start_token": identity[1],
                     }
-                if _on_event is not None:
-                    _on_event(event)
                 if event.get("kind") == "terminal":
                     return dict(event)
                 # Unknown kinds and heartbeats deliberately keep the read armed.
