@@ -186,6 +186,17 @@ def test_portable_workflow_requires_runtime_pack_bootstrap_on_mac_and_linux() ->
     assert "build-essential" not in bootstrap
 
 
+def test_portable_source_smoke_selects_explicit_source_lane() -> None:
+    portable_smoke = (REPO_ROOT / "tests/portable/run.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        'bash "$repo_root/install.sh" --archive-file "$bootstrap_archive" '
+        "install-source"
+    ) in portable_smoke
+
+
 def test_core_gate_isolated_from_the_previously_installed_runtime_stamp() -> None:
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     gate = makefile.split("\ntest-core:", 1)[1].split("\ndispatch-test:", 1)[0]
