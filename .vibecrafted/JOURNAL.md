@@ -31,3 +31,19 @@ Zlecenie Foundera (sesja 8d57e6a3): review otwartych PR-ów aicx, /vc-release 0.
   bump 0.13.0, fantomowy [0.12.6] rozpuszczony); channel-check + version-section green.
 - PR Loctree/aicx#70 otwarty (fusion → main; main = merge-base, merge = czysty FF).
   Guziki Foundera: merge #70 → make release-tag TAG=v0.13.0 → make release-push.
+
+## 2026-09-02T04:20:00+02:00 — release 4.3.0: re-weryfikacja stanu „pod guzikiem" + draft PR #75
+
+Sesja resume (pakiet ciągłości aicx, bez jawnego zlecenia). Decyzja moja: zamiast
+czekać, sprawdzić czy handoff z 3b73d1fe nadal trzyma i wystawić go na GitHub.
+
+- HEAD `fde0fbe3` == origin, drzewo czyste, 268 commitów nad `main` (merge-base = main,
+  czysty FF). `vibecrafted doctor`: 5/5 CLEAN (runtime 4.3.0+gd38f3e66, 10 commitów za HEAD).
+- `make exact-release-contract-gate` rc=0; `release-output.json`/`portable-output.json`
+  nazywają `fde0fbe3`; CodeQL open na `main` = 0.
+- #74/#73/#71/#70/#69/#66 = ancestory HEAD (`merge-base --is-ancestor`); #65 trzyma
+  8 commitów spoza linii → osobny cut po 4.3.0.
+- Otwarty **draft** PR #75 (`fix/v430-dispatcher-shutdown-race-v5` → `main`), body bez
+  vendor-footera. Merge, tag `v4.3.0`, push taga, `publish-release`, zamykanie PR-ów —
+  guziki Foundera, nie ruszone.
+- Korekta: JOURNAL jest trackowany gitem (`git ls-files`), wbrew notce z 3b73d1fe.
