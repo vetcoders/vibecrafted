@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 
-from vibecrafted_core import control_plane, server_observation
+from vibecrafted_core import control_plane, run_signal, server_observation
 from vibecrafted_core.run_signal import RunSignalServer, wait_for_run_signal
 from vibecrafted_core.runtime_paths import (
     classify_vibecrafted_home_child,
@@ -152,7 +152,7 @@ def test_real_dispatcher_wakes_await_under_100ms_without_server(
     assert not socket_path.exists()
 
 
-def test_sigkill_wakes_existing_client_on_eof_and_stale_socket_is_absent(
+def test_sigkill_wakes_await_on_eof_and_stale_socket_is_absent(
     monkeypatch, tmp_path: Path
 ) -> None:
     home = tmp_path / "home"
@@ -161,29 +161,69 @@ def test_sigkill_wakes_existing_client_on_eof_and_stale_socket_is_absent(
     process, _meta, _report = _dispatcher(tmp_path, run_id, delay=0.5)
     socket_path = run_signal_socket_path(run_id)
     _wait_for(socket_path)
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(1)
-    client.connect(str(socket_path))
-    try:
-        os.kill(process.pid, signal.SIGKILL)
-        process.wait(timeout=5)
-        while client.recv(65536):
-            pass
-    finally:
-        client.close()
+    accepted = threading.Event()
+    real_wait_for_run_signal = wait_for_run_signal
 
-    result = control_plane.await_run(run_id, timeout_seconds=0)
+    def synchronized_wait(run_id: str, *, timeout: float | None = None):
+        return real_wait_for_run_signal(
+            run_id,
+            timeout=timeout,
+            _on_event=lambda _event: accepted.set(),
+        )
 
+    monkeypatch.setattr(control_plane, "wait_for_run_signal", synchronized_wait)
+    results: list[dict[str, object]] = []
+    client = threading.Thread(
+        target=lambda: results.append(
+            control_plane.await_run(run_id, timeout_seconds=0)
+        ),
+        daemon=True,
+    )
+    client.start()
+    assert accepted.wait(timeout=5), "dispatcher never accepted the await client"
+    os.kill(process.pid, signal.SIGKILL)
+    process.wait(timeout=5)
+    client.join(timeout=5)
+
+    assert not client.is_alive()
+    assert len(results) == 1
+    result = results[0]
     assert result["completed"] is False
-    assert result["worker_alive"] is False
-    assert result["reason"] == "signal_missing"
-    assert result["signal_kind"] == "missing"
+    assert result["signal_kind"] == "eof"
+    assert result["reason"] in {"signal_invalidated", "signal_invalidated_live"}
     # SIGKILL cannot unlink; a refused orphan is treated as missing, never hung.
     started = time.monotonic()
     assert wait_for_run_signal(run_id)["kind"] == "missing"
     assert time.monotonic() - started < 0.1
     socket_path.unlink(missing_ok=True)
     time.sleep(0.55)  # the test-owned worker exits without being signalled
+
+
+def test_connection_reset_is_an_eof_wake(monkeypatch, tmp_path: Path) -> None:
+    class ResetClient:
+        def settimeout(self, _timeout: float) -> None:
+            pass
+
+        def connect(self, _path: str) -> None:
+            pass
+
+        def recv(self, _read_size: int) -> bytes:
+            raise ConnectionResetError("dispatcher died before accept")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(run_signal.socket, "socket", lambda *_args: ResetClient())
+    monkeypatch.setattr(
+        run_signal,
+        "run_signal_socket_path",
+        lambda _run_id: tmp_path / "reset.sock",
+    )
+
+    assert run_signal.wait_for_run_signal("signal-reset", timeout=1) == {
+        "kind": "eof",
+        "run_id": "signal-reset",
+    }
 
 
 def test_dispatcher_sigterm_unlinks_socket(monkeypatch, tmp_path: Path) -> None:
