@@ -515,6 +515,66 @@ def test_healthy_supervisor_loop_probes_without_restarting_pair(
     assert child_calls == [[str(launcher), "server", "stop"]]
 
 
+def test_supervisor_stop_interrupts_inflight_pair_health_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe_started = tmp_path / "pair-probe-started"
+    launcher = _executable(
+        tmp_path / "bin" / "vibecrafted",
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "import time\n"
+        "from pathlib import Path\n"
+        f"marker = Path({str(probe_started)!r})\n"
+        "if sys.argv[1:] == ['server', 'supervisor-pair-health']:\n"
+        "    marker.touch()\n"
+        "    time.sleep(60)\n"
+        "raise SystemExit(0)\n",
+    )
+    base = _config(tmp_path, launcher)
+    config = supervisor.SupervisorConfig(
+        paths=base.paths,
+        launcher=base.launcher,
+        host=base.host,
+        port=base.port,
+        interval=base.interval,
+        maximum_backoff=base.maximum_backoff,
+        command_timeout=60,
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "_managed_pair_snapshot",
+        lambda _paths: {
+            "server_pid": os.getpid(),
+            "guardian_pid": os.getppid(),
+        },
+    )
+    stop_event = threading.Event()
+    result: list[int] = []
+    worker = threading.Thread(
+        target=lambda: result.append(
+            supervisor.run_supervisor(config, stop_event=stop_event)
+        ),
+        daemon=True,
+    )
+    worker.start()
+
+    deadline = time.monotonic() + 5
+    while not probe_started.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert probe_started.exists()
+    stopped_at = time.monotonic()
+    stop_event.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert time.monotonic() - stopped_at < 5
+    assert result == [0]
+    receipt = json.loads(config.paths.receipt_file.read_text(encoding="utf-8"))
+    assert receipt["state"] == "stopped"
+
+
 def test_run_child_does_not_wait_for_daemonized_descendant_capture(
     tmp_path: Path,
 ) -> None:

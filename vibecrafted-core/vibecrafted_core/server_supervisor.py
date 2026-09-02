@@ -1345,14 +1345,14 @@ def run_supervisor(
                     continue
                 managed_pair = _managed_pair_snapshot(config.paths)
                 managed_pair_live = _managed_pair_healthy(managed_pair)
-                canonical_pair_healthy = (
-                    managed_pair_live
-                    and _pair_healthy(
-                        config.launcher,
-                        child_environment,
-                        timeout=config.command_timeout,
-                    )
+                canonical_pair_healthy = managed_pair_live and _pair_healthy(
+                    config.launcher,
+                    child_environment,
+                    timeout=config.command_timeout,
+                    stop_event=event,
                 )
+                if event.is_set():
+                    break
                 return_code = 0
                 detail = ""
                 if not canonical_pair_healthy:
@@ -1382,8 +1382,12 @@ def run_supervisor(
                             config.launcher,
                             child_environment,
                             timeout=config.command_timeout,
+                            stop_event=event,
                         )
                     )
+                    if event.is_set():
+                        last_exit_code = return_code
+                        break
                 last_exit_code = return_code
                 if canonical_pair_healthy:
                     consecutive_failures = 0
@@ -1941,13 +1945,27 @@ def _pair_healthy(
     environment: dict[str, str],
     *,
     timeout: float = 60.0,
+    stop_event: threading.Event | None = None,
 ) -> bool:
     """Run the launcher's single-process supervisor pair probe and require both
     managed roles in stdout with exit code 0; False on any subprocess error."""
 
+    argv = [str(launcher), "server", "supervisor-pair-health"]
+    if stop_event is not None:
+        return_code, detail = _run_child(
+            argv,
+            env=environment,
+            timeout=timeout,
+            stop_event=stop_event,
+        )
+        return (
+            return_code == 0
+            and "Server: RUNNING" in detail
+            and "Guardian: RUNNING" in detail
+        )
     try:
         result = subprocess.run(
-            [str(launcher), "server", "supervisor-pair-health"],
+            argv,
             check=False,
             capture_output=True,
             text=True,
