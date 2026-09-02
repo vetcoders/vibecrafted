@@ -1251,11 +1251,12 @@ def run_supervisor(
     service_managed: bool = False,
     identity: SupervisorIdentity | None = None,
 ) -> int:
-    """Foreground supervisor loop: acquire the coordination lease, then
-    repeatedly launch `<launcher> server start`, verify canonical pair health,
-    and back off exponentially on failure, until `stop_event` fires — at which
-    point it runs `<launcher> server stop` and writes a final receipt. Always
-    returns 0; failures are recorded in the receipt, not the return value."""
+    """Foreground supervisor loop: acquire the coordination lease, then probe
+    canonical pair health, invoke `<launcher> server start` only when proof is
+    absent, and back off exponentially on failure until `stop_event` fires — at
+    which point it runs `<launcher> server stop` and writes a final receipt.
+    Always returns 0; failures are recorded in the receipt, not the return
+    value."""
 
     event = stop_event or threading.Event()
     if (
