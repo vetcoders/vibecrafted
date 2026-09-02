@@ -419,7 +419,7 @@ def test_foreground_supervisor_lock_and_receipt_are_truthful(
         tmp_path / "bin" / "vibecrafted",
         f"""#!/bin/sh
 printf '%s\n' "$2" >> {str(lifecycle_log)!r}
-if [ "$2" = "status" ]; then
+if [ "$2" = "supervisor-pair-health" ]; then
     printf '%s\n' 'Server: RUNNING' 'Guardian: RUNNING'
 fi
 exit 0
@@ -468,6 +468,51 @@ exit 0
     stopped = json.loads(config.paths.receipt_file.read_text(encoding="utf-8"))
     assert stopped["state"] == "stopped"
     assert lifecycle_log.read_text(encoding="utf-8").splitlines()[-1] == "stop"
+
+
+def test_healthy_supervisor_loop_probes_without_restarting_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    stop_event = threading.Event()
+    pair_checks = 0
+    child_calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        supervisor,
+        "_managed_pair_snapshot",
+        lambda _paths: {
+            "server_pid": os.getpid(),
+            "guardian_pid": os.getppid(),
+        },
+    )
+
+    def healthy_pair(
+        _launcher: Path,
+        _environment: dict[str, str],
+        **_kwargs: object,
+    ) -> bool:
+        nonlocal pair_checks
+        pair_checks += 1
+        if pair_checks == 2:
+            stop_event.set()
+        return True
+
+    def record_child(
+        argv: list[str],
+        **_kwargs: object,
+    ) -> tuple[int, str]:
+        child_calls.append(argv)
+        return 0, ""
+
+    monkeypatch.setattr(supervisor, "_pair_healthy", healthy_pair)
+    monkeypatch.setattr(supervisor, "_run_child", record_child)
+
+    assert supervisor.run_supervisor(config, stop_event=stop_event) == 0
+    assert pair_checks == 2
+    assert child_calls == [[str(launcher), "server", "stop"]]
 
 
 def test_run_child_does_not_wait_for_daemonized_descendant_capture(
@@ -812,6 +857,31 @@ def test_pair_health_probe_failures_are_degraded(
     monkeypatch.setattr(supervisor.subprocess, "run", fail_probe)
 
     assert not supervisor._pair_healthy(launcher, {})
+
+
+def test_pair_health_uses_single_compact_launcher_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    calls: list[list[str]] = []
+
+    def fake_probe(
+        argv: list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            "Server: RUNNING\nGuardian: RUNNING\n",
+            "",
+        )
+
+    monkeypatch.setattr(supervisor.subprocess, "run", fake_probe)
+
+    assert supervisor._pair_healthy(launcher, {})
+    assert calls == [[str(launcher), "server", "supervisor-pair-health"]]
 
 
 def test_truncated_launch_agent_plist_degrades_service_and_runtime_status(

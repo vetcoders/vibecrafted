@@ -724,6 +724,22 @@ def test_server_lifecycle_starts_heals_and_stops_guardian(
     assert f"Server: RUNNING (PID {server_pid}" in status.stdout
     assert f"Guardian: RUNNING (PID {guardian_pid}" in status.stdout
 
+    compact_audit = state_dir / "compact-probe-audit.jsonl"
+    compact_env = env | {"VIBECRAFTED_TEST_PROCESS_AUDIT": str(compact_audit)}
+    compact_probe = _run_launcher(
+        compact_env,
+        "server",
+        "supervisor-pair-health",
+    )
+    assert compact_probe.returncode == 0, compact_probe.stderr
+    assert f"Server: RUNNING (PID {server_pid}" in compact_probe.stdout
+    assert f"Guardian: RUNNING (PID {guardian_pid}" in compact_probe.stdout
+    compact_probe_pids = {
+        json.loads(line)["probe_owner_pid"]
+        for line in compact_audit.read_text(encoding="utf-8").splitlines()
+    }
+    assert len(compact_probe_pids) == 1
+
     doctor = _run_launcher(env, "server", "doctor")
     assert doctor.returncode == 0, doctor.stderr
     assert "Guardian entrypoint present and executable" in doctor.stdout
@@ -735,6 +751,12 @@ def test_server_lifecycle_starts_heals_and_stops_guardian(
     stale = _run_launcher(env, "server", "status")
     assert stale.returncode != 0
     assert "Guardian: STALE-PID" in stale.stdout
+    stale_compact_probe = _run_launcher(
+        env,
+        "server",
+        "supervisor-pair-health",
+    )
+    assert stale_compact_probe.returncode != 0
 
     healed = _run_launcher(env, "server", "start")
     assert healed.returncode == 0, healed.stderr

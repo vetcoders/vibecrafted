@@ -1342,34 +1342,48 @@ def run_supervisor(
                     )
                     event.wait(delay)
                     continue
-                return_code, detail = _run_child(
-                    [
-                        str(config.launcher),
-                        "server",
-                        "start",
-                        "--host",
-                        config.host,
-                        "--port",
-                        str(config.port),
-                    ],
-                    env=child_environment,
-                    timeout=config.command_timeout,
-                    stop_event=event,
-                )
-                last_exit_code = return_code
-                if event.is_set():
-                    break
                 managed_pair = _managed_pair_snapshot(config.paths)
                 managed_pair_live = _managed_pair_healthy(managed_pair)
                 canonical_pair_healthy = (
-                    return_code == 0
-                    and managed_pair_live
+                    managed_pair_live
                     and _pair_healthy(
                         config.launcher,
                         child_environment,
                         timeout=config.command_timeout,
                     )
                 )
+                return_code = 0
+                detail = ""
+                if not canonical_pair_healthy:
+                    return_code, detail = _run_child(
+                        [
+                            str(config.launcher),
+                            "server",
+                            "start",
+                            "--host",
+                            config.host,
+                            "--port",
+                            str(config.port),
+                        ],
+                        env=child_environment,
+                        timeout=config.command_timeout,
+                        stop_event=event,
+                    )
+                    if event.is_set():
+                        last_exit_code = return_code
+                        break
+                    managed_pair = _managed_pair_snapshot(config.paths)
+                    managed_pair_live = _managed_pair_healthy(managed_pair)
+                    canonical_pair_healthy = (
+                        return_code == 0
+                        and managed_pair_live
+                        and _pair_healthy(
+                            config.launcher,
+                            child_environment,
+                            timeout=config.command_timeout,
+                        )
+                    )
+                last_exit_code = return_code
                 if canonical_pair_healthy:
                     consecutive_failures = 0
                     last_success_at = _utc_now()
@@ -1927,13 +1941,12 @@ def _pair_healthy(
     *,
     timeout: float = 60.0,
 ) -> bool:
-    """Run `<launcher> server status` and require both "Server: RUNNING" and
-    "Guardian: RUNNING" in stdout with exit code 0; False on any subprocess
-    error."""
+    """Run the launcher's single-process supervisor pair probe and require both
+    managed roles in stdout with exit code 0; False on any subprocess error."""
 
     try:
         result = subprocess.run(
-            [str(launcher), "server", "status"],
+            [str(launcher), "server", "supervisor-pair-health"],
             check=False,
             capture_output=True,
             text=True,
