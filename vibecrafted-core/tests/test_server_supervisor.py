@@ -503,9 +503,9 @@ def test_healthy_supervisor_loop_probes_without_restarting_pair(
     def record_child(
         argv: list[str],
         **_kwargs: object,
-    ) -> tuple[int, str, str]:
+    ) -> supervisor._ChildResult:
         child_calls.append(argv)
-        return 0, "", ""
+        return supervisor._ChildResult(0, "", "")
 
     monkeypatch.setattr(supervisor, "_pair_healthy", healthy_pair)
     monkeypatch.setattr(supervisor, "_run_child", record_child)
