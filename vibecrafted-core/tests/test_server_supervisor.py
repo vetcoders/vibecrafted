@@ -588,7 +588,7 @@ exit 0
     )
 
     started = time.monotonic()
-    return_code, stdout, stderr = supervisor._run_child(
+    result = supervisor._run_child(
         [str(launcher)],
         env=dict(os.environ),
         timeout=2,
@@ -596,9 +596,58 @@ exit 0
     )
 
     assert time.monotonic() - started < 2
-    assert return_code == 0
-    assert stdout == "launcher complete"
-    assert stderr == ""
+    assert result.exit_code == 0
+    assert result.stdout == "launcher complete"
+    assert result.stderr == ""
+    assert result.abort_reason is None
+
+
+def test_run_child_timeout_preserves_raw_streams(tmp_path: Path) -> None:
+    launcher = _executable(
+        tmp_path / "bin" / "launcher",
+        """#!/bin/sh
+printf 'launcher stdout\n'
+printf 'launcher stderr\n' >&2
+sleep 5
+""",
+    )
+
+    result = supervisor._run_child(
+        [str(launcher)],
+        env=dict(os.environ),
+        timeout=0.2,
+        stop_event=threading.Event(),
+    )
+
+    assert result.exit_code == 124
+    assert result.stdout == "launcher stdout"
+    assert result.stderr == "launcher stderr"
+    assert result.abort_reason == "timeout"
+    assert result.detail == "command timed out: launcher stderr"
+
+
+def test_run_child_stop_preserves_raw_streams(tmp_path: Path) -> None:
+    launcher = _executable(
+        tmp_path / "bin" / "launcher",
+        """#!/bin/sh
+sleep 5
+""",
+    )
+    stop_event = threading.Event()
+    stop_event.set()
+
+    result = supervisor._run_child(
+        [str(launcher)],
+        env=dict(os.environ),
+        timeout=2,
+        stop_event=stop_event,
+    )
+
+    assert result.exit_code == 143
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert result.abort_reason == "stopping"
+    assert result.detail == "supervisor stopping"
 
 
 def test_zero_exit_without_verified_pid_pair_is_degraded(
@@ -2021,9 +2070,9 @@ def test_stopping_receipt_failure_does_not_skip_pair_cleanup(
     def fake_run_child(
         argv: list[str],
         **_kwargs: object,
-    ) -> tuple[int, str, str]:
+    ) -> supervisor._ChildResult:
         child_calls.append(argv)
-        return 0, "", ""
+        return supervisor._ChildResult(0, "", "")
 
     monkeypatch.setattr(supervisor, "_atomic_json", flaky_atomic_json)
     monkeypatch.setattr(supervisor, "_run_child", fake_run_child)

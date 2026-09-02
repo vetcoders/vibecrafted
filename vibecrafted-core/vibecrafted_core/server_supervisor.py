@@ -69,6 +69,35 @@ class SupervisorError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class _ChildResult:
+    """Captured child streams plus an explicit supervisor-side abort reason."""
+
+    exit_code: int
+    stdout: str
+    stderr: str
+    abort_reason: str | None = None
+
+    @property
+    def detail(self) -> str:
+        """Render receipt text without changing the captured raw streams."""
+
+        raw_detail = self.stderr or self.stdout
+        if self.abort_reason == "stopping":
+            return (
+                f"supervisor stopping: {raw_detail[-3800:]}"
+                if raw_detail
+                else "supervisor stopping"
+            )
+        if self.abort_reason == "timeout":
+            return (
+                f"command timed out: {raw_detail[-3800:]}"
+                if raw_detail
+                else "command timed out"
+            )
+        return raw_detail
+
+
+@dataclass(frozen=True)
 class SupervisorPaths:
     """Canonical filesystem locations the supervisor reads from and writes to."""
 
@@ -1187,11 +1216,11 @@ def _run_child(
     env: dict[str, str],
     timeout: float,
     stop_event: threading.Event,
-) -> tuple[int, str, str]:
+) -> _ChildResult:
     """Run `argv` to completion (or until `timeout`/`stop_event`), capturing
-    output into temp files rather than pipes; returns (exit_code, stdout,
-    stderr), with each stream clipped to 4000 chars. Exit code 143 signals a
-    stop-event abort, 124 a timeout."""
+    output into temp files rather than pipes. Raw streams remain distinct and
+    clipped to 4000 chars; `abort_reason` distinguishes supervisor aborts from
+    children that independently exit 143 or 124."""
 
     # Pipes make ``communicate`` wait for EOF from every descendant that inherited
     # them, even after the direct launcher has exited. The shell deck deliberately
@@ -1228,28 +1257,11 @@ def _run_child(
         stderr_file.seek(0)
         stdout = stdout_file.read().strip()[-4000:]
         stderr = stderr_file.read().strip()[-4000:]
-        detail = stderr or stdout
         if stop_event.is_set():
-            return (
-                143,
-                stdout,
-                (
-                    f"supervisor stopping: {detail[-3800:]}"
-                    if detail
-                    else "supervisor stopping"
-                ),
-            )
+            return _ChildResult(143, stdout, stderr, "stopping")
         if timed_out:
-            return (
-                124,
-                stdout,
-                (
-                    f"command timed out: {detail[-3800:]}"
-                    if detail
-                    else "command timed out"
-                ),
-            )
-        return int(process.returncode or 0), stdout, stderr
+            return _ChildResult(124, stdout, stderr, "timeout")
+        return _ChildResult(int(process.returncode or 0), stdout, stderr)
 
 
 def run_supervisor(
@@ -1364,7 +1376,7 @@ def run_supervisor(
                 return_code = 0
                 detail = ""
                 if not canonical_pair_healthy:
-                    return_code, child_stdout, child_stderr = _run_child(
+                    child_result = _run_child(
                         [
                             str(config.launcher),
                             "server",
@@ -1378,7 +1390,8 @@ def run_supervisor(
                         timeout=config.command_timeout,
                         stop_event=event,
                     )
-                    detail = child_stderr or child_stdout
+                    return_code = child_result.exit_code
+                    detail = child_result.detail
                     if event.is_set():
                         last_exit_code = return_code
                         break
@@ -1476,13 +1489,14 @@ def run_supervisor(
                 config.launcher,
                 expected_sha256=runtime_identity.launcher_sha256,
             )
-            stop_code, stop_stdout, stop_stderr = _run_child(
+            stop_result = _run_child(
                 [str(config.launcher), "server", "stop"],
                 env=stop_environment,
                 timeout=config.command_timeout,
                 stop_event=cleanup_event,
             )
-            stop_detail = stop_stderr or stop_stdout
+            stop_code = stop_result.exit_code
+            stop_detail = stop_result.detail
             if stop_code != 0:
                 total_failures += 1
                 consecutive_failures += 1
@@ -1962,16 +1976,16 @@ def _pair_healthy(
 
     argv = [str(launcher), "server", "supervisor-pair-health"]
     if stop_event is not None:
-        return_code, stdout, _stderr = _run_child(
+        result = _run_child(
             argv,
             env=environment,
             timeout=timeout,
             stop_event=stop_event,
         )
         return (
-            return_code == 0
-            and "Server: RUNNING" in stdout
-            and "Guardian: RUNNING" in stdout
+            result.exit_code == 0
+            and "Server: RUNNING" in result.stdout
+            and "Guardian: RUNNING" in result.stdout
         )
     try:
         result = subprocess.run(
