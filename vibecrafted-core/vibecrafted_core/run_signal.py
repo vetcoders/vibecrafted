@@ -486,7 +486,12 @@ def wait_for_run_signal(
     read_size: int = 65536,
     _on_event: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    """Block for a terminal JSON line; return ``kind=missing|eof`` for reconciliation."""
+    """Wait for a terminal event or return a synthesized reconciliation outcome.
+
+    Synthesized outcomes use ``kind`` values ``missing``, ``eof``, ``timeout``,
+    or ``identity_changed``. The internal ``_on_event`` hook observes each
+    validated event before terminal or identity-change handling.
+    """
     path = run_signal_socket_path(run_id)
     _validate_socket_path(path)
     if not 1 <= read_size <= 65536:
