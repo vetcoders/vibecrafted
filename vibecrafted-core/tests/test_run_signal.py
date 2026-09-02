@@ -180,7 +180,9 @@ def test_sigkill_wakes_await_on_eof_and_stale_socket_is_absent(
         daemon=True,
     )
     client.start()
-    assert accepted.wait(timeout=5), "dispatcher never accepted the await client"
+    assert accepted.wait(timeout=5), (
+        "await client never received a valid dispatcher event"
+    )
     os.kill(process.pid, signal.SIGKILL)
     process.wait(timeout=5)
     client.join(timeout=5)
@@ -244,7 +246,9 @@ def test_dispatcher_sigterm_unlinks_socket(monkeypatch, tmp_path: Path) -> None:
         daemon=True,
     )
     client.start()
-    assert accepted.wait(timeout=5), "dispatcher never accepted the signal client"
+    assert accepted.wait(timeout=5), (
+        "signal client never received a valid dispatcher event"
+    )
     process.terminate()
     process.wait(timeout=5)
     client.join(timeout=5)
