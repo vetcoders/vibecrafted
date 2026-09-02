@@ -47,3 +47,25 @@ czekać, sprawdzić czy handoff z 3b73d1fe nadal trzyma i wystawić go na GitHub
   vendor-footera. Merge, tag `v4.3.0`, push taga, `publish-release`, zamykanie PR-ów —
   guziki Foundera, nie ruszone.
 - Korekta: JOURNAL jest trackowany gitem (`git ls-files`), wbrew notce z 3b73d1fe.
+
+## 2026-09-02T07:05:00+02:00 — 4.3.0 w polu: expat-plist (PR #76/#77) + tick storm supervisora (finding)
+
+Incydent na hoście Moniki z DMG `fde0fbe3`: obcy LaunchAgent z `--` w komentarzu XML
+→ `plistlib` rzuca `ExpatError`, instalator łapał tylko `InvalidFileException` →
+„Vibecrafted cannot open its workspace terminal" z surowym tracebackiem. Instalacja
+częściowa: runtime przestawiony na 4.3.0+gfde0fbe3, reszta przerwana.
+
+- Monika/Mikserka: PR #76 (`agent/fix-runtime-plist-expat`, fd95a9d4) — skaner cudzych
+  plistów. Decyzja Foundera (sesja, 06:5x): nie pchać na gałąź Moniki, własna gałąź.
+- Claude: PR #77 (`agent/plist-decode-errors-all-sites`) nad #76 — jedna krotka
+  `_PLIST_DECODE_ERRORS` we wszystkich 4 odczytach plistów instalatora + dedykowany
+  test regresji z bajtami z pola; 157 testów instalatora zielone.
+- Konsekwencja dla wydania: artefakty w `dist/` nazywają `fde0fbe3`; po merge #76/#77
+  na linię tag i `make release` muszą iść z nowego HEAD. Guziki Foundera.
+- Finding (nie fix): supervisor LaunchAgent bez `--interval` → 1 s; zdrowy tick =
+  pełne `server start` + `server status` przez deck bash + kilka python3.12.
+  Pomiar tu (20 s): 14×start, 13×status, ≥26 python, CPU śr. 27 %, szczyt 84 %.
+  Raport: `~/.vibecrafted/reports/2026-09-02-supervisor-tick-storm-430.md`.
+  Usługa na tym hoście NIE zatrzymana (sesja Foundera żyje na tym runtime).
+- Pre-commit semgrep i pre-push (cały tree) przekraczają 2-min limit harnessu —
+  commit/push idą odłączone (`nohup`) z monitorem.
