@@ -503,9 +503,9 @@ def test_healthy_supervisor_loop_probes_without_restarting_pair(
     def record_child(
         argv: list[str],
         **_kwargs: object,
-    ) -> tuple[int, str]:
+    ) -> tuple[int, str, str]:
         child_calls.append(argv)
-        return 0, ""
+        return 0, "", ""
 
     monkeypatch.setattr(supervisor, "_pair_healthy", healthy_pair)
     monkeypatch.setattr(supervisor, "_run_child", record_child)
@@ -588,7 +588,7 @@ exit 0
     )
 
     started = time.monotonic()
-    return_code, detail = supervisor._run_child(
+    return_code, stdout, stderr = supervisor._run_child(
         [str(launcher)],
         env=dict(os.environ),
         timeout=2,
@@ -597,7 +597,8 @@ exit 0
 
     assert time.monotonic() - started < 2
     assert return_code == 0
-    assert detail == "launcher complete"
+    assert stdout == "launcher complete"
+    assert stderr == ""
 
 
 def test_zero_exit_without_verified_pid_pair_is_degraded(
@@ -942,6 +943,23 @@ def test_pair_health_uses_single_compact_launcher_probe(
 
     assert supervisor._pair_healthy(launcher, {})
     assert calls == [[str(launcher), "server", "supervisor-pair-health"]]
+
+
+def test_stop_aware_pair_health_preserves_stdout_with_stderr_warning(
+    tmp_path: Path,
+) -> None:
+    launcher = _executable(
+        tmp_path / "bin" / "vibecrafted",
+        "#!/bin/sh\n"
+        "printf '%s\\n' 'ulimit helper unavailable' >&2\n"
+        "printf '%s\\n' 'Server: RUNNING' 'Guardian: RUNNING'\n",
+    )
+
+    assert supervisor._pair_healthy(
+        launcher,
+        dict(os.environ),
+        stop_event=threading.Event(),
+    )
 
 
 def test_truncated_launch_agent_plist_degrades_service_and_runtime_status(
@@ -2003,9 +2021,9 @@ def test_stopping_receipt_failure_does_not_skip_pair_cleanup(
     def fake_run_child(
         argv: list[str],
         **_kwargs: object,
-    ) -> tuple[int, str]:
+    ) -> tuple[int, str, str]:
         child_calls.append(argv)
-        return 0, ""
+        return 0, "", ""
 
     monkeypatch.setattr(supervisor, "_atomic_json", flaky_atomic_json)
     monkeypatch.setattr(supervisor, "_run_child", fake_run_child)

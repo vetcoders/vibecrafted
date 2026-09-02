@@ -1187,10 +1187,10 @@ def _run_child(
     env: dict[str, str],
     timeout: float,
     stop_event: threading.Event,
-) -> tuple[int, str]:
+) -> tuple[int, str, str]:
     """Run `argv` to completion (or until `timeout`/`stop_event`), capturing
-    output into temp files rather than pipes; returns (exit_code, tail-of-
-    stderr-or-stdout detail, clipped to 4000 chars). Exit code 143 signals a
+    output into temp files rather than pipes; returns (exit_code, stdout,
+    stderr), with each stream clipped to 4000 chars. Exit code 143 signals a
     stop-event abort, 124 a timeout."""
 
     # Pipes make ``communicate`` wait for EOF from every descendant that inherited
@@ -1226,22 +1226,30 @@ def _run_child(
                 process.wait(timeout=5)
         stdout_file.seek(0)
         stderr_file.seek(0)
-        stdout = stdout_file.read()
-        stderr = stderr_file.read()
-        detail = (stderr or stdout).strip()
+        stdout = stdout_file.read().strip()[-4000:]
+        stderr = stderr_file.read().strip()[-4000:]
+        detail = stderr or stdout
         if stop_event.is_set():
-            return 143, (
-                f"supervisor stopping: {detail[-3800:]}"
-                if detail
-                else "supervisor stopping"
+            return (
+                143,
+                stdout,
+                (
+                    f"supervisor stopping: {detail[-3800:]}"
+                    if detail
+                    else "supervisor stopping"
+                ),
             )
         if timed_out:
-            return 124, (
-                f"command timed out: {detail[-3800:]}"
-                if detail
-                else "command timed out"
+            return (
+                124,
+                stdout,
+                (
+                    f"command timed out: {detail[-3800:]}"
+                    if detail
+                    else "command timed out"
+                ),
             )
-        return int(process.returncode or 0), detail[-4000:]
+        return int(process.returncode or 0), stdout, stderr
 
 
 def run_supervisor(
@@ -1356,7 +1364,7 @@ def run_supervisor(
                 return_code = 0
                 detail = ""
                 if not canonical_pair_healthy:
-                    return_code, detail = _run_child(
+                    return_code, child_stdout, child_stderr = _run_child(
                         [
                             str(config.launcher),
                             "server",
@@ -1370,6 +1378,7 @@ def run_supervisor(
                         timeout=config.command_timeout,
                         stop_event=event,
                     )
+                    detail = child_stderr or child_stdout
                     if event.is_set():
                         last_exit_code = return_code
                         break
@@ -1467,12 +1476,13 @@ def run_supervisor(
                 config.launcher,
                 expected_sha256=runtime_identity.launcher_sha256,
             )
-            stop_code, stop_detail = _run_child(
+            stop_code, stop_stdout, stop_stderr = _run_child(
                 [str(config.launcher), "server", "stop"],
                 env=stop_environment,
                 timeout=config.command_timeout,
                 stop_event=cleanup_event,
             )
+            stop_detail = stop_stderr or stop_stdout
             if stop_code != 0:
                 total_failures += 1
                 consecutive_failures += 1
@@ -1952,7 +1962,7 @@ def _pair_healthy(
 
     argv = [str(launcher), "server", "supervisor-pair-health"]
     if stop_event is not None:
-        return_code, detail = _run_child(
+        return_code, stdout, _stderr = _run_child(
             argv,
             env=environment,
             timeout=timeout,
@@ -1960,8 +1970,8 @@ def _pair_healthy(
         )
         return (
             return_code == 0
-            and "Server: RUNNING" in detail
-            and "Guardian: RUNNING" in detail
+            and "Server: RUNNING" in stdout
+            and "Guardian: RUNNING" in stdout
         )
     try:
         result = subprocess.run(
