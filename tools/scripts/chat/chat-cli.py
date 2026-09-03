@@ -20,7 +20,7 @@ Usage:
     ./chat-cli.py --base-url http://localhost:8080/v1
 
     # With custom model
-    ./chat-cli.py --base-url http://host-a:10240/v1 --model libraxisai/a local-11b
+    ./chat-cli.py --base-url http://host-a:10240/v1 --model "libraxisai/a local-11b"
 
     # With OpenAI
     ./chat-cli.py --base-url https://api.openai.com/v1 --api-key sk-... --model gpt-4o
@@ -282,7 +282,7 @@ Examples:
   ./chat-cli.py --base-url http://localhost:8080/v1
 
   # host-a with a local model
-  ./chat-cli.py --base-url http://host-a:10240/v1 --model libraxisai/a local-11b
+  ./chat-cli.py --base-url http://host-a:10240/v1 --model "libraxisai/a local-11b"
 
   # OpenAI
   ./chat-cli.py --base-url https://api.openai.com/v1 --api-key $OPENAI_API_KEY --model gpt-4o
