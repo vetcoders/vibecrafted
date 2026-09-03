@@ -1011,6 +1011,90 @@ def test_stop_aware_pair_health_preserves_stdout_with_stderr_warning(
     )
 
 
+def test_in_process_pair_health_does_not_spawn_subprocesses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    config.paths.server_dir.mkdir(parents=True)
+
+    server_pid = os.getpid()
+    guardian_pid = os.getppid()
+
+    (config.paths.server_dir / "server.pid").write_text(
+        f"{server_pid}\n", encoding="utf-8"
+    )
+    (config.paths.server_dir / "guardian.pid").write_text(
+        f"{guardian_pid}\n", encoding="utf-8"
+    )
+    (config.paths.server_dir / "server.identity.json").write_text(
+        json.dumps(
+            {
+                "schema": "vibecrafted.managed-process.v1",
+                "role": "server",
+                "pid": server_pid,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (config.paths.server_dir / "guardian.identity.json").write_text(
+        json.dumps(
+            {
+                "schema": "vibecrafted.managed-process.v1",
+                "role": "guardian",
+                "pid": guardian_pid,
+                "nonce": "test-nonce-12345",
+            }
+        ),
+        encoding="utf-8",
+    )
+    target_url = f"http://{config.host}:{config.port}"
+    (config.paths.server_dir / "guardian.url").write_text(
+        f"{target_url}\n", encoding="utf-8"
+    )
+    ready_receipt = tmp_path / "ready.receipt.json"
+    ready_receipt.write_text(
+        json.dumps(
+            {
+                "schema": "vibecrafted.guardian-ready.v1",
+                "nonce": "test-nonce-12345",
+                "pid": guardian_pid,
+                "server_url": target_url,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (config.paths.server_dir / "guardian.ready-path").write_text(
+        f"{ready_receipt}\n", encoding="utf-8"
+    )
+
+    monkeypatch.setattr(
+        supervisor, "_server_http_healthy", lambda _h, _p, timeout=1.0: True
+    )
+
+    calls: list[list[str]] = []
+
+    def fake_subprocess_run(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        raise AssertionError(
+            f"subprocess.run must not be called when in-process healthy: {argv}"
+        )
+
+    monkeypatch.setattr(supervisor.subprocess, "run", fake_subprocess_run)
+
+    assert supervisor._pair_healthy(
+        launcher,
+        {},
+        paths=config.paths,
+        host=config.host,
+        port=config.port,
+    )
+    assert calls == []
+
+
 def test_truncated_launch_agent_plist_degrades_service_and_runtime_status(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

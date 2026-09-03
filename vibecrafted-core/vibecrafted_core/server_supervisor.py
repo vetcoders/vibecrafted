@@ -7,6 +7,7 @@ import argparse
 import errno
 import fcntl
 import hashlib
+import http.client
 import json
 import os
 import plistlib
@@ -154,7 +155,7 @@ class SupervisorConfig:
     port: int
     public_url: str = ""
     config_file: Path | None = None
-    interval: float = 1.0
+    interval: float = 15.0
     maximum_backoff: float = 30.0
     command_timeout: float = 60.0
 
@@ -392,18 +393,29 @@ def _supervisor_identity(
     )
 
 
+_LAUNCHER_STAT_CACHE: dict[Path, tuple[tuple[int, int, int], str]] = {}
+
+
 def _launcher_sha256(
     launcher: Path,
     *,
     expected_sha256: str | None = None,
 ) -> str:
     """Hash the launcher, requiring the path to already be canonical and, if
-    `expected_sha256` is given, matching it exactly."""
+    `expected_sha256` is given, matching it exactly. Caches hash across loop ticks
+    as long as (mtime, size, inode) remain unchanged."""
 
     canonical = _validate_owned_regular_file(launcher, executable=True)
     if canonical != launcher:
         raise SupervisorError("launcher path must already be canonical", EX_CONFIG)
-    digest = _sha256_file(canonical)
+    st = canonical.stat()
+    stat_key = (st.st_mtime_ns, st.st_size, st.st_ino)
+    cached = _LAUNCHER_STAT_CACHE.get(canonical)
+    if cached is not None and cached[0] == stat_key:
+        digest = cached[1]
+    else:
+        digest = _sha256_file(canonical)
+        _LAUNCHER_STAT_CACHE[canonical] = (stat_key, digest)
     if expected_sha256 and digest != expected_sha256:
         raise SupervisorError(
             "Vibecrafted launcher hash differs from the installed LaunchAgent",
@@ -1370,6 +1382,9 @@ def run_supervisor(
                     child_environment,
                     timeout=config.command_timeout,
                     stop_event=event,
+                    paths=config.paths,
+                    host=config.host,
+                    port=config.port,
                 )
                 if event.is_set():
                     break
@@ -1405,6 +1420,9 @@ def run_supervisor(
                             child_environment,
                             timeout=config.command_timeout,
                             stop_event=event,
+                            paths=config.paths,
+                            host=config.host,
+                            port=config.port,
                         )
                     )
                     if event.is_set():
@@ -1437,7 +1455,8 @@ def run_supervisor(
                     state = "backoff"
                     delay = min(
                         config.maximum_backoff,
-                        config.interval * (2 ** min(consecutive_failures - 1, 6)),
+                        min(2.0, config.interval)
+                        * (2 ** min(consecutive_failures - 1, 6)),
                     )
                 _atomic_json(
                     config.paths.receipt_file,
@@ -1964,15 +1983,116 @@ def _wait_for_managed_supervisor(
     return probe
 
 
+def _server_http_healthy(
+    host: str,
+    port: int,
+    *,
+    timeout: float = 1.0,
+) -> bool:
+    """In-process HTTP health probe for the server; True when HTTP 200 is returned."""
+    try:
+        connection = http.client.HTTPConnection(host, port, timeout=timeout)
+        connection.request("GET", "/api/health", headers={"Accept": "application/json"})
+        response = connection.getresponse()
+        status = response.status
+        response.read(1024)
+        connection.close()
+        return status == 200
+    except (OSError, TimeoutError, http.client.HTTPException):
+        return False
+
+
+def _managed_pair_in_process_healthy(
+    paths: SupervisorPaths,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 3024,
+    timeout: float = 1.0,
+) -> bool:
+    """Verify managed pair health in-process: validates server and guardian pids,
+    identities, guardian readiness receipt, and server HTTP health endpoint."""
+    snapshot = _managed_pair_snapshot(paths)
+    if not _managed_pair_healthy(snapshot):
+        return False
+
+    server_pid = snapshot.get("server_pid")
+    guardian_pid = snapshot.get("guardian_pid")
+    if not server_pid or not guardian_pid:
+        return False
+
+    rendered_host = f"[{host}]" if ":" in host else host
+    target_url = f"http://{rendered_host}:{port}"
+
+    # Verify guardian URL matches managed server endpoint
+    guardian_url_file = paths.server_dir / "guardian.url"
+    if not guardian_url_file.is_file():
+        return False
+    try:
+        url_lines = guardian_url_file.read_text(encoding="utf-8").splitlines()
+        if not url_lines or url_lines[0].strip() != target_url:
+            return False
+    except OSError:
+        return False
+
+    # Read and verify guardian identity nonce
+    raw_guardian_id = _read_owned_text(paths.server_dir / "guardian.identity.json")
+    if not raw_guardian_id:
+        return False
+    try:
+        guardian_identity = json.loads(raw_guardian_id)
+    except (ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(guardian_identity, dict):
+        return False
+    nonce = guardian_identity.get("nonce")
+    if not nonce:
+        return False
+
+    # Verify guardian readiness receipt
+    ready_pointer = paths.server_dir / "guardian.ready-path"
+    if not ready_pointer.is_file():
+        return False
+    try:
+        ready_lines = ready_pointer.read_text(encoding="utf-8").splitlines()
+        if not ready_lines or not ready_lines[0].strip():
+            return False
+        ready_path = Path(ready_lines[0].strip())
+        if not ready_path.is_file():
+            return False
+        ready_payload = json.loads(ready_path.read_text(encoding="utf-8"))
+        if ready_payload != {
+            "schema": "vibecrafted.guardian-ready.v1",
+            "nonce": nonce,
+            "pid": guardian_pid,
+            "server_url": target_url,
+        }:
+            return False
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+
+    # Verify server HTTP health endpoint answers 200
+    return _server_http_healthy(host, port, timeout=timeout)
+
+
 def _pair_healthy(
     launcher: Path,
     environment: dict[str, str],
     *,
     timeout: float = 60.0,
     stop_event: threading.Event | None = None,
+    paths: SupervisorPaths | None = None,
+    host: str = "127.0.0.1",
+    port: int = 3024,
 ) -> bool:
-    """Run the launcher's single-process supervisor pair probe and require both
-    managed roles in stdout with exit code 0; False on any subprocess error."""
+    """Verify supervisor pair health. When `paths` is provided, performs an
+    in-process PID+HTTP health check (zero child processes). Falls back to the
+    launcher's supervisor-pair-health subprocess probe when paths is None or
+    when in-process probe indicates failure."""
+
+    if paths is not None and _managed_pair_in_process_healthy(
+        paths, host=host, port=port, timeout=min(timeout, 2.0)
+    ):
+        return True
 
     argv = [str(launcher), "server", "supervisor-pair-health"]
     if stop_event is not None:
@@ -2032,6 +2152,9 @@ def service_status(config: SupervisorConfig) -> ServiceStatus:
             config.launcher,
             environment,
             timeout=config.command_timeout,
+            paths=config.paths,
+            host=config.host,
+            port=config.port,
         )
     )
     return ServiceStatus(
@@ -2607,7 +2730,7 @@ def _add_config_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--launcher", required=True)
     parser.add_argument("--host")
     parser.add_argument("--port", type=int)
-    parser.add_argument("--interval", type=float, default=1.0)
+    parser.add_argument("--interval", type=float, default=15.0)
     parser.add_argument("--maximum-backoff", type=float, default=30.0)
     parser.add_argument("--command-timeout", type=float, default=60.0)
 
