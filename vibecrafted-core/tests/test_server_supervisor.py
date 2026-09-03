@@ -1011,14 +1011,10 @@ def test_stop_aware_pair_health_preserves_stdout_with_stderr_warning(
     )
 
 
-def test_in_process_pair_health_does_not_spawn_subprocesses(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    launcher = _executable(tmp_path / "bin" / "vibecrafted")
-    config = _config(tmp_path, launcher)
-    config.paths.server_dir.mkdir(parents=True)
-
+def _setup_healthy_pair_state(
+    tmp_path: Path, config: supervisor.SupervisorConfig
+) -> tuple[int, int, Path]:
+    config.paths.server_dir.mkdir(parents=True, exist_ok=True)
     server_pid = os.getpid()
     guardian_pid = os.getppid()
 
@@ -1068,6 +1064,16 @@ def test_in_process_pair_health_does_not_spawn_subprocesses(
     (config.paths.server_dir / "guardian.ready-path").write_text(
         f"{ready_receipt}\n", encoding="utf-8"
     )
+    return server_pid, guardian_pid, ready_receipt
+
+
+def test_in_process_pair_health_does_not_spawn_subprocesses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    _setup_healthy_pair_state(tmp_path, config)
 
     monkeypatch.setattr(
         supervisor, "_server_http_healthy", lambda _h, _p, timeout=1.0: True
@@ -1093,6 +1099,184 @@ def test_in_process_pair_health_does_not_spawn_subprocesses(
         port=config.port,
     )
     assert calls == []
+
+
+def test_server_http_healthy_closes_connection_on_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed = False
+
+    class DummyConnection:
+        def __init__(self, host: str, port: int, timeout: float = 1.0) -> None:
+            pass
+
+        def request(self, method: str, url: str, headers: dict[str, str]) -> None:
+            raise OSError("connection reset")
+
+        def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    monkeypatch.setattr(supervisor.http.client, "HTTPConnection", DummyConnection)
+    assert not supervisor._server_http_healthy("127.0.0.1", 3024)
+    assert closed
+
+
+def _tamper_url_mismatch(config: supervisor.SupervisorConfig, _receipt: Path) -> None:
+    (config.paths.server_dir / "guardian.url").write_text(
+        "http://127.0.0.1:9999\n", encoding="utf-8"
+    )
+
+
+def _tamper_url_symlink(config: supervisor.SupervisorConfig, _receipt: Path) -> None:
+    target = config.paths.server_dir / "guardian.url"
+    target.unlink()
+    target.symlink_to(config.paths.server_dir / "server.pid")
+
+
+def _tamper_ready_pointer_symlink(
+    config: supervisor.SupervisorConfig, _receipt: Path
+) -> None:
+    target = config.paths.server_dir / "guardian.ready-path"
+    target.unlink()
+    target.symlink_to(config.paths.server_dir / "server.pid")
+
+
+def _tamper_ready_receipt_symlink(
+    config: supervisor.SupervisorConfig, receipt: Path
+) -> None:
+    receipt.unlink()
+    receipt.symlink_to(config.paths.server_dir / "server.pid")
+
+
+def _tamper_receipt_corrupted_json(
+    _config: supervisor.SupervisorConfig, receipt: Path
+) -> None:
+    receipt.write_text("{bad-json", encoding="utf-8")
+
+
+def _tamper_receipt_nonce_mismatch(
+    config: supervisor.SupervisorConfig, receipt: Path
+) -> None:
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema": "vibecrafted.guardian-ready.v1",
+                "nonce": "tampered-nonce",
+                "pid": os.getppid(),
+                "server_url": f"http://{config.host}:{config.port}",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize(
+    "tamper_fn",
+    [
+        pytest.param(_tamper_url_mismatch, id="url_mismatch"),
+        pytest.param(_tamper_url_symlink, id="url_symlink"),
+        pytest.param(_tamper_ready_pointer_symlink, id="ready_pointer_symlink"),
+        pytest.param(_tamper_ready_receipt_symlink, id="ready_receipt_symlink"),
+        pytest.param(_tamper_receipt_corrupted_json, id="receipt_corrupted_json"),
+        pytest.param(_tamper_receipt_nonce_mismatch, id="receipt_nonce_mismatch"),
+    ],
+)
+def test_in_process_pair_health_negative_paths_fall_back_to_launcher(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper_fn: object,
+) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    _, _, ready_receipt = _setup_healthy_pair_state(tmp_path, config)
+
+    monkeypatch.setattr(
+        supervisor, "_server_http_healthy", lambda _h, _p, timeout=1.0: True
+    )
+
+    tamper_fn(config, ready_receipt)
+
+    assert not supervisor._managed_pair_in_process_healthy(
+        config.paths, host=config.host, port=config.port
+    )
+
+    calls: list[list[str]] = []
+
+    def fake_subprocess_run(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(
+            argv, 0, "Server: RUNNING\nGuardian: RUNNING\n", ""
+        )
+
+    monkeypatch.setattr(supervisor.subprocess, "run", fake_subprocess_run)
+
+    assert supervisor._pair_healthy(
+        launcher,
+        {},
+        paths=config.paths,
+        host=config.host,
+        port=config.port,
+    )
+    assert calls == [[str(launcher), "server", "supervisor-pair-health"]]
+
+
+def test_in_process_pair_health_falls_back_when_http_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    _setup_healthy_pair_state(tmp_path, config)
+
+    monkeypatch.setattr(
+        supervisor, "_server_http_healthy", lambda _h, _p, timeout=1.0: False
+    )
+
+    assert not supervisor._managed_pair_in_process_healthy(
+        config.paths, host=config.host, port=config.port
+    )
+
+    calls: list[list[str]] = []
+
+    def fake_subprocess_run(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(
+            argv, 0, "Server: RUNNING\nGuardian: RUNNING\n", ""
+        )
+
+    monkeypatch.setattr(supervisor.subprocess, "run", fake_subprocess_run)
+
+    assert supervisor._pair_healthy(
+        launcher,
+        {},
+        paths=config.paths,
+        host=config.host,
+        port=config.port,
+    )
+    assert calls == [[str(launcher), "server", "supervisor-pair-health"]]
+
+
+def test_launcher_sha256_cache_invalidates_on_content_change(
+    tmp_path: Path,
+) -> None:
+    supervisor._LAUNCHER_STAT_CACHE.clear()
+    launcher = _executable(tmp_path / "bin" / "vibecrafted", "#!/bin/sh\necho 1\n")
+    digest1 = supervisor._launcher_sha256(launcher)
+
+    # Second call uses cache
+    assert supervisor._launcher_sha256(launcher) == digest1
+
+    # Modify content and chmod to trigger ctime/mtime/content update
+    launcher.write_text("#!/bin/sh\necho 222\n", encoding="utf-8")
+    launcher.chmod(0o755)
+
+    digest2 = supervisor._launcher_sha256(launcher)
+    assert digest2 != digest1
 
 
 def test_truncated_launch_agent_plist_degrades_service_and_runtime_status(

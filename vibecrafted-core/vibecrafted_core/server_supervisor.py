@@ -4,6 +4,7 @@ coordination, identity-verified launchd service management, and CLI entrypoint."
 from __future__ import annotations
 
 import argparse
+import contextlib
 import errno
 import fcntl
 import hashlib
@@ -393,7 +394,7 @@ def _supervisor_identity(
     )
 
 
-_LAUNCHER_STAT_CACHE: dict[Path, tuple[tuple[int, int, int], str]] = {}
+_LAUNCHER_STAT_CACHE: dict[Path, tuple[tuple[int, int, int, int], str]] = {}
 
 
 def _launcher_sha256(
@@ -403,13 +404,13 @@ def _launcher_sha256(
 ) -> str:
     """Hash the launcher, requiring the path to already be canonical and, if
     `expected_sha256` is given, matching it exactly. Caches hash across loop ticks
-    as long as (mtime, size, inode) remain unchanged."""
+    as long as (mtime, ctime, size, inode) remain unchanged."""
 
     canonical = _validate_owned_regular_file(launcher, executable=True)
     if canonical != launcher:
         raise SupervisorError("launcher path must already be canonical", EX_CONFIG)
     st = canonical.stat()
-    stat_key = (st.st_mtime_ns, st.st_size, st.st_ino)
+    stat_key = (st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino)
     cached = _LAUNCHER_STAT_CACHE.get(canonical)
     if cached is not None and cached[0] == stat_key:
         digest = cached[1]
@@ -1990,16 +1991,20 @@ def _server_http_healthy(
     timeout: float = 1.0,
 ) -> bool:
     """In-process HTTP health probe for the server; True when HTTP 200 is returned."""
+    connection: http.client.HTTPConnection | None = None
     try:
         connection = http.client.HTTPConnection(host, port, timeout=timeout)
         connection.request("GET", "/api/health", headers={"Accept": "application/json"})
         response = connection.getresponse()
         status = response.status
         response.read(1024)
-        connection.close()
         return status == 200
     except (OSError, TimeoutError, http.client.HTTPException):
         return False
+    finally:
+        if connection is not None:
+            with contextlib.suppress(OSError, http.client.HTTPException):
+                connection.close()
 
 
 def _managed_pair_in_process_healthy(
@@ -2024,14 +2029,11 @@ def _managed_pair_in_process_healthy(
     target_url = f"http://{rendered_host}:{port}"
 
     # Verify guardian URL matches managed server endpoint
-    guardian_url_file = paths.server_dir / "guardian.url"
-    if not guardian_url_file.is_file():
+    raw_guardian_url = _read_owned_text(paths.server_dir / "guardian.url")
+    if not raw_guardian_url:
         return False
-    try:
-        url_lines = guardian_url_file.read_text(encoding="utf-8").splitlines()
-        if not url_lines or url_lines[0].strip() != target_url:
-            return False
-    except OSError:
+    url_lines = raw_guardian_url.splitlines()
+    if not url_lines or url_lines[0].strip() != target_url:
         return False
 
     # Read and verify guardian identity nonce
@@ -2049,25 +2051,28 @@ def _managed_pair_in_process_healthy(
         return False
 
     # Verify guardian readiness receipt
-    ready_pointer = paths.server_dir / "guardian.ready-path"
-    if not ready_pointer.is_file():
+    raw_ready_pointer = _read_owned_text(paths.server_dir / "guardian.ready-path")
+    if not raw_ready_pointer:
+        return False
+    ready_lines = raw_ready_pointer.splitlines()
+    if not ready_lines or not ready_lines[0].strip():
+        return False
+    ready_path = Path(ready_lines[0].strip())
+    raw_ready_payload = _read_owned_text(ready_path)
+    if not raw_ready_payload:
         return False
     try:
-        ready_lines = ready_pointer.read_text(encoding="utf-8").splitlines()
-        if not ready_lines or not ready_lines[0].strip():
-            return False
-        ready_path = Path(ready_lines[0].strip())
-        if not ready_path.is_file():
-            return False
-        ready_payload = json.loads(ready_path.read_text(encoding="utf-8"))
-        if ready_payload != {
-            "schema": "vibecrafted.guardian-ready.v1",
-            "nonce": nonce,
-            "pid": guardian_pid,
-            "server_url": target_url,
-        }:
-            return False
-    except (OSError, ValueError, json.JSONDecodeError):
+        ready_payload = json.loads(raw_ready_payload)
+    except (ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(ready_payload, dict):
+        return False
+    if ready_payload != {
+        "schema": "vibecrafted.guardian-ready.v1",
+        "nonce": nonce,
+        "pid": guardian_pid,
+        "server_url": target_url,
+    }:
         return False
 
     # Verify server HTTP health endpoint answers 200
