@@ -445,12 +445,21 @@ def test_real_dispatcher_replacement_changes_identity_and_reclaims_dead_owner(
     _wait_for(socket_path)
     first_owner = _wait_for_owner_token(socket_path)
     first_result: dict[str, object] = {}
+    accepted = threading.Event()
     client = threading.Thread(
-        target=lambda: first_result.update(wait_for_run_signal(run_id, timeout=5)),
+        target=lambda: first_result.update(
+            wait_for_run_signal(
+                run_id,
+                timeout=5,
+                _on_event=lambda _event: accepted.set(),
+            )
+        ),
         daemon=True,
     )
     client.start()
-    time.sleep(0.05)
+    assert accepted.wait(timeout=5), (
+        "replacement client never received a valid dispatcher event"
+    )
     os.kill(first.pid, signal.SIGKILL)
     first.wait(timeout=5)
     client.join(timeout=1)

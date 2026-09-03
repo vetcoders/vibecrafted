@@ -47,3 +47,51 @@ czekać, sprawdzić czy handoff z 3b73d1fe nadal trzyma i wystawić go na GitHub
   vendor-footera. Merge, tag `v4.3.0`, push taga, `publish-release`, zamykanie PR-ów —
   guziki Foundera, nie ruszone.
 - Korekta: JOURNAL jest trackowany gitem (`git ls-files`), wbrew notce z 3b73d1fe.
+
+## 2026-09-02T07:05:00+02:00 — 4.3.0 w polu: expat-plist (PR #76/#77) + tick storm supervisora (finding)
+
+Incydent na hoście Moniki z DMG `fde0fbe3`: obcy LaunchAgent z `--` w komentarzu XML
+→ `plistlib` rzuca `ExpatError`, instalator łapał tylko `InvalidFileException` →
+„Vibecrafted cannot open its workspace terminal" z surowym tracebackiem. Instalacja
+częściowa: runtime przestawiony na 4.3.0+gfde0fbe3, reszta przerwana.
+
+- Monika/Mikserka: PR #76 (`agent/fix-runtime-plist-expat`, fd95a9d4) — skaner cudzych
+  plistów. Decyzja Foundera (sesja, 06:5x): nie pchać na gałąź Moniki, własna gałąź.
+- Claude: PR #77 (`agent/plist-decode-errors-all-sites`) nad #76 — jedna krotka
+  `_PLIST_DECODE_ERRORS` we wszystkich 4 odczytach plistów instalatora + dedykowany
+  test regresji z bajtami z pola; 157 testów instalatora zielone.
+- Konsekwencja dla wydania: artefakty w `dist/` nazywają `fde0fbe3`; po merge #76/#77
+  na linię tag i `make release` muszą iść z nowego HEAD. Guziki Foundera.
+- Finding (nie fix): supervisor LaunchAgent bez `--interval` → 1 s; zdrowy tick =
+  pełne `server start` + `server status` przez deck bash + kilka python3.12.
+  Pomiar tu (20 s): 14×start, 13×status, ≥26 python, CPU śr. 27 %, szczyt 84 %.
+  Raport: `~/.vibecrafted/reports/2026-09-02-supervisor-tick-storm-430.md`.
+  Usługa na tym hoście NIE zatrzymana (sesja Foundera żyje na tym runtime).
+- Pre-commit semgrep i pre-push (cały tree) przekraczają 2-min limit harnessu —
+  commit/push idą odłączone (`nohup`) z monitorem.
+
+## 2026-09-02T08:20:00+02:00 — stos 4.3.0-hotfix: #76 → #77 → #78; #77 zsynchronizowany, tick storm ma fix (PR #78)
+
+Sesja resume bez jawnego zlecenia (wejście „Primary" = urwany wklej pakietu ciągłości;
+pakiet 06:44 dotyczył host-a, ten z 04:06 — vibecrafted). Decyzja moja: zamknąć
+to, co od wpisu 07:05 zmieniło się na GitHubie, i zostawić Founderowi jeden guzik.
+
+- **PR #78** (`agent/fix-supervisor-healthy-loop`, Monika/codex, 11 commitów, stacked na #76)
+  to fix tick-stormu z raportu `2026-09-02-supervisor-tick-storm-430.md`: supervisor
+  najpierw sonduje parę (`server supervisor-pair-health` = 1 bash + 1 python), `server
+  start` woła tylko przy braku dowodu; interwał 1 s zachowany; sonda przerywalna na stop.
+  Deck ≡ scripts (bajt w bajt, sprawdzone). Review lokalne, bez komentarzy na PR.
+- **PR #76** urósł fd95a9d4 → fea43671 (8 commitów, wyłącznie hardening CI/testów run-signal;
+  treści #77 nie skonsumował). **PR #77** stał na starym fd95a9d4 → portable red na obu OS:
+  Linux SC2093 (`pane-python`, naprawione w #76 a233cd0f), macOS `claude executable not
+  found` w `test_operator_mode.py` (naprawione w #76 0e3a6ab6/690eb3d5). Odziedziczone, nie moje.
+- Sync #77: merge czubka #76 (`b6241ebc`, zero konfliktów, bez force-push — ten sam wzór co
+  #78). Pre-commit ruff-format złożył jedno wywołanie `read_text()` z 690eb3d5 na jedną linię;
+  CI nie ma kroku `ruff format --check`, więc to artefakt hooka, nie bloker #76. Baza #77
+  przestawiona na `agent/fix-runtime-plist-expat` (diff = tylko własna zmiana).
+  Testy instalatora w worktree gałęzi: 196 passed (2:46) przez `uv run --with pytest`.
+- Kolejność dla Foundera: merge #76 → #77 → #78 na `fix/v430-dispatcher-shutdown-race-v5`,
+  dopiero potem tag `v4.3.0` i `make release` z nowego HEAD (artefakty w `dist/` nadal
+  nazywają `fde0fbe3`). Portable CI dla fea43671 i ecf95053 w toku od 07:27.
+- Hook `commit-msg` odrzuca typ `merge(...)` i wymaga trailerów `session_id`/`time`/`runtime`;
+  merge commit poszedł jako `chore(install)`.
