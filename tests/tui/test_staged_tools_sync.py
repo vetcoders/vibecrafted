@@ -707,6 +707,8 @@ def test_live_legacy_service_cutover_publishes_native_identity_without_orphans(
     monkeypatch.setenv("VIBECRAFTED_TOOLS_HOME", str(tools))
     monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(launcher.parent))
     monkeypatch.setattr(installer.sys, "platform", "darwin")
+    monkeypatch.setattr(installer, "_darwin_process_ids", lambda: ())
+    monkeypatch.setattr(installer, "_darwin_caller_ancestor_pids", lambda: frozenset())
     _mock_runtime_launchd_gate(monkeypatch, events)
     monkeypatch.setattr(
         installer,
@@ -2820,6 +2822,8 @@ def test_successful_explicit_service_install_repairs_retained_disabled_gate(
     monkeypatch.setenv("VIBECRAFTED_TOOLS_HOME", str(tools))
     monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(launcher.parent))
     monkeypatch.setattr(installer.sys, "platform", "darwin")
+    monkeypatch.setattr(installer, "_darwin_process_ids", lambda: ())
+    monkeypatch.setattr(installer, "_darwin_caller_ancestor_pids", lambda: frozenset())
     gate_state = _mock_runtime_launchd_gate(monkeypatch)
     gate_state["disabled"] = True
     monkeypatch.setattr(
@@ -3085,6 +3089,8 @@ def test_install_drains_reclaimable_degraded_supervisor_before_publish(
     monkeypatch.setenv("VIBECRAFTED_TOOLS_HOME", str(tools))
     monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(launcher.parent))
     monkeypatch.setattr(installer.sys, "platform", "darwin")
+    monkeypatch.setattr(installer, "_darwin_process_ids", lambda: ())
+    monkeypatch.setattr(installer, "_darwin_caller_ancestor_pids", lambda: frozenset())
     gate_state = _mock_runtime_launchd_gate(monkeypatch)
     monkeypatch.setattr(
         installer,

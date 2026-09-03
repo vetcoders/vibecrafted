@@ -9,6 +9,7 @@ import subprocess
 import sys
 from argparse import Namespace
 from pathlib import Path
+from xml.parsers.expat import ExpatError
 
 import pytest
 from vibecrafted_core.doctor import _vc_frame_delivery_findings
@@ -166,6 +167,45 @@ def test_doctor_foundation_service_findings_flag_dangling_plist(
 
     assert [finding.level for finding in findings] == ["fail"]
     assert "dangling" in findings[0].message
+
+
+def test_foundation_service_scan_skips_expat_malformed_plist(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """One unrelated malformed LaunchAgent must not abort the whole scan."""
+    home = tmp_path / "home"
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(installer.sys, "platform", "darwin")
+
+    malformed = agents / "ai.libraxis.aicx-push.plist"
+    malformed.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Fleet sync is additive and never --delete. -->
+<plist version="1.0"><dict><key>Label</key><string>ai.libraxis.aicx-push</string></dict></plist>
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ExpatError):
+        plistlib.loads(malformed.read_bytes())
+
+    valid = agents / "zz.libraxis.loctree-mcp.plist"
+    valid.write_bytes(
+        plistlib.dumps(
+            {
+                "Label": "ai.libraxis.loctree-mcp",
+                "ProgramArguments": ["/usr/local/bin/loctree-mcp"],
+            }
+        )
+    )
+
+    dependents = installer._foundation_service_dependent_plists()
+
+    assert [(path.name, payload["Label"]) for path, payload in dependents] == [
+        (valid.name, "ai.libraxis.loctree-mcp")
+    ]
 
 
 def test_run_doctor_smokes_helper_and_launcher_runtime(

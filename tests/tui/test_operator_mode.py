@@ -56,6 +56,21 @@ def _write_capture_command(bin_dir: Path, name: str, capture_file: Path) -> None
         script.chmod(0o755)
 
 
+def _write_fake_claude(bin_dir: Path) -> None:
+    script = bin_dir / "claude"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [[ "${1:-}" == "--version" ]]; then\n'
+        "  printf '2.1.232 (Claude Code)\\n'\n"
+        'elif [[ "${1:-}" == "--help" ]]; then\n'
+        "  printf '%s\\n' '--session-id <uuid>'\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+
+
 def _write_stateful_vc_frame(
     bin_dir: Path, capture_file: Path, session_state_file: Path
 ) -> None:
@@ -647,6 +662,7 @@ def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
     fake_bin.mkdir()
     operator_bin.mkdir(parents=True)
     _write_stateful_vc_frame(bundled_bin, capture_file, session_state_file)
+    _write_fake_claude(bundled_bin)
     forbidden_vc_frame = operator_bin / "vc-frame"
     forbidden_vc_frame.write_text(
         "#!/usr/bin/env bash\n"
@@ -924,8 +940,11 @@ def test_vc_init_missing_vc_frame_message_has_fresh_install_path_hint(
     crafted_home = home / ".vibecrafted"
     runtime_home = home / ".local" / "share" / "vibecrafted"
     effective_home = tmp_path / "effective-home.txt"
+    runtime_bin = runtime_home / "bin"
 
     home.mkdir()
+    runtime_bin.mkdir(parents=True)
+    _write_fake_claude(runtime_bin)
 
     env = os.environ.copy()
     env["HOME"] = str(home)
