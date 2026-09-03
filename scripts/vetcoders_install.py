@@ -70,7 +70,12 @@ except ModuleNotFoundError:  # pragma: no cover - import path depends on entrypo
 # XML that is not well-formed (e.g. ``--`` inside a comment, which ``plutil``
 # tolerates but expat does not); ``InvalidFileException`` covers the binary
 # format and header sniffing; ``ValueError``/``TypeError`` cover bad payload
-# shapes. A foreign LaunchAgent that trips any of these is skipped, never fatal.
+# shapes.
+#
+# Callers decide fatality. Owned/runtime LaunchAgent reads wrap these into
+# ``OSError`` so a corrupt contract plist still fails closed. Foreign
+# LaunchAgent scans catch the same tuple and continue. The tuple is the
+# decode set, not a skip policy.
 _PLIST_DECODE_ERRORS: tuple[type[Exception], ...] = (
     plistlib.InvalidFileException,
     ExpatError,
@@ -15579,6 +15584,23 @@ def _path_is_under(path: Path, root: Path) -> bool:
         return False
 
 
+def _foreign_launch_agent_program(payload: Mapping[str, Any]) -> str:
+    """Program path from a LaunchAgent dict; empty when the schema is unusable."""
+    program = payload.get("Program")
+    if program not in (None, ""):
+        return str(program)
+    arguments = payload.get("ProgramArguments")
+    if isinstance(arguments, str):
+        return arguments
+    if (
+        isinstance(arguments, Sequence)
+        and not isinstance(arguments, (bytes, bytearray, str))
+        and arguments
+    ):
+        return str(arguments[0])
+    return ""
+
+
 def _foundation_service_dependent_plists() -> list[tuple[Path, dict[str, Any]]]:
     """LaunchAgent plists whose program is a public foundation tool.
 
@@ -15599,13 +15621,14 @@ def _foundation_service_dependent_plists() -> list[tuple[Path, dict[str, Any]]]:
             # Foreign services are not ours to validate: a plist that plistlib
             # cannot read is skipped, never a reason to abort the install.
             continue
+        if not isinstance(payload, dict):
+            continue
         label = str(payload.get("Label") or "")
         if label.startswith(("io.vetcoders.", "com.vibecrafted.")):
             # Our own services are reconciled by their own lanes.
             continue
-        arguments = payload.get("ProgramArguments") or []
-        program = payload.get("Program") or (arguments[0] if arguments else "")
-        program_name = Path(str(program)).name
+        program = _foreign_launch_agent_program(payload)
+        program_name = Path(program).name
         if program_name.removeprefix("vibecrafted-") in _FOUNDATION_TOOL_NAMES:
             dependents.append((plist_path, payload))
     return dependents

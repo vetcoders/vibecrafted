@@ -68,3 +68,38 @@ def test_malformed_foreign_launch_agent_is_skipped_not_fatal(
         "ai.libraxis.aicx-serve.plist"
     ]
     assert dependents[0][1]["Label"] == "ai.libraxis.aicx-serve"
+
+
+ARRAY_ROOT_PLIST = b"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array><string>/opt/homebrew/bin/aicx</string></array>
+</plist>
+"""
+
+STRING_ARGS_PLIST = {
+    "Label": "ai.libraxis.string-args",
+    "ProgramArguments": "/opt/homebrew/bin/aicx",
+}
+
+
+def test_non_dict_and_string_program_arguments_do_not_abort_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agents = tmp_path / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    (agents / "ai.libraxis.array-root.plist").write_bytes(ARRAY_ROOT_PLIST)
+    with (agents / "ai.libraxis.string-args.plist").open("wb") as handle:
+        plistlib.dump(STRING_ARGS_PLIST, handle)
+    with (agents / "ai.libraxis.aicx-serve.plist").open("wb") as handle:
+        plistlib.dump(DEPENDENT_PLIST, handle)
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    dependents = vetcoders_install._foundation_service_dependent_plists()
+
+    names = [path.name for path, _payload in dependents]
+    assert "ai.libraxis.array-root.plist" not in names
+    assert "ai.libraxis.string-args.plist" in names
+    assert "ai.libraxis.aicx-serve.plist" in names
