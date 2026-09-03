@@ -2525,6 +2525,73 @@ elif operation == "status-read":
             payload.get("port", default_port),
         )
         print(f"{host}\t{port}")
+elif operation == "pair-health":
+    runtime_dir = Path(args[0])
+    audit_process_probe("pair-health", os.getpid())
+
+    def first_line(path: Path) -> str:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            fail(f"cannot read managed-pair evidence at {path}: {exc}", 5)
+        if not lines or not lines[0]:
+            fail(f"managed-pair evidence at {path} is empty", 5)
+        return lines[0]
+
+    status_path = runtime_dir / "status.json"
+    if status_path.is_file():
+        status_payload = read_json(status_path)
+        host, port = validate_endpoint(
+            status_payload.get("host", "127.0.0.1"),
+            status_payload.get("port", 3024),
+        )
+    else:
+        host, port = "127.0.0.1", 3024
+    try:
+        server_pid = int(first_line(runtime_dir / "server.pid"))
+        guardian_pid = int(first_line(runtime_dir / "guardian.pid"))
+    except ValueError:
+        fail("managed-pair PID evidence is not an integer", 4)
+    if server_pid <= 1 or guardian_pid <= 1 or server_pid == guardian_pid:
+        fail("managed-pair PID evidence is invalid", 4)
+
+    verify_identity(runtime_dir / "server.identity.json", server_pid, "server")
+    guardian_identity = verify_identity(
+        runtime_dir / "guardian.identity.json",
+        guardian_pid,
+        "guardian",
+    )
+    target_url = origin(host, port)
+    if first_line(runtime_dir / "guardian.url") != target_url:
+        fail("guardian endpoint does not match the managed server", 4)
+
+    connection = http.client.HTTPConnection(host, port, timeout=1.0)
+    try:
+        connection.request(
+            "GET",
+            "/api/health",
+            headers={"Accept": "application/json"},
+        )
+        response = connection.getresponse()
+        if response.status != 200:
+            fail(f"server health endpoint returned HTTP {response.status}", 4)
+        response.read(1024)
+    except (OSError, TimeoutError, http.client.HTTPException) as exc:
+        fail(f"server health probe failed: {type(exc).__name__}: {exc}", 4)
+    finally:
+        connection.close()
+
+    ready_path = Path(first_line(runtime_dir / "guardian.ready-path"))
+    ready_payload = read_json(ready_path)
+    if ready_payload != {
+        "schema": READY_SCHEMA,
+        "nonce": guardian_identity.get("nonce"),
+        "pid": guardian_pid,
+        "server_url": target_url,
+    }:
+        fail("guardian readiness receipt does not match the managed pair", 4)
+    print(f"Server: RUNNING (PID {server_pid}, listening on {target_url})")
+    print(f"Guardian: RUNNING (PID {guardian_pid}, server {target_url})")
 elif operation in {"health", "health-wait"}:
     host, port = validate_endpoint(args[0], args[1])
 
@@ -3879,6 +3946,10 @@ cmd_server() {
         _server_python update-status "$status_file" "stopped" "none"
       fi
       return "$stop_errors"
+      ;;
+    supervisor-pair-health)
+      _server_python pair-health "$(_server_runtime_dir)"
+      return $?
       ;;
     status)
       local runtime_dir

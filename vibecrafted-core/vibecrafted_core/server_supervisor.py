@@ -69,6 +69,35 @@ class SupervisorError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class _ChildResult:
+    """Captured child streams plus an explicit supervisor-side abort reason."""
+
+    exit_code: int
+    stdout: str
+    stderr: str
+    abort_reason: str | None = None
+
+    @property
+    def detail(self) -> str:
+        """Render receipt text without changing the captured raw streams."""
+
+        raw_detail = self.stderr or self.stdout
+        if self.abort_reason == "stopping":
+            return (
+                f"supervisor stopping: {raw_detail[-3800:]}"
+                if raw_detail
+                else "supervisor stopping"
+            )
+        if self.abort_reason == "timeout":
+            return (
+                f"command timed out: {raw_detail[-3800:]}"
+                if raw_detail
+                else "command timed out"
+            )
+        return raw_detail
+
+
+@dataclass(frozen=True)
 class SupervisorPaths:
     """Canonical filesystem locations the supervisor reads from and writes to."""
 
@@ -1187,11 +1216,11 @@ def _run_child(
     env: dict[str, str],
     timeout: float,
     stop_event: threading.Event,
-) -> tuple[int, str]:
+) -> _ChildResult:
     """Run `argv` to completion (or until `timeout`/`stop_event`), capturing
-    output into temp files rather than pipes; returns (exit_code, tail-of-
-    stderr-or-stdout detail, clipped to 4000 chars). Exit code 143 signals a
-    stop-event abort, 124 a timeout."""
+    output into temp files rather than pipes. Raw streams remain distinct and
+    clipped to 4000 chars; `abort_reason` distinguishes supervisor aborts from
+    children that independently exit 143 or 124."""
 
     # Pipes make ``communicate`` wait for EOF from every descendant that inherited
     # them, even after the direct launcher has exited. The shell deck deliberately
@@ -1226,22 +1255,13 @@ def _run_child(
                 process.wait(timeout=5)
         stdout_file.seek(0)
         stderr_file.seek(0)
-        stdout = stdout_file.read()
-        stderr = stderr_file.read()
-        detail = (stderr or stdout).strip()
+        stdout = stdout_file.read().strip()[-4000:]
+        stderr = stderr_file.read().strip()[-4000:]
         if stop_event.is_set():
-            return 143, (
-                f"supervisor stopping: {detail[-3800:]}"
-                if detail
-                else "supervisor stopping"
-            )
+            return _ChildResult(143, stdout, stderr, "stopping")
         if timed_out:
-            return 124, (
-                f"command timed out: {detail[-3800:]}"
-                if detail
-                else "command timed out"
-            )
-        return int(process.returncode or 0), detail[-4000:]
+            return _ChildResult(124, stdout, stderr, "timeout")
+        return _ChildResult(int(process.returncode or 0), stdout, stderr)
 
 
 def run_supervisor(
@@ -1251,11 +1271,12 @@ def run_supervisor(
     service_managed: bool = False,
     identity: SupervisorIdentity | None = None,
 ) -> int:
-    """Foreground supervisor loop: acquire the coordination lease, then
-    repeatedly launch `<launcher> server start`, verify canonical pair health,
-    and back off exponentially on failure, until `stop_event` fires — at which
-    point it runs `<launcher> server stop` and writes a final receipt. Always
-    returns 0; failures are recorded in the receipt, not the return value."""
+    """Foreground supervisor loop: acquire the coordination lease, then probe
+    canonical pair health, invoke `<launcher> server start` only when proof is
+    absent, and back off exponentially on failure until `stop_event` fires — at
+    which point it runs `<launcher> server stop` and writes a final receipt.
+    Always returns 0; failures are recorded in the receipt, not the return
+    value."""
 
     event = stop_event or threading.Event()
     if (
@@ -1342,34 +1363,54 @@ def run_supervisor(
                     )
                     event.wait(delay)
                     continue
-                return_code, detail = _run_child(
-                    [
-                        str(config.launcher),
-                        "server",
-                        "start",
-                        "--host",
-                        config.host,
-                        "--port",
-                        str(config.port),
-                    ],
-                    env=child_environment,
+                managed_pair = _managed_pair_snapshot(config.paths)
+                managed_pair_live = _managed_pair_healthy(managed_pair)
+                canonical_pair_healthy = managed_pair_live and _pair_healthy(
+                    config.launcher,
+                    child_environment,
                     timeout=config.command_timeout,
                     stop_event=event,
                 )
-                last_exit_code = return_code
                 if event.is_set():
                     break
-                managed_pair = _managed_pair_snapshot(config.paths)
-                managed_pair_live = _managed_pair_healthy(managed_pair)
-                canonical_pair_healthy = (
-                    return_code == 0
-                    and managed_pair_live
-                    and _pair_healthy(
-                        config.launcher,
-                        child_environment,
+                return_code = 0
+                detail = ""
+                if not canonical_pair_healthy:
+                    child_result = _run_child(
+                        [
+                            str(config.launcher),
+                            "server",
+                            "start",
+                            "--host",
+                            config.host,
+                            "--port",
+                            str(config.port),
+                        ],
+                        env=child_environment,
                         timeout=config.command_timeout,
+                        stop_event=event,
                     )
-                )
+                    return_code = child_result.exit_code
+                    detail = child_result.detail
+                    if event.is_set():
+                        last_exit_code = return_code
+                        break
+                    managed_pair = _managed_pair_snapshot(config.paths)
+                    managed_pair_live = _managed_pair_healthy(managed_pair)
+                    canonical_pair_healthy = (
+                        return_code == 0
+                        and managed_pair_live
+                        and _pair_healthy(
+                            config.launcher,
+                            child_environment,
+                            timeout=config.command_timeout,
+                            stop_event=event,
+                        )
+                    )
+                    if event.is_set():
+                        last_exit_code = return_code
+                        break
+                last_exit_code = return_code
                 if canonical_pair_healthy:
                     consecutive_failures = 0
                     last_success_at = _utc_now()
@@ -1448,12 +1489,14 @@ def run_supervisor(
                 config.launcher,
                 expected_sha256=runtime_identity.launcher_sha256,
             )
-            stop_code, stop_detail = _run_child(
+            stop_result = _run_child(
                 [str(config.launcher), "server", "stop"],
                 env=stop_environment,
                 timeout=config.command_timeout,
                 stop_event=cleanup_event,
             )
+            stop_code = stop_result.exit_code
+            stop_detail = stop_result.detail
             if stop_code != 0:
                 total_failures += 1
                 consecutive_failures += 1
@@ -1926,14 +1969,27 @@ def _pair_healthy(
     environment: dict[str, str],
     *,
     timeout: float = 60.0,
+    stop_event: threading.Event | None = None,
 ) -> bool:
-    """Run `<launcher> server status` and require both "Server: RUNNING" and
-    "Guardian: RUNNING" in stdout with exit code 0; False on any subprocess
-    error."""
+    """Run the launcher's single-process supervisor pair probe and require both
+    managed roles in stdout with exit code 0; False on any subprocess error."""
 
+    argv = [str(launcher), "server", "supervisor-pair-health"]
+    if stop_event is not None:
+        result = _run_child(
+            argv,
+            env=environment,
+            timeout=timeout,
+            stop_event=stop_event,
+        )
+        return (
+            result.exit_code == 0
+            and "Server: RUNNING" in result.stdout
+            and "Guardian: RUNNING" in result.stdout
+        )
     try:
         result = subprocess.run(
-            [str(launcher), "server", "status"],
+            argv,
             check=False,
             capture_output=True,
             text=True,
