@@ -307,6 +307,9 @@ if [[ "$operation" == "install" && -n "$app_root" ]]; then
   arguments+=(
     --app-root "$app_root"
   )
+  if [[ -n "$terminal_host" ]]; then
+    arguments+=(--terminal-host "$terminal_host")
+  fi
 fi
 
 if [[ -n "$temporary" ]]; then

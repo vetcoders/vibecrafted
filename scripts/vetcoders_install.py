@@ -15931,14 +15931,24 @@ def _runtime_install_result(
     generation: Path,
     app_root: Path | None,
     paths: Mapping[str, Path],
+    terminal_host: Path | None = None,
 ) -> dict[str, str]:
     product_config = paths["product_config"]
+    resolved_terminal_host = str(generation / "bin/vc-terminal")
+    if terminal_host and terminal_host.is_file():
+        resolved_terminal_host = str(terminal_host)
+    elif app_root:
+        candidate = (
+            app_root / "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
+        )
+        if candidate.is_file():
+            resolved_terminal_host = str(candidate)
     return {
         "schema": "vibecrafted.runtime-install-result.v1",
         "root": str(generation),
         "launcher": str(paths["launcher_home"] / "vibecrafted"),
         "terminal": str(generation / "bin/vc-terminal"),
-        "terminal_host": str(generation / "bin/vc-terminal"),
+        "terminal_host": resolved_terminal_host,
         # AppDelegate exports this as VIBECRAFTED_VC_FRAME_BIN for the public
         # product entry. Point it at the native provider, never back at the
         # wrapper itself, or the first `vc-frame ls` recursively execs the
@@ -15959,6 +15969,11 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
     """Install one immutable Runtime Pack and publish a closed ownership receipt."""
     payload_root = Path(args.payload_root).expanduser().resolve()
     app_root = Path(args.app_root).expanduser().resolve() if args.app_root else None
+    terminal_host_arg = (
+        Path(args.terminal_host).expanduser().resolve()
+        if getattr(args, "terminal_host", None)
+        else None
+    )
     if not (payload_root / "VERSION").is_file():
         raise RuntimeError(f"Runtime Pack has no VERSION: {payload_root}")
     version = (payload_root / "VERSION").read_text(encoding="utf-8").strip()
@@ -16056,7 +16071,16 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
                 shutil.rmtree(staging)
     _assert_runtime_tree_has_no_symlinks(generation)
 
-    terminal_host = generation / "bin/vc-terminal"
+    generation_terminal_host = generation / "bin/vc-terminal"
+    resolved_terminal_host = generation_terminal_host
+    if terminal_host_arg and terminal_host_arg.is_file():
+        resolved_terminal_host = terminal_host_arg
+    elif app_root:
+        candidate = (
+            app_root / "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
+        )
+        if candidate.is_file():
+            resolved_terminal_host = candidate
     required = [
         generation / "bin/vibecrafted",
         generation / "bin/loct",
@@ -16071,7 +16095,7 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         generation / "bin/vc-server-supervisor",
         generation / "bin/vc-start",
         generation / "bin/vc-workflow",
-        terminal_host,
+        generation_terminal_host,
         generation / "config/alacritty/launch-primary-shell.zsh",
         generation / "vibecrafted-core/vibecrafted_core/skills",
     ]
@@ -16228,7 +16252,7 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         crafted_home=paths["crafted_home"],
         runtime_home=runtime_home,
         frame_config=frame_config,
-        executable=terminal_host,
+        executable=resolved_terminal_host,
         leading_arguments=(
             "--config-file",
             str(product_config / "terminal-entry.toml"),
@@ -16294,6 +16318,7 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         generation=generation,
         app_root=app_root,
         paths=paths,
+        terminal_host=resolved_terminal_host,
     )
     result["tools_current"] = str(current_link)
     result["skills"] = str(len(skill_names))
@@ -16853,6 +16878,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     p_runtime_install.add_argument("--payload-root", required=True)
     p_runtime_install.add_argument("--app-root")
+    p_runtime_install.add_argument("--terminal-host")
 
     p_runtime_uninstall = sub.add_parser(
         "runtime-uninstall", help="Undo the receipted Runtime Pack install"

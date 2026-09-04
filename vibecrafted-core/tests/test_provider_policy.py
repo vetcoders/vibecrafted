@@ -1811,3 +1811,38 @@ def test_full_lineage_rejects_degraded_material_before_spawn(
             run_id="init-degraded",
             prompt="/vc-init",
         )
+
+
+def test_runtime_policy_capabilities_reports_availability_without_requiring_live_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibecrafted_core.spawn import runtime_policy_capabilities
+
+    monkeypatch.setattr(
+        "vibecrafted_core.spawn.which",
+        lambda cmd, path=None: f"/mock/bin/{cmd}",
+    )
+    for provider in ("codex", "grok", "cursor", "agy", "junie"):
+        caps = runtime_policy_capabilities(provider)
+        assert caps["local-native"]["available"] is True
+        assert caps["local-native"]["reason"] == ""
+        assert caps["local-worktrees"]["available"] is True
+        assert caps["local-native"]["usage_capability"]["supported"] is False
+
+
+def test_interactive_workspace_command_defaults_to_unmetered_for_providers_without_usage_sidechannel(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for provider in ("codex", "grok", "cursor", "agy", "junie"):
+        cmd = interactive_workspace_command(
+            provider,
+            "/vc-init",
+            "local-native",
+            "read-only" if provider != "codex" else "bypass",
+            repo,
+            token_budget="unmetered",
+        )
+        assert "--token-budget" in cmd
+        assert cmd[cmd.index("--token-budget") + 1] == "unmetered"

@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from vibecrafted_core.vc_frame_staging import materialize_vc_frame_config
@@ -69,8 +69,167 @@ def test_launcher_commands_keep_interactive_agent_in_this_panel() -> None:
         "resume",
         "claude",
     ]
-    with pytest.raises(ValueError, match="interactive ritual"):
-        workshop.launch_argv("codex", "operator")
+    with pytest.raises(ValueError, match="interactive mode"):
+        workshop.launch_argv("codex", "workflow")
+
+
+def test_choice_markers_are_unboxed_and_selected_once() -> None:
+    workshop = _load()
+
+    tokens = workshop._choice_tokens(
+        ("init", "resume", "operator"),
+        selected=1,
+        available=(True, True, False),
+    )
+
+    assert tokens == ("init", "• resume", "× operator")
+    assert sum(token.startswith("• ") for token in tokens) == 1
+    assert all("[" not in token and "«" not in token for token in tokens)
+
+
+def test_interactive_mode_matrix_is_complete_and_fails_closed() -> None:
+    workshop = _load()
+
+    native = workshop.mode_capabilities("codex", "local-native", "bypass")
+    worktree = workshop.mode_capabilities("codex", "local-worktrees", "bypass")
+
+    assert tuple(native) == ("init", "resume", "partner", "operator")
+    assert native["partner"]["available"] == native["init"]["available"]
+    assert native["operator"]["available"] == native["init"]["available"]
+    assert native["resume"]["available"] is True
+    assert worktree["resume"] == {
+        "available": False,
+        "reason": "resume is supported only in local-native runtime",
+    }
+
+
+def test_partner_operator_and_path_are_preserved_in_launch_argv(
+    tmp_path: Path,
+) -> None:
+    workshop = _load()
+
+    partner = workshop.launch_argv(
+        "codex", "partner", workspace=tmp_path, continuity="fresh"
+    )
+    operator = workshop.launch_argv(
+        "codex", "operator", workspace=tmp_path, continuity="fresh"
+    )
+    resume = workshop.launch_argv("codex", "resume", workspace=tmp_path)
+
+    assert partner[-4:] == ["--root", str(tmp_path), "--prompt", "/vc-partner"]
+    assert operator[-4:] == ["--root", str(tmp_path), "--prompt", "/vc-operator"]
+    assert resume[-2:] == ["--root", str(tmp_path)]
+
+
+def test_parent_picker_uses_canonical_session_catalog(tmp_path: Path) -> None:
+    workshop = _load()
+    older = workshop.SessionRecord(
+        session_id="older-session",
+        agent="claude",
+        repo_path=str(tmp_path),
+        updated_at="2026-09-01T10:00:00Z",
+    )
+    newer = workshop.SessionRecord(
+        session_id="newer-session",
+        agent="claude",
+        repo_path=str(tmp_path),
+        updated_at="2026-09-02T10:00:00Z",
+    )
+
+    class FakeChain(workshop.SessionChain):
+        def list_sessions(self, **kwargs: object) -> SimpleNamespace:
+            assert kwargs["project"] == f"/{tmp_path.name}"
+            assert kwargs["root"] == tmp_path
+            assert kwargs["agent"] == "claude"
+            return SimpleNamespace(
+                sessions=[older, newer],
+                warnings=[],
+            )
+
+    choices, error = workshop.parent_session_choices(
+        "claude", tmp_path, chain=FakeChain()
+    )
+
+    assert error == ""
+    assert [choice.session_id for choice in choices] == [
+        "newer-session",
+        "older-session",
+    ]
+
+    picker = workshop.Workshop(SimpleNamespace(), mode="launcher")
+    picker.agent = workshop.AGENTS.index("claude")
+    picker.parent_sessions = choices
+    picker._cycle_parent(1)
+    assert picker.continuity_parent == "newer-session"
+    picker._cycle_parent(1)
+    assert picker.continuity_parent == "older-session"
+
+
+def test_successful_launch_renames_and_replaces_the_form(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workshop = _load()
+    launched = workshop.Workshop(SimpleNamespace(), mode="launcher")
+    launched.path = str(tmp_path)
+    launched.agent = workshop.AGENTS.index("codex")
+    launched.launch_mode = workshop.LAUNCH_MODES.index("partner")
+    launched.runtime = workshop.RUNTIME_POLICIES.index("local-native")
+    launched.permissions = workshop.PERMISSION_POLICIES.index("bypass")
+    launched.continuity = workshop.CONTINUITY_MODES.index("fresh")
+    calls: list[object] = []
+
+    monkeypatch.setattr(
+        workshop,
+        "runtime_policy_capabilities",
+        lambda _agent: {
+            "local-native": {"available": True, "reason": ""},
+        },
+    )
+    monkeypatch.setattr(
+        workshop,
+        "continuity_policy_capabilities",
+        lambda *_args, **_kwargs: {
+            "fresh": {"available": True, "reason": ""},
+        },
+    )
+    monkeypatch.setattr(workshop.shutil, "which", lambda _name: "/bin/vibecrafted")
+    monkeypatch.setattr(
+        workshop.subprocess,
+        "run",
+        lambda command, **_kwargs: (
+            calls.append(("rename", command))
+            or SimpleNamespace(returncode=0, stdout="", stderr="")
+        ),
+    )
+    monkeypatch.setattr(workshop.curses, "endwin", lambda: calls.append("endwin"))
+    monkeypatch.setattr(workshop.os, "chdir", lambda path: calls.append(("cwd", path)))
+    monkeypatch.setattr(
+        workshop.os,
+        "execvpe",
+        lambda executable, argv, env: calls.append(("exec", executable, argv, env)),
+    )
+
+    launched.launch()
+
+    assert calls[0] == (
+        "rename",
+        [
+            "vc-frame",
+            "action",
+            "rename-pane",
+            f"codex · partner · {tmp_path.name}",
+        ],
+    )
+    assert calls[1:3] == ["endwin", ("cwd", tmp_path)]
+    exec_call = calls[3]
+    assert isinstance(exec_call, tuple)
+    assert exec_call[0:2] == ("exec", "/bin/vibecrafted")
+    assert exec_call[2][-4:] == [
+        "--root",
+        str(tmp_path),
+        "--prompt",
+        "/vc-partner",
+    ]
 
 
 def test_launcher_projects_explicit_continuity_selection() -> None:

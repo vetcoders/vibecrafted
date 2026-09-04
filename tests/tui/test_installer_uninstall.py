@@ -197,6 +197,8 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     generation = runtime_home / "releases/9.9.9+g12345678"
     assert Path(installed["root"]) == generation
     assert Path(installed["frame"]) == generation / "libexec/vc-frame"
+    assert Path(installed["terminal_host"]) == terminal_host
+    assert Path(installed["terminal"]) == generation / "bin/vc-terminal"
     assert "pin_darwin_socket_dir" in (generation / "bin/vc-frame").read_text(
         encoding="utf-8"
     )
