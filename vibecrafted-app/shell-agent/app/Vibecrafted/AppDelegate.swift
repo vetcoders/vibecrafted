@@ -98,6 +98,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private var startServerMenuItem: NSMenuItem?
   private var stopServerMenuItem: NSMenuItem?
   private var restartServerMenuItem: NSMenuItem?
+  private var openServerMenuItem: NSMenuItem?
+  private var openWorkspacesMenuItem: NSMenuItem?
   private var openServerLogsMenuItem: NSMenuItem?
   private var runtimePackStatusMenuItem: NSMenuItem?
   private var runtimePackDetailMenuItem: NSMenuItem?
@@ -107,7 +109,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private var signedCarrierRevisions: (source: String, terminal: String, frame: String)?
   private var trayBaseIcon: NSImage?
   private var statusRefreshTimer: Timer?
-  private var terminalProcess: Process?
+  private var terminalApplication: NSRunningApplication?
+  private var terminalLaunchInFlight = false
   private var serverStatusProcess: Process?
   private var serverActionProcess: Process?
   private var serverActionInFlight: ServerLifecycleAction?
@@ -229,7 +232,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   func applicationWillTerminate(_ notification: Notification) {
     let terminalState =
-      terminalProcess.map { $0.isRunning ? "vc-terminal pid=\($0.processIdentifier) still running" : "vc-terminal already exited" }
+      terminalApplication.map {
+        !$0.isTerminated
+          ? "vc-terminal pid=\($0.processIdentifier) still running"
+          : "vc-terminal already exited"
+      }
       ?? "no vc-terminal"
     lifecycleLog("applicationWillTerminate; \(terminalState)")
     statusRefreshTimer?.invalidate()
@@ -251,7 +258,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   private func launchWorkspaceTerminal() {
-    if terminalProcess?.isRunning == true {
+    if terminalApplication?.isTerminated == false || terminalLaunchInFlight {
       return
     }
 
@@ -329,28 +336,54 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     applyRuntimePackMenuState()
     refreshServerStatus()
 
-    let process = Process()
-    process.executableURL = install.terminalHost
-    process.arguments = [
+    guard let helperApplication = terminalHelperApplication(for: install) else {
+      reportWorkspaceLaunchFailure(
+        "The bundled vc-terminal helper app or its referenced icon is invalid")
+      return
+    }
+    let configuration = NSWorkspace.OpenConfiguration()
+    configuration.arguments = [
       "--config-file", install.terminalConfig.path,
       "-e", install.primaryShell.path, install.start.path, "operator",
     ]
-    process.environment = environment
-    process.terminationHandler = { finished in
-      let how = finished.terminationReason == .uncaughtSignal ? "signal" : "exit"
-      lifecycleLog(
-        "vc-terminal pid=\(finished.processIdentifier) ended by \(how) status=\(finished.terminationStatus)")
-    }
-    do {
-      try process.run()
-      terminalProcess = process
-      lifecycleLog("vc-terminal launched pid=\(process.processIdentifier) host=\(install.terminalHost.lastPathComponent) generation=\(install.root.lastPathComponent)")
-    } catch {
-      lifecycleLog("vc-terminal launch failed: \(error.localizedDescription)")
-      reportWorkspaceLaunchFailure(
-        "Failed to launch bundled vc-terminal: \(error.localizedDescription)")
+    configuration.environment = environment
+    configuration.activates = true
+    configuration.addsToRecentItems = false
+    terminalLaunchInFlight = true
+    Task {
+      do {
+        let application = try await NSWorkspace.shared.openApplication(
+          at: helperApplication, configuration: configuration)
+        terminalApplication = application
+        terminalLaunchInFlight = false
+        lifecycleLog(
+          "vc-terminal launched through helper bundle pid=\(application.processIdentifier) generation=\(install.root.lastPathComponent)")
+      } catch {
+        terminalLaunchInFlight = false
+        lifecycleLog("vc-terminal helper launch failed: \(error.localizedDescription)")
+        reportWorkspaceLaunchFailure(
+          "Failed to launch bundled vc-terminal helper app: \(error.localizedDescription)")
+      }
     }
     reconcileControlPlaneEye(install: install, environment: environment)
+  }
+
+  private func terminalHelperApplication(for install: CanonicalRuntimeInstall) -> URL? {
+    let helper = install.terminalHost
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+    guard helper.pathExtension == "app",
+      let bundle = Bundle(url: helper),
+      bundle.executableURL?.standardizedFileURL == install.terminalHost.standardizedFileURL,
+      let iconName = bundle.object(forInfoDictionaryKey: "CFBundleIconFile") as? String,
+      !iconName.isEmpty,
+      FileManager.default.fileExists(
+        atPath: helper.appendingPathComponent("Contents/Resources/\(iconName)").path)
+    else {
+      return nil
+    }
+    return helper
   }
 
   private func reconcileControlPlaneEye(
@@ -554,12 +587,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     serverDetail.isEnabled = false
     serverDetailMenuItem = serverDetail
     menu.addItem(.separator())
+    let openServer = menu.addItem(
+      withTitle: "Open VC Server", action: #selector(openServerFromStatusItem),
+      keyEquivalent: "o")
+    openServer.keyEquivalentModifierMask = [.command, .option]
+    openServer.target = self
+    openServerMenuItem = openServer
     let console = menu.addItem(
-      withTitle: "Open VC Console", action: #selector(openConsoleFromStatusItem), keyEquivalent: "")
+      withTitle: "Open Native Console", action: #selector(openConsoleFromStatusItem),
+      keyEquivalent: "c")
+    console.keyEquivalentModifierMask = [.command, .option]
     console.target = self
     let terminal = menu.addItem(
       withTitle: "Open VC Terminal", action: #selector(openTerminalFromStatusItem),
-      keyEquivalent: "")
+      keyEquivalent: "t")
+    terminal.keyEquivalentModifierMask = [.command, .option]
     terminal.target = self
     let serverOwner = menu.addItem(withTitle: "VC Server", action: nil, keyEquivalent: "")
     let serverMenu = NSMenu(title: "VC Server")
@@ -576,6 +618,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     restart.target = self
     restartServerMenuItem = restart
     serverMenu.addItem(.separator())
+    let workspaces = serverMenu.addItem(
+      withTitle: "Open Workspaces", action: #selector(openWorkspacesFromStatusItem),
+      keyEquivalent: "w")
+    workspaces.keyEquivalentModifierMask = [.command, .option]
+    workspaces.target = self
+    openWorkspacesMenuItem = workspaces
     let logs = serverMenu.addItem(
       withTitle: "Open Logs", action: #selector(openServerLogsFromStatusItem), keyEquivalent: "")
     logs.target = self
@@ -605,7 +653,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     revealHome.target = self
     revealRuntimeHomeMenuItem = revealHome
     let openControlPlane = runtimePackMenu.addItem(
-      withTitle: "Open Control Plane", action: #selector(openControlPlaneFromStatusItem),
+      withTitle: "Reveal Control Plane Files", action: #selector(openControlPlaneFromStatusItem),
       keyEquivalent: "")
     openControlPlane.target = self
     openControlPlaneMenuItem = openControlPlane
@@ -720,6 +768,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     startServerMenuItem?.isEnabled = state.canStart
     stopServerMenuItem?.isEnabled = state.canStop
     restartServerMenuItem?.isEnabled = state.canRestart
+    let navigation = resolveServerNavigation(caretakerData: lastCaretakerData)
+    openServerMenuItem?.isEnabled = navigation.isAvailable
+    openServerMenuItem?.toolTip = navigation.unavailableReason
+    openWorkspacesMenuItem?.isEnabled = navigation.isAvailable
+    openWorkspacesMenuItem?.toolTip = navigation.unavailableReason
     openServerLogsMenuItem?.isEnabled =
       canonicalInstall != nil && serverUtilityProcess?.isRunning != true
     statusItem?.button?.image = statusIcon(health: state.health)
@@ -776,9 +829,34 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
   }
 
+  @objc private func openServerFromStatusItem() {
+    openServerPage(\.server, label: "VC Server")
+  }
+
+  @objc private func openWorkspacesFromStatusItem() {
+    openServerPage(\.workspaces, label: "Workspaces")
+  }
+
+  private func openServerPage(
+    _ keyPath: KeyPath<ServerNavigationState, URL?>, label: String
+  ) {
+    let navigation = resolveServerNavigation(caretakerData: lastCaretakerData)
+    guard let url = navigation[keyPath: keyPath] else {
+      let alert = NSAlert()
+      alert.alertStyle = .warning
+      alert.messageText = "\(label) is unavailable"
+      alert.informativeText =
+        navigation.unavailableReason ?? "The configured VC Server is unavailable."
+      alert.addButton(withTitle: "OK")
+      alert.runModal()
+      return
+    }
+    NSWorkspace.shared.open(url)
+  }
+
   @objc private func openTerminalFromStatusItem() {
-    if let process = terminalProcess, process.isRunning {
-      NSRunningApplication(processIdentifier: process.processIdentifier)?.activate(options: [])
+    if let application = terminalApplication, !application.isTerminated {
+      application.activate(options: [])
       return
     }
     launchWorkspaceTerminal()
@@ -929,7 +1007,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     alert.alertStyle = .informational
     alert.messageText = "Vibecrafted Help"
     alert.informativeText =
-      "The tray dot reports VC Server: green is healthy, amber is transitioning, red needs attention, and gray is stopped. The Runtime Pack section shows the installed generation and whether it matches this App's signed carrier — amber drift means the runtime moved ahead and the App should be updated to re-sync. Open VC Console for live runs; VC Server actions always route through the installed service owner."
+      "The tray dot reports VC Server: green is healthy, amber is transitioning, red needs attention, and gray is stopped. Open VC Server and Open Workspaces use the configured live server only when its caretaker says it is available. Open Native Console shows the local AppKit console. Reveal Control Plane Files opens the on-disk runtime state."
     alert.addButton(withTitle: "OK")
     alert.runModal()
   }

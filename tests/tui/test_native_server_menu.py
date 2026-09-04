@@ -157,6 +157,19 @@ let degradedEnvelope = #"""
 }
 """#.data(using: .utf8)
 
+let malformedEnvelope = #"""
+{
+  "schema": "vibecrafted.caretaker.v1",
+  "actions": {
+    "open_console": {
+      "enabled": true,
+      "reason": "",
+      "url": "file:///tmp/not-a-server"
+    }
+  }
+}
+"""#.data(using: .utf8)
+
 let scenario = CommandLine.arguments[1]
 let caretaker: Data?
 let action: ServerLifecycleAction?
@@ -177,6 +190,10 @@ case "stopped":
   ready = true
 case "degraded":
   caretaker = degradedEnvelope
+  action = nil
+  ready = true
+case "malformed":
+  caretaker = malformedEnvelope
   action = nil
   ready = true
 case "garbage":
@@ -213,6 +230,10 @@ let logs = decodeServerLogs(
   data: #"{"directory":"/tmp/vc-home/server","stdout":"/tmp/vc-home/server/supervisor.stdout.log","stderr":"/tmp/vc-home/server/supervisor.stderr.log"}"#.data(using: .utf8)!)!
 print(logs.directory.path)
 print(caretakerDiagnosticsLines(data: caretaker).joined(separator: " | "))
+let navigation = resolveServerNavigation(caretakerData: caretaker)
+print(navigation.server?.absoluteString ?? "nil")
+print(navigation.workspaces?.absoluteString ?? "nil")
+print(navigation.unavailableReason ?? "")
 '''
 
 
@@ -266,6 +287,11 @@ def test_server_menu_renders_the_caretaker_verdict_verbatim(
     assert "Guardian PID: 124" in diagnostics
     assert "Endpoint: 127.0.0.1:4107" in diagnostics
     assert "Status receipt: /tmp/vc-home/server/supervisor.status.json" in diagnostics
+    assert lines[10:12] == [
+        "http://127.0.0.1:4107",
+        "http://127.0.0.1:4107/workspaces",
+    ]
+    assert lines[12] == ""
 
 
 def test_server_menu_exposes_the_server_when_it_is_down(policy_binary: Path) -> None:
@@ -284,6 +310,16 @@ def test_server_menu_exposes_the_server_when_it_is_down(policy_binary: Path) -> 
         "true,false,true",
     ]
     assert "[error] server_unreachable: worker failed" in lines[9]
+    assert lines[10:12] == ["nil", "nil"]
+    assert "not answering" in lines[12]
+
+
+def test_server_navigation_rejects_malformed_non_http_configuration(
+    policy_binary: Path,
+) -> None:
+    lines = _run_policy(policy_binary, "malformed")
+    assert lines[10:12] == ["nil", "nil"]
+    assert lines[12] == "The caretaker returned a malformed server URL."
 
 
 def test_server_menu_marks_an_intentional_stop_neutral(policy_binary: Path) -> None:

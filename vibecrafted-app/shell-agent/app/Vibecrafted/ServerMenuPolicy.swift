@@ -31,6 +31,16 @@ struct ServerMenuState {
   let canRestart: Bool
 }
 
+struct ServerNavigationState {
+  let server: URL?
+  let workspaces: URL?
+  let unavailableReason: String?
+
+  var isAvailable: Bool {
+    server != nil && workspaces != nil
+  }
+}
+
 /// The `vibecrafted.caretaker.v1` envelope as the tray consumes it. Every
 /// field is optional-lean: a partial or older envelope must degrade into an
 /// honest menu state, never crash the status item.
@@ -207,6 +217,67 @@ func decodeCaretakerEnvelope(data: Data?) -> CaretakerEnvelope? {
 
 func decodeServerLogs(data: Data) -> ServerLogLocations? {
   try? JSONDecoder().decode(ServerLogLocations.self, from: data)
+}
+
+private func validatedServerOrigin(_ value: String) -> URL? {
+  guard var components = URLComponents(string: value),
+    let scheme = components.scheme?.lowercased(),
+    ["http", "https"].contains(scheme),
+    let host = components.host,
+    !host.isEmpty,
+    components.user == nil,
+    components.password == nil,
+    components.path.isEmpty || components.path == "/",
+    components.query == nil,
+    components.fragment == nil,
+    components.port.map({ (1...65_535).contains($0) }) ?? true
+  else {
+    return nil
+  }
+  components.scheme = scheme
+  components.path = ""
+  return components.url
+}
+
+private func serverPageURL(origin: URL, path: String) -> URL? {
+  guard path.hasPrefix("/"), !path.contains("?"), !path.contains("#"),
+    var components = URLComponents(url: origin, resolvingAgainstBaseURL: false)
+  else {
+    return nil
+  }
+  components.path = path
+  return components.url
+}
+
+/// The caretaker's `open_console` action is the sole URL authority for the
+/// tray. It already combines configured server identity with liveness. Swift
+/// only validates that origin and derives known routes from it.
+func resolveServerNavigation(caretakerData: Data?) -> ServerNavigationState {
+  guard let envelope = decodeCaretakerEnvelope(data: caretakerData) else {
+    return ServerNavigationState(
+      server: nil, workspaces: nil,
+      unavailableReason: "The canonical caretaker has not published a server address.")
+  }
+  guard let action = envelope.actions?.openConsole else {
+    return ServerNavigationState(
+      server: nil, workspaces: nil,
+      unavailableReason: "The caretaker did not provide a server navigation action.")
+  }
+  guard action.enabled else {
+    return ServerNavigationState(
+      server: nil, workspaces: nil,
+      unavailableReason: conciseCaretakerLine(action.reason)
+        ?? "The configured VC Server is unavailable.")
+  }
+  guard let value = action.url, let origin = validatedServerOrigin(value),
+    let workspaces = serverPageURL(origin: origin, path: "/workspaces")
+  else {
+    return ServerNavigationState(
+      server: nil, workspaces: nil,
+      unavailableReason: "The caretaker returned a malformed server URL.")
+  }
+  return ServerNavigationState(
+    server: origin, workspaces: workspaces, unavailableReason: nil)
 }
 
 private func conciseCaretakerLine(_ value: String?) -> String? {

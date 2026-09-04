@@ -1013,9 +1013,11 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "showMainWindowIfNeeded()" not in launch_handler
     assert "\t<key>LSUIElement</key>\n\t<true/>" in info
     assert "\t<key>NSQuitAlwaysKeepsWindows</key>\n\t<false/>" in info
-    assert 'withTitle: "Open VC Console"' in delegate
+    assert 'withTitle: "Open VC Server"' in delegate
+    assert 'withTitle: "Open Native Console"' in delegate
     assert 'withTitle: "Open VC Terminal"' in delegate
     assert 'withTitle: "VC Server"' in delegate
+    assert 'withTitle: "Open Workspaces"' in delegate
     assert 'withTitle: "Start"' in delegate
     assert 'withTitle: "Stop"' in delegate
     assert 'withTitle: "Restart"' in delegate
@@ -1042,11 +1044,8 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "statusRefreshTimer = Timer.scheduledTimer(" in delegate
     assert "statusIcon(health:" in delegate
     assert "health.color.setFill()" in delegate
-    assert "process.isRunning" in delegate
-    assert (
-        "NSRunningApplication(processIdentifier: process.processIdentifier)?.activate(options: [])"
-        in delegate
-    )
+    assert "application.isTerminated" in delegate
+    assert "application.activate(options: [])" in delegate
     termination_handler = delegate[
         delegate.index(
             "func applicationShouldTerminateAfterLastWindowClosed"
@@ -1054,6 +1053,11 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     ]
     assert "    false\n" in termination_handler
     assert "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty" in delegate
+    assert "NSWorkspace.shared.openApplication(" in delegate
+    assert "at: helperApplication, configuration: configuration" in delegate
+    assert "process.executableURL = install.terminalHost" not in delegate
+    assert 'bundle.object(forInfoDictionaryKey: "CFBundleIconFile")' in delegate
+    assert '"Contents/Resources/\\(iconName)"' in delegate
     assert 'appendingPathComponent("runtime-pack", isDirectory: true)' in delegate
     assert 'appendingPathComponent("install-runtime-pack.sh")' in delegate
     assert '"--expected-source-revision"' in delegate
@@ -1118,10 +1122,10 @@ def test_tray_menu_supervises_runtime_pack_carrier_drift() -> None:
 
     # The tray supervises the Runtime Pack carrier, not just the server: the
     # live generation is a first-class status line and the submenu carries the
-    # supervision actions (reveal home, open control plane, copy identity).
+    # supervision actions (reveal home, reveal control files, copy identity).
     assert 'withTitle: "Runtime Pack"' in delegate
     assert 'withTitle: "Reveal Runtime Home"' in delegate
-    assert 'withTitle: "Open Control Plane"' in delegate
+    assert 'withTitle: "Reveal Control Plane Files"' in delegate
     assert 'withTitle: "Copy Runtime Identity"' in delegate
     assert "#selector(revealRuntimeHomeFromStatusItem)" in delegate
     assert "#selector(openControlPlaneFromStatusItem)" in delegate
@@ -3641,7 +3645,8 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     assert "$VIBECRAFTED_RUNTIME_ROOT/bin/vc-start" in terminal
     assert "${1##*/}" in primary_shell
     assert '"$0" "$@"' in primary_shell
-    assert "process.executableURL = install.terminalHost" in delegate
+    assert "NSWorkspace.shared.openApplication(" in delegate
+    assert "configuration.environment = environment" in delegate
     assert '"-e", install.primaryShell.path, install.start.path, "operator"' in delegate
     assert 'product_config / "terminal-entry.toml"' in installer
     assert 'product_config / "terminal-policy.toml"' in installer
