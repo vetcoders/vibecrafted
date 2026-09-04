@@ -278,9 +278,16 @@ _vetcoders_record_vc_frame_attachment() {
     return 0
   fi
   if [[ "$attach_status" -ne 0 ]]; then
-    printf "Warning: could not attach vc-frame session '%s' to WES.\n" \
+    printf "vc-start: could not attach vc-frame session '%s' to WES " \
       "$runtime_session_id" >&2
-    return 1
+    printf "(workspace=%s instance=%s session=%s, status=%s).\n" \
+      "$VIBECRAFTED_WORKSPACE_ID" \
+      "$VIBECRAFTED_WORKSPACE_INSTANCE_ID" \
+      "$VIBECRAFTED_SESSION_ID" \
+      "$attach_status" >&2
+    printf "vc-start: re-run vc-start from the intended workspace root; " >&2
+    printf "if the mismatch persists, inspect 'vibecrafted workspace list'.\n" >&2
+    return "$attach_status"
   fi
 }
 

@@ -200,7 +200,8 @@ def test_product_entry_prepare_exists_in_shipped_dashboard() -> None:
     )
     assert "vibecrafted workspace resolve" not in text
     assert "vibecrafted server status" not in text
-    assert "_vetcoders_product_core_cli workspace resolve --env" in text
+    assert "workspace resolve --root" in text
+    assert '"$requested_root" --env' in text
     vc_frame = (
         REPO / "vibecrafted-core/vibecrafted_core/runtime/shell/lib/vc_frame.sh"
     ).read_text(encoding="utf-8")
@@ -490,7 +491,7 @@ def test_vc_start_probe_pins_product_config(tmp_path: Path) -> None:
         textwrap.dedent(
             """\
             #!/usr/bin/env bash
-            if [[ "$*" == "workspace resolve --env" ]]; then
+            if [[ "$1 $2" == "workspace resolve" ]]; then
               echo VIBECRAFTED_WORKSPACE_ID=019ff97a-3328-7660-b6cd-f957b1b163f8
               echo VIBECRAFTED_WORKSPACE_INSTANCE_ID=019ff97a-3328-7660-b6cd-f957b1b163f9
               echo VIBECRAFTED_OPERATOR_SESSION=probe-place
@@ -545,6 +546,211 @@ def test_vc_start_probe_pins_product_config(tmp_path: Path) -> None:
     assert "should-not-run-in-probe" not in out
 
 
+def test_vc_start_foreign_workspace_env_cannot_override_requested_root(
+    tmp_path: Path,
+) -> None:
+    requested_root = tmp_path / "requested"
+    foreign_root = tmp_path / "codescribe"
+    home = tmp_path / "home"
+    bin_dir = tmp_path / "bin"
+    capture = tmp_path / "core-calls"
+    requested_root.mkdir()
+    foreign_root.mkdir()
+    home.mkdir()
+    bin_dir.mkdir()
+
+    _write_fake_bin(bin_dir, "python3", "#!/usr/bin/env bash\nexit 1\n")
+    _write_fake_bin(
+        bin_dir,
+        "vibecrafted",
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env bash
+            printf '%s\\n' "$*" >> "{capture}"
+            if [[ "$*" == "workspace resolve --root {requested_root} --env" ]]; then
+              echo VIBECRAFTED_WORKSPACE_ID=requested-workspace
+              echo VIBECRAFTED_SESSION_ID=requested-session
+              echo VIBECRAFTED_WORKSPACE_INSTANCE_ID=requested-instance
+              echo VIBECRAFTED_BUILD_ID=requested-build
+              echo VIBECRAFTED_OPERATOR_SESSION=requested
+              echo VIBECRAFTED_WORKSPACE_ROOT={requested_root}
+              exit 0
+            fi
+            [[ "$*" == "server status" ]] && exit 0
+            exit 64
+            """
+        ),
+    )
+
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "HOME": str(home),
+        "VIBECRAFTED_ROOT": str(REPO),
+        "VIBECRAFTED_PRODUCT_CORE_CLI": str(bin_dir / "vibecrafted"),
+        "VIBECRAFTED_PRODUCT_ENTRY_PROBE": "1",
+        "VIBECRAFTED_WORKSPACE_ID": "foreign-workspace",
+        "VIBECRAFTED_SESSION_ID": "foreign-session",
+        "VIBECRAFTED_WORKSPACE_INSTANCE_ID": "foreign-instance",
+        "VIBECRAFTED_OPERATOR_SESSION": "codescribe",
+        "VIBECRAFTED_WORKSPACE_ROOT": str(foreign_root),
+    }
+    proc = subprocess.run(
+        [
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            f'source "{HELPER}"; vc-start; printf "FINAL_PWD=%s\\n" "$PWD"',
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=requested_root,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert capture.read_text(encoding="utf-8").splitlines()[0] == (
+        f"workspace resolve --root {requested_root} --env"
+    )
+    assert "VIBECRAFTED_WORKSPACE_ID=requested-workspace" in proc.stdout
+    assert "VIBECRAFTED_WORKSPACE_INSTANCE_ID=requested-instance" in proc.stdout
+    assert f"FINAL_PWD={requested_root}" in proc.stdout
+    assert str(foreign_root) not in proc.stdout
+
+
+def test_vc_start_same_root_reuses_resolved_tuple_for_frame_attachment(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "workspace"
+    home = tmp_path / "home"
+    bin_dir = tmp_path / "bin"
+    capture = tmp_path / "core-calls"
+    root.mkdir()
+    home.mkdir()
+    bin_dir.mkdir()
+
+    _write_fake_bin(bin_dir, "python3", "#!/usr/bin/env bash\nexit 1\n")
+    _write_fake_bin(
+        bin_dir,
+        "vibecrafted",
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env bash
+            printf '%s\\n' "$*" >> "{capture}"
+            if [[ "$1 $2" == "workspace resolve" ]]; then
+              echo VIBECRAFTED_WORKSPACE_ID=stable-workspace
+              echo VIBECRAFTED_SESSION_ID=stable-session
+              echo VIBECRAFTED_WORKSPACE_INSTANCE_ID=stable-instance
+              echo VIBECRAFTED_BUILD_ID=stable-build
+              echo VIBECRAFTED_OPERATOR_SESSION=workspace
+              echo VIBECRAFTED_WORKSPACE_ROOT={root}
+              exit 0
+            fi
+            [[ "$*" == "server status" ]] && exit 0
+            [[ "$1 $2" == "workspace session-attach" ]] && exit 0
+            exit 64
+            """
+        ),
+    )
+
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "HOME": str(home),
+        "VIBECRAFTED_ROOT": str(REPO),
+        "VIBECRAFTED_PRODUCT_CORE_CLI": str(bin_dir / "vibecrafted"),
+        "VIBECRAFTED_PRODUCT_ENTRY_PROBE": "1",
+        "VIBECRAFTED_WORKSPACE_ID": "stable-workspace",
+        "VIBECRAFTED_SESSION_ID": "stable-session",
+        "VIBECRAFTED_WORKSPACE_INSTANCE_ID": "stable-instance",
+        "VIBECRAFTED_OPERATOR_SESSION": "workspace",
+        "VIBECRAFTED_WORKSPACE_ROOT": str(root),
+    }
+    proc = subprocess.run(
+        [
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            (
+                f'source "{HELPER}"; vc-start; '
+                "_vetcoders_record_vc_frame_attachment live workspace"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=root,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    calls = capture.read_text(encoding="utf-8").splitlines()
+    assert calls[0] == f"workspace resolve --root {root} --env"
+    attach = next(call for call in calls if call.startswith("workspace session-attach"))
+    assert "--workspace-id stable-workspace" in attach
+    assert "--session-id stable-session" in attach
+    assert "--instance-id stable-instance" in attach
+    assert "--runtime-session-id workspace" in attach
+
+
+def test_frame_attachment_mismatch_preserves_status_and_names_recovery(
+    tmp_path: Path,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_bin(
+        bin_dir,
+        "vibecrafted",
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            echo "workspace session ownership does not match the requested instance" >&2
+            exit 42
+            """
+        ),
+    )
+
+    proc = subprocess.run(
+        [
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            (
+                f'source "{HELPER}"; '
+                "_vetcoders_product_workspace_prepare() { :; }; "
+                "_vetcoders_import_legacy_vc_frame_sessions() { "
+                "_vetcoders_record_vc_frame_attachment live codescribe; }; "
+                "_vetcoders_product_entry_prepare; "
+                "_vetcoders_launch_dashboard operator"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "VIBECRAFTED_PRODUCT_CORE_CLI": str(bin_dir / "vibecrafted"),
+            "VIBECRAFTED_WORKSPACE_ID": "requested-workspace",
+            "VIBECRAFTED_SESSION_ID": "requested-session",
+            "VIBECRAFTED_WORKSPACE_INSTANCE_ID": "requested-instance",
+            "VC_FRAME_PANE_ID": "1",
+            "VC_FRAME_SESSION_NAME": "codescribe",
+        },
+        check=False,
+    )
+
+    assert proc.returncode == 42
+    assert "workspace session ownership does not match" in proc.stderr
+    assert "workspace=requested-workspace" in proc.stderr
+    assert "instance=requested-instance" in proc.stderr
+    assert "re-run vc-start from the intended workspace root" in proc.stderr
+    assert "Already in Vibecrafted workspace" not in proc.stdout
+
+
 def test_product_entry_reconciles_the_one_macos_server_service_owner(
     tmp_path: Path,
 ) -> None:
@@ -568,7 +774,13 @@ def test_product_entry_reconciles_the_one_macos_server_service_owner(
             f"""\
             #!/usr/bin/env bash
             printf '%s\\n' "$*" >> "{capture}"
-            if [[ "$*" == "workspace resolve --env" ]]; then exit 0; fi
+                if [[ "$1 $2" == "workspace resolve" ]]; then
+                  echo VIBECRAFTED_WORKSPACE_ID=service-workspace
+                  echo VIBECRAFTED_SESSION_ID=service-session
+                  echo VIBECRAFTED_WORKSPACE_INSTANCE_ID=service-instance
+                  echo VIBECRAFTED_WORKSPACE_ROOT={REPO}
+                  exit 0
+                fi
             if [[ "$*" == "server status" ]]; then exit 1; fi
             if [[ "$*" == "server service reconcile" ]]; then exit 0; fi
             exit 1
@@ -689,7 +901,7 @@ def test_vc_start_probe_twice_is_stable(tmp_path: Path) -> None:
         textwrap.dedent(
             """\
             #!/usr/bin/env bash
-            if [[ "$*" == "workspace resolve --env" ]]; then
+            if [[ "$1 $2" == "workspace resolve" ]]; then
               echo VIBECRAFTED_WORKSPACE_ID=019ff97a-3328-7660-b6cd-f957b1b163f8
               echo VIBECRAFTED_WORKSPACE_INSTANCE_ID=019ff97a-3328-7660-b6cd-f957b1b163f9
               echo VIBECRAFTED_OPERATOR_SESSION=workspace-b1b163f8

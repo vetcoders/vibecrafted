@@ -64,9 +64,22 @@ _vetcoders_product_core_cli() {
 }
 
 _vetcoders_product_workspace_prepare() {
-  local line key value resolved
-  resolved="$(_vetcoders_product_core_cli workspace resolve --env 2>/dev/null || true)"
-  [[ -n "$resolved" ]] || return 0
+  local requested_root="${1:-}"
+  local line key value resolved resolve_status=0
+  if [[ -z "$requested_root" ]]; then
+    requested_root="$(pwd -P)" || return $?
+  fi
+  resolved="$(
+    _vetcoders_product_core_cli \
+      workspace resolve --root "$requested_root" --env
+  )" || resolve_status=$?
+  if [[ "$resolve_status" -ne 0 || -z "$resolved" ]]; then
+    [[ "$resolve_status" -ne 0 ]] || resolve_status=1
+    printf "vc-start: could not resolve requested workspace root '%s' (status %s).\n" \
+      "$requested_root" "$resolve_status" >&2
+    printf "vc-start: clear stale VIBECRAFTED_WORKSPACE_* values or re-run from the intended root.\n" >&2
+    return "$resolve_status"
+  fi
   while IFS= read -r line; do
     key="${line%%=*}"
     value="${line#*=}"
@@ -98,22 +111,40 @@ _vetcoders_control_plane_eye_prepare() {
 # Pins product config, projects Super/scripts when available, pokes control-plane
 # eye (best-effort). Never loads into ordinary PATH-only shells unless called.
 _vetcoders_product_entry_prepare() {
+  local requested_root entry_status=0
+  requested_root="$(pwd -P)" || return $?
+  unset VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS
+
   # Host CLIs (node/codex) must be on PATH before workspace resolve and the
   # control-plane eye — AppDelegate/vc-start start with a closed allowlist.
   if declare -F _vetcoders_path_with_bundled_bin_priority >/dev/null 2>&1; then
     PATH="$(_vetcoders_path_with_bundled_bin_priority "${PATH:-}")"
     export PATH
   fi
-  _vetcoders_product_workspace_prepare
+  _vetcoders_product_workspace_prepare "$requested_root" || {
+    entry_status=$?
+    VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS="$entry_status"
+    return "$entry_status"
+  }
   if [[ -n "${VIBECRAFTED_WORKSPACE_ROOT:-}" && -d "$VIBECRAFTED_WORKSPACE_ROOT" ]]; then
-    cd "$VIBECRAFTED_WORKSPACE_ROOT" || true
+    cd "$VIBECRAFTED_WORKSPACE_ROOT" || {
+      entry_status=$?
+      printf "vc-start: could not enter resolved workspace root '%s'.\n" \
+        "$VIBECRAFTED_WORKSPACE_ROOT" >&2
+      VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS="$entry_status"
+      return "$entry_status"
+    }
   fi
 
   # Vibecrafted.app moved new frames to a short product-owned socket root.
   # Preserve every physical session found in the old namespace as a WES
   # attachment before the new visible workspace is opened.
   if declare -F _vetcoders_import_legacy_vc_frame_sessions >/dev/null 2>&1; then
-    _vetcoders_import_legacy_vc_frame_sessions || return $?
+    _vetcoders_import_legacy_vc_frame_sessions || {
+      entry_status=$?
+      VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS="$entry_status"
+      return "$entry_status"
+    }
   fi
 
   # Normalize ambient context first so frontier resolution is stable.
@@ -243,6 +274,11 @@ _vetcoders_launch_dashboard() {
       return
       ;;
   esac
+
+  if [[ -n "${VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS:-}" ]]; then
+    printf "vc-start: workspace preparation failed; dashboard attachment was not attempted.\n" >&2
+    return "$VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS"
+  fi
 
   local layout_name layout_file session_name repo_source repo_vc_frame_dir state inside_vc_frame current_session vc_frame_bin
   _vetcoders_normalize_ambient_context
