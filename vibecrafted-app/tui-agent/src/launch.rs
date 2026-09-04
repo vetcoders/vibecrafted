@@ -12,15 +12,38 @@ pub enum LaunchKind {
     Research,
     Review,
     Marbles,
+    Skill(&'static crate::skills_catalog::SkillEntry),
 }
 
 impl LaunchKind {
+    pub fn all() -> Vec<Self> {
+        let mut kinds = vec![
+            Self::Workflow,
+            Self::Research,
+            Self::Review,
+            Self::Marbles,
+        ];
+        kinds.extend(
+            crate::skills_catalog::CATALOG
+                .iter()
+                .filter(|entry| {
+                    !matches!(
+                        entry.slug,
+                        "vc-workflow" | "vc-research" | "vc-review" | "vc-marbles"
+                    )
+                })
+                .map(Self::Skill),
+        );
+        kinds
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             LaunchKind::Workflow => "workflow",
             LaunchKind::Research => "research",
             LaunchKind::Review => "review",
             LaunchKind::Marbles => "marbles",
+            LaunchKind::Skill(entry) => entry.command_token(),
         }
     }
 
@@ -30,6 +53,7 @@ impl LaunchKind {
             LaunchKind::Research => "Research swarm",
             LaunchKind::Review => "Review",
             LaunchKind::Marbles => "Marbles loop",
+            LaunchKind::Skill(entry) => entry.display,
         }
     }
 
@@ -45,6 +69,7 @@ impl LaunchKind {
             LaunchKind::Marbles => {
                 "Run convergence loops when the code works but still lies or drifts."
             }
+            LaunchKind::Skill(entry) => entry.one_line,
         }
     }
 }
@@ -255,6 +280,18 @@ fn build_deck_launch_command(deck: &Path, request: &LaunchRequest) -> LaunchComm
                 args.push(request.prompt.clone().into());
             }
         }
+        LaunchKind::Skill(entry) => {
+            args.push(request.agent.clone().into());
+            if !request.prompt.trim().is_empty()
+                && !matches!(
+                    entry.accepts,
+                    crate::skills_catalog::SkillPayloadKind::None
+                )
+            {
+                args.push("--prompt".into());
+                args.push(request.prompt.clone().into());
+            }
+        }
     }
     args.push("--runtime".into());
     args.push(request.runtime.label().into());
@@ -375,6 +412,12 @@ fn resolved_vc_frame_config_dir_from(
     if let Some(explicit) = explicit {
         return Some(PathBuf::from(explicit));
     }
+    if let Some(root) = root {
+        let repo_config_dir = root.join("config/vc-frame");
+        if repo_config_dir.join("config.kdl").is_file() {
+            return Some(repo_config_dir);
+        }
+    }
     let config_home = xdg_config_home
         .map(PathBuf::from)
         .or_else(|| home.map(|home| PathBuf::from(home).join(".config")));
@@ -384,12 +427,7 @@ fn resolved_vc_frame_config_dir_from(
             return Some(installed);
         }
     }
-    let root = root?;
-    let repo_config_dir = root.join("config/vc-frame");
-    repo_config_dir
-        .join("config.kdl")
-        .is_file()
-        .then_some(repo_config_dir)
+    None
 }
 
 fn shell_join(program: &Path, args: &[OsString]) -> String {

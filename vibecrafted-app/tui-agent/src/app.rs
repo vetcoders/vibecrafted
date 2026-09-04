@@ -426,30 +426,19 @@ impl App {
     /// Refresh the remote Observe projection on its own bounded cadence.
     /// Returns whether the fetch succeeded so the scheduler can back off.
     pub fn refresh_observe(&mut self) -> bool {
-        let origin = self.config.server.clone();
-        self.observe.origin = origin.clone();
-        match observe::fetch_state(&origin) {
-            Ok((generated_at, runs)) => {
-                self.observe.generated_at = generated_at;
-                self.observe.status = ObserveHealth::Live;
-                self.observe.error = None;
-                self.observe.runs = runs;
-                if self.observe.selected >= self.observe.runs.len() {
-                    self.observe.selected = self.observe.runs.len().saturating_sub(1);
-                }
-                self.refresh_observe_transcript();
-                true
-            }
-            Err(error) => {
-                if self.observe.runs.is_empty() {
-                    self.observe.status = ObserveHealth::Offline;
-                } else {
-                    self.observe.status = ObserveHealth::Degraded;
-                }
-                self.observe.error = Some(error.to_string());
-                false
-            }
+        self.observe.origin = format!(
+            "control-plane:{}",
+            self.config.state_root.display()
+        );
+        self.observe.generated_at = chrono::Utc::now().to_rfc3339();
+        self.observe.status = ObserveHealth::Live;
+        self.observe.error = None;
+        self.observe.runs = observe::project_control_plane(&self.state);
+        if self.observe.selected >= self.observe.runs.len() {
+            self.observe.selected = self.observe.runs.len().saturating_sub(1);
         }
+        self.refresh_observe_transcript();
+        true
     }
 
     pub fn refresh_observe_transcript(&mut self) {
@@ -459,9 +448,17 @@ impl App {
             return;
         };
         let run_id = run.run_id.clone();
+        let transcript_path = run.transcript_path.clone();
         if self.observe.transcript_run_id.as_deref() == Some(run_id.as_str())
             && !self.observe.transcript.is_empty()
         {
+            return;
+        }
+        if let Some(path) = transcript_path
+            && let Ok(body) = fs::read_to_string(path)
+        {
+            self.observe.transcript = crate::run_detail::humanize_transcript(&body);
+            self.observe.transcript_run_id = Some(run_id);
             return;
         }
         match observe::fetch_transcript(&self.config.server, &run_id) {
@@ -493,6 +490,19 @@ impl App {
         self.observe.transcript.clear();
         self.observe.transcript_run_id = None;
         self.refresh_observe_transcript();
+    }
+
+    pub fn observe_switch_command(&self) -> Option<LaunchCommand> {
+        let session = self
+            .observe
+            .runs
+            .get(self.observe.selected)?
+            .switch_target()?;
+        Some(LaunchCommand {
+            program: self.config.terminal_binary.clone(),
+            args: vec!["attach".into(), session.into()],
+            env: self.launch_env(),
+        })
     }
 
     pub fn refresh_memory(&mut self) {
@@ -731,12 +741,7 @@ impl App {
     }
 
     pub fn shift_launch_kind(&mut self, delta: isize) {
-        let kinds = [
-            LaunchKind::Workflow,
-            LaunchKind::Research,
-            LaunchKind::Review,
-            LaunchKind::Marbles,
-        ];
+        let kinds = LaunchKind::all();
         let current = kinds
             .iter()
             .position(|kind| *kind == self.launch_kind)
@@ -816,6 +821,8 @@ impl App {
     pub fn error_lines(&self) -> Vec<String> {
         let mut lines = vec![self.error_title.clone(), String::new()];
         lines.extend(self.error_lines.clone());
+        lines.push(String::new());
+        lines.push("R retry launch · Esc back to dispatch".to_string());
         lines
     }
 
@@ -1449,11 +1456,12 @@ pub fn default_prompt(kind: LaunchKind) -> String {
         LaunchKind::Marbles => {
             "Run a convergence loop on the selected surface until the lies are exposed.".to_string()
         }
+        LaunchKind::Skill(entry) => format!("Run {} for the task I am looking at now.", entry.display),
     }
 }
 
-pub fn agents() -> [&'static str; 4] {
-    ["claude", "codex", "gemini", "cursor"]
+pub fn agents() -> [&'static str; 7] {
+    ["claude", "codex", "gemini", "cursor", "agy", "junie", "grok"]
 }
 
 fn apply_run_filters(
