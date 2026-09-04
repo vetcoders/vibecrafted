@@ -3,7 +3,7 @@ use crate::mission_control::{
     ActionPriority, ActionQueueItem, ActionQueueKind, ActiveDispatch, AgentStatsRow, DataQuality,
     FailureEntry, FleetHealthSignal, FleetHealthStatus, SkillStatsRow, WaveSegment, WaveState,
 };
-use crate::observe::ConsoleView;
+use crate::observe::{ConsoleView, ObserveHealth};
 use crate::state::RunKind;
 use ratatui::prelude::*;
 use ratatui::style::{Color, Modifier, Style};
@@ -131,8 +131,13 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
 
     let mut items = Vec::new();
     if app.observe.runs.is_empty() {
+        let empty_message = match app.observe.status {
+            ObserveHealth::Live => "no live sessions in canonical control plane",
+            ObserveHealth::Degraded => "canonical state stale; showing no cached sessions",
+            ObserveHealth::Offline => "canonical control plane unavailable",
+        };
         items.push(ListItem::new(Line::from(Span::styled(
-            "no active workers on the server",
+            empty_message,
             Style::default().fg(Color::DarkGray),
         ))));
     }
@@ -197,6 +202,12 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
             run.run_id.clone(),
             Style::default().fg(Color::DarkGray),
         )));
+        body.push(Line::from(Span::styled(
+            run.switch_target()
+                .map(|target| format!("Enter switches to {target} · click row to select"))
+                .unwrap_or_else(|| "session has no attach target".to_string()),
+            Style::default().fg(Color::Cyan),
+        )));
         body.push(Line::from(""));
         if app.observe.transcript.trim().is_empty() {
             body.push(Line::from(Span::styled(
@@ -213,7 +224,7 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
         }
     } else {
         body.push(Line::from(Span::styled(
-            "Select a worker. Transcripts come from the server, not a local pid scan.",
+            "Select a live session from the canonical control plane.",
             Style::default().fg(Color::DarkGray),
         )));
     }

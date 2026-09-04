@@ -13,7 +13,10 @@ pub mod state;
 pub mod ui;
 
 use anyhow::Context;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+    MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -175,7 +178,7 @@ pub fn run_cli() -> anyhow::Result<()> {
 fn run_app(config: AppConfig) -> anyhow::Result<()> {
     enable_raw_mode().context("failed to enable raw mode")?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -213,11 +216,12 @@ fn run_app(config: AppConfig) -> anyhow::Result<()> {
                 .checked_sub(last_draw.elapsed())
                 .unwrap_or(Duration::ZERO);
 
-            if event::poll(timeout)?
-                && let Event::Key(key) = event::read()?
-                && handle_key(&mut app, key)?
-            {
-                break;
+            if event::poll(timeout)? {
+                match event::read()? {
+                    Event::Key(key) if handle_key(&mut app, key)? => break,
+                    Event::Mouse(mouse) => handle_mouse(&mut app, mouse)?,
+                    _ => {}
+                }
             }
 
             let now = Instant::now();
@@ -269,7 +273,11 @@ fn run_app(config: AppConfig) -> anyhow::Result<()> {
 
 fn shutdown_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Result<()> {
     disable_raw_mode().context("failed to disable raw mode")?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }
@@ -339,6 +347,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
             _ => {}
         },
         LaunchFocus::Error => match key.code {
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                app.focus = LaunchFocus::Browse;
+                launch_selected(app)?;
+            }
             KeyCode::Char('f') | KeyCode::Char('F')
                 if app
                     .error_lines
@@ -452,7 +464,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
             }
             KeyCode::Enter => match app.active_tab() {
                 AppTab::Monitor => {
-                    if app.selected_run().is_some() {
+                    if app.config.view == crate::observe::ConsoleView::Observe {
+                        switch_to_selected_observe_session(app)?;
+                    } else if app.selected_run().is_some() {
                         app.set_active_tab(AppTab::Controls);
                     }
                 }
@@ -508,12 +522,61 @@ fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
     Ok(false)
 }
 
+fn handle_mouse(app: &mut App, mouse: MouseEvent) -> anyhow::Result<()> {
+    if app.focus != LaunchFocus::Browse
+        || app.active_tab() != AppTab::Monitor
+        || app.config.view != crate::observe::ConsoleView::Observe
+    {
+        return Ok(());
+    }
+    match mouse.kind {
+        MouseEventKind::ScrollUp => app.move_observe_selection(-1),
+        MouseEventKind::ScrollDown => app.move_observe_selection(1),
+        MouseEventKind::Down(MouseButton::Left) => {
+            let (width, _) = crossterm::terminal::size()?;
+            let list_width = u32::from(width) * 38 / 100;
+            if u32::from(mouse.column) < list_width && mouse.row >= 6 {
+                let index = usize::from(mouse.row - 6);
+                if index < app.observe.runs.len() {
+                    if index == app.observe.selected {
+                        switch_to_selected_observe_session(app)?;
+                    } else {
+                        app.observe.selected = index;
+                        app.observe.transcript.clear();
+                        app.refresh_observe_transcript();
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn switch_to_selected_observe_session(app: &mut App) -> anyhow::Result<()> {
+    let Some(command) = app.observe_switch_command() else {
+        app.show_error(
+            "session switch unavailable",
+            vec!["The canonical session has no vc-frame attach target.".to_string()],
+        );
+        return Ok(());
+    };
+    let summary = command.command_line();
+    if let Err(error) = suspend_and_run(&command) {
+        app.show_error("session switch failed", error.detail_lines(summary));
+    } else {
+        app.append_status(format!("returned from {summary}"));
+        app.refresh();
+    }
+    Ok(())
+}
+
 fn launch_aicx_wizard(app: &mut App) -> anyhow::Result<()> {
     disable_raw_mode().ok();
-    let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
     let result = crate::memory::launch_wizard(&app.memory.project);
     enable_raw_mode().ok();
-    let _ = execute!(io::stdout(), EnterAlternateScreen);
+    let _ = execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture);
     match result {
         Ok(()) => app.append_status("returned from aicx wizard"),
         Err(error) => app.show_error("aicx wizard failed", vec![error.to_string()]),
@@ -725,7 +788,7 @@ fn suspend_and_run(command: &LaunchCommand) -> Result<(), LaunchRunError> {
     disable_raw_mode()
         .context("failed to disable raw mode before launch")
         .map_err(launch_error)?;
-    execute!(stdout, LeaveAlternateScreen).map_err(launch_error)?;
+    execute!(stdout, DisableMouseCapture, LeaveAlternateScreen).map_err(launch_error)?;
 
     let launch_result: Result<Output, LaunchRunError> =
         match command.spawn_interactive_with_stderr() {
@@ -733,8 +796,8 @@ fn suspend_and_run(command: &LaunchCommand) -> Result<(), LaunchRunError> {
             Err(error) => Err(launch_error(error)),
         };
 
-    let leave_result =
-        execute!(stdout, EnterAlternateScreen).context("failed to restore alternate screen");
+    let leave_result = execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .context("failed to restore alternate screen");
     let raw_result = enable_raw_mode().context("failed to re-enable raw mode after launch");
 
     leave_result.map_err(launch_error)?;
