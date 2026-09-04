@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -80,3 +81,23 @@ def test_isolation_create_workspace_does_not_write_operator_catalog(
         body = leaked.read_text(encoding="utf-8")
         assert record.workspace_id not in body
     assert record.workspace_id in catalog.read_text(encoding="utf-8")
+
+
+def test_direct_helper_refuses_pytest_root_against_nonisolated_home(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="vibecrafted-production-home-") as raw:
+        production_home = Path(raw) / ".vibecrafted"
+        test_root = Path(raw) / "pytest-of-direct-helper" / "test_meta0"
+        test_root.mkdir(parents=True)
+        monkeypatch.setenv("VIBECRAFTED_HOME", str(production_home))
+
+        with pytest.raises(
+            wc.WorkspaceCatalogError,
+            match="refusing to persist an ephemeral test workspace root",
+        ):
+            wc.resolve_run_workspace_identity(root=test_root)
+
+        assert not (
+            production_home / "control_plane" / "workspaces" / "catalog.json"
+        ).exists()

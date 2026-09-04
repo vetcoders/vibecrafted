@@ -44,7 +44,9 @@ vc-frame — resolves in this order:
 
 1. **`VIBECRAFTED_WORKSPACE_ID`** — the identity the runtime already resolved
    and exported into this process tree. It is honoured only when it names an
-   **active** workspace in the catalog.
+   **active** workspace whose `canonical_root` is the explicit launch root.
+   Same-root children also reuse the inherited logical session. A foreign-root
+   export is ambient parent context and cannot override an explicit launch root.
 2. **The one canonical catalog by `canonical_root`** — the unique active
    workspace rooted here. When several are rooted here, the selected one wins;
    an ambiguous root without a selection is an error, never a guess.
@@ -105,6 +107,7 @@ $VIBECRAFTED_HOME/control_plane/workspaces/
   instances/<uuid>.json        # vibecrafted.workspace-instance.v1
   sessions/<uuid>.json        # vibecrafted.workspace-session.v1
   snapshot_manifests/<uuid>.json
+  ephemeral_quarantine_receipts/<uuid>.json
   migration_report.json
 ```
 
@@ -121,11 +124,18 @@ vibecrafted workspace materialize <workspace_id> [--root PATH]
 vibecrafted workspace session-attach --workspace-id UUID --session-id UUID \
   --instance-id UUID --runtime vc-frame --runtime-session-id NAME --state live|dead|missing
 vibecrafted workspace migrate  [--dry-run]
+vibecrafted workspace quarantine-ephemeral [--apply] [--json]
 vibecrafted workspace settlement-counts <workspace_id>
 ```
 
 `bury` detaches live instances. `recover` reactivates the logical workspace
 without pretending an incompatible live runtime can be attached.
+
+`quarantine-ephemeral` previews only roots with positive pytest or generated
+temporary-directory provenance. `--apply` writes a full recovery receipt
+before removing those records from the catalog projection; instance, session,
+and snapshot history remains untouched. Workspace creation also refuses such a
+root when the catalog home is not itself pytest-isolated.
 
 ## WES runtime attachments
 
