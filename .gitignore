@@ -11,6 +11,8 @@ scripts/installer/**/__pycache__/
 .ai-context/*
 /.claude
 **/.claude/
+/.junie
+**/.junie/
 /*.png
 /__pycache__
 /scripts/__pycache__
