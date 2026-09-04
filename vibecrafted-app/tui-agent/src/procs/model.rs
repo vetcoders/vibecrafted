@@ -190,7 +190,10 @@ mod tests {
             FamilyTag::Codex
         );
         assert_eq!(
-            FamilyTag::classify("cursor-agent", "cursor-agent -p --output-format stream-json"),
+            FamilyTag::classify(
+                "cursor-agent",
+                "cursor-agent -p --output-format stream-json"
+            ),
             FamilyTag::Cursor
         );
         assert_eq!(FamilyTag::classify("bash", "ls"), FamilyTag::Other);

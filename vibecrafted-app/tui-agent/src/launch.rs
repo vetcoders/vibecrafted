@@ -17,12 +17,7 @@ pub enum LaunchKind {
 
 impl LaunchKind {
     pub fn all() -> Vec<Self> {
-        let mut kinds = vec![
-            Self::Workflow,
-            Self::Research,
-            Self::Review,
-            Self::Marbles,
-        ];
+        let mut kinds = vec![Self::Workflow, Self::Research, Self::Review, Self::Marbles];
         kinds.extend(
             crate::skills_catalog::CATALOG
                 .iter()
@@ -283,10 +278,7 @@ fn build_deck_launch_command(deck: &Path, request: &LaunchRequest) -> LaunchComm
         LaunchKind::Skill(entry) => {
             args.push(request.agent.clone().into());
             if !request.prompt.trim().is_empty()
-                && !matches!(
-                    entry.accepts,
-                    crate::skills_catalog::SkillPayloadKind::None
-                )
+                && !matches!(entry.accepts, crate::skills_catalog::SkillPayloadKind::None)
             {
                 args.push("--prompt".into());
                 args.push(request.prompt.clone().into());
@@ -412,12 +404,6 @@ fn resolved_vc_frame_config_dir_from(
     if let Some(explicit) = explicit {
         return Some(PathBuf::from(explicit));
     }
-    if let Some(root) = root {
-        let repo_config_dir = root.join("config/vc-frame");
-        if repo_config_dir.join("config.kdl").is_file() {
-            return Some(repo_config_dir);
-        }
-    }
     let config_home = xdg_config_home
         .map(PathBuf::from)
         .or_else(|| home.map(|home| PathBuf::from(home).join(".config")));
@@ -427,7 +413,12 @@ fn resolved_vc_frame_config_dir_from(
             return Some(installed);
         }
     }
-    None
+    let root = root?;
+    let repo_config_dir = root.join("config/vc-frame");
+    repo_config_dir
+        .join("config.kdl")
+        .is_file()
+        .then_some(repo_config_dir)
 }
 
 fn shell_join(program: &Path, args: &[OsString]) -> String {

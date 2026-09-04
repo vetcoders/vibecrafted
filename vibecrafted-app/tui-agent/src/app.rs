@@ -231,7 +231,10 @@ impl DeepAction {
             DeepAction::MuxVerifyClient(_) => "Verify mux client routing".to_string(),
             DeepAction::MuxFixClientDrift(_) => "Fix mux client drift".to_string(),
             DeepAction::PolarizeIntent {
-                band, score, run_id, ..
+                band,
+                score,
+                run_id,
+                ..
             } => format!(
                 "Polarize {} {} {}",
                 band.label(),
@@ -239,7 +242,11 @@ impl DeepAction {
                 truncate_id(run_id, 18)
             ),
             DeepAction::SkillLaunch { skill, agent, .. } => {
-                format!("Launch {} ({})", skill.trim_start_matches("vc-"), agent.label())
+                format!(
+                    "Launch {} ({})",
+                    skill.trim_start_matches("vc-"),
+                    agent.label()
+                )
             }
         }
     }
@@ -426,10 +433,7 @@ impl App {
     /// Refresh the remote Observe projection on its own bounded cadence.
     /// Returns whether the fetch succeeded so the scheduler can back off.
     pub fn refresh_observe(&mut self) -> bool {
-        self.observe.origin = format!(
-            "control-plane:{}",
-            self.config.state_root.display()
-        );
+        self.observe.origin = format!("control-plane:{}", self.config.state_root.display());
         self.observe.generated_at = chrono::Utc::now().to_rfc3339();
         self.observe.status = ObserveHealth::Live;
         self.observe.error = None;
@@ -1160,9 +1164,9 @@ impl App {
             matches!(
                 entry.slug,
                 "vc-workflow" | "vc-review" | "vc-marbles" | "vc-polarize"
-            ) || selected_skill
-                .as_deref()
-                .is_some_and(|skill| entry.slug == skill || entry.slug.trim_start_matches("vc-") == skill)
+            ) || selected_skill.as_deref().is_some_and(|skill| {
+                entry.slug == skill || entry.slug.trim_start_matches("vc-") == skill
+            })
         }) {
             let agent = resolve_skill_agent(entry.default_agent, self.selected_agent());
             let payload = match entry.accepts {
@@ -1456,12 +1460,16 @@ pub fn default_prompt(kind: LaunchKind) -> String {
         LaunchKind::Marbles => {
             "Run a convergence loop on the selected surface until the lies are exposed.".to_string()
         }
-        LaunchKind::Skill(entry) => format!("Run {} for the task I am looking at now.", entry.display),
+        LaunchKind::Skill(entry) => {
+            format!("Run {} for the task I am looking at now.", entry.display)
+        }
     }
 }
 
 pub fn agents() -> [&'static str; 7] {
-    ["claude", "codex", "gemini", "cursor", "agy", "junie", "grok"]
+    [
+        "claude", "codex", "gemini", "cursor", "agy", "junie", "grok",
+    ]
 }
 
 fn apply_run_filters(
@@ -1472,7 +1480,8 @@ fn apply_run_filters(
 ) {
     let now = chrono::Utc::now();
     let workspace_live = runs.iter().any(|run| {
-        is_actionable_kind(run.kind, &run.snapshot, now) && workspace_matches(&run.snapshot, workspace)
+        is_actionable_kind(run.kind, &run.snapshot, now)
+            && workspace_matches(&run.snapshot, workspace)
     });
     match queue_scope {
         QueueScope::Live => runs.retain(|run| {
@@ -1532,7 +1541,10 @@ fn truncate_id(value: &str, width: usize) -> String {
     if value.chars().count() <= width {
         return value.to_string();
     }
-    let mut short = value.chars().take(width.saturating_sub(1)).collect::<String>();
+    let mut short = value
+        .chars()
+        .take(width.saturating_sub(1))
+        .collect::<String>();
     short.push('…');
     short
 }
@@ -1615,7 +1627,9 @@ fn artifact_lines(path: &Path, run_root: Option<&str>) -> anyhow::Result<Vec<Str
         text
     };
     if rendered.trim().is_empty() {
-        return Ok(vec!["No transcript or events in this artifact yet.".to_string()]);
+        return Ok(vec![
+            "No transcript or events in this artifact yet.".to_string(),
+        ]);
     }
     let mut lines = rendered
         .lines()

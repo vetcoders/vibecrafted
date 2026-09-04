@@ -955,7 +955,11 @@ fn start_state_watcher(path: &Path, tx: Sender<()>) -> anyhow::Result<Recommende
             let Ok(event) = event else {
                 return;
             };
-            if event.paths.iter().any(|candidate| is_projection_path(candidate)) {
+            if event
+                .paths
+                .iter()
+                .any(|candidate| is_projection_path(candidate))
+            {
                 let _ = tx.send(());
             }
         },
@@ -1430,10 +1434,7 @@ mod tests {
                 | Err(std::sync::mpsc::TryRecvError::Empty)
         ));
         // After drop the notify callback is gone; a later send path cannot exist.
-        assert!(
-            rx.recv_timeout(Duration::from_millis(50))
-                .is_err()
-        );
+        assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
     }
 
     #[test]

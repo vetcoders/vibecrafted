@@ -143,7 +143,11 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
     }
     for (index, run) in app.observe.runs.iter().enumerate() {
         let selected = index == app.observe.selected;
-        let glyph = if run.is_genuinely_active() { "●" } else { "○" };
+        let glyph = if run.is_genuinely_active() {
+            "●"
+        } else {
+            "○"
+        };
         let style = if selected {
             Style::default()
                 .fg(Color::Black)

@@ -69,12 +69,15 @@ async fn operator_console_launch_uses_vc_frame_top_level_layout_flags() {
     let previous_path = env::var_os("PATH");
     let previous_override = env::var_os("VIBECRAFTED_TERMINAL_BINARY");
     let previous_config_dir = env::var_os("VC_FRAME_CONFIG_DIR");
+    let previous_xdg = env::var_os("XDG_CONFIG_HOME");
+    let previous_home = env::var_os("HOME");
+    let dir = tempdir().unwrap();
     unsafe {
         env::remove_var("VIBECRAFTED_TERMINAL_BINARY");
         env::remove_var("VC_FRAME_CONFIG_DIR");
+        env::set_var("XDG_CONFIG_HOME", dir.path().join("empty-xdg"));
+        env::set_var("HOME", dir.path().join("empty-home"));
     }
-
-    let dir = tempdir().unwrap();
     let bin_dir = dir.path().join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
     fs::write(bin_dir.join("vc-frame"), "#!/bin/sh\n").unwrap();
@@ -169,6 +172,22 @@ async fn operator_console_launch_uses_vc_frame_top_level_layout_flags() {
         },
         None => unsafe {
             env::remove_var("VC_FRAME_CONFIG_DIR");
+        },
+    }
+    match previous_xdg {
+        Some(value) => unsafe {
+            env::set_var("XDG_CONFIG_HOME", value);
+        },
+        None => unsafe {
+            env::remove_var("XDG_CONFIG_HOME");
+        },
+    }
+    match previous_home {
+        Some(value) => unsafe {
+            env::set_var("HOME", value);
+        },
+        None => unsafe {
+            env::remove_var("HOME");
         },
     }
 }
@@ -371,11 +390,15 @@ fn marbles_launches_keep_runtime_root_and_loop_controls() {
     // Process env is shared across tests, so pin access while we mutate vc_frame config.
     let _guard = env_lock().lock().unwrap();
     let previous = env::var_os("VC_FRAME_CONFIG_DIR");
-    unsafe {
-        env::remove_var("VC_FRAME_CONFIG_DIR");
-    }
+    let prev_xdg = env::var_os("XDG_CONFIG_HOME");
+    let prev_home = env::var_os("HOME");
     let dir = tempdir().unwrap();
     let root = dir.path();
+    unsafe {
+        env::remove_var("VC_FRAME_CONFIG_DIR");
+        env::set_var("XDG_CONFIG_HOME", root.join("empty-xdg"));
+        env::set_var("HOME", root.join("empty-home"));
+    }
     fs::create_dir_all(root.join("config/vc-frame")).unwrap();
     fs::write(root.join("config/vc-frame/config.kdl"), "layout {}\n").unwrap();
     let deck = Path::new("/usr/bin/vibecrafted");
@@ -436,6 +459,22 @@ fn marbles_launches_keep_runtime_root_and_loop_controls() {
         },
         None => unsafe {
             env::remove_var("VC_FRAME_CONFIG_DIR");
+        },
+    }
+    match prev_xdg {
+        Some(value) => unsafe {
+            env::set_var("XDG_CONFIG_HOME", value);
+        },
+        None => unsafe {
+            env::remove_var("XDG_CONFIG_HOME");
+        },
+    }
+    match prev_home {
+        Some(value) => unsafe {
+            env::set_var("HOME", value);
+        },
+        None => unsafe {
+            env::remove_var("HOME");
         },
     }
 }
@@ -640,10 +679,14 @@ fn terminal_launch_omits_session_flag_when_session_name_is_none() {
 fn terminal_launch_probe_inherits_config_dir_env_from_launch_command() {
     let _guard = env_lock().lock().unwrap();
     let previous = env::var_os("VC_FRAME_CONFIG_DIR");
+    let previous_xdg = env::var_os("XDG_CONFIG_HOME");
+    let previous_home = env::var_os("HOME");
+    let workspace = tempdir().unwrap();
     unsafe {
         env::remove_var("VC_FRAME_CONFIG_DIR");
+        env::set_var("XDG_CONFIG_HOME", workspace.path().join("empty-xdg"));
+        env::set_var("HOME", workspace.path().join("empty-home"));
     }
-    let workspace = tempdir().unwrap();
     let vc_frame_dir = workspace.path().join("config/vc-frame");
     fs::create_dir_all(&vc_frame_dir).unwrap();
     fs::write(vc_frame_dir.join("config.kdl"), "// repo-local vc_frame\n").unwrap();
@@ -729,6 +772,22 @@ fn terminal_launch_probe_inherits_config_dir_env_from_launch_command() {
         },
         None => unsafe {
             env::remove_var("VC_FRAME_CONFIG_DIR");
+        },
+    }
+    match previous_xdg {
+        Some(value) => unsafe {
+            env::set_var("XDG_CONFIG_HOME", value);
+        },
+        None => unsafe {
+            env::remove_var("XDG_CONFIG_HOME");
+        },
+    }
+    match previous_home {
+        Some(value) => unsafe {
+            env::set_var("HOME", value);
+        },
+        None => unsafe {
+            env::remove_var("HOME");
         },
     }
 }
@@ -865,7 +924,11 @@ fn mux_health_deep_actions_surface_per_known_service() {
         .iter()
         .filter(|action| matches!(action, DeepAction::MuxHealth { .. }))
         .collect();
-    assert_eq!(mux_actions.len(), 1, "only unhealthy mux services are actions");
+    assert_eq!(
+        mux_actions.len(),
+        1,
+        "only unhealthy mux services are actions"
+    );
 
     let services: Vec<&str> = actions
         .iter()
