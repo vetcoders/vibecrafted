@@ -176,6 +176,49 @@ def test_print_completed_sends_missing_payload_error_to_stderr(capsys) -> None:
     assert "completed without control-plane payload" in captured.err
 
 
+def test_argv_has_job_input_detects_prompt_and_file_flags() -> None:
+    assert wrappers.argv_has_job_input([]) is False
+    assert wrappers.argv_has_job_input(["claude"]) is False
+    assert wrappers.argv_has_job_input(["claude", "--runtime", "plain"]) is False
+    assert wrappers.argv_has_job_input(["claude", "--prompt", "x"]) is True
+    assert wrappers.argv_has_job_input(["claude", "-p", "x"]) is True
+    assert wrappers.argv_has_job_input(["claude", "--file", "brief.md"]) is True
+    assert wrappers.argv_has_job_input(["claude", "-f", "brief.md"]) is True
+    assert wrappers.argv_has_job_input(["claude", "--prompt-stdin"]) is True
+    assert wrappers.argv_has_job_input(["--prompt=x", "claude"]) is True
+    assert wrappers.argv_has_job_input(["--file=brief.md"]) is True
+
+
+def test_partner_main_without_prompt_calls_deck(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_call(cmd):
+        calls.append(list(cmd))
+        return 0
+
+    monkeypatch.setattr(subprocess, "call", fake_call)
+
+    assert wrappers.partner_main(["claude"]) == 0
+    assert calls
+    assert calls[0][1:] == ["partner", "claude"]
+
+
+def test_partner_main_with_prompt_stays_supervised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        wrappers,
+        "supervised_skill_main",
+        lambda skill, argv: (
+            0 if skill == "partner" and argv == ["claude", "--prompt", "x"] else 9
+        ),
+    )
+
+    assert wrappers.partner_main(["claude", "--prompt", "x"]) == 0
+
+
 def test_resume_main_routes_through_tracked_native_resume_api(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

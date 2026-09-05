@@ -1351,6 +1351,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif first not in python_commands and not first.startswith("-"):
             is_lifecycle = True
 
+    from .wrappers import argv_has_job_input
+
+    if raw_args and raw_args[0] == "partner" and not argv_has_job_input(raw_args[1:]):
+        # Bare partner is an interactive TTY face (init/operator/resume family),
+        # not a supervised headless worker. --prompt/--file keep launch_workflow.
+        is_lifecycle = True
+
     if is_lifecycle:
         from .runtime_paths import vibecrafted_tools_home
 

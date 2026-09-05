@@ -1068,6 +1068,45 @@ cmd_init_help() {
   printf '\n'
 }
 
+cmd_partner_help() {
+  printf '\n'
+  printf '%b⚒%b  %bpartner%b\n' "$_copper" "$_reset" "$_bold" "$_reset"
+  printf '%b─────────────────────────────────────────%b\n' "$_steel" "$_reset"
+  printf '  Start an interactive partner session with an agent (shared steering).\n'
+  printf '  Bare partner opens a TTY face with /vc-partner. --prompt/--file dispatch a\n'
+  printf '  tracked headless worker instead.\n'
+  printf '\n'
+  printf '%bUsage:%b\n' "$_bold" "$_reset"
+  printf '  vibecrafted partner [claude|codex|agy|junie|grok|cursor] [--runtime terminal|visible|plain]\n'
+  printf '  vibecrafted partner <agent> --prompt "<task>"     (headless worker)\n'
+  printf '  vc-partner [claude|codex|agy|junie|grok|cursor]\n'
+  printf '\n'
+  printf '%bExamples:%b\n' "$_bold" "$_reset"
+  printf '  vibecrafted partner claude\n'
+  printf '  vibecrafted partner codex --runtime plain\n'
+  printf '  vibecrafted partner claude --prompt "debug the launcher"\n'
+  printf '  vc-partner grok\n'
+  printf '\n'
+}
+
+cmd_operator_help() {
+  printf '\n'
+  printf '%b⚒%b  %boperator%b\n' "$_copper" "$_reset" "$_bold" "$_reset"
+  printf '%b─────────────────────────────────────────%b\n' "$_steel" "$_reset"
+  printf '  Start an interactive Agent Operator session (never the human Founder).\n'
+  printf '  Opens a TTY face with /vc-operator — same family as init, not a worker job.\n'
+  printf '\n'
+  printf '%bUsage:%b\n' "$_bold" "$_reset"
+  printf '  vibecrafted operator [claude|codex|agy|junie|grok|cursor] [--runtime terminal|visible]\n'
+  printf '  vc-operator [claude|codex|agy|junie|grok|cursor]\n'
+  printf '\n'
+  printf '%bExamples:%b\n' "$_bold" "$_reset"
+  printf '  vibecrafted operator claude\n'
+  printf '  vibecrafted operator codex --operator auto\n'
+  printf '  vc-operator grok\n'
+  printf '\n'
+}
+
 cmd_status_help() {
   printf '\n'
   printf '%b⚒%b  %bstatus%b\n' "$_copper" "$_reset" "$_bold" "$_reset"
@@ -4379,6 +4418,14 @@ cmd_help() {
       cmd_init_help
       return
       ;;
+    partner)
+      cmd_partner_help
+      return
+      ;;
+    operator)
+      cmd_operator_help
+      return
+      ;;
     start)
       cmd_start_help
       return
@@ -4815,6 +4862,81 @@ cmd_init() {
     return
   fi
   printf '%b✗%b Missing helper %s and no generic skill-init is available.\n' "$_red" "$_reset" "$helper_name" >&2
+  return 1
+}
+
+cmd_partner() {
+  if _is_help_flag "${1:-}"; then
+    cmd_partner_help
+    return 0
+  fi
+  local agent="${1:-claude}"
+  _prepend_repo_bin_path
+  if [[ "$agent" == "gemini" ]]; then
+    printf '%b✗ gemini CLI is deprecated.%b Use agy (Google Antigravity CLI) instead.\n' "$_red" "$_reset" >&2
+    printf '  Example: vibecrafted partner agy --prompt "..." \n' >&2
+    return 1
+  fi
+  _has_agent "$agent" || {
+    printf '%b✗%b Unknown agent: %s\n' "$_red" "$_reset" "$agent" >&2
+    return 1
+  }
+
+  _require_agent_cli "$agent" || return 1
+
+  [[ $# -gt 0 ]] && shift
+  _ensure_helpers_loaded || return 1
+  if _vetcoders_argv_has_job_input "$@"; then
+    printf '%b⚒%b  Starting %b%s%b partner worker...\n' "$_copper" "$_reset" "$_bold" "$agent" "$_reset"
+    cmd_core_workflow_skill partner "$agent" "$@"
+    return
+  fi
+  printf '%b⚒%b  Starting %b%s%b with vc-partner...\n' "$_copper" "$_reset" "$_bold" "$agent" "$_reset"
+  local helper_name="${agent}-skill-partner"
+  if command -v "$helper_name" >/dev/null 2>&1; then
+    _run_helper "$helper_name" "$@"
+    return
+  fi
+  if command -v _vetcoders_skill_partner >/dev/null 2>&1; then
+    _vetcoders_skill_partner "$agent" "$@"
+    return
+  fi
+  printf '%b✗%b Missing helper %s and no generic skill-partner is available.\n' "$_red" "$_reset" "$helper_name" >&2
+  return 1
+}
+
+cmd_operator() {
+  if _is_help_flag "${1:-}"; then
+    cmd_operator_help
+    return 0
+  fi
+  local agent="${1:-claude}"
+  _prepend_repo_bin_path
+  if [[ "$agent" == "gemini" ]]; then
+    printf '%b✗ gemini CLI is deprecated.%b Use agy (Google Antigravity CLI) instead.\n' "$_red" "$_reset" >&2
+    printf '  Example: vibecrafted operator agy\n' >&2
+    return 1
+  fi
+  _has_agent "$agent" || {
+    printf '%b✗%b Unknown agent: %s\n' "$_red" "$_reset" "$agent" >&2
+    return 1
+  }
+
+  _require_agent_cli "$agent" || return 1
+
+  [[ $# -gt 0 ]] && shift
+  printf '%b⚒%b  Starting %b%s%b with vc-operator...\n' "$_copper" "$_reset" "$_bold" "$agent" "$_reset"
+  _ensure_helpers_loaded || return 1
+  local helper_name="${agent}-skill-operator"
+  if command -v "$helper_name" >/dev/null 2>&1; then
+    _run_helper "$helper_name" "$@"
+    return
+  fi
+  if command -v _vetcoders_skill_operator >/dev/null 2>&1; then
+    _vetcoders_skill_operator "$agent" "$@"
+    return
+  fi
+  printf '%b✗%b Missing helper %s and no generic skill-operator is available.\n' "$_red" "$_reset" "$helper_name" >&2
   return 1
 }
 
@@ -5717,6 +5839,16 @@ run_skill() {
     return
   fi
 
+  if [[ "$skill" == "partner" ]]; then
+    cmd_partner "$agent" "$@"
+    return
+  fi
+
+  if [[ "$skill" == "operator" ]]; then
+    cmd_operator "$agent" "$@"
+    return
+  fi
+
   if [[ "$skill" == "agents" ]]; then
     cmd_agents "$@"
     return
@@ -5922,6 +6054,7 @@ main() {
     help|-h|--help) cmd_help "$@" ;;
     start) cmd_start "$@" ;;
     init) cmd_init "$@" ;;
+    operator) cmd_operator "$@" ;;
     resume) cmd_resume "$@" ;;
     observe|await|stop) cmd_lifecycle_command "$cmd" "$@" ;;
     gui) cmd_gui "$@" ;;

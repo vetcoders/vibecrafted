@@ -586,8 +586,18 @@ def _resolved_workspace_session(env: dict[str, str]) -> str:
     return value
 
 
-def test_init_claude_uses_interactive_tab_without_print_mode(
+@pytest.mark.parametrize(
+    ("verb", "seed"),
+    [
+        ("init", "/vc-init"),
+        ("partner", "/vc-partner"),
+        ("operator", "/vc-operator"),
+    ],
+)
+def test_bare_shell_face_opens_interactive_tab_without_print_mode(
     tmp_path: Path,
+    verb: str,
+    seed: str,
 ) -> None:
     home = tmp_path / "home"
     fake_bin = tmp_path / "bin"
@@ -617,7 +627,7 @@ def test_init_claude_uses_interactive_tab_without_print_mode(
     env.pop("VC_FRAME_SESSION_NAME", None)
 
     subprocess.run(
-        ["bash", str(LAUNCHER), "init", "claude", "--operator", "auto"],
+        ["bash", str(LAUNCHER), verb, "claude", "--operator", "auto"],
         check=True,
         cwd=REPO_ROOT,
         env=env,
@@ -636,7 +646,7 @@ def test_init_claude_uses_interactive_tab_without_print_mode(
         "vibecrafted_core.spawn interactive-launch claude --runtime local-native "
         "--permissions bypass --token-budget safe --operator auto --continuity fresh --root"
     ) in script_body
-    assert "/vc-init" in script_body
+    assert seed in script_body
     assert " -p " not in script_body
 
 

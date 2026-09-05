@@ -215,6 +215,21 @@ _vetcoders_parse_skill_contract() {
   return "$status"
 }
 
+# Explicit operator job text — not a positional tail and not an AICX pack.
+# Bare partner/resume stay interactive; --prompt/--file send a tracked
+# headless worker. Init/operator keep the TTY and append extra text to the seed.
+_vetcoders_argv_has_job_input() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      -p|--prompt|-f|--file|--prompt-stdin|--prompt=*|--file=*)
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
 _vetcoders_effective_runtime() {
   if [[ -n "$_vetcoders_contract_runtime" ]]; then
     printf '%s\n' "$_vetcoders_contract_runtime"

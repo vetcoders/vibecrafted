@@ -25,10 +25,12 @@ SKILL_PREFIX = {
     "followup": "fwup",
     "implement": "just",
     "marbles": "marb",
+    "partner": "part",
     "prune": "prun",
     "review": "rvew",
     "scaffold": "scaf",
 }
+_JOB_INPUT_FLAGS = frozenset({"-p", "--prompt", "-f", "--file", "--prompt-stdin"})
 
 
 def invocation_root() -> Path:
@@ -54,6 +56,20 @@ def _print_workflow_help(workflow_id: str) -> int:
 def _has_flag(args: Sequence[str], name: str) -> bool:
     """True if `name` appears bare or as `name=value` among `args`."""
     return name in args or any(arg.startswith(f"{name}=") for arg in args)
+
+
+def argv_has_job_input(args: Sequence[str]) -> bool:
+    """True when argv carries explicit --prompt/--file/--prompt-stdin job text.
+
+    Bare partner/init/operator/resume stay an interactive TTY face. These flags
+    are the worker-dispatch payload (tracked headless run).
+    """
+    for arg in args:
+        if arg in _JOB_INPUT_FLAGS:
+            return True
+        if arg.startswith(("--prompt=", "--file=")):
+            return True
+    return False
 
 
 def _help_requested(args: Sequence[str]) -> bool:
@@ -409,7 +425,16 @@ def ownership_main(argv: Sequence[str] | None = None) -> int:
 
 
 def partner_main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry for `vibecrafted partner`."""
+    """CLI entry for `vibecrafted partner` / `vc-partner`.
+
+    No --prompt/--file: interactive face (deck `partner`, same family as init).
+    With --prompt/--file: tracked headless worker via supervised_skill_main.
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    if _help_requested(args):
+        return _print_workflow_help("partner")
+    if not argv_has_job_input(args):
+        return subprocess.call([str(deck_path()), "partner", *args])
     return supervised_skill_main("partner", argv)
 
 
