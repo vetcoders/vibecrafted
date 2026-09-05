@@ -403,13 +403,55 @@ _vetcoders_wait_for_vc_frame_session() {
   return 1
 }
 
+_vetcoders_place_label_from_session_name() {
+  # Strip old hashed recovery tails (`-rHHMMSS-PID`) and numeric incarnations
+  # (`-2`). The SESSIONS rail is a place name, not a socket token.
+  local name="${1:-workspace}"
+  if [[ "$name" =~ ^(.*)-r[0-9]{6}-[0-9]+$ ]]; then
+    name="${BASH_REMATCH[1]}"
+  fi
+  if [[ "$name" =~ ^(.*)-([0-9]{1,2})$ ]]; then
+    name="${BASH_REMATCH[1]}"
+  fi
+  [[ -n "$name" ]] || name="workspace"
+  printf '%s\n' "$name"
+}
+
+_vetcoders_next_free_place_session() {
+  local place="${1:-workspace}"
+  local max_len=24
+  local n=2
+  local suffix stem candidate budget
+  while (( n <= 99 )); do
+    suffix="-${n}"
+    budget=$((max_len - ${#suffix}))
+    (( budget < 1 )) && budget=1
+    stem="$place"
+    if (( ${#stem} > budget )); then
+      stem="${stem:0:budget}"
+      stem="${stem%-}"
+      [[ -n "$stem" ]] || stem="ws"
+    fi
+    candidate="${stem}${suffix}"
+    if [[ "$(_vetcoders_vc_frame_session_state "$candidate")" == "missing" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    n=$((n + 1))
+  done
+  printf '%s\n' "${place:0:21}-x"
+}
+
 _vetcoders_recovery_vc_frame_session_name() {
-  local original="${1:-vibecrafted}"
-  local suffix
-  suffix="r$(date +%H%M%S)-$$"
-  # Recovery also runs from CLI shells that do not have the app's short
-  # product socket root. Twenty bytes fit the default macOS TMPDIR budget.
-  _vetcoders_compact_session_name "${original}-${suffix}" "$suffix" 20
+  local original="${1:-}"
+  local place=""
+  # Catalog place wins: hashed dead names like `3m-4ad4-r034605-2072` are not
+  # a workspace identity. Fall back to stripping the dead name.
+  place="$(_vetcoders_operator_place_session_name 2>/dev/null || true)"
+  if [[ -z "$place" ]]; then
+    place="$(_vetcoders_place_label_from_session_name "${original:-workspace}")"
+  fi
+  _vetcoders_next_free_place_session "$place"
 }
 
 _vetcoders_run_new_vc_frame_session() {
