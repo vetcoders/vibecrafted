@@ -331,6 +331,25 @@ def current_faces() -> list[str]:
         return []
 
 
+# Curses pair 0 is COLOR_BLACK. Signed palettes put purple-navy `#26233a` in
+# `colors.normal.black`, which is not dark paper (`#0b0b12`) and becomes a dark
+# rectangle on light paper (`#fafafa`). Pair 1 at default/default follows the
+# vc-frame / alacritty theme in both modes.
+_PAPER_PAIR = 1
+_PAPER = 0
+
+
+def bind_terminal_paper(window: curses.window) -> int:
+    """Paint with the host terminal paper; never ANSI black."""
+    global _PAPER
+    curses.use_default_colors()
+    curses.init_pair(_PAPER_PAIR, -1, -1)
+    _PAPER = curses.color_pair(_PAPER_PAIR)
+    window.bkgd(" ", _PAPER)
+    window.bkgdset(" ", _PAPER)
+    return _PAPER
+
+
 def _clip(text: str, width: int) -> str:
     if width <= 0:
         return ""
@@ -346,7 +365,7 @@ def _safe_addstr(
     if row < 0 or row >= height or col < 0 or col >= width:
         return
     try:
-        window.addstr(row, col, _clip(text, width - col), attr)
+        window.addstr(row, col, _clip(text, width - col), attr | _PAPER)
     except curses.error:
         pass
 
@@ -408,8 +427,7 @@ class Workshop:
 
     def configure(self) -> None:
         try:
-            curses.use_default_colors()
-            self.window.bkgd(" ", curses.A_NORMAL)
+            bind_terminal_paper(self.window)
         except curses.error:
             pass
         curses.curs_set(0)

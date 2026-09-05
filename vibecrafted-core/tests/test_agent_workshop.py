@@ -87,6 +87,43 @@ def test_choice_markers_are_unboxed_and_selected_once() -> None:
     assert all("[" not in token and "«" not in token for token in tokens)
 
 
+def test_bind_terminal_paper_uses_default_colors_not_ansi_black() -> None:
+    workshop = _load()
+    calls: list[object] = []
+
+    class FakeCurses:
+        error = Exception
+
+        def use_default_colors(self) -> None:
+            calls.append("use_default")
+
+        def init_pair(self, pair: int, fg: int, bg: int) -> None:
+            calls.append(("pair", pair, fg, bg))
+
+        def color_pair(self, pair: int) -> int:
+            return 256 * pair
+
+    class FakeWindow:
+        def bkgd(self, ch: str, attr: int) -> None:
+            calls.append(("bkgd", ch, attr))
+
+        def bkgdset(self, ch: str, attr: int) -> None:
+            calls.append(("bkgdset", ch, attr))
+
+    original = workshop.curses
+    workshop.curses = FakeCurses()  # type: ignore[misc]
+    try:
+        attr = workshop.bind_terminal_paper(FakeWindow())  # type: ignore[arg-type]
+    finally:
+        workshop.curses = original
+
+    assert attr == 256
+    assert "use_default" in calls
+    assert ("pair", 1, -1, -1) in calls
+    assert ("bkgd", " ", 256) in calls
+    assert ("bkgdset", " ", 256) in calls
+
+
 def test_interactive_mode_matrix_is_complete_and_fails_closed() -> None:
     workshop = _load()
 
