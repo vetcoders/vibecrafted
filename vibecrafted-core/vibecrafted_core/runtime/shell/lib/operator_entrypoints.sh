@@ -51,7 +51,11 @@ _vetcoders_init_in_current_terminal() {
     printf 'vc-frame cockpit not installed — starting %s in this terminal instead (vibecrafted %s %s --runtime plain does the same explicitly).\n' "$tool" "$verb" "$tool" >&2
   fi
   if [[ ! -t 0 || ! -t 1 ]]; then
-    printf 'vibecrafted %s needs an interactive terminal for %s; for a non-interactive run use: vibecrafted %s %s --prompt "<task>"\n' "$verb" "$tool" "$verb" "$tool" >&2
+    if [[ "$verb" == "partner" ]]; then
+      printf '%s\n' "\`vc-partner\` is available from interactive agent session. Use vc-init first, and then trigger the skill from the active session" >&2
+    else
+      printf 'vibecrafted %s needs an interactive terminal for %s; for a non-interactive run use: vibecrafted %s %s --prompt "<task>"\n' "$verb" "$tool" "$verb" "$tool" >&2
+    fi
     return 1
   fi
   ( cd "$root_dir" && eval "$command_text" )
@@ -93,16 +97,11 @@ _vetcoders_skill_operator() {
 }
 
 # vc-partner launcher — interactive partner session, same family as init.
-# Explicit --prompt/--file is a tracked headless worker, not a TTY face.
+# --prompt/--file append extra seed context; they never select a headless worker.
 _vetcoders_skill_partner() {
   local tool="$1"
   shift
   local runtime partner_prompt command_text permissions
-
-  if _vetcoders_argv_has_job_input "$@"; then
-    _vetcoders_skill "$tool" partner "$@"
-    return
-  fi
 
   _vetcoders_parse_contract "$@" || return 1
   [[ -z "$_vetcoders_contract_count" ]] || {

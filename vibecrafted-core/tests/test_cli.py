@@ -116,48 +116,27 @@ def test_bare_partner_delegates_to_deck_not_launch_workflow(
     assert runs[0][1:] == ["partner", "claude"]
 
 
-def test_partner_with_prompt_keeps_launch_workflow(
+def test_partner_with_prompt_delegates_to_deck_not_launch_workflow(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    capsys,
 ) -> None:
-    seen: dict[str, object] = {}
+    launches: list[object] = []
+    runs: list[list[str]] = []
 
-    def fake_launch(spec, _source_dir):
-        seen["skill"] = spec.skill
-        seen["prompt"] = spec.prompt
-        seen["agent"] = spec.agent
-        return {
-            "accepted": True,
-            "run_id": "prtn-prompt-1",
-            "agent": spec.agent,
-            "skill": spec.skill,
-            "root": spec.root,
-            "status": "launching",
-        }
+    def fake_launch(*_args, **_kwargs):
+        launches.append(1)
+        raise AssertionError("partner --prompt must not call launch_workflow")
+
+    def fake_run(cmd, **_kwargs):
+        runs.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0)
 
     monkeypatch.setattr(cli, "launch_workflow", fake_launch)
+    monkeypatch.setattr(subprocess, "run", fake_run)
 
-    rc = cli.main(
-        [
-            "partner",
-            "claude",
-            "--prompt",
-            "do the cut",
-            "--runtime",
-            "headless",
-            "--root",
-            str(tmp_path),
-            "--json",
-        ]
-    )
-
-    assert rc == 0
-    assert seen["skill"] == "partner"
-    assert seen["prompt"] == "do the cut"
-    assert seen["agent"] == "claude"
-    body = json.loads(capsys.readouterr().out)
-    assert body["run_id"] == "prtn-prompt-1"
+    assert cli.main(["partner", "claude", "--prompt", "do the cut"]) == 0
+    assert launches == []
+    assert runs
+    assert runs[0][1:] == ["partner", "claude", "--prompt", "do the cut"]
 
 
 def test_core_parser_accepts_the_short_prompt_and_file_flags() -> None:

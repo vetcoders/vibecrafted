@@ -216,8 +216,9 @@ _vetcoders_parse_skill_contract() {
 }
 
 # Explicit operator job text — not a positional tail and not an AICX pack.
-# Bare partner/resume stay interactive; --prompt/--file send a tracked
-# headless worker. Init/operator keep the TTY and append extra text to the seed.
+# Bare resume stays interactive; --prompt/--file on resume send a tracked
+# headless worker. Init/operator/partner keep the TTY and append extra text
+# to the seed. Partner never uses this predicate to select a worker lane.
 _vetcoders_argv_has_job_input() {
   local arg
   for arg in "$@"; do

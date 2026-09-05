@@ -58,11 +58,26 @@ def _has_flag(args: Sequence[str], name: str) -> bool:
     return name in args or any(arg.startswith(f"{name}=") for arg in args)
 
 
+PARTNER_INTERACTIVE_ONLY = (
+    "`vc-partner` is available from interactive agent session. "
+    "Use vc-init first, and then trigger the skill from the active session"
+)
+
+
+def _stdio_is_interactive() -> bool:
+    """True when both stdin and stdout are TTYs. Closed stdio is not interactive."""
+    try:
+        return bool(sys.stdin.isatty() and sys.stdout.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
 def argv_has_job_input(args: Sequence[str]) -> bool:
     """True when argv carries explicit --prompt/--file/--prompt-stdin job text.
 
-    Bare partner/init/operator/resume stay an interactive TTY face. These flags
-    are the worker-dispatch payload (tracked headless run).
+    Bare init/operator/resume stay an interactive TTY face. On resume these
+    flags are the worker-dispatch payload (tracked headless run). Partner is
+    interactive-only: job flags never select a headless worker.
     """
     for arg in args:
         if arg in _JOB_INPUT_FLAGS:
@@ -425,17 +440,19 @@ def ownership_main(argv: Sequence[str] | None = None) -> int:
 
 
 def partner_main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry for `vibecrafted partner` / `vc-partner`.
+    """CLI entry for `vc-partner`. Interactive skill; never a headless worker.
 
-    No --prompt/--file: interactive face (deck `partner`, same family as init).
-    With --prompt/--file: tracked headless worker via supervised_skill_main.
+    `vibecrafted partner <agent>` is the TTY launcher (init routing, seed
+    `/vc-partner`). This wrapper is the in-session skill: refuse without a TTY
+    and tell the caller to `vc-init` first, then trigger the skill there.
     """
     args = list(sys.argv[1:] if argv is None else argv)
     if _help_requested(args):
         return _print_workflow_help("partner")
-    if not argv_has_job_input(args):
-        return subprocess.call([str(deck_path()), "partner", *args])
-    return supervised_skill_main("partner", argv)
+    if not _stdio_is_interactive():
+        print(PARTNER_INTERACTIVE_ONLY, file=sys.stderr)
+        return 1
+    return subprocess.call([str(deck_path()), "partner", *args])
 
 
 def release_main(argv: Sequence[str] | None = None) -> int:

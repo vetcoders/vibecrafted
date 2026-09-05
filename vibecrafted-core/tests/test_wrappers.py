@@ -189,6 +189,13 @@ def test_argv_has_job_input_detects_prompt_and_file_flags() -> None:
     assert wrappers.argv_has_job_input(["--file=brief.md"]) is True
 
 
+def _force_interactive_stdio(
+    monkeypatch: pytest.MonkeyPatch, interactive: bool
+) -> None:
+    monkeypatch.setattr(wrappers.sys.stdin, "isatty", lambda: interactive)
+    monkeypatch.setattr(wrappers.sys.stdout, "isatty", lambda: interactive)
+
+
 def test_partner_main_without_prompt_calls_deck(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -198,6 +205,7 @@ def test_partner_main_without_prompt_calls_deck(
         calls.append(list(cmd))
         return 0
 
+    _force_interactive_stdio(monkeypatch, True)
     monkeypatch.setattr(subprocess, "call", fake_call)
 
     assert wrappers.partner_main(["claude"]) == 0
@@ -205,18 +213,41 @@ def test_partner_main_without_prompt_calls_deck(
     assert calls[0][1:] == ["partner", "claude"]
 
 
-def test_partner_main_with_prompt_stays_supervised(
+def test_partner_main_with_prompt_stays_on_deck(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        wrappers,
-        "supervised_skill_main",
-        lambda skill, argv: (
-            0 if skill == "partner" and argv == ["claude", "--prompt", "x"] else 9
-        ),
-    )
+    calls: list[list[str]] = []
+
+    def fake_call(cmd):
+        calls.append(list(cmd))
+        return 0
+
+    def boom(_skill, _argv):
+        raise AssertionError("partner --prompt must not call supervised_skill_main")
+
+    _force_interactive_stdio(monkeypatch, True)
+    monkeypatch.setattr(subprocess, "call", fake_call)
+    monkeypatch.setattr(wrappers, "supervised_skill_main", boom)
 
     assert wrappers.partner_main(["claude", "--prompt", "x"]) == 0
+    assert calls
+    assert calls[0][1:] == ["partner", "claude", "--prompt", "x"]
+
+
+def test_partner_main_without_tty_refuses_even_with_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def boom(_cmd):
+        raise AssertionError("headless vc-partner must not spawn the deck")
+
+    _force_interactive_stdio(monkeypatch, False)
+    monkeypatch.setattr(subprocess, "call", boom)
+
+    assert wrappers.partner_main(["claude", "--prompt", "x"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip() == wrappers.PARTNER_INTERACTIVE_ONLY
 
 
 def test_resume_main_routes_through_tracked_native_resume_api(

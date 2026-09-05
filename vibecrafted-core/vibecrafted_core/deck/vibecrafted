@@ -1073,19 +1073,17 @@ cmd_partner_help() {
   printf '%b⚒%b  %bpartner%b\n' "$_copper" "$_reset" "$_bold" "$_reset"
   printf '%b─────────────────────────────────────────%b\n' "$_steel" "$_reset"
   printf '  Start an interactive partner session with an agent (shared steering).\n'
-  printf '  Bare partner opens a TTY face with /vc-partner. --prompt/--file dispatch a\n'
-  printf '  tracked headless worker instead.\n'
+  printf '  Same family as init: TTY/frame face with /vc-partner. Never a headless worker.\n'
+  printf '  --prompt/--file append extra seed context. vc-partner without a TTY refuses.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted partner [claude|codex|agy|junie|grok|cursor] [--runtime terminal|visible|plain]\n'
-  printf '  vibecrafted partner <agent> --prompt "<task>"     (headless worker)\n'
   printf '  vc-partner [claude|codex|agy|junie|grok|cursor]\n'
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted partner claude\n'
   printf '  vibecrafted partner codex --runtime plain\n'
-  printf '  vibecrafted partner claude --prompt "debug the launcher"\n'
-  printf '  vc-partner grok\n'
+  printf '  vc-start / [New] with the partner ritual, then /vc-partner in that session\n'
   printf '\n'
 }
 
@@ -4498,7 +4496,7 @@ cmd_help() {
       cmd_skill_help "implement"
       return
       ;;
-    audit|decorate|delegate|dou|followup|guard|hydrate|intents|justdo|marbles|ownership|partner|polarize|prune|release|research|review|scaffold|trust|workflow)
+    audit|decorate|delegate|dou|followup|guard|hydrate|intents|justdo|marbles|ownership|polarize|prune|release|research|review|scaffold|trust|workflow)
       cmd_skill_help "$topic"
       return
       ;;
@@ -4874,7 +4872,7 @@ cmd_partner() {
   _prepend_repo_bin_path
   if [[ "$agent" == "gemini" ]]; then
     printf '%b✗ gemini CLI is deprecated.%b Use agy (Google Antigravity CLI) instead.\n' "$_red" "$_reset" >&2
-    printf '  Example: vibecrafted partner agy --prompt "..." \n' >&2
+    printf '  Example: vibecrafted partner agy\n' >&2
     return 1
   fi
   _has_agent "$agent" || {
@@ -4886,11 +4884,6 @@ cmd_partner() {
 
   [[ $# -gt 0 ]] && shift
   _ensure_helpers_loaded || return 1
-  if _vetcoders_argv_has_job_input "$@"; then
-    printf '%b⚒%b  Starting %b%s%b partner worker...\n' "$_copper" "$_reset" "$_bold" "$agent" "$_reset"
-    cmd_core_workflow_skill partner "$agent" "$@"
-    return
-  fi
   printf '%b⚒%b  Starting %b%s%b with vc-partner...\n' "$_copper" "$_reset" "$_bold" "$agent" "$_reset"
   local helper_name="${agent}-skill-partner"
   if command -v "$helper_name" >/dev/null 2>&1; then
@@ -6055,6 +6048,7 @@ main() {
     start) cmd_start "$@" ;;
     init) cmd_init "$@" ;;
     operator) cmd_operator "$@" ;;
+    partner) cmd_partner "$@" ;;
     resume) cmd_resume "$@" ;;
     observe|await|stop) cmd_lifecycle_command "$cmd" "$@" ;;
     gui) cmd_gui "$@" ;;
@@ -6092,7 +6086,7 @@ main() {
       return 2
       ;;
     implement) run_skill "implement" "$@" ;;
-    audit|canary|decorate|delegate|dou|followup|guard|hydrate|intents|justdo|marbles|ownership|partner|polarize|prune|release|research|review|scaffold|trust|workflow)
+    audit|canary|decorate|delegate|dou|followup|guard|hydrate|intents|justdo|marbles|ownership|polarize|prune|release|research|review|scaffold|trust|workflow)
       run_skill "$cmd" "$@"
       ;;
     *)
