@@ -2,6 +2,7 @@ use crate::config::{AppConfig, path_display};
 use crate::launch::{
     LaunchCommand, LaunchKind, LaunchRequest, LaunchRuntime, build_launch_command,
 };
+use crate::layout::PaneId;
 use crate::memory::{self, MemoryState};
 use crate::mission_control::{self, ActionQueueItem, ActionQueueKind, MissionControlState};
 use crate::observe::{self, ObserveHealth, ObserveState};
@@ -86,6 +87,74 @@ pub enum LaunchFocus {
     Error,
     Artifact,
     Memory,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PaneScroll {
+    pub deck: u16,
+    pub playbook: u16,
+    pub trail: u16,
+    pub monitor_list: u16,
+    pub dossier: u16,
+    pub timeline: u16,
+    pub observe_list: u16,
+    pub observe_transcript: u16,
+    pub controls_actions: u16,
+    pub controls_artifacts: u16,
+    pub controls_timeline: u16,
+    pub mission: [u16; 7],
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct InteractionState {
+    pub focused: Option<PaneId>,
+    pub scroll: PaneScroll,
+}
+
+impl InteractionState {
+    pub fn offset_mut(&mut self, pane: PaneId) -> &mut u16 {
+        match pane {
+            PaneId::DispatchDeck => &mut self.scroll.deck,
+            PaneId::DispatchPlaybook => &mut self.scroll.playbook,
+            PaneId::DispatchTrail => &mut self.scroll.trail,
+            PaneId::MonitorList => &mut self.scroll.monitor_list,
+            PaneId::MonitorDossier => &mut self.scroll.dossier,
+            PaneId::MonitorTimeline => &mut self.scroll.timeline,
+            PaneId::ObserveList => &mut self.scroll.observe_list,
+            PaneId::ObserveTranscript => &mut self.scroll.observe_transcript,
+            PaneId::ControlsActions => &mut self.scroll.controls_actions,
+            PaneId::ControlsArtifacts => &mut self.scroll.controls_artifacts,
+            PaneId::ControlsTimeline => &mut self.scroll.controls_timeline,
+            PaneId::Mission(index) => {
+                &mut self.scroll.mission[usize::from(index).min(self.scroll.mission.len() - 1)]
+            }
+        }
+    }
+
+    pub fn offset(&self, pane: PaneId) -> u16 {
+        match pane {
+            PaneId::DispatchDeck => self.scroll.deck,
+            PaneId::DispatchPlaybook => self.scroll.playbook,
+            PaneId::DispatchTrail => self.scroll.trail,
+            PaneId::MonitorList => self.scroll.monitor_list,
+            PaneId::MonitorDossier => self.scroll.dossier,
+            PaneId::MonitorTimeline => self.scroll.timeline,
+            PaneId::ObserveList => self.scroll.observe_list,
+            PaneId::ObserveTranscript => self.scroll.observe_transcript,
+            PaneId::ControlsActions => self.scroll.controls_actions,
+            PaneId::ControlsArtifacts => self.scroll.controls_artifacts,
+            PaneId::ControlsTimeline => self.scroll.controls_timeline,
+            PaneId::Mission(index) => {
+                self.scroll.mission[usize::from(index).min(self.scroll.mission.len() - 1)]
+            }
+        }
+    }
+
+    pub fn scroll_pane(&mut self, pane: PaneId, delta: i16, content_len: usize, view_height: u16) {
+        let next = crate::layout::step_scroll(self.offset(pane), delta, content_len, view_height);
+        *self.offset_mut(pane) = next;
+        self.focused = Some(pane);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,6 +366,7 @@ pub struct App {
     pub mission_artifact_root: PathBuf,
     pub observe: ObserveState,
     pub memory: MemoryState,
+    pub interaction: InteractionState,
 }
 
 impl App {
@@ -344,6 +414,7 @@ impl App {
                 project: memory_project,
                 ..MemoryState::default()
             },
+            interaction: InteractionState::default(),
         };
         apply_run_filters(
             &mut app.runs,
@@ -1549,7 +1620,19 @@ fn truncate_id(value: &str, width: usize) -> String {
     short
 }
 
-fn wrap_operator_line(value: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrapped_line_count<I, S>(lines: I, width: u16) -> usize
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let width = usize::from(width.max(8));
+    lines
+        .into_iter()
+        .map(|line| wrap_operator_line(line.as_ref(), width).len().max(1))
+        .sum()
+}
+
+pub(crate) fn wrap_operator_line(value: &str, width: usize) -> Vec<String> {
     if value.chars().count() <= width {
         return vec![value.to_string()];
     }
