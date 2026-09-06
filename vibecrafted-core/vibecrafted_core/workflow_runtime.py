@@ -592,8 +592,8 @@ async def _run_child(
     prompt_body: str | None = None,
 ) -> ChildResult:
     """Spawn and await one supervised child agent process, writing its prompt
-    file, resolving its command (default: stdin command with model override),
-    and returning the collected `ChildResult`.
+    file, resolving its command, applying a requested model pin once, and
+    returning the collected `ChildResult`.
     """
     safe_label = _safe_label(label)
     run_id = f"{_parent_run_id()}-{safe_label}"
@@ -607,10 +607,10 @@ async def _run_child(
     prompt_file.write_text(
         prompt_body or _child_prompt(kind, label, root, prompt), encoding="utf-8"
     )
-    child_command = (
-        list(command)
-        if command is not None
-        else _with_model_override(agent, _stdin_command(agent), model_requested)
+    child_command = _with_model_override(
+        agent,
+        command if command is not None else _stdin_command(agent),
+        model_requested,
     )
     child_env = _child_env(agent, report, transcript, meta, model_requested)
     child_command = _resolve_agent_command(agent, child_command, child_env)
@@ -1073,6 +1073,7 @@ async def _run_research_synthesis(
         root=root,
         prompt=prompt,
         command=synthesis_command,
+        model_requested=model_requested,
         prompt_body=_research_synthesis_prompt(root, prompt, survivors),
     )
 
