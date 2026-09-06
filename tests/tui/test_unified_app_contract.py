@@ -3555,6 +3555,7 @@ def test_shell_front_door_self_test_exercises_real_verifier() -> None:
     env = {
         "HOME": os.environ["HOME"],
         "PATH": "/usr/bin:/bin",
+        "PYTHON": sys.executable,
     }
     result = subprocess.run(
         [str(VERIFY_SCRIPT), "--self-test"],

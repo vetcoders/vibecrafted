@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import shlex
-import shutil
 import sys
 from argparse import Namespace
 from pathlib import Path
@@ -10,8 +9,9 @@ from xml.parsers.expat import ExpatError
 
 import pytest
 from _runtime_pack_fixture import seed_runtime_pack
-from scripts import vetcoders_install as installer
 from vibecrafted_core import doctor
+
+from scripts import vetcoders_install as installer
 
 
 def test_installer_module_loads_source_file_without_mutating_sys_path(
@@ -669,14 +669,17 @@ def _truth_sandbox(tmp_path: Path, monkeypatch) -> tuple[Path, Path, Path]:
         installer, "_teardown_owned_runtime_for_uninstall", lambda *_args, **_kwargs: ()
     )
     payload = seed_runtime_pack(tmp_path / "runtime-pack")
-    assert installer.cmd_runtime_install(
-        Namespace(
-            payload_root=str(payload),
-            app_root=None,
-            terminal_host=None,
-            frame_helper=None,
+    assert (
+        installer.cmd_runtime_install(
+            Namespace(
+                payload_root=str(payload),
+                app_root=None,
+                terminal_host=None,
+                frame_helper=None,
+            )
         )
-    ) == 0
+        == 0
+    )
     tools = runtime_home / "tools"
     generation = runtime_home / "releases" / "9.9.9+g12345678"
     assert installer._runtime_generation_payload_errors(generation) == []
@@ -720,16 +723,7 @@ def test_delivery_reads_package_owned_runtime_generation(
 def test_delivery_accepts_exact_physical_runtime_pack_config(
     tmp_path: Path, monkeypatch
 ) -> None:
-    tools, generation, home = _truth_sandbox(tmp_path, monkeypatch)
-    generated = (
-        generation
-        / "vibecrafted-core"
-        / "vibecrafted_core"
-        / "runtime"
-        / "generated"
-        / "vc-frame"
-    )
-    view = home / ".config" / "vibecrafted" / "vc-frame"
+    tools, _, home = _truth_sandbox(tmp_path, monkeypatch)
 
     findings = doctor._vc_frame_delivery_findings(home=home, tools_home=tools)
 
@@ -783,18 +777,21 @@ def test_truth_drift_fails_on_projection_into_parked_generation(
     tmp_path: Path, monkeypatch
 ) -> None:
     tools, generation, home = _truth_sandbox(tmp_path, monkeypatch)
-    assert installer.cmd_runtime_install(
-        Namespace(
-            payload_root=str(
-                seed_runtime_pack(
-                    tmp_path / "runtime-pack-next", version="9.9.10+g12345679"
-                )
-            ),
-            app_root=None,
-            terminal_host=None,
-            frame_helper=None,
+    assert (
+        installer.cmd_runtime_install(
+            Namespace(
+                payload_root=str(
+                    seed_runtime_pack(
+                        tmp_path / "runtime-pack-next", version="9.9.10+g12345679"
+                    )
+                ),
+                app_root=None,
+                terminal_host=None,
+                frame_helper=None,
+            )
         )
-    ) == 0
+        == 0
+    )
     current = tools / "vibecrafted-current"
     assert current.resolve(strict=True) != generation
     view = home / ".config" / "vibecrafted" / "vc-frame"
