@@ -34,13 +34,13 @@ if ! command -v vc-frame >/dev/null 2>&1; then
 fi
 
 # Consume the installed physical config. Launch must never deliver or repair it.
-frame_config="${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame"
+frame_config="$HOME/.config/vibecrafted/vc-frame"
 if [[ ! -d "$frame_config" || -L "$frame_config" \
   || ! -f "$frame_config/config.kdl" || -L "$frame_config/config.kdl" \
   || ! -d "$frame_config/layouts" || -L "$frame_config/layouts" \
   || ! -f "$frame_config/layouts/operator.kdl" || -L "$frame_config/layouts/operator.kdl" ]]; then
   warn "Installed product configuration is missing or misrouted: $frame_config"
-  warn "Repair through the verified Runtime Pack runtime-install --payload-root PATH operation."
+  warn "Repair: run make install from the Vibecrafted checkout with your verified Runtime Pack."
   exit 1
 fi
 export VC_FRAME_CONFIG_DIR="$frame_config"

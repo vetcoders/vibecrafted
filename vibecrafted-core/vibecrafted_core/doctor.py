@@ -750,7 +750,7 @@ def _vc_frame_delivery_findings(
     """Inspect installer-owned copies, allowing preferences only in config.kdl."""
     findings: list[_Finding] = []
     view = vc_frame_user_config_dir(home)
-    repair = "repair via the verified Runtime Pack runtime-install --payload-root PATH"
+    repair = "run make install from the Vibecrafted checkout with your verified Runtime Pack"
     try:
         generation = _runtime_config_generation(tools_home)
     except (OSError, RuntimeError) as exc:

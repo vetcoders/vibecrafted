@@ -275,7 +275,7 @@ def _build_parser() -> argparse.ArgumentParser:
     config_sub = config.add_subparsers(dest="config_action")
     config_sub.add_parser(
         "install",
-        help="retired: use the explicit Runtime Pack runtime-install operation",
+        help="retired: repair the verified Runtime Pack with make install",
     )
     config_zshrc = config_sub.add_parser(
         "ensure-zshrc",
@@ -1449,8 +1449,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if action == "install":
             print(
                 "config install has been retired. Product configuration is owned "
-                "by the Runtime Pack installer; use its explicit runtime-install "
-                "--payload-root PATH operation with the verified Runtime Pack. "
+                "by the Runtime Pack installer. Run make install from the "
+                "Vibecrafted checkout with your verified Runtime Pack. "
                 "No configuration was delivered.",
                 file=sys.stderr,
             )

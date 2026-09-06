@@ -2,7 +2,7 @@
 
 The Runtime Pack installer is the sole product configuration writer. Shipped
 host-adapted defaults stay inside their immutable generation; active physical
-copies and preferences live under XDG_CONFIG_HOME/vibecrafted.
+copies and preferences live under ~/.config/vibecrafted.
 """
 
 from __future__ import annotations
@@ -32,12 +32,8 @@ OPERATOR_SCRIPT_NAMES: tuple[str, ...] = (
 
 def vc_frame_user_config_dir(home: Path | None = None) -> Path:
     """The one product-owned vc-frame config directory."""
-    if home is not None:
-        xdg = os.environ.get("XDG_CONFIG_HOME")
-        if xdg:
-            return Path(xdg).expanduser() / "vibecrafted" / "vc-frame"
-        return home / ".config" / "vibecrafted" / "vc-frame"
-    return xdg_config_home() / "vibecrafted" / "vc-frame"
+    root = home if home is not None else Path.home()
+    return root / ".config" / "vibecrafted" / "vc-frame"
 
 
 def tools_current_path(tools_home: Path | None = None) -> Path:

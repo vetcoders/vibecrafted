@@ -115,7 +115,7 @@ binary_runs() {
 
 # Sole live vc-frame config directory owned by the product.
 _vcframe_config_roots() {
-  local xdg="${XDG_CONFIG_HOME:-$HOME/.config}"
+  local xdg="$HOME/.config"
   printf '%s\n' "$xdg/vibecrafted/vc-frame"
 }
 
@@ -163,7 +163,7 @@ verify_vcframe_cockpit() {
 
   if [[ -z "$cfg_root" ]]; then
     warn "cockpit: no live config.kdl under ~/.config/vibecrafted/vc-frame"
-    warn "  fix: Runtime Pack runtime-install --payload-root PATH"
+    warn "  fix: run make install from the Vibecrafted checkout with your verified Runtime Pack"
     fails=1
   else
     cfg="$cfg_root/config.kdl"
@@ -531,7 +531,7 @@ install_aicx() {
 # or patch the selected immutable generation.
 install_vcframe() {
   if ! verify_vcframe_cockpit; then
-    warn "Install/repair the verified Runtime Pack with runtime-install --payload-root PATH."
+    warn "Repair: run make install from the Vibecrafted checkout with your verified Runtime Pack."
     return 1
   fi
 }

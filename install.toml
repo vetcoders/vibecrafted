@@ -1,7 +1,7 @@
 # Vibecrafted install manifest — consumed by the built-in vetcoders-installer
 # under scripts/installer/.
 #
-#   make install                          (terminal wizard, the default)
+#   make install                          (verified Runtime Pack installer)
 #   make setup-dev                        (same meta-installer, advanced options)
 #   make wizard                           (browser-based GUI, optional)
 #   uv run --project scripts/installer vetcoders-installer install.toml --dry-run
@@ -59,44 +59,17 @@ optional = true
 key = "installation"
 label = "Installation"
 reason = """
-We will install the backyard product spine (one path, no install loops):
+We will install the verified Runtime Pack through the public installer:
 
-  - product foundations: loctree / aicx (canonical product installers)
-  - vc-frame donor BINARY built from sibling source and installed only by
-    Vibecrafted (no companion installer or release channel)
-  - framework-owned support tools when needed
-  - frontier config + operator scripts (Composer / Super binds projection)
-  - shared skills, launchers, and mirrored agent views
-  - the selected runtime horse when RUNTIME=... is provided
-  - the Python CLI and MCP packages through uv tool install
-  - vendored foundation binaries from bin/vendor/<platform> when present
-  - Rust app/server binaries (voc, vc-admin, vc-server) in ~/.local/bin
+  - one immutable runtime generation with vc-terminal, vc-frame and vc-start
+  - physical product configuration under ~/.config/vibecrafted
+  - preserved preferences and receipted recovery snapshots
+  - public launchers and shared agent views
 
-The public macOS install is one Vibecrafted.app carrying vc-terminal, vc-frame,
-vc-start, and the Vibecrafted runtime. It does not rewrite user shell or terminal
-configuration; the app injects only its bundled environment at process start.
+The App and CLI use the same Runtime Pack installer. Installation errors stop
+this phase; configuration is published only after conflict checks complete.
 """
-cmd = [
-    "bash",
-    "-e",
-    "-c",
-    '''
-bash scripts/install-foundations.sh
-bash scripts/install-runtime.sh --runtime "${VIBECRAFTED_RUNTIME:-none}" --yes
-make --no-print-directory install-vendored-binaries
-make --no-print-directory install-app-binaries
-make --no-print-directory install-bundle-tools
-stable_root="${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/tools/vibecrafted-current"
-bash "$stable_root/vibecrafted-core/vibecrafted_core/runtime/scripts/install-frontier-config.sh" --source "$stable_root" || printf '[warn] Frontier config skipped (non-fatal)\n'
-# Project Super binds + operator scripts onto frontier (living install path).
-if command -v vibecrafted >/dev/null 2>&1; then
-  vibecrafted config install || printf '[warn] vibecrafted config install skipped (non-fatal)\n'
-elif [[ -x scripts/vetcoders_install.py ]]; then
-  python3 -c "from vibecrafted_core.vc_frame_delivery import stage_vc_frame_config; print(stage_vc_frame_config().render())" 2>/dev/null \
-    || printf '[warn] config projection skipped (non-fatal)\n'
-fi
-''',
-]
+cmd = ["make", "--no-print-directory", "install"]
 
 
 [[phase]]
@@ -119,7 +92,7 @@ cmd = [
     "-e",
     "-c",
     '''
-python3 scripts/vetcoders_install.py doctor || true
+python3 scripts/vetcoders_install.py doctor
 bash scripts/post-install-launch.sh
 ''',
 ]
