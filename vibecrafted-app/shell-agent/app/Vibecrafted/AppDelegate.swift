@@ -36,6 +36,28 @@ private struct CanonicalRuntimeInstall: Decodable {
     case craftedHome = "crafted_home"
   }
 
+  /// Build the launch contract from an already-installed generation. The
+  /// installer's JSON is one source of this shape; the resolved installation is
+  /// the other, and normal opening uses the latter.
+  init(
+    root: URL, launcher: URL, terminal: URL, terminalHost: URL, frame: URL, start: URL,
+    primaryShell: URL, terminalConfig: URL, frameConfig: URL, runtimeHome: URL,
+    configHome: URL, craftedHome: URL
+  ) {
+    self.root = root
+    self.launcher = launcher
+    self.terminal = terminal
+    self.terminalHost = terminalHost
+    self.frame = frame
+    self.start = start
+    self.primaryShell = primaryShell
+    self.terminalConfig = terminalConfig
+    self.frameConfig = frameConfig
+    self.runtimeHome = runtimeHome
+    self.configHome = configHome
+    self.craftedHome = craftedHome
+  }
+
   init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
 
@@ -106,6 +128,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private var revealRuntimeHomeMenuItem: NSMenuItem?
   private var openControlPlaneMenuItem: NSMenuItem?
   private var copyRuntimeIdentityMenuItem: NSMenuItem?
+  private var repairRuntimeMenuItem: NSMenuItem?
   private var signedCarrierRevisions: (source: String, terminal: String, frame: String)?
   private var trayBaseIcon: NSImage?
   private var statusRefreshTimer: Timer?
@@ -262,12 +285,40 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       return
     }
 
+    // Carrier identity is this bundle's own property, so the tray can compare
+    // it against the live generation whether or not this open installs
+    // anything. A malformed manifest must not block opening an installed
+    // runtime; it degrades the drift line, which the policy reports honestly.
+    try? loadSignedCarrierRevisions()
+
+    // Opening is not installing. The runtime of record is whatever generation
+    // the Founder has installed; the bundled carrier is bootstrap and repair
+    // material only. Republishing it on every open re-ran a full install for a
+    // window and could walk a newer runtime backwards.
     let install: CanonicalRuntimeInstall
-    do {
-      install = try installCanonicalRuntime()
-    } catch {
+    switch resolveInstalledRuntime() {
+    case .ready(let layout):
+      install = canonicalRuntime(for: layout)
+      lifecycleLog("resolved installed generation \(layout.version) at \(layout.generation.path)")
+    case .absent(let reason):
+      // Nothing is installed yet, so the bundled carrier is the only runtime
+      // that can exist. Publishing it here is first onboarding.
+      lifecycleLog("no installed runtime (\(reason)); bootstrapping the bundled carrier")
+      do {
+        install = try installCanonicalRuntime()
+      } catch {
+        reportWorkspaceLaunchFailure(
+          "Cannot publish the canonical Vibecrafted runtime: \(error.localizedDescription)")
+        return
+      }
+    case .unusable(let reason):
+      // An installation exists but disagrees with itself. Overwriting it from
+      // the bundled carrier would be an automatic downgrade of the Founder's
+      // runtime, so repair stays a deliberate action in the tray.
+      lifecycleLog("installed runtime is unusable: \(reason)")
       reportWorkspaceLaunchFailure(
-        "Cannot publish the canonical Vibecrafted runtime: \(error.localizedDescription)")
+        "The installed Vibecrafted runtime cannot be used: \(reason). "
+          + "Use Runtime Pack ▸ Reinstall From Bundled Pack… to repair it.")
       return
     }
     canonicalInstall = install
@@ -296,6 +347,47 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       return
     }
 
+    let environment = composeRuntimeEnvironment(install: install)
+    canonicalRuntimeEnvironment = environment
+    applyRuntimePackMenuState()
+    refreshServerStatus()
+
+    guard let helperApplication = terminalHelperApplication(for: install) else {
+      reportWorkspaceLaunchFailure(
+        "The bundled vc-terminal helper app or its referenced icon is invalid")
+      return
+    }
+    let configuration = NSWorkspace.OpenConfiguration()
+    configuration.arguments = [
+      "--config-file", install.terminalConfig.path,
+      "-e", install.primaryShell.path, install.start.path, "operator",
+    ]
+    configuration.environment = environment
+    configuration.activates = true
+    configuration.addsToRecentItems = false
+    terminalLaunchInFlight = true
+    Task {
+      do {
+        let application = try await NSWorkspace.shared.openApplication(
+          at: helperApplication, configuration: configuration)
+        terminalApplication = application
+        terminalLaunchInFlight = false
+        lifecycleLog(
+          "vc-terminal launched through helper bundle pid=\(application.processIdentifier) generation=\(install.root.lastPathComponent)")
+      } catch {
+        terminalLaunchInFlight = false
+        lifecycleLog("vc-terminal helper launch failed: \(error.localizedDescription)")
+        reportWorkspaceLaunchFailure(
+          "Failed to launch bundled vc-terminal helper app: \(error.localizedDescription)")
+      }
+    }
+    reconcileControlPlaneEye(install: install, environment: environment)
+  }
+
+  /// The environment every generation-owned subprocess inherits: the tray's
+  /// caretaker poll, the service actions and the workspace terminal all run
+  /// with exactly this, so they can never address different roots.
+  private func composeRuntimeEnvironment(install: CanonicalRuntimeInstall) -> [String: String] {
     let host = ProcessInfo.processInfo.environment
     let inherited = [
       "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "COLORTERM", "TMPDIR",
@@ -332,40 +424,60 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       environment["VIBECRAFTED_LEGACY_VC_FRAME_SOCKET_DIR"] =
         "/\(temp)/vc-frame-\(getuid())"
     }
-    canonicalRuntimeEnvironment = environment
-    applyRuntimePackMenuState()
-    refreshServerStatus()
+    return environment
+  }
 
-    guard let helperApplication = terminalHelperApplication(for: install) else {
-      reportWorkspaceLaunchFailure(
-        "The bundled vc-terminal helper app or its referenced icon is invalid")
-      return
-    }
-    let configuration = NSWorkspace.OpenConfiguration()
-    configuration.arguments = [
-      "--config-file", install.terminalConfig.path,
-      "-e", install.primaryShell.path, install.start.path, "operator",
-    ]
-    configuration.environment = environment
-    configuration.activates = true
-    configuration.addsToRecentItems = false
-    terminalLaunchInFlight = true
-    Task {
-      do {
-        let application = try await NSWorkspace.shared.openApplication(
-          at: helperApplication, configuration: configuration)
-        terminalApplication = application
-        terminalLaunchInFlight = false
-        lifecycleLog(
-          "vc-terminal launched through helper bundle pid=\(application.processIdentifier) generation=\(install.root.lastPathComponent)")
-      } catch {
-        terminalLaunchInFlight = false
-        lifecycleLog("vc-terminal helper launch failed: \(error.localizedDescription)")
-        reportWorkspaceLaunchFailure(
-          "Failed to launch bundled vc-terminal helper app: \(error.localizedDescription)")
-      }
-    }
-    reconcileControlPlaneEye(install: install, environment: environment)
+  /// Read the installation's own two published documents and derive what a
+  /// normal open may do with them. This never writes: the installer owns both
+  /// the active-generation pointer and the ownership receipt.
+  private func resolveInstalledRuntime() -> InstalledRuntimeDisposition {
+    let host = ProcessInfo.processInfo.environment
+    let runtimeHome = resolvedRuntimeHome(
+      environment: host,
+      homeDirectory: host["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path)
+    let activeData = try? Data(
+      contentsOf: activeRuntimeDocumentURL(runtimeHome: runtimeHome))
+    let receiptData = try? Data(
+      contentsOf: runtimeInstallReceiptURL(runtimeHome: runtimeHome))
+    return installedRuntimeDisposition(
+      activeData: activeData, receiptData: receiptData, runtimeHome: runtimeHome)
+  }
+
+  /// Bind a resolved installation to this bundle's terminal canvas. The
+  /// generation owns the runtime; the App owns the signed helper it opens, so
+  /// the helper comes from the bundle rather than being read back out of the
+  /// installation.
+  private func canonicalRuntime(for layout: InstalledRuntimeLayout) -> CanonicalRuntimeInstall {
+    CanonicalRuntimeInstall(
+      root: layout.generation,
+      launcher: layout.launcher,
+      terminal: layout.terminal,
+      terminalHost: Bundle.main.bundleURL.appendingPathComponent(
+        "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"),
+      frame: layout.frame,
+      start: layout.start,
+      primaryShell: layout.primaryShell,
+      terminalConfig: layout.terminalConfig,
+      frameConfig: layout.frameConfig,
+      runtimeHome: layout.runtimeHome,
+      configHome: layout.configHome,
+      craftedHome: layout.craftedHome)
+  }
+
+  /// The active generation can move under a running App: a runtime-first
+  /// upgrade republishes the pointer while the tray is still open. Re-resolve
+  /// before each status read so liveness and the service actions address the
+  /// generation the Founder is actually running, instead of a root cached at
+  /// launch forever.
+  private func adoptCurrentGenerationIfChanged() {
+    guard case .ready(let layout) = resolveInstalledRuntime() else { return }
+    let resolved = layout.generation.standardizedFileURL.path
+    guard resolved != canonicalInstall?.root.standardizedFileURL.path else { return }
+    let install = canonicalRuntime(for: layout)
+    canonicalInstall = install
+    canonicalRuntimeEnvironment = composeRuntimeEnvironment(install: install)
+    lastCaretakerData = nil
+    lifecycleLog("adopted active generation \(layout.version) at \(resolved)")
   }
 
   private func terminalHelperApplication(for install: CanonicalRuntimeInstall) -> URL? {
@@ -433,20 +545,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
   }
 
-  private func installCanonicalRuntime() throws -> CanonicalRuntimeInstall {
-    let appRoot = Bundle.main.bundleURL
-    let resources = appRoot.appendingPathComponent("Contents/Resources", isDirectory: true)
-    let carrierDirectory = resources.appendingPathComponent("runtime-pack", isDirectory: true)
-    let carriers = try FileManager.default.contentsOfDirectory(
-      at: carrierDirectory, includingPropertiesForKeys: nil
-    ).filter {
-      $0.lastPathComponent.hasPrefix("Vibecrafted_RuntimePack_") && $0.pathExtension == "gz"
-    }
-    guard carriers.count == 1 else {
-      throw NSError(
-        domain: "io.vetcoders.vibecrafted.install", code: 1,
-        userInfo: [NSLocalizedDescriptionKey: "signed App must contain one Runtime Pack carrier"])
-    }
+  /// Read the revision tuple this signed bundle ships and record it for the
+  /// tray. Carrier identity is a property of the App, not of any installation,
+  /// so drift supervision must not depend on having just run the installer.
+  @discardableResult
+  private func loadSignedCarrierRevisions() throws -> (
+    source: String, terminal: String, frame: String
+  ) {
+    let resources = Bundle.main.bundleURL.appendingPathComponent(
+      "Contents/Resources", isDirectory: true)
     let manifestData = try Data(
       contentsOf: resources.appendingPathComponent("product-manifest.json"))
     guard
@@ -465,6 +572,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ])
     }
     signedCarrierRevisions = (sourceRevision, terminalRevision, frameRevision)
+    return (sourceRevision, terminalRevision, frameRevision)
+  }
+
+  private func installCanonicalRuntime() throws -> CanonicalRuntimeInstall {
+    let appRoot = Bundle.main.bundleURL
+    let resources = appRoot.appendingPathComponent("Contents/Resources", isDirectory: true)
+    let carrierDirectory = resources.appendingPathComponent("runtime-pack", isDirectory: true)
+    let carriers = try FileManager.default.contentsOfDirectory(
+      at: carrierDirectory, includingPropertiesForKeys: nil
+    ).filter {
+      $0.lastPathComponent.hasPrefix("Vibecrafted_RuntimePack_") && $0.pathExtension == "gz"
+    }
+    guard carriers.count == 1 else {
+      throw NSError(
+        domain: "io.vetcoders.vibecrafted.install", code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "signed App must contain one Runtime Pack carrier"])
+    }
+    let (sourceRevision, terminalRevision, frameRevision) = try loadSignedCarrierRevisions()
     let terminalHost = appRoot.appendingPathComponent(
       "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty")
     let frameHelper = appRoot.appendingPathComponent("Contents/Helpers/vc-frame")
@@ -664,6 +789,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       keyEquivalent: "")
     copyIdentity.target = self
     copyRuntimeIdentityMenuItem = copyIdentity
+    runtimePackMenu.addItem(.separator())
+    // The one deliberate way back to the bundled carrier. Routine opening
+    // resolves the installed generation instead, so this action — not a window
+    // — is what may replace a runtime, and it always asks first.
+    let repair = runtimePackMenu.addItem(
+      withTitle: "Reinstall From Bundled Pack…", action: #selector(repairRuntimeFromBundledPack),
+      keyEquivalent: "")
+    repair.target = self
+    repairRuntimeMenuItem = repair
     runtimePackOwner.submenu = runtimePackMenu
     menu.addItem(.separator())
     menu.addItem(
@@ -710,6 +844,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   private func refreshServerStatus() {
+    adoptCurrentGenerationIfChanged()
     guard let install = canonicalInstall, let environment = canonicalRuntimeEnvironment else {
       applyServerMenuState(
         deriveServerMenuState(
@@ -793,6 +928,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     revealRuntimeHomeMenuItem?.isEnabled = state.actionsEnabled
     openControlPlaneMenuItem?.isEnabled = state.actionsEnabled
     copyRuntimeIdentityMenuItem?.isEnabled = state.actionsEnabled
+    // Repair is deliberately not gated on `actionsEnabled`: it is the way out
+    // of an absent or self-contradictory installation, which is exactly when
+    // the inspection actions above have nothing to inspect.
   }
 
   @objc private func revealRuntimeHomeFromStatusItem() {
@@ -820,6 +958,56 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       configHome: install.configHome.path)
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(blob, forType: .string)
+  }
+
+  /// Explicit repair: publish this App's signed carrier over the current
+  /// installation. Normal opening never reaches here — it resolves whatever is
+  /// installed — so replacing a runtime stays something the Founder asks for,
+  /// with the generation that would be written named before the fact.
+  @objc private func repairRuntimeFromBundledPack() {
+    let confirmation = NSAlert()
+    confirmation.alertStyle = .warning
+    confirmation.messageText = "Reinstall the Vibecrafted runtime from this App?"
+    let installed = canonicalInstall.map { "Installed generation: \($0.root.lastPathComponent).\n" }
+      ?? "No usable runtime is currently installed.\n"
+    confirmation.informativeText =
+      installed
+      + "This publishes the Runtime Pack carried by this App"
+      + (signedCarrierRevisions.map { " (source \(String($0.source.prefix(8))))" } ?? "")
+      + ". The installer refuses to replace a newer runtime with an older carrier."
+    confirmation.addButton(withTitle: "Cancel")
+    confirmation.addButton(withTitle: "Reinstall")
+    guard confirmation.runModal() == .alertSecondButtonReturn else { return }
+
+    repairRuntimeMenuItem?.isEnabled = false
+    defer { repairRuntimeMenuItem?.isEnabled = true }
+    let install: CanonicalRuntimeInstall
+    do {
+      install = try installCanonicalRuntime()
+    } catch {
+      lifecycleLog("runtime repair failed: \(error.localizedDescription)")
+      let failure = NSAlert()
+      failure.alertStyle = .critical
+      failure.messageText = "Vibecrafted could not reinstall its runtime"
+      failure.informativeText = error.localizedDescription
+      failure.addButton(withTitle: "OK")
+      failure.runModal()
+      return
+    }
+    canonicalInstall = install
+    let environment = composeRuntimeEnvironment(install: install)
+    canonicalRuntimeEnvironment = environment
+    lastCaretakerData = nil
+    // A repaired install is allowed to report its launch failures again.
+    workspaceLaunchFailureReported = false
+    lifecycleLog("runtime repaired to generation \(install.root.lastPathComponent)")
+    reconcileControlPlaneEye(install: install, environment: environment)
+    applyRuntimePackMenuState()
+    refreshServerStatus()
+    // Repair is usually asked for because the terminal would not open. Attach
+    // to the live one if it survived, otherwise open it on the repaired
+    // runtime; the launch path re-resolves and so also proves the repair.
+    launchWorkspaceTerminal()
   }
 
   @objc private func openConsoleFromStatusItem() {
