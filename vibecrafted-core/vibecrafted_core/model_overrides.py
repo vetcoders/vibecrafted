@@ -140,7 +140,11 @@ def _with_direct_model_override(
         if existing_model == requested:
             return command_list
         raise ValueError("model_override_conflicts_with_existing_model")
-    if command_list[0] == "codex" and len(command_list) > 1 and command_list[1] == "exec":
+    if (
+        command_list[0] == "codex"
+        and len(command_list) > 1
+        and command_list[1] == "exec"
+    ):
         return [command_list[0], command_list[1], flag, requested, *command_list[2:]]
     return [command_list[0], flag, requested, *command_list[1:]]
 

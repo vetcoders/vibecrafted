@@ -722,9 +722,8 @@ def _config_entry_matches(candidate: Path, expected: Path) -> bool:
 
     try:
         candidate_inventory = inventory(candidate)
-        return (
-            candidate_inventory is not None
-            and candidate_inventory == inventory(expected)
+        return candidate_inventory is not None and candidate_inventory == inventory(
+            expected
         )
     except OSError:
         return False
@@ -750,13 +749,16 @@ def _vc_frame_delivery_findings(
     """Inspect installer-owned copies, allowing preferences only in config.kdl."""
     findings: list[_Finding] = []
     view = vc_frame_user_config_dir(home)
-    repair = "run make install from the Vibecrafted checkout with your verified Runtime Pack"
+    repair = (
+        "run make install from the Vibecrafted checkout with your verified Runtime Pack"
+    )
     try:
         generation = _runtime_config_generation(tools_home)
     except (OSError, RuntimeError) as exc:
         return [
             _Finding(
-                "fail", "vc-frame:runtime",
+                "fail",
+                "vc-frame:runtime",
                 f"selected runtime unavailable: {exc}; {repair}",
             )
         ]
@@ -767,7 +769,8 @@ def _vc_frame_delivery_findings(
         if not root.is_dir() or any(p.is_symlink() for p in (root, *root.parents)):
             findings.append(
                 _Finding(
-                    "fail", "vc-frame:view",
+                    "fail",
+                    "vc-frame:view",
                     f"missing or aliased physical config tree: {root}; {repair}",
                 )
             )
@@ -781,7 +784,8 @@ def _vc_frame_delivery_findings(
         if selected and Path(selected).expanduser().absolute() != expected.absolute():
             findings.append(
                 _Finding(
-                    "fail", "vc-frame:view",
+                    "fail",
+                    "vc-frame:view",
                     f"{variable} routes outside product configuration at {expected}",
                 )
             )
@@ -803,7 +807,8 @@ def _vc_frame_delivery_findings(
         ):
             findings.append(
                 _Finding(
-                    "fail", "vc-frame:runtime",
+                    "fail",
+                    "vc-frame:runtime",
                     f"missing, unusable or aliased shipped asset: {default}; {repair}",
                 )
             )
@@ -831,14 +836,16 @@ def _vc_frame_delivery_findings(
         elif not _config_entry_matches(path, default):
             findings.append(
                 _Finding(
-                    "fail", "vc-frame:view",
+                    "fail",
+                    "vc-frame:view",
                     f"missing, modified or misrouted owned asset: {path}; {repair}",
                 )
             )
         else:
             findings.append(
                 _Finding(
-                    "ok", "vc-frame:view",
+                    "ok",
+                    "vc-frame:view",
                     f"installed physical asset matches selected generation: {path}",
                 )
             )
@@ -877,13 +884,15 @@ def _vc_frame_truth_drift_findings(
     except (OSError, RuntimeError, ValueError, ImportError) as exc:
         return [
             _Finding(
-                "fail", "vc-frame:truth",
+                "fail",
+                "vc-frame:truth",
                 f"{exc}; reinstall the verified Runtime Pack",
             )
         ]
     return [
         _Finding(
-            "ok", "vc-frame:truth",
+            "ok",
+            "vc-frame:truth",
             "shipped config.kdl matches the sealed generation manifest "
             f"at {generation}",
         )
