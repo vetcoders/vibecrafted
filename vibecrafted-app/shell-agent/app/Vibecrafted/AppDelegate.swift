@@ -97,7 +97,6 @@ final class EventObserver: @unchecked Sendable, EventCallback {
   }
 }
 
-@MainActor
 /// Accumulates a bounded amount of one subprocess stream.
 ///
 /// Foundation delivers pipe readability on its own queue, so this is the same
@@ -170,6 +169,7 @@ private typealias RuntimeContract = RuntimeResolution<CanonicalRuntimeInstall>
 /// work before treating its silence as an answer.
 private let activityTruthTimeout: TimeInterval = 15
 
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   var mainWindow: MainWindowController?
   private var statusItem: NSStatusItem?
@@ -374,7 +374,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // it against the live generation whether or not this open installs
     // anything. A malformed manifest must not block opening an installed
     // runtime; it degrades the drift line, which the policy reports honestly.
-    try? loadSignedCarrierRevisions()
+    _ = try? loadSignedCarrierRevisions()
 
     // Opening is not installing. The runtime of record is whatever generation
     // the Founder has installed, and the owner is the only thing entitled to
@@ -774,7 +774,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     label: String,
     stdoutLimit: Int = 1 << 20,
     stderrLimit: Int = 1 << 16,
-    completion: @escaping (BoundedProcessResult) -> Void
+    completion: @escaping @MainActor @Sendable (BoundedProcessResult) -> Void
   ) throws {
     let output = Pipe()
     let errors = Pipe()
@@ -806,8 +806,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         stderr: stderr.collected,
         terminationStatus: finished.terminationStatus,
         clean: finished.terminationReason == .exit)
+      // Foundation runs this handler on its own queue, so the completion has to
+      // hop before it touches anything the delegate owns. Once it is on the
+      // main queue the isolation is a fact, not an assumption, and asserting it
+      // keeps the callback main-actor typed instead of laundering tray state
+      // through unchecked mutable sharing.
       DispatchQueue.main.async {
-        completion(result)
+        MainActor.assumeIsolated {
+          completion(result)
+        }
       }
     }
     do {
