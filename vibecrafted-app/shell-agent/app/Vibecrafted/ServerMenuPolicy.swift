@@ -658,3 +658,64 @@ func runtimeResolverBootstrap(
   }
   return .ask(python: python, installer: installer)
 }
+
+// MARK: - Identity freshness
+
+/// How many times a resolve may be restarted because the installation moved
+/// under it before the App stops trying and refuses instead.
+let runtimeResolveDriftLimit = 2
+
+/// Cheap identity of the two documents the installer publishes together.
+///
+/// A generation change is published by rewriting them, so their stamps are both
+/// the refresh signal and the validity window of an answer: the App re-asks the
+/// owner when this changes, reuses the last answer when it has not, and —
+/// because the owner is asked in a subprocess — reads the pair again before
+/// believing what that subprocess said.
+struct RuntimeIdentityFingerprint: Equatable {
+  let home: String
+  let pointer: FileStamp?
+  let receipt: FileStamp?
+}
+
+/// Size and modification time of one identity document, or nil when there is
+/// nothing there to stamp.
+struct FileStamp: Equatable {
+  let size: Int
+  let modified: Date
+}
+
+/// What may be done with an answer that has just come back from the owner.
+enum RuntimeResolveDelivery: Equatable {
+  /// The installation did not move: the answer describes what is installed.
+  case deliver
+  /// It moved. The answer describes the preceding generation, so it is neither
+  /// cached nor delivered — the identity that is there now is asked about
+  /// instead, on behalf of everyone still waiting.
+  case reresolve
+  /// It kept moving under every attempt. Refuse with this reason rather than
+  /// arm the tray with whichever generation happened to answer last.
+  case refuse(String)
+}
+
+/// Decide whether an owner answer may be delivered.
+///
+/// The owner is asked in a subprocess, so a publication can land while that
+/// child runs — and a caller that joins mid-flight may already be looking at
+/// the newer pointer. Comparing the identity read at invocation with the one
+/// read at completion is what keeps an answer, and every action taken from it,
+/// bound to the generation it actually describes.
+func runtimeResolveDelivery(
+  invoked: RuntimeIdentityFingerprint,
+  observed: RuntimeIdentityFingerprint,
+  attempt: Int,
+  limit: Int = runtimeResolveDriftLimit
+) -> RuntimeResolveDelivery {
+  guard observed != invoked else { return .deliver }
+  guard attempt < limit else {
+    return .refuse(
+      "the installed runtime changed while it was being resolved "
+        + "(\(limit + 1) attempts); the next status poll reads it again")
+  }
+  return .reresolve
+}

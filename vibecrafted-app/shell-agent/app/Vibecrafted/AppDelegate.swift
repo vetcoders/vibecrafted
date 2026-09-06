@@ -166,23 +166,6 @@ extension RuntimeIdentityProbe {
 /// The App only ever resolves one thing: the owner's launch contract.
 private typealias RuntimeContract = RuntimeResolution<CanonicalRuntimeInstall>
 
-/// Cheap identity of the two documents the installer publishes together.
-///
-/// A generation change is published by rewriting them, so their stamps are the
-/// refresh signal: the App re-asks the owner when this changes and reuses the
-/// last answer when it has not. That keeps a five-second tray poll from
-/// spawning an interpreter it does not need.
-private struct RuntimeIdentityFingerprint: Equatable {
-  let home: String
-  let pointer: FileStamp?
-  let receipt: FileStamp?
-}
-
-private struct FileStamp: Equatable {
-  let size: Int
-  let modified: Date
-}
-
 /// How long the quit path waits for the lifecycle launcher to describe active
 /// work before treating its silence as an answer.
 private let activityTruthTimeout: TimeInterval = 15
@@ -212,6 +195,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private var serverStatusProcess: Process?
   private var serverActionProcess: Process?
   private var serverActionInFlight: ServerLifecycleAction?
+  /// The one tray action allowed to be preflighting its runtime identity. This
+  /// is not the same as an action being in flight: between the click and the
+  /// spawn the App is asking the owner what is installed, and a second click in
+  /// that window would put two verbs on the same service.
+  private var runtimeActionPreflight: String?
   private var serverUtilityProcess: Process?
   /// The last caretaker envelope bytes the status poll brought back. The menu,
   /// the diagnostics alert and the action in-flight state all render from this
@@ -578,6 +566,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     return environment
   }
 
+  /// Where this process looks for an installation.
+  private func currentRuntimeHome() -> URL {
+    let host = ProcessInfo.processInfo.environment
+    return resolvedRuntimeHome(
+      environment: host,
+      homeDirectory: host["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path)
+  }
+
   /// Ask the owner what is installed.
   ///
   /// Coalesced and cached: callers that arrive while a resolve is in flight
@@ -585,32 +581,45 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   /// pair reuses the last answer, so a five-second tray poll does not spawn an
   /// interpreter it does not need. The call itself is read-only by contract —
   /// it installs, publishes, reconciles and repairs nothing.
+  ///
+  /// Every answer is bound to the identity that was read when it was asked for,
+  /// and that identity is read again before the answer is believed. A generation
+  /// published while the resolver runs therefore cannot be handed to a caller
+  /// that is already looking at the new one.
   private func resolveInstalledRuntime(
     forceRefresh: Bool = false,
     completion: @escaping (RuntimeContract) -> Void
   ) {
-    let host = ProcessInfo.processInfo.environment
-    let runtimeHome = resolvedRuntimeHome(
-      environment: host,
-      homeDirectory: host["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path)
+    let runtimeHome = currentRuntimeHome()
     let fingerprint = identityFingerprint(runtimeHome: runtimeHome)
     if !forceRefresh, let cached = cachedResolution, cached.fingerprint == fingerprint {
       completion(cached.value)
       return
     }
+    // Join first, then decide whether to ask. One serialization point means a
+    // caller that arrives mid-flight is answered about the installation as it
+    // stands when the answer lands, not about the one it happened to catch.
+    runtimeResolveWaiters.append(completion)
+    guard runtimeResolveProcess == nil else { return }
+    beginRuntimeResolve(runtimeHome: runtimeHome, fingerprint: fingerprint, attempt: 0)
+  }
 
+  /// Ask the owner once, about one identity, for everyone currently waiting.
+  private func beginRuntimeResolve(
+    runtimeHome: URL,
+    fingerprint: RuntimeIdentityFingerprint,
+    attempt: Int
+  ) {
     switch runtimeResolverBootstrap(runtimeHome: runtimeHome, probe: .live) {
     case .absent(let reason):
       let resolution: RuntimeContract = .absent(reason)
       cachedResolution = (fingerprint, resolution)
-      completion(resolution)
+      deliverResolution(resolution)
     case .unusable(let reason):
       let resolution: RuntimeContract = .unusable(reason)
       cachedResolution = (fingerprint, resolution)
-      completion(resolution)
+      deliverResolution(resolution)
     case .ask(let python, let installer):
-      runtimeResolveWaiters.append(completion)
-      guard runtimeResolveProcess == nil else { return }
       let process = Process()
       process.executableURL = python
       process.arguments = runtimeResolveArguments(installer: installer, runtimeHome: runtimeHome)
@@ -619,13 +628,34 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         try runBounded(process, timeout: 20, label: "runtime-resolve") { [weak self] result in
           guard let self else { return }
           self.runtimeResolveProcess = nil
-          let resolution: RuntimeContract = decodeRuntimeResolution(
-            stdout: result.stdout,
-            stderr: result.stderr,
-            terminationStatus: result.terminationStatus,
-            clean: result.clean)
-          self.cachedResolution = (fingerprint, resolution)
-          self.deliverResolution(resolution)
+          // The child ran while the installer was free to publish, so the pair
+          // is read again: this answer is only about the identity it was asked
+          // about.
+          let delivery = runtimeResolveDelivery(
+            invoked: fingerprint,
+            observed: self.identityFingerprint(runtimeHome: runtimeHome),
+            attempt: attempt)
+          switch delivery {
+          case .deliver:
+            let resolution: RuntimeContract = decodeRuntimeResolution(
+              stdout: result.stdout,
+              stderr: result.stderr,
+              terminationStatus: result.terminationStatus,
+              clean: result.clean)
+            self.cachedResolution = (fingerprint, resolution)
+            self.deliverResolution(resolution)
+          case .reresolve:
+            lifecycleLog(
+              "runtime identity changed while resolving; discarding that answer and re-asking")
+            // Cached under neither identity: it describes what was asked about,
+            // which is no longer what is installed.
+            self.cachedResolution = nil
+            self.restartRuntimeResolve(attempt: attempt + 1)
+          case .refuse(let reason):
+            lifecycleLog("runtime identity kept changing while resolving; refusing")
+            self.cachedResolution = nil
+            self.deliverResolution(.unusable(reason))
+          }
         }
         runtimeResolveProcess = process
       } catch {
@@ -636,6 +666,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         deliverResolution(resolution)
       }
     }
+  }
+
+  /// Ask again, about the identity that is installed now, keeping the callers
+  /// that are still waiting for an answer.
+  private func restartRuntimeResolve(attempt: Int) {
+    let runtimeHome = currentRuntimeHome()
+    beginRuntimeResolve(
+      runtimeHome: runtimeHome,
+      fingerprint: identityFingerprint(runtimeHome: runtimeHome),
+      attempt: attempt)
   }
 
   /// Hand one answer to everybody who asked, exactly once.
@@ -1432,19 +1472,56 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     performServerAction(.restart)
   }
 
+  /// Start, stop or restart the shared service — on the generation that is
+  /// installed now, never on one the tray merely remembers.
+  ///
+  /// The active pointer can move between the menu being drawn and an item being
+  /// clicked, and the refresh that would notice it is asynchronous. So the owner
+  /// is asked again here and the verb runs against whatever that answer adopts.
+  /// An unchanged identity is answered from cache and spawns nothing, which
+  /// leaves the ordinary click exactly as immediate as it was.
   private func performServerAction(_ action: ServerLifecycleAction) {
-    guard serverActionProcess?.isRunning != true else { return }
-    guard let install = canonicalInstall, let environment = canonicalRuntimeEnvironment else {
-      // Say why there is nothing to act on. "Onboarding has not completed" is
-      // the wrong story when the owner refused an installation that exists.
-      reportWorkspaceLaunchFailure(
-        runtimeResolutionFailure.map {
-          "Cannot \(action.rawValue) VC Server: \($0)"
-        } ?? "Cannot \(action.rawValue) VC Server before runtime onboarding completes")
-      return
+    guard serverActionProcess?.isRunning != true, runtimeActionPreflight == nil else { return }
+    runtimeActionPreflight = "server \(action.rawValue)"
+    // The transition is honest from the click rather than from the spawn: the
+    // Founder asked for it and the App is already working on it.
+    serverActionInFlight = action
+    renderServerStatus()
+    resolveInstalledRuntime { [weak self] resolution in
+      guard let self else { return }
+      self.runtimeActionPreflight = nil
+      guard let install = self.applyResolution(resolution),
+        let environment = self.canonicalRuntimeEnvironment
+      else {
+        // Adoption failed, so there is nothing to act on. Say why, instead of
+        // running a service verb through a generation this App no longer
+        // controls.
+        self.serverActionInFlight = nil
+        self.renderServerStatus()
+        self.reportWorkspaceLaunchFailure(
+          self.runtimeResolutionFailure.map {
+            "Cannot \(action.rawValue) VC Server: \($0)"
+          } ?? "Cannot \(action.rawValue) VC Server before runtime onboarding completes")
+        return
+      }
+      self.runServerAction(action, install: install, environment: environment)
     }
+  }
+
+  /// Run the canonical service verb against an identity that was just adopted.
+  ///
+  /// The epoch is read after that adoption, so this action belongs to the
+  /// generation it addresses: if the pointer moves again while the verb runs,
+  /// its completion is dropped rather than allowed to repaint the tray.
+  private func runServerAction(
+    _ action: ServerLifecycleAction,
+    install: CanonicalRuntimeInstall,
+    environment: [String: String]
+  ) {
     let deck = install.root.appendingPathComponent("bin/vibecrafted")
     guard FileManager.default.isExecutableFile(atPath: deck.path) else {
+      serverActionInFlight = nil
+      renderServerStatus()
       reportWorkspaceLaunchFailure("Canonical server launcher is missing: \(deck.path)")
       return
     }
@@ -1478,11 +1555,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.refreshServerStatus()
       }
       serverActionProcess = process
+      // Adoption may have cleared the transition on the way here; the verb is
+      // running, so it is true again.
       serverActionInFlight = action
       renderServerStatus()
     } catch {
       serverActionProcess = nil
       serverActionInFlight = nil
+      renderServerStatus()
       let alert = NSAlert()
       alert.alertStyle = .critical
       alert.messageText = "Vibecrafted could not \(action.rawValue) VC Server"
@@ -1492,15 +1572,35 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   @objc private func openServerLogsFromStatusItem() {
-    guard serverUtilityProcess?.isRunning != true else { return }
-    guard let install = canonicalInstall, let environment = canonicalRuntimeEnvironment else {
-      reportWorkspaceLaunchFailure(
-        runtimeResolutionFailure.map { "Cannot open VC Server logs: \($0)" }
-          ?? "Cannot open VC Server logs before runtime onboarding completes")
-      return
+    guard serverUtilityProcess?.isRunning != true, runtimeActionPreflight == nil else { return }
+    // Same rule as the service verbs: the log location belongs to the
+    // generation that is installed now, so the owner is asked before the deck
+    // of a remembered one is executed.
+    runtimeActionPreflight = "server logs"
+    openServerLogsMenuItem?.isEnabled = false
+    resolveInstalledRuntime { [weak self] resolution in
+      guard let self else { return }
+      self.runtimeActionPreflight = nil
+      guard let install = self.applyResolution(resolution),
+        let environment = self.canonicalRuntimeEnvironment
+      else {
+        self.renderServerStatus()
+        self.reportWorkspaceLaunchFailure(
+          self.runtimeResolutionFailure.map { "Cannot open VC Server logs: \($0)" }
+            ?? "Cannot open VC Server logs before runtime onboarding completes")
+        return
+      }
+      self.runServerLogs(install: install, environment: environment)
     }
+  }
+
+  /// Ask the canonical service owner where its logs are, on the generation that
+  /// was just adopted. The epoch is read after that adoption, so a location
+  /// belonging to a runtime this App no longer controls is never opened.
+  private func runServerLogs(install: CanonicalRuntimeInstall, environment: [String: String]) {
     let deck = install.root.appendingPathComponent("bin/vibecrafted")
     guard FileManager.default.isExecutableFile(atPath: deck.path) else {
+      renderServerStatus()
       reportWorkspaceLaunchFailure("Canonical server launcher is missing: \(deck.path)")
       return
     }
@@ -1534,9 +1634,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.refreshServerStatus()
       }
       serverUtilityProcess = process
-      openServerLogsMenuItem?.isEnabled = false
     } catch {
       serverUtilityProcess = nil
+      renderServerStatus()
       let alert = NSAlert()
       alert.alertStyle = .critical
       alert.messageText = "Vibecrafted could not open VC Server logs"
