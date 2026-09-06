@@ -204,6 +204,16 @@ def _fake_generation(
     return generation
 
 
+def _shell_argv(shell: str, script: str) -> list[str]:
+    """The no-rc invocation for a given login shell, bash or zsh."""
+    if shell == "zsh":
+        # -f: skip all rc/profile files, same isolation as bash's --noprofile
+        # --norc. Zsh's own default array base (1-indexed, no KSH_ARRAYS) stays
+        # untouched -- this is exactly the boundary the facade must survive.
+        return ["zsh", "-f", "-c", script]
+    return ["bash", "--noprofile", "--norc", "-c", script]
+
+
 def _run_entry(
     tmp_path: Path,
     invocation: str,
@@ -215,6 +225,7 @@ def _run_entry(
     front_doors: tuple[str, ...] = ("vc-start", "vibecrafted"),
     terminal_exit: int = 0,
     expect_launch: bool = True,
+    shell: str = "bash",
 ) -> tuple[subprocess.CompletedProcess[str], dict | None]:
     capture = tmp_path / "terminal-launch.json"
     home = tmp_path / "home"
@@ -266,7 +277,7 @@ def _run_entry(
     ]
 
     result = subprocess.run(
-        ["bash", "--noprofile", "--norc", "-c", "\n".join(lines)],
+        _shell_argv(shell, "\n".join(lines)),
         check=False,
         cwd=project_dir,
         env=env,
@@ -1102,3 +1113,143 @@ def test_child_does_not_hang_its_tab_on_an_unrelated_session(
     assert _first_index(calls, "--new-session-with-layout") >= 0, (
         f"this project's own session was never prepared: {calls}"
     )
+
+
+# --------------------------------------------------------------------------
+# Zsh compatibility: the facade's compatibility promise, proven, not assumed
+# --------------------------------------------------------------------------
+#
+# The two module-scope helpers below are direct probes, not the full terminal
+# harness: `_run_entry` is out of reach here because these cases assert on
+# `_vetcoders_contract_argv` itself, before any terminal or session exists.
+
+
+def _probe_rewrite_argv(shell: str, normalized: str, *args: str) -> list[str]:
+    """Direct probe: call the scanner alone, print back `_vetcoders_contract_argv`."""
+    probe = "\n".join(
+        [
+            f'source "{SHELL_SH}"',
+            "_vetcoders_rewrite_contract_root_argv "
+            + shlex.quote(normalized)
+            + " "
+            + " ".join(shlex.quote(a) for a in args),
+            'for _a in "${_vetcoders_contract_argv[@]}"; do printf "ARG=[%s]\\n" "$_a"; done',
+        ]
+    )
+    result = subprocess.run(
+        _shell_argv(shell, probe),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, (shell, result.stdout, result.stderr)
+    return [
+        line[len("ARG=[") : -1]
+        for line in result.stdout.splitlines()
+        if line.startswith("ARG=[")
+    ]
+
+
+def test_rewrite_contract_root_argv_root_value_as_last_token(tmp_path: Path) -> None:
+    """Direct scanner probe: nested relative --root rewritten when its value is
+    the LAST token in the vector -- exactly the S1 R3 confirmed shape
+    (`_vetcoders_rewrite_contract_root_argv /abs --root child`, snapshot
+    sha256 b271db305fe127025b0486d2b1ee7ed415c5756d3c7d550c300618b23649a057)
+    and the real `vc-resume codex --root child` forward.
+
+    Zsh arrays are 1-indexed (no KSH_ARRAYS). The old scanner's own bounds
+    check (`index + 1 < $#`, sized for a 0-based array whose last valid slot
+    is `$# - 1`) silently under-counts by one once the loop's index space
+    re-aligns to zsh's 1-based positions, so it wrongly treats the true last
+    element as out of bounds and never rewrites it. The fix must not
+    subscript the argv array with a computed numeric index at all -- neither
+    special-cased per shell nor via a global array-base option.
+    """
+    normalized = str(tmp_path / "project" / "child")
+    for shell in ("bash", "zsh"):
+        args = _probe_rewrite_argv(
+            shell, normalized, "--fork-session", "--root", "child"
+        )
+        assert args == ["--fork-session", "--root", normalized], (shell, args)
+
+
+def test_rewrite_contract_root_argv_preserves_prompt_and_dashdash_payload(
+    tmp_path: Path,
+) -> None:
+    """Direct scanner probe: only the root VALUE is rewritten -- everything
+    around it, including a --prompt / `--` payload after it, stays byte for
+    byte, in both shells.
+    """
+    normalized = str(tmp_path / "project" / "child")
+    expected = [
+        "--fork-session",
+        "--root",
+        normalized,
+        "--prompt",
+        "two",
+        "words",
+        "with",
+        "--",
+        "inside",
+    ]
+    for shell in ("bash", "zsh"):
+        args = _probe_rewrite_argv(
+            shell,
+            normalized,
+            "--fork-session",
+            "--root",
+            "child",
+            "--prompt",
+            "two",
+            "words",
+            "with",
+            "--",
+            "inside",
+        )
+        assert args == expected, (shell, args)
+
+
+def test_nested_relative_root_survives_the_child_reparse_under_zsh(
+    tmp_path: Path,
+) -> None:
+    """The bash P0 fix (test_nested_relative_root_survives_the_child_reparse)
+    held only under bash: the same `--root child` case must open the correct
+    nested project, and the hosted argv must carry the absolute rewrite, when
+    the operator's login shell is zsh.
+    """
+    project = tmp_path / "mlx-batch-runner"
+    project.mkdir(parents=True, exist_ok=True)
+    nested = project / "child"
+    nested.mkdir()
+
+    result, launch = _run_entry(tmp_path, "vc-resume codex --root child", shell="zsh")
+
+    assert result.returncode == 0, result.stderr
+    assert launch is not None, result.stderr
+    assert _working_directory(launch) == nested.resolve()
+
+    hosted = _hosted_argv(launch)
+    assert hosted[4] == "--root", hosted
+    assert Path(hosted[5]).is_absolute(), f"a relative root crossed the cwd: {hosted}"
+    assert Path(hosted[5]).resolve() == nested.resolve()
+
+
+def test_bare_resume_without_tty_opens_terminal_under_zsh(tmp_path: Path) -> None:
+    """The reported P0, under zsh: `local status=""` collides with zsh's
+    readonly `$status` special parameter inside
+    `_vetcoders_open_entry_in_vc_terminal` (S1 R3 probe: `read-only variable:
+    status`, function still exit 0) -- the receipt-polling loop that decides
+    whether the host admitted the launch must not silently read the wrong
+    variable.
+    """
+    result, launch = _run_entry(tmp_path, "vc-resume codex", shell="zsh")
+
+    assert result.returncode == 0, result.stderr
+    assert launch is not None, f"no terminal was opened: {result.stderr}"
+    assert "read-only variable" not in result.stderr, result.stderr
+    hosted = _hosted_argv(launch)
+    assert hosted[0].endswith("launch-primary-shell.zsh")
+
+    # Nothing may be launched twice: no AICX pack in the escalating parent.
+    assert not (tmp_path / "aicx-called.txt").exists()

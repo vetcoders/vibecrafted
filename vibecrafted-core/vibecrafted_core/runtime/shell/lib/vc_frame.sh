@@ -209,17 +209,21 @@ _vetcoders_open_entry_in_vc_terminal() {
   } &
   disown 2>/dev/null || true
 
-  local waited=0 status=""
+  # `status` itself is a zsh readonly special parameter (an alias for `$?`):
+  # `local status=""` errors "read-only variable: status" under zsh (function
+  # still exits 0 — the error is non-fatal but the local never actually holds
+  # our receipt content). Use a task-specific name instead of a reserved word.
+  local waited=0 admit_status=""
   while ((waited < 30)); do
-    status="$(cat "$receipt" 2>/dev/null || true)"
-    [[ -z "$status" ]] || break
+    admit_status="$(cat "$receipt" 2>/dev/null || true)"
+    [[ -z "$admit_status" ]] || break
     sleep 0.05
     ((waited += 1))
   done
   rm -rf "$receipt_dir"
-  if [[ -n "$status" && "$status" != "0" ]]; then
+  if [[ -n "$admit_status" && "$admit_status" != "0" ]]; then
     printf 'vc-terminal: the terminal host rejected this launch (exit %s); no window was opened.\n' \
-      "$status" >&2
+      "$admit_status" >&2
     printf '  host:    %s\n' "$terminal_bin" >&2
     printf '  project: %s\n' "$project_root" >&2
     return 1
@@ -229,7 +233,7 @@ _vetcoders_open_entry_in_vc_terminal() {
   # window is a host that spawned the window and returned. No exit at all is
   # only the ABSENCE of a rejection — the shape a real window has, but not
   # proof of one, and it must not be reported as if we had seen it open.
-  if [[ -n "$status" ]]; then
+  if [[ -n "$admit_status" ]]; then
     printf 'No TTY here — opened the Vibecrafted terminal for this project.\n' >&2
   else
     printf 'No TTY here — the Vibecrafted terminal host accepted this launch (starting; it had not exited after 1.5s).\n' >&2

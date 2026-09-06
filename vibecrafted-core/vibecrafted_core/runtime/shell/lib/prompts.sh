@@ -227,24 +227,45 @@ _vetcoders_parse_contract() {
 #
 # Only the LAST accepted occurrence is rewritten — that is the one the parser
 # keeps, so that is the one the child resolves.
+#
+# Portability (2026-09-06): this used to walk the vector with a hand-rolled
+# 0-based numeric index (`${_vetcoders_contract_argv[index]}`,
+# `((index + 1 < $#))`). Bash arrays are 0-based; zsh arrays are 1-based with
+# KSH_ARRAYS off, which is the facade's default in both shells. That single
+# assumption baked into the bounds math meant the scanner silently declined to
+# rewrite the LAST element of the vector under zsh (`vc-resume codex --root
+# child` — child) and passed all-green under bash, because bash's array base
+# happened to match the arithmetic. The fix below never subscripts the array
+# with a computed index at all: it walks it twice with `for ... in
+# "${arr[@]}"` (base-agnostic in both shells) tracking a plain 1..N ordinal
+# counter of our own, so no shell's array-base convention is ever load-bearing.
 _vetcoders_rewrite_contract_root_argv() {
   local normalized_root="$1"
   shift
   _vetcoders_contract_argv=("$@")
   [[ -n "$normalized_root" ]] || return 0
 
-  local -i index=0 root_value_index=-1
-  while ((index < $#)); do
-    case "${_vetcoders_contract_argv[index]}" in
+  # Pass 1 (read-only): find the ordinal — the Nth argument overall, counting
+  # from 1 — of the LAST accepted --root value before --prompt/-p/-- ends the
+  # scan. `skip` steps over a value that follows a value-taking flag so it is
+  # never itself read as a flag.
+  local -i ordinal=0 root_ordinal=0 skip=0
+  local _arg
+  for _arg in "${_vetcoders_contract_argv[@]}"; do
+    ordinal+=1
+    if ((skip > 0)); then
+      skip=$((skip - 1))
+      continue
+    fi
+    case "$_arg" in
       # --prompt is greedy and `--` opens the tail: past either of them nothing
       # is a flag any more, so nothing there may be rewritten.
       -p | --prompt | --)
         break
         ;;
       --root)
-        ((index + 1 < $#)) || break
-        root_value_index=$((index + 1))
-        ((index += 2))
+        root_ordinal=$((ordinal + 1))
+        skip=1
         ;;
       # Value-taking flags: step over the VALUE too, so a value that happens to
       # spell a flag is never read as one.
@@ -252,16 +273,26 @@ _vetcoders_rewrite_contract_root_argv() {
         --runtime | --model | --policy-runtime | --permissions | \
         --token-budget | --operator | --continuity | --parent-session | \
         --continuity-parent)
-        ((index += 2))
-        ;;
-      *)
-        ((index += 1))
+        skip=1
         ;;
     esac
   done
 
-  ((root_value_index >= 0)) || return 0
-  _vetcoders_contract_argv[root_value_index]="$normalized_root"
+  ((root_ordinal > 0)) || return 0
+
+  # Pass 2: rebuild the array by ordinal, appending in order — never assigning
+  # into a computed subscript — so the shell's array base never matters.
+  local -a _rewritten=()
+  ordinal=0
+  for _arg in "${_vetcoders_contract_argv[@]}"; do
+    ordinal+=1
+    if ((ordinal == root_ordinal)); then
+      _rewritten+=("$normalized_root")
+    else
+      _rewritten+=("$_arg")
+    fi
+  done
+  _vetcoders_contract_argv=("${_rewritten[@]}")
 }
 
 # Skill launchers own model selection. Keep the shared parser fail-closed for
