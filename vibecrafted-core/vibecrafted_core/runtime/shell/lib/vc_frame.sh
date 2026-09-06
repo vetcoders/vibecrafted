@@ -863,6 +863,21 @@ _vetcoders_mark_pending_vc_frame_attach() {
 # The foreground handover. By contract this runs LAST — after the provider tab
 # exists — and blocks until the Founder detaches. A caller that never prepared
 # an attach is a no-op, so ordinary dispatch paths are untouched.
+#
+# _vetcoders_prepare_operator_runtime exports VC_FRAME_SESSION_NAME (and, on
+# the guessed/explicit paths, ZELLIJ_SESSION_NAME too) into THIS shell purely
+# for downstream dispatch targeting — so the AICX pack and provider tab land
+# on the right project. Those markers are not proof that this process is
+# itself already attached. The native binary disagrees: its own startup
+# aliases VC_FRAME_SESSION_NAME into ZELLIJ_SESSION_NAME (zellij-utils
+# envs::normalize_vc_frame_env_aliases), and src/commands.rs:844 panics
+# ("You are trying to attach to the current session") whenever that value
+# equals the attach target. A brand-new external client inheriting our own
+# targeting marker looks, to the native guard, exactly like an illegal nested
+# reattach. Clear both for ONLY this invocation — same contract the detached
+# create path above already uses (env -u ... attach --create-background) —
+# so the parent shell's targeting state and the explicit session argument are
+# untouched, only the child's inherited attachment context is.
 _vetcoders_attach_prepared_vc_frame_session() {
   local session_name="${1:-${VIBECRAFTED_PENDING_VC_FRAME_ATTACH:-}}"
   [[ -n "$session_name" ]] || return 0
@@ -870,7 +885,9 @@ _vetcoders_attach_prepared_vc_frame_session() {
   local vc_frame_bin=""
   vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 1
   _vetcoders_record_vc_frame_attachment live "$session_name" || true
-  "$vc_frame_bin" attach "$session_name"
+  env -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME \
+    -u ZELLIJ -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME \
+    "$vc_frame_bin" attach "$session_name"
 }
 
 _vetcoders_ensure_vc_frame_session() {
