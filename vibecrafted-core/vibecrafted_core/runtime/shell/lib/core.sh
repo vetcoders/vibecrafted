@@ -10,71 +10,75 @@ _vetcoders_script_dir() {
   else
     script_path="$0"
   fi
-  local current_dir
-  current_dir="$(cd "$(dirname "$script_path")" && pwd)"
-  printf '%s\n' "$current_dir"
+
+  local script_dir link_target
+  while [[ -L "$script_path" ]]; do
+    script_dir="$(cd -P "$(dirname "$script_path")" && pwd -P)" || return $?
+    link_target="$(readlink "$script_path")" || return $?
+    if [[ "$link_target" == /* ]]; then
+      script_path="$link_target"
+    else
+      script_path="$script_dir/$link_target"
+    fi
+  done
+  cd -P "$(dirname "$script_path")" && pwd -P
 }
 
-_vetcoders_runtime_repo_root() {
-  local cursor
-  cursor="$(_vetcoders_script_dir)"
-
-  while [[ "$cursor" != "/" && -n "$cursor" ]]; do
-    if [[ -f "$cursor/VERSION" && -f "$cursor/scripts/vibecrafted" ]]; then
-      printf '%s\n' "$cursor"
-      return 0
-    fi
-    cursor="$(cd "$cursor/.." && pwd)"
-  done
-
-  return 1
+_vetcoders_runtime_owner_root() {
+  local module_dir owner_root
+  module_dir="$(_vetcoders_script_dir)" || return $?
+  case "$module_dir" in
+    */vibecrafted-core/vibecrafted_core/runtime/shell/lib)
+      owner_root="${module_dir%/vibecrafted-core/vibecrafted_core/runtime/shell/lib}"
+      [[ -n "$owner_root" ]] || owner_root="/"
+      printf '%s\n' "$owner_root"
+      ;;
+    *)
+      printf 'Vetcoders shell core is outside a physical runtime owner: %s\n' "$module_dir" >&2
+      return 1
+      ;;
+  esac
 }
 
 _vetcoders_runtime_helper_candidates() {
-  local module_runtime_root
-  module_runtime_root="$(_vetcoders_script_dir)"
-  module_runtime_root="${module_runtime_root%/shell/lib}"
-  if [[ -n "${VIBECRAFTED_ROOT:-}" ]]; then
-    printf '%s/runtime/helpers/vetcoders-runtime-core.sh\n' "${VIBECRAFTED_ROOT}"
-    printf '%s/vibecrafted-core/vibecrafted_core/runtime/helpers/vetcoders-runtime-core.sh\n' "${VIBECRAFTED_ROOT}"
-    printf '%s/helpers/vetcoders-runtime-core.sh\n' "${VIBECRAFTED_ROOT}"
+  local owner_root helper_dir helper
+  owner_root="$(_vetcoders_runtime_owner_root)" || return $?
+  helper_dir="$owner_root/vibecrafted-core/vibecrafted_core/runtime/helpers"
+  helper="$helper_dir/vetcoders-runtime-core.sh"
+
+  if [[ -L "$helper_dir" || ! -d "$helper_dir" || -L "$helper" || ! -f "$helper" || ! -r "$helper" ]]; then
+    printf 'Missing or unsafe adjacent Vetcoders runtime helper: %s\n' "$helper" >&2
+    return 1
   fi
-  printf '%s/helpers/vetcoders-runtime-core.sh\n' "$module_runtime_root"
-  local repo_root
-  repo_root="$(_vetcoders_runtime_repo_root 2>/dev/null || true)"
-  if [[ -n "$repo_root" ]]; then
-    printf '%s/runtime/helpers/vetcoders-runtime-core.sh\n' "$repo_root"
-    printf '%s/vibecrafted-core/vibecrafted_core/runtime/helpers/vetcoders-runtime-core.sh\n' "$repo_root"
-  fi
-  printf '%s/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/helpers/vetcoders-runtime-core.sh\n' "${VIBECRAFTED_TOOLS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/tools}"
+
+  printf '%s\n' "$helper"
 }
 
 _vetcoders_source_runtime_helpers() {
-  local helper candidates=()
-  # Drain the enumerator fully before sourcing: returning out of a
-  # `while read < <(...)` loop closes the pipe under the producer and every
-  # later candidate printf dies with "write error: Broken pipe" on stderr.
-  # (No mapfile: /bin/bash on macOS is 3.2.)
-  while IFS= read -r helper; do
-    candidates+=("$helper")
-  done < <(_vetcoders_runtime_helper_candidates)
-  for helper in ${candidates[@]+"${candidates[@]}"}; do
-    [[ -n "$helper" && -r "$helper" ]] || continue
-    # shellcheck disable=SC1090
-    source "$helper"
-    return 0
-  done
+  local helper owner_root source_status
+  owner_root="$(_vetcoders_runtime_owner_root)" || return $?
+  helper="$(_vetcoders_runtime_helper_candidates)" || return $?
 
-  printf '%s\n' "Missing Vetcoders runtime helpers in:" >&2
-  _vetcoders_runtime_helper_candidates >&2
-  return 1
+  # shellcheck disable=SC1090
+  if source "$helper"; then
+    # The sourced helper resolves later runtime scripts through VIBECRAFTED_ROOT.
+    # Bind it to this helper's physical owner only after the source succeeds.
+    export VIBECRAFTED_ROOT="$owner_root"
+    export VIBECRAFTED_RUNTIME_ROOT="$owner_root"
+    return 0
+  else
+    source_status=$?
+  fi
+
+  printf 'Failed to source adjacent Vetcoders runtime helper: %s\n' "$helper" >&2
+  return "$source_status"
 }
 
 _vetcoders_runtime_source_status=0
 _vetcoders_source_runtime_helpers || {
   _vetcoders_runtime_source_status=$?
   unset -f _vetcoders_script_dir \
-    _vetcoders_runtime_repo_root \
+    _vetcoders_runtime_owner_root \
     _vetcoders_runtime_helper_candidates \
     _vetcoders_source_runtime_helpers
   if (return 0 2>/dev/null); then
@@ -83,7 +87,7 @@ _vetcoders_source_runtime_helpers || {
   exit "${_vetcoders_runtime_source_status}"
 }
 unset -f _vetcoders_script_dir \
-  _vetcoders_runtime_repo_root \
+  _vetcoders_runtime_owner_root \
   _vetcoders_runtime_helper_candidates \
   _vetcoders_source_runtime_helpers
 unset _vetcoders_runtime_source_status
