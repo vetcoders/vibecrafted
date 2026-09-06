@@ -3,16 +3,18 @@
   "adr": "docs/adr/0002-unified-operator-ownership.md",
   "plan_id": "vc-unified-operator-runtime",
   "frozen": "2026-07-29",
+  "last_updated": "2026-09-06",
   "domains": [
     {
       "id": "installed-runtime",
-      "truth": "installed runtime, generations and profile under ~/.local/share/vibecrafted and ~/.vibecrafted",
+      "truth": "installed runtime generations and selectors under ~/.local/share/vibecrafted, active configuration under ~/.config/vibecrafted/**, and durable control/artifacts/history under ~/.vibecrafted",
       "owner": "vibecrafted-runtime-manifest",
-      "write_surface": "installer generation build + atomic generation switch",
+      "write_surface": "installer generation build + atomic generation switch (installer alone publishes; ordinary startup consumes selected runtime/config without delivery)",
       "read_projections": [
         "host shell path helper",
         "vc-start environment",
         "vc-terminal environment",
+        "vibecrafted-app environment",
         "doctor"
       ]
     },
@@ -55,14 +57,19 @@
       "truth": "branded terminal emulator surface: rendering, fonts, window, branding",
       "owner": "vc-terminal-alacritty",
       "write_surface": "installed vc-terminal profile from the runtime manifest",
-      "read_projections": ["wezterm compatibility adapter"]
+      "read_projections": [
+        "wezterm compatibility adapter"
+      ]
     },
     {
       "id": "session-composition",
       "truth": "tabs, layouts, panes, multiplexing and session composition",
       "owner": "vc-frame",
       "write_surface": "vc-frame layout and session commands",
-      "read_projections": ["vc-terminal windows", "operator shell FLEET links"]
+      "read_projections": [
+        "vc-terminal windows",
+        "operator shell FLEET links"
+      ]
     },
     {
       "id": "a2a-envelopes",
@@ -88,7 +95,7 @@
     },
     {
       "id": "plan-artifacts",
-      "truth": "plan artifacts (mission, atlas, briefs, tracker, reports) under $VIBECRAFTED_HOME/artifacts/<org>/<repo>/<day>/plans/",
+      "truth": "plan artifacts (mission, atlas, briefs, tracker, reports) under /Users/polyversai/.vibecrafted/artifacts/<org>/<repo>/<day>/plans/",
       "owner": "plan-filesystem",
       "write_surface": "direct file writes in the artifact tree (workers, operators and the scaffold editor all write the same files; the scaffold API is a convenience client of this surface and the only path for remote integrations without filesystem access)",
       "read_projections": [
@@ -101,20 +108,47 @@
   "components": [
     {
       "id": "vibecrafted-runtime-manifest",
-      "owns": ["installed-runtime"],
+      "owns": [
+        "installed-runtime"
+      ],
       "must_not": [
         "link installed artifacts to a repository checkout",
-        "source product logic into the host shell"
-      ]
+        "source product logic into the host shell",
+        "reinstall or mutate configuration during ordinary product startup"
+      ],
+      "code_care": {
+        "lead": "codex",
+        "review": "claude",
+        "secondary": "agi (installer prose/art assets only; launcher agy, model gemini-3.8-flash-medium)",
+        "scope_paths": [
+          "scripts/",
+          "vibecrafted-core/vibecrafted_core/runtime/shell/",
+          "config/"
+        ]
+      }
     },
     {
       "id": "control-plane",
-      "owns": ["run-lifecycle"],
-      "must_not": ["delegate run truth to any UI or transport"]
+      "owns": [
+        "run-lifecycle"
+      ],
+      "must_not": [
+        "delegate run truth to any UI or transport"
+      ],
+      "code_care": {
+        "lead": "codex",
+        "review": "claude",
+        "scope_paths": [
+          "vibecrafted-core/vibecrafted_core/control_plane.py",
+          "vibecrafted-server/control-core/src/read.rs"
+        ]
+      }
     },
     {
       "id": "aicx",
-      "owns": ["session-intention"],
+      "owns": [
+        "session-intention"
+      ],
       "must_not": [
         "act as a run-state store",
         "act as a repository-structure store"
@@ -122,29 +156,63 @@
     },
     {
       "id": "loctree",
-      "owns": ["repository-structure"],
-      "must_not": ["act as a session-memory store"]
+      "owns": [
+        "repository-structure"
+      ],
+      "must_not": [
+        "act as a session-memory store"
+      ]
     },
     {
       "id": "vc-terminal-alacritty",
-      "owns": ["terminal-substrate"],
+      "owns": [
+        "terminal-substrate"
+      ],
       "must_not": [
         "implement run or session lifecycle",
-        "duplicate vc-frame state"
-      ]
+        "duplicate vc-frame state",
+        "own run recovery"
+      ],
+      "code_care": {
+        "lead": "claude",
+        "review": "codex",
+        "secondary": "agi (visual asset/copy work only; launcher agy, model gemini-3.8-flash-medium)",
+        "scope_paths": [
+          "alacritty/",
+          "alacritty_terminal/",
+          "scripts/vc-terminal-product-entry.sh"
+        ],
+        "rationale": "Alacritty is VC Terminal because VC Frame owns multiplexing, sessions and UI composition; a richer terminal would duplicate that responsibility."
+      }
     },
     {
       "id": "vc-frame",
-      "owns": ["session-composition"],
+      "owns": [
+        "session-composition"
+      ],
       "must_not": [
         "own run-lifecycle truth (projects the control plane)",
         "own the terminal substrate"
-      ]
+      ],
+      "code_care": {
+        "lead": "codex",
+        "review": "claude",
+        "scope_paths": [
+          "zellij-server/src/",
+          "zellij-client/src/",
+          "zellij-utils/src/",
+          "default-plugins/"
+        ],
+        "interface_contract": "One shared rail, tabs strip and status strip throughout VC Frame is the intended contract (not claimed implementation done)."
+      }
     },
     {
       "id": "wezterm-adapter",
       "owns": [],
-      "must_not": ["carry the product terminal identity", "own any lifecycle"]
+      "must_not": [
+        "carry the product terminal identity",
+        "own any lifecycle"
+      ]
     },
     {
       "id": "vibecrafted-server",
@@ -158,7 +226,9 @@
     },
     {
       "id": "vibecrafted-slack-bus",
-      "owns": ["a2a-envelopes"],
+      "owns": [
+        "a2a-envelopes"
+      ],
       "must_not": [
         "be the source of run-lifecycle truth",
         "execute untrusted text through a shell",
@@ -167,13 +237,22 @@
     },
     {
       "id": "polar-tenant-service",
-      "owns": ["commercial-entitlement"],
-      "must_not": ["coexist with a second billing system", "gate runtime truth"]
+      "owns": [
+        "commercial-entitlement"
+      ],
+      "must_not": [
+        "coexist with a second billing system",
+        "gate runtime truth"
+      ]
     },
     {
       "id": "plan-filesystem",
-      "owns": ["plan-artifacts"],
-      "must_not": ["depend on any service being up for a write to count"]
+      "owns": [
+        "plan-artifacts"
+      ],
+      "must_not": [
+        "depend on any service being up for a write to count"
+      ]
     },
     {
       "id": "scaffold-store",
@@ -182,6 +261,200 @@
         "become a required mediator for plan-artifact writes (files are the only write surface)",
         "treat its changes/checkpoints ledger as authoritative over the plan files on disk"
       ]
+    },
+    {
+      "id": "vibecrafted-app",
+      "owns": [],
+      "must_not": [
+        "act as supervisor process or run-state owner",
+        "reinstall or deliver runtimes during ordinary startup (consumption only)",
+        "terminate supervised durable sessions when terminal window closes"
+      ],
+      "code_care": {
+        "lead": "claude",
+        "review": "codex",
+        "secondary": "agi (icons, static UI copy, docs only; launcher agy, model gemini-3.8-flash-medium)",
+        "scope_paths": [
+          "vibecrafted-app/shell-agent/app/Vibecrafted/"
+        ],
+        "boundary": "AppKit shell for presentation, launcher convenience, and canonical service control; not supervisor or run-state owner."
+      }
+    },
+    {
+      "id": "shared-supervisor",
+      "owns": [],
+      "must_not": [
+        "replace control-plane run authority",
+        "terminate runs or sessions on client detach or terminal close",
+        "crawl arbitrary files to reconstruct liveness"
+      ],
+      "code_care": {
+        "lead": "codex",
+        "review": "claude",
+        "scope_paths": [
+          "vibecrafted-core/vibecrafted_core/server_supervisor.py",
+          "vibecrafted-core/vibecrafted_core/caretaker.py",
+          "vibecrafted-server/"
+        ],
+        "boundary": "LaunchAgent supervised server+guardian pair; keeps agents, runs, PTY, and frame sessions alive after terminal closure. Derives single caretaker verdict."
+      }
+    }
+  ],
+  "code_care_matrix": [
+    {
+      "area": "App and tray",
+      "runtime_component": "vibecrafted-app",
+      "lead": "claude",
+      "review": "codex",
+      "scope_paths": [
+        "vibecrafted-app/shell-agent/app/Vibecrafted/"
+      ],
+      "runtime_responsibility": "AppKit presentation shell, tray status, current-runtime launcher, and canonical service control. Renders Python caretaker health without inventing health state. Resolves active installed generation on normal start without reinstalling.",
+      "authority_type": "code_care_maintenance",
+      "decision_source": "Founder requirement (App is not supervisor or run-state owner; terminal closure must not kill sessions) + Agent-Operator allocation (Claude lead / Codex review)",
+      "notes": "Agi (launcher agy, model gemini-3.8-flash-medium) limited to icons, static UI copy, and docs. Legacy gemini CLI deprecated."
+    },
+    {
+      "area": "System supervisor and server caretaker",
+      "runtime_component": "shared-supervisor",
+      "lead": "codex",
+      "review": "claude",
+      "scope_paths": [
+        "vibecrafted-core/vibecrafted_core/server_supervisor.py",
+        "vibecrafted-core/vibecrafted_core/caretaker.py",
+        "vibecrafted-server/"
+      ],
+      "runtime_responsibility": "LaunchAgent identity-verified server+guardian pair; single caretaker verdict derivation. Keeps runs, PTYs, and frame sessions alive across terminal close.",
+      "authority_type": "code_care_maintenance",
+      "decision_source": "Founder requirement (shared supervisor/server maintains background persistence after terminal exit) + Agent-Operator allocation (Codex lead / Claude review)",
+      "notes": "Integrator admits changes; Claude reviews service failure modes and macOS lifecycle."
+    },
+    {
+      "area": "Control plane and Live Runs",
+      "runtime_component": "control-plane",
+      "lead": "codex",
+      "review": "claude",
+      "scope_paths": [
+        "vibecrafted-core/vibecrafted_core/control_plane.py",
+        "vibecrafted-server/control-core/src/read.rs"
+      ],
+      "runtime_responsibility": "Event/meta reconciliation, runs/*.json projections, and AsyncSupervisor agent child orchestration. Single liveness and settlement projection owner; Rust/web is reader only.",
+      "authority_type": "code_care_maintenance",
+      "decision_source": "Historical ADR-0002 doctrine (control-plane sole owner of run-lifecycle) + Agent-Operator allocation (Codex lead / Claude review)",
+      "notes": "Prompt publication after launch; no second reducer or raw artifact union in Rust reader."
+    },
+    {
+      "area": "Frame / session / PTY core",
+      "runtime_component": "vc-frame",
+      "lead": "codex",
+      "review": "claude",
+      "scope_paths": [
+        "zellij-server/src/",
+        "zellij-client/src/"
+      ],
+      "runtime_responsibility": "PTY allocation, session sockets, client attach/visit, and terminal-session process graph. Client disconnects detach views but never terminate long-lived guest server.",
+      "authority_type": "code_care_maintenance",
+      "decision_source": "Founder requirement (multiplexing and session composition belong in VC Frame, not terminal) + Agent-Operator allocation (Codex lead / Claude review)",
+      "notes": "Durable identity decoupled from client GUI lifecycle."
+    },
+    {
+      "area": "Snapshot and resurrect within Frame",
+      "runtime_component": "vc-frame",
+      "lead": "claude",
+      "review": "codex",
+      "scope_paths": [
+        "zellij-utils/src/sessions.rs",
+        "zellij-server/src/background_jobs.rs"
+      ],
+      "runtime_responsibility": "Session socket lease, on-disk session metadata, snapshot cadence, and resurrection layout mechanics. Never conflates session resurrection with agent run recovery.",
+      "authority_type": "code_care_maintenance",
+      "decision_source": "Agent-Operator allocation (Claude lead / Codex review for invariants and state machine)",
+      "notes": "Rejects elapsed-age heuristics; preserves session identity across socket rebound."
+    },
+    {
+      "area": "VC Terminal / Alacritty",
+      "runtime_component": "vc-terminal-alacritty",
+      "lead": "claude",
+      "review": "codex",
+      "scope_paths": [
+        "alacritty/",
+        "alacritty_terminal/",
+        "scripts/vc-terminal-product-entry.sh"
+      ],
+      "runtime_responsibility": "Native terminal host window, GPU rendering, typography, branding, and host configuration. Starts active runtime primary shell/attachment path; never owns run recovery.",
+      "authority_type": "code_care_maintenance",
+      "decision_source": "Founder explicit decision: Alacritty is VC Terminal because VC Frame owns multiplexing, sessions, and UI composition; a richer terminal would duplicate that responsibility. + Agent-Operator allocation (Claude lead / Codex review)",
+      "notes": "Agi limited to visual assets and copy. Terminal exit must not terminate supervised sessions."
+    },
+    {
+      "area": "Installer and configuration",
+      "runtime_component": "vibecrafted-runtime-manifest",
+      "lead": "codex",
+      "review": "claude",
+      "scope_paths": [
+        "scripts/",
+        "vibecrafted-core/vibecrafted_core/runtime/shell/",
+        "config/"
+      ],
+      "runtime_responsibility": "Publishes verified installed generations/selectors under ~/.local/share/vibecrafted, active configuration under ~/.config/vibecrafted/**, and durable storage under ~/.vibecrafted. Ordinary startup consumes without delivery; installer alone publishes.",
+      "authority_type": "code_care_maintenance",
+      "decision_source": "Founder requirement (ordinary start does not install/deliver) + Agent-Operator allocation (Codex lead / Claude review)",
+      "notes": "Agi limited to installer prose/art assets. Preserves user sidecars."
+    },
+    {
+      "area": "Plugin rendering, browser and interface coherence",
+      "runtime_component": "vc-frame",
+      "lead": "grok",
+      "review": "claude",
+      "scope_paths": [
+        "default-plugins/",
+        "zellij-utils/src/"
+      ],
+      "runtime_responsibility": "Plugin rendering, plugin-browser behavior, flicker-free rendering, and cross-view interface coherence across tabs and panes. Views session and control-plane truth without inventing new run or caretaker authorities.",
+      "authority_type": "code_care_maintenance",
+      "decision_source": "Founder explicit requirement adding Grok participation to code-care matrix + Agent-Operator allocation (Grok lead / Claude independent review)",
+      "notes": "Includes plugin-browser flicker fix. One shared rail, tabs strip and status strip throughout VC Frame is intended contract (not claimed implementation done)."
+    },
+    {
+      "area": "Static layouts, assets and UI copy",
+      "runtime_component": "vc-frame",
+      "lead": "agi",
+      "review": "grok",
+      "admitted_by": "codex",
+      "scope_paths": [
+        "docs/",
+        "config/"
+      ],
+      "runtime_responsibility": "Static layout definitions, icon assets, UI copy strings, and documentation. Pure presentation/prose without code-level state mutations.",
+      "authority_type": "code_care_maintenance",
+      "decision_source": "Founder requirement (Agi pinned launcher agy, model gemini-3.8-flash-medium) + Agent-Operator allocation (Agi lead / Grok review / Codex admission)",
+      "notes": "Agi launcher is agy, pinned model gemini-3.8-flash-medium (Gemini 3.8 Flash Medium). Legacy gemini CLI is deprecated, never prescribe it. Other model pins are per-cut decisions."
+    },
+    {
+      "area": "Fleet dispatcher and provider adapters",
+      "runtime_component": "control-plane",
+      "lead": "codex",
+      "review": "claude",
+      "scope_paths": [
+        "vibecrafted-core/vibecrafted_core/dispatch/"
+      ],
+      "runtime_responsibility": "Packet assembly, provider launch translation, process wrappers, and lifecycle normalization into one control-plane run contract. Adapters own launched processes; they never become a second control-plane, session, or installer.",
+      "authority_type": "code_care_maintenance",
+      "decision_source": "Historical architecture doctrine + Agent-Operator allocation (Codex lead / Claude review)",
+      "notes": "Supported providers: claude, codex, agy (legacy gemini deprecated), grok. Agi limited to documentation/UI."
+    },
+    {
+      "area": "Integration and operator",
+      "runtime_component": "vibecrafted-runtime-manifest",
+      "lead": "codex",
+      "review": "claude",
+      "scope_paths": [
+        "."
+      ],
+      "runtime_responsibility": "No runtime truth component. Founder owns decisions; designated Agent-Operator owns evidence-based fleet admission, closure checks, security/secret scans, ancestry verification, and gate execution.",
+      "authority_type": "code_care_maintenance",
+      "decision_source": "Founder governance doctrine + Agent-Operator role assignment (Codex coordinator / Claude review; Agi has no integration authority)",
+      "notes": "Integration is a separate proven act, never a worker claim."
     }
   ],
   "rules": [
@@ -222,6 +495,16 @@
       "statement": "Append-entries in plan-artifact files (tracker rows, decision addenda, journal lines) carry an inline HTML-comment provenance stamp with the same key set as commit-msg trailers. Server changes/checkpoints ledgers and AICX intents are projections of these stamps, never their source.",
       "stamp_format": "<!-- provenance: source=<kind> agent=<agent> model=<model> session_id=<uuid> time=<iso8601> runtime=<runtime> -->",
       "enforced_by": "tests/test_ownership_contract.py (rule presence) + planned decision-entry lint"
+    },
+    {
+      "id": "code-care-separation",
+      "statement": "Code-care allocations govern agent code maintenance responsibility only; they never create, alter, or compete with runtime truth ownership domains.",
+      "enforced_by": "ADR-0002 canonical contract review"
+    },
+    {
+      "id": "config-runtime-storage-separation",
+      "statement": "Active configuration lives under ~/.config/vibecrafted/**; immutable runtime generations and selectors under ~/.local/share/vibecrafted; durable control, artifacts and history under ~/.vibecrafted. Ordinary startup consumes verified active generations without delivering or reinstalling.",
+      "enforced_by": "installer and app startup contract review"
     }
   ]
 }
