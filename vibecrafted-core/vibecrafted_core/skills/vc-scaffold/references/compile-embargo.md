@@ -32,11 +32,11 @@ is sufficient for every checkpoint in that phase. Do not weaken product assertio
 
 The embargo has three distinct states:
 
-| State | Owner and allowed action | Evidence and meaning |
-| --- | --- | --- |
-| Local worker checkpoint | Worker commits in its Fleet Worktree and stops. No push, publication, or remote `embargo/<plan-id>` ref. | Exact SHA, scope, and report of gates run/skipped. The bundled hook entrypoint may be bypassed; this is neither security-clean nor verified delivery. |
+| State                              | Owner and allowed action                                                                                                                                                                            | Evidence and meaning                                                                                                                                            |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Local worker checkpoint            | Worker commits in its Fleet Worktree and stops. No push, publication, or remote `embargo/<plan-id>` ref.                                                                                            | Exact SHA, scope, and report of gates run/skipped. The bundled hook entrypoint may be bypassed; this is neither security-clean nor verified delivery.           |
 | Structural admission under embargo | Designated integrator verifies the exact worker commit and scope, runs Semgrep plus secret/security review, and may integrate the local baton so later worker waves build on coherent architecture. | Structurally admitted only. Compile, lint, type-check, and tests remain deferred until named closure; the integrator never calls a skipped security gate clean. |
-| Verified delivery | Designated integrator after named closure. | Full language-appropriate deferred and normal gates pass and are recorded against the exact admitted SHA. |
+| Verified delivery                  | Designated integrator after named closure.                                                                                                                                                          | Full language-appropriate deferred and normal gates pass and are recorded against the exact admitted SHA.                                                       |
 
 The plan, tracker, journal, and `.dispatch.toml` artifact remain the sources of execution truth.
 Structural admission is a local architectural join, not a delivery claim or a second control plane.

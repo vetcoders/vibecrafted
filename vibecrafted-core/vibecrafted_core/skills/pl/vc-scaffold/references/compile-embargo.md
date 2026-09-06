@@ -34,11 +34,11 @@ autoryzacja fazy wystarcza dla każdego checkpointu w tej fazie. Nie osłabiaj a
 
 Embargo ma trzy odrębne stany:
 
-| Stan | Właściciel i dozwolona akcja | Dowód i znaczenie |
-| --- | --- | --- |
-| Lokalny checkpoint workera | Worker zapisuje commit w swoim Fleet Worktree i na tym kończy pracę. Bez push, publikacji ani zdalnego refa `embargo/<plan-id>`. | Dokładny SHA, zakres i raport uruchomionych/pominiętych bramek. Wejście bundlowanych hooków może być pominięte; to nie jest security-clean ani verified delivery. |
+| Stan                               | Właściciel i dozwolona akcja                                                                                                                                                                                               | Dowód i znaczenie                                                                                                                                                                   |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Lokalny checkpoint workera         | Worker zapisuje commit w swoim Fleet Worktree i na tym kończy pracę. Bez push, publikacji ani zdalnego refa `embargo/<plan-id>`.                                                                                           | Dokładny SHA, zakres i raport uruchomionych/pominiętych bramek. Wejście bundlowanych hooków może być pominięte; to nie jest security-clean ani verified delivery.                   |
 | Structural admission pod embargiem | Wyznaczony integrator weryfikuje dokładny commit i zakres workera, uruchamia Semgrep oraz przegląd sekretów/bezpieczeństwa i może lokalnie zintegrować baton, aby kolejne fale workerów budowały na spójnej architekturze. | Wyłącznie strukturalnie dopuszczone. Compile, lint, type-check i testy pozostają odroczone do nazwanej closure; integrator nigdy nie nazywa pominiętej bramki bezpieczeństwa clean. |
-| Verified delivery | Wyznaczony integrator po nazwanej closure. | Pełne, odpowiednie dla języka bramki odroczone i normalne przechodzą i są zapisane dla dokładnego dopuszczonego SHA. |
+| Verified delivery                  | Wyznaczony integrator po nazwanej closure.                                                                                                                                                                                 | Pełne, odpowiednie dla języka bramki odroczone i normalne przechodzą i są zapisane dla dokładnego dopuszczonego SHA.                                                                |
 
 Plan, tracker, journal i artefakt `.dispatch.toml` pozostają źródłami prawdy wykonania.
 Structural admission jest lokalnym joinem architektonicznym, nie claimem dostarczenia ani drugim control plane.
