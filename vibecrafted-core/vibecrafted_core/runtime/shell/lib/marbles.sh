@@ -437,6 +437,20 @@ _vetcoders_resume_agent() {
   local tool="$1"
   shift
   _vetcoders_parse_contract "$@" || return 1
+  # Normalize an explicit --root ONCE, before anything changes cwd. `--root ../B`
+  # must mean ../B relative to where the operator typed it, not relative to
+  # wherever a later step happens to stand. Everything downstream — terminal
+  # cwd, workspace/session naming, AICX, provider cwd — then reads this one
+  # absolute value instead of re-deriving its own.
+  if [[ -n "${_vetcoders_contract_root:-}" ]]; then
+    local _resume_root_normalized=""
+    _resume_root_normalized="$(_vetcoders_absolute_physical_path "$_vetcoders_contract_root")"
+    if [[ -z "$_resume_root_normalized" || ! -d "$_resume_root_normalized" ]]; then
+      printf 'resume: --root is not an existing directory: %s\n' "$_vetcoders_contract_root" >&2
+      return 1
+    fi
+    _vetcoders_contract_root="$_resume_root_normalized"
+  fi
   if [[ -n "${_vetcoders_contract_help:-}" ]]; then
     echo "Resume a provider session or a stopped control-plane run." >&2
     echo "  vibecrafted resume ${tool} --session <provider-uuid>" >&2
@@ -520,16 +534,19 @@ _vetcoders_resume_agent() {
     [[ -z "${_vetcoders_contract_runtime:-}" || "${_vetcoders_contract_runtime:-}" =~ ^(terminal|visible)$ ]] &&
     command -v _vetcoders_needs_vc_terminal_entry >/dev/null 2>&1 &&
     _vetcoders_needs_vc_terminal_entry; then
-    local _resume_front_door=""
+    local _resume_front_door="" _resume_project_root=""
     _resume_front_door="$(_vetcoders_product_front_door vibecrafted 2>/dev/null || true)"
-    if [[ -n "$_resume_front_door" ]]; then
-      if _vetcoders_open_entry_in_vc_terminal "$_resume_front_door" resume "$tool" "$@"; then
-        return 0
-      fi
+    if [[ -z "$_resume_front_door" ]]; then
+      # No front door means no supported way to obtain a PTY. Falling through
+      # would assemble a 48h AICX pack for a launch that cannot happen.
+      printf 'vc-resume: no TTY and no installed vibecrafted front door to open a terminal with.\n' >&2
+      printf 'Run the resume from a terminal, or install the runtime so bin/vc-terminal exists.\n' >&2
       return 1
     fi
-    printf 'vc-resume: no TTY and no installed vibecrafted front door to open a terminal with.\n' >&2
-    printf 'Run the resume from a terminal, or install the runtime so bin/vc-terminal exists.\n' >&2
+    _resume_project_root="$(_vetcoders_effective_project_root)"
+    _vetcoders_open_entry_in_vc_terminal \
+      "$_resume_front_door" "$_resume_project_root" resume "$tool" "$@" || return 1
+    return 0
   fi
 
   local aicx_fallback_mode=""
@@ -658,7 +675,11 @@ _vetcoders_resume_agent() {
   # Prepare resolves: explicit env | in-frame | attached/current | repo-bound
   # live | single live. Multi-candidate ambiguity fails closed with a list.
   if [[ "$resume_mode" == interactive ]] && [[ "$runtime" =~ ^(terminal|visible)$ ]]; then
-    _vetcoders_prepare_operator_runtime "$runtime" || return 1
+    # defer-attach: preparation may CREATE this project's session, but it must
+    # not hand the terminal to a foreground client yet — that client blocks
+    # until detach, so the provider tab below would only be created after the
+    # operator closed the window they were waiting for.
+    _vetcoders_prepare_operator_runtime "$runtime" defer-attach || return 1
     if [[ -n "${VIBECRAFTED_OPERATOR_SESSION:-}" ]]; then
       _vetcoders_spawn_into_operator_session "$(_vetcoders_operator_face_tab "$tool")" "$resume_cmd" || return 1
       printf 'Resume launched in operator session: %s\n' "$VIBECRAFTED_OPERATOR_SESSION"
@@ -670,6 +691,9 @@ _vetcoders_resume_agent() {
       fi
       [[ -n "$aicx_fallback_mode" ]] && printf '  mode:    %s\n' "$aicx_fallback_mode"
       [[ -n "$aicx_context_file" ]] && printf '  pack:    %s\n' "$aicx_context_file"
+      # Last act: the tab exists, so the terminal may now be handed over. This
+      # blocks until the Founder detaches, which is exactly what they asked for.
+      _vetcoders_attach_prepared_vc_frame_session || return $?
       return 0
     fi
   fi

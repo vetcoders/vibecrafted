@@ -22,15 +22,78 @@ provider adapter → changes argv only, never policy
 
 ### Interactive target resolution (order)
 
-1. Explicit `VIBECRAFTED_OPERATOR_SESSION` (jawny target)
-2. In-frame env (`VC_FRAME_PANE_ID` + `VC_FRAME_SESSION_NAME`)
-3. Detected: vc-frame `(attached)` / `(current)`
-4. Detected: live repo-bound host (`basename` of project root)
-5. Detected: exactly one live non-`EXITED` session
-6. Multiple live candidates with no unique pick → **fail closed** with candidate
-   list (never silent headless, never pick arbitrarily)
+Ownership must be **proven**. A session is this project's target only when the
+caller owns it, named it, or it belongs to this project.
 
-Interactive without a resolved target **refuses to downgrade** to headless.
+1. Explicit `VIBECRAFTED_OPERATOR_SESSION` (jawny target)
+2. Verified in-frame env of THIS caller (`VC_FRAME_PANE_ID` +
+   `VC_FRAME_SESSION_NAME`)
+3. Detected: this project's workspace-bound host, when live
+4. Detected: this project's repository `basename`, when live
+5. No match → target stays empty; the caller **prepares this project's own
+   session**. Unrelated live sessions are listed on stderr as context only.
+
+Explicitly **not** targets (removed 2026-09-06):
+
+- a session vc-frame lists as `(attached)` / `(current)` — that marker means
+  *some* client is attached, routinely another operator window on another
+  repository; it is not proof that this caller owns it;
+- "exactly one live session" — a global count is not ownership.
+
+Both let a single unrelated live session capture another project's resume and
+dispatch its provider tab there (P0, Founder 2026-09-06: a resume launched in
+`mlx-batch-runner` was blocked by `Live runs` / `Needs attention` /
+`host-a`).
+
+### Project identity (one owner)
+
+`_vetcoders_effective_project_root` resolves the project **once**, at the public
+entry: explicit `--root` (normalized to an absolute physical path *before* any
+cwd change) → ambient project root → the caller's repository. Terminal cwd,
+workspace/session naming, AICX and provider cwd all read that one value.
+
+`VIBECRAFTED_ROOT` is **not** a project source when it equals
+`VIBECRAFTED_RUNTIME_ROOT`: every front door (`vc_start.rs`,
+`scripts/vc-terminal-product-entry.sh`, `scripts/vc-frame-product-entry.sh`,
+`shell/lib/core.sh`, `shell/lib/dashboard.sh`) pins both to the runtime
+generation, and naming a session after the release is never right.
+
+### No TTY (public entries)
+
+`vc-frame` keeps its strict TTY guard — it is internal and still refuses a pipe.
+A **public** entry (`vc-start`, `vc-resume`) instead opens the product terminal
+host on this project and re-runs itself there with a real PTY, via the owner
+`Vibecrafted.app` already uses:
+
+```text
+vc-terminal --working-directory <project> -e <launch-primary-shell.zsh> <front door> [argv...]
+```
+
+- The launcher has ONE physical owner:
+  `$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh`, with no
+  symlinked ancestor. No `XDG_CONFIG_HOME` override, no release-default
+  fallback — the generation's `config/alacritty` copy is installer input.
+- `VIBECRAFTED_TERMINAL_ENTRY=1` rides with the child and stops a launch loop.
+- Escalation happens **before** any AICX/provider side effect, so the pack is
+  assembled exactly once — in the child.
+- Launch is admitted or it failed: a wrapper that rejects a missing config
+  (exit 2) or an invalid native host (exit 127) is reported as a failure, never
+  as "opened". A missing front door returns immediately.
+
+### Order inside the terminal
+
+A foreground `vc-frame` client does not return until the Founder detaches, so
+sequencing matters:
+
+1. prepare (create the project's session **detached**, never foreground),
+2. create the provider tab,
+3. hand the terminal over (`attach`) — **last**.
+
+Preparing by attaching first meant the provider tab was created only after the
+window had been closed.
+
+Interactive without a resolved target and without any way to prepare one
+**refuses to downgrade** to headless.
 
 ## Modes
 
@@ -110,9 +173,14 @@ From `grok --help`:
   headless worker.
 - Provider-specific policy forks (e.g. “only Codex prepares the operator
   surface”) — policy is one owner; adapters change argv only.
-- Equating “interactive endpoint” solely with auto-detected `(attached)` when
-  live sessions exist but none was selected — list candidates and require an
-  explicit target instead.
+- Treating a global `(attached)` marker or a lone live session as ownership of
+  the current project — list them as context and prepare this project's own
+  target instead.
+- Reading `VIBECRAFTED_ROOT` as the project behind a product front door (it is
+  the runtime generation there).
+- Reporting a backgrounded terminal launch as success without any admission
+  evidence.
+- Attaching the foreground frame client before the provider tab exists.
 
 ## Ownership
 

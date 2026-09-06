@@ -435,6 +435,7 @@ def _probe_interactive_operator_target(
     *,
     sessions_body: str,
     repo_basename: str,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Resolve interactive target against a fake vc-frame listing only.
 
@@ -469,8 +470,15 @@ def _probe_interactive_operator_target(
     ):
         env.pop(key, None)
     env["PATH"] = f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
-    env["VIBECRAFTED_ROOT"] = str(tmp_path / repo_basename)
-    (tmp_path / repo_basename).mkdir(exist_ok=True)
+    # VIBECRAFTED_ROOT cannot carry the project here: sourcing vetcoders.sh
+    # rebinds it (and VIBECRAFTED_RUNTIME_ROOT) to the runtime generation
+    # (shell/lib/core.sh). The project is the caller's location, so the probe
+    # states it the way an operator does -- by standing in the repository.
+    for stale in ("SPAWN_ROOT", "VIBECRAFTED_ROOT", "VIBECRAFTED_RUNTIME_ROOT"):
+        env.pop(stale, None)
+    project_dir = tmp_path / repo_basename
+    project_dir.mkdir(exist_ok=True)
+    env.update(extra_env or {})
 
     return subprocess.run(
         [
@@ -490,7 +498,7 @@ def _probe_interactive_operator_target(
             ),
         ],
         check=False,
-        cwd=REPO_ROOT,
+        cwd=project_dir,
         env=env,
         capture_output=True,
         text=True,
@@ -522,22 +530,55 @@ def test_interactive_target_ambiguous_live_sessions_fail_closed(
     )
     assert result.returncode == 0, result.stderr
     assert "target=[]" in result.stdout
-    assert "ambiguous" in result.stderr
+    assert "unrelated live vc-frame session" in result.stderr
     assert "alpha" in result.stderr
     assert "beta" in result.stderr
     assert "VIBECRAFTED_OPERATOR_SESSION" in result.stderr
 
 
-def test_interactive_target_single_live_session_is_detected(
+def test_interactive_target_single_live_session_is_not_adopted(
     tmp_path: Path,
 ) -> None:
+    """A lone live session elsewhere is a coincidence, not ownership.
+
+    Reversed on 2026-09-06. Adopting "the only live session" is what let a
+    host-a window capture a resume launched from mlx-batch-runner: the
+    provider tab was dispatched into somebody else's project. Ownership must be
+    proven (this caller's frame, an explicit target, or this project's own
+    session), never inferred from a global count.
+    """
     result = _probe_interactive_operator_target(
         tmp_path,
         sessions_body="solo-session [Created]\n",
         repo_basename="other-repo",
     )
     assert result.returncode == 0, result.stderr
-    assert "target=[solo-session]" in result.stdout
+    assert "target=[]" in result.stdout
+    assert "solo-session" in result.stderr
+
+
+def test_interactive_target_ignores_the_runtime_generation_as_project(
+    tmp_path: Path,
+) -> None:
+    """The generation is not a project, even though every front door pins it.
+
+    vc_start.rs, vc-terminal-product-entry.sh and shell/lib/core.sh all export
+    VIBECRAFTED_ROOT == VIBECRAFTED_RUNTIME_ROOT. Reading that as the project
+    named the operator's session after the release directory.
+    """
+    generation = tmp_path / "runtime-generation"
+    generation.mkdir()
+    result = _probe_interactive_operator_target(
+        tmp_path,
+        sessions_body="runtime-generation [Created]\nvibecrafted [Created]\n",
+        repo_basename="vibecrafted",
+        extra_env={
+            "VIBECRAFTED_ROOT": str(generation),
+            "VIBECRAFTED_RUNTIME_ROOT": str(generation),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert "target=[vibecrafted]" in result.stdout
 
 
 def test_public_and_packaged_resume_help_describe_provider_neutral_contract() -> None:

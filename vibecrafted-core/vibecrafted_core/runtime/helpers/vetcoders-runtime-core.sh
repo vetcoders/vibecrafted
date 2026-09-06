@@ -73,6 +73,52 @@ _vetcoders_repo_root() {
   git rev-parse --show-toplevel 2>/dev/null || pwd
 }
 
+# Absolute physical path, resolved BEFORE any cwd change. A relative --root is
+# meaningless once a caller has chdir'd into the project it names, so every
+# public entry normalizes once, at the boundary, and passes the result on.
+_vetcoders_absolute_physical_path() {
+  local path="${1:-}"
+  [[ -n "$path" ]] || return 1
+  if [[ -d "$path" ]]; then
+    (cd -P -- "$path" 2>/dev/null && pwd -P) && return 0
+  fi
+  case "$path" in
+    /*) printf '%s\n' "$path" ;;
+    *) printf '%s/%s\n' "$(pwd -P)" "$path" ;;
+  esac
+}
+
+# The runtime generation is NOT a project. Every product front door exports
+# VIBECRAFTED_ROOT and VIBECRAFTED_RUNTIME_ROOT to the same generation path
+# (vc_start.rs run(), scripts/vc-terminal-product-entry.sh,
+# scripts/vc-frame-product-entry.sh, shell/lib/core.sh, shell/lib/dashboard.sh).
+# Reading VIBECRAFTED_ROOT as "the project" behind those doors names sessions
+# and workspaces after the release instead of the operator's repository.
+_vetcoders_ambient_project_root() {
+  local root="${SPAWN_ROOT:-}"
+  if [[ -n "$root" ]]; then
+    printf '%s\n' "$root"
+    return 0
+  fi
+  root="${VIBECRAFTED_ROOT:-}"
+  if [[ -n "$root" && -n "${VIBECRAFTED_RUNTIME_ROOT:-}" \
+    && "$root" == "${VIBECRAFTED_RUNTIME_ROOT}" ]]; then
+    return 0
+  fi
+  printf '%s\n' "$root"
+}
+
+# One project identity for the whole public entry: explicit --root first, then
+# an ambient project root, then the caller's repository. Session naming, the
+# terminal cwd, AICX and the provider cwd all read THIS, so they cannot drift
+# apart mid-flight.
+_vetcoders_effective_project_root() {
+  local root="${1:-${_vetcoders_contract_root:-}}"
+  [[ -n "$root" ]] || root="$(_vetcoders_ambient_project_root)"
+  [[ -n "$root" ]] || root="$(_vetcoders_repo_root 2>/dev/null || pwd -P)"
+  _vetcoders_absolute_physical_path "$root"
+}
+
 _vetcoders_org_repo() {
   local root="${1:-$(_vetcoders_repo_root)}"
   local org_repo=""
@@ -350,10 +396,8 @@ _vetcoders_operator_place_session_name() {
     _vetcoders_session_base_name
     return 0
   fi
-  local root_dir="${SPAWN_ROOT:-${VIBECRAFTED_ROOT:-${_vetcoders_contract_root:-}}}"
-  if [[ -z "$root_dir" ]]; then
-    root_dir="$(_vetcoders_repo_root 2>/dev/null || pwd)"
-  fi
+  local root_dir=""
+  root_dir="$(_vetcoders_effective_project_root)"
   local resolved=""
   if command -v python3 >/dev/null 2>&1; then
     resolved="$(

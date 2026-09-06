@@ -843,16 +843,21 @@ vc-start() {
   if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" != "1" ]] &&
     command -v _vetcoders_needs_vc_terminal_entry >/dev/null 2>&1 &&
     _vetcoders_needs_vc_terminal_entry; then
-    local _vc_start_front_door=""
+    local _vc_start_front_door="" _vc_start_project_root=""
     _vc_start_front_door="$(_vetcoders_product_front_door vc-start 2>/dev/null || true)"
-    if [[ -n "$_vc_start_front_door" ]]; then
-      if _vetcoders_open_entry_in_vc_terminal "$_vc_start_front_door" "$@"; then
-        return 0
-      fi
+    if [[ -z "$_vc_start_front_door" ]]; then
+      # No front door means no supported way to obtain a PTY; continuing would
+      # walk straight into vc-frame's strict TTY guard and die there anyway.
+      printf 'vc-start: no TTY and no installed vc-start front door to open a terminal with.\n' >&2
+      printf 'Run vc-start from a terminal, or install the runtime so bin/vc-terminal and bin/vc-start exist.\n' >&2
       return 1
     fi
-    printf 'vc-start: no TTY and no installed vc-start front door to open a terminal with.\n' >&2
-    printf 'Run vc-start from a terminal, or install the runtime so bin/vc-terminal and bin/vc-start exist.\n' >&2
+    # The project is the caller's repository, resolved through the one owner —
+    # NOT $VIBECRAFTED_ROOT, which every front door pins to the generation.
+    _vc_start_project_root="$(_vetcoders_effective_project_root)"
+    _vetcoders_open_entry_in_vc_terminal \
+      "$_vc_start_front_door" "$_vc_start_project_root" "$@" || return 1
+    return 0
   fi
   # Required lifecycle helpers belong to the admitted facade.
   if ! declare -F _vetcoders_product_entry_prepare >/dev/null 2>&1; then
