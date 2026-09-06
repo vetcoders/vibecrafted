@@ -48,9 +48,16 @@ _LOGIN_SHELL_ROOT_ENV = (
 
 
 @pytest.fixture(autouse=True)
-def _disable_live_perception_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
+def _disable_live_perception_side_effects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
     """TUI/launcher tests must not reach live operator runtime surfaces."""
 
+    home = tmp_path_factory.mktemp("tui-home").resolve()
+    monkeypatch.setenv("HOME", str(home))
+    for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("VC_FRAME_SOCKET_DIR", str(home / "frame-sockets"))
     monkeypatch.setenv("VIBECRAFTED_PERCEPTION_WATCH", "0")
     monkeypatch.setenv("VIBECRAFTED_TEST_MODE", "1")
     for name in _AMBIENT_FRAME_ENV + _AMBIENT_ROOT_ENV:
