@@ -399,6 +399,7 @@ Commands:
   init [agent]         Orient an agent in this repo
   <skill> <agent>      Run a workflow with an agent
   resume <agent>       Continue a stopped run (--run-id) or a provider session
+  fork <agent>         Branch a provider session in the current vc-frame tab
   resume-session       Continue an exact provider session as a tracked run
   relocate             Snapshot open sessions + worktrees for a machine move (snapshot|restore)
   status               Today's agent activity

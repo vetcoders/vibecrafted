@@ -1038,6 +1038,24 @@ cmd_resume_help() {
   printf '\n'
 }
 
+cmd_fork_help() {
+  printf '\n'
+  printf '%b⚒%b  %bfork%b\n' "$_copper" "$_reset" "$_bold" "$_reset"
+  printf '%b─────────────────────────────────────────%b\n' "$_steel" "$_reset"
+  printf '  Branch an exact Codex session into a new provider session.\n'
+  printf '  The source stays untouched; visible launches open a pane in this vc-frame tab.\n'
+  printf '\n%bUsage:%b\n' "$_bold" "$_reset"
+  printf '  vibecrafted fork codex --session current|previous|<session-id> [flags]\n'
+  printf '\n%bOptions:%b\n' "$_bold" "$_reset"
+  printf '  --runtime visible|terminal|headless  visible/terminal use this tab; headless is rejected by Codex TUI\n'
+  printf '  --placement right|floating          pane shape (default: right)\n'
+  printf '  --model <name>                      Codex model override\n'
+  printf '  --permissions bypass|auto|read-only Codex approval/sandbox contract (default: current config)\n'
+  printf '  --root <path>                       repository root (default: current repo)\n'
+  printf '  -p, --prompt <text>                 optional first prompt in the fork\n'
+  printf '\n'
+}
+
 cmd_init_help() {
   printf '\n'
   printf '%b⚒%b  %binit%b\n' "$_copper" "$_reset" "$_bold" "$_reset"
@@ -4484,6 +4502,10 @@ cmd_help() {
       cmd_resume_help
       return
       ;;
+    fork)
+      cmd_fork_help
+      return
+      ;;
     observe|await|stop)
       cmd_lifecycle_help "$topic"
       return
@@ -4524,6 +4546,7 @@ cmd_help() {
   printf '  %binit%b [agent]         Orient an agent in this repo\n' "$_cyan" "$_reset"
   printf '  %b<skill> <agent>%b      Run a workflow with an agent\n' "$_cyan" "$_reset"
   printf '  %bresume%b <agent>       Continue a stopped run or a provider session\n' "$_cyan" "$_reset"
+  printf '  %bfork%b <agent>         Branch a provider session in this vc-frame tab\n' "$_cyan" "$_reset"
   printf '  %bobserve%b <agent>      Check a run report or transcript\n' "$_cyan" "$_reset"
   printf '  %bawait%b <agent>        Wait for a run to settle\n' "$_cyan" "$_reset"
   printf '  %bstop%b <agent>         Stop a tracked launcher process group\n' "$_cyan" "$_reset"
@@ -4594,6 +4617,7 @@ cmd_help_full() {
   printf '  %bvibecrafted await <agent>%b     --last      Join the shared vc-server monitor\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted stop <agent>%b      --last      Stop the tracked launcher process group\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted resume <agent>%b    --last      Continue as a new tracked job\n' "$_cyan" "$_reset"
+  printf '  %bvibecrafted fork codex%b        --session current --runtime visible\n' "$_cyan" "$_reset"
   printf '\n'
   printf '%b=== RESEARCH (launcher) ===%b\n' "$_bold" "$_reset"
   printf '\n'
@@ -5668,6 +5692,160 @@ cmd_agents() {
   printf '\n'
 }
 
+_vibecrafted_fork_session_id() {
+  local agent="$1" selector="$2" root_dir="$3"
+  if [[ "$selector" != current && "$selector" != previous ]]; then
+    printf '%s\n' "$selector"
+    return 0
+  fi
+  command -v aicx >/dev/null 2>&1 || {
+    echo "aicx is required for --session ${selector}; pass an exact session id instead." >&2
+    return 1
+  }
+
+  local python_bin current_json current_fields current_id current_agent
+  python_bin="$(_vibecrafted_python)"
+  current_json="$(cd "$root_dir" && aicx sessions current --json)" || return 1
+  current_fields="$(
+    printf '%s' "$current_json" | "$python_bin" -c \
+      'import json,sys; p=json.load(sys.stdin); print(str(p.get("session_id") or "")+"\t"+str(p.get("agent") or ""))'
+  )" || return 1
+  current_id="${current_fields%%$'\t'*}"
+  current_agent="${current_fields#*$'\t'}"
+  [[ -n "$current_id" ]] || {
+    echo "AICX did not resolve a current provider session in ${root_dir}." >&2
+    return 1
+  }
+  [[ "$current_agent" == "$agent" ]] || {
+    printf 'AICX current session belongs to %s, not %s; pass an exact session id.\n' "${current_agent:-unknown}" "$agent" >&2
+    return 1
+  }
+  if [[ "$selector" == current ]]; then
+    printf '%s\n' "$current_id"
+    return 0
+  fi
+
+  local sessions_json previous_id
+  sessions_json="$(cd "$root_dir" && aicx sessions list --cwd --agent "$agent" --limit 20 --format json)" || return 1
+  previous_id="$(
+    printf '%s' "$sessions_json" | "$python_bin" -c \
+      'import json,sys; current=sys.argv[1]; rows=json.load(sys.stdin); print(next((str(row.get("session_id") or "") for row in rows if str(row.get("session_id") or "") and str(row.get("session_id")) != current), ""))' \
+      "$current_id"
+  )" || return 1
+  [[ -n "$previous_id" ]] || {
+    echo "AICX found no previous ${agent} session for ${root_dir}." >&2
+    return 1
+  }
+  printf '%s\n' "$previous_id"
+}
+
+cmd_fork() {
+  local agent="${1:-}"
+  shift || true
+  if _is_help_flag "$agent" || [[ -z "$agent" ]]; then
+    cmd_fork_help
+    [[ -n "$agent" ]] && return 0 || return 1
+  fi
+  [[ "$agent" == codex ]] || {
+    printf 'Native fork is currently proven only for codex; unsupported provider: %s\n' "$agent" >&2
+    return 2
+  }
+
+  local selector="" runtime="visible" placement="right"
+  local model="" permissions="" root_dir="" prompt=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --session) shift; [[ $# -gt 0 ]] || { echo "Missing value for --session" >&2; return 2; }; selector="$1" ;;
+      --runtime) shift; [[ $# -gt 0 ]] || { echo "Missing value for --runtime" >&2; return 2; }; runtime="$1" ;;
+      --placement) shift; [[ $# -gt 0 ]] || { echo "Missing value for --placement" >&2; return 2; }; placement="$1" ;;
+      --floating) placement="floating" ;;
+      --model) shift; [[ $# -gt 0 ]] || { echo "Missing value for --model" >&2; return 2; }; model="$1" ;;
+      --permissions) shift; [[ $# -gt 0 ]] || { echo "Missing value for --permissions" >&2; return 2; }; permissions="$1" ;;
+      --root) shift; [[ $# -gt 0 ]] || { echo "Missing value for --root" >&2; return 2; }; root_dir="$1" ;;
+      -p|--prompt) shift; [[ $# -gt 0 ]] || { echo "Missing value for --prompt" >&2; return 2; }; prompt="$1" ;;
+      -h|--help) cmd_fork_help; return 0 ;;
+      *) printf 'Unknown fork argument: %s\n' "$1" >&2; return 2 ;;
+    esac
+    shift
+  done
+  [[ -n "$selector" ]] || { echo "fork requires --session current|previous|<session-id>." >&2; return 2; }
+  case "$runtime" in
+    visible|terminal) ;;
+    headless) echo "codex fork is an interactive TUI; --runtime headless cannot preserve a usable fork." >&2; return 2 ;;
+    *) echo "Unknown fork runtime: ${runtime} (use visible, terminal, or headless)." >&2; return 2 ;;
+  esac
+  case "$placement" in
+    right|floating) ;;
+    *) echo "Unknown fork placement: ${placement} (use right or floating)." >&2; return 2 ;;
+  esac
+  case "$permissions" in
+    ""|bypass|auto|read-only) ;;
+    *) echo "Unsupported codex fork permissions: ${permissions}." >&2; return 2 ;;
+  esac
+
+  _ensure_helpers_loaded || return 1
+  _require_agent_cli "$agent" || return 1
+  root_dir="${root_dir:-$(_repo_root)}"
+  root_dir="$(cd "$root_dir" 2>/dev/null && pwd -P)" || {
+    printf 'Fork root is not a directory: %s\n' "$root_dir" >&2
+    return 2
+  }
+  local session_id
+  session_id="$(_vibecrafted_fork_session_id "$agent" "$selector" "$root_dir")" || return 1
+  _vetcoders_looks_like_run_id "$session_id" && {
+    printf 'That is a control-plane run id, not a provider session: %s\n' "$session_id" >&2
+    return 2
+  }
+
+  local -a provider_argv=(codex fork --cd "$root_dir")
+  [[ -z "$model" ]] || provider_argv+=(--model "$model")
+  case "$permissions" in
+    bypass) provider_argv+=(--dangerously-bypass-approvals-and-sandbox) ;;
+    auto) provider_argv+=(--ask-for-approval on-request --sandbox workspace-write) ;;
+    read-only) provider_argv+=(--ask-for-approval never --sandbox read-only) ;;
+  esac
+  provider_argv+=("$session_id")
+  [[ -z "$prompt" ]] || provider_argv+=("$prompt")
+  local command_text
+  command_text="$(_vetcoders_shell_quote_join "${provider_argv[@]}")" || return 1
+
+  if ! _vetcoders_in_vc_frame; then
+    if [[ "$runtime" == terminal && -t 0 && -t 1 ]]; then
+      exec "${provider_argv[@]}"
+    fi
+    echo "Same-tab fork needs an attached vc-frame pane (VC_FRAME_PANE_ID + VC_FRAME_SESSION_NAME)." >&2
+    echo "  Run it from Quick cmd/a shell pane in the target tab, or use --runtime terminal in a plain TTY." >&2
+    return 2
+  fi
+
+  local vc_frame_bin session_name repo_label pane_title cmd_script
+  vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 1
+  session_name="$VC_FRAME_SESSION_NAME"
+  repo_label="$(basename "$(dirname "$root_dir")")/$(basename "$root_dir")"
+  pane_title="codex fork @${repo_label} ${session_id}"
+  cmd_script="$(_vetcoders_tmp_script_path "vc-fork-cmd" "$root_dir")"
+  _vetcoders_write_command_script "$cmd_script" "$command_text" || return 1
+
+  local -a pane_args=(action new-pane --near-current-pane --name "$pane_title" --cwd "$root_dir")
+  if [[ "$placement" == floating ]]; then
+    pane_args+=(--floating --width 62% --height 80%)
+  else
+    pane_args+=(--direction right)
+  fi
+  pane_args+=(-- "$cmd_script")
+  local pane_id
+  pane_id="$("$vc_frame_bin" --session "$session_name" "${pane_args[@]}")" || {
+    echo "vc-frame refused the same-tab fork pane; no replacement session or tab was created." >&2
+    return 1
+  }
+  printf 'Fork launched in current vc-frame tab:\n'
+  printf '  agent:     %s\n' "$agent"
+  printf '  session:   %s\n' "$session_id"
+  printf '  pane:      %s\n' "$placement"
+  [[ -z "$pane_id" ]] || printf '  pane-id:   %s\n' "$pane_id"
+  printf '  title:     %s\n' "$pane_title"
+}
+
 cmd_resume() {
   local agent="${1:-}"
   if _is_help_flag "$agent"; then
@@ -6050,6 +6228,7 @@ main() {
     operator) cmd_operator "$@" ;;
     partner) cmd_partner "$@" ;;
     resume) cmd_resume "$@" ;;
+    fork) cmd_fork "$@" ;;
     observe|await|stop) cmd_lifecycle_command "$cmd" "$@" ;;
     gui) cmd_gui "$@" ;;
     server) cmd_server "$@" ;;

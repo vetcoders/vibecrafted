@@ -2836,6 +2836,165 @@ def test_resume_wrapper_accepts_bare_positional_session_id(tmp_path: Path) -> No
     assert "codex exec" not in command_body
 
 
+def _write_fake_aicx_sessions(bin_dir: Path, current_id: str, previous_id: str) -> None:
+    script = bin_dir / "aicx"
+    script.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import json",
+                "import sys",
+                "args = sys.argv[1:]",
+                "if args[:2] == ['sessions', 'current']:",
+                f"    print(json.dumps({{'session_id': '{current_id}', 'agent': 'codex'}}))",
+                "elif args[:2] == ['sessions', 'list']:",
+                "    print(json.dumps([",
+                f"        {{'session_id': '{current_id}', 'agent': 'codex'}},",
+                f"        {{'session_id': '{previous_id}', 'agent': 'codex'}},",
+                "    ]))",
+                "else:",
+                "    raise SystemExit(97)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+
+
+@pytest.mark.parametrize(
+    ("selector", "expected_session"),
+    [("current", "current-codex-session"), ("previous", "previous-codex-session")],
+)
+def test_fork_codex_opens_named_pane_in_current_vc_frame_tab(
+    tmp_path: Path, selector: str, expected_session: str
+) -> None:
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    root = tmp_path / "Loctree" / "aicx"
+    capture_file = tmp_path / "vc-frame-args.txt"
+    home.mkdir()
+    fake_bin.mkdir()
+    root.mkdir(parents=True)
+    _write_fake_vc_frame_with_live_session(fake_bin, capture_file, "operator-test")
+    _write_fake_aicx_sessions(
+        fake_bin, "current-codex-session", "previous-codex-session"
+    )
+
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+    env["VIBECRAFTED_RUNTIME_BIN"] = str(fake_bin)
+    env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
+    env["VC_FRAME_PANE_ID"] = "7"
+    env["VC_FRAME_SESSION_NAME"] = "operator-test"
+    env["CAPTURE_FILE"] = str(capture_file)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(LAUNCHER),
+            "fork",
+            "codex",
+            "--session",
+            selector,
+            "--runtime",
+            "visible",
+            "--root",
+            str(root),
+            "--model",
+            "gpt-test",
+            "--permissions",
+            "auto",
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = capture_file.read_text(encoding="utf-8").splitlines()
+    assert payload[:3] == ["--session", "operator-test", "action"]
+    assert "new-pane" in payload
+    assert "new-tab" not in payload
+    assert payload[payload.index("--direction") + 1] == "right"
+    assert payload[payload.index("--name") + 1] == (
+        f"codex fork @Loctree/aicx {expected_session}"
+    )
+    separator = payload.index("--")
+    command_body = Path(payload[separator + 1]).read_text(encoding="utf-8")
+    assert "codex fork" in command_body
+    assert "--model gpt-test" in command_body
+    assert "--ask-for-approval on-request --sandbox workspace-write" in command_body
+    assert f"--cd {root}" in command_body
+    assert expected_session in command_body
+    assert f"session:   {expected_session}" in result.stdout
+
+
+def test_fork_codex_supports_floating_same_tab_placement(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    capture_file = tmp_path / "vc-frame-args.txt"
+    home.mkdir()
+    fake_bin.mkdir()
+    _write_fake_vc_frame_with_live_session(fake_bin, capture_file, "operator-test")
+
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+    env["VIBECRAFTED_RUNTIME_BIN"] = str(fake_bin)
+    env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
+    env["VC_FRAME_PANE_ID"] = "7"
+    env["VC_FRAME_SESSION_NAME"] = "operator-test"
+    env["CAPTURE_FILE"] = str(capture_file)
+
+    subprocess.run(
+        [
+            "bash",
+            str(LAUNCHER),
+            "fork",
+            "codex",
+            "--session",
+            "explicit-session-id",
+            "--runtime",
+            "terminal",
+            "--placement",
+            "floating",
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+        env=env,
+    )
+
+    payload = capture_file.read_text(encoding="utf-8").splitlines()
+    assert "new-pane" in payload
+    assert "--floating" in payload
+    assert "--direction" not in payload
+
+
+def test_fork_codex_rejects_headless_runtime() -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            str(LAUNCHER),
+            "fork",
+            "codex",
+            "--session",
+            "explicit-session-id",
+            "--runtime",
+            "headless",
+        ],
+        check=False,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "codex fork is an interactive TUI" in result.stderr
+
+
 def test_vc_dashboard_wrapper_dispatches_to_dashboard(tmp_path: Path) -> None:
     """vc-dashboard wrapper (symlink) reaches cmd_dashboard, not run_skill."""
     home = tmp_path / "home"

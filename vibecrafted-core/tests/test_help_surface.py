@@ -56,6 +56,7 @@ def test_root_help_uses_the_registered_ship_cycle() -> None:
     assert "More workflows: vibecrafted help --all" in output
     assert "Vibecrafted core command surface" not in output
     assert "resume-session" in output
+    assert "fork <agent>" in output
     assert "--run-id" in output
     assert "uninstall            Remove runtime" in output
     assert "vibecrafted uninstall --dry-run" in output
