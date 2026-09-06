@@ -218,7 +218,7 @@ def test_upgrade_preserves_user_kdl_policy_and_exact_theme_bytes(
 def test_both_changed_kdl_refuses_publication_and_preserves_evidence(
     installed, tmp_path, capsys
 ):
-    paths, _, result = installed
+    paths, _, _result = installed
     product = paths["product_config"]
     config = product / "vc-frame/config.kdl"
     config.write_bytes(config.read_bytes() + b"\ncopy_on_select true\n")
@@ -291,6 +291,7 @@ owner.cmd_runtime_install(Namespace(payload_root=payload, app_root=None, termina
         capture_output=True,
         text=True,
         timeout=60,
+        check=False,
     )
     assert result.returncode == 86, result.stdout + result.stderr
 
@@ -497,7 +498,9 @@ def test_terminal_wrapper_pins_physical_owner_and_preserves_payload_argv(
     ):
         monkeypatch.setenv(key, str(tmp_path / "foreign"))
     before = _snapshot(home)
-    result = subprocess.run([str(wrapper), *arguments], capture_output=True, text=True)
+    result = subprocess.run(
+        [str(wrapper), *arguments], capture_output=True, text=True, check=False
+    )
     assert result.returncode == (0 if accepted else 2), result.stderr
     assert _snapshot(home) == before
     if accepted:

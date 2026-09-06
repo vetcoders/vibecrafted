@@ -10,7 +10,6 @@ from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
-
 from _runtime_pack_fixture import seed_runtime_pack
 
 from scripts import vetcoders_install as installer

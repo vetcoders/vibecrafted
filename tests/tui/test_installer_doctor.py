@@ -12,17 +12,16 @@ from pathlib import Path
 from xml.parsers.expat import ExpatError
 
 import pytest
+from _runtime_pack_fixture import (
+    _RUNTIME_GENERATION_FIXTURE_SOURCES,
+    _write_test_source_provenance,
+)
 from vibecrafted_core.doctor import _vc_frame_delivery_findings
 from vibecrafted_core.frontier_assets import vc_frame_config_source
 from vibecrafted_core.vc_frame_staging import (
     materialize_vc_frame_config,
     resolve_clipboard_command,
     resolve_pane_shell,
-)
-
-from _runtime_pack_fixture import (
-    _RUNTIME_GENERATION_FIXTURE_SOURCES,
-    _write_test_source_provenance,
 )
 
 from scripts import vetcoders_install as installer

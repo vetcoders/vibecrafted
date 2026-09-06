@@ -5,10 +5,10 @@ import shutil
 import subprocess
 import sys
 import tarfile
-import tomllib
 from pathlib import Path
 
 import pytest
+import tomllib
 
 from scripts import distribution_manifest as distribution
 from scripts import vetcoders_install as installer
@@ -684,7 +684,9 @@ def test_install_manifest_has_one_runtime_pack_owner_and_propagates_doctor_failu
     scripts.mkdir()
     (scripts / "vetcoders_install.py").write_text("raise SystemExit(37)\n")
     (scripts / "post-install-launch.sh").write_text("touch forbidden-launch\n")
-    result = subprocess.run(onboarding, cwd=tmp_path, capture_output=True, text=True)
+    result = subprocess.run(
+        onboarding, cwd=tmp_path, capture_output=True, text=True, check=False
+    )
     assert result.returncode == 37
     assert not (tmp_path / "forbidden-launch").exists()
 
@@ -703,6 +705,7 @@ def test_install_source_delegates_once_and_preserves_owner_failure(
         cwd=tmp_path,
         capture_output=True,
         text=True,
+        check=False,
     )
     assert marker.read_text() == "owner\n"
     assert (result.returncode == 0) == (exit_code == 0)
@@ -1243,7 +1246,11 @@ def test_foundations_frame_check_requires_explicit_pack_repair(
     )
     before = set(tmp_path.iterdir())
     result = subprocess.run(
-        ["bash", "-c", script], cwd=tmp_path, capture_output=True, text=True
+        ["bash", "-c", script],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert result.returncode == (0 if available else 1)
     if not available:

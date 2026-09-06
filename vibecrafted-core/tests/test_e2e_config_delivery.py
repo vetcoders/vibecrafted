@@ -197,6 +197,7 @@ def _run_stage_in_venv(
         capture_output=True,
         text=True,
         timeout=120,
+        check=False,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     return proc.stdout.strip().splitlines()[-1]
