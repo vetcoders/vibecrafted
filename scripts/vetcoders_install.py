@@ -11785,11 +11785,7 @@ def _doctor_runtime_receipt_findings() -> list[DoctorFinding]:
                 "Runtime Pack publication or recovery is pending; rerun make install",
             )
         ]
-    preferences = {
-        paths["product_config"] / "vc-frame/config.kdl",
-        paths["product_config"] / "terminal-policy.toml",
-        paths["product_config"] / "terminal-theme.toml",
-    }
+    preferences = _runtime_preference_paths(paths["product_config"])
     missing: list[str] = []
     drifted: list[str] = []
     for key, digest in receipt.get("owned_files", {}).items():
@@ -15638,6 +15634,27 @@ def _merge_runtime_preferences(
     return "".join(result)
 
 
+def _runtime_preference_paths(product_config: Path) -> tuple[Path, ...]:
+    """Canonical user-owned content, distinct from generated executable/config assets."""
+    return (
+        product_config / "vc-frame/config.kdl",
+        product_config / "terminal-policy.toml",
+        product_config / "terminal-theme.toml",
+    )
+
+
+def _validate_runtime_preference(path: Path) -> None:
+    """Apply the resolver's read-only preference contract before accepting user drift."""
+    _assert_runtime_physical_path(path)
+    text = _capture_runtime_bound_file(path).decode("utf-8")
+    if not text.strip() or "\0" in text:
+        raise RuntimeError(f"product preference is empty or invalid: {path.name}")
+    if path.suffix == ".toml":
+        import tomllib
+
+        tomllib.loads(text)
+
+
 def _prepare_runtime_preferences(
     generation: Path,
     product_config: Path,
@@ -16896,22 +16913,8 @@ def cmd_runtime_resolve(args: argparse.Namespace) -> int:
             if not (generation / "scripts/vetcoders_install.py").is_file():
                 raise RuntimeError("selected generation installer is missing")
             product = paths["product_config"]
-            preferences = {
-                product / "vc-frame/config.kdl",
-                product / "terminal-policy.toml",
-                product / "terminal-theme.toml",
-            }
-            import tomllib
-
-            for path in preferences:
-                _assert_runtime_physical_path(path)
-                text = _capture_runtime_bound_file(path).decode("utf-8")
-                if not text.strip() or "\0" in text:
-                    raise RuntimeError(
-                        f"product preference is empty or invalid: {path.name}"
-                    )
-                if path.suffix == ".toml":
-                    tomllib.loads(text)
+            for path in _runtime_preference_paths(product):
+                _validate_runtime_preference(path)
             for path, relative in (
                 (
                     product / "vc-frame/config.kdl",
@@ -17659,16 +17662,24 @@ def _uninstall_runtime_pack(args: argparse.Namespace) -> int:
                 f"receipt empty directory escapes projection roots: {raw_path}"
             )
     backup_root = runtime_home / ".installer-backups"
-    conflicts = [
-        raw_path
-        for raw_path, installed_hash in sorted(owned_files.items())
-        if _path_present(path := Path(raw_path))
-        and (
-            path.is_symlink()
-            or not path.is_file()
-            or _sha256_path(path) != installed_hash
-        )
-    ]
+    preferences = _runtime_preference_paths(paths["product_config"])
+    conflicts: list[str] = []
+    for raw_path, installed_hash in sorted(owned_files.items()):
+        path = Path(raw_path)
+        if not _path_present(path):
+            continue
+        if path.is_symlink() or not path.is_file():
+            conflicts.append(raw_path)
+        elif _sha256_path(path) != installed_hash:
+            if path in preferences:
+                try:
+                    _validate_runtime_preference(path)
+                except (OSError, RuntimeError, ValueError):
+                    conflicts.append(raw_path)
+                # Accepted user bytes are preserved by the full product snapshot
+                # below, before teardown or removal can begin.
+            else:
+                conflicts.append(raw_path)
     conflicts.extend(
         raw_path
         for raw_path, raw_target in sorted(owned_symlinks.items())

@@ -449,6 +449,198 @@ def test_uninstall_preserves_accepted_user_preferences_in_recovery(
 
 
 @pytest.mark.parametrize(
+    "preference",
+    ["vc-frame/config.kdl", "terminal-policy.toml", "terminal-theme.toml"],
+)
+def test_uninstall_preference_dry_run_and_final_snapshot(installed, capsys, preference):
+    paths, _, _ = installed
+    config = paths["product_config"] / preference
+    expected = config.read_bytes() + (
+        b"\ncopy_on_select true\n"
+        if preference.endswith(".kdl")
+        else b"\n# user preference\n"
+    )
+    config.write_bytes(expected)
+    _resolve(paths, capsys, status="ready")
+    before = _snapshot(Path.home())
+    assert (
+        installer.cmd_runtime_uninstall(Namespace(dry_run=True, emit_result=True)) == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "dry-run"
+    assert result["conflicts"] == []
+    assert _snapshot(Path.home()) == before
+
+    assert (
+        installer.cmd_runtime_uninstall(Namespace(dry_run=False, emit_result=True)) == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "removed"
+    assert result["conflicts"] == []
+    archive = json.loads(
+        next(
+            (paths["runtime_home"] / ".installer-backups").glob("uninstalled-*.json")
+        ).read_text()
+    )
+    snapshot = Path(archive["drift_backups"][str(paths["product_config"])])
+    assert (snapshot / preference).read_bytes() == expected
+    assert archive["status"] == "removed"
+    assert archive["uninstall_pending"] is False
+
+
+@pytest.mark.parametrize(
+    "preference,body",
+    [
+        ("vc-frame/config.kdl", b""),
+        ("vc-frame/config.kdl", b"copy_on_select true\0"),
+        ("terminal-policy.toml", b"opacity ="),
+        ("terminal-policy.toml", b"[colors"),
+        ("terminal-policy.toml", b"# \xff"),
+    ],
+)
+def test_uninstall_invalid_preference_stays_conflicted(
+    installed, capsys, monkeypatch, preference, body
+):
+    paths, _, _ = installed
+    config = paths["product_config"] / preference
+    installed_receipt = json.loads(
+        (paths["runtime_home"] / installer.RUNTIME_INSTALL_RECEIPT).read_text()
+    )
+    assert str(config) in installed_receipt["owned_files"]
+    config.write_bytes(body)
+    _resolve(paths, capsys, status="unusable")
+    monkeypatch.setattr(
+        installer,
+        "_teardown_owned_runtime_for_uninstall",
+        lambda *_a, **_k: pytest.fail("conflict must precede runtime teardown"),
+    )
+    before = _snapshot(paths["product_config"])
+    backups = _snapshot(paths["runtime_home"] / ".installer-backups")
+    receipt = (paths["runtime_home"] / installer.RUNTIME_INSTALL_RECEIPT).read_bytes()
+    for dry_run in (True, False):
+        assert (
+            installer.cmd_runtime_uninstall(
+                Namespace(dry_run=dry_run, emit_result=True)
+            )
+            == 1
+        )
+        result = json.loads(capsys.readouterr().out)
+        assert result["status"] == "conflict"
+        assert result["actions"] == []
+        assert str(config) in result["conflicts"]
+        assert _snapshot(paths["product_config"]) == before
+        assert _snapshot(paths["runtime_home"] / ".installer-backups") == backups
+        assert (
+            paths["runtime_home"] / installer.RUNTIME_INSTALL_RECEIPT
+        ).read_bytes() == receipt
+
+
+def test_uninstall_keeps_unreceipted_theme_bytes_in_recovery(installed, capsys):
+    paths, _, _ = installed
+    theme = paths["product_config"] / "terminal-theme.toml"
+    receipt = json.loads(
+        (paths["runtime_home"] / installer.RUNTIME_INSTALL_RECEIPT).read_text()
+    )
+    assert str(theme) not in receipt["owned_files"]
+    expected = b"# unfinished user theme\n[colors"
+    theme.write_bytes(expected)
+    assert (
+        installer.cmd_runtime_uninstall(Namespace(dry_run=False, emit_result=True)) == 0
+    )
+    capsys.readouterr()
+    archive = json.loads(
+        next(
+            (paths["runtime_home"] / ".installer-backups").glob("uninstalled-*.json")
+        ).read_text()
+    )
+    snapshot = Path(archive["drift_backups"][str(paths["product_config"])])
+    assert (snapshot / "terminal-theme.toml").read_bytes() == expected
+
+
+def test_uninstall_preference_snapshot_failure_precedes_removal(
+    installed, capsys, monkeypatch
+):
+    paths, _, _ = installed
+    config = paths["product_config"] / "vc-frame/config.kdl"
+    config.write_bytes(config.read_bytes() + b"\ncopy_on_select true\n")
+    before = _snapshot(paths["product_config"])
+    receipt_path = paths["runtime_home"] / installer.RUNTIME_INSTALL_RECEIPT
+    receipt = receipt_path.read_bytes()
+
+    def fail_copy(*_a, **_k):
+        raise OSError("snapshot write failed")
+
+    monkeypatch.setattr(installer, "_copy_path_to_backup", fail_copy)
+    monkeypatch.setattr(
+        installer,
+        "_teardown_owned_runtime_for_uninstall",
+        lambda *_a, **_k: pytest.fail("snapshot must precede runtime teardown"),
+    )
+    with pytest.raises(OSError, match="snapshot write failed"):
+        installer.cmd_runtime_uninstall(Namespace(dry_run=False, emit_result=True))
+    assert _snapshot(paths["product_config"]) == before
+    assert receipt_path.read_bytes() == receipt
+    assert not list(
+        (paths["runtime_home"] / ".installer-backups").glob("uninstalled-*.json")
+    )
+
+
+@pytest.mark.parametrize(
+    "alias", ["symlink", "parent-symlink", "hardlink", "directory"]
+)
+def test_uninstall_aliased_preference_stays_conflicted(installed, capsys, alias):
+    paths, _, _ = installed
+    config = paths["product_config"] / "vc-frame/config.kdl"
+    config.write_bytes(config.read_bytes() + b"\ncopy_on_select true\n")
+    saved = paths["product_config"] / "saved-preference"
+    if alias == "parent-symlink":
+        config.parent.rename(saved)
+        config.parent.symlink_to(saved, target_is_directory=True)
+    else:
+        config.rename(saved)
+        if alias == "hardlink":
+            config.hardlink_to(saved)
+        elif alias == "directory":
+            config.mkdir()
+        else:
+            config.symlink_to(saved)
+    before = _snapshot(Path.home())
+    assert (
+        installer.cmd_runtime_uninstall(Namespace(dry_run=True, emit_result=True)) == 1
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "conflict"
+    assert result["actions"] == []
+    assert str(config) in result["conflicts"]
+    assert _snapshot(Path.home()) == before
+
+
+@pytest.mark.parametrize(
+    "managed",
+    [
+        "vc-terminal/vc-terminal.toml",
+        "vc-terminal/launch-primary-shell.zsh",
+        "vc-frame/layouts/operator.kdl",
+    ],
+)
+def test_uninstall_preference_does_not_excuse_managed_drift(installed, capsys, managed):
+    paths, _, _ = installed
+    config = paths["product_config"] / "vc-frame/config.kdl"
+    config.write_bytes(config.read_bytes() + b"\ncopy_on_select true\n")
+    other = paths["product_config"] / managed
+    other.write_bytes(other.read_bytes() + b"\n# unknown drift\n")
+    before = _snapshot(Path.home())
+    assert (
+        installer.cmd_runtime_uninstall(Namespace(dry_run=True, emit_result=True)) == 1
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "conflict"
+    assert result["actions"] == []
+    assert result["conflicts"] == [str(other)]
+    assert _snapshot(Path.home()) == before
+
+
+@pytest.mark.parametrize(
     "arguments,accepted",
     [
         (["--config-file", "foreign.toml"], False),
