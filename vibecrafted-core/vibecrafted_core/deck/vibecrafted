@@ -158,6 +158,17 @@ _is_framework_source_root() {
   [[ -d "$candidate/runtime" || -d "$candidate/vibecrafted-core/vibecrafted_core/runtime" ]]
 }
 
+# A physically installed generation, told apart from a development checkout by
+# the receipt the installer writes and a checkout never carries. The shell layer
+# already draws this exact boundary (_vetcoders_vc_frame_developer_mode); the
+# deck needs it one step earlier -- BEFORE it chooses which helper tree to load.
+_is_installed_generation_root() {
+  local candidate="${1:-}"
+  [[ -n "$candidate" ]] || return 1
+  [[ -f "$candidate/runtime-manifest.json" && ! -L "$candidate/runtime-manifest.json" ]] || return 1
+  [[ ! -e "$candidate/.git" ]]
+}
+
 _repo_source_root() {
   local repo_root script_root
   repo_root="$(_repo_root)"
@@ -354,12 +365,32 @@ _helper_candidates() {
 
 _ensure_helpers_loaded() {
   local helper owner_root="${1:-}"
+  if [[ -z "$owner_root" ]]; then
+    # An installed public entry owns its helper tree by where it PHYSICALLY is,
+    # never by where it was run from. Without this, `vibecrafted resume` started
+    # inside a framework checkout resolved _repo_source_root from cwd, sourced
+    # that checkout's helpers, and the front-door lookup then asked the checkout
+    # for bin/vibecrafted -- absent -- so the public resume died with "no
+    # installed vibecrafted front door" while `start`, which passes the owner
+    # explicitly, opened a terminal from the very same directory.
+    #
+    # The receipt lying beside the script is the authority, not the caller's
+    # environment: VIBECRAFTED_ROOT and friends are inherited from whoever
+    # invoked us and cannot be allowed to select a different generation.
+    local physical_owner=""
+    physical_owner="$(_script_owner_root 2>/dev/null || true)"
+    if _is_installed_generation_root "$physical_owner"; then
+      owner_root="$physical_owner"
+    fi
+  fi
   if [[ -n "$owner_root" ]]; then
-    # Product start passes the physical deck owner, not the current checkout
-    # or inherited tools-current. Do not fall through on a partial install.
+    # A product entry runs on the physical deck owner, not the current checkout
+    # or an inherited tools-current. Do not fall through on a partial install:
+    # a selected generation missing its own helper is a broken install, and
+    # borrowing another tree's helpers would hide that behind a working window.
     helper="$owner_root/vibecrafted-core/vibecrafted_core/runtime/shell/vetcoders.sh"
     if [[ ! -r "$helper" ]]; then
-      printf 'vc-start: selected runtime shell missing: %s\n' "$helper" >&2
+      printf 'vibecrafted: selected runtime shell missing: %s\n' "$helper" >&2
       printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
       return 1
     fi
