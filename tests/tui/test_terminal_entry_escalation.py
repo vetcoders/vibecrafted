@@ -36,6 +36,7 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -1235,6 +1236,133 @@ def test_nested_relative_root_survives_the_child_reparse_under_zsh(
     assert Path(hosted[5]).resolve() == nested.resolve()
 
 
+# --------------------------------------------------------------------------
+# Process lifetime: the host must outlive its caller's process group
+# --------------------------------------------------------------------------
+
+
+def test_terminal_host_survives_synthetic_caller_group_death(tmp_path: Path) -> None:
+    """S1 R5: the opened terminal host must not die when ITS CALLER's own
+    process group is torn down after the caller has already returned.
+
+    Evidence (public-start-lifetime.json/.log, S1 R5 brief): the real
+    installed vc-start child exited 0 while its vc-terminal PID (37536)
+    remained alive at second 12 -- but that terminal's PGID (37470) was the
+    OUTER TOOL's group, not its own. Once that outer group was torn down,
+    the terminal, its shell and its Frame client were all gone, though no
+    signal was ever sent to any of them directly -- their group simply
+    died. `disown` (the prior mechanism) only drops a job from the shell's
+    OWN job table; under a non-interactive shell (no job control, the
+    normal case for a scripted/agent caller) a backgrounded job keeps the
+    SAME pgid as its caller and goes down with it.
+
+    Reproduced directly here with an isolated, self-created,
+    identity-verified synthetic "caller" process group -- never a Founder
+    process, never anything outside this test's own process tree.
+    """
+    import signal
+
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    _install_canonical_launcher(home)
+    project_dir = tmp_path / "project"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    survived = tmp_path / "survived.marker"
+    capture = tmp_path / "terminal-launch.json"
+    generation = _fake_generation(tmp_path, capture)
+    # Outlive the 1.5s bounded admission window before proving survival --
+    # a host that exits inside that window would pass even under the bug.
+    _write(
+        generation / "bin" / "vc-terminal",
+        "#!/bin/bash\n"
+        "sleep 2\n"
+        f"printf '%s\\n' \"$$\" > {shlex.quote(str(survived))}\n"
+        "exit 0\n",
+    )
+
+    caller_pid_file = tmp_path / "caller.pid"
+    script = "\n".join(
+        [
+            f'source "{SHELL_SH}"',
+            f'_vetcoders_vc_frame_loaded_root="{generation}"',
+            f'printf "%s\\n" "$$" > {shlex.quote(str(caller_pid_file))}',
+            "_vetcoders_open_entry_in_vc_terminal "
+            + shlex.quote(str(generation / "bin" / "vc-start"))
+            + " "
+            + shlex.quote(str(project_dir)),
+        ]
+    )
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
+    env["XDG_CONFIG_HOME"] = str(home / ".config")
+
+    # The isolated synthetic caller: its own session AND process group,
+    # created fresh for this test, never shared with pytest's own group.
+    # DEVNULL, not PIPE: a pipe's write end stays open for as long as ANY
+    # descendant holds it, which under the pre-fix code is the backgrounded
+    # host too -- that would make process-exit detection below depend on
+    # the very stdio coupling this fix removes, instead of testing the
+    # caller's own lifetime independently of it.
+    caller = subprocess.Popen(
+        ["bash", "--noprofile", "--norc", "-c", script],
+        cwd=project_dir,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    # Identity check while it is certainly still alive: a freshly
+    # start_new_session=True child is always its own session/group leader.
+    caller_pgid = os.getpgid(caller.pid)
+    assert caller_pgid == caller.pid, (
+        "the synthetic caller was not its own session/group leader -- "
+        "the test setup, not the fix, would be under test here"
+    )
+    assert caller_pgid not in (0, 1, os.getpgrp()), (
+        "refusing to signal a shared/system process group"
+    )
+
+    try:
+        caller.wait(timeout=30)
+        assert caller.returncode == 0, caller.returncode
+        recorded_pid = int(caller_pid_file.read_text().strip())
+        assert recorded_pid == caller.pid, (
+            "pid mismatch -- refusing to signal an unverified group"
+        )
+        assert not survived.exists(), (
+            "the fake host finished inside the caller's own lifetime -- "
+            "this proves nothing about surviving the caller's group death"
+        )
+
+        # The caller (standing in for the reported incident's "outer tool
+        # call") is done. Tear down ITS ENTIRE process group now -- this
+        # signal targets ONLY the pgid created and identity-verified above,
+        # never a pid discovered by scanning, never a Founder process.
+        try:
+            os.killpg(caller_pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # nothing left in that group -- the host already detached out of it
+
+        deadline = time.monotonic() + 5.0
+        while not survived.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+        assert survived.exists(), (
+            "the terminal host did not survive its caller's process group "
+            "being torn down -- it is still coupled to the caller's "
+            "session/pgid"
+        )
+    finally:
+        if caller.poll() is None:
+            try:
+                os.killpg(caller_pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            caller.wait(timeout=5)
+
+
 def test_bare_resume_without_tty_opens_terminal_under_zsh(tmp_path: Path) -> None:
     """The reported P0, under zsh: `local status=""` collides with zsh's
     readonly `$status` special parameter inside
@@ -1253,3 +1381,100 @@ def test_bare_resume_without_tty_opens_terminal_under_zsh(tmp_path: Path) -> Non
 
     # Nothing may be launched twice: no AICX pack in the escalating parent.
     assert not (tmp_path / "aicx-called.txt").exists()
+
+
+# --------------------------------------------------------------------------
+# Truthful admission: the foreground spawner's OWN failures, not the host's
+# --------------------------------------------------------------------------
+#
+# S1 R5b (independent review of R5): the receipt-polling loop only ever saw
+# the ABSENCE of a receipt file and reported that as "accepted... starting",
+# whether that absence came from a host still opening (correct) or from the
+# foreground python3 driver never having run at all (wrong). Both cases below
+# reproduce a driver that never gets as far as spawning the detached writer,
+# so no receipt can ever appear -- proven on both shells, matching how the
+# original evidence (reports/S1-terminal-lifetime-R5-spawner-failure.json,
+# reports/S1-terminal-lifetime-R5-popen-failure.json) was reproduced.
+
+
+def _write_fake_python3(bin_dir: Path, body: str) -> Path:
+    """A `python3` shim placed ahead of the real interpreter on PATH, used to
+    force the foreground driver itself to fail before it ever spawns the
+    detached writer. Its shebang points at THIS interpreter's real absolute
+    path, never back through PATH, so it cannot recursively invoke itself.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    return _write(bin_dir / "python3", body)
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_interpreter_start_failure_is_not_reported_as_accepted(
+    tmp_path: Path, shell: str
+) -> None:
+    """reports/S1-terminal-lifetime-R5-spawner-failure.json: a python3 that
+    fails to even start the driver (here, SPAWNER_EXIT_42 -- it exits before
+    reading its heredoc'd stdin at all) must never be reported as "accepted"
+    or "starting". No writer was ever spawned, so the real terminal host
+    (`vc-terminal`) must never be invoked either.
+    """
+    fake_bin = tmp_path / "fakebin"
+    _write_fake_python3(fake_bin, f"#!{sys.executable}\nimport sys\nsys.exit(42)\n")
+
+    result, launch = _run_entry(
+        tmp_path,
+        "vc-resume codex",
+        extra_env={"PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"},
+        expect_launch=False,
+        shell=shell,
+    )
+
+    assert launch is None, "the host was invoked despite the driver never running"
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "failed to start an independent terminal session" in result.stderr
+    assert "accepted this launch" not in result.stderr
+    assert "opened the Vibecrafted terminal" not in result.stderr
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_driver_popen_failure_is_not_reported_as_accepted(
+    tmp_path: Path, shell: str
+) -> None:
+    """reports/S1-terminal-lifetime-R5-popen-failure.json: the REAL driver
+    runs, but its own `subprocess.Popen` call -- the one spawning the
+    detached writer, not the writer's later exec of the host -- raises
+    OSError (e.g. a fork/resource limit). That must be caught and reported
+    as a clean, single diagnostic: never an uncaught traceback, and never
+    silently folded into "accepted... starting".
+    """
+    fake_bin = tmp_path / "fakebin"
+    _write_fake_python3(
+        fake_bin,
+        f"#!{sys.executable}\n"
+        "import sys, subprocess\n"
+        "class _FailingPopen:\n"
+        "    def __init__(self, *a, **kw):\n"
+        "        raise OSError(11, 'R5B_REVIEW_SPAWN_REFUSED')\n"
+        "subprocess.Popen = _FailingPopen\n"
+        "exec(sys.stdin.read())\n",
+    )
+
+    result, launch = _run_entry(
+        tmp_path,
+        "vc-resume codex",
+        extra_env={"PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"},
+        expect_launch=False,
+        shell=shell,
+    )
+
+    assert launch is None, "the host was invoked despite the writer never spawning"
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "failed to start an independent terminal session" in result.stderr
+    assert "R5B_REVIEW_SPAWN_REFUSED" in result.stderr, (
+        "the underlying Popen failure was swallowed instead of surfaced: "
+        + result.stderr
+    )
+    assert "Traceback" not in result.stderr, (
+        "an uncaught exception leaked instead of a clean diagnostic: " + result.stderr
+    )
+    assert "accepted this launch" not in result.stderr
+    assert "opened the Vibecrafted terminal" not in result.stderr
