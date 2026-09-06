@@ -197,17 +197,77 @@ _vetcoders_open_entry_in_vc_terminal() {
   local receipt_dir="" receipt=""
   receipt_dir="$(mktemp -d "${TMPDIR:-/tmp}/vc-terminal-admit.XXXXXX")" || return 1
   receipt="$receipt_dir/status"
+
+  # Detach the host into its OWN process session, not merely a backgrounded
+  # + disowned job. `disown` only drops the job from THIS shell's job table;
+  # under a non-interactive/non-monitor shell (the normal case for a public
+  # entry invoked by a script or agent tool) the child stays in the SAME OS
+  # process group as the caller. When the caller is itself a transient tool
+  # process torn down as a group, the "detached" terminal host is reaped
+  # with it — no signal was ever sent to it directly, its group just died.
+  # This is the same class of bug already solved for headless dispatch in
+  # runtime/scripts/lib/launcher.sh (spawn_launch_headless): macOS has no
+  # setsid(1), so Python's start_new_session=True (posix setsid) is the
+  # portable true-detach. It must run in a freshly forked child, never on
+  # the caller's own process (self-setsid fails once a process is already
+  # its group leader, and whether bash/zsh hands `&` its own pgid here is
+  # shell/mode-dependent) — so a short-lived foreground driver spawns one
+  # detached writer that outlives it.
+  command -v python3 >/dev/null 2>&1 || {
+    printf 'vc-terminal: python3 is required to open an independent terminal session but is not on PATH.\n' >&2
+    rm -rf "$receipt_dir"
+    return 1
+  }
+
+  local argv_file="$receipt_dir/argv"
   {
-    VIBECRAFTED_TERMINAL_ENTRY=1 \
-      "$terminal_bin" --working-directory "$project_root" \
-      -e "$primary_shell" "$front_door" "$@"
-    vc_terminal_admit_rc=$?
-    # Silenced as a group: once the directory is gone this redirect fails, and
-    # a shell error about it would surface in the operator's terminal long
-    # after the launch it refers to.
-    { printf '%s' "$vc_terminal_admit_rc" >"$receipt"; } 2>/dev/null
-  } &
-  disown 2>/dev/null || true
+    printf '%s\0' "$terminal_bin" "--working-directory" "$project_root" \
+      "-e" "$primary_shell" "$front_door"
+    if (($#)); then
+      printf '%s\0' "$@"
+    fi
+  } >"$argv_file"
+
+  # The writer's own stdio is fully closed off the caller's (possibly
+  # pipe-backed) fds before it ever execs the host, so a closed pipe on the
+  # caller's side can never reach into a still-running terminal.
+  VC_TERMINAL_ARGV_FILE="$argv_file" VC_TERMINAL_RECEIPT="$receipt" \
+    VIBECRAFTED_TERMINAL_ENTRY=1 python3 - <<'PY'
+import os
+import subprocess
+import sys
+
+argv_file = os.environ["VC_TERMINAL_ARGV_FILE"]
+receipt = os.environ["VC_TERMINAL_RECEIPT"]
+with open(argv_file, "rb") as fh:
+    raw = fh.read()
+argv = [part.decode("utf-8", "surrogateescape") for part in raw.split(b"\0")[:-1]]
+
+# Baked in as a literal (not re-read from disk): the writer must not depend
+# on argv_file surviving the bounded admission window that follows.
+writer_src = (
+    "import subprocess\n"
+    "argv = " + repr(argv) + "\n"
+    "try:\n"
+    "    rc = subprocess.call(argv)\n"
+    "except OSError:\n"
+    "    rc = 127\n"
+    "try:\n"
+    "    with open(" + repr(receipt) + ", 'w') as fh:\n"
+    "        fh.write(str(rc))\n"
+    "except OSError:\n"
+    "    pass\n"
+)
+
+subprocess.Popen(
+    [sys.executable, "-c", writer_src],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    start_new_session=True,
+    close_fds=True,
+)
+PY
 
   # `status` itself is a zsh readonly special parameter (an alias for `$?`):
   # `local status=""` errors "read-only variable: status" under zsh (function
