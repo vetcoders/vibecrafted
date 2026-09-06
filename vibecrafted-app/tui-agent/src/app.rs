@@ -585,13 +585,6 @@ impl App {
         self.memory = memory::load_continuity(&project);
     }
 
-    pub fn open_aicx_wizard(&mut self) {
-        let project = memory::default_project(&self.config.launch_root);
-        if let Err(error) = memory::launch_wizard(&project) {
-            self.show_error("aicx wizard failed", vec![error.to_string()]);
-        }
-    }
-
     pub fn refresh_mission_control(&mut self) {
         self.mission_control = MissionControlState::build_with_intents(
             &self.state,

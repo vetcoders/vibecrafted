@@ -28,7 +28,7 @@ use ratatui::backend::CrosstermBackend;
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::mpsc::{self, Sender};
@@ -742,15 +742,26 @@ fn switch_to_selected_observe_session(app: &mut App) -> anyhow::Result<()> {
 }
 
 fn launch_aicx_wizard(app: &mut App) -> anyhow::Result<()> {
-    disable_raw_mode().ok();
-    let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
-    let result = crate::memory::launch_wizard(&app.memory.project);
-    enable_raw_mode().ok();
-    let _ = execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture);
+    let mut stdout = io::stdout();
+    let leave = (|| -> anyhow::Result<()> {
+        disable_raw_mode().context("failed to disable raw mode before aicx wizard")?;
+        execute!(stdout, DisableMouseCapture, LeaveAlternateScreen)
+            .context("failed to leave alternate screen before aicx wizard")?;
+        stdout.flush().ok();
+        Ok(())
+    })();
+    let result = match leave {
+        Ok(()) => crate::memory::launch_wizard(&app.memory.project, &app.config.launch_root),
+        Err(error) => Err(error),
+    };
+    let restore_raw = enable_raw_mode();
+    let restore_screen = execute!(stdout, EnterAlternateScreen, EnableMouseCapture);
     match result {
         Ok(()) => app.append_status("returned from aicx wizard"),
         Err(error) => app.show_error("aicx wizard failed", vec![error.to_string()]),
     }
+    restore_raw.context("failed to restore raw mode after aicx wizard")?;
+    restore_screen.context("failed to restore alternate screen after aicx wizard")?;
     Ok(())
 }
 
