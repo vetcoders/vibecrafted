@@ -835,18 +835,20 @@ vc-start() {
     _vetcoders_vc_passthrough start --help
     return $?
   fi
-  # Product lifecycle: pin config, project Super/scripts, poke CP eye.
-  if declare -F _vetcoders_product_entry_prepare >/dev/null 2>&1; then
-    _vetcoders_product_entry_prepare
+  # Required lifecycle helpers belong to the admitted facade.
+  if ! declare -F _vetcoders_product_entry_prepare >/dev/null 2>&1; then
+    printf 'vc-start: required product preparation helper missing\n' >&2
+    return 1
   fi
+  _vetcoders_product_entry_prepare || return $?
   # Tests/doctor: print env effects without attach (no TUI, no session create).
   if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" == "1" ]]; then
-    if declare -F _vetcoders_product_entry_probe_print >/dev/null 2>&1; then
-      _vetcoders_product_entry_probe_print
-    else
-      printf 'VC_FRAME_CONFIG_DIR=%s\n' "${VC_FRAME_CONFIG_DIR:-}"
+    if ! declare -F _vetcoders_product_entry_probe_print >/dev/null 2>&1; then
+      printf 'vc-start: required product probe helper missing\n' >&2
+      return 1
     fi
-    return 0
+    _vetcoders_product_entry_probe_print
+    return $?
   fi
   if [[ "${1:-}" == "resume" ]]; then
     shift || true

@@ -36,11 +36,20 @@ _vetcoders_frontier_root() {
   return 1
 }
 
-# Resolve each frontier asset independently so repo-owned prompt/history presets
-# can coexist with an external session companion repo.
+# Optional prompt/history presets retain their independent frontier resolution.
+# Frame assets all come from the selected product view (or explicit source entry).
 _vetcoders_frontier_file() {
   local relative_path="$1"
   local candidate
+  case "$relative_path" in
+    vc-frame/*)
+      candidate="$(_vetcoders_vc_frame_config_dir)" || return 1
+      candidate="$candidate/${relative_path#vc-frame/}"
+      [[ -f "$candidate" ]] || return 1
+      printf '%s\n' "$candidate"
+      return 0
+      ;;
+  esac
   while IFS= read -r candidate; do
     if [[ -f "$candidate/$relative_path" ]]; then
       printf '%s/%s\n' "$candidate" "$relative_path"
@@ -76,24 +85,22 @@ _vetcoders_frontier_source_root() {
 }
 
 _vetcoders_vc_frame_config_dir() {
-  local vc_frame_config
-  vc_frame_config="$(_vetcoders_frontier_file "vc-frame/config.kdl" 2>/dev/null || true)"
-  [[ -n "$vc_frame_config" ]] || return 1
-  dirname "$vc_frame_config"
+  local owner_root
+  if _vetcoders_vc_frame_developer_mode; then
+    owner_root="$(_vetcoders_vc_frame_owner_root)" || return 1
+    printf '%s/vibecrafted-core/vibecrafted_core/config/vc-frame\n' "$owner_root"
+  else
+    printf '%s/.config/vibecrafted/vc-frame\n' "$HOME"
+  fi
 }
 
 _vetcoders_pin_vc_frame_config_dir() {
   local config_dir
-  config_dir="$(_vetcoders_vc_frame_config_dir 2>/dev/null || true)"
-  [[ -n "$config_dir" ]] || return 0
-  # Self-heal: keep an already-exported VC_FRAME_CONFIG_DIR only if it actually
-  # resolves to a config.kdl. A stale value — e.g. a removed zellij-named sidecar
-  # left by an earlier rebrand — is re-pointed at the resolved vc-frame dir, so
-  # the frame loads the real config instead of falling back to a Ctrl-q=Quit default.
-  if [[ -n "${VC_FRAME_CONFIG_DIR:-}" && -f "${VC_FRAME_CONFIG_DIR%/}/config.kdl" ]]; then
-    return 0
-  fi
+  config_dir="$(_vetcoders_vc_frame_config_dir)" || return 1
+  # Pin even when absent: startup validates it, never searches or repairs it.
+  unset ZELLIJ_CONFIG_DIR ZELLIJ_CONFIG_FILE
   export VC_FRAME_CONFIG_DIR="$config_dir"
+  export VC_FRAME_CONFIG_FILE="$config_dir/config.kdl"
 }
 
 _vetcoders_load_frontier_sidecars() {
@@ -102,7 +109,7 @@ _vetcoders_load_frontier_sidecars() {
   starship_config="$(_vetcoders_frontier_file "starship.toml" 2>/dev/null || true)"
   atuin_config="$(_vetcoders_frontier_file "atuin/config.toml" 2>/dev/null || true)"
 
-  # Frontier tools (starship, atuin, vc-frame) are suggested for the runtime,
+  # Frontier tools (starship, atuin) are suggested for the runtime,
   # not required. Never override a user's existing config — only set env vars
   # when the user has no config of their own. Users opt in explicitly.
   if command -v starship >/dev/null 2>&1 \
