@@ -36,7 +36,7 @@ caller owns it, named it, or it belongs to this project.
 Explicitly **not** targets (removed 2026-09-06):
 
 - a session vc-frame lists as `(attached)` / `(current)` — that marker means
-  *some* client is attached, routinely another operator window on another
+  _some_ client is attached, routinely another operator window on another
   repository; it is not proof that this caller owns it;
 - "exactly one live session" — a global count is not ownership.
 
@@ -48,7 +48,7 @@ dispatch its provider tab there (P0, Founder 2026-09-06: a resume launched in
 ### Project identity (one owner)
 
 `_vetcoders_effective_project_root` resolves the project **once**, at the public
-entry: explicit `--root` (normalized to an absolute physical path *before* any
+entry: explicit `--root` (normalized to an absolute physical path _before_ any
 cwd change) → ambient project root → the caller's repository. Terminal cwd,
 workspace/session naming, AICX and provider cwd all read that one value.
 
