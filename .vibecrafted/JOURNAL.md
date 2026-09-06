@@ -95,3 +95,10 @@ to, co od wpisu 07:05 zmieniło się na GitHubie, i zostawić Founderowi jeden g
   nazywają `fde0fbe3`). Portable CI dla fea43671 i ecf95053 w toku od 07:27.
 - Hook `commit-msg` odrzuca typ `merge(...)` i wymaga trailerów `session_id`/`time`/`runtime`;
   merge commit poszedł jako `chore(install)`.
+
+
+## 2026-09-06 — Stage 1 terminal-entry integration
+
+Agent-Operator admitted the reviewed Fleet Worktree chain through `7dc7b2d5ca1fba5540ed1469ae25dd16f50ea486` with exact merge `dd8350bf0ac611324bc1a04c629b958857b5a445` (first parent `de2d1bbc2601334a815ec3554df6a2496d5a4011`). Public non-TTY start/resume now uses the canonical terminal host and explicit project root; native detached Frame creation precedes one provider launch and foreground attach. R4 closes Bash/Zsh root-argv and reserved-status differences. Independent review and recorded 40 passing affected tests are in `~/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0906/reports/S1-start-resume-R4-admission.md`. Installed-runtime acceptance remains pending.
+
+Earlier operator continuity was appended to ignored `.vibecrafted/THE_JOURNAL.md`; current tracked charter specifies this `JOURNAL.md`. Preserve that historical file as evidence and continue material decisions here; do not erase or promote its claims without current verification. Stage 2 remains held until final build, signed installation, config preservation and live-owner/launch proof. Remote was independently verified at `de2d1bbc2601334a815ec3554df6a2496d5a4011` after all normal pre-push gates.
