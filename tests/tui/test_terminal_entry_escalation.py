@@ -36,6 +36,7 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -1380,3 +1381,100 @@ def test_bare_resume_without_tty_opens_terminal_under_zsh(tmp_path: Path) -> Non
 
     # Nothing may be launched twice: no AICX pack in the escalating parent.
     assert not (tmp_path / "aicx-called.txt").exists()
+
+
+# --------------------------------------------------------------------------
+# Truthful admission: the foreground spawner's OWN failures, not the host's
+# --------------------------------------------------------------------------
+#
+# S1 R5b (independent review of R5): the receipt-polling loop only ever saw
+# the ABSENCE of a receipt file and reported that as "accepted... starting",
+# whether that absence came from a host still opening (correct) or from the
+# foreground python3 driver never having run at all (wrong). Both cases below
+# reproduce a driver that never gets as far as spawning the detached writer,
+# so no receipt can ever appear -- proven on both shells, matching how the
+# original evidence (reports/S1-terminal-lifetime-R5-spawner-failure.json,
+# reports/S1-terminal-lifetime-R5-popen-failure.json) was reproduced.
+
+
+def _write_fake_python3(bin_dir: Path, body: str) -> Path:
+    """A `python3` shim placed ahead of the real interpreter on PATH, used to
+    force the foreground driver itself to fail before it ever spawns the
+    detached writer. Its shebang points at THIS interpreter's real absolute
+    path, never back through PATH, so it cannot recursively invoke itself.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    return _write(bin_dir / "python3", body)
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_interpreter_start_failure_is_not_reported_as_accepted(
+    tmp_path: Path, shell: str
+) -> None:
+    """reports/S1-terminal-lifetime-R5-spawner-failure.json: a python3 that
+    fails to even start the driver (here, SPAWNER_EXIT_42 -- it exits before
+    reading its heredoc'd stdin at all) must never be reported as "accepted"
+    or "starting". No writer was ever spawned, so the real terminal host
+    (`vc-terminal`) must never be invoked either.
+    """
+    fake_bin = tmp_path / "fakebin"
+    _write_fake_python3(fake_bin, f"#!{sys.executable}\nimport sys\nsys.exit(42)\n")
+
+    result, launch = _run_entry(
+        tmp_path,
+        "vc-resume codex",
+        extra_env={"PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"},
+        expect_launch=False,
+        shell=shell,
+    )
+
+    assert launch is None, "the host was invoked despite the driver never running"
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "failed to start an independent terminal session" in result.stderr
+    assert "accepted this launch" not in result.stderr
+    assert "opened the Vibecrafted terminal" not in result.stderr
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_driver_popen_failure_is_not_reported_as_accepted(
+    tmp_path: Path, shell: str
+) -> None:
+    """reports/S1-terminal-lifetime-R5-popen-failure.json: the REAL driver
+    runs, but its own `subprocess.Popen` call -- the one spawning the
+    detached writer, not the writer's later exec of the host -- raises
+    OSError (e.g. a fork/resource limit). That must be caught and reported
+    as a clean, single diagnostic: never an uncaught traceback, and never
+    silently folded into "accepted... starting".
+    """
+    fake_bin = tmp_path / "fakebin"
+    _write_fake_python3(
+        fake_bin,
+        f"#!{sys.executable}\n"
+        "import sys, subprocess\n"
+        "class _FailingPopen:\n"
+        "    def __init__(self, *a, **kw):\n"
+        "        raise OSError(11, 'R5B_REVIEW_SPAWN_REFUSED')\n"
+        "subprocess.Popen = _FailingPopen\n"
+        "exec(sys.stdin.read())\n",
+    )
+
+    result, launch = _run_entry(
+        tmp_path,
+        "vc-resume codex",
+        extra_env={"PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"},
+        expect_launch=False,
+        shell=shell,
+    )
+
+    assert launch is None, "the host was invoked despite the writer never spawning"
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "failed to start an independent terminal session" in result.stderr
+    assert "R5B_REVIEW_SPAWN_REFUSED" in result.stderr, (
+        "the underlying Popen failure was swallowed instead of surfaced: "
+        + result.stderr
+    )
+    assert "Traceback" not in result.stderr, (
+        "an uncaught exception leaked instead of a clean diagnostic: " + result.stderr
+    )
+    assert "accepted this launch" not in result.stderr
+    assert "opened the Vibecrafted terminal" not in result.stderr

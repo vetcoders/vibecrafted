@@ -231,6 +231,17 @@ _vetcoders_open_entry_in_vc_terminal() {
   # The writer's own stdio is fully closed off the caller's (possibly
   # pipe-backed) fds before it ever execs the host, so a closed pipe on the
   # caller's side can never reach into a still-running terminal.
+  #
+  # This FOREGROUND driver's own exit status is load-bearing: an interpreter
+  # that fails to start at all (a broken/shimmed python3), or whose own
+  # subprocess.Popen call below (the one spawning the detached writer -- NOT
+  # the writer's own later exec of the host, already handled by the receipt)
+  # raises, must never fall through to the receipt-polling loop and be
+  # reported as "accepted". No writer ever ran in that case, so no receipt
+  # will ever appear -- and that ABSENCE is indistinguishable from a real
+  # host still opening unless this driver's own exit status is checked
+  # first, before the poll below ever starts.
+  local driver_rc=0
   VC_TERMINAL_ARGV_FILE="$argv_file" VC_TERMINAL_RECEIPT="$receipt" \
     VIBECRAFTED_TERMINAL_ENTRY=1 python3 - <<'PY'
 import os
@@ -259,15 +270,36 @@ writer_src = (
     "    pass\n"
 )
 
-subprocess.Popen(
-    [sys.executable, "-c", writer_src],
-    stdin=subprocess.DEVNULL,
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL,
-    start_new_session=True,
-    close_fds=True,
-)
+try:
+    subprocess.Popen(
+        [sys.executable, "-c", writer_src],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+except OSError as exc:
+    # A real failure to fork/exec the detached writer -- e.g. a resource
+    # limit -- not a rejection from the terminal host (no writer exists yet
+    # to reject anything). Report it plainly and exit non-zero so the shell
+    # side never mistakes this for "starting".
+    print(
+        f"vc-terminal: could not start the detached terminal writer: {exc}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 PY
+  driver_rc=$?
+
+  if ((driver_rc != 0)); then
+    rm -rf "$receipt_dir"
+    printf 'vc-terminal: failed to start an independent terminal session (spawner exited %s); no window was opened.\n' \
+      "$driver_rc" >&2
+    printf '  host:    %s\n' "$terminal_bin" >&2
+    printf '  project: %s\n' "$project_root" >&2
+    return 1
+  fi
 
   # `status` itself is a zsh readonly special parameter (an alias for `$?`):
   # `local status=""` errors "read-only variable: status" under zsh (function
