@@ -544,8 +544,15 @@ _vetcoders_resume_agent() {
       return 1
     fi
     _resume_project_root="$(_vetcoders_effective_project_root)"
+    # The child re-parses this very vector, but from the terminal's working
+    # directory — which IS the normalized root. Forwarding the raw token would
+    # resolve a relative `--root` a second time, one level deeper. Hand over
+    # the absolute value this function already settled on, so the child, the
+    # session name, AICX and the provider all read the same project.
+    _vetcoders_rewrite_contract_root_argv "${_vetcoders_contract_root:-}" "$@"
     _vetcoders_open_entry_in_vc_terminal \
-      "$_resume_front_door" "$_resume_project_root" resume "$tool" "$@" || return 1
+      "$_resume_front_door" "$_resume_project_root" resume "$tool" \
+      "${_vetcoders_contract_argv[@]}" || return 1
     return 0
   fi
 

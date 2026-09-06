@@ -53,8 +53,14 @@ SHELL_SH = (
 PRIMARY_SHELL = REPO_ROOT / "config" / "alacritty" / "launch-primary-shell.zsh"
 
 # A stand-in for the vc-frame engine. It records every invocation, keeps a live
-# session list on disk, and -- crucially -- BLOCKS on the two calls that block
-# for real: the new-session client and the foreground attach.
+# session list on disk, BLOCKS on the two calls that block for real (the
+# interactive new-session client and the foreground attach), and -- crucially
+# -- refuses the same things the real engine refuses.
+#
+# The refusals are the point. A fixture more permissive than Frame turns a
+# broken create into a green test: the previous stub accepted an interactive
+# `--new-session-with-layout` client with no TTY, which the real engine rejects
+# at zellij-client/src/lib.rs:792 before the session is ever created.
 VC_FRAME_STUB = """#!/usr/bin/env python3
 import json, os, sys, time
 
@@ -82,26 +88,67 @@ if argv[:1] in (["ls"], ["list-sessions"]):
         print("%s [Created 1s ago]" % name)
     sys.exit(0)
 
+def remember(name):
+    if live_file and name:
+        with open(live_file, "a") as handle:
+            handle.write("%s\\n" % name)
+
+
+def refuse_without_tty():
+    if sys.stdin.isatty():
+        return
+    # zellij-client/src/lib.rs:792, reached only by an INTERACTIVE client.
+    sys.stderr.write(
+        "vc-frame: stdin is not a terminal (TTY); cannot start an "
+        "interactive session. Run vc-frame from a real terminal.\\n"
+    )
+    sys.exit(1)
+
+
 session = None
 rest = argv
 if rest[:1] == ["--session"]:
     session = rest[1]
     rest = rest[2:]
 
+layout = None
 if rest[:1] == ["--new-session-with-layout"]:
-    with open(live_file, "a") as handle:
-        handle.write("%s\\n" % session)
-    # A real client owns the terminal until the operator detaches. The launcher
-    # is expected to reap us once the server socket is live.
-    time.sleep(30)
+    layout = rest[1]
+    rest = rest[2:]
+
+if rest[:1] == ["action"]:
     sys.exit(0)
 
-if rest[:2] == ["action", "new-tab"]:
+# The native detached create: `[-n LAYOUT] attach --create-background NAME`.
+# src/commands.rs:792 turns --create-background into should_create_detached and
+# zellij-client/src/lib.rs:783 returns from start_server_detached BEFORE the
+# TTY guard -- so this form, and only this form, works without a terminal. An
+# existing session is REPORTED, never silently accepted (the ClientInfo::Attach
+# arm of start_server_detached).
+if rest[:2] == ["attach", "--create-background"]:
+    name = rest[2] if len(rest) > 2 else session
+    forced = os.environ.get("VC_FRAME_CREATE_ERROR", "")
+    if forced:
+        sys.stderr.write(forced + "\\n")
+        sys.exit(1)
+    if name in live_sessions():
+        sys.stderr.write("Session already exists\\n")
+        sys.exit(1)
+    remember(name)
     sys.exit(0)
 
 if rest[:1] == ["attach"]:
+    refuse_without_tty()
     # The foreground handover blocks; keep it short so the test can finish.
     time.sleep(0.3)
+    sys.exit(0)
+
+if layout is not None:
+    # Interactive new-session client: owns the terminal until the operator
+    # detaches, and cannot start at all without one.
+    refuse_without_tty()
+    remember(session)
+    time.sleep(30)
     sys.exit(0)
 
 sys.exit(0)
@@ -213,7 +260,7 @@ def _run_entry(
         # duplicate launch waiting to happen.
         (
             "_vetcoders_aicx_resume_fallback() { printf 'called\\n' "
-            '>> "$TEST_AICX_CAPTURE"; printf \'MODE=new_session\\n\'; }'
+            ">> \"$TEST_AICX_CAPTURE\"; printf 'MODE=new_session\\n'; }"
         ),
         invocation,
     ]
@@ -247,6 +294,42 @@ def _hosted_argv(launch: dict) -> list[str]:
 def _working_directory(launch: dict) -> Path:
     argv = launch["argv"]
     return Path(argv[argv.index("--working-directory") + 1]).resolve()
+
+
+def _child_effective_root(tmp_path: Path, launch: dict) -> Path:
+    """The project the CHILD lands on, resolved from the argv it was handed.
+
+    The child re-parses the forwarded vector from the terminal's working
+    directory. That SECOND parse is where a raw relative --root resolves one
+    level too deep, so asserting on the parent's cwd alone cannot see it.
+    """
+    hosted = _hosted_argv(launch)
+    assert hosted[2] == "resume", hosted
+    contract_args = hosted[4:]
+    script = "\n".join(
+        [
+            f'source "{SHELL_SH}"',
+            "_vetcoders_parse_contract "
+            + " ".join(shlex.quote(arg) for arg in contract_args),
+            'printf "CHILD_ROOT=[%s]\\n" "$(_vetcoders_effective_project_root)"',
+        ]
+    )
+    env = os.environ.copy()
+    for key in ("VIBECRAFTED_ROOT", "VIBECRAFTED_RUNTIME_ROOT", "SPAWN_ROOT"):
+        env.pop(key, None)
+    env["HOME"] = str(tmp_path / "home")
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-c", script],
+        check=False,
+        cwd=_working_directory(launch),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    marker = "CHILD_ROOT=["
+    assert marker in result.stdout, result.stdout + result.stderr
+    return Path(result.stdout.split(marker, 1)[1].split("]", 1)[0]).resolve()
 
 
 # --------------------------------------------------------------------------
@@ -335,6 +418,57 @@ def test_relative_explicit_root_is_resolved_against_the_caller(
     assert result.returncode == 0, result.stderr
     assert launch is not None, result.stderr
     assert _working_directory(launch) == other.resolve()
+    # A sibling token resolves back onto itself from the new cwd, so this case
+    # is forgiving by accident. Check the child too, or it proves nothing.
+    assert _child_effective_root(tmp_path, launch) == other.resolve()
+
+
+def test_nested_relative_root_survives_the_child_reparse(tmp_path: Path) -> None:
+    """`--root child` from /project must not become /project/child/child.
+
+    The parent chdirs the terminal INTO the normalized root, so the child reads
+    the same token from one level deeper. Forwarding it raw makes the child
+    resolve a directory that usually does not exist -- and, when it happens to
+    exist, silently binds continuity and the provider to the wrong repository.
+    """
+    project = tmp_path / "mlx-batch-runner"
+    project.mkdir(parents=True, exist_ok=True)
+    nested = project / "child"
+    nested.mkdir()
+
+    result, launch = _run_entry(tmp_path, "vc-resume codex --root child")
+
+    assert result.returncode == 0, result.stderr
+    assert launch is not None, result.stderr
+    assert _working_directory(launch) == nested.resolve()
+
+    hosted = _hosted_argv(launch)
+    assert hosted[4] == "--root", hosted
+    assert Path(hosted[5]).is_absolute(), f"a relative root crossed the cwd: {hosted}"
+    assert Path(hosted[5]).resolve() == nested.resolve()
+    assert _child_effective_root(tmp_path, launch) == nested.resolve()
+
+
+def test_root_rewrite_preserves_every_other_argument(tmp_path: Path) -> None:
+    """Only the root VALUE is rewritten; flags, order and provider args stay."""
+    project = tmp_path / "mlx-batch-runner"
+    project.mkdir(parents=True, exist_ok=True)
+    nested = project / "child"
+    nested.mkdir()
+
+    result, launch = _run_entry(
+        tmp_path,
+        "vc-resume claude --fork-session --root child --runtime terminal",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert launch is not None, result.stderr
+
+    hosted = _hosted_argv(launch)[2:]
+    assert hosted[:3] == ["resume", "claude", "--fork-session"], hosted
+    assert hosted[3] == "--root", hosted
+    assert Path(hosted[4]).resolve() == nested.resolve()
+    assert hosted[5:] == ["--runtime", "terminal"], hosted
 
 
 def test_explicit_root_that_does_not_exist_is_refused(tmp_path: Path) -> None:
@@ -438,9 +572,7 @@ def test_many_unrelated_live_sessions_do_not_capture_the_project(
     tmp_path: Path,
 ) -> None:
     """The exact P0 listing: none of these belong to mlx-batch-runner."""
-    result = _resolve_target(
-        tmp_path, ["Live runs", "Needs attention", "host-a"]
-    )
+    result = _resolve_target(tmp_path, ["Live runs", "Needs attention", "host-a"])
     assert "TARGET=[]" in result.stdout, result.stdout + result.stderr
     assert "unrelated live vc-frame session" in result.stderr
 
@@ -458,17 +590,13 @@ def test_project_bound_live_session_is_reused(tmp_path: Path) -> None:
     result = _resolve_target(
         tmp_path, ["Live runs", "mlx-batch-runner", "host-a"]
     )
-    assert "TARGET=[mlx-batch-runner]" in result.stdout, (
-        result.stdout + result.stderr
-    )
+    assert "TARGET=[mlx-batch-runner]" in result.stdout, result.stdout + result.stderr
 
 
 def test_unrelated_live_sessions_do_not_block_the_project(tmp_path: Path) -> None:
     """End to end: global sessions elsewhere never refuse the escalation."""
     live_file = tmp_path / "live-sessions.txt"
-    live_file.write_text(
-        "Live runs\nNeeds attention\nhost-a\n", encoding="utf-8"
-    )
+    live_file.write_text("Live runs\nNeeds attention\nhost-a\n", encoding="utf-8")
     result, launch = _run_entry(
         tmp_path,
         "vc-resume codex",
@@ -738,7 +866,7 @@ def _run_child_resume(
             f'_vetcoders_vc_frame_loaded_root="{generation}"',
             (
                 "_vetcoders_aicx_resume_fallback() { printf 'called\\n' "
-                '>> "$TEST_AICX_CAPTURE"; printf \'MODE=new_session\\n\'; }'
+                ">> \"$TEST_AICX_CAPTURE\"; printf 'MODE=new_session\\n'; }"
             ),
             "vc-resume codex",
         ]
@@ -775,6 +903,19 @@ def _first_index(calls: list[list[str]], needle: str) -> int:
     return -1
 
 
+def _foreground_attach_index(calls: list[list[str]]) -> int:
+    """Index of the blocking handover, which is `attach <session>` and nothing else.
+
+    Substring matching cannot be used for this: the detached CREATE is
+    `-n LAYOUT attach --create-background NAME`, so the token `attach` legally
+    appears in the call that must come FIRST.
+    """
+    for index, argv in enumerate(calls):
+        if argv[:1] == ["attach"]:
+            return index
+    return -1
+
+
 def test_provider_tab_is_created_before_the_foreground_attach(
     tmp_path: Path,
 ) -> None:
@@ -788,7 +929,7 @@ def test_provider_tab_is_created_before_the_foreground_attach(
 
     created = _first_index(calls, "--new-session-with-layout")
     new_tab = _first_index(calls, "new-tab")
-    attach = _first_index(calls, "attach")
+    attach = _foreground_attach_index(calls)
 
     assert created >= 0, f"the project session was never created: {calls}"
     assert new_tab >= 0, f"no provider tab was created: {calls}\n{result.stdout}"
@@ -797,6 +938,137 @@ def test_provider_tab_is_created_before_the_foreground_attach(
         "wrong order -- the foreground attach must be the LAST act: "
         f"created={created} new_tab={new_tab} attach={attach} calls={calls}"
     )
+
+
+def test_session_creation_uses_the_native_detached_form(tmp_path: Path) -> None:
+    """Preparation must use the create Frame supports without a terminal.
+
+    A backgrounded interactive client is handed /dev/null on stdin by any
+    non-interactive shell -- proven independently of this test -- so the real
+    engine refuses it at its TTY guard and the session never appears. Only
+    `[-n LAYOUT] attach --create-background NAME` reaches start_server_detached,
+    which returns BEFORE that guard.
+    """
+    _result, calls = _run_child_resume(tmp_path)
+
+    creates = [argv for argv in calls if "--new-session-with-layout" in argv]
+    assert creates, f"the project session was never created: {calls}"
+    assert len(creates) == 1, f"the session was created more than once: {creates}"
+
+    argv = creates[0]
+    assert "attach" in argv and "--create-background" in argv, (
+        "preparation used the interactive client form, which Frame refuses "
+        f"without a TTY: {argv}"
+    )
+    # The layout is a top-level option and must precede the subcommand:
+    # src/main.rs:359 moves it into the layout field while KEEPING Attach.
+    assert argv.index("--new-session-with-layout") < argv.index("attach"), argv
+    created_name = argv[argv.index("--create-background") + 1]
+    assert created_name and not created_name.startswith("-"), argv
+
+    # The terminal is handed to the session that was actually prepared.
+    attaches = [a for a in calls if a[:1] == ["attach"]]
+    assert attaches, f"the terminal was never handed over: {calls}"
+    assert attaches[-1][1:2] == [created_name], (attaches, created_name)
+
+
+def _detached_create(
+    tmp_path: Path,
+    session_name: str,
+    *,
+    live: list[str] | None = None,
+    create_error: str = "",
+) -> subprocess.CompletedProcess[str]:
+    """Call the preparation helper directly, with nothing else in the way."""
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    layout = _write(
+        home / ".config" / "vibecrafted" / "vc-frame" / "layouts" / "operator.kdl",
+        "layout {\n}\n",
+    )
+    generation = _fake_generation(tmp_path, tmp_path / "unused.json")
+    live_file = tmp_path / "live-sessions.txt"
+    live_file.write_text(
+        "".join(f"{name}\n" for name in (live or [])), encoding="utf-8"
+    )
+
+    env = os.environ.copy()
+    for key in (
+        "VC_FRAME",
+        "VC_FRAME_PANE_ID",
+        "VC_FRAME_SESSION_NAME",
+        "ZELLIJ",
+        "ZELLIJ_PANE_ID",
+        "ZELLIJ_SESSION_NAME",
+    ):
+        env.pop(key, None)
+    env["HOME"] = str(home)
+    env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
+    env["XDG_CONFIG_HOME"] = str(home / ".config")
+    env["VC_FRAME_LIVE"] = str(live_file)
+    env["VC_FRAME_LOG"] = str(tmp_path / "frame.log")
+    if create_error:
+        env["VC_FRAME_CREATE_ERROR"] = create_error
+
+    script = "\n".join(
+        [
+            f'source "{SHELL_SH}"',
+            f'_vetcoders_vc_frame_loaded_root="{generation}"',
+            (
+                "if _vetcoders_create_vc_frame_session_detached "
+                f'"{generation}/bin/vc-frame" {shlex.quote(session_name)} '
+                f'"{layout}"; then echo PREPARED; else echo REFUSED; fi'
+            ),
+        ]
+    )
+    return subprocess.run(
+        ["bash", "--noprofile", "--norc", "-c", script],
+        check=False,
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def test_detached_create_reconciles_a_session_that_already_exists(
+    tmp_path: Path,
+) -> None:
+    """A lost race is exit 1 + "Session already exists", not an idempotent 0.
+
+    Frame refuses the detached create outright when the name is taken. That is
+    still a usable outcome -- the session the caller wanted is up -- but only
+    readiness may say so, never the exit status.
+    """
+    result = _detached_create(tmp_path, "already-there", live=["already-there"])
+
+    assert "PREPARED" in result.stdout, result.stdout + result.stderr
+    assert "refused to create" not in result.stderr
+
+
+def test_detached_create_refuses_instead_of_waiting_out_a_real_error(
+    tmp_path: Path,
+) -> None:
+    """Any other non-zero exit is a refusal and must stop the launch at once.
+
+    Waiting the full readiness budget out on an error that already told us the
+    session will never appear is how a dead launch gets reported as a slow one.
+    """
+    started = time.monotonic()
+    result = _detached_create(
+        tmp_path,
+        "never-comes-up",
+        create_error="vc-frame: could not read the layout file",
+    )
+    elapsed = time.monotonic() - started
+
+    assert "REFUSED" in result.stdout, result.stdout + result.stderr
+    assert "refused to create the session never-comes-up" in result.stderr
+    assert "could not read the layout file" in result.stderr, (
+        "the engine's own reason was swallowed: " + result.stderr
+    )
+    assert elapsed < 8, f"a hard refusal was waited out for {elapsed:.1f}s"
 
 
 def test_child_creates_exactly_one_tab_and_one_aicx_pack(tmp_path: Path) -> None:

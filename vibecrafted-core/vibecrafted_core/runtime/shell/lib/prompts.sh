@@ -49,6 +49,9 @@ _vetcoders_contract_reset() {
   _vetcoders_contract_fork_session=""
   _vetcoders_contract_last=""
   _vetcoders_contract_help=""
+  # Owned by _vetcoders_rewrite_contract_root_argv; reset here so a vector can
+  # never survive into the next parse.
+  _vetcoders_contract_argv=()
 }
 
 _vetcoders_append_tail() {
@@ -202,6 +205,63 @@ _vetcoders_parse_contract() {
   if [[ -z "$_vetcoders_contract_prompt" && -n "$_vetcoders_contract_tail" ]]; then
     _vetcoders_contract_prompt="$_vetcoders_contract_tail"
   fi
+}
+
+# Rewrite the accepted `--root` VALUE inside an argument vector to a path the
+# caller has ALREADY normalized, leaving every other byte — order, quoting, the
+# `--` payload, opaque provider arguments — exactly where it was. The result
+# lands in the global array _vetcoders_contract_argv.
+#
+# Why this exists (2026-09-06): a public entry that normalizes `--root` and
+# then forwards the RAW vector to a child running from the new working
+# directory makes the child resolve the same relative token a SECOND time,
+# against a different directory. `vc-resume codex --root child` from /project
+# opened /project/child and then told the child to resolve `child` again —
+# /project/child/child. The sibling form `../project-b` hid this, because from
+# the sibling it happens to resolve back onto itself.
+#
+# The scanner mirrors _vetcoders_parse_contract's own flag table on purpose and
+# lives directly beneath it: a value-taking flag missing from this list would
+# let a value that merely reads like `--root` (e.g. `--session --root`) shift
+# the rewrite onto the wrong argument. Keep the two lists in step.
+#
+# Only the LAST accepted occurrence is rewritten — that is the one the parser
+# keeps, so that is the one the child resolves.
+_vetcoders_rewrite_contract_root_argv() {
+  local normalized_root="$1"
+  shift
+  _vetcoders_contract_argv=("$@")
+  [[ -n "$normalized_root" ]] || return 0
+
+  local -i index=0 root_value_index=-1
+  while ((index < $#)); do
+    case "${_vetcoders_contract_argv[index]}" in
+      # --prompt is greedy and `--` opens the tail: past either of them nothing
+      # is a flag any more, so nothing there may be rewritten.
+      -p | --prompt | --)
+        break
+        ;;
+      --root)
+        ((index + 1 < $#)) || break
+        root_value_index=$((index + 1))
+        ((index += 2))
+        ;;
+      # Value-taking flags: step over the VALUE too, so a value that happens to
+      # spell a flag is never read as one.
+      -f | --file | --task | --session | --run-id | --count | --depth | \
+        --runtime | --model | --policy-runtime | --permissions | \
+        --token-budget | --operator | --continuity | --parent-session | \
+        --continuity-parent)
+        ((index += 2))
+        ;;
+      *)
+        ((index += 1))
+        ;;
+    esac
+  done
+
+  ((root_value_index >= 0)) || return 0
+  _vetcoders_contract_argv[root_value_index]="$normalized_root"
 }
 
 # Skill launchers own model selection. Keep the shared parser fail-closed for

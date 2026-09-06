@@ -186,13 +186,26 @@ _vetcoders_open_entry_in_vc_terminal() {
   # product config (exit 2) or an invalid native host (exit 127) dies at once;
   # reporting "opened" for that leaves the operator waiting for a window that
   # never appears. A host that really opened writes nothing in this window.
-  local receipt=""
-  receipt="$(mktemp "${TMPDIR:-/tmp}/vc-terminal-admit.XXXXXX")" || return 1
+  #
+  # The receipt lives in a private DIRECTORY, not a bare temp file, because the
+  # writer outlives this window by design: a host that really opened exits only
+  # when the operator closes the window, minutes from now. Unlinking a bare
+  # file would let that late write recreate it — a stale artifact left in
+  # TMPDIR, at a name any other process could have taken over in the meantime.
+  # Removing the directory makes the late write simply fail: a file cannot be
+  # created without its parent.
+  local receipt_dir="" receipt=""
+  receipt_dir="$(mktemp -d "${TMPDIR:-/tmp}/vc-terminal-admit.XXXXXX")" || return 1
+  receipt="$receipt_dir/status"
   {
     VIBECRAFTED_TERMINAL_ENTRY=1 \
       "$terminal_bin" --working-directory "$project_root" \
       -e "$primary_shell" "$front_door" "$@"
-    printf '%s' "$?" >"$receipt"
+    vc_terminal_admit_rc=$?
+    # Silenced as a group: once the directory is gone this redirect fails, and
+    # a shell error about it would surface in the operator's terminal long
+    # after the launch it refers to.
+    { printf '%s' "$vc_terminal_admit_rc" >"$receipt"; } 2>/dev/null
   } &
   disown 2>/dev/null || true
 
@@ -203,7 +216,7 @@ _vetcoders_open_entry_in_vc_terminal() {
     sleep 0.05
     ((waited += 1))
   done
-  rm -f "$receipt"
+  rm -rf "$receipt_dir"
   if [[ -n "$status" && "$status" != "0" ]]; then
     printf 'vc-terminal: the terminal host rejected this launch (exit %s); no window was opened.\n' \
       "$status" >&2
@@ -212,7 +225,15 @@ _vetcoders_open_entry_in_vc_terminal() {
     return 1
   fi
 
-  printf 'No TTY here — opened the Vibecrafted terminal for this project.\n' >&2
+  # Two different truths, said in two different sentences. An exit 0 inside the
+  # window is a host that spawned the window and returned. No exit at all is
+  # only the ABSENCE of a rejection — the shape a real window has, but not
+  # proof of one, and it must not be reported as if we had seen it open.
+  if [[ -n "$status" ]]; then
+    printf 'No TTY here — opened the Vibecrafted terminal for this project.\n' >&2
+  else
+    printf 'No TTY here — the Vibecrafted terminal host accepted this launch (starting; it had not exited after 1.5s).\n' >&2
+  fi
   printf '  project: %s\n' "$project_root" >&2
   printf '  entry:   %s' "${front_door##*/}" >&2
   if (($#)); then
@@ -665,9 +686,8 @@ _vetcoders_run_new_vc_frame_session() {
 }
 
 # Create the operator's session WITHOUT handing the caller's terminal to a
-# foreground client. Same background-client + readiness + reap sequence the
-# in-frame branch of _vetcoders_ensure_vc_frame_session already uses: the
-# client is only a midwife, the SERVER survives it.
+# foreground client, and without needing a terminal at all: Frame's own
+# detached-create is a finite call that starts the server and returns.
 #
 # Why this exists (2026-09-06): a foreground vc-frame client does not return
 # until the Founder detaches, so any work sequenced after preparation — the
@@ -686,20 +706,43 @@ _vetcoders_create_vc_frame_session_detached() {
 
   _vetcoders_record_vc_frame_attachment missing "$session_name" || return $?
 
-  env -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME \
+  # `attach --create-background` is the ONLY create that works without a
+  # terminal. Verified against Frame source 6ec4a6a5: src/main.rs:359 moves
+  # --new-session-with-layout into the layout field while KEEPING the Attach
+  # command, src/commands.rs:792 turns --create-background into
+  # should_create_detached, and zellij-client/src/lib.rs:783 runs
+  # start_server_detached — returning BEFORE the interactive TTY guard at :792.
+  # The ClientInfo::New branch spawns the server with that layout and returns
+  # on its own, so there is no client to reap here.
+  #
+  # Backgrounding an interactive client instead is what this replaces: a
+  # non-interactive shell hands an async command /dev/null on stdin, so Frame
+  # refuses at the TTY guard, the redirect swallows the message, and the
+  # readiness loop can only time out.
+  local create_output="" create_rc=0
+  create_output="$(env -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME \
     -u ZELLIJ -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME \
-    "$vc_frame_bin" --session "$session_name" \
-    --new-session-with-layout "$layout_file" >/dev/null 2>&1 &
-  local bg_pid=$!
+    "$vc_frame_bin" --new-session-with-layout "$layout_file" \
+    attach --create-background "$session_name" 2>&1)" || create_rc=$?
 
-  if ! _vetcoders_wait_for_vc_frame_session "$session_name" 40; then
-    kill "$bg_pid" 2>/dev/null || true
-    wait "$bg_pid" 2>/dev/null || true
-    printf 'vc-frame session did not come up: %s\n' "$session_name" >&2
+  # One recoverable outcome: another caller won the race and the exact session
+  # is already there. Frame reports that as exit 1 + "Session already exists"
+  # (zellij-client/src/lib.rs, ClientInfo::Attach arm of start_server_detached),
+  # never as an idempotent exit 0 — so the readiness probe below is what
+  # settles it. Anything else is a real refusal and must not be waited out.
+  if ((create_rc != 0)) &&
+    ! _vetcoders_vc_frame_stderr_is_session_already_exists "$create_output"; then
+    printf 'vc-frame refused to create the session %s (exit %s).\n' \
+      "$session_name" "$create_rc" >&2
+    [[ -z "$create_output" ]] || printf '%s\n' "$create_output" >&2
     return 1
   fi
-  kill "$bg_pid" 2>/dev/null || true
-  wait "$bg_pid" 2>/dev/null || true
+
+  if ! _vetcoders_wait_for_vc_frame_session "$session_name" 40; then
+    printf 'vc-frame session did not come up: %s\n' "$session_name" >&2
+    [[ -z "$create_output" ]] || printf '%s\n' "$create_output" >&2
+    return 1
+  fi
 
   _vetcoders_record_vc_frame_attachment live "$session_name" || return $?
   export VIBECRAFTED_PREPARED_VC_FRAME_SESSION="$session_name"
@@ -977,6 +1020,14 @@ _vetcoders_vc_frame_stderr_is_session_not_found() {
   [[ -n "$text" ]] || return 1
   printf '%s' "$text" | command grep -qiE \
     "Session ['\"][^'\"]+['\"] not found|There is no active session!"
+}
+
+# Detached create refused because the exact session is already up. Recoverable
+# by readiness reconciliation, unlike every other non-zero exit from that call.
+_vetcoders_vc_frame_stderr_is_session_already_exists() {
+  local text="${1:-}"
+  [[ -n "$text" ]] || return 1
+  printf '%s' "$text" | command grep -qiE "Session already exists"
 }
 
 _vetcoders_vc_frame_stderr_is_ambiguous_action_ack() {
