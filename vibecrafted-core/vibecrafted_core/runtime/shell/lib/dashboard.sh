@@ -114,6 +114,69 @@ _vetcoders_control_plane_eye_prepare() {
   return 0
 }
 
+# One read-only admission per preparation, never per frame action/status call.
+# The installer owns receipts, publication transactions and generation validation.
+# This consumer only decodes its envelope and rejects a changed selected owner.
+_vetcoders_product_runtime_admit() {
+  local owner_root="$1"
+  if [[ ! -f "$owner_root/scripts/vetcoders_install.py" || -L "$owner_root/scripts/vetcoders_install.py" ]]; then
+    printf 'vc-start: selected runtime resolver missing; explicit upgrade/repair required\n' >&2
+    return 2
+  fi
+  env -u PYTHONPATH -u PYTHONHOME PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 \
+    "$owner_root/bin/python3" -I -B - "$owner_root" <<'PY_RUNTIME_ADMIT'
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+owner = Path(sys.argv[1])
+# Installed generations live at <runtime-home>/releases/<generation>. The
+# invoked facade already selected this physical root; do not select via env.
+if owner.parent.name != "releases":
+    print("vc-start: selected shell is not an installed generation; use explicit checkout development mode or install", file=sys.stderr)
+    sys.exit(2)
+try:
+    result = subprocess.run(
+        [str(owner / "bin/python3"), "-B",
+         str(owner / "scripts/vetcoders_install.py"), "runtime-resolve",
+         "--runtime-home", str(owner.parent.parent), "--json"],
+        capture_output=True, timeout=30, check=False,
+    )
+    if len(result.stdout) > 1024 * 1024:
+        raise ValueError("oversized resolution envelope")
+    envelope = json.loads(result.stdout)
+    if not isinstance(envelope, dict) or envelope.get("schema") != "vibecrafted.runtime-resolution.v1":
+        raise ValueError("invalid resolution envelope")
+    state = envelope.get("status")
+    reason = envelope.get("reason")
+    if not isinstance(reason, str):
+        raise ValueError("invalid resolution reason")
+    if state in ("absent", "unusable"):
+        if result.returncode != (0 if state == "absent" else 2) or envelope.get("runtime") is not None:
+            raise ValueError("inconsistent resolution status")
+        # The owner contract supplies a human-readable, secret-free reason.
+        print(f"vc-start: installed runtime {state}: {reason[:2000]}; explicit install/repair required", file=sys.stderr)
+        sys.exit(2)
+    runtime = envelope.get("runtime")
+    if result.returncode != 0 or state != "ready" or not isinstance(runtime, dict):
+        raise ValueError("runtime resolution did not return ready")
+    if runtime.get("schema") != "vibecrafted.runtime-install-result.v1":
+        raise ValueError("invalid runtime result schema")
+    selected = runtime.get("root")
+    if not isinstance(selected, str) or not os.path.isabs(selected):
+        raise ValueError("invalid selected runtime root")
+    if os.path.realpath(selected) != str(owner):
+        raise ValueError("selected generation changed; reopen through the current product entry")
+except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+    # Do not replay raw subprocess stderr/JSON (CLI errors can include argv).
+    message = str(error) if isinstance(error, ValueError) and not isinstance(error, json.JSONDecodeError) else "resolver unavailable, timed out or returned invalid JSON"
+    print(f"vc-start: {message}; explicit upgrade/repair required", file=sys.stderr)
+    sys.exit(2)
+PY_RUNTIME_ADMIT
+}
+
 # Product lifecycle choke shared by shell `vc-start` and deck `cmd_start`.
 # Reads installed product config and scripts, then prepares workspace/control
 # state. Configuration publication belongs exclusively to explicit installation.
@@ -133,13 +196,18 @@ _vetcoders_product_entry_prepare() {
     export VIBECRAFTED_CORE_DIR="$owner_root/vibecrafted-core"
     export VIBECRAFTED_PYTHON="$owner_root/bin/python3"
     unset VIBECRAFTED_PREFER_REPO_VC_FRAME VIBECRAFTED_PREFER_REPO_SPAWN
-    unset VIBECRAFTED_PRODUCT_CORE_CLI PYTHONPATH
+    unset VIBECRAFTED_PRODUCT_CORE_CLI PYTHONPATH PYTHONHOME
     if [[ ! -x "$VIBECRAFTED_PYTHON" || ! -f "$VIBECRAFTED_CORE_DIR/vibecrafted_core/cli.py" ]]; then
       printf 'vc-start: selected runtime Python/core missing under: %s\n' "$owner_root" >&2
       printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
       VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS=1
       return 1
     fi
+    _vetcoders_product_runtime_admit "$owner_root" || {
+      entry_status=$?
+      VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS="$entry_status"
+      return "$entry_status"
+    }
   fi
   _vetcoders_pin_vc_frame_config_dir || {
     VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS=1
@@ -224,11 +292,15 @@ _vetcoders_product_entry_prepare() {
 _vetcoders_product_entry_probe_print() {
   [[ -z "${VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS:-}" ]] || return "$VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS"
   local layout=""
-  if declare -F _vetcoders_dashboard_layout_file >/dev/null 2>&1; then
-    layout="$(_vetcoders_dashboard_layout_file operator 2>/dev/null || true)"
+  if [[ "${VIBECRAFTED_PRODUCT_ENTRY:-0}" != "1" ]] \
+    || ! declare -F _vetcoders_dashboard_layout_file >/dev/null 2>&1; then
+    printf 'vc-start: product probe requires successful preparation and layout helper\n' >&2
+    return 1
   fi
-  if [[ -z "$layout" && -n "${VC_FRAME_CONFIG_DIR:-}" ]]; then
-    layout="${VC_FRAME_CONFIG_DIR%/}/layouts/operator.kdl"
+  layout="$(_vetcoders_dashboard_layout_file operator)" || return $?
+  if [[ ! -r "${VC_FRAME_CONFIG_DIR:-}/config.kdl" || -L "${VC_FRAME_CONFIG_DIR:-}/config.kdl" || ! -r "$layout" || -L "$layout" ]]; then
+    printf 'vc-start: product probe config/layout unavailable\n' >&2
+    return 1
   fi
   printf 'VIBECRAFTED_PRODUCT_ENTRY=%s\n' "${VIBECRAFTED_PRODUCT_ENTRY:-0}"
   printf 'VC_FRAME_CONFIG_DIR=%s\n' "${VC_FRAME_CONFIG_DIR:-}"

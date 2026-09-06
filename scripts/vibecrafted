@@ -4,25 +4,17 @@ set -euo pipefail
 readonly VIBECRAFTED_SERVICE_LIFECYCLE_LOCK_CONTRACT=1
 
 _vc_source_launcher_ulimits() {
-  local script_dir candidate
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  for candidate in \
-    "$script_dir/../runtime/scripts/lib/ulimits.sh" \
-    "$script_dir/../vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh" \
-    "${VIBECRAFTED_ROOT:-}/vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh" \
-    "${VIBECRAFTED_TOOLS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/tools}/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh" \
-    "${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/runtime/scripts/lib/ulimits.sh"; do
-    [[ -n "$candidate" && -r "$candidate" ]] || continue
-    # shellcheck disable=SC1090
-    source "$candidate"
-    vc_raise_launcher_limits
-    return 0
-  done
-  printf '[warn] launcher ulimit helper not found; continuing without rlimit raise\n' >&2
-  return 0
+  local owner_root candidate
+  owner_root="$(_script_owner_root)" || return $?
+  candidate="$owner_root/vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh"
+  if [[ ! -f "$candidate" || ! -r "$candidate" || -L "$candidate" ]]; then
+    printf 'vibecrafted: selected launcher limit helper missing: %s\n' "$candidate" >&2
+    return 1
+  fi
+  # shellcheck disable=SC1090
+  source "$candidate" || return $?
+  vc_raise_launcher_limits
 }
-_vc_source_launcher_ulimits
-unset -f _vc_source_launcher_ulimits
 
 _expand_home_path() {
   local raw="${1:-}"
@@ -101,17 +93,25 @@ _script_repo_root() {
 _script_owner_root() {
   local script_path="${BASH_SOURCE[0]}" script_dir link_target
   while [[ -L "$script_path" ]]; do
-    script_dir="$(cd -P "$(dirname "$script_path")" && pwd -P)"
-    link_target="$(readlink "$script_path")"
+    script_dir="$(cd -P "$(dirname "$script_path")" && pwd -P)" || return $?
+    link_target="$(readlink "$script_path")" || return $?
     if [[ "$link_target" == /* ]]; then
       script_path="$link_target"
     else
       script_path="$script_dir/$link_target"
     fi
   done
-  script_dir="$(cd -P "$(dirname "$script_path")" && pwd -P)"
-  cd -P "$script_dir/.." && pwd -P
+  script_dir="$(cd -P "$(dirname "$script_path")" && pwd -P)" || return $?
+  # The tracked package deck and published bin deck share this physical owner.
+  case "$script_dir" in
+    */vibecrafted-core/vibecrafted_core/deck)
+      cd -P "$script_dir/../../.." && pwd -P ;;
+    *) cd -P "$script_dir/.." && pwd -P ;;
+  esac
 }
+
+_vc_source_launcher_ulimits || exit $?
+unset -f _vc_source_launcher_ulimits
 
 _runtime_payload_root() {
   local candidate="${VIBECRAFTED_RUNTIME_ROOT:-}"
@@ -355,11 +355,6 @@ _helper_candidates() {
 _ensure_helpers_loaded() {
   local helper owner_root="${1:-}"
   if [[ -n "$owner_root" ]]; then
-    case "$owner_root" in
-      */vibecrafted-core/vibecrafted_core)
-        owner_root="${owner_root%/vibecrafted-core/vibecrafted_core}"
-        ;;
-    esac
     # Product start passes the physical deck owner, not the current checkout
     # or inherited tools-current. Do not fall through on a partial install.
     helper="$owner_root/vibecrafted-core/vibecrafted_core/runtime/shell/vetcoders.sh"
@@ -388,7 +383,7 @@ _ensure_helpers_loaded() {
   while IFS= read -r helper; do
     [[ -r "$helper" ]] || continue
     # shellcheck disable=SC1090
-    source "$helper"
+    source "$helper" || return $?
     return 0
   done < <(_helper_candidates)
   printf '%b✗%b Could not find the 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. helper layer.\n' "$_red" "$_reset" >&2
@@ -4754,22 +4749,24 @@ cmd_start() {
     cmd_start_help
     return 0
   fi
-  local status
+  local status=0 owner_root
   # Product entrypoint choke: load full lifecycle helpers (shell modules,
   # frontier pin, frame launcher). Ordinary shells stay PATH-only.
   # Note: live operator path is shell `vc-start` → same prepare function;
   # deck start is secondary (vibecrafted start) and must share that choke.
-  _ensure_helpers_loaded "$(_script_owner_root)" || return 1
-  if declare -F _vetcoders_product_entry_prepare >/dev/null 2>&1; then
-    _vetcoders_product_entry_prepare || return $?
+  owner_root="$(_script_owner_root)" || return $?
+  _ensure_helpers_loaded "$owner_root" || return $?
+  if ! declare -F _vetcoders_product_entry_prepare >/dev/null 2>&1; then
+    printf 'vc-start: required product preparation helper missing\n' >&2
+    return 1
   fi
+  _vetcoders_product_entry_prepare || return $?
   if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" == "1" ]]; then
-    if declare -F _vetcoders_product_entry_probe_print >/dev/null 2>&1; then
-      _vetcoders_product_entry_probe_print
-    else
-      printf 'VC_FRAME_CONFIG_DIR=%s\n' "${VC_FRAME_CONFIG_DIR:-}"
+    if ! declare -F _vetcoders_product_entry_probe_print >/dev/null 2>&1; then
+      printf 'vc-start: required product probe helper missing\n' >&2
+      return 1
     fi
-    status=0
+    _vetcoders_product_entry_probe_print || status=$?
   elif [[ "${1:-}" == "resume" ]]; then
     # Call frame launcher directly — never re-enter via public vc-start alias
     # (thin passthrough to `vibecrafted start` fork-bombs: Python→deck→helper).

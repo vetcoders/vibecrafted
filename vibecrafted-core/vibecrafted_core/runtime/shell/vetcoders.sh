@@ -12,27 +12,29 @@ _vetcoders_shell_facade_dir() {
   else
     script_path="$0"
   fi
-  cd "$(dirname "$script_path")" && pwd
-}
-
-_vetcoders_shell_lib_candidates() {
-  local facade_dir="$(_vetcoders_shell_facade_dir)"
-  [[ -n "$facade_dir" ]] && printf '%s/lib\n' "$facade_dir"
-  if [[ -n "${VIBECRAFTED_ROOT:-}" ]]; then
-    printf '%s/vibecrafted-core/vibecrafted_core/runtime/shell/lib\n' "$VIBECRAFTED_ROOT"
-  fi
-  printf '%s/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/shell/lib\n' "${VIBECRAFTED_TOOLS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/tools}"
-  printf '%s/runtime/shell/lib\n' "${VIBECRAFTED_HOME:-$HOME/.vibecrafted}"
+  local script_dir link_target
+  while [[ -L "$script_path" ]]; do
+    script_dir="$(cd -P "$(dirname "$script_path")" && pwd -P)" || return $?
+    link_target="$(readlink "$script_path")" || return $?
+    if [[ "$link_target" == /* ]]; then
+      script_path="$link_target"
+    else
+      script_path="$script_dir/$link_target"
+    fi
+  done
+  cd -P "$(dirname "$script_path")" && pwd -P
 }
 
 _vetcoders_resolve_shell_lib_dir() {
-  local candidate
-  while IFS= read -r candidate; do
-    [[ -n "$candidate" && -r "$candidate/core.sh" ]] || continue
-    printf '%s\n' "$candidate"
-    return 0
-  done < <(_vetcoders_shell_lib_candidates)
-  return 1
+  local facade_dir
+  facade_dir="$(_vetcoders_shell_facade_dir)" || return $?
+  # Installed and explicitly sourced checkout facades both own their adjacent
+  # modules. An incomplete tree is never permission to load another generation.
+  if [[ -L "$facade_dir/lib" || ! -d "$facade_dir/lib" ]]; then
+    printf 'Missing or symlinked Vibecrafted shell module directory: %s/lib\n' "$facade_dir" >&2
+    return 1
+  fi
+  printf '%s/lib\n' "$facade_dir"
 }
 
 _vetcoders_source_shell_module() {
@@ -42,12 +44,12 @@ _vetcoders_source_shell_module() {
   # corrupts the autoload of `zsh/rlimits` (which provides `ulimit` in zsh),
   # spamming dlopen errors on every shell start.
   local module_file="${_vetcoders_shell_lib_dir}/${module_name}.sh"
-  [[ -r "$module_file" ]] || {
+  [[ -f "$module_file" && -r "$module_file" && ! -L "$module_file" ]] || {
     printf 'Missing Vibecrafted shell module: %s\n' "$module_file" >&2
     return 1
   }
   # shellcheck disable=SC1090
-  source "$module_file"
+  source "$module_file" || return $?
 }
 
 _vetcoders_source_workflow_module() {
@@ -59,30 +61,19 @@ _vetcoders_source_workflow_module() {
   # See note in _vetcoders_source_shell_module: `module_path` is a reserved zsh
   # special parameter; never shadow it with a plain file path.
   local module_file="${_vetcoders_shell_lib_dir%/shell/lib}/${workflow_name}/shell/${module_name}.sh"
-  [[ -r "$module_file" ]] || {
+  if [[ -L "${_vetcoders_shell_lib_dir%/shell/lib}/${workflow_name}" || -L "${module_file%/*}" ]]; then
+    printf 'Symlinked Vibecrafted workflow module directory: %s\n' "${module_file%/*}" >&2
+    return 1
+  fi
+  [[ -f "$module_file" && -r "$module_file" && ! -L "$module_file" ]] || {
     printf 'Missing Vibecrafted workflow shell module: %s\n' "$module_file" >&2
     return 1
   }
   # shellcheck disable=SC1090
-  source "$module_file"
+  source "$module_file" || return $?
 }
 
-_vetcoders_shell_lib_dir="$(_vetcoders_resolve_shell_lib_dir 2>/dev/null || true)"
-if [[ -z "$_vetcoders_shell_lib_dir" ]]; then
-  _vetcoders_runtime_helper="${VIBECRAFTED_TOOLS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/tools}/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/helpers/vetcoders-runtime-core.sh"
-  if [[ -r "$_vetcoders_runtime_helper" ]]; then
-    # shellcheck disable=SC1090
-    source "$_vetcoders_runtime_helper"
-    unset -f _vetcoders_shell_facade_dir _vetcoders_shell_lib_candidates _vetcoders_resolve_shell_lib_dir _vetcoders_source_shell_module _vetcoders_source_workflow_module
-    unset _vetcoders_shell_lib_dir _vetcoders_runtime_helper
-    return 0
-  fi
-  printf 'Missing Vibecrafted shell module directory. Checked:\n' >&2
-  _vetcoders_shell_lib_candidates | sed 's/^/  - /' >&2
-  unset -f _vetcoders_shell_facade_dir _vetcoders_shell_lib_candidates _vetcoders_resolve_shell_lib_dir _vetcoders_source_shell_module _vetcoders_source_workflow_module
-  unset _vetcoders_shell_lib_dir _vetcoders_runtime_helper
-  return 1
-fi
+_vetcoders_shell_lib_dir="$(_vetcoders_resolve_shell_lib_dir)" || return $?
 
 # Load order: core -> runtime substrates -> workflow helpers -> public dispatch.
 _vetcoders_source_shell_module core || return $?
@@ -105,5 +96,5 @@ _vetcoders_source_shell_module skill_shortcuts || return $?
 _vetcoders_source_shell_module marbles || return $?
 _vetcoders_source_shell_module dispatch || return $?
 
-unset -f _vetcoders_shell_facade_dir _vetcoders_shell_lib_candidates _vetcoders_resolve_shell_lib_dir _vetcoders_source_shell_module _vetcoders_source_workflow_module
+unset -f _vetcoders_shell_facade_dir _vetcoders_resolve_shell_lib_dir _vetcoders_source_shell_module _vetcoders_source_workflow_module
 unset _vetcoders_shell_lib_dir

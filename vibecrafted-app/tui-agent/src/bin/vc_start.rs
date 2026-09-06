@@ -138,7 +138,7 @@ fn run() -> Result<(), String> {
             "--noprofile",
             "--norc",
             "-c",
-            r#"source "$1"; shift; vc-start "$@""#,
+            r#"source "$1" || exit $?; shift; vc-start "$@""#,
             "vc-start",
         ])
         .arg(&shell)

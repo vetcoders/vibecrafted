@@ -85,114 +85,12 @@ if [[ $# -eq 0 ]]; then
   exec "$root/bin/vc-start"
 fi
 
-# Startup config and asset roots cannot be overridden by native CLI switches.
-# Startup/new-tab/switch-session layouts must name an installed product file.
-args=()
-startup_options=1
-while [[ $# -gt 0 ]]; do
-  argument="$1"
-  shift
-  layout=""
-  case "$argument" in
-    action)
-      args+=("$argument")
-      [[ "$startup_options" == "1" ]] || continue
-      [[ $# -gt 0 ]] || break
-      action="$1"
-      shift
-      args+=("$action")
-      startup_options=0
-      case "$action" in
-        new-tab|switch-session) continue ;;
-        *)
-          # Action payload (eg. write-chars or a pane command) is opaque data,
-          # not a second set of startup flags.
-          args+=("$@")
-          break
-          ;;
-      esac
-      ;;
-    attach|a)
-      startup_options=0
-      args+=("$argument")
-      continue
-      ;;
-    -s|--session|--server|--name|--cwd|-c|-n)
-      if [[ "$startup_options" == "1" && "$argument" == "-c" ]]; then
-        printf 'vc-frame: configuration is product-owned: %s\n' "$VC_FRAME_CONFIG_DIR" >&2
-        exit 2
-      fi
-      if [[ "$startup_options" == "1" && "$argument" == "-n" ]]; then
-        # Global -n is a layout; action new-tab -n is a tab name.
-        argument="--new-session-with-layout"
-        [[ $# -gt 0 ]] || { printf 'vc-frame: missing layout value\n' >&2; exit 2; }
-        layout="$1"
-        shift
-      else
-        args+=("$argument")
-        # attach -c is a boolean; action new-tab -c is a cwd value.
-        if [[ "$argument" != "-c" || "${action:-}" == "new-tab" || "${action:-}" == "switch-session" ]]; then
-          [[ $# -gt 0 ]] || break
-          args+=("$1")
-          shift
-        fi
-        continue
-      fi
-      ;;
-    --)
-      args+=("$argument" "$@")
-      break
-      ;;
-    --config|--config=*|--config-dir|--config-dir=*|--layout-dir|--layout-dir=*|--theme-dir|--theme-dir=*|--data-dir|--data-dir=*|--layout-string|--layout-string=*)
-      printf 'vc-frame: configuration and assets are product-owned: %s\n' "$VC_FRAME_CONFIG_DIR" >&2
-      exit 2
-      ;;
-    -c?*)
-      if [[ "$startup_options" == "1" ]]; then
-        printf 'vc-frame: configuration is product-owned: %s\n' "$VC_FRAME_CONFIG_DIR" >&2
-        exit 2
-      fi
-      args+=("$argument")
-      continue
-      ;;
-    -l|--layout|--new-session-with-layout)
-      if [[ $# -eq 0 ]]; then
-        printf 'vc-frame: missing layout value for %s\n' "$argument" >&2
-        exit 2
-      fi
-      layout="$1"
-      shift
-      ;;
-    --layout=*|--new-session-with-layout=*)
-      layout="${argument#*=}"
-      argument="${argument%%=*}"
-      ;;
-    -l?*|-n?*)
-      if [[ "$startup_options" == "0" && "$argument" == -n* ]]; then
-        args+=("$argument")
-        continue
-      fi
-      layout="${argument:2}"
-      layout="${layout#=}"
-      argument="${argument:0:2}"
-      ;;
-    -s?*|-d|-h|-V)
-      args+=("$argument")
-      continue
-      ;;
-    -[!-]*)
-      if [[ "$startup_options" == "1" ]]; then
-        printf 'vc-frame: use separate startup flags; combined short options cannot override product configuration: %s\n' "$argument" >&2
-        exit 2
-      fi
-      args+=("$argument")
-      continue
-      ;;
-    *)
-      args+=("$argument")
-      continue
-      ;;
-  esac
+# CliArgs root options are not clap globals: the first unconsumed positional
+# token transfers ownership to the native subcommand (including every alias).
+# Only layout-bearing actions and Options need an additional product guard.
+# All other subcommands, values and execution payloads stay native argv.
+pin_product_layout() {
+  local layout="$1" layout_dir product_layout_dir
   if [[ "$layout" != */* ]]; then
     layout="$VC_FRAME_CONFIG_DIR/layouts/${layout%.kdl}.kdl"
   fi
@@ -200,10 +98,115 @@ while [[ $# -gt 0 ]]; do
   product_layout_dir="$(cd -P "$VC_FRAME_CONFIG_DIR/layouts" && pwd -P)"
   if [[ "$layout" != /* || "$layout_dir" != "$product_layout_dir" || -L "$layout" || ! -f "$layout" || ! -r "$layout" ]]; then
     printf 'vc-frame: layout must be an installed file in %s/layouts: %s\n' "$VC_FRAME_CONFIG_DIR" "$layout" >&2
-    printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
     exit 2
   fi
-  args+=("$argument" "$layout")
+  printf '%s\n' "$layout"
+}
+
+args=()
+context=root
+while [[ $# -gt 0 ]]; do
+  argument="$1"
+  shift
+  layout_flag=""
+  layout_value=""
+  case "$context:$argument" in
+    root:--|attach:--|options:--|new-tab:--|switch-session:--)
+      # Native validation owns whether a delimiter is legal here; never scan
+      # command/text/session data behind it for product flags.
+      args+=("$argument" "$@")
+      break
+      ;;
+    root:action|root:ac)
+      args+=("$argument")
+      [[ $# -gt 0 ]] || break
+      context="$1"
+      args+=("$1")
+      shift
+      case "$context" in
+        new-tab|switch-session|override-layout) continue ;;
+        *) args+=("$@"); break ;;
+      esac
+      ;;
+    root:attach|root:a) context=attach; args+=("$argument"); continue ;;
+    root:options|attach:options) context=options; args+=("$argument"); continue ;;
+    root:--config|root:--config=*|root:--config-dir|root:--config-dir=*|root:-c|root:-c?*|root:--data-dir|root:--data-dir=*|root:--layout-string|root:--layout-string=*|options:--layout-dir|options:--layout-dir=*|options:--theme-dir|options:--theme-dir=*|new-tab:--layout-dir|new-tab:--layout-dir=*|new-tab:--layout-string|new-tab:--layout-string=*|switch-session:--layout-dir|switch-session:--layout-dir=*|switch-session:--layout-string|switch-session:--layout-string=*|override-layout:--layout-dir|override-layout:--layout-dir=*|override-layout:--layout-string|override-layout:--layout-string=*)
+      printf 'vc-frame: configuration and assets are product-owned: %s\n' "$VC_FRAME_CONFIG_DIR" >&2
+      exit 2
+      ;;
+    root:-l|root:--layout|root:-n|root:--new-session-with-layout|options:--default-layout|new-tab:-l|new-tab:--layout|switch-session:-l|switch-session:--layout)
+      [[ $# -gt 0 ]] || { printf 'vc-frame: missing layout value for %s\n' "$argument" >&2; exit 2; }
+      layout_flag="$argument"
+      layout_value="$1"
+      shift
+      ;;
+    root:--layout=*|root:--new-session-with-layout=*|options:--default-layout=*|new-tab:--layout=*|switch-session:--layout=*)
+      layout_flag="${argument%%=*}"
+      layout_value="${argument#*=}"
+      ;;
+    root:-l?*|root:-n?*|new-tab:-l?*|switch-session:-l?*)
+      layout_flag="${argument:0:2}"
+      layout_value="${argument:2}"
+      layout_value="${layout_value#=}"
+      ;;
+    root:-s|root:--session|root:--server|root:--max-panes|attach:--index|attach:--token|attach:-t|attach:--ca-cert|new-tab:-n|new-tab:--name|new-tab:-c|new-tab:--cwd|new-tab:--initial-plugin|switch-session:--tab-position|switch-session:--pane-id|switch-session:-c|switch-session:--cwd)
+      args+=("$argument")
+      [[ $# -gt 0 ]] || break
+      args+=("$1")
+      shift
+      continue
+      ;;
+    root:-s?*|root:-d|root:-h|root:-V)
+      args+=("$argument"); continue ;;
+    root:-[!-]*)
+      # Root clusters could hide -c/-l/-n. Native subcommand clusters are
+      # untouched. Keep this explicit, bounded restriction at product entry.
+      printf 'vc-frame: use separate root short options: %s\n' "$argument" >&2
+      exit 2
+      ;;
+    root:--*) args+=("$argument"); continue ;;
+    root:*) args+=("$argument" "$@"); break ;;
+    options:--*=*|options:--help|options:-h)
+      args+=("$argument"); continue ;;
+    options:--*)
+      # Options contains long value options. Preserve the following value
+      # even if it resembles a product switch; clap validates it as before.
+      args+=("$argument")
+      [[ $# -gt 0 ]] || break
+      args+=("$1")
+      shift
+      continue
+      ;;
+    override-layout:--)
+      # Here the positional tail is a layout, not an execution payload.
+      args+=("$argument")
+      [[ $# -gt 0 ]] || break
+      layout_value="$(pin_product_layout "$1")" || exit $?
+      args+=("$layout_value")
+      shift
+      args+=("$@")
+      break
+      ;;
+    override-layout:-*) args+=("$argument"); continue ;;
+    override-layout:*)
+      layout_value="$(pin_product_layout "$argument")" || exit $?
+      args+=("$layout_value")
+      continue
+      ;;
+    attach:*)
+      args+=("$argument")
+      # Attach's only short value option is -t, which may follow booleans in
+      # a native cluster (-ct TOKEN). Do not mistake its value for `options`.
+      if [[ "$argument" =~ ^-[cbfr]*t$ && $# -gt 0 ]]; then
+        args+=("$1")
+        shift
+      fi
+      continue
+      ;;
+    *) args+=("$argument"); continue ;;
+  esac
+  layout_value="$(pin_product_layout "$layout_value")" || exit $?
+  args+=("$layout_flag" "$layout_value")
 done
 
 exec "$real" --config-dir "$VC_FRAME_CONFIG_DIR" --config "$VC_FRAME_CONFIG_FILE" "${args[@]}"
