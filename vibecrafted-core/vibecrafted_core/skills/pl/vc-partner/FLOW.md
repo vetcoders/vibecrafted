@@ -173,10 +173,11 @@ original_shape:
 
 ## Trasy
 
-| Wejście                       | Argumenty               | Produkuje                                            | Wyjście            |
-| ----------------------------- | ----------------------- | ---------------------------------------------------- | ------------------ |
-| `vibecrafted partner <agent>` | `--prompt` lub `--file` | wpis do dziennika, raport partnera, transkrypt, meta | `0` przy dispatchu |
-| `vc-partner <agent>`          | tak samo                | tak samo                                             | `0` przy dispatchu |
+| Wejście                       | Argumenty                           | Produkuje                                    | Wyjście                        |
+| ----------------------------- | ----------------------------------- | -------------------------------------------- | ------------------------------ |
+| `vibecrafted partner <agent>` | opcjonalny seed `--prompt`/`--file` | interaktywna twarz TTY/frame z `/vc-partner` | `0` przy interaktywnym starcie |
+| `vc-partner` z TTY            | nic wymaganego                      | skill w aktywnej sesji                       | `0`                            |
+| `vc-partner` bez TTY          | dowolne                             | odmowa (najpierw `vc-init`, potem skill)     | `1`                            |
 
 ### Krawędzie eskalacji
 

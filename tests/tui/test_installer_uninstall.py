@@ -3,14 +3,19 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import shutil
 import subprocess
 from argparse import Namespace
 from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
+from _runtime_pack_fixture import seed_runtime_pack
 
 from scripts import vetcoders_install as installer
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+_MACHO_MAGIC = b"\xcf\xfa\xed\xfe"
 
 
 def _legacy_shim_public_name(name: str) -> str:
@@ -24,62 +29,12 @@ def _legacy_shim_public_name(name: str) -> str:
     return f"vibecrafted-{name}"
 
 
-def _complete_runtime_pack_fixture(payload: Path) -> None:
-    """The v5 Runtime Pack inversion requires `libexec/vc-frame` and
-    `bin/vc-terminal`; the shared fixture predates it (known-red on this
-    base). Complete it locally so these tests exercise the reclaim path
-    instead of the fixture gap."""
-    _write_executable(payload / "libexec" / "vc-frame")
-    _write_executable(payload / "bin" / "vc-terminal")
-
-
 @pytest.fixture(autouse=True)
 def _isolate_uninstall_from_live_runtime(monkeypatch) -> None:
     """A unit-test HOME must never inspect or mutate the host's real LaunchAgent."""
     monkeypatch.setattr(installer, "_runtime_loaded_service_home", lambda: None)
     monkeypatch.setattr(installer, "_runtime_service_snapshot", lambda _home: None)
     monkeypatch.setattr(installer, "_darwin_process_ids", tuple)
-
-    def materialize(root: Path) -> None:
-        source = root / "vibecrafted-core/vibecrafted_core/config/vc-frame"
-        for destination in (
-            root / "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame",
-        ):
-            destination.mkdir(parents=True, exist_ok=True)
-            (destination / "config.kdl").write_text(
-                (source / "config.kdl").read_text(encoding="utf-8"),
-                encoding="utf-8",
-            )
-            (destination / "layouts").mkdir()
-            (destination / "themes").mkdir()
-            (destination / "vc-composer.sh").write_text("#!/bin/sh\n", encoding="utf-8")
-
-    monkeypatch.setattr(installer, "_materialize_vc_frame_generation", materialize)
-    monkeypatch.setattr(
-        installer,
-        "load_source_provenance",
-        lambda _root: {
-            "schema": "vibecrafted.source-provenance.v2",
-            "owner_repo": "vetcoders/vibecrafted",
-            "source_revision": "1" * 40,
-            "payload": {
-                "schema": "vibecrafted.distribution-tree.v1",
-                "algorithm": "sha256-path-mode-content-v1",
-                "tree_sha256": "2" * 64,
-                "entry_count": 1,
-            },
-        },
-    )
-    monkeypatch.setattr(
-        installer,
-        "_write_runtime_generation_manifest",
-        lambda root, **_kwargs: (root / "runtime-manifest.json").write_text(
-            "{}\n", encoding="utf-8"
-        ),
-    )
-    monkeypatch.setattr(
-        installer, "_runtime_generation_payload_errors", lambda _root: []
-    )
 
 
 def _write_executable(path: Path, body: str | None = None) -> None:
@@ -88,54 +43,14 @@ def _write_executable(path: Path, body: str | None = None) -> None:
     path.chmod(0o755)
 
 
+def _write_native_stub(path: Path, payload: bytes = b"pack-terminal") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_MACHO_MAGIC + payload)
+    path.chmod(0o755)
+
+
 def _runtime_pack_fixture(root: Path) -> tuple[Path, Path, Path]:
-    payload = root / "runtime-pack"
-    for name in (
-        "vibecrafted",
-        "loct",
-        "loctree-mcp",
-        "aicx",
-        "aicx-mcp",
-        "prview",
-        "screenscribe",
-        "vc-server",
-        "vc-server-supervisor",
-        "vc-start",
-        "vc-terminal",
-        "vc-workflow",
-    ):
-        _write_executable(payload / "bin" / name)
-    _write_executable(
-        payload / "libexec/vc-frame", "#!/bin/sh\necho runtime-pack-frame\n"
-    )
-    _write_executable(payload / "vibecrafted-core/vibecrafted_core/deck/vibecrafted")
-    (payload / "VERSION").write_text("9.9.9+g12345678\n", encoding="utf-8")
-    terminal_root = payload / "config/vc-terminal"
-    (terminal_root / "themes").mkdir(parents=True)
-    (terminal_root / "vibecrafted.toml").write_text("[window]\n", encoding="utf-8")
-    (terminal_root / "themes/dark.toml").write_text(
-        "[colors.primary]\nbackground = '#000000'\n", encoding="utf-8"
-    )
-    frame_config = payload / "vibecrafted-core/vibecrafted_core/config/vc-frame"
-    frame_config.mkdir(parents=True)
-    (frame_config / "config.kdl").write_text("// frame\n", encoding="utf-8")
-    _write_executable(
-        payload / "scripts/vc-frame-product-entry.sh",
-        "#!/usr/bin/env bash\npin_darwin_socket_dir() { :; }\n"
-        'exec "$VIBECRAFTED_VC_FRAME_BIN" "$@"\n',
-    )
-    shell = payload / "vibecrafted-core/vibecrafted_core/runtime/shell"
-    shell.mkdir(parents=True)
-    (shell / "vetcoders.sh").write_text("# shell\n", encoding="utf-8")
-    skills = payload / "vibecrafted-core/vibecrafted_core/skills"
-    for name in ("vc-audit", "vc-implement"):
-        skill = skills / name
-        skill.mkdir(parents=True)
-        (skill / "SKILL.md").write_text(f"# {name}\n", encoding="utf-8")
-    (skills / "VERIFICATION_RULE.md").write_text(
-        "# Verification rule\n", encoding="utf-8"
-    )
-    _write_executable(payload / "config/alacritty/launch-primary-shell.zsh")
+    payload = seed_runtime_pack(root / "runtime-pack")
     terminal_host = root / "Vibecrafted.app/Contents/Helpers/vc-terminal"
     frame_helper = root / "Vibecrafted.app/Contents/Helpers/vc-frame"
     # Deliberately differ from the carrier payload. The current installer may
@@ -144,6 +59,167 @@ def _runtime_pack_fixture(root: Path) -> tuple[Path, Path, Path]:
     _write_executable(terminal_host, "#!/bin/sh\necho app-terminal-helper\n")
     _write_executable(frame_helper, "#!/bin/sh\necho app-frame-helper\n")
     return payload, terminal_host, frame_helper
+
+
+def test_vc_terminal_product_entry_pins_config_file_and_refuses_private_alacritty(
+    tmp_path: Path,
+) -> None:
+    """A raw generation `bin/vc-terminal` must not spawn ~/.config/alacritty."""
+    generation = tmp_path / "releases/4.3.0+gfixture"
+    (generation / "bin").mkdir(parents=True)
+    (generation / "libexec").mkdir()
+    host = generation / "libexec/vc-terminal"
+    user_bin = tmp_path / "user-bin"
+    user_bin.mkdir()
+    user_aicx = user_bin / "aicx"
+    user_aicx.write_text("#!/bin/sh\n", encoding="utf-8")
+    user_aicx.chmod(0o755)
+    private_aicx = generation / "bin/aicx"
+    private_aicx.write_text("#!/bin/sh\n", encoding="utf-8")
+    private_aicx.chmod(0o755)
+    host.write_text(
+        "#!/bin/bash\n"
+        "printf 'aicx=%s\\n' \"$(command -v aicx)\"\n"
+        "printf '%s\\n' \"$@\"\n",
+        encoding="utf-8",
+    )
+    host.chmod(0o755)
+    wrapper = generation / "bin/vc-terminal"
+    shutil.copy2(REPO_ROOT / "scripts/vc-terminal-product-entry.sh", wrapper)
+    wrapper.chmod(0o755)
+    config_home = tmp_path / "home/.config"
+    entry = config_home / "vibecrafted/vc-terminal/vc-terminal.toml"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("[general]\nlive_config_reload = true\n", encoding="utf-8")
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "XDG_CONFIG_HOME": str(tmp_path / "ignored-xdg"),
+        "PATH": f"{user_bin}:/usr/bin:/bin",
+    }
+    env.pop("VIBECRAFTED_RUNTIME_ROOT", None)
+    first = subprocess.run(
+        [str(wrapper)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    second = subprocess.run(
+        [str(wrapper)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    expected = [f"aicx={user_aicx}", "--config-file", str(entry)]
+    assert first.stdout.splitlines() == expected
+    assert second.stdout.splitlines() == expected
+    assert first.stdout == second.stdout
+    rejected = subprocess.run(
+        [str(wrapper), "--config-file", "/tmp/explicit.toml"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert rejected.returncode == 2
+    assert "--config-file is product-owned" in rejected.stderr
+    rejected_equals = subprocess.run(
+        [str(wrapper), "--config-file=/tmp/explicit.toml"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert rejected_equals.returncode == 2
+    assert "--config-file is product-owned" in rejected_equals.stderr
+    entry.unlink()
+    missing = subprocess.run(
+        [str(wrapper)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert missing.returncode == 2
+    assert "product config missing" in missing.stderr
+    assert str(entry) in missing.stderr
+    assert "~/.config/alacritty" in missing.stderr
+
+
+def test_native_executable_probe_requires_regular_executable_bytes(
+    tmp_path: Path,
+) -> None:
+    native = tmp_path / "native"
+    native.write_bytes(b"\xcf\xfa\xed\xfe" + b"\x00" * 32)
+    native.chmod(0o755)
+    assert installer._is_native_executable(native)
+
+    native.chmod(0o644)
+    assert not installer._is_native_executable(native)
+    native.chmod(0o755)
+    link = tmp_path / "native-link"
+    link.symlink_to(native)
+    assert not installer._is_native_executable(link)
+
+
+def test_runtime_install_reclaims_leftover_alacritty_and_alt_screen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A leftover vc-terminal/alacritty.toml is not a second live choke-point."""
+    home = tmp_path / "home"
+    runtime_home = home / ".local/share/vibecrafted"
+    launcher_home = home / ".local/bin"
+    crafted_home = home / ".vibecrafted"
+    config_home = home / ".config"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(launcher_home))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(crafted_home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    product_config = config_home / "vibecrafted"
+    debris_dir = product_config / "vc-terminal"
+    debris_dir.mkdir(parents=True)
+    (debris_dir / "alacritty.toml").write_text(
+        'shell = { program = "${HOME}/.config/alacritty/launch-primary-shell.zsh" }\n',
+        encoding="utf-8",
+    )
+    (debris_dir / "launch-alt-screen.zsh").write_text(
+        "#!/bin/zsh\nexec launch-primary-shell.zsh\n", encoding="utf-8"
+    )
+    (product_config / "terminal-entry.toml").write_text(
+        "# leftover pin\n", encoding="utf-8"
+    )
+    args = Namespace(
+        payload_root=str(payload),
+        app_root=str(terminal_host.parents[2]),
+        terminal_host=str(terminal_host),
+        frame_helper=str(frame_helper),
+    )
+    assert installer.cmd_runtime_install(args) == 0
+    installed = json.loads(capsys.readouterr().out)
+    assert Path(installed["terminal_config"]) == (
+        product_config / "vc-terminal/vc-terminal.toml"
+    )
+    assert (product_config / "vc-terminal/vc-terminal.toml").is_file()
+    assert (product_config / "vc-terminal/launch-primary-shell.zsh").is_file()
+    assert not (debris_dir / "alacritty.toml").exists()
+    assert not (debris_dir / "launch-alt-screen.zsh").exists()
+    assert not (product_config / "terminal-entry.toml").exists()
+    names = sorted(
+        path.name for path in debris_dir.iterdir() if path.name != ".DS_Store"
+    )
+    assert names == ["launch-primary-shell.zsh", "vc-terminal.toml"]
+    lines = sorted(
+        str(path.relative_to(product_config))
+        for path in product_config.rglob("*")
+        if path.is_file() and path.name != ".DS_Store"
+    )
+    (tmp_path / "product-config-tree.txt").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
 
 
 def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
@@ -197,15 +273,24 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     generation = runtime_home / "releases/9.9.9+g12345678"
     assert Path(installed["root"]) == generation
     assert Path(installed["frame"]) == generation / "libexec/vc-frame"
+    assert Path(installed["terminal_host"]) == generation / "libexec/vc-terminal"
+    assert Path(installed["terminal"]) == generation / "bin/vc-terminal"
     assert "pin_darwin_socket_dir" in (generation / "bin/vc-frame").read_text(
         encoding="utf-8"
     )
     assert (generation / "libexec/vc-frame").read_bytes() == (
         payload / "libexec/vc-frame"
     ).read_bytes()
-    assert (generation / "bin/vc-terminal").read_bytes() == (
+    assert (generation / "libexec/vc-terminal").read_bytes() == (
         payload / "bin/vc-terminal"
     ).read_bytes()
+    terminal_entry = (generation / "bin/vc-terminal").read_text(encoding="utf-8")
+    assert "--config-file" in terminal_entry
+    assert "libexec/vc-terminal" in terminal_entry
+    assert "vc-terminal.toml" in terminal_entry
+    assert "alacritty.toml" not in terminal_entry
+    assert "terminal-entry.toml" not in terminal_entry
+    assert "launch-alt-screen" not in terminal_entry
     assert (generation / "libexec/vc-frame").read_bytes() != frame_helper.read_bytes()
     assert (generation / "bin/vc-terminal").read_bytes() != terminal_host.read_bytes()
     assert (runtime_home / installer.RUNTIME_INSTALL_RECEIPT).is_file()
@@ -215,15 +300,29 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     assert "VIBECRAFTED_RUNTIME_ROOT=" in original_launcher.read_text(encoding="utf-8")
     product_config = config_home / "vibecrafted"
     assert (product_config / "vc-frame/config.kdl").is_file()
-    assert (product_config / "terminal-policy.toml").read_text(encoding="utf-8") == (
-        "[window]\n"
+    assert (product_config / "terminal-policy.toml").read_bytes() == (
+        payload / "config/vc-terminal/vibecrafted.toml"
+    ).read_bytes()
+    terminal_pin = product_config / "vc-terminal/vc-terminal.toml"
+    terminal_entry = terminal_pin.read_text(encoding="utf-8")
+    assert Path(installed["terminal_config"]) == terminal_pin
+    assert Path(installed["primary_shell"]) == (
+        product_config / "vc-terminal/launch-primary-shell.zsh"
     )
-    terminal_entry = (product_config / "terminal-entry.toml").read_text(
-        encoding="utf-8"
-    )
+    assert (product_config / "vc-terminal/launch-primary-shell.zsh").is_file()
+    assert not (product_config / "terminal-entry.toml").exists()
+    assert not (product_config / "vc-terminal/alacritty.toml").exists()
+    assert not (product_config / "vc-terminal/launch-alt-screen.zsh").exists()
     assert str(product_config / "terminal-policy.toml") in terminal_entry
     assert str(product_config / "terminal-theme.toml") in terminal_entry
     assert str(generation / "config/vc-terminal/vibecrafted.toml") not in terminal_entry
+    path_wrapper = (launcher_home / "vc-terminal").read_text(encoding="utf-8")
+    assert "--config-file" not in path_wrapper
+    assert str(generation / "bin/vc-terminal") in path_wrapper
+    assert str(terminal_host) not in path_wrapper
+    assert f'export PATH="{generation / "bin"}:' not in path_wrapper
+    assert "terminal-entry.toml" not in path_wrapper
+    assert "alacritty.toml" not in path_wrapper
     for runtime in installer.STANDARD_VIEW_RUNTIMES:
         for skill_name in ("vc-audit", "vc-implement"):
             view = home / f".{runtime}/skills/{skill_name}"
@@ -244,8 +343,8 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     assert state["skills"] == ["vc-audit", "vc-implement"]
     assert state["runtimes"] == installer.STANDARD_VIEW_RUNTIMES
 
-    # The app calls the installer on every launch. Reconciliation must retain
-    # first-install ownership so a later reset still returns to baseline.
+    # An explicit repeated install must retain first-install ownership so
+    # a later uninstall restores the original collisions and keeps recovery.
     assert installer.cmd_runtime_install(install_args) == 0
     capsys.readouterr()
 
@@ -275,9 +374,11 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     assert not (home / ".agents").exists()
     assert not (home / ".claude").exists()
     assert not (home / ".codex/commands").exists()
-    assert not runtime_home.exists()
-    assert not crafted_home.exists()
-    assert not config_home.exists()
+    assert (runtime_home / ".installer-backups").is_dir()
+    assert not (runtime_home / installer.RUNTIME_INSTALL_RECEIPT).exists()
+    assert (crafted_home / "runtime-created-state").read_text() == "owned\n"
+    assert (config_home / "vibecrafted/terminal-theme.toml").is_file()
+    assert not (config_home / "vibecrafted/vc-frame").exists()
     # .local predated the install in this fixture because it carries an
     # operator-owned ScreenScribe target. The installer must preserve it.
     assert (home / ".local").is_dir()
@@ -315,8 +416,10 @@ def test_runtime_pack_uninstall_prunes_only_created_empty_xdg_parents(
     )
     capsys.readouterr()
 
-    assert not (home / ".local").exists()
-    assert not (home / ".config").exists()
+    assert (runtime_home / ".installer-backups").is_dir()
+    assert not (home / ".local/bin").exists()
+    assert (home / ".config/vibecrafted/terminal-theme.toml").is_file()
+    assert not (home / ".config/vibecrafted/vc-frame").exists()
     assert not (home / ".agents").exists()
     assert not (home / ".claude").exists()
     assert not (home / ".codex").exists()
@@ -387,7 +490,6 @@ def test_runtime_pack_restores_public_owner_when_retiring_old_bare_shim(
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
     payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
-    _complete_runtime_pack_fixture(payload)
     args = Namespace(
         payload_root=str(payload),
         app_root=str(terminal_host.parents[2]),
@@ -439,7 +541,6 @@ def test_runtime_pack_forgets_already_removed_old_bare_shim(
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
     payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
-    _complete_runtime_pack_fixture(payload)
     args = Namespace(
         payload_root=str(payload),
         app_root=str(terminal_host.parents[2]),
@@ -481,7 +582,6 @@ def test_runtime_pack_retires_legacy_vibecrafted_shim_aliases(
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
     payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
-    _complete_runtime_pack_fixture(payload)
     args = Namespace(
         payload_root=str(payload),
         app_root=str(terminal_host.parents[2]),
@@ -544,7 +644,6 @@ def test_runtime_install_repoints_foundation_launchagent_off_retired_shim(
     monkeypatch.setenv("PATH", f"{user_bin}:/usr/bin:/bin")
 
     payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
-    _complete_runtime_pack_fixture(payload)
     args = Namespace(
         payload_root=str(payload),
         app_root=str(terminal_host.parents[2]),
@@ -642,7 +741,7 @@ def test_runtime_pack_reinstall_reclaims_drifted_managed_paths(
 
     # An operator tweaks their terminal config and retargets a projection;
     # the next (repair/upgrade) install must reclaim both instead of dying.
-    terminal_entry = home / "config/vibecrafted/terminal-entry.toml"
+    terminal_entry = home / ".config/vibecrafted/vc-terminal/vc-terminal.toml"
     canonical_entry = terminal_entry.read_text(encoding="utf-8")
     drifted_entry = canonical_entry + "# operator font tweak\n"
     terminal_entry.write_text(drifted_entry, encoding="utf-8")
@@ -652,8 +751,7 @@ def test_runtime_pack_reinstall_reclaims_drifted_managed_paths(
     projection.symlink_to(home / "operator-owned-target")
 
     assert installer.cmd_runtime_install(args) == 0
-    captured = capsys.readouterr()
-    assert "diverged since install" in captured.err
+    capsys.readouterr()
 
     assert terminal_entry.read_text(encoding="utf-8") == canonical_entry
     assert projection.is_symlink()
@@ -664,12 +762,18 @@ def test_runtime_pack_reinstall_reclaims_drifted_managed_paths(
     receipt = json.loads(
         (runtime_home / installer.RUNTIME_INSTALL_RECEIPT).read_text(encoding="utf-8")
     )
-    drift_backups = receipt["drift_backups"]
-    entry_backup = Path(drift_backups[str(terminal_entry)])
-    assert entry_backup.read_text(encoding="utf-8") == drifted_entry
-    projection_backup = Path(drift_backups[str(projection)])
-    assert projection_backup.is_symlink()
-    assert projection_backup.readlink() == home / "operator-owned-target"
+    history = receipt["drift_backup_history"]
+    product = home / ".config/vibecrafted"
+    assert any(
+        (Path(raw) / "vc-terminal/vc-terminal.toml").read_text() == drifted_entry
+        for raw in history[str(product)]
+        if (Path(raw) / "vc-terminal/vc-terminal.toml").is_file()
+    )
+    assert any(
+        Path(raw).is_symlink()
+        and Path(raw).readlink() == home / "operator-owned-target"
+        for raw in history[str(projection)]
+    )
 
 
 def test_runtime_pack_uninstall_refuses_modified_agent_projection(
@@ -744,7 +848,7 @@ def test_runtime_pack_install_refuses_symlinked_agent_projection_ancestor(
     assert (runtime_home / installer.RUNTIME_INSTALL_RECEIPT).is_file()
 
 
-def test_interrupted_runtime_pack_install_leaves_receipt_for_clean_reset(
+def test_interrupted_runtime_pack_install_requires_explicit_recovery_before_uninstall(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     home = tmp_path / "home"
@@ -764,30 +868,39 @@ def test_interrupted_runtime_pack_install_leaves_receipt_for_clean_reset(
         terminal_host=str(terminal_host),
         frame_helper=str(frame_helper),
     )
-    original = installer._write_runtime_owned_file
+    original = installer._replace_runtime_transaction_entry
+    fired = False
 
-    def interrupt_during_agent_projection(
-        path: Path, *args: object, **kwargs: object
-    ) -> None:
-        if path == home / ".claude/skills/VERIFICATION_RULE.md":
+    def interrupt_during_agent_projection(entry, source):
+        nonlocal fired
+        if (
+            Path(entry["path"]) == home / ".claude/skills/VERIFICATION_RULE.md"
+            and not fired
+        ):
+            fired = True
             raise RuntimeError("injected onboarding interruption")
-        original(path, *args, **kwargs)
+        return original(entry, source)
 
     monkeypatch.setattr(
-        installer, "_write_runtime_owned_file", interrupt_during_agent_projection
+        installer,
+        "_replace_runtime_transaction_entry",
+        interrupt_during_agent_projection,
     )
     with pytest.raises(RuntimeError, match="injected onboarding interruption"):
         installer.cmd_runtime_install(args)
-
     receipt = runtime_home / installer.RUNTIME_INSTALL_RECEIPT
     assert receipt.is_file()
-    monkeypatch.setattr(installer, "_write_runtime_owned_file", original)
+    with pytest.raises(RuntimeError, match="pending Runtime Pack publication"):
+        installer.cmd_runtime_uninstall(Namespace(dry_run=False, emit_result=True))
+    monkeypatch.setattr(installer, "_replace_runtime_transaction_entry", original)
+    assert installer.cmd_runtime_install(args) == 0
+    capsys.readouterr()
     assert (
         installer.cmd_runtime_uninstall(Namespace(dry_run=False, emit_result=True)) == 0
     )
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == "removed"
-    assert not runtime_home.exists()
+    assert (runtime_home / ".installer-backups").is_dir()
     assert not (home / ".agents").exists()
     assert not (home / ".claude").exists()
     assert not (home / ".codex").exists()
@@ -816,32 +929,37 @@ def test_interrupted_projection_publish_restores_checkpointed_collision(
         terminal_host=str(terminal_host),
         frame_helper=str(frame_helper),
     )
-    original_symlink = installer._atomic_symlink
+    original = installer._replace_runtime_transaction_entry
+    fired = False
 
-    def interrupt_publish(_target: Path, path: Path) -> None:
-        if path == current:
+    def interrupt_publish(entry, source):
+        nonlocal fired
+        if Path(entry["path"]) == current and not fired:
+            fired = True
             raise RuntimeError("injected projection publication interruption")
-        original_symlink(_target, path)
+        return original(entry, source)
 
-    monkeypatch.setattr(installer, "_atomic_symlink", interrupt_publish)
+    monkeypatch.setattr(
+        installer, "_replace_runtime_transaction_entry", interrupt_publish
+    )
     with pytest.raises(
         RuntimeError, match="injected projection publication interruption"
     ):
         installer.cmd_runtime_install(args)
-
     receipt_path = runtime_home / installer.RUNTIME_INSTALL_RECEIPT
-    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt = json.loads(receipt_path.read_text())
     backup = Path(receipt["backups"][str(current)])
-    assert backup.read_text(encoding="utf-8") == "operator-owned current marker\n"
-    assert not current.exists()
-
-    monkeypatch.setattr(installer, "_atomic_symlink", original_symlink)
+    assert backup.read_text() == "operator-owned current marker\n"
+    assert current.read_text() == "operator-owned current marker\n"
+    monkeypatch.setattr(installer, "_replace_runtime_transaction_entry", original)
+    assert installer.cmd_runtime_install(args) == 0
+    capsys.readouterr()
     assert (
         installer.cmd_runtime_uninstall(Namespace(dry_run=False, emit_result=True)) == 0
     )
-    result = json.loads(capsys.readouterr().out)
-    assert result["status"] == "removed"
-    assert current.read_text(encoding="utf-8") == "operator-owned current marker\n"
+    assert json.loads(capsys.readouterr().out)["status"] == "removed"
+    assert current.read_text() == "operator-owned current marker\n"
+    assert backup.read_text() == "operator-owned current marker\n"
 
 
 def test_runtime_pack_uninstall_rejects_projection_path_injected_into_receipt(
@@ -956,7 +1074,7 @@ def test_runtime_pack_uninstall_rejects_symlinked_backup_parent(
     receipt["backups"][destination] = str(escaped_parent / "payload")
     receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
 
-    with pytest.raises(RuntimeError, match="backup path escapes backup root"):
+    with pytest.raises(RuntimeError, match="runtime path is aliased:"):
         installer.cmd_runtime_uninstall(Namespace(dry_run=False, emit_result=True))
     assert receipt_path.is_file()
 

@@ -12,15 +12,33 @@ pub enum LaunchKind {
     Research,
     Review,
     Marbles,
+    Skill(&'static crate::skills_catalog::SkillEntry),
 }
 
 impl LaunchKind {
+    pub fn all() -> Vec<Self> {
+        let mut kinds = vec![Self::Workflow, Self::Research, Self::Review, Self::Marbles];
+        kinds.extend(
+            crate::skills_catalog::CATALOG
+                .iter()
+                .filter(|entry| {
+                    !matches!(
+                        entry.slug,
+                        "vc-workflow" | "vc-research" | "vc-review" | "vc-marbles"
+                    )
+                })
+                .map(Self::Skill),
+        );
+        kinds
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             LaunchKind::Workflow => "workflow",
             LaunchKind::Research => "research",
             LaunchKind::Review => "review",
             LaunchKind::Marbles => "marbles",
+            LaunchKind::Skill(entry) => entry.command_token(),
         }
     }
 
@@ -30,6 +48,7 @@ impl LaunchKind {
             LaunchKind::Research => "Research swarm",
             LaunchKind::Review => "Review",
             LaunchKind::Marbles => "Marbles loop",
+            LaunchKind::Skill(entry) => entry.display,
         }
     }
 
@@ -45,6 +64,7 @@ impl LaunchKind {
             LaunchKind::Marbles => {
                 "Run convergence loops when the code works but still lies or drifts."
             }
+            LaunchKind::Skill(entry) => entry.one_line,
         }
     }
 }
@@ -251,6 +271,15 @@ fn build_deck_launch_command(deck: &Path, request: &LaunchRequest) -> LaunchComm
             args.push("--depth".into());
             args.push(request.depth.unwrap_or(3).to_string().into());
             if !request.prompt.trim().is_empty() {
+                args.push("--prompt".into());
+                args.push(request.prompt.clone().into());
+            }
+        }
+        LaunchKind::Skill(entry) => {
+            args.push(request.agent.clone().into());
+            if !request.prompt.trim().is_empty()
+                && !matches!(entry.accepts, crate::skills_catalog::SkillPayloadKind::None)
+            {
                 args.push("--prompt".into());
                 args.push(request.prompt.clone().into());
             }

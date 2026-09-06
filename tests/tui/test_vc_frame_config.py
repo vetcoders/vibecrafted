@@ -37,6 +37,29 @@ def test_vc_frame_config_uses_plain_ctrl_without_option_layer() -> None:
     assert "Ctrl Shift" not in payload
 
 
+def test_composer_bind_does_not_enable_line_numbers() -> None:
+    """Composer is prose. A mouse selection copies cells; a gutter rides into paste.
+
+    The Super+e fallback must not resurrect `set number` after 60d9986f dropped
+    the gutter from vc-composer.sh.
+    """
+    payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
+    composer = (
+        REPO_ROOT
+        / "vibecrafted-core"
+        / "vibecrafted_core"
+        / "config"
+        / "vc-frame"
+        / "vc-composer.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "-c 'set number'" not in payload
+    assert "-c 'set nonumber'" in payload
+    assert "set nonumber" in composer
+    assert "set norelativenumber" in composer
+    assert "Draft in vim with: number," not in composer
+
+
 def test_vc_frame_config_enables_kitty_protocol_for_super_switcher() -> None:
     # Key-contract v3 (8a0f14e65): the global Super/Cmd switcher rides kitty
     # CSI-u sequences. Disabling this strands "Super Left/Right/Up/Down" and

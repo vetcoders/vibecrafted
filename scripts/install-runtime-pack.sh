@@ -291,6 +291,8 @@ if [[ "$operation" == "install" && -n "$app_root" ]]; then
     || die "cannot resolve bundled vc-frame helper"
   [[ -x "$terminal_host" ]] || die "bundled terminal host missing: $terminal_host"
   [[ -x "$frame_helper" ]] || die "bundled vc-frame helper missing: $frame_helper"
+  pack_terminal_host="$payload_root/libexec/vc-terminal"
+  [[ -x "$pack_terminal_host" ]] || die "Runtime Pack native terminal host missing: $pack_terminal_host"
   # Same compilation product, signature-agnostic: byte equality stopped being
   # possible when the pack's binaries gained their own Developer ID signatures
   # (the App helper is bundle-signed, the pack copy bare-signed — different
@@ -298,7 +300,7 @@ if [[ "$operation" == "install" && -n "$app_root" ]]; then
   # the bytes differ. A non-Mach-O impostor has no UUID and fails closed.
   PYTHONPATH="$payload_root/vibecrafted-core" "$pack_python" \
     -m vibecrafted_core.runtime_pack_contract helpers-agree \
-    --app-copy "$terminal_host" --pack-copy "$payload_root/bin/vc-terminal" \
+    --app-copy "$terminal_host" --pack-copy "${pack_terminal_host}" \
     || die "App terminal helper disagrees with the signed Runtime Pack"
   PYTHONPATH="$payload_root/vibecrafted-core" "$pack_python" \
     -m vibecrafted_core.runtime_pack_contract helpers-agree \
@@ -307,6 +309,9 @@ if [[ "$operation" == "install" && -n "$app_root" ]]; then
   arguments+=(
     --app-root "$app_root"
   )
+  # helpers-agree already proved App copies match the signed pack. Do not
+  # forward --terminal-host/--frame-helper into the installer — that would
+  # replace pack Mach-O bytes with the bundle-signed helper.
 fi
 
 if [[ -n "$temporary" ]]; then

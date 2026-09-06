@@ -2,6 +2,7 @@ use crate::config::{AppConfig, path_display};
 use crate::launch::{
     LaunchCommand, LaunchKind, LaunchRequest, LaunchRuntime, build_launch_command,
 };
+use crate::layout::PaneId;
 use crate::memory::{self, MemoryState};
 use crate::mission_control::{self, ActionQueueItem, ActionQueueKind, MissionControlState};
 use crate::observe::{self, ObserveHealth, ObserveState};
@@ -86,6 +87,74 @@ pub enum LaunchFocus {
     Error,
     Artifact,
     Memory,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PaneScroll {
+    pub deck: u16,
+    pub playbook: u16,
+    pub trail: u16,
+    pub monitor_list: u16,
+    pub dossier: u16,
+    pub timeline: u16,
+    pub observe_list: u16,
+    pub observe_transcript: u16,
+    pub controls_actions: u16,
+    pub controls_artifacts: u16,
+    pub controls_timeline: u16,
+    pub mission: [u16; 7],
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct InteractionState {
+    pub focused: Option<PaneId>,
+    pub scroll: PaneScroll,
+}
+
+impl InteractionState {
+    pub fn offset_mut(&mut self, pane: PaneId) -> &mut u16 {
+        match pane {
+            PaneId::DispatchDeck => &mut self.scroll.deck,
+            PaneId::DispatchPlaybook => &mut self.scroll.playbook,
+            PaneId::DispatchTrail => &mut self.scroll.trail,
+            PaneId::MonitorList => &mut self.scroll.monitor_list,
+            PaneId::MonitorDossier => &mut self.scroll.dossier,
+            PaneId::MonitorTimeline => &mut self.scroll.timeline,
+            PaneId::ObserveList => &mut self.scroll.observe_list,
+            PaneId::ObserveTranscript => &mut self.scroll.observe_transcript,
+            PaneId::ControlsActions => &mut self.scroll.controls_actions,
+            PaneId::ControlsArtifacts => &mut self.scroll.controls_artifacts,
+            PaneId::ControlsTimeline => &mut self.scroll.controls_timeline,
+            PaneId::Mission(index) => {
+                &mut self.scroll.mission[usize::from(index).min(self.scroll.mission.len() - 1)]
+            }
+        }
+    }
+
+    pub fn offset(&self, pane: PaneId) -> u16 {
+        match pane {
+            PaneId::DispatchDeck => self.scroll.deck,
+            PaneId::DispatchPlaybook => self.scroll.playbook,
+            PaneId::DispatchTrail => self.scroll.trail,
+            PaneId::MonitorList => self.scroll.monitor_list,
+            PaneId::MonitorDossier => self.scroll.dossier,
+            PaneId::MonitorTimeline => self.scroll.timeline,
+            PaneId::ObserveList => self.scroll.observe_list,
+            PaneId::ObserveTranscript => self.scroll.observe_transcript,
+            PaneId::ControlsActions => self.scroll.controls_actions,
+            PaneId::ControlsArtifacts => self.scroll.controls_artifacts,
+            PaneId::ControlsTimeline => self.scroll.controls_timeline,
+            PaneId::Mission(index) => {
+                self.scroll.mission[usize::from(index).min(self.scroll.mission.len() - 1)]
+            }
+        }
+    }
+
+    pub fn scroll_pane(&mut self, pane: PaneId, delta: i16, content_len: usize, view_height: u16) {
+        let next = crate::layout::step_scroll(self.offset(pane), delta, content_len, view_height);
+        *self.offset_mut(pane) = next;
+        self.focused = Some(pane);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,7 +300,10 @@ impl DeepAction {
             DeepAction::MuxVerifyClient(_) => "Verify mux client routing".to_string(),
             DeepAction::MuxFixClientDrift(_) => "Fix mux client drift".to_string(),
             DeepAction::PolarizeIntent {
-                band, score, run_id, ..
+                band,
+                score,
+                run_id,
+                ..
             } => format!(
                 "Polarize {} {} {}",
                 band.label(),
@@ -239,7 +311,11 @@ impl DeepAction {
                 truncate_id(run_id, 18)
             ),
             DeepAction::SkillLaunch { skill, agent, .. } => {
-                format!("Launch {} ({})", skill.trim_start_matches("vc-"), agent.label())
+                format!(
+                    "Launch {} ({})",
+                    skill.trim_start_matches("vc-"),
+                    agent.label()
+                )
             }
         }
     }
@@ -290,6 +366,7 @@ pub struct App {
     pub mission_artifact_root: PathBuf,
     pub observe: ObserveState,
     pub memory: MemoryState,
+    pub interaction: InteractionState,
 }
 
 impl App {
@@ -337,6 +414,7 @@ impl App {
                 project: memory_project,
                 ..MemoryState::default()
             },
+            interaction: InteractionState::default(),
         };
         apply_run_filters(
             &mut app.runs,
@@ -426,30 +504,16 @@ impl App {
     /// Refresh the remote Observe projection on its own bounded cadence.
     /// Returns whether the fetch succeeded so the scheduler can back off.
     pub fn refresh_observe(&mut self) -> bool {
-        let origin = self.config.server.clone();
-        self.observe.origin = origin.clone();
-        match observe::fetch_state(&origin) {
-            Ok((generated_at, runs)) => {
-                self.observe.generated_at = generated_at;
-                self.observe.status = ObserveHealth::Live;
-                self.observe.error = None;
-                self.observe.runs = runs;
-                if self.observe.selected >= self.observe.runs.len() {
-                    self.observe.selected = self.observe.runs.len().saturating_sub(1);
-                }
-                self.refresh_observe_transcript();
-                true
-            }
-            Err(error) => {
-                if self.observe.runs.is_empty() {
-                    self.observe.status = ObserveHealth::Offline;
-                } else {
-                    self.observe.status = ObserveHealth::Degraded;
-                }
-                self.observe.error = Some(error.to_string());
-                false
-            }
+        self.observe.origin = format!("control-plane:{}", self.config.state_root.display());
+        self.observe.generated_at = chrono::Utc::now().to_rfc3339();
+        self.observe.status = ObserveHealth::Live;
+        self.observe.error = None;
+        self.observe.runs = observe::project_control_plane(&self.state);
+        if self.observe.selected >= self.observe.runs.len() {
+            self.observe.selected = self.observe.runs.len().saturating_sub(1);
         }
+        self.refresh_observe_transcript();
+        true
     }
 
     pub fn refresh_observe_transcript(&mut self) {
@@ -459,9 +523,17 @@ impl App {
             return;
         };
         let run_id = run.run_id.clone();
+        let transcript_path = run.transcript_path.clone();
         if self.observe.transcript_run_id.as_deref() == Some(run_id.as_str())
             && !self.observe.transcript.is_empty()
         {
+            return;
+        }
+        if let Some(path) = transcript_path
+            && let Ok(body) = fs::read_to_string(path)
+        {
+            self.observe.transcript = crate::run_detail::humanize_transcript(&body);
+            self.observe.transcript_run_id = Some(run_id);
             return;
         }
         match observe::fetch_transcript(&self.config.server, &run_id) {
@@ -495,16 +567,22 @@ impl App {
         self.refresh_observe_transcript();
     }
 
+    pub fn observe_switch_command(&self) -> Option<LaunchCommand> {
+        let session = self
+            .observe
+            .runs
+            .get(self.observe.selected)?
+            .switch_target()?;
+        Some(LaunchCommand {
+            program: self.config.terminal_binary.clone(),
+            args: vec!["attach".into(), session.into()],
+            env: self.launch_env(),
+        })
+    }
+
     pub fn refresh_memory(&mut self) {
         let project = memory::default_project(&self.config.launch_root);
         self.memory = memory::load_continuity(&project);
-    }
-
-    pub fn open_aicx_wizard(&mut self) {
-        let project = memory::default_project(&self.config.launch_root);
-        if let Err(error) = memory::launch_wizard(&project) {
-            self.show_error("aicx wizard failed", vec![error.to_string()]);
-        }
     }
 
     pub fn refresh_mission_control(&mut self) {
@@ -731,12 +809,7 @@ impl App {
     }
 
     pub fn shift_launch_kind(&mut self, delta: isize) {
-        let kinds = [
-            LaunchKind::Workflow,
-            LaunchKind::Research,
-            LaunchKind::Review,
-            LaunchKind::Marbles,
-        ];
+        let kinds = LaunchKind::all();
         let current = kinds
             .iter()
             .position(|kind| *kind == self.launch_kind)
@@ -816,6 +889,8 @@ impl App {
     pub fn error_lines(&self) -> Vec<String> {
         let mut lines = vec![self.error_title.clone(), String::new()];
         lines.extend(self.error_lines.clone());
+        lines.push(String::new());
+        lines.push("R retry launch · Esc back to dispatch".to_string());
         lines
     }
 
@@ -1153,9 +1228,9 @@ impl App {
             matches!(
                 entry.slug,
                 "vc-workflow" | "vc-review" | "vc-marbles" | "vc-polarize"
-            ) || selected_skill
-                .as_deref()
-                .is_some_and(|skill| entry.slug == skill || entry.slug.trim_start_matches("vc-") == skill)
+            ) || selected_skill.as_deref().is_some_and(|skill| {
+                entry.slug == skill || entry.slug.trim_start_matches("vc-") == skill
+            })
         }) {
             let agent = resolve_skill_agent(entry.default_agent, self.selected_agent());
             let payload = match entry.accepts {
@@ -1449,11 +1524,16 @@ pub fn default_prompt(kind: LaunchKind) -> String {
         LaunchKind::Marbles => {
             "Run a convergence loop on the selected surface until the lies are exposed.".to_string()
         }
+        LaunchKind::Skill(entry) => {
+            format!("Run {} for the task I am looking at now.", entry.display)
+        }
     }
 }
 
-pub fn agents() -> [&'static str; 4] {
-    ["claude", "codex", "gemini", "cursor"]
+pub fn agents() -> [&'static str; 7] {
+    [
+        "claude", "codex", "gemini", "cursor", "agy", "junie", "grok",
+    ]
 }
 
 fn apply_run_filters(
@@ -1464,7 +1544,8 @@ fn apply_run_filters(
 ) {
     let now = chrono::Utc::now();
     let workspace_live = runs.iter().any(|run| {
-        is_actionable_kind(run.kind, &run.snapshot, now) && workspace_matches(&run.snapshot, workspace)
+        is_actionable_kind(run.kind, &run.snapshot, now)
+            && workspace_matches(&run.snapshot, workspace)
     });
     match queue_scope {
         QueueScope::Live => runs.retain(|run| {
@@ -1524,12 +1605,27 @@ fn truncate_id(value: &str, width: usize) -> String {
     if value.chars().count() <= width {
         return value.to_string();
     }
-    let mut short = value.chars().take(width.saturating_sub(1)).collect::<String>();
+    let mut short = value
+        .chars()
+        .take(width.saturating_sub(1))
+        .collect::<String>();
     short.push('…');
     short
 }
 
-fn wrap_operator_line(value: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrapped_line_count<I, S>(lines: I, width: u16) -> usize
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let width = usize::from(width.max(8));
+    lines
+        .into_iter()
+        .map(|line| wrap_operator_line(line.as_ref(), width).len().max(1))
+        .sum()
+}
+
+pub(crate) fn wrap_operator_line(value: &str, width: usize) -> Vec<String> {
     if value.chars().count() <= width {
         return vec![value.to_string()];
     }
@@ -1607,7 +1703,9 @@ fn artifact_lines(path: &Path, run_root: Option<&str>) -> anyhow::Result<Vec<Str
         text
     };
     if rendered.trim().is_empty() {
-        return Ok(vec!["No transcript or events in this artifact yet.".to_string()]);
+        return Ok(vec![
+            "No transcript or events in this artifact yet.".to_string(),
+        ]);
     }
     let mut lines = rendered
         .lines()

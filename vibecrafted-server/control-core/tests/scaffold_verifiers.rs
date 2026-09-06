@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use control_core::{
-    doctor_plan_root, extract_brief_verifier_commands, SCAFFOLD_MANIFEST_SCHEMA_JSON,
+    SCAFFOLD_MANIFEST_SCHEMA_JSON, doctor_plan_root, extract_brief_verifier_commands,
 };
 use serde_json::json;
 

@@ -389,7 +389,17 @@ def test_runtime_pack_signing_happens_after_final_copy_and_before_archive() -> N
     assert '--payload-root "$RUNTIME_PAYLOAD"' in producer
     assert '--app "$APP"' not in producer
     assert (
-        'install -m 0755 "$terminal_source" "$runtime/bin/vc-terminal"' in materializer
+        'install -m 0755 "$terminal_source" "$runtime/libexec/vc-terminal"'
+        in materializer
+    )
+    assert (
+        'install -m 0755 "$runtime/scripts/vc-terminal-product-entry.sh"'
+        in materializer
+    )
+    assert '"$runtime/bin/vc-terminal"' in materializer
+    assert (
+        'install -m 0755 "$terminal_source" "$runtime/bin/vc-terminal"'
+        not in materializer
     )
     assert 'install -m 0755 "$frame_source" "$runtime/libexec/vc-frame"' in materializer
     assert 'install -m 0644 "$RUNTIME_PACK" "$EMBEDDED_RUNTIME_PACK"' in embed
@@ -580,9 +590,17 @@ def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
     )
     assert 'terminal_policy = product_config / "terminal-policy.toml"' in installer
     assert 'terminal_policy_source.read_text(encoding="utf-8")' in installer
-    assert 'product_config / "terminal-entry.toml"' in installer
+    assert 'product_config / "vc-terminal" / "vc-terminal.toml"' in installer
+    assert 'product_config / "terminal-entry.toml"' not in installer
+    assert "_reclaim_product_terminal_debris" in installer
+    assert "vc-terminal/alacritty.toml" in installer
+    assert "launch-alt-screen" not in installer
     assert 'product_config / "terminal-theme.toml"' in installer
     assert 'product_config / "terminal.toml"' not in installer
+    assert (
+        'install -m 0755 "$terminal_source" "$runtime/libexec/vc-terminal"' in builder
+    )
+    assert "vc-terminal-product-entry.sh" in builder
     assert (
         'install -m 0644 "$SPOT_MONO_FONT" "$resources/fonts/SpotMono.ttc"' in builder
     )

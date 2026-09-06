@@ -38,13 +38,7 @@ const OBSERVABILITY_VIEW_SCHEMA: &str = "vibecrafted.observability-view.v1";
 const CARETAKER_SNAPSHOT_NAME: &str = "caretaker.json";
 
 /// One named projection of the control plane.
-fn projection(
-    name: &str,
-    kind: &str,
-    route: &str,
-    source_path: PathBuf,
-    missing: &str,
-) -> Value {
+fn projection(name: &str, kind: &str, route: &str, source_path: PathBuf, missing: &str) -> Value {
     let available = source_path.exists();
     json!({
         "name": name,

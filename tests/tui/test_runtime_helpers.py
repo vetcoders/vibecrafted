@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import textwrap
@@ -497,8 +498,58 @@ def test_recovery_session_name_fits_macos_default_socket_budget() -> None:
         check=False,
     )
 
-    assert result.returncode == 0
-    assert len(result.stdout.strip().encode("utf-8")) <= 20
+    name = result.stdout.strip()
+    assert result.returncode == 0, result.stderr
+    assert len(name.encode("utf-8")) <= 24
+    assert re.search(r"-r[0-9]{6}-[0-9]+$", name) is None
+
+
+def test_recovery_session_name_keeps_the_place_label() -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            "-lc",
+            (
+                f'source "{HELPER_SCRIPT}"; '
+                '_vetcoders_recovery_vc_frame_session_name "vibecrafted"'
+            ),
+        ],
+        cwd=REPO_ROOT,
+        env={**os.environ, "VIBECRAFTED_ROOT": str(REPO_ROOT)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    name = result.stdout.strip()
+    assert result.returncode == 0, result.stderr
+    assert name.startswith("vibecrafted")
+    assert name != "vibecrafted"
+    assert len(name.encode("utf-8")) <= 24
+
+
+def test_recovery_session_name_does_not_keep_hashed_incarnation() -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            "-lc",
+            (
+                f'source "{HELPER_SCRIPT}"; '
+                '_vetcoders_recovery_vc_frame_session_name "3m-4ad4-r034605-2072"'
+            ),
+        ],
+        cwd=REPO_ROOT,
+        env={**os.environ, "VIBECRAFTED_ROOT": str(REPO_ROOT)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    name = result.stdout.strip()
+    assert result.returncode == 0, result.stderr
+    assert "4ad4" not in name
+    assert "-r034605-" not in name
+    assert len(name.encode("utf-8")) <= 24
 
 
 def test_vc_marbles_wrapper_routes_control_subcommands(tmp_path: Path) -> None:

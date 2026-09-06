@@ -8,6 +8,7 @@ Subcommands:
     uninstall       Remove 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. skills, views, launchers, and helpers
     restore         Restore pre-install state from backup
     runtime-install Install a signed/offline Runtime Pack for the native app or CLI
+    runtime-resolve Read installed Runtime Pack identity without mutation
     runtime-uninstall
                     Remove exactly the Runtime Pack surfaces recorded at install
 
@@ -18,6 +19,7 @@ Usage:
     python3 scripts/vetcoders_install.py uninstall [--dry-run]
     python3 scripts/vetcoders_install.py restore [--dry-run]
     python3 scripts/vetcoders_install.py runtime-install --payload-root PATH [--app-root PATH]
+    python3 -B scripts/vetcoders_install.py runtime-resolve --runtime-home ABSOLUTE_PATH --json
     python3 scripts/vetcoders_install.py runtime-uninstall [--dry-run]
 """
 
@@ -26,6 +28,7 @@ from __future__ import annotations
 import argparse
 import ast
 import ctypes
+import difflib
 import errno
 import fcntl
 import hashlib
@@ -58,6 +61,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 from xml.parsers.expat import ExpatError
+
+# Resolution imports must not populate bytecode in an installed generation.
+if "runtime-resolve" in sys.argv[1:2]:
+    sys.dont_write_bytecode = True
 
 try:
     _distribution_manifest = importlib.import_module("distribution_manifest")
@@ -8501,6 +8508,55 @@ def _materialize_runtime_generation_vc_frame_entry(runtime_root: Path) -> None:
     target.chmod(0o755)
 
 
+_NATIVE_EXECUTABLE_MAGIC = {
+    b"\x7fELF",
+    b"\xca\xfe\xba\xbe",
+    b"\xbe\xba\xfe\xca",
+    b"\xfe\xed\xfa\xce",
+    b"\xce\xfa\xed\xfe",
+    b"\xfe\xed\xfa\xcf",
+    b"\xcf\xfa\xed\xfe",
+}
+
+
+def _is_native_executable(path: Path) -> bool:
+    """True when `path` is a Mach-O or ELF regular file, not a product wrapper."""
+    try:
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o111 == 0:
+            return False
+        with path.open("rb") as stream:
+            magic = stream.read(4)
+    except OSError:
+        return False
+    return magic in _NATIVE_EXECUTABLE_MAGIC
+
+
+def _materialize_runtime_generation_vc_terminal_entry(runtime_root: Path) -> None:
+    """Pin generation `bin/vc-terminal` to the product config, host in libexec.
+
+    A raw `releases/<ver>/bin/vc-terminal` used to be the Alacritty Mach-O, so
+    it read `~/.config/alacritty/` and tried to spawn a literal `${HOME}/...`
+    program. Same split as vc-frame: native bytes under libexec, wrapper on PATH.
+    """
+    source = runtime_root / "scripts" / "vc-terminal-product-entry.sh"
+    bin_term = runtime_root / "bin" / "vc-terminal"
+    libexec = runtime_root / "libexec" / "vc-terminal"
+    libexec.parent.mkdir(parents=True, exist_ok=True)
+    if bin_term.is_file() and _is_native_executable(bin_term):
+        if libexec.exists() and _is_native_executable(libexec):
+            bin_term.unlink()
+        else:
+            os.replace(bin_term, libexec)
+            libexec.chmod(0o755)
+    if not libexec.is_file() or not _is_native_executable(libexec):
+        raise OSError(f"candidate runtime has no native vc-terminal host: {libexec}")
+    if not source.is_file():
+        raise OSError(f"candidate runtime has no vc-terminal product entry: {source}")
+    shutil.copy2(source, bin_term)
+    bin_term.chmod(0o755)
+
+
 def _runtime_active_text_files(runtime_root: Path) -> Iterator[Path]:
     """Yield every active (non-symlink) text config/script file under the runtime's watched
     roots.
@@ -9373,6 +9429,7 @@ def _prepare_runtime_generation_candidate(
     _materialize_vc_frame_generation(staging)
     _materialize_runtime_generation_entrypoint(staging)
     _materialize_runtime_generation_vc_frame_entry(staging)
+    _materialize_runtime_generation_vc_terminal_entry(staging)
     audit_errors = _runtime_generation_audit_errors(staging, source_root=src)
     if audit_errors:
         raise OSError("\n".join(audit_errors))
@@ -11704,20 +11761,42 @@ def _doctor_runtime_receipt_findings() -> list[DoctorFinding]:
     invisible; doctor must see it. Emits nothing when no runtime receipt
     exists (source-only installs never wrote one).
     """
-    receipt_path = _runtime_receipt_path(_runtime_install_paths()["runtime_home"])
+    paths = _runtime_install_paths()
+    receipt_path = _runtime_receipt_path(paths["runtime_home"])
     if not receipt_path.is_file():
         return []
     try:
         receipt = _load_runtime_install_receipt(receipt_path)
     except RuntimeError as exc:
         return [DoctorFinding("warn", "runtime-receipt", str(exc))]
+    if "config_transaction" in receipt or any(
+        receipt.get(key)
+        for key in (
+            "install_pending",
+            "config_pending",
+            "config_conflicts",
+            "uninstall_pending",
+        )
+    ):
+        return [
+            DoctorFinding(
+                "fail",
+                "runtime-receipt",
+                "Runtime Pack publication or recovery is pending; rerun make install",
+            )
+        ]
+    preferences = _runtime_preference_paths(paths["product_config"])
     missing: list[str] = []
     drifted: list[str] = []
     for key, digest in receipt.get("owned_files", {}).items():
         path = Path(key)
         if not _path_present(path):
             missing.append(key)
-        elif path.is_symlink() or not path.is_file() or _sha256_path(path) != digest:
+        elif (
+            path.is_symlink()
+            or not path.is_file()
+            or (path not in preferences and _sha256_path(path) != digest)
+        ):
             drifted.append(key)
     findings: list[DoctorFinding] = []
     if missing or drifted:
@@ -11737,7 +11816,11 @@ def _doctor_runtime_receipt_findings() -> list[DoctorFinding]:
         )
     else:
         findings.append(
-            DoctorFinding("ok", "runtime-receipt", "receipted files match disk")
+            DoctorFinding(
+                "ok",
+                "runtime-receipt",
+                "managed files match receipt; preference content remains user-owned",
+            )
         )
     return findings
 
@@ -15267,7 +15350,7 @@ _RUNTIME_NAMESPACE_PREFIXES = ("vc-", "vibecrafted")
 _RUNTIME_NAMESPACE_NAMES = {"vibecraft", "telemetry"}
 
 
-def _runtime_install_paths() -> dict[str, Path]:
+def _runtime_install_paths(runtime_home_override: str | None = None) -> dict[str, Path]:
     """Resolve the one cross-channel runtime/config/state layout."""
     home = Path.home()
     runtime_home = Path(
@@ -15279,7 +15362,11 @@ def _runtime_install_paths() -> dict[str, Path]:
             ),
         )
     ).expanduser()
-    config_home = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config")).expanduser()
+    if runtime_home_override is not None:
+        runtime_home = Path(runtime_home_override)
+        if not runtime_home.is_absolute():
+            raise RuntimeError("--runtime-home requires an absolute path")
+    config_home = home / ".config"
     return {
         "runtime_home": runtime_home,
         "config_home": config_home,
@@ -15318,7 +15405,7 @@ def _assert_runtime_tree_has_no_symlinks(root: Path) -> None:
 def _atomic_text(path: Path, body: str, *, mode: int = 0o644) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.parent / f".{path.name}.new-{os.getpid()}"
-    temporary.write_text(body, encoding="utf-8")
+    temporary.write_text(body, encoding="utf-8", newline="")
     temporary.chmod(mode)
     os.replace(temporary, path)
 
@@ -15332,6 +15419,8 @@ def _runtime_launcher_body(
     frame_config: Path,
     executable: Path,
     leading_arguments: Sequence[str] = (),
+    environment: Mapping[str, str] | None = None,
+    prepend_generation_bin: bool = True,
 ) -> str:
     quoted_arguments = " ".join(shlex_quote(value) for value in leading_arguments)
     prefix = f"{quoted_arguments} " if quoted_arguments else ""
@@ -15346,10 +15435,23 @@ def _runtime_launcher_body(
         f"export VIBECRAFTED_PYTHON={shlex_quote(str(generation / 'bin/python3'))}",
         f"export VIBECRAFTED_VC_FRAME_BIN={shlex_quote(str(generation / 'libexec/vc-frame'))}",
         f"export VC_FRAME_CONFIG_DIR={shlex_quote(str(frame_config))}",
-        f'export PATH="{generation / "bin"}:${{PATH:-/usr/bin:/bin:/usr/sbin:/sbin}}"',
-        'export VIBECRAFTED_DECLARED_LAUNCHER="$0"',
-        f'exec {shlex_quote(str(executable))} {prefix}"$@"',
     ]
+    for name, value in sorted((environment or {}).items()):
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+            raise ValueError(f"invalid runtime launcher environment name: {name!r}")
+        lines.append(f"export {name}={shlex_quote(value)}")
+    if prepend_generation_bin:
+        lines.append(
+            f'export PATH="{generation / "bin"}:${{PATH:-/usr/bin:/bin:/usr/sbin:/sbin}}"'
+        )
+    else:
+        lines.append('export PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"')
+    lines.extend(
+        [
+            'export VIBECRAFTED_DECLARED_LAUNCHER="$0"',
+            f'exec {shlex_quote(str(executable))} {prefix}"$@"',
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -15362,7 +15464,7 @@ def _load_runtime_install_receipt(path: Path) -> dict[str, Any]:
         raise RuntimeError(
             f"cannot read runtime install receipt {path}: {exc}"
         ) from exc
-    if receipt.get("schema") != RUNTIME_INSTALL_SCHEMA:
+    if not isinstance(receipt, dict) or receipt.get("schema") != RUNTIME_INSTALL_SCHEMA:
         raise RuntimeError(f"unsupported runtime install receipt schema: {path}")
     return receipt
 
@@ -15384,6 +15486,8 @@ def _backup_runtime_collision(
     backup_root = runtime_home / ".installer-backups" / "original"
     token = hashlib.sha256(key.encode("utf-8")).hexdigest()[:20]
     backup = backup_root / f"{token}-{destination.name}"
+    if _path_present(backup):
+        backup = backup_root / f"{token}-{os.urandom(6).hex()}-{destination.name}"
     backup.parent.mkdir(parents=True, exist_ok=True)
     _copy_path_to_backup(destination, backup)
     backups[key] = str(backup)
@@ -15393,16 +15497,25 @@ def _backup_runtime_collision(
 
 
 def _backup_runtime_drift(
-    destination: Path, *, runtime_home: Path, receipt: dict[str, Any]
+    destination: Path,
+    *,
+    runtime_home: Path,
+    receipt: dict[str, Any],
+    reason: str = "managed path diverged since install",
 ) -> Path:
     """Preserve an operator-diverged managed path before the installer reclaims it.
 
-    Drift backups are content-addressed and live apart from the `original`
+    File drift backups are content-addressed; trees and symlinks get unique
+    snapshots. They live apart from the `original`
     collision tree: `backups` carries over between installs and would
     early-return, silently dropping the operator's newest divergent copy.
     """
     token = hashlib.sha256(str(destination).encode("utf-8")).hexdigest()[:20]
-    marker = _sha256_path(destination)[:12] if destination.is_file() else "nonfile"
+    marker = (
+        _sha256_path(destination)[:12]
+        if not destination.is_symlink() and destination.is_file()
+        else os.urandom(6).hex()
+    )
     backup = (
         runtime_home
         / ".installer-backups"
@@ -15412,11 +15525,18 @@ def _backup_runtime_drift(
     if not _path_present(backup):
         backup.parent.mkdir(parents=True, exist_ok=True)
         _copy_path_to_backup(destination, backup)
+    history = receipt.setdefault("drift_backup_history", {}).setdefault(
+        str(destination), []
+    )
+    prior = receipt.get("drift_backups", {}).get(str(destination))
+    for value in (prior, str(backup)):
+        if value and value not in history:
+            history.append(value)
     receipt.setdefault("drift_backups", {})[str(destination)] = str(backup)
     _checkpoint_runtime_install_receipt(runtime_home, receipt)
     print(
-        f"[runtime-install] managed path diverged since install; "
-        f"reclaimed {destination} (divergent copy: {backup})",
+        f"[runtime-install] {reason}; "
+        f"preserved {destination} (divergent copy: {backup})",
         file=sys.stderr,
     )
     return backup
@@ -15457,6 +15577,716 @@ def _write_runtime_owned_file(
     _checkpoint_runtime_install_receipt(runtime_home, receipt)
 
 
+def _merge_runtime_preferences(
+    previous: str | None, current: str, incoming: str, *, kdl: bool = False
+) -> str:
+    """Carry independent user edits onto new defaults; refuse ambiguous overlap.
+
+    This is a conservative text merge, not a KDL/TOML rewrite. Comments and
+    user formatting survive. Missing history and touching edits require an
+    explicit resolution instead of guessing which preference should win.
+    """
+    if current == incoming:
+        return current
+    if previous is None:
+        raise ValueError("previous shipped defaults are unavailable")
+    if current == previous:
+        return incoming
+    if incoming == previous:
+        return current
+    if kdl:
+        # setup --check prints config errors but exits zero, so it is not a
+        # safe validation API. Never synthesize KDL from two changed documents.
+        # Keep exact user bytes when defaults are unchanged; otherwise require
+        # explicit resolution against the preserved previous/incoming defaults.
+        raise ValueError(
+            "both user KDL and shipped defaults changed; explicit merge required"
+        )
+    base = previous.splitlines(keepends=True)
+
+    def edits(text: str) -> list[tuple[int, int, list[str]]]:
+        lines = text.splitlines(keepends=True)
+        return [
+            (a, b, lines[c:d])
+            for tag, a, b, c, d in difflib.SequenceMatcher(
+                a=base, b=lines, autojunk=False
+            ).get_opcodes()
+            if tag != "equal"
+        ]
+
+    user_edits = edits(current)
+    upstream_edits = edits(incoming)
+
+    merged_edits = list(upstream_edits)
+    for user in user_edits:
+        for upstream in upstream_edits:
+            if user == upstream:
+                break
+            if user[0] <= upstream[1] and upstream[0] <= user[1]:
+                raise ValueError("user edits overlap or touch changed shipped defaults")
+        else:
+            merged_edits.append(user)
+    result = list(base)
+    for start, end, replacement in sorted(
+        merged_edits, key=lambda edit: edit[0], reverse=True
+    ):
+        result[start:end] = replacement
+    return "".join(result)
+
+
+def _runtime_preference_paths(product_config: Path) -> tuple[Path, ...]:
+    """Canonical user-owned content, distinct from generated executable/config assets."""
+    return (
+        product_config / "vc-frame/config.kdl",
+        product_config / "terminal-policy.toml",
+        product_config / "terminal-theme.toml",
+    )
+
+
+def _validate_runtime_preference(path: Path) -> None:
+    """Apply the resolver's read-only preference contract before accepting user drift."""
+    _assert_runtime_physical_path(path)
+    text = _capture_runtime_bound_file(path).decode("utf-8")
+    if not text.strip() or "\0" in text:
+        raise RuntimeError(f"product preference is empty or invalid: {path.name}")
+    if path.suffix == ".toml":
+        import tomllib
+
+        tomllib.loads(text)
+
+
+def _prepare_runtime_preferences(
+    generation: Path,
+    product_config: Path,
+    *,
+    runtime_home: Path,
+    receipt: dict[str, Any],
+    previous: dict[str, Any],
+) -> dict[Path, dict[str, Any]]:
+    """Preflight every preference before changing config or runtime selectors.
+
+    Defaults are read from the old receipted generation, never from the last
+    installed user bytes. Per-file default lineage in the same install receipt
+    also makes retries after a partially completed installation unambiguous.
+    """
+    sources = {
+        product_config / "vc-frame/config.kdl": Path(
+            "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
+        ),
+        product_config / "terminal-policy.toml": Path(
+            "config/vc-terminal/vibecrafted.toml"
+        ),
+    }
+    prior_generation = previous.get("owned_symlinks", {}).get(
+        str(runtime_home / "tools/vibecrafted-current")
+    )
+    defaults = previous.get("config_defaults", {})
+    prepared: dict[Path, dict[str, Any]] = {}
+    conflicts: list[dict[str, str]] = []
+    for destination, relative in sources.items():
+        incoming_source = generation / relative
+        incoming = incoming_source.read_bytes().decode("utf-8")
+        old = defaults.get(str(destination), {})
+        baseline: str | None = None
+        baseline_source: Path | None = None
+        backup_destination = destination
+        try:
+            aliases = [
+                path
+                for path in (destination, *destination.parents)
+                if path.is_symlink()
+            ]
+            if aliases:
+                backup_destination = aliases[-1]
+                raise ValueError(
+                    "product preference path is aliased; "
+                    "resolve its ownership explicitly"
+                )
+            if _path_present(destination) and not destination.is_file():
+                raise ValueError("product preference is not a regular file")
+            current_raw = destination.read_bytes() if destination.is_file() else None
+            current_hash = (
+                hashlib.sha256(current_raw).hexdigest()
+                if current_raw is not None
+                else None
+            )
+            if previous.get("config_pending"):
+                raise ValueError(
+                    "legacy partial configuration publication requires explicit "
+                    "backup recovery; per-file markers cannot prove a complete install"
+                )
+            old_generation = old.get("generation", prior_generation)
+            if old_generation:
+                old_root = Path(old_generation)
+                if (
+                    not old_root.is_absolute()
+                    or old_root.parent != runtime_home / "releases"
+                ):
+                    raise ValueError(
+                        "previous defaults escape the receipted release root"
+                    )
+                baseline_source = old_root / relative
+                if any(
+                    path.is_symlink()
+                    for path in (baseline_source, *baseline_source.parents)
+                ):
+                    raise ValueError("previous shipped defaults are aliased")
+                if not baseline_source.is_file():
+                    raise ValueError("previous shipped defaults are missing")
+                manifest, manifest_error = _load_runtime_generation_manifest(old_root)
+                if manifest is None:
+                    raise ValueError(
+                        manifest_error or "previous generation manifest is invalid"
+                    )
+                raw = baseline_source.read_bytes()
+                digest = hashlib.sha256(raw).hexdigest()
+                expected_digest = (
+                    old.get("sha256")
+                    or manifest["hashes"].get(relative.as_posix())
+                    or previous.get("owned_files", {}).get(str(destination))
+                )
+                if not expected_digest or digest != expected_digest:
+                    raise ValueError(
+                        "previous shipped defaults differ from their receipt"
+                    )
+                bound_digest = manifest["hashes"].get(relative.as_posix())
+                if bound_digest and digest != bound_digest:
+                    raise ValueError(
+                        "previous shipped defaults differ from their manifest"
+                    )
+                baseline = raw.decode("utf-8")
+            current = current_raw.decode("utf-8") if current_raw is not None else None
+            body = (
+                incoming
+                if current is None
+                else _merge_runtime_preferences(
+                    baseline, current, incoming, kdl=destination.suffix == ".kdl"
+                )
+            )
+            if not body.strip() or "\0" in body:
+                raise ValueError("merged preference file is empty or invalid")
+            if destination.suffix == ".toml":
+                import tomllib
+
+                tomllib.loads(body)
+        except (OSError, UnicodeError, ValueError) as exc:
+            # Reuse the installer's backup and receipt, without installing a
+            # conflict-marker file or creating another preference directory.
+            backup = ""
+            if _path_present(backup_destination):
+                backup = str(
+                    _backup_runtime_drift(
+                        backup_destination,
+                        runtime_home=runtime_home,
+                        receipt=receipt,
+                        reason="product configuration conflict",
+                    )
+                )
+            conflicts.append(
+                {
+                    "path": str(destination),
+                    "reason": str(exc),
+                    "backup": backup,
+                    "previous_defaults": str(baseline_source or ""),
+                    "incoming_defaults": str(incoming_source),
+                }
+            )
+            continue
+        prepared[destination] = {
+            "body": body,
+            "current_sha256": current_hash,
+            "defaults": {
+                "generation": str(generation),
+                "sha256": hashlib.sha256(incoming.encode("utf-8")).hexdigest(),
+            },
+        }
+    if conflicts:
+        receipt["config_conflicts"] = conflicts
+        _checkpoint_runtime_install_receipt(runtime_home, receipt)
+        raise RuntimeError(
+            "product configuration conflict; config and runtime selectors "
+            "were not published. Resolve the preserved user configuration "
+            "against previous/incoming defaults "
+            "listed in install-receipt.json and retry runtime-install: "
+            + "; ".join(f"{item['path']}: {item['reason']}" for item in conflicts)
+        )
+    receipt.pop("config_conflicts", None)
+    _checkpoint_runtime_install_receipt(runtime_home, receipt)
+    return prepared
+
+
+def _assert_runtime_physical_path(path: Path, *, leaf_symlink: bool = False) -> None:
+    """Reject aliases before inspecting receipt-bound state (without creating it)."""
+    if not path.is_absolute() or Path(os.path.abspath(path)) != path:
+        raise RuntimeError(f"runtime path must be normalized and absolute: {path}")
+    for candidate in (*reversed(path.parents), path):
+        try:
+            mode = candidate.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(mode) and not (leaf_symlink and candidate == path):
+            raise RuntimeError(f"runtime path is aliased: {candidate}")
+        if candidate != path and not stat.S_ISDIR(mode):
+            raise RuntimeError(f"runtime ancestor is not a directory: {candidate}")
+
+
+def _runtime_config_inventory(path: Path) -> dict[str, list[Any]] | None:
+    """Snapshot names, bytes and modes; symlinks are opaque only at the root.
+
+    This inventory serves transaction equality, not configuration semantics.
+    Host .DS_Store metadata cannot participate in publication identity.
+    """
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(metadata.st_mode):
+        return {".": ["symlink", os.readlink(path)]}
+    entries: dict[str, list[Any]] = {}
+
+    def visit(node: Path, relative: str) -> None:
+        mode = node.lstat().st_mode
+        if stat.S_ISREG(mode):
+            entries[relative] = ["file", stat.S_IMODE(mode), _sha256_path(node)]
+        elif stat.S_ISDIR(mode):
+            entries[relative] = ["directory", stat.S_IMODE(mode)]
+            for child in sorted(node.iterdir()):
+                if child.name != ".DS_Store":
+                    visit(child, child.relative_to(path).as_posix())
+        else:
+            raise RuntimeError(f"non-physical configuration asset: {node}")
+
+    visit(path, ".")
+    return entries
+
+
+def _runtime_config_digest(path: Path) -> str | None:
+    inventory = _runtime_config_inventory(path)
+    if inventory is None:
+        return None
+    return hashlib.sha256(json.dumps(inventory, sort_keys=True).encode()).hexdigest()
+
+
+def _sync_runtime_config_path(path: Path) -> None:
+    """Flush pre/postimages before the receipt can authorize any replacement."""
+    if path.is_symlink():
+        return
+    if path.is_dir():
+        for child in path.iterdir():
+            if child.name != ".DS_Store":
+                _sync_runtime_config_path(child)
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _runtime_backup_entries(receipt: Mapping[str, Any]) -> Iterator[tuple[str, str]]:
+    for key in ("backups", "drift_backups"):
+        yield from receipt.get(key, {}).items()
+    for destination, backups in receipt.get("drift_backup_history", {}).items():
+        for backup in backups:
+            yield destination, backup
+
+
+def _validate_runtime_backup_receipts(
+    receipt: Mapping[str, Any], paths: Mapping[str, Path]
+) -> None:
+    backup_root = paths["runtime_home"] / ".installer-backups"
+    _assert_runtime_physical_path(backup_root)
+    for destination_raw, backup_raw in _runtime_backup_entries(receipt):
+        destination, backup = Path(destination_raw), Path(backup_raw)
+        if not (
+            _receipt_path_is_allowed(destination, paths)
+            or _receipt_projection_path_is_allowed(destination)
+        ):
+            raise RuntimeError(
+                f"receipt restore path escapes managed roots: {destination}"
+            )
+        _assert_runtime_physical_path(destination, leaf_symlink=True)
+        _assert_runtime_physical_path(backup, leaf_symlink=True)
+        if not _receipt_backup_path_is_allowed(backup, backup_root):
+            raise RuntimeError(f"receipt backup path escapes backup root: {backup}")
+        backup.lstat()  # A missing receipted snapshot is never successful recovery.
+
+
+def _stage_runtime_product_config(
+    generation: Path,
+    paths: Mapping[str, Path],
+    preferences: Mapping[Path, Mapping[str, Any]],
+    staged: Path,
+    receipt: dict[str, Any],
+    previous: Mapping[str, Any],
+) -> None:
+    """Build the complete physical postimage before touching effective config."""
+    product = paths["product_config"]
+    _assert_runtime_physical_path(product)
+    _assert_runtime_tree_has_no_symlinks(product)
+    if product.exists():
+        shutil.copytree(product, staged)
+    else:
+        staged.mkdir()
+    for path, preference in preferences.items():
+        current = _sha256_path(path) if path.is_file() else None
+        if current != preference["current_sha256"]:
+            raise RuntimeError(f"preference changed during staging: {path}")
+
+    frame = product / "vc-frame"
+    generated_relative = Path(
+        "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame"
+    )
+    old_generation = previous.get("owned_symlinks", {}).get(
+        str(paths["runtime_home"] / "tools/vibecrafted-current")
+    )
+    if frame.exists():
+        # Whole-tree replacement must not silently discard a custom layout,
+        # theme, script, or extra asset. A changed managed tree is a conflict.
+        current = _runtime_config_inventory(frame) or {}
+        expected = (
+            _runtime_config_inventory(Path(old_generation) / generated_relative)
+            if old_generation
+            else None
+        )
+        incoming = _runtime_config_inventory(generation / generated_relative) or {}
+        for inventory in (current, expected, incoming):
+            if inventory is not None:
+                inventory.pop("config.kdl", None)
+        if current != expected and current != incoming:
+            _backup_runtime_drift(
+                frame,
+                runtime_home=paths["runtime_home"],
+                receipt=receipt,
+                reason="frame assets conflict with shipped defaults",
+            )
+            raise RuntimeError(
+                "frame layouts/themes/scripts changed; restore or resolve the "
+                "preserved frame tree before retrying the Runtime Pack installer"
+            )
+    for relative, source in (
+        ("vc-frame", generation / generated_relative),
+        ("shell", generation / "vibecrafted-core/vibecrafted_core/runtime/shell"),
+    ):
+        destination = product / relative
+        if destination.exists() and str(destination) not in previous.get(
+            "owned_dirs", []
+        ):
+            _backup_runtime_collision(
+                destination, runtime_home=paths["runtime_home"], receipt=receipt
+            )
+        target = staged / relative
+        if target.exists():
+            _remove_path(target)
+        shutil.copytree(source, target)
+        if str(destination) not in receipt["owned_dirs"]:
+            receipt["owned_dirs"].append(str(destination))
+    for path, preference in preferences.items():
+        target = staged / path.relative_to(product)
+        target.write_bytes(preference["body"].encode("utf-8"))
+        receipt.setdefault("config_defaults", {})[str(path)] = preference["defaults"]
+
+    theme = staged / "terminal-theme.toml"
+    if not theme.exists():
+        shutil.copy2(generation / "config/vc-terminal/themes/dark.toml", theme)
+    import tomllib
+
+    # Theme bytes are user-owned; parsing never rewrites them.
+    tomllib.loads(theme.read_text(encoding="utf-8"))
+    terminal = staged / "vc-terminal"
+    terminal.mkdir(exist_ok=True)
+    for relative in _PRODUCT_TERMINAL_DEBRIS:
+        debris = staged / relative
+        if _path_present(debris):
+            _remove_path(debris)
+        receipt["owned_files"].pop(str(product / relative), None)
+    for debris in terminal.glob("launch-*.zsh"):
+        if debris.name != _PRODUCT_PRIMARY_SHELL_NAME:
+            _remove_path(debris)
+            receipt["owned_files"].pop(str(product / "vc-terminal" / debris.name), None)
+    policy = product / "terminal-policy.toml"
+    (terminal / "vc-terminal.toml").write_text(
+        "# Generated by the Vibecrafted installer.\n[general]\nimport = [\n"
+        f"  {json.dumps(str(policy))},\n"
+        f"  {json.dumps(str(product / 'terminal-theme.toml'))},\n"
+        "]\nlive_config_reload = true\n",
+        encoding="utf-8",
+    )
+    shutil.copy2(
+        generation / "config/alacritty/launch-primary-shell.zsh",
+        terminal / _PRODUCT_PRIMARY_SHELL_NAME,
+    )
+    if str(product / "vc-terminal") not in receipt["owned_dirs"]:
+        receipt["owned_dirs"].append(str(product / "vc-terminal"))
+    for raw in list(receipt["owned_files"]):
+        if any(
+            _path_is_under(Path(raw), product / name) for name in ("vc-frame", "shell")
+        ):
+            receipt["owned_files"].pop(raw)
+    # Receipt every managed file, not just config.kdl. Preferences have separate
+    # default lineage and resolution deliberately permits their edited bytes.
+    for subtree in (staged / "vc-frame", staged / "shell", terminal):
+        for entry in subtree.rglob("*"):
+            if entry.is_file() and entry.name != ".DS_Store":
+                receipt["owned_files"][str(product / entry.relative_to(staged))] = (
+                    _sha256_path(entry)
+                )
+    receipt["owned_files"][str(policy)] = _sha256_path(staged / "terminal-policy.toml")
+    _assert_runtime_tree_has_no_symlinks(staged)
+
+
+def _runtime_transaction_paths(
+    entry: Mapping[str, Any], paths: Mapping[str, Path]
+) -> tuple[Path, Path, Path]:
+    destination = Path(entry["path"])
+    runtime_home = paths["runtime_home"]
+    allowed = destination in {
+        paths["product_config"],
+        runtime_home / "active.json",
+        runtime_home / "tools/vibecrafted-current",
+    } or (
+        destination.parent == paths["launcher_home"]
+        and (
+            _runtime_launcher_public_name(destination.name) is not None
+            or destination.name == SECURE_WALKAROUND_LAUNCHER
+        )
+    )
+    allowed = (
+        allowed
+        or _receipt_projection_path_is_allowed(destination)
+        or (destination == paths["crafted_home"] / STATE_FILE)
+    )
+    if not allowed:
+        raise RuntimeError("config transaction destination escapes publication roots")
+    _assert_runtime_physical_path(destination, leaf_symlink=True)
+    before, after = Path(entry["before"]), Path(entry["after"])
+    for backup in (before, after):
+        _assert_runtime_physical_path(backup, leaf_symlink=True)
+        if not _receipt_backup_path_is_allowed(
+            backup, runtime_home / ".installer-backups"
+        ):
+            raise RuntimeError("config transaction snapshot escapes backup root")
+    for key in ("temporary", "displaced"):
+        expected = destination.parent / f".{destination.name}.{key}-{entry['token']}"
+        if Path(entry[key]) != expected:
+            raise RuntimeError("config transaction temporary path mismatch")
+        _assert_runtime_physical_path(expected, leaf_symlink=True)
+    return destination, before, after
+
+
+def _replace_runtime_transaction_entry(
+    entry: Mapping[str, Any], source: Path | None
+) -> None:
+    destination = Path(entry["path"])
+    temporary, displaced = Path(entry["temporary"]), Path(entry["displaced"])
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    for leftover in (temporary, displaced):
+        if _path_present(leftover):
+            _remove_path(leftover)
+    if source is not None:
+        _copy_path_to_backup(source, temporary)
+        _sync_runtime_config_path(temporary)
+    needs_displacement = (destination.is_dir() and not destination.is_symlink()) or (
+        source is not None and source.is_dir() and not source.is_symlink()
+    )
+    # Files and symlinks use one atomic replacement, with no missing-path gap.
+    # Two renames for a nonempty directory, never a recursive deletion of the
+    # active tree. The durable pending receipt covers the unavoidable gap.
+    if needs_displacement and _path_present(destination):
+        os.replace(destination, displaced)
+    if source is not None:
+        os.replace(temporary, destination)
+    elif _path_present(destination):
+        destination.unlink()
+    descriptor = os.open(destination.parent, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    if _path_present(displaced):
+        _remove_path(displaced)
+
+
+def _rollback_runtime_config_transaction(
+    paths: Mapping[str, Path], receipt: dict[str, Any]
+) -> None:
+    transaction = receipt.get("config_transaction")
+    if "config_transaction" not in receipt:
+        return
+    if (
+        not isinstance(transaction, dict)
+        or transaction.get("schema") != "vibecrafted.config-publication.v1"
+    ):
+        raise RuntimeError("unsupported pending configuration transaction")
+    entries = transaction["entries"]
+    restored = transaction["previous_receipt"]
+    if (
+        not isinstance(entries, list)
+        or not entries
+        or not isinstance(restored, dict)
+        or (
+            restored
+            and (
+                restored.get("schema") != RUNTIME_INSTALL_SCHEMA
+                or restored.get("roots") != receipt.get("roots")
+            )
+        )
+    ):
+        raise RuntimeError("invalid configuration rollback receipt")
+    # Validate every restore input and every current target before the first
+    # rollback write. A user edit during interruption remains an explicit conflict.
+    for entry in entries:
+        destination, before, after = _runtime_transaction_paths(entry, paths)
+        if (
+            _runtime_config_digest(before) != entry["before_digest"]
+            or _runtime_config_digest(after) != entry["after_digest"]
+        ):
+            raise RuntimeError(
+                "configuration transaction snapshot is missing or changed"
+            )
+        actual = _runtime_config_digest(destination)
+        allowed = {entry["before_digest"], entry["after_digest"]}
+        if entry.get("phase") in {"replacing", "rolling-back"}:
+            allowed.add(None)
+        if actual not in allowed:
+            raise RuntimeError(
+                f"configuration changed after interruption: {destination}; preserved snapshots require explicit recovery"
+            )
+    for entry in reversed(entries):
+        source = Path(entry["before"]) if entry["before_digest"] is not None else None
+        if entry["directory_transition"]:
+            entry["phase"] = "rolling-back"
+            _checkpoint_runtime_install_receipt(paths["runtime_home"], receipt)
+        _replace_runtime_transaction_entry(entry, source)
+    _restore_runtime_publication_receipt(
+        paths, receipt, transaction["previous_receipt"]
+    )
+
+
+def _restore_runtime_publication_receipt(
+    paths: Mapping[str, Path],
+    receipt: dict[str, Any],
+    restored: dict[str, Any],
+) -> None:
+    """Restore pre-publication lineage while retaining recovery artifacts."""
+    # Keep all newly captured user snapshots and staged-generation ownership.
+    for key in ("backups", "drift_backups", "drift_backup_history"):
+        restored[key] = receipt.get(key, {})
+    restored["owned_dirs"] = sorted(
+        set(restored.get("owned_dirs", []))
+        | {
+            path
+            for path in receipt.get("owned_dirs", [])
+            if Path(path).parent == paths["runtime_home"] / "releases"
+        }
+    )
+    restored["owned_empty_dirs"] = sorted(
+        set(restored.get("owned_empty_dirs", []))
+        | set(receipt.get("owned_empty_dirs", []))
+    )
+    restored["roots_created"] = receipt.get("roots_created", {})
+    if not restored.get("schema"):
+        restored.update(
+            schema=RUNTIME_INSTALL_SCHEMA, roots=receipt["roots"], install_pending=True
+        )
+    _checkpoint_runtime_install_receipt(paths["runtime_home"], restored)
+    receipt.clear()
+    receipt.update(restored)
+
+
+def _publish_runtime_config_transaction(
+    paths: Mapping[str, Path],
+    receipt: dict[str, Any],
+    previous: Mapping[str, Any],
+    replacements: Sequence[tuple[Path, Path]],
+    staging_root: Path,
+    product_before: str | None,
+) -> None:
+    entries = []
+    token = staging_root.name
+    for index, (destination, source) in enumerate(replacements):
+        _assert_runtime_physical_path(destination, leaf_symlink=True)
+        before = staging_root / f"before-{index}"
+        if _path_present(destination):
+            _copy_path_to_backup(destination, before)
+        entry = {
+            "path": str(destination),
+            "before": str(before),
+            "after": str(source),
+            "before_digest": _runtime_config_digest(before),
+            "after_digest": _runtime_config_digest(source),
+            "token": token,
+            "temporary": str(
+                destination.parent / f".{destination.name}.temporary-{token}"
+            ),
+            "displaced": str(
+                destination.parent / f".{destination.name}.displaced-{token}"
+            ),
+            "phase": "prepared",
+            "directory_transition": (
+                (destination.is_dir() and not destination.is_symlink())
+                or (source.is_dir() and not source.is_symlink())
+            ),
+        }
+        _runtime_transaction_paths(entry, paths)
+        if (
+            destination == paths["product_config"]
+            and entry["before_digest"] != product_before
+        ):
+            raise RuntimeError(
+                "product config changed after staging; nothing was published"
+            )
+        if _runtime_config_digest(destination) != entry["before_digest"]:
+            raise RuntimeError(
+                f"configuration changed while capturing snapshot: {destination}"
+            )
+        entries.append(entry)
+        if entry["before_digest"] is not None:
+            history = receipt.setdefault("drift_backup_history", {}).setdefault(
+                str(destination), []
+            )
+            history.append(str(before))
+    _sync_runtime_config_path(staging_root)
+    directory = os.open(staging_root.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    receipt["config_transaction"] = {
+        "schema": "vibecrafted.config-publication.v1",
+        "entries": entries,
+        "previous_receipt": json.loads(json.dumps(previous)),
+    }
+    _checkpoint_runtime_install_receipt(paths["runtime_home"], receipt)
+    try:
+        for entry in entries:
+            destination, _, source = _runtime_transaction_paths(entry, paths)
+            if _runtime_config_digest(destination) != entry["before_digest"]:
+                raise RuntimeError(
+                    f"configuration changed before publication: {destination}"
+                )
+            if entry["directory_transition"]:
+                entry["phase"] = "replacing"
+                _checkpoint_runtime_install_receipt(paths["runtime_home"], receipt)
+            _replace_runtime_transaction_entry(entry, source)
+            entry["phase"] = "published"
+            if entry["directory_transition"]:
+                _checkpoint_runtime_install_receipt(paths["runtime_home"], receipt)
+        for entry in entries:
+            if _runtime_config_digest(Path(entry["path"])) != entry["after_digest"]:
+                raise RuntimeError(
+                    "configuration changed before publication could be sealed"
+                )
+    except BaseException:
+        # Crash/SIGKILL recovery uses this same path on the next explicit
+        # runtime-install. Reads never call it. Keep pending on any conflict.
+        _rollback_runtime_config_transaction(paths, receipt)
+        raise
+    receipt.pop("config_transaction")
+    receipt.pop("preparing_previous_receipt", None)
+    receipt["install_phase"] = "ancillary"
+    _checkpoint_runtime_install_receipt(paths["runtime_home"], receipt)
+
+
 def _runtime_launcher_public_name(name: str) -> str | None:
     """Map a generation executable into the namespace Vibecrafted may publish.
 
@@ -15493,7 +16323,7 @@ def _restore_receipt_collision_backup(
         raise RuntimeError(f"receipt backup path escapes backup root: {backup}")
     if _path_present(backup):
         _restore_path_from_backup(backup, stale)
-        _remove_path(backup)
+        # Keep the source snapshot: a crash may precede the receipt checkpoint.
 
 
 def _reclaim_foreign_launcher_names(
@@ -15562,6 +16392,13 @@ def _reclaim_foreign_launcher_names(
             )
     _checkpoint_runtime_install_receipt(runtime_home, receipt)
     return retired
+
+
+_PRODUCT_TERMINAL_DEBRIS = (
+    "terminal-entry.toml",
+    "vc-terminal/alacritty.toml",
+)
+_PRODUCT_PRIMARY_SHELL_NAME = "launch-primary-shell.zsh"
 
 
 _FOUNDATION_TOOL_NAMES = (
@@ -15842,7 +16679,8 @@ def _install_runtime_agent_projections(
     version: str,
     runtime_home: Path,
     receipt: dict[str, Any],
-    previous: dict[str, Any],
+    stage_file: Callable[..., None],
+    stage_symlink: Callable[[Path, Path], None],
 ) -> tuple[list[str], list[str]]:
     """Project the immutable generation into the agent-native discovery surfaces."""
     skills_root = generation / "vibecrafted-core/vibecrafted_core/skills"
@@ -15860,21 +16698,15 @@ def _install_runtime_agent_projections(
             view_root, runtime_home=runtime_home, receipt=receipt
         )
         for source, relative in iter_skill_root_rule_files(skills_root):
-            _write_runtime_owned_file(
+            stage_file(
                 view_root / relative,
                 source.read_text(encoding="utf-8"),
                 mode=stat.S_IMODE(source.stat().st_mode),
-                runtime_home=runtime_home,
-                receipt=receipt,
-                previous=previous,
             )
         for skill in skills:
-            _write_runtime_owned_symlink(
+            stage_symlink(
                 view_root / skill.name,
                 skill,
-                runtime_home=runtime_home,
-                receipt=receipt,
-                previous=previous,
             )
 
         payloads = _agent_command_payloads(runtime)
@@ -15884,13 +16716,10 @@ def _install_runtime_agent_projections(
                 commands_root, runtime_home=runtime_home, receipt=receipt
             )
             for filename, content in payloads.items():
-                _write_runtime_owned_file(
+                stage_file(
                     commands_root / filename,
                     content,
                     mode=0o644,
-                    runtime_home=runtime_home,
-                    receipt=receipt,
-                    previous=previous,
                 )
 
     now = datetime.now(timezone.utc).isoformat()
@@ -15915,13 +16744,10 @@ def _install_runtime_agent_projections(
         shell_helpers=False,
         install_path=str(skills_root),
     )
-    _write_runtime_owned_file(
+    stage_file(
         vibecrafted_home() / STATE_FILE,
         json.dumps(asdict(state), indent=2) + "\n",
         mode=0o644,
-        runtime_home=runtime_home,
-        receipt=receipt,
-        previous=previous,
     )
     return skill_names, runtimes
 
@@ -15938,15 +16764,17 @@ def _runtime_install_result(
         "root": str(generation),
         "launcher": str(paths["launcher_home"] / "vibecrafted"),
         "terminal": str(generation / "bin/vc-terminal"),
-        "terminal_host": str(generation / "bin/vc-terminal"),
+        "terminal_host": str(generation / "libexec/vc-terminal"),
         # AppDelegate exports this as VIBECRAFTED_VC_FRAME_BIN for the public
         # product entry. Point it at the native provider, never back at the
         # wrapper itself, or the first `vc-frame ls` recursively execs the
         # wrapper forever.
         "frame": str(generation / "libexec/vc-frame"),
         "start": str(generation / "bin/vc-start"),
-        "primary_shell": str(generation / "config/alacritty/launch-primary-shell.zsh"),
-        "terminal_config": str(product_config / "terminal-entry.toml"),
+        "primary_shell": str(
+            product_config / "vc-terminal" / "launch-primary-shell.zsh"
+        ),
+        "terminal_config": str(product_config / "vc-terminal" / "vc-terminal.toml"),
         "frame_config": str(product_config / "vc-frame"),
         "runtime_home": str(paths["runtime_home"]),
         "config_home": str(paths["config_home"]),
@@ -15955,7 +16783,275 @@ def _runtime_install_result(
     }
 
 
+def cmd_runtime_resolve(args: argparse.Namespace) -> int:
+    """Inspect installed identity without creating files, importing core, or repairing."""
+    envelope: dict[str, Any] = {
+        "schema": "vibecrafted.runtime-resolution.v1",
+        "status": "unusable",
+        "reason": "",
+        "runtime": None,
+    }
+    descriptor: int | None = None
+    try:
+        paths = _runtime_install_paths(getattr(args, "runtime_home", None))
+        for path in paths.values():
+            _assert_runtime_physical_path(path)
+        runtime_home = paths["runtime_home"]
+        active_path = runtime_home / "active.json"
+        receipt_path = _runtime_receipt_path(runtime_home)
+        current = runtime_home / "tools/vibecrafted-current"
+        lock_path = _tools_install_lease_path(current)
+        _assert_runtime_physical_path(lock_path)
+        try:
+            descriptor = os.open(lock_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except FileNotFoundError:
+            pass
+        else:
+            _validate_tools_lease_descriptor(descriptor, lock_path)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError("runtime installation is in progress") from exc
+
+        def present(path: Path) -> bool:
+            _assert_runtime_physical_path(path)
+            try:
+                metadata = path.lstat()
+            except FileNotFoundError:
+                return False
+            if not stat.S_ISREG(metadata.st_mode):
+                raise RuntimeError(
+                    f"runtime identity is not a regular file: {path.name}"
+                )
+            return True
+
+        active_present, receipt_present = present(active_path), present(receipt_path)
+        if not active_present and not receipt_present:
+            envelope.update(status="absent", reason="runtime identity files are absent")
+        else:
+            if not active_present or not receipt_present:
+                raise RuntimeError(
+                    "runtime identity is partial; explicit Runtime Pack repair required"
+                )
+            active_bytes = _capture_runtime_bound_file(active_path)
+            receipt_bytes = _capture_runtime_bound_file(receipt_path)
+            active = json.loads(active_bytes)
+            receipt = _load_runtime_install_receipt(receipt_path)
+            if (
+                not isinstance(active, dict)
+                or active.get("schema") != "vibecrafted.active-runtime.v1"
+            ):
+                raise RuntimeError("unsupported active runtime identity")
+            if "config_transaction" in receipt or any(
+                receipt.get(key)
+                for key in (
+                    "install_pending",
+                    "config_pending",
+                    "config_conflicts",
+                    "uninstall_pending",
+                )
+            ):
+                raise RuntimeError(
+                    "runtime installation has pending configuration or recovery state"
+                )
+            if receipt.get("roots") != {
+                name: str(path) for name, path in paths.items()
+            }:
+                raise RuntimeError(
+                    "runtime receipt roots do not match requested installation"
+                )
+            version = active.get("version")
+            if (
+                not isinstance(version, str)
+                or not re.fullmatch(r"[A-Za-z0-9.+_-]+", version)
+                or version != receipt.get("version")
+            ):
+                raise RuntimeError("runtime identity versions disagree")
+            generation = runtime_home / "releases" / version
+            if active.get("runtime_root") != str(generation):
+                raise RuntimeError("active runtime escapes its receipted generation")
+            _assert_runtime_physical_path(generation)
+            _assert_runtime_tree_has_no_symlinks(generation)
+            _assert_runtime_physical_path(current, leaf_symlink=True)
+            if (
+                not current.is_symlink()
+                or current.resolve(strict=True) != generation
+                or receipt.get("owned_symlinks", {}).get(str(current))
+                != str(generation)
+            ):
+                raise RuntimeError("runtime selectors disagree")
+            if active.get("app_root", "") != receipt.get("app_root", ""):
+                raise RuntimeError("runtime carrier identities disagree")
+            _validate_runtime_backup_receipts(receipt, paths)
+            errors = _runtime_generation_payload_errors(generation)
+            if errors:
+                raise RuntimeError(
+                    "selected generation is unusable: " + "; ".join(errors[:4])
+                )
+            if (generation / "VERSION").read_text(encoding="utf-8").strip() != version:
+                raise RuntimeError("selected generation version differs from identity")
+            required_executables = (
+                "bin/python3",
+                "bin/vibecrafted",
+                "bin/vc-terminal",
+                "libexec/vc-terminal",
+                "bin/vc-frame",
+                "libexec/vc-frame",
+                "bin/vc-start",
+                "bin/vc-server",
+                "bin/vc-server-supervisor",
+            )
+            for relative in required_executables:
+                path = generation / relative
+                if not path.is_file() or not os.access(path, os.X_OK):
+                    raise RuntimeError(
+                        f"selected generation entry is unusable: {relative}"
+                    )
+            for relative in ("libexec/vc-terminal", "libexec/vc-frame"):
+                if not _is_native_executable(generation / relative):
+                    raise RuntimeError(f"selected native host is unusable: {relative}")
+            if not (generation / "scripts/vetcoders_install.py").is_file():
+                raise RuntimeError("selected generation installer is missing")
+            product = paths["product_config"]
+            for path in _runtime_preference_paths(product):
+                _validate_runtime_preference(path)
+            for path, relative in (
+                (
+                    product / "vc-frame/config.kdl",
+                    "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl",
+                ),
+                (
+                    product / "terminal-policy.toml",
+                    "config/vc-terminal/vibecrafted.toml",
+                ),
+            ):
+                lineage = receipt.get("config_defaults", {}).get(str(path), {})
+                if lineage.get("generation") != str(generation) or lineage.get(
+                    "sha256"
+                ) != _sha256_path(generation / relative):
+                    raise RuntimeError(
+                        f"preference default lineage is incomplete or split: {path.name}"
+                    )
+            entry_source = generation / "scripts/vc-terminal-product-entry.sh"
+            if _capture_runtime_bound_file(
+                generation / "bin/vc-terminal"
+            ) != _capture_runtime_bound_file(entry_source):
+                raise RuntimeError(
+                    "selected terminal entry differs from its generation source"
+                )
+            # Compare managed trees with generation defaults, permitting only
+            # config.kdl to carry intentional user preference bytes.
+            for relative, source in (
+                (
+                    "vc-frame",
+                    generation
+                    / "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame",
+                ),
+                (
+                    "shell",
+                    generation / "vibecrafted-core/vibecrafted_core/runtime/shell",
+                ),
+            ):
+                installed, defaults = (
+                    _runtime_config_inventory(product / relative),
+                    _runtime_config_inventory(source),
+                )
+                if installed is None or defaults is None:
+                    raise RuntimeError(
+                        f"required product config is missing: {relative}"
+                    )
+                if relative == "vc-frame":
+                    installed.pop("config.kdl", None)
+                    defaults.pop("config.kdl", None)
+                if installed != defaults:
+                    raise RuntimeError(
+                        f"managed product config differs from selected generation: {relative}"
+                    )
+            required_owned = (
+                active_path,
+                paths["launcher_home"] / "vibecrafted",
+                paths["launcher_home"] / "vc-terminal",
+                paths["launcher_home"] / "vc-frame",
+                product / "vc-terminal/vc-terminal.toml",
+                product / "vc-terminal/launch-primary-shell.zsh",
+            )
+            for path in required_owned:
+                _assert_runtime_physical_path(path)
+                if not path.is_file() or receipt.get("owned_files", {}).get(
+                    str(path)
+                ) != _sha256_path(path):
+                    raise RuntimeError(
+                        f"required product entry is missing or differs from receipt: {path.name}"
+                    )
+                if path.suffix not in {".toml", ".json"} and not os.access(
+                    path, os.X_OK
+                ):
+                    raise RuntimeError(
+                        f"required product entry is not executable: {path.name}"
+                    )
+            for name in ("vibecrafted", "vc-terminal", "vc-frame"):
+                expected = _runtime_launcher_body(
+                    generation=generation,
+                    config_home=paths["config_home"],
+                    crafted_home=paths["crafted_home"],
+                    runtime_home=runtime_home,
+                    frame_config=product / "vc-frame",
+                    executable=generation / "bin" / name,
+                    prepend_generation_bin=name != "vc-terminal",
+                )
+                if _capture_runtime_bound_file(
+                    paths["launcher_home"] / name
+                ) != expected.encode("utf-8"):
+                    raise RuntimeError(
+                        f"public {name} launcher selects another runtime"
+                    )
+            result = _runtime_install_result(
+                generation=generation, app_root=_receipt_app_root(receipt), paths=paths
+            )
+            if (
+                _capture_runtime_bound_file(active_path) != active_bytes
+                or _capture_runtime_bound_file(receipt_path) != receipt_bytes
+                or current.resolve(strict=True) != generation
+            ):
+                raise RuntimeError("runtime identity changed during resolution")
+            envelope.update(status="ready", reason="", runtime=result)
+        # A first install can create the existing lease after our absent probe.
+        if descriptor is None and lock_path.exists():
+            raise RuntimeError("runtime publication began during resolution; retry")
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+        KeyError,
+        AttributeError,
+    ) as exc:
+        envelope.update(
+            status="unusable",
+            reason=str(exc)[:1200] or "runtime inspection failed",
+            runtime=None,
+        )
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    print(json.dumps(envelope, sort_keys=True))
+    return 2 if envelope["status"] == "unusable" else 0
+
+
 def cmd_runtime_install(args: argparse.Namespace) -> int:
+    paths = _runtime_install_paths()
+    for path in paths.values():
+        _assert_runtime_physical_path(path)
+    current = paths["runtime_home"] / "tools/vibecrafted-current"
+    _assert_runtime_physical_path(current, leaf_symlink=True)
+    with (
+        _tools_install_lease(current, operation="runtime-install") as descriptor,
+        _inherited_tools_install_lease(descriptor),
+    ):
+        return _install_runtime_pack(args)
+
+
+def _install_runtime_pack(args: argparse.Namespace) -> int:
     """Install one immutable Runtime Pack and publish a closed ownership receipt."""
     payload_root = Path(args.payload_root).expanduser().resolve()
     app_root = Path(args.app_root).expanduser().resolve() if args.app_root else None
@@ -15968,10 +17064,6 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
 
     paths = _runtime_install_paths()
     runtime_home = paths["runtime_home"]
-    _refuse_runtime_pack_downgrade(
-        payload_root,
-        runtime_home,
-    )
     receipt_path = _runtime_receipt_path(runtime_home)
     previous = _load_runtime_install_receipt(receipt_path)
     previous_roots = {
@@ -15981,6 +17073,20 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         raise RuntimeError(
             "existing runtime install receipt belongs to different install roots"
         )
+    _validate_runtime_backup_receipts(previous, paths)
+    _rollback_runtime_config_transaction(paths, previous)
+    if previous.get("install_phase") == "preparing":
+        saved = previous.get("preparing_previous_receipt")
+        if not isinstance(saved, dict) or (
+            saved and saved.get("roots") != previous.get("roots")
+        ):
+            raise RuntimeError("pre-publication receipt history is invalid")
+        _restore_runtime_publication_receipt(paths, previous, saved)
+    _refuse_runtime_pack_downgrade(payload_root, runtime_home)
+    if previous.get("config_pending"):
+        raise RuntimeError(
+            "legacy partial config publication requires explicit backup recovery before install"
+        )
     previous_created = previous.get("roots_created", {})
     root_created = {
         name: bool(previous_created.get(name)) or not path.exists()
@@ -15989,6 +17095,9 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
     }
     receipt: dict[str, Any] = {
         "schema": RUNTIME_INSTALL_SCHEMA,
+        "install_pending": True,
+        "install_phase": "preparing",
+        "preparing_previous_receipt": json.loads(json.dumps(previous)),
         "installed_at": datetime.now(timezone.utc).isoformat(),
         "version": version,
         "payload_root": str(payload_root),
@@ -16000,10 +17109,17 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         "owned_dirs": list(previous.get("owned_dirs", [])),
         "owned_empty_dirs": list(previous.get("owned_empty_dirs", [])),
         "backups": dict(previous.get("backups", {})),
+        "drift_backups": dict(previous.get("drift_backups", {})),
+        "drift_backup_history": json.loads(
+            json.dumps(previous.get("drift_backup_history", {}))
+        ),
+        "config_defaults": dict(previous.get("config_defaults", {})),
+        "config_pending": dict(previous.get("config_pending", {})),
     }
 
     releases = runtime_home / "releases"
     generation = releases / version
+    _assert_runtime_physical_path(generation)
     for directory in (
         releases,
         paths["product_config"],
@@ -16035,6 +17151,7 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             _materialize_vc_frame_generation(staging)
             _materialize_runtime_generation_entrypoint(staging)
             _materialize_runtime_generation_vc_frame_entry(staging)
+            _materialize_runtime_generation_vc_terminal_entry(staging)
             source_provenance = load_source_provenance(staging)
             if source_provenance is None:
                 raise RuntimeError("Runtime Pack has no source-provenance.json")
@@ -16055,8 +17172,16 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             if staging.exists():
                 shutil.rmtree(staging)
     _assert_runtime_tree_has_no_symlinks(generation)
+    payload_errors = _runtime_generation_payload_errors(generation)
+    if payload_errors:
+        raise RuntimeError(
+            "Runtime Pack generation is invalid: " + "; ".join(payload_errors)
+        )
 
-    terminal_host = generation / "bin/vc-terminal"
+    generation_terminal_entry = generation / "bin/vc-terminal"
+    generation_terminal_host = generation / "libexec/vc-terminal"
+    # Historical App bootstrap passes --terminal-host. The carrier remains
+    # accepted, but that hint never selects executable truth over this generation.
     required = [
         generation / "bin/vibecrafted",
         generation / "bin/loct",
@@ -16071,7 +17196,8 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         generation / "bin/vc-server-supervisor",
         generation / "bin/vc-start",
         generation / "bin/vc-workflow",
-        terminal_host,
+        generation_terminal_entry,
+        generation_terminal_host,
         generation / "config/alacritty/launch-primary-shell.zsh",
         generation / "vibecrafted-core/vibecrafted_core/skills",
     ]
@@ -16087,81 +17213,52 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
     if missing:
         raise RuntimeError("Runtime Pack is incomplete: " + ", ".join(missing))
 
-    # `active.json`, the CLI, foundations, doctor, and agent views must all
-    # name the same immutable release.  `vibecrafted-current` is a stable
-    # projection for older consumers, never a second tools generation.
-    current_link = runtime_home / "tools/vibecrafted-current"
-    _write_runtime_owned_symlink(
-        current_link,
-        generation,
-        runtime_home=runtime_home,
-        receipt=receipt,
-        previous=previous,
-    )
-
     product_config = paths["product_config"]
-    terminal_theme = product_config / "terminal-theme.toml"
-    if not terminal_theme.exists():
-        shutil.copy2(generation / "config/vc-terminal/themes/dark.toml", terminal_theme)
-        receipt["owned_dirs"].append(str(terminal_theme))
-        _checkpoint_runtime_install_receipt(runtime_home, receipt)
-    terminal_policy_source = generation / "config/vc-terminal/vibecrafted.toml"
-    terminal_policy = product_config / "terminal-policy.toml"
-    _write_runtime_owned_file(
-        terminal_policy,
-        terminal_policy_source.read_text(encoding="utf-8"),
-        mode=0o644,
+    preferences = _prepare_runtime_preferences(
+        generation,
+        product_config,
         runtime_home=runtime_home,
         receipt=receipt,
         previous=previous,
     )
-    terminal_entry = (
-        "# Generated by the Vibecrafted installer.\n"
-        "[general]\n"
-        "import = [\n"
-        f"  {json.dumps(str(terminal_policy))},\n"
-        f"  {json.dumps(str(terminal_theme))},\n"
-        "]\n"
-        "live_config_reload = true\n"
+    product_before = _runtime_config_digest(product_config)
+    backup_root = runtime_home / ".installer-backups"
+    backup_root.mkdir(parents=True, exist_ok=True)
+    staging_root = Path(tempfile.mkdtemp(prefix="publication-", dir=backup_root))
+    staged_config = staging_root / "product-config"
+    _stage_runtime_product_config(
+        generation,
+        paths,
+        preferences,
+        staged_config,
+        receipt,
+        previous,
     )
-    _write_runtime_owned_file(
-        product_config / "terminal-entry.toml",
-        terminal_entry,
-        mode=0o644,
-        runtime_home=runtime_home,
-        receipt=receipt,
-        previous=previous,
-    )
-
     frame_config = product_config / "vc-frame"
-    if frame_config.exists():
-        if str(frame_config) not in previous.get("owned_dirs", []):
+    current_link = runtime_home / "tools/vibecrafted-current"
+    replacements: dict[Path, Path] = {product_config: staged_config}
+
+    def stage_launcher(destination: Path, body: str, *, mode: int = 0o755) -> None:
+        if str(destination) not in previous.get("owned_files", {}):
             _backup_runtime_collision(
-                frame_config, runtime_home=runtime_home, receipt=receipt
+                destination, runtime_home=runtime_home, receipt=receipt
             )
-        _remove_path(frame_config)
-    shutil.copytree(
-        generation / "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame",
-        frame_config,
-    )
-    if str(frame_config) not in receipt["owned_dirs"]:
-        receipt["owned_dirs"].append(str(frame_config))
-    _checkpoint_runtime_install_receipt(runtime_home, receipt)
-    shell_config = product_config / "shell"
-    if shell_config.exists():
-        if str(shell_config) not in previous.get("owned_dirs", []):
+        token = hashlib.sha256(str(destination).encode()).hexdigest()
+        staged = staging_root / f"file-{token}"
+        _atomic_text(staged, body, mode=mode)
+        replacements[destination] = staged
+        receipt["owned_files"][str(destination)] = _sha256_path(staged)
+
+    def stage_symlink(destination: Path, target: Path) -> None:
+        if str(destination) not in previous.get("owned_symlinks", {}):
             _backup_runtime_collision(
-                shell_config, runtime_home=runtime_home, receipt=receipt
+                destination, runtime_home=runtime_home, receipt=receipt
             )
-        _remove_path(shell_config)
-    shutil.copytree(
-        generation / "vibecrafted-core/vibecrafted_core/runtime/shell",
-        shell_config,
-    )
-    if str(shell_config) not in receipt["owned_dirs"]:
-        receipt["owned_dirs"].append(str(shell_config))
-    _checkpoint_runtime_install_receipt(runtime_home, receipt)
-    _assert_runtime_tree_has_no_symlinks(product_config)
+        token = hashlib.sha256(str(destination).encode()).hexdigest()
+        staged = staging_root / f"link-{token}"
+        staged.symlink_to(target.resolve(strict=True))
+        replacements[destination] = staged
+        receipt["owned_symlinks"][str(destination)] = str(target.resolve(strict=True))
 
     bin_dir = generation / "bin"
     for entry in sorted(bin_dir.iterdir(), key=lambda item: item.name):
@@ -16185,41 +17282,14 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             frame_config=frame_config,
             executable=entry,
         )
-        _write_runtime_owned_file(
-            destination,
-            body,
-            mode=0o755,
-            runtime_home=runtime_home,
-            receipt=receipt,
-            previous=previous,
-        )
-    retired_launchers = _reclaim_foreign_launcher_names(
-        bin_dir,
-        paths["launcher_home"],
-        runtime_home=runtime_home,
-        receipt=receipt,
-        previous=previous,
-    )
-    _repoint_foundation_service_dependents(
-        retired_launchers,
-        launcher_home=paths["launcher_home"],
-        runtime_home=runtime_home,
-    )
-
+        stage_launcher(destination, body)
     verifier_launcher = paths["launcher_home"] / SECURE_WALKAROUND_LAUNCHER
     verifier_body = _secure_walkaround_launcher_contents(
         current_link,
         generation / "bin/python3",
         launcher_path=verifier_launcher,
     ).decode("utf-8")
-    _write_runtime_owned_file(
-        verifier_launcher,
-        verifier_body,
-        mode=0o755,
-        runtime_home=runtime_home,
-        receipt=receipt,
-        previous=previous,
-    )
+    stage_launcher(verifier_launcher, verifier_body)
 
     terminal_launcher = paths["launcher_home"] / "vc-terminal"
     terminal_body = _runtime_launcher_body(
@@ -16228,20 +17298,10 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         crafted_home=paths["crafted_home"],
         runtime_home=runtime_home,
         frame_config=frame_config,
-        executable=terminal_host,
-        leading_arguments=(
-            "--config-file",
-            str(product_config / "terminal-entry.toml"),
-        ),
+        executable=generation_terminal_entry,
+        prepend_generation_bin=False,
     )
-    _write_runtime_owned_file(
-        terminal_launcher,
-        terminal_body,
-        mode=0o755,
-        runtime_home=runtime_home,
-        receipt=receipt,
-        previous=previous,
-    )
+    stage_launcher(terminal_launcher, terminal_body)
 
     deck = generation / "bin/vibecrafted"
     for name, verb in _RUNTIME_WRAPPER_VERBS.items():
@@ -16257,21 +17317,15 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             executable=deck,
             leading_arguments=(verb,),
         )
-        _write_runtime_owned_file(
-            destination,
-            body,
-            mode=0o755,
-            runtime_home=runtime_home,
-            receipt=receipt,
-            previous=previous,
-        )
+        stage_launcher(destination, body)
 
     skill_names, runtime_views = _install_runtime_agent_projections(
         generation,
         version=version,
         runtime_home=runtime_home,
         receipt=receipt,
-        previous=previous,
+        stage_file=stage_launcher,
+        stage_symlink=stage_symlink,
     )
 
     active = {
@@ -16281,15 +17335,51 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         "app_root": str(app_root) if app_root else "",
     }
     active_path = runtime_home / "active.json"
-    _write_runtime_owned_file(
-        active_path,
-        json.dumps(active, indent=2, sort_keys=True) + "\n",
-        mode=0o644,
+    staged_active = staging_root / "active.json"
+    _atomic_text(staged_active, json.dumps(active, indent=2, sort_keys=True) + "\n")
+    receipt["owned_files"][str(active_path)] = _sha256_path(staged_active)
+    if str(current_link) not in previous.get("owned_symlinks", {}):
+        _backup_runtime_collision(
+            current_link, runtime_home=runtime_home, receipt=receipt
+        )
+    staged_pointer = staging_root / "current"
+    staged_pointer.symlink_to(generation)
+    receipt["owned_symlinks"][str(current_link)] = str(generation)
+    # All root postimages exist. Selectors are published last; readers reject
+    # install_pending/config_transaction throughout the multi-root transition.
+    replacements[active_path] = staged_active
+    replacements[current_link] = staged_pointer
+    if _runtime_config_digest(product_config) != product_before:
+        raise RuntimeError(
+            "product configuration changed during install; selectors were not published"
+        )
+    _publish_runtime_config_transaction(
+        paths,
+        receipt,
+        previous,
+        list(replacements.items()),
+        staging_root,
+        product_before,
+    )
+    # The selected runtime/config transaction is complete. Existing foreign-tool
+    # reclamation and service reconciliation run afterward, with install_pending
+    # still set. A retry of this phase keeps the now-current default lineage.
+    retired_launchers = _reclaim_foreign_launcher_names(
+        bin_dir,
+        paths["launcher_home"],
         runtime_home=runtime_home,
         receipt=receipt,
         previous=previous,
     )
-    _atomic_json_file(receipt_path, receipt)
+    _repoint_foundation_service_dependents(
+        retired_launchers,
+        launcher_home=paths["launcher_home"],
+        runtime_home=runtime_home,
+    )
+
+    receipt.pop("install_pending", None)
+    receipt.pop("install_phase", None)
+    _checkpoint_runtime_install_receipt(runtime_home, receipt)
     result = _runtime_install_result(
         generation=generation,
         app_root=app_root,
@@ -16480,6 +17570,23 @@ def _receipt_app_root(receipt: Mapping[str, Any]) -> Path | None:
 
 
 def cmd_runtime_uninstall(args: argparse.Namespace) -> int:
+    paths = _runtime_install_paths()
+    for path in paths.values():
+        _assert_runtime_physical_path(path)
+    receipt = _runtime_receipt_path(paths["runtime_home"])
+    _assert_runtime_physical_path(receipt)
+    if args.dry_run or not receipt.exists():
+        return _uninstall_runtime_pack(args)
+    current = paths["runtime_home"] / "tools/vibecrafted-current"
+    _assert_runtime_physical_path(current, leaf_symlink=True)
+    with (
+        _tools_install_lease(current, operation="runtime-uninstall") as descriptor,
+        _inherited_tools_install_lease(descriptor),
+    ):
+        return _uninstall_runtime_pack(args)
+
+
+def _uninstall_runtime_pack(args: argparse.Namespace) -> int:
     """Undo one Runtime Pack install from its ownership receipt."""
     paths = _runtime_install_paths()
     runtime_home = paths["runtime_home"]
@@ -16504,8 +17611,26 @@ def cmd_runtime_uninstall(args: argparse.Namespace) -> int:
             "runtime install receipt roots do not match the current environment"
         )
 
+    if "config_transaction" in receipt or any(
+        receipt.get(key) for key in ("config_pending", "install_pending")
+    ):
+        raise RuntimeError(
+            "pending Runtime Pack publication; rerun the verified installer to recover before uninstall"
+        )
+    _validate_runtime_backup_receipts(receipt, paths)
     dry_run = bool(args.dry_run)
     actions: list[str] = []
+    backup_root = runtime_home / ".installer-backups"
+    for raw_path in (
+        *receipt.get("owned_files", {}),
+        *receipt.get("owned_symlinks", {}),
+        *receipt.get("owned_dirs", []),
+    ):
+        path = Path(raw_path)
+        if _path_is_under(path, backup_root) or _path_is_under(backup_root, path):
+            raise RuntimeError(
+                f"receipt deletion would consume recovery snapshots: {path}"
+            )
     owned_files = receipt.get("owned_files", {})
     owned_symlinks = receipt.get("owned_symlinks", {})
     for raw_path in owned_files:
@@ -16537,25 +17662,24 @@ def cmd_runtime_uninstall(args: argparse.Namespace) -> int:
                 f"receipt empty directory escapes projection roots: {raw_path}"
             )
     backup_root = runtime_home / ".installer-backups"
-    for destination_raw, backup_raw in receipt.get("backups", {}).items():
-        destination = Path(destination_raw)
-        backup = Path(backup_raw)
-        if not (
-            _receipt_path_is_allowed(destination, paths)
-            or _receipt_projection_path_is_allowed(destination)
-        ):
-            raise RuntimeError(
-                f"receipt restore path escapes managed roots: {destination}"
-            )
-        if not _receipt_backup_path_is_allowed(backup, backup_root):
-            raise RuntimeError(f"receipt backup path escapes backup root: {backup}")
-    conflicts = [
-        raw_path
-        for raw_path, installed_hash in sorted(owned_files.items())
-        if (path := Path(raw_path)).is_file()
-        and not path.is_symlink()
-        and _sha256_path(path) != installed_hash
-    ]
+    preferences = _runtime_preference_paths(paths["product_config"])
+    conflicts: list[str] = []
+    for raw_path, installed_hash in sorted(owned_files.items()):
+        path = Path(raw_path)
+        if not _path_present(path):
+            continue
+        if path.is_symlink() or not path.is_file():
+            conflicts.append(raw_path)
+        elif _sha256_path(path) != installed_hash:
+            if path in preferences:
+                try:
+                    _validate_runtime_preference(path)
+                except (OSError, RuntimeError, ValueError):
+                    conflicts.append(raw_path)
+                # Accepted user bytes are preserved by the full product snapshot
+                # below, before teardown or removal can begin.
+            else:
+                conflicts.append(raw_path)
     conflicts.extend(
         raw_path
         for raw_path, raw_target in sorted(owned_symlinks.items())
@@ -16574,6 +17698,31 @@ def cmd_runtime_uninstall(args: argparse.Namespace) -> int:
         }
         _runtime_uninstall_result(args, result)
         return 1
+    # A final full product snapshot preserves added layouts, themes, scripts,
+    # and preferences that a historic receipt did not inventory individually.
+    # Keep the entire existing backup tree, including predecessor snapshots
+    # whose latest-only drift map no longer names every earlier copy.
+    if _path_present(paths["product_config"]):
+        actions.append(f"preserve product configuration in {backup_root}")
+        if not dry_run:
+            _backup_runtime_drift(
+                paths["product_config"],
+                runtime_home=runtime_home,
+                receipt=receipt,
+                reason="snapshot before Runtime Pack uninstall",
+            )
+    archive = backup_root / (
+        "uninstalled-"
+        + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        + "-"
+        + os.urandom(6).hex()
+        + ".json"
+    )
+    actions.append(f"retain recovery receipt and all user snapshots in {backup_root}")
+    if not dry_run:
+        receipt["uninstall_pending"] = True
+        _checkpoint_runtime_install_receipt(runtime_home, receipt)
+        _atomic_json_file(archive, receipt)
     runtime_actions = _teardown_owned_runtime_for_uninstall(
         paths["crafted_home"],
         dry_run=dry_run,
@@ -16637,9 +17786,7 @@ def cmd_runtime_uninstall(args: argparse.Namespace) -> int:
         root = paths[name]
         if not roots_created.get(name) or not root.exists():
             continue
-        if name == "launcher_home" and any(root.iterdir()):
-            continue
-        if name == "product_config" and any(root.iterdir()):
+        if any(root.iterdir()):
             continue
         actions.append(f"remove {root}")
         if not dry_run:
@@ -16661,9 +17808,10 @@ def cmd_runtime_uninstall(args: argparse.Namespace) -> int:
             path.rmdir()
 
     if not dry_run and receipt_path.exists():
+        # The archive is recovery evidence, never an active installation record.
+        archived = dict(receipt, uninstall_pending=False, status="removed")
+        _atomic_json_file(archive, archived)
         receipt_path.unlink()
-        if backup_root.exists() and not conflicts:
-            shutil.rmtree(backup_root)
         if (
             roots_created.get("runtime_home")
             and runtime_home.exists()
@@ -16853,6 +18001,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     p_runtime_install.add_argument("--payload-root", required=True)
     p_runtime_install.add_argument("--app-root")
+    p_runtime_install.add_argument("--terminal-host")
+
+    p_runtime_resolve = sub.add_parser(
+        "runtime-resolve", help="Read installed Runtime Pack identity without repair"
+    )
+    p_runtime_resolve.add_argument("--runtime-home", metavar="ABSOLUTE_PATH")
+    p_runtime_resolve.add_argument("--json", action="store_true")
 
     p_runtime_uninstall = sub.add_parser(
         "runtime-uninstall", help="Undo the receipted Runtime Pack install"
@@ -16880,6 +18035,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_restore(args)
     elif args.command == "runtime-install":
         return cmd_runtime_install(args)
+    elif args.command == "runtime-resolve":
+        return cmd_runtime_resolve(args)
     elif args.command == "runtime-uninstall":
         return cmd_runtime_uninstall(args)
 

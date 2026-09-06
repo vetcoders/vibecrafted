@@ -212,8 +212,8 @@ WORKFLOW_HELP: dict[str, WorkflowHelp] = {
             "carry the chosen cut forward",
         ),
         (
-            'vibecrafted partner codex --prompt "Help me choose the right architecture"',
-            "vc-partner claude --file /path/to/context.md",
+            "vibecrafted partner codex",
+            "vibecrafted partner claude --runtime plain",
         ),
     ),
     "paste": WorkflowHelp(
@@ -399,6 +399,7 @@ Commands:
   init [agent]         Orient an agent in this repo
   <skill> <agent>      Run a workflow with an agent
   resume <agent>       Continue a stopped run (--run-id) or a provider session
+  fork <agent>         Branch a provider session in the current vc-frame tab
   resume-session       Continue an exact provider session as a tracked run
   relocate             Snapshot open sessions + worktrees for a machine move (snapshot|restore)
   status               Today's agent activity
@@ -497,6 +498,13 @@ def _option_lines(topic: str) -> list[str]:
             "  --print-prompt                  Print the prepared prompt",
             "  --dry-run                       Resolve without launching",
             "  --json                          Machine-readable output",
+        ]
+    if topic == "partner":
+        return [
+            "  -p, --prompt <text>            Extra seed context for /vc-partner (not a job)",
+            "  -f, --file <path.md>           Extra seed file context (not a job)",
+            "  --runtime <terminal|visible|plain>  Interactive face (default: terminal)",
+            "  --root <path>                  Repository root",
         ]
     lines = [
         "  -p, --prompt <text>            Inline prompt",

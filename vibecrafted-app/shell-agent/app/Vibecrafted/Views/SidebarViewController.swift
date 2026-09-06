@@ -68,6 +68,9 @@ class SidebarViewController: NSViewController, NSTableViewDataSource, NSTableVie
     tableView.delegate = self
     tableView.rowHeight = 28
     tableView.style = .sourceList
+    tableView.allowsEmptySelection = false
+    tableView.allowsMultipleSelection = false
+    tableView.setAccessibilityLabel("Mission Control sections")
 
     scrollView.documentView = tableView
     scrollView.translatesAutoresizingMaskIntoConstraints = false
@@ -86,6 +89,7 @@ class SidebarViewController: NSViewController, NSTableViewDataSource, NSTableVie
     )
 
     refreshCounts()
+    tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
   }
 
   @objc private func handleMissionControlSnapshotChanged(_ notification: Notification) {
@@ -170,6 +174,7 @@ class SidebarViewController: NSViewController, NSTableViewDataSource, NSTableVie
     cell?.imageView?.image = NSImage(
       systemSymbolName: section.symbolName, accessibilityDescription: section.title)
     cell?.imageView?.contentTintColor = .secondaryLabelColor
+    cell?.setAccessibilityLabel("\(section.title), \(section.count(in: snapshot)) items")
 
     return cell
   }

@@ -1,9 +1,13 @@
-use crate::app::{App, AppTab, LaunchFocus};
+use crate::app::{App, AppTab, DispatchFocus, LaunchFocus, wrap_operator_line};
+use crate::layout::{
+    PaneId, controls_layout, dispatch_layout, mission_layout, monitor_layout, mux_panel_height,
+    observe_layout, polarize_panel_height,
+};
 use crate::mission_control::{
     ActionPriority, ActionQueueItem, ActionQueueKind, ActiveDispatch, AgentStatsRow, DataQuality,
     FailureEntry, FleetHealthSignal, FleetHealthStatus, SkillStatsRow, WaveSegment, WaveState,
 };
-use crate::observe::ConsoleView;
+use crate::observe::{ConsoleView, ObserveHealth};
 use crate::state::RunKind;
 use ratatui::prelude::*;
 use ratatui::style::{Color, Modifier, Style};
@@ -46,12 +50,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 
     let title = if app.config.view == ConsoleView::Observe {
         Line::from(vec![
-            Span::styled(
-                "voc",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("voc", Style::default().add_modifier(Modifier::BOLD)),
             Span::styled(
                 format!("  {}  {}", app.observe.status.label(), app.observe.origin),
                 Style::default().fg(Color::DarkGray),
@@ -124,32 +123,36 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
-        .split(area);
+    let columns = observe_layout(area);
 
     let mut items = Vec::new();
     if app.observe.runs.is_empty() {
+        let empty_message = match app.observe.status {
+            ObserveHealth::Live => "no live sessions in canonical control plane",
+            ObserveHealth::Degraded => "canonical state stale; showing no cached sessions",
+            ObserveHealth::Offline => "canonical control plane unavailable",
+        };
         items.push(ListItem::new(Line::from(Span::styled(
-            "no active workers on the server",
+            empty_message,
             Style::default().fg(Color::DarkGray),
         ))));
     }
-    for (index, run) in app.observe.runs.iter().enumerate() {
+    let skip = usize::from(app.interaction.scroll.observe_list);
+    for (index, run) in app.observe.runs.iter().enumerate().skip(skip) {
         let selected = index == app.observe.selected;
-        let glyph = if run.is_genuinely_active() { "●" } else { "○" };
+        let glyph = if run.is_genuinely_active() {
+            "●"
+        } else {
+            "○"
+        };
         let style = if selected {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::White)
-                .add_modifier(Modifier::BOLD)
+            Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
         } else if run.kind_label() == "stalled" {
             Style::default().fg(Color::Yellow)
         } else if run.is_genuinely_active() {
             Style::default().fg(Color::Green)
         } else {
-            Style::default().fg(Color::Gray)
+            Style::default()
         };
         items.push(ListItem::new(Line::from(vec![
             Span::styled(format!("{glyph} "), style),
@@ -170,12 +173,11 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
         .count();
     let title = format!(" Observe · {active} active · {stalled} stalled ");
     frame.render_widget(
-        List::new(items).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(Span::styled(title, Style::default().fg(Color::White))),
-        ),
-        columns[0],
+        List::new(items).block(Block::default().borders(Borders::ALL).title(Span::styled(
+            title,
+            Style::default().add_modifier(Modifier::BOLD),
+        ))),
+        columns.list,
     );
 
     let mut body = Vec::new();
@@ -189,13 +191,17 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(run) = app.observe.runs.get(app.observe.selected) {
         body.push(Line::from(Span::styled(
             run.title_line(),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
+            Style::default().add_modifier(Modifier::BOLD),
         )));
         body.push(Line::from(Span::styled(
             run.run_id.clone(),
             Style::default().fg(Color::DarkGray),
+        )));
+        body.push(Line::from(Span::styled(
+            run.switch_target()
+                .map(|target| format!("Enter switches to {target} · click row to select"))
+                .unwrap_or_else(|| "session has no attach target".to_string()),
+            Style::default().fg(Color::Cyan),
         )));
         body.push(Line::from(""));
         if app.observe.transcript.trim().is_empty() {
@@ -204,27 +210,25 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(Color::DarkGray),
             )));
         } else {
-            // Last 40 lines, in file order.
-            let lines: Vec<&str> = app.observe.transcript.lines().collect();
-            let tail = &lines[lines.len().saturating_sub(40)..];
-            for line in tail {
+            for line in app.observe.transcript.lines() {
                 body.push(Line::from(line.to_string()));
             }
         }
     } else {
         body.push(Line::from(Span::styled(
-            "Select a worker. Transcripts come from the server, not a local pid scan.",
+            "Select a live session from the canonical control plane.",
             Style::default().fg(Color::DarkGray),
         )));
     }
     frame.render_widget(
-        Paragraph::new(body).wrap(Wrap { trim: false }).block(
-            Block::default().borders(Borders::ALL).title(Span::styled(
+        Paragraph::new(body)
+            .wrap(Wrap { trim: false })
+            .scroll((app.interaction.scroll.observe_transcript, 0))
+            .block(Block::default().borders(Borders::ALL).title(Span::styled(
                 " Transcript ",
-                Style::default().fg(Color::White),
-            )),
-        ),
-        columns[1],
+                Style::default().add_modifier(Modifier::BOLD),
+            ))),
+        columns.transcript,
     );
 }
 
@@ -264,36 +268,13 @@ fn draw_memory_overlay(frame: &mut Frame, app: &App) {
 fn draw_monitor(frame: &mut Frame, area: Rect, app: &App) {
     let mux_lines = app.mux_status_lines();
     let polarize_lines = app.polarize_status_lines();
-    let mux_height = if mux_lines.is_empty() {
-        0
-    } else {
-        // header + entries + 2 (top + bottom border). Capped so a noisy mux
-        // setup with many services cannot starve the run table; the panel
-        // scrolls with `Wrap` past the cap.
-        (mux_lines.len() as u16 + 2).clamp(3, 10)
-    };
-    let polarize_height = if polarize_lines.is_empty() {
-        0
-    } else {
-        (polarize_lines.len() as u16 + 2).clamp(3, 9)
-    };
-
-    let mut constraints = vec![Constraint::Length(5)];
-    if !mux_lines.is_empty() {
-        constraints.push(Constraint::Length(mux_height));
-    }
-    if !polarize_lines.is_empty() {
-        constraints.push(Constraint::Length(polarize_height));
-    }
-    constraints.push(Constraint::Min(8));
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(area);
+    let mux_height = mux_panel_height(mux_lines.len());
+    let polarize_height = polarize_panel_height(polarize_lines.len());
+    let layout = monitor_layout(area, mux_height, polarize_height);
 
     draw_stat_strip(
         frame,
-        rows[0],
+        layout.stats,
         [
             (
                 "Monitor pulse",
@@ -337,10 +318,10 @@ fn draw_monitor(frame: &mut Frame, area: Rect, app: &App) {
                 Color::Cyan,
             ),
         ],
+        None,
     );
 
-    let mut body_idx = 1;
-    if !mux_lines.is_empty() {
+    if let Some(mux_area) = layout.mux {
         let state = app
             .mux_subscriber
             .as_ref()
@@ -348,36 +329,24 @@ fn draw_monitor(frame: &mut Frame, area: Rect, app: &App) {
             .map(|s| s.clone());
         draw_mux_panel(
             frame,
-            rows[body_idx],
+            mux_area,
             &mux_lines,
             app.mux_summaries.len(),
             state.as_ref(),
         );
-        body_idx += 1;
     }
-    if !polarize_lines.is_empty() {
+    if let Some(polarize_area) = layout.polarize {
         draw_polarize_panel(
             frame,
-            rows[body_idx],
+            polarize_area,
             &polarize_lines,
             app.polarize_intents.len(),
         );
-        body_idx += 1;
     }
 
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(36), Constraint::Percentage(64)])
-        .split(rows[body_idx]);
-
-    draw_runs(frame, body[0], app, true);
-
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
-        .split(body[1]);
-    draw_detail(frame, right[0], app, "Run dossier");
-    draw_events(frame, right[1], app, "Recent timeline");
+    draw_runs(frame, layout.list, app, true);
+    draw_detail(frame, layout.dossier, app, "Run dossier");
+    draw_events(frame, layout.timeline, app, "Recent timeline");
 }
 
 fn draw_mux_panel(
@@ -489,14 +458,16 @@ fn draw_polarize_panel(frame: &mut Frame, area: Rect, lines: &[String], total_in
 }
 
 fn draw_dispatch(frame: &mut Frame, area: Rect, app: &App) {
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(5), Constraint::Min(12)])
-        .split(area);
+    let layout = dispatch_layout(area);
+    let selected_stat = match app.dispatch_focus() {
+        DispatchFocus::Kind => Some(0),
+        DispatchFocus::Agent | DispatchFocus::Runtime => Some(1),
+        DispatchFocus::Prompt => Some(2),
+    };
 
     draw_stat_strip(
         frame,
-        rows[0],
+        layout.stats,
         [
             (
                 "Mission",
@@ -527,37 +498,37 @@ fn draw_dispatch(frame: &mut Frame, area: Rect, app: &App) {
                 Color::Magenta,
             ),
         ],
+        selected_stat,
     );
 
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-        .split(rows[1]);
+    draw_launch(frame, layout.deck, app);
 
-    draw_launch(frame, body[0], app);
-
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
-        .split(body[1]);
-
+    let playbook_focused = app.interaction.focused == Some(PaneId::DispatchPlaybook);
     let guide_lines = vec![
         Line::from("Dispatch posture"),
         Line::from(""),
         Line::from("Shape the next worker before you launch it."),
         Line::from("Use mission kind for intent, agent for style, runtime for surface."),
         Line::from("Prompt edit is the last mile: keep it sharp and bounded."),
+        Line::from(""),
+        Line::from("Click a cell to focus it. Wheel scrolls only that pane."),
     ];
     let guide = Paragraph::new(guide_lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Dispatch playbook"),
+                .title("Dispatch playbook")
+                .border_style(if playbook_focused {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                }),
         )
+        .scroll((app.interaction.scroll.playbook, 0))
         .wrap(Wrap { trim: false });
-    frame.render_widget(guide, right[0]);
+    frame.render_widget(guide, layout.playbook);
 
-    draw_launch_history(frame, right[1], app);
+    draw_launch_history(frame, layout.trail, app);
 }
 
 fn draw_controls(frame: &mut Frame, area: Rect, app: &App) {
@@ -579,14 +550,11 @@ fn draw_controls(frame: &mut Frame, area: Rect, app: &App) {
         })
         .count();
 
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(5), Constraint::Min(12)])
-        .split(area);
+    let layout = controls_layout(area);
 
     draw_stat_strip(
         frame,
-        rows[0],
+        layout.stats,
         [
             (
                 "Run access",
@@ -622,22 +590,12 @@ fn draw_controls(frame: &mut Frame, area: Rect, app: &App) {
                 Color::Green,
             ),
         ],
+        None,
     );
 
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(46), Constraint::Percentage(54)])
-        .split(rows[1]);
-
-    draw_deep_controls(frame, body[0], app);
-
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-        .split(body[1]);
-
-    draw_detail(frame, right[0], app, "Artifact access");
-    draw_events(frame, right[1], app, "Selected timeline");
+    draw_deep_controls(frame, layout.actions, app);
+    draw_detail(frame, layout.artifacts, app, "Artifact access");
+    draw_events(frame, layout.timeline, app, "Selected timeline");
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
@@ -652,7 +610,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
 
     let nav_hint = match (app.active_tab(), app.focus) {
         (AppTab::Monitor, _) => {
-            "Monitor: ↑/↓ runs  / search  f scope  x archive  d controls  ? help"
+            "Monitor: click a row  wheel that pane  ↑/↓ runs  / search  f scope  x archive  ? help"
         }
         (AppTab::Dispatch, LaunchFocus::EditPrompt) => {
             "Dispatch edit: type prompt  Enter newline  Ctrl+S/Esc save"
@@ -660,12 +618,14 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         (_, LaunchFocus::Error) => "Error: Enter/Esc closes the failure details",
         (_, LaunchFocus::Artifact) => "Artifact viewer: Enter/Esc closes the native viewer",
         (AppTab::Dispatch, _) => {
-            "Dispatch: ↑/↓ field  ←/→ change  e edit prompt  Enter launch  1-4 presets"
+            "Dispatch: click a cell  wheel that pane  ↑/↓ field  ←/→ change  e edit  Enter launch"
         }
         (AppTab::Controls, _) => {
-            "Controls: ↑/↓ action  ←/→ run selection  Enter open  d jump here from Monitor"
+            "Controls: click an action  wheel that pane  ↑/↓ action  Enter open"
         }
-        (AppTab::MissionControl, _) => "Mission Control: ↑/↓ panel focus  r refresh  Tab next tab",
+        (AppTab::MissionControl, _) => {
+            "Mission Control: click a panel  wheel that pane  ↑/↓ focus  r refresh"
+        }
     };
     frame.render_widget(
         Paragraph::new(nav_hint).style(Style::default().fg(Color::Cyan)),
@@ -702,6 +662,7 @@ fn draw_runs(frame: &mut Frame, area: Rect, app: &App, emphasize_live: bool) {
         app.runs
             .iter()
             .enumerate()
+            .skip(usize::from(app.interaction.scroll.monitor_list))
             .map(|(idx, run)| {
                 let status = status_style(run.kind);
                 let selected = idx == app.selected;
@@ -739,8 +700,14 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App, title: &str) {
         .into_iter()
         .map(Line::from)
         .collect::<Vec<_>>();
+    let offset = if title.contains("Artifact") {
+        app.interaction.scroll.controls_artifacts
+    } else {
+        app.interaction.scroll.dossier
+    };
     let detail = Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title(title))
+        .scroll((offset, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(detail, area);
 }
@@ -751,27 +718,45 @@ fn draw_events(frame: &mut Frame, area: Rect, app: &App, title: &str) {
         .into_iter()
         .map(Line::from)
         .collect::<Vec<_>>();
+    let offset = if title.contains("Selected") {
+        app.interaction.scroll.controls_timeline
+    } else {
+        app.interaction.scroll.timeline
+    };
     let events = Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title(title))
+        .scroll((offset, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(events, area);
 }
 
 fn draw_launch(frame: &mut Frame, area: Rect, app: &App) {
-    let lines = app
-        .prompt_lines()
-        .into_iter()
-        .map(Line::from)
-        .collect::<Vec<_>>();
-
     let title = if app.focus == LaunchFocus::EditPrompt {
         "Dispatch deck (editing prompt)"
     } else {
         "Dispatch deck"
     };
 
-    let launch = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(title))
+    let inner_width = usize::from(area.width.saturating_sub(2).max(8));
+    let wrapped = app
+        .prompt_lines()
+        .into_iter()
+        .flat_map(|line| wrap_operator_line(&line, inner_width))
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    let deck_focused = app.interaction.focused == Some(PaneId::DispatchDeck);
+    let launch = Paragraph::new(wrapped)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(if deck_focused {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                }),
+        )
+        .scroll((app.interaction.scroll.deck, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(launch, area);
 }
@@ -797,8 +782,19 @@ fn draw_launch_history(frame: &mut Frame, area: Rect, app: &App) {
             .map(|run| run.snapshot.run_id.as_str())
             .unwrap_or("none")
     )));
+    let trail_focused = app.interaction.focused == Some(PaneId::DispatchTrail);
     let panel = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title("Launch trail"))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Launch trail")
+                .border_style(if trail_focused {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                }),
+        )
+        .scroll((app.interaction.scroll.trail, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(panel, area);
 }
@@ -815,6 +811,7 @@ fn draw_deep_controls(frame: &mut Frame, area: Rect, app: &App) {
                 .borders(Borders::ALL)
                 .title("Primary actions"),
         )
+        .scroll((app.interaction.scroll.controls_actions, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(panel, area);
 }
@@ -822,19 +819,12 @@ fn draw_deep_controls(frame: &mut Frame, area: Rect, app: &App) {
 fn draw_mission_control(frame: &mut Frame, area: Rect, app: &App) {
     let mission = &app.mission_control;
     let focus = app.mission_focus;
-
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(5),
-            Constraint::Min(8),
-            Constraint::Length(6),
-        ])
-        .split(area);
+    let layout = mission_layout(area);
+    let mission_scroll = app.interaction.scroll.mission;
 
     draw_stat_strip(
         frame,
-        rows[0],
+        layout.stats,
         [
             (
                 "Active dispatches",
@@ -880,50 +870,66 @@ fn draw_mission_control(frame: &mut Frame, area: Rect, app: &App) {
                 Color::Magenta,
             ),
         ],
+        None,
     );
 
-    // Grid layout: 7 panels arranged as 3 rows × (varied columns) per
-    // PLAN_23 §4 mock-up:
-    //  ┌ active  │ wave-atlas ┐
-    //  ├ per-agent           ┤
-    //  ┌ per-skill │ fleet   ┐
-    //  ┌ failures  │ action  ┐
-    let body = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
-        ])
-        .split(rows[1]);
+    let panels = layout.panels;
+    draw_mc_active_dispatches(
+        frame,
+        panels[0],
+        &mission.active_dispatches,
+        focus == 0,
+        mission_scroll[0],
+    );
+    draw_mc_wave_atlas(
+        frame,
+        panels[1],
+        &mission.wave_atlas,
+        focus == 1,
+        mission_scroll[1],
+    );
+    draw_mc_agent_stats(
+        frame,
+        panels[2],
+        &mission.agent_stats,
+        focus == 2,
+        mission_scroll[2],
+    );
+    draw_mc_skill_stats(
+        frame,
+        panels[3],
+        &mission.skill_stats,
+        focus == 3,
+        mission_scroll[3],
+    );
+    draw_mc_fleet_health(
+        frame,
+        panels[4],
+        &mission.fleet_health,
+        focus == 4,
+        mission_scroll[4],
+    );
+    draw_mc_failure_board(
+        frame,
+        panels[5],
+        &mission.failures,
+        focus == 5,
+        mission_scroll[5],
+    );
+    draw_mc_action_queue(
+        frame,
+        panels[6],
+        &mission.action_queue,
+        focus == 6,
+        mission_scroll[6],
+    );
 
-    let top = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(body[0]);
-    draw_mc_active_dispatches(frame, top[0], &mission.active_dispatches, focus == 0);
-    draw_mc_wave_atlas(frame, top[1], &mission.wave_atlas, focus == 1);
-
-    let middle = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-        .split(body[1]);
-    draw_mc_agent_stats(frame, middle[0], &mission.agent_stats, focus == 2);
-    draw_mc_skill_stats(frame, middle[1], &mission.skill_stats, focus == 3);
-
-    let bottom = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
-            Constraint::Percentage(33),
-        ])
-        .split(body[2]);
-    draw_mc_fleet_health(frame, bottom[0], &mission.fleet_health, focus == 4);
-    draw_mc_failure_board(frame, bottom[1], &mission.failures, focus == 5);
-    draw_mc_action_queue(frame, bottom[2], &mission.action_queue, focus == 6);
-
-    draw_mc_quality_footer(frame, rows[2], &mission.data_quality, &mission.generated_at);
+    draw_mc_quality_footer(
+        frame,
+        layout.footer,
+        &mission.data_quality,
+        &mission.generated_at,
+    );
 }
 
 fn draw_mc_active_dispatches(
@@ -931,6 +937,7 @@ fn draw_mc_active_dispatches(
     area: Rect,
     items: &[ActiveDispatch],
     focused: bool,
+    offset: u16,
 ) {
     let title = format!(" Active dispatches ({}) ", items.len());
     let block = panel_block(&title, focused, Color::Green);
@@ -969,11 +976,18 @@ fn draw_mc_active_dispatches(
     };
     let para = Paragraph::new(lines)
         .block(block)
+        .scroll((offset, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(para, area);
 }
 
-fn draw_mc_wave_atlas(frame: &mut Frame, area: Rect, segments: &[WaveSegment], focused: bool) {
+fn draw_mc_wave_atlas(
+    frame: &mut Frame,
+    area: Rect,
+    segments: &[WaveSegment],
+    focused: bool,
+    offset: u16,
+) {
     let title = format!(" Wave atlas ({}) ", segments.len());
     let block = panel_block(&title, focused, Color::Cyan);
     let lines: Vec<Line> = if segments.is_empty() {
@@ -1016,11 +1030,18 @@ fn draw_mc_wave_atlas(frame: &mut Frame, area: Rect, segments: &[WaveSegment], f
     };
     let para = Paragraph::new(lines)
         .block(block)
+        .scroll((offset, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(para, area);
 }
 
-fn draw_mc_agent_stats(frame: &mut Frame, area: Rect, rows: &[AgentStatsRow], focused: bool) {
+fn draw_mc_agent_stats(
+    frame: &mut Frame,
+    area: Rect,
+    rows: &[AgentStatsRow],
+    focused: bool,
+    offset: u16,
+) {
     let title = format!(" Per-agent stats (30d, {} agents) ", rows.len());
     let block = panel_block(&title, focused, Color::Yellow);
     let lines: Vec<Line> = if rows.is_empty() {
@@ -1058,11 +1079,18 @@ fn draw_mc_agent_stats(frame: &mut Frame, area: Rect, rows: &[AgentStatsRow], fo
     };
     let para = Paragraph::new(lines)
         .block(block)
+        .scroll((offset, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(para, area);
 }
 
-fn draw_mc_skill_stats(frame: &mut Frame, area: Rect, rows: &[SkillStatsRow], focused: bool) {
+fn draw_mc_skill_stats(
+    frame: &mut Frame,
+    area: Rect,
+    rows: &[SkillStatsRow],
+    focused: bool,
+    offset: u16,
+) {
     let title = format!(" Per-skill stats ({}) ", rows.len());
     let block = panel_block(&title, focused, Color::Blue);
     let lines: Vec<Line> = if rows.is_empty() {
@@ -1098,6 +1126,7 @@ fn draw_mc_skill_stats(frame: &mut Frame, area: Rect, rows: &[SkillStatsRow], fo
     };
     let para = Paragraph::new(lines)
         .block(block)
+        .scroll((offset, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(para, area);
 }
@@ -1107,6 +1136,7 @@ fn draw_mc_fleet_health(
     area: Rect,
     signals: &[FleetHealthSignal],
     focused: bool,
+    offset: u16,
 ) {
     let title = format!(" Fleet health ({}) ", signals.len());
     let block = panel_block(&title, focused, Color::Magenta);
@@ -1122,6 +1152,7 @@ fn draw_mc_fleet_health(
     };
     let para = Paragraph::new(lines)
         .block(block)
+        .scroll((offset, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(para, area);
 }
@@ -1207,7 +1238,13 @@ fn fleet_health_status_rank(status: FleetHealthStatus) -> u8 {
     }
 }
 
-fn draw_mc_failure_board(frame: &mut Frame, area: Rect, entries: &[FailureEntry], focused: bool) {
+fn draw_mc_failure_board(
+    frame: &mut Frame,
+    area: Rect,
+    entries: &[FailureEntry],
+    focused: bool,
+    offset: u16,
+) {
     let title = format!(" Failure board 24h ({}) ", entries.len());
     let block = panel_block(&title, focused, Color::Red);
     let lines: Vec<Line> = if entries.is_empty() {
@@ -1237,11 +1274,18 @@ fn draw_mc_failure_board(frame: &mut Frame, area: Rect, entries: &[FailureEntry]
     };
     let para = Paragraph::new(lines)
         .block(block)
+        .scroll((offset, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(para, area);
 }
 
-fn draw_mc_action_queue(frame: &mut Frame, area: Rect, items: &[ActionQueueItem], focused: bool) {
+fn draw_mc_action_queue(
+    frame: &mut Frame,
+    area: Rect,
+    items: &[ActionQueueItem],
+    focused: bool,
+    offset: u16,
+) {
     let title = format!(" Operator action queue ({}) ", items.len());
     let block = panel_block(&title, focused, Color::White);
     // Inner text width = panel minus the left/right border cells.
@@ -1289,6 +1333,7 @@ fn draw_mc_action_queue(frame: &mut Frame, area: Rect, items: &[ActionQueueItem]
     };
     let para = Paragraph::new(lines)
         .block(block)
+        .scroll((offset, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(para, area);
 }
@@ -1393,22 +1438,27 @@ fn format_duration_seconds(seconds: f64) -> String {
     }
 }
 
-fn draw_stat_strip(frame: &mut Frame, area: Rect, cards: [(&str, Vec<String>, Color); 3]) {
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Ratio(1, 3); 3])
-        .split(area);
-
-    for ((title, lines, accent), column) in cards.into_iter().zip(columns.iter().copied()) {
+fn draw_stat_strip(
+    frame: &mut Frame,
+    columns: [Rect; 3],
+    cards: [(&str, Vec<String>, Color); 3],
+    selected: Option<usize>,
+) {
+    for (index, ((title, lines, accent), column)) in cards.into_iter().zip(columns).enumerate() {
+        let focused = selected == Some(index);
+        let mut border = Style::default().fg(accent);
+        if focused {
+            border = border.add_modifier(Modifier::BOLD | Modifier::REVERSED);
+        }
         let content = lines.into_iter().map(Line::from).collect::<Vec<_>>();
         let panel = Paragraph::new(content)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .title(title)
-                    .border_style(Style::default().fg(accent)),
+                    .border_style(border),
             )
-            .style(Style::default().fg(Color::White))
+            .style(Style::default())
             .wrap(Wrap { trim: false });
         frame.render_widget(panel, column);
     }
@@ -1697,6 +1747,7 @@ mod tests {
             mission_artifact_root: std::path::PathBuf::from("/tmp/vc-op-mission-test"),
             observe: Default::default(),
             memory: Default::default(),
+            interaction: Default::default(),
         }
     }
 

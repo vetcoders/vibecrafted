@@ -81,9 +81,42 @@ def test_vc_operator_uses_one_repository_local_operator_journal() -> None:
 
 def test_vc_scaffold_emits_dispatch_and_preserves_embargo_recovery_contract() -> None:
     skills = REPO_ROOT / "vibecrafted-core/vibecrafted_core/skills"
-    variants = [skills / "vc-scaffold", skills / "pl/vc-scaffold"]
+    variants = [
+        (
+            skills / "vc-scaffold",
+            (
+                (
+                    "For a local worker checkpoint under a declared embargo, "
+                    "`--no-verify` is fully authorized."
+                ),
+                "No push, publication, or remote `embargo/<plan-id>` ref.",
+                "runs Semgrep plus secret/security review",
+                "this is neither security-clean nor verified delivery.",
+                (
+                    "Full language-appropriate deferred and normal gates pass and are "
+                    "recorded against the exact admitted SHA."
+                ),
+            ),
+        ),
+        (
+            skills / "pl/vc-scaffold",
+            (
+                (
+                    "Przy lokalnym checkpoincie workera pod zadeklarowanym embargiem "
+                    "`--no-verify` jest w pełni\nautoryzowany."
+                ),
+                "Bez push, publikacji ani zdalnego refa `embargo/<plan-id>`.",
+                "uruchamia Semgrep oraz przegląd sekretów/bezpieczeństwa",
+                "to nie jest security-clean ani verified delivery.",
+                (
+                    "Pełne, odpowiednie dla języka bramki odroczone i normalne "
+                    "przechodzą i są zapisane dla dokładnego dopuszczonego SHA."
+                ),
+            ),
+        ),
+    ]
 
-    for scaffold in variants:
+    for scaffold, embargo_contract in variants:
         skill = (scaffold / "SKILL.md").read_text(encoding="utf-8")
         flow = (scaffold / "FLOW.md").read_text(encoding="utf-8")
         template = (scaffold / "references/plan-template.md").read_text(
@@ -105,10 +138,8 @@ def test_vc_scaffold_emits_dispatch_and_preserves_embargo_recovery_contract() ->
         )
         assert "founder_interview_evidence:" in template
         assert "AICX" in skill
-        assert "--no-verify" in embargo
-        assert "embargo/<plan-id>" in embargo
         assert "policy-aware" in embargo
-        assert (
-            "forbidden in every phase" in embargo
-            or "zabronione w każdej fazie" in embargo
-        )
+        for marker in embargo_contract:
+            assert marker in embargo, (
+                f"{scaffold.relative_to(REPO_ROOT)} missing embargo contract: {marker!r}"
+            )

@@ -117,5 +117,30 @@ _vetcoders_compose_operator_prompt() {
 _vetcoders_operator_command_text() {
   local tool="$1"
   local operator_prompt="$2"
-  _vetcoders_init_command_text "$tool" "$operator_prompt" "${3:-local-native}" "${4:-bypass}"
+  _vetcoders_init_command_text "$tool" "$operator_prompt" "${3:-local-native}" "${4:-bypass}" "${5:-safe}" "${6:-none}" "${7:-fresh}" "${8:-}" "${9:-}"
+}
+
+_vetcoders_partner_runtime() {
+  _vetcoders_init_runtime "${1:-terminal}"
+}
+
+_vetcoders_compose_partner_prompt() {
+  local prompt_text="${1:-}"
+  local file_path="${2:-}"
+  local partner_prompt="/vc-partner"
+  local extra
+
+  extra="$(_vetcoders_compose_input_context "$prompt_text" "$file_path")" || return 1
+  if [[ -n "$extra" ]]; then
+    partner_prompt+=$'\n\n'
+    partner_prompt+="$extra"
+  fi
+
+  printf '%s' "$partner_prompt"
+}
+
+_vetcoders_partner_command_text() {
+  local tool="$1"
+  local partner_prompt="$2"
+  _vetcoders_init_command_text "$tool" "$partner_prompt" "${3:-local-native}" "${4:-bypass}" "${5:-safe}" "${6:-none}" "${7:-fresh}" "${8:-}" "${9:-}"
 }

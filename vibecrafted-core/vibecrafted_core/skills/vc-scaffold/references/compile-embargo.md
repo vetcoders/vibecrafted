@@ -1,53 +1,65 @@
 # Compile Embargo — Phase-Aware Recovery Contract
 
-A compile embargo may protect an architectural shaping phase from compiler-driven redesign. It is
-not a Git-hook bypass, a push ban, or permission to make the only recovery point local.
+A compile embargo protects architectural shaping from compiler- and test-driven redesign.
+Under the Founder's authorization, checkpoint commits may use `--no-verify` or an equivalent
+selective bypass for deferred Ruff, compile, lint, type-check, and test gates. Keep coherent work
+committed; a temporarily failing build is not a reason to leave the only recovery point in a dirty tree.
 
 ## Admission gate
 
 A scaffold may declare compile embargo only when all of the following are explicit:
 
-- the founder/operator decision that authorizes the experiment;
+- the Founder decision that authorizes the experiment;
 - the phases covered and the exact compile/lint/test gates deferred in each phase;
 - the assertions or structural evidence that replace those gates temporarily;
 - the attestation that ends the embargo (for example `W2_STRUCTURALLY_CLOSED`), its required author,
   journal location, and commit SHA;
-- the repository-owned hook/policy path that understands that marker.
+- the checkpoint procedure: which hooks and gates are deferred or bypassed, and the report location
+  that records what actually ran and what was skipped.
 
-Commit-message, secret, security, ref-safety, and destructive-command checks are never deferred.
-`--no-verify` and equivalent bypass flags are forbidden in every phase.
+For a local worker checkpoint under a declared embargo, `--no-verify` is fully authorized. It
+bypasses Git's bundled hook entrypoint as a whole; it is not a selective execution mechanism and
+does not impose a security-hook prerequisite on the worker. Its authorization is limited to the
+declared checkpoint scope, not to a claim that skipped gates passed. Preserve accurate commit
+attribution and the authorized ref/operation scope. Record the deferred gates with the commit and
+report the gates that actually ran or were skipped.
 
-If the repository has no policy-aware hook mechanism capable of deferring only the named gates,
-the scaffold must add that mechanism as a separate prerequisite cut or split the work into ordinary
-hook-clean commits. A prose claim that hooks "should be quiet" is not implementation and cannot
-admit the embargo.
+Use a selective repository-owned, policy-aware hook policy when available. Its absence does not
+block a local worker checkpoint or require building a new policy system first: phase authorization
+is sufficient for every checkpoint in that phase. Do not weaken product assertions to obtain green.
 
 ## Recovery channel under embargo
 
-Every coherent phase boundary produces an ordinary, attributed commit through the active hooks.
-When the current-turn mandate authorizes remote mutation, publish that commit to the dedicated,
-non-trunk recovery ref `embargo/<plan-id>`. The repository's policy-aware pre-push must verify:
+The embargo has three distinct states:
 
-1. the destination is exactly the declared embargo ref, never trunk, a release branch, or a tag;
-2. the phase marker names the plan ID, phase, deferred gates, attestation state, and exact commit;
-3. commit-message, security, secret, identity, and ref-safety checks remain hard;
-4. only the explicitly listed compile/lint/test gates are deferred;
-5. the remote checkpoint receipt and pushed SHA are written to the mission journal.
+| State                              | Owner and allowed action                                                                                                                                                                            | Evidence and meaning                                                                                                                                            |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Local worker checkpoint            | Worker commits in its Fleet Worktree and stops. No push, publication, or remote `embargo/<plan-id>` ref.                                                                                            | Exact SHA, scope, and report of gates run/skipped. The bundled hook entrypoint may be bypassed; this is neither security-clean nor verified delivery.           |
+| Structural admission under embargo | Designated integrator verifies the exact worker commit and scope, runs Semgrep plus secret/security review, and may integrate the local baton so later worker waves build on coherent architecture. | Structurally admitted only. Compile, lint, type-check, and tests remain deferred until named closure; the integrator never calls a skipped security gate clean. |
+| Verified delivery                  | Designated integrator after named closure.                                                                                                                                                          | Full language-appropriate deferred and normal gates pass and are recorded against the exact admitted SHA.                                                       |
 
-This is a recovery ref, not a merge candidate or a second control plane. The plan, tracker, journal,
-and the `.dispatch.toml` artifact remain the sources of execution truth. Never infer push authority from the
-existence of an embargo: without current-turn authorization, report the checkpoint as local-only
-and remote recoverability as blocked. With authorization, a blanket push ban is a reliability
-defect.
+The plan, tracker, journal, and `.dispatch.toml` artifact remain the sources of execution truth.
+Structural admission is a local architectural join, not a delivery claim or a second control plane.
 
 ## Releasing the embargo
 
-The named attestation ends the embargo. Before the next ordinary feature-branch checkpoint:
+The named attestation ends the embargo. Before verified delivery:
 
 1. run every deferred gate plus the normal full gate set;
 2. record results and the attestation against the exact commit SHA;
-3. make the next commit and push through the normal feature-branch policy;
-4. retain the embargo ref as recovery evidence until integration policy permits cleanup.
+3. have the designated integrator record verified delivery against the exact admitted SHA;
+4. retain the local checkpoint and structural-admission receipts as recovery evidence until
+   integration policy permits cleanup.
 
-A failed deferred gate reopens the declared recovery path; it never resurrects `--no-verify`.
+### Mixed-repository deferred-gate matrix
+
+Until named closure, structural admission does not authorize compile, lint, type-check, or test
+execution merely to make an embargo green. At closure, run the applicable categories for the
+admitted scope: Swift — build/type-check and tests; Rust — `cargo check`/Clippy and tests; Python —
+lint/type-check and tests; Shell — syntax, formatter/linter, and script tests. The exact commands
+belong to the repository's normal gate contract and are recorded with the admitted SHA.
+
+A failed deferred gate triggers repair of the implementation. A renewed structural embargo and
+its checkpoint bypass require a recorded phase decision; neither a failing test nor an old bypass
+receipt is evidence of verified delivery.
 Merge, tag, release, publication, and stable promotion remain `vc-release` buttons.

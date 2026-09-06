@@ -334,22 +334,22 @@ def resolve_quota_policy(
     raw = "safe" if selection is None else str(selection).strip().lower()
     if not raw or raw == "safe":
         return QuotaPolicy("bounded", QUOTA_PRESET_TOKENS, "safe")
-    if raw == "unlimited":
+    if raw in {"unlimited", "unmetered"}:
         if mode != "interactive" or runtime != "local-native":
             raise ValueError(
-                "unlimited quota is restricted to directly User-observed local-native sessions"
+                f"{raw} quota is restricted to directly User-observed local-native sessions"
             )
         return QuotaPolicy(
-            "unlimited",
+            raw,
             None,
-            "unlimited",
-            "User selected unlimited usage; Vibecrafted will measure but will not terminate on token usage",
+            raw,
+            f"User selected {raw} usage; Vibecrafted will not terminate on token usage",
         )
     try:
         budget = int(raw, 10)
     except ValueError as exc:
         raise ValueError(
-            "token budget must be safe, unlimited, or a positive integer"
+            "token budget must be safe, unlimited, unmetered, or a positive integer"
         ) from exc
     if budget <= 0:
         raise ValueError("token budget must be a positive integer")
@@ -794,32 +794,20 @@ def runtime_policy_capabilities(provider: str) -> dict[str, dict[str, Any]]:
     vm_found = which("docker") is not None or which("colima") is not None
     return {
         "local-native": {
-            "available": provider_found and usage.supported,
+            "available": provider_found,
             "usage_capability": usage.as_dict(),
-            "reason": (
-                ""
-                if provider_found and usage.supported
-                else (
-                    f"{provider} executable not found"
-                    if not provider_found
-                    else usage.reason
-                )
-            ),
+            "reason": ("" if provider_found else f"{provider} executable not found"),
         },
         "local-worktrees": {
-            "available": provider_found and worktree_substrate and usage.supported,
+            "available": provider_found and worktree_substrate,
             "substrate": worktree_substrate,
             "usage_capability": usage.as_dict(),
             "reason": ""
-            if provider_found and worktree_substrate and usage.supported
+            if provider_found and worktree_substrate
             else (
                 f"{provider} executable not found"
                 if not provider_found
-                else (
-                    "git/dispatch manage_worktrees unavailable"
-                    if not worktree_substrate
-                    else usage.reason
-                )
+                else "git/dispatch manage_worktrees unavailable"
             ),
         },
         "local-vm": {
@@ -924,7 +912,7 @@ def interactive_workspace_command(
         raise ValueError(decision.reason)
     quota = resolve_quota_policy(token_budget, runtime=runtime)
     capability = resolve_provider_usage_capability(provider)
-    if not capability.supported:
+    if quota.kind in {"safe", "bounded"} and not capability.supported:
         raise ValueError(capability.reason)
     operator_policy = resolve_operator_agent_policy(operator, runtime=runtime)
     if not operator_policy.supported:
@@ -1046,11 +1034,14 @@ def prepare_interactive_workspace_launch(
     resolved_executable = executable or which(provider, path=agent_tool_search_path())
     if not resolved_executable:
         raise ValueError(f"{provider} executable not found")
-    quota = quota_policy or resolve_quota_policy(None, runtime=runtime)
     capability = usage_capability or resolve_provider_usage_capability(
         provider, executable=resolved_executable
     )
-    if not capability.supported:
+    if quota_policy is not None:
+        quota = quota_policy
+    else:
+        quota = resolve_quota_policy(None, runtime=runtime)
+    if quota.kind in {"safe", "bounded"} and not capability.supported:
         raise ValueError(capability.reason)
     effective_provider_session_id = provider_session_id or str(uuid.uuid4())
     try:
@@ -1104,9 +1095,13 @@ def prepare_interactive_workspace_launch(
             "quota_warning": quota.warning,
             "usage_capability": capability.as_dict(),
             "usage_measurement": {
-                "source": capability.source,
-                "attribution": "provider_session_id+cwd+provider_version+message_id",
-                "monotonic": True,
+                "source": capability.source or "unmetered",
+                "attribution": (
+                    "provider_session_id+cwd+provider_version+message_id"
+                    if capability.supported
+                    else "unmetered"
+                ),
+                "monotonic": capability.supported,
             },
             "measured_usage": {
                 "input_tokens": 0,
@@ -1187,6 +1182,20 @@ def _git_output(root: Path, *args: str) -> str:
         ["git", *args], cwd=root, check=False, capture_output=True, text=True
     )
     return completed.stdout.strip() if completed.returncode == 0 else ""
+
+
+class _UnmeteredUsage:
+    """Null usage reader for providers lacking an attributable live side channel."""
+
+    def poll(self) -> dict[str, int]:
+        return {
+            "input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "messages": 0,
+        }
 
 
 class _ClaudeTranscriptUsage:
@@ -1430,16 +1439,19 @@ def launch_interactive_workspace(
         provider_session_id=provider_session_id,
         continuity_material=continuity_material,
     )
-    try:
-        usage_reader = _ClaudeTranscriptUsage(
-            provider_session_id=provider_session_id,
-            effective_root=launch.effective_root,
-            provider_version=capability.provider_version,
-            env=child_env,
-        )
-    except Exception:
-        _cleanup_unspawned_interactive_launch(launch)
-        raise
+    if capability.supported and provider == "claude":
+        try:
+            usage_reader: Any = _ClaudeTranscriptUsage(
+                provider_session_id=provider_session_id,
+                effective_root=launch.effective_root,
+                provider_version=capability.provider_version,
+                env=child_env,
+            )
+        except Exception:
+            _cleanup_unspawned_interactive_launch(launch)
+            raise
+    else:
+        usage_reader = _UnmeteredUsage()
     child_env.update(
         {
             "VIBECRAFTED_RUN_ID": launch.run_id,
@@ -1676,13 +1688,21 @@ def _launch_supervised_interactive_workspace(
         provider_session_id=child_session_id,
         continuity_material=continuity_material,
     )
+    if child_capability.supported and provider == "claude":
+        try:
+            usage_reader: Any = _ClaudeTranscriptUsage(
+                provider_session_id=child_session_id,
+                effective_root=launch.effective_root,
+                provider_version=child_capability.provider_version,
+                env=base_env,
+            )
+        except Exception:
+            _cleanup_unspawned_interactive_launch(launch)
+            raise
+    else:
+        usage_reader = _UnmeteredUsage()
+
     try:
-        usage_reader = _ClaudeTranscriptUsage(
-            provider_session_id=child_session_id,
-            effective_root=launch.effective_root,
-            provider_version=child_capability.provider_version,
-            env=base_env,
-        )
         from .workflow import reserve_run_id
 
         operator_run_id = reserve_run_id("oper")

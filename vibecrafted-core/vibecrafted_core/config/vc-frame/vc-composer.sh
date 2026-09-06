@@ -3,7 +3,7 @@
 #
 # Contract (same door as compact-bar chip and Super+e / Cmd+E — Alt+e is free
 # for Polish `ę` on macOS):
-#   1. Draft in vim with: number, laststatus=0, nowrap (clean -- INSERT --)
+#   1. Draft in vim with: nonumber, laststatus=0, nowrap (clean -- INSERT --)
 #   2. Ctrl+p opens the Paste Stack picker and inserts at cursor
 #   3. `?` in normal mode toggles the built-in cheat sheet (q/Esc closes) —
 #      backward-search is deliberately traded away; `/` still searches
@@ -86,6 +86,7 @@ set nocompatible
 " No line numbers: the Composer is prose, not code, and a mouse selection
 " copies rendered cells — numbers in the gutter would ride into every paste.
 set nonumber
+set norelativenumber
 set laststatus=0
 set noshowcmd
 set noruler
@@ -135,6 +136,7 @@ function! VcComposerHelp() abort
 endfunction
 
 " One-line orientation hint in the free cmdline (laststatus=0 keeps it clear).
+autocmd VimEnter * set nonumber norelativenumber
 autocmd VimEnter * echo 'Composer: i = type · :wq = send · ? = help'
 VIMRC_HEAD
   printf '%s\n' "$wrap_line"

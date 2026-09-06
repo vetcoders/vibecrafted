@@ -129,15 +129,23 @@ async fn observability_index_names_projections_of_one_control_plane() {
     // The split the product promises: logs, metrics and the run board all
     // exist, all named as projections of the same control plane.
     for name in ["logs", "metrics", "run-board"] {
-        let row = by_name.get(name).unwrap_or_else(|| panic!("missing projection {name}"));
-        assert_eq!(row["source"], "control_plane", "{name} must read the one store");
+        let row = by_name
+            .get(name)
+            .unwrap_or_else(|| panic!("missing projection {name}"));
+        assert_eq!(
+            row["source"], "control_plane",
+            "{name} must read the one store"
+        );
         let source_path = row["source_path"].as_str().expect("source_path");
         assert!(
             source_path.starts_with(&format!("{control_plane}/")),
             "{name} escapes the control plane: {source_path}"
         );
         assert!(
-            row["route"].as_str().expect("route").starts_with("/api/control/"),
+            row["route"]
+                .as_str()
+                .expect("route")
+                .starts_with("/api/control/"),
             "{name} must be served by the control surface"
         );
     }

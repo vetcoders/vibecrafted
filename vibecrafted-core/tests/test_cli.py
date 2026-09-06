@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -90,6 +91,52 @@ def test_resume_session_help_topic_matches_direct_flag(capsys) -> None:
     assert topic_output == direct_output
     assert "--agent-session-id <id>" in topic_output
     assert "tracked, detached headless run" in topic_output
+
+
+def test_bare_partner_delegates_to_deck_not_launch_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launches: list[object] = []
+    runs: list[list[str]] = []
+
+    def fake_launch(*_args, **_kwargs):
+        launches.append(1)
+        raise AssertionError("bare partner must not call launch_workflow")
+
+    def fake_run(cmd, **_kwargs):
+        runs.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(cli, "launch_workflow", fake_launch)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert cli.main(["partner", "claude"]) == 0
+    assert launches == []
+    assert runs
+    assert runs[0][1:] == ["partner", "claude"]
+
+
+def test_partner_with_prompt_delegates_to_deck_not_launch_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launches: list[object] = []
+    runs: list[list[str]] = []
+
+    def fake_launch(*_args, **_kwargs):
+        launches.append(1)
+        raise AssertionError("partner --prompt must not call launch_workflow")
+
+    def fake_run(cmd, **_kwargs):
+        runs.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(cli, "launch_workflow", fake_launch)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert cli.main(["partner", "claude", "--prompt", "do the cut"]) == 0
+    assert launches == []
+    assert runs
+    assert runs[0][1:] == ["partner", "claude", "--prompt", "do the cut"]
 
 
 def test_core_parser_accepts_the_short_prompt_and_file_flags() -> None:

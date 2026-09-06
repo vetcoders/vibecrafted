@@ -520,6 +520,8 @@ materialize_runtime_payload() {
     "$runtime/scripts/installer_brand.py"
   install -m 0755 "$REPO_ROOT/scripts/vc-frame-product-entry.sh" \
     "$runtime/scripts/vc-frame-product-entry.sh"
+  install -m 0755 "$REPO_ROOT/scripts/vc-terminal-product-entry.sh" \
+    "$runtime/scripts/vc-terminal-product-entry.sh"
   "$REPO_ROOT/scripts/project-python" "$REPO_ROOT/scripts/distribution_manifest.py" \
     carrier --source "$REPO_ROOT" --output "$runtime/source-provenance.json" \
     --owner-repo vetcoders/vibecrafted --source-revision "$ROOT_SHA"
@@ -534,7 +536,9 @@ materialize_runtime_payload() {
   install -m 0755 "$server_source" "$runtime/bin/vc-server"
   install -m 0755 "$server_source" "$runtime/bin/vibecrafted-server-web"
   install -m 0755 "$scaffold_doctor_source" "$runtime/bin/scaffold-doctor"
-  install -m 0755 "$terminal_source" "$runtime/bin/vc-terminal"
+  install -m 0755 "$terminal_source" "$runtime/libexec/vc-terminal"
+  install -m 0755 "$runtime/scripts/vc-terminal-product-entry.sh" \
+    "$runtime/bin/vc-terminal"
   install -m 0755 "$frame_source" "$runtime/libexec/vc-frame"
   install -m 0755 "$runtime/scripts/vc-frame-product-entry.sh" \
     "$runtime/bin/vc-frame"
@@ -590,7 +594,7 @@ materialize_runtime_payload() {
   chmod 0755 "$runtime/bin/screenscribe"
   "$runtime/bin/screenscribe" --version >/dev/null
 
-  /usr/bin/strip -S "$runtime/bin/vc-terminal" "$runtime/libexec/vc-frame"
+  /usr/bin/strip -S "$runtime/libexec/vc-terminal" "$runtime/libexec/vc-frame"
   if find "$runtime" -type l -print -quit | grep -q .; then
     die "Runtime Pack payload contains symlinks"
   fi

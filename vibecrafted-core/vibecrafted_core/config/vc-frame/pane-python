@@ -9,7 +9,7 @@ if [[ $# -gt 0 ]]; then
 fi
 
 if [[ -z "$launcher" || ! -x "$launcher" ]]; then
-  printf '\n  Pane launcher missing: %s\n  Run: vibecrafted config install --force\n\n' "${launcher:-<none>}" >&2
+  printf '\n  Pane launcher missing: %s\n  Repair: run make install from the Vibecrafted checkout with your verified Runtime Pack\n\n' "${launcher:-<none>}" >&2
   exec "${SHELL:-/bin/zsh}" -l
 fi
 

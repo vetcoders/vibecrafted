@@ -1,6 +1,6 @@
-# Agent interactive contract — init / resume / operator
+# Agent interactive contract — init / resume / operator / partner
 
-Spec for how `vibecrafted init|resume|operator <agent>` must behave.
+Spec for how `vibecrafted init|resume|operator|partner <agent>` must behave.
 Applies to the **operator seat** (interactive launcher → explicit or detected
 operator target). Fleet workers (`*_spawn.sh`, marbles baton) stay
 non-interactive by design.
@@ -9,7 +9,8 @@ non-interactive by design.
 
 ```text
 bare resume → interactive → explicit or detected operator target
-prompt/file → tracked headless worker
+resume prompt/file → tracked headless worker
+init / operator / partner → always interactive (prompt/file = seed context)
 provider adapter → changes argv only, never policy
 ```
 
@@ -33,10 +34,10 @@ Interactive without a resolved target **refuses to downgrade** to headless.
 
 ## Modes
 
-| Mode                | Trigger                                                                              | UI                                                    | Agent invocation                     |
-| ------------------- | ------------------------------------------------------------------------------------ | ----------------------------------------------------- | ------------------------------------ |
-| **interactive**     | bare `init` / `resume` / `operator`; or `resume --session` without operator job text | Explicit or detected operator target (tab / frame)    | TUI stays open; human can continue   |
-| **non-interactive** | explicit `--prompt` / `--file` on resume (job continue); fleet spawn                 | Headless worker; tab/UI is transcript projection only | One-shot / print / exec / `--single` |
+| Mode                | Trigger                                                                                                                                          | UI                                                    | Agent invocation                     |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------- | ------------------------------------ |
+| **interactive**     | `init` / `operator` / `partner` (with or without extra `--prompt`/`--file` seed); bare `resume`; or `resume --session` without operator job text | Explicit or detected operator target (tab / frame)    | TUI stays open; human can continue   |
+| **non-interactive** | explicit `--prompt` / `--file` on **resume** (job continue); fleet spawn                                                                         | Headless worker; tab/UI is transcript projection only | One-shot / print / exec / `--single` |
 
 An internal AICX continuity pack is **transport**, not operator job text, for
 every provider — bare resume stays interactive.
@@ -76,6 +77,19 @@ every provider — bare resume stays interactive.
 ### `vibecrafted operator <agent>`
 
 Same interactive contract as init; seed `/vc-operator`.
+
+### `vibecrafted partner <agent>`
+
+Same interactive contract as init; seed `/vc-partner`. `--prompt` / `--file`
+append extra seed context; they never select `launch_workflow` / a headless
+worker. `vc-partner` without a TTY refuses:
+
+```text
+`vc-partner` is available from interactive agent session. Use vc-init first, and then trigger the skill from the active session
+```
+
+Visible live partner is `vc-start` / `[New]` with the partner ritual, then
+`/vc-partner` in that session.
 
 ## Grok CLI flags (ground truth)
 

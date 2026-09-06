@@ -301,6 +301,7 @@ fn mission_app(state: MissionControlState) -> App {
         mission_artifact_root: PathBuf::from("/fixture/artifacts"),
         observe: Default::default(),
         memory: Default::default(),
+        interaction: Default::default(),
     }
 }
 

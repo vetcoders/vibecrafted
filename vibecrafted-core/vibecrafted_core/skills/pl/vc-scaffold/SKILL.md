@@ -261,11 +261,14 @@ drugiego systemu wykonania.
 ### Plany z compile embargo
 
 Jeśli plan odracza bramki compile/test podczas kształtowania architektury, stosuj fazowo-świadomy
-kontrakt recovery z `references/compile-embargo.md`. Embargo nigdy nie legalizuje `--no-verify`,
-nie osłabia commit-message/security i nie zostawia po cichu jedynego zaakceptowanego punktu recovery
-lokalnie. Plan musi wskazać repo-owned mechanizm polityk, który potrafi odroczyć tylko nazwane bramki
-fazy; bez niego embargo jest zablokowane, dopóki prerequisite go nie wdroży albo praca nie zostanie
-podzielona na zwykłe hook-clean cięcia.
+kontrakt recovery z `references/compile-embargo.md`. Gdy Founder autoryzuje fazę embarga,
+`--no-verify` jest w pełni autoryzowany dla każdego lokalnego checkpointu workera w tej fazie.
+Obejmuje całe wejście bundlowanych hooków Gita, więc worker raportuje, co uruchomiono, a co
+pominięto; nie jest to claim dostarczenia zweryfikowanego przez bezpieczeństwo ani compile/test.
+Worker nie pushuje. Wyłącznie wyznaczony integrator może zrobić lokalny structural admission po
+weryfikacji dokładnego commita/zakresu, Semgrep oraz przeglądzie sekretów/bezpieczeństwa, aby kolejne
+fale budowały na złączonej architekturze, podczas gdy compile, lint, type-check i testy pozostają
+odroczone. Dopiero nazwana closure oraz pełne, odpowiednie dla języka bramki tworzą verified delivery.
 
 ### 6. Serwuj i przeglądaj (edytowalne artefakty przez vibecrafted-server)
 
@@ -356,7 +359,8 @@ to wyzwala recovery-vector** (fallback/failover/handsoff). Pełen alfabet + mark
 - Planowanie przed checkpointem orientacji (komponowanie architektury z pamięci = cichy dryf).
 - Shape bez odpowiedzi foundera albo wskazanego wcześniejszego wywiadu.
 - Sekcja „Running This Plan" złożona z ręcznych komend workflow per task.
-- Compile embargo zapisane jako push-ban albo pozwolenie na `--no-verify`.
+- Gołe pozwolenie na `--no-verify` bez autoryzacji fazy, zadeklarowanych bramek, raportu
+  checkpointu i kontraktu admission integratora.
 - 50-stronicowy design doc zamiast ostrego, mierzalnego planu.
 - Proza zamiast kolumny `state` — operator nie odpali trigger/stop na prozie.
 - Traktowanie twierdzenia `[~]` agenta jak `[x]` bez verifiera (pułapka optymizmu).
@@ -369,8 +373,8 @@ to wyzwala recovery-vector** (fallback/failover/handsoff). Pełen alfabet + mark
 - **`references/cadence.md`** — cadence read/write VC-ship (kolejność, WRITE/READ, przekazanie, reguły planowania).
 - **`references/output-shapes.md`** — trzy kształty skali + 12-sekcyjny szablon dispatchu + tracker.
 - **`references/plan-template.md`** — format wyjścia SCAFFOLD.md (teraz z Vector + state + verifier).
-- **`references/compile-embargo.md`** — fazowo-świadomy, zdalnie odzyskiwalny kontrakt embarga bez
-  obchodzenia hooków.
+- **`references/compile-embargo.md`** — kanoniczny, fazowo-świadomy kontrakt embarga: autoryzowane
+  lokalne checkpointy workera, niezależny admission integratora i domknięcie odroczonych bramek.
 
 ---
 

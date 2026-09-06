@@ -2577,10 +2577,7 @@ fn first_private_absolute_path(content: &str) -> Option<String> {
             .find_map(|(index, character)| {
                 (index > 0
                     && (character.is_whitespace()
-                        || matches!(
-                            character,
-                            '`' | '\'' | '"' | ')' | ']' | '}' | ',' | ';'
-                        )))
+                        || matches!(character, '`' | '\'' | '"' | ')' | ']' | '}' | ',' | ';')))
                 .then_some(index)
             })
             .unwrap_or(rest.len());

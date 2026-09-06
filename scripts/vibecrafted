@@ -4,25 +4,17 @@ set -euo pipefail
 readonly VIBECRAFTED_SERVICE_LIFECYCLE_LOCK_CONTRACT=1
 
 _vc_source_launcher_ulimits() {
-  local script_dir candidate
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  for candidate in \
-    "$script_dir/../runtime/scripts/lib/ulimits.sh" \
-    "$script_dir/../vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh" \
-    "${VIBECRAFTED_ROOT:-}/vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh" \
-    "${VIBECRAFTED_TOOLS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/tools}/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh" \
-    "${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/runtime/scripts/lib/ulimits.sh"; do
-    [[ -n "$candidate" && -r "$candidate" ]] || continue
-    # shellcheck disable=SC1090
-    source "$candidate"
-    vc_raise_launcher_limits
-    return 0
-  done
-  printf '[warn] launcher ulimit helper not found; continuing without rlimit raise\n' >&2
-  return 0
+  local owner_root candidate
+  owner_root="$(_script_owner_root)" || return $?
+  candidate="$owner_root/vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh"
+  if [[ ! -f "$candidate" || ! -r "$candidate" || -L "$candidate" ]]; then
+    printf 'vibecrafted: selected launcher limit helper missing: %s\n' "$candidate" >&2
+    return 1
+  fi
+  # shellcheck disable=SC1090
+  source "$candidate" || return $?
+  vc_raise_launcher_limits
 }
-_vc_source_launcher_ulimits
-unset -f _vc_source_launcher_ulimits
 
 _expand_home_path() {
   local raw="${1:-}"
@@ -101,17 +93,25 @@ _script_repo_root() {
 _script_owner_root() {
   local script_path="${BASH_SOURCE[0]}" script_dir link_target
   while [[ -L "$script_path" ]]; do
-    script_dir="$(cd "$(dirname "$script_path")" && pwd)"
-    link_target="$(readlink "$script_path")"
+    script_dir="$(cd -P "$(dirname "$script_path")" && pwd -P)" || return $?
+    link_target="$(readlink "$script_path")" || return $?
     if [[ "$link_target" == /* ]]; then
       script_path="$link_target"
     else
       script_path="$script_dir/$link_target"
     fi
   done
-  script_dir="$(cd "$(dirname "$script_path")" && pwd)"
-  cd "$script_dir/.." && pwd
+  script_dir="$(cd -P "$(dirname "$script_path")" && pwd -P)" || return $?
+  # The tracked package deck and published bin deck share this physical owner.
+  case "$script_dir" in
+    */vibecrafted-core/vibecrafted_core/deck)
+      cd -P "$script_dir/../../.." && pwd -P ;;
+    *) cd -P "$script_dir/.." && pwd -P ;;
+  esac
 }
+
+_vc_source_launcher_ulimits || exit $?
+unset -f _vc_source_launcher_ulimits
 
 _runtime_payload_root() {
   local candidate="${VIBECRAFTED_RUNTIME_ROOT:-}"
@@ -353,7 +353,25 @@ _helper_candidates() {
 }
 
 _ensure_helpers_loaded() {
-  local helper
+  local helper owner_root="${1:-}"
+  if [[ -n "$owner_root" ]]; then
+    # Product start passes the physical deck owner, not the current checkout
+    # or inherited tools-current. Do not fall through on a partial install.
+    helper="$owner_root/vibecrafted-core/vibecrafted_core/runtime/shell/vetcoders.sh"
+    if [[ ! -r "$helper" ]]; then
+      printf 'vc-start: selected runtime shell missing: %s\n' "$helper" >&2
+      printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
+      return 1
+    fi
+    export VIBECRAFTED_ROOT="$owner_root"
+    export VIBECRAFTED_RUNTIME_ROOT="$owner_root"
+    export VIBECRAFTED_RUNTIME_BIN="$owner_root/bin"
+    export VIBECRAFTED_CORE_DIR="$owner_root/vibecrafted-core"
+    unset VIBECRAFTED_PREFER_REPO_SPAWN
+    # shellcheck disable=SC1090
+    source "$helper" || return $?
+    return 0
+  fi
   local repo_source=""
   repo_source="$(_repo_source_root 2>/dev/null || true)"
   if [[ -n "$repo_source" ]]; then
@@ -365,7 +383,7 @@ _ensure_helpers_loaded() {
   while IFS= read -r helper; do
     [[ -r "$helper" ]] || continue
     # shellcheck disable=SC1090
-    source "$helper"
+    source "$helper" || return $?
     return 0
   done < <(_helper_candidates)
   printf '%b✗%b Could not find the 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. helper layer.\n' "$_red" "$_reset" >&2
@@ -1038,6 +1056,24 @@ cmd_resume_help() {
   printf '\n'
 }
 
+cmd_fork_help() {
+  printf '\n'
+  printf '%b⚒%b  %bfork%b\n' "$_copper" "$_reset" "$_bold" "$_reset"
+  printf '%b─────────────────────────────────────────%b\n' "$_steel" "$_reset"
+  printf '  Branch an exact Codex session into a new provider session.\n'
+  printf '  The source stays untouched; visible launches open a pane in this vc-frame tab.\n'
+  printf '\n%bUsage:%b\n' "$_bold" "$_reset"
+  printf '  vibecrafted fork codex --session current|previous|<session-id> [flags]\n'
+  printf '\n%bOptions:%b\n' "$_bold" "$_reset"
+  printf '  --runtime visible|terminal|headless  visible/terminal use this tab; headless is rejected by Codex TUI\n'
+  printf '  --placement right|floating          pane shape (default: right)\n'
+  printf '  --model <name>                      Codex model override\n'
+  printf '  --permissions bypass|auto|read-only Codex approval/sandbox contract (default: current config)\n'
+  printf '  --root <path>                       repository root (default: current repo)\n'
+  printf '  -p, --prompt <text>                 optional first prompt in the fork\n'
+  printf '\n'
+}
+
 cmd_init_help() {
   printf '\n'
   printf '%b⚒%b  %binit%b\n' "$_copper" "$_reset" "$_bold" "$_reset"
@@ -1065,6 +1101,43 @@ cmd_init_help() {
   printf '  vibecrafted init claude --runtime plain --policy-runtime local-native --permissions accept-edits\n'
   printf '  vibecrafted init claude --continuity full-lineage --continuity-parent <run-id>\n'
   printf '  vc-init codex\n'
+  printf '\n'
+}
+
+cmd_partner_help() {
+  printf '\n'
+  printf '%b⚒%b  %bpartner%b\n' "$_copper" "$_reset" "$_bold" "$_reset"
+  printf '%b─────────────────────────────────────────%b\n' "$_steel" "$_reset"
+  printf '  Start an interactive partner session with an agent (shared steering).\n'
+  printf '  Same family as init: TTY/frame face with /vc-partner. Never a headless worker.\n'
+  printf '  --prompt/--file append extra seed context. vc-partner without a TTY refuses.\n'
+  printf '\n'
+  printf '%bUsage:%b\n' "$_bold" "$_reset"
+  printf '  vibecrafted partner [claude|codex|agy|junie|grok|cursor] [--runtime terminal|visible|plain]\n'
+  printf '  vc-partner [claude|codex|agy|junie|grok|cursor]\n'
+  printf '\n'
+  printf '%bExamples:%b\n' "$_bold" "$_reset"
+  printf '  vibecrafted partner claude\n'
+  printf '  vibecrafted partner codex --runtime plain\n'
+  printf '  vc-start / [New] with the partner ritual, then /vc-partner in that session\n'
+  printf '\n'
+}
+
+cmd_operator_help() {
+  printf '\n'
+  printf '%b⚒%b  %boperator%b\n' "$_copper" "$_reset" "$_bold" "$_reset"
+  printf '%b─────────────────────────────────────────%b\n' "$_steel" "$_reset"
+  printf '  Start an interactive Agent Operator session (never the human Founder).\n'
+  printf '  Opens a TTY face with /vc-operator — same family as init, not a worker job.\n'
+  printf '\n'
+  printf '%bUsage:%b\n' "$_bold" "$_reset"
+  printf '  vibecrafted operator [claude|codex|agy|junie|grok|cursor] [--runtime terminal|visible]\n'
+  printf '  vc-operator [claude|codex|agy|junie|grok|cursor]\n'
+  printf '\n'
+  printf '%bExamples:%b\n' "$_bold" "$_reset"
+  printf '  vibecrafted operator claude\n'
+  printf '  vibecrafted operator codex --operator auto\n'
+  printf '  vc-operator grok\n'
   printf '\n'
 }
 
@@ -4379,6 +4452,14 @@ cmd_help() {
       cmd_init_help
       return
       ;;
+    partner)
+      cmd_partner_help
+      return
+      ;;
+    operator)
+      cmd_operator_help
+      return
+      ;;
     start)
       cmd_start_help
       return
@@ -4439,6 +4520,10 @@ cmd_help() {
       cmd_resume_help
       return
       ;;
+    fork)
+      cmd_fork_help
+      return
+      ;;
     observe|await|stop)
       cmd_lifecycle_help "$topic"
       return
@@ -4451,7 +4536,7 @@ cmd_help() {
       cmd_skill_help "implement"
       return
       ;;
-    audit|decorate|delegate|dou|followup|guard|hydrate|intents|justdo|marbles|ownership|partner|polarize|prune|release|research|review|scaffold|trust|workflow)
+    audit|decorate|delegate|dou|followup|guard|hydrate|intents|justdo|marbles|ownership|polarize|prune|release|research|review|scaffold|trust|workflow)
       cmd_skill_help "$topic"
       return
       ;;
@@ -4479,6 +4564,7 @@ cmd_help() {
   printf '  %binit%b [agent]         Orient an agent in this repo\n' "$_cyan" "$_reset"
   printf '  %b<skill> <agent>%b      Run a workflow with an agent\n' "$_cyan" "$_reset"
   printf '  %bresume%b <agent>       Continue a stopped run or a provider session\n' "$_cyan" "$_reset"
+  printf '  %bfork%b <agent>         Branch a provider session in this vc-frame tab\n' "$_cyan" "$_reset"
   printf '  %bobserve%b <agent>      Check a run report or transcript\n' "$_cyan" "$_reset"
   printf '  %bawait%b <agent>        Wait for a run to settle\n' "$_cyan" "$_reset"
   printf '  %bstop%b <agent>         Stop a tracked launcher process group\n' "$_cyan" "$_reset"
@@ -4549,6 +4635,7 @@ cmd_help_full() {
   printf '  %bvibecrafted await <agent>%b     --last      Join the shared vc-server monitor\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted stop <agent>%b      --last      Stop the tracked launcher process group\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted resume <agent>%b    --last      Continue as a new tracked job\n' "$_cyan" "$_reset"
+  printf '  %bvibecrafted fork codex%b        --session current --runtime visible\n' "$_cyan" "$_reset"
   printf '\n'
   printf '%b=== RESEARCH (launcher) ===%b\n' "$_bold" "$_reset"
   printf '\n'
@@ -4662,24 +4749,24 @@ cmd_start() {
     cmd_start_help
     return 0
   fi
-  local previous_repo_vc_frame_pref="${VIBECRAFTED_PREFER_REPO_VC_FRAME-}"
-  local status
+  local status=0 owner_root
   # Product entrypoint choke: load full lifecycle helpers (shell modules,
   # frontier pin, frame launcher). Ordinary shells stay PATH-only.
   # Note: live operator path is shell `vc-start` → same prepare function;
   # deck start is secondary (vibecrafted start) and must share that choke.
-  _ensure_helpers_loaded || return 1
-  export VIBECRAFTED_PREFER_REPO_VC_FRAME=1
-  if declare -F _vetcoders_product_entry_prepare >/dev/null 2>&1; then
-    _vetcoders_product_entry_prepare
+  owner_root="$(_script_owner_root)" || return $?
+  _ensure_helpers_loaded "$owner_root" || return $?
+  if ! declare -F _vetcoders_product_entry_prepare >/dev/null 2>&1; then
+    printf 'vc-start: required product preparation helper missing\n' >&2
+    return 1
   fi
+  _vetcoders_product_entry_prepare || return $?
   if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" == "1" ]]; then
-    if declare -F _vetcoders_product_entry_probe_print >/dev/null 2>&1; then
-      _vetcoders_product_entry_probe_print
-    else
-      printf 'VC_FRAME_CONFIG_DIR=%s\n' "${VC_FRAME_CONFIG_DIR:-}"
+    if ! declare -F _vetcoders_product_entry_probe_print >/dev/null 2>&1; then
+      printf 'vc-start: required product probe helper missing\n' >&2
+      return 1
     fi
-    status=0
+    _vetcoders_product_entry_probe_print || status=$?
   elif [[ "${1:-}" == "resume" ]]; then
     # Call frame launcher directly — never re-enter via public vc-start alias
     # (thin passthrough to `vibecrafted start` fork-bombs: Python→deck→helper).
@@ -4692,11 +4779,6 @@ cmd_start() {
     fi
     _vetcoders_launch_dashboard operator "$@"
     status=$?
-  fi
-  if [[ -n "${previous_repo_vc_frame_pref}" ]]; then
-    export VIBECRAFTED_PREFER_REPO_VC_FRAME="${previous_repo_vc_frame_pref}"
-  else
-    unset VIBECRAFTED_PREFER_REPO_VC_FRAME
   fi
   return "$status"
 }
@@ -4815,6 +4897,76 @@ cmd_init() {
     return
   fi
   printf '%b✗%b Missing helper %s and no generic skill-init is available.\n' "$_red" "$_reset" "$helper_name" >&2
+  return 1
+}
+
+cmd_partner() {
+  if _is_help_flag "${1:-}"; then
+    cmd_partner_help
+    return 0
+  fi
+  local agent="${1:-claude}"
+  _prepend_repo_bin_path
+  if [[ "$agent" == "gemini" ]]; then
+    printf '%b✗ gemini CLI is deprecated.%b Use agy (Google Antigravity CLI) instead.\n' "$_red" "$_reset" >&2
+    printf '  Example: vibecrafted partner agy\n' >&2
+    return 1
+  fi
+  _has_agent "$agent" || {
+    printf '%b✗%b Unknown agent: %s\n' "$_red" "$_reset" "$agent" >&2
+    return 1
+  }
+
+  _require_agent_cli "$agent" || return 1
+
+  [[ $# -gt 0 ]] && shift
+  _ensure_helpers_loaded || return 1
+  printf '%b⚒%b  Starting %b%s%b with vc-partner...\n' "$_copper" "$_reset" "$_bold" "$agent" "$_reset"
+  local helper_name="${agent}-skill-partner"
+  if command -v "$helper_name" >/dev/null 2>&1; then
+    _run_helper "$helper_name" "$@"
+    return
+  fi
+  if command -v _vetcoders_skill_partner >/dev/null 2>&1; then
+    _vetcoders_skill_partner "$agent" "$@"
+    return
+  fi
+  printf '%b✗%b Missing helper %s and no generic skill-partner is available.\n' "$_red" "$_reset" "$helper_name" >&2
+  return 1
+}
+
+cmd_operator() {
+  if _is_help_flag "${1:-}"; then
+    cmd_operator_help
+    return 0
+  fi
+  local agent="${1:-claude}"
+  _prepend_repo_bin_path
+  if [[ "$agent" == "gemini" ]]; then
+    printf '%b✗ gemini CLI is deprecated.%b Use agy (Google Antigravity CLI) instead.\n' "$_red" "$_reset" >&2
+    printf '  Example: vibecrafted operator agy\n' >&2
+    return 1
+  fi
+  _has_agent "$agent" || {
+    printf '%b✗%b Unknown agent: %s\n' "$_red" "$_reset" "$agent" >&2
+    return 1
+  }
+
+  _require_agent_cli "$agent" || return 1
+
+  [[ $# -gt 0 ]] && shift
+  printf '%b⚒%b  Starting %b%s%b with vc-operator...\n' "$_copper" "$_reset" "$_bold" "$agent" "$_reset"
+  _ensure_helpers_loaded || return 1
+  local helper_name="${agent}-skill-operator"
+  if command -v "$helper_name" >/dev/null 2>&1; then
+    _run_helper "$helper_name" "$@"
+    return
+  fi
+  if command -v _vetcoders_skill_operator >/dev/null 2>&1; then
+    _vetcoders_skill_operator "$agent" "$@"
+    return
+  fi
+  printf '%b✗%b Missing helper %s and no generic skill-operator is available.\n' "$_red" "$_reset" "$helper_name" >&2
   return 1
 }
 
@@ -5553,6 +5705,160 @@ cmd_agents() {
   printf '\n'
 }
 
+_vibecrafted_fork_session_id() {
+  local agent="$1" selector="$2" root_dir="$3"
+  if [[ "$selector" != current && "$selector" != previous ]]; then
+    printf '%s\n' "$selector"
+    return 0
+  fi
+  command -v aicx >/dev/null 2>&1 || {
+    echo "aicx is required for --session ${selector}; pass an exact session id instead." >&2
+    return 1
+  }
+
+  local python_bin current_json current_fields current_id current_agent
+  python_bin="$(_vibecrafted_python)"
+  current_json="$(cd "$root_dir" && aicx sessions current --json)" || return 1
+  current_fields="$(
+    printf '%s' "$current_json" | "$python_bin" -c \
+      'import json,sys; p=json.load(sys.stdin); print(str(p.get("session_id") or "")+"\t"+str(p.get("agent") or ""))'
+  )" || return 1
+  current_id="${current_fields%%$'\t'*}"
+  current_agent="${current_fields#*$'\t'}"
+  [[ -n "$current_id" ]] || {
+    echo "AICX did not resolve a current provider session in ${root_dir}." >&2
+    return 1
+  }
+  [[ "$current_agent" == "$agent" ]] || {
+    printf 'AICX current session belongs to %s, not %s; pass an exact session id.\n' "${current_agent:-unknown}" "$agent" >&2
+    return 1
+  }
+  if [[ "$selector" == current ]]; then
+    printf '%s\n' "$current_id"
+    return 0
+  fi
+
+  local sessions_json previous_id
+  sessions_json="$(cd "$root_dir" && aicx sessions list --cwd --agent "$agent" --limit 20 --format json)" || return 1
+  previous_id="$(
+    printf '%s' "$sessions_json" | "$python_bin" -c \
+      'import json,sys; current=sys.argv[1]; rows=json.load(sys.stdin); print(next((str(row.get("session_id") or "") for row in rows if str(row.get("session_id") or "") and str(row.get("session_id")) != current), ""))' \
+      "$current_id"
+  )" || return 1
+  [[ -n "$previous_id" ]] || {
+    echo "AICX found no previous ${agent} session for ${root_dir}." >&2
+    return 1
+  }
+  printf '%s\n' "$previous_id"
+}
+
+cmd_fork() {
+  local agent="${1:-}"
+  shift || true
+  if _is_help_flag "$agent" || [[ -z "$agent" ]]; then
+    cmd_fork_help
+    [[ -n "$agent" ]] && return 0 || return 1
+  fi
+  [[ "$agent" == codex ]] || {
+    printf 'Native fork is currently proven only for codex; unsupported provider: %s\n' "$agent" >&2
+    return 2
+  }
+
+  local selector="" runtime="visible" placement="right"
+  local model="" permissions="" root_dir="" prompt=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --session) shift; [[ $# -gt 0 ]] || { echo "Missing value for --session" >&2; return 2; }; selector="$1" ;;
+      --runtime) shift; [[ $# -gt 0 ]] || { echo "Missing value for --runtime" >&2; return 2; }; runtime="$1" ;;
+      --placement) shift; [[ $# -gt 0 ]] || { echo "Missing value for --placement" >&2; return 2; }; placement="$1" ;;
+      --floating) placement="floating" ;;
+      --model) shift; [[ $# -gt 0 ]] || { echo "Missing value for --model" >&2; return 2; }; model="$1" ;;
+      --permissions) shift; [[ $# -gt 0 ]] || { echo "Missing value for --permissions" >&2; return 2; }; permissions="$1" ;;
+      --root) shift; [[ $# -gt 0 ]] || { echo "Missing value for --root" >&2; return 2; }; root_dir="$1" ;;
+      -p|--prompt) shift; [[ $# -gt 0 ]] || { echo "Missing value for --prompt" >&2; return 2; }; prompt="$1" ;;
+      -h|--help) cmd_fork_help; return 0 ;;
+      *) printf 'Unknown fork argument: %s\n' "$1" >&2; return 2 ;;
+    esac
+    shift
+  done
+  [[ -n "$selector" ]] || { echo "fork requires --session current|previous|<session-id>." >&2; return 2; }
+  case "$runtime" in
+    visible|terminal) ;;
+    headless) echo "codex fork is an interactive TUI; --runtime headless cannot preserve a usable fork." >&2; return 2 ;;
+    *) echo "Unknown fork runtime: ${runtime} (use visible, terminal, or headless)." >&2; return 2 ;;
+  esac
+  case "$placement" in
+    right|floating) ;;
+    *) echo "Unknown fork placement: ${placement} (use right or floating)." >&2; return 2 ;;
+  esac
+  case "$permissions" in
+    ""|bypass|auto|read-only) ;;
+    *) echo "Unsupported codex fork permissions: ${permissions}." >&2; return 2 ;;
+  esac
+
+  _ensure_helpers_loaded || return 1
+  _require_agent_cli "$agent" || return 1
+  root_dir="${root_dir:-$(_repo_root)}"
+  root_dir="$(cd "$root_dir" 2>/dev/null && pwd -P)" || {
+    printf 'Fork root is not a directory: %s\n' "$root_dir" >&2
+    return 2
+  }
+  local session_id
+  session_id="$(_vibecrafted_fork_session_id "$agent" "$selector" "$root_dir")" || return 1
+  _vetcoders_looks_like_run_id "$session_id" && {
+    printf 'That is a control-plane run id, not a provider session: %s\n' "$session_id" >&2
+    return 2
+  }
+
+  local -a provider_argv=(codex fork --cd "$root_dir")
+  [[ -z "$model" ]] || provider_argv+=(--model "$model")
+  case "$permissions" in
+    bypass) provider_argv+=(--dangerously-bypass-approvals-and-sandbox) ;;
+    auto) provider_argv+=(--ask-for-approval on-request --sandbox workspace-write) ;;
+    read-only) provider_argv+=(--ask-for-approval never --sandbox read-only) ;;
+  esac
+  provider_argv+=("$session_id")
+  [[ -z "$prompt" ]] || provider_argv+=("$prompt")
+  local command_text
+  command_text="$(_vetcoders_shell_quote_join "${provider_argv[@]}")" || return 1
+
+  if ! _vetcoders_in_vc_frame; then
+    if [[ "$runtime" == terminal && -t 0 && -t 1 ]]; then
+      exec "${provider_argv[@]}"
+    fi
+    echo "Same-tab fork needs an attached vc-frame pane (VC_FRAME_PANE_ID + VC_FRAME_SESSION_NAME)." >&2
+    echo "  Run it from Quick cmd/a shell pane in the target tab, or use --runtime terminal in a plain TTY." >&2
+    return 2
+  fi
+
+  local vc_frame_bin session_name repo_label pane_title cmd_script
+  vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 1
+  session_name="$VC_FRAME_SESSION_NAME"
+  repo_label="$(basename "$(dirname "$root_dir")")/$(basename "$root_dir")"
+  pane_title="codex fork @${repo_label} ${session_id}"
+  cmd_script="$(_vetcoders_tmp_script_path "vc-fork-cmd" "$root_dir")"
+  _vetcoders_write_command_script "$cmd_script" "$command_text" || return 1
+
+  local -a pane_args=(action new-pane --near-current-pane --name "$pane_title" --cwd "$root_dir")
+  if [[ "$placement" == floating ]]; then
+    pane_args+=(--floating --width 62% --height 80%)
+  else
+    pane_args+=(--direction right)
+  fi
+  pane_args+=(-- "$cmd_script")
+  local pane_id
+  pane_id="$("$vc_frame_bin" --session "$session_name" "${pane_args[@]}")" || {
+    echo "vc-frame refused the same-tab fork pane; no replacement session or tab was created." >&2
+    return 1
+  }
+  printf 'Fork launched in current vc-frame tab:\n'
+  printf '  agent:     %s\n' "$agent"
+  printf '  session:   %s\n' "$session_id"
+  printf '  pane:      %s\n' "$placement"
+  [[ -z "$pane_id" ]] || printf '  pane-id:   %s\n' "$pane_id"
+  printf '  title:     %s\n' "$pane_title"
+}
+
 cmd_resume() {
   local agent="${1:-}"
   if _is_help_flag "$agent"; then
@@ -5714,6 +6020,16 @@ run_skill() {
 
   if [[ "$skill" == "init" ]]; then
     cmd_init "$agent" "$@"
+    return
+  fi
+
+  if [[ "$skill" == "partner" ]]; then
+    cmd_partner "$agent" "$@"
+    return
+  fi
+
+  if [[ "$skill" == "operator" ]]; then
+    cmd_operator "$agent" "$@"
     return
   fi
 
@@ -5922,7 +6238,10 @@ main() {
     help|-h|--help) cmd_help "$@" ;;
     start) cmd_start "$@" ;;
     init) cmd_init "$@" ;;
+    operator) cmd_operator "$@" ;;
+    partner) cmd_partner "$@" ;;
     resume) cmd_resume "$@" ;;
+    fork) cmd_fork "$@" ;;
     observe|await|stop) cmd_lifecycle_command "$cmd" "$@" ;;
     gui) cmd_gui "$@" ;;
     server) cmd_server "$@" ;;
@@ -5959,7 +6278,7 @@ main() {
       return 2
       ;;
     implement) run_skill "implement" "$@" ;;
-    audit|canary|decorate|delegate|dou|followup|guard|hydrate|intents|justdo|marbles|ownership|partner|polarize|prune|release|research|review|scaffold|trust|workflow)
+    audit|canary|decorate|delegate|dou|followup|guard|hydrate|intents|justdo|marbles|ownership|polarize|prune|release|research|review|scaffold|trust|workflow)
       run_skill "$cmd" "$@"
       ;;
     *)

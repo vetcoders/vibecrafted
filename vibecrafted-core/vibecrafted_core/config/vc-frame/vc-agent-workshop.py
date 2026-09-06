@@ -102,6 +102,13 @@ if (_SCRIPT_CORE_TREE / "vibecrafted_core" / "__init__.py").is_file():
 
 ensure_generation_python()
 
+from vibecrafted_core.aicx_session_chain import (
+    CliSessionChain,
+    SessionChain,
+    SessionChainError,
+    SessionRecord,
+    project_filter_for_root,
+)
 from vibecrafted_core.spawn import (
     CONTINUITY_MODES,
     OPERATOR_POLICIES,
@@ -114,9 +121,8 @@ from vibecrafted_core.spawn import (
 )
 
 AGENTS = ("agy", "claude", "codex", "cursor", "grok", "junie")
-# The accepted design leaves operator/partner unresolved.  Do not expose them
-# until their CLI contracts can guarantee an interactive TTY on this tab.
-RITUALS = ("init", "resume")
+LAUNCH_MODES = ("init", "resume", "partner", "operator")
+MODE_PROMPTS = {"partner": "/vc-partner", "operator": "/vc-operator"}
 RUNTIME_HELP = {
     "local-native": (
         "Direct selected checkout; no isolation; full disk scope per provider permissions.",
@@ -136,21 +142,23 @@ RUNTIME_HELP = {
 
 def launch_argv(
     agent: str,
-    ritual: str,
+    mode: str,
     runtime: str = "local-native",
     permissions: str = "bypass",
     operator: str = "none",
     continuity: str = "fresh",
     continuity_parent: str = "",
+    workspace: str | os.PathLike[str] = "",
 ) -> list[str]:
     """Return the one canonical interactive command for a launcher choice."""
     if agent not in AGENTS:
         raise ValueError(f"unsupported agent: {agent}")
-    if ritual not in RITUALS:
-        raise ValueError(f"unsupported interactive ritual: {ritual}")
+    if mode not in LAUNCH_MODES:
+        raise ValueError(f"unsupported interactive mode: {mode}")
     if continuity not in CONTINUITY_MODES:
         raise ValueError(f"unsupported continuity policy: {continuity}")
-    if ritual == "init":
+    root = str(Path(workspace).expanduser().resolve()) if workspace else ""
+    if mode != "resume":
         decision = resolve_provider_policy(agent, runtime, permissions, "interactive")
         if not decision.supported:
             raise ValueError(decision.reason)
@@ -176,6 +184,8 @@ def launch_argv(
             "--continuity",
             continuity,
         ]
+        if root:
+            command.extend(["--root", root])
         if continuity == "bare-fork":
             if not continuity_parent:
                 raise ValueError(
@@ -184,12 +194,73 @@ def launch_argv(
             command.extend(["--parent-session", continuity_parent])
         elif continuity == "full-lineage" and continuity_parent:
             command.extend(["--continuity-parent", continuity_parent])
+        if mode in MODE_PROMPTS:
+            command.extend(["--prompt", MODE_PROMPTS[mode]])
         return command
     if runtime != "local-native":
         raise ValueError(
             "worktree resume supervision belongs to H2b2 and is not configured yet"
         )
-    return ["vibecrafted", "resume", agent]
+    command = ["vibecrafted", "resume", agent]
+    if root:
+        command.extend(["--root", root])
+    return command
+
+
+def mode_capabilities(
+    agent: str, runtime: str, permissions: str
+) -> dict[str, dict[str, Any]]:
+    """Describe every launch mode without hiding unsupported combinations."""
+    decision = resolve_provider_policy(agent, runtime, permissions, "interactive")
+    resume_available = runtime == "local-native"
+    return {
+        "init": {"available": decision.supported, "reason": decision.reason},
+        "resume": {
+            "available": resume_available,
+            "reason": (
+                ""
+                if resume_available
+                else "resume is supported only in local-native runtime"
+            ),
+        },
+        "partner": {"available": decision.supported, "reason": decision.reason},
+        "operator": {"available": decision.supported, "reason": decision.reason},
+    }
+
+
+def parent_session_choices(
+    agent: str,
+    root: str | os.PathLike[str],
+    *,
+    chain: SessionChain | None = None,
+) -> tuple[list[SessionRecord], str]:
+    """Read parent choices from the canonical AICX session catalog."""
+    root_path = Path(root).expanduser().resolve()
+    if chain is None:
+        aicx = shutil.which("aicx")
+        if not aicx:
+            return [], "aicx executable not found; parent sessions unavailable"
+        chain = CliSessionChain(aicx)
+    try:
+        result = chain.list_sessions(
+            project=project_filter_for_root(root_path),
+            root=root_path,
+            agent=agent,
+            hours=24 * 30,
+            limit=40,
+        )
+    except SessionChainError as exc:
+        return [], f"session catalog {exc.kind}: {exc.message}"
+    except OSError as exc:
+        return [], f"session catalog unavailable: {exc}"
+    sessions = sorted(result.sessions, key=lambda item: item.updated_at, reverse=True)
+    if sessions:
+        return sessions, ""
+    reason = next(
+        (warning for warning in result.warnings if warning),
+        f"no {agent} sessions for {root_path.name}",
+    )
+    return [], reason
 
 
 def normalized_workspace(raw: str, *, base: Path | None = None) -> Path:
@@ -260,6 +331,25 @@ def current_faces() -> list[str]:
         return []
 
 
+# Curses pair 0 is COLOR_BLACK. Signed palettes put purple-navy `#26233a` in
+# `colors.normal.black`, which is not dark paper (`#0b0b12`) and becomes a dark
+# rectangle on light paper (`#fafafa`). Pair 1 at default/default follows the
+# vc-frame / alacritty theme in both modes.
+_PAPER_PAIR = 1
+_PAPER = 0
+
+
+def bind_terminal_paper(window: curses.window) -> int:
+    """Paint with the host terminal paper; never ANSI black."""
+    global _PAPER
+    curses.use_default_colors()
+    curses.init_pair(_PAPER_PAIR, -1, -1)
+    _PAPER = curses.color_pair(_PAPER_PAIR)
+    window.bkgd(" ", _PAPER)
+    window.bkgdset(" ", _PAPER)
+    return _PAPER
+
+
 def _clip(text: str, width: int) -> str:
     if width <= 0:
         return ""
@@ -275,7 +365,7 @@ def _safe_addstr(
     if row < 0 or row >= height or col < 0 or col >= width:
         return
     try:
-        window.addstr(row, col, _clip(text, width - col), attr)
+        window.addstr(row, col, _clip(text, width - col), attr | _PAPER)
     except curses.error:
         pass
 
@@ -288,11 +378,30 @@ def _dim_unavailable_choices(
     available: tuple[bool, ...],
 ) -> None:
     """Redraw disabled choice tokens with terminal-native dim styling."""
-    for choice, enabled in zip(choices, available, strict=True):
-        token = f"[{choice}]" if enabled else f"({choice})"
+    for token, enabled in zip(
+        _choice_tokens(choices, selected=-1, available=available),
+        available,
+        strict=True,
+    ):
         if not enabled:
             _safe_addstr(window, row, col, token, curses.A_DIM)
         col += len(token) + 1
+
+
+def _choice_tokens(
+    choices: tuple[str, ...],
+    *,
+    selected: int,
+    available: tuple[bool, ...] | None = None,
+) -> tuple[str, ...]:
+    """Use one canonical bullet and leave available unselected choices plain."""
+    enabled = available or tuple(True for _ in choices)
+    return tuple(
+        f"• {choice}"
+        if index == selected and enabled[index]
+        else (choice if enabled[index] else f"× {choice}")
+        for index, choice in enumerate(choices)
+    )
 
 
 class Workshop:
@@ -302,11 +411,14 @@ class Workshop:
         self.home_choice = 0
         self.row = 0
         self.agent = 2  # codex is the least surprising neutral default here
-        self.ritual = 0
+        self.launch_mode = 0
         self.runtime = 1  # safe recommended local default when the provider supports it
         self.permissions = 0
         self.continuity = 0
         self.continuity_parent = ""
+        self.parent_sessions: list[SessionRecord] = []
+        self.parent_index = -1
+        self.parent_error = ""
         self.path = str(Path.cwd())
         self.error = ""
         self.mouse_targets: list[tuple[int, int, int, int, str]] = []
@@ -314,12 +426,18 @@ class Workshop:
         self.faces: list[str] = []
 
     def configure(self) -> None:
+        try:
+            bind_terminal_paper(self.window)
+        except curses.error:
+            pass
         curses.curs_set(0)
         curses.noecho()
         curses.cbreak()
         self.window.keypad(True)
         self.window.timeout(500)
         self._normalize_runtime_choice()
+        self._normalize_permission_choice()
+        self._normalize_mode_choice()
         self._normalize_continuity_choice()
         try:
             curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
@@ -420,43 +538,66 @@ class Workshop:
             "┌ ❯ New agent " + "─" * max(1, card_width - 29) + " [Cancel] ┐",
         )
         agent_line = "  agent    " + " ".join(
-            f"«{name}»" if index == self.agent else f"[{name}]"
-            for index, name in enumerate(AGENTS)
-        )
-        ritual_line = "  ritual   " + " ".join(
-            f"«{name}»" if index == self.ritual else f"[{name}]"
-            for index, name in enumerate(RITUALS)
+            _choice_tokens(AGENTS, selected=self.agent)
         )
         provider = AGENTS[self.agent]
         capabilities = runtime_policy_capabilities(provider)
-        runtime_line = "  runtime  " + " ".join(
-            (f"«{name}»" if index == self.runtime else f"[{name}]")
-            if capabilities[name]["available"]
-            else f"({name})"
-            for index, name in enumerate(RUNTIME_POLICIES)
+        runtime_available = tuple(
+            bool(capabilities[name]["available"]) for name in RUNTIME_POLICIES
         )
-        permission_line = "  permits  " + " ".join(
-            (f"«{name}»" if index == self.permissions else f"[{name}]")
-            if resolve_provider_policy(
+        runtime_line = "  runtime  " + " ".join(
+            _choice_tokens(
+                RUNTIME_POLICIES,
+                selected=self.runtime,
+                available=runtime_available,
+            )
+        )
+        permission_available = tuple(
+            resolve_provider_policy(
                 provider, RUNTIME_POLICIES[self.runtime], name, "interactive"
             ).supported
-            else f"({name})"
-            for index, name in enumerate(PERMISSION_POLICIES)
+            for name in PERMISSION_POLICIES
+        )
+        permission_line = "  permits  " + " ".join(
+            _choice_tokens(
+                PERMISSION_POLICIES,
+                selected=self.permissions,
+                available=permission_available,
+            )
+        )
+        mode_caps = mode_capabilities(
+            provider,
+            RUNTIME_POLICIES[self.runtime],
+            PERMISSION_POLICIES[self.permissions],
+        )
+        mode_available = tuple(
+            bool(mode_caps[name]["available"]) for name in LAUNCH_MODES
+        )
+        mode_line = "  mode     " + " ".join(
+            _choice_tokens(
+                LAUNCH_MODES,
+                selected=self.launch_mode,
+                available=mode_available,
+            )
         )
         continuity_caps = continuity_policy_capabilities(
             provider,
             root=self.path,
             explicit_parent=self.continuity_parent,
         )
+        continuity_available = tuple(
+            bool(continuity_caps[name]["available"]) for name in CONTINUITY_MODES
+        )
         continuity_line = "  memory   " + " ".join(
-            (f"«{name}»" if index == self.continuity else f"[{name}]")
-            if continuity_caps[name]["available"]
-            else f"({name})"
-            for index, name in enumerate(CONTINUITY_MODES)
+            _choice_tokens(
+                CONTINUITY_MODES,
+                selected=self.continuity,
+                available=continuity_available,
+            )
         )
         rows = (
             agent_line,
-            ritual_line,
+            mode_line,
             runtime_line,
             permission_line,
             continuity_line,
@@ -477,34 +618,31 @@ class Workshop:
             )
         _dim_unavailable_choices(
             self.window,
+            top + 2,
+            left + 2 + len("  mode     "),
+            LAUNCH_MODES,
+            mode_available,
+        )
+        _dim_unavailable_choices(
+            self.window,
             top + 3,
             left + 2 + len("  runtime  "),
             RUNTIME_POLICIES,
-            tuple(bool(capabilities[name]["available"]) for name in RUNTIME_POLICIES),
+            runtime_available,
         )
         _dim_unavailable_choices(
             self.window,
             top + 5,
             left + 2 + len("  memory   "),
             CONTINUITY_MODES,
-            tuple(
-                bool(continuity_caps[name]["available"]) for name in CONTINUITY_MODES
-            ),
+            continuity_available,
         )
         _dim_unavailable_choices(
             self.window,
             top + 4,
             left + 2 + len("  permits  "),
             PERMISSION_POLICIES,
-            tuple(
-                resolve_provider_policy(
-                    provider,
-                    RUNTIME_POLICIES[self.runtime],
-                    name,
-                    "interactive",
-                ).supported
-                for name in PERMISSION_POLICIES
-            ),
+            permission_available,
         )
         runtime_help = RUNTIME_HELP[RUNTIME_POLICIES[self.runtime]]
         _safe_addstr(
@@ -532,7 +670,7 @@ class Workshop:
             self.window,
             top + 11,
             left,
-            "└─ ↑/↓ row · ←/→ choice · type path · Enter launch · Esc cancel "
+            "└─ ↑/↓ row · ←/→ choose parent · type/edit path · Enter launch · Esc "
             + "─" * max(0, card_width - 67)
             + "┘",
         )
@@ -548,6 +686,11 @@ class Workshop:
             "Unavailable — "
             + " · ".join(
                 unavailable
+                + [
+                    f"{name}: {mode_caps[name]['reason']}"
+                    for name in LAUNCH_MODES
+                    if not mode_caps[name]["available"]
+                ]
                 + [
                     f"{name}: {continuity_caps[name]['reason']}"
                     for name in CONTINUITY_MODES
@@ -589,15 +732,20 @@ class Workshop:
                 self.agent = (self.agent + delta) % len(AGENTS)
                 self._normalize_runtime_choice()
                 self._normalize_permission_choice()
+                self._normalize_mode_choice()
                 self._normalize_continuity_choice()
+                self.parent_sessions = []
+                self.parent_index = -1
             elif self.row == 1:
-                self.ritual = (self.ritual + delta) % len(RITUALS)
+                self._cycle_mode(delta)
             elif self.row == 2:
                 self._cycle_runtime(delta)
             elif self.row == 3:
                 self._cycle_permissions(delta)
             elif self.row == 4:
                 self._cycle_continuity(delta)
+            elif self.row == 5:
+                self._cycle_parent(delta)
             return
         if key in (10, 13, curses.KEY_ENTER):
             self.launch()
@@ -606,13 +754,51 @@ class Workshop:
             if key in (curses.KEY_BACKSPACE, 127, 8):
                 if self.row == 5:
                     self.continuity_parent = self.continuity_parent[:-1]
+                    self.parent_index = -1
                 else:
                     self.path = self.path[:-1]
+                    self.parent_sessions = []
+                    self.parent_index = -1
             elif 32 <= key <= 126:
                 if self.row == 5:
                     self.continuity_parent += chr(key)
+                    self.parent_index = -1
                 else:
                     self.path += chr(key)
+                    self.parent_sessions = []
+                    self.parent_index = -1
+
+    def _cycle_mode(self, delta: int) -> None:
+        capabilities = mode_capabilities(
+            AGENTS[self.agent],
+            RUNTIME_POLICIES[self.runtime],
+            PERMISSION_POLICIES[self.permissions],
+        )
+        for _ in LAUNCH_MODES:
+            self.launch_mode = (self.launch_mode + delta) % len(LAUNCH_MODES)
+            if capabilities[LAUNCH_MODES[self.launch_mode]]["available"]:
+                return
+        self.error = "No interactive mode is available for this provider/runtime"
+
+    def _refresh_parent_sessions(self) -> None:
+        self.parent_sessions, self.parent_error = parent_session_choices(
+            AGENTS[self.agent], self.path
+        )
+        self.parent_index = -1
+
+    def _cycle_parent(self, delta: int) -> None:
+        if not self.parent_sessions:
+            self._refresh_parent_sessions()
+        if not self.parent_sessions:
+            self.error = self.parent_error
+            return
+        self.parent_index = (
+            self.parent_index + delta
+            if self.parent_index >= 0
+            else (0 if delta > 0 else len(self.parent_sessions) - 1)
+        ) % len(self.parent_sessions)
+        self.continuity_parent = self.parent_sessions[self.parent_index].session_id
+        self._normalize_continuity_choice()
 
     def _cycle_runtime(self, delta: int) -> None:
         capabilities = runtime_policy_capabilities(AGENTS[self.agent])
@@ -620,6 +806,8 @@ class Workshop:
             self.runtime = (self.runtime + delta) % len(RUNTIME_POLICIES)
             name = RUNTIME_POLICIES[self.runtime]
             if capabilities[name]["available"]:
+                self._normalize_permission_choice()
+                self._normalize_mode_choice()
                 return
         self.error = "No runtime is available for this provider"
 
@@ -631,6 +819,7 @@ class Workshop:
             if resolve_provider_policy(
                 provider, runtime, PERMISSION_POLICIES[self.permissions], "interactive"
             ).supported:
+                self._normalize_mode_choice()
                 return
         self.error = "No permission policy is available for this provider/runtime"
 
@@ -655,6 +844,19 @@ class Workshop:
                 provider, runtime, permissions, "interactive"
             ).supported:
                 self.permissions = index
+                return
+
+    def _normalize_mode_choice(self) -> None:
+        capabilities = mode_capabilities(
+            AGENTS[self.agent],
+            RUNTIME_POLICIES[self.runtime],
+            PERMISSION_POLICIES[self.permissions],
+        )
+        if capabilities[LAUNCH_MODES[self.launch_mode]]["available"]:
+            return
+        for index, mode in enumerate(LAUNCH_MODES):
+            if capabilities[mode]["available"]:
+                self.launch_mode = index
                 return
 
     def _cycle_continuity(self, delta: int) -> None:
@@ -754,11 +956,12 @@ class Workshop:
                 raise ValueError(str(continuity_capability["reason"]))
             argv = launch_argv(
                 AGENTS[self.agent],
-                RITUALS[self.ritual],
+                LAUNCH_MODES[self.launch_mode],
                 runtime_name,
                 PERMISSION_POLICIES[self.permissions],
                 continuity=continuity_name,
                 continuity_parent=self.continuity_parent,
+                workspace=workspace,
             )
         except ValueError as exc:
             self.error = str(exc)
@@ -767,7 +970,10 @@ class Workshop:
         if executable is None:
             self.error = "vibecrafted launcher is missing from PATH"
             return
-        title = f"{AGENTS[self.agent]} · {RITUALS[self.ritual]} · {workspace.name}"
+        title = (
+            f"{AGENTS[self.agent]} · "
+            f"{LAUNCH_MODES[self.launch_mode]} · {workspace.name}"
+        )
         subprocess.run(
             ["vc-frame", "action", "rename-pane", title],
             check=False,

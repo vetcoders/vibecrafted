@@ -250,7 +250,7 @@ def test_research_runtime_yaml_wins_over_legacy_toml_and_applies_lane_models(
     config_dir = home / "config"
     config_dir.mkdir(parents=True)
     (config_dir / "research.yaml").write_text(
-        "lanes:\n  - agent: codex\n    model: gpt-yaml\n    enabled: true\n  - agent: agy\n    model: agy-yaml\n    enabled: true\n  - agent: claude\n    enabled: false\nsynthesizer:\n  agent: codex\n  model: gpt-synth\n",
+        "lanes:\n  - agent: codex\n    model: gpt-yaml\n    enabled: true\n  - agent: agy\n    model: agy-yaml\n    enabled: true\n  - agent: claude\n    enabled: false\nsynthesizer:\n  agent: agy\n  model: agy-synth\n",
         encoding="utf-8",
     )
 
@@ -263,8 +263,8 @@ def test_research_runtime_yaml_wins_over_legacy_toml_and_applies_lane_models(
     meta = json.loads((home / "parent.meta.json").read_text(encoding="utf-8"))
     assert f"source: {config_dir / 'research.yaml'}" in report
     assert "agents: codex, agy" in report
-    assert "synthesizer: codex" in report
-    assert "synthesizer_model: gpt-synth" in report
+    assert "synthesizer: agy" in report
+    assert "synthesizer_model: agy-synth" in report
     assert "research-claude" not in report
     codex_transcript = (
         home / "rsch-yaml-children" / "research-codex.transcript.log"
@@ -272,18 +272,42 @@ def test_research_runtime_yaml_wins_over_legacy_toml_and_applies_lane_models(
     agy_transcript = (
         home / "rsch-yaml-children" / "research-agy.transcript.log"
     ).read_text(encoding="utf-8")
+    synthesis_transcript = (
+        home / "rsch-yaml-children" / "research-synthesis.transcript.log"
+    ).read_text(encoding="utf-8")
     assert "exec\n-m\ngpt-yaml\n--json" in codex_transcript
-    assert "\nagy-yaml\n" not in agy_transcript
+    assert agy_transcript.splitlines()[:8] == [
+        "--model",
+        "agy-yaml",
+        "--dangerously-skip-permissions",
+        "--add-dir",
+        ".",
+        "--print-timeout",
+        "30m",
+        "--print",
+    ]
+    assert synthesis_transcript.splitlines()[:8] == [
+        "--model",
+        "agy-synth",
+        "--dangerously-skip-permissions",
+        "--add-dir",
+        ".",
+        "--print-timeout",
+        "30m",
+        "--print",
+    ]
     children = {child["agent"]: child for child in meta["children"]}
     assert children["codex"]["model_requested"] == "gpt-yaml"
     assert children["codex"]["model_override_supported"] is True
     assert children["agy"]["model_requested"] == "agy-yaml"
-    assert children["agy"]["model_override_supported"] is False
-    assert children["agy"]["model_override_skip_reason"] == (
-        "unsupported_agent_model_flag"
-    )
-    assert meta["research_synthesizer"] == "codex"
-    assert meta["research_synthesizer_model"] == "gpt-synth"
+    assert children["agy"]["model_override_supported"] is True
+    assert children["agy"]["model_override_skipped"] is False
+    assert "model_override_skip_reason" not in children["agy"]
+    assert meta["research_synthesizer"] == "agy"
+    assert meta["research_synthesizer_model"] == "agy-synth"
+    assert meta["synthesis"]["model_requested"] == "agy-synth"
+    assert meta["synthesis"]["model_override_supported"] is True
+    assert meta["synthesis"]["model_override_skipped"] is False
 
 
 def test_research_runtime_applies_model_request_per_child_runner(
@@ -323,7 +347,16 @@ def test_research_runtime_applies_model_request_per_child_runner(
     assert "--model\nfrontier\n-p" in claude_transcript
     assert "exec\n-m\nfrontier\n--json" in codex_transcript
     assert "yaml-codex" not in codex_transcript
-    assert "\nfrontier\n" not in agy_transcript
+    assert agy_transcript.splitlines()[:8] == [
+        "--model",
+        "frontier",
+        "--dangerously-skip-permissions",
+        "--add-dir",
+        ".",
+        "--print-timeout",
+        "30m",
+        "--print",
+    ]
 
     meta = json.loads((home / "parent.meta.json").read_text(encoding="utf-8"))
     assert meta["model_requested"] == "frontier"
@@ -332,11 +365,9 @@ def test_research_runtime_applies_model_request_per_child_runner(
     assert children["claude"]["model_override_supported"] is True
     assert children["claude"]["model_override_skipped"] is False
     assert children["codex"]["model_override_supported"] is True
-    assert children["agy"]["model_override_supported"] is False
-    assert children["agy"]["model_override_skipped"] is True
-    assert (
-        children["agy"]["model_override_skip_reason"] == "unsupported_agent_model_flag"
-    )
+    assert children["agy"]["model_override_supported"] is True
+    assert children["agy"]["model_override_skipped"] is False
+    assert "model_override_skip_reason" not in children["agy"]
 
 
 def test_research_runtime_writes_canonical_named_lane_artifacts(

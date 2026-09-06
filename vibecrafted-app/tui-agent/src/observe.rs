@@ -62,6 +62,9 @@ impl ObserveHealth {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObserveRun {
     pub run_id: String,
+    pub session_id: Option<String>,
+    pub operator_session: Option<String>,
+    pub transcript_path: Option<String>,
     pub agent: String,
     pub skill: String,
     pub repo: String,
@@ -71,6 +74,17 @@ pub struct ObserveRun {
 }
 
 impl ObserveRun {
+    pub fn switch_target(&self) -> Option<&str> {
+        self.operator_session
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                self.session_id
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+            })
+    }
+
     pub fn is_genuinely_active(&self) -> bool {
         self.state.eq_ignore_ascii_case("active")
             && !self.liveness.to_ascii_lowercase().contains("dead")
@@ -211,6 +225,9 @@ fn runs_from_envelope(envelope: StateEnvelope, now: SystemTime) -> Vec<ObserveRu
         }
         let run = ObserveRun {
             run_id,
+            session_id: None,
+            operator_session: None,
+            transcript_path: None,
             agent: empty_as_unknown(dto.agent),
             skill: empty_as_unknown(dto.skill),
             repo: repo_label(&dto.root),
@@ -227,6 +244,39 @@ fn runs_from_envelope(envelope: StateEnvelope, now: SystemTime) -> Vec<ObserveRu
         runs.push(run);
     }
     runs
+}
+
+/// Project the cockpit from the same canonical control-plane state used by
+/// Monitor and Mission Control. The server remains a transcript transport,
+/// never a second live-session registry.
+pub fn project_control_plane(state: &crate::state::ControlPlaneState) -> Vec<ObserveRun> {
+    let now = chrono::Utc::now();
+    crate::state::render_runs(state)
+        .into_iter()
+        .filter(|run| crate::state::is_actionable_kind(run.kind, &run.snapshot, now))
+        .map(|run| {
+            let snapshot = run.snapshot;
+            let state_label = snapshot.display_state();
+            let liveness = snapshot
+                .extra
+                .get("liveness")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| run.kind.label())
+                .to_string();
+            ObserveRun {
+                run_id: snapshot.run_id,
+                session_id: snapshot.session_id,
+                operator_session: snapshot.operator_session,
+                transcript_path: snapshot.latest_transcript,
+                agent: empty_as_unknown(snapshot.agent.unwrap_or_default()),
+                skill: empty_as_unknown(snapshot.skill.unwrap_or_default()),
+                repo: crate::state::workspace_label(snapshot.root.as_deref()),
+                state: state_label,
+                age: run.age_label,
+                liveness,
+            }
+        })
+        .collect()
 }
 
 fn observe_age_is_archive(age: &str) -> bool {
@@ -364,5 +414,53 @@ mod tests {
     fn reject_path_run_ids() {
         assert!(!is_safe_run_id("../secret"));
         assert!(is_safe_run_id("work-260816-215903-94636"));
+    }
+
+    #[test]
+    fn canonical_projection_keeps_every_actionable_interactive_face() {
+        use crate::state::{ControlPlaneState, RunSnapshot};
+        use std::collections::{HashMap, HashSet};
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let providers = ["agy", "junie", "grok", "cursor", "codex", "claude"];
+        let runs = providers
+            .iter()
+            .enumerate()
+            .map(|(index, provider)| RunSnapshot {
+                run_id: format!("live-{provider}"),
+                session_id: Some(format!("provider-{index}")),
+                agent: Some((*provider).to_string()),
+                skill: Some("implement".to_string()),
+                mode: Some("interactive".to_string()),
+                state: Some("running".to_string()),
+                status: None,
+                started_at: Some(now.clone()),
+                updated_at: Some(now.clone()),
+                last_heartbeat: Some(now.clone()),
+                root: Some(format!("/tmp/{provider}")),
+                operator_session: Some(format!("frame-{index}")),
+                latest_report: None,
+                latest_transcript: Some(format!("/tmp/{provider}/transcript.log")),
+                last_error: None,
+                extra: HashMap::new(),
+            })
+            .collect::<Vec<_>>();
+        let state = ControlPlaneState {
+            root: "/tmp/control-plane".into(),
+            retained_runs: runs.clone(),
+            runs,
+            events: Vec::new(),
+            archived_run_ids: HashSet::new(),
+        };
+
+        let faces = project_control_plane(&state);
+        assert_eq!(faces.len(), providers.len());
+        for provider in providers {
+            let face = faces
+                .iter()
+                .find(|face| face.agent == provider)
+                .expect("provider face");
+            assert!(face.switch_target().is_some());
+        }
     }
 }

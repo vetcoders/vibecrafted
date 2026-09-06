@@ -8,12 +8,11 @@
 # TUIs (Atuin, less, vim, vc-frame panes) enter/leave the alternate buffer
 # themselves — do not smcup the whole session.
 #
-# Install next to the host preset:
-#   ~/.config/alacritty/launch-primary-shell.zsh
-# and point alacritty.toml at it only when you want a plain login shell
-# (the shipped vc-frame.toml launches `vc-frame attach` directly instead).
+# Product install path (installer-owned):
+#   ${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-terminal/launch-primary-shell.zsh
+# Private ~/.config/alacritty is not a product surface.
 #
-# Source of truth: vc-frame/tools/alacritty/launch-primary-shell.zsh
+# Source of truth in this repo: config/alacritty/launch-primary-shell.zsh
 # 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 
 tty_path="/dev/tty"

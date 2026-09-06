@@ -1,21 +1,59 @@
 # shellcheck shell=bash
 # Extracted from vetcoders.sh; sourced only by the compatibility facade.
 
+_vetcoders_vc_frame_owner_root() {
+  # The loaded shell belongs to the selected payload. Ambient roots and cwd
+  # cannot select a different generation after the entrypoint has been chosen.
+  if [[ -n "${_vetcoders_vc_frame_loaded_root:-}" ]]; then
+    printf '%s\n' "$_vetcoders_vc_frame_loaded_root"
+    return 0
+  fi
+  local source_file="${BASH_SOURCE[0]:-}"
+  if [[ -z "$source_file" && -n "${ZSH_VERSION:-}" ]]; then
+    source_file="$(eval 'printf "%s\n" "${(%):-%x}"')"
+  fi
+  [[ -n "$source_file" ]] || return 1
+  (cd -P "$(dirname "$source_file")/../../../../.." && pwd -P)
+}
+
+# Capture at source time, before cwd or a tools-current symlink can move.
+unset _vetcoders_vc_frame_loaded_root
+_vetcoders_vc_frame_loaded_root="$(_vetcoders_vc_frame_owner_root)" || return 1
+
+_vetcoders_vc_frame_developer_mode() {
+  local owner_root
+  [[ "${VIBECRAFTED_PREFER_REPO_VC_FRAME:-0}" == "1" ]] || return 1
+  owner_root="$(_vetcoders_vc_frame_owner_root)" || return 1
+  # Retain the existing opt-in only for a directly sourced Git checkout.
+  # A leaked development preference never changes installed product startup.
+  [[ -e "$owner_root/.git" && ! -f "$owner_root/runtime-manifest.json" ]]
+}
+
 _vetcoders_vc_frame_missing_message() {
-  local xdg_data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
-  local runtime_bin="${VIBECRAFTED_RUNTIME_BIN:-${VIBECRAFTED_RUNTIME_HOME:-$xdg_data_home/vibecrafted}/bin}"
-  echo "vc-frame is required for the Vibecrafted operator runtime." >&2
-  echo "Run 'vc-start' first to create or attach the operator vc-frame session, then retry." >&2
-  echo "Expected vc-frame on PATH or bundled at: $runtime_bin/vc-frame" >&2
+  local owner_root
+  owner_root="$(_vetcoders_vc_frame_owner_root)" || return 1
+  printf 'vc-frame: installed product entry/engine missing under: %s/{bin,libexec}/vc-frame\n' "$owner_root" >&2
+  printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
 }
 
 _vetcoders_vc_frame_bin() {
-  local bin=""
-  bin="$(command -v vc-frame 2>/dev/null || true)"
-  if [[ -n "$bin" ]]; then
+  local owner_root bin
+  owner_root="$(_vetcoders_vc_frame_owner_root)" || return 1
+  if _vetcoders_vc_frame_developer_mode; then
+    bin="${VIBECRAFTED_VC_FRAME_BIN:-}"
+    [[ -n "$bin" ]] || bin="$(command -v vc-frame 2>/dev/null || true)"
+  else
+    bin="$owner_root/bin/vc-frame"
+    if [[ -L "$bin" || -L "$owner_root/libexec/vc-frame" || ! -f "$owner_root/libexec/vc-frame" || ! -x "$owner_root/libexec/vc-frame" ]]; then
+      _vetcoders_vc_frame_missing_message
+      return 1
+    fi
+  fi
+  if [[ "$bin" == /* && -f "$bin" && -x "$bin" ]]; then
     printf '%s\n' "$bin"
     return 0
   fi
+  _vetcoders_vc_frame_missing_message
   return 1
 }
 
@@ -278,9 +316,16 @@ _vetcoders_record_vc_frame_attachment() {
     return 0
   fi
   if [[ "$attach_status" -ne 0 ]]; then
-    printf "Warning: could not attach vc-frame session '%s' to WES.\n" \
+    printf "vc-start: could not attach vc-frame session '%s' to WES " \
       "$runtime_session_id" >&2
-    return 1
+    printf "(workspace=%s instance=%s session=%s, status=%s).\n" \
+      "$VIBECRAFTED_WORKSPACE_ID" \
+      "$VIBECRAFTED_WORKSPACE_INSTANCE_ID" \
+      "$VIBECRAFTED_SESSION_ID" \
+      "$attach_status" >&2
+    printf "vc-start: re-run vc-start from the intended workspace root; " >&2
+    printf "if the mismatch persists, inspect 'vibecrafted workspace list'.\n" >&2
+    return "$attach_status"
   fi
 }
 
@@ -396,13 +441,55 @@ _vetcoders_wait_for_vc_frame_session() {
   return 1
 }
 
+_vetcoders_place_label_from_session_name() {
+  # Strip old hashed recovery tails (`-rHHMMSS-PID`) and numeric incarnations
+  # (`-2`). The SESSIONS rail is a place name, not a socket token.
+  local name="${1:-workspace}"
+  if [[ "$name" =~ ^(.*)-r[0-9]{6}-[0-9]+$ ]]; then
+    name="${BASH_REMATCH[1]}"
+  fi
+  if [[ "$name" =~ ^(.*)-([0-9]{1,2})$ ]]; then
+    name="${BASH_REMATCH[1]}"
+  fi
+  [[ -n "$name" ]] || name="workspace"
+  printf '%s\n' "$name"
+}
+
+_vetcoders_next_free_place_session() {
+  local place="${1:-workspace}"
+  local max_len=24
+  local n=2
+  local suffix stem candidate budget
+  while (( n <= 99 )); do
+    suffix="-${n}"
+    budget=$((max_len - ${#suffix}))
+    (( budget < 1 )) && budget=1
+    stem="$place"
+    if (( ${#stem} > budget )); then
+      stem="${stem:0:budget}"
+      stem="${stem%-}"
+      [[ -n "$stem" ]] || stem="ws"
+    fi
+    candidate="${stem}${suffix}"
+    if [[ "$(_vetcoders_vc_frame_session_state "$candidate")" == "missing" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    n=$((n + 1))
+  done
+  printf '%s\n' "${place:0:21}-x"
+}
+
 _vetcoders_recovery_vc_frame_session_name() {
-  local original="${1:-vibecrafted}"
-  local suffix
-  suffix="r$(date +%H%M%S)-$$"
-  # Recovery also runs from CLI shells that do not have the app's short
-  # product socket root. Twenty bytes fit the default macOS TMPDIR budget.
-  _vetcoders_compact_session_name "${original}-${suffix}" "$suffix" 20
+  local original="${1:-}"
+  local place=""
+  # Catalog place wins: hashed dead names like `3m-4ad4-r034605-2072` are not
+  # a workspace identity. Fall back to stripping the dead name.
+  place="$(_vetcoders_operator_place_session_name 2>/dev/null || true)"
+  if [[ -z "$place" ]]; then
+    place="$(_vetcoders_place_label_from_session_name "${original:-workspace}")"
+  fi
+  _vetcoders_next_free_place_session "$place"
 }
 
 _vetcoders_run_new_vc_frame_session() {
@@ -450,7 +537,7 @@ _vetcoders_ensure_vc_frame_session() {
   shift 2
 
   _vetcoders_require_vc_frame || return 1
-  _vetcoders_pin_vc_frame_config_dir
+  _vetcoders_pin_vc_frame_config_dir || return $?
   vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 1
 
   local inside_vc_frame=0

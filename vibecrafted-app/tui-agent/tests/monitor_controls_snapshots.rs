@@ -85,6 +85,7 @@ fn board_app() -> App {
         mission_artifact_root: "/fixture/artifacts".into(),
         observe: Default::default(),
         memory: Default::default(),
+        interaction: Default::default(),
     }
 }
 

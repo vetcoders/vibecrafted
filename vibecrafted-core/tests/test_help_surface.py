@@ -29,6 +29,16 @@ def test_worker_help_declares_headless_as_the_default_surface() -> None:
     assert "Worker surface (default: headless)" in output
 
 
+def test_partner_help_is_interactive_only() -> None:
+    output = render_workflow_help("partner")
+
+    assert "Worker surface (default: headless)" not in output
+    assert "--runtime <terminal|headless>" not in output
+    assert "--runtime <terminal|visible|plain>" in output
+    assert "vibecrafted partner codex" in output
+    assert "not a job" in output
+
+
 def test_research_help_exposes_swarm_alias() -> None:
     output = render_workflow_help("research")
 
@@ -46,6 +56,7 @@ def test_root_help_uses_the_registered_ship_cycle() -> None:
     assert "More workflows: vibecrafted help --all" in output
     assert "Vibecrafted core command surface" not in output
     assert "resume-session" in output
+    assert "fork <agent>" in output
     assert "--run-id" in output
     assert "uninstall            Remove runtime" in output
     assert "vibecrafted uninstall --dry-run" in output

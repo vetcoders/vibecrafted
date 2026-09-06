@@ -1,6 +1,6 @@
 ---
 title: "Management Commands"
-description: "Reference for vibecrafted management commands: init, status, doctor, receipt, settlements, update, resume, version, uninstall, help."
+description: "Reference for vibecrafted management commands: init, status, doctor, receipt, settlements, update, resume, fork, version, uninstall, help."
 section: cli
 order: 20
 ---
@@ -22,6 +22,7 @@ past runs. They launch no workflows themselves — that is the job of the
 | `vibecrafted settlements <action>`   | Read-only f/x/n ledger query                        |
 | `vibecrafted update`                 | Update to the latest release                        |
 | `vibecrafted resume <agent>`         | Continue a stopped run or a provider session        |
+| `vibecrafted fork codex`             | Branch a Codex session in the current vc-frame tab  |
 | `vibecrafted resume-session <agent>` | Continue an exact provider session as a tracked run |
 | `vibecrafted version`                | Print version                                       |
 | `vibecrafted uninstall`              | Reverse the install                                 |
@@ -156,6 +157,24 @@ detached headless run. The prompt comes from `-p <text>`, `-f <path>`, or
 <path>`, `--model <name>`, `--json` for a machine-readable launch receipt.
 This command is always headless; it does not pretend to be an interactive
 session.
+
+## fork
+
+```bash
+vibecrafted fork codex --session current --runtime visible
+vibecrafted fork codex --session previous --placement floating
+vibecrafted fork codex --session <provider-uuid> --model <model>
+```
+
+`fork` leaves the source Codex session untouched and creates a new provider
+session. `current` resolves the attached Codex session through AICX;
+`previous` selects the newest same-repository Codex session other than
+`current`; an exact UUID bypasses discovery. Inside vc-frame, `visible` and
+`terminal` open a pane in the current tab: break-right by default or floating
+with `--placement floating`. Native `codex fork` is an interactive TUI, so
+`--runtime headless` fails closed instead of creating an inaccessible process.
+
+The pane title is `codex fork @<owner>/<repo> <source-session-id>`.
 
 ## version, uninstall, help
 

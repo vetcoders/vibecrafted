@@ -41,11 +41,11 @@ dogfooding: "required for repo-impacting work"
 > - [Per-launcher rule](../DELEGATION_MATRIX.md#per-launcher-rule-the-semantic-delta)
 > - [Native vs external](../DELEGATION_MATRIX.md#native-subagents-vs-external-workers)
 >
-> | Path                    | Literal for this skill                                                                                                                   |
-> | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-> | 1. User-launched worker | `vibecrafted partner <agent>`                                                                                                            |
-> | 2. Interactive          | `/vc-partner` — execute **in this session**; use native subagents when required; do **not** externalize merely because a launcher exists |
-> | 3. Agent-operator       | may dispatch the worker form above via `vc-dispatch` / operator lines while preserving this skill's identity                             |
+> | Path                 | Literal for this skill                                                                                                                   |
+> | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+> | 1. User-launched TTY | `vibecrafted partner <agent>` — init-family interactive face, never a headless worker                                                    |
+> | 2. Interactive       | `/vc-partner` — execute **in this session**; use native subagents when required; do **not** externalize merely because a launcher exists |
+> | 3. Agent-operator    | do **not** dispatch `vibecrafted partner` as a job; grant the seat after `vc-init` in the active session                                 |
 
 > Freer native on some runs ≠ abandon external fleet. `vc-dispatch` and `vc-ship` keep their own identities.
 

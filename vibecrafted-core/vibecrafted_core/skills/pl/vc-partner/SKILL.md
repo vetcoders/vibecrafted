@@ -41,11 +41,11 @@ dogfooding: "required for repo-impacting work"
 > - [Reguła per-launcher](../DELEGATION_MATRIX.md#reguła-per-launcher-delta-semantyczna)
 > - [Native vs external](../DELEGATION_MATRIX.md#natywne-subagenty-vs-zewnętrzni-workerzy)
 >
-> | Ścieżka               | Literał tego skilla                                                                                                            |
-> | --------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-> | 1. Worker użytkownika | `vibecrafted partner <agent>`                                                                                                  |
-> | 2. Interactive        | `/vc-partner` — wykonaj **w tej sesji**; native subagenty gdy trzeba; **nie** zewnętrzniaj tylko dlatego, że launcher istnieje |
-> | 3. Agent-operator     | może odpalić formę workera powyżej przez `vc-dispatch` / linie operatora, zachowując tożsamość tego skilla                     |
+> | Ścieżka            | Literał tego skilla                                                                                                            |
+> | ------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+> | 1. TTY użytkownika | `vibecrafted partner <agent>` — interaktywna twarz jak init, nigdy headless worker                                             |
+> | 2. Interactive     | `/vc-partner` — wykonaj **w tej sesji**; native subagenty gdy trzeba; **nie** zewnętrzniaj tylko dlatego, że launcher istnieje |
+> | 3. Agent-operator  | **nie** dispatchuj `vibecrafted partner` jako job; nadaj fotel po `vc-init` w aktywnej sesji                                   |
 
 > Swobodniejszy native na niektórych biegach ≠ porzucenie floty external. `vc-dispatch` i `vc-ship` zachowują własne tożsamości.
 

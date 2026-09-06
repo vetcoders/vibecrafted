@@ -39,6 +39,6 @@ workspace: repo  |  active 0  stalled 0  |  scope: live  |  Mission Control
 │1 meta.json parse failures skipped                                                                                    │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-Mission Control: ↑/↓ panel focus  r refresh  Tab next tab
+Mission Control: click a panel  wheel that pane  ↑/↓ focus  r refresh
 Global: q quit  r refresh  a cycle agent  v cycle runtime  y copy  Ctrl+L clear search  ? help
 state root: /fixture/state

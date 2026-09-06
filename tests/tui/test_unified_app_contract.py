@@ -198,7 +198,7 @@ def test_final_embedded_runtime_pack_rejects_invalid_nested_macho(
     tmp_path: Path, macho_executable: Path
 ) -> None:
     payload = tmp_path / "payload/VibecraftedRuntime"
-    terminal = payload / "bin/vc-terminal"
+    terminal = payload / "libexec/vc-terminal"
     terminal.parent.mkdir(parents=True)
     shutil.copy2(macho_executable, terminal)
     _codesign_macho(terminal)
@@ -218,14 +218,14 @@ def test_final_embedded_runtime_pack_rejects_invalid_nested_macho(
 
     invalid_result = _runtime_pack_macho_preflight(invalid)
     assert invalid_result.returncode != 0
-    assert "invalid signature: bin/vc-terminal" in invalid_result.stderr
+    assert "invalid signature: libexec/vc-terminal" in invalid_result.stderr
 
 
 def test_valid_runtime_pack_preserves_success_across_late_cleanup_race(
     tmp_path: Path, macho_executable: Path
 ) -> None:
     payload = tmp_path / "payload/VibecraftedRuntime"
-    terminal = payload / "bin/vc-terminal"
+    terminal = payload / "libexec/vc-terminal"
     terminal.parent.mkdir(parents=True)
     shutil.copy2(macho_executable, terminal)
     _codesign_macho(terminal)
@@ -323,7 +323,7 @@ def _module_fixture(
     return manifest
 
 
-def _runtime_pack_fixture(app: Path) -> str:
+def _runtime_pack_fixture(app: Path, macho_executable: Path) -> str:
     name = "Vibecrafted_RuntimePack_1.0.0-20260814-22222222-darwin-arm64.tar.gz"
     embedded = app / "Contents/Resources/runtime-pack" / name
     with tempfile.TemporaryDirectory(prefix="runtime-pack-fixture.") as temporary:
@@ -343,8 +343,17 @@ def _runtime_pack_fixture(app: Path) -> str:
         frame_wrapper.chmod(0o755)
         native_frame = payload / "libexec/vc-frame"
         native_frame.parent.mkdir(parents=True)
-        native_frame.write_bytes(b"\xcf\xfa\xed\xfe" + b"\x00" * 32)
-        native_frame.chmod(0o755)
+        shutil.copy2(macho_executable, native_frame)
+        terminal_wrapper = payload / "bin/vc-terminal"
+        terminal_wrapper.write_text(
+            (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
+                encoding="utf-8"
+            ),
+            encoding="utf-8",
+        )
+        terminal_wrapper.chmod(0o755)
+        native_terminal = payload / "libexec/vc-terminal"
+        shutil.copy2(macho_executable, native_terminal)
         frame_config = payload / runtime_pack_contract.VC_FRAME_CONFIG_ROOT
         (frame_config / "layouts").mkdir(parents=True)
         (frame_config / "themes").mkdir()
@@ -523,7 +532,7 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
         entrypoint_name="frame",
         product_entry=frame_product_entry,
     )
-    runtime_pack_name = _runtime_pack_fixture(app)
+    runtime_pack_name = _runtime_pack_fixture(app, macho_executable)
     manifest = {
         "schema": contract.PRODUCT_SCHEMA,
         "product": contract.PRODUCT_NAME,
@@ -1009,13 +1018,25 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
             "func applicationShouldTerminateAfterLastWindowClosed"
         )
     ]
+    workspace_launch = delegate[
+        delegate.index("private func launchWorkspaceTerminal") : delegate.index(
+            "private func terminalIsLive"
+        )
+    ]
+    terminal_launch = delegate[
+        delegate.index("private func openWorkspaceTerminal") : delegate.index(
+            "private func terminalIsLive"
+        )
+    ]
     assert "launchWorkspaceTerminal()" in launch_handler
     assert "showMainWindowIfNeeded()" not in launch_handler
     assert "\t<key>LSUIElement</key>\n\t<true/>" in info
     assert "\t<key>NSQuitAlwaysKeepsWindows</key>\n\t<false/>" in info
-    assert 'withTitle: "Open VC Console"' in delegate
+    assert 'withTitle: "Open VC Server"' in delegate
+    assert 'withTitle: "Open Native Console"' in delegate
     assert 'withTitle: "Open VC Terminal"' in delegate
     assert 'withTitle: "VC Server"' in delegate
+    assert 'withTitle: "Open Workspaces"' in delegate
     assert 'withTitle: "Start"' in delegate
     assert 'withTitle: "Stop"' in delegate
     assert 'withTitle: "Restart"' in delegate
@@ -1042,11 +1063,8 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "statusRefreshTimer = Timer.scheduledTimer(" in delegate
     assert "statusIcon(health:" in delegate
     assert "health.color.setFill()" in delegate
-    assert "process.isRunning" in delegate
-    assert (
-        "NSRunningApplication(processIdentifier: process.processIdentifier)?.activate(options: [])"
-        in delegate
-    )
+    assert "application.isTerminated" in delegate
+    assert "application.activate(options: [])" in delegate
     termination_handler = delegate[
         delegate.index(
             "func applicationShouldTerminateAfterLastWindowClosed"
@@ -1054,6 +1072,29 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     ]
     assert "    false\n" in termination_handler
     assert "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty" in delegate
+    # A normal launch first asks the installer-owned read-only resolver which
+    # generation is current. Only a truly absent runtime may bootstrap the
+    # bundled carrier; an unusable one must be refused rather than overwritten.
+    assert "resolveInstalledRuntime { [weak self] resolution in" in workspace_launch
+    assert "case .ready:" in workspace_launch
+    assert "case .absent(let reason):" in workspace_launch
+    assert "try self.installCanonicalRuntime()" in workspace_launch
+    assert "case .unusable(let reason):" in workspace_launch
+    assert "self.openWorkspaceTerminal(install: install)" in workspace_launch
+    # The selected generation's terminal wrapper receives the explicit primary
+    # shell/start argv. The bundled terminal host remains onboarding material,
+    # never the direct launch target of the App.
+    assert "NSWorkspace.shared.openApplication(" not in terminal_launch
+    assert "process.executableURL = install.terminal" in terminal_launch
+    assert (
+        'process.arguments = ["-e", install.primaryShell.path, install.start.path, "operator"]'
+        in terminal_launch
+    )
+    assert "process.environment = environment" in terminal_launch
+    assert "process.terminationHandler" in terminal_launch
+    assert "process.executableURL = install.terminalHost" not in terminal_launch
+    assert "\t<key>CFBundleIconFile</key>\n\t<string>Vibecrafted.icns</string>" in info
+    assert "NSApp.applicationIconImage.copy()" in delegate
     assert 'appendingPathComponent("runtime-pack", isDirectory: true)' in delegate
     assert 'appendingPathComponent("install-runtime-pack.sh")' in delegate
     assert '"--expected-source-revision"' in delegate
@@ -1087,22 +1128,23 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "copyItem(at:" not in delegate
     assert "writeLauncher(" not in delegate
     assert 'appendingPathComponent("active.json")' not in delegate
-    # PATH composes: the signed generation wins, the caller's PATH survives behind
-    # it. A hard-coded system-only PATH strips Homebrew/~/.local/bin/~/.cargo/bin
-    # from every spawned agent CLI, so `#!/usr/bin/env` shebangs exit 127.
+    # PATH composes: the caller's tools win and the signed generation remains a
+    # fallback. A hard-coded system-only PATH strips Homebrew/~/.local/bin/
+    # ~/.cargo/bin from spawned agent CLIs, so `#!/usr/bin/env` shebangs exit 127.
     assert 'environment["PATH"] = composedPath(' in delegate
     assert 'environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"' not in delegate
+    assert 'return (entries + [generationBin]).joined(separator: ":")' in delegate
     assert '["server", "service", "reconcile"]' in delegate
     assert "shell-agent" not in delegate
     assert 'name = "vc-start"' in cargo
     assert '"--noprofile"' in launcher
     assert '"--norc"' in launcher
-    assert 'source "$1"; shift; vc-start "$@"' in launcher
+    assert 'source "$1" || exit $?; shift; vc-start "$@"' in launcher
     assert 'Command::new("/bin/bash")' in launcher
     assert "fn host_agent_search_path(" in launcher
     assert '"/opt/homebrew/bin"' in launcher
-    # vc-start composes: the PATH AppDelegate hands it (generation first, the
-    # operator's Homebrew/npm/cargo/nvm tail behind) must survive the handoff,
+    # vc-start composes: the PATH AppDelegate hands it (the Founder's
+    # Homebrew/npm/cargo/nvm entries first, generation fallback last) survives,
     # sanitized rather than amputated — a closed allowlist here re-created the
     # exit-127 shebang failures the composed PATH fixed one process earlier.
     assert 'let inherited_path = env::var("PATH").ok();' in launcher
@@ -1118,10 +1160,10 @@ def test_tray_menu_supervises_runtime_pack_carrier_drift() -> None:
 
     # The tray supervises the Runtime Pack carrier, not just the server: the
     # live generation is a first-class status line and the submenu carries the
-    # supervision actions (reveal home, open control plane, copy identity).
+    # supervision actions (reveal home, reveal control files, copy identity).
     assert 'withTitle: "Runtime Pack"' in delegate
     assert 'withTitle: "Reveal Runtime Home"' in delegate
-    assert 'withTitle: "Open Control Plane"' in delegate
+    assert 'withTitle: "Reveal Control Plane Files"' in delegate
     assert 'withTitle: "Copy Runtime Identity"' in delegate
     assert "#selector(revealRuntimeHomeFromStatusItem)" in delegate
     assert "#selector(openControlPlaneFromStatusItem)" in delegate
@@ -3513,6 +3555,7 @@ def test_shell_front_door_self_test_exercises_real_verifier() -> None:
     env = {
         "HOME": os.environ["HOME"],
         "PATH": "/usr/bin:/bin",
+        "PYTHON": sys.executable,
     }
     result = subprocess.run(
         [str(VERIFY_SCRIPT), "--self-test"],
@@ -3638,14 +3681,37 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     assert 'mods = "Command|Shift"' in terminal
     assert 'chars = "\\u001b[46;10u"' in terminal
     assert "launch-primary-shell.zsh" in terminal
+    assert (
+        "$VIBECRAFTED_RUNTIME_ROOT/config/alacritty/launch-primary-shell.zsh"
+        not in terminal
+    )
     assert "$VIBECRAFTED_RUNTIME_ROOT/bin/vc-start" in terminal
     assert "${1##*/}" in primary_shell
     assert '"$0" "$@"' in primary_shell
-    assert "process.executableURL = install.terminalHost" in delegate
-    assert '"-e", install.primaryShell.path, install.start.path, "operator"' in delegate
-    assert 'product_config / "terminal-entry.toml"' in installer
+    terminal_launch = delegate[
+        delegate.index("private func openWorkspaceTerminal") : delegate.index(
+            "private func terminalIsLive"
+        )
+    ]
+    assert "NSWorkspace.shared.openApplication(" not in terminal_launch
+    assert "process.executableURL = install.terminal" in terminal_launch
+    assert "process.environment = environment" in terminal_launch
+    assert (
+        '"-e", install.primaryShell.path, install.start.path, "operator"'
+        in terminal_launch
+    )
+    assert 'product_config / "vc-terminal" / "vc-terminal.toml"' in installer
+    assert 'product_config / "terminal-entry.toml"' not in installer
+    assert 'for debris in terminal.glob("launch-*.zsh"):' in installer
+    assert "if debris.name != _PRODUCT_PRIMARY_SHELL_NAME:" in installer
+    assert "_remove_path(debris)" in installer
+    assert "vc-terminal/launch-primary-shell.zsh" in terminal
     assert 'product_config / "terminal-policy.toml"' in installer
-    assert 'product_config / "terminal-theme.toml"' in installer
+    assert 'theme = staged / "terminal-theme.toml"' in installer
+    assert 'generation / "config/vc-terminal/themes/dark.toml"' in installer
+    assert 'tomllib.loads(theme.read_text(encoding="utf-8"))' in installer
+    assert "_materialize_runtime_generation_vc_terminal_entry" in installer
+    assert 'generation / "libexec/vc-terminal"' in installer
     assert 'let socketRoot = "/tmp/vc-frame-\\(getuid())"' in delegate
     assert 'environment["VC_FRAME_SOCKET_DIR"] = socketRoot' in delegate
     assert 'environment["ZELLIJ_SOCKET_DIR"] = socketRoot' in delegate
@@ -3663,10 +3729,12 @@ def test_installed_deck_resolves_server_binary_and_site_from_its_generation() ->
     assert 'server_bin="${runtime_root:+$runtime_root/bin/vc-server}"' in deck
     assert 'site_root="${runtime_root:+$runtime_root/server/site}"' in deck
     assert 'local server_bin="$HOME/.local/bin/vc-server"' not in deck
+    assert "_vc_source_launcher_ulimits()" in deck
     assert (
-        '"$script_dir/../vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh"'
+        'candidate="$owner_root/vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh"'
         in deck
     )
+    assert 'source "$candidate"' in deck
 
 
 def test_primary_shell_exits_instead_of_reusing_pty_after_vc_start_failure(

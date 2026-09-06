@@ -43,12 +43,12 @@ junie-justdo() { _vetcoders_skill junie justdo "$@"; }
 grok-justdo() { _vetcoders_skill grok justdo "$@"; }
 cursor-justdo() { _vetcoders_skill cursor justdo "$@"; }
 
-codex-partner() { _vetcoders_skill codex partner "$@"; }
-claude-partner() { _vetcoders_skill claude partner "$@"; }
-agy-partner() { _vetcoders_skill agy partner "$@"; }
-junie-partner() { _vetcoders_skill junie partner "$@"; }
-grok-partner() { _vetcoders_skill grok partner "$@"; }
-cursor-partner() { _vetcoders_skill cursor partner "$@"; }
+codex-partner() { _vetcoders_skill_partner codex "$@"; }
+claude-partner() { _vetcoders_skill_partner claude "$@"; }
+agy-partner() { _vetcoders_skill_partner agy "$@"; }
+junie-partner() { _vetcoders_skill_partner junie "$@"; }
+grok-partner() { _vetcoders_skill_partner grok "$@"; }
+cursor-partner() { _vetcoders_skill_partner cursor "$@"; }
 
 # Per-agent skill-* helpers. The deck (`vibecrafted <skill> <agent>` and
 # `vibecrafted init <agent>`) resolves `${agent}-skill-${skill}` by name.
@@ -111,6 +111,13 @@ junie-skill-init() { _vetcoders_skill_init junie "$@"; }
 grok-skill-init() { _vetcoders_skill_init grok "$@"; }
 cursor-skill-init() { _vetcoders_skill_init cursor "$@"; }
 
+codex-skill-operator() { _vetcoders_skill_operator codex "$@"; }
+claude-skill-operator() { _vetcoders_skill_operator claude "$@"; }
+agy-skill-operator() { _vetcoders_skill_operator agy "$@"; }
+junie-skill-operator() { _vetcoders_skill_operator junie "$@"; }
+grok-skill-operator() { _vetcoders_skill_operator grok "$@"; }
+cursor-skill-operator() { _vetcoders_skill_operator cursor "$@"; }
+
 codex-skill-justdo() { _vetcoders_skill_entry codex justdo "$@"; }
 claude-skill-justdo() { _vetcoders_skill_entry claude justdo "$@"; }
 agy-skill-justdo() { _vetcoders_skill_entry agy justdo "$@"; }
@@ -135,12 +142,12 @@ junie-skill-marbles() { _vetcoders_marbles junie "$@"; }
 grok-skill-marbles() { _vetcoders_marbles grok "$@"; }
 cursor-skill-marbles() { _vetcoders_marbles cursor "$@"; }
 
-codex-skill-partner() { _vetcoders_skill_entry codex partner "$@"; }
-claude-skill-partner() { _vetcoders_skill_entry claude partner "$@"; }
-agy-skill-partner() { _vetcoders_skill_entry agy partner "$@"; }
-junie-skill-partner() { _vetcoders_skill_entry junie partner "$@"; }
-grok-skill-partner() { _vetcoders_skill_entry grok partner "$@"; }
-cursor-skill-partner() { _vetcoders_skill_entry cursor partner "$@"; }
+codex-skill-partner() { _vetcoders_skill_partner codex "$@"; }
+claude-skill-partner() { _vetcoders_skill_partner claude "$@"; }
+agy-skill-partner() { _vetcoders_skill_partner agy "$@"; }
+junie-skill-partner() { _vetcoders_skill_partner junie "$@"; }
+grok-skill-partner() { _vetcoders_skill_partner grok "$@"; }
+cursor-skill-partner() { _vetcoders_skill_partner cursor "$@"; }
 
 codex-skill-polarize() { _vetcoders_skill_entry codex polarize "$@"; }
 claude-skill-polarize() { _vetcoders_skill_entry claude polarize "$@"; }
@@ -341,6 +348,7 @@ _vetcoders_skill_wrapper() {
 
   case "$skill" in
     init) _vetcoders_skill_init "$tool" "$@" ;;
+    partner) _vetcoders_skill_partner "$tool" "$@" ;;
     operator) _vetcoders_skill_operator "$tool" "$@" ;;
     marbles) _vetcoders_marbles "$tool" "$@" ;;
     *) _vetcoders_skill_entry "$tool" "$skill" "$@" ;;
@@ -431,10 +439,10 @@ vc-trust() { _vetcoders_vc_passthrough trust "$@"; }
 vc-guard() { _vetcoders_vc_passthrough guard "$@"; }
 vc-workflow() { _vetcoders_vc_passthrough workflow "$@"; }
 vc-dispatch() { _vetcoders_vc_passthrough dispatch "$@"; }
-# Agent-first skills without a deck LAUNCHERS verb — safe help via skill_wrapper,
-# execution still goes agent → skill entry (not a false vibecrafted operator verb).
+# Agent-first skills without a deck LAUNCHERS verb — safe help via skill_wrapper.
 vc-agents() { _vetcoders_skill_dispatch agents "$@"; }
-vc-operator() { _vetcoders_skill_dispatch operator "$@"; }
+# Deck now owns `vibecrafted operator` (interactive face). Passthrough matches vc-init.
+vc-operator() { _vetcoders_vc_passthrough operator "$@"; }
 
 vc-help() {
   _vetcoders_vc_passthrough help "$@"
@@ -827,18 +835,20 @@ vc-start() {
     _vetcoders_vc_passthrough start --help
     return $?
   fi
-  # Product lifecycle: pin config, project Super/scripts, poke CP eye.
-  if declare -F _vetcoders_product_entry_prepare >/dev/null 2>&1; then
-    _vetcoders_product_entry_prepare
+  # Required lifecycle helpers belong to the admitted facade.
+  if ! declare -F _vetcoders_product_entry_prepare >/dev/null 2>&1; then
+    printf 'vc-start: required product preparation helper missing\n' >&2
+    return 1
   fi
+  _vetcoders_product_entry_prepare || return $?
   # Tests/doctor: print env effects without attach (no TUI, no session create).
   if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" == "1" ]]; then
-    if declare -F _vetcoders_product_entry_probe_print >/dev/null 2>&1; then
-      _vetcoders_product_entry_probe_print
-    else
-      printf 'VC_FRAME_CONFIG_DIR=%s\n' "${VC_FRAME_CONFIG_DIR:-}"
+    if ! declare -F _vetcoders_product_entry_probe_print >/dev/null 2>&1; then
+      printf 'vc-start: required product probe helper missing\n' >&2
+      return 1
     fi
-    return 0
+    _vetcoders_product_entry_probe_print
+    return $?
   fi
   if [[ "${1:-}" == "resume" ]]; then
     shift || true

@@ -9,6 +9,9 @@ pub enum SkillAgent {
     Codex,
     Cursor,
     Gemini,
+    Agy,
+    Junie,
+    Grok,
     Any,
 }
 
@@ -19,6 +22,9 @@ impl SkillAgent {
             SkillAgent::Codex => "codex",
             SkillAgent::Cursor => "cursor",
             SkillAgent::Gemini => "gemini",
+            SkillAgent::Agy => "agy",
+            SkillAgent::Junie => "junie",
+            SkillAgent::Grok => "grok",
             SkillAgent::Any => "any",
         }
     }
@@ -29,6 +35,9 @@ impl SkillAgent {
             "gemini" => SkillAgent::Gemini,
             "codex" => SkillAgent::Codex,
             "cursor" => SkillAgent::Cursor,
+            "agy" => SkillAgent::Agy,
+            "junie" => SkillAgent::Junie,
+            "grok" => SkillAgent::Grok,
             _ => SkillAgent::Any,
         }
     }
@@ -39,10 +48,16 @@ impl SkillAgent {
             SkillAgent::Codex => "codex",
             SkillAgent::Cursor => "cursor",
             SkillAgent::Gemini => "gemini",
+            SkillAgent::Agy => "agy",
+            SkillAgent::Junie => "junie",
+            SkillAgent::Grok => "grok",
             SkillAgent::Any => match fallback {
                 SkillAgent::Claude => "claude",
                 SkillAgent::Cursor => "cursor",
                 SkillAgent::Gemini => "gemini",
+                SkillAgent::Agy => "agy",
+                SkillAgent::Junie => "junie",
+                SkillAgent::Grok => "grok",
                 _ => "codex",
             },
         }

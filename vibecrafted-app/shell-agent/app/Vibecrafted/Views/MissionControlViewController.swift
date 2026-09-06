@@ -4,7 +4,7 @@
 import AppKit
 
 final class MissionControlViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
-  private enum Section {
+  private enum Section: CaseIterable {
     case agents
     case waves
     case skills
@@ -32,9 +32,13 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
     return formatter
   }()
 
-  private let scrollView = NSScrollView()
-  private let contentView = NSView()
-  private let stackView = NSStackView()
+  private enum SortValue {
+    case date(Date?)
+    case number(Double)
+    case text(String)
+  }
+
+  private let sectionContainer = NSView()
   private let statusLabel = NSTextField(labelWithString: "Loading Mission Control...")
   private let emptyLabel = NSTextField(labelWithString: "Loading Mission Control snapshot...")
   private let refreshButton = NSButton(title: "Refresh", target: nil, action: nil)
@@ -49,10 +53,8 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
   private let dataQualityFooterLabel = NSTextField(labelWithString: "")
 
   private var tableSections: [ObjectIdentifier: Section] = [:]
-  private var heightConstraints: [ObjectIdentifier: NSLayoutConstraint] = [:]
-  private var sectionAnchors: [String: NSView] = [:]
-  private var highlightedAnchor: NSView?
-  private var focusResetWorkItem: DispatchWorkItem?
+  private var sectionViews: [Section: NSView] = [:]
+  private var selectedSection: Section = .active
   private var snapshot: FfiMissionControlSnapshot?
   private var isLoading = false
   private var pendingFocusRunId: String?
@@ -79,25 +81,18 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
     refreshButton.target = self
     refreshButton.action = #selector(refreshButtonPressed(_:))
     refreshButton.bezelStyle = .rounded
+    refreshButton.keyEquivalent = "r"
+    refreshButton.keyEquivalentModifierMask = [.command]
+    refreshButton.toolTip = "Refresh Mission Control (Command-R)"
+    refreshButton.setAccessibilityLabel("Refresh Mission Control")
 
     headerStack.addArrangedSubview(titleLabel)
     headerStack.addArrangedSubview(statusLabel)
     headerStack.addArrangedSubview(NSView())
     headerStack.addArrangedSubview(refreshButton)
 
-    scrollView.hasVerticalScroller = true
-    scrollView.borderType = .noBorder
-    scrollView.translatesAutoresizingMaskIntoConstraints = false
-    root.addSubview(scrollView)
-
-    contentView.translatesAutoresizingMaskIntoConstraints = false
-    scrollView.documentView = contentView
-
-    stackView.orientation = .vertical
-    stackView.alignment = .leading
-    stackView.spacing = 14
-    stackView.translatesAutoresizingMaskIntoConstraints = false
-    contentView.addSubview(stackView)
+    sectionContainer.translatesAutoresizingMaskIntoConstraints = false
+    root.addSubview(sectionContainer)
 
     emptyLabel.font = NSFont.systemFont(ofSize: 13, weight: .regular)
     emptyLabel.textColor = .secondaryLabelColor
@@ -114,26 +109,17 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
       headerStack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
       headerStack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
 
-      scrollView.topAnchor.constraint(equalTo: headerStack.bottomAnchor, constant: 12),
-      scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-      scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-      scrollView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-
-      contentView.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
-      contentView.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
-      contentView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
-      contentView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
-
-      stackView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
-      stackView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-      stackView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
-      stackView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16),
+      sectionContainer.topAnchor.constraint(equalTo: headerStack.bottomAnchor, constant: 12),
+      sectionContainer.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+      sectionContainer.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
+      sectionContainer.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
 
       emptyLabel.centerXAnchor.constraint(equalTo: root.centerXAnchor),
       emptyLabel.centerYAnchor.constraint(equalTo: root.centerYAnchor),
       emptyLabel.leadingAnchor.constraint(greaterThanOrEqualTo: root.leadingAnchor, constant: 24),
       emptyLabel.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -24),
     ])
+    selectSection(.active)
   }
 
   override func viewDidLoad() {
@@ -195,7 +181,7 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
           self.statusLabel.stringValue = "Snapshot failed"
           self.emptyLabel.stringValue = "Mission Control snapshot failed: \(error)"
           self.emptyLabel.isHidden = false
-          self.scrollView.isHidden = true
+          self.sectionContainer.isHidden = true
         }
       }
     }
@@ -210,10 +196,15 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
         ("Agent", "AGENT", 90),
         ("Skill", "SKILL", 120),
         ("Wave", "WAVE", 180),
+        ("Started", "STARTED", 145),
         ("Age", "AGE", 90),
         ("ETA", "ETA", 110),
       ],
-      title: "Active dispatches"
+      title: "Active dispatches",
+      actions: [
+        actionButton("Inspect Selected", action: #selector(inspectSelectedRun)),
+        actionButton("Check Clients", action: #selector(checkClients)),
+      ]
     )
     configure(
       tableView: failuresTableView,
@@ -226,7 +217,11 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
         ("Reason", "REASON", 320),
         ("Age", "AGE", 90),
       ],
-      title: "Failures board"
+      title: "Failures board",
+      actions: [
+        actionButton("Inspect Selected", action: #selector(inspectSelectedRun)),
+        actionButton("Open Artifact", action: #selector(openSelectedFailureArtifact)),
+      ]
     )
     configure(
       tableView: waveTableView,
@@ -239,7 +234,8 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
         ("Failed", "FAILED", 70),
         ("Active", "ACTIVE", 70),
       ],
-      title: "Wave atlas"
+      title: "Wave atlas",
+      actions: []
     )
     configure(
       tableView: agentTableView,
@@ -253,7 +249,8 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
         ("Model", "MODEL", 70),
         ("Avg Dur", "AVG_DUR", 90),
       ],
-      title: "Per-agent stats"
+      title: "Per-agent stats",
+      actions: [actionButton("Check Clients", action: #selector(checkClients))]
     )
     configure(
       tableView: skillTableView,
@@ -265,7 +262,8 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
         ("Failed", "FAILED", 70),
         ("Avg Dur", "AVG_DUR", 90),
       ],
-      title: "Per-skill stats"
+      title: "Per-skill stats",
+      actions: []
     )
   }
 
@@ -273,7 +271,8 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
     tableView: NSTableView,
     section: Section,
     columns: [(String, String, CGFloat)],
-    title: String
+    title: String,
+    actions: [NSButton]
   ) {
     tableSections[ObjectIdentifier(tableView)] = section
     tableView.dataSource = self
@@ -281,64 +280,125 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
     tableView.usesAlternatingRowBackgroundColors = true
     tableView.rowHeight = 24
     tableView.allowsColumnResizing = true
+    tableView.allowsColumnReordering = true
     tableView.allowsEmptySelection = true
     tableView.allowsMultipleSelection = false
+    tableView.setAccessibilityLabel(title)
 
     for (title, identifier, width) in columns {
       let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(identifier))
       column.title = title
       column.width = width
+      column.sortDescriptorPrototype = NSSortDescriptor(
+        key: identifier, ascending: true,
+        selector: #selector(NSString.localizedStandardCompare(_:)))
       tableView.addTableColumn(column)
     }
 
+    let panel = NSView()
+    panel.translatesAutoresizingMaskIntoConstraints = false
+    sectionContainer.addSubview(panel)
+    sectionViews[section] = panel
+
     let titleLabel = NSTextField(labelWithString: title)
     titleLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-    sectionAnchors[section.focusID] = titleLabel
-    stackView.addArrangedSubview(titleLabel)
+    titleLabel.translatesAutoresizingMaskIntoConstraints = false
+    titleLabel.setAccessibilityRole(.staticText)
+    titleLabel.setAccessibilitySubrole(NSAccessibility.Subrole(rawValue: "AXHeading"))
+    panel.addSubview(titleLabel)
+
+    let actionStack = NSStackView(views: actions)
+    actionStack.orientation = .horizontal
+    actionStack.spacing = 8
+    actionStack.translatesAutoresizingMaskIntoConstraints = false
+    panel.addSubview(actionStack)
 
     let scroll = NSScrollView()
-    scroll.hasVerticalScroller = false
+    scroll.hasVerticalScroller = true
     scroll.hasHorizontalScroller = true
     scroll.borderType = .bezelBorder
     scroll.documentView = tableView
     scroll.translatesAutoresizingMaskIntoConstraints = false
-    stackView.addArrangedSubview(scroll)
-
-    let height = scroll.heightAnchor.constraint(equalToConstant: 86)
-    height.isActive = true
-    heightConstraints[ObjectIdentifier(tableView)] = height
+    panel.addSubview(scroll)
 
     NSLayoutConstraint.activate([
-      scroll.leadingAnchor.constraint(equalTo: stackView.leadingAnchor),
-      scroll.trailingAnchor.constraint(equalTo: stackView.trailingAnchor),
+      panel.topAnchor.constraint(equalTo: sectionContainer.topAnchor),
+      panel.leadingAnchor.constraint(equalTo: sectionContainer.leadingAnchor),
+      panel.trailingAnchor.constraint(equalTo: sectionContainer.trailingAnchor),
+      panel.bottomAnchor.constraint(equalTo: sectionContainer.bottomAnchor),
+      titleLabel.topAnchor.constraint(equalTo: panel.topAnchor),
+      titleLabel.leadingAnchor.constraint(equalTo: panel.leadingAnchor),
+      actionStack.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
+      actionStack.trailingAnchor.constraint(equalTo: panel.trailingAnchor),
+      titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: actionStack.leadingAnchor, constant: -12),
+      scroll.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
+      scroll.leadingAnchor.constraint(equalTo: panel.leadingAnchor),
+      scroll.trailingAnchor.constraint(equalTo: panel.trailingAnchor),
+      scroll.bottomAnchor.constraint(equalTo: panel.bottomAnchor),
     ])
   }
 
   private func configureHealthStrip() {
-    settlementLabel.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .medium)
-    settlementLabel.textColor = .labelColor
-    stackView.addArrangedSubview(settlementLabel)
+    let panel = NSView()
+    panel.translatesAutoresizingMaskIntoConstraints = false
+    sectionContainer.addSubview(panel)
+    sectionViews[.health] = panel
 
     let titleLabel = NSTextField(labelWithString: "Fleet health")
     titleLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-    sectionAnchors[Section.health.focusID] = titleLabel
-    stackView.addArrangedSubview(titleLabel)
+    titleLabel.translatesAutoresizingMaskIntoConstraints = false
+    titleLabel.setAccessibilityRole(.staticText)
+    titleLabel.setAccessibilitySubrole(NSAccessibility.Subrole(rawValue: "AXHeading"))
+    panel.addSubview(titleLabel)
+
+    let actions = NSStackView(views: [
+      actionButton("Launch Server", action: #selector(launchServer)),
+      actionButton("Relaunch Server", action: #selector(relaunchServer)),
+      actionButton("Check Clients", action: #selector(checkClients)),
+      actionButton("Open Server", action: #selector(openServer)),
+    ])
+    actions.orientation = .horizontal
+    actions.spacing = 8
+    actions.translatesAutoresizingMaskIntoConstraints = false
+    panel.addSubview(actions)
+
+    settlementLabel.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .medium)
+    settlementLabel.textColor = .labelColor
+    settlementLabel.translatesAutoresizingMaskIntoConstraints = false
+    panel.addSubview(settlementLabel)
 
     healthStackView.orientation = .vertical
     healthStackView.alignment = .leading
     healthStackView.spacing = 4
     healthStackView.translatesAutoresizingMaskIntoConstraints = false
-    stackView.addArrangedSubview(healthStackView)
-    NSLayoutConstraint.activate([
-      healthStackView.leadingAnchor.constraint(equalTo: stackView.leadingAnchor),
-      healthStackView.trailingAnchor.constraint(lessThanOrEqualTo: stackView.trailingAnchor),
-    ])
+    panel.addSubview(healthStackView)
 
     dataQualityFooterLabel.font = NSFont.systemFont(ofSize: 12, weight: .regular)
     dataQualityFooterLabel.textColor = .secondaryLabelColor
     dataQualityFooterLabel.lineBreakMode = .byTruncatingMiddle
     dataQualityFooterLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-    stackView.addArrangedSubview(dataQualityFooterLabel)
+    dataQualityFooterLabel.translatesAutoresizingMaskIntoConstraints = false
+    panel.addSubview(dataQualityFooterLabel)
+
+    NSLayoutConstraint.activate([
+      panel.topAnchor.constraint(equalTo: sectionContainer.topAnchor),
+      panel.leadingAnchor.constraint(equalTo: sectionContainer.leadingAnchor),
+      panel.trailingAnchor.constraint(equalTo: sectionContainer.trailingAnchor),
+      panel.bottomAnchor.constraint(equalTo: sectionContainer.bottomAnchor),
+      titleLabel.topAnchor.constraint(equalTo: panel.topAnchor),
+      titleLabel.leadingAnchor.constraint(equalTo: panel.leadingAnchor),
+      actions.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
+      actions.trailingAnchor.constraint(equalTo: panel.trailingAnchor),
+      titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: actions.leadingAnchor, constant: -12),
+      settlementLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 16),
+      settlementLabel.leadingAnchor.constraint(equalTo: panel.leadingAnchor),
+      healthStackView.topAnchor.constraint(equalTo: settlementLabel.bottomAnchor, constant: 12),
+      healthStackView.leadingAnchor.constraint(equalTo: panel.leadingAnchor),
+      healthStackView.trailingAnchor.constraint(lessThanOrEqualTo: panel.trailingAnchor),
+      dataQualityFooterLabel.leadingAnchor.constraint(equalTo: panel.leadingAnchor),
+      dataQualityFooterLabel.trailingAnchor.constraint(equalTo: panel.trailingAnchor),
+      dataQualityFooterLabel.bottomAnchor.constraint(equalTo: panel.bottomAnchor),
+    ])
   }
 
   private func apply(_ snapshot: FfiMissionControlSnapshot) {
@@ -354,7 +414,6 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
     updateSettlementStrip()
     updateHealthStrip()
     updateDataQualityFooter()
-    updateTableHeights()
     updateEmptyState()
     updateStatus()
     NotificationCenter.default.post(
@@ -369,13 +428,15 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
     pendingFocusRunId = nil
     if let idx = snapshot.activeDispatches.firstIndex(where: { $0.runId == runId }) {
       focusSection("active_dispatches")
-      activeTableView.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
+      let displayedRow = sortedIndices(for: activeTableView).firstIndex(of: idx) ?? idx
+      activeTableView.selectRowIndexes(IndexSet(integer: displayedRow), byExtendingSelection: false)
       postSelection(runId: runId, sourcePath: nil, kind: "dispatch")
       return
     }
     if let idx = snapshot.failures.firstIndex(where: { $0.runId == runId }) {
       focusSection("failures")
-      failuresTableView.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
+      let displayedRow = sortedIndices(for: failuresTableView).firstIndex(of: idx) ?? idx
+      failuresTableView.selectRowIndexes(IndexSet(integer: displayedRow), byExtendingSelection: false)
       let item = snapshot.failures[idx]
       postSelection(runId: runId, sourcePath: item.sourcePath, kind: "failure")
       return
@@ -446,23 +507,16 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
   private func updateEmptyState() {
     if snapshot != nil {
       emptyLabel.isHidden = true
-      scrollView.isHidden = false
+      sectionContainer.isHidden = false
       return
     }
 
-    scrollView.isHidden = true
+    sectionContainer.isHidden = true
     emptyLabel.isHidden = false
     if isLoading {
       emptyLabel.stringValue = "Loading Mission Control snapshot..."
     } else {
       emptyLabel.stringValue = "No Mission Control data yet."
-    }
-  }
-
-  private func updateTableHeights() {
-    for tableView in [activeTableView, failuresTableView, waveTableView, agentTableView, skillTableView] {
-      let rows = max(1, tableView.numberOfRows)
-      heightConstraints[ObjectIdentifier(tableView)]?.constant = CGFloat(rows * 24 + 30)
     }
   }
 
@@ -489,7 +543,8 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
   func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
     guard let identifier = tableColumn?.identifier else { return nil }
     let cell = reusableCell(for: tableView, identifier: identifier)
-    cell.textField?.stringValue = value(for: tableView, column: identifier.rawValue, row: row)
+    let sourceRow = sourceRow(for: tableView, displayedRow: row)
+    cell.textField?.stringValue = value(for: tableView, column: identifier.rawValue, row: sourceRow)
     return cell
   }
 
@@ -529,6 +584,7 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
       case "AGENT": return displayValue(item.agent)
       case "SKILL": return displayValue(item.skill)
       case "WAVE": return displayValue(item.wave)
+      case "STARTED": return dateTime(item.startedAt)
       case "AGE": return displayValue(item.ageLabel)
       case "ETA": return displayValue(item.etaLabel)
       default: return ""
@@ -591,8 +647,9 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
       let section = tableSections[ObjectIdentifier(tableView)]
     else { return }
 
-    let row = tableView.selectedRow
-    guard row >= 0 else { return }
+    let displayedRow = tableView.selectedRow
+    guard displayedRow >= 0 else { return }
+    let row = sourceRow(for: tableView, displayedRow: displayedRow)
 
     switch section {
     case .active:
@@ -606,6 +663,10 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
     case .agents, .waves, .skills, .health:
       return
     }
+  }
+
+  func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
+    tableView.reloadData()
   }
 
   private func postSelection(runId: String, sourcePath: String?, kind: String) {
@@ -639,28 +700,209 @@ final class MissionControlViewController: NSViewController, NSTableViewDataSourc
   }
 
   private func focusSection(_ sectionID: String) {
-    guard let anchor = sectionAnchors[sectionID] else { return }
-    anchor.scrollToVisible(anchor.bounds)
-    flash(anchor)
+    guard let section = Section.allCases.first(where: { $0.focusID == sectionID }) else { return }
+    selectSection(section)
   }
 
-  private func flash(_ anchor: NSView) {
-    focusResetWorkItem?.cancel()
-    highlightedAnchor?.wantsLayer = false
+  private func selectSection(_ section: Section) {
+    selectedSection = section
+    for (candidate, sectionView) in sectionViews {
+      sectionView.isHidden = candidate != section
+    }
+    sectionViews[section]?.setAccessibilityFocused(true)
+  }
 
-    anchor.wantsLayer = true
-    anchor.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.16).cgColor
-    anchor.layer?.cornerRadius = 4
-    highlightedAnchor = anchor
+  private func actionButton(_ title: String, action: Selector) -> NSButton {
+    let button = NSButton(title: title, target: self, action: action)
+    button.bezelStyle = .rounded
+    button.setAccessibilityLabel(title)
+    return button
+  }
 
-    let workItem = DispatchWorkItem { [weak self, weak anchor] in
-      anchor?.wantsLayer = false
-      if self?.highlightedAnchor === anchor {
-        self?.highlightedAnchor = nil
+  private func sourceRow(for tableView: NSTableView, displayedRow: Int) -> Int {
+    let indices = sortedIndices(for: tableView)
+    guard indices.indices.contains(displayedRow) else { return displayedRow }
+    return indices[displayedRow]
+  }
+
+  private func sortedIndices(for tableView: NSTableView) -> [Int] {
+    guard let snapshot, let section = tableSections[ObjectIdentifier(tableView)] else { return [] }
+    let count: Int
+    switch section {
+    case .active: count = snapshot.activeDispatches.count
+    case .failures: count = snapshot.failures.count
+    case .waves: count = snapshot.waveAtlas.count
+    case .agents: count = snapshot.agentStats.count
+    case .skills: count = snapshot.skillStats.count
+    case .health: count = 0
+    }
+    let indices = Array(0..<count)
+    guard let descriptor = tableView.sortDescriptors.first, let column = descriptor.key else {
+      return indices
+    }
+    return indices.sorted { lhs, rhs in
+      let result = compare(
+        sortValue(section: section, column: column, row: lhs),
+        sortValue(section: section, column: column, row: rhs))
+      if result == .orderedSame { return lhs < rhs }
+      return descriptor.ascending ? result == .orderedAscending : result == .orderedDescending
+    }
+  }
+
+  private func sortValue(section: Section, column: String, row: Int) -> SortValue {
+    guard let snapshot else { return .text("") }
+    switch section {
+    case .active:
+      let item = snapshot.activeDispatches[row]
+      switch column {
+      case "RUN_ID": return .text(item.runId)
+      case "AGENT": return .text(item.agent)
+      case "SKILL": return .text(item.skill)
+      case "WAVE": return .text(item.wave ?? "")
+      case "STARTED": return .date(item.startedAt.flatMap(Self.iso8601DateFormatter.date(from:)))
+      case "AGE": return .date(item.startedAt.flatMap(Self.iso8601DateFormatter.date(from:)))
+      case "ETA": return .text(item.etaLabel)
+      default: return .text("")
+      }
+    case .failures:
+      let item = snapshot.failures[row]
+      switch column {
+      case "RUN_ID": return .text(item.runId)
+      case "DATE", "AGE": return .date(item.occurredAt.flatMap(Self.iso8601DateFormatter.date(from:)))
+      case "AGENT": return .text(item.agent)
+      case "SKILL": return .text(item.skill)
+      case "REASON": return .text(item.reason)
+      default: return .text("")
+      }
+    case .waves:
+      let item = snapshot.waveAtlas[row]
+      switch column {
+      case "STATE": return .text(waveStateLabel(item.latestState))
+      case "WAVE": return .text(item.waveId)
+      case "TOTAL": return .number(Double(item.total))
+      case "COMPLETE": return .number(Double(item.completed))
+      case "FAILED": return .number(Double(item.failed))
+      case "ACTIVE": return .number(Double(item.active))
+      default: return .text("")
+      }
+    case .agents:
+      let item = snapshot.agentStats[row]
+      switch column {
+      case "AGENT": return .text(item.agent)
+      case "RUNS": return .number(Double(item.totalRuns))
+      case "COMPLETE": return .number(Double(item.completed))
+      case "FAILED": return .number(Double(item.failed))
+      case "SUCCESS": return .number(Double(item.successRate))
+      case "MODEL": return .number(Double(item.modelKnownRate))
+      case "AVG_DUR": return .number(item.avgDurationS ?? -.infinity)
+      default: return .text("")
+      }
+    case .skills:
+      let item = snapshot.skillStats[row]
+      switch column {
+      case "SKILL": return .text(item.skill)
+      case "INV": return .number(Double(item.invocations))
+      case "COMPLETE": return .number(Double(item.completed))
+      case "FAILED": return .number(Double(item.failed))
+      case "AVG_DUR": return .number(item.avgDurationS ?? -.infinity)
+      default: return .text("")
+      }
+    case .health:
+      return .text("")
+    }
+  }
+
+  private func compare(_ lhs: SortValue, _ rhs: SortValue) -> ComparisonResult {
+    switch (lhs, rhs) {
+    case (.number(let lhs), .number(let rhs)):
+      if lhs == rhs { return .orderedSame }
+      return lhs < rhs ? .orderedAscending : .orderedDescending
+    case (.date(let lhs), .date(let rhs)):
+      if lhs == rhs { return .orderedSame }
+      guard let lhs else { return .orderedAscending }
+      guard let rhs else { return .orderedDescending }
+      return lhs < rhs ? .orderedAscending : .orderedDescending
+    case (.text(let lhs), .text(let rhs)):
+      return lhs.localizedStandardCompare(rhs)
+    default:
+      return .orderedSame
+    }
+  }
+
+  @objc private func inspectSelectedRun() {
+    let tableView = selectedSection == .failures ? failuresTableView : activeTableView
+    guard tableView.selectedRow >= 0 else {
+      NSSound.beep()
+      return
+    }
+    tableViewSelectionDidChange(Notification(name: NSTableView.selectionDidChangeNotification, object: tableView))
+  }
+
+  @objc private func openSelectedFailureArtifact() {
+    guard let snapshot, failuresTableView.selectedRow >= 0 else {
+      NSSound.beep()
+      return
+    }
+    let row = sourceRow(for: failuresTableView, displayedRow: failuresTableView.selectedRow)
+    guard snapshot.failures.indices.contains(row), let path = snapshot.failures[row].sourcePath else {
+      NSSound.beep()
+      return
+    }
+    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+  }
+
+  @objc private func launchServer() {
+    routeServerLifecycleAction("startServerFromStatusItem")
+  }
+
+  @objc private func relaunchServer() {
+    routeServerLifecycleAction("restartServerFromStatusItem")
+  }
+
+  private func routeServerLifecycleAction(_ selectorName: String) {
+    let handled = NSApp.sendAction(Selector(selectorName), to: NSApp.delegate, from: self)
+    if !handled {
+      presentAlert(title: "Server action unavailable", detail: "The canonical app service owner is not ready.")
+    }
+  }
+
+  @objc private func checkClients() {
+    Task {
+      do {
+        let result = try await verifyClient(kind: .codex)
+        await MainActor.run {
+          self.presentAlert(
+            title: result.ok ? "Client check passed" : "Client check failed",
+            detail: result.detail)
+        }
+      } catch {
+        await MainActor.run {
+          self.presentAlert(title: "Client check failed", detail: error.localizedDescription)
+        }
       }
     }
-    focusResetWorkItem = workItem
-    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: workItem)
+  }
+
+  @objc private func openServer() {
+    let environment = ProcessInfo.processInfo.environment
+    let rawURL =
+      environment["VIBECRAFTED_SERVER_URL"] ?? environment["VC_SERVER_URL"]
+      ?? "http://127.0.0.1:3025"
+    guard let url = URL(string: rawURL),
+      ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+      url.host != nil
+    else {
+      presentAlert(title: "Server URL unavailable", detail: "The configured server URL is not a safe HTTP(S) URL.")
+      return
+    }
+    NSWorkspace.shared.open(url)
+  }
+
+  private func presentAlert(title: String, detail: String) {
+    let alert = NSAlert()
+    alert.messageText = title
+    alert.informativeText = detail
+    alert.runModal()
   }
 
   private func waveStateLabel(_ state: FfiWaveState) -> String {

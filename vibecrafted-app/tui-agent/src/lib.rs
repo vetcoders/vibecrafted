@@ -1,6 +1,7 @@
 pub mod app;
 pub mod config;
 pub mod launch;
+pub mod layout;
 pub mod memory;
 pub mod mission_control;
 pub mod mux;
@@ -13,7 +14,10 @@ pub mod state;
 pub mod ui;
 
 use anyhow::Context;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+    MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -24,7 +28,7 @@ use ratatui::backend::CrosstermBackend;
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::mpsc::{self, Sender};
@@ -175,7 +179,7 @@ pub fn run_cli() -> anyhow::Result<()> {
 fn run_app(config: AppConfig) -> anyhow::Result<()> {
     enable_raw_mode().context("failed to enable raw mode")?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -213,11 +217,12 @@ fn run_app(config: AppConfig) -> anyhow::Result<()> {
                 .checked_sub(last_draw.elapsed())
                 .unwrap_or(Duration::ZERO);
 
-            if event::poll(timeout)?
-                && let Event::Key(key) = event::read()?
-                && handle_key(&mut app, key)?
-            {
-                break;
+            if event::poll(timeout)? {
+                match event::read()? {
+                    Event::Key(key) if handle_key(&mut app, key)? => break,
+                    Event::Mouse(mouse) => handle_mouse(&mut app, mouse)?,
+                    _ => {}
+                }
             }
 
             let now = Instant::now();
@@ -269,7 +274,11 @@ fn run_app(config: AppConfig) -> anyhow::Result<()> {
 
 fn shutdown_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Result<()> {
     disable_raw_mode().context("failed to disable raw mode")?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }
@@ -339,6 +348,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
             _ => {}
         },
         LaunchFocus::Error => match key.code {
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                app.focus = LaunchFocus::Browse;
+                launch_selected(app)?;
+            }
             KeyCode::Char('f') | KeyCode::Char('F')
                 if app
                     .error_lines
@@ -452,7 +465,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
             }
             KeyCode::Enter => match app.active_tab() {
                 AppTab::Monitor => {
-                    if app.selected_run().is_some() {
+                    if app.config.view == crate::observe::ConsoleView::Observe {
+                        switch_to_selected_observe_session(app)?;
+                    } else if app.selected_run().is_some() {
                         app.set_active_tab(AppTab::Controls);
                     }
                 }
@@ -508,16 +523,245 @@ fn handle_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
     Ok(false)
 }
 
+fn handle_mouse(app: &mut App, mouse: MouseEvent) -> anyhow::Result<()> {
+    let (width, height) = crossterm::terminal::size()?;
+    apply_mouse(app, mouse, ratatui::layout::Rect::new(0, 0, width, height))?;
+    Ok(())
+}
+
+fn apply_mouse(
+    app: &mut App,
+    mouse: MouseEvent,
+    area: ratatui::layout::Rect,
+) -> anyhow::Result<()> {
+    if app.focus != LaunchFocus::Browse {
+        return Ok(());
+    }
+    let mux_height = crate::layout::mux_panel_height(app.mux_status_lines().len());
+    let polarize_height = crate::layout::polarize_panel_height(app.polarize_status_lines().len());
+    let Some(hit) = crate::layout::hit_test(
+        area,
+        app.active_tab(),
+        app.config.view,
+        mux_height,
+        polarize_height,
+        mouse.column,
+        mouse.row,
+    ) else {
+        return Ok(());
+    };
+    match mouse.kind {
+        MouseEventKind::ScrollUp => scroll_hit(app, area, hit, -1),
+        MouseEventKind::ScrollDown => scroll_hit(app, area, hit, 1),
+        MouseEventKind::Down(MouseButton::Left) => click_hit(app, hit)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn scroll_hit(
+    app: &mut App,
+    area: ratatui::layout::Rect,
+    hit: crate::layout::HitTarget,
+    delta: i16,
+) {
+    use crate::layout::{inner_height, pane_for_hit};
+    if matches!(hit, crate::layout::HitTarget::ObserveList { .. }) {
+        app.move_observe_selection(delta.into());
+        return;
+    }
+    if matches!(hit, crate::layout::HitTarget::MonitorList { .. }) {
+        app.move_selection(delta.into());
+        return;
+    }
+    let Some(pane) = pane_for_hit(hit) else {
+        return;
+    };
+    let Some(rect) = pane_rect(area, app, pane) else {
+        return;
+    };
+    let view_height = inner_height(rect);
+    let view_width = rect.width.saturating_sub(2);
+    let content_len = pane_content_len(app, pane, view_width);
+    app.interaction
+        .scroll_pane(pane, delta, content_len, view_height);
+}
+
+fn click_hit(app: &mut App, hit: crate::layout::HitTarget) -> anyhow::Result<()> {
+    use crate::layout::{HitTarget, pane_for_hit};
+    if let Some(pane) = pane_for_hit(hit) {
+        app.interaction.focused = Some(pane);
+    }
+    match hit {
+        HitTarget::Tab(index) => {
+            app.set_active_tab(AppTab::from_index(index));
+        }
+        HitTarget::DispatchStat(0) => {
+            app.dispatch_selected = DispatchFocus::Kind as usize;
+        }
+        HitTarget::DispatchStat(1) => {
+            app.dispatch_selected = DispatchFocus::Agent as usize;
+        }
+        HitTarget::DispatchStat(_) => {
+            app.dispatch_selected = DispatchFocus::Prompt as usize;
+        }
+        HitTarget::DispatchDeck { inner_row } => {
+            let row = usize::from(inner_row.saturating_add(app.interaction.scroll.deck));
+            if row < DispatchFocus::COUNT {
+                app.dispatch_selected = row;
+            }
+        }
+        HitTarget::ObserveList { inner_row } => {
+            let index = usize::from(inner_row.saturating_add(app.interaction.scroll.observe_list));
+            if index < app.observe.runs.len() {
+                if index == app.observe.selected {
+                    switch_to_selected_observe_session(app)?;
+                } else {
+                    app.observe.selected = index;
+                    app.observe.transcript.clear();
+                    app.refresh_observe_transcript();
+                }
+            }
+        }
+        HitTarget::MonitorList { inner_row } => {
+            let index =
+                usize::from(inner_row) / 2 + usize::from(app.interaction.scroll.monitor_list);
+            if index < app.runs.len() {
+                app.selected = index;
+            }
+        }
+        HitTarget::MonitorStat(2) => {
+            app.queue_scope = app.queue_scope.next();
+        }
+        HitTarget::ControlsActions { inner_row } => {
+            let index =
+                usize::from(inner_row.saturating_add(app.interaction.scroll.controls_actions));
+            if index < app.deep_actions().len() {
+                app.deep_selected = index;
+            }
+        }
+        HitTarget::MissionPanel(index) => {
+            app.mission_focus = usize::from(index);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn pane_rect(
+    area: ratatui::layout::Rect,
+    app: &App,
+    pane: crate::layout::PaneId,
+) -> Option<ratatui::layout::Rect> {
+    use crate::layout::{
+        PaneId, controls_layout, dispatch_layout, mission_layout, monitor_layout, mux_panel_height,
+        observe_layout, polarize_panel_height, root_layout,
+    };
+    let body = root_layout(area).body;
+    match pane {
+        PaneId::DispatchDeck => Some(dispatch_layout(body).deck),
+        PaneId::DispatchPlaybook => Some(dispatch_layout(body).playbook),
+        PaneId::DispatchTrail => Some(dispatch_layout(body).trail),
+        PaneId::MonitorList => Some(
+            monitor_layout(
+                body,
+                mux_panel_height(app.mux_status_lines().len()),
+                polarize_panel_height(app.polarize_status_lines().len()),
+            )
+            .list,
+        ),
+        PaneId::MonitorDossier => Some(
+            monitor_layout(
+                body,
+                mux_panel_height(app.mux_status_lines().len()),
+                polarize_panel_height(app.polarize_status_lines().len()),
+            )
+            .dossier,
+        ),
+        PaneId::MonitorTimeline => Some(
+            monitor_layout(
+                body,
+                mux_panel_height(app.mux_status_lines().len()),
+                polarize_panel_height(app.polarize_status_lines().len()),
+            )
+            .timeline,
+        ),
+        PaneId::ObserveList => Some(observe_layout(body).list),
+        PaneId::ObserveTranscript => Some(observe_layout(body).transcript),
+        PaneId::ControlsActions => Some(controls_layout(body).actions),
+        PaneId::ControlsArtifacts => Some(controls_layout(body).artifacts),
+        PaneId::ControlsTimeline => Some(controls_layout(body).timeline),
+        PaneId::Mission(index) => mission_layout(body).panels.get(usize::from(index)).copied(),
+    }
+}
+
+fn pane_content_len(app: &App, pane: crate::layout::PaneId, view_width: u16) -> usize {
+    use crate::app::wrapped_line_count;
+    use crate::layout::PaneId;
+    match pane {
+        PaneId::DispatchDeck => wrapped_line_count(app.prompt_lines(), view_width),
+        PaneId::DispatchPlaybook => 8,
+        PaneId::DispatchTrail => app.launch_history.len().max(3).saturating_add(2),
+        PaneId::MonitorList => app.runs.len(),
+        PaneId::MonitorDossier | PaneId::ControlsArtifacts => app.detail_lines().len(),
+        PaneId::MonitorTimeline | PaneId::ControlsTimeline => app.event_lines().len(),
+        PaneId::ObserveList => app.observe.runs.len(),
+        PaneId::ObserveTranscript => app.observe.transcript.lines().count().saturating_add(6),
+        PaneId::ControlsActions => app.deep_control_lines().len(),
+        PaneId::Mission(0) => app
+            .mission_control
+            .active_dispatches
+            .len()
+            .saturating_mul(2),
+        PaneId::Mission(1) => app.mission_control.wave_atlas.len(),
+        PaneId::Mission(2) => app.mission_control.agent_stats.len(),
+        PaneId::Mission(3) => app.mission_control.skill_stats.len(),
+        PaneId::Mission(4) => app.mission_control.fleet_health.len(),
+        PaneId::Mission(5) => app.mission_control.failures.len(),
+        PaneId::Mission(6) => app.mission_control.action_queue.len(),
+        PaneId::Mission(_) => 0,
+    }
+}
+
+fn switch_to_selected_observe_session(app: &mut App) -> anyhow::Result<()> {
+    let Some(command) = app.observe_switch_command() else {
+        app.show_error(
+            "session switch unavailable",
+            vec!["The canonical session has no vc-frame attach target.".to_string()],
+        );
+        return Ok(());
+    };
+    let summary = command.command_line();
+    if let Err(error) = suspend_and_run(&command) {
+        app.show_error("session switch failed", error.detail_lines(summary));
+    } else {
+        app.append_status(format!("returned from {summary}"));
+        app.refresh();
+    }
+    Ok(())
+}
+
 fn launch_aicx_wizard(app: &mut App) -> anyhow::Result<()> {
-    disable_raw_mode().ok();
-    let _ = execute!(io::stdout(), LeaveAlternateScreen);
-    let result = crate::memory::launch_wizard(&app.memory.project);
-    enable_raw_mode().ok();
-    let _ = execute!(io::stdout(), EnterAlternateScreen);
+    let mut stdout = io::stdout();
+    let leave = (|| -> anyhow::Result<()> {
+        disable_raw_mode().context("failed to disable raw mode before aicx wizard")?;
+        execute!(stdout, DisableMouseCapture, LeaveAlternateScreen)
+            .context("failed to leave alternate screen before aicx wizard")?;
+        stdout.flush().ok();
+        Ok(())
+    })();
+    let result = match leave {
+        Ok(()) => crate::memory::launch_wizard(&app.memory.project, &app.config.launch_root),
+        Err(error) => Err(error),
+    };
+    let restore_raw = enable_raw_mode();
+    let restore_screen = execute!(stdout, EnterAlternateScreen, EnableMouseCapture);
     match result {
         Ok(()) => app.append_status("returned from aicx wizard"),
         Err(error) => app.show_error("aicx wizard failed", vec![error.to_string()]),
     }
+    restore_raw.context("failed to restore raw mode after aicx wizard")?;
+    restore_screen.context("failed to restore alternate screen after aicx wizard")?;
     Ok(())
 }
 
@@ -725,7 +969,7 @@ fn suspend_and_run(command: &LaunchCommand) -> Result<(), LaunchRunError> {
     disable_raw_mode()
         .context("failed to disable raw mode before launch")
         .map_err(launch_error)?;
-    execute!(stdout, LeaveAlternateScreen).map_err(launch_error)?;
+    execute!(stdout, DisableMouseCapture, LeaveAlternateScreen).map_err(launch_error)?;
 
     let launch_result: Result<Output, LaunchRunError> =
         match command.spawn_interactive_with_stderr() {
@@ -733,8 +977,8 @@ fn suspend_and_run(command: &LaunchCommand) -> Result<(), LaunchRunError> {
             Err(error) => Err(launch_error(error)),
         };
 
-    let leave_result =
-        execute!(stdout, EnterAlternateScreen).context("failed to restore alternate screen");
+    let leave_result = execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .context("failed to restore alternate screen");
     let raw_result = enable_raw_mode().context("failed to re-enable raw mode after launch");
 
     leave_result.map_err(launch_error)?;
@@ -892,7 +1136,11 @@ fn start_state_watcher(path: &Path, tx: Sender<()>) -> anyhow::Result<Recommende
             let Ok(event) = event else {
                 return;
             };
-            if event.paths.iter().any(|candidate| is_projection_path(candidate)) {
+            if event
+                .paths
+                .iter()
+                .any(|candidate| is_projection_path(candidate))
+            {
                 let _ = tx.send(());
             }
         },
@@ -1102,11 +1350,25 @@ mod tests {
             mission_artifact_root: std::path::PathBuf::from("/tmp/vc-op-mission-test"),
             observe: Default::default(),
             memory: Default::default(),
+            interaction: Default::default(),
         }
     }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn dispatch_area() -> ratatui::layout::Rect {
+        ratatui::layout::Rect::new(0, 0, 120, 40)
     }
 
     #[test]
@@ -1190,6 +1452,107 @@ mod tests {
         assert!(app.launch_prompt.contains("\nn"));
         assert_eq!(app.focus, LaunchFocus::Browse);
         assert!(app.status_line.contains("prompt updated"));
+    }
+
+    #[test]
+    fn mouse_click_selects_a_dispatch_stat_cell() {
+        let mut app = sample_app();
+        app.set_active_tab(AppTab::Dispatch);
+        let area = dispatch_area();
+        let operator =
+            crate::layout::dispatch_layout(crate::layout::root_layout(area).body).stats[1];
+        apply_mouse(
+            &mut app,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                operator.x + 2,
+                operator.y + 1,
+            ),
+            area,
+        )
+        .unwrap();
+        assert_eq!(app.dispatch_focus(), DispatchFocus::Agent);
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_only_the_pane_under_the_cursor() {
+        let mut app = sample_app();
+        app.set_active_tab(AppTab::Dispatch);
+        app.launch_prompt = "keep the cut bounded. ".repeat(80);
+        app.launch_history = (0..40).map(|i| format!("launch-{i}")).collect();
+        let area = dispatch_area();
+        let layout = crate::layout::dispatch_layout(crate::layout::root_layout(area).body);
+        apply_mouse(
+            &mut app,
+            mouse(
+                MouseEventKind::ScrollDown,
+                layout.deck.x + 2,
+                layout.deck.y + 2,
+            ),
+            area,
+        )
+        .unwrap();
+        apply_mouse(
+            &mut app,
+            mouse(
+                MouseEventKind::ScrollDown,
+                layout.deck.x + 2,
+                layout.deck.y + 2,
+            ),
+            area,
+        )
+        .unwrap();
+        assert!(
+            app.interaction.scroll.deck > 0,
+            "deck under the cursor must scroll"
+        );
+        assert_eq!(
+            app.interaction.scroll.trail, 0,
+            "trail must stay put while the wheel is over the deck"
+        );
+
+        let deck_after = app.interaction.scroll.deck;
+        apply_mouse(
+            &mut app,
+            mouse(
+                MouseEventKind::ScrollDown,
+                layout.trail.x + 2,
+                layout.trail.y + 2,
+            ),
+            area,
+        )
+        .unwrap();
+        assert_eq!(
+            app.interaction.scroll.deck, deck_after,
+            "deck must stay put while the wheel is over the trail"
+        );
+        assert!(
+            app.interaction.scroll.trail > 0,
+            "trail under the cursor must scroll"
+        );
+        assert_eq!(
+            app.interaction.focused,
+            Some(crate::layout::PaneId::DispatchTrail)
+        );
+    }
+
+    #[test]
+    fn mouse_click_selects_a_monitor_run_row() {
+        let mut app = sample_app();
+        app.set_active_tab(AppTab::Monitor);
+        let area = dispatch_area();
+        let list = crate::layout::monitor_layout(crate::layout::root_layout(area).body, 0, 0).list;
+        apply_mouse(
+            &mut app,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                list.x + 2,
+                list.y + 3,
+            ),
+            area,
+        )
+        .unwrap();
+        assert_eq!(app.selected, 1);
     }
 
     #[test]
@@ -1367,10 +1730,7 @@ mod tests {
                 | Err(std::sync::mpsc::TryRecvError::Empty)
         ));
         // After drop the notify callback is gone; a later send path cannot exist.
-        assert!(
-            rx.recv_timeout(Duration::from_millis(50))
-                .is_err()
-        );
+        assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
     }
 
     #[test]

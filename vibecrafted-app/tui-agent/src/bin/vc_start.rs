@@ -2,13 +2,13 @@
 //!
 //! This executable deliberately does not read a login shell profile. It locates
 //! the runtime carried inside Vibecrafted.app, composes the host-agent PATH
-//! (generation bin first, then the known agent-CLI homes, then whatever PATH the
-//! caller already had — sanitized, never amputated), sources the shipped shell
+//! (the inherited user PATH first, then known agent-CLI homes and the generation
+//! fallback — sanitized, never amputated), sources the shipped shell
 //! facade, and enters `vc-start`.
 //!
 //! PATH composes instead of replacing: AppDelegate hands this process a PATH
-//! that keeps the operator's Homebrew/npm/cargo/nvm entries behind the signed
-//! generation, and dropping that tail here is exactly what made
+//! that keeps the Founder's Homebrew/npm/cargo/nvm entries ahead of the signed
+//! generation, and dropping those entries here is exactly what made
 //! `#!/usr/bin/env node` agent CLIs exit 127 from the app terminal.
 
 use std::env;
@@ -40,7 +40,15 @@ fn host_agent_search_path(
             }
         }
     };
-    push(runtime_bin.to_path_buf());
+    // The caller's PATH is the product-owner lane. Empty and relative entries
+    // are implicit-cwd lookups and never cross; the private runtime bin is
+    // removed here and re-added once as the final fallback below.
+    for entry in inherited.unwrap_or("").split(':') {
+        if entry.is_empty() || !entry.starts_with('/') || Path::new(entry) == runtime_bin {
+            continue;
+        }
+        push(PathBuf::from(entry));
+    }
     if let Some(home) = home {
         push(home.join(".local/bin"));
         push(home.join(".cargo/bin"));
@@ -49,16 +57,7 @@ fn host_agent_search_path(
     for entry in SYSTEM_PATH_ENTRIES {
         push(PathBuf::from(entry));
     }
-    // The caller's PATH survives behind the canon: that is where nvm, pnpm,
-    // pipx and hand-rolled ~/bin actually live. Only sane entries cross —
-    // empty segments and relative paths (`.`, `bin`) would turn a long-lived
-    // agent shell into an implicit-cwd lookup, so they are dropped, not kept.
-    for entry in inherited.unwrap_or("").split(':') {
-        if entry.is_empty() || !entry.starts_with('/') {
-            continue;
-        }
-        push(PathBuf::from(entry));
-    }
+    push(runtime_bin.to_path_buf());
     entries.join(":")
 }
 
@@ -139,7 +138,7 @@ fn run() -> Result<(), String> {
             "--noprofile",
             "--norc",
             "-c",
-            r#"source "$1"; shift; vc-start "$@""#,
+            r#"source "$1" || exit $?; shift; vc-start "$@""#,
             "vc-start",
         ])
         .arg(&shell)
@@ -196,12 +195,11 @@ mod tests {
     }
 
     #[test]
-    fn host_path_keeps_the_callers_tail_behind_the_canon_and_drops_unsafe_entries() {
-        // The caller's PATH (nvm, pnpm, ~/bin…) survives behind the canon: that
-        // tail is where the operator's agent CLIs actually live. Empty and
+    fn host_path_keeps_the_callers_path_ahead_of_runtime_and_drops_unsafe_entries() {
+        // The caller's PATH (nvm, pnpm, ~/bin…) remains authoritative. Empty and
         // relative segments are implicit-cwd lookups and never cross.
-        let runtime = Path::new("/usr/bin");
-        let inherited = format!(":{}::.:bin:/usr/bin:", "/tmp");
+        let runtime = Path::new("/tmp");
+        let inherited = ":/usr/bin::.:bin:/tmp:";
         let path = host_agent_search_path(runtime, None, Some(&inherited));
         let entries: Vec<&str> = path.split(':').collect();
         assert!(entries.contains(&"/tmp"));
@@ -212,12 +210,8 @@ mod tests {
             entries.iter().filter(|entry| **entry == "/usr/bin").count(),
             1
         );
-        let canon_end = entries.iter().position(|entry| *entry == "/sbin").unwrap();
-        let tail = entries.iter().position(|entry| *entry == "/tmp").unwrap();
-        assert!(
-            tail > canon_end,
-            "inherited tail must follow the canon: {path}"
-        );
+        assert_eq!(entries.first(), Some(&"/usr/bin"));
+        assert_eq!(entries.last(), Some(&"/tmp"));
     }
 
     #[test]
