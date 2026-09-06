@@ -36,7 +36,7 @@ Embargo ma trzy odrębne stany:
 
 | Stan | Właściciel i dozwolona akcja | Dowód i znaczenie |
 | --- | --- | --- |
-| Lokalny checkpoint workera | Worker commituję w swoim Fleet Worktree i się zatrzymuje. Bez push, publikacji ani zdalnego refa `embargo/<plan-id>`. | Dokładny SHA, zakres i raport uruchomionych/pominiętych bramek. Wejście bundlowanych hooków może być pominięte; to nie jest security-clean ani verified delivery. |
+| Lokalny checkpoint workera | Worker zapisuje commit w swoim Fleet Worktree i na tym kończy pracę. Bez push, publikacji ani zdalnego refa `embargo/<plan-id>`. | Dokładny SHA, zakres i raport uruchomionych/pominiętych bramek. Wejście bundlowanych hooków może być pominięte; to nie jest security-clean ani verified delivery. |
 | Structural admission pod embargiem | Wyznaczony integrator weryfikuje dokładny commit i zakres workera, uruchamia Semgrep oraz przegląd sekretów/bezpieczeństwa i może lokalnie zintegrować baton, aby kolejne fale workerów budowały na spójnej architekturze. | Wyłącznie strukturalnie dopuszczone. Compile, lint, type-check i testy pozostają odroczone do nazwanej closure; integrator nigdy nie nazywa pominiętej bramki bezpieczeństwa clean. |
 | Verified delivery | Wyznaczony integrator po nazwanej closure. | Pełne, odpowiednie dla języka bramki odroczone i normalne przechodzą i są zapisane dla dokładnego dopuszczonego SHA. |
 
