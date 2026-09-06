@@ -35,6 +35,12 @@ _vetcoders_dashboard_session_name() {
 
 _vetcoders_product_core_cli() {
   local source_file="${BASH_SOURCE[0]}" core_dir product_root python_bin python_dir checkout_python project_python embedded_python
+  local config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+  # Product preferences are canonical without changing Atuin/Starship's XDG
+  # environment in the parent shell.
+  if ! _vetcoders_vc_frame_developer_mode; then
+    config_home="$HOME/.config"
+  fi
   if [[ -n "${VIBECRAFTED_PRODUCT_CORE_CLI:-}" ]]; then
     "$VIBECRAFTED_PRODUCT_CORE_CLI" "$@"
     return $?
@@ -59,6 +65,7 @@ _vetcoders_product_core_cli() {
   [[ "$python_bin" == */* ]] && python_dir="$(dirname "$python_bin")"
   [[ -f "$core_dir/vibecrafted_core/cli.py" ]] || return 1
   PATH="${python_dir:+$python_dir:}${PATH:-}" \
+    XDG_CONFIG_HOME="$config_home" \
     PYTHONPATH="$core_dir${PYTHONPATH:+:$PYTHONPATH}" \
     "$python_bin" -m vibecrafted_core.cli "$@"
 }
@@ -108,12 +115,61 @@ _vetcoders_control_plane_eye_prepare() {
 }
 
 # Product lifecycle choke shared by shell `vc-start` and deck `cmd_start`.
-# Pins product config, projects Super/scripts when available, pokes control-plane
-# eye (best-effort). Never loads into ordinary PATH-only shells unless called.
+# Reads installed product config and scripts, then prepares workspace/control
+# state. Configuration publication belongs exclusively to explicit installation.
 _vetcoders_product_entry_prepare() {
-  local requested_root entry_status=0
+  local requested_root owner_root required entry_status=0
   requested_root="$(pwd -P)" || return $?
-  unset VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS
+  unset VIBECRAFTED_PRODUCT_ENTRY VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS
+
+  owner_root="$(_vetcoders_vc_frame_owner_root)" || {
+    VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS=1
+    return 1
+  }
+  if ! _vetcoders_vc_frame_developer_mode; then
+    export VIBECRAFTED_ROOT="$owner_root"
+    export VIBECRAFTED_RUNTIME_ROOT="$owner_root"
+    export VIBECRAFTED_RUNTIME_BIN="$owner_root/bin"
+    export VIBECRAFTED_CORE_DIR="$owner_root/vibecrafted-core"
+    export VIBECRAFTED_PYTHON="$owner_root/bin/python3"
+    unset VIBECRAFTED_PREFER_REPO_VC_FRAME VIBECRAFTED_PREFER_REPO_SPAWN
+    unset VIBECRAFTED_PRODUCT_CORE_CLI PYTHONPATH
+    if [[ ! -x "$VIBECRAFTED_PYTHON" || ! -f "$VIBECRAFTED_CORE_DIR/vibecrafted_core/cli.py" ]]; then
+      printf 'vc-start: selected runtime Python/core missing under: %s\n' "$owner_root" >&2
+      printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
+      VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS=1
+      return 1
+    fi
+  fi
+  _vetcoders_pin_vc_frame_config_dir || {
+    VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS=1
+    return 1
+  }
+  if ! _vetcoders_vc_frame_developer_mode \
+    && [[ -L "$VC_FRAME_CONFIG_DIR" || -L "$VC_FRAME_CONFIG_DIR/layouts" ]]; then
+    printf 'vc-start: product config must be installer-owned files: %s\n' "$VC_FRAME_CONFIG_DIR" >&2
+    printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
+    VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS=1
+    return 1
+  fi
+  for required in config.kdl layouts/operator.kdl pane-python vc-start-here.py vc-agent-workshop.py; do
+    if [[ ! -f "$VC_FRAME_CONFIG_DIR/$required" || ! -r "$VC_FRAME_CONFIG_DIR/$required" || -L "$VC_FRAME_CONFIG_DIR/$required" ]]; then
+      printf 'vc-start: product resource missing or symlinked: %s/%s\n' "$VC_FRAME_CONFIG_DIR" "$required" >&2
+      printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
+      VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS=1
+      return 1
+    fi
+  done
+  if [[ ! -x "$VC_FRAME_CONFIG_DIR/pane-python" ]]; then
+    printf 'vc-start: product pane runner is not executable: %s/pane-python\n' "$VC_FRAME_CONFIG_DIR" >&2
+    printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
+    VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS=1
+    return 1
+  fi
+  _vetcoders_require_vc_frame || {
+    VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS=1
+    return 1
+  }
 
   # Host CLIs (node/codex) must be on PATH before workspace resolve and the
   # control-plane eye — AppDelegate/vc-start start with a closed allowlist.
@@ -147,33 +203,14 @@ _vetcoders_product_entry_prepare() {
     }
   fi
 
-  # Normalize ambient context first so frontier resolution is stable.
+  # Normalize session context without changing the selected configuration.
   if declare -F _vetcoders_normalize_ambient_context >/dev/null 2>&1; then
     _vetcoders_normalize_ambient_context || true
   fi
 
-  # Sidecars include pin of VC_FRAME_CONFIG_DIR away from stock ~/.config/vc-frame.
+  # Atuin and Starship remain optional and independent of product admission.
   if declare -F _vetcoders_load_frontier_sidecars >/dev/null 2>&1; then
     _vetcoders_load_frontier_sidecars || true
-  elif declare -F _vetcoders_pin_vc_frame_config_dir >/dev/null 2>&1; then
-    _vetcoders_pin_vc_frame_config_dir || true
-  fi
-
-  # Explicit product roots if pin still empty/stale (bare shells, partial installs).
-  if [[ -z "${VC_FRAME_CONFIG_DIR:-}" || ! -f "${VC_FRAME_CONFIG_DIR%/}/config.kdl" ]]; then
-    local frontier="${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/frontier/vc-frame"
-    local view="${XDG_CONFIG_HOME:-$HOME/.config}/vc-frame"
-    if [[ -f "$frontier/config.kdl" ]]; then
-      export VC_FRAME_CONFIG_DIR="$frontier"
-    elif [[ -f "$view/config.kdl" ]]; then
-      export VC_FRAME_CONFIG_DIR="$view"
-    fi
-  fi
-
-  # Config projection (Super binds + operator scripts) — best effort.
-  if command -v python3 >/dev/null 2>&1; then
-    python3 -c "from vibecrafted_core.vc_frame_delivery import stage_vc_frame_config; stage_vc_frame_config()" \
-      >/dev/null 2>&1 || true
   fi
 
   # Control-plane eye — best effort; never block cockpit if repair is unavailable.
@@ -185,6 +222,7 @@ _vetcoders_product_entry_prepare() {
 
 # Probe printer for tests / doctor: env effects without attach/create.
 _vetcoders_product_entry_probe_print() {
+  [[ -z "${VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS:-}" ]] || return "$VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS"
   local layout=""
   if declare -F _vetcoders_dashboard_layout_file >/dev/null 2>&1; then
     layout="$(_vetcoders_dashboard_layout_file operator 2>/dev/null || true)"
@@ -211,6 +249,10 @@ _vetcoders_product_entry_probe_print() {
 }
 
 _vetcoders_launch_dashboard() {
+  if [[ -n "${VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS:-}" ]]; then
+    printf 'vc-start: product preparation failed; dashboard attachment was not attempted.\n' >&2
+    return "$VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS"
+  fi
   local PATH="${PATH:-}"
   PATH="$(_vetcoders_path_with_bundled_bin_priority "$PATH")"
   export PATH
@@ -275,12 +317,7 @@ _vetcoders_launch_dashboard() {
       ;;
   esac
 
-  if [[ -n "${VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS:-}" ]]; then
-    printf "vc-start: workspace preparation failed; dashboard attachment was not attempted.\n" >&2
-    return "$VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS"
-  fi
-
-  local layout_name layout_file session_name repo_source repo_vc_frame_dir state inside_vc_frame current_session vc_frame_bin
+  local layout_name layout_file session_name state inside_vc_frame current_session vc_frame_bin
   _vetcoders_normalize_ambient_context
   layout_name="$(_vetcoders_dashboard_layout_name "${first_arg}")" || return 1
   (( $# )) && shift
@@ -294,7 +331,7 @@ _vetcoders_launch_dashboard() {
     echo "Everything else works without it. Run agents headless:" >&2
     echo "    vibecrafted workflow <agent> -p \"your task\"" >&2
     echo "    vibecrafted observe <agent> --run-id <id>" >&2
-    echo "To get the dashboard, install vc-frame and re-run: vc-start" >&2
+    echo "Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>" >&2
     return 1
   }
 
@@ -303,24 +340,10 @@ _vetcoders_launch_dashboard() {
   layout_file="$(_vetcoders_dashboard_layout_file "$layout_name" 2>/dev/null || true)"
   [[ -n "$layout_file" ]] || {
     echo "Dashboard layout not found for: $layout_name" >&2
-    echo "Expected vc-frame/layouts/${layout_name}.kdl in the active frontier config roots." >&2
+    printf 'Expected: %s/layouts/%s.kdl\n' "$(_vetcoders_vc_frame_config_dir)" "$layout_name" >&2
+    echo "Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>" >&2
     return 1
   }
-
-  if [[ "${VIBECRAFTED_PREFER_REPO_VC_FRAME:-0}" == "1" ]]; then
-    repo_source="$(_vetcoders_repo_root)"
-    repo_vc_frame_dir="$repo_source/config/vc-frame"
-    if [[ ! -d "$repo_vc_frame_dir" ]]; then
-      repo_vc_frame_dir="$repo_source/vibecrafted-core/vibecrafted_core/config/vc-frame"
-    fi
-    if [[ -d "$repo_vc_frame_dir" && -f "$repo_vc_frame_dir/config.kdl" ]]; then
-      local repo_layout="$repo_vc_frame_dir/layouts/${layout_name}.kdl"
-      if [[ -f "$repo_layout" ]]; then
-        layout_file="$repo_layout"
-        export VC_FRAME_CONFIG_DIR="$repo_vc_frame_dir"
-      fi
-    fi
-  fi
 
   session_name="$(_vetcoders_dashboard_session_name "$layout_name")"
   state="$(_vetcoders_vc_frame_session_state "$session_name")"
@@ -358,10 +381,18 @@ _vetcoders_launch_dashboard() {
 }
 
 _vetcoders_resume_operator_session() {
+  if [[ -n "${VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS:-}" ]]; then
+    printf 'vc-start: product preparation failed; resume was not attempted.\n' >&2
+    return "$VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS"
+  fi
   local session_name layout_file
   _vetcoders_normalize_ambient_context
   session_name="$(_vetcoders_operator_session_name)"
-  layout_file="$(_vetcoders_operator_layout_file 2>/dev/null || true)"
+  layout_file="$(_vetcoders_operator_layout_file)" || {
+    printf 'vc-start: operator layout missing under: %s\n' "$(_vetcoders_vc_frame_config_dir)" >&2
+    printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
+    return 1
+  }
 
   if _vetcoders_ensure_vc_frame_session "$session_name" "$layout_file"; then
     export VIBECRAFTED_OPERATOR_SESSION="${VIBECRAFTED_PREPARED_VC_FRAME_SESSION:-$session_name}"
