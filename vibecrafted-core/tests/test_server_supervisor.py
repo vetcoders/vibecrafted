@@ -9,7 +9,9 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from vibecrafted_core import server_supervisor as supervisor
@@ -2317,6 +2319,378 @@ def test_service_mutation_lease_accepts_verified_inherited_descriptor(
     finally:
         fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
+
+
+@pytest.fixture
+def service_admission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Two receipted generations with all process/service boundaries mocked."""
+    base = _config(tmp_path, tmp_path / "unused")
+    monkeypatch.setattr(supervisor.sys, "platform", "darwin")
+    monkeypatch.setattr(supervisor, "PACKAGE_VERSION", "1.0.0")
+    monkeypatch.setenv("HOME", str(base.paths.operator_home))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(base.paths.home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(base.paths.runtime_home))
+    monkeypatch.delenv(supervisor._TOOLS_INSTALL_LEASE_ENV, raising=False)
+    monkeypatch.delenv("VIBECRAFTED_TOOLS_HOME", raising=False)
+    original_module = Path(supervisor.__file__).read_bytes()
+    generations = {}
+    for version in ("1.0.0", "2.0.0"):
+        root = base.paths.runtime_home / "releases" / version
+        launcher = _executable(root / "bin/vibecrafted")
+        binary = _executable(root / "bin/vc-server-supervisor")
+        module = root / "vibecrafted-core/vibecrafted_core/server_supervisor.py"
+        module.parent.mkdir(parents=True)
+        module.write_bytes(original_module)
+        generations[version] = (replace(base, launcher=launcher), binary, module)
+
+    def publish(version):
+        config, binary, _module = generations[version]
+        root = binary.parent.parent
+        active = base.paths.runtime_home / "active.json"
+        active.write_text(
+            json.dumps(
+                {
+                    "schema": "vibecrafted.active-runtime.v1",
+                    "version": version,
+                    "runtime_root": str(root),
+                    "app_root": "",
+                }
+            )
+        )
+        current = base.paths.runtime_home / "tools/vibecrafted-current"
+        current.parent.mkdir(exist_ok=True)
+        current.unlink(missing_ok=True)
+        current.symlink_to(root)
+        receipt = {
+            "schema": "vibecrafted.runtime-install.v1",
+            "version": version,
+            "roots": {"launcher_home": str(base.paths.operator_home / ".local/bin")},
+            "owned_files": {str(active): supervisor._sha256_file(active)},
+            "owned_symlinks": {str(current): str(root)},
+        }
+        (base.paths.runtime_home / "install-receipt.json").write_text(
+            json.dumps(receipt)
+        )
+        supervisor.install_service(config, supervisor_binary=binary)
+
+    def command(action, version="1.0.0", *, public=False):
+        config, binary, module = generations[version]
+        monkeypatch.setattr(supervisor, "__file__", str(module))
+        monkeypatch.setattr(supervisor, "PACKAGE_VERSION", version)
+        if public:
+            config = replace(
+                config, launcher=base.paths.operator_home / ".local/bin/vibecrafted"
+            )
+            binary = base.paths.operator_home / ".local/bin/vc-server-supervisor"
+        return supervisor.main(
+            [
+                "service",
+                action,
+                "--launcher",
+                str(config.launcher),
+                "--supervisor-bin",
+                str(binary),
+            ]
+        )
+
+    publish("1.0.0")
+    mutations = Mock()
+    monkeypatch.setattr(supervisor, "_launchctl_loaded", lambda: True)
+    monkeypatch.setattr(supervisor, "_launchctl_job_owns_paths", lambda _paths: True)
+    monkeypatch.setattr(
+        supervisor, "probe_supervisor", lambda _paths: _managed_probe(base, pid=2222)
+    )
+    monkeypatch.setattr(supervisor, "restart_service", mutations.restart)
+    monkeypatch.setattr(supervisor, "start_service", mutations.start)
+    monkeypatch.setattr(supervisor, "stop_service", mutations.stop)
+    monkeypatch.setattr(supervisor, "uninstall_service", mutations.uninstall)
+    monkeypatch.setattr(supervisor, "_launchctl", mutations.launchctl)
+    monkeypatch.setattr(
+        supervisor.subprocess,
+        "run",
+        Mock(side_effect=AssertionError("unexpected subprocess")),
+    )
+    monkeypatch.setattr(
+        supervisor.subprocess,
+        "Popen",
+        Mock(side_effect=AssertionError("unexpected process")),
+    )
+    return base, generations, publish, command, mutations
+
+
+@pytest.mark.parametrize(
+    "action", ["install", "reconcile", "restart", "start", "stop", "uninstall"]
+)
+def test_service_admission_rejects_generation_switch(
+    service_admission, monkeypatch, capsys, action
+):
+    base, _generations, publish, command, mutations = service_admission
+    enter = supervisor._ToolsInstallMutationLease.__enter__
+    published = []
+
+    def switch_before_acquisition(lease):
+        # B publishes after A's deck selected its argv, before A owns the lock.
+        publish("2.0.0")
+        published.append(base.paths.launch_agent_file.read_bytes())
+        return enter(lease)
+
+    monkeypatch.setattr(
+        supervisor._ToolsInstallMutationLease, "__enter__", switch_before_acquisition
+    )
+    result = command(action)
+
+    assert base.paths.launch_agent_file.read_bytes() == published[0]
+    assert mutations.mock_calls == []
+    assert result == supervisor.EX_TEMPFAIL
+    assert "selected runtime" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "action", ["install", "reconcile", "restart", "start", "stop", "uninstall"]
+)
+def test_service_admission_accepts_current_generation(service_admission, action):
+    _base, _generations, _publish, command, _mutations = service_admission
+    assert command(action) == 0
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ["absent", "json", "schema", "version", "outside", "symlink", "receipt", "pointer"],
+)
+def test_service_admission_rejects_invalid_publication(
+    service_admission, invalid, capsys
+):
+    base, _generations, _publish, command, mutations = service_admission
+    active = base.paths.runtime_home / "active.json"
+    before = base.paths.launch_agent_file.read_bytes()
+    payload = json.loads(active.read_text())
+    if invalid == "absent":
+        active.unlink()
+    elif invalid == "json":
+        active.write_text("{")
+    elif invalid == "symlink":
+        target = active.with_name("other.json")
+        active.rename(target)
+        active.symlink_to(target)
+    elif invalid == "receipt":
+        (active.parent / "install-receipt.json").unlink()
+    elif invalid == "pointer":
+        (active.parent / "tools/vibecrafted-current").unlink()
+    else:
+        payload[
+            {"schema": "schema", "version": "version", "outside": "runtime_root"}[
+                invalid
+            ]
+        ] = "invalid"
+        active.write_text(json.dumps(payload))
+    assert command("reconcile") == supervisor.EX_CONFIG
+    assert mutations.mock_calls == []
+    assert base.paths.launch_agent_file.read_bytes() == before
+    assert "publication" in capsys.readouterr().err
+
+
+def test_service_admission_preserves_installer_inherited_lease(
+    service_admission, monkeypatch
+):
+    base, _generations, publish, command, _mutations = service_admission
+    with supervisor._ToolsInstallMutationLease(base.paths) as owner:
+        monkeypatch.setenv(supervisor._TOOLS_INSTALL_LEASE_ENV, str(owner.descriptor))
+        # Drain the old selection, then reconcile the newly published one,
+        # retaining the installer's descriptor throughout the transaction.
+        assert command("stop") == 0
+        publish("2.0.0")
+        receipt_path = base.paths.runtime_home / "install-receipt.json"
+        receipt = json.loads(receipt_path.read_text())
+        receipt["install_pending"] = True
+        receipt_path.write_text(json.dumps(receipt))
+        assert command("reconcile", version="2.0.0") == 0
+        os.fstat(owner.descriptor)
+        other = os.open(supervisor._tools_install_lock_path(base.paths), os.O_RDWR)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(other)
+
+
+@pytest.mark.parametrize("tampered", [False, True])
+def test_service_admission_binds_public_wrappers_to_receipt(
+    service_admission, tampered
+):
+    base, _generations, _publish, command, mutations = service_admission
+    receipt_path = base.paths.runtime_home / "install-receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    for name in ("vibecrafted", "vc-server-supervisor"):
+        wrapper = _executable(
+            base.paths.operator_home / ".local/bin" / name,
+            "#!/bin/sh\n# public wrapper\nexit 0\n",
+        )
+        receipt["owned_files"][str(wrapper)] = supervisor._sha256_file(wrapper)
+    receipt_path.write_text(json.dumps(receipt))
+    if tampered:
+        wrapper.write_text("#!/bin/sh\n# stale wrapper\nexit 0\n")
+    assert command("reconcile", public=True) == (
+        supervisor.EX_CONFIG if tampered else 0
+    )
+    if tampered:
+        assert mutations.mock_calls == []
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "install_pending",
+        "config_transaction",
+        "config_pending",
+        "config_conflicts",
+        "uninstall_pending",
+    ],
+)
+def test_service_admission_rejects_unfinished_publication(service_admission, state):
+    base, _generations, _publish, command, mutations = service_admission
+    path = base.paths.runtime_home / "install-receipt.json"
+    receipt = json.loads(path.read_text())
+    receipt[state] = True
+    path.write_text(json.dumps(receipt))
+    before = base.paths.launch_agent_file.read_bytes()
+    assert command("reconcile") == supervisor.EX_CONFIG
+    assert base.paths.launch_agent_file.read_bytes() == before
+    assert mutations.mock_calls == []
+
+
+@pytest.mark.parametrize("standalone", [False, True])
+def test_service_admission_distinguishes_absent_from_standalone(
+    service_admission, monkeypatch, tmp_path, standalone
+):
+    base, generations, _publish, _command, mutations = service_admission
+    for relative in (
+        "active.json",
+        "install-receipt.json",
+        "tools/vibecrafted-current",
+    ):
+        (base.paths.runtime_home / relative).unlink()
+    config, binary, module = generations["1.0.0"]
+    if standalone:
+        config = replace(
+            config, launcher=_executable(tmp_path / "standalone/bin/vibecrafted")
+        )
+        binary = _executable(tmp_path / "standalone/bin/vc-server-supervisor")
+        standalone_module = tmp_path / "standalone/server_supervisor.py"
+        standalone_module.write_bytes(module.read_bytes())
+        module = standalone_module
+    monkeypatch.setattr(supervisor, "__file__", str(module))
+    before = base.paths.launch_agent_file.read_bytes()
+    result = supervisor.main(
+        [
+            "service",
+            "install",
+            "--launcher",
+            str(config.launcher),
+            "--supervisor-bin",
+            str(binary),
+        ]
+    )
+    assert result == (0 if standalone else supervisor.EX_CONFIG)
+    if not standalone:
+        assert base.paths.launch_agent_file.read_bytes() == before
+        assert mutations.mock_calls == []
+    else:
+        assert mutations.restart.called
+
+
+def test_service_admission_reads_config_under_publication_lease(
+    service_admission, monkeypatch
+):
+    base, _generations, _publish, command, mutations = service_admission
+    enter = supervisor._ToolsInstallMutationLease.__enter__
+
+    def update_before_acquisition(lease):
+        path = base.paths.operator_home / ".config/vibecrafted/config.toml"
+        path.parent.mkdir(parents=True)
+        path.write_text('[server]\nbind_host = "127.0.0.2"\nport = 3030\n')
+        return enter(lease)
+
+    monkeypatch.setattr(
+        supervisor._ToolsInstallMutationLease, "__enter__", update_before_acquisition
+    )
+    assert command("restart") == 0
+    config = mutations.restart.call_args.args[0]
+    assert (config.host, config.port) == ("127.0.0.2", 3030)
+
+
+def test_service_admission_reads_large_projection_receipt(service_admission):
+    base, _generations, _publish, command, _mutations = service_admission
+    path = base.paths.runtime_home / "install-receipt.json"
+    receipt = json.loads(path.read_text())
+    receipt["owned_files"].update(
+        {f"/fixture/skill/{index}": "a" * 64 for index in range(1000)}
+    )
+    path.write_text(json.dumps(receipt))
+    assert path.stat().st_size > 64 * 1024
+    assert command("reconcile") == 0
+
+
+def test_service_admission_rejects_stale_imported_version(
+    service_admission, monkeypatch
+):
+    base, _generations, _publish, command, mutations = service_admission
+    enter = supervisor._ToolsInstallMutationLease.__enter__
+
+    def stale_import_before_acquisition(lease):
+        monkeypatch.setattr(supervisor, "PACKAGE_VERSION", "0.9.0")
+        return enter(lease)
+
+    monkeypatch.setattr(
+        supervisor._ToolsInstallMutationLease,
+        "__enter__",
+        stale_import_before_acquisition,
+    )
+    before = base.paths.launch_agent_file.read_bytes()
+    assert command("reconcile") == supervisor.EX_TEMPFAIL
+    assert base.paths.launch_agent_file.read_bytes() == before
+    assert mutations.mock_calls == []
+
+
+@pytest.mark.parametrize("entry", ["launcher", "supervisor", "module"])
+def test_service_admission_refuses_missing_entry_before_mutation(
+    service_admission, entry, capsys
+):
+    base, generations, _publish, command, mutations = service_admission
+    config, binary, module = generations["1.0.0"]
+    {"launcher": config.launcher, "supervisor": binary, "module": module}[
+        entry
+    ].unlink()
+    before = base.paths.launch_agent_file.read_bytes()
+    assert command("reconcile") == supervisor.EX_CONFIG
+    assert "refusing service mutation" in capsys.readouterr().err
+    assert base.paths.launch_agent_file.read_bytes() == before
+    assert mutations.mock_calls == []
+
+
+@pytest.mark.parametrize("entry", ["launcher", "supervisor"])
+def test_service_admission_refuses_mixed_generation_entry(
+    service_admission, monkeypatch, entry
+):
+    base, generations, _publish, _command, mutations = service_admission
+    current, binary, module = generations["1.0.0"]
+    other, other_binary, _other_module = generations["2.0.0"]
+    monkeypatch.setattr(supervisor, "__file__", str(module))
+    before = base.paths.launch_agent_file.read_bytes()
+    assert (
+        supervisor.main(
+            [
+                "service",
+                "reconcile",
+                "--launcher",
+                str(other.launcher if entry == "launcher" else current.launcher),
+                "--supervisor-bin",
+                str(other_binary if entry == "supervisor" else binary),
+            ]
+        )
+        == supervisor.EX_TEMPFAIL
+    )
+    assert base.paths.launch_agent_file.read_bytes() == before
+    assert mutations.mock_calls == []
 
 
 def test_stopping_receipt_failure_does_not_skip_pair_cleanup(
