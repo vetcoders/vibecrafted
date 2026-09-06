@@ -211,20 +211,16 @@ verify_vcframe_cockpit() {
 
   composer=""
   if [[ -n "$cfg_root" ]]; then
-    for candidate in \
-      "$cfg_root/vc-composer.sh"
-    do
-      if [[ -x "$candidate" && ! -L "$candidate" ]]; then
-        # Prefer non-tiny STALE stubs (legacy 606B antique).
-        if [[ -f "$candidate" ]] && [[ "$(wc -c <"$candidate" | tr -d ' ')" -lt 1500 ]]; then
-          warn "cockpit: $candidate looks like a STALE stub (<1.5KB) — reinstall the verified Runtime Pack"
-          fails=1
-          continue
-        fi
+    candidate="$cfg_root/vc-composer.sh"
+    if [[ -x "$candidate" && ! -L "$candidate" ]]; then
+      # Reject tiny STALE stubs (legacy 606B antique).
+      if [[ -f "$candidate" ]] && [[ "$(wc -c <"$candidate" | tr -d ' ')" -lt 1500 ]]; then
+        warn "cockpit: $candidate looks like a STALE stub (<1.5KB) — reinstall the verified Runtime Pack"
+        fails=1
+      else
         composer="$candidate"
-        break
       fi
-    done
+    fi
   fi
   if [[ -n "$composer" ]]; then
     ok "cockpit: operator composer @ $composer"
