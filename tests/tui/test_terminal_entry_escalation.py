@@ -139,6 +139,31 @@ if rest[:2] == ["attach", "--create-background"]:
     sys.exit(0)
 
 if rest[:1] == ["attach"]:
+    target = rest[1] if len(rest) > 1 else session
+    # zellij-utils/src/envs.rs normalize_vc_frame_env_aliases() copies
+    # VC_FRAME_SESSION_NAME into ZELLIJ_SESSION_NAME whenever the latter is
+    # unset, then src/commands.rs:844 panics when that value equals the
+    # attach target. A caller must not get to inherit its OWN dispatch-
+    # targeting marker as if it were proof of a pre-existing attachment --
+    # the previous stub ignored this and let a broken caller pass.
+    capture = os.environ.get("VC_FRAME_ATTACH_ENV_CAPTURE", "")
+    if capture:
+        with open(capture, "a") as handle:
+            handle.write(json.dumps({
+                "target": target,
+                "VC_FRAME_SESSION_NAME": os.environ.get("VC_FRAME_SESSION_NAME"),
+                "ZELLIJ_SESSION_NAME": os.environ.get("ZELLIJ_SESSION_NAME"),
+            }) + "\\n")
+    zellij_session = os.environ.get("ZELLIJ_SESSION_NAME") or os.environ.get(
+        "VC_FRAME_SESSION_NAME"
+    )
+    if zellij_session == target:
+        sys.stderr.write(
+            "panicked at src/commands.rs:844: "
+            'You are trying to attach to the current session ("%s"). '
+            "This is not supported.\\n" % target
+        )
+        sys.exit(101)
     refuse_without_tty()
     # The foreground handover blocks; keep it short so the test can finish.
     time.sleep(0.3)
@@ -1081,6 +1106,167 @@ def test_detached_create_refuses_instead_of_waiting_out_a_real_error(
         "the engine's own reason was swallowed: " + result.stderr
     )
     assert elapsed < 8, f"a hard refusal was waited out for {elapsed:.1f}s"
+
+
+# --------------------------------------------------------------------------
+# R7 -- native attach owns a clean client environment
+# --------------------------------------------------------------------------
+#
+# _vetcoders_prepare_operator_runtime exports VC_FRAME_SESSION_NAME (and, on
+# some paths, ZELLIJ_SESSION_NAME) into ITS OWN shell purely for downstream
+# dispatch targeting -- so the AICX pack and provider tab land on the right
+# project. _vetcoders_attach_prepared_vc_frame_session then hands the
+# terminal to a BRAND NEW native client, which inherits that same shell's
+# exported env unless something clears it. The real engine's own startup
+# aliases VC_FRAME_SESSION_NAME into ZELLIJ_SESSION_NAME (zellij-utils
+# envs::normalize_vc_frame_env_aliases) and src/commands.rs:844 panics
+# ("You are trying to attach to the current session") whenever that value
+# equals the attach target -- so an inherited targeting marker makes a fresh
+# client panic as if it were an illegal nested reattach.
+
+
+def _prepare_and_attach(
+    tmp_path: Path,
+    project_name: str,
+    *,
+    ambient_attached: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    """Drive prepare_operator_runtime(defer-attach) + the deferred handover.
+
+    A REAL pty is required: _vetcoders_mark_pending_vc_frame_attach only marks
+    a pending handover when both stdin and stdout are a controlling terminal,
+    the same gate the real non-interactive-shell-hands-a-window-to-the-
+    operator contract relies on.
+    """
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    _write(
+        home / ".config" / "vibecrafted" / "vc-frame" / "layouts" / "operator.kdl",
+        "layout {\n}\n",
+    )
+    project_dir = tmp_path / project_name
+    project_dir.mkdir(parents=True, exist_ok=True)
+    generation = _fake_generation(tmp_path, tmp_path / "unused.json")
+
+    frame_log = tmp_path / "frame.log"
+    attach_capture = tmp_path / "attach-env.jsonl"
+    live_file = tmp_path / "live-sessions.txt"
+    live_file.write_text("", encoding="utf-8")
+
+    env = os.environ.copy()
+    for key in (
+        "VIBECRAFTED_OPERATOR_SESSION",
+        "VIBECRAFTED_PENDING_VC_FRAME_ATTACH",
+        "VIBECRAFTED_ROOT",
+        "VIBECRAFTED_RUNTIME_ROOT",
+        "SPAWN_ROOT",
+        "VC_FRAME",
+        "VC_FRAME_PANE_ID",
+        "VC_FRAME_SESSION_NAME",
+        "ZELLIJ",
+        "ZELLIJ_PANE_ID",
+        "ZELLIJ_SESSION_NAME",
+    ):
+        env.pop(key, None)
+    env["HOME"] = str(home)
+    env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
+    env["XDG_CONFIG_HOME"] = str(home / ".config")
+    env["VC_FRAME_LOG"] = str(frame_log)
+    env["VC_FRAME_LIVE"] = str(live_file)
+    env["VC_FRAME_ATTACH_ENV_CAPTURE"] = str(attach_capture)
+    env["VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME"] = "1"
+    if ambient_attached:
+        # A GENUINE nested caller: this process already lives inside the
+        # target session -- _vetcoders_in_vc_frame's own trusted signal.
+        env["VC_FRAME"] = "1"
+        env["VC_FRAME_PANE_ID"] = "0"
+        env["VC_FRAME_SESSION_NAME"] = project_name
+
+    script = "\n".join(
+        [
+            f'source "{SHELL_SH}"',
+            f'_vetcoders_vc_frame_loaded_root="{generation}"',
+            "_vetcoders_prepare_operator_runtime terminal defer-attach; prep_rc=$?",
+            'echo "PREP_RC=$prep_rc"',
+            'echo "SESSION=$VIBECRAFTED_OPERATOR_SESSION"',
+            'echo "PENDING=$VIBECRAFTED_PENDING_VC_FRAME_ATTACH"',
+            "_vetcoders_attach_prepared_vc_frame_session; attach_rc=$?",
+            'echo "ATTACH_RC=$attach_rc"',
+            'echo "PARENT_VC_FRAME_SESSION_NAME=$VC_FRAME_SESSION_NAME"',
+        ]
+    )
+    result = subprocess.run(
+        [
+            "python3",
+            "-c",
+            (
+                "import pty, sys; sys.exit(pty.spawn("
+                "['bash', '--noprofile', '--norc', '-c', sys.argv[1]]))"
+            ),
+            script,
+        ],
+        check=False,
+        cwd=project_dir,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return result, attach_capture
+
+
+def test_final_attach_clears_forged_targeting_markers(tmp_path: Path) -> None:
+    """The deferred handover must not hand the native client its own dispatch-
+    targeting env as if it were a real nested attachment (src/commands.rs:844)
+    -- while the parent shell keeps that marker for its own downstream use.
+    """
+    result, attach_capture = _prepare_and_attach(tmp_path, "freshproject")
+
+    assert "PREP_RC=0" in result.stdout, result.stdout + result.stderr
+    assert "PENDING=freshproject" in result.stdout, result.stdout + result.stderr
+    assert "ATTACH_RC=0" in result.stdout, (
+        "the deferred handover was rejected by the native guard: "
+        + result.stdout
+        + result.stderr
+    )
+    assert "commands.rs:844" not in result.stderr, result.stderr
+
+    assert attach_capture.exists(), "the native attach binary was never invoked"
+    seen = [
+        json.loads(line)
+        for line in attach_capture.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert seen, "no attach invocation was captured"
+    last = seen[-1]
+    assert last["target"] == "freshproject", last
+    assert last["VC_FRAME_SESSION_NAME"] is None, (
+        "the fresh native client inherited a forged targeting marker: " + str(last)
+    )
+    assert last["ZELLIJ_SESSION_NAME"] is None, last
+
+    # Only the child invocation was sanitized -- the parent shell's own
+    # targeting state must survive for its other callers.
+    assert "PARENT_VC_FRAME_SESSION_NAME=freshproject" in result.stdout, result.stdout
+
+
+def test_genuine_attached_caller_gets_no_pending_external_attach(
+    tmp_path: Path,
+) -> None:
+    """A caller already living inside the target session must not spawn a
+    second client, and its ambient targeting env must stay untouched.
+    """
+    result, attach_capture = _prepare_and_attach(
+        tmp_path, "already-inside", ambient_attached=True
+    )
+
+    assert "PREP_RC=0" in result.stdout, result.stdout + result.stderr
+    assert "PENDING=already-inside" not in result.stdout, result.stdout
+    assert "ATTACH_RC=0" in result.stdout, result.stdout + result.stderr
+    assert not attach_capture.exists(), (
+        "a genuinely attached caller must not invoke a second native client"
+    )
+    assert "PARENT_VC_FRAME_SESSION_NAME=already-inside" in result.stdout, result.stdout
 
 
 def test_child_creates_exactly_one_tab_and_one_aicx_pack(tmp_path: Path) -> None:
