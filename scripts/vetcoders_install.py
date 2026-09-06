@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import ast
 import ctypes
+import difflib
 import errno
 import fcntl
 import hashlib
@@ -15368,7 +15369,7 @@ def _assert_runtime_tree_has_no_symlinks(root: Path) -> None:
 def _atomic_text(path: Path, body: str, *, mode: int = 0o644) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.parent / f".{path.name}.new-{os.getpid()}"
-    temporary.write_text(body, encoding="utf-8")
+    temporary.write_text(body, encoding="utf-8", newline="")
     temporary.chmod(mode)
     os.replace(temporary, path)
 
@@ -15462,12 +15463,17 @@ def _backup_runtime_drift(
 ) -> Path:
     """Preserve an operator-diverged managed path before the installer reclaims it.
 
-    Drift backups are content-addressed and live apart from the `original`
+    File drift backups are content-addressed; trees and symlinks get unique
+    snapshots. They live apart from the `original`
     collision tree: `backups` carries over between installs and would
     early-return, silently dropping the operator's newest divergent copy.
     """
     token = hashlib.sha256(str(destination).encode("utf-8")).hexdigest()[:20]
-    marker = _sha256_path(destination)[:12] if destination.is_file() else "nonfile"
+    marker = (
+        _sha256_path(destination)[:12]
+        if not destination.is_symlink() and destination.is_file()
+        else os.urandom(6).hex()
+    )
     backup = (
         runtime_home
         / ".installer-backups"
@@ -15481,7 +15487,7 @@ def _backup_runtime_drift(
     _checkpoint_runtime_install_receipt(runtime_home, receipt)
     print(
         f"[runtime-install] managed path diverged since install; "
-        f"reclaimed {destination} (divergent copy: {backup})",
+        f"preserved {destination} (divergent copy: {backup})",
         file=sys.stderr,
     )
     return backup
@@ -15499,9 +15505,23 @@ def _write_runtime_owned_file(
     runtime_home: Path,
     receipt: dict[str, Any],
     previous: dict[str, Any],
+    preference: Mapping[str, Any] | None = None,
 ) -> None:
     previous_owned = previous.get("owned_files", {})
     key = str(path)
+    if preference is not None:
+        actual = (
+            _sha256_path(path)
+            if not path.is_symlink() and path.is_file() else None
+        )
+        if path.is_symlink() or actual != preference["current_sha256"]:
+            raise RuntimeError(f"product preference changed during install: {path}")
+        receipt.setdefault("config_pending", {})[key] = {
+            "before_sha256": actual,
+            "after_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            "defaults": preference["defaults"],
+        }
+        _checkpoint_runtime_install_receipt(runtime_home, receipt)
     if _path_present(path):
         if key in previous_owned:
             if (
@@ -15519,7 +15539,290 @@ def _write_runtime_owned_file(
             _backup_runtime_collision(path, runtime_home=runtime_home, receipt=receipt)
     _atomic_text(path, body, mode=mode)
     _record_owned_file(receipt, path)
+    if preference is not None:
+        receipt.setdefault("config_defaults", {})[key] = preference["defaults"]
+        receipt["config_pending"].pop(key, None)
     _checkpoint_runtime_install_receipt(runtime_home, receipt)
+
+
+def _merge_runtime_preferences(
+    previous: str | None, current: str, incoming: str, *, kdl: bool = False
+) -> str:
+    """Carry independent user edits onto new defaults; refuse ambiguous overlap.
+
+    This is a conservative text merge, not a KDL/TOML rewrite. Comments and
+    user formatting survive. Missing history and touching edits require an
+    explicit resolution instead of guessing which preference should win.
+    """
+    if current == incoming:
+        return current
+    if previous is None:
+        raise ValueError("previous shipped defaults are unavailable")
+    if current == previous:
+        return incoming
+    if incoming == previous:
+        return current
+    base = previous.splitlines(keepends=True)
+
+    def edits(text: str) -> list[tuple[int, int, list[str]]]:
+        lines = text.splitlines(keepends=True)
+        return [
+            (a, b, lines[c:d])
+            for tag, a, b, c, d in difflib.SequenceMatcher(
+                a=base, b=lines, autojunk=False
+            ).get_opcodes()
+            if tag != "equal"
+        ]
+
+    user_edits = edits(current)
+    upstream_edits = edits(incoming)
+
+    def scalar_names(edit: tuple[int, int, list[str]]) -> set[str]:
+        # KDL allows repeated scalar nodes. A text merge could otherwise put a
+        # newly shipped copy_on_select in a different place from the user's
+        # insertion and silently change which value wins. Treat matching
+        # scalar names conservatively, even across separate blocks.
+        if not kdl:
+            return set()
+        pattern = (
+            r'\s*([A-Za-z_][A-Za-z0-9_]*)\s+'
+            r'(?:"(?:\\.|[^"\\])*"|true|false|-?\d+)\s*(?://[^\r\n]*)?'
+        )
+        return {
+            match.group(1)
+            for line in [*base[edit[0]:edit[1]], *edit[2]]
+            if (match := re.fullmatch(pattern, line.strip()))
+        }
+
+    merged_edits = list(upstream_edits)
+    for user in user_edits:
+        for upstream in upstream_edits:
+            if user == upstream:
+                break
+            if scalar_names(user) & scalar_names(upstream):
+                raise ValueError(
+                    "user and shipped defaults change the same KDL setting"
+                )
+            if user[0] <= upstream[1] and upstream[0] <= user[1]:
+                raise ValueError("user edits overlap or touch changed shipped defaults")
+        else:
+            merged_edits.append(user)
+    result = list(base)
+    for start, end, replacement in sorted(
+        merged_edits, key=lambda edit: edit[0], reverse=True
+    ):
+        result[start:end] = replacement
+    return "".join(result)
+
+
+def _prepare_runtime_preferences(
+    generation: Path,
+    product_config: Path,
+    *,
+    runtime_home: Path,
+    receipt: dict[str, Any],
+    previous: dict[str, Any],
+) -> dict[Path, dict[str, Any]]:
+    """Preflight every preference before changing config or runtime selectors.
+
+    Defaults are read from the old receipted generation, never from the last
+    installed user bytes. Per-file default lineage in the same install receipt
+    also makes retries after a partially completed installation unambiguous.
+    """
+    sources = {
+        product_config / "vc-frame/config.kdl": Path(
+            "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
+        ),
+        product_config / "terminal-policy.toml": Path(
+            "config/vc-terminal/vibecrafted.toml"
+        ),
+    }
+    prior_generation = previous.get("owned_symlinks", {}).get(
+        str(runtime_home / "tools/vibecrafted-current")
+    )
+    defaults = previous.get("config_defaults", {})
+    prepared: dict[Path, dict[str, Any]] = {}
+    conflicts: list[dict[str, str]] = []
+    for destination, relative in sources.items():
+        incoming_source = generation / relative
+        incoming = incoming_source.read_bytes().decode("utf-8")
+        old = defaults.get(str(destination), {})
+        baseline: str | None = None
+        baseline_source: Path | None = None
+        backup_destination = destination
+        try:
+            aliases = [
+                path for path in (destination, *destination.parents)
+                if path.is_symlink()
+            ]
+            if aliases:
+                backup_destination = aliases[-1]
+                raise ValueError(
+                    "product preference path is aliased; "
+                    "resolve its ownership explicitly"
+                )
+            if _path_present(destination) and not destination.is_file():
+                raise ValueError("product preference is not a regular file")
+            current_raw = destination.read_bytes() if destination.is_file() else None
+            current_hash = (
+                hashlib.sha256(current_raw).hexdigest()
+                if current_raw is not None else None
+            )
+            pending = previous.get("config_pending", {}).get(str(destination))
+            if pending:
+                # The file and receipt cannot be atomically replaced together.
+                # Resolve the recorded transition by bytes; a third value is
+                # an explicit conflict, never an automatically replayed write.
+                if current_hash == pending["after_sha256"]:
+                    old = pending["defaults"]
+                    receipt["config_defaults"][str(destination)] = old
+                elif current_hash != pending["before_sha256"]:
+                    raise ValueError(
+                        "interrupted preference publication has divergent bytes; "
+                        "restore or resolve the receipted backup before retrying"
+                    )
+                receipt.setdefault("config_pending", {}).pop(str(destination), None)
+            old_generation = old.get("generation", prior_generation)
+            if old_generation:
+                old_root = Path(old_generation)
+                if (
+                    not old_root.is_absolute()
+                    or old_root.parent != runtime_home / "releases"
+                ):
+                    raise ValueError(
+                        "previous defaults escape the receipted release root"
+                    )
+                baseline_source = old_root / relative
+                if any(
+                    path.is_symlink()
+                    for path in (baseline_source, *baseline_source.parents)
+                ):
+                    raise ValueError("previous shipped defaults are aliased")
+                if baseline_source.is_file():
+                    raw = baseline_source.read_bytes()
+                    if (
+                        old.get("sha256")
+                        and hashlib.sha256(raw).hexdigest() != old["sha256"]
+                    ):
+                        raise ValueError(
+                            "previous shipped defaults differ from their receipt"
+                        )
+                    baseline = raw.decode("utf-8")
+            current = current_raw.decode("utf-8") if current_raw is not None else None
+            body = (
+                incoming if current is None
+                else _merge_runtime_preferences(
+                    baseline, current, incoming, kdl=destination.suffix == ".kdl"
+                )
+            )
+            if not body.strip() or "\0" in body:
+                raise ValueError("merged preference file is empty or invalid")
+            if destination.suffix == ".toml":
+                import tomllib
+
+                tomllib.loads(body)
+        except (OSError, UnicodeError, ValueError) as exc:
+            # Reuse the installer's backup and receipt, without installing a
+            # conflict-marker file or creating another preference directory.
+            backup = ""
+            if _path_present(backup_destination):
+                backup = str(
+                    _backup_runtime_drift(
+                        backup_destination, runtime_home=runtime_home, receipt=receipt
+                    )
+                )
+            conflicts.append(
+                {
+                    "path": str(destination),
+                    "reason": str(exc),
+                    "backup": backup,
+                    "previous_defaults": str(baseline_source or ""),
+                    "incoming_defaults": str(incoming_source),
+                }
+            )
+            continue
+        prepared[destination] = {
+            "body": body,
+            "current_sha256": current_hash,
+            "defaults": {
+                "generation": str(generation),
+                "sha256": hashlib.sha256(incoming.encode("utf-8")).hexdigest(),
+            },
+        }
+    if conflicts:
+        receipt["config_conflicts"] = conflicts
+        _checkpoint_runtime_install_receipt(runtime_home, receipt)
+        raise RuntimeError(
+            "product configuration conflict; config and runtime selectors "
+            "were not published. Resolve the preserved user configuration "
+            "against previous/incoming defaults "
+            "listed in install-receipt.json and retry runtime-install: "
+            + "; ".join(f"{item['path']}: {item['reason']}" for item in conflicts)
+        )
+    receipt.pop("config_conflicts", None)
+    _checkpoint_runtime_install_receipt(runtime_home, receipt)
+    return prepared
+
+
+def _publish_runtime_frame_config(
+    source: Path,
+    destination: Path,
+    preference: Mapping[str, Any],
+    *,
+    runtime_home: Path,
+    receipt: dict[str, Any],
+    previous: dict[str, Any],
+) -> None:
+    """Publish a physical tree, preserving the old tree through existing backups."""
+    staged = Path(tempfile.mkdtemp(prefix=".vc-frame.install-", dir=destination.parent))
+    backup: Path | None = None
+    try:
+        shutil.rmtree(staged)
+        shutil.copytree(source, staged)
+        (staged / "config.kdl").write_bytes(preference["body"].encode("utf-8"))
+        _assert_runtime_tree_has_no_symlinks(staged)
+        config = destination / "config.kdl"
+        actual = (
+            _sha256_path(config)
+            if not config.is_symlink() and config.is_file() else None
+        )
+        if (
+            destination.is_symlink() or config.is_symlink()
+            or actual != preference["current_sha256"]
+        ):
+            raise RuntimeError(
+                f"product configuration changed during installation: {config}; retry"
+            )
+        receipt.setdefault("config_pending", {})[str(config)] = {
+            "before_sha256": actual,
+            "after_sha256": _sha256_path(staged / "config.kdl"),
+            "defaults": preference["defaults"],
+        }
+        _checkpoint_runtime_install_receipt(runtime_home, receipt)
+        if _path_present(destination):
+            if str(destination) not in previous.get("owned_dirs", []):
+                _backup_runtime_collision(
+                    destination, runtime_home=runtime_home, receipt=receipt
+                )
+            backup = _backup_runtime_drift(
+                destination, runtime_home=runtime_home, receipt=receipt
+            )
+            _remove_path(destination)
+        try:
+            os.replace(staged, destination)
+        except BaseException:
+            if backup is not None and not _path_present(destination):
+                _copy_path_to_backup(backup, destination)
+            raise
+        if str(destination) not in receipt["owned_dirs"]:
+            receipt["owned_dirs"].append(str(destination))
+        _record_owned_file(receipt, config)
+        receipt.setdefault("config_defaults", {})[str(config)] = preference["defaults"]
+        receipt["config_pending"].pop(str(config), None)
+        _checkpoint_runtime_install_receipt(runtime_home, receipt)
+    finally:
+        if staged.exists():
+            shutil.rmtree(staged)
 
 
 def _runtime_launcher_public_name(name: str) -> str | None:
@@ -16136,6 +16439,9 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         "owned_dirs": list(previous.get("owned_dirs", [])),
         "owned_empty_dirs": list(previous.get("owned_empty_dirs", [])),
         "backups": dict(previous.get("backups", {})),
+        "drift_backups": dict(previous.get("drift_backups", {})),
+        "config_defaults": dict(previous.get("config_defaults", {})),
+        "config_pending": dict(previous.get("config_pending", {})),
     }
 
     releases = runtime_home / "releases"
@@ -16235,33 +16541,37 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
     if missing:
         raise RuntimeError("Runtime Pack is incomplete: " + ", ".join(missing))
 
-    # `active.json`, the CLI, foundations, doctor, and agent views must all
-    # name the same immutable release.  `vibecrafted-current` is a stable
-    # projection for older consumers, never a second tools generation.
-    current_link = runtime_home / "tools/vibecrafted-current"
-    _write_runtime_owned_symlink(
-        current_link,
-        generation,
-        runtime_home=runtime_home,
-        receipt=receipt,
-        previous=previous,
-    )
-
     product_config = paths["product_config"]
+    preferences = _prepare_runtime_preferences(
+        generation, product_config,
+        runtime_home=runtime_home, receipt=receipt, previous=previous,
+    )
+    # Complete preference conflict checks before either publishing a selector or
+    # replacing any product config. Recheck reads before applying the prepared cut.
+    for path, preference in preferences.items():
+        actual = (
+            _sha256_path(path)
+            if not path.is_symlink() and path.is_file() else None
+        )
+        if path.is_symlink() or actual != preference["current_sha256"]:
+            raise RuntimeError(
+                f"product configuration changed during installation: {path}; retry"
+            )
+
     terminal_theme = product_config / "terminal-theme.toml"
     if not terminal_theme.exists():
         shutil.copy2(generation / "config/vc-terminal/themes/dark.toml", terminal_theme)
         receipt["owned_dirs"].append(str(terminal_theme))
         _checkpoint_runtime_install_receipt(runtime_home, receipt)
-    terminal_policy_source = generation / "config/vc-terminal/vibecrafted.toml"
     terminal_policy = product_config / "terminal-policy.toml"
     _write_runtime_owned_file(
         terminal_policy,
-        terminal_policy_source.read_text(encoding="utf-8"),
+        preferences[terminal_policy]["body"],
         mode=0o644,
         runtime_home=runtime_home,
         receipt=receipt,
         previous=previous,
+        preference=preferences[terminal_policy],
     )
     _reclaim_product_terminal_debris(
         product_config,
@@ -16302,19 +16612,14 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         _checkpoint_runtime_install_receipt(runtime_home, receipt)
 
     frame_config = product_config / "vc-frame"
-    if frame_config.exists():
-        if str(frame_config) not in previous.get("owned_dirs", []):
-            _backup_runtime_collision(
-                frame_config, runtime_home=runtime_home, receipt=receipt
-            )
-        _remove_path(frame_config)
-    shutil.copytree(
+    _publish_runtime_frame_config(
         generation / "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame",
         frame_config,
+        preferences[frame_config / "config.kdl"],
+        runtime_home=runtime_home,
+        receipt=receipt,
+        previous=previous,
     )
-    if str(frame_config) not in receipt["owned_dirs"]:
-        receipt["owned_dirs"].append(str(frame_config))
-    _checkpoint_runtime_install_receipt(runtime_home, receipt)
     shell_config = product_config / "shell"
     if shell_config.exists():
         if str(shell_config) not in previous.get("owned_dirs", []):
@@ -16330,6 +16635,16 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         receipt["owned_dirs"].append(str(shell_config))
     _checkpoint_runtime_install_receipt(runtime_home, receipt)
     _assert_runtime_tree_has_no_symlinks(product_config)
+
+    # Publish the canonical generation pointer only after config admission.
+    current_link = runtime_home / "tools/vibecrafted-current"
+    _write_runtime_owned_symlink(
+        current_link,
+        generation,
+        runtime_home=runtime_home,
+        receipt=receipt,
+        previous=previous,
+    )
 
     bin_dir = generation / "bin"
     for entry in sorted(bin_dir.iterdir(), key=lambda item: item.name):

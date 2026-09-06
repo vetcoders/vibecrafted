@@ -8,7 +8,6 @@
 set -euo pipefail
 
 info() { printf '\033[36m▸\033[0m %s\n' "$*"; }
-ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m!\033[0m %s\n' "$*"; }
 
 NONINTERACTIVE="${VIBECRAFTED_INSTALL_NONINTERACTIVE:-0}"
@@ -30,27 +29,21 @@ fi
 
 if ! command -v vc-frame >/dev/null 2>&1; then
   warn "vc-frame not on PATH — cannot launch cockpit."
-  warn "Fix foundations, then: vc-start"
+  warn "Install the verified Runtime Pack, then: vc-start"
   exit 0
 fi
 
-# Best-effort: project frontier config so Super binds + operator scripts exist.
-# Prefer the deck command; fall back to in-tree Python when the published
-# generation is older than this script.
-if command -v vibecrafted >/dev/null 2>&1 \
-  && vibecrafted help 2>/dev/null | grep -q 'config'; then
-  info "Projecting operator config (frontier + view)…"
-  vibecrafted config install 2>/dev/null || warn "config install skipped (non-fatal)"
-elif [[ -f "${VIBECRAFTED_SOURCE:-}/vibecrafted-core/vibecrafted_core/vc_frame_delivery.py" ]] \
-  || [[ -f "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/vibecrafted-core/vibecrafted_core/vc_frame_delivery.py" ]]; then
-  info "Projecting operator config via checkout Python…"
-  root="${VIBECRAFTED_SOURCE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-  (
-    cd "$root"
-    PYTHONPATH="$root/vibecrafted-core${PYTHONPATH:+:$PYTHONPATH}" \
-      python3 -c "from vibecrafted_core.vc_frame_delivery import stage_vc_frame_config; print(stage_vc_frame_config().render())"
-  ) 2>/dev/null || warn "config projection skipped (non-fatal)"
+# Consume the installed physical config. Launch must never deliver or repair it.
+frame_config="${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame"
+if [[ ! -d "$frame_config" || -L "$frame_config" \
+  || ! -f "$frame_config/config.kdl" || -L "$frame_config/config.kdl" \
+  || ! -d "$frame_config/layouts" || -L "$frame_config/layouts" \
+  || ! -f "$frame_config/layouts/operator.kdl" || -L "$frame_config/layouts/operator.kdl" ]]; then
+  warn "Installed product configuration is missing or misrouted: $frame_config"
+  warn "Repair through the verified Runtime Pack runtime-install --payload-root PATH operation."
+  exit 1
 fi
+export VC_FRAME_CONFIG_DIR="$frame_config"
 
 answer="y"
 if [[ "$FORCE_YES" == "1" || "$YES" == "1" ]]; then
@@ -84,23 +77,18 @@ case "$answer" in
     ;;
 esac
 
-# Prefer public launcher wrappers installed by the framework.
+# Invoke one installed entry once, preserving its result for the installer.
 if command -v vc-start >/dev/null 2>&1; then
-  ok "Opening operator session via vc-start…"
-  # Do not exec — installer should still exit cleanly after spawn attempt.
-  vc-start operator || vc-start || true
-  exit 0
+  info "Opening operator session via vc-start…"
+  vc-start operator
+  exit $?
 fi
 
 if command -v vibecrafted >/dev/null 2>&1; then
-  ok "Opening operator session via vibecrafted start…"
-  vibecrafted start operator 2>/dev/null || vibecrafted start || true
-  exit 0
+  info "Opening operator session via vibecrafted start…"
+  vibecrafted start operator
+  exit $?
 fi
 
-# Last resort: direct frame with default_layout from config (vibecrafted).
-ok "Opening vc-frame session 'vibecrafted'…"
-vc-frame attach --create vibecrafted 2>/dev/null \
-  || vc-frame --session vibecrafted 2>/dev/null \
-  || warn "Could not spawn frame; run: vc-frame attach --create vibecrafted"
-exit 0
+warn "Installed product launcher is missing; repair the verified Runtime Pack."
+exit 1

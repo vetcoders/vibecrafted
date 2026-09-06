@@ -26,12 +26,6 @@ from .package_resources import (
 )
 from .vc_frame_delivery import (
     OPERATOR_SCRIPT_NAMES,
-    classify_view_path,
-    frontier_root,
-    list_dangling_frontier_links,
-    prefer_repo_vc_frame,
-    resolve_clipboard_command,
-    resolve_pane_shell,
     tools_current_path,
     vc_frame_user_config_dir,
 )
@@ -87,7 +81,7 @@ def _vc_frame_launcher_findings(
                 "vc-frame:path",
                 f"vc-frame on PATH ({path}) is a raw binary, not the product "
                 "wrapper. Claude/CLI will use TMPDIR sockets and overflow "
-                "macOS sockaddr_un. Re-run the foundations installer.",
+                "macOS sockaddr_un. Reinstall the verified Runtime Pack.",
             )
         ]
     pin_owner = path
@@ -688,28 +682,37 @@ def _packaged_asset_findings() -> list[_Finding]:
 def _config_entry_matches(candidate: Path, expected: Path) -> bool:
     """True only for an unaliased physical copy with identical closed contents."""
 
-    def inventory(root: Path) -> dict[str, tuple[str, str]] | None:
+    def inventory(root: Path) -> dict[str, tuple[str, str, int]] | None:
         if root.is_symlink():
             return None
         if root.is_file():
             try:
-                return {".": ("file", hashlib.sha256(root.read_bytes()).hexdigest())}
+                return {
+                    ".": (
+                        "file",
+                        hashlib.sha256(root.read_bytes()).hexdigest(),
+                        root.stat().st_mode & 0o777,
+                    )
+                }
             except OSError:
                 return None
         if not root.is_dir():
             return None
-        entries: dict[str, tuple[str, str]] = {}
+        entries: dict[str, tuple[str, str, int]] = {}
         for path in sorted(root.rglob("*")):
+            if path.name == ".DS_Store":
+                continue
             if path.is_symlink():
                 return None
             relative = path.relative_to(root).as_posix()
             if path.is_dir():
-                entries[relative] = ("dir", "")
+                entries[relative] = ("dir", "", path.stat().st_mode & 0o777)
             elif path.is_file():
                 try:
                     entries[relative] = (
                         "file",
                         hashlib.sha256(path.read_bytes()).hexdigest(),
+                        path.stat().st_mode & 0o777,
                     )
                 except OSError:
                     return None
@@ -717,7 +720,25 @@ def _config_entry_matches(candidate: Path, expected: Path) -> bool:
                 return None
         return entries
 
-    return inventory(candidate) == inventory(expected) and candidate.exists()
+    try:
+        candidate_inventory = inventory(candidate)
+        return (
+            candidate_inventory is not None
+            and candidate_inventory == inventory(expected)
+        )
+    except OSError:
+        return False
+
+
+def _runtime_config_generation(tools_home: Path | None = None) -> Path:
+    """Inspect the launcher's selected generation; never select a dev config."""
+    selected = (
+        os.environ.get("VIBECRAFTED_RUNTIME_ROOT") if tools_home is None else None
+    )
+    root = Path(selected).expanduser() if selected else tools_current_path(tools_home)
+    if not root.is_absolute():
+        raise OSError(f"selected runtime path is not absolute: {root}")
+    return root.resolve(strict=True)
 
 
 def _vc_frame_delivery_findings(
@@ -726,346 +747,102 @@ def _vc_frame_delivery_findings(
     tools_home: Path | None = None,
     path_env: str | None = None,
 ) -> list[_Finding]:
-    """Config delivery health: view channel, themes, pane-shell, frontier zombies."""
+    """Inspect installer-owned copies, allowing preferences only in config.kdl."""
     findings: list[_Finding] = []
     view = vc_frame_user_config_dir(home)
-    current = tools_current_path(tools_home)
-    package = current / "vibecrafted-core" / "vibecrafted_core"
-    store_cfg = package / "config" / "vc-frame"
-    checkout = None
+    repair = "repair via the verified Runtime Pack runtime-install --payload-root PATH"
     try:
-        from .frontier_assets import vc_frame_config_source
-
-        checkout = vc_frame_config_source()
-    except FileNotFoundError:
-        pass
-    use_repo = prefer_repo_vc_frame()
-    generated = package / "runtime" / "generated" / "vc-frame"
-    materialized_paths = (
-        generated / "config.kdl",
-        generated / "layouts",
-        generated / "themes",
-        generated / "vc-composer.sh",
+        generation = _runtime_config_generation(tools_home)
+    except (OSError, RuntimeError) as exc:
+        return [
+            _Finding(
+                "fail", "vc-frame:runtime",
+                f"selected runtime unavailable: {exc}; {repair}",
+            )
+        ]
+    generated = (
+        generation / "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame"
     )
-    materialized = all(
-        path.is_file() if path.suffix else path.is_dir() for path in materialized_paths
-    )
-    if use_repo:
-        findings.append(
-            _Finding(
-                "ok",
-                "vc-frame:runtime",
-                "dev-checkout channel does not require a published config generation",
+    for root in (view, generated):
+        if not root.is_dir() or any(p.is_symlink() for p in (root, *root.parents)):
+            findings.append(
+                _Finding(
+                    "fail", "vc-frame:view",
+                    f"missing or aliased physical config tree: {root}; {repair}",
+                )
             )
-        )
-        view_repair = "`vibecrafted config install --prefer-repo`"
-    elif materialized:
-        findings.append(
-            _Finding(
-                "ok",
-                "vc-frame:runtime",
-                f"pre-materialized config present under {generated}",
+    if findings:
+        return findings
+    for variable, expected in (
+        ("VC_FRAME_CONFIG_DIR", view),
+        ("VC_FRAME_CONFIG_FILE", view / "config.kdl"),
+    ):
+        selected = os.environ.get(variable)
+        if selected and Path(selected).expanduser().absolute() != expected.absolute():
+            findings.append(
+                _Finding(
+                    "fail", "vc-frame:view",
+                    f"{variable} routes outside product configuration at {expected}",
+                )
             )
-        )
-        view_repair = "`vibecrafted config install`"
-    else:
-        findings.append(
-            _Finding(
-                "fail",
-                "vc-frame:runtime",
-                f"published runtime has no complete pre-materialized config "
-                f"under {generated} — run `vibecrafted update`",
-            )
-        )
-        view_repair = "`vibecrafted update`"
 
-    channels: list[str] = []
-    for name in ("config.kdl", "layouts", "themes"):
-        path = view / name
-        ch = classify_view_path(path, store_current=store_cfg, checkout=checkout)
-        if ch == "STALE-FILE" and _config_entry_matches(path, generated / name):
-            ch = "runtime-copy"
-        channels.append(ch)
-        if ch == "DANGLING":
-            findings.append(
-                _Finding(
-                    "fail",
-                    "vc-frame:view",
-                    f"{path} is a dangling symlink — run {view_repair}",
-                )
-            )
-        elif ch == "STALE-FILE":
-            findings.append(
-                _Finding(
-                    "fail",
-                    "vc-frame:view",
-                    f"{path} is a regular file shadowing the store view — "
-                    f"run {view_repair} (backs up as .stale.* when wiring)",
-                )
-            )
-        elif ch == "missing":
-            findings.append(
-                _Finding(
-                    "warn",
-                    "vc-frame:view",
-                    f"{path} missing — run {view_repair}",
-                )
-            )
-        elif ch == "foreign":
-            findings.append(
-                _Finding(
-                    "warn",
-                    "vc-frame:view",
-                    f"{path} is user-managed (foreign) — not store/dev view",
-                )
-            )
+    names = {"config.kdl", "layouts", "themes", *OPERATOR_SCRIPT_NAMES}
+    names.update(path.name for path in generated.iterdir() if path.name != ".DS_Store")
+    for name in sorted(names):
+        path, default = view / name, generated / name
+        if name in {"layouts", "themes"}:
+            expected_type = default.is_dir()
+        elif name in {"config.kdl", *OPERATOR_SCRIPT_NAMES}:
+            expected_type = default.is_file()
         else:
-            findings.append(_Finding("ok", "vc-frame:view", f"{name}: {ch} -> {path}"))
-
-    # themes presence under view or source
-    themes_dir = view / "themes"
-    if themes_dir.is_dir() or themes_dir.is_symlink():
-        try:
-            resolved = themes_dir.resolve(strict=True)
-            theme_files = list(resolved.glob("*.kdl"))
-            if theme_files:
-                findings.append(
-                    _Finding(
-                        "ok",
-                        "vc-frame:themes",
-                        f"{len(theme_files)} theme file(s) under {themes_dir}",
-                    )
-                )
-            else:
-                findings.append(
-                    _Finding(
-                        "warn",
-                        "vc-frame:themes",
-                        f"themes dir empty: {themes_dir}",
-                    )
-                )
-        except OSError:
+            expected_type = default.is_dir() or default.is_file()
+        if (
+            not expected_type
+            or default.is_symlink()
+            or (name in OPERATOR_SCRIPT_NAMES and not os.access(default, os.X_OK))
+        ):
             findings.append(
                 _Finding(
-                    "fail",
-                    "vc-frame:themes",
-                    f"themes path does not resolve: {themes_dir}",
+                    "fail", "vc-frame:runtime",
+                    f"missing, unusable or aliased shipped asset: {default}; {repair}",
                 )
             )
-    else:
-        findings.append(
-            _Finding(
-                "warn",
-                "vc-frame:themes",
-                f"themes view missing at {themes_dir}",
-            )
-        )
-
-    # Host commands: every shipped KDL must match the available shell/clipboard.
-    shell = resolve_pane_shell(path_env)
-    clipboard = resolve_clipboard_command(path_env)
-    layouts = view / "layouts"
-    unresolved: list[str] = []
-    kdl_files: list[Path] = []
-    config_file = view / "config.kdl"
-    if config_file.exists():
-        kdl_files.append(config_file)
-    if layouts.exists():
-        try:
-            kdl_files.extend(sorted(layouts.resolve().glob("*.kdl")))
-        except OSError:
-            pass
-    for kdl_file in kdl_files:
-        try:
-            text = kdl_file.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
             continue
-        if shell != "zsh" and any(
-            token in text
-            for token in (
-                'command="zsh"',
-                'default_shell "zsh"',
-                "exec zsh -l",
-                "exec /bin/zsh -l",
-            )
-        ):
-            unresolved.append(f"{kdl_file.name}:zsh")
-        if clipboard is None and (
-            'copy_command "pbcopy"' in text or "pbcopy <" in text
-        ):
-            unresolved.append(f"{kdl_file.name}:pbcopy")
-    if unresolved:
-        remediation = (
-            "dev checkout is intentionally raw; install the referenced host "
-            "commands or unset VIBECRAFTED_PREFER_REPO_VC_FRAME and run "
-            "`vibecrafted update`"
-            if use_repo
-            else "republish host-adapted config via `vibecrafted update`"
-        )
-        findings.append(
-            _Finding(
-                "warn",
-                "vc-frame:pane-shell",
-                f"unresolved host commands for shell={shell!r}, "
-                f"clipboard={clipboard or 'internal'}: {', '.join(unresolved)}; "
-                f"{remediation}",
-            )
-        )
-    else:
-        findings.append(
-            _Finding(
-                "ok",
-                "vc-frame:pane-shell",
-                f"host commands ok (shell={shell}, clipboard={clipboard or 'internal'})",
-            )
-        )
-
-    # frontier zombies
-    froot = frontier_root(home)
-    zombies = list_dangling_frontier_links(froot)
-    if zombies:
-        findings.append(
-            _Finding(
-                "fail",
-                "frontier:zombies",
-                f"{len(zombies)} dangling link(s) under {froot} — "
-                f"re-run install-frontier-config.sh or `vibecrafted update`",
-            )
-        )
-    else:
-        findings.append(
-            _Finding(
-                "ok",
-                "frontier:zombies",
-                f"no dangling frontier links under {froot}",
-            )
-        )
-
-    # Operator scripts + Super/Cmd contract live beside the sole canonical
-    # product config. Legacy frontier paths are residue, never a second view.
-    for projection, label in ((view, "view"),):
-        missing_scripts = [
-            name
-            for name in OPERATOR_SCRIPT_NAMES
-            if name != "auto-theme.sh" and not (projection / name).exists()
-        ]
-        stale_scripts = [
-            name
-            for name in OPERATOR_SCRIPT_NAMES
-            if (projection / name).is_file()
-            and not (projection / name).is_symlink()
-            and not _config_entry_matches(projection / name, generated / name)
-        ]
-        if missing_scripts:
-            findings.append(
-                _Finding(
-                    "fail",
-                    f"vc-frame:operator-scripts:{label}",
-                    f"missing {', '.join(missing_scripts)} under {projection} — "
-                    f"{view_repair}",
+        if name == "config.kdl":
+            try:
+                if not path.is_file() or path.is_symlink():
+                    raise OSError("expected a physical config.kdl")
+                text = path.read_text(encoding="utf-8")
+                if not text.strip() or "\0" in text:
+                    raise OSError("empty or invalid config text")
+            except (OSError, UnicodeError) as exc:
+                findings.append(
+                    _Finding("fail", "vc-frame:view", f"{path}: {exc}; {repair}")
                 )
+                continue
+            detail = (
+                "shipped defaults"
+                if _config_entry_matches(path, default)
+                else "user preferences (configuration syntax not validated)"
             )
-        elif stale_scripts:
+            findings.append(
+                _Finding("ok", "vc-frame:view", f"physical {path}: {detail}")
+            )
+        elif not _config_entry_matches(path, default):
             findings.append(
                 _Finding(
-                    "fail",
-                    f"vc-frame:operator-scripts:{label}",
-                    f"STALE-FILE (not install-managed link) for "
-                    f"{', '.join(stale_scripts)} under {projection} — "
-                    f"{view_repair} (backs up and re-wires)",
+                    "fail", "vc-frame:view",
+                    f"missing, modified or misrouted owned asset: {path}; {repair}",
                 )
             )
         else:
             findings.append(
                 _Finding(
-                    "ok",
-                    f"vc-frame:operator-scripts:{label}",
-                    f"operator scripts projected under {projection}",
+                    "ok", "vc-frame:view",
+                    f"installed physical asset matches selected generation: {path}",
                 )
             )
-
-        cfg = projection / "config.kdl"
-        if cfg.is_file() or cfg.is_symlink():
-            try:
-                text = cfg.read_text(encoding="utf-8")
-            except OSError as exc:
-                findings.append(
-                    _Finding(
-                        "fail",
-                        f"vc-frame:key-contract:{label}",
-                        f"cannot read {cfg}: {exc}",
-                    )
-                )
-            else:
-                kitty_on = (
-                    "support_kitty_keyboard_protocol true" in text
-                    or "support_kitty_keyboard_protocol true" in text
-                )
-                has_super = 'bind "Super' in text or 'bind "Super' in text
-                if not kitty_on:
-                    findings.append(
-                        _Finding(
-                            "fail",
-                            f"vc-frame:key-contract:{label}",
-                            f"{cfg} has support_kitty_keyboard_protocol off — "
-                            "Super/Cmd chords will never reach keybinds; "
-                            f"{view_repair}",
-                        )
-                    )
-                elif not has_super:
-                    findings.append(
-                        _Finding(
-                            "fail",
-                            f"vc-frame:key-contract:{label}",
-                            f"{cfg} enables kitty protocol but binds no Super/* "
-                            f"chords — Cmd switcher/Composer are dead; {view_repair}",
-                        )
-                    )
-                else:
-                    findings.append(
-                        _Finding(
-                            "ok",
-                            f"vc-frame:key-contract:{label}",
-                            "kitty protocol on + Super/* binds present",
-                        )
-                    )
-
-    if use_repo:
-        findings.append(
-            _Finding(
-                "ok",
-                "vc-frame:channel",
-                "VIBECRAFTED_PREFER_REPO_VC_FRAME=1 (dev-checkout preferred)",
-            )
-        )
     return findings
-
-
-_TRUTH_PATTERNS = ("config.kdl", "auto-theme.sh", "layouts/*.kdl", "themes/*.kdl")
-
-
-def _hash_config_tree(root: Path) -> dict[str, str]:
-    """sha256 map of the canonical vc-frame config files under one truth root."""
-    hashes: dict[str, str] = {}
-    if not root.is_dir():
-        return hashes
-    for pattern in _TRUTH_PATTERNS:
-        for path in sorted(root.glob(pattern)):
-            if not path.is_file():
-                continue
-            try:
-                digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            except OSError:
-                continue
-            hashes[str(path.relative_to(root))] = digest
-    return hashes
-
-
-def _diverged_files(left: dict[str, str], right: dict[str, str]) -> list[str]:
-    """Return sorted filenames whose hash differs (or is missing) between the two maps."""
-    return sorted(
-        name for name in left.keys() | right.keys() if left.get(name) != right.get(name)
-    )
 
 
 def _vc_frame_truth_drift_findings(
@@ -1073,156 +850,44 @@ def _vc_frame_truth_drift_findings(
     home: Path | None = None,
     tools_home: Path | None = None,
 ) -> list[_Finding]:
-    """Content drift across the vc-frame config truths.
+    """Verify sealed defaults against the generation's existing manifest.
 
-    The delivery checks prove the FORM of the view (symlink channels, dangling
-    links). This proves the CONTENT: the published generation must agree with
-    itself (package config/ vs package runtime/generated/), the dev checkout
-    may run ahead of the store but never silently, and no projection link may
-    resolve into a parked generation instead of vibecrafted-current.
+    Host adaptation happened at install time. Today's PATH or checkout cannot
+    redefine those defaults; doctor neither rematerializes nor repairs them.
+    Product preferences are checked separately from immutable generation bytes.
     """
-    findings: list[_Finding] = []
-    current = tools_current_path(tools_home)
-    package = current / "vibecrafted-core" / "vibecrafted_core"
-    store_cfg = package / "config" / "vc-frame"
-    generated = package / "runtime" / "generated" / "vc-frame"
-
-    store_map = _hash_config_tree(store_cfg)
-    generated_map = _hash_config_tree(generated)
-    if store_map and generated_map:
-        # generated/ is HOST-ADAPTED from config/ (pane-shell + clipboard
-        # substitution in every kdl), so the raw trees legitimately differ on
-        # any host whose adaptation differs from the shipped defaults (a
-        # Linux box without pbcopy diverges on every layout). Compare against
-        # a fresh materialization built by the same production code instead
-        # of raw hashes — self-agreement modulo intended adaptation.
-        expected_map = store_map
-        try:
-            import tempfile
-
-            from .vc_frame_staging import (
-                materialize_vc_frame_config,
-                resolve_clipboard_command,
-                resolve_pane_shell,
-            )
-
-            with tempfile.TemporaryDirectory(prefix="vc-doctor-truth-") as tmp:
-                expected_root = Path(tmp) / "vc-frame"
-                materialize_vc_frame_config(
-                    store_cfg,
-                    expected_root,
-                    pane_shell=resolve_pane_shell(),
-                    clipboard_command=resolve_clipboard_command(),
-                )
-                expected_map = _hash_config_tree(expected_root)
-        except OSError:
-            # Incomplete store tree — raw comparison still beats no signal.
-            expected_map = store_map
-        split = _diverged_files(expected_map, generated_map)
-        if split:
-            findings.append(
-                _Finding(
-                    "fail",
-                    "vc-frame:truth",
-                    "published generation disagrees with itself "
-                    f"(config/ vs runtime/generated/): {', '.join(split[:6])}"
-                    f"{' …' if len(split) > 6 else ''} — run `vibecrafted update`",
-                )
-            )
-        else:
-            findings.append(
-                _Finding(
-                    "ok",
-                    "vc-frame:truth",
-                    f"store truths agree ({len(store_map)} file(s) hashed)",
-                )
-            )
-
-    checkout: Path | None = None
     try:
-        from .frontier_assets import vc_frame_config_source
-
-        checkout = vc_frame_config_source()
-    except FileNotFoundError:
-        checkout = None
-    if checkout is not None and store_map:
-        drift = _diverged_files(_hash_config_tree(checkout), store_map)
-        if drift:
-            findings.append(
-                _Finding(
-                    "warn",
-                    "vc-frame:truth",
-                    f"dev checkout differs from published store on {len(drift)} "
-                    f"file(s): {', '.join(drift[:6])}"
-                    f"{' …' if len(drift) > 6 else ''} — legal mid-development; "
-                    "republish via `vibecrafted update` before trusting "
-                    "env-less sessions",
-                )
-            )
-        else:
-            findings.append(
-                _Finding("ok", "vc-frame:truth", "dev checkout matches published store")
-            )
-
-    tools_root = current.parent
-    try:
-        current_real = current.resolve(strict=True)
-    except OSError:
-        return findings
-    projection_roots = (
-        vc_frame_user_config_dir(home),
-        frontier_root(home) / "vc-frame",
-    )
-    stale: list[Path] = []
-    escaped: list[Path] = []
-    for root in projection_roots:
-        if not root.is_dir():
-            continue
-        for path in sorted(root.rglob("*")):
-            if not path.is_symlink():
-                continue
-            try:
-                target = path.resolve(strict=True)
-            except OSError:
-                continue  # dangling links are the delivery check's finding
-            if target.is_relative_to(tools_root) and not target.is_relative_to(
-                current_real
-            ):
-                stale.append(path)
-            elif not target.is_relative_to(current_real):
-                escaped.append(path)
-    if stale:
-        listed = ", ".join(str(path) for path in stale[:4])
-        findings.append(
-            _Finding(
-                "fail",
-                "vc-frame:truth",
-                f"{len(stale)} projection link(s) resolve into a parked "
-                f"generation instead of vibecrafted-current: {listed}"
-                f"{' …' if len(stale) > 4 else ''} — re-run `vibecrafted update`",
-            )
+        generation = _runtime_config_generation(tools_home)
+        installer = _installer_module()
+        manifest, error = installer._load_runtime_generation_manifest(generation)
+        if manifest is None:
+            raise OSError(error or "missing runtime generation manifest")
+        relative = (
+            "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
         )
-    if escaped:
-        listed = ", ".join(str(path) for path in escaped[:4])
-        findings.append(
-            _Finding(
-                "fail",
-                "vc-frame:truth",
-                f"{len(escaped)} projection link(s) escape the active immutable "
-                f"Runtime Pack (for example into a checkout): {listed}"
-                f"{' …' if len(escaped) > 4 else ''} — reinstall the complete "
-                "Runtime Pack",
+        path = generation / relative
+        if any(p.is_symlink() for p in (path, *path.parents)):
+            raise OSError(f"aliased shipped defaults: {path}")
+        expected = manifest["hashes"].get(relative)
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if not expected or actual != expected:
+            raise OSError(
+                f"shipped config.kdl differs from its generation manifest: {path}"
             )
-        )
-    if not stale and not escaped:
-        findings.append(
+    except (OSError, RuntimeError, ValueError, ImportError) as exc:
+        return [
             _Finding(
-                "ok",
-                "vc-frame:truth",
-                "all projection links resolve inside vibecrafted-current",
+                "fail", "vc-frame:truth",
+                f"{exc}; reinstall the verified Runtime Pack",
             )
+        ]
+    return [
+        _Finding(
+            "ok", "vc-frame:truth",
+            "shipped config.kdl matches the sealed generation manifest "
+            f"at {generation}",
         )
-    return findings
+    ]
 
 
 _RELEASE_REPO_DEFAULT = "vetcoders/vibecrafted"

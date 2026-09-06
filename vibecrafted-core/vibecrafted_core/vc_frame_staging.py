@@ -1,8 +1,8 @@
 """Stdlib-only vc-frame config materialization for unpublished runtimes.
 
 This module deliberately has no package-relative imports.  The installer loads
-the copy inside a candidate runtime before publishing that runtime, while the
-installed package reuses the same functions for explicit config maintenance.
+the copy inside a candidate runtime before publishing that runtime. Published
+generations and active product configuration are never materializer targets.
 """
 
 from __future__ import annotations
@@ -94,16 +94,22 @@ def materialize_vc_frame_config(
         raise OSError(f"vc-frame config source is not a directory: {source}")
     if not (source_root / "config.kdl").is_file():
         raise OSError(f"vc-frame config source has no config.kdl: {source}")
-    if destination.is_symlink():
-        raise OSError(
-            f"refusing to materialize vc-frame config through symlink: {destination}"
-        )
-    if destination.exists():
-        if not destination.is_dir():
+    # Never refresh an existing tree. Only the installer may supply a fresh,
+    # unpublished destination; in particular a missing generated/ tree inside
+    # a published generation is an install error, not permission to repair it.
+    for ancestor in (destination, *destination.parents):
+        if ancestor.is_symlink():
             raise OSError(
-                f"vc-frame config destination is not a directory: {destination}"
+                f"refusing vc-frame materialization through symlink: {ancestor}"
             )
-        shutil.rmtree(destination)
+        if (ancestor / "runtime-manifest.json").exists():
+            raise OSError(
+                f"refusing vc-frame materialization in sealed runtime: {ancestor}"
+            )
+    if destination.exists():
+        raise OSError(
+            f"vc-frame materialization destination already exists: {destination}"
+        )
     destination.mkdir(parents=True, exist_ok=False)
 
     for root, directories, files in os.walk(source_root):
