@@ -49,6 +49,9 @@ _vetcoders_contract_reset() {
   _vetcoders_contract_fork_session=""
   _vetcoders_contract_last=""
   _vetcoders_contract_help=""
+  # Owned by _vetcoders_rewrite_contract_root_argv; reset here so a vector can
+  # never survive into the next parse.
+  _vetcoders_contract_argv=()
 }
 
 _vetcoders_append_tail() {
@@ -202,6 +205,94 @@ _vetcoders_parse_contract() {
   if [[ -z "$_vetcoders_contract_prompt" && -n "$_vetcoders_contract_tail" ]]; then
     _vetcoders_contract_prompt="$_vetcoders_contract_tail"
   fi
+}
+
+# Rewrite the accepted `--root` VALUE inside an argument vector to a path the
+# caller has ALREADY normalized, leaving every other byte — order, quoting, the
+# `--` payload, opaque provider arguments — exactly where it was. The result
+# lands in the global array _vetcoders_contract_argv.
+#
+# Why this exists (2026-09-06): a public entry that normalizes `--root` and
+# then forwards the RAW vector to a child running from the new working
+# directory makes the child resolve the same relative token a SECOND time,
+# against a different directory. `vc-resume codex --root child` from /project
+# opened /project/child and then told the child to resolve `child` again —
+# /project/child/child. The sibling form `../project-b` hid this, because from
+# the sibling it happens to resolve back onto itself.
+#
+# The scanner mirrors _vetcoders_parse_contract's own flag table on purpose and
+# lives directly beneath it: a value-taking flag missing from this list would
+# let a value that merely reads like `--root` (e.g. `--session --root`) shift
+# the rewrite onto the wrong argument. Keep the two lists in step.
+#
+# Only the LAST accepted occurrence is rewritten — that is the one the parser
+# keeps, so that is the one the child resolves.
+#
+# Portability (2026-09-06): this used to walk the vector with a hand-rolled
+# 0-based numeric index (`${_vetcoders_contract_argv[index]}`,
+# `((index + 1 < $#))`). Bash arrays are 0-based; zsh arrays are 1-based with
+# KSH_ARRAYS off, which is the facade's default in both shells. That single
+# assumption baked into the bounds math meant the scanner silently declined to
+# rewrite the LAST element of the vector under zsh (`vc-resume codex --root
+# child` — child) and passed all-green under bash, because bash's array base
+# happened to match the arithmetic. The fix below never subscripts the array
+# with a computed index at all: it walks it twice with `for ... in
+# "${arr[@]}"` (base-agnostic in both shells) tracking a plain 1..N ordinal
+# counter of our own, so no shell's array-base convention is ever load-bearing.
+_vetcoders_rewrite_contract_root_argv() {
+  local normalized_root="$1"
+  shift
+  _vetcoders_contract_argv=("$@")
+  [[ -n "$normalized_root" ]] || return 0
+
+  # Pass 1 (read-only): find the ordinal — the Nth argument overall, counting
+  # from 1 — of the LAST accepted --root value before --prompt/-p/-- ends the
+  # scan. `skip` steps over a value that follows a value-taking flag so it is
+  # never itself read as a flag.
+  local -i ordinal=0 root_ordinal=0 skip=0
+  local _arg
+  for _arg in "${_vetcoders_contract_argv[@]}"; do
+    ordinal+=1
+    if ((skip > 0)); then
+      skip=$((skip - 1))
+      continue
+    fi
+    case "$_arg" in
+      # --prompt is greedy and `--` opens the tail: past either of them nothing
+      # is a flag any more, so nothing there may be rewritten.
+      -p | --prompt | --)
+        break
+        ;;
+      --root)
+        root_ordinal=$((ordinal + 1))
+        skip=1
+        ;;
+      # Value-taking flags: step over the VALUE too, so a value that happens to
+      # spell a flag is never read as one.
+      -f | --file | --task | --session | --run-id | --count | --depth | \
+        --runtime | --model | --policy-runtime | --permissions | \
+        --token-budget | --operator | --continuity | --parent-session | \
+        --continuity-parent)
+        skip=1
+        ;;
+    esac
+  done
+
+  ((root_ordinal > 0)) || return 0
+
+  # Pass 2: rebuild the array by ordinal, appending in order — never assigning
+  # into a computed subscript — so the shell's array base never matters.
+  local -a _rewritten=()
+  ordinal=0
+  for _arg in "${_vetcoders_contract_argv[@]}"; do
+    ordinal+=1
+    if ((ordinal == root_ordinal)); then
+      _rewritten+=("$normalized_root")
+    else
+      _rewritten+=("$_arg")
+    fi
+  done
+  _vetcoders_contract_argv=("${_rewritten[@]}")
 }
 
 # Skill launchers own model selection. Keep the shared parser fail-closed for
