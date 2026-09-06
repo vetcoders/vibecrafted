@@ -1009,6 +1009,16 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
             "func applicationShouldTerminateAfterLastWindowClosed"
         )
     ]
+    workspace_launch = delegate[
+        delegate.index("private func launchWorkspaceTerminal") : delegate.index(
+            "private func terminalIsLive"
+        )
+    ]
+    terminal_launch = delegate[
+        delegate.index("private func openWorkspaceTerminal") : delegate.index(
+            "private func terminalIsLive"
+        )
+    ]
     assert "launchWorkspaceTerminal()" in launch_handler
     assert "showMainWindowIfNeeded()" not in launch_handler
     assert "\t<key>LSUIElement</key>\n\t<true/>" in info
@@ -1053,11 +1063,29 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     ]
     assert "    false\n" in termination_handler
     assert "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty" in delegate
-    assert "NSWorkspace.shared.openApplication(" in delegate
-    assert "at: helperApplication, configuration: configuration" in delegate
-    assert "process.executableURL = install.terminalHost" not in delegate
-    assert 'bundle.object(forInfoDictionaryKey: "CFBundleIconFile")' in delegate
-    assert '"Contents/Resources/\\(iconName)"' in delegate
+    # A normal launch first asks the installer-owned read-only resolver which
+    # generation is current. Only a truly absent runtime may bootstrap the
+    # bundled carrier; an unusable one must be refused rather than overwritten.
+    assert "resolveInstalledRuntime { [weak self] resolution in" in workspace_launch
+    assert "case .ready:" in workspace_launch
+    assert "case .absent(let reason):" in workspace_launch
+    assert "try self.installCanonicalRuntime()" in workspace_launch
+    assert "case .unusable(let reason):" in workspace_launch
+    assert "self.openWorkspaceTerminal(install: install)" in workspace_launch
+    # The selected generation's terminal wrapper receives the explicit primary
+    # shell/start argv. The bundled terminal host remains onboarding material,
+    # never the direct launch target of the App.
+    assert "NSWorkspace.shared.openApplication(" not in terminal_launch
+    assert "process.executableURL = install.terminal" in terminal_launch
+    assert (
+        'process.arguments = ["-e", install.primaryShell.path, install.start.path, "operator"]'
+        in terminal_launch
+    )
+    assert "process.environment = environment" in terminal_launch
+    assert "process.terminationHandler" in terminal_launch
+    assert "process.executableURL = install.terminalHost" not in terminal_launch
+    assert "\t<key>CFBundleIconFile</key>\n\t<string>Vibecrafted.icns</string>" in info
+    assert "NSApp.applicationIconImage.copy()" in delegate
     assert 'appendingPathComponent("runtime-pack", isDirectory: true)' in delegate
     assert 'appendingPathComponent("install-runtime-pack.sh")' in delegate
     assert '"--expected-source-revision"' in delegate
@@ -1102,7 +1130,7 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert 'name = "vc-start"' in cargo
     assert '"--noprofile"' in launcher
     assert '"--norc"' in launcher
-    assert 'source "$1"; shift; vc-start "$@"' in launcher
+    assert 'source "$1" || exit $?; shift; vc-start "$@"' in launcher
     assert 'Command::new("/bin/bash")' in launcher
     assert "fn host_agent_search_path(" in launcher
     assert '"/opt/homebrew/bin"' in launcher
@@ -3650,15 +3678,28 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     assert "$VIBECRAFTED_RUNTIME_ROOT/bin/vc-start" in terminal
     assert "${1##*/}" in primary_shell
     assert '"$0" "$@"' in primary_shell
-    assert "NSWorkspace.shared.openApplication(" in delegate
-    assert "configuration.environment = environment" in delegate
-    assert '"-e", install.primaryShell.path, install.start.path, "operator"' in delegate
+    terminal_launch = delegate[
+        delegate.index("private func openWorkspaceTerminal") : delegate.index(
+            "private func terminalIsLive"
+        )
+    ]
+    assert "NSWorkspace.shared.openApplication(" not in terminal_launch
+    assert "process.executableURL = install.terminal" in terminal_launch
+    assert "process.environment = environment" in terminal_launch
+    assert (
+        '"-e", install.primaryShell.path, install.start.path, "operator"'
+        in terminal_launch
+    )
     assert 'product_config / "vc-terminal" / "vc-terminal.toml"' in installer
     assert 'product_config / "terminal-entry.toml"' not in installer
-    assert "_reclaim_product_terminal_debris" in installer
+    assert 'for debris in terminal.glob("launch-*.zsh"):' in installer
+    assert "if debris.name != _PRODUCT_PRIMARY_SHELL_NAME:" in installer
+    assert "_remove_path(debris)" in installer
     assert "vc-terminal/launch-primary-shell.zsh" in terminal
     assert 'product_config / "terminal-policy.toml"' in installer
-    assert 'product_config / "terminal-theme.toml"' in installer
+    assert 'theme = staged / "terminal-theme.toml"' in installer
+    assert 'generation / "config/vc-terminal/themes/dark.toml"' in installer
+    assert 'tomllib.loads(theme.read_text(encoding="utf-8"))' in installer
     assert "_materialize_runtime_generation_vc_terminal_entry" in installer
     assert 'generation / "libexec/vc-terminal"' in installer
     assert 'let socketRoot = "/tmp/vc-frame-\\(getuid())"' in delegate
