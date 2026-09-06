@@ -41,7 +41,10 @@ fetch_source \
   "$frame_archive_sha256" "$work/vc-frame.tar.gz" "$work/vc-frame"
 
 make -C "$work/vc-terminal" release-bins
-install -m 0755 "$work/vc-terminal/target/release/alacritty" "$payload/bin/vc-terminal"
+install -m 0755 "$work/vc-terminal/target/release/alacritty" "$payload/libexec/vc-terminal"
+install -m 0755 "$repo_root/scripts/vc-terminal-product-entry.sh" \
+  "$payload/scripts/vc-terminal-product-entry.sh"
+install -m 0755 "$payload/scripts/vc-terminal-product-entry.sh" "$payload/bin/vc-terminal"
 rm -rf "$work/vc-terminal" "$work/vc-terminal.tar.gz"
 
 frame_sha="$frame_revision"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import shutil
 import subprocess
 from argparse import Namespace
 from contextlib import nullcontext
@@ -11,6 +12,9 @@ from pathlib import Path
 import pytest
 
 from scripts import vetcoders_install as installer
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+_MACHO_MAGIC = b"\xcf\xfa\xed\xfe"
 
 
 def _legacy_shim_public_name(name: str) -> str:
@@ -26,11 +30,16 @@ def _legacy_shim_public_name(name: str) -> str:
 
 def _complete_runtime_pack_fixture(payload: Path) -> None:
     """The v5 Runtime Pack inversion requires `libexec/vc-frame` and
-    `bin/vc-terminal`; the shared fixture predates it (known-red on this
+    `libexec/vc-terminal`; the shared fixture predates it (known-red on this
     base). Complete it locally so these tests exercise the reclaim path
     instead of the fixture gap."""
     _write_executable(payload / "libexec" / "vc-frame")
-    _write_executable(payload / "bin" / "vc-terminal")
+    _write_native_stub(payload / "bin" / "vc-terminal")
+    (payload / "scripts").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(
+        REPO_ROOT / "scripts/vc-terminal-product-entry.sh",
+        payload / "scripts/vc-terminal-product-entry.sh",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -88,6 +97,12 @@ def _write_executable(path: Path, body: str | None = None) -> None:
     path.chmod(0o755)
 
 
+def _write_native_stub(path: Path, payload: bytes = b"pack-terminal") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_MACHO_MAGIC + payload)
+    path.chmod(0o755)
+
+
 def _runtime_pack_fixture(root: Path) -> tuple[Path, Path, Path]:
     payload = root / "runtime-pack"
     for name in (
@@ -101,12 +116,17 @@ def _runtime_pack_fixture(root: Path) -> tuple[Path, Path, Path]:
         "vc-server",
         "vc-server-supervisor",
         "vc-start",
-        "vc-terminal",
         "vc-workflow",
     ):
         _write_executable(payload / "bin" / name)
+    _write_native_stub(payload / "bin" / "vc-terminal")
     _write_executable(
         payload / "libexec/vc-frame", "#!/bin/sh\necho runtime-pack-frame\n"
+    )
+    (payload / "scripts").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(
+        REPO_ROOT / "scripts/vc-terminal-product-entry.sh",
+        payload / "scripts/vc-terminal-product-entry.sh",
     )
     _write_executable(payload / "vibecrafted-core/vibecrafted_core/deck/vibecrafted")
     (payload / "VERSION").write_text("9.9.9+g12345678\n", encoding="utf-8")
@@ -144,6 +164,167 @@ def _runtime_pack_fixture(root: Path) -> tuple[Path, Path, Path]:
     _write_executable(terminal_host, "#!/bin/sh\necho app-terminal-helper\n")
     _write_executable(frame_helper, "#!/bin/sh\necho app-frame-helper\n")
     return payload, terminal_host, frame_helper
+
+
+def test_vc_terminal_product_entry_pins_config_file_and_refuses_private_alacritty(
+    tmp_path: Path,
+) -> None:
+    """A raw generation `bin/vc-terminal` must not spawn ~/.config/alacritty."""
+    generation = tmp_path / "releases/4.3.0+gfixture"
+    (generation / "bin").mkdir(parents=True)
+    (generation / "libexec").mkdir()
+    host = generation / "libexec/vc-terminal"
+    user_bin = tmp_path / "user-bin"
+    user_bin.mkdir()
+    user_aicx = user_bin / "aicx"
+    user_aicx.write_text("#!/bin/sh\n", encoding="utf-8")
+    user_aicx.chmod(0o755)
+    private_aicx = generation / "bin/aicx"
+    private_aicx.write_text("#!/bin/sh\n", encoding="utf-8")
+    private_aicx.chmod(0o755)
+    host.write_text(
+        "#!/bin/bash\n"
+        "printf 'aicx=%s\\n' \"$(command -v aicx)\"\n"
+        "printf '%s\\n' \"$@\"\n",
+        encoding="utf-8",
+    )
+    host.chmod(0o755)
+    wrapper = generation / "bin/vc-terminal"
+    shutil.copy2(REPO_ROOT / "scripts/vc-terminal-product-entry.sh", wrapper)
+    wrapper.chmod(0o755)
+    config_home = tmp_path / "xdg-config"
+    entry = config_home / "vibecrafted/vc-terminal/vc-terminal.toml"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("[general]\nlive_config_reload = true\n", encoding="utf-8")
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "XDG_CONFIG_HOME": str(config_home),
+        "PATH": f"{user_bin}:/usr/bin:/bin",
+    }
+    env.pop("VIBECRAFTED_RUNTIME_ROOT", None)
+    first = subprocess.run(
+        [str(wrapper)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    second = subprocess.run(
+        [str(wrapper)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    expected = [f"aicx={user_aicx}", "--config-file", str(entry)]
+    assert first.stdout.splitlines() == expected
+    assert second.stdout.splitlines() == expected
+    assert first.stdout == second.stdout
+    rejected = subprocess.run(
+        [str(wrapper), "--config-file", "/tmp/explicit.toml"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert rejected.returncode == 2
+    assert "--config-file is product-owned" in rejected.stderr
+    rejected_equals = subprocess.run(
+        [str(wrapper), "--config-file=/tmp/explicit.toml"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert rejected_equals.returncode == 2
+    assert "--config-file is product-owned" in rejected_equals.stderr
+    entry.unlink()
+    missing = subprocess.run(
+        [str(wrapper)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert missing.returncode == 2
+    assert "product config missing" in missing.stderr
+    assert str(entry) in missing.stderr
+    assert "~/.config/alacritty" in missing.stderr
+
+
+def test_native_executable_probe_requires_regular_executable_bytes(
+    tmp_path: Path,
+) -> None:
+    native = tmp_path / "native"
+    native.write_bytes(b"\xcf\xfa\xed\xfe" + b"\x00" * 32)
+    native.chmod(0o755)
+    assert installer._is_native_executable(native)
+
+    native.chmod(0o644)
+    assert not installer._is_native_executable(native)
+    native.chmod(0o755)
+    link = tmp_path / "native-link"
+    link.symlink_to(native)
+    assert not installer._is_native_executable(link)
+
+
+def test_runtime_install_reclaims_leftover_alacritty_and_alt_screen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A leftover vc-terminal/alacritty.toml is not a second live choke-point."""
+    home = tmp_path / "home"
+    runtime_home = home / ".local/share/vibecrafted"
+    launcher_home = home / ".local/bin"
+    crafted_home = home / ".vibecrafted"
+    config_home = home / ".config"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(launcher_home))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(crafted_home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    product_config = config_home / "vibecrafted"
+    debris_dir = product_config / "vc-terminal"
+    debris_dir.mkdir(parents=True)
+    (debris_dir / "alacritty.toml").write_text(
+        'shell = { program = "${HOME}/.config/alacritty/launch-primary-shell.zsh" }\n',
+        encoding="utf-8",
+    )
+    (debris_dir / "launch-alt-screen.zsh").write_text(
+        "#!/bin/zsh\nexec launch-primary-shell.zsh\n", encoding="utf-8"
+    )
+    (product_config / "terminal-entry.toml").write_text(
+        "# leftover pin\n", encoding="utf-8"
+    )
+    args = Namespace(
+        payload_root=str(payload),
+        app_root=str(terminal_host.parents[2]),
+        terminal_host=str(terminal_host),
+        frame_helper=str(frame_helper),
+    )
+    assert installer.cmd_runtime_install(args) == 0
+    installed = json.loads(capsys.readouterr().out)
+    assert Path(installed["terminal_config"]) == (
+        product_config / "vc-terminal/vc-terminal.toml"
+    )
+    assert (product_config / "vc-terminal/vc-terminal.toml").is_file()
+    assert (product_config / "vc-terminal/launch-primary-shell.zsh").is_file()
+    assert not (debris_dir / "alacritty.toml").exists()
+    assert not (debris_dir / "launch-alt-screen.zsh").exists()
+    assert not (product_config / "terminal-entry.toml").exists()
+    names = sorted(
+        path.name for path in debris_dir.iterdir() if path.name != ".DS_Store"
+    )
+    assert names == ["launch-primary-shell.zsh", "vc-terminal.toml"]
+    lines = sorted(
+        str(path.relative_to(product_config))
+        for path in product_config.rglob("*")
+        if path.is_file() and path.name != ".DS_Store"
+    )
+    (tmp_path / "product-config-tree.txt").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
 
 
 def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
@@ -205,9 +386,16 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     assert (generation / "libexec/vc-frame").read_bytes() == (
         payload / "libexec/vc-frame"
     ).read_bytes()
-    assert (generation / "bin/vc-terminal").read_bytes() == (
+    assert (generation / "libexec/vc-terminal").read_bytes() == (
         payload / "bin/vc-terminal"
     ).read_bytes()
+    terminal_entry = (generation / "bin/vc-terminal").read_text(encoding="utf-8")
+    assert "--config-file" in terminal_entry
+    assert "libexec/vc-terminal" in terminal_entry
+    assert "vc-terminal.toml" in terminal_entry
+    assert "alacritty.toml" not in terminal_entry
+    assert "terminal-entry.toml" not in terminal_entry
+    assert "launch-alt-screen" not in terminal_entry
     assert (generation / "libexec/vc-frame").read_bytes() != frame_helper.read_bytes()
     assert (generation / "bin/vc-terminal").read_bytes() != terminal_host.read_bytes()
     assert (runtime_home / installer.RUNTIME_INSTALL_RECEIPT).is_file()
@@ -220,12 +408,33 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     assert (product_config / "terminal-policy.toml").read_text(encoding="utf-8") == (
         "[window]\n"
     )
-    terminal_entry = (product_config / "terminal-entry.toml").read_text(
-        encoding="utf-8"
+    terminal_pin = product_config / "vc-terminal/vc-terminal.toml"
+    terminal_entry = terminal_pin.read_text(encoding="utf-8")
+    assert Path(installed["terminal_config"]) == terminal_pin
+    assert Path(installed["primary_shell"]) == (
+        product_config / "vc-terminal/launch-primary-shell.zsh"
     )
+    assert (product_config / "vc-terminal/launch-primary-shell.zsh").is_file()
+    assert not (product_config / "terminal-entry.toml").exists()
+    assert not (product_config / "vc-terminal/alacritty.toml").exists()
+    assert not (product_config / "vc-terminal/launch-alt-screen.zsh").exists()
     assert str(product_config / "terminal-policy.toml") in terminal_entry
     assert str(product_config / "terminal-theme.toml") in terminal_entry
     assert str(generation / "config/vc-terminal/vibecrafted.toml") not in terminal_entry
+    path_wrapper = (launcher_home / "vc-terminal").read_text(encoding="utf-8")
+    assert "--config-file" not in path_wrapper
+    assert str(generation / "bin/vc-terminal") in path_wrapper
+    assert f"export VIBECRAFTED_TERMINAL_HOST={terminal_host}" in path_wrapper
+    assert f'export PATH="{generation / "bin"}:' not in path_wrapper
+    assert "terminal-entry.toml" not in path_wrapper
+    assert "alacritty.toml" not in path_wrapper
+    launched_terminal = subprocess.run(
+        [str(launcher_home / "vc-terminal")],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert launched_terminal.stdout.strip() == "app-terminal-helper"
     for runtime in installer.STANDARD_VIEW_RUNTIMES:
         for skill_name in ("vc-audit", "vc-implement"):
             view = home / f".{runtime}/skills/{skill_name}"
@@ -644,7 +853,7 @@ def test_runtime_pack_reinstall_reclaims_drifted_managed_paths(
 
     # An operator tweaks their terminal config and retargets a projection;
     # the next (repair/upgrade) install must reclaim both instead of dying.
-    terminal_entry = home / "config/vibecrafted/terminal-entry.toml"
+    terminal_entry = home / "config/vibecrafted/vc-terminal/vc-terminal.toml"
     canonical_entry = terminal_entry.read_text(encoding="utf-8")
     drifted_entry = canonical_entry + "# operator font tweak\n"
     terminal_entry.write_text(drifted_entry, encoding="utf-8")

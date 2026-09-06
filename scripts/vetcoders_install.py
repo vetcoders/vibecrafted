@@ -8501,6 +8501,55 @@ def _materialize_runtime_generation_vc_frame_entry(runtime_root: Path) -> None:
     target.chmod(0o755)
 
 
+_NATIVE_EXECUTABLE_MAGIC = {
+    b"\x7fELF",
+    b"\xca\xfe\xba\xbe",
+    b"\xbe\xba\xfe\xca",
+    b"\xfe\xed\xfa\xce",
+    b"\xce\xfa\xed\xfe",
+    b"\xfe\xed\xfa\xcf",
+    b"\xcf\xfa\xed\xfe",
+}
+
+
+def _is_native_executable(path: Path) -> bool:
+    """True when `path` is a Mach-O or ELF regular file, not a product wrapper."""
+    try:
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o111 == 0:
+            return False
+        with path.open("rb") as stream:
+            magic = stream.read(4)
+    except OSError:
+        return False
+    return magic in _NATIVE_EXECUTABLE_MAGIC
+
+
+def _materialize_runtime_generation_vc_terminal_entry(runtime_root: Path) -> None:
+    """Pin generation `bin/vc-terminal` to the product config, host in libexec.
+
+    A raw `releases/<ver>/bin/vc-terminal` used to be the Alacritty Mach-O, so
+    it read `~/.config/alacritty/` and tried to spawn a literal `${HOME}/...`
+    program. Same split as vc-frame: native bytes under libexec, wrapper on PATH.
+    """
+    source = runtime_root / "scripts" / "vc-terminal-product-entry.sh"
+    bin_term = runtime_root / "bin" / "vc-terminal"
+    libexec = runtime_root / "libexec" / "vc-terminal"
+    libexec.parent.mkdir(parents=True, exist_ok=True)
+    if bin_term.is_file() and _is_native_executable(bin_term):
+        if libexec.exists() and _is_native_executable(libexec):
+            bin_term.unlink()
+        else:
+            os.replace(bin_term, libexec)
+            libexec.chmod(0o755)
+    if not libexec.is_file() or not _is_native_executable(libexec):
+        raise OSError(f"candidate runtime has no native vc-terminal host: {libexec}")
+    if not source.is_file():
+        raise OSError(f"candidate runtime has no vc-terminal product entry: {source}")
+    shutil.copy2(source, bin_term)
+    bin_term.chmod(0o755)
+
+
 def _runtime_active_text_files(runtime_root: Path) -> Iterator[Path]:
     """Yield every active (non-symlink) text config/script file under the runtime's watched
     roots.
@@ -9373,6 +9422,7 @@ def _prepare_runtime_generation_candidate(
     _materialize_vc_frame_generation(staging)
     _materialize_runtime_generation_entrypoint(staging)
     _materialize_runtime_generation_vc_frame_entry(staging)
+    _materialize_runtime_generation_vc_terminal_entry(staging)
     audit_errors = _runtime_generation_audit_errors(staging, source_root=src)
     if audit_errors:
         raise OSError("\n".join(audit_errors))
@@ -15332,6 +15382,8 @@ def _runtime_launcher_body(
     frame_config: Path,
     executable: Path,
     leading_arguments: Sequence[str] = (),
+    environment: Mapping[str, str] | None = None,
+    prepend_generation_bin: bool = True,
 ) -> str:
     quoted_arguments = " ".join(shlex_quote(value) for value in leading_arguments)
     prefix = f"{quoted_arguments} " if quoted_arguments else ""
@@ -15346,10 +15398,23 @@ def _runtime_launcher_body(
         f"export VIBECRAFTED_PYTHON={shlex_quote(str(generation / 'bin/python3'))}",
         f"export VIBECRAFTED_VC_FRAME_BIN={shlex_quote(str(generation / 'libexec/vc-frame'))}",
         f"export VC_FRAME_CONFIG_DIR={shlex_quote(str(frame_config))}",
-        f'export PATH="{generation / "bin"}:${{PATH:-/usr/bin:/bin:/usr/sbin:/sbin}}"',
-        'export VIBECRAFTED_DECLARED_LAUNCHER="$0"',
-        f'exec {shlex_quote(str(executable))} {prefix}"$@"',
     ]
+    for name, value in sorted((environment or {}).items()):
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+            raise ValueError(f"invalid runtime launcher environment name: {name!r}")
+        lines.append(f"export {name}={shlex_quote(value)}")
+    if prepend_generation_bin:
+        lines.append(
+            f'export PATH="{generation / "bin"}:${{PATH:-/usr/bin:/bin:/usr/sbin:/sbin}}"'
+        )
+    else:
+        lines.append('export PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"')
+    lines.extend(
+        [
+            'export VIBECRAFTED_DECLARED_LAUNCHER="$0"',
+            f'exec {shlex_quote(str(executable))} {prefix}"$@"',
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -15562,6 +15627,60 @@ def _reclaim_foreign_launcher_names(
             )
     _checkpoint_runtime_install_receipt(runtime_home, receipt)
     return retired
+
+
+_PRODUCT_TERMINAL_DEBRIS = (
+    "terminal-entry.toml",
+    "vc-terminal/alacritty.toml",
+)
+_PRODUCT_PRIMARY_SHELL_NAME = "launch-primary-shell.zsh"
+
+
+def _reclaim_product_terminal_debris(
+    product_config: Path,
+    *,
+    runtime_home: Path,
+    receipt: dict[str, Any],
+    previous: Mapping[str, Any],
+) -> None:
+    """Drop retired product-host filenames so one vc-terminal.toml remains.
+
+    Leftover host configs and extra launchers are not a second live choke-point.
+    Unowned debris is collision-backed then removed; previously owned copies
+    are forgotten after the same backup rules as other reclaimed managed files.
+    """
+    previous_owned = previous.get("owned_files", {})
+    debris: list[Path] = [
+        product_config / relative for relative in _PRODUCT_TERMINAL_DEBRIS
+    ]
+    terminal_dir = product_config / "vc-terminal"
+    if terminal_dir.is_dir():
+        for path in sorted(terminal_dir.iterdir()):
+            if (
+                path.is_file()
+                and path.name.startswith("launch-")
+                and path.suffix == ".zsh"
+                and path.name != _PRODUCT_PRIMARY_SHELL_NAME
+            ):
+                debris.append(path)
+    for path in debris:
+        key = str(path)
+        if not _path_present(path):
+            receipt.setdefault("owned_files", {}).pop(key, None)
+            continue
+        if key in previous_owned:
+            identical = (
+                not path.is_symlink()
+                and path.is_file()
+                and _sha256_path(path) == previous_owned[key]
+            )
+            if not identical:
+                _backup_runtime_drift(path, runtime_home=runtime_home, receipt=receipt)
+        else:
+            _backup_runtime_collision(path, runtime_home=runtime_home, receipt=receipt)
+        _remove_path(path)
+        receipt.setdefault("owned_files", {}).pop(key, None)
+    _checkpoint_runtime_install_receipt(runtime_home, receipt)
 
 
 _FOUNDATION_TOOL_NAMES = (
@@ -15934,7 +16053,7 @@ def _runtime_install_result(
     terminal_host: Path | None = None,
 ) -> dict[str, str]:
     product_config = paths["product_config"]
-    resolved_terminal_host = str(generation / "bin/vc-terminal")
+    resolved_terminal_host = str(generation / "libexec/vc-terminal")
     if terminal_host and terminal_host.is_file():
         resolved_terminal_host = str(terminal_host)
     elif app_root:
@@ -15955,8 +16074,10 @@ def _runtime_install_result(
         # wrapper forever.
         "frame": str(generation / "libexec/vc-frame"),
         "start": str(generation / "bin/vc-start"),
-        "primary_shell": str(generation / "config/alacritty/launch-primary-shell.zsh"),
-        "terminal_config": str(product_config / "terminal-entry.toml"),
+        "primary_shell": str(
+            product_config / "vc-terminal" / "launch-primary-shell.zsh"
+        ),
+        "terminal_config": str(product_config / "vc-terminal" / "vc-terminal.toml"),
         "frame_config": str(product_config / "vc-frame"),
         "runtime_home": str(paths["runtime_home"]),
         "config_home": str(paths["config_home"]),
@@ -16050,6 +16171,7 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             _materialize_vc_frame_generation(staging)
             _materialize_runtime_generation_entrypoint(staging)
             _materialize_runtime_generation_vc_frame_entry(staging)
+            _materialize_runtime_generation_vc_terminal_entry(staging)
             source_provenance = load_source_provenance(staging)
             if source_provenance is None:
                 raise RuntimeError("Runtime Pack has no source-provenance.json")
@@ -16071,7 +16193,8 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
                 shutil.rmtree(staging)
     _assert_runtime_tree_has_no_symlinks(generation)
 
-    generation_terminal_host = generation / "bin/vc-terminal"
+    generation_terminal_entry = generation / "bin/vc-terminal"
+    generation_terminal_host = generation / "libexec/vc-terminal"
     resolved_terminal_host = generation_terminal_host
     if terminal_host_arg and terminal_host_arg.is_file():
         resolved_terminal_host = terminal_host_arg
@@ -16095,6 +16218,7 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         generation / "bin/vc-server-supervisor",
         generation / "bin/vc-start",
         generation / "bin/vc-workflow",
+        generation_terminal_entry,
         generation_terminal_host,
         generation / "config/alacritty/launch-primary-shell.zsh",
         generation / "vibecrafted-core/vibecrafted_core/skills",
@@ -16139,6 +16263,13 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         receipt=receipt,
         previous=previous,
     )
+    _reclaim_product_terminal_debris(
+        product_config,
+        runtime_home=runtime_home,
+        receipt=receipt,
+        previous=previous,
+    )
+    terminal_config = product_config / "vc-terminal" / "vc-terminal.toml"
     terminal_entry = (
         "# Generated by the Vibecrafted installer.\n"
         "[general]\n"
@@ -16149,13 +16280,26 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         "live_config_reload = true\n"
     )
     _write_runtime_owned_file(
-        product_config / "terminal-entry.toml",
+        terminal_config,
         terminal_entry,
         mode=0o644,
         runtime_home=runtime_home,
         receipt=receipt,
         previous=previous,
     )
+    primary_shell_source = generation / "config/alacritty/launch-primary-shell.zsh"
+    _write_runtime_owned_file(
+        product_config / "vc-terminal" / "launch-primary-shell.zsh",
+        primary_shell_source.read_text(encoding="utf-8"),
+        mode=0o755,
+        runtime_home=runtime_home,
+        receipt=receipt,
+        previous=previous,
+    )
+    terminal_dir = product_config / "vc-terminal"
+    if str(terminal_dir) not in receipt["owned_dirs"]:
+        receipt["owned_dirs"].append(str(terminal_dir))
+        _checkpoint_runtime_install_receipt(runtime_home, receipt)
 
     frame_config = product_config / "vc-frame"
     if frame_config.exists():
@@ -16252,11 +16396,9 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         crafted_home=paths["crafted_home"],
         runtime_home=runtime_home,
         frame_config=frame_config,
-        executable=resolved_terminal_host,
-        leading_arguments=(
-            "--config-file",
-            str(product_config / "terminal-entry.toml"),
-        ),
+        executable=generation_terminal_entry,
+        environment={"VIBECRAFTED_TERMINAL_HOST": str(resolved_terminal_host)},
+        prepend_generation_bin=False,
     )
     _write_runtime_owned_file(
         terminal_launcher,

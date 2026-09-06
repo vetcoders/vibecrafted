@@ -198,7 +198,7 @@ def test_final_embedded_runtime_pack_rejects_invalid_nested_macho(
     tmp_path: Path, macho_executable: Path
 ) -> None:
     payload = tmp_path / "payload/VibecraftedRuntime"
-    terminal = payload / "bin/vc-terminal"
+    terminal = payload / "libexec/vc-terminal"
     terminal.parent.mkdir(parents=True)
     shutil.copy2(macho_executable, terminal)
     _codesign_macho(terminal)
@@ -218,14 +218,14 @@ def test_final_embedded_runtime_pack_rejects_invalid_nested_macho(
 
     invalid_result = _runtime_pack_macho_preflight(invalid)
     assert invalid_result.returncode != 0
-    assert "invalid signature: bin/vc-terminal" in invalid_result.stderr
+    assert "invalid signature: libexec/vc-terminal" in invalid_result.stderr
 
 
 def test_valid_runtime_pack_preserves_success_across_late_cleanup_race(
     tmp_path: Path, macho_executable: Path
 ) -> None:
     payload = tmp_path / "payload/VibecraftedRuntime"
-    terminal = payload / "bin/vc-terminal"
+    terminal = payload / "libexec/vc-terminal"
     terminal.parent.mkdir(parents=True)
     shutil.copy2(macho_executable, terminal)
     _codesign_macho(terminal)
@@ -1091,11 +1091,12 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "copyItem(at:" not in delegate
     assert "writeLauncher(" not in delegate
     assert 'appendingPathComponent("active.json")' not in delegate
-    # PATH composes: the signed generation wins, the caller's PATH survives behind
-    # it. A hard-coded system-only PATH strips Homebrew/~/.local/bin/~/.cargo/bin
-    # from every spawned agent CLI, so `#!/usr/bin/env` shebangs exit 127.
+    # PATH composes: the caller's tools win and the signed generation remains a
+    # fallback. A hard-coded system-only PATH strips Homebrew/~/.local/bin/
+    # ~/.cargo/bin from spawned agent CLIs, so `#!/usr/bin/env` shebangs exit 127.
     assert 'environment["PATH"] = composedPath(' in delegate
     assert 'environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"' not in delegate
+    assert 'return (entries + [generationBin]).joined(separator: ":")' in delegate
     assert '["server", "service", "reconcile"]' in delegate
     assert "shell-agent" not in delegate
     assert 'name = "vc-start"' in cargo
@@ -1105,8 +1106,8 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert 'Command::new("/bin/bash")' in launcher
     assert "fn host_agent_search_path(" in launcher
     assert '"/opt/homebrew/bin"' in launcher
-    # vc-start composes: the PATH AppDelegate hands it (generation first, the
-    # operator's Homebrew/npm/cargo/nvm tail behind) must survive the handoff,
+    # vc-start composes: the PATH AppDelegate hands it (the Founder's
+    # Homebrew/npm/cargo/nvm entries first, generation fallback last) survives,
     # sanitized rather than amputated — a closed allowlist here re-created the
     # exit-127 shebang failures the composed PATH fixed one process earlier.
     assert 'let inherited_path = env::var("PATH").ok();' in launcher
@@ -3642,15 +3643,24 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     assert 'mods = "Command|Shift"' in terminal
     assert 'chars = "\\u001b[46;10u"' in terminal
     assert "launch-primary-shell.zsh" in terminal
+    assert (
+        "$VIBECRAFTED_RUNTIME_ROOT/config/alacritty/launch-primary-shell.zsh"
+        not in terminal
+    )
     assert "$VIBECRAFTED_RUNTIME_ROOT/bin/vc-start" in terminal
     assert "${1##*/}" in primary_shell
     assert '"$0" "$@"' in primary_shell
     assert "NSWorkspace.shared.openApplication(" in delegate
     assert "configuration.environment = environment" in delegate
     assert '"-e", install.primaryShell.path, install.start.path, "operator"' in delegate
-    assert 'product_config / "terminal-entry.toml"' in installer
+    assert 'product_config / "vc-terminal" / "vc-terminal.toml"' in installer
+    assert 'product_config / "terminal-entry.toml"' not in installer
+    assert "_reclaim_product_terminal_debris" in installer
+    assert "vc-terminal/launch-primary-shell.zsh" in terminal
     assert 'product_config / "terminal-policy.toml"' in installer
     assert 'product_config / "terminal-theme.toml"' in installer
+    assert "_materialize_runtime_generation_vc_terminal_entry" in installer
+    assert 'generation / "libexec/vc-terminal"' in installer
     assert 'let socketRoot = "/tmp/vc-frame-\\(getuid())"' in delegate
     assert 'environment["VC_FRAME_SOCKET_DIR"] = socketRoot' in delegate
     assert 'environment["ZELLIJ_SOCKET_DIR"] = socketRoot' in delegate

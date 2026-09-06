@@ -657,6 +657,11 @@ def test_control_plane_staging_delegates_to_distribution_manifest(
     )
     monkeypatch.setattr(
         installer,
+        "_materialize_runtime_generation_vc_terminal_entry",
+        lambda runtime_root: seen.update(vc_terminal_entry_materialized=runtime_root),
+    )
+    monkeypatch.setattr(
+        installer,
         "_write_runtime_generation_manifest",
         lambda runtime_root, **kwargs: seen.update(
             manifested=runtime_root,
@@ -680,6 +685,7 @@ def test_control_plane_staging_delegates_to_distribution_manifest(
     assert seen["frame_materialized"] == seen["destination"]
     assert seen["entrypoint_materialized"] == seen["destination"]
     assert seen["vc_frame_entry_materialized"] == seen["destination"]
+    assert seen["vc_terminal_entry_materialized"] == seen["destination"]
     assert seen["manifested"] == seen["destination"]
     assert seen["validated"] == seen["destination"]
     assert (destination / "payload.txt").read_text(encoding="utf-8") == "validated\n"

@@ -306,8 +306,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // The workspace terminal spawns agent CLIs (codex, gh, claude, loct) whose
     // `#!/usr/bin/env` shebangs resolve against exactly this PATH. Amputating the
     // caller's PATH down to the system set hides Homebrew, ~/.local/bin and
-    // ~/.cargo/bin, so those tools die with exit 127. Keep the host PATH and only
-    // give the signed generation priority over it.
+    // ~/.cargo/bin, so those tools die with exit 127. Keep the host PATH first;
+    // the signed generation is a fallback, not a shadow of user-owned tools.
     environment["PATH"] = composedPath(
       generation: install.root, inherited: host["PATH"])
     environment["PYTHONNOUSERSITE"] = "1"
@@ -539,11 +539,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     return result
   }
 
-  /// Signed generation bin first, then the inherited PATH; use the minimal
+  /// Inherited PATH first, then the signed generation fallback; use the minimal
   /// system set only when the caller carried no PATH at all.
   private func composedPath(generation: URL, inherited: String?) -> String {
-    let tail = (inherited ?? "").isEmpty ? "/usr/bin:/bin:/usr/sbin:/sbin" : inherited!
-    return "\(generation.appendingPathComponent("bin").path):\(tail)"
+    let generationBin = generation.appendingPathComponent("bin").path
+    let head = (inherited ?? "").isEmpty ? "/usr/bin:/bin:/usr/sbin:/sbin" : inherited!
+    let entries = head.split(separator: ":").map(String.init).filter { $0 != generationBin }
+    return (entries + [generationBin]).joined(separator: ":")
   }
 
   /// Surface a launch failure where the operator can actually see it: the unified

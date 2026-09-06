@@ -135,6 +135,48 @@ def _runtime_product_payload(root: Path) -> None:
         raise RuntimePackContractError(
             "Runtime Pack product wrapper is not executable: bin/vc-frame"
         )
+    native_terminal = root / "libexec/vc-terminal"
+    if not _native_executable(native_terminal):
+        raise RuntimePackContractError(
+            "Runtime Pack native vc-terminal is missing or is not Mach-O/ELF: "
+            "libexec/vc-terminal"
+        )
+    terminal_wrapper = root / "bin/vc-terminal"
+    try:
+        terminal_wrapper_mode = terminal_wrapper.lstat().st_mode
+    except OSError as exc:
+        raise RuntimePackContractError(
+            "Runtime Pack product wrapper is missing bin/vc-terminal"
+        ) from exc
+    if (
+        not stat.S_ISREG(terminal_wrapper_mode)
+        or stat.S_IMODE(terminal_wrapper_mode) & 0o111 == 0
+    ):
+        raise RuntimePackContractError(
+            "Runtime Pack product wrapper is not executable: bin/vc-terminal"
+        )
+    if _native_executable(terminal_wrapper):
+        raise RuntimePackContractError(
+            "Runtime Pack bin/vc-terminal must be the product wrapper, not the Alacritty host"
+        )
+    try:
+        terminal_wrapper_text = terminal_wrapper.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimePackContractError(
+            "Runtime Pack bin/vc-terminal is unreadable"
+        ) from exc
+    if "--config-file" not in terminal_wrapper_text:
+        raise RuntimePackContractError(
+            "Runtime Pack bin/vc-terminal does not pin --config-file"
+        )
+    if "vc-terminal.toml" not in terminal_wrapper_text:
+        raise RuntimePackContractError(
+            "Runtime Pack bin/vc-terminal does not pin vc-terminal.toml"
+        )
+    if "libexec/vc-terminal" not in terminal_wrapper_text:
+        raise RuntimePackContractError(
+            "Runtime Pack bin/vc-terminal does not exec libexec/vc-terminal"
+        )
     config = root / VC_FRAME_CONFIG_ROOT
     required = (config / "config.kdl", config / "layouts", config / "themes")
     if not required[0].is_file() or not all(path.is_dir() for path in required[1:]):

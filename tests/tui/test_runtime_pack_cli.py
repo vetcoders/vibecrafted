@@ -91,6 +91,22 @@ def _seed_vc_frame_product_payload(root: Path) -> None:
     native.parent.mkdir(parents=True, exist_ok=True)
     native.write_bytes(b"\xcf\xfa\xed\xfe" + b"\x00" * 32)
     native.chmod(0o755)
+    terminal_wrapper = root / "bin/vc-terminal"
+    terminal_wrapper.write_text(
+        (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
+            encoding="utf-8"
+        ),
+        encoding="utf-8",
+    )
+    terminal_wrapper.chmod(0o755)
+    (root / "scripts").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(
+        REPO_ROOT / "scripts/vc-terminal-product-entry.sh",
+        root / "scripts/vc-terminal-product-entry.sh",
+    )
+    terminal_host = root / "libexec/vc-terminal"
+    terminal_host.write_bytes(b"\xcf\xfa\xed\xfe" + b"\x00" * 32)
+    terminal_host.chmod(0o755)
     config = root / "vibecrafted-core/vibecrafted_core/config/vc-frame"
     (config / "layouts").mkdir(parents=True, exist_ok=True)
     (config / "themes").mkdir()
@@ -394,9 +410,7 @@ def test_app_helpers_can_verify_but_cannot_replace_signed_pack_bytes(
     payload = tmp_path / "source/VibecraftedRuntime"
     capture = tmp_path / "argv"
     _fake_runtime_payload(payload, capture)
-    terminal = payload / "bin/vc-terminal"
-    terminal.write_text("#!/bin/sh\n# signed terminal\n", encoding="utf-8")
-    terminal.chmod(0o755)
+    terminal = payload / "libexec/vc-terminal"
     archive, public_key = _sealed_archive(tmp_path, payload)
     app = tmp_path / "Vibecrafted.app"
     app_terminal = app / "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
@@ -561,9 +575,6 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
     _foundation_manifest(runtime)
     _source_provenance(runtime)
     _seed_vc_frame_product_payload(runtime)
-    terminal = runtime / "bin/vc-terminal"
-    terminal.write_text("#!/bin/sh\n", encoding="utf-8")
-    terminal.chmod(0o755)
     output = tmp_path / "Vibecrafted_RuntimePack_fixture.tar.gz"
 
     result = subprocess.run(
@@ -604,6 +615,7 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
         assert "VibecraftedRuntime/bin/vc-frame" in names
         assert "VibecraftedRuntime/bin/vc-start" in names
         assert "VibecraftedRuntime/libexec/vc-frame" in names
+        assert "VibecraftedRuntime/libexec/vc-terminal" in names
         assert "VibecraftedRuntime/runtime-pack-provenance.json" in names
         assert "VibecraftedRuntime/scripts/vibecrafted" in names
         assert not any(name.endswith("/.DS_Store") for name in names)
@@ -629,12 +641,13 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
     # the native builder records from real produced bytes. A synthetic payload
     # cannot be mislabeled as a complete Linux carrier merely because it has
     # executable-shaped files.
-    for relative in ("bin/vc-terminal", "bin/vc-frame", "libexec/vc-frame"):
+    for relative in ("bin/vc-frame", "libexec/vc-frame"):
         helper = runtime / relative
         helper.parent.mkdir(parents=True, exist_ok=True)
         helper.write_text("#!/bin/sh\n", encoding="utf-8")
         helper.chmod(0o755)
     (runtime / "libexec/vc-frame").write_bytes(b"\x7fELF" + b"\x00" * 32)
+    (runtime / "libexec/vc-terminal").write_bytes(b"\x7fELF" + b"\x00" * 32)
     linux_output = tmp_path / "Vibecrafted_RuntimePack_fixture-linux-arm64.tar.gz"
     linux = subprocess.run(
         [

@@ -5,9 +5,9 @@
 live_config_reload = true
 
 [terminal]
-# The app passes the generation-bound primary-shell path with `-e`. This
-# fallback gives the standalone vc-terminal launcher the identical chain.
-shell = { program = "/bin/zsh", args = ["-lc", "exec \"$VIBECRAFTED_RUNTIME_ROOT/config/alacritty/launch-primary-shell.zsh\" \"$VIBECRAFTED_RUNTIME_ROOT/bin/vc-start\" operator"] }
+# Alacritty does not expand ${HOME} in [terminal].shell.program. /bin/zsh -lc
+# expands XDG and execs the one product launcher the installer publishes.
+shell = { program = "/bin/zsh", args = ["-lc", "exec \"${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-terminal/launch-primary-shell.zsh\" \"$VIBECRAFTED_RUNTIME_ROOT/bin/vc-start\" operator"] }
 
 [window]
 blur = true
