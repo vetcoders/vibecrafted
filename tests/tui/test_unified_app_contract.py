@@ -323,7 +323,7 @@ def _module_fixture(
     return manifest
 
 
-def _runtime_pack_fixture(app: Path) -> str:
+def _runtime_pack_fixture(app: Path, macho_executable: Path) -> str:
     name = "Vibecrafted_RuntimePack_1.0.0-20260814-22222222-darwin-arm64.tar.gz"
     embedded = app / "Contents/Resources/runtime-pack" / name
     with tempfile.TemporaryDirectory(prefix="runtime-pack-fixture.") as temporary:
@@ -343,8 +343,17 @@ def _runtime_pack_fixture(app: Path) -> str:
         frame_wrapper.chmod(0o755)
         native_frame = payload / "libexec/vc-frame"
         native_frame.parent.mkdir(parents=True)
-        native_frame.write_bytes(b"\xcf\xfa\xed\xfe" + b"\x00" * 32)
-        native_frame.chmod(0o755)
+        shutil.copy2(macho_executable, native_frame)
+        terminal_wrapper = payload / "bin/vc-terminal"
+        terminal_wrapper.write_text(
+            (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
+                encoding="utf-8"
+            ),
+            encoding="utf-8",
+        )
+        terminal_wrapper.chmod(0o755)
+        native_terminal = payload / "libexec/vc-terminal"
+        shutil.copy2(macho_executable, native_terminal)
         frame_config = payload / runtime_pack_contract.VC_FRAME_CONFIG_ROOT
         (frame_config / "layouts").mkdir(parents=True)
         (frame_config / "themes").mkdir()
@@ -523,7 +532,7 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
         entrypoint_name="frame",
         product_entry=frame_product_entry,
     )
-    runtime_pack_name = _runtime_pack_fixture(app)
+    runtime_pack_name = _runtime_pack_fixture(app, macho_executable)
     manifest = {
         "schema": contract.PRODUCT_SCHEMA,
         "product": contract.PRODUCT_NAME,
@@ -3719,10 +3728,12 @@ def test_installed_deck_resolves_server_binary_and_site_from_its_generation() ->
     assert 'server_bin="${runtime_root:+$runtime_root/bin/vc-server}"' in deck
     assert 'site_root="${runtime_root:+$runtime_root/server/site}"' in deck
     assert 'local server_bin="$HOME/.local/bin/vc-server"' not in deck
+    assert "_vc_source_launcher_ulimits()" in deck
     assert (
-        '"$script_dir/../vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh"'
+        'candidate="$owner_root/vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh"'
         in deck
     )
+    assert 'source "$candidate"' in deck
 
 
 def test_primary_shell_exits_instead_of_reusing_pty_after_vc_start_failure(
