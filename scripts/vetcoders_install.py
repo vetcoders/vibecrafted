@@ -15459,7 +15459,11 @@ def _backup_runtime_collision(
 
 
 def _backup_runtime_drift(
-    destination: Path, *, runtime_home: Path, receipt: dict[str, Any]
+    destination: Path,
+    *,
+    runtime_home: Path,
+    receipt: dict[str, Any],
+    reason: str = "managed path diverged since install",
 ) -> Path:
     """Preserve an operator-diverged managed path before the installer reclaims it.
 
@@ -15486,7 +15490,7 @@ def _backup_runtime_drift(
     receipt.setdefault("drift_backups", {})[str(destination)] = str(backup)
     _checkpoint_runtime_install_receipt(runtime_home, receipt)
     print(
-        f"[runtime-install] managed path diverged since install; "
+        f"[runtime-install] {reason}; "
         f"preserved {destination} (divergent copy: {backup})",
         file=sys.stderr,
     )
@@ -15728,7 +15732,10 @@ def _prepare_runtime_preferences(
             if _path_present(backup_destination):
                 backup = str(
                     _backup_runtime_drift(
-                        backup_destination, runtime_home=runtime_home, receipt=receipt
+                        backup_destination,
+                        runtime_home=runtime_home,
+                        receipt=receipt,
+                        reason="product configuration conflict",
                     )
                 )
             conflicts.append(
@@ -15805,7 +15812,10 @@ def _publish_runtime_frame_config(
                     destination, runtime_home=runtime_home, receipt=receipt
                 )
             backup = _backup_runtime_drift(
-                destination, runtime_home=runtime_home, receipt=receipt
+                destination,
+                runtime_home=runtime_home,
+                receipt=receipt,
+                reason="snapshot before product configuration replacement",
             )
             _remove_path(destination)
         try:
