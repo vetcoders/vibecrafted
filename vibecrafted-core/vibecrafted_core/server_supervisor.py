@@ -635,16 +635,23 @@ def _active_generation_root(runtime_home: Path) -> Path | None:
         payload = json.loads(encoded)
     except (ValueError, UnicodeDecodeError):
         return None
-    if not isinstance(payload, dict):
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema") != "vibecrafted.active-runtime.v1"
+    ):
+        return None
+    version = payload.get("version")
+    if not isinstance(version, str) or not re.fullmatch(r"[A-Za-z0-9.+_-]+", version):
         return None
     runtime_root = payload.get("runtime_root")
-    if not isinstance(runtime_root, str) or not runtime_root:
+    expected = runtime_home / "releases" / version
+    if runtime_root != str(expected):
         return None
     try:
         generation = _absolute_path(Path(runtime_root))
-    except SupervisorError:
+    except (SupervisorError, OSError, ValueError):
         return None
-    if not generation.is_relative_to(runtime_home):
+    if generation != expected or generation.parent != runtime_home / "releases":
         return None
     return generation
 
@@ -740,8 +747,8 @@ def _child_path(paths: SupervisorPaths) -> str:
     return os.pathsep.join(ordered)
 
 
-def _read_owned_bytes(path: Path) -> bytes | None:
-    """Read up to 64KiB from an owned, non-symlinked, single-hardlink regular
+def _read_owned_bytes(path: Path, *, max_bytes: int = 64 * 1024) -> bytes | None:
+    """Read bounded bytes from an owned, non-symlinked, single-hardlink regular
     file, verifying descriptor identity matches the named path; None on any
     trust failure or OS error."""
 
@@ -764,7 +771,8 @@ def _read_owned_bytes(path: Path) -> bytes | None:
         opened = os.fstat(descriptor)
         if (opened.st_dev, opened.st_ino) != (visible.st_dev, visible.st_ino):
             return None
-        return os.read(descriptor, 64 * 1024)
+        encoded = os.read(descriptor, max_bytes + 1)
+        return encoded if len(encoded) <= max_bytes else None
     except OSError:
         return None
     finally:
@@ -2929,6 +2937,112 @@ def _runtime_status(paths: SupervisorPaths) -> int:
     return 0
 
 
+def _admit_service_mutation(
+    config: SupervisorConfig,
+    *,
+    supervisor_binary: Path | None,
+    inherited: bool,
+) -> None:
+    """Admit this caller only while holding the tools-install mutation lease.
+
+    The active receipt selects the generation; the install receipt binds public
+    wrappers to that selection. The loaded owner must also belong to it, even
+    when two generations contain identical launcher bytes. Standalone service
+    installs without a runtime publication keep their existing semantics.
+    """
+
+    paths = config.paths
+    active = paths.runtime_home / "active.json"
+    receipt_path = paths.runtime_home / "install-receipt.json"
+    current = paths.runtime_home / "tools/vibecrafted-current"
+    module = Path(__file__).resolve()
+    candidates = [config.launcher, module]
+    if supervisor_binary is not None:
+        candidates.append(supervisor_binary)
+    generation = _active_generation_root(paths.runtime_home)
+    if generation is None:
+        # Absence is a standalone install only when there is no publication
+        # evidence at all. Unreadable, symlinked and partial state is not absent.
+        try:
+            for path in (active, receipt_path, current):
+                try:
+                    path.lstat()
+                except FileNotFoundError:
+                    continue
+                break
+            else:
+                if not any(
+                    path.is_relative_to(paths.runtime_home / "releases")
+                    for path in candidates
+                ):
+                    return
+        except OSError:
+            pass
+        raise SupervisorError(
+            "runtime publication is absent or invalid; repair it before service mutation",
+            EX_CONFIG,
+        )
+
+    # Install receipts include all owned projections and can exceed the small
+    # status/lock receipt limit. Keep the same descriptor/ownership checks.
+    encoded = _read_owned_bytes(receipt_path, max_bytes=16 * 1024 * 1024)
+    try:
+        receipt = json.loads(encoded) if encoded is not None else None
+        if (
+            not isinstance(receipt, dict)
+            or receipt.get("schema") != "vibecrafted.runtime-install.v1"
+            or receipt.get("version") != generation.name
+            or receipt.get("owned_files", {}).get(str(active)) != _sha256_file(active)
+            or not current.is_symlink()
+            or current.resolve(strict=True) != generation
+            or receipt.get("owned_symlinks", {}).get(str(current)) != str(generation)
+            or "config_transaction" in receipt
+            or any(
+                receipt.get(key)
+                for key in ("config_pending", "config_conflicts", "uninstall_pending")
+            )
+            or (receipt.get("install_pending") and not inherited)
+        ):
+            raise ValueError("incomplete or conflicting selection")
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        raise SupervisorError(
+            "runtime publication has no coherent install identity; repair it before service mutation",
+            EX_CONFIG,
+        ) from exc
+
+    if (
+        module != generation / "vibecrafted-core/vibecrafted_core/server_supervisor.py"
+        or PACKAGE_VERSION != generation.name
+    ):
+        raise SupervisorError(
+            "service caller differs from the selected runtime; retry using the current launcher",
+            EX_TEMPFAIL,
+        )
+    for candidate, name in (
+        (config.launcher, "vibecrafted"),
+        (supervisor_binary, "vc-server-supervisor"),
+    ):
+        if candidate is None or candidate == generation / "bin" / name:
+            continue
+        if candidate.is_relative_to(paths.runtime_home / "releases"):
+            raise SupervisorError(
+                "service entrypoint differs from the selected runtime; retry using the current launcher",
+                EX_TEMPFAIL,
+            )
+        roots = receipt.get("roots")
+        launcher_home = roots.get("launcher_home") if isinstance(roots, dict) else None
+        if (
+            not isinstance(launcher_home, str)
+            or candidate != Path(launcher_home) / name
+            or receipt["owned_files"].get(str(candidate)) != _sha256_file(candidate)
+        ):
+            raise SupervisorError(
+                "service entrypoint is not bound to the runtime publication",
+                EX_CONFIG,
+            )
+    _supervisor_identity(supervisor_binary, launcher=config.launcher)
+
+
 def _service_command(args: argparse.Namespace) -> int:
     """Dispatch the `service` subcommand's action (status/logs/install/
     reconcile/restart/start/stop/uninstall), serializing mutating actions behind
@@ -2936,7 +3050,8 @@ def _service_command(args: argparse.Namespace) -> int:
     (status returns 1 unless every health field is green)."""
 
     _require_macos_service()
-    config = _config_from_args(args)
+    if args.action in {"status", "logs"}:
+        config = _config_from_args(args)
     if args.action == "status":
         status = service_status(config)
         _print_service_status(status, as_json=args.json)
@@ -2966,11 +3081,27 @@ def _service_command(args: argparse.Namespace) -> int:
             print(f"Stdout: {payload['stdout']}")
             print(f"Stderr: {payload['stderr']}")
         return 0
-    with _ToolsInstallMutationLease(config.paths):
+    with _ToolsInstallMutationLease(_paths_from_args(args)) as lease:
+        try:
+            config = _config_from_args(args)
+            supervisor_binary = (
+                _install_requires_supervisor_binary(args)
+                if args.action in {"install", "reconcile"} or args.supervisor_bin
+                else None
+            )
+            _admit_service_mutation(
+                config, supervisor_binary=supervisor_binary, inherited=lease.inherited
+            )
+        except (OSError, ValueError) as exc:
+            raise SupervisorError(
+                "service selection is unavailable or invalid; refusing service mutation",
+                EX_CONFIG,
+            ) from exc
         if args.action in {"install", "reconcile"}:
+            assert supervisor_binary is not None
             changed, restarted = install_and_reconcile_service(
                 config,
-                supervisor_binary=_install_requires_supervisor_binary(args),
+                supervisor_binary=supervisor_binary,
             )
             print(
                 f"LaunchAgent {'installed' if changed else 'already current'} at "
