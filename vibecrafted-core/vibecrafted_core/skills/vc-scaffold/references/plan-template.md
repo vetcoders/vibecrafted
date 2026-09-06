@@ -110,10 +110,14 @@ task above to one `[[cuts]]` entry with its dependencies, agent/workflow, brief-
 delivery-verifier. `vibecrafted dispatch <absolute-plan-root>/<plan-id>.dispatch.toml --doctor`
 must pass before handoff. Multi-cut execution belongs to `/vc-ship` A→Z.
 
-If the plan uses compile embargo, include the phase marker, deferred-gate list, repository-owned
-hook/policy path, recovery ref, and release attestation required by
-`references/compile-embargo.md`. If that policy mechanism does not exist, add it as a prerequisite
-or remove the embargo; never use `--no-verify` or a push ban as the substitute.
+If the plan uses compile embargo, include the explicit Founder authorization, phase marker,
+deferred-gate list, temporary structural evidence, checkpoint procedure, named release attestation,
+and local worker-commit report required by `references/compile-embargo.md`. A selective
+repository-owned hook policy is preferred when available; its absence does not block the embargo
+or require a new policy system first. The worker report must state what ran and what was skipped.
+The plan must distinguish the local checkpoint, integrator structural admission (exact SHA/scope,
+Semgrep, and secret/security review; deferred compile/lint/type/test gates still skipped), and
+verified delivery after named closure and the full language-appropriate gate set.
 
 ## Test Gates (per Vector profile)
 
@@ -125,7 +129,8 @@ every cut `[~]→[x]`.
 - **stabilize** → the bleeding stops + a regression/canary gate green (busy ≠ dead)
 - **recon** → map/answer delivered with evidence refs
 - **e2e** → the full path runs end-to-end
-- **always** → no exposed secrets; security gate not skipped (`--no-verify` forbidden)
+- **always** → no exposed secrets; integrator structural admission records Semgrep and
+  secret/security review, while verified delivery after closure records the full language-appropriate gates
 
 ## Living Tree Note
 

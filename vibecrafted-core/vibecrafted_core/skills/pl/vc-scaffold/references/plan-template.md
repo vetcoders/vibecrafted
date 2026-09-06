@@ -110,10 +110,14 @@ na jeden wpis `[[cuts]]` z zależnościami, agentem/workflow, promptem wskazują
 delivery-verifierem. `vibecrafted dispatch <absolutny-root-planu>/<plan-id>.dispatch.toml --doctor`
 musi przejść przed handoffem. Wielocięciowe wykonanie należy do `/vc-ship` A→Z.
 
-Jeśli plan używa compile embargo, podaj marker fazy, listę odroczonych bramek, ścieżkę repo-owned
-hooka/polityki, ref recovery oraz atestację zdjęcia embarga wymaganą przez
-`references/compile-embargo.md`. Jeśli taki mechanizm polityk nie istnieje, dodaj go jako prerequisite
-albo usuń embargo; nigdy nie zastępuj go `--no-verify` ani push-banem.
+Jeśli plan używa compile embargo, podaj jawną autoryzację Foundera, marker fazy, listę odroczonych
+bramek, tymczasowy dowód strukturalny, procedurę checkpointu, nazwaną atestację zdjęcia embarga
+oraz raport lokalnego commita workera wymagane przez `references/compile-embargo.md`. Selektywna
+repo-owned polityka hooków jest preferowana, gdy jest dostępna; jej brak nie blokuje embarga ani
+nie wymaga najpierw budowania nowego systemu polityk. Raport workera musi podać, co uruchomiono,
+a co pominięto. Plan musi rozróżnić lokalny checkpoint, structural admission integratora (dokładny
+SHA/zakres, Semgrep i przegląd sekretów/bezpieczeństwa; odroczone compile/lint/type/test nadal
+pominięte) oraz verified delivery po nazwanej closure i pełnym, odpowiednim dla języka zestawie bramek.
 
 ## Test Gates (per Vector profile)
 
@@ -125,7 +129,8 @@ każdego cięcia `[~]→[x]`.
 - **stabilize** → krwawienie ustaje + bramka regresji/canary zielona (busy ≠ dead)
 - **recon** → mapa/odpowiedź dostarczona z referencjami do evidence
 - **e2e** → pełna ścieżka przebiega end-to-end
-- **always** → żadnych odsłoniętych sekretów; bramka bezpieczeństwa nie pominięta (`--no-verify` zabronione)
+- **always** → żadnych odsłoniętych sekretów; structural admission integratora zapisuje Semgrep
+  i przegląd sekretów/bezpieczeństwa, a verified delivery po closure zapisuje pełne, odpowiednie dla języka bramki
 
 ## Living Tree Note
 
