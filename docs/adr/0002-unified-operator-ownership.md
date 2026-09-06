@@ -1,6 +1,6 @@
 # ADR-0002 — Unified operator runtime: one owner per truth domain
 
-- **Status:** Accepted (plan `vc-unified-operator-runtime` W0-A, polarize cut 2026-07-29; amended 2026-09-06 for component code-care and runtime boundaries).
+- **Status:** Accepted (plan `vc-unified-operator-runtime` W0-A, polarize cut 2026-07-29). This source amendment, dated 2026-09-06, is proposed for integrator admission; it does not claim that the isolated worktree has landed or that pending implementation seams are installed.
 - **Machine contract:** [`docs/adr/ownership-matrix.json`](ownership-matrix.json), enforced by
   `tests/test_ownership_contract.py` (deterministic gate — rejects a second owner for any domain).
 - **Supersedes as doctrine:** the implicit, per-plan ownership statements in `vc-single-brain`,
@@ -70,12 +70,14 @@ a write to count) and would require retraining the entire fleet for zero truth g
   truth from the control plane; it does not own it. It does not own the terminal substrate.
   One shared rail, tabs strip, and status strip throughout VC Frame is the intended contract
   (implementation in progress, not claimed done).
-- **App and tray (`vibecrafted-app`)** is an AppKit presentation shell, tray status display,
-  convenient current-runtime launcher, and canonical service control entrypoint. It consumes
-  the Python caretaker health verdict and active Runtime Pack identity. Opening or reattaching
-  a terminal must not make the App a server or run-state owner. Ordinary App startup resolves
-  the verified active generation from `~/.local/share/vibecrafted` and consumes configuration
-  from `~/.config/vibecrafted/**` without delivering or reinstalling carriers. Reinstall and repair
+- **App and tray (`vibecrafted-app`)** has the required target contract of an AppKit presentation
+  shell, tray status display, current-runtime reader/launcher, and canonical service-control
+  client. It must consume the Python caretaker verdict and selected Runtime Pack identity, and
+  ensure/control the canonical shared supervisor through that service interface. Opening or
+  reattaching a terminal must not make the App a server, background supervisor, or run-state owner.
+  Pending admission of the canonical installer-resolver seam, ordinary App startup must resolve the
+  verified active generation from `~/.local/share/vibecrafted` and consume configuration from
+  `~/.config/vibecrafted/**` without delivering or reinstalling carriers. Reinstall and repair
   remain explicit onboarding/repair commands. Terminal window closure from the App must preserve
   supervised background sessions.
 - **Shared system supervisor and server caretaker (`shared-supervisor`)** owns the identity-verified
@@ -111,17 +113,21 @@ Aplikacja (App/tray) stanowi natywną powłokę prezentacyjną, wygodny launcher
 wykonawczego oraz kanoniczny punkt kontroli usług; nie jest procesem supervisora ani właścicielem stanu
 runów. Współdzielony supervisor systemowy (`server_supervisor`) wraz z serwerem utrzymują agentów,
 przebiegi robocze (runs), PTY oraz sesje VC Frame przy życiu po zamknięciu okna terminala. Zwykłe
-uruchomienie Aplikacji konsumuje zweryfikowaną aktywną generację i konfigurację, bez publikowania ani
-reinstalowania środowiska w tle.
+uruchomienie Aplikacji ma konsumować zweryfikowaną aktywną generację i konfigurację, bez publikowania
+ani reinstalowania środowiska w tle; to wymagany kontrakt docelowy, a nie twierdzenie o zintegrowanym
+lub uruchomionym resolverze.
 
 **English (Canonical architectural boundary):**
 Why Alacritty is VC Terminal: VC Frame owns multiplexing, sessions, and UI composition; a richer
 terminal emulator would duplicate that responsibility. VC Terminal (Alacritty) remains strictly a
 replaceable presentation substrate (GPU rendering, window management, typography). The App (tray) is
-a presentation shell, a convenient current-runtime launcher, and canonical service control; it is not
+required to be a presentation shell, a convenient current-runtime reader/launcher, and canonical
+service-control client; it must ensure/control the shared supervisor through that interface, but is not
 the supervisor process or run-state owner. The shared system supervisor (`server_supervisor`) and server
-keep agents, runs, PTYs, and VC Frame sessions alive after terminal closure. Ordinary App launch only
-consumes the verified active generation and configuration without delivering or reinstalling carriers.
+keep agents, runs, PTYs, and VC Frame sessions alive after terminal closure. Ordinary App launch must
+only consume the verified active generation and configuration without delivering or reinstalling
+carriers. This is a required target contract pending installer-resolver seam admission, not a claim of
+installed or live behavior.
 
 ### Active configuration and installed runtime paths
 
@@ -137,21 +143,22 @@ a carrier as a side effect of opening a window.
 ### Code-care matrix: agent maintenance responsibilities
 
 Runtime components own data and runtime truth domains; agents maintain code. Code-care allocations
-govern maintenance responsibilities and review pairing, not runtime authority.
+govern repository-qualified, bounded maintenance responsibilities and review pairing, not runtime
+authority. A review role may recur across rows; it does not confer source scope or exclusive authorship.
 
-| Component Area | Runtime Component | Code-Care Lead | Review / Admission | Scope Paths (relative to repos) | Authority & Decision Provenance |
-| --- | --- | --- | --- | --- | --- |
-| **App and tray** | `vibecrafted-app` | **Claude** | **Codex** review | `vibecrafted-app/shell-agent/app/Vibecrafted/` | **Founder requirement** (App is presentation/launcher, not supervisor or run-state owner; terminal close survives) + **Agent-Operator allocation** (Claude lead / Codex review). Agi limited to icons, copy, docs (launcher `agy`, model `gemini-3.8-flash-medium`). |
-| **System supervisor and caretaker** | `shared-supervisor` | **Codex** | **Claude** review | `vibecrafted-core/vibecrafted_core/server_supervisor.py`, `caretaker.py`, `vibecrafted-server/` | **Founder requirement** (shared supervisor keeps agents/runs/PTYs alive across terminal exits) + **Agent-Operator allocation** (Codex lead / Claude review; integrator admits). |
-| **Control plane and Live Runs** | `control-plane` | **Codex** | **Claude** review | `vibecrafted-core/vibecrafted_core/control_plane.py`, `vibecrafted-server/control-core/src/read.rs` | **Historical ADR-0002 doctrine** (control-plane sole owner of run-lifecycle) + **Agent-Operator allocation** (Codex lead / Claude review). Python publishes; Rust reads. |
-| **VC Frame PTY/multiplexer core** | `vc-frame` | **Codex** | **Claude** review | `zellij-server/src/`, `zellij-client/src/` | **Founder requirement** (multiplexing and session composition belong in VC Frame) + **Agent-Operator allocation** (Codex lead / Claude review). Long-lived server survives client exit. |
-| **Snapshot / resurrect within Frame** | `vc-frame` | **Claude** | **Codex** review | `zellij-utils/src/sessions.rs`, `zellij-server/src/background_jobs.rs` | **Agent-Operator allocation** (Claude lead / Codex review). Stable session/lease identity across socket rebound; rejects age heuristics. |
-| **VC Terminal / Alacritty** | `vc-terminal-alacritty` | **Claude** | **Codex** review | `alacritty/`, `alacritty_terminal/`, `scripts/vc-terminal-product-entry.sh` | **Founder explicit decision** (Alacritty is VC Terminal because VC Frame owns multiplexing and UI composition; richer terminal duplicates state) + **Agent-Operator allocation** (Claude lead / Codex review). Agi visual assets/copy only. |
-| **Installer and configuration** | `vibecrafted-runtime-manifest` | **Codex** | **Claude** review | `scripts/`, `vibecrafted-core/vibecrafted_core/runtime/shell/`, `config/` | **Founder requirement** (ordinary startup consumes without delivery; installer alone publishes) + **Agent-Operator allocation** (Codex lead / Claude review). Agi prose/art only. |
-| **Plugin rendering and coherence** | `vc-frame` | **Grok** | **Claude** review | `default-plugins/`, `zellij-utils/src/` | **Founder explicit requirement** (adding Grok participation for plugin rendering, browser behavior, and interface coherence) + **Agent-Operator allocation** (Grok lead / Claude review). |
-| **Static layouts, assets and UI copy** | `vc-frame` | **Agi** (`agy`) | **Grok** review, **Codex** admission | `docs/`, `config/` | **Founder requirement** (Agi pinned launcher `agy`, model `gemini-3.8-flash-medium`; legacy `gemini` CLI deprecated) + **Agent-Operator allocation** (Agi lead / Grok review / Codex admission). |
-| **Fleet dispatcher and adapters** | `control-plane` | **Codex** | **Claude** review | `vibecrafted-core/vibecrafted_core/dispatch/` | **Historical doctrine** + **Agent-Operator allocation** (Codex lead / Claude review). Provider adapters normalize into one control-plane run contract. |
-| **Integration and operator** | `vibecrafted-runtime-manifest` | **Codex** (Agent-Operator) | **Claude** review | `.` | **Founder governance doctrine** + **Agent-Operator role assignment**. Integration is a separate proven act, never a worker claim. |
+| Component Area | Runtime Component | Code-Care Lead | Review / Admission | Repository | Scope Paths (relative to that repository) | Authority & Decision Provenance |
+| --- | --- | --- | --- | --- | --- | --- |
+| **App and tray** | `vibecrafted-app` | **Claude** | **Codex** review | `vetcoders/vibecrafted` | `vibecrafted-app/shell-agent/app/Vibecrafted/AppDelegate.swift`, `vibecrafted-app/shell-agent/app/Vibecrafted/ServerMenuPolicy.swift` | **Founder requirement** (App is presentation/current-runtime reader and service-control client, not supervisor or run-state owner; terminal close survives) + **Agent-Operator allocation** (Claude lead / Codex review). Agi allocation is launcher `agy`, requested model `gemini-3.8-flash-medium`, and is limited to icons, copy, docs; it is not actual-model evidence. |
+| **System supervisor and caretaker** | `shared-supervisor` | **Codex** | **Claude** review | `vetcoders/vibecrafted` | `vibecrafted-core/vibecrafted_core/server_supervisor.py`, `vibecrafted-core/vibecrafted_core/caretaker.py`, `vibecrafted-server/web/src/control/caretaker.rs` | **Founder requirement** (shared supervisor keeps agents/runs/PTYs alive across terminal exits) + **Agent-Operator allocation** (Codex lead / Claude review; integrator admits). |
+| **Control plane and Live Runs** | `control-plane` | **Codex** | **Claude** review | `vetcoders/vibecrafted` | `vibecrafted-core/vibecrafted_core/control_plane.py`, `vibecrafted-core/vibecrafted_core/supervisor_async.py`, `vibecrafted-server/control-core/src/read.rs` | **Historical ADR-0002 doctrine** (control-plane sole owner of run-lifecycle) + **Agent-Operator allocation** (Codex lead / Claude review). Python publishes; Rust reads. |
+| **VC Frame PTY/multiplexer core** | `vc-frame` | **Codex** | **Claude** review | `vetcoders/vc-frame` | `zellij-server/src/pty.rs`, `zellij-server/src/route.rs`, `zellij-server/src/tab/layout_applier.rs`, `zellij-client/src/` | **Founder requirement** (multiplexing and session composition belong in VC Frame) + **Agent-Operator allocation** (Codex lead / Claude review). Long-lived server survives client exit. |
+| **Snapshot / resurrect within Frame** | `vc-frame` | **Claude** | **Codex** review | `vetcoders/vc-frame` | `zellij-utils/src/sessions.rs`, `zellij-server/src/background_jobs.rs` | **Agent-Operator allocation** (Claude lead / Codex review). Stable session/lease identity across socket rebound; rejects age heuristics. |
+| **VC Terminal / Alacritty** | `vc-terminal-alacritty` | **Claude** | **Codex** review | `vetcoders/vc-terminal` | `alacritty/`, `alacritty_terminal/` | **Founder explicit decision** (Alacritty is VC Terminal because VC Frame owns multiplexing and UI composition; richer terminal duplicates state) + **Agent-Operator allocation** (Claude lead / Codex review). Agi visual assets/copy only. |
+| **Installer and configuration** | `vibecrafted-runtime-manifest` | **Codex** | **Claude** review | `vetcoders/vibecrafted` | `scripts/install-runtime-pack.sh`, `scripts/vetcoders_install.py`, `scripts/unified_product_manifest.py`, `scripts/lib/runtime-roots.sh`, `scripts/vc-terminal-product-entry.sh`, `config/vc-terminal/vibecrafted.toml`, `vibecrafted-core/vibecrafted_core/runtime/helpers/vetcoders-runtime-core.sh` | **Founder requirement** (ordinary startup consumes without delivery; installer alone publishes) + **Agent-Operator allocation** (Codex lead / Claude review). Agi prose/art only. |
+| **Plugin rendering and browser coherence** | `vc-frame` | **Grok** | **Claude** review | `vetcoders/vc-frame` | `default-plugins/`, `zellij-client/assets/` | **Founder explicit requirement** (adding Grok participation for plugin rendering, browser behavior, and interface coherence) + **Agent-Operator allocation** (Grok lead / Claude review). |
+| **Static layouts, assets and UI copy** | `vc-frame` | **Agi** (`agy`) | **Grok** review, **Agent-Operator** admission | `vetcoders/vc-frame` | `assets/operator-layouts/`, `zellij-utils/assets/layouts/`, `docs/VC_FRAME_OPERATOR_SURFACE.md` | **Founder requirement** (Agi allocation uses launcher `agy` with requested model `gemini-3.8-flash-medium`; legacy `gemini` CLI deprecated) + **Agent-Operator allocation** (Agi lead / Grok review / Agent-Operator admission). This allocation is not evidence of actual model execution. |
+| **Fleet dispatcher and adapters** | `control-plane` | **Codex** | **Claude** review | `vetcoders/vibecrafted` | `vibecrafted-core/vibecrafted_core/dispatch/` | **Historical doctrine** + **Agent-Operator allocation** (Codex lead / Claude review). Provider adapters normalize into one control-plane run contract. |
+| **Integration and admission** | none — admission role | **Agent-Operator** | **Claude** review | — | none | **Founder governance doctrine** + **Agent-Operator role assignment**. This is evidence/admission authority for scoped results, never repository-wide source ownership; integration is a separate proven act, never a worker claim. |
 
 **Decision Provenance Distinction:**
 - **Founder requirements:**
@@ -159,7 +166,7 @@ govern maintenance responsibilities and review pairing, not runtime authority.
   2. The App is presentation/launcher/service control; it is not the supervisor or run-state owner.
   3. The shared supervisor/server keeps background runs, PTYs, and frame sessions alive across terminal exit.
   4. Grok is the code-care lead for plugin rendering, plugin-browser behavior, flicker fix, and interface coherence.
-  5. Agi launcher is `agy` with pinned model `gemini-3.8-flash-medium` (legacy `gemini` CLI is deprecated). Other model pins are per-cut decisions.
+  5. Agi allocation uses launcher `agy` with requested model `gemini-3.8-flash-medium` (legacy `gemini` CLI is deprecated). Other model pins are per-cut decisions; allocation is not execution evidence.
   6. VC Frame contract is one shared rail, tabs strip, and status strip across all views (not claimed done).
 - **Agent-Operator allocation choices:**
   1. Lead and review assignments among providers based on architectural domain suitability (e.g. Codex for Python/Rust core and installer; Claude for Swift AppKit and Rust state machines; Grok for plugins/layouts).

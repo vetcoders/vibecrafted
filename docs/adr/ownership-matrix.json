@@ -119,11 +119,14 @@
       "code_care": {
         "lead": "codex",
         "review": "claude",
-        "secondary": "agi (installer prose/art assets only; launcher agy, model gemini-3.8-flash-medium)",
+        "secondary": "agi (installer prose/art assets only; launcher agy, requested model gemini-3.8-flash-medium)",
+        "repository": "vetcoders/vibecrafted",
         "scope_paths": [
-          "scripts/",
-          "vibecrafted-core/vibecrafted_core/runtime/shell/",
-          "config/"
+          "scripts/install-runtime-pack.sh",
+          "scripts/vetcoders_install.py",
+          "scripts/unified_product_manifest.py",
+          "scripts/lib/runtime-roots.sh",
+          "vibecrafted-core/vibecrafted_core/runtime/helpers/vetcoders-runtime-core.sh"
         ]
       }
     },
@@ -138,8 +141,10 @@
       "code_care": {
         "lead": "codex",
         "review": "claude",
+        "repository": "vetcoders/vibecrafted",
         "scope_paths": [
           "vibecrafted-core/vibecrafted_core/control_plane.py",
+          "vibecrafted-core/vibecrafted_core/supervisor_async.py",
           "vibecrafted-server/control-core/src/read.rs"
         ]
       }
@@ -176,11 +181,11 @@
       "code_care": {
         "lead": "claude",
         "review": "codex",
-        "secondary": "agi (visual asset/copy work only; launcher agy, model gemini-3.8-flash-medium)",
+        "secondary": "agi (visual asset/copy work only; launcher agy, requested model gemini-3.8-flash-medium)",
+        "repository": "vetcoders/vc-terminal",
         "scope_paths": [
           "alacritty/",
-          "alacritty_terminal/",
-          "scripts/vc-terminal-product-entry.sh"
+          "alacritty_terminal/"
         ],
         "rationale": "Alacritty is VC Terminal because VC Frame owns multiplexing, sessions and UI composition; a richer terminal would duplicate that responsibility."
       }
@@ -197,11 +202,12 @@
       "code_care": {
         "lead": "codex",
         "review": "claude",
+        "repository": "vetcoders/vc-frame",
         "scope_paths": [
-          "zellij-server/src/",
-          "zellij-client/src/",
-          "zellij-utils/src/",
-          "default-plugins/"
+          "zellij-server/src/pty.rs",
+          "zellij-server/src/route.rs",
+          "zellij-server/src/tab/layout_applier.rs",
+          "zellij-client/src/"
         ],
         "interface_contract": "One shared rail, tabs strip and status strip throughout VC Frame is the intended contract (not claimed implementation done)."
       }
@@ -273,11 +279,13 @@
       "code_care": {
         "lead": "claude",
         "review": "codex",
-        "secondary": "agi (icons, static UI copy, docs only; launcher agy, model gemini-3.8-flash-medium)",
+        "secondary": "agi (icons, static UI copy, docs only; launcher agy, requested model gemini-3.8-flash-medium)",
+        "repository": "vetcoders/vibecrafted",
         "scope_paths": [
-          "vibecrafted-app/shell-agent/app/Vibecrafted/"
+          "vibecrafted-app/shell-agent/app/Vibecrafted/AppDelegate.swift",
+          "vibecrafted-app/shell-agent/app/Vibecrafted/ServerMenuPolicy.swift"
         ],
-        "boundary": "AppKit shell for presentation, launcher convenience, and canonical service control; not supervisor or run-state owner."
+        "boundary": "Required target contract pending installer-resolver seam admission: AppKit presentation shell reads the selected current runtime and ensures/controls the canonical shared supervisor through service control; it is not the supervisor process or run-state owner."
       }
     },
     {
@@ -291,10 +299,11 @@
       "code_care": {
         "lead": "codex",
         "review": "claude",
+        "repository": "vetcoders/vibecrafted",
         "scope_paths": [
           "vibecrafted-core/vibecrafted_core/server_supervisor.py",
           "vibecrafted-core/vibecrafted_core/caretaker.py",
-          "vibecrafted-server/"
+          "vibecrafted-server/web/src/control/caretaker.rs"
         ],
         "boundary": "LaunchAgent supervised server+guardian pair; keeps agents, runs, PTY, and frame sessions alive after terminal closure. Derives single caretaker verdict."
       }
@@ -306,23 +315,26 @@
       "runtime_component": "vibecrafted-app",
       "lead": "claude",
       "review": "codex",
+      "repository": "vetcoders/vibecrafted",
       "scope_paths": [
-        "vibecrafted-app/shell-agent/app/Vibecrafted/"
+        "vibecrafted-app/shell-agent/app/Vibecrafted/AppDelegate.swift",
+        "vibecrafted-app/shell-agent/app/Vibecrafted/ServerMenuPolicy.swift"
       ],
-      "runtime_responsibility": "AppKit presentation shell, tray status, current-runtime launcher, and canonical service control. Renders Python caretaker health without inventing health state. Resolves active installed generation on normal start without reinstalling.",
+      "runtime_responsibility": "Required target contract pending canonical installer-resolver seam admission: AppKit presentation shell and tray read the selected current runtime, render Python caretaker health without inventing health state, and ensure/control the canonical shared supervisor through its service interface. The App is not the background supervisor or run-state owner; normal start must resolve the verified active generation without reinstalling.",
       "authority_type": "code_care_maintenance",
       "decision_source": "Founder requirement (App is not supervisor or run-state owner; terminal closure must not kill sessions) + Agent-Operator allocation (Claude lead / Codex review)",
-      "notes": "Agi (launcher agy, model gemini-3.8-flash-medium) limited to icons, static UI copy, and docs. Legacy gemini CLI deprecated."
+      "notes": "Agi allocation is launcher agy with requested model gemini-3.8-flash-medium, limited to icons, static UI copy, and docs. Legacy gemini CLI is deprecated; this allocation is not execution or live-runtime evidence."
     },
     {
       "area": "System supervisor and server caretaker",
       "runtime_component": "shared-supervisor",
       "lead": "codex",
       "review": "claude",
+      "repository": "vetcoders/vibecrafted",
       "scope_paths": [
         "vibecrafted-core/vibecrafted_core/server_supervisor.py",
         "vibecrafted-core/vibecrafted_core/caretaker.py",
-        "vibecrafted-server/"
+        "vibecrafted-server/web/src/control/caretaker.rs"
       ],
       "runtime_responsibility": "LaunchAgent identity-verified server+guardian pair; single caretaker verdict derivation. Keeps runs, PTYs, and frame sessions alive across terminal close.",
       "authority_type": "code_care_maintenance",
@@ -334,8 +346,10 @@
       "runtime_component": "control-plane",
       "lead": "codex",
       "review": "claude",
+      "repository": "vetcoders/vibecrafted",
       "scope_paths": [
         "vibecrafted-core/vibecrafted_core/control_plane.py",
+        "vibecrafted-core/vibecrafted_core/supervisor_async.py",
         "vibecrafted-server/control-core/src/read.rs"
       ],
       "runtime_responsibility": "Event/meta reconciliation, runs/*.json projections, and AsyncSupervisor agent child orchestration. Single liveness and settlement projection owner; Rust/web is reader only.",
@@ -348,8 +362,11 @@
       "runtime_component": "vc-frame",
       "lead": "codex",
       "review": "claude",
+      "repository": "vetcoders/vc-frame",
       "scope_paths": [
-        "zellij-server/src/",
+        "zellij-server/src/pty.rs",
+        "zellij-server/src/route.rs",
+        "zellij-server/src/tab/layout_applier.rs",
         "zellij-client/src/"
       ],
       "runtime_responsibility": "PTY allocation, session sockets, client attach/visit, and terminal-session process graph. Client disconnects detach views but never terminate long-lived guest server.",
@@ -362,6 +379,7 @@
       "runtime_component": "vc-frame",
       "lead": "claude",
       "review": "codex",
+      "repository": "vetcoders/vc-frame",
       "scope_paths": [
         "zellij-utils/src/sessions.rs",
         "zellij-server/src/background_jobs.rs"
@@ -376,10 +394,10 @@
       "runtime_component": "vc-terminal-alacritty",
       "lead": "claude",
       "review": "codex",
+      "repository": "vetcoders/vc-terminal",
       "scope_paths": [
         "alacritty/",
-        "alacritty_terminal/",
-        "scripts/vc-terminal-product-entry.sh"
+        "alacritty_terminal/"
       ],
       "runtime_responsibility": "Native terminal host window, GPU rendering, typography, branding, and host configuration. Starts active runtime primary shell/attachment path; never owns run recovery.",
       "authority_type": "code_care_maintenance",
@@ -391,10 +409,15 @@
       "runtime_component": "vibecrafted-runtime-manifest",
       "lead": "codex",
       "review": "claude",
+      "repository": "vetcoders/vibecrafted",
       "scope_paths": [
-        "scripts/",
-        "vibecrafted-core/vibecrafted_core/runtime/shell/",
-        "config/"
+        "scripts/install-runtime-pack.sh",
+        "scripts/vetcoders_install.py",
+        "scripts/unified_product_manifest.py",
+        "scripts/lib/runtime-roots.sh",
+        "scripts/vc-terminal-product-entry.sh",
+        "config/vc-terminal/vibecrafted.toml",
+        "vibecrafted-core/vibecrafted_core/runtime/helpers/vetcoders-runtime-core.sh"
       ],
       "runtime_responsibility": "Publishes verified installed generations/selectors under ~/.local/share/vibecrafted, active configuration under ~/.config/vibecrafted/**, and durable storage under ~/.vibecrafted. Ordinary startup consumes without delivery; installer alone publishes.",
       "authority_type": "code_care_maintenance",
@@ -406,9 +429,10 @@
       "runtime_component": "vc-frame",
       "lead": "grok",
       "review": "claude",
+      "repository": "vetcoders/vc-frame",
       "scope_paths": [
         "default-plugins/",
-        "zellij-utils/src/"
+        "zellij-client/assets/"
       ],
       "runtime_responsibility": "Plugin rendering, plugin-browser behavior, flicker-free rendering, and cross-view interface coherence across tabs and panes. Views session and control-plane truth without inventing new run or caretaker authorities.",
       "authority_type": "code_care_maintenance",
@@ -420,21 +444,24 @@
       "runtime_component": "vc-frame",
       "lead": "agi",
       "review": "grok",
-      "admitted_by": "codex",
+      "admitted_by": "Agent-Operator",
+      "repository": "vetcoders/vc-frame",
       "scope_paths": [
-        "docs/",
-        "config/"
+        "assets/operator-layouts/",
+        "zellij-utils/assets/layouts/",
+        "docs/VC_FRAME_OPERATOR_SURFACE.md"
       ],
       "runtime_responsibility": "Static layout definitions, icon assets, UI copy strings, and documentation. Pure presentation/prose without code-level state mutations.",
       "authority_type": "code_care_maintenance",
-      "decision_source": "Founder requirement (Agi pinned launcher agy, model gemini-3.8-flash-medium) + Agent-Operator allocation (Agi lead / Grok review / Codex admission)",
-      "notes": "Agi launcher is agy, pinned model gemini-3.8-flash-medium (Gemini 3.8 Flash Medium). Legacy gemini CLI is deprecated, never prescribe it. Other model pins are per-cut decisions."
+      "decision_source": "Founder requirement (Agi launcher agy, requested model gemini-3.8-flash-medium) + Agent-Operator allocation (Agi lead / Grok review / Agent-Operator admission)",
+      "notes": "Agi allocation uses launcher agy with requested model gemini-3.8-flash-medium (Gemini 3.8 Flash Medium). Legacy gemini CLI is deprecated, never prescribe it. Other model pins are per-cut decisions; allocation is not evidence of actual model execution."
     },
     {
       "area": "Fleet dispatcher and provider adapters",
       "runtime_component": "control-plane",
       "lead": "codex",
       "review": "claude",
+      "repository": "vetcoders/vibecrafted",
       "scope_paths": [
         "vibecrafted-core/vibecrafted_core/dispatch/"
       ],
@@ -444,17 +471,16 @@
       "notes": "Supported providers: claude, codex, agy (legacy gemini deprecated), grok. Agi limited to documentation/UI."
     },
     {
-      "area": "Integration and operator",
-      "runtime_component": "vibecrafted-runtime-manifest",
-      "lead": "codex",
+      "area": "Integration and admission",
+      "runtime_component": "none (admission role)",
+      "lead": "Agent-Operator",
       "review": "claude",
-      "scope_paths": [
-        "."
-      ],
+      "repository": null,
+      "scope_paths": [],
       "runtime_responsibility": "No runtime truth component. Founder owns decisions; designated Agent-Operator owns evidence-based fleet admission, closure checks, security/secret scans, ancestry verification, and gate execution.",
-      "authority_type": "code_care_maintenance",
-      "decision_source": "Founder governance doctrine + Agent-Operator role assignment (Codex coordinator / Claude review; Agi has no integration authority)",
-      "notes": "Integration is a separate proven act, never a worker claim."
+      "authority_type": "admission_and_evidence_authority",
+      "decision_source": "Founder governance doctrine + Agent-Operator role assignment (Claude may review native/system cuts; Agi has no integration authority)",
+      "notes": "This role has no source-maintenance scope. It admits scoped results only after evidence review; integration is a separate proven act, never a worker claim."
     }
   ],
   "rules": [
@@ -498,7 +524,7 @@
     },
     {
       "id": "code-care-separation",
-      "statement": "Code-care allocations govern agent code maintenance responsibility only; they never create, alter, or compete with runtime truth ownership domains.",
+      "statement": "Code-care allocations govern repository-qualified, bounded agent maintenance responsibility only; they never create, alter, or compete with runtime truth ownership domains. Review roles may overlap without granting source scope or exclusive authorship.",
       "enforced_by": "ADR-0002 canonical contract review"
     },
     {
