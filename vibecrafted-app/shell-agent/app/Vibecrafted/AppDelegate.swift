@@ -7,6 +7,14 @@ import os.log
 // lives in LifecycleLog.swift — supervision evidence extracted from this
 // delegate; the Runtime Pack installer owns initialization of the log file.
 
+/// The owner's `vibecrafted.runtime-install-result.v1` launch contract.
+///
+/// One shape, two producers, both of them the installer: `runtime-install`
+/// prints it after publishing a generation, and the read-only `runtime-resolve`
+/// prints it back for the generation already installed. The App decodes this
+/// and launches what it says. It derives none of these paths for itself — that
+/// duplication is precisely what made the App a second opinion on what counts
+/// as an installable runtime.
 private struct CanonicalRuntimeInstall: Decodable {
   let root: URL
   let launcher: URL
@@ -34,28 +42,6 @@ private struct CanonicalRuntimeInstall: Decodable {
     case runtimeHome = "runtime_home"
     case configHome = "config_home"
     case craftedHome = "crafted_home"
-  }
-
-  /// Build the launch contract from an already-installed generation. The
-  /// installer's JSON is one source of this shape; the resolved installation is
-  /// the other, and normal opening uses the latter.
-  init(
-    root: URL, launcher: URL, terminal: URL, terminalHost: URL, frame: URL, start: URL,
-    primaryShell: URL, terminalConfig: URL, frameConfig: URL, runtimeHome: URL,
-    configHome: URL, craftedHome: URL
-  ) {
-    self.root = root
-    self.launcher = launcher
-    self.terminal = terminal
-    self.terminalHost = terminalHost
-    self.frame = frame
-    self.start = start
-    self.primaryShell = primaryShell
-    self.terminalConfig = terminalConfig
-    self.frameConfig = frameConfig
-    self.runtimeHome = runtimeHome
-    self.configHome = configHome
-    self.craftedHome = craftedHome
   }
 
   init(from decoder: Decoder) throws {
@@ -112,6 +98,95 @@ final class EventObserver: @unchecked Sendable, EventCallback {
 }
 
 @MainActor
+/// Accumulates a bounded amount of one subprocess stream.
+///
+/// Foundation delivers pipe readability on its own queue, so this is the same
+/// shape as `EventObserver` above: an `@unchecked Sendable` box whose mutation
+/// is serialised by a lock. Draining continuously is what stops a child from
+/// blocking forever on a full pipe buffer; the ceiling is what stops a chatty
+/// failure from becoming unbounded memory behind the tray.
+private final class BoundedOutputSink: @unchecked Sendable {
+  private let lock = NSLock()
+  private let limit: Int
+  private var storage = Data()
+
+  init(limit: Int) {
+    self.limit = limit
+  }
+
+  func absorb(_ chunk: Data) {
+    guard !chunk.isEmpty else { return }
+    lock.lock()
+    defer { lock.unlock() }
+    let room = limit - storage.count
+    guard room > 0 else { return }
+    storage.append(chunk.count <= room ? chunk : chunk.prefix(room))
+  }
+
+  var collected: Data {
+    lock.lock()
+    defer { lock.unlock() }
+    return storage
+  }
+}
+
+/// The outcome of one bounded subprocess.
+private struct BoundedProcessResult {
+  let stdout: Data
+  let stderr: Data
+  let terminationStatus: Int32
+  /// The child exited on its own rather than being signalled or timed out.
+  let clean: Bool
+}
+
+/// Take whatever a pipe still holds. Safe only once the writer is gone, which
+/// is why this runs from the termination handler and not before it.
+private func drainRemainder(_ handle: FileHandle, into sink: BoundedOutputSink) {
+  handle.readabilityHandler = nil
+  var tail = handle.availableData
+  while !tail.isEmpty {
+    sink.absorb(tail)
+    tail = handle.availableData
+  }
+}
+
+extension RuntimeIdentityProbe {
+  /// The real filesystem. `exists` is deliberately positive presence, so an
+  /// existing file this App cannot read stays an installation rather than
+  /// becoming "nothing is installed".
+  static var live: RuntimeIdentityProbe {
+    RuntimeIdentityProbe(
+      exists: { FileManager.default.fileExists(atPath: $0.path) },
+      read: { try? Data(contentsOf: $0) },
+      realPath: { $0.resolvingSymlinksInPath() },
+      isExecutable: { FileManager.default.isExecutableFile(atPath: $0.path) })
+  }
+}
+
+/// The App only ever resolves one thing: the owner's launch contract.
+private typealias RuntimeContract = RuntimeResolution<CanonicalRuntimeInstall>
+
+/// Cheap identity of the two documents the installer publishes together.
+///
+/// A generation change is published by rewriting them, so their stamps are the
+/// refresh signal: the App re-asks the owner when this changes and reuses the
+/// last answer when it has not. That keeps a five-second tray poll from
+/// spawning an interpreter it does not need.
+private struct RuntimeIdentityFingerprint: Equatable {
+  let home: String
+  let pointer: FileStamp?
+  let receipt: FileStamp?
+}
+
+private struct FileStamp: Equatable {
+  let size: Int
+  let modified: Date
+}
+
+/// How long the quit path waits for the lifecycle launcher to describe active
+/// work before treating its silence as an answer.
+private let activityTruthTimeout: TimeInterval = 15
+
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   var mainWindow: MainWindowController?
   private var statusItem: NSStatusItem?
@@ -146,6 +221,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private var canonicalRuntimeEnvironment: [String: String]?
   private var workspaceLaunchFailureReported = false
   private var eyeReconcileProcess: Process?
+  private var runtimeResolveProcess: Process?
+  /// Callers that asked while a resolve was already in flight. They join the
+  /// one invocation instead of racing a second resolver against it.
+  private var runtimeResolveWaiters: [(RuntimeContract) -> Void] = []
+  /// Bumped whenever runtime truth changes — adopted, lost or refused. Results
+  /// and actions carrying an older epoch are dropped, so a late answer for a
+  /// previous generation can never repopulate live controls.
+  private var runtimeResolveEpoch: UInt64 = 0
+  private var cachedResolution: (fingerprint: RuntimeIdentityFingerprint, value: RuntimeContract)?
+  /// Why there is no usable runtime, rendered where the generation would be.
+  private var runtimeResolutionFailure: String?
+  /// A non-fatal note about the shared service, rendered under the runtime line.
+  private var runtimeAdvisory: String?
+  private var terminalProcess: Process?
   let eventObserver = EventObserver()
 
   func showMainWindowIfNeeded() {
@@ -254,13 +343,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   func applicationWillTerminate(_ notification: Notification) {
-    let terminalState =
-      terminalApplication.map {
-        !$0.isTerminated
-          ? "vc-terminal pid=\($0.processIdentifier) still running"
-          : "vc-terminal already exited"
-      }
-      ?? "no vc-terminal"
+    // The workspace terminal is now started through the generation wrapper, so
+    // it is a child of this process rather than an independent application.
+    // That changes nothing about its lifetime: quitting the App is a view
+    // closing. Nothing here stops the terminal, the shared service, frame
+    // sessions, PTYs or workers, and nothing here should.
+    let terminalState: String
+    if let application = terminalApplication, !application.isTerminated {
+      terminalState = "vc-terminal pid=\(application.processIdentifier) still running"
+    } else if let process = terminalProcess, process.isRunning {
+      terminalState = "vc-terminal pid=\(process.processIdentifier) still running"
+    } else if terminalApplication != nil || terminalProcess != nil {
+      terminalState = "vc-terminal already exited"
+    } else {
+      terminalState = "no vc-terminal"
+    }
     lifecycleLog("applicationWillTerminate; \(terminalState)")
     statusRefreshTimer?.invalidate()
     NotificationManager.shared.clearHeartbeat(craftedHome: craftedHomeURL())
@@ -281,7 +378,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   private func launchWorkspaceTerminal() {
-    if terminalApplication?.isTerminated == false || terminalLaunchInFlight {
+    if terminalIsLive() || terminalLaunchInFlight {
       return
     }
 
@@ -292,96 +389,126 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     try? loadSignedCarrierRevisions()
 
     // Opening is not installing. The runtime of record is whatever generation
-    // the Founder has installed; the bundled carrier is bootstrap and repair
-    // material only. Republishing it on every open re-ran a full install for a
-    // window and could walk a newer runtime backwards.
-    let install: CanonicalRuntimeInstall
-    switch resolveInstalledRuntime() {
-    case .ready(let layout):
-      install = canonicalRuntime(for: layout)
-      lifecycleLog("resolved installed generation \(layout.version) at \(layout.generation.path)")
-    case .absent(let reason):
-      // Nothing is installed yet, so the bundled carrier is the only runtime
-      // that can exist. Publishing it here is first onboarding.
-      lifecycleLog("no installed runtime (\(reason)); bootstrapping the bundled carrier")
-      do {
-        install = try installCanonicalRuntime()
-      } catch {
-        reportWorkspaceLaunchFailure(
-          "Cannot publish the canonical Vibecrafted runtime: \(error.localizedDescription)")
-        return
+    // the Founder has installed, and the owner is the only thing entitled to
+    // say which one that is. The bundled carrier is bootstrap and repair
+    // material — republishing it for a window re-ran a full install and could
+    // walk a newer runtime backwards.
+    terminalLaunchInFlight = true
+    resolveInstalledRuntime { [weak self] resolution in
+      guard let self else { return }
+      switch resolution {
+      case .ready:
+        guard let install = self.applyResolution(resolution) else {
+          self.terminalLaunchInFlight = false
+          return
+        }
+        self.openWorkspaceTerminal(install: install)
+      case .absent(let reason):
+        // Nothing is installed yet, so the bundled carrier is the only runtime
+        // that can exist. Publishing it here is first onboarding.
+        self.applyResolution(resolution)
+        lifecycleLog("no installed runtime (\(reason)); bootstrapping the bundled carrier")
+        let install: CanonicalRuntimeInstall
+        do {
+          install = try self.installCanonicalRuntime()
+        } catch {
+          self.terminalLaunchInFlight = false
+          self.reportWorkspaceLaunchFailure(
+            "Cannot publish the canonical Vibecrafted runtime: \(error.localizedDescription)")
+          return
+        }
+        // The bootstrap just changed what is installed, so the cached answer is
+        // stale by construction.
+        self.cachedResolution = nil
+        self.applyResolution(.ready(install))
+        self.openWorkspaceTerminal(install: install)
+      case .unusable(let reason):
+        // An installation exists but the owner refuses it. Overwriting it from
+        // the bundled carrier would be an automatic downgrade of the Founder's
+        // runtime, so repair stays a deliberate action in the tray.
+        self.terminalLaunchInFlight = false
+        self.applyResolution(resolution)
+        self.renderServerStatus()
+        self.reportWorkspaceLaunchFailure(
+          "The installed Vibecrafted runtime cannot be used: \(reason). "
+            + "Use Runtime Pack ▸ Reinstall From Bundled Pack… to repair it.")
       }
-    case .unusable(let reason):
-      // An installation exists but disagrees with itself. Overwriting it from
-      // the bundled carrier would be an automatic downgrade of the Founder's
-      // runtime, so repair stays a deliberate action in the tray.
-      lifecycleLog("installed runtime is unusable: \(reason)")
-      reportWorkspaceLaunchFailure(
-        "The installed Vibecrafted runtime cannot be used: \(reason). "
-          + "Use Runtime Pack ▸ Reinstall From Bundled Pack… to repair it.")
-      return
     }
-    canonicalInstall = install
+  }
 
-    for required in [
-      install.terminal, install.terminalHost, install.frame, install.start,
-      install.primaryShell,
-    ]
-    where !FileManager.default.isExecutableFile(
-      atPath: required.path)
-    {
-      reportWorkspaceLaunchFailure(
-        "Bundled product entry is missing or not executable: \(required.path)")
-      return
-    }
-    guard FileManager.default.fileExists(atPath: install.terminalConfig.path) else {
-      reportWorkspaceLaunchFailure(
-        "Canonical terminal config is missing: \(install.terminalConfig.path)")
+  /// Open the workspace terminal on the generation the owner selected.
+  ///
+  /// The public wrapper is the entry point, not a terminal binary chosen here.
+  /// The wrapper is where the selected generation's product config and native
+  /// host are applied — it refuses a caller-supplied `--config-file` outright —
+  /// and the host itself is the owner's choice, carried in the environment
+  /// rather than substituted from this bundle. Pairing a newly resolved
+  /// generation with the old App's helper binary was the ownership failure this
+  /// replaces.
+  private func openWorkspaceTerminal(install: CanonicalRuntimeInstall) {
+    guard let environment = canonicalRuntimeEnvironment else {
+      terminalLaunchInFlight = false
+      reportWorkspaceLaunchFailure("The resolved runtime carries no launch environment")
       return
     }
     do {
       try registerBundledFonts()
     } catch {
+      terminalLaunchInFlight = false
       reportWorkspaceLaunchFailure(
         "Cannot register the bundled terminal font: \(error.localizedDescription)")
       return
     }
-
-    let environment = composeRuntimeEnvironment(install: install)
-    canonicalRuntimeEnvironment = environment
     applyRuntimePackMenuState()
     refreshServerStatus()
 
-    guard let helperApplication = terminalHelperApplication(for: install) else {
-      reportWorkspaceLaunchFailure(
-        "The bundled vc-terminal helper app or its referenced icon is invalid")
-      return
-    }
-    let configuration = NSWorkspace.OpenConfiguration()
-    configuration.arguments = [
-      "--config-file", install.terminalConfig.path,
-      "-e", install.primaryShell.path, install.start.path, "operator",
-    ]
-    configuration.environment = environment
-    configuration.activates = true
-    configuration.addsToRecentItems = false
-    terminalLaunchInFlight = true
-    Task {
-      do {
-        let application = try await NSWorkspace.shared.openApplication(
-          at: helperApplication, configuration: configuration)
-        terminalApplication = application
-        terminalLaunchInFlight = false
+    let process = Process()
+    process.executableURL = install.terminal
+    process.arguments = ["-e", install.primaryShell.path, install.start.path, "operator"]
+    process.environment = environment
+    // No pipes: the workspace terminal is a long-lived view process, not a verb
+    // whose output the tray reads. Giving it a pipe nobody drains is how a
+    // terminal ends up blocked on its own logging.
+    process.terminationHandler = { [weak self] finished in
+      DispatchQueue.main.async { [weak self] in
+        guard let self else { return }
+        self.terminalProcess = nil
+        self.terminalApplication = nil
         lifecycleLog(
-          "vc-terminal launched through helper bundle pid=\(application.processIdentifier) generation=\(install.root.lastPathComponent)")
-      } catch {
-        terminalLaunchInFlight = false
-        lifecycleLog("vc-terminal helper launch failed: \(error.localizedDescription)")
-        reportWorkspaceLaunchFailure(
-          "Failed to launch bundled vc-terminal helper app: \(error.localizedDescription)")
+          "vc-terminal exited status=\(finished.terminationStatus) generation=\(install.root.lastPathComponent)"
+        )
       }
     }
+    do {
+      try process.run()
+    } catch {
+      terminalLaunchInFlight = false
+      reportWorkspaceLaunchFailure(
+        "Failed to launch the installed vc-terminal wrapper at \(install.terminal.path): "
+          + error.localizedDescription)
+      return
+    }
+    terminalProcess = process
+    terminalLaunchInFlight = false
+    // The wrapper execs its native host in place, so the view is trackable as
+    // an application only once macOS has registered it. Bring it forward when
+    // it is there; never make the launch depend on that.
+    if let application = NSRunningApplication(processIdentifier: process.processIdentifier) {
+      terminalApplication = application
+      application.activate(options: [])
+    }
+    lifecycleLog(
+      "vc-terminal launched through the generation wrapper pid=\(process.processIdentifier) generation=\(install.root.lastPathComponent)"
+    )
     reconcileControlPlaneEye(install: install, environment: environment)
+  }
+
+  /// True when a workspace terminal this App started is still up.
+  private func terminalIsLive() -> Bool {
+    if let application = terminalApplication, !application.isTerminated {
+      return true
+    }
+    return terminalProcess?.isRunning == true
   }
 
   /// The environment every generation-owned subprocess inherits: the tray's
@@ -413,6 +540,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     environment["VIBECRAFTED_PYTHON"] = install.root.appendingPathComponent("bin/python3").path
     environment["VIBECRAFTED_VC_FRAME_BIN"] = install.frame.path
     environment["VC_FRAME_CONFIG_DIR"] = install.frameConfig.path
+    // The public wrapper resolves its native host from this, defaulting to the
+    // generation's own libexec. Carrying the owner's answer through is how the
+    // App consumes a resolved host instead of imposing the one it ships.
+    environment["VIBECRAFTED_TERMINAL_HOST"] = install.terminalHost.path
     // Keep Unix socket paths below macOS' 104-byte sockaddr_un limit. Preserve
     // the former TMPDIR namespace for one-way import into WES during startup.
     let socketRoot = "/tmp/vc-frame-\(getuid())"
@@ -427,94 +558,295 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     return environment
   }
 
-  /// Read the installation's own two published documents and derive what a
-  /// normal open may do with them. This never writes: the installer owns both
-  /// the active-generation pointer and the ownership receipt.
-  private func resolveInstalledRuntime() -> InstalledRuntimeDisposition {
+  /// The owner is asked in a closed interpreter environment.
+  ///
+  /// No inherited `PYTHONPATH`/`PYTHONHOME` — the runtime exports a global
+  /// `PYTHONPATH` that poisons unrelated Python tools, and the resolver must
+  /// read the installation, not whatever the host session had loaded. No user
+  /// site packages, and no bytecode written into the installation being
+  /// inspected. Built from an allow-list so a new host variable cannot leak in.
+  private func runtimeResolverEnvironment() -> [String: String] {
+    let host = ProcessInfo.processInfo.environment
+    let inherited = ["HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR"]
+    var environment = Dictionary(
+      uniqueKeysWithValues: inherited.compactMap { key in host[key].map { (key, $0) } })
+    // No PATH at all. Both the interpreter and the installer script are given
+    // as absolute paths, so a read-only resolve that needed to look an
+    // executable up in PATH would be doing something it is not allowed to do.
+    environment["PYTHONNOUSERSITE"] = "1"
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    return environment
+  }
+
+  /// Ask the owner what is installed.
+  ///
+  /// Coalesced and cached: callers that arrive while a resolve is in flight
+  /// join it rather than racing a second resolver, and an unchanged identity
+  /// pair reuses the last answer, so a five-second tray poll does not spawn an
+  /// interpreter it does not need. The call itself is read-only by contract —
+  /// it installs, publishes, reconciles and repairs nothing.
+  private func resolveInstalledRuntime(
+    forceRefresh: Bool = false,
+    completion: @escaping (RuntimeContract) -> Void
+  ) {
     let host = ProcessInfo.processInfo.environment
     let runtimeHome = resolvedRuntimeHome(
       environment: host,
       homeDirectory: host["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path)
-    let activeData = try? Data(
-      contentsOf: activeRuntimeDocumentURL(runtimeHome: runtimeHome))
-    let receiptData = try? Data(
-      contentsOf: runtimeInstallReceiptURL(runtimeHome: runtimeHome))
-    return installedRuntimeDisposition(
-      activeData: activeData, receiptData: receiptData, runtimeHome: runtimeHome)
+    let fingerprint = identityFingerprint(runtimeHome: runtimeHome)
+    if !forceRefresh, let cached = cachedResolution, cached.fingerprint == fingerprint {
+      completion(cached.value)
+      return
+    }
+
+    switch runtimeResolverBootstrap(runtimeHome: runtimeHome, probe: .live) {
+    case .absent(let reason):
+      let resolution: RuntimeContract = .absent(reason)
+      cachedResolution = (fingerprint, resolution)
+      completion(resolution)
+    case .unusable(let reason):
+      let resolution: RuntimeContract = .unusable(reason)
+      cachedResolution = (fingerprint, resolution)
+      completion(resolution)
+    case .ask(let python, let installer):
+      runtimeResolveWaiters.append(completion)
+      guard runtimeResolveProcess == nil else { return }
+      let process = Process()
+      process.executableURL = python
+      process.arguments = runtimeResolveArguments(installer: installer, runtimeHome: runtimeHome)
+      process.environment = runtimeResolverEnvironment()
+      do {
+        try runBounded(process, timeout: 20, label: "runtime-resolve") { [weak self] result in
+          guard let self else { return }
+          self.runtimeResolveProcess = nil
+          let resolution: RuntimeContract = decodeRuntimeResolution(
+            stdout: result.stdout,
+            stderr: result.stderr,
+            terminationStatus: result.terminationStatus,
+            clean: result.clean)
+          self.cachedResolution = (fingerprint, resolution)
+          self.deliverResolution(resolution)
+        }
+        runtimeResolveProcess = process
+      } catch {
+        runtimeResolveProcess = nil
+        let resolution: RuntimeContract = .unusable(
+          "the runtime resolver could not be started: \(error.localizedDescription)")
+        cachedResolution = (fingerprint, resolution)
+        deliverResolution(resolution)
+      }
+    }
   }
 
-  /// Bind a resolved installation to this bundle's terminal canvas. The
-  /// generation owns the runtime; the App owns the signed helper it opens, so
-  /// the helper comes from the bundle rather than being read back out of the
-  /// installation.
-  private func canonicalRuntime(for layout: InstalledRuntimeLayout) -> CanonicalRuntimeInstall {
-    CanonicalRuntimeInstall(
-      root: layout.generation,
-      launcher: layout.launcher,
-      terminal: layout.terminal,
-      terminalHost: Bundle.main.bundleURL.appendingPathComponent(
-        "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"),
-      frame: layout.frame,
-      start: layout.start,
-      primaryShell: layout.primaryShell,
-      terminalConfig: layout.terminalConfig,
-      frameConfig: layout.frameConfig,
-      runtimeHome: layout.runtimeHome,
-      configHome: layout.configHome,
-      craftedHome: layout.craftedHome)
+  /// Hand one answer to everybody who asked, exactly once.
+  private func deliverResolution(_ resolution: RuntimeContract) {
+    let waiters = runtimeResolveWaiters
+    runtimeResolveWaiters = []
+    for waiter in waiters {
+      waiter(resolution)
+    }
   }
 
-  /// The active generation can move under a running App: a runtime-first
-  /// upgrade republishes the pointer while the tray is still open. Re-resolve
-  /// before each status read so liveness and the service actions address the
-  /// generation the Founder is actually running, instead of a root cached at
-  /// launch forever.
-  private func adoptCurrentGenerationIfChanged() {
-    guard case .ready(let layout) = resolveInstalledRuntime() else { return }
-    let resolved = layout.generation.standardizedFileURL.path
-    guard resolved != canonicalInstall?.root.standardizedFileURL.path else { return }
-    let install = canonicalRuntime(for: layout)
-    canonicalInstall = install
-    canonicalRuntimeEnvironment = composeRuntimeEnvironment(install: install)
-    lastCaretakerData = nil
-    lifecycleLog("adopted active generation \(layout.version) at \(resolved)")
+  private func identityFingerprint(runtimeHome: URL) -> RuntimeIdentityFingerprint {
+    RuntimeIdentityFingerprint(
+      home: runtimeHome.path,
+      pointer: fileStamp(activeRuntimePointerURL(runtimeHome: runtimeHome)),
+      receipt: fileStamp(runtimeInstallReceiptURL(runtimeHome: runtimeHome)))
   }
 
-  private func terminalHelperApplication(for install: CanonicalRuntimeInstall) -> URL? {
-    let helper = install.terminalHost
-      .deletingLastPathComponent()
-      .deletingLastPathComponent()
-      .deletingLastPathComponent()
-    guard helper.pathExtension == "app",
-      let bundle = Bundle(url: helper),
-      bundle.executableURL?.standardizedFileURL == install.terminalHost.standardizedFileURL,
-      let iconName = bundle.object(forInfoDictionaryKey: "CFBundleIconFile") as? String,
-      !iconName.isEmpty,
-      FileManager.default.fileExists(
-        atPath: helper.appendingPathComponent("Contents/Resources/\(iconName)").path)
+  private func fileStamp(_ url: URL) -> FileStamp? {
+    guard
+      let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+      let size = attributes[.size] as? Int,
+      let modified = attributes[.modificationDate] as? Date
     else {
       return nil
     }
-    return helper
+    return FileStamp(size: size, modified: modified)
   }
 
+  /// The one place runtime truth changes.
+  ///
+  /// Adopting a generation, losing one and being refused one all bump the
+  /// epoch, so a caretaker reading or a service action belonging to the
+  /// previous generation is dropped instead of repopulating live controls.
+  @discardableResult
+  private func applyResolution(_ resolution: RuntimeContract) -> CanonicalRuntimeInstall? {
+    switch resolution {
+    case .ready(let install):
+      let changed = install.root.standardizedFileURL.path
+        != canonicalInstall?.root.standardizedFileURL.path
+      if changed {
+        runtimeResolveEpoch &+= 1
+        lastCaretakerData = nil
+        serverActionInFlight = nil
+        runtimeAdvisory = nil
+        // A newly adopted generation is allowed to report its own failures.
+        workspaceLaunchFailureReported = false
+      }
+      canonicalInstall = install
+      canonicalRuntimeEnvironment = composeRuntimeEnvironment(install: install)
+      runtimeResolutionFailure = nil
+      if changed {
+        lifecycleLog("adopted active generation at \(install.root.path)")
+      }
+      return install
+    case .absent(let reason):
+      discardRuntimeTruth(failure: nil, log: "no installed runtime (\(reason))")
+      return nil
+    case .unusable(let reason):
+      discardRuntimeTruth(failure: reason, log: "installed runtime is unusable: \(reason)")
+      return nil
+    }
+  }
+
+  /// Stop controlling a runtime this App can no longer resolve.
+  ///
+  /// A stale generation must not stay behind the tray as fallback truth: if the
+  /// published pointer breaks, the honest reading is that there is nothing to
+  /// control, so the actions go quiet and the reason is rendered in their place.
+  private func discardRuntimeTruth(failure: String?, log: String) {
+    let hadRuntime = canonicalInstall != nil
+    runtimeResolveEpoch &+= 1
+    canonicalInstall = nil
+    canonicalRuntimeEnvironment = nil
+    lastCaretakerData = nil
+    serverActionInFlight = nil
+    runtimeAdvisory = nil
+    runtimeResolutionFailure = failure
+    if hadRuntime || failure != nil {
+      lifecycleLog(log)
+    }
+  }
+
+  /// Attach bounded, continuously drained plumbing to a configured subprocess,
+  /// start it, and deliver its outcome on the main thread exactly once.
+  ///
+  /// Every generation-owned verb the tray calls goes through here. Reading a
+  /// pipe only after the child has exited deadlocks as soon as the child writes
+  /// more than one pipe buffer, and an unbounded child leaves a tray control —
+  /// or, from `applicationShouldTerminate`, the quit itself — waiting forever.
+  /// Callers configure the process and own its lifetime reference; the pipes
+  /// belong to this helper.
+  private func runBounded(
+    _ process: Process,
+    timeout: TimeInterval,
+    label: String,
+    stdoutLimit: Int = 1 << 20,
+    stderrLimit: Int = 1 << 16,
+    completion: @escaping (BoundedProcessResult) -> Void
+  ) throws {
+    let output = Pipe()
+    let errors = Pipe()
+    let stdout = BoundedOutputSink(limit: stdoutLimit)
+    let stderr = BoundedOutputSink(limit: stderrLimit)
+    process.standardOutput = output
+    process.standardError = errors
+    output.fileHandleForReading.readabilityHandler = { handle in
+      let chunk = handle.availableData
+      if chunk.isEmpty {
+        handle.readabilityHandler = nil
+      } else {
+        stdout.absorb(chunk)
+      }
+    }
+    errors.fileHandleForReading.readabilityHandler = { handle in
+      let chunk = handle.availableData
+      if chunk.isEmpty {
+        handle.readabilityHandler = nil
+      } else {
+        stderr.absorb(chunk)
+      }
+    }
+    process.terminationHandler = { finished in
+      drainRemainder(output.fileHandleForReading, into: stdout)
+      drainRemainder(errors.fileHandleForReading, into: stderr)
+      let result = BoundedProcessResult(
+        stdout: stdout.collected,
+        stderr: stderr.collected,
+        terminationStatus: finished.terminationStatus,
+        clean: finished.terminationReason == .exit)
+      DispatchQueue.main.async {
+        completion(result)
+      }
+    }
+    do {
+      try process.run()
+    } catch {
+      output.fileHandleForReading.readabilityHandler = nil
+      errors.fileHandleForReading.readabilityHandler = nil
+      process.terminationHandler = nil
+      throw error
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak process] in
+      guard let process, process.isRunning else { return }
+      lifecycleLog("\(label) exceeded \(Int(timeout))s; terminating pid=\(process.processIdentifier)")
+      process.terminate()
+      DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak process] in
+        guard let process, process.isRunning else { return }
+        kill(process.processIdentifier, SIGKILL)
+      }
+    }
+  }
+
+  /// Ensure the canonical shared service exists.
+  ///
+  /// Keeping the shared caretaker available is the App's job and the canonical
+  /// verb is idempotent, so asking for it on open is legitimate. Asking blindly
+  /// is not: the previous version discarded stdout, stderr and the exit status,
+  /// so a refused or leased reconcile was indistinguishable from a successful
+  /// one. Recovery ownership stays with the supervisor; this asks once,
+  /// observes the answer and reports it.
   private func reconcileControlPlaneEye(
     install: CanonicalRuntimeInstall, environment: [String: String]
   ) {
+    // One reconcile at a time: overlapping calls would race the supervisor's
+    // install lease against itself.
+    guard eyeReconcileProcess?.isRunning != true else {
+      lifecycleLog("service reconcile already in flight; not starting a second")
+      return
+    }
     let deck = install.root.appendingPathComponent("bin/vibecrafted")
-    guard FileManager.default.isExecutableFile(atPath: deck.path) else { return }
+    guard FileManager.default.isExecutableFile(atPath: deck.path) else {
+      surfaceRuntimeAdvisory("The installed service owner is missing: \(deck.path)")
+      return
+    }
+    let epoch = runtimeResolveEpoch
     let process = Process()
     process.executableURL = deck
     process.arguments = ["server", "service", "reconcile"]
     process.environment = environment
-    process.standardOutput = FileHandle.nullDevice
-    process.standardError = FileHandle.nullDevice
     do {
-      try process.run()
+      try runBounded(process, timeout: 120, label: "server service reconcile") {
+        [weak self] result in
+        guard let self else { return }
+        self.eyeReconcileProcess = nil
+        guard epoch == self.runtimeResolveEpoch else { return }
+        guard result.clean, result.terminationStatus == 0 else {
+          let detail = boundedResolverDiagnostic(stdout: result.stdout, stderr: result.stderr)
+          self.surfaceRuntimeAdvisory(
+            "The shared VC Server service could not be reconciled" + detail)
+          self.renderServerStatus()
+          return
+        }
+        self.runtimeAdvisory = nil
+        lifecycleLog("shared service reconciled on \(install.root.lastPathComponent)")
+        self.renderServerStatus()
+      }
       eyeReconcileProcess = process
     } catch {
-      print("Cannot reconcile the control-plane eye: \(error)")
+      surfaceRuntimeAdvisory(
+        "The shared VC Server service could not be reconciled: \(error.localizedDescription)")
     }
+  }
+
+  /// Report something about the shared service without interrupting the
+  /// Founder: the log for post-mortem, the tray for the current truth.
+  private func surfaceRuntimeAdvisory(_ message: String) {
+    runtimeAdvisory = message
+    installLog.error("\(message, privacy: .public)")
+    lifecycleLog(message)
+    applyRuntimePackMenuState()
   }
 
   private func registerBundledFonts() throws {
@@ -844,72 +1176,89 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   private func refreshServerStatus() {
-    adoptCurrentGenerationIfChanged()
-    guard let install = canonicalInstall, let environment = canonicalRuntimeEnvironment else {
-      applyServerMenuState(
-        deriveServerMenuState(
-          caretakerData: nil, actionInFlight: nil, runtimeReady: false))
-      return
+    // Render what is already known, then re-ask the owner. The active pointer
+    // can move under a running App — a runtime-first upgrade republishes it
+    // while the tray is open — so liveness and the service actions must follow
+    // the generation the Founder is actually running rather than a root cached
+    // at launch forever.
+    renderServerStatus()
+    resolveInstalledRuntime { [weak self] resolution in
+      guard let self else { return }
+      guard let install = self.applyResolution(resolution),
+        let environment = self.canonicalRuntimeEnvironment
+      else {
+        self.renderServerStatus()
+        return
+      }
+      self.pollCaretaker(install: install, environment: environment)
     }
+  }
+
+  /// Read the caretaker verdict of the resolved generation.
+  ///
+  /// One verb, one truth: the caretaker builds the envelope, publishes it for
+  /// every other reader (the HTTP route serves the same bytes), and prints the
+  /// already-derived verdict. The tray renders; it never re-derives.
+  private func pollCaretaker(install: CanonicalRuntimeInstall, environment: [String: String]) {
     guard serverStatusProcess?.isRunning != true else { return }
     let deck = install.root.appendingPathComponent("bin/vibecrafted")
     guard FileManager.default.isExecutableFile(atPath: deck.path) else {
-      applyServerMenuState(
-        deriveServerMenuState(
-          caretakerData: nil,
-          actionInFlight: serverActionInFlight, runtimeReady: true))
+      renderServerStatus()
       return
     }
-
-    // One verb, one truth: the caretaker builds the envelope, publishes it for
-    // every other reader (the HTTP route serves the same bytes), and prints the
-    // already-derived verdict. The tray renders; it never re-derives.
-    let output = Pipe()
-    let errors = Pipe()
+    let epoch = runtimeResolveEpoch
     let process = Process()
     process.executableURL = deck
     process.arguments = serverCaretakerArguments()
     process.environment = environment
-    process.standardOutput = output
-    process.standardError = errors
-    process.terminationHandler = { [weak self] _ in
-      let caretakerData = output.fileHandleForReading.readDataToEndOfFile()
-      DispatchQueue.main.async { [weak self] in
+    do {
+      try runBounded(process, timeout: 30, label: "server caretaker") { [weak self] result in
         guard let self else { return }
         self.serverStatusProcess = nil
-        if !caretakerData.isEmpty {
-          self.lastCaretakerData = caretakerData
+        // A verdict about a generation this App no longer controls is not the
+        // current truth, however recently it arrived.
+        guard epoch == self.runtimeResolveEpoch else { return }
+        if !result.stdout.isEmpty {
+          self.lastCaretakerData = result.stdout
         }
-        self.applyServerMenuState(
-          deriveServerMenuState(
-            caretakerData: caretakerData.isEmpty ? self.lastCaretakerData : caretakerData,
-            actionInFlight: self.serverActionInFlight,
-            runtimeReady: true))
+        self.renderServerStatus()
       }
-    }
-    do {
-      try process.run()
       serverStatusProcess = process
     } catch {
-      applyServerMenuState(
-        deriveServerMenuState(
-          caretakerData: lastCaretakerData,
-          actionInFlight: serverActionInFlight, runtimeReady: true))
+      serverStatusProcess = nil
+      renderServerStatus()
     }
+  }
+
+  /// Paint the tray from cached truth alone. This spawns nothing, so it is safe
+  /// to call from any completion handler.
+  private func renderServerStatus() {
+    applyServerMenuState(
+      deriveServerMenuState(
+        caretakerData: lastCaretakerData,
+        actionInFlight: serverActionInFlight,
+        runtimeReady: canonicalInstall != nil))
   }
 
   private func applyServerMenuState(_ state: ServerMenuState) {
     serverStatusMenuItem?.title = state.header
-    serverDetailMenuItem?.title = state.detail
-    serverDetailMenuItem?.isHidden = state.detail.isEmpty
+    // When the runtime itself cannot be resolved, that reason outranks the
+    // generic waiting-for-runtime line: it is the only thing that tells the
+    // Founder what actually happened and what to do next.
+    let detail = runtimeResolutionFailure ?? state.detail
+    serverDetailMenuItem?.title = detail
+    serverDetailMenuItem?.isHidden = detail.isEmpty
     startServerMenuItem?.isEnabled = state.canStart
     stopServerMenuItem?.isEnabled = state.canStop
     restartServerMenuItem?.isEnabled = state.canRestart
     let navigation = resolveServerNavigation(caretakerData: lastCaretakerData)
-    openServerMenuItem?.isEnabled = navigation.isAvailable
-    openServerMenuItem?.toolTip = navigation.unavailableReason
-    openWorkspacesMenuItem?.isEnabled = navigation.isAvailable
-    openWorkspacesMenuItem?.toolTip = navigation.unavailableReason
+    // No resolved runtime means no navigable server, whatever the last envelope
+    // happened to say.
+    let navigable = navigation.isAvailable && canonicalInstall != nil
+    openServerMenuItem?.isEnabled = navigable
+    openServerMenuItem?.toolTip = runtimeResolutionFailure ?? navigation.unavailableReason
+    openWorkspacesMenuItem?.isEnabled = navigable
+    openWorkspacesMenuItem?.toolTip = runtimeResolutionFailure ?? navigation.unavailableReason
     openServerLogsMenuItem?.isEnabled =
       canonicalInstall != nil && serverUtilityProcess?.isRunning != true
     statusItem?.button?.image = statusIcon(health: state.health)
@@ -923,14 +1272,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       signedSourceRevision: signedCarrierRevisions?.source,
       runtimeReady: canonicalInstall != nil)
     runtimePackStatusMenuItem?.title = state.header
-    runtimePackDetailMenuItem?.title = state.detail
-    runtimePackDetailMenuItem?.isHidden = state.detail.isEmpty
+    // Same precedence as the server line: a refusal from the owner first, then
+    // a problem with the shared service, then whatever the policy derived.
+    let detail = runtimeResolutionFailure ?? runtimeAdvisory ?? state.detail
+    runtimePackDetailMenuItem?.title = detail
+    runtimePackDetailMenuItem?.isHidden = detail.isEmpty
     revealRuntimeHomeMenuItem?.isEnabled = state.actionsEnabled
     openControlPlaneMenuItem?.isEnabled = state.actionsEnabled
     copyRuntimeIdentityMenuItem?.isEnabled = state.actionsEnabled
     // Repair is deliberately not gated on `actionsEnabled`: it is the way out
-    // of an absent or self-contradictory installation, which is exactly when
-    // the inspection actions above have nothing to inspect.
+    // of an absent or refused installation, which is exactly when the
+    // inspection actions above have nothing to inspect.
   }
 
   @objc private func revealRuntimeHomeFromStatusItem() {
@@ -994,19 +1346,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       failure.runModal()
       return
     }
-    canonicalInstall = install
-    let environment = composeRuntimeEnvironment(install: install)
-    canonicalRuntimeEnvironment = environment
-    lastCaretakerData = nil
+    // Repair just republished the installation, so any cached resolution — and
+    // any reading or action still in flight for the previous generation — is
+    // stale by construction.
+    cachedResolution = nil
+    guard let repaired = applyResolution(.ready(install)),
+      let environment = canonicalRuntimeEnvironment
+    else {
+      return
+    }
     // A repaired install is allowed to report its launch failures again.
     workspaceLaunchFailureReported = false
-    lifecycleLog("runtime repaired to generation \(install.root.lastPathComponent)")
-    reconcileControlPlaneEye(install: install, environment: environment)
+    lifecycleLog("runtime repaired to generation \(repaired.root.lastPathComponent)")
+    reconcileControlPlaneEye(install: repaired, environment: environment)
     applyRuntimePackMenuState()
     refreshServerStatus()
     // Repair is usually asked for because the terminal would not open. Attach
     // to the live one if it survived, otherwise open it on the repaired
-    // runtime; the launch path re-resolves and so also proves the repair.
+    // runtime; the launch path re-resolves through the owner and so also proves
+    // the repair.
     launchWorkspaceTerminal()
   }
 
@@ -1049,6 +1407,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       application.activate(options: [])
       return
     }
+    // The wrapper execs its host in place, so a live terminal is not always
+    // registered as an application. Try to adopt it before deciding it is gone
+    // and opening a second one.
+    if let process = terminalProcess, process.isRunning {
+      if let application = NSRunningApplication(processIdentifier: process.processIdentifier) {
+        terminalApplication = application
+        application.activate(options: [])
+      }
+      return
+    }
     launchWorkspaceTerminal()
   }
 
@@ -1067,8 +1435,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private func performServerAction(_ action: ServerLifecycleAction) {
     guard serverActionProcess?.isRunning != true else { return }
     guard let install = canonicalInstall, let environment = canonicalRuntimeEnvironment else {
+      // Say why there is nothing to act on. "Onboarding has not completed" is
+      // the wrong story when the owner refused an installation that exists.
       reportWorkspaceLaunchFailure(
-        "Cannot \(action.rawValue) VC Server before runtime onboarding completes")
+        runtimeResolutionFailure.map {
+          "Cannot \(action.rawValue) VC Server: \($0)"
+        } ?? "Cannot \(action.rawValue) VC Server before runtime onboarding completes")
       return
     }
     let deck = install.root.appendingPathComponent("bin/vibecrafted")
@@ -1077,25 +1449,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       return
     }
 
+    let epoch = runtimeResolveEpoch
     let process = Process()
-    let output = Pipe()
-    let errors = Pipe()
     process.executableURL = deck
     process.arguments = serverActionArguments(for: action)
     process.environment = environment
-    process.standardOutput = output
-    process.standardError = errors
-    process.terminationHandler = { [weak self] finished in
-      let stdout = output.fileHandleForReading.readDataToEndOfFile()
-      let stderr = errors.fileHandleForReading.readDataToEndOfFile()
-      DispatchQueue.main.async { [weak self] in
+    do {
+      try runBounded(process, timeout: 120, label: "server \(action.rawValue)") {
+        [weak self] result in
         guard let self else { return }
         self.serverActionProcess = nil
+        // An action that finished against a generation this App no longer
+        // controls must not clear the current transition or repaint the tray.
+        guard epoch == self.runtimeResolveEpoch else { return }
         self.serverActionInFlight = nil
-        if finished.terminationStatus != 0 {
-          let detail = String(data: stderr.isEmpty ? stdout : stderr, encoding: .utf8)?
+        if !result.clean || result.terminationStatus != 0 {
+          let detail = String(
+            data: result.stderr.isEmpty ? result.stdout : result.stderr, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-            ?? "Canonical service owner exited \(finished.terminationStatus)"
+            ?? "Canonical service owner exited \(result.terminationStatus)"
           let alert = NSAlert()
           alert.alertStyle = .critical
           alert.messageText = "Vibecrafted could not \(action.rawValue) VC Server"
@@ -1105,16 +1477,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         self.refreshServerStatus()
       }
-    }
-    do {
-      try process.run()
       serverActionProcess = process
       serverActionInFlight = action
-      applyServerMenuState(
-        deriveServerMenuState(
-          caretakerData: lastCaretakerData,
-          actionInFlight: action, runtimeReady: true))
+      renderServerStatus()
     } catch {
+      serverActionProcess = nil
+      serverActionInFlight = nil
       let alert = NSAlert()
       alert.alertStyle = .critical
       alert.messageText = "Vibecrafted could not \(action.rawValue) VC Server"
@@ -1126,7 +1494,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   @objc private func openServerLogsFromStatusItem() {
     guard serverUtilityProcess?.isRunning != true else { return }
     guard let install = canonicalInstall, let environment = canonicalRuntimeEnvironment else {
-      reportWorkspaceLaunchFailure("Cannot open VC Server logs before runtime onboarding completes")
+      reportWorkspaceLaunchFailure(
+        runtimeResolutionFailure.map { "Cannot open VC Server logs: \($0)" }
+          ?? "Cannot open VC Server logs before runtime onboarding completes")
       return
     }
     let deck = install.root.appendingPathComponent("bin/vibecrafted")
@@ -1135,24 +1505,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       return
     }
 
-    let output = Pipe()
-    let errors = Pipe()
+    let epoch = runtimeResolveEpoch
     let process = Process()
     process.executableURL = deck
     process.arguments = ["server", "service", "logs", "--json"]
     process.environment = environment
-    process.standardOutput = output
-    process.standardError = errors
-    process.terminationHandler = { [weak self] finished in
-      let stdout = output.fileHandleForReading.readDataToEndOfFile()
-      let stderr = errors.fileHandleForReading.readDataToEndOfFile()
-      DispatchQueue.main.async { [weak self] in
+    do {
+      try runBounded(process, timeout: 30, label: "server service logs") { [weak self] result in
         guard let self else { return }
         self.serverUtilityProcess = nil
-        if finished.terminationStatus == 0, let logs = decodeServerLogs(data: stdout) {
+        guard epoch == self.runtimeResolveEpoch else { return }
+        if result.clean, result.terminationStatus == 0,
+          let logs = decodeServerLogs(data: result.stdout)
+        {
           NSWorkspace.shared.open(logs.directory)
         } else {
-          let detail = String(data: stderr.isEmpty ? stdout : stderr, encoding: .utf8)?
+          let detail = String(
+            data: result.stderr.isEmpty ? result.stdout : result.stderr, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             ?? "Canonical service owner did not return its log location"
           let alert = NSAlert()
@@ -1164,12 +1533,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         self.refreshServerStatus()
       }
-    }
-    do {
-      try process.run()
       serverUtilityProcess = process
       openServerLogsMenuItem?.isEnabled = false
     } catch {
+      serverUtilityProcess = nil
       let alert = NSAlert()
       alert.alertStyle = .critical
       alert.messageText = "Vibecrafted could not open VC Server logs"
@@ -1219,12 +1586,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     process.standardError = FileHandle.nullDevice
     do {
       try process.run()
-      let data = output.fileHandleForReading.readDataToEndOfFile()
-      process.waitUntilExit()
-      return decodeRuntimeActivityTruth(data: data, terminationStatus: process.terminationStatus)
     } catch {
       return .unavailable(error.localizedDescription)
     }
+    // This one answer is needed synchronously, because the quit decision hangs
+    // on it. Waiting for it forever means a wedged launcher can make the App
+    // unquittable, so the wait is bounded and a silent launcher becomes an
+    // explicit "unavailable" the Founder is asked about.
+    let deadline = Date().addingTimeInterval(activityTruthTimeout)
+    while process.isRunning, Date() < deadline {
+      usleep(50_000)
+    }
+    guard !process.isRunning else {
+      process.terminate()
+      usleep(200_000)
+      if process.isRunning {
+        kill(process.processIdentifier, SIGKILL)
+      }
+      lifecycleLog("lifecycle activity read exceeded \(Int(activityTruthTimeout))s; terminated")
+      return .unavailable(
+        "the canonical lifecycle launcher did not answer within \(Int(activityTruthTimeout))s")
+    }
+    let data = output.fileHandleForReading.readDataToEndOfFile()
+    return decodeRuntimeActivityTruth(data: data, terminationStatus: process.terminationStatus)
   }
 
   @objc private func requestQuit() {

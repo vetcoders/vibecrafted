@@ -404,103 +404,182 @@ func caretakerDiagnosticsLines(data: Data?) -> [String] {
 
 // MARK: - Installed runtime resolution
 
-// Opening the App must render the runtime the Founder actually installed, not
-// the carrier this bundle happens to ship. The installer publishes two
-// versioned artifacts inside one transaction: `vibecrafted.active-runtime.v1`
-// names the active generation, `vibecrafted.runtime-install.v1` records the
-// roots that installation owns. This file decodes both and derives the launch
-// contract from them. It is a reader: it never writes either document, never
-// materializes a path, and never becomes a second installer. `tools/
-// vibecrafted-current` stays a compatibility projection — the pointer of
-// record is `active.json`.
+// Which runtime is installed, where it lives, and what may be launched out of
+// it is owned by the Runtime Pack installer — not by this App. The owner
+// answers one read-only question, `runtime-resolve --runtime-home <abs> --json`,
+// and returns `vibecrafted.runtime-resolution.v1`. This file decodes that
+// envelope and stops there: no receipt fields, no generation validation, no
+// preference rules, no launch-path derivation. Every one of those used to live
+// here in Swift, which made the App a second implementation of what counts as
+// an installable runtime. The only thing left is the bootstrap below, which
+// exists purely because the App has to find the owner before it can ask it
+// anything.
 
-/// The `vibecrafted.active-runtime.v1` pointer as the App consumes it.
-struct ActiveRuntimeDocument: Decodable {
-  let schema: String?
-  let version: String?
-  let runtimeRoot: String?
-  let appRoot: String?
+let runtimeResolutionSchema = "vibecrafted.runtime-resolution.v1"
 
-  enum CodingKeys: String, CodingKey {
-    case schema
-    case version
-    case runtimeRoot = "runtime_root"
-    case appRoot = "app_root"
-  }
-}
-
-/// The `vibecrafted.runtime-install.v1` receipt, narrowed to the roots the
-/// launch contract is derived from. Unknown keys are ignored on purpose: a
-/// newer installer may record more ownership without invalidating this read.
-struct RuntimeInstallReceiptDocument: Decodable {
-  struct Roots: Decodable {
-    let runtimeHome: String?
-    let configHome: String?
-    let productConfig: String?
-    let craftedHome: String?
-    let launcherHome: String?
-
-    enum CodingKeys: String, CodingKey {
-      case runtimeHome = "runtime_home"
-      case configHome = "config_home"
-      case productConfig = "product_config"
-      case craftedHome = "crafted_home"
-      case launcherHome = "launcher_home"
-    }
-  }
-
-  let schema: String?
-  let version: String?
-  let roots: Roots?
-}
-
-/// Absolute launch entries of one installed generation. Mirrors the installer's
-/// `vibecrafted.runtime-install-result.v1` shape for the fields the App needs,
-/// minus the terminal host: the canvas helper is bundle-owned, so the App
-/// supplies it rather than reading it back out of the installation.
-struct InstalledRuntimeLayout {
-  let generation: URL
-  let version: String
-  let launcher: URL
-  let terminal: URL
-  let frame: URL
-  let start: URL
-  let primaryShell: URL
-  let terminalConfig: URL
-  let frameConfig: URL
-  let runtimeHome: URL
-  let configHome: URL
-  let craftedHome: URL
-}
-
-/// What a normal open is allowed to do with the current installation.
+/// The owner's answer, as the App is allowed to understand it.
 ///
-/// The distinction is the whole point of this type. `absent` means nothing is
-/// installed yet, so publishing the bundled carrier is onboarding. `unusable`
-/// means an installation exists but disagrees with itself — replacing it from
-/// the bundled carrier would silently take the Founder's runtime backwards, so
-/// repair stays an explicit action instead.
-enum InstalledRuntimeDisposition {
-  case ready(InstalledRuntimeLayout)
+/// Generic over the launch contract on purpose. This file is Foundation-only
+/// and is compiled on its own by the tray's server-menu contract test, so it
+/// must not name the AppKit-side type that carries the contract — while still
+/// refusing to grow a second copy of that shape here.
+enum RuntimeResolution<Runtime> {
+  /// A usable installation. The payload is the owner's own
+  /// `vibecrafted.runtime-install-result.v1` launch contract, verbatim.
+  case ready(Runtime)
+  /// Nothing is installed, so publishing the bundled carrier is onboarding.
   case absent(String)
+  /// Something is installed but the owner refuses it, or could not be asked.
+  /// Never a licence to overwrite: that would walk the Founder's runtime
+  /// backwards from an older carrier.
   case unusable(String)
 }
 
-let activeRuntimeSchema = "vibecrafted.active-runtime.v1"
-let runtimeInstallReceiptSchema = "vibecrafted.runtime-install.v1"
+/// `vibecrafted.runtime-resolution.v1`. Unknown keys are ignored on purpose —
+/// a newer owner may report more without invalidating this read.
+struct RuntimeResolutionEnvelope<Runtime: Decodable>: Decodable {
+  let schema: String?
+  let status: String?
+  let reason: String?
+  let runtime: Runtime?
+}
+
+/// The whole invocation of the read-only owner API.
+///
+/// `-B` is an interpreter flag and therefore precedes the script: asking what
+/// is installed must not write bytecode into the installation being inspected.
+func runtimeResolveArguments(installer: URL, runtimeHome: URL) -> [String] {
+  [
+    "-B", installer.path, "runtime-resolve",
+    "--runtime-home", runtimeHome.path, "--json",
+  ]
+}
+
+/// Turn one owner invocation into a verdict.
+///
+/// Exit 0 carries `ready` or `absent`; exit 2 carries `unusable` and is still
+/// decoded, because that envelope is where the reason lives. Everything else —
+/// another status, a signal, the watchdog, unparseable bytes, or a schema this
+/// App does not know — is `unusable`. A resolver that cannot be trusted to
+/// describe the installation must never be read as "nothing is installed",
+/// because that reading is what turns a bad read into an automatic overwrite.
+func decodeRuntimeResolution<Runtime: Decodable>(
+  stdout: Data,
+  stderr: Data,
+  terminationStatus: Int32,
+  clean: Bool
+) -> RuntimeResolution<Runtime> {
+  let diagnostic = boundedResolverDiagnostic(stdout: stdout, stderr: stderr)
+  guard clean else {
+    return .unusable("the runtime resolver did not exit cleanly\(diagnostic)")
+  }
+  guard terminationStatus == 0 || terminationStatus == 2 else {
+    return .unusable("the runtime resolver exited \(terminationStatus)\(diagnostic)")
+  }
+  guard
+    let envelope = try? JSONDecoder().decode(
+      RuntimeResolutionEnvelope<Runtime>.self, from: stdout)
+  else {
+    return .unusable("the runtime resolver returned no readable resolution\(diagnostic)")
+  }
+  guard envelope.schema == runtimeResolutionSchema else {
+    return .unusable("the runtime resolver answered with schema \(envelope.schema ?? "none")")
+  }
+  let reason = envelope.reason.flatMap { $0.isEmpty ? nil : $0 }
+  switch envelope.status {
+  case "ready":
+    guard terminationStatus == 0 else {
+      return .unusable("the runtime resolver reported ready but exited \(terminationStatus)")
+    }
+    guard let runtime = envelope.runtime else {
+      return .unusable("the runtime resolver reported ready without a launch contract")
+    }
+    return .ready(runtime)
+  case "absent":
+    guard terminationStatus == 0 else {
+      return .unusable("the runtime resolver reported absent but exited \(terminationStatus)")
+    }
+    return .absent(reason ?? "no Vibecrafted runtime is installed yet")
+  case "unusable":
+    return .unusable(reason ?? "the installed runtime cannot be used")
+  default:
+    return .unusable("the runtime resolver answered with status \(envelope.status ?? "none")")
+  }
+}
+
+/// One short single-line excerpt of what the resolver said, for the tray and
+/// the log. Bounded so a chatty failure cannot become the whole menu.
+func boundedResolverDiagnostic(stdout: Data, stderr: Data, limit: Int = 240) -> String {
+  let source = stderr.isEmpty ? stdout : stderr
+  guard let text = String(data: source, encoding: .utf8) else { return "" }
+  let collapsed =
+    text
+    .split(whereSeparator: { $0.isNewline })
+    .map { $0.trimmingCharacters(in: .whitespaces) }
+    .filter { !$0.isEmpty }
+    .joined(separator: " · ")
+  guard !collapsed.isEmpty else { return "" }
+  return ": " + (collapsed.count > limit ? String(collapsed.prefix(limit)) + "…" : collapsed)
+}
+
+// MARK: - Owner bootstrap
+
+// The one thing the App must work out for itself: where the owner is. This is
+// deliberately the smallest read that can find it — is anything installed at
+// all, and which generation carries the resolver — and it stops there.
+
+/// What the App may do before the owner has spoken.
+enum RuntimeResolverBootstrap {
+  /// The owner can be asked about this runtime home.
+  case ask(python: URL, installer: URL)
+  /// Both identity documents are positively absent: first onboarding.
+  case absent(String)
+  /// An installation is present but this App cannot even ask about it.
+  case unusable(String)
+}
+
+/// Filesystem probes the bootstrap needs, injected so this policy holds no
+/// `FileManager` of its own and can be exercised without a real installation.
+struct RuntimeIdentityProbe {
+  /// Positive presence: an existing but unreadable file is *present*.
+  let exists: (URL) -> Bool
+  /// File bytes, or nil when they cannot be read.
+  let read: (URL) -> Data?
+  /// Links resolved, so containment cannot be defeated by a symlink.
+  let realPath: (URL) -> URL
+  /// Executable regular file.
+  let isExecutable: (URL) -> Bool
+}
+
+/// The `vibecrafted.active-runtime.v1` pointer, narrowed to the one field the
+/// bootstrap needs. Everything else in that document is the owner's to read.
+struct ActiveRuntimePointer: Decodable {
+  let runtimeRoot: String?
+
+  enum CodingKeys: String, CodingKey {
+    case runtimeRoot = "runtime_root"
+  }
+}
 
 /// Location of the active-generation pointer inside a runtime home.
-func activeRuntimeDocumentURL(runtimeHome: URL) -> URL {
+func activeRuntimePointerURL(runtimeHome: URL) -> URL {
   runtimeHome.appendingPathComponent("active.json")
 }
 
-/// Location of the ownership receipt inside a runtime home.
+/// Location of the ownership receipt inside a runtime home. Its contents are
+/// the owner's; the App only ever asks whether it is there.
 func runtimeInstallReceiptURL(runtimeHome: URL) -> URL {
   runtimeHome.appendingPathComponent("install-receipt.json")
 }
 
-/// The runtime home a normal open reads, resolved by the same precedence the
-/// installer uses: explicit override, then XDG data home, then its default.
+/// Where to look for an installation: explicit override, then XDG data home,
+/// then the default.
+///
+/// This is the same precedence the installer applies, which is exactly why the
+/// resolved home is handed back to the owner as `--runtime-home`: the owner
+/// refuses when it disagrees with the receipt, so a divergence (a symlinked or
+/// overridden `HOME`, say) surfaces as a visible refusal instead of silently
+/// addressing the wrong runtime.
 func resolvedRuntimeHome(environment: [String: String], homeDirectory: String) -> URL {
   if let explicit = environment["VIBECRAFTED_RUNTIME_HOME"], explicit.hasPrefix("/") {
     return URL(fileURLWithPath: explicit, isDirectory: true)
@@ -513,105 +592,69 @@ func resolvedRuntimeHome(environment: [String: String], homeDirectory: String) -
     .appendingPathComponent(".local/share/vibecrafted", isDirectory: true)
 }
 
-private func absoluteDirectory(_ value: String?) -> URL? {
-  guard let value, value.hasPrefix("/") else { return nil }
-  return URL(fileURLWithPath: value, isDirectory: true)
+/// True when `candidate` lives strictly beneath `directory`. Both sides are
+/// expected to be link-resolved already.
+func pathIsBeneath(_ candidate: URL, _ directory: URL) -> Bool {
+  let root = directory.standardizedFileURL.path
+  let prefix = root.hasSuffix("/") ? root : root + "/"
+  return candidate.standardizedFileURL.path.hasPrefix(prefix)
 }
 
-/// True when `candidate` is the releases directory of `runtimeHome` or below
-/// it. A generation pointer that escapes its own runtime home is refused
-/// rather than launched.
-func generationBelongsToRuntimeHome(generation: URL, runtimeHome: URL) -> Bool {
-  let releases =
-    runtimeHome
-    .standardizedFileURL
+/// Decide whether the owner can be asked, and refuse honestly when it cannot.
+func runtimeResolverBootstrap(
+  runtimeHome: URL,
+  probe: RuntimeIdentityProbe
+) -> RuntimeResolverBootstrap {
+  let pointer = activeRuntimePointerURL(runtimeHome: runtimeHome)
+  let receipt = runtimeInstallReceiptURL(runtimeHome: runtimeHome)
+  let pointerPresent = probe.exists(pointer)
+  let receiptPresent = probe.exists(receipt)
+
+  // Absence is only absence when both identity documents are positively
+  // missing. A half-published pair, or one this App cannot read, is an
+  // installation — and an installation is never something to overwrite from
+  // the bundled carrier without being asked.
+  guard pointerPresent || receiptPresent else {
+    return .absent("no Vibecrafted runtime is installed under \(runtimeHome.path)")
+  }
+  guard pointerPresent else {
+    return .unusable("\(receipt.path) exists with no active runtime pointer beside it")
+  }
+  guard receiptPresent else {
+    return .unusable("\(pointer.path) exists with no install receipt beside it")
+  }
+  guard let pointerData = probe.read(pointer), !pointerData.isEmpty else {
+    return .unusable("\(pointer.path) cannot be read")
+  }
+  guard
+    let document = try? JSONDecoder().decode(ActiveRuntimePointer.self, from: pointerData),
+    let root = document.runtimeRoot, root.hasPrefix("/")
+  else {
+    return .unusable("\(pointer.path) names no absolute generation root")
+  }
+
+  // Resolve links on both sides before comparing, and therefore before
+  // executing anything found through the result: a pointer that leaves this
+  // home's releases directory is an escape, not a generation.
+  let generation = probe.realPath(URL(fileURLWithPath: root, isDirectory: true))
+  let releases = probe.realPath(runtimeHome)
     .appendingPathComponent("releases", isDirectory: true)
-    .path
-  let candidate = generation.standardizedFileURL.path
-  return candidate.hasPrefix(releases + "/")
-}
+  guard pathIsBeneath(generation, releases) else {
+    return .unusable("the active generation escapes \(releases.path)")
+  }
 
-/// Derive the launch contract of the currently installed generation, or say
-/// precisely why it cannot be derived. Pure: all filesystem reads happen in the
-/// caller, existence of the launch entries is checked there too.
-func installedRuntimeDisposition(
-  activeData: Data?,
-  receiptData: Data?,
-  runtimeHome: URL
-) -> InstalledRuntimeDisposition {
-  guard let activeData, !activeData.isEmpty else {
-    return .absent("no active runtime pointer under \(runtimeHome.path)")
+  let python = generation.appendingPathComponent("bin/python3")
+  guard probe.isExecutable(python) else {
+    return .unusable("\(generation.lastPathComponent) carries no executable bin/python3")
   }
-  guard let receiptData, !receiptData.isEmpty else {
-    return .absent("no runtime install receipt under \(runtimeHome.path)")
-  }
-  guard
-    let active = try? JSONDecoder().decode(ActiveRuntimeDocument.self, from: activeData)
-  else {
-    return .unusable("the active runtime pointer is not readable JSON")
-  }
-  guard
-    let receipt = try? JSONDecoder().decode(
-      RuntimeInstallReceiptDocument.self, from: receiptData)
-  else {
-    return .unusable("the runtime install receipt is not readable JSON")
-  }
-  guard active.schema == activeRuntimeSchema else {
+  let installer = generation.appendingPathComponent("scripts/vetcoders_install.py")
+  guard probe.exists(installer) else {
+    // A generation that predates the read-only resolver cannot be asked. The
+    // answer is an explicit upgrade or repair — never a resolver copied back
+    // into Swift, which is the duplication this whole cut removes.
     return .unusable(
-      "the active runtime pointer carries schema \(active.schema ?? "none")")
+      "\(generation.lastPathComponent) does not carry the runtime resolver "
+        + "(scripts/vetcoders_install.py); repair or upgrade the runtime explicitly")
   }
-  guard receipt.schema == runtimeInstallReceiptSchema else {
-    return .unusable(
-      "the runtime install receipt carries schema \(receipt.schema ?? "none")")
-  }
-  guard let version = active.version, !version.isEmpty else {
-    return .unusable("the active runtime pointer names no version")
-  }
-  // Both documents are written in one installer transaction. Disagreement means
-  // a half-applied or hand-edited installation, never something to launch.
-  guard receipt.version == version else {
-    return .unusable(
-      "active generation \(version) disagrees with the install receipt "
-        + "(\(receipt.version ?? "none"))")
-  }
-  guard let generation = absoluteDirectory(active.runtimeRoot) else {
-    return .unusable("the active runtime pointer names no absolute generation root")
-  }
-  guard let roots = receipt.roots,
-    let receiptRuntimeHome = absoluteDirectory(roots.runtimeHome),
-    let configHome = absoluteDirectory(roots.configHome),
-    let productConfig = absoluteDirectory(roots.productConfig),
-    let craftedHome = absoluteDirectory(roots.craftedHome),
-    let launcherHome = absoluteDirectory(roots.launcherHome)
-  else {
-    return .unusable("the runtime install receipt records no absolute roots")
-  }
-  guard
-    receiptRuntimeHome.standardizedFileURL.path == runtimeHome.standardizedFileURL.path
-  else {
-    return .unusable(
-      "the runtime install receipt belongs to \(receiptRuntimeHome.path), not "
-        + runtimeHome.path)
-  }
-  guard generationBelongsToRuntimeHome(generation: generation, runtimeHome: runtimeHome)
-  else {
-    return .unusable("the active generation escapes \(runtimeHome.path)/releases")
-  }
-  return .ready(
-    InstalledRuntimeLayout(
-      generation: generation,
-      version: version,
-      launcher: launcherHome.appendingPathComponent("vibecrafted"),
-      terminal: generation.appendingPathComponent("bin/vc-terminal"),
-      // The native provider, never the wrapper: pointing this back at the
-      // wrapper makes the first `vc-frame ls` exec itself forever.
-      frame: generation.appendingPathComponent("libexec/vc-frame"),
-      start: generation.appendingPathComponent("bin/vc-start"),
-      primaryShell: productConfig.appendingPathComponent(
-        "vc-terminal/launch-primary-shell.zsh"),
-      terminalConfig: productConfig.appendingPathComponent("vc-terminal/vc-terminal.toml"),
-      frameConfig: productConfig.appendingPathComponent("vc-frame", isDirectory: true),
-      runtimeHome: receiptRuntimeHome,
-      configHome: configHome,
-      craftedHome: craftedHome))
+  return .ask(python: python, installer: installer)
 }
