@@ -67,6 +67,132 @@ _vetcoders_require_vc_frame() {
   }
 }
 
+# ---------------------------------------------------------------------------
+# Product terminal host (VC Terminal) — the PTY supplier for public VC entries.
+#
+# vc-frame keeps its strict TTY guard: it is an internal surface and still
+# refuses a pipe. The PUBLIC entries (vc-start / vc-resume) must not inherit
+# that refusal, because the operator's caller (agent shell, script, app hook)
+# legitimately has no controlling terminal. The supported answer is the same
+# one Vibecrafted.app already uses:
+#
+#   vc-terminal -e <launch-primary-shell.zsh> <product front door> [argv...]
+#
+# (AppDelegate.openWorkspaceTerminal, config/vc-terminal/vibecrafted.toml).
+# We reuse that owner instead of inventing nohup/setsid/osascript launchers.
+# ---------------------------------------------------------------------------
+
+_vetcoders_vc_terminal_missing_message() {
+  local owner_root
+  owner_root="$(_vetcoders_vc_frame_owner_root)" || return 1
+  printf 'vc-terminal: installed product entry/engine missing under: %s/{bin,libexec}/vc-terminal\n' \
+    "$owner_root" >&2
+  printf 'A non-interactive caller has no PTY, so Vibecrafted must open its own terminal host.\n' >&2
+  printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
+}
+
+# Strict twin of _vetcoders_vc_frame_bin: entry AND engine must be real,
+# executable, non-symlink files inside the generation that loaded this shell.
+_vetcoders_vc_terminal_bin() {
+  local owner_root bin engine
+  owner_root="$(_vetcoders_vc_frame_owner_root)" || return 1
+  bin="$owner_root/bin/vc-terminal"
+  engine="$owner_root/libexec/vc-terminal"
+  if [[ -L "$bin" || -L "$engine" || ! -f "$engine" || ! -x "$engine" ]]; then
+    return 1
+  fi
+  if [[ "$bin" == /* && -f "$bin" && -x "$bin" ]]; then
+    printf '%s\n' "$bin"
+    return 0
+  fi
+  return 1
+}
+
+# Installer-owned product launcher; the repo checkout keeps the source of truth.
+_vetcoders_vc_terminal_primary_shell() {
+  local owner_root config_home candidate
+  config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+  candidate="$config_home/vibecrafted/vc-terminal/launch-primary-shell.zsh"
+  if [[ -f "$candidate" && -x "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  owner_root="$(_vetcoders_vc_frame_owner_root)" || return 1
+  candidate="$owner_root/config/alacritty/launch-primary-shell.zsh"
+  if [[ -f "$candidate" && -x "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  return 1
+}
+
+# True when this process is a public VC entry that owes the operator a visible
+# terminal. Deliberately NOT a test flag: the signals are the real controlling
+# terminal and one explicit re-entry boundary exported into the child.
+_vetcoders_needs_vc_terminal_entry() {
+  # The child we spawn re-enters the same entry; the boundary stops the loop
+  # even if the host somehow fails to hand us a PTY.
+  [[ -z "${VIBECRAFTED_TERMINAL_ENTRY:-}" ]] || return 1
+  # A real terminal means the direct path is already correct — never reroute it.
+  [[ ! -t 0 || ! -t 1 ]] || return 1
+  # Inside a frame the caller already owns a visible surface.
+  ! _vetcoders_in_vc_frame || return 1
+  # An explicitly named operator session is honoured on the direct path.
+  [[ -z "${VIBECRAFTED_OPERATOR_SESSION:-}" ]] || return 1
+  return 0
+}
+
+# Open the product terminal host on THIS project and run the prepared entry
+# inside it. Returns 0 when the host was launched, 1 when the caller must keep
+# its own path (already interactive, boundary reached, or host unavailable).
+_vetcoders_open_entry_in_vc_terminal() {
+  local front_door="$1"
+  shift
+  local terminal_bin primary_shell cwd
+  terminal_bin="$(_vetcoders_vc_terminal_bin)" || {
+    _vetcoders_vc_terminal_missing_message
+    return 1
+  }
+  primary_shell="$(_vetcoders_vc_terminal_primary_shell)" || {
+    printf 'vc-terminal: product shell launcher missing: %s\n' \
+      "${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-terminal/launch-primary-shell.zsh" >&2
+    return 1
+  }
+  [[ -n "$front_door" && -x "$front_door" ]] || {
+    printf 'vc-terminal: product front door is not executable: %s\n' "$front_door" >&2
+    return 1
+  }
+
+  # Exact cwd is the project identity: the operator ran this in their repo and
+  # the session must be bound to that repo, not to the host's default folder.
+  cwd="$(pwd -P)"
+
+  VIBECRAFTED_TERMINAL_ENTRY=1 \
+    "$terminal_bin" --working-directory "$cwd" \
+    -e "$primary_shell" "$front_door" "$@" &
+  disown 2>/dev/null || true
+
+  printf 'No TTY here — opened the Vibecrafted terminal for this project.\n' >&2
+  printf '  project: %s\n' "$cwd" >&2
+  printf '  entry:   %s' "${front_door##*/}" >&2
+  if (( $# )); then
+    printf ' %s' "$@" >&2
+  fi
+  printf '\n' >&2
+  return 0
+}
+
+# Canonical product front door for a public verb, inside the generation that
+# loaded this shell. Never PATH-resolved: a stale ~/.local/bin shim from
+# another generation must not capture the escalation.
+_vetcoders_product_front_door() {
+  local verb="$1" owner_root candidate
+  owner_root="$(_vetcoders_vc_frame_owner_root)" || return 1
+  candidate="$owner_root/bin/$verb"
+  [[ -f "$candidate" && -x "$candidate" ]] || return 1
+  printf '%s\n' "$candidate"
+}
+
 # vc-frame needs a real PTY to enable raw mode. When stdin/stdout are pipes
 # (curl|bash, ssh without -t, agent subprocess), vc-frame panics with an
 # unhelpful Rust traceback. Catch the missing-TTY case early and return a
@@ -199,14 +325,18 @@ _vetcoders_resolve_interactive_operator_target() {
   fi
 
   if ((live_count > 1)); then
-    printf 'Interactive operator target is ambiguous (%d live vc-frame sessions); pick one explicitly.\n' \
+    # Informational, never fatal: unrelated live sessions elsewhere are not a
+    # claim on THIS project. Callers fall through to the project-bound session
+    # (creating it through the terminal host when they have no PTY), so the
+    # only thing missing here is a *proven* pick — not permission to proceed.
+    printf 'No project-bound operator target; %d live vc-frame sessions are ambiguous for this repo.\n' \
       "$live_count" >&2
     printf '  candidates:\n' >&2
     while IFS= read -r name; do
       [[ -n "$name" ]] || continue
       printf '    - %s\n' "$name" >&2
     done <<< "$live_list"
-    printf '  export VIBECRAFTED_OPERATOR_SESSION=<name>  # or attach a vc-frame tab\n' >&2
+    printf '  continuing with this project'"'"'s own session; export VIBECRAFTED_OPERATOR_SESSION=<name> to override.\n' >&2
   fi
   return 0
 }

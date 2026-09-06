@@ -835,6 +835,25 @@ vc-start() {
     _vetcoders_vc_passthrough start --help
     return $?
   fi
+  # A public entry without a controlling terminal owes the operator a visible
+  # terminal, not a refusal: vc-frame cannot create a session over a pipe, so
+  # route through the product terminal host (the same owner Vibecrafted.app
+  # uses) and let the child run this very entry with a real PTY. Probe mode is
+  # a deliberate non-interactive contract and is never rerouted.
+  if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" != "1" ]] &&
+    command -v _vetcoders_needs_vc_terminal_entry >/dev/null 2>&1 &&
+    _vetcoders_needs_vc_terminal_entry; then
+    local _vc_start_front_door=""
+    _vc_start_front_door="$(_vetcoders_product_front_door vc-start 2>/dev/null || true)"
+    if [[ -n "$_vc_start_front_door" ]]; then
+      if _vetcoders_open_entry_in_vc_terminal "$_vc_start_front_door" "$@"; then
+        return 0
+      fi
+      return 1
+    fi
+    printf 'vc-start: no TTY and no installed vc-start front door to open a terminal with.\n' >&2
+    printf 'Run vc-start from a terminal, or install the runtime so bin/vc-terminal and bin/vc-start exist.\n' >&2
+  fi
   # Required lifecycle helpers belong to the admitted facade.
   if ! declare -F _vetcoders_product_entry_prepare >/dev/null 2>&1; then
     printf 'vc-start: required product preparation helper missing\n' >&2

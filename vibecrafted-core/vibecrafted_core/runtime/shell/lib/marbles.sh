@@ -509,6 +509,29 @@ _vetcoders_resume_agent() {
     resume_explicit_input=1
   fi
 
+  # A bare resume is an operator TUI, so it needs a visible surface. When the
+  # caller has no controlling terminal we open the product terminal host on
+  # THIS project and re-run the same entry there, rather than refusing.
+  #
+  # Placement is the contract: this sits BEFORE the AICX continuity pack and
+  # before any provider command is composed, so the escalated child assembles
+  # the pack exactly once. Escalating later would launch AICX twice.
+  if [[ -z "$resume_explicit_input" ]] &&
+    [[ -z "${_vetcoders_contract_runtime:-}" || "${_vetcoders_contract_runtime:-}" =~ ^(terminal|visible)$ ]] &&
+    command -v _vetcoders_needs_vc_terminal_entry >/dev/null 2>&1 &&
+    _vetcoders_needs_vc_terminal_entry; then
+    local _resume_front_door=""
+    _resume_front_door="$(_vetcoders_product_front_door vibecrafted 2>/dev/null || true)"
+    if [[ -n "$_resume_front_door" ]]; then
+      if _vetcoders_open_entry_in_vc_terminal "$_resume_front_door" resume "$tool" "$@"; then
+        return 0
+      fi
+      return 1
+    fi
+    printf 'vc-resume: no TTY and no installed vibecrafted front door to open a terminal with.\n' >&2
+    printf 'Run the resume from a terminal, or install the runtime so bin/vc-terminal exists.\n' >&2
+  fi
+
   local aicx_fallback_mode=""
   local aicx_context_file=""
   if [[ -z "$_vetcoders_contract_session" && -z "$resume_explicit_input" ]]; then
