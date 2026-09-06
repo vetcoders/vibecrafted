@@ -115,7 +115,7 @@ binary_runs() {
 
 # Sole live vc-frame config directory owned by the product.
 _vcframe_config_roots() {
-  local xdg="${XDG_CONFIG_HOME:-$HOME/.config}"
+  local xdg="$HOME/.config"
   printf '%s\n' "$xdg/vibecrafted/vc-frame"
 }
 
@@ -155,7 +155,7 @@ verify_vcframe_cockpit() {
   cfg_root=""
   while IFS= read -r candidate; do
     [[ -n "$candidate" ]] || continue
-    if [[ -f "$candidate/config.kdl" ]]; then
+    if [[ -d "$candidate" && ! -L "$candidate" && -f "$candidate/config.kdl" && ! -L "$candidate/config.kdl" ]]; then
       cfg_root="$candidate"
       break
     fi
@@ -163,7 +163,7 @@ verify_vcframe_cockpit() {
 
   if [[ -z "$cfg_root" ]]; then
     warn "cockpit: no live config.kdl under ~/.config/vibecrafted/vc-frame"
-    warn "  fix: vibecrafted config install   # or checkout stage_vc_frame_config"
+    warn "  fix: run make install from the Vibecrafted checkout with your verified Runtime Pack"
     fails=1
   else
     cfg="$cfg_root/config.kdl"
@@ -212,14 +212,12 @@ verify_vcframe_cockpit() {
   composer=""
   if [[ -n "$cfg_root" ]]; then
     for candidate in \
-      "$cfg_root/vc-composer.sh" \
-      "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/frontier/vc-frame/vc-composer.sh" \
-      "${XDG_CONFIG_HOME:-$HOME/.config}/vc-frame/vc-composer.sh"
+      "$cfg_root/vc-composer.sh"
     do
-      if [[ -x "$candidate" || -L "$candidate" ]]; then
+      if [[ -x "$candidate" && ! -L "$candidate" ]]; then
         # Prefer non-tiny STALE stubs (legacy 606B antique).
         if [[ -f "$candidate" ]] && [[ "$(wc -c <"$candidate" | tr -d ' ')" -lt 1500 ]]; then
-          warn "cockpit: $candidate looks like a STALE stub (<1.5KB) — re-run config install"
+          warn "cockpit: $candidate looks like a STALE stub (<1.5KB) — reinstall the verified Runtime Pack"
           fails=1
           continue
         fi
@@ -524,257 +522,17 @@ install_aicx() {
 # ---------------------------------------------------------------------------
 # vc-frame — product frame binary (hard install on product path)
 #
-# Order:
-#   1. already on PATH and runs
-#   2. sibling Living Tree: build donor with `make release`, then install the
-#      exact binary through this Vibecrafted-owned installer.
-# There is deliberately no vc-frame release/installer fallback.
+# The Runtime Pack installer publishes vc-frame with its matching config.
+# This foundations step inspects that installation.
 # ---------------------------------------------------------------------------
 
-_vcframe_sibling_root() {
-  local candidate
-  for candidate in \
-    "${VIBECRAFTED_VC_FRAME_SOURCE:-}" \
-    "$SOURCE_DIR/../vc-frame" \
-    "$SOURCE_DIR/../vetcoders/vc-frame"
-  do
-    [[ -n "$candidate" ]] || continue
-    if [[ -f "$candidate/Makefile" && -d "$candidate/zellij-utils" ]]; then
-      printf '%s\n' "$(cd "$candidate" && pwd)"
-      return 0
-    fi
-  done
-  return 1
-}
-
+# vc-frame and its product config are installed together by runtime-install.
+# Foundations consumes that result; it cannot build a second donor installation
+# or patch the selected immutable generation.
 install_vcframe() {
-  local sibling vcframe_target_root donor_binary
-  local need_binary=0
-
-  if binary_runs vc-frame; then
-    ok "vc-frame binary present: $(command -v vc-frame)"
-  else
-    need_binary=1
-  fi
-
-  if (( need_binary )); then
-    sibling="$(_vcframe_sibling_root 2>/dev/null || true)"
-    if [[ -n "$sibling" ]]; then
-      if (( CHECK_ONLY )); then
-        info "Would build the vc-frame donor from sibling source and install it through Vibecrafted:"
-        info "  make -C $sibling release"
-        info "  install -m 0755 <donor-binary> $LAUNCHER_PREFIX/vc-frame"
-      else
-        info "Building vc-frame donor from sibling Living Tree: $sibling"
-        vcframe_target_root="${XDG_CACHE_HOME:-$HOME/.cache}/vibecrafted/build/vc-frame"
-        mkdir -p "$vcframe_target_root"
-        if CARGO_TARGET_DIR="$vcframe_target_root" \
-          make -C "$sibling" --no-print-directory release; then
-          donor_binary="$vcframe_target_root/release/vc-frame"
-          [[ -x "$donor_binary" ]] || {
-            warn "vc-frame donor build completed without $donor_binary"
-            return 1
-          }
-          mkdir -p "$LAUNCHER_PREFIX"
-          install -m 0755 "$donor_binary" "$LAUNCHER_PREFIX/vc-frame"
-          if binary_runs vc-frame; then
-            ok "vc-frame donor installed by Vibecrafted: $(command -v vc-frame)"
-            need_binary=0
-          else
-            warn "donor install finished but vc-frame is still not runnable on PATH"
-          fi
-        else
-          warn "vc-frame donor build failed"
-        fi
-      fi
-    fi
-  fi
-
-  if (( need_binary )) && ! (( CHECK_ONLY )); then
-    warn "vc-frame (the visual cockpit) is not installed — the headless runtime works without it:"
-    warn "  vibecrafted doctor · vibecrafted implement claude --prompt \"...\" · vibecrafted await claude --last"
-    warn "To get the cockpit: install the Vibecrafted desktop app (DMG) when published,"
-    sibling="$(_vcframe_sibling_root 2>/dev/null || true)"
-    if [[ -n "$sibling" ]]; then
-      warn "  or build the sibling checkout: make -C $sibling release"
-    else
-      warn "  or (maintainers) set VIBECRAFTED_VC_FRAME_SOURCE to a vc-frame checkout and rerun make install"
-    fi
+  if ! verify_vcframe_cockpit; then
+    warn "Repair: run make install from the Vibecrafted checkout with your verified Runtime Pack."
     return 1
-  fi
-
-  if (( CHECK_ONLY )); then
-    # Dry-run still reports cockpit gaps against current machine.
-    verify_vcframe_cockpit || warn "cockpit gaps present (check-only; install would fail until fixed)"
-    return 0
-  fi
-
-  # Best-effort projection before cockpit verify (binary alone is not enough).
-  if command -v vibecrafted >/dev/null 2>&1 \
-    && vibecrafted help 2>/dev/null | grep -q 'config'; then
-    vibecrafted config install 2>/dev/null || true
-  elif [[ -f "$SOURCE_DIR/vibecrafted-core/vibecrafted_core/vc_frame_delivery.py" ]]; then
-    (
-      cd "$SOURCE_DIR"
-      PYTHONPATH="$SOURCE_DIR/vibecrafted-core${PYTHONPATH:+:$PYTHONPATH}" \
-        python3 -c "from vibecrafted_core.vc_frame_delivery import stage_vc_frame_config; stage_vc_frame_config()" \
-        >/dev/null 2>&1
-    ) || true
-  fi
-
-  verify_vcframe_cockpit
-}
-
-
-# Product entry wrapper: ~/.local/bin/vc-frame → product choke + real binary.
-install_vc_frame_product_wrapper() {
-  local real dest wrapper_src cargo_bin product_bin legacy_bin
-  dest="$LAUNCHER_PREFIX/vc-frame"
-  wrapper_src="$SOURCE_DIR/scripts/vc-frame-product-entry.sh"
-  cargo_bin="${HOME}/.cargo/bin/vc-frame"
-  product_bin="${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/bin/vc-frame"
-  legacy_bin="$LAUNCHER_PREFIX/vc-frame.real"
-
-  if [[ ! -f "$wrapper_src" ]]; then
-    warn "product entry wrapper source missing: $wrapper_src"
-    return 0
-  fi
-
-  # Locate real Mach-O/ELF binary (not a shell wrapper).
-  real=""
-  if [[ -n "${VIBECRAFTED_VC_FRAME_BIN:-}" && -x "${VIBECRAFTED_VC_FRAME_BIN}" ]]; then
-    real="$VIBECRAFTED_VC_FRAME_BIN"
-  elif [[ -x "$cargo_bin" ]] && ! head -c 2 "$cargo_bin" 2>/dev/null | grep -q '#!'; then
-    real="$cargo_bin"
-  elif [[ -x "$product_bin" ]] && ! head -c 2 "$product_bin" 2>/dev/null | grep -q '#!'; then
-    real="$product_bin"
-  elif [[ -x "$dest" ]] && ! head -c 2 "$dest" 2>/dev/null | grep -q '#!'; then
-    real="$dest"
-  elif [[ -x "$legacy_bin" ]] && ! head -c 2 "$legacy_bin" 2>/dev/null | grep -q '#!'; then
-    # One-way migration from the retired sibling shadow into the product data root.
-    real="$legacy_bin"
-  fi
-
-  if [[ -z "$real" ]]; then
-    warn "could not locate real vc-frame binary for product wrapper"
-    return 0
-  fi
-
-  if (( CHECK_ONLY )); then
-    info "Would install product vc-frame entry wrapper -> $dest (symlink into vibecrafted-current/bin; real=$real; remove legacy=$legacy_bin)"
-    return 0
-  fi
-
-  mkdir -p "$LAUNCHER_PREFIX" "$(dirname "$product_bin")"
-  if [[ "$real" == "$dest" || "$real" == "$legacy_bin" ]]; then
-    install -m 0755 "$real" "$product_bin"
-    real="$product_bin"
-  fi
-
-  # PATH must be a symlink into vibecrafted-current so path-doctor and
-  # `vibecrafted update` see one owner. A copied wrapper in ~/.local/bin
-  # is a snapshot Claude/CLI keep running after the generation moves.
-  local tools_home current gen
-  tools_home="${VIBECRAFTED_TOOLS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/tools}"
-  current="$tools_home/vibecrafted-current"
-  if [[ -d "$current" ]]; then
-    gen="$(cd "$current" && pwd -P)"
-    # Generations are immutable and carry bin/vc-frame since publication
-    # materializes it; only a pre-materialization generation gets the copy.
-    if [[ ! -x "$gen/bin/vc-frame" ]]; then
-      mkdir -p "$gen/bin"
-      install -m 0755 "$wrapper_src" "$gen/bin/vc-frame"
-    fi
-    ln -sfn "$current/bin/vc-frame" "$dest"
-    ok "product vc-frame entry installed: $dest -> $current/bin/vc-frame (real=$real)"
-  else
-    install -m 0755 "$wrapper_src" "$dest"
-    ok "product vc-frame entry installed: $dest (real=$real; no generation, copied)"
-  fi
-  rm -f "$legacy_bin"
-}
-
-
-# Sync product entry choke into the active vibecrafted-current generation so
-# shell vc-start (not only the git checkout) carries prepare + deck cmd_start.
-install_product_entry_into_current() {
-  local tools_home current gen deck_src shell_src
-  tools_home="${VIBECRAFTED_TOOLS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/tools}"
-  current="$tools_home/vibecrafted-current"
-  if [[ ! -d "$current" ]]; then
-    warn "vibecrafted-current missing — skip product-entry generation sync"
-    return 0
-  fi
-  # Resolve generation root (current may be a symlink).
-  gen="$(cd "$current" && pwd -P)"
-
-  deck_src=""
-  for candidate in \
-    "$SOURCE_DIR/vibecrafted-core/vibecrafted_core/deck/vibecrafted" \
-    "$SOURCE_DIR/scripts/vibecrafted"
-  do
-    if [[ -f "$candidate" ]] && grep -q '_vetcoders_product_entry_prepare\|Product entrypoint choke' "$candidate" 2>/dev/null; then
-      deck_src="$candidate"
-      break
-    fi
-  done
-  # Fallback: any deck with cmd_start
-  if [[ -z "$deck_src" ]]; then
-    for candidate in \
-      "$SOURCE_DIR/vibecrafted-core/vibecrafted_core/deck/vibecrafted" \
-      "$SOURCE_DIR/scripts/vibecrafted"
-    do
-      [[ -f "$candidate" ]] && deck_src="$candidate" && break
-    done
-  fi
-
-  shell_src=""
-  for candidate in \
-    "$SOURCE_DIR/vibecrafted-core/vibecrafted_core/runtime/shell/lib" \
-    "$SOURCE_DIR/vibecrafted-core/vibecrafted_core/runtime/shell/lib"
-  do
-    if [[ -f "$candidate/dashboard.sh" ]] && grep -q '_vetcoders_product_entry_prepare' "$candidate/dashboard.sh" 2>/dev/null; then
-      shell_src="$candidate"
-      break
-    fi
-  done
-
-  if (( CHECK_ONLY )); then
-    info "Would sync product entry into $gen (shell=${shell_src:-missing} deck=${deck_src:-missing})"
-    return 0
-  fi
-
-  if [[ -n "$shell_src" ]]; then
-    local dest_lib
-    for dest_lib in \
-      "$gen/runtime/shell/lib" \
-      "$gen/vibecrafted-core/vibecrafted_core/runtime/shell/lib"
-    do
-      if [[ -d "$dest_lib" ]]; then
-        install -m 0644 "$shell_src/dashboard.sh" "$dest_lib/dashboard.sh"
-        install -m 0644 "$shell_src/dispatch.sh" "$dest_lib/dispatch.sh"
-        ok "product entry shell synced: $dest_lib/{dashboard,dispatch}.sh"
-      fi
-    done
-  else
-    warn "product entry shell source missing (dashboard.sh prepare not found)"
-  fi
-
-  if [[ -n "$deck_src" ]]; then
-    local dest_deck="$gen/vibecrafted-core/vibecrafted_core/deck/vibecrafted"
-    if [[ -d "$(dirname "$dest_deck")" ]]; then
-      install -m 0755 "$deck_src" "$dest_deck"
-      ok "product entry deck synced: $dest_deck"
-    fi
-  else
-    warn "product entry deck source missing"
-  fi
-
-  local wrapper_src="$SOURCE_DIR/scripts/vc-frame-product-entry.sh"
-  if [[ -f "$wrapper_src" ]]; then
-    mkdir -p "$gen/bin"
-    install -m 0755 "$wrapper_src" "$gen/bin/vc-frame"
-    ok "product vc-frame wrapper synced: $gen/bin/vc-frame"
   fi
 }
 
@@ -1070,8 +828,6 @@ for target in "${TARGETS[@]}"; do
     # separate vc-frame release or installer fallback.
     vc-frame)
       install_vcframe  || foundation_optional_fail vc-frame
-      install_vc_frame_product_wrapper || true
-      install_product_entry_into_current || true
       ;;
     agents)
       if ! install_agents; then

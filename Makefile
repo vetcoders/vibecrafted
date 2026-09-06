@@ -302,26 +302,10 @@ install:
 	@VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)" bash "$(RUNTIME_PACK_INSTALLER)"
 	@$(MAKE) --no-print-directory reconcile-server-service
 
-# Explicit source/compiler lane retained for the portable Linux/WSL carrier.
-# It is not the normal customer installer: it may require Rust, cargo-leptos,
-# sibling donors, and platform targets. macOS CLI/App install the exact same
-# closed Runtime Pack through `make install` and AppDelegate respectively.
-install-source:
-	@mkdir -p "$(HOME)/.vibecrafted"
-	@: > "$(INSTALL_LOG)"
-	@printf "Installing Vibecrafted\n"
-	@VIBECRAFTED_INSTALL_LOG="$(INSTALL_LOG)" VERBOSE="$(VERBOSE)" $(INSTALL_STEP) "foundations" -- bash -e -c 'make --no-print-directory init-hooks; bash scripts/install-foundations.sh'
-	@VIBECRAFTED_INSTALL_LOG="$(INSTALL_LOG)" VERBOSE="$(VERBOSE)" $(INSTALL_STEP) "runtime tools" -- bash scripts/install-runtime.sh --runtime "$(RUNTIME)" --yes
-	@VIBECRAFTED_INSTALL_LOG="$(INSTALL_LOG)" VERBOSE="$(VERBOSE)" $(INSTALL_STEP) "app binaries" -- bash -e -c 'make --no-print-directory install-vendored-binaries; make --no-print-directory install-app-binaries'
-	@VIBECRAFTED_INSTALL_LOG="$(INSTALL_LOG)" VERBOSE="$(VERBOSE)" $(INSTALL_STEP) "skills and launchers" -- $(MAKE) --no-print-directory install-bundle-tools
-	@VIBECRAFTED_INSTALL_LOG="$(INSTALL_LOG)" VERBOSE="$(VERBOSE)" $(INSTALL_STEP) "frontier config" -- bash -e -c '$(RESOLVE_STABLE_RUNTIME_ROOT); $(REQUIRE_STAGED_RUNTIME_ROOT); bash "$$stable_root/vibecrafted-core/vibecrafted_core/runtime/scripts/install-frontier-config.sh" --source "$$stable_root" || printf "[warn] Frontier config skipped (non-fatal)\n"'
-	@VIBECRAFTED_INSTALL_LOG="$(INSTALL_LOG)" VERBOSE="$(VERBOSE)" $(INSTALL_STEP) "vc-frame config" -- bash -e -c 'export PATH="$$HOME/.local/bin:$$PATH"; $(RESOLVE_STABLE_RUNTIME_ROOT); $(REQUIRE_STAGED_RUNTIME_ROOT); tool_python="$$(uv tool dir --color never)/vibecrafted/bin/python"; test -x "$$tool_python"; PYTHONPATH="$$stable_root/vibecrafted-core" "$$tool_python" -c "from vibecrafted_core.vc_frame_delivery import wire_vc_frame_config; print(wire_vc_frame_config(force_frontier=True).render(), end=\"\")"'
-	@if PATH="$$HOME/.local/bin:$$PATH" command -v vc-frame >/dev/null 2>&1; then \
-	  printf "\nVibecrafted is ready.\n\nStart here:\n  vc-start\n\nHealth:\n  vibecrafted doctor\n\nLog:\n  ~/.vibecrafted/install.log\n"; \
-	else \
-	  printf "\nVibecrafted is ready (headless: the vc-frame cockpit is not installed; vc-start needs it).\n\nStart here:\n  export PATH=\"\$$HOME/.local/bin:\$$PATH\"\n  vibecrafted doctor\n  vibecrafted implement claude --prompt \"describe this repo\"\n  vibecrafted await claude --last\n\nLog:\n  ~/.vibecrafted/install.log\n"; \
-	fi
-	@$(MAKE) --no-print-directory reconcile-server-service
+# Retained public spelling: configuration and runtime publication have one
+# installer. Build the appropriate carrier separately, then supply it through
+# `make install RUNTIME_PACK=/absolute/path/to/RuntimePack.tar.gz`.
+install-source: install
 
 # The explicit source/compiler lane calls `install-python-tools`; retain the
 # alias for that portable residual without putting it back on `make install`.
