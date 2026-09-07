@@ -175,6 +175,65 @@ def vibecrafted_runtime_bin() -> Path:
     )
 
 
+def selected_runtime_environment(
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Return an environment coherent with an explicitly selected runtime.
+
+    A public runtime launcher selects an immutable generation by exporting
+    ``VIBECRAFTED_RUNTIME_ROOT``.  That selection owns its executable bin and
+    interpreter; inherited ``VIBECRAFTED_RUNTIME_BIN`` / ``VIBECRAFTED_PYTHON``
+    values are merely legacy process state and must not split a child across
+    generations.  A runtime-bin override without a selected root remains
+    supported for source and test lanes.
+
+    Do not replace a selected root with the mutable runtime-home pointer.  A
+    malformed selected root is an identity failure, not permission to fall
+    back to whichever generation happens to be active.
+    """
+
+    env = dict(os.environ if environment is None else environment)
+    raw_root = str(env.get("VIBECRAFTED_RUNTIME_ROOT", "")).strip()
+    if not raw_root:
+        return env
+
+    root = Path(raw_root).expanduser()
+    if not root.is_absolute():
+        raise ValueError(
+            "selected runtime root must be an absolute immutable generation path: "
+            f"{raw_root}"
+        )
+    try:
+        root = root.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"selected runtime root is unavailable: {raw_root}") from exc
+
+    version = read_version_file(root)
+    runtime_bin = root / "bin"
+    runtime_python = runtime_bin / "python3"
+    if not root.is_dir() or not version_is_stamped(version):
+        raise ValueError(
+            f"selected runtime root is not an immutable stamped generation: {root}"
+        )
+    if (
+        not runtime_bin.is_dir()
+        or not runtime_python.is_file()
+        or not os.access(runtime_python, os.X_OK)
+    ):
+        raise ValueError(
+            "selected runtime generation is incomplete; expected executable "
+            f"{runtime_python}"
+        )
+
+    selected = str(root)
+    env["VIBECRAFTED_RUNTIME_ROOT"] = selected
+    env["VIBECRAFTED_RUNTIME_BIN"] = str(runtime_bin)
+    env["VIBECRAFTED_PYTHON"] = str(runtime_python)
+    env["VIBECRAFTED_ROOT"] = selected
+    env["VIBECRAFTED_CORE_DIR"] = str(root / "vibecrafted-core")
+    return env
+
+
 def resolve_operator_launch_root(
     *,
     cwd: Path | None = None,
@@ -231,7 +290,7 @@ def agent_tool_search_path(environment: Mapping[str, str] | None = None) -> str:
     lockstep with ``runtime/scripts/lib/util.sh:spawn_prepend_agent_tool_paths``.
     """
 
-    env = os.environ if environment is None else environment
+    env = selected_runtime_environment(environment)
     raw_home = str(env.get("HOME", "")).strip()
     home = Path(raw_home).expanduser() if raw_home else Path.home()
     raw_xdg_data = str(env.get("XDG_DATA_HOME", "")).strip()

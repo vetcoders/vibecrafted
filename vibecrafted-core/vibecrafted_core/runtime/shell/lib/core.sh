@@ -97,7 +97,11 @@ _vetcoders_default_runtime() {
 
 _vetcoders_bundled_bin_dirs() {
   local xdg_data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
-  local runtime_bin="${VIBECRAFTED_RUNTIME_BIN:-${VIBECRAFTED_RUNTIME_HOME:-$xdg_data_home/vibecrafted}/bin}"
+  # A public launcher may have selected an immutable generation already.
+  # Never let an inherited legacy runtime-bin pull this shell back to another
+  # generation; source lanes without a selected root retain their old override.
+  local runtime_bin="${VIBECRAFTED_RUNTIME_ROOT:+$VIBECRAFTED_RUNTIME_ROOT/bin}"
+  runtime_bin="${runtime_bin:-${VIBECRAFTED_RUNTIME_BIN:-${VIBECRAFTED_RUNTIME_HOME:-$xdg_data_home/vibecrafted}/bin}}"
   [[ -d "$runtime_bin" ]] && printf '%s\n' "$runtime_bin"
 }
 
@@ -134,7 +138,8 @@ _vetcoders_path_with_bundled_bin_priority() {
 
 _vetcoders_aicx_bin() {
   local xdg_data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
-  local runtime_bin="${VIBECRAFTED_RUNTIME_BIN:-${VIBECRAFTED_RUNTIME_HOME:-$xdg_data_home/vibecrafted}/bin}"
+  local runtime_bin="${VIBECRAFTED_RUNTIME_ROOT:+$VIBECRAFTED_RUNTIME_ROOT/bin}"
+  runtime_bin="${runtime_bin:-${VIBECRAFTED_RUNTIME_BIN:-${VIBECRAFTED_RUNTIME_HOME:-$xdg_data_home/vibecrafted}/bin}}"
   local candidate=""
 
   # Foundation discovery is deterministic and independent of interactive

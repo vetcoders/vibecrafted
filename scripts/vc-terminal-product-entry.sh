@@ -18,6 +18,7 @@ config="$HOME/.config/vibecrafted/vc-terminal/vc-terminal.toml"
 
 export VIBECRAFTED_RUNTIME_ROOT="$root"
 export VIBECRAFTED_ROOT="$root"
+export VIBECRAFTED_RUNTIME_BIN="$root/bin"
 export VIBECRAFTED_TERMINAL_HOST="$host"
 export XDG_CONFIG_HOME="$HOME/.config"
 export VIBECRAFTED_PYTHON="$root/bin/python3"
