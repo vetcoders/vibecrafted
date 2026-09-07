@@ -410,11 +410,13 @@ _vetcoders_list_live_vc_frame_sessions() {
 
 # Typed owner for interactive surface targeting (init / bare resume / operator).
 # Policy (order is the contract — not provider-specific):
-#   1. this project's workspace-bound host, when that session is live
-#   2. this project's repository basename, when that session is live
-#   3. otherwise empty — the caller prepares THIS project's own target
+#   1. this project's canonical workspace-bound session, when that session is
+#      live — the binding comes from the same owner vc-start prepares through
+#   2. otherwise empty — the caller prepares THIS project's own target
 #
-# What is deliberately NOT here (2026-09-06): a session listed as
+# What is deliberately NOT here (2026-09-07): a live session whose name merely
+# equals this repository's basename. A name is not a binding; see the resolver
+# body. What is deliberately NOT here (2026-09-06): a session listed as
 # `(attached)`/`(current)` by vc-frame, and a lone live session. Neither proves
 # the current caller owns it. A `(attached)` marker means SOME client is
 # attached — routinely another operator window on another repository — and a
@@ -440,18 +442,32 @@ _vetcoders_resolve_interactive_operator_target() {
     ((live_count += 1))
   done <<< "$live_list"
 
-  local repo_root="" host="" place=""
+  local repo_root="" host="" bound=""
   repo_root="$(_vetcoders_effective_project_root)"
   host="$(basename "$repo_root")"
-  place="$(_vetcoders_operator_place_session_name 2>/dev/null || true)"
-  if [[ -n "$place" ]] && printf '%s\n' "$live_list" | grep -Fxq -- "$place"; then
-    printf '%s\n' "$place"
+
+  # The binding comes from the ONE canonical workspace owner — the same one
+  # vc-start prepares through. Anything already resolved (product entry choke
+  # or an explicit operator override) is honoured as-is; otherwise ask that
+  # owner here.
+  bound="${VIBECRAFTED_OPERATOR_SESSION:-}"
+  if [[ -z "$bound" ]] \
+    && command -v _vetcoders_ensure_canonical_workspace_identity >/dev/null 2>&1; then
+    if _vetcoders_ensure_canonical_workspace_identity >/dev/null 2>&1; then
+      bound="${VIBECRAFTED_OPERATOR_SESSION:-}"
+    fi
+  fi
+  if [[ -n "$bound" ]] && printf '%s\n' "$live_list" | grep -Fxq -- "$bound"; then
+    printf '%s\n' "$bound"
     return 0
   fi
-  if [[ -n "$host" ]] && printf '%s\n' "$live_list" | grep -Fxq -- "$host"; then
-    printf '%s\n' "$host"
-    return 0
-  fi
+
+  # Deliberately absent (2026-09-07): adopting a live session because its name
+  # equals this repository's basename. That is a coincidence of naming, not a
+  # workspace binding — the catalogue binds THIS root to a workspace id, and a
+  # same-basename checkout elsewhere produces an identically named session that
+  # owns nothing here. The old basename branch is exactly how bare resume
+  # captured a session vc-start had never bound.
 
   if ((live_count > 0)); then
     # Informational, never fatal: live sessions elsewhere are not a claim on
@@ -1064,9 +1080,20 @@ _vetcoders_prepare_operator_runtime() {
     return 0
   fi
 
+  # One canonical workspace owner for start and resume. This runs in the
+  # CALLER's shell on purpose: the resolver below runs in a subshell, so it can
+  # pick a name but can never carry the workspace/session/instance ids that WES
+  # attachment needs. Resolving here also refuses BEFORE any provider or AICX
+  # side effect when canonical ownership cannot be established — targeting a
+  # session by name alone is what handed this project's resume to a session it
+  # did not own.
+  if command -v _vetcoders_ensure_canonical_workspace_identity >/dev/null 2>&1; then
+    _vetcoders_ensure_canonical_workspace_identity || return $?
+  fi
+
   # Detected interactive target (typed owner — not provider-specific).
-  # Priority: attached/current → repo-bound live → single live.
-  # Multi-candidate ambiguity leaves session unset and prints candidates.
+  # Priority: attached/current → explicit override → canonical bound live.
+  # No canonical live target leaves the session unset and prints candidates.
   local guessed_session
   guessed_session="$(_vetcoders_resolve_interactive_operator_target)"
   if [[ -n "$guessed_session" ]]; then
@@ -1090,7 +1117,13 @@ _vetcoders_prepare_operator_runtime() {
   # session-free path. The test bypass env lets the suite exercise the create
   # branch without a real TTY.
   if [[ ! -t 0 || ! -t 1 ]] && [[ -z "${VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME:-}" ]]; then
-    printf 'no TTY and no detected operator target; leaving operator session unset\n' >&2
+    # The canonical target is now known even when it is not live, but creating
+    # it needs a real PTY. Advertising a session that does not exist would send
+    # the caller's provider tab at a session nobody can attach to, so keep the
+    # documented contract: no target here. The resolved workspace identities
+    # stay exported — they describe the project, not a live session.
+    unset VIBECRAFTED_OPERATOR_SESSION VC_FRAME_SESSION_NAME
+    printf 'no TTY and no live canonical operator target; leaving operator session unset\n' >&2
     return 0
   fi
 

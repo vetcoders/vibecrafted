@@ -399,17 +399,37 @@ _vetcoders_operator_place_session_name() {
   local root_dir=""
   root_dir="$(_vetcoders_effective_project_root)"
   local resolved=""
+
+  # Physical owner first: the selected generation's CLI is the same catalogue
+  # reader vc-start's workspace preparation uses, with the interpreter and
+  # PYTHONPATH that can actually import vibecrafted_core.
+  if command -v _vetcoders_product_core_cli >/dev/null 2>&1; then
+    resolved="$(
+      _vetcoders_product_core_cli workspace resolve --root "$root_dir" --env 2>/dev/null \
+        | sed -n 's/^VIBECRAFTED_OPERATOR_SESSION=//p'
+    )" || resolved=""
+    if [[ -n "$resolved" ]]; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  fi
+
+  # Degraded path: this helper is also sourced without the product entry
+  # module. `python3` here is whatever the login PATH provides — under
+  # `zsh -lic` that is Homebrew's, ahead of the generation's bin, and it cannot
+  # import vibecrafted_core at all. The previous blanket `except Exception`
+  # printed the repository basename for that ImportError, making an unreachable
+  # catalogue indistinguishable from a genuine "this root has no workspace" and
+  # silently degrading a bound place to a bare name. Let the import failure be
+  # a failure; `resolve_operator_place_session` already answers the real
+  # catalogue misses itself.
   if command -v python3 >/dev/null 2>&1; then
     resolved="$(
       SPAWN_ROOT="$root_dir" VIBECRAFTED_ROOT="$root_dir" python3 - <<'PY' 2>/dev/null
 import os
-from pathlib import Path
+from vibecrafted_core.workspace_catalog import resolve_operator_place_session
 root = os.environ.get("SPAWN_ROOT") or os.environ.get("VIBECRAFTED_ROOT") or os.getcwd()
-try:
-    from vibecrafted_core.workspace_catalog import resolve_operator_place_session
-    print(resolve_operator_place_session(root=root, env=os.environ), end="")
-except Exception:
-    print(Path(root).name or "vibecrafted", end="")
+print(resolve_operator_place_session(root=root, env=os.environ), end="")
 PY
     )" || resolved=""
   fi
