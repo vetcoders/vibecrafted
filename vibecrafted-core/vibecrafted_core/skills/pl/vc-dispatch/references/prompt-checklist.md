@@ -34,7 +34,10 @@ Musi pokryć (złożone Z kontekstu, nie skopiowane z szablonu):
       NIETYKALNE ścieżki/wartości, precedencja configu
 - [ ] footguny języka/toolchaina istotne dla repo (np. Rust 2024 if-let temp
       scope: snapshot-into-let przed `if let` na lockach)
-- [ ] twarde zakazy: ZERO push/PR/release; NIGDY --no-verify; tabu lintera
+- [ ] twarde zakazy: ZERO pushu workera/PR/release; `--no-verify` wyłącznie dla
+      lokalnego checkpointu compile embargo jawnie autoryzowanego przez
+      Foundera, z receiptem pominiętych bramek; push z nim jest Founder-only;
+      tabu lintera
       repo (no unwrap(), no sleep() in tests, …)
 - [ ] kontrakt commita: format + trailery, które egzekwuje hook (własna
       tożsamość agenta/runtime'u workera, prawdziwy session id, komenda date)

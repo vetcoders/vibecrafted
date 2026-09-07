@@ -59,7 +59,9 @@ vibecrafted <workflow> <agent> --prompt '<inline intent>'
   well-formed per the commit-msg hook. **Never leave delivered work uncommitted.**
 - **Multi-commit per dispatch** is expected when a mission spans rounds; a `vc-workflow` run produces
   **up to 3 commits** (Implement / Marbles / Polarize each commit their round).
-- **NO push / merge / PR / deploy** — that is the operator's button only. No `--no-verify`, ever.
+- **NO worker push / merge / PR / deploy.** A declared Founder-authorized
+  compile embargo may use `--no-verify` for a local checkpoint only, with a
+  skipped-gate receipt. Push with `--no-verify` is an exclusive Founder button.
 
 ## 5. Observe (metadata-first, not pane-first)
 

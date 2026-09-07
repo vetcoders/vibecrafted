@@ -265,7 +265,8 @@ kontrakt recovery z `references/compile-embargo.md`. Gdy Founder autoryzuje faz�
 `--no-verify` jest w pełni autoryzowany dla każdego lokalnego checkpointu workera w tej fazie.
 Obejmuje całe wejście bundlowanych hooków Gita, więc worker raportuje, co uruchomiono, a co
 pominięto; nie jest to claim dostarczenia zweryfikowanego przez bezpieczeństwo ani compile/test.
-Worker nie pushuje. Wyłącznie wyznaczony integrator może zrobić lokalny structural admission po
+Worker nie pushuje; push z `--no-verify` jest wyłącznym przyciskiem Foundera. Wyłącznie wyznaczony
+integrator może zrobić lokalny structural admission po
 weryfikacji dokładnego commita/zakresu, Semgrep oraz przeglądzie sekretów/bezpieczeństwa, aby kolejne
 fale budowały na złączonej architekturze, podczas gdy compile, lint, type-check i testy pozostają
 odroczone. Dopiero nazwana closure oraz pełne, odpowiednie dla języka bramki tworzą verified delivery.

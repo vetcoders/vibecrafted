@@ -204,7 +204,8 @@ Scope:
 
 Constraints:
 
-- No --no-verify
+- No `--no-verify` outside a declared Founder-authorized local
+  compile-embargo checkpoint; workers never push with it
 - Follow repo conventions
 
 Acceptance:
@@ -339,7 +340,9 @@ Keep the standard 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. quality bar:
 ## Safety rules
 
 - Do not log secrets or commit `.env` files.
-- Never use `--no-verify` for `commit` or `push`.
+- Use `--no-verify` only for a declared Founder-authorized compile-embargo
+  local checkpoint whose receipt names skipped hooks and gates. Workers never
+  push with it; a push using `--no-verify` is Founder-only.
 - Do not rewrite git history unless the user explicitly asks.
 - Treat concurrent edits as normal, but still verify before overwriting.
 - If a repo has a strict command such as `make check`, run it or explain why not.

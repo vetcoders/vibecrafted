@@ -267,7 +267,8 @@ If a plan defers compile/test gates while shaping architecture, apply the phase-
 contract in `references/compile-embargo.md`. Once the Founder authorizes an embargo phase,
 `--no-verify` is fully authorized for each local worker checkpoint in that phase. It bypasses the
 bundled Git hook entrypoint as a whole, so workers report what ran and what was skipped; it is not
-a security or compile/test delivery claim. Workers do not push. The designated integrator may make
+a security or compile/test delivery claim. Workers do not push; a push using `--no-verify` is an
+exclusive Founder button. The designated integrator may make
 a local structural admission after exact commit/scope, Semgrep, and secret/security review, so later
 waves can build on the joined architecture while compile, lint, type-check, and tests remain
 deferred. Only named closure plus full language-appropriate gates creates verified delivery.
