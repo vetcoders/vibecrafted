@@ -10,8 +10,10 @@ from __future__ import annotations
 import json
 import os
 import re
-import signal
 import shlex
+import signal
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -21,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from .control_plane import control_plane_home
 from .dispatch.worktrees import repo_identity
+from .process_control import process_identity_receipt, validate_process_identity
 from .runtime_paths import vibecrafted_home
 from .workflows.model import WorkflowStage
 
@@ -367,9 +370,7 @@ def build_stage_dispatch(
         meta=Meta(
             name=f"{fleet.stage_workflow}-fleet-{fleet.stage_id}",
             repo=str(Path(repo_root).expanduser().resolve()),
-            description=(
-                f"WRITE stage fleet for lifecycle run {fleet.parent_run_id}"
-            ),
+            description=(f"WRITE stage fleet for lifecycle run {fleet.parent_run_id}"),
         ),
         # Every declared cut is disjoint, so the whole fleet is allowed to be
         # in flight at once; the scheduler pool is what makes that real.
@@ -417,9 +418,7 @@ def dispatcher_fleet_launch(
             if not candidate.is_absolute():
                 candidate = Path(repo_root).expanduser() / candidate
             if not candidate.is_file():
-                raise RuntimeError(
-                    f"declared dispatch plan not found: {candidate}"
-                )
+                raise RuntimeError(f"declared dispatch plan not found: {candidate}")
             resolved_plan = str(candidate)
         dispatch = build_stage_dispatch(
             fleet,
@@ -467,14 +466,35 @@ def dispatcher_fleet_launch(
 
         if wait:
             run()
+        elif cell_launcher is not None:
+            # A bounded transport was injected into this interpreter; there is
+            # nothing to hand to another process, and the caller owns the
+            # scheduler by construction.
+            _start_background_dispatch(run_id, run)
+            store.update_metadata(
+                scheduler_owner_mode="in-process",
+                scheduler_detached=False,
+                scheduler_owner_pid=os.getpid(),
+            )
+        elif resolved_plan:
+            _start_detached_dispatch(
+                run_id, store, plan_path=resolved_plan, repo_root=repo_root
+            )
         else:
-            # Test transports deliberately stay in-process.  The production
-            # path has no injected transport and must not make the disposable
-            # UI/terminal the scheduler's lifetime owner.
-            if cell_launcher is None:
-                _start_detached_dispatch(run_id, store, run)
-            else:
-                _start_background_dispatch(run_id, run)
+            # A derived plan lives only in this interpreter's memory: no file
+            # names these cuts, so no fresh process could re-own them.  Run it
+            # here and record that, rather than detaching an owner nobody can
+            # recover.
+            _start_background_dispatch(run_id, run)
+            store.update_metadata(
+                scheduler_owner_mode="in-process",
+                scheduler_detached=False,
+                scheduler_owner_pid=os.getpid(),
+                scheduler_undetachable_reason=(
+                    "no durable dispatch plan declared; declare `dispatch_plan:` "
+                    "in the mission to give this fleet a detachable owner"
+                ),
+            )
 
         by_cut = {cut.id: cut for cut in dispatch.cuts}
         return [
@@ -527,6 +547,9 @@ def _project_receipt(
 
 
 _ACTIVE_FLEET_DISPATCHES: dict[str, threading.Thread] = {}
+# Detached owners this interpreter spawned.  A reopened observer has an empty
+# map and falls back to the ledger's identity receipt, which is the point.
+_ACTIVE_FLEET_OWNERS: dict[str, subprocess.Popen[bytes]] = {}
 _FLEET_DISPATCH_ERRORS: dict[str, str] = {}
 _FLEET_DISPATCH_LOCK = threading.Lock()
 
@@ -552,82 +575,213 @@ def _start_background_dispatch(run_id: str, run: Callable[[], None]) -> None:
     thread.start()
 
 
-def _start_detached_dispatch(
-    run_id: str, store: Any, run: Callable[[], None]
-) -> int:
-    """Fork the existing dispatcher owner into a new session.
+def scheduler_owner_command(plan_path: str | Path, dispatch_run_id: str) -> list[str]:
+    """The argv of the existing dispatcher entrypoint that owns one stage fleet.
 
-    The durable receipt ledger is created before this fork.  Thus a fresh
-    observer can reconnect by its stable run id after the originating shell
-    or App exits; this is an owner handoff, not a second scheduler or store.
+    ``vibecrafted dispatch <plan> --resume <run_id>`` is the dispatcher's own
+    public verb, and this is that verb's module.  Using it — rather than a
+    forked closure — means the owner started here is the same owner the
+    recorded recovery command re-creates.
     """
-    if not hasattr(os, "fork"):
-        # The supported desktop substrate is POSIX.  Keep an honest fallback
-        # for development hosts rather than pretending a thread is detached.
-        _start_background_dispatch(run_id, run)
-        store.update_metadata(scheduler_owner_mode="in-process-fallback")
-        return 0
-    pid = os.fork()
-    if pid:
-        store.update_metadata(
-            scheduler_owner_pid=pid,
-            scheduler_owner_mode="detached-fork",
-            scheduler_stop_requested=False,
+    return [
+        sys.executable,
+        "-m",
+        "vibecrafted_core.dispatch.cli",
+        str(plan_path),
+        "--resume",
+        str(dispatch_run_id),
+    ]
+
+
+def _start_detached_dispatch(
+    run_id: str,
+    store: Any,
+    *,
+    plan_path: str | Path,
+    repo_root: str | Path,
+) -> dict[str, Any]:
+    """Hand this fleet to a process that outlives the caller, and prove whose it is.
+
+    The owner is a fresh interpreter in its own session, so closing the
+    terminal or the App removes the observer, not the scheduler and not the
+    settlement work it still owes.  Its full OS identity — pid, pgid, start
+    token, command hash — is captured before anything can act on it: a bare
+    PID is a name the kernel reuses, and signalling a stranger because a
+    number came back around is exactly what this record prevents.
+    """
+    plan = str(plan_path or "").strip()
+    if not plan or not Path(plan).expanduser().is_file():
+        raise RuntimeError(
+            "detached scheduler owner needs a durable typed plan; "
+            f"{plan or '<none>'} is not a file"
         )
-        return pid
+    command = scheduler_owner_command(plan, run_id)
+    log_path = store.root / "scheduler.log"
+    started_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    env = dict(os.environ)
+    # The owner has to run the same code that wrote this ledger.  Without
+    # this, an interpreter that resolves an installed release would take over
+    # receipts a different version created — a skew nobody can see from the
+    # outside.  Scoped to this child; never exported to the host shell.
+    package_root = str(Path(__file__).resolve().parents[1])
+    inherited = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        package_root if not inherited else package_root + os.pathsep + inherited
+    )
+    with log_path.open("ab", buffering=0) as log:
+        proc = subprocess.Popen(
+            command,
+            cwd=str(Path(repo_root).expanduser().resolve()),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            # The whole point: a new session has no controlling terminal, so
+            # the SIGHUP that closes the operator's window never reaches it.
+            start_new_session=True,
+        )
+    identity = process_identity_receipt(proc.pid, run_id=run_id)
+    receipt: dict[str, Any] = {
+        "scheduler_owner_mode": "detached-subprocess",
+        "scheduler_detached": True,
+        "scheduler_owner_pid": proc.pid,
+        "scheduler_owner_identity": identity or {},
+        "scheduler_owner_command": list(command),
+        "scheduler_owner_plan": plan,
+        "scheduler_owner_log": str(log_path),
+        "scheduler_owner_started_at": started_at,
+        "scheduler_stop_requested": False,
+    }
+    if identity is None:
+        # The owner was gone before we could describe it.  Say so, rather than
+        # persisting a pid that a later stop would be entitled to signal.
+        receipt["scheduler_owner_identity_error"] = "process_identity_unavailable"
+    store.update_metadata(**receipt)
+    with _FLEET_DISPATCH_LOCK:
+        _ACTIVE_FLEET_OWNERS[run_id] = proc
+    threading.Thread(
+        target=_reap_detached_owner,
+        args=(run_id, proc, log_path),
+        name=f"lifecycle-fleet-owner-{run_id}",
+        daemon=True,
+    ).start()
+    return receipt
+
+
+def _reap_detached_owner(run_id: str, proc: Any, log_path: Path) -> None:
+    """Reap the owner and record an exit that left cuts unstarted.
+
+    An unreaped child stays a zombie, and ``kill(pid, 0)`` then answers
+    "alive" for a process that already finished — an observer could not tell
+    settlement from stale OS state.  A non-zero exit is only a *scheduler*
+    failure when cuts never left the queue; a run that finished with failed
+    cuts already carries its own verdicts.
+    """
     try:
-        os.setsid()
-        log_path = store.root / "scheduler.log"
-        with log_path.open("ab", buffering=0) as log:
-            os.dup2(log.fileno(), 1)
-            os.dup2(log.fileno(), 2)
-            store.update_metadata(
-                scheduler_owner_pid=os.getpid(),
-                scheduler_owner_mode="detached-fork",
-                scheduler_started_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        code = proc.wait()
+    except OSError:
+        return
+    try:
+        store = _receipt_store_for(run_id)
+        store.update_metadata(
+            scheduler_owner_exit_code=code,
+            scheduler_owner_finished_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        )
+        if code == 0:
+            return
+        payload = store.read()
+        ledger = payload.get("cuts") if isinstance(payload.get("cuts"), dict) else {}
+        unstarted = sorted(
+            cut_id
+            for cut_id, entry in ledger.items()
+            if isinstance(entry, dict) and entry.get("state") == "queued"
+        )
+        if unstarted:
+            record_stage_dispatch_failure(
+                run_id,
+                f"scheduler owner exited {code} leaving {', '.join(unstarted)} "
+                f"unstarted; see {log_path}",
             )
-            run()
-            store.update_metadata(scheduler_finished_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
-    except BaseException as exc:  # noqa: BLE001 - child must leave durable evidence
-        record_stage_dispatch_failure(run_id, f"{type(exc).__name__}: {exc}")
-    finally:
-        os._exit(0)
+    except Exception:  # noqa: BLE001 - a note about a failure is never a second one
+        return
+
+
+def _receipt_store_for(dispatch_run_id: str) -> Any:
+    """Open one dispatch run's existing ledger; never create a new one."""
+    from .dispatch.receipts import DispatchReceiptStore
+
+    return DispatchReceiptStore(dispatch_run_id, (), create=False)
+
+
+def scheduler_owner_identity(dispatch_run_id: str) -> tuple[dict[str, Any], int]:
+    """The persisted owner identity receipt and pid for one dispatch run."""
+    try:
+        payload = _receipt_store_for(dispatch_run_id).read()
+    except Exception:  # noqa: BLE001 - a missing ledger owns nothing
+        return {}, 0
+    receipt = payload.get("scheduler_owner_identity")
+    return (
+        dict(receipt) if isinstance(receipt, dict) else {},
+        int(payload.get("scheduler_owner_pid") or 0),
+    )
+
+
+def scheduler_owner_alive(dispatch_run_id: str) -> tuple[bool, str]:
+    """Whether the recorded owner is still the process that was recorded.
+
+    Liveness here is an identity question, not a PID question.  "Something
+    holds that number" is precisely how an unrelated program gets adopted as
+    our scheduler — and then signalled as one.
+    """
+    receipt, pid = scheduler_owner_identity(dispatch_run_id)
+    if not receipt or pid <= 0:
+        return False, "process_identity_unavailable"
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError, OSError):
+        return False, "process_identity_gone"
+    ok, reason, _identity = validate_process_identity(
+        receipt,
+        expected_pid=pid,
+        expected_pgid=None,
+        expected_run_id=dispatch_run_id,
+    )
+    return ok, reason
 
 
 def join_stage_dispatch(dispatch_run_id: str, timeout: float | None = None) -> bool:
-    """Wait for a backgrounded stage dispatch; True when it is no longer running."""
+    """Wait for a stage dispatch owner; True when it is no longer running."""
     with _FLEET_DISPATCH_LOCK:
         thread = _ACTIVE_FLEET_DISPATCHES.get(dispatch_run_id)
-    if thread is None:
-        # A detached owner belongs to a previous/calling process, so it cannot
-        # be in this interpreter's thread map.  Its durable PID is the same
-        # reconnectable ownership receipt used by a fresh observer.
-        deadline = None if timeout is None else time.monotonic() + timeout
-        while True:
-            try:
-                from .dispatch.receipts import DispatchReceiptStore
+        owner = _ACTIVE_FLEET_OWNERS.get(dispatch_run_id)
+    if thread is not None:
+        thread.join(timeout)
+        return not thread.is_alive()
+    if owner is not None:
+        try:
+            owner.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
+    return _join_detached_owner(dispatch_run_id, timeout)
 
-                payload = DispatchReceiptStore(dispatch_run_id, (), create=False).read()
-                pid = int(payload.get("scheduler_owner_pid") or 0)
-            except Exception:
-                return True
-            if not pid:
-                return True
-            try:
-                reaped, _status = os.waitpid(pid, os.WNOHANG)
-                if reaped == pid:
-                    return True
-            except ChildProcessError:
-                pass
-            try:
-                os.kill(pid, 0)
-            except (ProcessLookupError, PermissionError, OSError):
-                return True
-            if deadline is not None and time.monotonic() >= deadline:
-                return False
-            time.sleep(0.01)
-    thread.join(timeout)
-    return not thread.is_alive()
+
+def _join_detached_owner(dispatch_run_id: str, timeout: float | None) -> bool:
+    """Await an owner this interpreter never spawned, by its recorded identity.
+
+    A detached owner belongs to another process tree, so it can never appear
+    in this interpreter's handle map.  Its durable identity receipt is the
+    same reconnectable truth a reopened observer reads — and the reason a
+    recycled PID does not read here as "still running".
+    """
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        alive, _reason = scheduler_owner_alive(dispatch_run_id)
+        if not alive:
+            return True
+        if deadline is not None and time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
 
 
 def stage_dispatch_error(dispatch_run_id: str) -> str:
@@ -646,7 +800,9 @@ def stage_dispatch_error(dispatch_run_id: str) -> str:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return ""
-    return str(payload.get("scheduler_error") or "") if isinstance(payload, dict) else ""
+    return (
+        str(payload.get("scheduler_error") or "") if isinstance(payload, dict) else ""
+    )
 
 
 def record_stage_dispatch_failure(dispatch_run_id: str, message: str) -> None:
@@ -670,26 +826,97 @@ def record_stage_dispatch_failure(dispatch_run_id: str, message: str) -> None:
         return
 
 
-def request_stage_dispatch_stop(dispatch_run_id: str) -> dict[str, Any]:
-    """Fence future launches before lifecycle signals active provider runs."""
-    from .dispatch.receipts import DispatchReceiptStore
+def request_stage_dispatch_stop(
+    dispatch_run_id: str, *, signal_owner: bool = False
+) -> dict[str, Any]:
+    """Fence future launches, and signal an owner only when it proves itself.
 
+    The fence is the stop: it is written under the same ledger lock the
+    scheduler uses to admit a launch, so once this returns ``accepted`` no
+    queued cut can be admitted.  Signalling is separate and off by default —
+    terminating the owner would abandon the settlement work the operator's
+    already-running cuts still need, and killing on a bare PID is how an
+    unrelated process gets a SIGTERM meant for a scheduler that died hours
+    ago.  When a caller does ask for a signal, the recorded identity must
+    re-capture exactly; anything else is reported, never signalled.
+    """
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     try:
-        store = DispatchReceiptStore(dispatch_run_id, (), create=False)
+        store = _receipt_store_for(dispatch_run_id)
         store.update_metadata(
             scheduler_stop_requested=True,
-            scheduler_stop_requested_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            scheduler_stop_requested_at=stamp,
         )
         payload = store.read()
     except Exception as exc:  # noqa: BLE001 - interrupt must report refusal honestly
-        return {"accepted": False, "reason": str(exc), "owner_pid": 0}
+        return {
+            "accepted": False,
+            "fenced": False,
+            "reason": str(exc),
+            "owner_pid": 0,
+            "owner_mode": "",
+            "owner_identity": "process_identity_unavailable",
+            "owner_signalled": False,
+        }
     owner_pid = int(payload.get("scheduler_owner_pid") or 0)
-    if owner_pid:
-        try:
-            os.killpg(owner_pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
-    return {"accepted": True, "reason": "future launches fenced", "owner_pid": owner_pid}
+    receipt = payload.get("scheduler_owner_identity")
+    result: dict[str, Any] = {
+        "accepted": True,
+        "fenced": True,
+        "reason": "future launches fenced",
+        "owner_pid": owner_pid,
+        "owner_mode": str(payload.get("scheduler_owner_mode") or ""),
+        "owner_identity": "not_probed",
+        "owner_signalled": False,
+    }
+    if not signal_owner:
+        return result
+
+    ok, reason, identity = validate_process_identity(
+        receipt if isinstance(receipt, dict) else None,
+        expected_pid=owner_pid,
+        expected_pgid=None,
+        expected_run_id=dispatch_run_id,
+    )
+    result["owner_identity"] = reason
+    if not ok or identity is None:
+        # Stale, missing or mismatched identity: the recorded owner is gone.
+        # Whatever holds that PID now is a stranger, and the fence already
+        # did the part of the stop that is actually ours to do.
+        result["reason"] = f"fenced; owner not signalled ({reason})"
+        _record_stop_probe(store, result)
+        return result
+    if identity.pgid != identity.pid:
+        # A detached owner leads its own session.  A group that is not its own
+        # is somebody else's group, and SIGTERM there is a stray blast.
+        result["owner_identity"] = "process_group_not_owned"
+        result["reason"] = "fenced; owner is not its own session leader"
+        _record_stop_probe(store, result)
+        return result
+    try:
+        os.killpg(identity.pgid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError) as exc:
+        result["owner_signal_error"] = f"{type(exc).__name__}: {exc}"
+        result["reason"] = f"fenced; owner signal refused ({type(exc).__name__})"
+        _record_stop_probe(store, result)
+        return result
+    result["owner_signalled"] = True
+    result["owner_pgid"] = identity.pgid
+    result["reason"] = "future launches fenced; owner group signalled"
+    _record_stop_probe(store, result)
+    return result
+
+
+def _record_stop_probe(store: Any, result: dict[str, Any]) -> None:
+    """Persist what the stop actually did, so a fresh observer reads the truth."""
+    try:
+        store.update_metadata(
+            scheduler_stop_owner_identity=str(result.get("owner_identity") or ""),
+            scheduler_stop_signalled=bool(result.get("owner_signalled")),
+            scheduler_stop_signal_error=str(result.get("owner_signal_error") or ""),
+        )
+    except Exception:  # noqa: BLE001 - the fence itself is already durable
+        return
 
 
 def stage_fleet_receipts(parent_run_id: str, stage_id: str) -> dict[str, Any]:
@@ -787,9 +1014,7 @@ def fleet_obligations(
         if not isinstance(entry, dict):
             # Declared by the lifecycle, absent from the dispatcher's ledger:
             # nobody can say what happened to it.
-            cuts.append(
-                {"cut_id": cut_id, "state": "", "obligation": "missing"}
-            )
+            cuts.append({"cut_id": cut_id, "state": "", "obligation": "missing"})
             continue
         state = str(entry.get("state") or "")
         acceptance = str(entry.get("acceptance") or "")
@@ -813,13 +1038,14 @@ def fleet_obligations(
     else:
         verdict = max(
             (record["obligation"] for record in cuts),
-            key=lambda obligation: _VERDICT_RANK.index(obligation)
-            if obligation in _VERDICT_RANK
-            else len(_VERDICT_RANK),
+            key=lambda obligation: (
+                _VERDICT_RANK.index(obligation)
+                if obligation in _VERDICT_RANK
+                else len(_VERDICT_RANK)
+            ),
         )
     blocking = [
-        f"{record['cut_id']}={record['obligation']}"
-        f"({record['state'] or 'no-receipt'})"
+        f"{record['cut_id']}={record['obligation']}({record['state'] or 'no-receipt'})"
         for record in cuts
         if record["obligation"] != "complete"
     ]
@@ -835,6 +1061,8 @@ def fleet_obligations(
         "blocking": blocking,
         "scheduler_error": scheduler_error,
         "scheduler_owner_pid": int(payload.get("scheduler_owner_pid") or 0),
+        "scheduler_owner_mode": str(payload.get("scheduler_owner_mode") or ""),
+        "scheduler_detached": bool(payload.get("scheduler_detached")),
         "scheduler_stop_requested": bool(payload.get("scheduler_stop_requested")),
         "recovery_command": fleet_recovery_command(dispatch_run_id, plan_path),
     }
@@ -851,9 +1079,7 @@ def fleet_recovery_command(dispatch_run_id: str, plan_path: str = "") -> str:
     plan = str(plan_path or "").strip()
     if not plan:
         return ""
-    return "vibecrafted dispatch {} --resume {}".format(
-        shlex.quote(plan), shlex.quote(dispatch_run_id)
-    )
+    return f"vibecrafted dispatch {shlex.quote(plan)} --resume {shlex.quote(dispatch_run_id)}"
 
 
 def stage_fleet_progress(
@@ -889,13 +1115,22 @@ def stage_fleet_progress(
     projections = []
     for target in candidates:
         fleet = dict(target.get("fleet") or {})
-        projections.append(fleet_obligations(
-            str(fleet.get("parent_run_id") or state.get("run_id") or ""),
-            str(fleet.get("stage_id") or target.get("id") or ""),
-            declared_cuts=[str(cut) for cut in (fleet.get("cuts") or [])],
-            plan_path=str(fleet.get("plan_path") or ""),
-        ))
-    return next((item for item in projections if item.get("present") and not item.get("complete")), projections[0])
+        projections.append(
+            fleet_obligations(
+                str(fleet.get("parent_run_id") or state.get("run_id") or ""),
+                str(fleet.get("stage_id") or target.get("id") or ""),
+                declared_cuts=[str(cut) for cut in (fleet.get("cuts") or [])],
+                plan_path=str(fleet.get("plan_path") or ""),
+            )
+        )
+    return next(
+        (
+            item
+            for item in projections
+            if item.get("present") and not item.get("complete")
+        ),
+        projections[0],
+    )
 
 
 def record_write_stage_fleet(

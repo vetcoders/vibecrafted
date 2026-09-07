@@ -17,6 +17,7 @@ from vibecrafted_core.dispatch.model import (
     STATE_VERIFIED,
     Dispatch,
 )
+from vibecrafted_core.dispatch.receipts import DispatchReceiptStore
 from vibecrafted_core.dispatch.schema import parse_dispatch
 from vibecrafted_core.dispatch.supervisor import (
     CellRun,
@@ -1140,3 +1141,141 @@ prompt = "deliver in a fleet worktree"
     assert branch_tip != baseline
     assert result.states == {"wt-cut": STATE_VERIFIED}
     assert result.cuts[0]["commit"] == branch_tip
+
+
+TWO_CUTS = """
+[[cuts]]
+id = "first"
+agent = "codex"
+workflow = "implement"
+prompt = "first cut"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = { contains = "ok" }
+
+[[cuts]]
+id = "second"
+agent = "codex"
+workflow = "implement"
+prompt = "second cut"
+  [[cuts.verify]]
+  run = "echo ok"
+  expect = { contains = "ok" }
+"""
+
+
+class _FenceOnFirstLaunch:
+    """Launcher double whose first cut trips the operator's interrupt mid-flight.
+
+    This is the race the ledger lock has to settle: the stop lands *after* the
+    scheduler has already decided there is work to do, and before the queued
+    sibling reaches its spawn.
+    """
+
+    def __init__(self, inner: FakeCells, store: DispatchReceiptStore) -> None:
+        self.inner = inner
+        self.store = store
+        self.launches: list[str] = []
+
+    def __call__(self, cut, prompt: str, kind: str) -> CellRun:
+        self.launches.append(cut.id)
+        run = self.inner(cut, prompt, kind)
+        if cut.id == "first":
+            self.store.update_metadata(scheduler_stop_requested=True)
+        return run
+
+
+def test_an_accepted_stop_prevents_any_further_queued_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A queued cut must not reach a provider after the interrupt is accepted."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    dispatch, reports_dir, artifacts_dir = build_dispatch(
+        tmp_path, TWO_CUTS, policy="repair_rounds = 0\nconcurrency = 1"
+    )
+    run_id = "fence-race-run"
+    store = DispatchReceiptStore(run_id, dispatch.cuts, repo_root=str(tmp_path))
+    launcher = _FenceOnFirstLaunch(FakeCells(reports_dir=reports_dir), store)
+
+    run_dispatch(
+        dispatch,
+        launcher=launcher,
+        artifacts_dir=artifacts_dir,
+        run_id=run_id,
+    )
+
+    # The provider transport is the only place a launch can be observed, and
+    # it never saw the queued sibling.
+    assert launcher.launches == ["first"]
+    payload = store.read()
+    assert payload["cuts"]["second"]["state"] == "stopped"
+    assert payload["cuts"]["second"]["acceptance"] == "interrupted"
+    # Admission is the ordering record; a cut that was never admitted cannot
+    # have been spawned, whatever a later reader believes about timing.
+    assert "launch_admitted_at" not in payload["cuts"]["second"]
+    assert payload["cuts"]["first"]["launch_admitted_at"]
+
+
+def test_admission_refuses_under_the_same_lock_that_records_the_fence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once the fence is durable, admission can never return a stale yes."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    dispatch, _reports_dir, _artifacts_dir = build_dispatch(tmp_path, TWO_CUTS)
+    store = DispatchReceiptStore(
+        "fence-order-run", dispatch.cuts, repo_root=str(tmp_path)
+    )
+
+    assert store.admit_launch("first", scheduler_slot=1) is True
+    store.update_metadata(scheduler_stop_requested=True)
+    assert store.admit_launch("second", scheduler_slot=1) is False
+
+    payload = store.read()
+    assert payload["cuts"]["first"]["scheduler_slot"] == 1
+    assert "launch_admitted_at" not in payload["cuts"]["second"]
+
+
+def test_explicit_resume_lifts_the_fence_and_reruns_only_the_failed_cut(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recovery clears the interrupt it inherited, and nothing else."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    dispatch, reports_dir, artifacts_dir = build_dispatch(
+        tmp_path, TWO_CUTS, policy="repair_rounds = 0\nconcurrency = 1"
+    )
+    run_id = "resume-fence-run"
+    store = DispatchReceiptStore(run_id, dispatch.cuts, repo_root=str(tmp_path))
+    store.update(
+        "first", "settled", acceptance="verified", provider_run_id="provider-first"
+    )
+    store.update("second", "failed", acceptance="failed")
+    store.update_metadata(
+        scheduler_stop_requested=True, scheduler_error="owner lost transport"
+    )
+    settled_before = store.cut("first")
+
+    launcher = FakeCells(reports_dir=reports_dir)
+    result = run_dispatch(
+        dispatch,
+        launcher=launcher,
+        artifacts_dir=artifacts_dir,
+        run_id=run_id,
+        resume=True,
+    )
+
+    # Exactly one execution, and only of the cut that failed.
+    assert launcher.launches == [("second", "initial")]
+    assert result.states["first"] == STATE_VERIFIED
+
+    payload = store.read()
+    assert payload["scheduler_stop_requested"] is False
+    assert payload["scheduler_error"] == ""
+    assert payload["scheduler_resumed_at"]
+    # The settled sibling is not re-run, not re-admitted, and not rewritten.
+    assert payload["cuts"]["first"]["state"] == "settled"
+    assert payload["cuts"]["first"]["provider_run_id"] == "provider-first"
+    assert (
+        payload["cuts"]["first"]["settled_epoch_ns"]
+        == settled_before["settled_epoch_ns"]
+    )
+    assert "launch_admitted_at" not in payload["cuts"]["first"]
