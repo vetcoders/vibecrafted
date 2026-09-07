@@ -210,6 +210,7 @@ class DispatchSupervisor:
             dispatch_run_id=self.run_id,
         )
         self._sleep = sleep
+        self._resume = bool(resume)
         self._io_lock = threading.RLock()
         self._geometries: dict[str, WorktreeGeometry] = {}
         self._mutation_claim_id = ""
@@ -287,6 +288,24 @@ class DispatchSupervisor:
                 f" await=poll {poll_s:g}s/timeout {timeout_s:g}s"
             )
             self._write_tracker()
+            if self._resume:
+                # An interrupt is durable on purpose: without this the very
+                # recovery verb the operator was handed would re-fence itself
+                # and stop every cut it just came back to finish.  Only the
+                # scheduler-owned fence and its stale error are lifted; cut
+                # receipts stay untouched, so settled siblings restore below
+                # and only unfinished cuts are scheduled again.
+                lifted = self._receipt_store.clear_stop_fence(
+                    scheduler_resumed_at=datetime.now(timezone.utc).isoformat(
+                        timespec="seconds"
+                    )
+                )
+                if lifted["scheduler_stop_requested"] or lifted["scheduler_error"]:
+                    self._journal(
+                        "explicit resume lifted scheduler fence: "
+                        f"stop_requested={lifted['scheduler_stop_requested']} "
+                        f"error={lifted['scheduler_error'] or '<none>'}"
+                    )
             self._restore_settled_verdicts(verdicts)
             pending = {
                 cut.id: cut for cut in self.dispatch.cuts if cut.id not in verdicts
@@ -299,6 +318,23 @@ class DispatchSupervisor:
             ) as pool:
                 while pending or active:
                     made_progress = False
+                    # The lifecycle interrupt records this before signalling
+                    # active providers.  Recheck at the launch boundary: a
+                    # queued cut must never race through after an interrupt.
+                    if self._receipt_store.stop_requested():
+                        for stopped in pending.values():
+                            self._set_state(
+                                stopped.id,
+                                STATE_PENDING,
+                                "stopped: scheduler interrupt",
+                            )
+                            self._receipt_store.update(
+                                stopped.id, "stopped", acceptance="interrupted"
+                            )
+                        pending.clear()
+                        self._journal(
+                            "scheduler stop requested; no queued cut may launch"
+                        )
                     if line_broken and not active:
                         for stopped in pending.values():
                             self._set_state(
@@ -351,6 +387,15 @@ class DispatchSupervisor:
                         ):
                             continue
                         slot = min(free_slots)
+                        # Ordering point, not a snapshot: admission and the
+                        # lifecycle interrupt contend for the same ledger lock,
+                        # so this cut is either recorded before the fence or
+                        # refused by it.  Reading a boolean and then spawning
+                        # leaves a window in which stopped work still launches.
+                        if not self._receipt_store.admit_launch(
+                            cut.id, scheduler_slot=slot
+                        ):
+                            break
                         free_slots.remove(slot)
                         pending.pop(cut.id)
                         scheduled = replace(cut, scheduler_slot=slot)
@@ -1022,6 +1067,10 @@ class DispatchSupervisor:
             pid=cell.pid,
             report_path=cell.report_path,
             meta_path=cell.meta_path,
+            # Which attempt owns this pid: the same token the launch
+            # idempotency key is built from, so a reopened observer can tell
+            # the initial launch from a repair round.
+            attempt=kind,
         )
         self._set_state(
             cut.id,
