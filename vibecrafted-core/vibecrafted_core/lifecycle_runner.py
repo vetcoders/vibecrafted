@@ -30,6 +30,7 @@ from .lifecycle_fleet import (
     live_vc_dispatch_permitted,
     mission_cuts,
     record_write_stage_fleet,
+    stage_fleet_progress,
     stage_worker_may_launch_agent_lines,
 )
 from .report_contract import parse_report_path
@@ -1023,6 +1024,16 @@ class LifecycleRunner:
                     ),
                     "",
                 ),
+                # The typed plan this fleet was scheduled from; the operator's
+                # recovery command is not nameable without it.
+                "plan_path": next(
+                    (
+                        str(item.get("plan_path") or "")
+                        for item in supervisor_launches
+                        if item.get("plan_path")
+                    ),
+                    "",
+                ),
                 "supervisor_launches": supervisor_launches,
             }
         return record
@@ -1571,6 +1582,10 @@ class LifecycleSupervisor:
             "state_path": state.get("state_path"),
             "report_path": state.get("report_path"),
             "stage_worker": _stage_worker_liveness(state, stage_launch),
+            # Fleet progress is read back from the dispatcher's receipt
+            # ledger, never recomputed here: status, await and approve must
+            # not be able to disagree about what the fleet still owes.
+            "fleet": stage_fleet_progress(state),
         }
 
 

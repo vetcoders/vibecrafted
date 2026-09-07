@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .control_plane import control_plane_home
+from .delivery.store import atomic_write_json
 from .dispatch.worktrees import repo_identity
 from .runtime_paths import vibecrafted_home
 from .workflows.model import WorkflowStage
@@ -456,6 +457,7 @@ def dispatcher_fleet_launch(
                 receipt=store.cut(contract.cut_id),
                 cut=by_cut.get(contract.cut_id),
                 resumed=resume,
+                plan_path=resolved_plan,
             )
             for contract in fleet.children
         ]
@@ -471,6 +473,7 @@ def _project_receipt(
     receipt: dict[str, Any],
     cut: Any,
     resumed: bool,
+    plan_path: str = "",
 ) -> dict[str, Any]:
     """Project one authoritative dispatch receipt into a lifecycle launch result."""
     return {
@@ -485,6 +488,9 @@ def _project_receipt(
         "worktree_path": str(receipt.get("worktree_path") or ""),
         "branch": str(receipt.get("branch") or ""),
         "receipts_path": str(receipts_path),
+        # The typed plan on disk; without it the dispatcher's own resume verb
+        # has nothing to name.
+        "plan_path": str(plan_path or ""),
         "receipt_state": str(receipt.get("state") or "queued"),
         "agent": getattr(cut, "agent", contract.agent),
         "model": getattr(cut, "model", ""),
@@ -504,8 +510,13 @@ def _start_background_dispatch(run_id: str, run: Callable[[], None]) -> None:
         try:
             run()
         except Exception as exc:  # noqa: BLE001 - recorded, never swallowed silently
+            message = f"{type(exc).__name__}: {exc}"
             with _FLEET_DISPATCH_LOCK:
-                _FLEET_DISPATCH_ERRORS[run_id] = f"{type(exc).__name__}: {exc}"
+                _FLEET_DISPATCH_ERRORS[run_id] = message
+            # In-process memory dies with the observer.  A scheduler that
+            # failed before its children started would otherwise leave every
+            # cut reading `queued` forever, with the reason gone.
+            record_stage_dispatch_failure(run_id, message)
 
     thread = threading.Thread(target=target, name=f"lifecycle-fleet-{run_id}")
     with _FLEET_DISPATCH_LOCK:
@@ -524,9 +535,46 @@ def join_stage_dispatch(dispatch_run_id: str, timeout: float | None = None) -> b
 
 
 def stage_dispatch_error(dispatch_run_id: str) -> str:
-    """The recorded failure of a backgrounded stage dispatch, if it failed."""
+    """The recorded failure of a stage dispatch, from memory or the ledger.
+
+    The in-process map answers the launching process; the receipt ledger
+    answers everyone who comes after it.  A reopened observer must be able to
+    see why a fleet never moved.
+    """
     with _FLEET_DISPATCH_LOCK:
-        return _FLEET_DISPATCH_ERRORS.get(dispatch_run_id, "")
+        live = _FLEET_DISPATCH_ERRORS.get(dispatch_run_id, "")
+    if live:
+        return live
+    path = stage_dispatch_home(dispatch_run_id) / "receipts.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    return str(payload.get("scheduler_error") or "") if isinstance(payload, dict) else ""
+
+
+def record_stage_dispatch_failure(dispatch_run_id: str, message: str) -> None:
+    """Persist a scheduler failure into the existing dispatch receipt ledger.
+
+    Reuses the dispatcher's own ledger file rather than opening a second
+    error store: the ledger is created before the scheduler starts, so the
+    failure lands next to the cut states it explains.
+    """
+    path = stage_dispatch_home(dispatch_run_id) / "receipts.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        # No ledger means the dispatch never reached the point of owning cuts;
+        # the caller still holds the exception.
+        return
+    if not isinstance(payload, dict):
+        return
+    payload["scheduler_error"] = str(message)
+    payload["scheduler_error_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    try:
+        atomic_write_json(path, payload)
+    except OSError:
+        return
 
 
 def stage_fleet_receipts(parent_run_id: str, stage_id: str) -> dict[str, Any]:
@@ -543,6 +591,180 @@ def stage_fleet_receipts(parent_run_id: str, stage_id: str) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+# The obligation vocabulary IS the dispatcher's ``SCHEDULER_STATES``, read
+# back from its ledger.  The lifecycle classifies those states; it never keeps
+# a second copy of them.
+FLEET_STATES_COMPLETE = frozenset({"settled"})
+FLEET_STATES_ACTIVE = frozenset(
+    {"queued", "launching", "active", "reported", "integrating", "verified"}
+)
+FLEET_STATES_FAILED = frozenset({"failed", "stopped"})
+
+# Worst obligation wins: a fleet is only "complete" when every declared cut is.
+_VERDICT_RANK = ("complete", "active", "unknown", "missing", "failed")
+
+# Fields copied verbatim out of the ledger so a reopened observer recovers the
+# same cut, provider, worktree and attempt it had before the owner exited.
+_RECEIPT_IDENTITY_FIELDS = (
+    "provider_run_id",
+    "pid",
+    "worktree_path",
+    "branch",
+    "baseline_sha",
+    "target_path",
+    "report_path",
+    "meta_path",
+    "delivered_commit_sha",
+    "integrated_sha",
+    "scheduler_slot",
+    "attempt",
+    "acceptance",
+    "updated_at",
+)
+
+
+def _classify_obligation(state: str, *, scheduler_failed: bool) -> str:
+    """Map one dispatcher scheduler state onto a lifecycle obligation."""
+    if state in FLEET_STATES_FAILED:
+        return "failed"
+    if state in FLEET_STATES_COMPLETE:
+        return "complete"
+    if state in FLEET_STATES_ACTIVE:
+        # A cut still sitting in the scheduler's queue is not evidence that a
+        # provider was ever spawned.  When the scheduler itself died, "queued"
+        # is a failure that never started, not work in flight.
+        if scheduler_failed and state == "queued":
+            return "failed"
+        return "active"
+    return "unknown"
+
+
+def fleet_obligations(
+    parent_run_id: str,
+    stage_id: str,
+    *,
+    declared_cuts: Sequence[str] = (),
+    plan_path: str = "",
+) -> dict[str, Any]:
+    """Project the authoritative dispatch receipts into lifecycle obligations.
+
+    This is the whole read side of the control boundary: ``ship status``,
+    ``await`` and ``approve`` all decide from this one projection, so they
+    cannot disagree about whether a fleet still owes work.
+    """
+    dispatch_run_id = stage_dispatch_run_id(parent_run_id, stage_id)
+    payload = stage_fleet_receipts(parent_run_id, stage_id)
+    scheduler_error = stage_dispatch_error(dispatch_run_id)
+    ledger = payload.get("cuts") if isinstance(payload.get("cuts"), dict) else {}
+    declared = tuple(str(cut) for cut in declared_cuts if str(cut)) or tuple(ledger)
+
+    cuts: list[dict[str, Any]] = []
+    for cut_id in declared:
+        entry = ledger.get(cut_id)
+        if not isinstance(entry, dict):
+            # Declared by the lifecycle, absent from the dispatcher's ledger:
+            # nobody can say what happened to it.
+            cuts.append(
+                {"cut_id": cut_id, "state": "", "obligation": "missing"}
+            )
+            continue
+        state = str(entry.get("state") or "")
+        record: dict[str, Any] = {
+            "cut_id": cut_id,
+            "state": state,
+            "obligation": _classify_obligation(
+                state, scheduler_failed=bool(scheduler_error)
+            ),
+        }
+        for field in _RECEIPT_IDENTITY_FIELDS:
+            if field in entry:
+                record[field] = entry[field]
+        cuts.append(record)
+
+    counts: dict[str, int] = {}
+    for record in cuts:
+        counts[record["obligation"]] = counts.get(record["obligation"], 0) + 1
+    if not cuts:
+        verdict = "none"
+    else:
+        verdict = max(
+            (record["obligation"] for record in cuts),
+            key=lambda obligation: _VERDICT_RANK.index(obligation)
+            if obligation in _VERDICT_RANK
+            else len(_VERDICT_RANK),
+        )
+    blocking = [
+        f"{record['cut_id']}={record['obligation']}"
+        f"({record['state'] or 'no-receipt'})"
+        for record in cuts
+        if record["obligation"] != "complete"
+    ]
+    return {
+        "present": bool(cuts),
+        "dispatch_run_id": dispatch_run_id,
+        "receipts_path": str(stage_dispatch_home(dispatch_run_id) / "receipts.json"),
+        "plan_path": str(plan_path or ""),
+        "verdict": verdict,
+        "complete": verdict == "complete",
+        "counts": counts,
+        "cuts": cuts,
+        "blocking": blocking,
+        "scheduler_error": scheduler_error,
+        "recovery_command": fleet_recovery_command(dispatch_run_id, plan_path),
+    }
+
+
+def fleet_recovery_command(dispatch_run_id: str, plan_path: str = "") -> str:
+    """The existing public command that re-owns this fleet, or why there is none.
+
+    ``vibecrafted dispatch <plan> --resume <run_id>`` is the dispatcher's own
+    recovery verb: settled cuts are restored from the ledger, live cuts are
+    re-owned, and only failed cuts run again.  It needs the typed plan on
+    disk, which is exactly what a mission ``dispatch_plan:`` declares.
+    """
+    plan = str(plan_path or "").strip()
+    if not plan:
+        return ""
+    return f"vibecrafted dispatch {plan} --resume {dispatch_run_id}"
+
+
+def stage_fleet_progress(
+    state: dict[str, Any], *, stage_id: str = ""
+) -> dict[str, Any]:
+    """Fleet obligations for a lifecycle run's current (or named) WRITE stage."""
+    stages = [dict(item) for item in (state.get("stages") or [])]
+    target: dict[str, Any] = {}
+    for stage in reversed(stages):
+        if stage_id and str(stage.get("id") or "") != stage_id:
+            continue
+        if dict(stage.get("fleet") or {}).get("children") is not None:
+            target = stage
+            break
+        if stage_id:
+            break
+    fleet = dict(target.get("fleet") or {})
+    if not fleet:
+        return {
+            "present": False,
+            "verdict": "none",
+            "complete": True,
+            "cuts": [],
+            "blocking": [],
+            "counts": {},
+            "scheduler_error": "",
+            "dispatch_run_id": "",
+            "receipts_path": "",
+            "plan_path": "",
+            "recovery_command": "",
+        }
+    return fleet_obligations(
+        str(fleet.get("parent_run_id") or state.get("run_id") or ""),
+        str(fleet.get("stage_id") or target.get("id") or ""),
+        declared_cuts=[str(cut) for cut in (fleet.get("cuts") or [])],
+        plan_path=str(fleet.get("plan_path") or ""),
+    )
 
 
 def record_write_stage_fleet(

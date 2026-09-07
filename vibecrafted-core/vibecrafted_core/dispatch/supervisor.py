@@ -1022,6 +1022,10 @@ class DispatchSupervisor:
             pid=cell.pid,
             report_path=cell.report_path,
             meta_path=cell.meta_path,
+            # Which attempt owns this pid: the same token the launch
+            # idempotency key is built from, so a reopened observer can tell
+            # the initial launch from a repair round.
+            attempt=kind,
         )
         self._set_state(
             cut.id,

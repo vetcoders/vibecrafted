@@ -6,8 +6,10 @@ import threading
 from pathlib import Path
 
 import pytest
+from vibecrafted_core.dispatch.receipts import DispatchReceiptStore
 from vibecrafted_core.dispatch.supervisor import CellRun
 from vibecrafted_core.lifecycle_fleet import (
+    _FLEET_DISPATCH_ERRORS,
     STAGE_WORKER_MAY_LAUNCH_AGENT_LINES,
     WRITE_FLEET_STAGE_WORKFLOWS,
     CutDispatchContract,
@@ -15,7 +17,9 @@ from vibecrafted_core.lifecycle_fleet import (
     cut_worktree_path,
     dispatch_recorded_children,
     dispatcher_fleet_launch,
+    fleet_obligations,
     is_write_fleet_stage,
+    join_stage_dispatch,
     live_vc_dispatch_permitted,
     load_cut_records,
     mission_cut_agents,
@@ -23,6 +27,7 @@ from vibecrafted_core.lifecycle_fleet import (
     mission_dispatch_plan,
     record_only_supervisor,
     record_write_stage_fleet,
+    stage_dispatch_error,
     stage_dispatch_home,
     stage_dispatch_run_id,
     stage_fleet_receipts,
@@ -607,3 +612,170 @@ def test_second_launch_resumes_the_same_dispatch_without_relaunching(
     again = dispatch_recorded_children(make_fleet(), fleet_launch=launch, resume=True)
     assert launches == ["solo"]
     assert again[0]["resumed"] is True
+
+
+# --------------------------------------------------------------------------
+# The read side of the control boundary: obligations, durable scheduler
+# failure, and exact-cut recovery.
+# --------------------------------------------------------------------------
+
+
+def _run_fleet(
+    repo: Path,
+    plan: Path,
+    parent_run_id: str,
+    launches: list[str],
+    *,
+    resume: bool = False,
+) -> list[dict]:
+    mission = f"---\ndispatch_plan: {plan.name}\ncuts: W0-a, W0-b, W0-c\n---\n"
+    fleet = record_write_stage_fleet(
+        stage=_write_stage("implement"),
+        cuts=mission_cuts(mission),
+        parent_run_id=parent_run_id,
+        repo_root=repo,
+        agent="codex",
+    )
+    return dispatch_recorded_children(
+        fleet,
+        fleet_launch=dispatcher_fleet_launch(
+            repo_root=repo,
+            mission_text=mission,
+            cell_launcher=_report_writer(launches),
+            wait=True,
+        ),
+        resume=resume,
+    )
+
+
+def test_fleet_obligations_read_identities_back_from_the_dispatcher_ledger(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A reopened observer recovers cut, provider, worktree and attempt."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    repo = tmp_path / "repo"
+    _seed_repo(repo)
+    plan = _plan(repo, ("W0-a", "W0-b", "W0-c"), ("codex", "claude", "codex"))
+    launches: list[str] = []
+    projected = _run_fleet(repo, plan, "life-reopen", launches)
+
+    progress = fleet_obligations(
+        "life-reopen",
+        "implement",
+        declared_cuts=("W0-a", "W0-b", "W0-c"),
+        plan_path=str(plan),
+    )
+
+    assert progress["verdict"] == "complete"
+    assert progress["complete"] is True
+    assert progress["blocking"] == []
+    by_cut = {item["cut_id"]: item for item in progress["cuts"]}
+    for cut_id in ("W0-a", "W0-b", "W0-c"):
+        entry = by_cut[cut_id]
+        assert entry["state"] == "settled"
+        assert entry["acceptance"] == "verified"
+        # Identity survives the launching process, verbatim from the ledger.
+        assert entry["provider_run_id"] == f"provider-{cut_id}"
+        assert entry["worktree_path"] and Path(entry["worktree_path"]).name.endswith(
+            cut_id
+        )
+        assert entry["attempt"] == "initial"
+    # The dispatcher's geometry — not the lifecycle placeholder — is authority.
+    assert {item["worktree_path"] for item in projected} == {
+        item["worktree_path"] for item in progress["cuts"]
+    }
+    assert progress["recovery_command"] == (
+        f"vibecrafted dispatch {plan} --resume "
+        f"{stage_dispatch_run_id('life-reopen', 'implement')}"
+    )
+
+
+def test_a_scheduler_that_dies_before_its_children_is_durably_visible(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Queued is not proof of a spawn, and the reason must outlive the owner."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    repo = tmp_path / "repo"
+    _seed_repo(repo)
+    plan = _plan(repo, ("W0-a", "W0-b", "W0-c"), ("codex", "claude", "codex"))
+    mission = f"---\ndispatch_plan: {plan.name}\ncuts: W0-a, W0-b, W0-c\n---\n"
+
+    def _explode(*_args, **_kwargs):
+        raise RuntimeError("provider bootstrap unavailable")
+
+    monkeypatch.setattr(
+        "vibecrafted_core.dispatch.supervisor.run_dispatch", _explode
+    )
+    fleet = record_write_stage_fleet(
+        stage=_write_stage("implement"),
+        cuts=mission_cuts(mission),
+        parent_run_id="life-scheduler-dead",
+        repo_root=repo,
+        agent="codex",
+    )
+    dispatch_recorded_children(
+        fleet,
+        fleet_launch=dispatcher_fleet_launch(
+            repo_root=repo, mission_text=mission, cell_launcher=None
+        ),
+    )
+    run_id = stage_dispatch_run_id("life-scheduler-dead", "implement")
+    assert join_stage_dispatch(run_id, timeout=10)
+
+    # Simulate the launching process being gone: only the ledger remains.
+    _FLEET_DISPATCH_ERRORS.clear()
+    assert "provider bootstrap unavailable" in stage_dispatch_error(run_id)
+
+    progress = fleet_obligations(
+        "life-scheduler-dead",
+        "implement",
+        declared_cuts=("W0-a", "W0-b", "W0-c"),
+        plan_path=str(plan),
+    )
+    assert progress["verdict"] == "failed"
+    assert "provider bootstrap unavailable" in progress["scheduler_error"]
+    assert {item["state"] for item in progress["cuts"]} == {"queued"}
+    assert {item["obligation"] for item in progress["cuts"]} == {"failed"}
+
+
+def test_recovery_reruns_only_the_failed_cut_and_leaves_its_siblings_alone(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Step 5 of the acceptance: resume one cut, never execute the others twice."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    repo = tmp_path / "repo"
+    _seed_repo(repo)
+    plan = _plan(repo, ("W0-a", "W0-b", "W0-c"), ("codex", "claude", "codex"))
+    launches: list[str] = []
+    _run_fleet(repo, plan, "life-exact-retry", launches)
+    assert sorted(launches) == ["W0-a", "W0-b", "W0-c"]
+
+    from vibecrafted_core.dispatch.doctor import diagnose_file
+
+    report = diagnose_file(plan)
+    assert report.dispatch is not None
+    store = DispatchReceiptStore(
+        stage_dispatch_run_id("life-exact-retry", "implement"),
+        report.dispatch.cuts,
+        repo_root=str(repo),
+        create=False,
+    )
+    store.update("W0-b", "failed", acceptance="failed")
+
+    _run_fleet(repo, plan, "life-exact-retry", launches, resume=True)
+
+    # The first three are concurrent, so their order is not meaningful; what
+    # is meaningful is that recovery added exactly one launch, and it was the
+    # failed cut.
+    assert sorted(launches[:3]) == ["W0-a", "W0-b", "W0-c"]
+    assert launches[3:] == ["W0-b"], (
+        "only the failed cut may run again; settled siblings are restored "
+        "from the receipt ledger"
+    )
+    progress = fleet_obligations(
+        "life-exact-retry",
+        "implement",
+        declared_cuts=("W0-a", "W0-b", "W0-c"),
+        plan_path=str(plan),
+    )
+    assert progress["verdict"] == "complete"
