@@ -66,9 +66,7 @@ _vetcoders_product_core_cli() {
   checkout_python="$product_root/.venv/bin/python3"
   project_python="$product_root/scripts/project-python"
   embedded_python="$product_root/bin/python3"
-  if [[ -n "${VIBECRAFTED_PYTHON:-}" && -x "$VIBECRAFTED_PYTHON" ]]; then
-    python_bin="$VIBECRAFTED_PYTHON"
-  elif [[ "$(basename "$(dirname "$product_root")")" == "releases" ]]; then
+  if [[ "$(basename "$(dirname "$product_root")")" == "releases" ]]; then
     # Installed generations live at <runtime-home>/releases/<generation> --
     # the same physical shape _vetcoders_product_runtime_admit already checks
     # (owner.parent.name == "releases"). There, the generation's own bundled
@@ -87,6 +85,8 @@ _vetcoders_product_core_cli() {
       printf 'vc-start: refusing to substitute a host python3; explicit upgrade/repair required\n' >&2
       return 1
     fi
+  elif [[ -n "${VIBECRAFTED_PYTHON:-}" && -x "$VIBECRAFTED_PYTHON" ]]; then
+    python_bin="$VIBECRAFTED_PYTHON"
   elif [[ -x "$checkout_python" ]]; then
     python_bin="$checkout_python"
   elif [[ -x "$embedded_python" ]]; then

@@ -1231,6 +1231,10 @@ def test_installed_generation_missing_interpreter_refuses_before_aicx_or_provide
     (generation / "bin").mkdir(parents=True, exist_ok=True)
     # Deliberately no generation/bin/python3: the exact "missing owned
     # interpreter" shape from the independent admission trace.
+    foreign_python = _write(
+        tmp_path / "foreign-python",
+        "#!/usr/bin/env bash\nprintf 'foreign interpreter ran\\n' >> \"$TEST_FOREIGN_PYTHON_CAPTURE\"\nexit 97\n",
+    )
     host_bin = tmp_path / "host-bin"
     _write(
         host_bin / "python3",
@@ -1244,7 +1248,6 @@ def test_installed_generation_missing_interpreter_refuses_before_aicx_or_provide
         env.pop(key, None)
     for key in (
         "VIBECRAFTED_PRODUCT_CORE_CLI",
-        "VIBECRAFTED_PYTHON",
         "VIBECRAFTED_PREFER_REPO_VC_FRAME",
     ):
         env.pop(key, None)
@@ -1252,6 +1255,8 @@ def test_installed_generation_missing_interpreter_refuses_before_aicx_or_provide
     # interpreter fallback chain in _vetcoders_product_core_cli.
     env["VIBECRAFTED_CORE_DIR"] = str(generation / "vibecrafted-core")
     env["PATH"] = f"{host_bin}:{env.get('PATH', '')}"
+    env["VIBECRAFTED_PYTHON"] = str(foreign_python)
+    env["TEST_FOREIGN_PYTHON_CAPTURE"] = str(tmp_path / "foreign-python-called.txt")
     env["VIBECRAFTED_TERMINAL_ENTRY"] = "1"
     env["TEST_AICX_CAPTURE"] = str(tmp_path / "aicx-called.txt")
     env["TEST_PROVIDER_CAPTURE"] = str(tmp_path / "provider-called.txt")
@@ -1287,6 +1292,56 @@ def test_installed_generation_missing_interpreter_refuses_before_aicx_or_provide
         + result.stdout
         + result.stderr
     )
+    assert not (tmp_path / "foreign-python-called.txt").exists(), (
+        "installed owner executed inherited VIBECRAFTED_PYTHON: "
+        + result.stdout
+        + result.stderr
+    )
+
+
+def test_installed_generation_uses_its_owned_interpreter_over_foreign_override(
+    tmp_path: Path,
+) -> None:
+    """A healthy pinned generation ignores an inherited executable override."""
+    generation = tmp_path / "runtime-home" / "releases" / "gen-a"
+    core_dir = generation / "vibecrafted-core"
+    (core_dir / "vibecrafted_core").mkdir(parents=True)
+    (core_dir / "vibecrafted_core" / "cli.py").write_text("", encoding="utf-8")
+    owned_capture = tmp_path / "owned-python-called.txt"
+    foreign_capture = tmp_path / "foreign-python-called.txt"
+    owned_python = _write(
+        generation / "bin" / "python3",
+        "#!/usr/bin/env bash\nprintf 'owned interpreter ran\\n' >> \"$TEST_OWNED_PYTHON_CAPTURE\"\nexit 0\n",
+    )
+    foreign_python = _write(
+        tmp_path / "foreign-python",
+        "#!/usr/bin/env bash\nprintf 'foreign interpreter ran\\n' >> \"$TEST_FOREIGN_PYTHON_CAPTURE\"\nexit 97\n",
+    )
+
+    env = os.environ.copy()
+    env["VIBECRAFTED_CORE_DIR"] = str(core_dir)
+    env["VIBECRAFTED_PYTHON"] = str(foreign_python)
+    env["TEST_OWNED_PYTHON_CAPTURE"] = str(owned_capture)
+    env["TEST_FOREIGN_PYTHON_CAPTURE"] = str(foreign_capture)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'source "{SHELL_SH}"; _vetcoders_product_core_cli workspace resolve --root "{tmp_path}" --env',
+        ],
+        check=False,
+        cwd=tmp_path,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert owned_python.exists()
+    assert owned_capture.exists(), result.stdout + result.stderr
+    assert not foreign_capture.exists(), result.stdout + result.stderr
 
 
 # --------------------------------------------------------------------------
