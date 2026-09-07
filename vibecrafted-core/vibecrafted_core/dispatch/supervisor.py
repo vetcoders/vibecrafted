@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from vibecrafted_core.control_plane import lookup_run
 from vibecrafted_core.delivery.model import ExecutionEnvelope
 from vibecrafted_core.repository_claims import (
     ClaimConflictError,
@@ -26,6 +27,7 @@ from vibecrafted_core.workflow import (
     LAUNCH_IDEMPOTENCY_KEY_ENV,
     WorkflowLaunchSpec,
     launch_workflow,
+    recover_launch_receipt,
     reserve_run_id,
 )
 
@@ -213,6 +215,10 @@ class DispatchSupervisor:
         self._resume = bool(resume)
         self._io_lock = threading.RLock()
         self._geometries: dict[str, WorktreeGeometry] = {}
+        # A terminal worker can leave deliberate staged work behind.  This is
+        # populated only after its dispatch-idempotency receipt and canonical
+        # run metadata agree with the recorded cut geometry.
+        self._resume_owned_progress: set[str] = set()
         self._mutation_claim_id = ""
         self._mutation_claim_session_id = f"dispatch:{self.run_id}"
 
@@ -580,8 +586,10 @@ class DispatchSupervisor:
         """Prepare one isolated root, hold integration exclusivity, and settle it."""
         runtime_cut = self._prepare_runtime_cut(cut, verdicts)
         receipt = self._receipt_store.cut(cut.id)
-        if receipt.get("state") in {"launching", "active", "reported"}:
-            resumed = self._resume_active_cut(runtime_cut, receipt)
+        if receipt.get("state") in {"launching", "active", "reported"} or (
+            self._resume and not receipt.get("provider_run_id")
+        ):
+            resumed = self._resume_active_cut(runtime_cut, receipt, baton)
             if resumed is not None:
                 self._receipt_store.update(
                     runtime_cut.id,
@@ -645,22 +653,37 @@ class DispatchSupervisor:
             and previous_root.is_dir()
             and not cut.integrator
         )
-        if recovering_active:
-            geometry = WorktreeGeometry(
-                org=self.worktrees.org,
-                repo=self.worktrees.repo,
-                day=self.worktrees.day,
-                cut_id=cut.id,
-                worktree_path=str(previous_root),
-                branch=str(previous.get("branch") or f"cut/{cut.id}"),
-                baseline_sha=str(previous.get("baseline_sha") or baseline),
-                target_path=str(
-                    previous.get("target_path") or previous_root / "target"
+        recovered_geometry = WorktreeGeometry(
+            org=self.worktrees.org,
+            repo=self.worktrees.repo,
+            day=self.worktrees.day,
+            cut_id=cut.id,
+            worktree_path=str(previous_root),
+            branch=str(previous.get("branch") or f"cut/{cut.id}"),
+            baseline_sha=str(previous.get("baseline_sha") or baseline),
+            target_path=str(previous.get("target_path") or previous_root / "target"),
+            artifact_path=str(self.worktrees.artifact_root),
+            integrator_exclusive=False,
+        )
+        recovering_owned_progress = (
+            self._resume
+            and bool(previous.get("worktree_path"))
+            and previous_root.is_dir()
+            and not cut.integrator
+            and self._authenticated_terminal_progress(
+                replace(
+                    cut,
+                    runtime_root=recovered_geometry.worktree_path,
+                    runtime_branch=recovered_geometry.branch,
                 ),
-                artifact_path=str(self.worktrees.artifact_root),
-                integrator_exclusive=False,
+                previous,
             )
+        )
+        if recovering_active or recovering_owned_progress:
+            geometry = recovered_geometry
             self.worktrees.recover_active(geometry)
+            if recovering_owned_progress:
+                self._resume_owned_progress.add(cut.id)
         else:
             geometry = self.worktrees.prepare(
                 cut.id,
@@ -771,7 +794,29 @@ class DispatchSupervisor:
                 cut.id, STATE_VERIFIED, "restored from receipt and Git ancestry"
             )
 
-    def _resume_active_cut(self, cut: Cut, receipt: dict[str, Any]) -> Verdict | None:
+    def _resume_active_cut(
+        self, cut: Cut, receipt: dict[str, Any], baton: Baton
+    ) -> Verdict | None:
+        # The scheduler can die after ``launch_workflow`` durably accepted a
+        # child and before this ledger received pid/report fields.  Rehydrate
+        # only from the exact dispatch idempotency identity; a bare PID, a
+        # same-named worktree, or a report label is never enough to adopt it.
+        if not receipt.get("provider_run_id"):
+            recovered = self._recover_dispatched_cell(
+                cut, render_cell_prompt(self.dispatch, cut, baton=baton), "initial"
+            )
+            if recovered is not None:
+                receipt = {**receipt, **recovered}
+                self._receipt_store.update(
+                    cut.id,
+                    "active",
+                    provider_run_id=str(recovered["provider_run_id"]),
+                    pid=recovered.get("pid"),
+                    report_path=str(recovered.get("report_path") or ""),
+                    meta_path=str(recovered.get("meta_path") or ""),
+                    attempt="initial",
+                    recovered_launch_receipt=True,
+                )
         pid = receipt.get("pid")
         if isinstance(pid, int) and self._pid_alive(pid):
             cell = CellRun(
@@ -794,14 +839,107 @@ class DispatchSupervisor:
             commit = self._cut_delivery_head(cut) or self._git_head(cut)
             return replace(verdict, commit=commit, report=outcome.report_path)
         if receipt.get("report_path") and Path(str(receipt["report_path"])).is_file():
+            empty_report = (
+                not Path(str(receipt["report_path"]))
+                .read_text(encoding="utf-8", errors="replace")
+                .strip()
+            )
+            if empty_report and self._authenticated_terminal_progress(cut, receipt):
+                # An empty launcher-reserved report is not delivery proof. It
+                # may, however, be a killed authenticated worker whose own
+                # progress must be continued in place, not discarded.
+                self._resume_owned_progress.add(cut.id)
+                return None
             verdict = self._verify(cut)
             commit = self._cut_delivery_head(cut) or self._git_head(cut)
             return replace(verdict, commit=commit, report=str(receipt["report_path"]))
         if receipt.get("state") in {"launching", "active", "reported"}:
+            if self._authenticated_terminal_progress(cut, receipt):
+                self._resume_owned_progress.add(cut.id)
+                return None
             raise CellContractError(
                 f"[{cut.id}] previous launch is no longer live and has no report; refusing duplicate launch"
             )
         return None
+
+    def _recover_dispatched_cell(
+        self, cut: Cut, prompt: str, attempt: str
+    ) -> dict[str, Any] | None:
+        """Rehydrate a launch receipt lost between provider admission and ledger update."""
+        if not self._resume:
+            return None
+        root = cut.runtime_root or self.dispatch.meta.repo
+        env = {
+            "VIBECRAFTED_DISPATCH_CUT_ID": cut.id,
+            "VIBECRAFTED_DISPATCH_WORKTREE": root,
+            "VIBECRAFTED_DISPATCH_BRANCH": cut.runtime_branch,
+            "VIBECRAFTED_DISPATCH_BASELINE_SHA": cut.baseline_sha,
+            "VIBECRAFTED_DISPATCH_ARTIFACT_PATH": cut.artifact_path,
+            "VIBECRAFTED_DISPATCH_DEPENDENCIES": ",".join(cut.depends_on),
+            "VIBECRAFTED_DISPATCH_SCHEDULER_SLOT": str(cut.scheduler_slot),
+            "VIBECRAFTED_DISPATCH_INTEGRATOR": str(cut.integrator).lower(),
+            LAUNCH_IDEMPOTENCY_KEY_ENV: (
+                f"dispatch:{self.run_id}:cut:{cut.id}:attempt:{attempt}"
+            ),
+        }
+        spec = WorkflowLaunchSpec(
+            agent=cut.agent,
+            mode=cut.resolved_workflow,
+            skill=cut.resolved_workflow,
+            prompt=prompt,
+            file="",
+            runtime="headless",
+            root=root,
+            model=cut.model,
+        )
+        recovered = recover_launch_receipt(spec, env=env)
+        if not recovered or not recovered.get("accepted"):
+            return None
+        run_id = str(recovered.get("run_id") or "")
+        canonical = lookup_run(run_id) if run_id else None
+        if not isinstance(canonical, dict) or not self._matches_cut_identity(
+            cut, canonical
+        ):
+            return None
+        return {
+            "provider_run_id": run_id,
+            "pid": canonical.get("worker_pid")
+            or recovered.get("worker_pid")
+            or recovered.get("pid"),
+            "report_path": str(
+                canonical.get("report") or recovered.get("report") or ""
+            ),
+            "meta_path": str(canonical.get("meta") or recovered.get("meta") or ""),
+        }
+
+    @staticmethod
+    def _matches_cut_identity(cut: Cut, run: dict[str, Any]) -> bool:
+        root = str(cut.runtime_root or "")
+        observed_root = str(run.get("resolved_worktree_path") or run.get("root") or "")
+        return bool(
+            root
+            and observed_root
+            and Path(root).resolve() == Path(observed_root).resolve()
+            and str(run.get("cut_id") or "") == cut.id
+            and str(run.get("branch") or "") == str(cut.runtime_branch or "")
+            and str(run.get("agent") or "").lower() == cut.agent.lower()
+            and str(run.get("skill") or "") == cut.resolved_workflow
+        )
+
+    def _authenticated_terminal_progress(
+        self, cut: Cut, receipt: dict[str, Any]
+    ) -> bool:
+        run_id = str(receipt.get("provider_run_id") or "")
+        canonical = lookup_run(run_id) if run_id else None
+        if not isinstance(canonical, dict) or not self._matches_cut_identity(
+            cut, canonical
+        ):
+            return False
+        return str(canonical.get("status") or "").lower() in {
+            "failed",
+            "cancelled",
+            "killed",
+        }
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:
@@ -834,16 +972,22 @@ class DispatchSupervisor:
                 ),
             )
         prompt = render_cell_prompt(self.dispatch, cut, baton=baton)
-        self._materialize_prompt(cut, "initial", prompt)
+        attempt = "resume" if cut.id in self._resume_owned_progress else "initial"
+        self._materialize_prompt(cut, attempt, prompt)
         git_before = self._git_state(cut)
         fleet_before = self._cut_delivery_head(cut)
-        if cut.mode != "read" and self.policy.require_commit and git_before[1]:
+        if (
+            cut.mode != "read"
+            and self.policy.require_commit
+            and git_before[1]
+            and cut.id not in self._resume_owned_progress
+        ):
             raise CellContractError(
                 f"[{cut.id}] WRITE cut started from a dirty worktree: {git_before[1]}"
             )
         repair_attempts = 0
 
-        outcome, launch_failure = self._execute_cell(cut, prompt, "initial")
+        outcome, launch_failure = self._execute_cell(cut, prompt, attempt)
         if launch_failure is not None:
             raise CellContractError(
                 "; ".join(launch_failure.failures) or f"[{cut.id}] launch failed"

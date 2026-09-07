@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
+from vibecrafted_core.dispatch import supervisor as supervisor_module
 from vibecrafted_core.dispatch.doctor import diagnose_runtime
 from vibecrafted_core.dispatch.receipts import (
     DispatchReceiptStore,
@@ -23,6 +24,7 @@ from vibecrafted_core.dispatch.schema import (
 )
 from vibecrafted_core.dispatch.supervisor import (
     CellRun,
+    DispatchSupervisor,
     cleanup_settled_run,
     run_dispatch,
 )
@@ -269,6 +271,110 @@ def test_resume_awaits_live_receipt_without_duplicate_launch(
     assert launches == 0
     assert result.states["resume-me"] == "[x]"
     assert store.cut("resume-me")["state"] == "settled"
+
+
+def test_resume_rehydrates_lost_launch_receipt_and_preserves_terminal_owned_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scheduler crash cannot turn a durable provider launch into a duplicate.
+
+    The first half exercises the receipt gap with a real child process; the
+    second proves that only canonical metadata for the same cut may retain a
+    dirty checkout for the new ``resume`` attempt.
+    """
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    repo = tmp_path / "repo"
+    baseline = _repo(repo)
+    dispatch = _dispatch(repo, _cut("recover"))
+    manager = WorktreeManager(repo, day="2026_0907")
+    geometry = manager.prepare("recover", baseline)
+    report = tmp_path / "recover.md"
+    meta = tmp_path / "recover-meta.json"
+    proc = subprocess.Popen(
+        [
+            "bash",
+            "-c",
+            (
+                "sleep 0.05; printf recovered > "
+                f"{shlex.quote(str(report))}; "
+                'printf \'{"status":"completed","exit_code":0}\' > '
+                f"{shlex.quote(str(meta))}"
+            ),
+        ]
+    )
+    store = DispatchReceiptStore("recover-gap", dispatch.cuts)
+    store.update(
+        "recover",
+        "launching",
+        worktree_path=geometry.worktree_path,
+        branch=geometry.branch,
+        baseline_sha=geometry.baseline_sha,
+        target_path=geometry.target_path,
+    )
+    canonical = {
+        "run_id": "provider-original",
+        "worker_pid": proc.pid,
+        "report": str(report),
+        "meta": str(meta),
+        "resolved_worktree_path": geometry.worktree_path,
+        "cut_id": "recover",
+        "branch": geometry.branch,
+        "agent": "codex",
+        "skill": "implement",
+        "status": "running",
+    }
+    monkeypatch.setattr(
+        supervisor_module,
+        "recover_launch_receipt",
+        lambda *_args, **_kwargs: {"accepted": True, "run_id": "provider-original"},
+    )
+    monkeypatch.setattr(supervisor_module, "lookup_run", lambda _run_id: canonical)
+    launches = 0
+
+    def forbidden_launcher(*_args):
+        nonlocal launches
+        launches += 1
+        raise AssertionError("rehydrated worker was launched again")
+
+    result = run_dispatch(
+        dispatch,
+        launcher=forbidden_launcher,
+        artifacts_dir=tmp_path / "artifacts",
+        run_id="recover-gap",
+        manage_worktrees=True,
+        resume=True,
+    )
+    assert result.states["recover"] == "[x]"
+    assert launches == 0
+    assert store.cut("recover")["provider_run_id"] == "provider-original"
+
+    # A terminal run of this exact cut may retain staged progress; a foreign
+    # run cannot turn the same dirt into resume authority.
+    (Path(geometry.worktree_path) / "owned-progress.txt").write_text("keep\n")
+    canonical["status"] = "failed"
+    resumed = DispatchSupervisor(
+        dispatch,
+        launcher=forbidden_launcher,
+        artifacts_dir=tmp_path / "second-artifacts",
+        run_id="recover-gap",
+        manage_worktrees=True,
+        resume=True,
+    )
+    store.update("recover", "failed", provider_run_id="provider-original")
+    runtime_cut = resumed._prepare_runtime_cut(dispatch.cuts[0], {})
+    assert runtime_cut.runtime_root == geometry.worktree_path
+    assert "recover" in resumed._resume_owned_progress
+    canonical["cut_id"] = "foreign"
+    denied = DispatchSupervisor(
+        dispatch,
+        launcher=forbidden_launcher,
+        artifacts_dir=tmp_path / "third-artifacts",
+        run_id="recover-gap",
+        manage_worktrees=True,
+        resume=True,
+    )
+    with pytest.raises(WorktreeContractError, match="dirty reused worktree"):
+        denied._prepare_runtime_cut(dispatch.cuts[0], {})
 
 
 def test_unknown_resume_run_id_refuses_before_any_launch(
