@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Run a real local two-worker dispatch smoke and persist its runtime receipt."""
+"""Run a fake-transport dispatch smoke or inspect an existing dispatch receipt."""
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shlex
@@ -49,7 +50,7 @@ def _plan(repo: Path):
     return parse_dispatch(
         f'''schema = "vibecrafted.dispatch.v1"
 [meta]
-name = "two-worker-parallel-smoke"
+name = "fake-transport-two-worker-parallel-smoke"
 repo = "{repo}"
 [policy]
 concurrency = 2
@@ -89,7 +90,222 @@ prompt = "integrate both verified branches"
     )
 
 
-def main() -> int:
+def _git_check(repo: Path, *args: str) -> tuple[bool, str]:
+    """Run a read-only Git query without making inspection depend on success."""
+    try:
+        process = subprocess.run(
+            ["git", *args], cwd=repo, capture_output=True, text=True, check=False
+        )
+    except OSError as exc:
+        return False, str(exc)
+    return process.returncode == 0, (process.stdout or process.stderr).strip()
+
+
+def _receipt_path(run_id: str) -> Path:
+    """Return a run ledger path without constructing a store (and therefore no mkdir)."""
+    from vibecrafted_core.control_plane import control_plane_home
+
+    candidate = Path(run_id)
+    if not run_id or candidate.name != run_id or run_id in {".", ".."}:
+        raise ValueError("dispatch run id must be one path component")
+    return control_plane_home() / "dispatches" / run_id / "receipts.json"
+
+
+def _attempts(receipt: dict[str, object]) -> tuple[list[str], list[str]]:
+    """Project the receipt's intended attempt identity, refusing duplicate claims."""
+    raw = receipt.get("attempts", receipt.get("launch_attempts", ()))
+    attempts: list[str]
+    if isinstance(raw, list):
+        attempts = [str(value) for value in raw if str(value)]
+    elif raw:
+        attempts = [str(raw)]
+    elif receipt.get("attempt"):
+        attempts = [str(receipt["attempt"])]
+    else:
+        attempts = []
+    duplicates = sorted({value for value in attempts if attempts.count(value) > 1})
+    return attempts, duplicates
+
+
+def _integration_evidence(
+    *, receipt: dict[str, object], repo_root: Path, terminal_sha: str
+) -> dict[str, object]:
+    """Verify delivery against the destination checkout, not a receipt label."""
+    declared = str(receipt.get("integrated_sha") or "")
+    target = str(receipt.get("integration_target") or "HEAD")
+    evidence: dict[str, object] = {
+        "declared_sha": declared,
+        "target": target,
+        "terminal_sha": terminal_sha,
+        "git_verified": False,
+    }
+    if not terminal_sha:
+        evidence["reason"] = "terminal SHA missing"
+        return evidence
+    if not str(repo_root) or str(repo_root) == "." or not repo_root.is_dir():
+        evidence["reason"] = f"destination repository missing: {repo_root}"
+        return evidence
+    valid_commit, detail = _git_check(
+        repo_root, "rev-parse", "--verify", "--quiet", f"{terminal_sha}^{{commit}}"
+    )
+    if not valid_commit:
+        evidence["reason"] = f"terminal SHA is not a destination commit: {detail}"
+        return evidence
+    # Share delivery scope's exact ancestry rule; a receipt's integrated_sha is
+    # informative only, while this Git relation is the independently observed fact.
+    from vibecrafted_core.delivery.scope import _commit_reachable
+
+    reachable = _commit_reachable(repo_root, terminal_sha, target)
+    _ok, detail = _git_check(
+        repo_root, "merge-base", "--is-ancestor", terminal_sha, target
+    )
+    evidence["git_verified"] = reachable
+    if not reachable:
+        evidence["reason"] = (
+            f"terminal SHA is not reachable from destination target {target}: {detail}"
+        )
+    return evidence
+
+
+def inspect_run(
+    run_id: str, *, require_integrated: bool = False
+) -> tuple[int, dict[str, object]]:
+    """Read one dispatch ledger and produce a conservative machine-readable verdict.
+
+    Inspection deliberately never creates a store: a missing run must remain missing.
+    """
+    try:
+        ledger_path = _receipt_path(run_id)
+    except ValueError as exc:
+        return 2, {
+            "schema": "vibecrafted.dispatch-inspection.v1",
+            "run_id": run_id,
+            "status": "invalid",
+            "issues": [str(exc)],
+        }
+    if not ledger_path.is_file():
+        return 2, {
+            "schema": "vibecrafted.dispatch-inspection.v1",
+            "run_id": run_id,
+            "status": "missing",
+            "receipt_path": str(ledger_path),
+            "issues": ["receipt ledger not found"],
+        }
+
+    # DispatchReceiptStore remains the canonical parser/identity validator. The
+    # public read() takes an exclusive lock and creates receipts.lock, which is
+    # a write; the private JSON reader is safe here because ledger updates are
+    # atomic replacements and inspection must leave no footprint.
+    from vibecrafted_core.dispatch.receipts import (
+        DispatchReceiptStore,
+        ReceiptContractError,
+    )
+
+    try:
+        payload = DispatchReceiptStore(run_id, (), create=False)._read_unlocked()
+    except ReceiptContractError as exc:
+        return 2, {
+            "schema": "vibecrafted.dispatch-inspection.v1",
+            "run_id": run_id,
+            "status": "invalid",
+            "receipt_path": str(ledger_path),
+            "issues": [str(exc)],
+        }
+
+    repo_root_text = str(payload.get("repo_root") or "")
+    repo_root = Path(repo_root_text).expanduser()
+    issues: list[str] = []
+    cuts: list[dict[str, object]] = []
+    raw_cuts = payload.get("cuts")
+    if not isinstance(raw_cuts, dict) or not raw_cuts:
+        issues.append("receipt has no cuts")
+        raw_cuts = {}
+    for cut_id, raw_receipt in raw_cuts.items():
+        if not isinstance(raw_receipt, dict):
+            issues.append(f"{cut_id}: receipt is not an object")
+            continue
+        receipt = raw_receipt
+        state = str(receipt.get("state") or "")
+        terminal_sha = str(receipt.get("delivered_commit_sha") or "")
+        report_path = str(receipt.get("report_path") or "")
+        attempts, duplicate_attempts = _attempts(receipt)
+        report_exists = bool(report_path) and Path(report_path).is_file()
+        verification = receipt.get("gates")
+        gates = verification if isinstance(verification, list) else []
+        gates_ok = bool(gates) and all(
+            isinstance(gate, dict) and gate.get("ok") is True for gate in gates
+        )
+        integration = _integration_evidence(
+            receipt=receipt, repo_root=repo_root, terminal_sha=terminal_sha
+        )
+        delivered = state == "settled" and receipt.get("acceptance") == "verified"
+        if state in {"launching", "active", "reported", "verified", "integrating"}:
+            disposition = "observed-live-work"
+        elif state == "failed" or receipt.get("acceptance") == "failed":
+            disposition = "failed"
+        elif delivered and integration["git_verified"]:
+            disposition = "integrated"
+        elif delivered:
+            disposition = "delivered-isolated"
+        else:
+            disposition = "incomplete"
+        cut_issues: list[str] = []
+        if state not in {"settled", "failed"}:
+            cut_issues.append(f"state is {state or 'missing'}")
+        if state == "failed" or receipt.get("acceptance") == "failed":
+            cut_issues.append("cut failed")
+        if not terminal_sha:
+            cut_issues.append("terminal SHA missing")
+        if not receipt.get("worktree_path"):
+            cut_issues.append("effective root missing")
+        if not receipt.get("branch"):
+            cut_issues.append("branch missing")
+        if not receipt.get("baseline_sha"):
+            cut_issues.append("baseline SHA missing")
+        if not report_exists:
+            cut_issues.append("report evidence missing")
+        if not gates_ok:
+            cut_issues.append("verification evidence missing or not fully green")
+        if not attempts:
+            cut_issues.append("intended attempt evidence missing")
+        if duplicate_attempts:
+            cut_issues.append(
+                f"ambiguous duplicate attempts: {', '.join(duplicate_attempts)}"
+            )
+        if require_integrated and not integration["git_verified"]:
+            cut_issues.append(
+                str(integration.get("reason") or "integration not proven")
+            )
+        issues.extend(f"{cut_id}: {issue}" for issue in cut_issues)
+        cuts.append(
+            {
+                "cut_id": str(cut_id),
+                "state": state,
+                "effective_root": str(receipt.get("worktree_path") or ""),
+                "branch": str(receipt.get("branch") or ""),
+                "baseline_sha": str(receipt.get("baseline_sha") or ""),
+                "terminal_sha": terminal_sha,
+                "report": {"path": report_path, "exists": report_exists},
+                "verification": {"gates": gates, "complete": gates_ok},
+                "intended_attempts": attempts,
+                "provider_run_id": str(receipt.get("provider_run_id") or ""),
+                "integration": {"disposition": disposition, **integration},
+            }
+        )
+    status = "accepted" if not issues else "incomplete"
+    return (0 if status == "accepted" else 1), {
+        "schema": "vibecrafted.dispatch-inspection.v1",
+        "run_id": run_id,
+        "status": status,
+        "require_integrated": require_integrated,
+        "receipt_path": str(ledger_path),
+        "repo_root": repo_root_text,
+        "cuts": cuts,
+        "issues": issues,
+    }
+
+
+def smoke() -> int:
     from vibecrafted_core.dispatch.receipts import DispatchReceiptStore
     from vibecrafted_core.dispatch.supervisor import (
         CellRun,
@@ -172,7 +388,7 @@ def main() -> int:
         )
         cleanup = cleanup_settled_run(dispatch, run_id)
         payload = {
-            "schema": "vibecrafted.parallel-smoke-receipt.v1",
+            "schema": "vibecrafted.fake-transport-dispatch-smoke-receipt.v1",
             "run_id": run_id,
             "result": result.to_dict(),
             "sibling_overlap": sibling_overlap,
@@ -202,4 +418,16 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--inspect-run", metavar="DISPATCH_RUN_ID")
+    parser.add_argument("--require-integrated", action="store_true")
+    args = parser.parse_args()
+    if args.require_integrated and not args.inspect_run:
+        parser.error("--require-integrated requires --inspect-run")
+    if args.inspect_run:
+        exit_code, evidence = inspect_run(
+            args.inspect_run, require_integrated=args.require_integrated
+        )
+        print(json.dumps(evidence, sort_keys=True))
+        raise SystemExit(exit_code)
+    raise SystemExit(smoke())
