@@ -83,7 +83,7 @@ Current runtime is not a future scaffold. It is active.
 | `runtime/vc-operator/`                  | Mission-control helpers, not a public `vibecrafted operator` command                   |
 | `vibecrafted dispatch`                  | Deterministic dispatch supervisor and async lifecycle lane                             |
 | `vibecrafted gui` / `tui` / `dashboard` | Operator surfaces, second-visit tools                                                  |
-| Finished-run triage (`f·x·n`)           | Live: `run_triage` + `vc-frame triage-run` — see `docs/runtime/TRIAGE_AND_SESSIONS.md` |
+| Run observability ownership             | Server/VOC canonical browsing; terminal triage is manual compatibility — see `docs/runtime/TRIAGE_AND_SESSIONS.md` |
 | Tools home vs checkout                  | Daily CLI runs staged `vibecrafted-current`, not floating git HEAD                     |
 
 When docs need to discuss what is planned, say "planned" or "partial." Do not

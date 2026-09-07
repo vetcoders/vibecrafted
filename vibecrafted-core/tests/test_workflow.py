@@ -65,7 +65,6 @@ real_popen = workflow.subprocess.Popen
 workflow._sweep_stale_runs = lambda: None
 workflow._stdin_command = lambda _agent: [sys.executable, "-c", "pass"]
 workflow._resolve_agent_command = lambda _agent, command, _env: list(command)
-workflow.open_live_viewer = lambda **_kwargs: {"status": "skipped"}
 
 if os.environ["LAUNCH_RETRY_MODE"] == "spawn":
     def fake_popen(*args, **kwargs):
@@ -1156,48 +1155,6 @@ def test_spawn_exception_after_run_id_does_not_mint_sibling_while_live(
     assert second["run_id"] != first["run_id"]
 
 
-def test_viewer_exception_after_spawn_still_returns_receipt_for_retry(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
-    monkeypatch.setenv(
-        workflow.LAUNCH_IDEMPOTENCY_KEY_ENV, "viewer-exception-transport-retry"
-    )
-    monkeypatch.setattr(_AliveProc, "pid", os.getpid())
-    monkeypatch.setattr(
-        workflow,
-        "validate_process_identity",
-        lambda *_args, **_kwargs: (True, "process_identity_current", None),
-    )
-    source = _source_dir(tmp_path)
-    spec = workflow.normalize_launch_spec(
-        {"skill": "workflow", "agent": "claude", "prompt": "same brief"},
-        source,
-    )
-    pops: list[object] = []
-    _patch_launch_popen(monkeypatch, pops)
-    monkeypatch.setattr(
-        workflow,
-        "_stdin_command",
-        lambda _agent: [sys.executable, "-c", "pass"],
-    )
-
-    def boom_viewer(**_kwargs: Any) -> dict[str, Any]:
-        raise RuntimeError("live viewer exploded")
-
-    monkeypatch.setattr(workflow, "open_live_viewer", boom_viewer)
-
-    first = workflow.launch_workflow(spec, source)
-    second = workflow.launch_workflow(spec, source)
-
-    assert first["accepted"] is True
-    assert first["run_id"]
-    assert first["live_viewer"]["status"] == "failed"
-    assert len(pops) == 1
-    assert second["run_id"] == first["run_id"]
-    assert second.get("replayed") is True
-
-
 def test_launch_workflow_preseeds_machine_owned_claim_digest(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1665,21 +1622,11 @@ def test_terminal_runtime_launches_worker_in_vc_frame_tab(
     assert payload["control"].endswith(f"{payload['run_id']}.json")
 
 
-def test_headless_launch_opens_live_bucket_viewer_and_stamps_origin(
+def test_headless_launch_never_creates_a_synthetic_viewer(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Cut C axis (a): the viewer lands in ``Live runs`` and stamps the origin.
-
-    The worker itself must stay detached headless — the LIVE tab is a viewer,
-    so it carries the run's transcript, never the dispatcher.
-    """
     monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
-    monkeypatch.setenv("VIBECRAFTED_LIVE_VIEWER", "1")
     source = _source_dir(tmp_path)
-    vc_frame = tmp_path / "bin" / "vc-frame"
-    vc_frame.parent.mkdir()
-    vc_frame.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
-
     spec = workflow.WorkflowLaunchSpec(
         agent="codex",
         mode="implement",
@@ -1692,136 +1639,20 @@ def test_headless_launch_opens_live_bucket_viewer_and_stamps_origin(
     monkeypatch.setattr(
         workflow, "_stdin_command", lambda _agent: [sys.executable, "-c", "pass"]
     )
-    monkeypatch.setattr(
-        workflow.shutil,
-        "which",
-        lambda name, path=None: str(vc_frame) if name == "vc-frame" else None,
-    )
-
-    captured: dict[str, Any] = {}
-
-    def fake_host_action(
-        command: list[str], *, operator_session: str, timeout: float = 45.0
-    ) -> workflow._HostActionResult:
-        captured["command"] = command
-        captured["operator_session"] = operator_session
-        return workflow._HostActionResult(True, 909, "", "", False)
-
-    monkeypatch.setattr(workflow, "_vc_frame_run_host_action", fake_host_action)
-
-    payload = workflow.launch_workflow(spec, source)
-    run_id = payload["run_id"]
-
-    # The worker never bought a tab: headless transport, no worker host.
-    assert payload["accepted"] is True
-    assert payload["transport"] == "headless"
-    assert payload["operator_session"] == ""
-
-    # The viewer did, and it went to the LIVE bucket under the run's own name.
-    assert captured["operator_session"] == "Live runs"
-    assert captured["command"][:6] == [
-        str(vc_frame),
-        "--session",
-        "Live runs",
-        "action",
-        "new-tab",
-        "--name",
-    ]
-    assert captured["command"][6] == run_id
-    viewer_script = Path(captured["command"][-1])
-    assert viewer_script.is_file()
-    body = viewer_script.read_text(encoding="utf-8")
-    assert 'exec tail -n +1 -F "$human_transcript"' in body
-    assert 'exec tail -n +1 -F "$transcript"' not in body
-    assert "transcript.human.log" in body
-    assert payload["transcript"] not in body
-    assert f"vibecrafted observe codex --run-id {run_id}" in body
-    assert f"vibecrafted codex observe --run-id {run_id}" not in body
-    # A viewer tails; it must never carry the dispatcher itself.
-    assert "vibecrafted_core.dispatcher" not in body
-
-    assert payload["live_viewer"]["status"] == "opened"
-    assert payload["live_viewer"]["session"] == "Live runs"
-    assert payload["live_viewer"]["tab"] == run_id
-
-    # The stamp is what lets the existing triage hook empty this bucket later.
-    meta = json.loads(Path(payload["meta"]).read_text(encoding="utf-8"))
-    assert meta["origin_session"] == "Live runs"
-    assert meta["origin_tab"] == run_id
-    assert meta["live_viewer"]["status"] == "opened"
-
-
-def test_test_mode_never_opens_live_viewer() -> None:
-    """Hermetic tests must not mutate the operator's real vc-frame surface."""
-    assert (
-        workflow._live_viewer_enabled(
-            {
-                "VIBECRAFTED_TEST_MODE": "1",
-                "VIBECRAFTED_LIVE_VIEWER": "1",
-            }
-        )
-        is False
-    )
-
-
-def test_headless_launch_fails_open_when_vc_frame_binary_is_absent(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Cut C axis (b): no binary → receipt, headless run continues, no origin.
-
-    Fail-open mirrors triage: the viewer is a convenience on top of a launch
-    that already succeeded, so it degrades to a recorded receipt and never an
-    exception. Crucially it must not stamp an origin it did not create —
-    triage would then try to capture and close a tab that never existed.
-    """
-    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
-    monkeypatch.setenv("VIBECRAFTED_LIVE_VIEWER", "1")
-    source = _source_dir(tmp_path)
-
-    spec = workflow.WorkflowLaunchSpec(
-        agent="codex",
-        mode="implement",
-        skill="implement",
-        prompt="go",
-        file="",
-        runtime="headless",
-        root=str(tmp_path),
-    )
-    monkeypatch.setattr(
-        workflow, "_stdin_command", lambda _agent: [sys.executable, "-c", "pass"]
-    )
-    monkeypatch.setattr(workflow.shutil, "which", lambda name, path=None: None)
 
     def refuse_host_action(*args: Any, **kwargs: Any) -> workflow._HostActionResult:
-        raise AssertionError("no binary must never reach a vc-frame host action")
+        raise AssertionError("headless launch must not mutate vc-frame presentation")
 
     monkeypatch.setattr(workflow, "_vc_frame_run_host_action", refuse_host_action)
-
     payload = workflow.launch_workflow(spec, source)
 
     assert payload["accepted"] is True
-    assert isinstance(payload["pid"], int)
-    assert payload["live_viewer"] == {
-        "schema": workflow.LIVE_VIEWER_SCHEMA,
-        "status": "skipped",
-        "reason": "no_binary",
-        "session": "Live runs",
-        "tab": payload["run_id"],
-        "command": [],
-    }
-
+    assert payload["transport"] == "headless"
+    assert "live_viewer" not in payload
     meta = json.loads(Path(payload["meta"]).read_text(encoding="utf-8"))
-    assert meta["live_viewer"]["reason"] == "no_binary"
+    assert "live_viewer" not in meta
     assert not str(meta.get("origin_session") or "").strip()
     assert not str(meta.get("origin_tab") or "").strip()
-
-    log_lines = Path(payload["launch_log"]).read_text(encoding="utf-8").splitlines()
-    receipts = [
-        json.loads(line)
-        for line in log_lines
-        if json.loads(line).get("event") == "live_viewer"
-    ]
-    assert receipts and receipts[0]["status"] == "skipped"
 
 
 def test_terminal_runtime_resurrects_missing_host_session(

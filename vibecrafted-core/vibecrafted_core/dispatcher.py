@@ -122,7 +122,7 @@ def _maybe_record_lifecycle_worker_exit(
 
 
 async def _run(args: argparse.Namespace) -> int:
-    """Run one worker under ``AsyncSupervisor``, then triage/summarize/report the outcome."""
+    """Run one worker under ``AsyncSupervisor`` and report the canonical outcome."""
     worker = _normalize_worker(args.worker)
     signal_server = RunSignalServer(args.run_id).start()
     try:
@@ -187,25 +187,6 @@ async def _run(args: argparse.Namespace) -> int:
         if lifecycle_state:
             _maybe_record_lifecycle_worker_exit(lifecycle_state, summary)
 
-        # Shell spawners call spawn_triage_run after finalize. The Python dispatcher
-        # path historically skipped it — SESSIONS rail f/x/n stayed at · 0 forever
-        # for scaffold/workflow/codex runs. Triage is fail-open decoration.
-        if handle.meta_path is not None and handle.exit_code is not None:
-            try:
-                from .run_triage import triage_finished_run
-
-                triage_outcome = triage_finished_run(handle.meta_path)
-                summary["triage"] = triage_outcome.outcome
-                if triage_outcome.bucket:
-                    summary["triage_bucket"] = triage_outcome.bucket
-                if triage_outcome.reason:
-                    summary["triage_reason"] = triage_outcome.reason
-            except Exception as exc:  # noqa: BLE001 — never fail a finished run on triage
-                summary["triage"] = "error"
-                summary["triage_reason"] = (
-                    f"dispatcher_hook: {type(exc).__name__}: {exc}"
-                )
-
         # A client that starts as the worker exits can still connect and receive
         # the replayed terminal line. File truth handles later callers.
         await asyncio.sleep(0.15)
@@ -221,12 +202,6 @@ async def _run(args: argparse.Namespace) -> int:
             print(f"artifact_ok: {str(summary['artifact_ok']).lower()}")
             if artifact_errors:
                 print("artifact_errors: " + ",".join(artifact_errors))
-            if summary.get("triage"):
-                line = f"triage: {summary['triage']}"
-                if summary.get("triage_bucket"):
-                    line += f" → {summary['triage_bucket']}"
-                print(line)
-
         exit_code = handle.exit_code
         if isinstance(exit_code, int) and exit_code != 0:
             return exit_code
