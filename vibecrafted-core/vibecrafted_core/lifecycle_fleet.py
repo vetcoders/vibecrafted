@@ -618,6 +618,10 @@ def _start_detached_dispatch(
     command = scheduler_owner_command(plan, run_id)
     log_path = store.root / "scheduler.log"
     started_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    # This is the explicit start/resume request.  It happens before Popen so a
+    # stop committed while the parent is handing ownership off orders after it
+    # and remains fenced when the child reaches its resume boundary.
+    resume_sequence = store.request_resume(scheduler_owner_handoff=True)
     env = dict(os.environ)
     # The owner has to run the same code that wrote this ledger.  Without
     # this, an interpreter that resolves an installed release would take over
@@ -628,6 +632,7 @@ def _start_detached_dispatch(
     env["PYTHONPATH"] = (
         package_root if not inherited else package_root + os.pathsep + inherited
     )
+    env["VIBECRAFTED_SCHEDULER_RESUME_SEQUENCE"] = str(resume_sequence)
     with log_path.open("ab", buffering=0) as log:
         proc = subprocess.Popen(
             command,
@@ -650,7 +655,7 @@ def _start_detached_dispatch(
         "scheduler_owner_plan": plan,
         "scheduler_owner_log": str(log_path),
         "scheduler_owner_started_at": started_at,
-        "scheduler_stop_requested": False,
+        "scheduler_owner_resume_sequence": resume_sequence,
     }
     if identity is None:
         # The owner was gone before we could describe it.  Say so, rather than
@@ -843,11 +848,9 @@ def request_stage_dispatch_stop(
     stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     try:
         store = _receipt_store_for(dispatch_run_id)
-        store.update_metadata(
-            scheduler_stop_requested=True,
+        payload = store.request_stop(
             scheduler_stop_requested_at=stamp,
         )
-        payload = store.read()
     except Exception as exc:  # noqa: BLE001 - interrupt must report refusal honestly
         return {
             "accepted": False,

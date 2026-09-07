@@ -1279,3 +1279,34 @@ def test_explicit_resume_lifts_the_fence_and_reruns_only_the_failed_cut(
         == settled_before["settled_epoch_ns"]
     )
     assert "launch_admitted_at" not in payload["cuts"]["first"]
+
+
+def test_stop_ordered_after_resume_request_is_not_cleared_by_that_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A later interrupt wins even when the child has not reached run() yet."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    dispatch, reports_dir, artifacts_dir = build_dispatch(tmp_path, TWO_CUTS)
+    run_id = "resume-stop-order-run"
+    store = DispatchReceiptStore(run_id, dispatch.cuts, repo_root=str(tmp_path))
+
+    # This barrier models the parent recording the handoff request before
+    # Popen returns, followed by an independently accepted lifecycle stop.
+    resume_sequence = store.request_resume()
+    store.request_stop(scheduler_stop_requested_at="after-resume-request")
+    monkeypatch.setenv("VIBECRAFTED_SCHEDULER_RESUME_SEQUENCE", str(resume_sequence))
+
+    launcher = FakeCells(reports_dir=reports_dir)
+    run_dispatch(
+        dispatch,
+        launcher=launcher,
+        artifacts_dir=artifacts_dir,
+        run_id=run_id,
+        resume=True,
+    )
+
+    payload = store.read()
+    assert launcher.launches == []
+    assert payload["scheduler_stop_requested"] is True
+    assert payload["scheduler_resume_cleared"] is False
+    assert all(cut["state"] == "stopped" for cut in payload["cuts"].values())

@@ -17,7 +17,7 @@ from vibecrafted_core.workflow import reserve_run_id
 
 from .doctor import diagnose_file
 from .model import STATE_VERIFIED, Dispatch
-from .receipts import ReceiptContractError
+from .receipts import DispatchReceiptStore, ReceiptContractError
 from .schema import render_cell_prompt
 from .supervisor import DispatchResult, cleanup_settled_run, run_dispatch
 from .worktrees import canonical_artifact_root
@@ -129,8 +129,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             manage_worktrees=True,
             resume=bool(args.resume),
         )
-    except ReceiptContractError as exc:
-        print(f"dispatch refused: {exc}")
+    except Exception as exc:  # noqa: BLE001 - detached owners need durable failure truth
+        # A parent-side reaper disappears when the initiating terminal/App
+        # exits.  The owner itself therefore records the failure in the ledger
+        # that a fresh lifecycle observer already projects, rather than relying
+        # on a disposable caller thread to notice its non-zero exit.
+        try:
+            DispatchReceiptStore(run_id, (), create=False).update_metadata(
+                scheduler_error=f"{type(exc).__name__}: {exc}",
+                scheduler_error_at=datetime.now(timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
+            )
+        except ReceiptContractError:
+            pass
+        print(f"dispatch failed: {exc}")
         return 1
     if args.json:
         print(json.dumps(dispatch_result.to_dict(), ensure_ascii=False, indent=2))

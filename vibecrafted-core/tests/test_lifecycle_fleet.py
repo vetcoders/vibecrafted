@@ -827,6 +827,51 @@ def test_scheduler_metadata_merge_never_discards_a_concurrent_cut_receipt(
     assert payload["cuts"]["W0-a"]["provider_run_id"] == "provider-W0-a"
 
 
+def test_parent_handoff_never_overwrites_a_stop_accepted_during_popen(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The post-Popen identity receipt is stale metadata, never stop authority."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    repo = tmp_path / "repo"
+    _seed_repo(repo)
+    plan = _plan(repo, ("W0-a",), ("codex",))
+    from vibecrafted_core.dispatch.doctor import diagnose_file
+    import vibecrafted_core.lifecycle_fleet as fleet_module
+
+    dispatch = diagnose_file(plan).dispatch
+    assert dispatch is not None
+    store = DispatchReceiptStore("handoff-stop-run", dispatch.cuts, repo_root=str(repo))
+
+    class PopenThatStops:
+        pid = 424242
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            store.request_stop(scheduler_stop_requested_at="during-popen")
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(fleet_module.subprocess, "Popen", PopenThatStops)
+    monkeypatch.setattr(
+        fleet_module,
+        "process_identity_receipt",
+        lambda pid, **_kwargs: {
+            "pid": pid,
+            "pgid": pid,
+            "start_token": "test",
+            "command_sha256": "a" * 64,
+        },
+    )
+
+    _start_detached_dispatch("handoff-stop-run", store, plan_path=plan, repo_root=repo)
+
+    payload = store.read()
+    assert payload["scheduler_stop_requested"] is True
+    assert (
+        payload["scheduler_stop_sequence"] > payload["scheduler_owner_resume_sequence"]
+    )
+
+
 def test_fleet_recovery_command_quotes_space_containing_plan_path() -> None:
     from vibecrafted_core.lifecycle_fleet import fleet_recovery_command
 

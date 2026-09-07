@@ -295,16 +295,29 @@ class DispatchSupervisor:
                 # scheduler-owned fence and its stale error are lifted; cut
                 # receipts stay untouched, so settled siblings restore below
                 # and only unfinished cuts are scheduled again.
+                inherited_sequence = os.environ.get(
+                    "VIBECRAFTED_SCHEDULER_RESUME_SEQUENCE", ""
+                )
+                try:
+                    resume_sequence = (
+                        int(inherited_sequence) if inherited_sequence else 0
+                    )
+                except ValueError:
+                    resume_sequence = 0
+                if resume_sequence <= 0:
+                    resume_sequence = self._receipt_store.request_resume()
                 lifted = self._receipt_store.clear_stop_fence(
+                    resume_sequence=resume_sequence,
                     scheduler_resumed_at=datetime.now(timezone.utc).isoformat(
                         timespec="seconds"
-                    )
+                    ),
                 )
                 if lifted["scheduler_stop_requested"] or lifted["scheduler_error"]:
                     self._journal(
-                        "explicit resume lifted scheduler fence: "
+                        "explicit resume considered scheduler fence: "
                         f"stop_requested={lifted['scheduler_stop_requested']} "
-                        f"error={lifted['scheduler_error'] or '<none>'}"
+                        f"error={lifted['scheduler_error'] or '<none>'} "
+                        f"cleared={lifted['cleared']}"
                     )
             self._restore_settled_verdicts(verdicts)
             pending = {

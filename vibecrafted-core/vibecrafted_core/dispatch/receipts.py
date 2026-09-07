@@ -133,6 +133,20 @@ class DispatchReceiptStore:
         """
         with self._locked_ledger():
             payload = self._read_unlocked()
+            # A generic metadata writer must never erase an already accepted
+            # interrupt.  Clearing is the narrow, ordered operation below;
+            # this protects the parent handoff receipt from restoring ``False``
+            # after a stop lands while Popen is returning.
+            if fields.get("scheduler_stop_requested") is False and payload.get(
+                "scheduler_stop_requested"
+            ):
+                fields = dict(fields)
+                fields.pop("scheduler_stop_requested")
+            if fields.get("scheduler_stop_requested") is True:
+                fields = dict(fields)
+                sequence = self._next_fence_sequence(payload)
+                fields.setdefault("scheduler_stop_sequence", sequence)
+                fields.setdefault("scheduler_fence_sequence", sequence)
             payload.update(fields)
             payload["updated_at"] = _now()
             atomic_write_json(self.path, payload)
@@ -171,7 +185,45 @@ class DispatchReceiptStore:
             atomic_write_json(self.path, payload)
             return True
 
-    def clear_stop_fence(self, **fields: Any) -> dict[str, Any]:
+    @staticmethod
+    def _next_fence_sequence(payload: dict[str, Any]) -> int:
+        """Return the next total order number for stop/resume fence events."""
+        return int(payload.get("scheduler_fence_sequence") or 0) + 1
+
+    def request_stop(self, **fields: Any) -> dict[str, Any]:
+        """Durably order an accepted stop against a pending explicit resume."""
+        with self._locked_ledger():
+            payload = self._read_unlocked()
+            sequence = self._next_fence_sequence(payload)
+            payload["scheduler_fence_sequence"] = sequence
+            payload["scheduler_stop_requested"] = True
+            payload["scheduler_stop_sequence"] = sequence
+            payload.update(fields)
+            payload["updated_at"] = _now()
+            atomic_write_json(self.path, payload)
+            return dict(payload)
+
+    def request_resume(self, **fields: Any) -> int:
+        """Record an explicit resume intent before its new owner may start.
+
+        The returned sequence is passed to the new owner.  A stop that obtains
+        this same lock later receives a larger sequence and therefore cannot be
+        cleared by that older resume request.
+        """
+        with self._locked_ledger():
+            payload = self._read_unlocked()
+            sequence = self._next_fence_sequence(payload)
+            payload["scheduler_fence_sequence"] = sequence
+            payload["scheduler_resume_sequence"] = sequence
+            payload["scheduler_resume_requested_at"] = _now()
+            payload.update(fields)
+            payload["updated_at"] = _now()
+            atomic_write_json(self.path, payload)
+            return sequence
+
+    def clear_stop_fence(
+        self, *, resume_sequence: int | None = None, **fields: Any
+    ) -> dict[str, Any]:
         """Lift an interrupt for an explicit resume, touching no cut receipt.
 
         Only the scheduler-owned fence and its stale failure note are cleared.
@@ -179,6 +231,8 @@ class DispatchReceiptStore:
         left it, so recovery re-runs the unfinished cuts and can never
         duplicate a sibling it did not run.
         """
+        if resume_sequence is None:
+            resume_sequence = self.request_resume()
         with self._locked_ledger():
             payload = self._read_unlocked()
             previous = {
@@ -187,12 +241,21 @@ class DispatchReceiptStore:
                 ),
                 "scheduler_error": str(payload.get("scheduler_error") or ""),
             }
-            payload["scheduler_stop_requested"] = False
-            payload["scheduler_error"] = ""
+            stop_sequence = int(payload.get("scheduler_stop_sequence") or 0)
+            # Unknown stop ordering is conservative: it can only have arrived
+            # after a legacy writer, never become permission to start work.
+            cleared = not payload.get("scheduler_stop_requested") or (
+                stop_sequence and stop_sequence < resume_sequence
+            )
+            if cleared:
+                payload["scheduler_stop_requested"] = False
+                payload["scheduler_error"] = ""
             payload.update(fields)
+            payload["scheduler_resume_applied_sequence"] = resume_sequence
+            payload["scheduler_resume_cleared"] = cleared
             payload["updated_at"] = _now()
             atomic_write_json(self.path, payload)
-            return previous
+            return {**previous, "cleared": cleared}
 
     def _read_unlocked(self) -> dict[str, Any]:
         try:
