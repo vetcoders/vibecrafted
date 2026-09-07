@@ -143,8 +143,8 @@ PY
     assert final["session_id"] == "telemetry-session-001"
 
 
-def test_finalize_handoff_returns_regular_meta_for_triage(tmp_path: Path) -> None:
-    """The shell handoff carries the canonical meta, never its compat symlink."""
+def test_finalize_handoff_returns_regular_canonical_meta(tmp_path: Path) -> None:
+    """Artifact closure returns canonical meta without presentation side effects."""
 
     home = tmp_path / "home" / ".vibecrafted"
     reports = home / "artifacts" / "Vetcoders" / "demo" / "2026_0726" / "reports"
@@ -167,7 +167,6 @@ def test_finalize_handoff_returns_regular_meta_for_triage(tmp_path: Path) -> Non
         spawn_finish_meta "{meta}" completed 0
         final_meta="$(spawn_finalize_artifacts "{meta}" "{report}" "{transcript}")"
         [[ -f "$final_meta" && ! -L "$final_meta" ]]
-        spawn_triage_run "$final_meta"
         printf 'FINAL_META=%s\\n' "$final_meta"
         '''
     )
@@ -181,8 +180,8 @@ def test_finalize_handoff_returns_regular_meta_for_triage(tmp_path: Path) -> Non
     assert final_meta.is_file()
     assert not final_meta.is_symlink()
     payload = json.loads(final_meta.read_text(encoding="utf-8"))
-    assert payload["triage"] == "skipped"
-    assert payload["triage_reason"] == "no_session"
+    assert "triage" not in payload
+    assert "triage_reason" not in payload
 
 
 def test_generated_launcher_walks_full_lifecycle(tmp_path: Path) -> None:
@@ -387,14 +386,8 @@ def test_write_meta_python_direct(tmp_path: Path, monkeypatch) -> None:
     assert os.environ["VIBECRAFTED_HOME"] == str(vibecrafted_home)
 
 
-def test_triage_run_is_the_last_step_of_a_generated_launcher() -> None:
-    """Triage closes the tab the launcher is running in, so it must run last.
-
-    Anything sequenced after `spawn_triage_run` in a successful transfer may
-    simply never execute — the pane is gone. Pinning the order here keeps a
-    later edit from quietly moving artifact closure behind it and losing the
-    report on exactly the runs that finished cleanly.
-    """
+def test_generated_launcher_has_no_terminal_triage_side_effect() -> None:
+    """Supervised lifecycle closes artifacts without creating or moving sessions."""
     launcher_src = (
         REPO_ROOT
         / "vibecrafted-core"
@@ -411,30 +404,11 @@ def test_triage_run_is_the_last_step_of_a_generated_launcher() -> None:
         == 2
     )
 
-    for branch, tail in (
-        ("success", 'spawn_triage_run "$meta"\nelse'),
-        ("failure", 'spawn_triage_run "$meta"\n  exit "$exit_code"'),
-    ):
-        assert tail in launcher_src, f"{branch} branch does not end with triage"
-
-    # ...and in both branches artifact closure precedes it.
-    first_triage = launcher_src.index('spawn_triage_run "$meta"')
-    first_finalize = launcher_src.index('spawn_finalize_artifacts "$meta"')
-    assert first_finalize < first_triage
-
-    last_triage = launcher_src.rindex('spawn_triage_run "$meta"')
-    last_finalize = launcher_src.rindex('spawn_finalize_artifacts "$meta"')
-    assert last_finalize < last_triage
+    assert "spawn_triage_run" not in launcher_src
 
 
-def test_reap_runs_after_artifact_closure_and_before_triage() -> None:
-    """The reaper sits between artifact closure and triage, in both branches.
-
-    Before triage, because a successful transfer closes this tab: sequenced after
-    it, the sweep may never run and the survivors keep burning cores until reboot.
-    After artifact closure, because the reap is only correct once the run's
-    terminal state is on disk — that is what makes it a *terminal* run's residue.
-    """
+def test_reap_runs_after_artifact_closure() -> None:
+    """The reaper runs only after terminal state is durably on disk."""
     launcher_src = (
         REPO_ROOT
         / "vibecrafted-core"
@@ -450,8 +424,7 @@ def test_reap_runs_after_artifact_closure_and_before_triage() -> None:
     for finder in ("index", "rindex"):
         finalize = getattr(launcher_src, finder)('spawn_finalize_artifacts "$meta"')
         reap = getattr(launcher_src, finder)("spawn_reap_run")
-        triage = getattr(launcher_src, finder)('spawn_triage_run "$meta"')
-        assert finalize < reap < triage
+        assert finalize < reap
 
 
 def test_reap_run_never_fails_a_finished_run(tmp_path: Path) -> None:
@@ -466,46 +439,6 @@ def test_reap_run_never_fails_a_finished_run(tmp_path: Path) -> None:
     )
     assert proc.returncode == 0
     assert "survived" in proc.stdout
-
-
-def test_triage_run_never_fails_a_finished_run(tmp_path: Path) -> None:
-    """The shell wrapper is fail-open: no meta, no session, no vc-frame — exit 0."""
-    meta = tmp_path / "agent.meta.json"
-    meta.write_text(
-        json.dumps({"run_id": "r1", "exit_code": 0}) + "\n", encoding="utf-8"
-    )
-
-    # _ENV_SANITIZE clears VC_FRAME_* but not the legacy ZELLIJ_* aliases that
-    # vc-frame still dual-emits, and this suite may itself be running inside a
-    # live session. Clear both so the assertion is about the code, not the host.
-    result = _bash(
-        f'''
-        set -euo pipefail
-        export HOME="{tmp_path / "home"}"
-        mkdir -p "$HOME"
-        unset VIBECRAFTED_HOME VIBECRAFTED_CONTROL_PLANE
-        unset ZELLIJ ZELLIJ_PANE_ID ZELLIJ_SESSION_NAME
-        source "{COMMON_SH}"
-        spawn_triage_run "{meta}"
-        echo "survived=$?"
-        '''
-    )
-
-    assert "survived=0" in result.stdout
-    # Headless test env has no vc-frame pane: the receipt says so plainly.
-    data = json.loads(meta.read_text(encoding="utf-8"))
-    assert data["triage"] == "skipped"
-    assert data["triage_reason"] == "no_session"
-
-
-def test_triage_run_tolerates_a_missing_meta(tmp_path: Path) -> None:
-    _bash(
-        f'''
-        set -euo pipefail
-        source "{COMMON_SH}"
-        spawn_triage_run "{tmp_path / "absent.meta.json"}"
-        '''
-    )
 
 
 def test_meta_writers_replace_never_truncate_in_place() -> None:

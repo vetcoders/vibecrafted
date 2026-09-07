@@ -423,28 +423,13 @@ spawn_finalize_artifacts() {
   printf '%s\n' "$final_meta"
 }
 
-# Move a finished run's tab into its vc-frame status bucket. Runs LAST, after
-# artifacts are closed: a successful transfer closes the tab this launcher is
-# running in, so anything sequenced after it may never execute.
-#
-# Triage is decoration on an already-finished run, so this never fails a run —
-# the Python side swallows every error and records a receipt instead. The `|| true`
-# is belt-and-braces for the interpreter itself failing to start.
-spawn_triage_run() {
-  local meta_path="$1"
-
-  [[ -f "$meta_path" ]] || return 0
-
-  spawn_python_module vibecrafted_core.run_triage "$meta_path" || true
-}
-
-# Sweep processes that outlived this (now terminal) run. Runs BEFORE triage: a
-# successful triage closes the tab we are running in, so anything sequenced after
-# it may never execute — and the survivors would keep burning cores until reboot.
+# Sweep processes that outlived this (now terminal) run after canonical artifact
+# closure. Run presentation belongs to vc-server/VOC; this helper never moves or
+# closes a terminal tab.
 #
 # The reaper excludes its own pid and every ancestor, so calling it from inside
 # the run it is cleaning up after is safe; only siblings (monitors, watchers) are
-# candidates. Like triage, it never fails a run that already finished.
+# candidates. It never fails a run that already finished.
 spawn_reap_run() {
   spawn_python_module vibecrafted_core.run_reaper || true
 }

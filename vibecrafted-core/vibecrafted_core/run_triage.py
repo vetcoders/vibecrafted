@@ -1,4 +1,8 @@
-"""Runtime caller for ``vc-frame triage-run``.
+"""Legacy/manual compatibility caller for ``vc-frame triage-run``.
+
+Supervised workflow, dispatcher and Guardian paths do not invoke this module.
+Canonical run browsing belongs to vc-server/control-plane routes and VOC. This
+code remains for explicit forensic and historical migration actions only.
 
 When a supervised run reaches a terminal state, the tab it lived in stops being
 work-in-progress and starts being evidence. vc-frame owns the transfer primitive
@@ -109,14 +113,8 @@ BUCKET_FINALIZED = "Finalized runs"
 BUCKET_FAILED = "Failed runs"
 BUCKET_NEEDS_ATTENTION = "Needs attention"
 
-#: The pre-terminal bucket. Unlike the three above it is not a triage
-#: destination and never appears in ``_BUCKET_FOR_VERDICT`` — a run is never
-#: *classified* as live. It hosts the read-only viewer tab that
-#: ``workflow.open_live_viewer`` opens at launch for a detached headless
-#: worker, and triage is what empties it: the viewer's ``origin_session`` is
-#: this bucket, so the ordinary transfer moves it into Finalized/Failed/Needs
-#: attention when the run settles. Same wire contract as the other three
-#: (a vc-frame session name); vc-frame still owns the rail UI.
+#: Historical pre-terminal bucket name retained for reading old receipts and
+#: explicit migration commands. New supervised launches do not create it.
 BUCKET_LIVE = "Live runs"
 
 # The four verdicts. Also the receipt values written to meta.json under

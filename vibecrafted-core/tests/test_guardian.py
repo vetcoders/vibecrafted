@@ -3518,10 +3518,6 @@ def test_main_recovers_trust_outbox_under_lock_before_sse_attach(
             order.append("history-stop")
             return True
 
-    def schedule_triage_startup() -> bool:
-        order.append("triage-startup")
-        return True
-
     monkeypatch.setattr(
         guardian_module,
         "GuardianState",
@@ -3559,9 +3555,10 @@ def test_main_recovers_trust_outbox_under_lock_before_sse_attach(
     monkeypatch.setattr(
         guardian_module,
         "_schedule_triage_startup_sweep",
-        schedule_triage_startup,
+        lambda: (_ for _ in ()).throw(
+            AssertionError("guardian startup must not schedule terminal triage")
+        ),
     )
-
     result = guardian_module.main(
         [
             "--server-url",
@@ -3578,7 +3575,6 @@ def test_main_recovers_trust_outbox_under_lock_before_sse_attach(
     assert order == [
         "lock",
         "recover",
-        "triage-startup",
         "history-start",
         "attach",
         "history-stop",

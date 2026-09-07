@@ -280,18 +280,12 @@ above was always unconditional; now the code is too._
 **Receipt truth**: launch-log / control-plane field `operator_session` is
 the **actual worker host** after the rules above, not the human seat name.
 
-**Out of scope for this cut**: sidebar UI grouping chrome inside the vc-frame
-repo beyond the existing session-manager rail; migrating live PTYs without
-recreate (vc-frame always recreates for triage); forcing marbles shell-entrypoint
-off the operator seat (primary fleet path is scripts/lib).
-
-**In scope (landed runtime wire)**: caller-side `triage_finished_run` /
-`spawn_triage_run` → `vc-frame triage-run`, origin stamp in meta, conjunction
-classifier, fail-open receipts. See
-[`TRIAGE_AND_SESSIONS.md`](./TRIAGE_AND_SESSIONS.md). If tools home lags the
-checkout that contains the wire, terminal viewer tabs may stay in the work
-session. That projection failure must not change settlement-ledger `f·x·n`
-counts — install, do not assume git alone refreshed the daily driver.
+**Current ownership**: supervised lifecycle code finalizes canonical run
+artifacts without creating, moving or closing presentation sessions. Run
+browsing belongs to vc-server/control-plane routes and VOC; the Frame rail is
+only a workspace navigator. `run_triage` and `vc-frame triage-run` remain
+manual compatibility tools, not automatic lifecycle hooks. See
+[`TRIAGE_AND_SESSIONS.md`](./TRIAGE_AND_SESSIONS.md).
 
 ---
 
