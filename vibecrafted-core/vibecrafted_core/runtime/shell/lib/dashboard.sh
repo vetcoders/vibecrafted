@@ -2,14 +2,18 @@
 # Extracted from vetcoders.sh; sourced only by the compatibility facade.
 
 _vetcoders_dashboard_layout_name() {
-  local requested="${1:-dashboard}"
+  local requested="${1:-default}"
   case "$requested" in
-    ""|dashboard|mc|mission-control|vc-dashboard) printf 'dashboard\n' ;;
+    # The product entrypoints and vc-frame's native default must name the
+    # same physical, shipped layout.  Keep the user-facing spellings, but do
+    # not create a second vibecrafted.kdl (or a symlink: Runtime Packs reject
+    # those) just to satisfy an alias.
+    ""|default|operator|vibecrafted) printf 'operator\n' ;;
+    dashboard|mc|mission-control|vc-dashboard) printf 'dashboard\n' ;;
     marbles|vc-marbles) printf 'marbles\n' ;;
     polarize|vc-polarize) printf 'polarize\n' ;;
     workflow|vc-workflow) printf 'workflow\n' ;;
     research|vc-research) printf 'research\n' ;;
-    operator|vibecrafted) printf 'operator\n' ;;
     *)
       echo "Unknown dashboard layout: $requested" >&2
       # shellcheck disable=SC2154 # sourced from core.sh by the facade.

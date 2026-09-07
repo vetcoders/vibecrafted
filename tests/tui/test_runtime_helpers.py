@@ -298,6 +298,18 @@ def test_dashboard_uses_bundled_vc_frame_priority_without_path_leak(
     assert result.stdout == f"PATH={initial_path}\n"
 
 
+def test_dashboard_default_aliases_resolve_to_the_shipped_operator_layout() -> None:
+    result = _run_vetcoders_helper(
+        HELPER_SCRIPT,
+        '_vetcoders_dashboard_layout_name; for alias in default vibecrafted operator; do _vetcoders_dashboard_layout_name "$alias"; done',
+        {"VIBECRAFTED_ROOT": str(REPO_ROOT)},
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert result.stdout.splitlines() == ["operator", "operator", "operator", "operator"]
+
+
 def test_dashboard_names_the_idempotent_same_workspace_noop(tmp_path: Path) -> None:
     layout = tmp_path / "operator.kdl"
     layout.write_text("layout {}\n", encoding="utf-8")
