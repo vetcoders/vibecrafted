@@ -259,28 +259,29 @@ def test_non_overlapping_kdl_upgrade_merges_user_preference_and_new_defaults(
 def test_same_setting_kdl_conflict_refuses_publication_and_preserves_evidence(
     installed, tmp_path, capsys
 ):
-    paths, _, _result = installed
+    paths, _, result = installed
     product = paths["product_config"]
     config = product / "vc-frame/config.kdl"
     config.write_bytes(
         config.read_bytes().replace(
-            b'default_layout "operator"', b'default_layout "personal"'
+            b"mouse_mode true", b"copy_on_select true\nmouse_mode true"
         )
     )
     before = _snapshot(product)
     active = (paths["runtime_home"] / "active.json").read_bytes()
     source = (
-        installed[1] / "vibecrafted-core/vibecrafted_core/config/vc-frame/config.kdl"
+        Path(result["root"])
+        / "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
     )
     payload_b = seed_runtime_pack(
         tmp_path / "pack-b",
         version="9.9.10+b",
         frame_config=source.read_text().replace(
-            'default_layout "operator"', 'default_layout "new-default"'
+            "mouse_mode true", "mouse_mode true\ncopy_on_select false"
         ),
     )
     with pytest.raises(
-        RuntimeError, match="user edits overlap changed shipped defaults"
+        RuntimeError, match="KDL settings conflict with changed shipped defaults"
     ):
         _install(payload_b, capsys)
     capsys.readouterr()
@@ -293,6 +294,28 @@ def test_same_setting_kdl_conflict_refuses_publication_and_preserves_evidence(
     assert Path(conflict["backup"]).read_bytes() == config.read_bytes()
     assert Path(conflict["previous_defaults"]).is_file()
     assert Path(conflict["incoming_defaults"]).is_file()
+    _resolve(paths, capsys, status="unusable")
+
+
+def test_nested_kdl_edit_refuses_publication_and_preserves_evidence(
+    installed, tmp_path, capsys
+):
+    paths, _, _result = installed
+    product = paths["product_config"]
+    config = product / "vc-frame/config.kdl"
+    config.write_bytes(
+        config.read_bytes().replace(
+            b"themes {", b"themes {\n    copy_on_select true"
+        )
+    )
+    before = _snapshot(product)
+    active = (paths["runtime_home"] / "active.json").read_bytes()
+    payload_b = seed_runtime_pack(tmp_path / "pack-b", version="9.9.10+b")
+    with pytest.raises(RuntimeError, match="KDL edit changes nested or structural content"):
+        _install(payload_b, capsys)
+    capsys.readouterr()
+    assert _snapshot(product) == before
+    assert (paths["runtime_home"] / "active.json").read_bytes() == active
     _resolve(paths, capsys, status="unusable")
 
 
