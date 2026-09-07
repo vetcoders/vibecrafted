@@ -305,21 +305,26 @@ def test_public_dispatch_recovers_killed_worker_with_monotonic_resume_attempts(
     assert second["provider_run_id"] != first["provider_run_id"]
 
 
-def test_public_concurrent_resumes_replay_three_real_children_then_retry_failed_one(
+def test_public_concurrent_resumes_preserve_live_siblings_then_retry_killed_child(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A killed dirty child is recovered once even when two schedulers resume.
+    """Only a killed dirty child is recovered while its live siblings survive.
 
     This deliberately exercises the public dispatcher with three real provider
     processes.  The provider itself is disposable, but launch receipts,
     process identity, worktree reuse, and concurrent scheduler recovery are
-    the production implementations.  ``retry`` fails its first resumed child
-    so a later resume must advance to ``resume-2`` rather than replaying a
-    terminal identity.
+    the production implementations.  Two initial children are held behind an
+    owned barrier, so their original process identities must survive two
+    concurrent resume callers.  The first recovered child is then killed;
+    only that cut may advance to ``resume-2``.
     """
     home = tmp_path / ".vibecrafted"
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
+    barriers = tmp_path / "barriers"
+    barriers.mkdir()
+    launches = tmp_path / "launches"
+    launches.mkdir()
     provider = fake_bin / "codex"
     provider.write_text(
         "#!/bin/sh\n"
@@ -327,14 +332,19 @@ def test_public_concurrent_resumes_replay_three_real_children_then_retry_failed_
         "root=$VIBECRAFTED_DISPATCH_WORKTREE\n"
         "cut=$VIBECRAFTED_DISPATCH_CUT_ID\n"
         "key=$VIBECRAFTED_LAUNCH_IDEMPOTENCY_KEY\n"
+        "attempt=${key##*:attempt:}\n"
+        'printf \'pid=%s run_id=%s key=%s\\n\' "$$" "$VIBECRAFTED_RUN_ID" "$key" > '
+        '"$VIBECRAFTED_TEST_LAUNCH_DIR/$cut-$attempt-$VIBECRAFTED_RUN_ID.launch"\n'
         'printf \'%s\' "$key" > "$root/provider-key.txt"\n'
         "if echo \"$key\" | grep -q ':attempt:initial$'; then\n"
         '  printf dirty > "$root/owned-progress.txt"\n'
         '  if [ "$cut" = "killed" ]; then sleep 30; fi\n'
+        '  while [ ! -f "$VIBECRAFTED_TEST_BARRIER_DIR/release-initial" ]; do sleep 0.02; done\n'
+        '  if [ "$cut" != "killed" ]; then printf recovered > "$VIBECRAFTED_REPORT_PATH"; exit 0; fi\n'
         "  exit 9\n"
         "fi\n"
-        'if [ "$cut" = "retry" ] && echo "$key" | grep -q \':attempt:resume-1$\'; then\n'
-        '  printf second-dirty > "$root/owned-progress.txt"\n'
+        'if [ "$cut" = "killed" ] && [ "$attempt" = "resume-1" ]; then\n'
+        '  while [ ! -f "$VIBECRAFTED_TEST_BARRIER_DIR/release-resume-1-killed" ]; do sleep 0.02; done\n'
         "  exit 9\n"
         "fi\n"
         'printf recovered > "$VIBECRAFTED_REPORT_PATH"\n',
@@ -345,6 +355,8 @@ def test_public_concurrent_resumes_replay_three_real_children_then_retry_failed_
     monkeypatch.setenv("VIBECRAFTED_GUARD", "0")
     monkeypatch.setenv("VIBECRAFTED_REAPER", "0")
     monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(fake_bin))
+    monkeypatch.setenv("VIBECRAFTED_TEST_BARRIER_DIR", str(barriers))
+    monkeypatch.setenv("VIBECRAFTED_TEST_LAUNCH_DIR", str(launches))
     monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
     repo = tmp_path / "repo"
     _repo(repo)
@@ -366,72 +378,157 @@ def test_public_concurrent_resumes_replay_three_real_children_then_retry_failed_
 
     initial = threading.Thread(target=launch_initial)
     initial.start()
-    deadline = time.monotonic() + 10
-    killed_meta: dict[str, object] | None = None
-    while time.monotonic() < deadline:
-        for meta_path in (home / "control_plane" / "runtime_runs").glob("*/meta.json"):
-            candidate = json.loads(meta_path.read_text(encoding="utf-8"))
-            if (
-                candidate.get("dispatch_cut_id") == "killed"
-                and isinstance(candidate.get("worker_pid"), int)
-                and Path(
-                    str(candidate.get("root") or ""), "owned-progress.txt"
-                ).is_file()
+    owned_pgids: set[int] = set()
+    try:
+        deadline = time.monotonic() + 10
+        initial_meta: dict[str, dict[str, object]] = {}
+        while time.monotonic() < deadline:
+            for meta_path in (home / "control_plane" / "runtime_runs").glob(
+                "*/meta.json"
             ):
-                killed_meta = candidate
+                candidate = json.loads(meta_path.read_text(encoding="utf-8"))
+                cut = str(candidate.get("dispatch_cut_id") or "")
+                if (
+                    cut in {"killed", "retained", "retry"}
+                    and candidate.get("dispatch_attempt") == "initial"
+                    and isinstance(candidate.get("worker_pid"), int)
+                    and Path(
+                        str(candidate.get("root") or ""), "owned-progress.txt"
+                    ).is_file()
+                ):
+                    initial_meta[cut] = candidate
+            if len(initial_meta) == 3:
                 break
-        if killed_meta is not None:
-            break
-        time.sleep(0.02)
-    assert killed_meta is not None, "the real killed provider was never admitted"
-    worker_pid = killed_meta.get("worker_pid")
-    worker_pgid = killed_meta.get("worker_pgid")
-    assert isinstance(worker_pid, int) and isinstance(worker_pgid, int)
-    os.killpg(worker_pgid, signal.SIGKILL)
-    initial.join(timeout=15)
-    assert not initial.is_alive()
-    assert len(initial_results) == 1
+            time.sleep(0.02)
+        assert set(initial_meta) == {"killed", "retained", "retry"}
+        for meta in initial_meta.values():
+            pgid = meta.get("worker_pgid")
+            assert isinstance(pgid, int)
+            owned_pgids.add(pgid)
 
-    store = DispatchReceiptStore(run_id, dispatch.cuts, create=False)
-    first = {cut: store.cut(cut) for cut in ("killed", "retained", "retry")}
-    assert all(item["attempt"] == "initial" for item in first.values())
-    assert all(
-        Path(item["worktree_path"], "owned-progress.txt").is_file()
-        for item in first.values()
-    )
-    assert all(
-        supervisor_module.lookup_run(str(item["provider_run_id"])).get("worker_alive")
-        is False
-        for item in first.values()
-    )
+        killed_pgid = initial_meta["killed"]["worker_pgid"]
+        assert isinstance(killed_pgid, int)
+        os.killpg(killed_pgid, signal.SIGKILL)
 
-    def resume_once() -> dict[str, str]:
-        result = run_dispatch(
-            dispatch,
-            artifacts_dir=tmp_path / "artifacts",
-            run_id=run_id,
-            manage_worktrees=True,
-            resume=True,
-        )
-        return result.states
+        store = DispatchReceiptStore(run_id, dispatch.cuts, create=False)
+        first = {cut: store.cut(cut) for cut in ("killed", "retained", "retry")}
+        siblings = {cut: initial_meta[cut] for cut in ("retained", "retry")}
+        for original in siblings.values():
+            pid = original["worker_pid"]
+            assert isinstance(pid, int)
+            os.kill(pid, 0)
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        raced = list(pool.map(lambda _ignored: resume_once(), range(2)))
-    assert all(set(result) == {"killed", "retained", "retry"} for result in raced)
-    after_race = {cut: store.cut(cut) for cut in ("killed", "retained", "retry")}
-    assert all(item["attempt"] == "resume-1" for item in after_race.values())
-    # Both callers share these exact recovery identities; no second child was minted.
-    for cut, item in after_race.items():
-        record = workflow._read_launch_idempotency_record(str(item["idempotency_key"]))
-        assert record and record["run_id"] == item["provider_run_id"], cut
-        assert item["provider_run_id"] != first[cut]["provider_run_id"]
-    assert after_race["retry"]["state"] == "failed"
+        def resume_once() -> dict[str, str]:
+            return run_dispatch(
+                dispatch,
+                artifacts_dir=tmp_path / "artifacts",
+                run_id=run_id,
+                manage_worktrees=True,
+                resume=True,
+            ).states
 
-    final = resume_once()
-    assert final == {"killed": "[x]", "retained": "[x]", "retry": "[x]"}
-    retry = store.cut("retry")
-    assert retry["attempt"] == "resume-2"
-    assert retry["provider_run_id"] != after_race["retry"]["provider_run_id"]
+        pool = ThreadPoolExecutor(max_workers=2)
+        raced = [pool.submit(resume_once) for _ in range(2)]
+        try:
+            deadline = time.monotonic() + 10
+            recovered: dict[str, object] | None = None
+            while time.monotonic() < deadline:
+                for meta_path in (home / "control_plane" / "runtime_runs").glob(
+                    "*/meta.json"
+                ):
+                    candidate = json.loads(meta_path.read_text(encoding="utf-8"))
+                    if (
+                        candidate.get("dispatch_cut_id") == "killed"
+                        and candidate.get("dispatch_attempt") == "resume-1"
+                        and isinstance(candidate.get("worker_pid"), int)
+                    ):
+                        recovered = candidate
+                        break
+                if recovered is not None:
+                    break
+                time.sleep(0.02)
+            assert recovered is not None, (
+                "racing resumes did not admit the killed child"
+            )
+            recovered_pgid = recovered.get("worker_pgid")
+            assert isinstance(recovered_pgid, int)
+            owned_pgids.add(recovered_pgid)
+
+            deadline = time.monotonic() + 10
+            after_race: dict[str, dict[str, object]] = {}
+            while time.monotonic() < deadline:
+                after_race = {
+                    cut: store.cut(cut) for cut in ("killed", "retained", "retry")
+                }
+                if after_race["killed"].get("attempt") == "resume-1":
+                    break
+                time.sleep(0.02)
+            assert after_race["killed"]["attempt"] == "resume-1"
+            assert (
+                after_race["killed"]["provider_run_id"]
+                != first["killed"]["provider_run_id"]
+            )
+            for cut, original in siblings.items():
+                current = supervisor_module.lookup_run(
+                    str(first[cut]["provider_run_id"])
+                )
+                pid = original["worker_pid"]
+                assert isinstance(pid, int)
+                os.kill(pid, 0)
+                assert current.get("run_id") == original["run_id"]
+                assert current.get("worker_identity") == original["worker_identity"]
+                assert after_race[cut]["attempt"] == "initial"
+                assert (
+                    after_race[cut]["provider_run_id"] == first[cut]["provider_run_id"]
+                )
+
+            launch_files = list(launches.glob("*.launch"))
+            assert (
+                len([path for path in launch_files if path.name.startswith("killed-")])
+                == 2
+            )
+            assert (
+                len(
+                    [path for path in launch_files if path.name.startswith("retained-")]
+                )
+                == 1
+            )
+            assert (
+                len([path for path in launch_files if path.name.startswith("retry-")])
+                == 1
+            )
+
+            os.killpg(recovered_pgid, signal.SIGKILL)
+            (barriers / "release-resume-1-killed").touch()
+            (barriers / "release-initial").touch()
+            assert all(future.result(timeout=15) for future in raced)
+        finally:
+            # Never let an assertion strand this test's real provider children.
+            (barriers / "release-resume-1-killed").touch()
+            (barriers / "release-initial").touch()
+            pool.shutdown(wait=True)
+
+        initial.join(timeout=15)
+        assert not initial.is_alive()
+        assert len(initial_results) == 1
+
+        final = resume_once()
+        assert final == {"killed": "[x]", "retained": "[x]", "retry": "[x]"}
+        killed = store.cut("killed")
+        assert killed["attempt"] == "resume-2"
+        assert killed["provider_run_id"] != after_race["killed"]["provider_run_id"]
+        assert len(list(launches.glob("killed-*.launch"))) == 3
+        assert len(list(launches.glob("retained-*.launch"))) == 1
+        assert len(list(launches.glob("retry-*.launch"))) == 1
+    finally:
+        (barriers / "release-initial").touch()
+        (barriers / "release-resume-1-killed").touch()
+        for pgid in owned_pgids:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        initial.join(timeout=15)
 
 
 def test_concurrent_resume_claims_share_one_attempt_then_advance_for_new_failure(
