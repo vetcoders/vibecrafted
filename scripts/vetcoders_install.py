@@ -15578,7 +15578,7 @@ def _write_runtime_owned_file(
 
 
 def _merge_runtime_preferences(
-    previous: str | None, current: str, incoming: str, *, kdl: bool = False
+    previous: str | None, current: str, incoming: str
 ) -> str:
     """Carry independent user edits onto new defaults; refuse ambiguous overlap.
 
@@ -15594,14 +15594,6 @@ def _merge_runtime_preferences(
         return incoming
     if incoming == previous:
         return current
-    if kdl:
-        # setup --check prints config errors but exits zero, so it is not a
-        # safe validation API. Never synthesize KDL from two changed documents.
-        # Keep exact user bytes when defaults are unchanged; otherwise require
-        # explicit resolution against the preserved previous/incoming defaults.
-        raise ValueError(
-            "both user KDL and shipped defaults changed; explicit merge required"
-        )
     base = previous.splitlines(keepends=True)
 
     def edits(text: str) -> list[tuple[int, int, list[str]]]:
@@ -15617,13 +15609,34 @@ def _merge_runtime_preferences(
     user_edits = edits(current)
     upstream_edits = edits(incoming)
 
+    def edits_conflict(
+        left: tuple[int, int, list[str]], right: tuple[int, int, list[str]]
+    ) -> bool:
+        """Reject overlapping edits, but permit changes at adjacent boundaries.
+
+        Line intervals are half-open.  Insertions at a replacement's start or
+        end are independent, while an insertion *inside* a replacement and two
+        different insertions at the same position are ambiguous.  This lets an
+        operator add a KDL preference beside a product-default update without
+        pretending that two edits to one setting can be reconciled safely.
+        """
+        left_start, left_end, _ = left
+        right_start, right_end, _ = right
+        if left_start == left_end and right_start == right_end:
+            return left_start == right_start
+        if left_start == left_end:
+            return right_start < left_start < right_end
+        if right_start == right_end:
+            return left_start < right_start < left_end
+        return left_start < right_end and right_start < left_end
+
     merged_edits = list(upstream_edits)
     for user in user_edits:
         for upstream in upstream_edits:
             if user == upstream:
                 break
-            if user[0] <= upstream[1] and upstream[0] <= user[1]:
-                raise ValueError("user edits overlap or touch changed shipped defaults")
+            if edits_conflict(user, upstream):
+                raise ValueError("user edits overlap changed shipped defaults")
         else:
             merged_edits.append(user)
     result = list(base)
@@ -15759,9 +15772,7 @@ def _prepare_runtime_preferences(
             body = (
                 incoming
                 if current is None
-                else _merge_runtime_preferences(
-                    baseline, current, incoming, kdl=destination.suffix == ".kdl"
-                )
+                else _merge_runtime_preferences(baseline, current, incoming)
             )
             if not body.strip() or "\0" in body:
                 raise ValueError("merged preference file is empty or invalid")

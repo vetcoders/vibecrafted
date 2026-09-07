@@ -215,13 +215,58 @@ def test_upgrade_preserves_user_kdl_policy_and_exact_theme_bytes(
     _resolve(paths, capsys, status="ready")
 
 
-def test_both_changed_kdl_refuses_publication_and_preserves_evidence(
+def test_non_overlapping_kdl_upgrade_merges_user_preference_and_new_defaults(
+    tmp_path, roots, capsys
+):
+    incoming = (
+        Path(__file__).resolve().parents[2]
+        / "vibecrafted-core/vibecrafted_core/config/vc-frame/config.kdl"
+    ).read_text()
+    previous = incoming.replace(
+        "// compact chowal rail SESSIONS z nowego default.kdl (2026-07-07)\n"
+        "// The native default and dashboard aliases resolve to the one shipped,\n"
+        "// regular file: layouts/operator.kdl.  Runtime Packs reject symlinks, so do\n"
+        "// not point this at an unmaterialized built-in `vibecrafted` layout.\n"
+        'default_layout "operator"',
+        '// Previous layout default.\ndefault_layout "vibecrafted"',
+    )
+    assert previous != incoming
+    initial = _install(
+        seed_runtime_pack(
+            tmp_path / "pack-a", version="9.9.9+a", frame_config=previous
+        ),
+        capsys,
+    )
+    config = roots["product_config"] / "vc-frame/config.kdl"
+    config.write_bytes(
+        config.read_bytes().replace(
+            b'copy_command "pbcopy"',
+            b'copy_command "pbcopy"\ncopy_on_select true',
+        )
+    )
+    payload_b = seed_runtime_pack(tmp_path / "pack-b", version="9.9.10+b")
+    upgraded = _install(payload_b, capsys)
+    expected = incoming.replace(
+        'copy_command "pbcopy"', 'copy_command "pbcopy"\ncopy_on_select true'
+    ).encode()
+    assert config.read_bytes() == expected
+    assert upgraded["root"] != initial["root"]
+    _install(payload_b, capsys)
+    assert config.read_bytes() == expected
+    _resolve(roots, capsys, status="ready")
+
+
+def test_same_setting_kdl_conflict_refuses_publication_and_preserves_evidence(
     installed, tmp_path, capsys
 ):
     paths, _, _result = installed
     product = paths["product_config"]
     config = product / "vc-frame/config.kdl"
-    config.write_bytes(config.read_bytes() + b"\ncopy_on_select true\n")
+    config.write_bytes(
+        config.read_bytes().replace(
+            b'default_layout "operator"', b'default_layout "personal"'
+        )
+    )
     before = _snapshot(product)
     active = (paths["runtime_home"] / "active.json").read_bytes()
     source = (
@@ -230,10 +275,12 @@ def test_both_changed_kdl_refuses_publication_and_preserves_evidence(
     payload_b = seed_runtime_pack(
         tmp_path / "pack-b",
         version="9.9.10+b",
-        frame_config=source.read_text() + "\n// changed shipped KDL\n",
+        frame_config=source.read_text().replace(
+            'default_layout "operator"', 'default_layout "new-default"'
+        ),
     )
     with pytest.raises(
-        RuntimeError, match="both user KDL and shipped defaults changed"
+        RuntimeError, match="user edits overlap changed shipped defaults"
     ):
         _install(payload_b, capsys)
     capsys.readouterr()
