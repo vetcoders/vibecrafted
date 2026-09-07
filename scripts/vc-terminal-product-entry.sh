@@ -25,6 +25,15 @@ export VIBECRAFTED_VC_FRAME_BIN="$root/libexec/vc-frame"
 export VC_FRAME_CONFIG_DIR="$HOME/.config/vibecrafted/vc-frame"
 unset VC_FRAME_CONFIG_FILE PYTHONPATH PYTHONHOME
 
+# This wrapper creates a new native terminal, so it must not pass through an
+# attachment identity from the non-interactive caller.  The child may start a
+# fresh VC Frame client, but inherited pane/session values would make its
+# front-door believe it already owns the caller's attached surface.  Clear both
+# current VC Frame and legacy Zellij twins only in this exec path; the parent
+# shell environment is unaffected.
+unset VC_FRAME VC_FRAME_PANE_ID VC_FRAME_SESSION_NAME
+unset ZELLIJ ZELLIJ_PANE_ID ZELLIJ_SESSION_NAME
+
 if [[ "$host" != /* || ! -x "$host" || -L "$host" || -L "$root/libexec" ]]; then
   printf 'vc-terminal: native host missing: %s\n' "$host" >&2
   exit 127
