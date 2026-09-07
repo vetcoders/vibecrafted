@@ -29,6 +29,7 @@ from vibecrafted_core.workflow import (
     WorkflowLaunchSpec,
     launch_workflow,
     recover_launch_receipt,
+    recover_legacy_dispatch_identity,
     reserve_run_id,
 )
 
@@ -599,6 +600,14 @@ class DispatchSupervisor:
         self, cut: Cut, baton: Baton, verdicts: dict[str, Verdict]
     ) -> Verdict:
         """Prepare one isolated root, hold integration exclusivity, and settle it."""
+        # Another resume owner can settle the shared receipt after this
+        # scheduler's initial restore pass and before its queued future gets
+        # CPU. Re-read at the mutation boundary: a settled, ancestry-valid
+        # receipt is delivery truth, not permission to prepare its now-dirty
+        # worktree again.
+        settled = self._settled_verdict(cut, self._receipt_store.cut(cut.id))
+        if settled is not None:
+            return settled
         runtime_cut = self._prepare_runtime_cut(cut, verdicts)
         receipt = self._receipt_store.cut(cut.id)
         if receipt.get("state") in {"launching", "active", "reported"} or (
@@ -783,32 +792,37 @@ class DispatchSupervisor:
 
     def _restore_settled_verdicts(self, verdicts: dict[str, Verdict]) -> None:
         for cut in self.dispatch.cuts:
-            receipt = self._receipt_store.cut(cut.id)
-            if receipt.get("state") != "settled":
+            verdict = self._settled_verdict(cut, self._receipt_store.cut(cut.id))
+            if verdict is None:
                 continue
-            commit = str(receipt.get("delivered_commit_sha") or "")
-            if commit:
-                resolved = self._git(["rev-parse", "--verify", f"{commit}^{{commit}}"])
-                reference = (
-                    "HEAD"
-                    if bool(receipt.get("integrator_exclusivity"))
-                    else str(receipt.get("branch") or f"cut/{cut.id}")
-                )
-                if not resolved or not self._git_ok(
-                    ["merge-base", "--is-ancestor", resolved, reference]
-                ):
-                    continue
-            verdict = Verdict(
-                cut_id=cut.id,
-                phase=cut.phase,
-                state=STATE_VERIFIED,
-                commit=commit,
-                report=str(receipt.get("report_path") or ""),
-            )
             verdicts[cut.id] = verdict
             self._set_state(
                 cut.id, STATE_VERIFIED, "restored from receipt and Git ancestry"
             )
+
+    def _settled_verdict(self, cut: Cut, receipt: dict[str, Any]) -> Verdict | None:
+        """Return a verified verdict only for a durable, ancestry-valid settle."""
+        if receipt.get("state") != "settled":
+            return None
+        commit = str(receipt.get("delivered_commit_sha") or "")
+        if commit:
+            resolved = self._git(["rev-parse", "--verify", f"{commit}^{{commit}}"])
+            reference = (
+                "HEAD"
+                if bool(receipt.get("integrator_exclusivity"))
+                else str(receipt.get("branch") or f"cut/{cut.id}")
+            )
+            if not resolved or not self._git_ok(
+                ["merge-base", "--is-ancestor", resolved, reference]
+            ):
+                return None
+        return Verdict(
+            cut_id=cut.id,
+            phase=cut.phase,
+            state=STATE_VERIFIED,
+            commit=commit,
+            report=str(receipt.get("report_path") or ""),
+        )
 
     def _resume_active_cut(
         self, cut: Cut, receipt: dict[str, Any], baton: Baton
@@ -975,6 +989,34 @@ class DispatchSupervisor:
             # a terminal status without this explicit absence is stale/ambiguous.
             or canonical.get("worker_alive") is not False
         ):
+            # Older providers did not project dispatch identity into meta.json.
+            # Their durable launch-idempotency record is sufficient only when it
+            # cryptographically binds the stored historical spec and the current
+            # canonical run still agrees on root/branch/baseline/cut/process.
+            if not receipt.get("idempotency_key") and run_id:
+                recovered, _reason = recover_legacy_dispatch_identity(
+                    WorkflowLaunchSpec(
+                        agent=cut.agent,
+                        mode=cut.resolved_workflow,
+                        skill=cut.resolved_workflow,
+                        prompt="",
+                        file="",
+                        runtime="headless",
+                        root=str(cut.runtime_root or self.dispatch.meta.repo),
+                        model=cut.model,
+                    ),
+                    env={
+                        LAUNCH_IDEMPOTENCY_KEY_ENV: self._dispatch_idempotency_key(
+                            cut, "initial"
+                        )
+                    },
+                    provider_run_id=run_id,
+                    cut_id=cut.id,
+                    branch=str(cut.runtime_branch or ""),
+                    baseline_sha=str(cut.baseline_sha or ""),
+                )
+                if recovered is not None:
+                    return True
             return False
         return str(canonical.get("status") or canonical.get("state") or "").lower() in {
             "failed",

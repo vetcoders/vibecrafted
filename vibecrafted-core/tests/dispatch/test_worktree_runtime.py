@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import signal
 import subprocess
 import threading
 import time
@@ -10,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
+from vibecrafted_core import workflow
 from vibecrafted_core.dispatch import supervisor as supervisor_module
 from vibecrafted_core.dispatch.doctor import diagnose_runtime
 from vibecrafted_core.dispatch.receipts import (
@@ -303,6 +305,135 @@ def test_public_dispatch_recovers_killed_worker_with_monotonic_resume_attempts(
     assert second["provider_run_id"] != first["provider_run_id"]
 
 
+def test_public_concurrent_resumes_replay_three_real_children_then_retry_failed_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A killed dirty child is recovered once even when two schedulers resume.
+
+    This deliberately exercises the public dispatcher with three real provider
+    processes.  The provider itself is disposable, but launch receipts,
+    process identity, worktree reuse, and concurrent scheduler recovery are
+    the production implementations.  ``retry`` fails its first resumed child
+    so a later resume must advance to ``resume-2`` rather than replaying a
+    terminal identity.
+    """
+    home = tmp_path / ".vibecrafted"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    provider = fake_bin / "codex"
+    provider.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "root=$VIBECRAFTED_DISPATCH_WORKTREE\n"
+        "cut=$VIBECRAFTED_DISPATCH_CUT_ID\n"
+        "key=$VIBECRAFTED_LAUNCH_IDEMPOTENCY_KEY\n"
+        'printf \'%s\' "$key" > "$root/provider-key.txt"\n'
+        "if echo \"$key\" | grep -q ':attempt:initial$'; then\n"
+        '  printf dirty > "$root/owned-progress.txt"\n'
+        '  if [ "$cut" = "killed" ]; then sleep 30; fi\n'
+        "  exit 9\n"
+        "fi\n"
+        'if [ "$cut" = "retry" ] && echo "$key" | grep -q \':attempt:resume-1$\'; then\n'
+        '  printf second-dirty > "$root/owned-progress.txt"\n'
+        "  exit 9\n"
+        "fi\n"
+        'printf recovered > "$VIBECRAFTED_REPORT_PATH"\n',
+        encoding="utf-8",
+    )
+    provider.chmod(0o755)
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_GUARD", "0")
+    monkeypatch.setenv("VIBECRAFTED_REAPER", "0")
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(fake_bin))
+    monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
+    repo = tmp_path / "repo"
+    _repo(repo)
+    dispatch = _dispatch(
+        repo, _cut("killed") + _cut("retained") + _cut("retry"), concurrency=3
+    )
+    run_id = "concurrent-public-recovery"
+    initial_results: list[dict[str, str]] = []
+
+    def launch_initial() -> None:
+        initial_results.append(
+            run_dispatch(
+                dispatch,
+                artifacts_dir=tmp_path / "artifacts",
+                run_id=run_id,
+                manage_worktrees=True,
+            ).states
+        )
+
+    initial = threading.Thread(target=launch_initial)
+    initial.start()
+    deadline = time.monotonic() + 10
+    killed_meta: dict[str, object] | None = None
+    while time.monotonic() < deadline:
+        for meta_path in (home / "control_plane" / "runtime_runs").glob("*/meta.json"):
+            candidate = json.loads(meta_path.read_text(encoding="utf-8"))
+            if (
+                candidate.get("dispatch_cut_id") == "killed"
+                and isinstance(candidate.get("worker_pid"), int)
+                and Path(
+                    str(candidate.get("root") or ""), "owned-progress.txt"
+                ).is_file()
+            ):
+                killed_meta = candidate
+                break
+        if killed_meta is not None:
+            break
+        time.sleep(0.02)
+    assert killed_meta is not None, "the real killed provider was never admitted"
+    worker_pid = killed_meta.get("worker_pid")
+    worker_pgid = killed_meta.get("worker_pgid")
+    assert isinstance(worker_pid, int) and isinstance(worker_pgid, int)
+    os.killpg(worker_pgid, signal.SIGKILL)
+    initial.join(timeout=15)
+    assert not initial.is_alive()
+    assert len(initial_results) == 1
+
+    store = DispatchReceiptStore(run_id, dispatch.cuts, create=False)
+    first = {cut: store.cut(cut) for cut in ("killed", "retained", "retry")}
+    assert all(item["attempt"] == "initial" for item in first.values())
+    assert all(
+        Path(item["worktree_path"], "owned-progress.txt").is_file()
+        for item in first.values()
+    )
+    assert all(
+        supervisor_module.lookup_run(str(item["provider_run_id"])).get("worker_alive")
+        is False
+        for item in first.values()
+    )
+
+    def resume_once() -> dict[str, str]:
+        result = run_dispatch(
+            dispatch,
+            artifacts_dir=tmp_path / "artifacts",
+            run_id=run_id,
+            manage_worktrees=True,
+            resume=True,
+        )
+        return result.states
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        raced = list(pool.map(lambda _ignored: resume_once(), range(2)))
+    assert all(set(result) == {"killed", "retained", "retry"} for result in raced)
+    after_race = {cut: store.cut(cut) for cut in ("killed", "retained", "retry")}
+    assert all(item["attempt"] == "resume-1" for item in after_race.values())
+    # Both callers share these exact recovery identities; no second child was minted.
+    for cut, item in after_race.items():
+        record = workflow._read_launch_idempotency_record(str(item["idempotency_key"]))
+        assert record and record["run_id"] == item["provider_run_id"], cut
+        assert item["provider_run_id"] != first[cut]["provider_run_id"]
+    assert after_race["retry"]["state"] == "failed"
+
+    final = resume_once()
+    assert final == {"killed": "[x]", "retained": "[x]", "retry": "[x]"}
+    retry = store.cut("retry")
+    assert retry["attempt"] == "resume-2"
+    assert retry["provider_run_id"] != after_race["retry"]["provider_run_id"]
+
+
 def test_concurrent_resume_claims_share_one_attempt_then_advance_for_new_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -325,6 +456,145 @@ def test_concurrent_resume_claims_share_one_attempt_then_advance_for_new_failure
         store.claim_resume_attempt("recover", parent_run_id="failed-resume-1")
         == "resume-2"
     )
+
+
+def test_legacy_dispatch_identity_recovers_only_from_bound_historical_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The original W0-c shape had no dispatch_* metadata in its run record.
+
+    Recovery derives identity from the exact launch-idempotency receipt, then
+    requires the older canonical projection to agree on its worktree, branch,
+    baseline, cut and terminated worker identity.  This is intentionally not a
+    compatibility allowance for arbitrary legacy metadata.
+    """
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    repo = tmp_path / "repo"
+    baseline = _repo(repo)
+    dispatch = _dispatch(repo, _cut("W0-c"))
+    manager = WorktreeManager(repo, day="2026_0907")
+    geometry = manager.prepare("W0-c", baseline)
+    prompt = tmp_path / "historical-prompt.md"
+    prompt.write_text("preserved W0-c prompt\n", encoding="utf-8")
+    run_id = "impl-260907-234041-50924"
+    dispatch_run_id = "life-ship-260907-234034-86089-implement-fleet"
+    key = f"dispatch:{dispatch_run_id}:cut:W0-c:attempt:initial"
+    historical = workflow.WorkflowLaunchSpec(
+        agent="codex",
+        mode="implement",
+        skill="implement",
+        prompt="",
+        file=str(prompt),
+        runtime="headless",
+        root=geometry.worktree_path,
+        model="gpt-5.6-terra",
+    )
+    # This fixture is deliberately the old persisted format: launch receipt
+    # has a spec digest and idempotency key, while canonical run metadata has
+    # cut_id/branch/baseline but none of the later dispatch_* projection keys.
+    workflow._write_launch_idempotency_record(
+        key,
+        {
+            "run_id": run_id,
+            "agent": "codex",
+            "skill": "implement",
+            "root": geometry.worktree_path,
+            "state": "dispatched",
+            "accepted": True,
+            "spec_digest": workflow._launch_spec_digest(historical),
+            "receipt": {
+                "accepted": True,
+                "run_id": run_id,
+                "agent": "codex",
+                "skill": "implement",
+                "root": geometry.worktree_path,
+                "idempotency_key": key,
+                "spec": historical.to_payload(),
+            },
+        },
+    )
+    canonical = {
+        "run_id": run_id,
+        "root": geometry.worktree_path,
+        "cut_id": "W0-c",
+        "branch": geometry.branch,
+        "baseline_sha": baseline,
+        "agent": "codex",
+        "skill": "implement",
+        "worker_alive": False,
+        "worker_pid": 66836,
+        "worker_identity": {
+            "pid": 66836,
+            "pgid": 66836,
+            "start_token": "start:83602922338560",
+            "command_sha256": "4aefeb389b1fd968b989295da222f517d3243e83eb43fba74581e6e20cecb141",
+            "run_id": run_id,
+        },
+        "state": "report_missing",
+    }
+    monkeypatch.setattr(
+        workflow,
+        "lookup_run",
+        lambda observed: canonical if observed == run_id else None,
+    )
+    monkeypatch.setattr(
+        supervisor_module,
+        "lookup_run",
+        lambda observed: canonical if observed == run_id else None,
+    )
+    recovered, reason = workflow.recover_legacy_dispatch_identity(
+        workflow.WorkflowLaunchSpec(
+            agent="codex",
+            mode="implement",
+            skill="implement",
+            prompt="",
+            file="",
+            runtime="headless",
+            root=geometry.worktree_path,
+        ),
+        env={workflow.LAUNCH_IDEMPOTENCY_KEY_ENV: key},
+        provider_run_id=run_id,
+        cut_id="W0-c",
+        branch=geometry.branch,
+        baseline_sha=baseline,
+    )
+    assert reason == ""
+    assert recovered == {
+        "provider_run_id": run_id,
+        "idempotency_key": key,
+        "spec_digest": workflow._launch_spec_digest(historical),
+    }
+
+    supervisor = supervisor_module.DispatchSupervisor(
+        dispatch,
+        artifacts_dir=tmp_path / "artifacts",
+        run_id=dispatch_run_id,
+        manage_worktrees=True,
+        resume=False,
+    )
+    legacy_receipt = {"provider_run_id": run_id, "attempt": "initial"}
+    runtime_cut = dispatch.cuts[0]
+    runtime_cut = runtime_cut.__class__(
+        **{
+            **runtime_cut.__dict__,
+            "runtime_root": geometry.worktree_path,
+            "runtime_branch": geometry.branch,
+            "baseline_sha": baseline,
+        }
+    )
+    assert supervisor._authenticated_terminal_progress(runtime_cut, legacy_receipt)
+
+    canonical["baseline_sha"] = "forged-baseline"
+    denied, denied_reason = workflow.recover_legacy_dispatch_identity(
+        historical,
+        env={workflow.LAUNCH_IDEMPOTENCY_KEY_ENV: key},
+        provider_run_id=run_id,
+        cut_id="W0-c",
+        branch=geometry.branch,
+        baseline_sha=baseline,
+    )
+    assert denied is None
+    assert "conflicts" in denied_reason
 
 
 def test_unknown_resume_run_id_refuses_before_any_launch(
