@@ -600,7 +600,7 @@ def _receipt_store(repo: Path, plan: Path) -> DispatchReceiptStore:
 def test_approve_advances_when_the_whole_fleet_is_genuinely_settled(
     tmp_path: Path, monkeypatch
 ) -> None:
-    repo, plan, launches = _settled_fleet(tmp_path, monkeypatch)
+    _repo, plan, launches = _settled_fleet(tmp_path, monkeypatch)
     assert sorted(launches) == ["W0-a", "W0-b", "W0-c"]
     state_path, state = _fleet_state(tmp_path, plan)
 
