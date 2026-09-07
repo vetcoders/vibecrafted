@@ -1,13 +1,13 @@
 // Vibecrafted — Command Deck status item
 // Created by Vetcoders
 //
-// Future sole tray owner for the shell App. Lifecycle precision stays in
+// Sole tray owner for the shell App. Lifecycle precision stays in
 // AppKit (NSStatusItem). Actions are typed callbacks — this type never owns
 // runtime processes and never treats Quit App as Stop Runtime.
 
 import AppKit
 
-/// Typed tray verbs. W2 wires these to native bridges; this leaf only emits.
+/// Typed tray verbs. AppDelegate routes these to native bridges; this leaf only emits.
 enum StatusItemAction: String, Sendable, CaseIterable {
   case showCommandDeck
   case openTerminal
@@ -15,11 +15,20 @@ enum StatusItemAction: String, Sendable, CaseIterable {
   case repairRuntime
   case stopRuntime
   case showDiagnostics
+  case showServer
+  case showWorkspaces
+  case startServer
+  case restartServer
+  case showLogs
+  case revealRuntime
+  case revealControlPlane
+  case copyRuntimeIdentity
+  case help
   case quitApp
 }
 
 /// Injected enablement for verbs that depend on session/runtime truth owned
-/// elsewhere. Defaults keep the menu usable before W2 wiring.
+/// elsewhere. Defaults deny process actions before runtime truth arrives.
 struct StatusItemAvailability: Equatable, Sendable {
   var canShowCommandDeck: Bool
   var canOpenTerminal: Bool
@@ -28,13 +37,14 @@ struct StatusItemAvailability: Equatable, Sendable {
   var canStopRuntime: Bool
   var canShowDiagnostics: Bool
   var canQuitApp: Bool
+  var runtimeActions: Set<StatusItemAction> = []
 
   static let `default` = StatusItemAvailability(
     canShowCommandDeck: true,
-    canOpenTerminal: true,
+    canOpenTerminal: false,
     canRetryConnection: true,
     canRepairRuntime: true,
-    canStopRuntime: true,
+    canStopRuntime: false,
     canShowDiagnostics: true,
     canQuitApp: true
   )
@@ -51,7 +61,7 @@ struct StatusItemPresentation: Equatable, Sendable {
   static let bootstrapping = StatusItemPresentation(
     health: .checking,
     statusLine: "Command Deck: Preparing…",
-    detailLine: "Waiting for session wiring",
+    detailLine: "Waiting for the runtime owner",
     availability: .default,
     toolTip: "Vibecrafted — preparing"
   )
@@ -76,6 +86,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
   private weak var repairItem: NSMenuItem?
   private weak var stopRuntimeItem: NSMenuItem?
   private weak var diagnosticsItem: NSMenuItem?
+  private var utilityItems: [StatusItemAction: NSMenuItem] = [:]
   private weak var quitAppItem: NSMenuItem?
 
   init(
@@ -169,8 +180,22 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     menu.addItem(.separator())
 
+    for (action, title) in [
+      (StatusItemAction.showServer, "Server"), (.showWorkspaces, "Workspaces"),
+      (.startServer, "Start Server"), (.restartServer, "Restart Server"),
+      (.showLogs, "Open Server Logs"), (.revealRuntime, "Reveal Runtime Home"),
+      (.revealControlPlane, "Reveal Control Plane Files"),
+      (.copyRuntimeIdentity, "Copy Runtime Identity"), (.help, "Command Deck Help")
+    ] {
+      let utility = menu.addItem(withTitle: title, action: #selector(emitUtility(_:)), keyEquivalent: "")
+      utility.target = self
+      utility.representedObject = action.rawValue
+      utilityItems[action] = utility
+    }
+    menu.addItem(.separator())
+
     // Quit App leaves server / PTYs / agents / sessions alive by contract.
-    // W2 must wire this callback to App termination only — never Stop Runtime.
+    // AppDelegate routes this callback to App termination only — never Stop Runtime.
     let quit = menu.addItem(
       withTitle: "Quit App",
       action: #selector(emitQuitApp(_:)),
@@ -198,6 +223,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     stopRuntimeItem = nil
     diagnosticsItem = nil
     quitAppItem = nil
+    utilityItems.removeAll()
   }
 
   func update(_ presentation: StatusItemPresentation) {
@@ -230,6 +256,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     stopRuntimeItem?.isEnabled = availability.canStopRuntime
     diagnosticsItem?.isEnabled = availability.canShowDiagnostics
     quitAppItem?.isEnabled = availability.canQuitApp
+    for (action, item) in utilityItems {
+      item.isEnabled = [.showServer, .showWorkspaces, .help].contains(action)
+        || availability.runtimeActions.contains(action)
+    }
   }
 
   /// Menu-bar labels stay scannable (swiftui-patterns menu-bar guidance).
@@ -242,6 +272,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
   private func emit(_ action: StatusItemAction) {
     handler(action)
+  }
+
+  @objc private func emitUtility(_ item: NSMenuItem) {
+    guard let raw = item.representedObject as? String,
+      let action = StatusItemAction(rawValue: raw) else { return }
+    emit(action)
   }
 
   @objc private func emitShowCommandDeck(_ sender: Any?) {

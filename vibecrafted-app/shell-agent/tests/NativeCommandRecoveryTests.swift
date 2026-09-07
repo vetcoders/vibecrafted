@@ -19,34 +19,16 @@ struct NativeCommandRecoveryTests {
   }
 
   static func testRejectedNativePayloads() throws {
-    try rejects { _ = try NativeCommand.decode("openTerminal") }
-    let rejected: [[String: Any]] = [
-      ["command": "retryConnection"],
-      ["command": "shell", "payload": ["command": "touch /tmp/should-not-exist"]],
-      ["command": "quitApp", "payload": [String: Any]()],
-      ["command": "openTerminal", "payload": ["workingDirectory": "/tmp", "argv": ["-c", "id"]]],
-      ["command": "openTerminal", "payload": ["workingDirectory": 42]],
-      ["command": "openTerminal", "payload": ["workingDirectory": "relative"]],
-      ["command": "revealPath", "payload": ["path": "/tmp/../private"]],
-      ["command": "revealPath", "payload": ["path": "/tmp/a\u{0}b"]],
-      ["command": "revealPath", "payload": ["path": "file:///tmp"]],
-      ["command": "requestRuntimeStop", "payload": ["confirmed": true]],
-      ["command": "retryConnection", "payload": NSNull()],
-      ["command": "retryConnection", "payload": [String: Any](), "executable": "/bin/sh"],
-    ]
-    for body in rejected { try rejects { _ = try NativeCommand.decode(body) } }
+    for value in ["relative", "//server/path", "/tmp/../private", "/tmp/a\u{0}b", "file:///tmp"] {
+      try rejects { _ = try NativeCommand.PathPayload(path: value) }
+    }
     for value in ["javascript:alert(1)", "file:///tmp/a", "data:text/html,x", "https://",
                   "https://user:password@example.com/", "https://example.com/\n",
-                  "https://example.com/%ZZ"] {
-      try rejects {
-        _ = try NativeCommand.decode(["command": "openExternalURL", "payload": ["url": value]])
-      }
+                  "https://example.com/%ZZ", "mailto:person@example.com"] {
+      try rejects { _ = try NativeCommand.ExternalURLPayload(value: value) }
     }
-    let command = try NativeCommand.decode([
-      "command": "openExternalURL", "payload": ["url": "https://example.com/a?b=c#d"],
-    ])
-    try require(command == .openExternalURL(
-      try NativeCommand.ExternalURLPayload(value: "https://example.com/a?b=c#d")), "URL changed")
+    let url = try NativeCommand.ExternalURLPayload(value: "https://example.com/a?b=c#d")
+    try require(url.url.absoluteString == "https://example.com/a?b=c#d", "URL changed")
   }
 
   static func testExactLaunchSpecification() throws {
@@ -117,18 +99,40 @@ struct NativeCommandRecoveryTests {
     for path in [outside.path, link.path, allowed.appendingPathComponent("missing").path] {
       try rejects { try bridge.perform(.revealPath(try .init(path: path))) }
     }
-    try rejects {
-      try bridge.receive(["command": "requestRuntimeStop", "payload": ["confirmed": true]])
-    }
     try require(events == before, "Rejected request reached native actions")
     try bridge.perform(.openTerminal(.init(workingDirectory: try .init(path: allowed.path))))
     try require(events.last == "terminal:\(allowed.resolvingSymlinksInPath().path)", "Wrong cwd routed")
+  }
+
+  static func testBoundedRegistrationObservation() throws {
+    let root = URL(fileURLWithPath: "/fixture/generation")
+    let host = root.appendingPathComponent("libexec/terminal")
+    let specification = try TerminalLauncher.Specification(generationRoot: root,
+      terminal: root.appendingPathComponent("bin/vc-terminal"), terminalHost: host,
+      primaryShell: root.appendingPathComponent("bin/zsh"), start: root.appendingPathComponent("bin/vc-start"),
+      workingDirectory: root, environment: ["VIBECRAFTED_ROOT": root.path,
+        "VIBECRAFTED_RUNTIME_ROOT": root.path, "VIBECRAFTED_TERMINAL_HOST": host.path])
+    let receipt = TerminalLauncher.Receipt(processIdentifier: 42, specification: specification)
+    let observation = TerminalRegistrationObservation(receipt: receipt, now: 100, timeout: 10)
+    try require(observation.observe(now: 100, currentLaunchID: receipt.launchID,
+      isRunning: true, isRegistered: false) == .waiting, "Spawn mistaken for registration")
+    try require(observation.observe(now: 101, currentLaunchID: receipt.launchID,
+      isRunning: true, isRegistered: true) == .ready, "Late registration not observed")
+    try require(observation.observe(now: 110, currentLaunchID: receipt.launchID,
+      isRunning: true, isRegistered: false) == .timedOut, "Observation is unbounded")
+    try require(observation.observe(now: 111, currentLaunchID: receipt.launchID,
+      isRunning: true, isRegistered: true) == .timedOut, "Late focus escaped the deadline")
+    try require(observation.observe(now: 101, currentLaunchID: UUID(),
+      isRunning: true, isRegistered: true) == .superseded, "Another launch inherited focus")
+    try require(observation.observe(now: 101, currentLaunchID: receipt.launchID,
+      isRunning: false, isRegistered: true) == .ended, "Exited process considered ready")
   }
 
   static func main() throws {
     try testRejectedNativePayloads()
     try testExactLaunchSpecification()
     try testNativeConfirmationAndPathBoundary()
+    try testBoundedRegistrationObservation()
     print("NativeCommandRecoveryTests passed")
   }
 }

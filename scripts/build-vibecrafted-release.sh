@@ -50,8 +50,8 @@ else
   TERMINAL_REPO="$TERMINAL_DONOR"
   FRAME_REPO="$FRAME_DONOR"
 fi
-ICON_SOURCE="${VIBECRAFTED_ICON_SOURCE:-$TERMINAL_REPO/assets/icon/vc-terminal-icon.png}"
-ICON_REFERENCE="${VIBECRAFTED_ICON_REFERENCE:-$TERMINAL_REPO/assets/icon/terminal.png}"
+ICON_SOURCE="${VIBECRAFTED_ICON_SOURCE:-$REPO_ROOT/docs/presence/logo-master.png}"
+ICON_REFERENCE="${VIBECRAFTED_ICON_REFERENCE:-}"
 DIST_DIR="${VIBECRAFTED_RELEASE_DIR:-$REPO_ROOT/dist}"
 BUILD_DIR="$REPO_ROOT/build/unified-release"
 APP="$DIST_DIR/Vibecrafted.app"
@@ -738,8 +738,10 @@ build_product() {
   /usr/bin/ditto "$TERMINAL_REPO/extra/osx/vc-terminal.app" "$terminal_app"
   mkdir -p "$terminal_app/Contents/MacOS" "$terminal_app/Contents/Resources"
   install -m 0755 "$terminal_source" "$terminal_app/Contents/MacOS/alacritty"
-  install -m 0644 "$resources/Vibecrafted.icns" \
-    "$terminal_app/Contents/Resources/alacritty.icns"
+  "$REPO_ROOT/scripts/build-vibecrafted-icon.sh" \
+    "$TERMINAL_REPO/assets/icon/vc-terminal-icon.png" \
+    "$terminal_app/Contents/Resources/alacritty.icns" \
+    "$TERMINAL_REPO/assets/icon/terminal.png"
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' \
     "$terminal_app/Contents/Info.plist")" == "alacritty" ]] \
     || die "vc-terminal helper bundle executable contract is invalid"

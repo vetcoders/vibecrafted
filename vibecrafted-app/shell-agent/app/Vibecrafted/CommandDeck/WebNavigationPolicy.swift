@@ -33,6 +33,7 @@ struct WebRuntimeOrigin: Equatable, Sendable {
     guard let scheme = components.scheme?.lowercased() else { return nil }
     guard scheme == "http" || scheme == "https" else { return nil }
     guard let host = components.host?.lowercased(), !host.isEmpty else { return nil }
+    guard components.user == nil, components.password == nil else { return nil }
     self.scheme = scheme
     self.host = host
     self.port = components.port ?? (scheme == "https" ? 443 : 80)
@@ -54,6 +55,12 @@ enum WebNavigationDecision: Equatable, Sendable {
   /// Becomes an explicit download with a native destination flow.
   case startDownload
   /// Refused, with a reason the App can surface honestly.
+  case block(reason: String)
+}
+
+enum WebResponseDecision: Equatable, Sendable {
+  case allowInApp
+  case startDownload
   case block(reason: String)
 }
 
@@ -79,7 +86,7 @@ enum WebNavigationPolicy {
   /// This allowlist is the reason a link in the embedded UI cannot reach a
   /// shell: `file:`, `javascript:`, `data:`, and every custom application
   /// scheme fall through to `.block`, so they never reach `NSWorkspace`.
-  static let externallyOpenableSchemes: Set<String> = ["http", "https", "mailto"]
+  static let externallyOpenableSchemes: Set<String> = ["http", "https"]
 
   /// Decides one navigation.
   ///
@@ -94,9 +101,6 @@ enum WebNavigationPolicy {
     isMainFrame: Bool,
     shouldPerformDownload: Bool
   ) -> WebNavigationDecision {
-    if shouldPerformDownload {
-      return .startDownload
-    }
     guard let url else {
       return .block(reason: "a navigation arrived without a URL")
     }
@@ -106,9 +110,7 @@ enum WebNavigationPolicy {
     }
 
     // WebKit's own bookkeeping pages stay inside the session.
-    if scheme == "about" {
-      return .allowInApp
-    }
+    if url.absoluteString == "about:blank", !shouldPerformDownload { return .allowInApp }
 
     // Blob URLs carry their originating origin in the resource specifier, and
     // the server UI uses them for client-generated files. Accept only blobs
@@ -121,12 +123,14 @@ enum WebNavigationPolicy {
       guard let innerURL = URL(string: inner), runtime.covers(innerURL) else {
         return .block(reason: "a blob URL did not originate from the runtime")
       }
-      return .allowInApp
+      // Top-level blobs are exports with an explicit native destination.
+      return isMainFrame || shouldPerformDownload ? .startDownload : .allowInApp
     }
 
     if let runtime, runtime.covers(url) {
-      return .allowInApp
+      return shouldPerformDownload ? .startDownload : .allowInApp
     }
+    if shouldPerformDownload { return .block(reason: "downloads must originate from the runtime") }
 
     // A foreign sub-frame is a page's own business; WebKit already sandboxes
     // it. Opening the system browser from an iframe would be hostile, so only
@@ -144,6 +148,26 @@ enum WebNavigationPolicy {
     return .openExternally(url)
   }
 
+  /// Responses must agree with the action boundary, including runtime blobs
+  /// and permitted HTTP(S) subframes. Foreign main-frame redirects never load.
+  static func decideResponse(
+    url: URL?, runtime: WebRuntimeOrigin?, isMainFrame: Bool,
+    canShowMIMEType: Bool, statusCode: Int?
+  ) -> WebResponseDecision {
+    guard let url else { return .block(reason: "response has no URL") }
+    if isMainFrame, let statusCode, statusCode >= 400 {
+      return .block(reason: "Server returned HTTP \(statusCode).")
+    }
+    let action = decide(url: url, runtime: runtime, isMainFrame: isMainFrame,
+      shouldPerformDownload: !canShowMIMEType)
+    switch action {
+    case .allowInApp: return .allowInApp
+    case .startDownload: return .startDownload
+    case .openExternally: return .block(reason: "response left the runtime origin")
+    case .block(let reason): return .block(reason: reason)
+    }
+  }
+
   /// Decides an authentication challenge.
   ///
   /// Server trust is always handed back to the system: this App never builds a
@@ -154,6 +178,7 @@ enum WebNavigationPolicy {
     method: String,
     host: String,
     port: Int,
+    scheme: String?,
     runtime: WebRuntimeOrigin?
   ) -> WebAuthChallengeDecision {
     switch method {
@@ -168,7 +193,8 @@ enum WebNavigationPolicy {
       guard let runtime else {
         return .cancel(reason: "credentials were requested before an endpoint was resolved")
       }
-      guard runtime.host == host.lowercased(), runtime.port == port else {
+      guard runtime.host == host.lowercased(), runtime.port == port,
+        scheme?.lowercased() == runtime.scheme else {
         return .cancel(reason: "credentials were requested by a host outside the runtime origin")
       }
       return .performDefaultHandling

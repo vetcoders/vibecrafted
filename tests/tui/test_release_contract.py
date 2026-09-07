@@ -609,10 +609,7 @@ def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
 
 
 def test_mission_control_failure_board_exposes_absolute_failure_time() -> None:
-    view = (
-        REPO_ROOT
-        / "vibecrafted-app/shell-agent/app/Vibecrafted/Views/MissionControlViewController.swift"
-    ).read_text(encoding="utf-8")
+    view = (REPO_ROOT / "vibecrafted-server/web/src/run_detail.rs").read_text(encoding="utf-8")
     ffi = (REPO_ROOT / "vibecrafted-app/shell-agent/ffi/src/lib.rs").read_text(
         encoding="utf-8"
     )
@@ -620,11 +617,8 @@ def test_mission_control_failure_board_exposes_absolute_failure_time() -> None:
         REPO_ROOT / "vibecrafted-app/tui-agent/src/mission_control.rs"
     ).read_text(encoding="utf-8")
 
-    assert '("Date", "DATE", 145)' in view
-    assert 'case "DATE": return dateTime(item.occurredAt)' in view
-    assert "private static let iso8601DateFormatter" in view
-    assert "private static let failureDateFormatter" in view
-    assert "ISO8601DateFormatter().date" not in view
+    assert 'fact("completed", run.completed_at)' in view
+    assert 'completed_at: run.completed_at' in view
     assert "pub occurred_at: Option<String>" in ffi
     assert "occurred_at: Some(record.completed_at.to_rfc3339())" in mission
 

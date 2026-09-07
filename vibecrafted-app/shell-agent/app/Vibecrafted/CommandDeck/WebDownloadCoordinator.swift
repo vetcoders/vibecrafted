@@ -152,6 +152,7 @@ extension WebDownloadCoordinator: WKDownloadDelegate {
       method: space.authenticationMethod,
       host: space.host,
       port: space.port,
+      scheme: space.protocol,
       runtime: origins[key]
     )
     switch decision {
@@ -161,6 +162,22 @@ extension WebDownloadCoordinator: WKDownloadDelegate {
       events.didFail(reason)
       return (.cancelAuthenticationChallenge, nil)
     }
+  }
+
+  func download(
+    _ download: WKDownload,
+    willPerformHTTPRedirection response: HTTPURLResponse,
+    newRequest request: URLRequest
+  ) async -> WKDownload.RedirectPolicy {
+    let key = ObjectIdentifier(download)
+    let decision = WebNavigationPolicy.decide(url: request.url, runtime: origins[key],
+      isMainFrame: true, shouldPerformDownload: true)
+    guard case .startDownload = decision else {
+      events.didFail("the download redirected outside the runtime origin")
+      settle(key)
+      return .cancel
+    }
+    return .allow
   }
 
   func downloadDidFinish(_ download: WKDownload) {
@@ -173,6 +190,7 @@ extension WebDownloadCoordinator: WKDownloadDelegate {
 
   func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
     let key = ObjectIdentifier(download)
+    guard active[key] != nil else { return }
     events.didFail((error as NSError).localizedDescription)
     settle(key)
   }

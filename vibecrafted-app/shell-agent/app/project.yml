@@ -65,7 +65,6 @@ targets:
         embed: true
     postBuildScripts:
       - script: |
-          bash $SRCROOT/../scripts/build-rust-binaries.sh
           bash $SRCROOT/../scripts/fix-dylib-install-names.sh "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH"
-        name: Build Rust binaries
+        name: Normalize notification FFI install names
         shell: /bin/bash

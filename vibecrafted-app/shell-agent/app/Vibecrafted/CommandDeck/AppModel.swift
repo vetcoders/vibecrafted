@@ -17,6 +17,11 @@ final class AppModel {
   }
 
   private(set) var state: State
+  private(set) var endpoint: URL?
+  private var lastLoadedURL: URL?
+  private(set) var webState: WebConsoleLoadState = .idle
+  var availableActions: Set<CommandDeckChromeAction> = [.showDiagnostics]
+  @ObservationIgnored var endpointDidChange: ((URL?) -> Void)?
 
   /// Session callbacks are coordination plumbing, not renderable state.
   @ObservationIgnored private var stateChangeHandler: ((State) -> Void)?
@@ -31,11 +36,6 @@ final class AppModel {
     self.endpointResolver = endpointResolver
   }
 
-  var endpoint: URL? {
-    guard case let .online(endpoint) = state else { return nil }
-    return endpoint
-  }
-
   func beginConnecting() {
     transition(to: .connecting)
   }
@@ -45,12 +45,82 @@ final class AppModel {
   func refreshEndpoint(caretakerData: Data?, runtimeReady: Bool) {
     switch endpointResolver.resolve(caretakerData: caretakerData, runtimeReady: runtimeReady) {
     case let .online(endpoint):
-      transition(to: .online(endpoint))
+      let changed = self.endpoint != endpoint
+      self.endpoint = endpoint
+      if changed {
+        lastLoadedURL = nil
+        webState = .idle
+        transition(to: .connecting)
+        endpointDidChange?(endpoint)
+      }
+      projectWebState()
     case let .recovering(reason):
+      invalidateEndpoint()
       transition(to: .recovering(reason))
     case let .blocked(reason):
+      invalidateEndpoint()
       transition(to: .blocked(reason))
     }
+  }
+
+  /// Caretaker availability cannot clear a WebKit failure. Only a new
+  /// navigation completion may make the combined presentation online.
+  func receiveWebState(_ value: WebConsoleLoadState) {
+    guard endpoint != nil else { return }
+    webState = value
+    projectWebState()
+  }
+
+  private func invalidateEndpoint() {
+    guard endpoint != nil else { return }
+    endpoint = nil
+    lastLoadedURL = nil
+    webState = .idle
+    endpointDidChange?(nil)
+  }
+
+  private func projectWebState() {
+    guard let endpoint else { return }
+    switch webState {
+    case .idle:
+      lastLoadedURL = nil
+      transition(to: .connecting)
+    case .loading:
+      // Ordinary same-owner navigation keeps the already displayed canvas.
+      // A failure or owner loss clears this proof, so retry stays covered.
+      if let lastLoadedURL { transition(to: .online(lastLoadedURL)) }
+      else { transition(to: .connecting) }
+    case .loaded(let url):
+      guard WebRuntimeOrigin(url: url) == WebRuntimeOrigin(url: endpoint) else { return }
+      lastLoadedURL = url
+      transition(to: .online(url))
+    case .failed(_, let reason), .interrupted(let reason):
+      lastLoadedURL = nil
+      transition(to: .recovering(reason))
+    }
+  }
+
+  var isNavigating: Bool {
+    if case .loading = webState { return lastLoadedURL != nil }
+    return false
+  }
+
+  var presentation: CommandDeckPresentation {
+    let phase: CommandDeckPhase
+    var reason: String?
+    switch state {
+    case .bootstrapping: phase = .bootstrapping
+    case .connecting: phase = .connecting
+    case .online: phase = .online
+    case .recovering(let detail): phase = .recovering; reason = detail
+    case .blocked(let detail): phase = .blocked; reason = detail
+    }
+    return CommandDeckPresentation(
+      phase: phase,
+      problem: reason.map { CommandDeckProblem(
+        title: "Connection needs attention", summary: "\($0)", receipt: nil) },
+      endpointCaption: endpoint.map { ($0.host ?? "Runtime") + (isNavigating ? " · Loading" : "") },
+      availableActions: availableActions)
   }
 
   func beginRecovery(reason: String) {
@@ -58,6 +128,7 @@ final class AppModel {
   }
 
   func block(reason: String) {
+    invalidateEndpoint()
     transition(to: .blocked(reason))
   }
 

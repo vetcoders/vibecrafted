@@ -19,7 +19,6 @@ struct RecoveryView: View {
   @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
   @Environment(\.locale) private var locale
   @FocusState private var focusedControl: CommandDeckChromeAction?
-  @State private var isConfirmingStop = false
 
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
@@ -28,8 +27,7 @@ struct RecoveryView: View {
       RecoveryActionRow(
         availableActions: availableActions,
         actions: actions,
-        focusedControl: $focusedControl,
-        isConfirmingStop: $isConfirmingStop
+        focusedControl: $focusedControl
       )
     }
     .padding(CommandDeckMetrics.overlayPadding)
@@ -45,20 +43,6 @@ struct RecoveryView: View {
     .defaultFocus($focusedControl, .retryConnection)
     .accessibilityElement(children: .contain)
     .accessibilityLabel(phase == .blocked ? "Runtime blocked" : "Runtime recovery")
-    .confirmationDialog(
-      "Stop Runtime?",
-      isPresented: $isConfirmingStop,
-      titleVisibility: .visible
-    ) {
-      Button("Stop Runtime", role: .destructive, action: confirmStopRuntime)
-      Button("Cancel", role: .cancel) {}
-    } message: {
-      Text("This stops the runtime. It does not quit the App. Open sessions may end.")
-    }
-  }
-
-  private func confirmStopRuntime() {
-    actions?.handle(.requestStopRuntime)
   }
 }
 
@@ -129,7 +113,6 @@ private struct RecoveryActionRow: View {
   let availableActions: Set<CommandDeckChromeAction>
   var actions: (any CommandDeckActionHandling)?
   var focusedControl: FocusState<CommandDeckChromeAction?>.Binding
-  @Binding var isConfirmingStop: Bool
 
   var body: some View {
     ViewThatFits(in: .horizontal) {
@@ -173,13 +156,18 @@ private struct RecoveryActionRow: View {
       .focused(focusedControl, equals: .openTerminal)
       .accessibilityHint("Opens the generation-owned terminal. Closing it does not stop the runtime.")
     }
+    if shows(.showDiagnostics) {
+      Button("Diagnostics", systemImage: "info.circle") { actions?.handle(.showDiagnostics) }
+        .buttonStyle(.commandDeckQuiet)
+        .focused(focusedControl, equals: .showDiagnostics)
+    }
     if shows(.requestStopRuntime) {
       Button("Stop Runtime", systemImage: "stop.circle") {
-        isConfirmingStop = true
+        actions?.handle(.requestStopRuntime)
       }
       .buttonStyle(.commandDeckDestructive)
       .focused(focusedControl, equals: .requestStopRuntime)
-      .accessibilityHint("Stops the runtime. Does not quit the App.")
+      .accessibilityHint("Confirms stopping the shared Runtime service. Does not quit the App or stop agents.")
       .accessibilityInputLabels(["Stop Runtime"])
     }
   }

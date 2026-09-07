@@ -47,19 +47,52 @@ final class WebConsoleSession: NSObject {
   var events: WebConsoleEvents
 
   private(set) var loadState: WebConsoleLoadState = .idle
-  /// The endpoint currently applied. Used to keep `updateNSView` idempotent.
+  /// The endpoint currently admitted by the App's caretaker resolver.
   private(set) var appliedEndpoint: URL?
   private(set) var runtimeOrigin: WebRuntimeOrigin?
+
+  private var activeNavigation: WKNavigation?
+  private var lastCommittedURL: URL?
+  private var route = URLComponents(string: "/")!
+
+  /// Native entrypoints select a route, never another window or origin.
+  func navigate(path: String) {
+    guard path.hasPrefix("/"), !path.hasPrefix("//"),
+      let components = URLComponents(string: path), components.scheme == nil,
+      components.host == nil else { return }
+    route = components
+    retry()
+  }
+
+  private var routeURL: URL? {
+    guard let endpoint = appliedEndpoint,
+      var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)
+    else { return nil }
+    components.percentEncodedPath = route.percentEncodedPath
+    components.percentEncodedQuery = route.percentEncodedQuery
+    components.percentEncodedFragment = route.percentEncodedFragment
+    return components.url
+  }
+
+  private func rememberRoute(_ url: URL) {
+    guard WebRuntimeOrigin(url: url) == runtimeOrigin,
+      let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
+    route = components
+  }
 
   private let downloads: WebDownloadCoordinator
   /// Guards the single automatic reload after a content-process death, so a
   /// repeatedly crashing page can never become a reload loop.
   private var didAutoRecoverFromTermination = false
 
-  init(events: WebConsoleEvents = WebConsoleEvents()) {
+  init(
+    events: WebConsoleEvents = WebConsoleEvents(),
+    websiteDataStore: WKWebsiteDataStore = .default(),
+    downloadDestinationProvider: @escaping WebDownloadDestinationProvider = WebDownloadCoordinator.savePanelDestinationProvider
+  ) {
     self.events = events
-    self.downloads = WebDownloadCoordinator()
-    self.webView = WKWebView(frame: .zero, configuration: Self.makeConfiguration())
+    self.downloads = WebDownloadCoordinator(destinationProvider: downloadDestinationProvider)
+    self.webView = WKWebView(frame: .zero, configuration: Self.makeConfiguration(websiteDataStore: websiteDataStore))
     super.init()
 
     webView.navigationDelegate = self
@@ -80,12 +113,12 @@ final class WebConsoleSession: NSObject {
     )
   }
 
-  private static func makeConfiguration() -> WKWebViewConfiguration {
+  private static func makeConfiguration(websiteDataStore: WKWebsiteDataStore) -> WKWebViewConfiguration {
     let configuration = WKWebViewConfiguration()
     // One shared, persistent store. Cookies and HTTP authentication survive a
     // window close and a server restart, which is what makes this a session
     // rather than a page load.
-    configuration.websiteDataStore = .default()
+    configuration.websiteDataStore = websiteDataStore
     configuration.defaultWebpagePreferences.allowsContentJavaScript = true
     // INVARIANT: no `WKScriptMessageHandler` is registered here or anywhere
     // else in this file. The App exposes no JavaScript-to-native channel, so
@@ -99,13 +132,17 @@ final class WebConsoleSession: NSObject {
 
   /// Applies a resolved endpoint.
   ///
-  /// Idempotent by contract: applying the same endpoint twice does nothing at
-  /// all, so `updateNSView` can be called as often as SwiftUI likes. A genuine
-  /// re-connection is an explicit act — see `retry()`.
+  /// Repeated caretaker polls do not reload. An unavailable-to-available
+  /// transition reapplies even the same URL; a web failure uses explicit retry.
   func apply(endpoint: URL?) {
     guard let endpoint else {
-      // No endpoint yet: native recovery owns that state; do not blank the
-      // canvas or tear down the session.
+      // Preserve cookies and route, but fence completions from the old owner.
+      activeNavigation = nil
+      lastCommittedURL = nil
+      appliedEndpoint = nil
+      runtimeOrigin = nil
+      webView.stopLoading()
+      updateState(.idle)
       return
     }
     guard appliedEndpoint != endpoint else { return }
@@ -113,26 +150,28 @@ final class WebConsoleSession: NSObject {
       events.navigationBlocked(endpoint, "the resolved endpoint is not an http(s) URL")
       return
     }
+    lastCommittedURL = nil
     appliedEndpoint = endpoint
     runtimeOrigin = origin
     didAutoRecoverFromTermination = false
-    load(endpoint)
+    if let url = routeURL { load(url) }
   }
 
   /// Re-requests the current endpoint after a failure or a server restart.
   /// Safe to call from a retry button; does nothing before a first endpoint.
   func retry() {
-    guard let endpoint = appliedEndpoint else { return }
+    guard appliedEndpoint != nil else { return }
     didAutoRecoverFromTermination = false
-    load(endpoint)
+    if let url = routeURL { load(url) }
   }
 
   private func load(_ url: URL) {
+    rememberRoute(url)
     updateState(.loading(url))
     var request = URLRequest(url: url)
     // A restarted server must not be answered out of the cache.
     request.cachePolicy = .reloadIgnoringLocalCacheData
-    webView.load(request)
+    activeNavigation = webView.load(request)
   }
 
   private func updateState(_ state: WebConsoleLoadState) {
@@ -178,6 +217,7 @@ extension WebConsoleSession: WKNavigationDelegate {
     )
     switch decision {
     case .allowInApp:
+      if isMainFrame, let url { rememberRoute(url) }
       return (.allow, preferences)
     case .startDownload:
       return (.download, preferences)
@@ -194,9 +234,21 @@ extension WebConsoleSession: WKNavigationDelegate {
     _ webView: WKWebView,
     decidePolicyFor navigationResponse: WKNavigationResponse
   ) async -> WKNavigationResponsePolicy {
-    // Anything WebKit cannot render becomes an explicit download instead of a
-    // blank page.
-    navigationResponse.canShowMIMEType ? .allow : .download
+    let response = navigationResponse.response
+    let decision = WebNavigationPolicy.decideResponse(
+      url: response.url, runtime: runtimeOrigin,
+      isMainFrame: navigationResponse.isForMainFrame,
+      canShowMIMEType: navigationResponse.canShowMIMEType,
+      statusCode: (response as? HTTPURLResponse)?.statusCode)
+    switch decision {
+    case .allowInApp: return .allow
+    case .startDownload: return .download
+    case .block(let reason):
+      if navigationResponse.isForMainFrame {
+        updateState(.failed(url: response.url, reason: reason))
+      }
+      return .cancel
+    }
   }
 
   func webView(
@@ -208,6 +260,7 @@ extension WebConsoleSession: WKNavigationDelegate {
       method: space.authenticationMethod,
       host: space.host,
       port: space.port,
+      scheme: space.protocol,
       runtime: runtimeOrigin
     )
     switch decision {
@@ -230,6 +283,7 @@ extension WebConsoleSession: WKNavigationDelegate {
     didBecome download: WKDownload
   ) {
     downloads.take(download, relativeTo: webView.window, runtime: runtimeOrigin)
+    restoreCommittedCanvasAfterDownload()
   }
 
   func webView(
@@ -238,13 +292,27 @@ extension WebConsoleSession: WKNavigationDelegate {
     didBecome download: WKDownload
   ) {
     downloads.take(download, relativeTo: webView.window, runtime: runtimeOrigin)
+    restoreCommittedCanvasAfterDownload()
+  }
+
+  private func restoreCommittedCanvasAfterDownload() {
+    guard let url = lastCommittedURL, WebRuntimeOrigin(url: url) == runtimeOrigin else { return }
+    rememberRoute(url)
+    updateState(.loaded(url))
+  }
+
+  func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+    guard runtimeOrigin != nil else { return }
+    activeNavigation = navigation
+    if let url = routeURL { updateState(.loading(url)) }
   }
 
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+    guard let navigation, navigation === activeNavigation,
+      let url = webView.url, WebRuntimeOrigin(url: url) == runtimeOrigin else { return }
     didAutoRecoverFromTermination = false
-    // Never invent a URL to report success with; if WebKit has none and no
-    // endpoint was applied, there is nothing honest to say.
-    guard let url = webView.url ?? appliedEndpoint else { return }
+    lastCommittedURL = url
+    rememberRoute(url)
     updateState(.loaded(url))
   }
 
@@ -253,10 +321,12 @@ extension WebConsoleSession: WKNavigationDelegate {
     didFailProvisionalNavigation navigation: WKNavigation!,
     withError error: Error
   ) {
+    guard let navigation, navigation === activeNavigation else { return }
     report(error)
   }
 
   func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+    guard let navigation, navigation === activeNavigation else { return }
     report(error)
   }
 
@@ -271,10 +341,10 @@ extension WebConsoleSession: WKNavigationDelegate {
 
   func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
     updateState(.interrupted(reason: "the web content process ended"))
-    guard !didAutoRecoverFromTermination, let endpoint = appliedEndpoint else { return }
+    guard !didAutoRecoverFromTermination, appliedEndpoint != nil else { return }
     // Exactly one automatic recovery; anything further is the user's call.
     didAutoRecoverFromTermination = true
-    load(endpoint)
+    if let url = routeURL { load(url) }
   }
 }
 
@@ -339,22 +409,17 @@ final class WebConsoleContainerView: NSView {
 struct WebConsoleHost: NSViewRepresentable {
   /// The App-owned session. Pass the same instance for the App's lifetime.
   let session: WebConsoleSession
-  /// The endpoint currently resolved by the App, or `nil` while unknown.
-  let endpoint: URL?
 
   func makeNSView(context: Context) -> WebConsoleContainerView {
     let container = WebConsoleContainerView()
     container.setAccessibilityElement(false)
     session.attach(to: container)
-    session.apply(endpoint: endpoint)
     return container
   }
 
-  /// Idempotent: re-attaching to the same container and re-applying the same
-  /// endpoint are both no-ops, so a redraw never reloads the page or drops the
-  /// web session.
+  /// Rendering only mounts. AppModel callbacks own endpoint changes outside
+  /// SwiftUI's update pass, so drawing cannot publish state or reload a page.
   func updateNSView(_ nsView: WebConsoleContainerView, context: Context) {
     session.attach(to: nsView)
-    session.apply(endpoint: endpoint)
   }
 }

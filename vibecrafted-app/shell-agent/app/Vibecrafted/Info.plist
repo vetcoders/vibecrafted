@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- nosemgrep: swift.insecure-communication.ats.ats-pinning.ATS-consider-pinning -- Network I/O is owned by the Rust FFI and targets an operator-selected local/Tailscale host:port, not a pinnable NSURLSession domain. -->
+<!-- nosemgrep: swift.insecure-communication.ats.ats-pinning.ATS-consider-pinning -- The caretaker selects the local/Tailscale HTTP endpoint. WebKit navigation is confined by WebNavigationPolicy; system TLS validation remains enabled. -->
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
@@ -24,7 +24,14 @@
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.developer-tools</string>
 	<key>LSUIElement</key>
-	<true/>
+	<false/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSQuitAlwaysKeepsWindows</key>

@@ -3,7 +3,7 @@
 
 import SwiftUI
 
-/// Presentation projection of the session. W2 maps sibling session types here.
+/// Presentation projection of the session. AppModel projects combined connection truth here.
 /// This type does not own endpoint resolution, WebKit, or process lifetime.
 enum CommandDeckPhase: String, Equatable, Sendable {
   case bootstrapping
@@ -70,7 +70,7 @@ struct CommandDeckPresentation: Equatable, Sendable {
 }
 
 /// Compact native chrome around an injected product canvas.
-/// W2 supplies the canvas and action handler; this view does not stub sibling types.
+/// The App supplies its persistent canvas and native action handler.
 struct CommandDeckView<Canvas: View>: View {
   let presentation: CommandDeckPresentation
   let canvas: Canvas

@@ -1,11 +1,12 @@
 import Foundation
 
 /// Consumes one already-adopted CanonicalRuntimeInstall and its environment.
-/// W2 supplies these values together; this leaf never resolves an active pointer,
+/// AppDelegate supplies these values together; this leaf never resolves an active pointer,
 /// selects a host, composes PATH, or substitutes the App bundle's generation.
 struct TerminalLauncher {
   struct Specification: Equatable, Sendable {
     let generationRoot: URL
+    let terminalHost: URL
     let executable: URL
     let arguments: [String]
     let workingDirectory: URL
@@ -32,6 +33,7 @@ struct TerminalLauncher {
         !key.isEmpty && !key.contains("=") && !key.utf8.contains(0) && !value.utf8.contains(0)
       }) else { throw LaunchError.invalidEnvironment }
 
+      self.terminalHost = terminalHost
       self.generationRoot = generationRoot
       executable = terminal
       arguments = ["-e", primaryShell.path, start.path, "operator"]
@@ -51,6 +53,7 @@ struct TerminalLauncher {
   /// Keep in memory; the specification contains the owner's environment and
   /// must not be dumped into logs or web responses.
   struct Receipt: Equatable, Sendable {
+    let launchID = UUID()
     let processIdentifier: Int32
     let specification: Specification
   }
@@ -65,6 +68,7 @@ struct TerminalLauncher {
     }
 
     var isRunning: Bool { process.isRunning }
+    var exitStatus: Int32? { process.isRunning ? nil : process.terminationStatus }
     // Intentionally no cancellation, stop, or deinit action. Closing a client
     // never terminates this process, its terminal children, or the server.
   }
@@ -88,5 +92,26 @@ struct TerminalLauncher {
     process.standardError = FileHandle.nullDevice
     try process.run()
     return Launch(process: process, specification: specification)
+  }
+}
+
+/// Pure, injectable registration observation. Time and registration are supplied
+/// by AppKit; this policy cannot launch, resolve, focus, or terminate a process.
+struct TerminalRegistrationObservation {
+  enum Outcome: Equatable { case waiting, ready, timedOut, ended, superseded }
+  let launchID: UUID
+  let deadline: TimeInterval
+
+  init(receipt: TerminalLauncher.Receipt, now: TimeInterval, timeout: TimeInterval = 10) {
+    launchID = receipt.launchID
+    deadline = now + timeout
+  }
+
+  func observe(now: TimeInterval, currentLaunchID: UUID?, isRunning: Bool,
+               isRegistered: Bool) -> Outcome {
+    guard currentLaunchID == launchID else { return .superseded }
+    guard isRunning else { return .ended }
+    guard now < deadline else { return .timedOut }
+    return isRegistered ? .ready : .waiting
   }
 }

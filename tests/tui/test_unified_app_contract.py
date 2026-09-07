@@ -1028,28 +1028,20 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
             "private func terminalIsLive"
         )
     ]
-    assert "launchWorkspaceTerminal()" in launch_handler
-    assert "showMainWindowIfNeeded()" not in launch_handler
-    assert "\t<key>LSUIElement</key>\n\t<true/>" in info
+    assert "connectCommandDeck()" in launch_handler
+    assert "launchWorkspaceTerminal()" not in launch_handler
+    assert "showMainWindowIfNeeded()" in launch_handler
+    assert "\t<key>LSUIElement</key>\n\t<false/>" in info
     assert "\t<key>NSQuitAlwaysKeepsWindows</key>\n\t<false/>" in info
-    assert 'withTitle: "Open VC Server"' in delegate
-    assert 'withTitle: "Open Native Console"' in delegate
-    assert 'withTitle: "Open VC Terminal"' in delegate
-    assert 'withTitle: "VC Server"' in delegate
-    assert 'withTitle: "Open Workspaces"' in delegate
-    assert 'withTitle: "Start"' in delegate
-    assert 'withTitle: "Stop"' in delegate
-    assert 'withTitle: "Restart"' in delegate
-    assert 'withTitle: "Open Logs"' in delegate
-    assert 'withTitle: "Server Diagnostics…"' in delegate
+    tray = (REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted/CommandDeck/StatusItemController.swift").read_text()
+    for title in ["Show Command Deck", "Open Terminal", "Stop Runtime…", "Repair Runtime…"]:
+        assert f'withTitle: "{title}"' in tray
     assert 'withTitle: "About Vibecrafted"' in delegate
-    assert 'withTitle: "Vibecrafted Help"' in delegate
     assert 'withTitle: "Quit Vibecrafted"' in delegate
     assert "#selector(requestQuit)" in delegate
     assert 'process.arguments = ["status", "--activity", "--json"]' in delegate
     assert "func applicationShouldTerminate(" in delegate
-    assert 'withTitle: "Cancel"' in delegate
-    assert 'withTitle: "Quit Anyway"' in delegate
+    assert 'withTitle: "Stop Runtime Service"' in delegate
     # One caretaker/control_plane truth: the tray derives server health from the
     # caretaker verb, never from a second health JSON read in Swift.
     assert "process.arguments = serverCaretakerArguments()" in delegate
@@ -1059,11 +1051,11 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
         'process.arguments = ["server", "service", "status", "--json"]' not in delegate
     )
     assert 'process.arguments = ["server", "service", "logs", "--json"]' in delegate
-    assert "menu.delegate = self" in delegate
+    assert "menu.delegate = self" in tray
     assert "statusRefreshTimer = Timer.scheduledTimer(" in delegate
-    assert "statusIcon(health:" in delegate
-    assert "health.color.setFill()" in delegate
-    assert "application.isTerminated" in delegate
+    assert "TrayGlyph.statusImage(health:" in tray
+    assert "NSStatusBar.system.statusItem" not in delegate
+    assert "terminalApplication?.isTerminated" in delegate
     assert "application.activate(options: [])" in delegate
     termination_handler = delegate[
         delegate.index(
@@ -1085,16 +1077,15 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     # shell/start argv. The bundled terminal host remains onboarding material,
     # never the direct launch target of the App.
     assert "NSWorkspace.shared.openApplication(" not in terminal_launch
-    assert "process.executableURL = install.terminal" in terminal_launch
-    assert (
-        'process.arguments = ["-e", install.primaryShell.path, install.start.path, "operator"]'
-        in terminal_launch
-    )
-    assert "process.environment = environment" in terminal_launch
-    assert "process.terminationHandler" in terminal_launch
+    assert "generationRoot: install.root, terminal: install.terminal" in terminal_launch
+    terminal_owner = (REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted/CommandDeck/TerminalLauncher.swift").read_text()
+    assert 'arguments = ["-e", primaryShell.path, start.path, "operator"]' in terminal_owner
+    assert "process.currentDirectoryURL = specification.workingDirectory" in terminal_owner
+    assert "environment: environment" in terminal_launch
+    assert "terminalLaunch = try TerminalLauncher.launch(specification)" in terminal_launch
     assert "process.executableURL = install.terminalHost" not in terminal_launch
     assert "\t<key>CFBundleIconFile</key>\n\t<string>Vibecrafted.icns</string>" in info
-    assert "NSApp.applicationIconImage.copy()" in delegate
+    assert "NSApp.applicationIconImage.copy()" not in delegate
     assert 'appendingPathComponent("runtime-pack", isDirectory: true)' in delegate
     assert 'appendingPathComponent("install-runtime-pack.sh")' in delegate
     assert '"--expected-source-revision"' in delegate
@@ -1161,14 +1152,13 @@ def test_tray_menu_supervises_runtime_pack_carrier_drift() -> None:
     # The tray supervises the Runtime Pack carrier, not just the server: the
     # live generation is a first-class status line and the submenu carries the
     # supervision actions (reveal home, reveal control files, copy identity).
-    assert 'withTitle: "Runtime Pack"' in delegate
-    assert 'withTitle: "Reveal Runtime Home"' in delegate
-    assert 'withTitle: "Reveal Control Plane Files"' in delegate
-    assert 'withTitle: "Copy Runtime Identity"' in delegate
-    assert "#selector(revealRuntimeHomeFromStatusItem)" in delegate
-    assert "#selector(openControlPlaneFromStatusItem)" in delegate
-    assert "#selector(copyRuntimeIdentityFromStatusItem)" in delegate
-    assert "NSWorkspace.shared.open(install.runtimeHome)" in delegate
+    tray = (app_dir / "CommandDeck/StatusItemController.swift").read_text()
+    for title in ["Reveal Runtime Home", "Reveal Control Plane Files", "Copy Runtime Identity"]:
+        assert title in tray
+    assert "case .revealRuntime: revealRuntimeHomeFromStatusItem()" in delegate
+    assert "case .revealControlPlane: openControlPlaneFromStatusItem()" in delegate
+    assert "case .copyRuntimeIdentity: copyRuntimeIdentityFromStatusItem()" in delegate
+    assert "revealNativePath(install.runtimeHome)" in delegate
     assert '"control_plane", isDirectory: true' in delegate
     assert "NSPasteboard.general.setString(blob, forType: .string)" in delegate
     # Menu state derives through the pure policy, wired from the status refresh
@@ -3694,12 +3684,10 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
         )
     ]
     assert "NSWorkspace.shared.openApplication(" not in terminal_launch
-    assert "process.executableURL = install.terminal" in terminal_launch
-    assert "process.environment = environment" in terminal_launch
-    assert (
-        '"-e", install.primaryShell.path, install.start.path, "operator"'
-        in terminal_launch
-    )
+    assert "generationRoot: install.root, terminal: install.terminal" in terminal_launch
+    assert "environment: environment" in terminal_launch
+    terminal_owner = (REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted/CommandDeck/TerminalLauncher.swift").read_text()
+    assert 'arguments = ["-e", primaryShell.path, start.path, "operator"]' in terminal_owner
     assert 'product_config / "vc-terminal" / "vc-terminal.toml"' in installer
     assert 'product_config / "terminal-entry.toml"' not in installer
     assert 'for debris in terminal.glob("launch-*.zsh"):' in installer

@@ -33,9 +33,8 @@ enum TrayGlyph {
     return image
   }
 
-  /// Template mark plus a small health badge. The composed bitmap is not a
-  /// template because the badge carries semantic color; the mark layer itself
-  /// remains monochrome ink.
+  /// The complete image stays a template in both menu-bar appearances.
+  /// Health is also named in the accessibility label and full native tooltip.
   static func statusImage(
     health: TrayServerHealth,
     size requested: CGFloat = preferredPointSize
@@ -55,7 +54,7 @@ enum TrayGlyph {
       drawBadge(health: health, in: rect)
       return true
     }
-    image.isTemplate = false
+    image.isTemplate = true
     image.accessibilityDescription = accessibilityLabel(for: health)
     return image
   }
@@ -109,21 +108,8 @@ enum TrayGlyph {
     // Punch a thin halo so the badge stays legible on both appearances.
     NSColor.windowBackgroundColor.setFill()
     NSBezierPath(ovalIn: badge.insetBy(dx: -1.0, dy: -1.0)).fill()
-    badgeColor(for: health).setFill()
+    NSColor.black.setFill()
     NSBezierPath(ovalIn: badge).fill()
-  }
-
-  private static func badgeColor(for health: TrayServerHealth) -> NSColor {
-    switch health {
-    case .checking, .neutral:
-      return .systemGray
-    case .healthy:
-      return .systemGreen
-    case .transitioning:
-      return .systemOrange
-    case .failed:
-      return .systemRed
-    }
   }
 
   private static func accessibilityLabel(for health: TrayServerHealth) -> String {

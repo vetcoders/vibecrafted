@@ -72,18 +72,6 @@ private struct CanonicalRuntimeInstall: Decodable {
   }
 }
 
-extension TrayServerHealth {
-  var color: NSColor {
-    switch self {
-    case .checking: return .systemGray
-    case .healthy: return .systemGreen
-    case .transitioning: return .systemOrange
-    case .failed: return .systemRed
-    case .neutral: return .systemGray
-    }
-  }
-}
-
 final class EventObserver: @unchecked Sendable, EventCallback {
   func onEvent(eventJson: String) {
     DispatchQueue.main.async {
@@ -170,25 +158,15 @@ private typealias RuntimeContract = RuntimeResolution<CanonicalRuntimeInstall>
 private let activityTruthTimeout: TimeInterval = 15
 
 @MainActor
-class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, CommandDeckActionHandling {
   var mainWindow: MainWindowController?
-  private var statusItem: NSStatusItem?
-  private var serverStatusMenuItem: NSMenuItem?
-  private var serverDetailMenuItem: NSMenuItem?
-  private var startServerMenuItem: NSMenuItem?
-  private var stopServerMenuItem: NSMenuItem?
-  private var restartServerMenuItem: NSMenuItem?
-  private var openServerMenuItem: NSMenuItem?
-  private var openWorkspacesMenuItem: NSMenuItem?
-  private var openServerLogsMenuItem: NSMenuItem?
-  private var runtimePackStatusMenuItem: NSMenuItem?
-  private var runtimePackDetailMenuItem: NSMenuItem?
-  private var revealRuntimeHomeMenuItem: NSMenuItem?
-  private var openControlPlaneMenuItem: NSMenuItem?
-  private var copyRuntimeIdentityMenuItem: NSMenuItem?
-  private var repairRuntimeMenuItem: NSMenuItem?
+  private let model = AppModel()
+  private lazy var webSession = WebConsoleSession()
+  private var tray: StatusItemController?
+  private var repairInFlight = false
+  private var confirmedStopRoot: URL?
+  private var terminalWorkingDirectory = FileManager.default.homeDirectoryForCurrentUser
   private var signedCarrierRevisions: (source: String, terminal: String, frame: String)?
-  private var trayBaseIcon: NSImage?
   private var statusRefreshTimer: Timer?
   private var terminalApplication: NSRunningApplication?
   private var terminalLaunchInFlight = false
@@ -222,12 +200,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private var runtimeResolutionFailure: String?
   /// A non-fatal note about the shared service, rendered under the runtime line.
   private var runtimeAdvisory: String?
-  private var terminalProcess: Process?
+  private var terminalLaunch: TerminalLauncher.Launch?
+  private var terminalRegistration: TerminalRegistrationObservation?
+  private var terminalRegistrationTimer: Timer?
   let eventObserver = EventObserver()
 
   func showMainWindowIfNeeded() {
     if mainWindow == nil {
-      mainWindow = MainWindowController()
+      mainWindow = MainWindowController(model: model, session: webSession, actions: self)
     }
     mainWindow?.showWindow(nil)
     mainWindow?.window?.makeKeyAndOrderFront(nil)
@@ -261,6 +241,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     lifecycleLog(
       "launch ppid=\(getppid()) launchedByLS=\(launchedByLS) args=[\(launchArgs)]")
 
+    NSApp.setActivationPolicy(.regular)
+    configureCommandDeck()
     buildMainMenu()
     buildStatusItem()
     startNativeNotifications()
@@ -279,7 +261,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       print("Failed to init runtime: \(error)")
     }
 
-    launchWorkspaceTerminal()
+    showMainWindowIfNeeded()
+    connectCommandDeck()
+  }
+
+  func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+    showMainWindowIfNeeded()
+    return true
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -287,39 +275,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-    let reply = decideTermination()
-    lifecycleLog("applicationShouldTerminate -> \(reply == .terminateNow ? "terminateNow" : "terminateCancel")")
-    return reply
-  }
-
-  private func decideTermination() -> NSApplication.TerminateReply {
-    switch activeRunSummary() {
-    case .available(let summary) where summary.lanes == 0:
-      lifecycleLog("quit requested with 0 active/stalled lanes")
-      return .terminateNow
-    case .available(let summary):
-      lifecycleLog(
-        "quit requested with \(summary.lanes) active/stalled lane(s), \(summary.worktrees) worktree-backed; asking")
-      let alert = NSAlert()
-      alert.alertStyle = .warning
-      alert.messageText = "Active or stalled Vibecrafted lanes still need a control surface"
-      alert.informativeText =
-        "\(summary.lanes) active/stalled lane(s), including \(summary.worktrees) worktree-backed lane(s). Quitting the app does not make that work disappear, but removes its live control surface."
-      alert.addButton(withTitle: "Cancel")
-      alert.addButton(withTitle: "Quit Anyway")
-      return alert.runModal() == .alertSecondButtonReturn ? .terminateNow : .terminateCancel
-    case .unavailable(let reason):
-      installLog.error("Cannot inspect lifecycle truth before quit: \(reason, privacy: .public)")
-      lifecycleLog("quit requested but lifecycle truth unavailable: \(reason); asking")
-      let alert = NSAlert()
-      alert.alertStyle = .critical
-      alert.messageText = "Vibecrafted lifecycle truth is unavailable"
-      alert.informativeText =
-        "The canonical control plane could not confirm whether any lanes are active or stalled. Cancel to keep the live control surface, or quit explicitly anyway."
-      alert.addButton(withTitle: "Cancel")
-      alert.addButton(withTitle: "Quit Anyway")
-      return alert.runModal() == .alertSecondButtonReturn ? .terminateNow : .terminateCancel
-    }
+    // Quit closes UI only; the service, terminals and agent lanes keep running.
+    .terminateNow
   }
 
   func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
@@ -339,21 +296,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let terminalState: String
     if let application = terminalApplication, !application.isTerminated {
       terminalState = "vc-terminal pid=\(application.processIdentifier) still running"
-    } else if let process = terminalProcess, process.isRunning {
-      terminalState = "vc-terminal pid=\(process.processIdentifier) still running"
-    } else if terminalApplication != nil || terminalProcess != nil {
+    } else if let launch = terminalLaunch, launch.isRunning {
+      terminalState = "vc-terminal pid=\(launch.receipt.processIdentifier) still running"
+    } else if terminalApplication != nil || terminalLaunch != nil {
       terminalState = "vc-terminal already exited"
     } else {
       terminalState = "no vc-terminal"
     }
     lifecycleLog("applicationWillTerminate; \(terminalState)")
     statusRefreshTimer?.invalidate()
+    terminalRegistrationTimer?.invalidate()
     NotificationManager.shared.clearHeartbeat(craftedHome: craftedHomeURL())
   }
 
   private func startNativeNotifications() {
     NotificationManager.shared.presentWindow = { [weak self] in
       self?.showMainWindowIfNeeded()
+    }
+    NotificationManager.shared.presentRun = { [weak self] runID, report, preferReport in
+      guard !runID.isEmpty,
+        runID.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) || "-_".unicodeScalars.contains($0) }) else { return }
+      self?.openRoute("/run/\(runID)")
+      if preferReport, let report {
+        do { try self?.nativeBridge.perform(.revealPath(try .init(path: report))) }
+        catch { self?.showNativeMessage("Cannot reveal report", error.localizedDescription) }
+      }
     }
     NotificationManager.shared.start(craftedHome: craftedHomeURL())
   }
@@ -363,6 +330,136 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let home = host["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
     return URL(
       fileURLWithPath: host["VIBECRAFTED_HOME"] ?? "\(home)/.vibecrafted", isDirectory: true)
+  }
+
+  private func configureCommandDeck() {
+    model.endpointDidChange = { [weak self] endpoint in self?.webSession.apply(endpoint: endpoint) }
+    model.setStateChangeHandler { [weak self] _ in self?.updateDeckPresentation() }
+    webSession.events.stateDidChange = { [weak self] state in self?.model.receiveWebState(state) }
+    webSession.events.openExternally = { [weak self] url in
+      do { try self?.nativeBridge.perform(.openExternalURL(try .init(value: url.absoluteString))) }
+      catch { self?.reportWorkspaceLaunchFailure(error.localizedDescription) }
+    }
+    webSession.events.navigationBlocked = { [weak self] _, reason in
+      self?.showNativeMessage("Navigation blocked", reason)
+    }
+    webSession.events.downloadFinished = { url in NSWorkspace.shared.activateFileViewerSelecting([url]) }
+    webSession.events.downloadFailed = { [weak self] reason in self?.showNativeMessage("Download failed", reason) }
+  }
+
+  private func connectCommandDeck() {
+    _ = try? loadSignedCarrierRevisions()
+    model.beginConnecting()
+    resolveInstalledRuntime { [weak self] resolution in
+      guard let self else { return }
+      // First onboarding and explicit repair remain in the existing installer.
+      let adopted: RuntimeContract
+      if case .absent = resolution {
+        do {
+          adopted = .ready(try self.installCanonicalRuntime())
+          self.cachedResolution = nil
+        } catch {
+          self.applyResolution(resolution)
+          let reason = "Runtime onboarding failed: \(error.localizedDescription)"
+          self.runtimeResolutionFailure = reason
+          self.model.block(reason: reason)
+          return
+        }
+      } else { adopted = resolution }
+      guard let install = self.applyResolution(adopted),
+        let environment = self.canonicalRuntimeEnvironment else {
+        self.renderServerStatus()
+        return
+      }
+      self.reconcileControlPlaneEye(install: install, environment: environment)
+      self.refreshServerStatus()
+    }
+  }
+
+  private var nativeBridge: NativeCommandBridge {
+    NativeCommandBridge(allowedPathRoots: [FileManager.default.homeDirectoryForCurrentUser,
+      craftedHomeURL()] + [canonicalInstall?.runtimeHome].compactMap { $0 }, actions: .init(
+      openTerminal: { [unowned self] directory in
+        guard self.canonicalInstall != nil else { throw NativeCommandError.pathNotAllowed }
+        self.terminalWorkingDirectory = directory
+        if self.terminalIsLive() { self.focusTerminal() }
+        else { self.launchWorkspaceTerminal() }
+      },
+      openExternalURL: { url in NSWorkspace.shared.open(url) },
+      revealPath: { url in NSWorkspace.shared.activateFileViewerSelecting([url]) },
+      retryConnection: { [unowned self] in
+        guard self.runtimeActionPreflight == nil, self.serverActionInFlight == nil else { return }
+        self.webSession.retry()
+        self.connectCommandDeck()
+      },
+      confirmRuntimeStop: { [unowned self] in self.confirmRuntimeStop() },
+      stopRuntime: { [unowned self] in self.performServerAction(.stop) }))
+  }
+
+  func handle(_ action: CommandDeckChromeAction) {
+    do {
+      switch action {
+      case .openTerminal: openTerminalFromStatusItem()
+      case .retryConnection: try nativeBridge.perform(.retryConnection)
+      case .requestStopRuntime: try nativeBridge.perform(.requestRuntimeStop)
+      case .repairRuntime: repairRuntimeFromBundledPack()
+      case .showDiagnostics: showServerDiagnostics()
+      }
+    } catch { showNativeMessage("Native action failed", error.localizedDescription) }
+  }
+
+  private func handleTray(_ action: StatusItemAction) {
+    switch action {
+    case .showCommandDeck: showMainWindowIfNeeded()
+    case .openTerminal: handle(.openTerminal)
+    case .retryConnection: handle(.retryConnection)
+    case .repairRuntime: handle(.repairRuntime)
+    case .stopRuntime: handle(.requestStopRuntime)
+    case .showDiagnostics: handle(.showDiagnostics)
+    case .showServer: openServerFromStatusItem()
+    case .showWorkspaces: openWorkspacesFromStatusItem()
+    case .startServer: startServerFromStatusItem()
+    case .restartServer: restartServerFromStatusItem()
+    case .showLogs: openServerLogsFromStatusItem()
+    case .revealRuntime: revealRuntimeHomeFromStatusItem()
+    case .revealControlPlane: openControlPlaneFromStatusItem()
+    case .copyRuntimeIdentity: copyRuntimeIdentityFromStatusItem()
+    case .help: showStatusItemHelp()
+    case .quitApp: requestQuit()
+    }
+  }
+
+  private func confirmRuntimeStop() -> Bool {
+    confirmedStopRoot = nil
+    guard runtimeActionPreflight == nil, serverActionInFlight == nil, !repairInFlight,
+      let install = canonicalInstall,
+      deriveServerMenuState(caretakerData: lastCaretakerData,
+        actionInFlight: nil, runtimeReady: true).canStop else { return false }
+    let activity: String
+    switch activeRunSummary() {
+    case .available(let summary): activity = "\(summary.lanes) active or stalled lanes; \(summary.worktrees) use worktrees."
+    case .unavailable: activity = "Active lane counts are unavailable."
+    }
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "Stop Runtime service?"
+    alert.informativeText = "This stops the shared VC Server through its service owner. "
+      + "The App loses its web canvas and other clients lose server access. "
+      + "It does not stop terminal sessions or agents. \(activity) "
+      + "Generation: \(install.root.lastPathComponent)."
+    alert.addButton(withTitle: "Cancel")
+    alert.addButton(withTitle: "Stop Runtime Service")
+    guard alert.runModal() == .alertSecondButtonReturn else { return false }
+    confirmedStopRoot = install.root
+    return true
+  }
+
+  private func showNativeMessage(_ title: String, _ message: String) {
+    let alert = NSAlert()
+    alert.messageText = title
+    alert.informativeText = message
+    alert.addButton(withTitle: "OK")
+    alert.runModal()
   }
 
   private func launchWorkspaceTerminal() {
@@ -419,7 +516,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.renderServerStatus()
         self.reportWorkspaceLaunchFailure(
           "The installed Vibecrafted runtime cannot be used: \(reason). "
-            + "Use Runtime Pack ▸ Reinstall From Bundled Pack… to repair it.")
+            + "Use Repair Runtime… to repair it.")
       }
     }
   }
@@ -434,69 +531,68 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   /// generation with the old App's helper binary was the ownership failure this
   /// replaces.
   private func openWorkspaceTerminal(install: CanonicalRuntimeInstall) {
+    defer { terminalLaunchInFlight = false }
     guard let environment = canonicalRuntimeEnvironment else {
-      terminalLaunchInFlight = false
       reportWorkspaceLaunchFailure("The resolved runtime carries no launch environment")
       return
     }
     do {
       try registerBundledFonts()
+      let specification = try TerminalLauncher.Specification(
+        generationRoot: install.root, terminal: install.terminal,
+        terminalHost: install.terminalHost, primaryShell: install.primaryShell,
+        start: install.start, workingDirectory: terminalWorkingDirectory,
+        environment: environment)
+      terminalLaunch = try TerminalLauncher.launch(specification)
+      observeTerminalRegistration()
     } catch {
-      terminalLaunchInFlight = false
-      reportWorkspaceLaunchFailure(
-        "Cannot register the bundled terminal font: \(error.localizedDescription)")
-      return
+      reportWorkspaceLaunchFailure("Cannot open the generation-owned terminal: \(error.localizedDescription)")
     }
-    applyRuntimePackMenuState()
-    refreshServerStatus()
-
-    let process = Process()
-    process.executableURL = install.terminal
-    process.arguments = ["-e", install.primaryShell.path, install.start.path, "operator"]
-    process.environment = environment
-    // No pipes: the workspace terminal is a long-lived view process, not a verb
-    // whose output the tray reads. Giving it a pipe nobody drains is how a
-    // terminal ends up blocked on its own logging.
-    process.terminationHandler = { [weak self] finished in
-      DispatchQueue.main.async { [weak self] in
-        guard let self else { return }
-        self.terminalProcess = nil
-        self.terminalApplication = nil
-        lifecycleLog(
-          "vc-terminal exited status=\(finished.terminationStatus) generation=\(install.root.lastPathComponent)"
-        )
-      }
-    }
-    do {
-      try process.run()
-    } catch {
-      terminalLaunchInFlight = false
-      reportWorkspaceLaunchFailure(
-        "Failed to launch the installed vc-terminal wrapper at \(install.terminal.path): "
-          + error.localizedDescription)
-      return
-    }
-    terminalProcess = process
-    terminalLaunchInFlight = false
-    // The wrapper execs its native host in place, so the view is trackable as
-    // an application only once macOS has registered it. Bring it forward when
-    // it is there; never make the launch depend on that.
-    if let application = NSRunningApplication(processIdentifier: process.processIdentifier) {
-      terminalApplication = application
-      application.activate(options: [])
-    }
-    lifecycleLog(
-      "vc-terminal launched through the generation wrapper pid=\(process.processIdentifier) generation=\(install.root.lastPathComponent)"
-    )
-    reconcileControlPlaneEye(install: install, environment: environment)
   }
 
-  /// True when a workspace terminal this App started is still up.
   private func terminalIsLive() -> Bool {
-    if let application = terminalApplication, !application.isTerminated {
-      return true
+    terminalLaunch?.isRunning == true || terminalApplication?.isTerminated == false
+  }
+
+  private func focusTerminal() {
+    // An explicit Open Terminal retries focus for this exact live launch.
+    observeTerminalRegistration()
+  }
+
+  private func observeTerminalRegistration() {
+    terminalRegistrationTimer?.invalidate()
+    guard let launch = terminalLaunch, launch.isRunning else { return }
+    terminalRegistration = TerminalRegistrationObservation(
+      receipt: launch.receipt, now: ProcessInfo.processInfo.systemUptime)
+    checkTerminalRegistration()
+    guard terminalRegistration != nil else { return }
+    terminalRegistrationTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+      Task { @MainActor [weak self] in self?.checkTerminalRegistration() }
     }
-    return terminalProcess?.isRunning == true
+  }
+
+  private func checkTerminalRegistration() {
+    guard let observation = terminalRegistration else { return }
+    let launch = terminalLaunch
+    let application = launch.flatMap { NSRunningApplication(processIdentifier: $0.receipt.processIdentifier) }
+    let registered = application?.isTerminated == false
+      && application?.executableURL?.resolvingSymlinksInPath()
+        == launch?.receipt.specification.terminalHost.resolvingSymlinksInPath()
+    let outcome = observation.observe(now: ProcessInfo.processInfo.systemUptime,
+      currentLaunchID: launch?.receipt.launchID, isRunning: launch?.isRunning == true,
+      isRegistered: registered)
+    guard outcome != .waiting else { return }
+    terminalRegistrationTimer?.invalidate()
+    terminalRegistrationTimer = nil
+    terminalRegistration = nil
+    if outcome == .ready, let application {
+      terminalApplication = application
+      application.activate(options: [])
+    } else if outcome == .timedOut {
+      showNativeMessage("Terminal is still starting",
+        "The process started, but its macOS application registration was not observed within 10 seconds. "
+          + "It remains running. Use Open Terminal to try focusing the same process again.")
+    }
   }
 
   /// The environment every generation-owned subprocess inherits: the tray's
@@ -728,6 +824,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       canonicalRuntimeEnvironment = composeRuntimeEnvironment(install: install)
       runtimeResolutionFailure = nil
       if changed {
+        model.refreshEndpoint(caretakerData: nil, runtimeReady: true)
         lifecycleLog("adopted active generation at \(install.root.path)")
       }
       return install
@@ -754,6 +851,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     serverActionInFlight = nil
     runtimeAdvisory = nil
     runtimeResolutionFailure = failure
+    model.refreshEndpoint(caretakerData: nil, runtimeReady: false)
     if hadRuntime || failure != nil {
       lifecycleLog(log)
     }
@@ -1070,159 +1168,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   // MARK: - Main Menu
 
   private func buildStatusItem() {
-    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    // Inherit the app (dock) icon for the menu-bar status item so the tray
-    // matches the dock panda instead of a generic SF Symbol.
-    let trayIcon = NSApp.applicationIconImage.copy() as? NSImage
-    trayIcon?.size = NSSize(width: 18, height: 18)
-    trayIcon?.accessibilityDescription = "Vibecrafted"
-    trayBaseIcon =
-      trayIcon ?? NSImage(systemSymbolName: "hammer.fill", accessibilityDescription: "Vibecrafted")
-    item.button?.image = statusIcon(health: .checking)
-    item.button?.imagePosition = .imageOnly
-    item.button?.toolTip = "Vibecrafted — checking server"
-
-    let menu = NSMenu()
-    menu.delegate = self
-    let serverStatus = menu.addItem(
-      withTitle: "VC Server: CHECKING…", action: nil, keyEquivalent: "")
-    serverStatus.isEnabled = false
-    serverStatusMenuItem = serverStatus
-    let serverDetail = menu.addItem(
-      withTitle: "Reading supervisor state…", action: nil, keyEquivalent: "")
-    serverDetail.isEnabled = false
-    serverDetailMenuItem = serverDetail
-    menu.addItem(.separator())
-    let openServer = menu.addItem(
-      withTitle: "Open VC Server", action: #selector(openServerFromStatusItem),
-      keyEquivalent: "o")
-    openServer.keyEquivalentModifierMask = [.command, .option]
-    openServer.target = self
-    openServerMenuItem = openServer
-    let console = menu.addItem(
-      withTitle: "Open Native Console", action: #selector(openConsoleFromStatusItem),
-      keyEquivalent: "c")
-    console.keyEquivalentModifierMask = [.command, .option]
-    console.target = self
-    let terminal = menu.addItem(
-      withTitle: "Open VC Terminal", action: #selector(openTerminalFromStatusItem),
-      keyEquivalent: "t")
-    terminal.keyEquivalentModifierMask = [.command, .option]
-    terminal.target = self
-    let serverOwner = menu.addItem(withTitle: "VC Server", action: nil, keyEquivalent: "")
-    let serverMenu = NSMenu(title: "VC Server")
-    let start = serverMenu.addItem(
-      withTitle: "Start", action: #selector(startServerFromStatusItem), keyEquivalent: "")
-    start.target = self
-    startServerMenuItem = start
-    let stop = serverMenu.addItem(
-      withTitle: "Stop", action: #selector(stopServerFromStatusItem), keyEquivalent: "")
-    stop.target = self
-    stopServerMenuItem = stop
-    let restart = serverMenu.addItem(
-      withTitle: "Restart", action: #selector(restartServerFromStatusItem), keyEquivalent: "")
-    restart.target = self
-    restartServerMenuItem = restart
-    serverMenu.addItem(.separator())
-    let workspaces = serverMenu.addItem(
-      withTitle: "Open Workspaces", action: #selector(openWorkspacesFromStatusItem),
-      keyEquivalent: "w")
-    workspaces.keyEquivalentModifierMask = [.command, .option]
-    workspaces.target = self
-    openWorkspacesMenuItem = workspaces
-    let logs = serverMenu.addItem(
-      withTitle: "Open Logs", action: #selector(openServerLogsFromStatusItem), keyEquivalent: "")
-    logs.target = self
-    openServerLogsMenuItem = logs
-    serverOwner.submenu = serverMenu
-    let diagnostics = menu.addItem(
-      withTitle: "Server Diagnostics…", action: #selector(showServerDiagnostics),
-      keyEquivalent: "")
-    diagnostics.target = self
-    menu.addItem(.separator())
-    // Runtime Pack supervision: the pack is the product carrier and this App
-    // consumes it, so the tray shows the live generation and its drift against
-    // the signed carrier instead of hiding the runtime behind the server dot.
-    let runtimePackStatus = menu.addItem(
-      withTitle: "Runtime Pack: WAITING FOR RUNTIME", action: nil, keyEquivalent: "")
-    runtimePackStatus.isEnabled = false
-    runtimePackStatusMenuItem = runtimePackStatus
-    let runtimePackDetail = menu.addItem(
-      withTitle: "Runtime onboarding has not completed", action: nil, keyEquivalent: "")
-    runtimePackDetail.isEnabled = false
-    runtimePackDetailMenuItem = runtimePackDetail
-    let runtimePackOwner = menu.addItem(withTitle: "Runtime Pack", action: nil, keyEquivalent: "")
-    let runtimePackMenu = NSMenu(title: "Runtime Pack")
-    let revealHome = runtimePackMenu.addItem(
-      withTitle: "Reveal Runtime Home", action: #selector(revealRuntimeHomeFromStatusItem),
-      keyEquivalent: "")
-    revealHome.target = self
-    revealRuntimeHomeMenuItem = revealHome
-    let openControlPlane = runtimePackMenu.addItem(
-      withTitle: "Reveal Control Plane Files", action: #selector(openControlPlaneFromStatusItem),
-      keyEquivalent: "")
-    openControlPlane.target = self
-    openControlPlaneMenuItem = openControlPlane
-    let copyIdentity = runtimePackMenu.addItem(
-      withTitle: "Copy Runtime Identity", action: #selector(copyRuntimeIdentityFromStatusItem),
-      keyEquivalent: "")
-    copyIdentity.target = self
-    copyRuntimeIdentityMenuItem = copyIdentity
-    runtimePackMenu.addItem(.separator())
-    // The one deliberate way back to the bundled carrier. Routine opening
-    // resolves the installed generation instead, so this action — not a window
-    // — is what may replace a runtime, and it always asks first.
-    let repair = runtimePackMenu.addItem(
-      withTitle: "Reinstall From Bundled Pack…", action: #selector(repairRuntimeFromBundledPack),
-      keyEquivalent: "")
-    repair.target = self
-    repairRuntimeMenuItem = repair
-    runtimePackOwner.submenu = runtimePackMenu
-    menu.addItem(.separator())
-    menu.addItem(
-      withTitle: "About Vibecrafted",
-      action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
-    let help = menu.addItem(
-      withTitle: "Vibecrafted Help", action: #selector(showStatusItemHelp), keyEquivalent: "")
-    help.target = self
-    menu.addItem(.separator())
-    let quit = menu.addItem(
-      withTitle: "Quit Vibecrafted", action: #selector(requestQuit), keyEquivalent: "q")
-    quit.target = self
-    item.menu = menu
-    statusItem = item
-    statusRefreshTimer = Timer.scheduledTimer(
-      timeInterval: 5, target: self, selector: #selector(refreshServerStatusFromTimer),
-      userInfo: nil, repeats: true)
-    refreshServerStatus()
-  }
-
-  func menuWillOpen(_ menu: NSMenu) {
-    refreshServerStatus()
-  }
-
-  @objc private func refreshServerStatusFromTimer() {
-    refreshServerStatus()
-  }
-
-  private func statusIcon(health: TrayServerHealth) -> NSImage? {
-    guard let base = trayBaseIcon else { return nil }
-    let size = NSSize(width: 18, height: 18)
-    let image = NSImage(size: size, flipped: false) { rect in
-      base.draw(in: rect)
-      let dotRect = NSRect(x: 11.5, y: 0.5, width: 6, height: 6)
-      NSColor.windowBackgroundColor.setFill()
-      NSBezierPath(ovalIn: dotRect.insetBy(dx: -1, dy: -1)).fill()
-      health.color.setFill()
-      NSBezierPath(ovalIn: dotRect).fill()
-      return true
+    tray = StatusItemController { [weak self] action in self?.handleTray(action) }
+    tray?.install()
+    statusRefreshTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+      Task { @MainActor [weak self] in self?.refreshServerStatus() }
     }
-    image.isTemplate = false
-    image.accessibilityDescription = "Vibecrafted server status"
-    return image
   }
 
   private func refreshServerStatus() {
+    if let launch = terminalLaunch, !launch.isRunning {
+      terminalRegistrationTimer?.invalidate()
+      terminalRegistration = nil
+      terminalLaunch = nil
+      terminalApplication = nil
+      if let status = launch.exitStatus, status != 0 {
+        showNativeMessage("Terminal exited", "The generation-owned terminal exited with status \(status). Open Terminal to try again.")
+      }
+    }
     // Render what is already known, then re-ask the owner. The active pointer
     // can move under a running App — a runtime-first upgrade republishes it
     // while the tray is open — so liveness and the service actions must follow
@@ -1250,6 +1212,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     guard serverStatusProcess?.isRunning != true else { return }
     let deck = install.root.appendingPathComponent("bin/vibecrafted")
     guard FileManager.default.isExecutableFile(atPath: deck.path) else {
+      lastCaretakerData = nil
       renderServerStatus()
       return
     }
@@ -1265,14 +1228,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // A verdict about a generation this App no longer controls is not the
         // current truth, however recently it arrived.
         guard epoch == self.runtimeResolveEpoch else { return }
-        if !result.stdout.isEmpty {
-          self.lastCaretakerData = result.stdout
-        }
+        self.lastCaretakerData = result.clean && result.terminationStatus == 0
+          && !result.stdout.isEmpty ? result.stdout : nil
         self.renderServerStatus()
       }
       serverStatusProcess = process
     } catch {
       serverStatusProcess = nil
+      lastCaretakerData = nil
       renderServerStatus()
     }
   }
@@ -1280,68 +1243,77 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   /// Paint the tray from cached truth alone. This spawns nothing, so it is safe
   /// to call from any completion handler.
   private func renderServerStatus() {
-    applyServerMenuState(
-      deriveServerMenuState(
-        caretakerData: lastCaretakerData,
-        actionInFlight: serverActionInFlight,
-        runtimeReady: canonicalInstall != nil))
+    if canonicalInstall == nil, let reason = runtimeResolutionFailure {
+      model.block(reason: reason)
+    } else {
+      model.refreshEndpoint(caretakerData: lastCaretakerData, runtimeReady: canonicalInstall != nil)
+    }
+    updateDeckPresentation()
   }
 
-  private func applyServerMenuState(_ state: ServerMenuState) {
-    serverStatusMenuItem?.title = state.header
-    // When the runtime itself cannot be resolved, that reason outranks the
-    // generic waiting-for-runtime line: it is the only thing that tells the
-    // Founder what actually happened and what to do next.
-    let detail = runtimeResolutionFailure ?? state.detail
-    serverDetailMenuItem?.title = detail
-    serverDetailMenuItem?.isHidden = detail.isEmpty
-    startServerMenuItem?.isEnabled = state.canStart
-    stopServerMenuItem?.isEnabled = state.canStop
-    restartServerMenuItem?.isEnabled = state.canRestart
-    let navigation = resolveServerNavigation(caretakerData: lastCaretakerData)
-    // No resolved runtime means no navigable server, whatever the last envelope
-    // happened to say.
-    let navigable = navigation.isAvailable && canonicalInstall != nil
-    openServerMenuItem?.isEnabled = navigable
-    openServerMenuItem?.toolTip = runtimeResolutionFailure ?? navigation.unavailableReason
-    openWorkspacesMenuItem?.isEnabled = navigable
-    openWorkspacesMenuItem?.toolTip = runtimeResolutionFailure ?? navigation.unavailableReason
-    openServerLogsMenuItem?.isEnabled =
-      canonicalInstall != nil && serverUtilityProcess?.isRunning != true
-    statusItem?.button?.image = statusIcon(health: state.health)
-    statusItem?.button?.toolTip = "Vibecrafted — \(state.header)"
-    applyRuntimePackMenuState()
-  }
+  private func applyRuntimePackMenuState() { updateDeckPresentation() }
 
-  private func applyRuntimePackMenuState() {
-    let state = deriveRuntimePackMenuState(
+  private func updateDeckPresentation() {
+    let state = deriveServerMenuState(caretakerData: lastCaretakerData,
+      actionInFlight: serverActionInFlight, runtimeReady: canonicalInstall != nil)
+    var actions: Set<CommandDeckChromeAction> = [.showDiagnostics]
+    if !repairInFlight { actions.insert(.repairRuntime) }
+    if runtimeActionPreflight == nil && serverActionInFlight == nil && !repairInFlight {
+      actions.insert(.retryConnection)
+    }
+    if canonicalInstall != nil && !terminalLaunchInFlight { actions.insert(.openTerminal) }
+    if state.canStop && runtimeActionPreflight == nil { actions.insert(.requestStopRuntime) }
+    model.availableActions = actions
+    let presentation = model.presentation
+    let runtimePack = deriveRuntimePackMenuState(
       generation: canonicalInstall?.root.lastPathComponent,
       signedSourceRevision: signedCarrierRevisions?.source,
       runtimeReady: canonicalInstall != nil)
-    runtimePackStatusMenuItem?.title = state.header
-    // Same precedence as the server line: a refusal from the owner first, then
-    // a problem with the shared service, then whatever the policy derived.
-    let detail = runtimeResolutionFailure ?? runtimeAdvisory ?? state.detail
-    runtimePackDetailMenuItem?.title = detail
-    runtimePackDetailMenuItem?.isHidden = detail.isEmpty
-    revealRuntimeHomeMenuItem?.isEnabled = state.actionsEnabled
-    openControlPlaneMenuItem?.isEnabled = state.actionsEnabled
-    copyRuntimeIdentityMenuItem?.isEnabled = state.actionsEnabled
-    // Repair is deliberately not gated on `actionsEnabled`: it is the way out
-    // of an absent or refused installation, which is exactly when the
-    // inspection actions above have nothing to inspect.
+    let detail: String
+    switch model.state {
+    case .blocked(let reason), .recovering(let reason): detail = runtimeResolutionFailure ?? reason
+    default: detail = runtimeAdvisory ?? state.detail
+    }
+    var utilities: Set<StatusItemAction> = []
+    if canonicalInstall != nil {
+      utilities.formUnion([.revealRuntime, .revealControlPlane, .copyRuntimeIdentity])
+      if serverUtilityProcess?.isRunning != true && runtimeActionPreflight == nil { utilities.insert(.showLogs) }
+    }
+    if state.canStart { utilities.insert(.startServer) }
+    if state.canRestart { utilities.insert(.restartServer) }
+    let health: TrayServerHealth
+    switch presentation.phase {
+    case .bootstrapping, .connecting: health = .checking
+    case .online: health = state.health
+    case .recovering, .blocked: health = .failed
+    }
+    tray?.update(StatusItemPresentation(
+      health: health,
+      statusLine: "Command Deck: \(presentation.phase.rawValue)", detailLine: detail,
+      availability: StatusItemAvailability(canShowCommandDeck: true,
+        canOpenTerminal: actions.contains(.openTerminal),
+        canRetryConnection: actions.contains(.retryConnection),
+        canRepairRuntime: actions.contains(.repairRuntime),
+        canStopRuntime: actions.contains(.requestStopRuntime),
+        canShowDiagnostics: true, canQuitApp: true, runtimeActions: utilities),
+      toolTip: "Vibecrafted — \(presentation.phase.rawValue). \(detail). \(runtimePack.header). \(runtimePack.detail)"))
+  }
+
+  private func revealNativePath(_ url: URL) {
+    do { try nativeBridge.perform(.revealPath(try .init(path: url.path))) }
+    catch { showNativeMessage("Cannot reveal path", error.localizedDescription) }
   }
 
   @objc private func revealRuntimeHomeFromStatusItem() {
     guard let install = canonicalInstall else { return }
-    NSWorkspace.shared.open(install.runtimeHome)
+    revealNativePath(install.runtimeHome)
   }
 
   @objc private func openControlPlaneFromStatusItem() {
     guard let install = canonicalInstall else { return }
     let controlPlane = install.craftedHome.appendingPathComponent(
       "control_plane", isDirectory: true)
-    NSWorkspace.shared.open(
+    revealNativePath(
       FileManager.default.fileExists(atPath: controlPlane.path)
         ? controlPlane : install.craftedHome)
   }
@@ -1378,8 +1350,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     confirmation.addButton(withTitle: "Reinstall")
     guard confirmation.runModal() == .alertSecondButtonReturn else { return }
 
-    repairRuntimeMenuItem?.isEnabled = false
-    defer { repairRuntimeMenuItem?.isEnabled = true }
+    guard !repairInFlight, runtimeActionPreflight == nil,
+      serverActionInFlight == nil else { return }
+    repairInFlight = true
+    updateDeckPresentation()
+    defer { repairInFlight = false; updateDeckPresentation() }
     let install: CanonicalRuntimeInstall
     do {
       install = try installCanonicalRuntime()
@@ -1408,72 +1383,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     reconcileControlPlaneEye(install: repaired, environment: environment)
     applyRuntimePackMenuState()
     refreshServerStatus()
-    // Repair is usually asked for because the terminal would not open. Attach
-    // to the live one if it survived, otherwise open it on the repaired
-    // runtime; the launch path re-resolves through the owner and so also proves
-    // the repair.
-    launchWorkspaceTerminal()
+    webSession.retry()
   }
 
-  @objc private func openConsoleFromStatusItem() {
-    Task {
-      _ = try? await getServerStatus()
-      await MainActor.run {
-        self.showMainWindowIfNeeded()
-      }
-    }
-  }
+  @objc private func openConsoleFromStatusItem() { openRoute("/") }
+  @objc private func openServerFromStatusItem() { openRoute("/") }
+  @objc private func openWorkspacesFromStatusItem() { openRoute("/workspaces") }
 
-  @objc private func openServerFromStatusItem() {
-    openServerPage(\.server, label: "VC Server")
-  }
-
-  @objc private func openWorkspacesFromStatusItem() {
-    openServerPage(\.workspaces, label: "Workspaces")
-  }
-
-  private func openServerPage(
-    _ keyPath: KeyPath<ServerNavigationState, URL?>, label: String
-  ) {
-    let navigation = resolveServerNavigation(caretakerData: lastCaretakerData)
-    guard let url = navigation[keyPath: keyPath] else {
-      let alert = NSAlert()
-      alert.alertStyle = .warning
-      alert.messageText = "\(label) is unavailable"
-      alert.informativeText =
-        navigation.unavailableReason ?? "The configured VC Server is unavailable."
-      alert.addButton(withTitle: "OK")
-      alert.runModal()
-      return
-    }
-    NSWorkspace.shared.open(url)
+  private func openRoute(_ path: String) {
+    showMainWindowIfNeeded()
+    webSession.navigate(path: path)
+    refreshServerStatus()
   }
 
   @objc private func openTerminalFromStatusItem() {
-    if let application = terminalApplication, !application.isTerminated {
-      application.activate(options: [])
-      return
-    }
-    // The wrapper execs its host in place, so a live terminal is not always
-    // registered as an application. Try to adopt it before deciding it is gone
-    // and opening a second one.
-    if let process = terminalProcess, process.isRunning {
-      if let application = NSRunningApplication(processIdentifier: process.processIdentifier) {
-        terminalApplication = application
-        application.activate(options: [])
-      }
-      return
-    }
-    launchWorkspaceTerminal()
+    do {
+      try nativeBridge.perform(.openTerminal(.init(
+        workingDirectory: try .init(path: terminalWorkingDirectory.path))))
+    } catch { reportWorkspaceLaunchFailure(error.localizedDescription) }
   }
 
   @objc private func startServerFromStatusItem() {
     performServerAction(.start)
   }
 
-  @objc private func stopServerFromStatusItem() {
-    performServerAction(.stop)
-  }
+  @objc private func stopServerFromStatusItem() { handle(.requestStopRuntime) }
 
   @objc private func restartServerFromStatusItem() {
     performServerAction(.restart)
@@ -1510,6 +1444,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             "Cannot \(action.rawValue) VC Server: \($0)"
           } ?? "Cannot \(action.rawValue) VC Server before runtime onboarding completes")
         return
+      }
+      if action == .stop {
+        guard self.confirmedStopRoot == install.root,
+          deriveServerMenuState(caretakerData: self.lastCaretakerData,
+            actionInFlight: nil, runtimeReady: true).canStop else {
+          self.confirmedStopRoot = nil
+          self.serverActionInFlight = nil
+          self.renderServerStatus()
+          self.reportWorkspaceLaunchFailure("Runtime identity or stop availability changed; review Stop Runtime again.")
+          return
+        }
+        self.confirmedStopRoot = nil
       }
       self.runServerAction(action, install: install, environment: environment)
     }
@@ -1584,7 +1530,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // generation that is installed now, so the owner is asked before the deck
     // of a remembered one is executed.
     runtimeActionPreflight = "server logs"
-    openServerLogsMenuItem?.isEnabled = false
     resolveInstalledRuntime { [weak self] resolution in
       guard let self else { return }
       self.runtimeActionPreflight = nil
@@ -1625,7 +1570,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if result.clean, result.terminationStatus == 0,
           let logs = decodeServerLogs(data: result.stdout)
         {
-          NSWorkspace.shared.open(logs.directory)
+          self.revealNativePath(logs.directory)
         } else {
           let detail = String(
             data: result.stderr.isEmpty ? result.stdout : result.stderr, encoding: .utf8)?
@@ -1671,7 +1616,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     alert.alertStyle = .informational
     alert.messageText = "Vibecrafted Help"
     alert.informativeText =
-      "The tray dot reports VC Server: green is healthy, amber is transitioning, red needs attention, and gray is stopped. Open VC Server and Open Workspaces use the configured live server only when its caretaker says it is available. Open Native Console shows the local AppKit console. Reveal Control Plane Files opens the on-disk runtime state."
+      "The tray reports the combined native connection and web canvas state. Open VC Server and Open Workspaces use the configured live server only when its caretaker says it is available. Console and Workspaces stay in the Command Deck web session. Reveal Control Plane Files opens the on-disk runtime state."
     alert.addButton(withTitle: "OK")
     alert.runModal()
   }
@@ -1696,10 +1641,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     } catch {
       return .unavailable(error.localizedDescription)
     }
-    // This one answer is needed synchronously, because the quit decision hangs
-    // on it. Waiting for it forever means a wedged launcher can make the App
-    // unquittable, so the wait is bounded and a silent launcher becomes an
-    // explicit "unavailable" the Founder is asked about.
+    // Stop confirmation names the current activity. A bounded failure is
+    // reported as unknown activity; Quit App never enters this read path.
     let deadline = Date().addingTimeInterval(activityTruthTimeout)
     while process.isRunning, Date() < deadline {
       usleep(50_000)
@@ -1758,20 +1701,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     fileMenuItem.submenu = fileMenu
     mainMenu.addItem(fileMenuItem)
 
-    // View menu
     let viewMenu = NSMenu(title: "View")
-    let sidebarItem = viewMenu.addItem(
-      withTitle: "Toggle Sidebar", action: #selector(NSSplitViewController.toggleSidebar(_:)),
-      keyEquivalent: "s")
-    sidebarItem.keyEquivalentModifierMask = [.command, .control]
-    let inspectorItem = viewMenu.addItem(
-      withTitle: "Toggle Inspector", action: #selector(NSSplitViewController.toggleInspector(_:)),
-      keyEquivalent: "i")
-    inspectorItem.keyEquivalentModifierMask = [.command, .control]
-
+    for (title, selector, key) in [
+      ("Console", #selector(openConsoleFromStatusItem), "1"),
+      ("Server", #selector(openServerFromStatusItem), "2"),
+      ("Workspaces", #selector(openWorkspacesFromStatusItem), "3")
+    ] {
+      let item = viewMenu.addItem(withTitle: title, action: selector, keyEquivalent: key)
+      item.target = self
+    }
     let viewMenuItem = NSMenuItem()
     viewMenuItem.submenu = viewMenu
     mainMenu.addItem(viewMenuItem)
+
+    let editMenu = NSMenu(title: "Edit")
+    for (title, selector, key) in [
+      ("Cut", "cut:", "x"), ("Copy", "copy:", "c"),
+      ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a")
+    ] { editMenu.addItem(withTitle: title, action: NSSelectorFromString(selector), keyEquivalent: key) }
+    let editItem = NSMenuItem()
+    editItem.submenu = editMenu
+    mainMenu.addItem(editItem)
 
     // Window menu
     let windowMenu = NSMenu(title: "Window")
