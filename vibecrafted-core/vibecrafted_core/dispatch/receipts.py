@@ -185,6 +185,31 @@ class DispatchReceiptStore:
             atomic_write_json(self.path, payload)
             return True
 
+    def claim_resume_attempt(self, cut_id: str, *, parent_run_id: str) -> str:
+        """Reserve one stable retry identity for a terminal provider run.
+
+        Concurrent supervisors recovering the same dead child must replay the
+        same provider idempotency key. A later dead child gets the next token.
+        """
+        if cut_id not in self._cut_ids or not parent_run_id:
+            raise ReceiptContractError("resume attempt requires cut and parent run")
+        with self._locked_ledger():
+            payload = self._read_unlocked()
+            entry = payload["cuts"][cut_id]
+            if str(entry.get("resume_parent_run_id") or "") == parent_run_id:
+                existing = str(entry.get("resume_attempt") or "")
+                if existing:
+                    return existing
+            sequence = int(entry.get("resume_attempt_sequence") or 0) + 1
+            attempt = f"resume-{sequence}"
+            entry["resume_attempt_sequence"] = sequence
+            entry["resume_parent_run_id"] = parent_run_id
+            entry["resume_attempt"] = attempt
+            entry["updated_at"] = _now()
+            payload["updated_at"] = _now()
+            atomic_write_json(self.path, payload)
+            return attempt
+
     @staticmethod
     def _next_fence_sequence(payload: dict[str, Any]) -> int:
         """Return the next total order number for stop/resume fence events."""

@@ -1724,6 +1724,12 @@ def _launch_tracking_payload(
             "attempt",
             "native_resume",
             "resume_idempotency_key",
+            "dispatch_run_id",
+            "dispatch_cut_id",
+            "dispatch_branch",
+            "dispatch_baseline_sha",
+            "dispatch_attempt",
+            "dispatch_idempotency_key",
         )
         if launch_meta.get(key) not in (None, "")
     }
@@ -2254,6 +2260,117 @@ def recover_launch_receipt(
     stored["accepted"] = bool(record.get("accepted")) and dispatched
     stored.setdefault("status", "launching" if stored["accepted"] else "failed")
     return stored
+
+
+def recover_legacy_dispatch_identity(
+    spec: WorkflowLaunchSpec,
+    *,
+    env: dict[str, str],
+    provider_run_id: str,
+    cut_id: str,
+    branch: str,
+    baseline_sha: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Authenticate a pre-dispatch-metadata launch from its durable record.
+
+    Older core runtimes persisted the launch idempotency record before they
+    projected ``dispatch_*`` fields into ``meta.json``.  Those fields must not
+    be guessed on resume: this recovery path accepts the old shape only when
+    the exact caller-owned key, immutable stored spec digest, stored receipt,
+    and current canonical run projection all describe the same launch.
+    """
+    key = launch_idempotency_key(spec, env=env)
+    if not key:
+        return None, "legacy dispatch recovery has no idempotency key"
+    record = _read_launch_idempotency_record(key)
+    if not record:
+        return None, "legacy dispatch idempotency record is absent"
+    receipt = record.get("receipt")
+    if not isinstance(receipt, dict):
+        return None, "legacy dispatch idempotency receipt is invalid"
+    stored_spec = receipt.get("spec")
+    if not isinstance(stored_spec, dict):
+        return None, "legacy dispatch idempotency spec is invalid"
+    try:
+        historical = WorkflowLaunchSpec(
+            agent=str(stored_spec["agent"]),
+            mode=str(stored_spec["mode"]),
+            skill=str(stored_spec["skill"]),
+            prompt=str(stored_spec.get("prompt") or ""),
+            file=str(stored_spec.get("file") or ""),
+            runtime=str(stored_spec["runtime"]),
+            root=str(stored_spec["root"]),
+            count=stored_spec.get("count"),
+            depth=stored_spec.get("depth"),
+            model=str(stored_spec.get("model") or ""),
+            research_agents=tuple(stored_spec.get("research_agents") or ()),
+            research_synthesizer=str(stored_spec.get("research_synthesizer") or ""),
+            research_synthesizer_model=str(
+                stored_spec.get("research_synthesizer_model") or ""
+            ),
+            lifecycle_state_path=str(stored_spec.get("lifecycle_state_path") or ""),
+            claim_digest=str(stored_spec.get("claim_digest") or ""),
+            run_id=str(stored_spec.get("run_id") or ""),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None, "legacy dispatch idempotency spec is incomplete"
+    if (
+        record.get("schema") != LAUNCH_IDEMPOTENCY_SCHEMA
+        or str(record.get("idempotency_key") or "") != key
+        or str(record.get("state") or "") != "dispatched"
+        or record.get("accepted") is not True
+        or not str(record.get("spec_digest") or "")
+        or _launch_spec_digest(historical) != str(record.get("spec_digest") or "")
+    ):
+        return None, "legacy dispatch idempotency record does not bind its launch"
+    root = str(Path(spec.root).expanduser().resolve(strict=False))
+    historical_root = str(Path(historical.root).expanduser().resolve(strict=False))
+    if not (
+        str(record.get("run_id") or "") == provider_run_id
+        and str(receipt.get("run_id") or "") == provider_run_id
+        and str(receipt.get("idempotency_key") or "") == key
+        and str(record.get("agent") or "").lower() == spec.agent.lower()
+        and str(record.get("skill") or "") == spec.skill
+        and str(record.get("root") or "") == root
+        and historical.agent.lower() == spec.agent.lower()
+        and historical.skill == spec.skill
+        and historical_root == root
+    ):
+        return None, "legacy dispatch record conflicts with the requested cut"
+    canonical = lookup_run(provider_run_id)
+    observed_root = str(
+        (canonical or {}).get("resolved_worktree_path")
+        or (canonical or {}).get("root")
+        or ""
+    )
+    worker_identity = (canonical or {}).get("worker_identity")
+    worker_pid = (canonical or {}).get("worker_pid")
+    if not (
+        isinstance(canonical, dict)
+        and str(canonical.get("run_id") or "") == provider_run_id
+        and observed_root
+        and Path(observed_root).resolve(strict=False)
+        == Path(root).resolve(strict=False)
+        and str(canonical.get("branch") or "") == branch
+        and str(canonical.get("baseline_sha") or "") == baseline_sha
+        and str(canonical.get("cut_id") or "") == cut_id
+        and str(canonical.get("agent") or "").lower() == spec.agent.lower()
+        and str(canonical.get("skill") or "") == spec.skill
+        and canonical.get("worker_alive") is False
+        and isinstance(worker_pid, int)
+        and isinstance(worker_identity, dict)
+        and worker_identity.get("run_id") == provider_run_id
+        and worker_identity.get("pid") == worker_pid
+        and worker_identity.get("pgid")
+        and worker_identity.get("start_token")
+        and worker_identity.get("command_sha256")
+    ):
+        return None, "legacy dispatch canonical identity is incomplete or conflicts"
+    return {
+        "provider_run_id": provider_run_id,
+        "idempotency_key": key,
+        "spec_digest": str(record["spec_digest"]),
+    }, ""
 
 
 def launch_workflow(
