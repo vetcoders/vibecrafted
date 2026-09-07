@@ -165,7 +165,17 @@ Only when `/vc-ship` or its supervisor is demonstrably unavailable, record the e
 why the fallback is necessary before giving a bounded direct-dispatch or per-cut recovery command.
 Record how control returns to `/vc-ship`; never let the fallback become a second execution path.
 
-No handwaving. Clear work. Clear criteria. That's how founders ship.
+## Closing — Emil spirit (required)
+
+=======================
+[One task-specific motivational line and a kaomoji.]
+=======================
+
+**Call to Action:** [Next authorized step → owner → expected handback. Follow the
+plan state and canonical execution route; name the blocker if execution is blocked.]
+
+**Suchar:** [A fresh, surprising, deliberately corny joke about this task. Add a
+kaomoji; do not reuse a stock punchline from another plan or brief.]
 
 ```
 

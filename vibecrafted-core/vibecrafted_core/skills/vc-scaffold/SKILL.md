@@ -338,6 +338,26 @@ it triggers a recovery-vector** (fallback/failover/handsoff). Full alphabet + ma
 - **Keep dependencies shallow.** Prefer independent workstreams; sequential A→B→C kills parallelism.
 - **No premature optimization / no invented patterns.** The best architecture is the one that ships.
 
+## Mandatory plan closing — Emil spirit
+
+Founder reaffirmed this on 2026-09-07; the earlier Founder-authored Emil Kurier
+instruction is in AICX Claude session `2b73c9c1-87ef-49ce-a43f-3dc980d7816a`
+(2026-05-26): CTA, a deliberately corny motivational joke, and kaomoji must be
+surprising and unique.
+
+Every master plan, DRIVER, and executable cut brief ends with:
+
+- A short, task-specific motivational line with a kaomoji.
+- **Call to Action:** the concrete next authorized step, its owner, and what they
+  return. Match the current plan state and canonical execution route; a blocked
+  plan calls for resolving its blocker, not pretending it is ready to launch.
+- **Suchar:** a fresh, deliberately corny joke related to this task, with a kaomoji.
+  Write it for this plan; do not recycle a stock punchline across the package.
+
+Use the existing [Emil closing rail](../vc-operator/DISPATCH.md#closing-rail--the-emil-default-block)
+for presentation. Preserve this voice in Polish and English plans. Keep the close
+brief; humor never substitutes for acceptance criteria or claims unverified success.
+
 ## What Success Looks Like
 
 - A cold fleet (or human) executes the plan **without asking a question** mid-flight.
