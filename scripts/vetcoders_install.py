@@ -15592,16 +15592,11 @@ def _merge_runtime_preferences(
         raise ValueError("previous shipped defaults are unavailable")
     if current == previous:
         return incoming
+    # An unchanged shipped default needs no three-way merge, irrespective of
+    # its format. In particular, do not reject a user-owned custom KDL block
+    # merely because this is a KDL preference file.
     if incoming == previous:
         return current
-    if kdl:
-        # setup --check prints config errors but exits zero, so it is not a
-        # safe validation API. Never synthesize KDL from two changed documents.
-        # Keep exact user bytes when defaults are unchanged; otherwise require
-        # explicit resolution against the preserved previous/incoming defaults.
-        raise ValueError(
-            "both user KDL and shipped defaults changed; explicit merge required"
-        )
     base = previous.splitlines(keepends=True)
 
     def edits(text: str) -> list[tuple[int, int, list[str]]]:
@@ -15617,13 +15612,39 @@ def _merge_runtime_preferences(
     user_edits = edits(current)
     upstream_edits = edits(incoming)
 
+    if kdl:
+        _assert_kdl_preference_merge_is_unambiguous(
+            base, user_edits, upstream_edits, previous, current, incoming
+        )
+
+    def edits_conflict(
+        left: tuple[int, int, list[str]], right: tuple[int, int, list[str]]
+    ) -> bool:
+        """Reject overlapping edits, but permit changes at adjacent boundaries.
+
+        Line intervals are half-open.  Insertions at a replacement's start or
+        end are independent, while an insertion *inside* a replacement and two
+        different insertions at the same position are ambiguous.  This lets an
+        operator add a KDL preference beside a product-default update without
+        pretending that two edits to one setting can be reconciled safely.
+        """
+        left_start, left_end, _ = left
+        right_start, right_end, _ = right
+        if left_start == left_end and right_start == right_end:
+            return left_start == right_start
+        if left_start == left_end:
+            return right_start < left_start < right_end
+        if right_start == right_end:
+            return left_start < right_start < left_end
+        return left_start < right_end and right_start < left_end
+
     merged_edits = list(upstream_edits)
     for user in user_edits:
         for upstream in upstream_edits:
             if user == upstream:
                 break
-            if user[0] <= upstream[1] and upstream[0] <= user[1]:
-                raise ValueError("user edits overlap or touch changed shipped defaults")
+            if edits_conflict(user, upstream):
+                raise ValueError("user edits overlap changed shipped defaults")
         else:
             merged_edits.append(user)
     result = list(base)
@@ -15632,6 +15653,121 @@ def _merge_runtime_preferences(
     ):
         result[start:end] = replacement
     return "".join(result)
+
+
+def _assert_kdl_preference_merge_is_unambiguous(
+    base: list[str],
+    user_edits: list[tuple[int, int, list[str]]],
+    upstream_edits: list[tuple[int, int, list[str]]],
+    previous: str,
+    current: str,
+    incoming: str,
+) -> None:
+    """Permit only independent top-level scalar KDL preference changes.
+
+    The text merge below preserves comments and exact formatting, but line
+    positions are not KDL identity: the same setting can be inserted at two
+    different positions. We deliberately do not grow a KDL parser here.
+    Instead, reject edits to blocks/nested content and compare changed
+    top-level scalar names before applying the ordinary three-way merge.
+    """
+
+    def line_without_comment(line: str) -> str:
+        quoted = False
+        escaped = False
+        for index, char in enumerate(line):
+            if escaped:
+                escaped = False
+            elif char == "\\" and quoted:
+                escaped = True
+            elif char == '"':
+                quoted = not quoted
+            elif not quoted and line[index : index + 2] == "//":
+                return line[:index]
+        return line
+
+    def depths(lines: list[str]) -> list[int]:
+        depth = 0
+        result: list[int] = []
+        for line in lines:
+            result.append(depth)
+            body = line_without_comment(line)
+            quoted = False
+            escaped = False
+            for char in body:
+                if escaped:
+                    escaped = False
+                elif char == "\\" and quoted:
+                    escaped = True
+                elif char == '"':
+                    quoted = not quoted
+                elif not quoted and char == "{":
+                    depth += 1
+                elif not quoted and char == "}":
+                    depth -= 1
+                    if depth < 0:
+                        raise ValueError("KDL structure is unbalanced")
+        if depth:
+            raise ValueError("KDL structure is unbalanced")
+        return result
+
+    scalar_setting = re.compile(
+        r"([A-Za-z_][A-Za-z0-9_-]*)\s+"
+        r'(?:true|false|-?(?:0|[1-9]\d*)(?:\.\d+)?|"(?:[^"\\]|\\.)*")'
+    )
+
+    def scalar_settings(text: str) -> dict[str, str]:
+        lines = text.splitlines(keepends=True)
+        line_depths = depths(lines)
+        settings: dict[str, str] = {}
+        for line, depth in zip(lines, line_depths):
+            body = line_without_comment(line).strip()
+            if not body:
+                continue
+            match = scalar_setting.fullmatch(body)
+            if depth == 0 and match:
+                name = match.group(1)
+                if name in settings:
+                    raise ValueError(f"KDL setting is repeated: {name}")
+                settings[name] = body
+        return settings
+
+    base_depths = depths(base)
+
+    def assert_scalar_edits(edits_to_check: list[tuple[int, int, list[str]]]) -> None:
+        for start, end, replacement in edits_to_check:
+            if start != end and any(depth != 0 for depth in base_depths[start:end]):
+                raise ValueError("KDL edit changes nested or structural content")
+            if start == end and (base_depths[start] if start < len(base) else 0) != 0:
+                raise ValueError("KDL edit changes nested or structural content")
+            for line in replacement:
+                body = line_without_comment(line).strip()
+                if "{" in body or "}" in body:
+                    raise ValueError("KDL edit changes nested or structural content")
+                if body and scalar_setting.fullmatch(body) is None:
+                    raise ValueError("KDL edit uses unsupported changed scalar syntax")
+
+    assert_scalar_edits(user_edits)
+    assert_scalar_edits(upstream_edits)
+    previous_settings = scalar_settings(previous)
+    user_settings = scalar_settings(current)
+    incoming_settings = scalar_settings(incoming)
+    user_changed = {
+        name
+        for name in previous_settings.keys() | user_settings.keys()
+        if previous_settings.get(name) != user_settings.get(name)
+    }
+    upstream_changed = {
+        name
+        for name in previous_settings.keys() | incoming_settings.keys()
+        if previous_settings.get(name) != incoming_settings.get(name)
+    }
+    conflicts = sorted(user_changed & upstream_changed)
+    if conflicts:
+        raise ValueError(
+            "KDL settings conflict with changed shipped defaults: "
+            + ", ".join(conflicts)
+        )
 
 
 def _runtime_preference_paths(product_config: Path) -> tuple[Path, ...]:
