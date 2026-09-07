@@ -1,47 +1,152 @@
+# Three independent cuts in three linked worktrees, two providers, one
+# scheduler — the plan shape a dispatcher runs when the work genuinely splits.
+#
+# Every command below is a real gate of THIS repository (`make dispatch-test`,
+# `make check`, `make server-check`, `make server-test`), narrowed to the one
+# surface its cut owns. Nothing here is a placeholder target: run the plan
+# against a checkout of vibecrafted and the verifiers execute.
+#
+# --- binding this example to a checkout -----------------------------------
+#
+# `meta.repo` is the ONLY binding between a plan and a working copy, and the
+# parser takes it verbatim: no `$VAR` expansion, no `~`, no cwd inference. To
+# run this example, replace the placeholder with an absolute path — either by
+# editing the file, or through the supported parser entry point, which accepts
+# text rather than a path:
+#
+#     from pathlib import Path
+#     from vibecrafted_core.dispatch.schema import parse_dispatch
+#
+#     source = Path("examples/dispatch/parallel-worktrees.dispatch.toml")
+#     bound = source.read_text(encoding="utf-8").replace(
+#         "/absolute/path/to/repository", str(checkout.resolve())
+#     )
+#     dispatch = parse_dispatch(bound, base_dir=source.parent)
+#
+# `base_dir` is not decoration: relative `brief` paths resolve against it, so
+# passing the example's own directory keeps a bound copy loadable from anywhere.
+# `load_dispatch(path)` is the same parse without the rebinding step.
+#
+# `meta.baseline` is DERIVED, never declared as truth. `vibecrafted dispatch`
+# stamps `branch`, `head` and `recorded_at` from the live git state of
+# `meta.repo` before any worker launches, overwriting whatever the file says.
+# Declare intent here if it helps a reader; the runtime records the fact. Bind
+# `meta.repo` correctly and the baseline follows — bind it wrong and every cut
+# branches off the wrong tree.
+#
+# reports_dir/tracker are deliberately absent: the dispatch doctor refuses any
+# path containing `/.vibecrafted/`, and the runtime picks the canonical
+# artifact plane itself.
 schema = "vibecrafted.dispatch.v1"
 
 [meta]
 name = "parallel-worktree-example"
 repo = "/absolute/path/to/repository"
+description = "Three disjoint repository surfaces cut in parallel; the root integrates."
 
 [policy]
-concurrency = 2
+# Three cuts, three slots. Concurrency below the cut count would serialize the
+# fleet and make the parallel worktrees pointless.
+#
+# The doctor refuses any concurrent plan while CARGO_TARGET_DIR is exported —
+# a shared target dir is a data race between worktrees, and Vibecrafted assigns
+# $PWD/target per worker instead. Validating this file from inside a dispatched
+# worker (which does export it) therefore needs `env -u CARGO_TARGET_DIR`; the
+# error is about your shell, not about this plan.
+concurrency = 3
 allow_concurrency = true
 require_commit = true
+# No automatic repair rounds: a failed cut comes back to the root with its
+# evidence instead of being silently re-driven by the scheduler.
+repair_rounds = 0
 await = { poll_s = 5, timeout_min = 90 }
 
 [common]
 text = """
-Work only in {repo}. Commit the cut and leave a complete report in the
-preallocated VIBECRAFTED_REPORT_PATH. Never choose another checkout or Cargo
-target; the dispatcher owns both.
+Work only inside the worktree the dispatcher gave you. Never switch checkout,
+branch or Cargo target — the dispatcher owns all three. Stay inside the file
+scope your cut names; another worker owns every other surface in this run.
+Commit your cut locally and leave a complete report at VIBECRAFTED_REPORT_PATH.
+Do not merge, rebase onto, or push to the trunk: the root Agent-Operator is the
+only integrator in this plan.
 """
 
-[[cuts]]
-id = "api"
-agent = "codex"
-workflow = "implement"
-prompt = "Implement the API half."
-  [[cuts.verify]]
-  run = "make test-api"
-  expect = { exit_code = 0 }
+[[phases]]
+title = "Parallel"
+detail = "three disjoint surfaces, no ordering between them"
 
+# --- cut 1: Python dispatch core --- Claude Opus 5 -------------------------
+# Reasoning-heavy work on the runtime's own verifier semantics.
 [[cuts]]
-id = "ui"
+id = "verifier-env"
+phase = "Parallel"
 agent = "claude"
+model = "claude-opus-5"
 workflow = "implement"
-prompt = "Implement the UI half."
+prompt = """
+Cut {id} in {repo}. Own vibecrafted-core/vibecrafted_core/dispatch/verify.py and
+vibecrafted-core/tests/dispatch/test_verify.py, and nothing else.
+
+`sanitize_env` builds every verifier shell from an allowlist, so an ambient
+CARGO_TARGET_DIR from the launching session must never reach a verifier — only
+the value the dispatcher injects explicitly. Prove that boundary with a
+regression test, and make the evidence excerpt name the matcher that failed so
+a red verifier is diagnosable from the report alone.
+"""
+
   [[cuts.verify]]
-  run = "make test-ui"
+  run = "uv run --project vibecrafted-core --with pytest python -m pytest vibecrafted-core/tests/dispatch/test_verify.py -q"
   expect = { exit_code = 0 }
 
+# --- cut 2: shell quality gate --- Codex GPT Terra -------------------------
+# Mechanical, host-dependent surface; fast iteration over many small scripts.
 [[cuts]]
-id = "integrate"
+id = "shell-dialect-gate"
+phase = "Parallel"
 agent = "codex"
+model = "gpt-5.6-terra"
 workflow = "implement"
-integrator = true
-depends_on = ["api", "ui"]
-prompt = "Merge the two verified cut branches and run the full product gate."
+prompt = """
+Cut {id} in {repo}. Own scripts/check_shell.py and the scripts/lib/*.sh files it
+inspects, and nothing else.
+
+The gate falls back from shellcheck to `<shell> -n` when shellcheck is missing
+or the file is zsh. Today that downgrade is silent, so a host without
+shellcheck reports the same green as a host with it. Make the gate state which
+dialect and which checker it used per file, and fail loudly when neither is
+available — a gate that cannot run must not report success.
+"""
+
   [[cuts.verify]]
-  run = "make test"
+  run = "scripts/project-python scripts/check_shell.py"
+  expect = { exit_code = 0 }
+
+  [[cuts.verify]]
+  run = "bash -n scripts/lib/runtime-roots.sh"
+  expect = { exit_code = 0 }
+
+# --- cut 3: Rust control plane --- Codex GPT Terra -------------------------
+# Two providers, three cuts: the fleet is not a round-robin over agents.
+[[cuts]]
+id = "control-core-lint"
+phase = "Parallel"
+agent = "codex"
+model = "gpt-5.6-terra"
+workflow = "implement"
+prompt = """
+Cut {id} in {repo}. Own vibecrafted-server/control-core/src and its in-crate
+tests, and nothing else.
+
+Bring control-core to a clean `clippy -D warnings` without widening any
+`#[allow(...)]`: every silencer you remove must be replaced by working code or
+a test that proves the case, never by a broader allow. Keep `cargo test -p
+control-core` green throughout.
+"""
+
+  [[cuts.verify]]
+  run = "cargo clippy --manifest-path vibecrafted-server/Cargo.toml -p control-core -- -D warnings"
+  expect = { exit_code = 0 }
+
+  [[cuts.verify]]
+  run = "cargo test --manifest-path vibecrafted-server/Cargo.toml -p control-core"
   expect = { exit_code = 0 }
