@@ -66,8 +66,29 @@ def _inspect(home: Path, run_id: str, *args: str) -> subprocess.CompletedProcess
     )
 
 
+def _write_report(
+    path: Path,
+    run_id: str,
+    *,
+    finalized: bool = True,
+    status: str = "completed",
+    claim: str = "receipt inspection proof",
+) -> None:
+    path.write_text(
+        "---\n"
+        f"run_id: {run_id}\n"
+        "agent: codex\n"
+        "skill: implement\n"
+        f"status: {status}\n"
+        f"finalized: {'true' if finalized else 'false'}\n"
+        f"claim: {claim}\n"
+        "---\n",
+        encoding="utf-8",
+    )
+
+
 def _receipt(
-    repo: Path, baseline: str, terminal: str, report: Path
+    repo: Path, baseline: str, terminal: str, report: Path, provider_run_id: str
 ) -> dict[str, object]:
     return {
         "state": "settled",
@@ -78,6 +99,7 @@ def _receipt(
         "delivered_commit_sha": terminal,
         "report_path": str(report),
         "attempt": "initial",
+        "provider_run_id": provider_run_id,
         "gates": [{"command": "true", "ok": True, "exit_code": 0}],
     }
 
@@ -87,10 +109,18 @@ def test_inspector_distinguishes_isolated_delivery_from_integrated_acceptance(
 ) -> None:
     repo, baseline, terminal = _repo(tmp_path)
     report = tmp_path / "report.md"
-    report.write_text("verified", encoding="utf-8")
+    _write_report(report, "provider-isolated")
     home = tmp_path / "home"
-    receipt = _receipt(repo, baseline, terminal, report)
-    receipt["integration_target"] = "refs/heads/missing-target"
+    receipt = _receipt(repo, baseline, terminal, report, "provider-isolated")
+    worker = tmp_path / "worker"
+    _git(repo, "worktree", "add", "-q", "-b", "worker-only", str(worker), baseline)
+    (worker / "isolated").write_text("isolated", encoding="utf-8")
+    _git(worker, "add", ".")
+    _git(worker, "commit", "-qm", "isolated")
+    receipt["worktree_path"] = str(worker)
+    receipt["branch"] = "worker-only"
+    receipt["delivered_commit_sha"] = _git(worker, "rev-parse", "HEAD")
+    receipt["integration_target"] = "worker-only"
     _write_ledger(home, "isolated", repo, receipt)
 
     observed = _inspect(home, "isolated")
@@ -103,7 +133,12 @@ def test_inspector_distinguishes_isolated_delivery_from_integrated_acceptance(
     assert required.returncode == 1
     assert "not reachable" in json.loads(required.stdout)["issues"][0]
 
-    receipt.pop("integration_target")
+    receipt["branch"] = _git(repo, "branch", "--show-current")
+    receipt["worktree_path"] = str(repo)
+    receipt["delivered_commit_sha"] = terminal
+    receipt["integration_target"] = "worker-only"
+    _write_report(report, "provider-integrated")
+    receipt["provider_run_id"] = "provider-integrated"
     _write_ledger(home, "integrated", repo, receipt)
     accepted = _inspect(home, "integrated", "--require-integrated")
     assert accepted.returncode == 0
@@ -117,8 +152,8 @@ def test_inspector_distinguishes_isolated_delivery_from_integrated_acceptance(
 def test_inspector_refuses_live_or_failed_cuts(tmp_path: Path, state: str) -> None:
     repo, baseline, terminal = _repo(tmp_path)
     report = tmp_path / "report.md"
-    report.write_text("verified", encoding="utf-8")
-    receipt = _receipt(repo, baseline, terminal, report)
+    _write_report(report, f"provider-{state}")
+    receipt = _receipt(repo, baseline, terminal, report, f"provider-{state}")
     receipt["state"] = state
     if state == "failed":
         receipt["acceptance"] = "failed"
@@ -136,19 +171,97 @@ def test_inspector_refuses_forged_or_ambiguous_receipts_without_writing(
 ) -> None:
     repo, baseline, _terminal = _repo(tmp_path)
     report = tmp_path / "report.md"
-    report.write_text("verified", encoding="utf-8")
+    _write_report(report, "provider-forged")
     home = tmp_path / "home"
-    receipt = _receipt(repo, baseline, "f" * 40, report)
-    receipt["attempts"] = ["initial", "initial"]
+    receipt = _receipt(repo, baseline, "f" * 40, report, "provider-forged")
+    receipt["attempts"] = [
+        {"attempt": "initial", "provider_run_id": "provider-duplicate"},
+        {"attempt": "repair1", "provider_run_id": "provider-duplicate"},
+    ]
     path = _write_ledger(home, "forged", repo, receipt)
     before = path.read_bytes()
-    result = _inspect(home, "forged", "--require-integrated")
+    result = _inspect(home, "forged")
     assert result.returncode == 1
     payload = json.loads(result.stdout)
-    assert any("duplicate attempts" in issue for issue in payload["issues"])
-    assert any("not a destination commit" in issue for issue in payload["issues"])
+    assert any("duplicate provider attempts" in issue for issue in payload["issues"])
+    assert any(
+        "terminal SHA is not an effective-root commit" in issue
+        for issue in payload["issues"]
+    )
     assert path.read_bytes() == before
     assert not (path.parent / "receipts.lock").exists()
+
+
+def test_inspector_refuses_settled_pending_unfinalized_acceptance(
+    tmp_path: Path,
+) -> None:
+    repo, baseline, terminal = _repo(tmp_path)
+    report = tmp_path / "report.md"
+    _write_report(report, "provider-pending", finalized=False)
+    receipt = _receipt(repo, baseline, terminal, report, "provider-pending")
+    receipt["acceptance"] = "pending"
+    _write_ledger(tmp_path / "home", "pending", repo, receipt)
+
+    result = _inspect(tmp_path / "home", "pending", "--require-integrated")
+    payload = json.loads(result.stdout)
+    assert result.returncode == 1
+    assert payload["status"] == "incomplete"
+    assert payload["cuts"][0]["integration"]["disposition"] == "incomplete"
+    assert any("acceptance is not verified" in issue for issue in payload["issues"])
+    assert any("report is not finalized" in issue for issue in payload["issues"])
+
+
+@pytest.mark.parametrize(
+    ("finalized", "status", "claim", "expected"),
+    [
+        (False, "completed", "claim", "report is not finalized"),
+        (True, "failed", "claim", "report status is not successful"),
+        (True, "completed", "", "report claim missing"),
+    ],
+)
+def test_inspector_refuses_missing_or_unattested_report_evidence(
+    tmp_path: Path, finalized: bool, status: str, claim: str, expected: str
+) -> None:
+    repo, baseline, terminal = _repo(tmp_path)
+    report = tmp_path / "report.md"
+    _write_report(
+        report, "provider-report", finalized=finalized, status=status, claim=claim
+    )
+    receipt = _receipt(repo, baseline, terminal, report, "provider-report")
+    _write_ledger(tmp_path / "home", "report", repo, receipt)
+    result = _inspect(tmp_path / "home", "report")
+    assert result.returncode == 1
+    assert any(expected in issue for issue in json.loads(result.stdout)["issues"])
+
+    receipt["report_path"] = str(tmp_path / "missing.md")
+    _write_ledger(tmp_path / "home", "report-missing", repo, receipt)
+    missing = _inspect(tmp_path / "home", "report-missing")
+    assert missing.returncode == 1
+    assert any(
+        "report_missing" in issue for issue in json.loads(missing.stdout)["issues"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("baseline_sha", "f" * 40, "baseline SHA is not an effective-root commit"),
+        ("worktree_path", "missing-root", "effective root missing or not a directory"),
+        ("branch", "missing-branch", "receipt branch does not match"),
+    ],
+)
+def test_inspector_refuses_worker_identity_mismatches(
+    tmp_path: Path, field: str, value: str, expected: str
+) -> None:
+    repo, baseline, terminal = _repo(tmp_path)
+    report = tmp_path / "report.md"
+    _write_report(report, "provider-identity")
+    receipt = _receipt(repo, baseline, terminal, report, "provider-identity")
+    receipt[field] = value
+    _write_ledger(tmp_path / "home", "identity", repo, receipt)
+    result = _inspect(tmp_path / "home", "identity")
+    assert result.returncode == 1
+    assert any(expected in issue for issue in json.loads(result.stdout)["issues"])
 
 
 def test_missing_run_does_not_create_a_ledger(tmp_path: Path) -> None:

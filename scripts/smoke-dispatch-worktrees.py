@@ -111,20 +111,124 @@ def _receipt_path(run_id: str) -> Path:
     return control_plane_home() / "dispatches" / run_id / "receipts.json"
 
 
-def _attempts(receipt: dict[str, object]) -> tuple[list[str], list[str]]:
-    """Project the receipt's intended attempt identity, refusing duplicate claims."""
+def _provider_attempts(
+    receipt: dict[str, object],
+) -> tuple[list[dict[str, str]], list[str], list[str]]:
+    """Project provider-attempt identity without equating labels to attempts."""
     raw = receipt.get("attempts", receipt.get("launch_attempts", ()))
-    attempts: list[str]
-    if isinstance(raw, list):
-        attempts = [str(value) for value in raw if str(value)]
-    elif raw:
-        attempts = [str(raw)]
-    elif receipt.get("attempt"):
-        attempts = [str(receipt["attempt"])]
-    else:
-        attempts = []
-    duplicates = sorted({value for value in attempts if attempts.count(value) > 1})
-    return attempts, duplicates
+    attempts: list[dict[str, str]] = []
+    raw_attempts = raw if isinstance(raw, list) else [raw] if raw else []
+    for value in raw_attempts:
+        if isinstance(value, dict):
+            attempts.append(
+                {
+                    "attempt": str(value.get("attempt") or ""),
+                    "provider_run_id": str(value.get("provider_run_id") or ""),
+                }
+            )
+        elif value:
+            attempts.append({"attempt": str(value), "provider_run_id": ""})
+    if not attempts and (receipt.get("attempt") or receipt.get("provider_run_id")):
+        attempts.append(
+            {
+                "attempt": str(receipt.get("attempt") or ""),
+                "provider_run_id": str(receipt.get("provider_run_id") or ""),
+            }
+        )
+    provider_ids = [
+        item["provider_run_id"] for item in attempts if item["provider_run_id"]
+    ]
+    duplicates = sorted({item for item in provider_ids if provider_ids.count(item) > 1})
+    missing_provider_ids = [
+        item["attempt"] or "unnamed" for item in attempts if not item["provider_run_id"]
+    ]
+    return attempts, duplicates, missing_provider_ids
+
+
+def _report_evidence(
+    report_path: str, provider_run_id: str
+) -> tuple[dict[str, object], list[str]]:
+    """Apply the canonical report-attestation contract to one provider run."""
+    from vibecrafted_core.report_contract import validate_report_file
+
+    frontmatter = validate_report_file(report_path, require_frontmatter=True)
+    evidence = {
+        "path": report_path,
+        "exists": bool(report_path) and Path(report_path).is_file(),
+        "valid": frontmatter.ok,
+        "finalized": frontmatter.finalized,
+        "claim": frontmatter.claim,
+        "run_id": frontmatter.run_id,
+        "status": frontmatter.claim_status,
+    }
+    issues = list(frontmatter.errors)
+    if not frontmatter.finalized:
+        issues.append("report is not finalized")
+    if not frontmatter.claim:
+        issues.append("report claim missing")
+    if frontmatter.claim_status not in {
+        "completed",
+        "complete",
+        "success",
+        "ok",
+        "done",
+    }:
+        issues.append(
+            f"report status is not successful: {frontmatter.claim_status or 'missing'}"
+        )
+    if not provider_run_id:
+        issues.append("provider run identity missing")
+    elif frontmatter.run_id != provider_run_id:
+        issues.append("report run identity does not match provider run")
+    return evidence, list(dict.fromkeys(issues))
+
+
+def _worker_evidence(
+    *, receipt: dict[str, object], terminal_sha: str
+) -> tuple[dict[str, object], list[str]]:
+    """Verify the worker root, branch and baseline independently of receipt text."""
+    root = Path(str(receipt.get("worktree_path") or "")).expanduser()
+    branch = str(receipt.get("branch") or "")
+    baseline = str(receipt.get("baseline_sha") or "")
+    evidence: dict[str, object] = {
+        "root": str(root),
+        "branch": branch,
+        "baseline_sha": baseline,
+        "terminal_sha": terminal_sha,
+        "git_verified": False,
+    }
+    issues: list[str] = []
+    if not root.is_dir():
+        return evidence, ["effective root missing or not a directory"]
+    ok, top_level = _git_check(root, "rev-parse", "--show-toplevel")
+    if not ok:
+        return evidence, [f"effective root is not a Git checkout: {top_level}"]
+    if Path(top_level).resolve() != root.resolve():
+        issues.append("effective root does not match Git checkout root")
+    ok, observed_branch = _git_check(root, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if not branch:
+        issues.append("branch missing")
+    elif not ok or observed_branch != branch:
+        issues.append("receipt branch does not match effective root branch")
+    for name, sha in (("baseline SHA", baseline), ("terminal SHA", terminal_sha)):
+        valid, _detail = _git_check(
+            root, "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}"
+        )
+        if not sha or not valid:
+            issues.append(f"{name} is not an effective-root commit")
+    if not issues:
+        ancestor, _detail = _git_check(
+            root, "merge-base", "--is-ancestor", baseline, terminal_sha
+        )
+        if not ancestor:
+            issues.append("baseline SHA is not an ancestor of terminal SHA")
+        on_branch, _detail = _git_check(
+            root, "merge-base", "--is-ancestor", terminal_sha, branch
+        )
+        if not on_branch:
+            issues.append("terminal SHA is not reachable from receipt branch")
+    evidence["git_verified"] = not issues
+    return evidence, issues
 
 
 def _integration_evidence(
@@ -132,9 +236,11 @@ def _integration_evidence(
 ) -> dict[str, object]:
     """Verify delivery against the destination checkout, not a receipt label."""
     declared = str(receipt.get("integrated_sha") or "")
-    target = str(receipt.get("integration_target") or "HEAD")
+    declared_target = str(receipt.get("integration_target") or "")
+    target = "HEAD"
     evidence: dict[str, object] = {
         "declared_sha": declared,
+        "declared_target": declared_target,
         "target": target,
         "terminal_sha": terminal_sha,
         "git_verified": False,
@@ -162,7 +268,7 @@ def _integration_evidence(
     evidence["git_verified"] = reachable
     if not reachable:
         evidence["reason"] = (
-            f"terminal SHA is not reachable from destination target {target}: {detail}"
+            f"terminal SHA is not reachable from destination HEAD: {detail}"
         )
     return evidence
 
@@ -228,8 +334,12 @@ def inspect_run(
         state = str(receipt.get("state") or "")
         terminal_sha = str(receipt.get("delivered_commit_sha") or "")
         report_path = str(receipt.get("report_path") or "")
-        attempts, duplicate_attempts = _attempts(receipt)
-        report_exists = bool(report_path) and Path(report_path).is_file()
+        attempts, duplicate_attempts, missing_provider_ids = _provider_attempts(receipt)
+        provider_run_id = str(receipt.get("provider_run_id") or "")
+        report, report_issues = _report_evidence(report_path, provider_run_id)
+        worker, worker_issues = _worker_evidence(
+            receipt=receipt, terminal_sha=terminal_sha
+        )
         verification = receipt.get("gates")
         gates = verification if isinstance(verification, list) else []
         gates_ok = bool(gates) and all(
@@ -238,7 +348,14 @@ def inspect_run(
         integration = _integration_evidence(
             receipt=receipt, repo_root=repo_root, terminal_sha=terminal_sha
         )
-        delivered = state == "settled" and receipt.get("acceptance") == "verified"
+        delivered = (
+            state == "settled"
+            and receipt.get("acceptance") == "verified"
+            and not report_issues
+            and not worker_issues
+            and not duplicate_attempts
+            and not missing_provider_ids
+        )
         if state in {"launching", "active", "reported", "verified", "integrating"}:
             disposition = "observed-live-work"
         elif state == "failed" or receipt.get("acceptance") == "failed":
@@ -254,23 +371,25 @@ def inspect_run(
             cut_issues.append(f"state is {state or 'missing'}")
         if state == "failed" or receipt.get("acceptance") == "failed":
             cut_issues.append("cut failed")
+        if receipt.get("acceptance") != "verified":
+            cut_issues.append("acceptance is not verified")
         if not terminal_sha:
             cut_issues.append("terminal SHA missing")
-        if not receipt.get("worktree_path"):
-            cut_issues.append("effective root missing")
-        if not receipt.get("branch"):
-            cut_issues.append("branch missing")
-        if not receipt.get("baseline_sha"):
-            cut_issues.append("baseline SHA missing")
-        if not report_exists:
-            cut_issues.append("report evidence missing")
+        cut_issues.extend(worker_issues)
+        cut_issues.extend(f"report: {issue}" for issue in report_issues)
         if not gates_ok:
             cut_issues.append("verification evidence missing or not fully green")
         if not attempts:
-            cut_issues.append("intended attempt evidence missing")
+            cut_issues.append("provider attempt evidence missing")
+        if missing_provider_ids:
+            cut_issues.append(
+                "provider run identity missing for attempts: "
+                + ", ".join(missing_provider_ids)
+            )
         if duplicate_attempts:
             cut_issues.append(
-                f"ambiguous duplicate attempts: {', '.join(duplicate_attempts)}"
+                "ambiguous duplicate provider attempts: "
+                f"{', '.join(duplicate_attempts)}"
             )
         if require_integrated and not integration["git_verified"]:
             cut_issues.append(
@@ -285,10 +404,11 @@ def inspect_run(
                 "branch": str(receipt.get("branch") or ""),
                 "baseline_sha": str(receipt.get("baseline_sha") or ""),
                 "terminal_sha": terminal_sha,
-                "report": {"path": report_path, "exists": report_exists},
+                "report": report,
                 "verification": {"gates": gates, "complete": gates_ok},
-                "intended_attempts": attempts,
-                "provider_run_id": str(receipt.get("provider_run_id") or ""),
+                "provider_attempts": attempts,
+                "provider_run_id": provider_run_id,
+                "worker": worker,
                 "integration": {"disposition": disposition, **integration},
             }
         )
