@@ -68,6 +68,25 @@ _vetcoders_product_core_cli() {
   embedded_python="$product_root/bin/python3"
   if [[ -n "${VIBECRAFTED_PYTHON:-}" && -x "$VIBECRAFTED_PYTHON" ]]; then
     python_bin="$VIBECRAFTED_PYTHON"
+  elif [[ "$(basename "$(dirname "$product_root")")" == "releases" ]]; then
+    # Installed generations live at <runtime-home>/releases/<generation> --
+    # the same physical shape _vetcoders_product_runtime_admit already checks
+    # (owner.parent.name == "releases"). There, the generation's own bundled
+    # interpreter is the only legitimate candidate: a bare `python3` lookup
+    # would resolve through whatever PATH the caller happened to have
+    # (Homebrew, pyenv, ...) and silently substitute a foreign interpreter for
+    # a missing/incomplete installed payload — the catalogue would then be
+    # read (or not) by an interpreter nobody selected. Refuse instead of
+    # guessing. A bare source/developer checkout (this file's own repo, a
+    # worktree, a test fixture) never has this shape and keeps the existing
+    # fallback chain below unchanged.
+    if [[ -x "$embedded_python" ]]; then
+      python_bin="$embedded_python"
+    else
+      printf 'vc-start: installed runtime is missing its own interpreter: %s\n' "$embedded_python" >&2
+      printf 'vc-start: refusing to substitute a host python3; explicit upgrade/repair required\n' >&2
+      return 1
+    fi
   elif [[ -x "$checkout_python" ]]; then
     python_bin="$checkout_python"
   elif [[ -x "$embedded_python" ]]; then
@@ -134,15 +153,33 @@ _vetcoders_product_workspace_prepare() {
 # the binding ids propagate instead of dying in a subshell. Failure is a real
 # failure: callers must refuse before any provider/AICX side effect rather than
 # silently target a session they do not own.
+#
+# $1 (optional): an already-normalized explicit requested root (e.g. a public
+# entry's parsed `--root`). When given, it is the effective request and wins
+# over any inherited VIBECRAFTED_WORKSPACE_ROOT — an ambient value from a
+# parent shell is not authoritative just because it is nonempty, and it must
+# never override what the caller was actually asked to target. Absent an
+# explicit root, behaviour is unchanged: ambient root, else cwd.
 _vetcoders_ensure_canonical_workspace_identity() {
+  local requested_root="${1:-}"
   local root_dir=""
+  if [[ -n "$requested_root" ]]; then
+    root_dir="$requested_root"
+  else
+    root_dir="${VIBECRAFTED_WORKSPACE_ROOT:-}"
+    [[ -n "$root_dir" && -d "$root_dir" ]] || root_dir="$(_vetcoders_effective_project_root)"
+  fi
+  # A cached identity only counts as proof for THIS root: three nonempty
+  # fields (missing VIBECRAFTED_SESSION_ID) and no root check let a stale
+  # binding for a different project stand in for the one just requested.
   if [[ -n "${VIBECRAFTED_WORKSPACE_ID:-}" \
     && -n "${VIBECRAFTED_WORKSPACE_INSTANCE_ID:-}" \
-    && -n "${VIBECRAFTED_OPERATOR_SESSION:-}" ]]; then
+    && -n "${VIBECRAFTED_SESSION_ID:-}" \
+    && -n "${VIBECRAFTED_OPERATOR_SESSION:-}" \
+    && -n "${VIBECRAFTED_WORKSPACE_ROOT:-}" \
+    && "${VIBECRAFTED_WORKSPACE_ROOT:-}" == "$root_dir" ]]; then
     return 0
   fi
-  root_dir="${VIBECRAFTED_WORKSPACE_ROOT:-}"
-  [[ -n "$root_dir" && -d "$root_dir" ]] || root_dir="$(_vetcoders_effective_project_root)"
   _vetcoders_product_workspace_prepare "$root_dir"
 }
 

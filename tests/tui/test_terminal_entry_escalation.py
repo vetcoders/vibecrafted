@@ -970,6 +970,326 @@ def test_absent_canonical_target_is_created_under_its_bound_name(
 
 
 # --------------------------------------------------------------------------
+# S1 R8b: the REAL public resume boundary, not dashboard.sh's `vc-start resume`
+#
+# Independent admission (2026-09-07) found R8 incomplete in two ways:
+#  1. `_vetcoders_ensure_canonical_workspace_identity` preferred an inherited
+#     VIBECRAFTED_WORKSPACE_ROOT over an explicit normalized --root, and
+#     treated three nonempty fields (missing VIBECRAFTED_SESSION_ID, no root
+#     check) as proof of an already-resolved identity -- so a fully-cached,
+#     stale binding for a DIFFERENT project could stand in for the one an
+#     operator had just explicitly requested with --root.
+#  2. The actual public `vibecrafted resume <tool> --root A` entry is
+#     marbles.sh's `_vetcoders_resume_agent`. It assembles the AICX
+#     continuity pack (no --session, no explicit prompt/file) well before it
+#     ever calls `_vetcoders_prepare_operator_runtime`; R8's gate lived only
+#     inside that later helper, so it never stopped AICX from running on an
+#     unresolvable owner. R8's own test called only that helper directly --
+#     a body that never touches AICX -- so the gap was invisible to it.
+#  3. Confirmed by an independent trace (r8-missing-python-path-trace.json):
+#     an installed generation missing its own bin/python3 let
+#     `_vetcoders_product_core_cli` fall through to a bare `python3` lookup,
+#     silently substituting whatever interpreter PATH happened to offer.
+#
+# Tests below exercise the real functions at the real boundary.
+# --------------------------------------------------------------------------
+
+
+def _root_aware_owner_cli(path: Path) -> Path:
+    """Encodes the requested --root into its answer.
+
+    Unlike `_canonical_owner_cli` (fixed session name regardless of root),
+    this stub lets a test tell whether the owner was actually asked for THIS
+    root, or a stale cached answer for a different one was reused untouched.
+    """
+    body = (
+        "#!/usr/bin/env bash\n"
+        'if [[ "$1 $2" == "workspace resolve" ]]; then\n'
+        "  shift 2\n"
+        '  root=""\n'
+        "  while [[ $# -gt 0 ]]; do\n"
+        '    case "$1" in\n'
+        '      --root) root="$2"; shift 2 ;;\n'
+        "      *) shift ;;\n"
+        "    esac\n"
+        "  done\n"
+        '  tag="$(basename "$root")"\n'
+        "  tag=\"$(printf '%s' \"$tag\" | tr -c 'A-Za-z0-9' '-')\"\n"
+        '  echo "VIBECRAFTED_WORKSPACE_ID=ws-$tag"\n'
+        '  echo "VIBECRAFTED_SESSION_ID=sess-$tag"\n'
+        '  echo "VIBECRAFTED_WORKSPACE_INSTANCE_ID=inst-$tag"\n'
+        '  echo "VIBECRAFTED_OPERATOR_SESSION=session-$tag"\n'
+        '  echo "VIBECRAFTED_WORKSPACE_ROOT=$root"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n"
+    )
+    return _write(path, body)
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_explicit_root_wins_over_stale_ambient_workspace_binding(
+    tmp_path: Path, shell: str
+) -> None:
+    """Finding #1: an inherited, FULLY cached binding for project B (all four
+    identity fields, including SESSION_ID) must never stand in for an
+    explicit normalized --root A. Pre-fix, three nonempty fields (no
+    SESSION_ID, no root comparison) were treated as sufficient proof and the
+    stale B binding was returned untouched, even though A was requested.
+    """
+    owner = _root_aware_owner_cli(tmp_path / "owner-cli")
+    root_a = tmp_path / "project-a"
+    root_b = tmp_path / "project-b"
+    root_a.mkdir()
+    root_b.mkdir()
+
+    env = os.environ.copy()
+    for key in WORKSPACE_IDENTITY_ENV:
+        env.pop(key, None)
+    env["VIBECRAFTED_PRODUCT_CORE_CLI"] = str(owner)
+    # A fully-cached, fully-valid binding -- for a DIFFERENT project (B).
+    env["VIBECRAFTED_WORKSPACE_ID"] = "ws-project-b"
+    env["VIBECRAFTED_SESSION_ID"] = "sess-project-b"
+    env["VIBECRAFTED_WORKSPACE_INSTANCE_ID"] = "inst-project-b"
+    env["VIBECRAFTED_OPERATOR_SESSION"] = "session-project-b"
+    env["VIBECRAFTED_WORKSPACE_ROOT"] = str(root_b)
+
+    script = (
+        f'source "{SHELL_SH}"\n'
+        f'_vetcoders_ensure_canonical_workspace_identity "{root_a}"\n'
+        'printf "RC=[%s]\\n" "$?"\n'
+        'printf "ROOT=[%s]\\n" "${VIBECRAFTED_WORKSPACE_ROOT:-}"\n'
+        'printf "TARGET=[%s]\\n" "${VIBECRAFTED_OPERATOR_SESSION:-}"\n'
+        'printf "SESSION_ID=[%s]\\n" "${VIBECRAFTED_SESSION_ID:-}"\n'
+    )
+    result = subprocess.run(
+        _shell_argv(shell, script),
+        check=False,
+        cwd=root_a,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
+    assert f"ROOT=[{root_a}]" in result.stdout, result.stdout + result.stderr
+    assert "TARGET=[session-project-a]" in result.stdout, result.stdout + result.stderr
+    assert "SESSION_ID=[sess-project-a]" in result.stdout, result.stdout + result.stderr
+    assert "TARGET=[session-project-b]" not in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_public_resume_owner_failure_records_zero_aicx_or_provider_calls(
+    tmp_path: Path, shell: str
+) -> None:
+    """Finding #2: the actual public boundary is marbles.sh's
+    `_vetcoders_resume_agent` (`vibecrafted resume <tool> --root A`), not
+    dashboard.sh's `vc-start resume`. On an unresolvable owner it must refuse
+    before AICX assembly and before any provider composition -- not merely
+    before the later `_vetcoders_prepare_operator_runtime` helper.
+    """
+    owner = _canonical_owner_cli(tmp_path / "owner-cli", resolve_exit=64)
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    env = os.environ.copy()
+    for key in WORKSPACE_IDENTITY_ENV:
+        env.pop(key, None)
+    env["VIBECRAFTED_PRODUCT_CORE_CLI"] = str(owner)
+    # Simulates running past the no-TTY terminal escalation, exactly like the
+    # re-parsed child it would hand off to -- the real boundary under test.
+    env["VIBECRAFTED_TERMINAL_ENTRY"] = "1"
+    env["TEST_AICX_CAPTURE"] = str(tmp_path / "aicx-called.txt")
+    env["TEST_PROVIDER_CAPTURE"] = str(tmp_path / "provider-called.txt")
+    env["TEST_PREPARE_CAPTURE"] = str(tmp_path / "prepare-called.txt")
+
+    script = (
+        f'source "{SHELL_SH}"\n'
+        "_vetcoders_aicx_resume_fallback() { printf 'called\\n' >> \"$TEST_AICX_CAPTURE\"; "
+        "printf 'MODE=new_session\\n'; }\n"
+        "_vetcoders_fresh_session_command() { printf 'called\\n' >> \"$TEST_PROVIDER_CAPTURE\"; "
+        "printf 'true\\n'; }\n"
+        "_vetcoders_prepare_operator_runtime() { printf 'called\\n' >> \"$TEST_PREPARE_CAPTURE\"; "
+        "return 0; }\n"
+        f'_vetcoders_resume_agent codex --root "{project_dir}"\n'
+        'printf "RC=[%s]\\n" "$?"\n'
+    )
+    result = subprocess.run(
+        _shell_argv(shell, script),
+        check=False,
+        cwd=project_dir,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert "RC=[0]" not in result.stdout, result.stdout + result.stderr
+    assert not (tmp_path / "aicx-called.txt").exists(), (
+        "AICX ran before admission: " + result.stdout + result.stderr
+    )
+    assert not (tmp_path / "provider-called.txt").exists(), (
+        "provider composed before admission: " + result.stdout + result.stderr
+    )
+    assert not (tmp_path / "prepare-called.txt").exists(), (
+        "operator runtime prepared before admission: " + result.stdout + result.stderr
+    )
+
+
+def test_public_resume_success_path_one_aicx_one_provider_canonical_ids(
+    tmp_path: Path,
+) -> None:
+    """Exact public success path, once: one AICX assembly, one provider
+    composition, canonical workspace/session ids for --root A and the exact
+    requested cwd -- propagated into the caller's shell, not a subshell.
+
+    The project's bound session is already live (the realistic re-entry
+    shape: an operator resuming into a session the catalogue already knows),
+    so the real live-detection/attach path runs end to end; only the final
+    blocking foreground attach is stubbed.
+    """
+    owner = _canonical_owner_cli(tmp_path / "owner-cli")
+    env, project_dir, generation = _bound_project(
+        tmp_path, live=[BOUND_SESSION], owner_cli=owner
+    )
+    env["VIBECRAFTED_TERMINAL_ENTRY"] = "1"
+    env["TEST_AICX_CAPTURE"] = str(tmp_path / "aicx-called.txt")
+
+    script = (
+        f'source "{SHELL_SH}"\n'
+        f'_vetcoders_vc_frame_loaded_root="{generation}"\n'
+        "_vetcoders_aicx_resume_fallback() { printf 'called\\n' >> \"$TEST_AICX_CAPTURE\"; "
+        "printf 'MODE=new_session\\n'; }\n"
+        # Only the final blocking foreground attach is stubbed; the real
+        # canonical-identity gate, the real live-session detection and the
+        # real provider composition/spawn (recorded in frame.log via the
+        # vc-frame stub) all run for real.
+        "_vetcoders_attach_prepared_vc_frame_session() { return 0; }\n"
+        f'_vetcoders_resume_agent codex --root "{project_dir}"\n'
+        'printf "RC=[%s]\\n" "$?"\n'
+        'printf "WORKSPACE=[%s]\\n" "${VIBECRAFTED_WORKSPACE_ID:-}"\n'
+        'printf "SESSION_ID=[%s]\\n" "${VIBECRAFTED_SESSION_ID:-}"\n'
+        'printf "TARGET=[%s]\\n" "${VIBECRAFTED_OPERATOR_SESSION:-}"\n'
+    )
+    result = subprocess.run(
+        _shell_argv("bash", script),
+        check=False,
+        cwd=project_dir,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
+    assert f"WORKSPACE=[{BOUND_WORKSPACE_ID}]" in result.stdout, (
+        result.stdout + result.stderr
+    )
+    assert "SESSION_ID=[sess-canonical]" in result.stdout, result.stdout + result.stderr
+    # Canonical target/IDs resolved for the EXACT requested --root/cwd (this
+    # project dir); the owner stub was invoked with --root project_dir, and
+    # the process itself ran with cwd=project_dir throughout.
+    assert f"TARGET=[{BOUND_SESSION}]" in result.stdout, result.stdout + result.stderr
+    aicx_calls = (tmp_path / "aicx-called.txt").read_text(encoding="utf-8").splitlines()
+    assert len(aicx_calls) == 1, aicx_calls
+    frame_log = tmp_path / "frame.log"
+    assert frame_log.exists(), result.stdout + result.stderr
+    calls = [
+        json.loads(line)
+        for line in frame_log.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    provider_tabs = [c for c in calls if "new-tab" in c and BOUND_SESSION in c]
+    assert len(provider_tabs) == 1, calls
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_installed_generation_missing_interpreter_refuses_before_aicx_or_provider(
+    tmp_path: Path, shell: str
+) -> None:
+    """Finding #3 (confirmed by r8-missing-python-path-trace.json): an
+    installed generation missing its own bin/python3 must refuse, even with a
+    perfectly real, executable host python3 available on PATH. Silently
+    substituting it is exactly how a broken/incomplete install produced a
+    coherent-looking but foreign resolution.
+    """
+    # Installed generations live at <runtime-home>/releases/<generation> --
+    # the exact physical shape _vetcoders_product_core_cli now checks
+    # (parent directory literally named "releases") to tell a genuine
+    # installed payload apart from a bare source/developer checkout.
+    generation = tmp_path / "runtime-home" / "releases" / "gen-a"
+    (generation / "vibecrafted-core" / "vibecrafted_core").mkdir(
+        parents=True, exist_ok=True
+    )
+    (generation / "vibecrafted-core" / "vibecrafted_core" / "cli.py").write_text(
+        "", encoding="utf-8"
+    )
+    (generation / "bin").mkdir(parents=True, exist_ok=True)
+    # Deliberately no generation/bin/python3: the exact "missing owned
+    # interpreter" shape from the independent admission trace.
+    host_bin = tmp_path / "host-bin"
+    _write(
+        host_bin / "python3",
+        '#!/usr/bin/env bash\nexec /usr/bin/python3 "$@"\n',
+    )
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    env = os.environ.copy()
+    for key in WORKSPACE_IDENTITY_ENV:
+        env.pop(key, None)
+    for key in (
+        "VIBECRAFTED_PRODUCT_CORE_CLI",
+        "VIBECRAFTED_PYTHON",
+        "VIBECRAFTED_PREFER_REPO_VC_FRAME",
+    ):
+        env.pop(key, None)
+    # The real owner selection, not a stub -- exercising the actual
+    # interpreter fallback chain in _vetcoders_product_core_cli.
+    env["VIBECRAFTED_CORE_DIR"] = str(generation / "vibecrafted-core")
+    env["PATH"] = f"{host_bin}:{env.get('PATH', '')}"
+    env["VIBECRAFTED_TERMINAL_ENTRY"] = "1"
+    env["TEST_AICX_CAPTURE"] = str(tmp_path / "aicx-called.txt")
+    env["TEST_PROVIDER_CAPTURE"] = str(tmp_path / "provider-called.txt")
+
+    script = (
+        f'source "{SHELL_SH}"\n'
+        "_vetcoders_aicx_resume_fallback() { printf 'called\\n' >> \"$TEST_AICX_CAPTURE\"; "
+        "printf 'MODE=new_session\\n'; }\n"
+        "_vetcoders_fresh_session_command() { printf 'called\\n' >> \"$TEST_PROVIDER_CAPTURE\"; "
+        "printf 'true\\n'; }\n"
+        f'_vetcoders_resume_agent codex --root "{project_dir}"\n'
+        'printf "RC=[%s]\\n" "$?"\n'
+        'printf "TARGET=[%s]\\n" "${VIBECRAFTED_OPERATOR_SESSION:-}"\n'
+    )
+    result = subprocess.run(
+        _shell_argv(shell, script),
+        check=False,
+        cwd=project_dir,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert "RC=[0]" not in result.stdout, result.stdout + result.stderr
+    assert "TARGET=[]" in result.stdout, result.stdout + result.stderr
+    assert not (tmp_path / "aicx-called.txt").exists(), (
+        "AICX ran with a foreign, unowned interpreter: " + result.stdout + result.stderr
+    )
+    assert not (tmp_path / "provider-called.txt").exists(), (
+        "provider composed with a foreign, unowned interpreter: "
+        + result.stdout
+        + result.stderr
+    )
+
+
+# --------------------------------------------------------------------------
 # One physical config owner
 # --------------------------------------------------------------------------
 

@@ -556,6 +556,41 @@ _vetcoders_resume_agent() {
     return 0
   fi
 
+  # ONE canonical workspace owner, at the REAL public resume boundary. This is
+  # the actual `vibecrafted resume <tool> --root A` entry (not dashboard.sh's
+  # `vc-start resume`): the AICX continuity pack is assembled a few lines below
+  # and `_vetcoders_prepare_operator_runtime` runs further down still, so the
+  # gate must sit HERE — after the no-TTY terminal escalation above has already
+  # returned (a re-parsed child will hit this same gate itself), but strictly
+  # before any AICX or provider side effect. Skipped for a headless dispatch
+  # with explicit --prompt/--file: that path never opens a vc-frame session and
+  # is unrelated to workspace/session binding. Also skipped when an explicit
+  # VIBECRAFTED_OPERATOR_SESSION or a genuine attached caller already answers
+  # the "which session" question -- exactly the precedence
+  # _vetcoders_prepare_operator_runtime itself already gives them (an explicit
+  # override must never even consult the catalogue, let alone be overridden by
+  # it).
+  if [[ -z "$resume_explicit_input" ]] &&
+    [[ -z "${VIBECRAFTED_OPERATOR_SESSION:-}" ]] &&
+    command -v _vetcoders_ensure_canonical_workspace_identity >/dev/null 2>&1 &&
+    { ! command -v _vetcoders_in_vc_frame >/dev/null 2>&1 || ! _vetcoders_in_vc_frame; }; then
+    _vetcoders_ensure_canonical_workspace_identity "${_vetcoders_contract_root:-}" || {
+      local _resume_identity_status=$?
+      printf 'resume: could not resolve the canonical workspace owner for this project.\n' >&2
+      printf 'resume: refusing to assemble continuity or open a provider session without an owned target; re-run from the intended root or inspect '"'"'vibecrafted workspace list'"'"'.\n' >&2
+      return "$_resume_identity_status"
+    }
+    # This gate's own job is WORKSPACE/SESSION/INSTANCE identity and the
+    # resolved root (for AICX and for reporting the canonical target below),
+    # never the visible ATTACH target. Which live session to reuse, or
+    # whether one must be created, stays _vetcoders_prepare_operator_runtime's
+    # decision further down -- its own explicit-override check
+    # (VIBECRAFTED_OPERATOR_SESSION nonempty) must still see it unset here, or
+    # a name this gate resolved (but never confirmed live) would be trusted
+    # blindly, skipping both live-detection and session creation.
+    unset VIBECRAFTED_OPERATOR_SESSION
+  fi
+
   local aicx_fallback_mode=""
   local aicx_context_file=""
   if [[ -z "$_vetcoders_contract_session" && -z "$resume_explicit_input" ]]; then
