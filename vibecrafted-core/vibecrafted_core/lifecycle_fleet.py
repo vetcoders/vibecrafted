@@ -121,6 +121,26 @@ def mission_cuts(mission_text: str) -> tuple[str, ...]:
     return tuple(ordered)
 
 
+def mission_stage_cuts(mission_text: str, stage_id: str) -> tuple[str, ...]:
+    """Return cuts explicitly bound to one WRITE stage.
+
+    A lifecycle mission may declare several WRITE stages.  A top-level
+    ``cuts:`` list has no stage owner, so using it for every stage replays the
+    same implementation work.  New missions must bind cuts with frontmatter
+    such as ``stage_cuts: implement=W0-a,W0-b`` (or its nested-map form).
+    """
+    from .stage_cast import _mission_frontmatter_map
+
+    bindings = _mission_frontmatter_map(mission_text, "stage_cuts")
+    raw = bindings.get(str(stage_id).strip(), "")
+    if raw:
+        return mission_cuts(f"---\ncuts: {raw}\n---\n")
+    # Compatibility is deliberately one-way: the historical unqualified
+    # ``cuts`` syntax belongs to the implementation stage, never to every
+    # later WRITE stage.  Additional fleets must be explicitly declared.
+    return mission_cuts(mission_text) if str(stage_id).strip() == "implement" else ()
+
+
 def mission_cut_agents(mission_text: str) -> dict[str, str]:
     """Per-cut provider pins declared alongside the cut ids.
 
@@ -625,12 +645,18 @@ _RECEIPT_IDENTITY_FIELDS = (
 )
 
 
-def _classify_obligation(state: str, *, scheduler_failed: bool) -> str:
+def _classify_obligation(
+    state: str, *, acceptance: str = "", scheduler_failed: bool
+) -> str:
     """Map one dispatcher scheduler state onto a lifecycle obligation."""
     if state in FLEET_STATES_FAILED:
         return "failed"
     if state in FLEET_STATES_COMPLETE:
-        return "complete"
+        # Dispatcher settlement only says scheduling has stopped.  Lifecycle
+        # admission additionally requires the dispatcher receipt's actual
+        # verifier result; otherwise a settled-but-unknown cut becomes false
+        # completion.
+        return "complete" if acceptance == "verified" else "unknown"
     if state in FLEET_STATES_ACTIVE:
         # A cut still sitting in the scheduler's queue is not evidence that a
         # provider was ever spawned.  When the scheduler itself died, "queued"
@@ -671,11 +697,12 @@ def fleet_obligations(
             )
             continue
         state = str(entry.get("state") or "")
+        acceptance = str(entry.get("acceptance") or "")
         record: dict[str, Any] = {
             "cut_id": cut_id,
             "state": state,
             "obligation": _classify_obligation(
-                state, scheduler_failed=bool(scheduler_error)
+                state, acceptance=acceptance, scheduler_failed=bool(scheduler_error)
             ),
         }
         for field in _RECEIPT_IDENTITY_FIELDS:
@@ -735,17 +762,15 @@ def stage_fleet_progress(
 ) -> dict[str, Any]:
     """Fleet obligations for a lifecycle run's current (or named) WRITE stage."""
     stages = [dict(item) for item in (state.get("stages") or [])]
-    target: dict[str, Any] = {}
+    candidates: list[dict[str, Any]] = []
     for stage in reversed(stages):
         if stage_id and str(stage.get("id") or "") != stage_id:
             continue
         if dict(stage.get("fleet") or {}).get("children") is not None:
-            target = stage
-            break
+            candidates.append(stage)
         if stage_id:
             break
-    fleet = dict(target.get("fleet") or {})
-    if not fleet:
+    if not candidates:
         return {
             "present": False,
             "verdict": "none",
@@ -759,12 +784,19 @@ def stage_fleet_progress(
             "plan_path": "",
             "recovery_command": "",
         }
-    return fleet_obligations(
-        str(fleet.get("parent_run_id") or state.get("run_id") or ""),
-        str(fleet.get("stage_id") or target.get("id") or ""),
-        declared_cuts=[str(cut) for cut in (fleet.get("cuts") or [])],
-        plan_path=str(fleet.get("plan_path") or ""),
-    )
+    # A later empty fleet must not mask an earlier open fleet.  Return the
+    # newest blocking projection; only if all are complete may the newest be
+    # used as the status surface.
+    projections = []
+    for target in candidates:
+        fleet = dict(target.get("fleet") or {})
+        projections.append(fleet_obligations(
+            str(fleet.get("parent_run_id") or state.get("run_id") or ""),
+            str(fleet.get("stage_id") or target.get("id") or ""),
+            declared_cuts=[str(cut) for cut in (fleet.get("cuts") or [])],
+            plan_path=str(fleet.get("plan_path") or ""),
+        ))
+    return next((item for item in projections if item.get("present") and not item.get("complete")), projections[0])
 
 
 def record_write_stage_fleet(

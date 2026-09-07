@@ -24,6 +24,7 @@ from vibecrafted_core.lifecycle_fleet import (
     load_cut_records,
     mission_cut_agents,
     mission_cuts,
+    mission_stage_cuts,
     mission_dispatch_plan,
     record_only_supervisor,
     record_write_stage_fleet,
@@ -69,6 +70,13 @@ def test_mission_cuts_parses_inline_and_nested_list() -> None:
 def test_mission_cuts_dedupes_and_strips() -> None:
     text = "---\ncuts: W0-a, W0-a, 'W1-c'\n---\n"
     assert mission_cuts(text) == ("W0-a", "W1-c")
+
+
+def test_mission_stage_cuts_binds_each_write_stage_without_replay() -> None:
+    mission = "---\nstage_cuts: implement=W0-a,W0-b, marbles=W1-a\n---\n"
+    assert mission_stage_cuts(mission, "implement") == ("W0-a", "W0-b")
+    assert mission_stage_cuts(mission, "marbles") == ("W1-a",)
+    assert mission_stage_cuts(mission, "hydrate") == ()
 
 
 def test_write_fleet_stage_set_is_the_ship_write_dispatchers() -> None:

@@ -714,6 +714,25 @@ def test_await_reports_complete_once_the_ledger_says_the_fleet_settled(
     assert payload["fleet"]["verdict"] == "complete"
 
 
+@pytest.mark.parametrize("acceptance", ["", "unknown", "failed"])
+def test_settled_receipt_requires_verified_acceptance(
+    tmp_path: Path, monkeypatch, acceptance: str
+) -> None:
+    repo, plan, _ = _settled_fleet(tmp_path, monkeypatch)
+    _receipt_store(repo, plan).update("W0-a", "settled", acceptance=acceptance)
+    state_path, state = _fleet_state(tmp_path, plan)
+    with pytest.raises(ValueError, match="W0-a=unknown\\(settled\\)"):
+        approve_transition(state_path, state, run_lifecycle_fn=lambda spec: {})
+
+    monkeypatch.setattr(
+        "vibecrafted_core.lifecycle_control.control_plane_await_run",
+        lambda *_a, **_k: {"completed": True, "worker_alive": False, "reason": "ok"},
+    )
+    payload = await_stage(state, idle_seconds=0.05, interval_seconds=0.01)
+    assert payload["completed"] is False
+    assert payload["fleet"]["blocking"] == ["W0-a=unknown(settled)"]
+
+
 def test_interrupt_stops_live_cuts_by_their_recorded_provider_identity(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -27,6 +27,7 @@ from .lifecycle_fleet import (
     SupervisorLaunch,
     dispatch_recorded_children,
     dispatcher_fleet_launch,
+    mission_stage_cuts,
     live_vc_dispatch_permitted,
     mission_cuts,
     record_write_stage_fleet,
@@ -911,7 +912,7 @@ class LifecycleRunner:
     ) -> dict[str, Any]:
         """Build the stage prompt, capture the pre-launch git baseline, and launch the
         stage worker; returns the initial stage record (before await/completion)."""
-        cuts = mission_cuts(source_prompt)
+        cuts = mission_stage_cuts(source_prompt, stage.id)
         prompt = self._stage_prompt(
             manifest=manifest,
             stage=stage,
