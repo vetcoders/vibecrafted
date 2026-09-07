@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -698,6 +699,29 @@ def test_await_does_not_call_a_stage_complete_while_its_fleet_still_owes_work(
     assert payload["fleet"]["blocking"] == ["W0-a=active(active)"]
 
 
+def test_await_hard_cap_covers_stage_and_fleet_wait_together(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo, plan, _ = _settled_fleet(tmp_path, monkeypatch)
+    _receipt_store(repo, plan).update("W0-a", "active")
+    _state_path, state = _fleet_state(tmp_path, plan)
+
+    def stage_wait(*_args, **_kwargs):
+        time.sleep(0.03)
+        return {"completed": True, "worker_alive": False, "reason": "ok"}
+
+    monkeypatch.setattr(
+        "vibecrafted_core.lifecycle_control.control_plane_await_run", stage_wait
+    )
+    started = time.monotonic()
+    payload = await_stage(
+        state, idle_seconds=1, interval_seconds=0.01, hard_cap_seconds=0.02
+    )
+    assert time.monotonic() - started < 0.05
+    assert payload["completed"] is False
+    assert payload["timed_out"] is True
+
+
 def test_await_reports_complete_once_the_ledger_says_the_fleet_settled(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -754,4 +778,6 @@ def test_interrupt_stops_live_cuts_by_their_recorded_provider_identity(
     # settled and failed siblings are left alone.
     assert stopped == ["stage-worker-run", "provider-W0-a"]
     assert [item["cut_id"] for item in result["fleet_stops"]] == ["W0-a"]
+    assert result["scheduler_stop"]["accepted"] is True
+    assert _receipt_store(repo, plan).read()["scheduler_stop_requested"] is True
     assert state["status"] == "interrupted"

@@ -15,6 +15,11 @@ from vibecrafted_core.delivery.store import atomic_write_json
 
 from .model import SCHEDULER_STATES, Cut
 
+try:  # POSIX is the production scheduler substrate; keep importability elsewhere.
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX development hosts
+    fcntl = None  # type: ignore[assignment]
+
 
 class ReceiptContractError(RuntimeError):
     """Raised when receipt state or an exclusivity lock violates the contract."""
@@ -86,7 +91,7 @@ class DispatchReceiptStore:
             )
 
     def read(self) -> dict[str, Any]:
-        with self._lock:
+        with self._locked_ledger():
             try:
                 payload = json.loads(self.path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
@@ -107,8 +112,8 @@ class DispatchReceiptStore:
             raise ReceiptContractError(f"unknown receipt cut {cut_id!r}")
         if state is not None and state not in SCHEDULER_STATES:
             raise ReceiptContractError(f"unknown scheduler state {state!r}")
-        with self._lock:
-            payload = self.read()
+        with self._locked_ledger():
+            payload = self._read_unlocked()
             entry = payload["cuts"][cut_id]
             if state is not None:
                 entry["state"] = state
@@ -118,6 +123,58 @@ class DispatchReceiptStore:
             entry["updated_at"] = _now()
             payload["updated_at"] = _now()
             atomic_write_json(self.path, payload)
+
+    def update_metadata(self, **fields: Any) -> None:
+        """Atomically merge scheduler-owned ledger metadata.
+
+        Scheduler state and cut receipts share one file.  A separate
+        read/replace writer loses a concurrent supervisor cut transition, so
+        scheduler lifecycle fields must use this same lock and merge path.
+        """
+        with self._locked_ledger():
+            payload = self._read_unlocked()
+            payload.update(fields)
+            payload["updated_at"] = _now()
+            atomic_write_json(self.path, payload)
+
+    def stop_requested(self) -> bool:
+        with self._locked_ledger():
+            return bool(self._read_unlocked().get("scheduler_stop_requested"))
+
+    def _read_unlocked(self) -> dict[str, Any]:
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ReceiptContractError(f"dispatch receipt unreadable: {exc}") from exc
+        if not isinstance(payload, dict) or payload.get("run_id") != self.run_id:
+            raise ReceiptContractError("dispatch receipt identity mismatch")
+        return payload
+
+    def _locked_ledger(self):
+        """Serialize independent scheduler and observer processes on POSIX."""
+        class _LedgerLock:
+            def __init__(inner, store: "DispatchReceiptStore") -> None:
+                inner.store = store
+                inner.handle: Any = None
+
+            def __enter__(inner):
+                inner.store._lock.acquire()
+                lock_path = inner.store.root / "receipts.lock"
+                inner.handle = lock_path.open("a+")
+                if fcntl is not None:
+                    fcntl.flock(inner.handle.fileno(), fcntl.LOCK_EX)
+                return inner
+
+            def __exit__(inner, *_args: object) -> None:
+                try:
+                    if inner.handle is not None and fcntl is not None:
+                        fcntl.flock(inner.handle.fileno(), fcntl.LOCK_UN)
+                    if inner.handle is not None:
+                        inner.handle.close()
+                finally:
+                    inner.store._lock.release()
+
+        return _LedgerLock(self)
 
 
 class IntegratorLease:

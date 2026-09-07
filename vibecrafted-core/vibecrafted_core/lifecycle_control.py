@@ -226,6 +226,7 @@ def await_stage(
     get back the one truth that decides the next verb: the stage delivered
     its report, died without one, or genuinely stalled.
     """
+    started = time.monotonic()
     stages = list(state.get("stages") or [])
     if not stages:
         raise ValueError("nothing to await: no stage launched yet")
@@ -262,9 +263,9 @@ def await_stage(
     # inside the same window the caller already granted.
     fleet = stage_fleet_progress(state)
     if fleet.get("present") and fleet.get("verdict") == "active":
-        deadline = time.monotonic() + max(float(idle_seconds), 0.0)
+        deadline = started + max(float(idle_seconds), 0.0)
         if hard_cap_seconds is not None:
-            deadline = min(deadline, time.monotonic() + max(hard_cap_seconds, 0.0))
+            deadline = min(deadline, started + max(hard_cap_seconds, 0.0))
         step = max(float(interval_seconds), 0.01)
         while time.monotonic() < deadline:
             time.sleep(step)
@@ -273,6 +274,11 @@ def await_stage(
                 break
 
     fleet_pending = bool(fleet.get("present")) and not bool(fleet.get("complete"))
+    total_timed_out = bool(
+        hard_cap_seconds is not None
+        and time.monotonic() >= started + max(hard_cap_seconds, 0.0)
+        and fleet_pending
+    )
     reason = str(result.get("reason") or "")
     if fleet_pending:
         reason = f"fleet_{fleet.get('verdict')}"
@@ -286,7 +292,7 @@ def await_stage(
         # outstanding fleet obligation is an unfinished stage.
         "completed": bool(result.get("completed")) and not fleet_pending,
         "stage_worker_completed": bool(result.get("completed")),
-        "timed_out": bool(result.get("timed_out")),
+        "timed_out": bool(result.get("timed_out")) or total_timed_out,
         "reason": reason,
         "worker_alive": worker_alive,
         "worker_dead_without_report": settled
@@ -398,11 +404,19 @@ def interrupt_workflow(
     if stage_run_id:
         stop_result = stop(stage_run_id, reason="lifecycle operator interrupt")
 
+    # Fence the scheduler BEFORE signalling its current providers.  A snapshot
+    # of active cuts is otherwise racy: queued work can launch after interrupt.
+    fleet = stage_fleet_progress(state)
+    scheduler_stop: dict[str, Any] = {}
+    if fleet.get("present"):
+        from .lifecycle_fleet import request_stage_dispatch_stop
+
+        scheduler_stop = request_stage_dispatch_stop(str(fleet.get("dispatch_run_id") or ""))
+
     # Stopping the stage worker does not reach the cuts it dispatched: those
     # are detached provider runs owned by the dispatcher's ledger.  Interrupt
     # them by their recorded identity, so the operator's stop covers the work
     # that is actually running.
-    fleet = stage_fleet_progress(state)
     fleet_stops: list[dict[str, Any]] = []
     for cut in fleet.get("cuts") or []:
         if cut.get("obligation") != "active":
@@ -438,6 +452,7 @@ def interrupt_workflow(
     }
     if fleet.get("present"):
         details["fleet_dispatch_run_id"] = str(fleet.get("dispatch_run_id") or "")
+        details["scheduler_stop"] = scheduler_stop
         details["fleet_stops"] = fleet_stops
         details["fleet_recovery_command"] = str(fleet.get("recovery_command") or "")
     entry = record_operator_action(state_path, state, "interrupt_workflow", details)
@@ -445,6 +460,7 @@ def interrupt_workflow(
         "status": "interrupted",
         "stage_run_id": stage_run_id,
         "fleet_stops": fleet_stops,
+        "scheduler_stop": scheduler_stop,
         "action": entry,
     }
 

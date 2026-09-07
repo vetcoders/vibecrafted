@@ -299,6 +299,15 @@ class DispatchSupervisor:
             ) as pool:
                 while pending or active:
                     made_progress = False
+                    # The lifecycle interrupt records this before signalling
+                    # active providers.  Recheck at the launch boundary: a
+                    # queued cut must never race through after an interrupt.
+                    if self._receipt_store.stop_requested():
+                        for stopped in pending.values():
+                            self._set_state(stopped.id, STATE_PENDING, "stopped: scheduler interrupt")
+                            self._receipt_store.update(stopped.id, "stopped", acceptance="interrupted")
+                        pending.clear()
+                        self._journal("scheduler stop requested; no queued cut may launch")
                     if line_broken and not active:
                         for stopped in pending.values():
                             self._set_state(
@@ -316,6 +325,8 @@ class DispatchSupervisor:
                     }
                     completed_bad = set(verdicts) - completed_ok
                     for cut_id, cut in list(pending.items()):
+                        if self._receipt_store.stop_requested():
+                            break
                         failed_dependencies = set(cut.depends_on) & completed_bad
                         if failed_dependencies:
                             verdict = Verdict(

@@ -8,7 +8,10 @@ that split explicit prevents a stage worker from becoming a second scheduler.
 from __future__ import annotations
 
 import json
+import os
 import re
+import signal
+import shlex
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -17,7 +20,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .control_plane import control_plane_home
-from .delivery.store import atomic_write_json
 from .dispatch.worktrees import repo_identity
 from .runtime_paths import vibecrafted_home
 from .workflows.model import WorkflowStage
@@ -466,7 +468,13 @@ def dispatcher_fleet_launch(
         if wait:
             run()
         else:
-            _start_background_dispatch(run_id, run)
+            # Test transports deliberately stay in-process.  The production
+            # path has no injected transport and must not make the disposable
+            # UI/terminal the scheduler's lifetime owner.
+            if cell_launcher is None:
+                _start_detached_dispatch(run_id, store, run)
+            else:
+                _start_background_dispatch(run_id, run)
 
         by_cut = {cut.id: cut for cut in dispatch.cuts}
         return [
@@ -544,12 +552,80 @@ def _start_background_dispatch(run_id: str, run: Callable[[], None]) -> None:
     thread.start()
 
 
+def _start_detached_dispatch(
+    run_id: str, store: Any, run: Callable[[], None]
+) -> int:
+    """Fork the existing dispatcher owner into a new session.
+
+    The durable receipt ledger is created before this fork.  Thus a fresh
+    observer can reconnect by its stable run id after the originating shell
+    or App exits; this is an owner handoff, not a second scheduler or store.
+    """
+    if not hasattr(os, "fork"):
+        # The supported desktop substrate is POSIX.  Keep an honest fallback
+        # for development hosts rather than pretending a thread is detached.
+        _start_background_dispatch(run_id, run)
+        store.update_metadata(scheduler_owner_mode="in-process-fallback")
+        return 0
+    pid = os.fork()
+    if pid:
+        store.update_metadata(
+            scheduler_owner_pid=pid,
+            scheduler_owner_mode="detached-fork",
+            scheduler_stop_requested=False,
+        )
+        return pid
+    try:
+        os.setsid()
+        log_path = store.root / "scheduler.log"
+        with log_path.open("ab", buffering=0) as log:
+            os.dup2(log.fileno(), 1)
+            os.dup2(log.fileno(), 2)
+            store.update_metadata(
+                scheduler_owner_pid=os.getpid(),
+                scheduler_owner_mode="detached-fork",
+                scheduler_started_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            )
+            run()
+            store.update_metadata(scheduler_finished_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+    except BaseException as exc:  # noqa: BLE001 - child must leave durable evidence
+        record_stage_dispatch_failure(run_id, f"{type(exc).__name__}: {exc}")
+    finally:
+        os._exit(0)
+
+
 def join_stage_dispatch(dispatch_run_id: str, timeout: float | None = None) -> bool:
     """Wait for a backgrounded stage dispatch; True when it is no longer running."""
     with _FLEET_DISPATCH_LOCK:
         thread = _ACTIVE_FLEET_DISPATCHES.get(dispatch_run_id)
     if thread is None:
-        return True
+        # A detached owner belongs to a previous/calling process, so it cannot
+        # be in this interpreter's thread map.  Its durable PID is the same
+        # reconnectable ownership receipt used by a fresh observer.
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            try:
+                from .dispatch.receipts import DispatchReceiptStore
+
+                payload = DispatchReceiptStore(dispatch_run_id, (), create=False).read()
+                pid = int(payload.get("scheduler_owner_pid") or 0)
+            except Exception:
+                return True
+            if not pid:
+                return True
+            try:
+                reaped, _status = os.waitpid(pid, os.WNOHANG)
+                if reaped == pid:
+                    return True
+            except ChildProcessError:
+                pass
+            try:
+                os.kill(pid, 0)
+            except (ProcessLookupError, PermissionError, OSError):
+                return True
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
     thread.join(timeout)
     return not thread.is_alive()
 
@@ -580,21 +656,40 @@ def record_stage_dispatch_failure(dispatch_run_id: str, message: str) -> None:
     error store: the ledger is created before the scheduler starts, so the
     failure lands next to the cut states it explains.
     """
-    path = stage_dispatch_home(dispatch_run_id) / "receipts.json"
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        from .dispatch.receipts import DispatchReceiptStore
+
+        store = DispatchReceiptStore(dispatch_run_id, (), create=False)
+        store.update_metadata(
+            scheduler_error=str(message),
+            scheduler_error_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        )
+    except Exception:  # noqa: BLE001 - original scheduler failure is primary
         # No ledger means the dispatch never reached the point of owning cuts;
         # the caller still holds the exception.
         return
-    if not isinstance(payload, dict):
-        return
-    payload["scheduler_error"] = str(message)
-    payload["scheduler_error_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def request_stage_dispatch_stop(dispatch_run_id: str) -> dict[str, Any]:
+    """Fence future launches before lifecycle signals active provider runs."""
+    from .dispatch.receipts import DispatchReceiptStore
+
     try:
-        atomic_write_json(path, payload)
-    except OSError:
-        return
+        store = DispatchReceiptStore(dispatch_run_id, (), create=False)
+        store.update_metadata(
+            scheduler_stop_requested=True,
+            scheduler_stop_requested_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        )
+        payload = store.read()
+    except Exception as exc:  # noqa: BLE001 - interrupt must report refusal honestly
+        return {"accepted": False, "reason": str(exc), "owner_pid": 0}
+    owner_pid = int(payload.get("scheduler_owner_pid") or 0)
+    if owner_pid:
+        try:
+            os.killpg(owner_pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    return {"accepted": True, "reason": "future launches fenced", "owner_pid": owner_pid}
 
 
 def stage_fleet_receipts(parent_run_id: str, stage_id: str) -> dict[str, Any]:
@@ -739,6 +834,8 @@ def fleet_obligations(
         "cuts": cuts,
         "blocking": blocking,
         "scheduler_error": scheduler_error,
+        "scheduler_owner_pid": int(payload.get("scheduler_owner_pid") or 0),
+        "scheduler_stop_requested": bool(payload.get("scheduler_stop_requested")),
         "recovery_command": fleet_recovery_command(dispatch_run_id, plan_path),
     }
 
@@ -754,7 +851,9 @@ def fleet_recovery_command(dispatch_run_id: str, plan_path: str = "") -> str:
     plan = str(plan_path or "").strip()
     if not plan:
         return ""
-    return f"vibecrafted dispatch {plan} --resume {dispatch_run_id}"
+    return "vibecrafted dispatch {} --resume {}".format(
+        shlex.quote(plan), shlex.quote(dispatch_run_id)
+    )
 
 
 def stage_fleet_progress(

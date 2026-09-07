@@ -10,6 +10,7 @@ from vibecrafted_core.dispatch.receipts import DispatchReceiptStore
 from vibecrafted_core.dispatch.supervisor import CellRun
 from vibecrafted_core.lifecycle_fleet import (
     _FLEET_DISPATCH_ERRORS,
+    _start_detached_dispatch,
     STAGE_WORKER_MAY_LAUNCH_AGENT_LINES,
     WRITE_FLEET_STAGE_WORKFLOWS,
     CutDispatchContract,
@@ -787,3 +788,74 @@ def test_recovery_reruns_only_the_failed_cut_and_leaves_its_siblings_alone(
         plan_path=str(plan),
     )
     assert progress["verdict"] == "complete"
+
+
+def test_scheduler_metadata_merge_never_discards_a_concurrent_cut_receipt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Scheduler errors and supervisor transitions share the locked ledger."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    repo = tmp_path / "repo"
+    _seed_repo(repo)
+    plan = _plan(repo, ("W0-a",), ("codex",))
+    from vibecrafted_core.dispatch.doctor import diagnose_file
+
+    dispatch = diagnose_file(plan).dispatch
+    assert dispatch is not None
+    run_id = stage_dispatch_run_id("life-ledger-lock", "implement")
+    store = DispatchReceiptStore(run_id, dispatch.cuts, repo_root=str(repo))
+    barrier = threading.Barrier(2)
+
+    def supervisor_write() -> None:
+        barrier.wait()
+        store.update("W0-a", "active", provider_run_id="provider-W0-a")
+
+    def scheduler_write() -> None:
+        barrier.wait()
+        store.update_metadata(scheduler_error="owner lost transport")
+
+    first = threading.Thread(target=supervisor_write)
+    second = threading.Thread(target=scheduler_write)
+    first.start()
+    second.start()
+    first.join()
+    second.join()
+    payload = store.read()
+    assert payload["scheduler_error"] == "owner lost transport"
+    assert payload["cuts"]["W0-a"]["state"] == "active"
+    assert payload["cuts"]["W0-a"]["provider_run_id"] == "provider-W0-a"
+
+
+def test_detached_scheduler_owner_survives_the_calling_process_boundary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The production owner is a real new-session process, not a UI thread."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    repo = tmp_path / "repo"
+    _seed_repo(repo)
+    plan = _plan(repo, ("W0-a",), ("codex",))
+    from vibecrafted_core.dispatch.doctor import diagnose_file
+
+    dispatch = diagnose_file(plan).dispatch
+    assert dispatch is not None
+    run_id = stage_dispatch_run_id("life-detached-owner", "implement")
+    store = DispatchReceiptStore(run_id, dispatch.cuts, repo_root=str(repo))
+    marker = tmp_path / "settled-by-detached-owner"
+
+    def detached_run() -> None:
+        marker.write_text("ok", encoding="utf-8")
+
+    owner_pid = _start_detached_dispatch(run_id, store, detached_run)
+    assert owner_pid > 0
+    assert join_stage_dispatch(run_id, timeout=5)
+    assert marker.read_text(encoding="utf-8") == "ok"
+    receipt = store.read()
+    assert receipt["scheduler_owner_mode"] == "detached-fork"
+    assert receipt["scheduler_owner_pid"] == owner_pid
+
+
+def test_fleet_recovery_command_quotes_space_containing_plan_path() -> None:
+    from vibecrafted_core.lifecycle_fleet import fleet_recovery_command
+
+    command = fleet_recovery_command("life implement fleet", "/tmp/plan with spaces.toml")
+    assert command == "vibecrafted dispatch '/tmp/plan with spaces.toml' --resume 'life implement fleet'"
