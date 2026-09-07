@@ -1,20 +1,31 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import threading
 from pathlib import Path
 
+import pytest
+from vibecrafted_core.dispatch.supervisor import CellRun
 from vibecrafted_core.lifecycle_fleet import (
     STAGE_WORKER_MAY_LAUNCH_AGENT_LINES,
     WRITE_FLEET_STAGE_WORKFLOWS,
     CutDispatchContract,
+    build_stage_dispatch,
     cut_worktree_path,
     dispatch_recorded_children,
+    dispatcher_fleet_launch,
     is_write_fleet_stage,
     live_vc_dispatch_permitted,
     load_cut_records,
+    mission_cut_agents,
     mission_cuts,
+    mission_dispatch_plan,
     record_only_supervisor,
     record_write_stage_fleet,
+    stage_dispatch_home,
+    stage_dispatch_run_id,
+    stage_fleet_receipts,
     stage_worker_may_launch_agent_lines,
 )
 from vibecrafted_core.workflows.model import WorkflowStage
@@ -254,3 +265,345 @@ def test_child_meta_is_json_control_plane_record(tmp_path: Path, monkeypatch) ->
     assert payload["stage_workflow"] == "marbles"
     assert payload["role"] == "write_stage_cut_child"
     assert payload["worktree_path"].endswith("/life-marb/L2")
+
+
+def _seed_repo(path: Path) -> str:
+    """A real git repo: the dispatcher refuses to build geometry without one."""
+    path.mkdir(parents=True, exist_ok=True)
+    for args in (
+        ("init", "-q"),
+        ("config", "user.email", "agents@vetcoders.io"),
+        ("config", "user.name", "lifecycle-fleet-test"),
+    ):
+        subprocess.run(["git", *args], cwd=path, check=True, capture_output=True)
+    (path / "README.md").write_text("seed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "seed"], cwd=path, check=True, capture_output=True
+    )
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def test_mission_cut_agents_reads_the_provider_pin_beside_each_cut() -> None:
+    inline = "---\ncuts: W0-a: codex, W0-b: claude, W0-c\n---\n"
+    assert mission_cuts(inline) == ("W0-a", "W0-b", "W0-c")
+    assert mission_cut_agents(inline) == {"W0-a": "codex", "W0-b": "claude"}
+
+    nested = "---\ncuts:\n  - W0-a: codex\n  - W0-b: claude\n---\n"
+    assert mission_cuts(nested) == ("W0-a", "W0-b")
+    assert mission_cut_agents(nested) == {"W0-a": "codex", "W0-b": "claude"}
+    assert mission_cut_agents("---\ncuts: W0-a, W0-b\n---\n") == {}
+
+
+def test_no_dispatcher_seam_fails_closed_naming_the_owning_boundary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    fleet = record_write_stage_fleet(
+        stage=_write_stage("implement"),
+        cuts=("W0-a",),
+        parent_run_id="life-fail-closed",
+        repo_root=tmp_path,
+        agent="codex",
+        org="vetcoders",
+        repo="vibecrafted",
+    )
+    # The old default silently degraded to record-only, so a "dispatched"
+    # stage could mean nothing had launched at all.
+    with pytest.raises(RuntimeError) as excinfo:
+        dispatch_recorded_children(fleet)
+    assert "dispatcher_fleet_launch" in str(excinfo.value)
+
+    # The degraded seam stays reachable, but only when it is asked for.
+    results = dispatch_recorded_children(fleet, supervisor=record_only_supervisor)
+    assert results[0]["spawned"] is False
+
+
+def test_build_stage_dispatch_is_one_plan_over_all_cuts_with_two_providers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    mission = "---\ncuts: W0-a: codex, W0-b: claude, W0-c: codex\n---\nmission body\n"
+    fleet = record_write_stage_fleet(
+        stage=_write_stage("implement"),
+        cuts=mission_cuts(mission),
+        parent_run_id="life-plan",
+        repo_root=tmp_path,
+        agent="codex",
+        org="vetcoders",
+        repo="vibecrafted",
+    )
+    dispatch = build_stage_dispatch(
+        fleet,
+        repo_root=tmp_path,
+        cut_agents=mission_cut_agents(mission),
+        mission_text=mission,
+    )
+    assert [cut.id for cut in dispatch.cuts] == ["W0-a", "W0-b", "W0-c"]
+    assert {cut.agent for cut in dispatch.cuts} == {"codex", "claude"}
+    # One plan, wide enough for every declared cut to be in flight at once.
+    assert dispatch.policy.concurrency == 3
+    assert dispatch.policy.allow_concurrency is True
+    assert dispatch.common.text == mission
+
+
+def test_public_default_dispatches_one_concurrent_fleet_on_the_real_dispatcher(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The ordinary construction path — no injected fleet seam at all.
+
+    Only the provider spawn is bounded (the lowest transport boundary); the
+    production supervisor, worktree manager and receipt ledger all execute.
+    """
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    repo = tmp_path / "repo"
+    _seed_repo(repo)
+
+    # A barrier of three only clears if the scheduler really holds three cuts
+    # open at once; a serialized fleet deadlocks here instead of passing.
+    barrier = threading.Barrier(3, timeout=30)
+    observed: dict[str, tuple[str, str]] = {}
+    lock = threading.Lock()
+
+    def cell_launcher(cut, _prompt: str, kind: str):
+        with lock:
+            observed[cut.id] = (cut.agent, cut.runtime_root)
+        barrier.wait()
+        report = Path(cut.artifact_path) / f"{cut.id}.md"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(f"{cut.id} done\n", encoding="utf-8")
+        return CellRun(
+            cut_id=cut.id,
+            kind=kind,
+            accepted=True,
+            run_id=f"provider-{cut.id}",
+            report_path=str(report),
+            exit_code=0,
+        )
+
+    mission = (
+        "---\n"
+        "cuts: W0-a: codex, W0-b: claude, W0-c: codex\n"
+        "---\n"
+        "# Mission: three disjoint cuts, two providers\n"
+    )
+    fleet = record_write_stage_fleet(
+        stage=_write_stage("implement"),
+        cuts=mission_cuts(mission),
+        parent_run_id="life-public",
+        repo_root=repo,
+        agent="codex",
+    )
+    launch = dispatcher_fleet_launch(
+        repo_root=repo,
+        mission_text=mission,
+        cell_launcher=cell_launcher,
+        await_config={"poll_s": 0.01, "timeout_min": 1.0},
+        wait=True,
+    )
+    results = dispatch_recorded_children(fleet, fleet_launch=launch)
+
+    assert len(results) == 3
+    assert all(item["live_dispatch"] is True for item in results)
+    assert {item["agent"] for item in results} == {"codex", "claude"}
+    assert {agent for agent, _ in observed.values()} == {"codex", "claude"}
+
+    # Real, disjoint worktrees created by the dispatcher's own manager.
+    worktrees = {cut_id: Path(root) for cut_id, (_, root) in observed.items()}
+    assert len(set(worktrees.values())) == 3
+    for cut_id, path in worktrees.items():
+        assert path.is_dir()
+        assert (path / ".git").exists()
+        assert path.name == cut_id
+
+    # Durable receipts under the dispatcher's authoritative ledger.
+    receipts = stage_fleet_receipts("life-public", "implement")
+    assert receipts["run_id"] == stage_dispatch_run_id("life-public", "implement")
+    for cut_id in ("W0-a", "W0-b", "W0-c"):
+        entry = receipts["cuts"][cut_id]
+        assert entry["provider_run_id"] == f"provider-{cut_id}"
+        assert entry["worktree_path"] == str(worktrees[cut_id])
+        # A mission that only lists cut ids declares nothing to verify, so no
+        # cut may claim a verified state — unverified is reported, not hidden.
+        assert entry["acceptance"] == "failed"
+        assert entry["gates"] == []
+
+    # The lifecycle record binds parent identity to that ledger; it does not
+    # keep a second copy of the geometry.
+    records = {item["cut_id"]: item for item in load_cut_records("life-public")}
+    for cut_id in ("W0-a", "W0-b", "W0-c"):
+        assert records[cut_id]["parent_run_id"] == "life-public"
+        assert records[cut_id]["receipts_path"] == str(
+            stage_dispatch_home(
+                stage_dispatch_run_id("life-public", "implement")
+            )
+            / "receipts.json"
+        )
+        assert records[cut_id]["dispatcher_run_id"] == stage_dispatch_run_id(
+            "life-public", "implement"
+        )
+
+
+def _plan(repo: Path, cuts: tuple[str, ...], agents: tuple[str, ...]) -> Path:
+    """A real dispatch plan TOML: the route that carries declared verifiers."""
+    body = "".join(
+        f'''[[cuts]]
+id = "{cut_id}"
+agent = "{agent}"
+workflow = "implement"
+prompt = "run {cut_id}"
+  [[cuts.verify]]
+  run = "test -s {{reports_dir}}/{cut_id}.md"
+  expect = {{ exit_code = 0 }}
+'''
+        for cut_id, agent in zip(cuts, agents, strict=True)
+    )
+    path = repo / "acceptance-plan.toml"
+    path.write_text(
+        f'''schema = "vibecrafted.dispatch.v1"
+[meta]
+name = "acceptance-fleet"
+repo = "{repo}"
+[policy]
+concurrency = {len(cuts)}
+allow_concurrency = {str(len(cuts) > 1).lower()}
+await = {{ poll_s = 0.01, timeout_min = 1.0 }}
+{body}''',
+        encoding="utf-8",
+    )
+    return path
+
+
+def _report_writer(launches: list[str]):
+    def cell_launcher(cut, _prompt: str, kind: str):
+        launches.append(cut.id)
+        report = Path(cut.artifact_path) / f"{cut.id}.md"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(f"{cut.id} done\n", encoding="utf-8")
+        return CellRun(
+            cut_id=cut.id,
+            kind=kind,
+            accepted=True,
+            run_id=f"provider-{cut.id}",
+            report_path=str(report),
+            exit_code=0,
+        )
+
+    return cell_launcher
+
+
+def test_mission_referenced_plan_carries_verifiers_and_settles_the_fleet(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The declared-plan route: existing loader, existing verifiers, no new parser."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    repo = tmp_path / "repo"
+    _seed_repo(repo)
+    plan = _plan(repo, ("W0-a", "W0-b", "W0-c"), ("codex", "claude", "codex"))
+    mission = (
+        "---\n"
+        f"dispatch_plan: {plan.name}\n"
+        "cuts: W0-a, W0-b, W0-c\n"
+        "---\n"
+    )
+    assert mission_dispatch_plan(mission) == plan.name
+
+    launches: list[str] = []
+    fleet = record_write_stage_fleet(
+        stage=_write_stage("implement"),
+        cuts=mission_cuts(mission),
+        parent_run_id="life-plan-run",
+        repo_root=repo,
+        agent="codex",
+    )
+    results = dispatch_recorded_children(
+        fleet,
+        fleet_launch=dispatcher_fleet_launch(
+            repo_root=repo,
+            mission_text=mission,
+            cell_launcher=_report_writer(launches),
+            wait=True,
+        ),
+    )
+    assert sorted(launches) == ["W0-a", "W0-b", "W0-c"]
+    assert {item["agent"] for item in results} == {"codex", "claude"}
+
+    receipts = stage_fleet_receipts("life-plan-run", "implement")
+    for cut_id in ("W0-a", "W0-b", "W0-c"):
+        entry = receipts["cuts"][cut_id]
+        assert entry["state"] == "settled"
+        assert entry["acceptance"] == "verified"
+        assert entry["gates"], "a settled cut must carry its verifier evidence"
+
+
+def test_a_plan_that_misses_a_declared_cut_fails_closed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    repo = tmp_path / "repo"
+    _seed_repo(repo)
+    plan = _plan(repo, ("W0-a",), ("codex",))
+    mission = f"---\ndispatch_plan: {plan.name}\ncuts: W0-a, W0-b\n---\n"
+    fleet = record_write_stage_fleet(
+        stage=_write_stage("implement"),
+        cuts=mission_cuts(mission),
+        parent_run_id="life-plan-gap",
+        repo_root=repo,
+        agent="codex",
+    )
+    with pytest.raises(RuntimeError, match="does not cover lifecycle cut"):
+        dispatch_recorded_children(
+            fleet,
+            fleet_launch=dispatcher_fleet_launch(
+                repo_root=repo, mission_text=mission, wait=True
+            ),
+        )
+
+
+def test_second_launch_resumes_the_same_dispatch_without_relaunching(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Crash retry is settled by the dispatcher's receipts, not by a bool."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    repo = tmp_path / "repo"
+    _seed_repo(repo)
+    plan = _plan(repo, ("solo",), ("codex",))
+    mission = f"---\ndispatch_plan: {plan.name}\ncuts: solo\n---\n"
+    launches: list[str] = []
+
+    def make_fleet():
+        return record_write_stage_fleet(
+            stage=_write_stage("implement"),
+            cuts=mission_cuts(mission),
+            parent_run_id="life-resume",
+            repo_root=repo,
+            agent="codex",
+        )
+
+    launch = dispatcher_fleet_launch(
+        repo_root=repo,
+        mission_text=mission,
+        cell_launcher=_report_writer(launches),
+        wait=True,
+    )
+    dispatch_recorded_children(make_fleet(), fleet_launch=launch)
+    assert launches == ["solo"]
+    assert stage_fleet_receipts("life-resume", "implement")["cuts"]["solo"][
+        "state"
+    ] == "settled"
+
+    # Replaying a live child without the recovery verb is still refused.
+    with pytest.raises(RuntimeError, match="refusing duplicate"):
+        dispatch_recorded_children(make_fleet(), fleet_launch=launch)
+
+    # With the recovery verb the dispatcher re-owns its settled cut from the
+    # receipt ledger instead of executing the same work a second time.
+    again = dispatch_recorded_children(make_fleet(), fleet_launch=launch, resume=True)
+    assert launches == ["solo"]
+    assert again[0]["resumed"] is True

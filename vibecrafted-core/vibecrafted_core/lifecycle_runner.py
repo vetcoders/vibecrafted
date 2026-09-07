@@ -23,8 +23,10 @@ from .lifecycle_delivery import (
     try_grant_lifecycle_stage_seal,
 )
 from .lifecycle_fleet import (
+    FleetLaunch,
     SupervisorLaunch,
     dispatch_recorded_children,
+    dispatcher_fleet_launch,
     live_vc_dispatch_permitted,
     mission_cuts,
     record_write_stage_fleet,
@@ -649,8 +651,19 @@ class LifecycleRunner:
         launcher: LaunchWorkflow = launch_workflow,
         awaiter: AwaitWorkflow | None = None,
         fleet_supervisor: SupervisorLaunch | None = None,
+        fleet_launch: FleetLaunch | None = None,
+        cell_launcher: Any | None = None,
+        fleet_await_config: dict[str, Any] | None = None,
     ) -> None:
-        """Wire the workflow launcher and awaiter (defaults to the real runtime paths)."""
+        """Wire the workflow launcher and awaiter (defaults to the real runtime paths).
+
+        The WRITE-stage fleet defaults to the existing dispatcher: absent an
+        injected seam, declared cuts are scheduled by ``run_dispatch`` against
+        real worktrees and durable receipts.  ``fleet_supervisor`` (per cut) and
+        ``fleet_launch`` (per fleet) stay available for injection;
+        ``cell_launcher`` bounds only the provider spawn, leaving the production
+        supervisor, parser, worktrees and receipts in play.
+        """
         self.launcher = launcher
         self.awaiter = awaiter or (
             lambda payload: await_launch_truth(
@@ -661,6 +674,9 @@ class LifecycleRunner:
             )
         )
         self.fleet_supervisor = fleet_supervisor
+        self.fleet_launch = fleet_launch
+        self.cell_launcher = cell_launcher
+        self.fleet_await_config = fleet_await_config
 
     async def run(self, spec: LifecycleRunSpec) -> dict[str, Any]:
         """Execute the full lifecycle: initialize state, then loop launching stages until
@@ -947,7 +963,20 @@ class LifecycleRunner:
             agent=agent,
         )
         supervisor_launches = dispatch_recorded_children(
-            fleet, supervisor=self.fleet_supervisor
+            fleet,
+            supervisor=self.fleet_supervisor,
+            fleet_launch=(
+                None
+                if self.fleet_supervisor is not None
+                else self.fleet_launch
+                or dispatcher_fleet_launch(
+                    repo_root=root,
+                    mission_text=source_prompt,
+                    stage_model=model,
+                    cell_launcher=self.cell_launcher,
+                    await_config=self.fleet_await_config,
+                )
+            ),
         )
         launch = await asyncio.to_thread(self.launcher, launch_spec, root)
         record: dict[str, Any] = {
@@ -975,6 +1004,24 @@ class LifecycleRunner:
                 **fleet.to_payload(),
                 "live_dispatch": any(
                     bool(item.get("live_dispatch")) for item in supervisor_launches
+                ),
+                # Where the authoritative per-cut truth lives, so a reopened
+                # view can recover the fleet without the launching process.
+                "dispatch_run_id": next(
+                    (
+                        str(item.get("dispatcher_run_id") or "")
+                        for item in supervisor_launches
+                        if item.get("dispatcher_run_id")
+                    ),
+                    "",
+                ),
+                "receipts_path": next(
+                    (
+                        str(item.get("receipts_path") or "")
+                        for item in supervisor_launches
+                        if item.get("receipts_path")
+                    ),
+                    "",
                 ),
                 "supervisor_launches": supervisor_launches,
             }
