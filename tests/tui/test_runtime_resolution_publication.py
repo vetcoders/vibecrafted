@@ -215,6 +215,21 @@ def test_upgrade_preserves_user_kdl_policy_and_exact_theme_bytes(
     _resolve(paths, capsys, status="ready")
 
 
+def test_unchanged_kdl_default_preserves_custom_keybinds_exactly(
+    installed, tmp_path, capsys
+):
+    paths, _, _result = installed
+    config = paths["product_config"] / "vc-frame/config.kdl"
+    user_config = config.read_bytes().replace(b'bind "Ctrl n"', b'bind "Ctrl b"')
+    assert user_config != config.read_bytes()
+    config.write_bytes(user_config)
+
+    _install(seed_runtime_pack(tmp_path / "pack-b", version="9.9.10+b"), capsys)
+
+    assert config.read_bytes() == user_config
+    _resolve(paths, capsys, status="ready")
+
+
 def test_non_overlapping_kdl_upgrade_merges_user_preference_and_new_defaults(
     tmp_path, roots, capsys
 ):
@@ -300,18 +315,60 @@ def test_same_setting_kdl_conflict_refuses_publication_and_preserves_evidence(
 def test_nested_kdl_edit_refuses_publication_and_preserves_evidence(
     installed, tmp_path, capsys
 ):
-    paths, _, _result = installed
+    paths, _, result = installed
+    product = paths["product_config"]
+    config = product / "vc-frame/config.kdl"
+    config.write_bytes(
+        config.read_bytes().replace(b"themes {", b"themes {\n    copy_on_select true")
+    )
+    before = _snapshot(product)
+    active = (paths["runtime_home"] / "active.json").read_bytes()
+    source = (
+        Path(result["root"])
+        / "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
+    )
+    payload_b = seed_runtime_pack(
+        tmp_path / "pack-b",
+        version="9.9.10+b",
+        frame_config=source.read_text().replace("mouse_mode true", "mouse_mode false"),
+    )
+    with pytest.raises(
+        RuntimeError, match="KDL edit changes nested or structural content"
+    ):
+        _install(payload_b, capsys)
+    capsys.readouterr()
+    assert _snapshot(product) == before
+    assert (paths["runtime_home"] / "active.json").read_bytes() == active
+    _resolve(paths, capsys, status="unusable")
+
+
+def test_unsupported_changed_kdl_scalar_syntax_refuses_publication(
+    installed, tmp_path, capsys
+):
+    paths, _, result = installed
     product = paths["product_config"]
     config = product / "vc-frame/config.kdl"
     config.write_bytes(
         config.read_bytes().replace(
-            b"themes {", b"themes {\n    copy_on_select true"
+            b'copy_command "pbcopy"', b'copy_command "pbcopy"; copy_on_select true'
         )
     )
     before = _snapshot(product)
     active = (paths["runtime_home"] / "active.json").read_bytes()
-    payload_b = seed_runtime_pack(tmp_path / "pack-b", version="9.9.10+b")
-    with pytest.raises(RuntimeError, match="KDL edit changes nested or structural content"):
+    source = (
+        Path(result["root"])
+        / "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
+    )
+    payload_b = seed_runtime_pack(
+        tmp_path / "pack-b",
+        version="9.9.10+b",
+        frame_config=source.read_text().replace(
+            'default_layout "operator"', 'default_layout "changed-upstream"'
+        ),
+    )
+    with pytest.raises(
+        RuntimeError, match="KDL edit uses unsupported changed scalar syntax"
+    ):
         _install(payload_b, capsys)
     capsys.readouterr()
     assert _snapshot(product) == before

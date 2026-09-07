@@ -15592,7 +15592,10 @@ def _merge_runtime_preferences(
         raise ValueError("previous shipped defaults are unavailable")
     if current == previous:
         return incoming
-    if incoming == previous and not kdl:
+    # An unchanged shipped default needs no three-way merge, irrespective of
+    # its format. In particular, do not reject a user-owned custom KDL block
+    # merely because this is a KDL preference file.
+    if incoming == previous:
         return current
     base = previous.splitlines(keepends=True)
 
@@ -15708,6 +15711,11 @@ def _assert_kdl_preference_merge_is_unambiguous(
             raise ValueError("KDL structure is unbalanced")
         return result
 
+    scalar_setting = re.compile(
+        r"([A-Za-z_][A-Za-z0-9_-]*)\s+"
+        r'(?:true|false|-?(?:0|[1-9]\d*)(?:\.\d+)?|"(?:[^"\\]|\\.)*")'
+    )
+
     def scalar_settings(text: str) -> dict[str, str]:
         lines = text.splitlines(keepends=True)
         line_depths = depths(lines)
@@ -15716,7 +15724,7 @@ def _assert_kdl_preference_merge_is_unambiguous(
             body = line_without_comment(line).strip()
             if not body:
                 continue
-            match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_-]*)\s+[^{}]+", body)
+            match = scalar_setting.fullmatch(body)
             if depth == 0 and match:
                 name = match.group(1)
                 if name in settings:
@@ -15736,6 +15744,8 @@ def _assert_kdl_preference_merge_is_unambiguous(
                 body = line_without_comment(line).strip()
                 if "{" in body or "}" in body:
                     raise ValueError("KDL edit changes nested or structural content")
+                if body and scalar_setting.fullmatch(body) is None:
+                    raise ValueError("KDL edit uses unsupported changed scalar syntax")
 
     assert_scalar_edits(user_edits)
     assert_scalar_edits(upstream_edits)
@@ -15755,7 +15765,8 @@ def _assert_kdl_preference_merge_is_unambiguous(
     conflicts = sorted(user_changed & upstream_changed)
     if conflicts:
         raise ValueError(
-            "KDL settings conflict with changed shipped defaults: " + ", ".join(conflicts)
+            "KDL settings conflict with changed shipped defaults: "
+            + ", ".join(conflicts)
         )
 
 
