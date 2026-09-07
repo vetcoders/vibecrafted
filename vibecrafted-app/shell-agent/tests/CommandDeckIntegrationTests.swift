@@ -12,15 +12,19 @@ struct CommandDeckIntegrationTests {
     var received: [CommandDeckChromeAction] = []
     func handle(_ action: CommandDeckChromeAction) { received.append(action) }
   }
+  @MainActor
+  final class DownloadChoice {
+    var cancel = false
+  }
 
   static func require(_ value: Bool, _ message: String) throws {
     if !value { throw Failure(message: message) }
   }
 
-  static func waitFor(_ condition: () -> Bool) async throws {
+  static func waitFor(line: UInt = #line, _ condition: () -> Bool) async throws {
     let deadline = Date().addingTimeInterval(10)
     while !condition() {
-      if Date() > deadline { throw Failure(message: "Fixture navigation timed out") }
+      if Date() > deadline { throw Failure(message: "Fixture navigation timed out at line \(line)") }
       try await Task.sleep(for: .milliseconds(25))
     }
   }
@@ -142,14 +146,18 @@ struct CommandDeckIntegrationTests {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: directory) }
-    var cancelDownload = false
+    let downloadChoice = DownloadChoice()
     let session = WebConsoleSession(websiteDataStore: .nonPersistent(), downloadDestinationProvider: { name, _, _ in
-      cancelDownload ? nil : directory.appendingPathComponent(name)
+      downloadChoice.cancel ? nil : directory.appendingPathComponent(name)
     })
     var downloaded: [URL] = []
     var downloadErrors: [String] = []
     session.events.downloadFinished = { downloaded.append($0) }
     session.events.downloadFailed = { downloadErrors.append($0) }
+    var interruptions = 0
+    session.events.stateDidChange = { state in
+      if case .interrupted = state { interruptions += 1 }
+    }
     let original = session.webView
     session.apply(endpoint: endpoint)
     try await waitFor { if case .loaded = session.loadState { return true }; return false }
@@ -175,30 +183,50 @@ struct CommandDeckIntegrationTests {
     try await waitFor { if case .failed = session.loadState { return true }; return false }
     session.navigate(path: "/workspaces")
     try await waitFor { if case .loaded = session.loadState { return true }; return false }
-    session.webViewWebContentProcessDidTerminate(session.webView)
+    // Obtain ownership directly from this nonpersistent fixture view. A
+    // requested WebKit termination suppresses the crash callback, so inject
+    // an actual process loss into that exact process instead.
+    // Source: WebKit/Source/WebKit/UIProcess/API/Cocoa/WKWebViewPrivate.h
+    let processIdentifier = NSSelectorFromString("_webProcessIdentifier")
+    try require(session.webView.responds(to: processIdentifier),
+      "WebKit process-loss fixture SPI unavailable; witness cannot be accepted")
+    let fixturePID = (session.webView.value(forKey: "_webProcessIdentifier") as? NSNumber)?.int32Value ?? 0
+    try require(fixturePID > 1 && fixturePID != getpid(), "Invalid fixture process identity")
+    try require(kill(fixturePID, SIGKILL) == 0, "Fixture process-loss injection failed")
+    try await waitFor { interruptions == 1 }
     try await waitFor { if case .loaded(let url) = session.loadState { return url.path == "/workspaces" }; return false }
+    try require(session.webView === original, "Process recovery replaced the retained web view")
+    let recoveredPID = (session.webView.value(forKey: "_webProcessIdentifier") as? NSNumber)?.int32Value ?? 0
+    try require(recoveredPID > 1 && recoveredPID != fixturePID, "Content process was not replaced")
+    let cookieAfterProcessLoss = await hasFixtureCookie(session.webView.configuration.websiteDataStore.httpCookieStore)
+    try require(cookieAfterProcessLoss, "Process recovery discarded the original cookie")
+    print("Witness: real WebKit process loss, delegate interruption, retained-view route recovery and cookie retention")
     try await evaluate("document.getElementById('download').click()", in: session.webView)
     try await waitFor { downloaded.count == 1 }
     try require(try String(contentsOf: downloaded[0], encoding: .utf8) == "server-download", "Server download bytes")
     try await evaluate("document.getElementById('blob').click()", in: session.webView)
     try await waitFor { downloaded.count == 2 }
     try require(try String(contentsOf: downloaded[1], encoding: .utf8) == "blob-download", "Blob download bytes")
-    cancelDownload = true
+    downloadChoice.cancel = true
     try await evaluate("document.getElementById('blob').click()", in: session.webView)
     try await waitFor { !downloadErrors.isEmpty }
     try require(downloaded.count == 2, "Cancelled download wrote a file")
+    print("Witness: server download bytes, blob download bytes and blob cancellation")
     let actions = Actions()
     let controller = MainWindowController(model: model, session: session, actions: actions)
     let window = controller.window
     controller.close()
     controller.showWindow(nil)
     try require(controller.window === window && session.webView === original, "Reopen recreated native or web window")
+    print("Witness: remount, reconnect, query/fragment, HTTP failure/retry and close/reopen identity")
     controller.close()
   }
 
   static func main() async throws {
     _ = NSApplication.shared
     let endpoint = URL(string: CommandLine.arguments[1])!
+    try require(endpoint.scheme == "http" && endpoint.host == "127.0.0.1" && endpoint.port != nil,
+      "Only a loopback fixture endpoint is permitted")
     try stateContract(endpoint)
     try policyContract(endpoint)
     try authenticationAndDownloadContract(endpoint)

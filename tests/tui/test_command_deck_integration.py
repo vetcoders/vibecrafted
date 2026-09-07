@@ -1,4 +1,5 @@
 """W2-authored contracts. Compilation, fixture execution and pytest are W3 gates."""
+
 from __future__ import annotations
 
 import http.server
@@ -42,9 +43,14 @@ def test_single_native_host_source_contract() -> None:
     assert "StatusItemController {" in delegate
     assert "self.confirmedStopRoot == install.root" in delegate
     assert "deriveServerMenuState(caretakerData: self.lastCaretakerData" in delegate
-    assert 'It does not stop terminal sessions or agents.' in delegate
-    for name in ["CanvasViewController", "InspectorViewController", "MainSplitViewController",
-                 "MissionControlViewController", "SidebarViewController"]:
+    assert "It does not stop terminal sessions or agents." in delegate
+    for name in [
+        "CanvasViewController",
+        "InspectorViewController",
+        "MainSplitViewController",
+        "MissionControlViewController",
+        "SidebarViewController",
+    ]:
         assert not (APP / f"Views/{name}.swift").exists()
         assert name not in delegate + window
 
@@ -58,7 +64,7 @@ def test_package_has_distinct_art_and_no_competing_tray() -> None:
     assert "vc-mux-tray" not in makefile
     assert "libvibecrafted_shell_ffi" in project  # notifications still consume FFI
     assert "docs/presence/logo-master.png" in builder + makefile
-    assert 'VIBECRAFTED_ICON_SOURCE:-$TERMINAL_REPO' not in builder
+    assert "VIBECRAFTED_ICON_SOURCE:-$TERMINAL_REPO" not in builder
     assert '"$TERMINAL_REPO/assets/icon/vc-terminal-icon.png"' in builder
     assert 'install -m 0644 "$resources/Vibecrafted.icns"' not in builder
     assert "image.isTemplate = false" not in tray
@@ -72,25 +78,46 @@ def _compile(tmp_path: Path, name: str, sources: list[Path]) -> Path:
         pytest.skip("swiftc is unavailable")
     binary = tmp_path / name
     target = "arm64" if os.uname().machine == "arm64" else "x86_64"
-    subprocess.run([compiler, "-swift-version", "6", "-target", f"{target}-apple-macosx14.0",
-                    *map(str, sources), "-o", str(binary)], check=True, timeout=180)
+    subprocess.run(
+        [
+            compiler,
+            "-swift-version",
+            "6",
+            "-target",
+            f"{target}-apple-macosx14.0",
+            *map(str, sources),
+            "-o",
+            str(binary),
+        ],
+        check=True,
+        timeout=180,
+    )
     return binary
 
 
 def test_native_typed_actions_and_terminal_contract(tmp_path: Path) -> None:
-    binary = _compile(tmp_path, "native-command-contract", [
-        APP / "CommandDeck/NativeCommandBridge.swift",
-        APP / "CommandDeck/TerminalLauncher.swift",
-        SHELL / "tests/NativeCommandRecoveryTests.swift",
-    ])
-    result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30, check=True)
+    binary = _compile(
+        tmp_path,
+        "native-command-contract",
+        [
+            APP / "CommandDeck/NativeCommandBridge.swift",
+            APP / "CommandDeck/TerminalLauncher.swift",
+            SHELL / "tests/NativeCommandRecoveryTests.swift",
+        ],
+    )
+    result = subprocess.run(
+        [str(binary)], capture_output=True, text=True, timeout=30, check=True
+    )
     assert "NativeCommandRecoveryTests passed" in result.stdout
 
 
 def test_native_session_state_routes_and_reopen(tmp_path: Path) -> None:
     sources = sorted((APP / "CommandDeck").glob("*.swift"))
-    sources += [APP / "ServerMenuPolicy.swift", APP / "Views/MainWindowController.swift",
-                SHELL / "tests/CommandDeckIntegrationTests.swift"]
+    sources += [
+        APP / "ServerMenuPolicy.swift",
+        APP / "Views/MainWindowController.swift",
+        SHELL / "tests/CommandDeckIntegrationTests.swift",
+    ]
     binary = _compile(tmp_path, "command-deck-contract", sources)
 
     class Fixture(http.server.BaseHTTPRequestHandler):
@@ -98,19 +125,26 @@ def test_native_session_state_routes_and_reopen(tmp_path: Path) -> None:
             if self.path == "/download":
                 self.send_response(200)
                 self.send_header("Content-Type", "application/octet-stream")
-                self.send_header("Content-Disposition", 'attachment; filename="report.txt"')
+                self.send_header(
+                    "Content-Disposition", 'attachment; filename="report.txt"'
+                )
                 self.end_headers()
                 self.wfile.write(b"server-download")
                 return
             self.send_response(503 if self.path.startswith("/failure") else 200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Set-Cookie", "w3_session=fixture; Path=/; SameSite=Lax")
+            # Reconnect must retain the original cookie; later responses must
+            # not recreate it and conceal a discarded website data store.
+            if self.path == "/":
+                self.send_header(
+                    "Set-Cookie", "w3_session=fixture; Path=/; SameSite=Lax"
+                )
             self.end_headers()
-            self.wfile.write(b'''<!doctype html><title>W3 fixture</title>
+            self.wfile.write(b"""<!doctype html><title>W3 fixture</title>
 <a href="/workspaces">Workspaces</a><p id="fixture">Ready</p>
 <a id="download" href="/download" download="report.txt">Download</a>
 <a id="blob" download="blob.txt">Blob</a>
-<script>document.getElementById('blob').href = URL.createObjectURL(new Blob(['blob-download'], {type: 'application/octet-stream'}));</script>''')
+<script>document.getElementById('blob').href = URL.createObjectURL(new Blob(['blob-download'], {type: 'application/octet-stream'}));</script>""")
 
         def log_message(self, *_: object) -> None:
             pass
@@ -119,9 +153,15 @@ def test_native_session_state_routes_and_reopen(tmp_path: Path) -> None:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        result = subprocess.run([str(binary), f"http://127.0.0.1:{server.server_port}/"],
-                                capture_output=True, text=True, timeout=90, check=True)
+        result = subprocess.run(
+            [str(binary), f"http://127.0.0.1:{server.server_port}/"],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=True,
+        )
         assert "CommandDeckIntegrationTests passed" in result.stdout
+        print(result.stdout)
     finally:
         server.shutdown()
         server.server_close()
