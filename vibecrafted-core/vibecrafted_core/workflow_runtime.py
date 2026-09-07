@@ -22,7 +22,7 @@ from .research_config import (
     ResearchAgentSelection,
     resolve_research_runtime_config,
 )
-from .runtime_paths import agent_tool_search_path
+from .runtime_paths import agent_tool_search_path, selected_runtime_environment
 from .spawn import _resolve_agent_command, _stdin_command
 from .supervisor_async import AsyncRunHandle, AsyncSupervisor
 
@@ -189,7 +189,7 @@ def _child_env(
     model_requested: str = "",
 ) -> dict[str, str]:
     """Child process env: agent + artifact paths, plus model override if requested."""
-    env = os.environ.copy()
+    env = selected_runtime_environment()
     env["VIBECRAFTED_AGENT"] = agent
     env["VIBECRAFTED_REPORT_PATH"] = str(report)
     env["VIBECRAFTED_TRANSCRIPT_PATH"] = str(transcript)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -52,6 +53,62 @@ def _runtime_env(monkeypatch, tmp_path: Path, run_id: str) -> Path:
     monkeypatch.setenv("VIBECRAFTED_TRANSCRIPT_PATH", str(home / "parent.log"))
     monkeypatch.setenv("VIBECRAFTED_META_PATH", str(home / "parent.meta.json"))
     return home
+
+
+def _write_generation_command(root: Path, name: str, generation: str) -> Path:
+    command = root / "bin" / name
+    command.parent.mkdir(parents=True, exist_ok=True)
+    command.write_text(
+        "#!/bin/sh\n"
+        f'printf \'%s|%s|%s|%s\\n\' \'{generation}\' "$VIBECRAFTED_RUNTIME_ROOT" "$VIBECRAFTED_RUNTIME_BIN" "$VIBECRAFTED_PYTHON"\n',
+        encoding="utf-8",
+    )
+    command.chmod(0o755)
+    return command
+
+
+def test_child_env_keeps_selected_generation_over_stale_inherited_bin(
+    monkeypatch, tmp_path: Path
+) -> None:
+    selected = tmp_path / "releases" / "new"
+    stale = tmp_path / "releases" / "old"
+    selected_bin = selected / "bin"
+    stale_bin = stale / "bin"
+    for root, version in ((selected, "4.3.0+g16425e69"), (stale, "4.3.0+gf861d136")):
+        (root / "bin").mkdir(parents=True, exist_ok=True)
+        (root / "VERSION").write_text(f"{version}\n", encoding="utf-8")
+        python = root / "bin" / "python3"
+        python.write_text("#!/bin/sh\n", encoding="utf-8")
+        python.chmod(0o755)
+    _write_generation_command(selected, "codex", "new")
+    _write_generation_command(stale, "codex", "old")
+    home = tmp_path / "home"
+    provider_bin = home / ".local" / "bin"
+    _write_generation_command(home / ".local", "claude", "provider")
+
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_ROOT", str(selected))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(stale_bin))
+    monkeypatch.setenv("VIBECRAFTED_PYTHON", str(stale_bin / "python3"))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", str(tmp_path / "rogue-bin"))
+
+    environment = workflow_runtime._child_env(
+        "codex",
+        tmp_path / "report.md",
+        tmp_path / "transcript.log",
+        tmp_path / "meta.json",
+    )
+    command = workflow_runtime._resolve_agent_command("codex", ["codex"], environment)
+    result = subprocess.run(
+        command, env=environment, text=True, capture_output=True, check=True
+    )
+
+    assert command[0] == str(selected_bin / "codex")
+    assert (
+        result.stdout.strip()
+        == f"new|{selected}|{selected_bin}|{selected_bin / 'python3'}"
+    )
+    assert str(provider_bin) in environment["PATH"]
 
 
 def _write_finished_lane_meta(

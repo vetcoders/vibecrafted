@@ -800,7 +800,7 @@ def test_terminal_wrapper_pins_physical_owner_and_preserves_payload_argv(
     )
     host = generation / "libexec/vc-terminal"
     host.write_text(
-        f"#!{sys.executable}\nimport json, os, sys\nprint(json.dumps({{'argv':sys.argv[1:], 'env':{{k:v for k,v in os.environ.items() if k in ('VIBECRAFTED_RUNTIME_ROOT','VIBECRAFTED_ROOT','VIBECRAFTED_TERMINAL_HOST','VIBECRAFTED_VC_FRAME_BIN','VIBECRAFTED_PYTHON','XDG_CONFIG_HOME','VC_FRAME_CONFIG_DIR','VC_FRAME_CONFIG_FILE','PYTHONPATH')}}}}))\n"
+        f"#!{sys.executable}\nimport json, os, sys\nprint(json.dumps({{'argv':sys.argv[1:], 'env':{{k:v for k,v in os.environ.items() if k in ('VIBECRAFTED_RUNTIME_ROOT','VIBECRAFTED_RUNTIME_BIN','VIBECRAFTED_ROOT','VIBECRAFTED_TERMINAL_HOST','VIBECRAFTED_VC_FRAME_BIN','VIBECRAFTED_PYTHON','XDG_CONFIG_HOME','VC_FRAME_CONFIG_DIR','VC_FRAME_CONFIG_FILE','PYTHONPATH')}}}}))\n"
     )
     host.chmod(0o755)
     monkeypatch.setenv("HOME", str(home))
@@ -828,6 +828,7 @@ def test_terminal_wrapper_pins_physical_owner_and_preserves_payload_argv(
         environment = capture["env"]
         for key in ("VIBECRAFTED_RUNTIME_ROOT", "VIBECRAFTED_ROOT"):
             assert environment[key] == str(generation)
+        assert environment["VIBECRAFTED_RUNTIME_BIN"] == str(generation / "bin")
         assert environment["VIBECRAFTED_TERMINAL_HOST"] == str(host)
         assert environment["VIBECRAFTED_VC_FRAME_BIN"] == str(
             generation / "libexec/vc-frame"

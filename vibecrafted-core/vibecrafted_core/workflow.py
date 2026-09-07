@@ -48,7 +48,7 @@ from .process_control import process_identity_receipt, validate_process_identity
 from .report_contract import CLAIM_DIGEST_ENV, reserve_launcher_report_template
 from .research_config import ResearchAgentSelection, resolve_research_runtime_config
 from .run_mutation import mutate_run_meta, run_mutation_locks
-from .runtime_paths import agent_tool_search_path
+from .runtime_paths import agent_tool_search_path, selected_runtime_environment
 from .spawn import _resolve_agent_command, _stdin_command
 from .workflow_runtime import WORKER_SIGNAL_DISCIPLINE, native_resume_argv
 from .workflows import registry as workflow_registry
@@ -649,7 +649,7 @@ def _vc_frame_subprocess_env() -> dict[str, str]:
     a workspace-bound session name is appended.
     """
 
-    env = dict(os.environ)
+    env = selected_runtime_environment()
     if (
         sys.platform == "darwin"
         and not str(env.get("VC_FRAME_SOCKET_DIR") or "").strip()
@@ -2390,13 +2390,14 @@ def launch_workflow(
         if worker_command_override is not None
         else build_launch_command(spec, source_dir, prompt_file=prompt_path)
     )
-    merged_env = dict(os.environ)
-    if env:
-        merged_env.update(env)
-    merged_env["PATH"] = agent_tool_search_path(merged_env)
     try:
+        merged_env = selected_runtime_environment()
+        if env:
+            merged_env.update(env)
+        merged_env = selected_runtime_environment(merged_env)
+        merged_env["PATH"] = agent_tool_search_path(merged_env)
         worker_command = _resolve_agent_command(spec.agent, worker_command, merged_env)
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError) as exc:
         return _finish_launch_idempotency(
             idem_key,
             {

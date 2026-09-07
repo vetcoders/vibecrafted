@@ -12,6 +12,7 @@ from vibecrafted_core.runtime_paths import (
     agent_tool_search_path,
     is_operator_home_root,
     resolve_operator_launch_root,
+    selected_runtime_environment,
 )
 
 ALL_AGENTS = ("claude", "codex", "gemini", "agy", "junie", "grok", "cursor")
@@ -151,6 +152,50 @@ def test_agent_tool_search_path_matches_detached_allowlist(tmp_path: Path) -> No
     ]
     assert str(rogue_bin) not in entries
     assert len(entries) == len(set(entries))
+
+
+def test_selected_generation_rebinds_stale_runtime_bin_and_python(
+    tmp_path: Path,
+) -> None:
+    selected = tmp_path / "releases" / "new"
+    stale = tmp_path / "releases" / "old"
+    selected_bin = selected / "bin"
+    stale_bin = stale / "bin"
+    for directory in (selected_bin, stale_bin):
+        directory.mkdir(parents=True)
+    (selected / "VERSION").write_text("4.3.0+g16425e69\n", encoding="utf-8")
+    python = selected_bin / "python3"
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    python.chmod(0o755)
+
+    environment = selected_runtime_environment(
+        {
+            "VIBECRAFTED_RUNTIME_ROOT": str(selected),
+            "VIBECRAFTED_RUNTIME_BIN": str(stale_bin),
+            "VIBECRAFTED_PYTHON": str(stale_bin / "python3"),
+            "VIBECRAFTED_ROOT": str(stale),
+        }
+    )
+
+    assert environment["VIBECRAFTED_RUNTIME_ROOT"] == str(selected)
+    assert environment["VIBECRAFTED_RUNTIME_BIN"] == str(selected_bin)
+    assert environment["VIBECRAFTED_PYTHON"] == str(python)
+    assert environment["VIBECRAFTED_ROOT"] == str(selected)
+
+
+def test_selected_generation_fails_closed_when_identity_is_incomplete(
+    tmp_path: Path,
+) -> None:
+    selected = tmp_path / "releases" / "incomplete"
+    selected.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="immutable stamped generation"):
+        selected_runtime_environment(
+            {
+                "VIBECRAFTED_RUNTIME_ROOT": str(selected),
+                "VIBECRAFTED_RUNTIME_BIN": str(tmp_path / "stale-bin"),
+            }
+        )
 
 
 def test_resolve_operator_launch_root_uses_workspace_from_home(
