@@ -233,9 +233,11 @@ prompt = "unpinned cut"
     )
     captured: dict[str, object] = {}
 
-    def fake_launch_workflow(spec, _base_dir, *, env=None):
+    def fake_launch_workflow(spec, _base_dir, *, env=None, launch_meta=None):
         captured[spec.agent] = spec.model
         assert env is not None
+        assert launch_meta is not None
+        captured[f"{spec.agent}_dispatch_attempt"] = launch_meta["dispatch_attempt"]
         captured[f"{spec.agent}_idempotency"] = env.get(
             workflow.LAUNCH_IDEMPOTENCY_KEY_ENV
         )
@@ -259,6 +261,7 @@ prompt = "unpinned cut"
     assert captured["claude_idempotency"] == (
         "dispatch:dispatch-stable-1:cut:c2:attempt:initial"
     )
+    assert captured["codex_dispatch_attempt"] == "initial"
 
 
 def test_passing_cuts_flip_to_verified_and_emit_artifacts(tmp_path: Path) -> None:

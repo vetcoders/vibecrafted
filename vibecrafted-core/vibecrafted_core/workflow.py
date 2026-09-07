@@ -1724,6 +1724,12 @@ def _launch_tracking_payload(
             "attempt",
             "native_resume",
             "resume_idempotency_key",
+            "dispatch_run_id",
+            "dispatch_cut_id",
+            "dispatch_branch",
+            "dispatch_baseline_sha",
+            "dispatch_attempt",
+            "dispatch_idempotency_key",
         )
         if launch_meta.get(key) not in (None, "")
     }
