@@ -149,7 +149,12 @@ def _report_evidence(
     report_path: str, provider_run_id: str
 ) -> tuple[dict[str, object], list[str]]:
     """Apply the canonical report-attestation contract to one provider run."""
-    from vibecrafted_core.report_contract import validate_report_file
+    from vibecrafted_core.report_contract import (
+        CLAIM_BLOCKED,
+        CLAIM_FAILED,
+        CLAIM_PARTIAL,
+        validate_report_file,
+    )
 
     frontmatter = validate_report_file(report_path, require_frontmatter=True)
     evidence = {
@@ -166,13 +171,12 @@ def _report_evidence(
         issues.append("report is not finalized")
     if not frontmatter.claim:
         issues.append("report claim missing")
-    if frontmatter.claim_status not in {
-        "completed",
-        "complete",
-        "success",
-        "ok",
-        "done",
-    }:
+    # ``finalized`` plus ``claim`` is the canonical provider-neutral positive
+    # attestation.  Do not duplicate a local success-word allowlist here:
+    # callers may use a valid neutral status such as ``attested``.  Known
+    # negative, blocked, and in-progress canonical claims are still refusal
+    # states even if their author incorrectly flips ``finalized``.
+    if frontmatter.claim_status in CLAIM_FAILED | CLAIM_BLOCKED | CLAIM_PARTIAL:
         issues.append(
             f"report status is not successful: {frontmatter.claim_status or 'missing'}"
         )
@@ -357,7 +361,11 @@ def inspect_run(
             and not missing_provider_ids
         )
         if state in {"launching", "active", "reported", "verified", "integrating"}:
-            disposition = "observed-live-work"
+            # Receipt state is a declaration, not an independently observed
+            # liveness fact.  This read-only inspector has no process identity
+            # probe, so it must not promote stale receipt text into a live-work
+            # observation.
+            disposition = "declared-live-unknown"
         elif state == "failed" or receipt.get("acceptance") == "failed":
             disposition = "failed"
         elif delivered and integration["git_verified"]:

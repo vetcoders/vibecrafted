@@ -162,7 +162,7 @@ def test_inspector_refuses_live_or_failed_cuts(tmp_path: Path, state: str) -> No
     payload = json.loads(result.stdout)
     assert result.returncode == 1
     assert payload["cuts"][0]["integration"]["disposition"] == (
-        "observed-live-work" if state == "active" else "failed"
+        "declared-live-unknown" if state == "active" else "failed"
     )
 
 
@@ -239,6 +239,43 @@ def test_inspector_refuses_missing_or_unattested_report_evidence(
     assert missing.returncode == 1
     assert any(
         "report_missing" in issue for issue in json.loads(missing.stdout)["issues"]
+    )
+
+
+def test_inspector_accepts_canonical_neutral_finalized_attestation(
+    tmp_path: Path,
+) -> None:
+    repo, baseline, terminal = _repo(tmp_path)
+    report = tmp_path / "report.md"
+    _write_report(report, "provider-attested", status="attested")
+    receipt = _receipt(repo, baseline, terminal, report, "provider-attested")
+    receipt["branch"] = _git(repo, "branch", "--show-current")
+    _write_ledger(tmp_path / "home", "attested", repo, receipt)
+
+    result = _inspect(tmp_path / "home", "attested", "--require-integrated")
+
+    payload = json.loads(result.stdout)
+    assert result.returncode == 0
+    assert payload["status"] == "accepted"
+    assert payload["cuts"][0]["report"]["status"] == "attested"
+
+
+@pytest.mark.parametrize("status", ["failed", "blocked", "pending"])
+def test_inspector_refuses_negative_or_nonterminal_finalized_reports(
+    tmp_path: Path, status: str
+) -> None:
+    repo, baseline, terminal = _repo(tmp_path)
+    report = tmp_path / "report.md"
+    _write_report(report, "provider-nonpositive", status=status)
+    receipt = _receipt(repo, baseline, terminal, report, "provider-nonpositive")
+    _write_ledger(tmp_path / "home", "nonpositive", repo, receipt)
+
+    result = _inspect(tmp_path / "home", "nonpositive")
+
+    assert result.returncode == 1
+    assert any(
+        f"report status is not successful: {status}" in issue
+        for issue in json.loads(result.stdout)["issues"]
     )
 
 
