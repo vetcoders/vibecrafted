@@ -117,8 +117,10 @@ simplified_ui true
 
 ### Operator layout = vibecrafted standard
 
-`layouts/operator.kdl` (vc-start) and built-in `default_layout "vibecrafted"`
-share the same product tabs: **Start here**, **Agents**, **Shell**, and **voc**
+`layouts/operator.kdl` is the one physical product layout: vc-start,
+`vibecrafted dashboard default`, `vibecrafted dashboard vibecrafted`, and
+native `default_layout "operator"` all resolve to it. It carries the same product
+tabs: **Start here**, **Agents**, **Shell**, and **voc**
 (no spaces in layout _filenames_; never `Vibecrafted Operator.kdl`):
 
 - `session_layer` (tagged `session_canvas`) — compact-bar brand + **SESSIONS

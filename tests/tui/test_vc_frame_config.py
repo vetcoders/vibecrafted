@@ -118,6 +118,15 @@ def test_vc_frame_config_session_resilience() -> None:
     assert "serialize_pane_viewport true" in payload
 
 
+def test_native_default_names_the_packaged_operator_layout() -> None:
+    payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
+    operator = LAYOUTS_DIR / "operator.kdl"
+
+    assert 'default_layout "operator"' in payload
+    assert operator.is_file()
+    assert not operator.is_symlink()
+
+
 def test_vc_frame_config_has_plugin_aliases() -> None:
     payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
 
@@ -178,7 +187,7 @@ def test_marbles_layout_is_operator_centric() -> None:
 
 
 def test_operator_layout_matches_vibecrafted_standard() -> None:
-    """vc-start operator.kdl is the launch alias of default_layout vibecrafted:
+    """vc-start operator.kdl is the native default layout:
     Start here + Agents + Shell + voc, SESSIONS rail on every tab, no strider."""
     payload = (LAYOUTS_DIR / "operator.kdl").read_text(encoding="utf-8")
     assert 'tab name="Start here"' in payload

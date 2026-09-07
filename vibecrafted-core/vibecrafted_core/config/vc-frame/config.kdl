@@ -60,9 +60,10 @@ simplified_ui true
 // ─── Shell & Display ────────────────────────────────────────────────────────────
 default_shell "zsh"
 // compact chowal rail SESSIONS z nowego default.kdl (2026-07-07)
-// 2026-07-20: default = wbudowany "vibecrafted" (operator layout z railem,
-// Guide + vibecrafted tabs) — zrzut zywego "Vibecrafted Operator"
-default_layout "vibecrafted"
+// The native default and dashboard aliases resolve to the one shipped,
+// regular file: layouts/operator.kdl.  Runtime Packs reject symlinks, so do
+// not point this at an unmaterialized built-in `vibecrafted` layout.
+default_layout "operator"
 copy_command "pbcopy"
 mouse_mode true
 // Rail hover chrome. Defaults in vc-frame are already true; pin so product

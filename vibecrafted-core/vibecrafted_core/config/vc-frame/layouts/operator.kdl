@@ -1,7 +1,6 @@
 // operator — launch alias for the vibecrafted operator entrypoint
 // Path kept as operator.kdl for: vibecrafted start | dashboard operator
-// Content CANON = built-in default_layout "vibecrafted"
-//   (zellij-utils/assets/layouts/vibecrafted.kdl)
+// Content CANON = the shipped default_layout "operator" in config.kdl.
 //
 //
 // Tabs:
