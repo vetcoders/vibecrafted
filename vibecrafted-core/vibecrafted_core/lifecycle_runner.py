@@ -935,6 +935,20 @@ class LifecycleRunner:
         commit_before = _git_head(root)
         git_before = _git_status(root)
         git_snapshot_before = _git_worktree_snapshot(root, git_before)
+        # Persist and dispatch the cut identities before the stage worker can
+        # become an unobservable detached process.  The stage worker never
+        # receives authority to spawn a fleet; ``fleet_supervisor`` is the
+        # root-owned existing dispatcher seam.
+        fleet = record_write_stage_fleet(
+            stage=stage,
+            cuts=cuts,
+            parent_run_id=lifecycle_run_id or launch_spec.run_id,
+            repo_root=root,
+            agent=agent,
+        )
+        supervisor_launches = dispatch_recorded_children(
+            fleet, supervisor=self.fleet_supervisor
+        )
         launch = await asyncio.to_thread(self.launcher, launch_spec, root)
         record: dict[str, Any] = {
             "id": stage.id,
@@ -956,19 +970,13 @@ class LifecycleRunner:
             "launch": launch,
             "status": "launching",
         }
-        fleet = record_write_stage_fleet(
-            stage=stage,
-            cuts=cuts,
-            parent_run_id=lifecycle_run_id or str(launch.get("run_id") or ""),
-            repo_root=root,
-            agent=agent,
-        )
         if fleet.children:
             record["fleet"] = {
                 **fleet.to_payload(),
-                "supervisor_launches": dispatch_recorded_children(
-                    fleet, supervisor=self.fleet_supervisor
+                "live_dispatch": any(
+                    bool(item.get("live_dispatch")) for item in supervisor_launches
                 ),
+                "supervisor_launches": supervisor_launches,
             }
         return record
 
@@ -1006,7 +1014,8 @@ class LifecycleRunner:
                 "\n  coder of every cut. Record one child run per listed cut with"
                 "\n  cut_id and worktree"
                 f" $VIBECRAFTED_HOME/worktrees/<org>/<repo>/{lifecycle_run_id or '<run_id>'}/<cut_id>."
-                "\n  Still no live vc-dispatch"
+                "\n  The root lifecycle supervisor records identities before invoking"
+                "\n  its existing dispatcher; stage workers still never invoke vc-dispatch"
                 f" (live_vc_dispatch_permitted={live_vc_dispatch_permitted()})."
                 f"\n- Listed cuts: {listed}"
             )

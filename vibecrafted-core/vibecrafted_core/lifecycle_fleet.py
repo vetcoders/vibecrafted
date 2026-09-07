@@ -1,9 +1,8 @@
-"""WRITE-stage fleet: one recorded child run per listed plan cut.
+"""WRITE-stage fleet: durable lifecycle identities around dispatcher-owned cuts.
 
-Stage workers remain forbidden from launching live agent lines. The
-test-gated exception is WRITE stages whose mission lists cuts: they
-become dispatchers that persist a control-plane contract per cut.
-Live ``vc-dispatch`` is still never spawned from this module.
+The lifecycle owns the parent-to-cut relation; the supplied dispatcher owns
+worktree creation, provider launch, liveness, recovery and receipts.  Keeping
+that split explicit prevents a stage worker from becoming a second scheduler.
 """
 
 from __future__ import annotations
@@ -185,7 +184,7 @@ def stage_worker_may_launch_agent_lines(
 
 
 def live_vc_dispatch_permitted() -> bool:
-    """Live agent-line spawn stays forbidden even when the fleet exception applies."""
+    """A stage worker may never invoke live dispatcher lines directly."""
     return False
 
 
@@ -195,7 +194,7 @@ def child_run_id(parent_run_id: str, stage_id: str, cut_id: str) -> str:
 
 
 def record_only_supervisor(contract: CutDispatchContract) -> dict[str, Any]:
-    """Default supervisor: accept the recorded contract, do not spawn."""
+    """Explicit test/degraded supervisor: accept the recorded contract, do not spawn."""
     return {
         "accepted": True,
         "spawned": False,
@@ -289,18 +288,34 @@ def dispatch_recorded_children(
     *,
     supervisor: SupervisorLaunch | None = None,
 ) -> list[dict[str, Any]]:
-    """Call a supervisor once per recorded cut. Default records-only; never live."""
+    """Invoke the single supplied dispatcher after durable identity registration.
+
+    A dispatcher result is projected verbatim enough to retain the real provider
+    run identity.  The old record-only bridge overwrote every result to
+    ``spawned: false``; that made a live child invisible and made replay safe
+    only by accident.  A recorded live child is now a hard duplicate refusal.
+    """
     if not fleet.children:
         return []
     launch = supervisor or record_only_supervisor
     launched: list[dict[str, Any]] = []
     for contract in fleet.children:
+        prior = _load_child_record(Path(contract.meta_path))
+        if bool(prior.get("spawned")):
+            raise RuntimeError(
+                f"refusing duplicate lifecycle cut launch: {contract.child_run_id}"
+            )
         result = dict(launch(contract))
         result.setdefault("cut_id", contract.cut_id)
         result.setdefault("run_id", contract.child_run_id)
         result.setdefault("worktree_path", contract.worktree_path)
-        result["spawned"] = False
-        result["live_dispatch"] = False
+        result.setdefault("spawned", False)
+        result.setdefault("live_dispatch", bool(result["spawned"]))
+        if result["spawned"] and not result["live_dispatch"]:
+            raise RuntimeError(
+                f"dispatcher contradicted live launch for lifecycle cut: {contract.child_run_id}"
+            )
+        _record_dispatch_result(contract, result)
         launched.append(result)
     return launched
 
@@ -342,6 +357,17 @@ def _write_child_record(
     run_dir = control_plane_home() / "runtime_runs" / child_run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     meta_path = run_dir / "meta.json"
+    prior = _load_child_record(meta_path)
+    if prior:
+        expected = {
+            "run_id": child_run_id,
+            "parent_run_id": parent_run_id,
+            "cut_id": cut_id,
+            "stage_id": stage.id,
+        }
+        if any(str(prior.get(key) or "") != value for key, value in expected.items()):
+            raise RuntimeError(f"conflicting lifecycle cut record: {child_run_id}")
+        return meta_path
     payload = {
         "schema": "vibecrafted.lifecycle_fleet.v1",
         "run_id": child_run_id,
@@ -365,3 +391,40 @@ def _write_child_record(
         encoding="utf-8",
     )
     return meta_path
+
+
+def _load_child_record(meta_path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _record_dispatch_result(
+    contract: CutDispatchContract, result: dict[str, Any]
+) -> None:
+    """Atomically retain dispatcher identity before the child can disappear."""
+    meta_path = Path(contract.meta_path)
+    payload = _load_child_record(meta_path)
+    if not payload:
+        raise RuntimeError(f"missing lifecycle cut record: {contract.child_run_id}")
+    payload.update(
+        {
+            "status": "launching" if result.get("spawned") else "recorded",
+            "spawned": bool(result.get("spawned")),
+            "live_dispatch": bool(result.get("live_dispatch")),
+            "dispatcher_run_id": str(result.get("dispatcher_run_id") or ""),
+            "provider_run_id": str(
+                result.get("provider_run_id") or result.get("run_id") or ""
+            ),
+            "dispatch": result,
+            "dispatched_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+    )
+    temporary = meta_path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(meta_path)

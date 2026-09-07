@@ -1997,9 +1997,20 @@ def test_write_stage_with_n_cuts_records_n_cut_id_children(
 
     def supervisor(contract: CutDispatchContract) -> dict:
         launched.append(contract.cut_id)
-        return {"accepted": True, "cut_id": contract.cut_id}
+        return {
+            "accepted": True,
+            "cut_id": contract.cut_id,
+            "spawned": True,
+            "live_dispatch": True,
+            "provider_run_id": f"provider-{contract.cut_id}",
+        }
 
     def fake_launcher(spec, _source_dir):
+        # The root supervisor must register every child before this detached
+        # stage-worker launch can make a provider session invisible.
+        records = {item["cut_id"]: item for item in load_cut_records("life-impl-fleet")}
+        assert set(records) == {"W0-a", "W0-b", "W1-c"}
+        assert all(record["spawned"] is True for record in records.values())
         report = tmp_path / f"{spec.skill}.md"
         report.write_text(f"{spec.skill} ok\n", encoding="utf-8")
         return {
@@ -2043,7 +2054,7 @@ def test_write_stage_with_n_cuts_records_n_cut_id_children(
 
     fleet = state["stages"][0]["fleet"]
     assert fleet["exception_granted"] is True
-    assert fleet["live_dispatch"] is False
+    assert fleet["live_dispatch"] is True
     assert fleet["cuts"] == ["W0-a", "W0-b", "W1-c"]
     assert launched == ["W0-a", "W0-b", "W1-c"]
     assert live_vc_dispatch_permitted() is False
@@ -2056,6 +2067,7 @@ def test_write_stage_with_n_cuts_records_n_cut_id_children(
         assert worktree.parts[-2:] == ("life-impl-fleet", cut_id)
         assert worktree.is_relative_to(home / "worktrees")
         assert len(worktree.relative_to(home / "worktrees").parts) == 4
+        assert by_cut[cut_id]["provider_run_id"] == f"provider-{cut_id}"
 
 
 def test_read_stage_with_cuts_does_not_record_fleet(
@@ -2135,5 +2147,5 @@ def test_write_stage_prompt_names_fleet_exception_when_cuts_listed(
     )
     assert "WRITE fleet exception" in prompts[0]
     assert "Listed cuts: A, B" in prompts[0]
-    assert "no live vc-dispatch" in prompts[0]
+    assert "stage workers still never invoke vc-dispatch" in prompts[0]
     assert "life-impl-prompt" in prompts[0]

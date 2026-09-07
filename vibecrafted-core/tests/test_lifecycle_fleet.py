@@ -72,7 +72,7 @@ def test_write_fleet_stage_set_is_the_ship_write_dispatchers() -> None:
     assert not is_write_fleet_stage(decorate)
 
 
-def test_agent_line_contract_exception_is_write_plus_cuts_and_never_live() -> None:
+def test_agent_line_contract_exception_is_write_plus_cuts_and_stage_worker_safe() -> None:
     assert STAGE_WORKER_MAY_LAUNCH_AGENT_LINES is False
     assert live_vc_dispatch_permitted() is False
     cuts = ("W0-a", "W0-b")
@@ -144,7 +144,7 @@ def test_record_write_stage_fleet_writes_one_control_plane_record_per_cut(
         ).is_file()
 
 
-def test_mocked_supervisor_would_launch_n_children(tmp_path: Path, monkeypatch) -> None:
+def test_supervisor_launch_is_retained_and_duplicate_replay_is_refused(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
     launched: list[str] = []
 
@@ -152,8 +152,11 @@ def test_mocked_supervisor_would_launch_n_children(tmp_path: Path, monkeypatch) 
         launched.append(contract.cut_id)
         return {
             "accepted": True,
-            "spawned": False,
+            "spawned": True,
+            "live_dispatch": True,
             "cut_id": contract.cut_id,
+            "dispatcher_run_id": "dispatch-parent",
+            "provider_run_id": f"provider-{contract.cut_id}",
             "command": ["vc-dispatch", "--cut", contract.cut_id],
         }
 
@@ -169,9 +172,18 @@ def test_mocked_supervisor_would_launch_n_children(tmp_path: Path, monkeypatch) 
     results = dispatch_recorded_children(fleet, supervisor=supervisor)
     assert launched == ["alpha", "beta", "gamma"]
     assert len(results) == 3
-    assert all(item["spawned"] is False for item in results)
-    assert all(item["live_dispatch"] is False for item in results)
+    assert all(item["spawned"] is True for item in results)
+    assert all(item["live_dispatch"] is True for item in results)
     assert "vc-dispatch" in results[0]["command"]
+    records = {item["cut_id"]: item for item in load_cut_records("life-work-test")}
+    assert records["alpha"]["provider_run_id"] == "provider-alpha"
+    assert records["alpha"]["dispatcher_run_id"] == "dispatch-parent"
+    try:
+        dispatch_recorded_children(fleet, supervisor=supervisor)
+    except RuntimeError as exc:
+        assert "refusing duplicate" in str(exc)
+    else:
+        raise AssertionError("live lifecycle child replayed")
 
 
 def test_read_stage_and_write_without_cuts_record_no_children(
