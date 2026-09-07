@@ -34,7 +34,7 @@ _vetcoders_dashboard_session_name() {
 }
 
 _vetcoders_product_core_cli() {
-  local source_file="${BASH_SOURCE[0]}" core_dir product_root python_bin python_dir checkout_python project_python embedded_python
+  local core_dir product_root python_bin python_dir checkout_python project_python embedded_python
   local config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
   # Product preferences are canonical without changing Atuin/Starship's XDG
   # environment in the parent shell.
@@ -45,12 +45,47 @@ _vetcoders_product_core_cli() {
     "$VIBECRAFTED_PRODUCT_CORE_CLI" "$@"
     return $?
   fi
-  core_dir="${VIBECRAFTED_CORE_DIR:-$(cd "$(dirname "$source_file")/../../../.." && pwd)}"
-  product_root="$(cd "$core_dir/.." && pwd)"
+  # This module's own physical location selects the core — the same
+  # physical-helper-owner rule core.sh applies — and it must resolve in BOTH
+  # shells. `BASH_SOURCE` is empty under zsh, and the primary shell is
+  # `zsh -lic`: there `dirname ""` is `.`, so the core was sought four levels
+  # above the caller's CWD, the `cli.py` probe below failed, and this owner
+  # returned 1 without ever reaching the catalogue. Every caller then fell
+  # through to its own weaker guess. The zsh source-file form is the one
+  # already used by _vetcoders_vc_frame_owner_root and the facade.
+  core_dir="${VIBECRAFTED_CORE_DIR:-}"
+  if [[ -z "$core_dir" ]]; then
+    local source_file="${BASH_SOURCE[0]:-}"
+    if [[ -z "$source_file" && -n "${ZSH_VERSION:-}" ]]; then
+      source_file="$(eval 'printf "%s\n" "${(%):-%x}"')"
+    fi
+    [[ -n "$source_file" ]] || return 1
+    core_dir="$(cd -P "$(dirname "$source_file")/../../../.." && pwd -P)" || return 1
+  fi
+  product_root="$(cd "$core_dir/.." && pwd)" || return 1
   checkout_python="$product_root/.venv/bin/python3"
   project_python="$product_root/scripts/project-python"
   embedded_python="$product_root/bin/python3"
-  if [[ -n "${VIBECRAFTED_PYTHON:-}" && -x "$VIBECRAFTED_PYTHON" ]]; then
+  if [[ "$(basename "$(dirname "$product_root")")" == "releases" ]]; then
+    # Installed generations live at <runtime-home>/releases/<generation> --
+    # the same physical shape _vetcoders_product_runtime_admit already checks
+    # (owner.parent.name == "releases"). There, the generation's own bundled
+    # interpreter is the only legitimate candidate: a bare `python3` lookup
+    # would resolve through whatever PATH the caller happened to have
+    # (Homebrew, pyenv, ...) and silently substitute a foreign interpreter for
+    # a missing/incomplete installed payload — the catalogue would then be
+    # read (or not) by an interpreter nobody selected. Refuse instead of
+    # guessing. A bare source/developer checkout (this file's own repo, a
+    # worktree, a test fixture) never has this shape and keeps the existing
+    # fallback chain below unchanged.
+    if [[ -x "$embedded_python" ]]; then
+      python_bin="$embedded_python"
+    else
+      printf 'vc-start: installed runtime is missing its own interpreter: %s\n' "$embedded_python" >&2
+      printf 'vc-start: refusing to substitute a host python3; explicit upgrade/repair required\n' >&2
+      return 1
+    fi
+  elif [[ -n "${VIBECRAFTED_PYTHON:-}" && -x "$VIBECRAFTED_PYTHON" ]]; then
     python_bin="$VIBECRAFTED_PYTHON"
   elif [[ -x "$checkout_python" ]]; then
     python_bin="$checkout_python"
@@ -99,6 +134,53 @@ _vetcoders_product_workspace_prepare() {
   if _vetcoders_is_legacy_operator_session_name "${VIBECRAFTED_OPERATOR_SESSION:-}"; then
     export VIBECRAFTED_OPERATOR_SESSION="$(_vetcoders_operator_session_name)"
   fi
+}
+
+# ONE canonical workspace owner for both public interactive entries.
+#
+# `vc-start` reached the catalogue through the selected generation's CLI above
+# and exported the resulting identities. Bare resume and the interactive target
+# resolver did not: they recomputed a session NAME through a generic `python3`
+# that cannot import vibecrafted_core, swallowed that failure, and degraded to
+# the repository basename. The two entries then disagreed about the same
+# project, and — because no workspace/session/instance id was ever propagated —
+# `_vetcoders_record_vc_frame_attachment` returned early, so the session resume
+# opened carried no binding receipt at all.
+#
+# Idempotent: identities already prepared by the product entry choke (or an
+# explicit operator override) are left exactly as they are. Otherwise this
+# prepares them through the SAME owner start uses, in the CALLER's shell, so
+# the binding ids propagate instead of dying in a subshell. Failure is a real
+# failure: callers must refuse before any provider/AICX side effect rather than
+# silently target a session they do not own.
+#
+# $1 (optional): an already-normalized explicit requested root (e.g. a public
+# entry's parsed `--root`). When given, it is the effective request and wins
+# over any inherited VIBECRAFTED_WORKSPACE_ROOT — an ambient value from a
+# parent shell is not authoritative just because it is nonempty, and it must
+# never override what the caller was actually asked to target. Absent an
+# explicit root, behaviour is unchanged: ambient root, else cwd.
+_vetcoders_ensure_canonical_workspace_identity() {
+  local requested_root="${1:-}"
+  local root_dir=""
+  if [[ -n "$requested_root" ]]; then
+    root_dir="$requested_root"
+  else
+    root_dir="${VIBECRAFTED_WORKSPACE_ROOT:-}"
+    [[ -n "$root_dir" && -d "$root_dir" ]] || root_dir="$(_vetcoders_effective_project_root)"
+  fi
+  # A cached identity only counts as proof for THIS root: three nonempty
+  # fields (missing VIBECRAFTED_SESSION_ID) and no root check let a stale
+  # binding for a different project stand in for the one just requested.
+  if [[ -n "${VIBECRAFTED_WORKSPACE_ID:-}" \
+    && -n "${VIBECRAFTED_WORKSPACE_INSTANCE_ID:-}" \
+    && -n "${VIBECRAFTED_SESSION_ID:-}" \
+    && -n "${VIBECRAFTED_OPERATOR_SESSION:-}" \
+    && -n "${VIBECRAFTED_WORKSPACE_ROOT:-}" \
+    && "${VIBECRAFTED_WORKSPACE_ROOT:-}" == "$root_dir" ]]; then
+    return 0
+  fi
+  _vetcoders_product_workspace_prepare "$root_dir"
 }
 
 _vetcoders_control_plane_eye_prepare() {
@@ -457,9 +539,19 @@ _vetcoders_resume_operator_session() {
     printf 'vc-start: product preparation failed; resume was not attempted.\n' >&2
     return "$VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS"
   fi
-  local session_name layout_file
+  local session_name layout_file identity_status=0
   _vetcoders_normalize_ambient_context
-  session_name="$(_vetcoders_operator_session_name)"
+  # Same canonical owner as start. Resume used to recompute the name from
+  # scratch and ignore the identities the owner had already resolved, so
+  # `vc-start` opened `vibecrafted-<token>` while `vc-start resume` opened a
+  # plain basename session with no binding receipt behind it.
+  _vetcoders_ensure_canonical_workspace_identity || {
+    identity_status=$?
+    printf 'vc-start: resume could not resolve the canonical workspace owner for this project.\n' >&2
+    printf 'vc-start: refusing to target a session by name alone; re-run from the intended root or inspect '"'"'vibecrafted workspace list'"'"'.\n' >&2
+    return "$identity_status"
+  }
+  session_name="${VIBECRAFTED_OPERATOR_SESSION:-$(_vetcoders_operator_session_name)}"
   layout_file="$(_vetcoders_operator_layout_file)" || {
     printf 'vc-start: operator layout missing under: %s\n' "$(_vetcoders_vc_frame_config_dir)" >&2
     printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
