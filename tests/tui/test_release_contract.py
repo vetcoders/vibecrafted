@@ -1097,6 +1097,18 @@ def test_release_strips_linker_paths_and_pins_frame_source_identity() -> None:
         'strip_macho_debug_tree "$APP/Contents/MacOS" "$APP/Contents/Helpers"'
         in app_strip
     )
+    # MEASURED 2026-09-09 on the aa12980d candidate: the Runtime Pack passed
+    # and the App gate refused Contents/Frameworks/libvibecrafted_shell_ffi.dylib
+    # for 17 linker stabs. That root holds the one library this build links,
+    # so it is the only root stripped with --shared-libraries; vendor roots
+    # (the embedded Runtime Pack under Contents/Resources/runtime) never are.
+    assert (
+        'strip_macho_debug_tree --shared-libraries "$APP/Contents/Frameworks"'
+        in app_strip
+    )
+    assert builder.count("strip_macho_debug_tree --shared-libraries") == 1, (
+        "--shared-libraries reached a root other than Contents/Frameworks"
+    )
     app_strip_call = builder.index("\n  strip_debug_stabs\n")
     app_gate = builder.index('assert_payload_is_anonymous "$APP"')
     app_signing = builder.index('sign_macho_tree "$APP/Contents"')

@@ -444,9 +444,22 @@ notary_submit() {
 # Runtime Pack payload passes through in materialize_runtime_payload, so no
 # binary is ever named twice and none is forgotten. It runs before any
 # signature.
+#
+# Contents/Frameworks is the one root whose LIBRARIES this build linked:
+# xcodegen's "Build Rust FFI" phase runs `cargo build -p vibecrafted-shell-ffi`
+# (its profile strip aborts in rust-objcopy, as a warning) and Xcode embeds
+# the dylib as it came. MEASURED 2026-09-09 on the aa12980d candidate: the
+# Runtime Pack passed (6739 files) and the App gate refused
+# libvibecrafted_shell_ffi.dylib for 17 N_OSO stabs — 11 naming the Cargo
+# target directory, 6 the rustup sysroot — and nothing else. That root is
+# therefore stripped with --shared-libraries, which also proves exports, load
+# commands and a real dyld load afterwards. The Runtime Pack's vendor dylibs
+# under Contents/Resources/runtime are not named here and stay as delivered.
 strip_debug_stabs() {
   strip_macho_debug_tree "$APP/Contents/MacOS" "$APP/Contents/Helpers" \
     || die "Vibecrafted.app debug-record strip failed"
+  strip_macho_debug_tree --shared-libraries "$APP/Contents/Frameworks" \
+    || die "Vibecrafted.app framework debug-record strip failed"
 }
 
 sign_nested_app_bundles() {
