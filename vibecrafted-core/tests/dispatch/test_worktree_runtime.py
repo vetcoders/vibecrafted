@@ -31,6 +31,7 @@ from vibecrafted_core.dispatch.supervisor import (
 )
 from vibecrafted_core.dispatch.worktrees import (
     WorktreeContractError,
+    WorktreeGeometry,
     WorktreeManager,
     _same_filesystem_location,
     canonical_artifact_root,
@@ -692,6 +693,178 @@ def test_legacy_dispatch_identity_recovers_only_from_bound_historical_record(
     )
     assert denied is None
     assert "conflicts" in denied_reason
+
+
+def test_cross_day_legacy_resume_reuses_original_checkout_and_leaves_settled_siblings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reproduce the installed W0-c resume shape across a calendar boundary.
+
+    The only launcher used here is a test double.  The old receipt, legacy
+    launch-idempotency record, real linked checkouts, receipt restoration, and
+    current-day supervisor are production code.  A successful resume must use
+    the 2026_0907 checkout, retain dirty W0-c progress, and never relaunch its
+    already-settled W0-a/W0-b siblings.
+    """
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    repo = tmp_path / "repo"
+    baseline = _repo(repo)
+    dispatch = _dispatch(
+        repo, _cut("W0-a") + _cut("W0-b") + _cut("W0-c"), concurrency=3
+    )
+    run_id = "life-ship-260907-234034-86089-implement-fleet"
+    previous_day = WorktreeManager(repo, day="2026_0907")
+    geometries = {
+        cut_id: previous_day.prepare(cut_id, baseline)
+        for cut_id in ("W0-a", "W0-b", "W0-c")
+    }
+    dirty_root = Path(geometries["W0-c"].worktree_path)
+    (dirty_root / "owned-progress.txt").write_text("keep this work\n", encoding="utf-8")
+
+    store = DispatchReceiptStore(run_id, dispatch.cuts, concurrency=3)
+    for cut_id in ("W0-a", "W0-b"):
+        geometry = geometries[cut_id]
+        store.update(
+            cut_id,
+            "settled",
+            acceptance="verified",
+            delivered_commit_sha=baseline,
+            worktree_path=geometry.worktree_path,
+            target_path=geometry.target_path,
+            artifact_path=geometry.artifact_path,
+            branch=geometry.branch,
+            baseline_sha=baseline,
+        )
+
+    provider_run_id = "impl-260907-234041-50924"
+    key = f"dispatch:{run_id}:cut:W0-c:attempt:initial"
+    historical = workflow.WorkflowLaunchSpec(
+        agent="codex",
+        mode="implement",
+        skill="implement",
+        prompt="",
+        file="",
+        runtime="headless",
+        root=str(dirty_root),
+    )
+    workflow._write_launch_idempotency_record(
+        key,
+        {
+            "run_id": provider_run_id,
+            "agent": "codex",
+            "skill": "implement",
+            "root": str(dirty_root),
+            "state": "dispatched",
+            "accepted": True,
+            "spec_digest": workflow._launch_spec_digest(historical),
+            "receipt": {
+                "accepted": True,
+                "run_id": provider_run_id,
+                "agent": "codex",
+                "skill": "implement",
+                "root": str(dirty_root),
+                "idempotency_key": key,
+                "spec": historical.to_payload(),
+            },
+        },
+    )
+    canonical = {
+        "run_id": provider_run_id,
+        "root": str(dirty_root),
+        "cut_id": "W0-c",
+        "branch": geometries["W0-c"].branch,
+        "baseline_sha": baseline,
+        "agent": "codex",
+        "skill": "implement",
+        "worker_alive": False,
+        "worker_pid": 66836,
+        "worker_identity": {
+            "pid": 66836,
+            "pgid": 66836,
+            "start_token": "start:83602922338560",
+            "command_sha256": "4aefeb389b1fd968b989295da222f517d3243e83eb43fba74581e6e20cecb141",
+            "run_id": provider_run_id,
+        },
+        "state": "report_missing",
+    }
+    monkeypatch.setattr(
+        workflow,
+        "lookup_run",
+        lambda observed: canonical if observed == provider_run_id else None,
+    )
+    monkeypatch.setattr(
+        supervisor_module,
+        "lookup_run",
+        lambda observed: canonical if observed == provider_run_id else None,
+    )
+    geometry = geometries["W0-c"]
+    store.update(
+        "W0-c",
+        "failed",
+        provider_run_id=provider_run_id,
+        worktree_path=geometry.worktree_path,
+        target_path=geometry.target_path,
+        artifact_path=geometry.artifact_path,
+        branch=geometry.branch,
+        baseline_sha=baseline,
+    )
+
+    launches: list[tuple[str, str, str]] = []
+
+    def launcher(cut, _prompt: str, kind: str) -> CellRun:
+        launches.append((cut.id, kind, str(cut.runtime_root)))
+        report = tmp_path / f"{cut.id}-{kind}.md"
+        proc = subprocess.Popen(
+            ["sh", "-c", f"printf recovered > {shlex.quote(str(report))}"]
+        )
+        return CellRun(
+            cut_id=cut.id,
+            kind=kind,
+            accepted=True,
+            run_id=f"new-{cut.id}",
+            pid=proc.pid,
+            report_path=str(report),
+            proc=proc,
+        )
+
+    result = run_dispatch(
+        dispatch,
+        launcher=launcher,
+        artifacts_dir=tmp_path / "artifacts",
+        run_id=run_id,
+        manage_worktrees=True,
+        resume=True,
+    )
+
+    assert result.states == {"W0-a": "[x]", "W0-b": "[x]", "W0-c": "[x]"}
+    assert launches == [("W0-c", "resume-1", str(dirty_root))]
+    assert (dirty_root / "owned-progress.txt").read_text(
+        encoding="utf-8"
+    ) == "keep this work\n"
+    assert not (WorktreeManager(repo).worktree_root / "W0-c").exists()
+
+
+def test_cross_day_resume_refuses_legacy_receipt_with_nonancestor_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    repo = tmp_path / "repo"
+    baseline = _repo(repo)
+    manager = WorktreeManager(repo, day="2026_0907")
+    geometry = manager.prepare("W0-c", baseline)
+    foreign = tmp_path / "foreign"
+    _repo(foreign)
+    (foreign / "foreign-only").write_text("foreign\n", encoding="utf-8")
+    _git(foreign, "add", "foreign-only")
+    _git(foreign, "commit", "-qm", "foreign baseline")
+    foreign_baseline = _git(foreign, "rev-parse", "HEAD")
+    forged = WorktreeGeometry(
+        **{**geometry.to_dict(), "baseline_sha": foreign_baseline}
+    )
+
+    with pytest.raises(WorktreeContractError, match="baseline mismatch"):
+        WorktreeManager(repo).recover_active(forged)
 
 
 def test_unknown_resume_run_id_refuses_before_any_launch(
