@@ -550,6 +550,8 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
         "bin/scaffold-doctor",
         "bin/vc-start",
         "bin/vibecrafted",
+        "bin/vibecrafted-mcp",
+        "vibecrafted-mcp/vibecrafted_mcp/__init__.py",
         "scripts/vibecrafted",
         "scripts/vc-frame-product-entry.sh",
         "scripts/vetcoders_install.py",
