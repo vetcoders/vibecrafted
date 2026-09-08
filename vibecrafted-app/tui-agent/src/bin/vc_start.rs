@@ -200,7 +200,7 @@ mod tests {
         // relative segments are implicit-cwd lookups and never cross.
         let runtime = Path::new("/tmp");
         let inherited = ":/usr/bin::.:bin:/tmp:";
-        let path = host_agent_search_path(runtime, None, Some(&inherited));
+        let path = host_agent_search_path(runtime, None, Some(inherited));
         let entries: Vec<&str> = path.split(':').collect();
         assert!(entries.contains(&"/tmp"));
         assert!(!entries.contains(&""));

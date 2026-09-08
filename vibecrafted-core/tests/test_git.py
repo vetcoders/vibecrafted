@@ -211,6 +211,113 @@ def test_vc_git_worktree_integration_distinguishes_merged_patch_equivalent_and_u
     assert "WARN unmerged" in rich
 
 
+def test_vc_git_does_not_call_unique_merge_patch_equivalent(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    merged = tmp_path / "unique-merge"
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "unique-merge",
+            str(merged),
+        ],
+        check=True,
+    )
+    _commit(repo, "target.txt", "target\n")
+    target = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    parent = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD^"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    blob = subprocess.run(
+        ["git", "-C", str(repo), "hash-object", "-w", "--stdin"],
+        input="unique\n",
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    tree = subprocess.run(
+        ["git", "-C", str(repo), "mktree"],
+        input=f"100644 blob {blob}\tx\n",
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    merge = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "commit-tree",
+            tree,
+            "-p",
+            target,
+            "-p",
+            parent,
+            "-m",
+            "unique merge",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "-C", str(merged), "reset", "--hard", merge], check=True)
+
+    payload = json.loads(_vc_git(repo, "--json").stdout)
+    item = next(
+        entry for entry in payload["worktrees"] if Path(entry["path"]) == merged
+    )
+    rich = _vc_git(repo).stdout
+
+    assert item["integration"]["status"] == "unmerged"
+    assert item["integration"]["unique_merge_commits"] == [merge]
+    assert "integrated by patch equivalence" not in rich
+    assert "unique merge commits" in rich
+
+
+def test_vc_git_reports_failed_worktree_status_as_unknown(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    broken = tmp_path / "broken-status"
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "broken-status",
+            str(broken),
+        ],
+        check=True,
+    )
+    (broken / ".git").unlink()
+
+    payload = json.loads(_vc_git(repo, "--json").stdout)
+    item = next(
+        entry for entry in payload["worktrees"] if Path(entry["path"]) == broken
+    )
+    rich = _vc_git(repo).stdout
+
+    assert item["status"] is None
+    assert "Dirt: staged unknown, unstaged unknown, untracked unknown" in rich
+
+
 def test_vc_git_missing_upstream_and_detached_worktree_are_truthful(
     tmp_path: Path,
 ) -> None:

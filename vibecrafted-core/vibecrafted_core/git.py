@@ -191,6 +191,34 @@ def _worktree_integration(
     if ancestor.returncode != 1:
         return {"status": "unknown", "target": target}
     try:
+        unique_merges = _git(root, "rev-list", "--merges", f"{target}..{source}")
+    except OSError as exc:
+        return {"status": "unknown", "target": target, "error": str(exc)}
+    if unique_merges.returncode != 0:
+        return {"status": "unknown", "target": target}
+    merge_commits = unique_merges.stdout.split()
+    # git cherry deliberately ignores merge commits. An empty result therefore
+    # cannot prove that a range containing one was integrated by patch.
+    if merge_commits:
+        try:
+            same_tree = _git(root, "diff", "--quiet", target, source)
+        except OSError as exc:
+            return {"status": "unknown", "target": target, "error": str(exc)}
+        if same_tree.returncode == 0:
+            return {
+                "status": "integrated_by_tree_equivalence",
+                "target": target,
+                "evidence": "exact_tree_equivalence",
+                "unique_merge_commits": merge_commits,
+            }
+        if same_tree.returncode == 1:
+            return {
+                "status": "unmerged",
+                "target": target,
+                "unique_merge_commits": merge_commits,
+            }
+        return {"status": "unknown", "target": target}
+    try:
         equivalent = _git(root, "cherry", "--abbrev", target, source)
     except OSError as exc:
         return {"status": "unknown", "target": target, "error": str(exc)}

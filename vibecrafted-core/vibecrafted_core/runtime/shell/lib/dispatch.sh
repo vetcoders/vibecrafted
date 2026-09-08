@@ -673,9 +673,29 @@ repo-full() {
   origin_url="$(git remote get-url origin 2>/dev/null || echo "no origin")"
   last_tag="$(git describe --tags --abbrev=0 2>/dev/null || echo "no tags")"
   stash_count="$(git stash list 2>/dev/null | wc -l | tr -d ' ')"
-  staged_count="$(git diff --cached --name-only 2>/dev/null | wc -l | tr -d ' ')"
-  unstaged_count="$(git diff --name-only 2>/dev/null | wc -l | tr -d ' ')"
-  untracked_count="$(git ls-files --others --exclude-standard 2>/dev/null | wc -l | tr -d ' ')"
+  _repo_full_status_counts() {
+    local status line staged=0 unstaged=0 untracked=0
+    if ! status="$(git -C "$1" status --porcelain 2>/dev/null)"; then
+      printf 'unknown unknown unknown'
+      return 1
+    fi
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      [[ -n "$line" ]] || continue
+      if [[ "$line" == '??'* ]]; then
+        ((untracked += 1))
+      else
+        [[ "${line:0:1}" != ' ' ]] && ((staged += 1))
+        [[ "${line:1:1}" != ' ' ]] && ((unstaged += 1))
+      fi
+    done <<< "$status"
+    printf '%s %s %s' "$staged" "$unstaged" "$untracked"
+  }
+  local root_status
+  if root_status="$(_repo_full_status_counts "$root")"; then
+    read -r staged_count unstaged_count untracked_count <<< "$root_status"
+  else
+    staged_count="unknown"; unstaged_count="unknown"; untracked_count="unknown"
+  fi
   worktree_count="$(git worktree list 2>/dev/null | wc -l | tr -d ' ')"
 
   default_remote="$(git remote | awk 'NR==1{print; exit}')"
@@ -701,7 +721,7 @@ repo-full() {
   fi
 
   _repo_full_worktree_truth() {
-    local wt_path="" wt_head="" wt_branch="detached" locked="false" prunable="false" line integration unmatched staged unstaged untracked
+    local wt_path="" wt_head="" wt_branch="detached" locked="false" prunable="false" line integration unmatched staged unstaged untracked merge_commits dirt
     while IFS= read -r line || [[ -n "$line" ]]; do
       if [[ -z "$line" ]]; then
         [[ -n "$wt_path" ]] || continue
@@ -709,17 +729,29 @@ repo-full() {
         unmatched=""
         if [[ -n "$wt_head" ]] && git merge-base --is-ancestor "$wt_head" "$head_full" >/dev/null 2>&1; then
           integration="merged (exact ancestor)"
-        elif [[ -n "$wt_head" ]] && unmatched="$(git cherry --abbrev "$head_full" "$wt_head" 2>/dev/null)"; then
-          if [[ -z "$(printf '%s\n' "$unmatched" | awk '$1 == "+" { print; exit }')" ]]; then
-            integration="integrated by patch equivalence"
-          else
-            integration="WARN unmerged ($(printf '%s\n' "$unmatched" | awk '$1 == "+" { count++ } END { print count+0 }') unmatched commits)"
+        elif [[ -n "$wt_head" ]]; then
+          if ! merge_commits="$(git rev-list --merges "$head_full..$wt_head" 2>/dev/null)"; then
+            integration="unknown"
+          elif [[ -n "$merge_commits" ]]; then
+            if git diff --quiet "$head_full" "$wt_head" 2>/dev/null; then
+              integration="integrated by exact tree equivalence (unique merge commits)"
+            elif [[ $? -eq 1 ]]; then
+              integration="WARN unmerged (unique merge commits; patch equivalence unavailable)"
+            fi
+          elif unmatched="$(git cherry --abbrev "$head_full" "$wt_head" 2>/dev/null)"; then
+            if [[ -z "$(printf '%s\n' "$unmatched" | awk '$1 == "+" { print; exit }')" ]]; then
+              integration="integrated by patch equivalence"
+            else
+              integration="WARN unmerged ($(printf '%s\n' "$unmatched" | awk '$1 == "+" { count++ } END { print count+0 }') unmatched commits)"
+            fi
           fi
         fi
         if [[ -d "$wt_path" ]]; then
-          staged="$(git -C "$wt_path" diff --cached --name-only 2>/dev/null | wc -l | tr -d ' ')"
-          unstaged="$(git -C "$wt_path" diff --name-only 2>/dev/null | wc -l | tr -d ' ')"
-          untracked="$(git -C "$wt_path" ls-files --others --exclude-standard 2>/dev/null | wc -l | tr -d ' ')"
+          if dirt="$(_repo_full_status_counts "$wt_path")"; then
+            read -r staged unstaged untracked <<< "$dirt"
+          else
+            staged="unknown"; unstaged="unknown"; untracked="unknown"
+          fi
         else
           staged="unknown"; unstaged="unknown"; untracked="unknown"
         fi
