@@ -24,6 +24,9 @@ past runs. They launch no workflows themselves — that is the job of the
 | `vibecrafted resume <agent>`         | Continue a stopped run or a provider session                   |
 | `vibecrafted fork <agent>`           | Branch a provider session into a new one (claude, codex, grok) |
 | `vibecrafted resume-session <agent>` | Continue an exact provider session as a tracked run            |
+| `vibecrafted version`                | Print version                                                  |
+| `vibecrafted uninstall`              | Reverse the install                                            |
+| `vibecrafted help [topic\|--all]`    | Command deck · full reference                                  |
 
 ## Selecting the repository: `--repo`
 
@@ -54,10 +57,6 @@ clean Git work-tree root; the launch receipt reports `worktree_path`,
 vibecrafted workflow claude --model claude-fable-5-1 --worktree true \
   --repo ~/Projects/app --prompt "Ujednolić polecenie fork"
 ```
-
-| `vibecrafted version` | Print version |
-| `vibecrafted uninstall` | Reverse the install |
-| `vibecrafted help [topic\|--all]` | Command deck · full reference |
 
 ## init
 
