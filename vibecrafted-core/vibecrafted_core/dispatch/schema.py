@@ -13,6 +13,7 @@ import tomllib
 
 from vibecrafted_core.autonomy_surface import destructive_remote_push
 from vibecrafted_core.delivery.model import ContractError, ExecutionEnvelope
+from vibecrafted_core.runtime_paths import vibecrafted_home
 from vibecrafted_core.workflow import SUPPORTED_WORKFLOWS
 
 from .model import (
@@ -473,17 +474,7 @@ def _doctor_policy_errors(dispatch: Dispatch) -> list[str]:
         ("meta.reports_dir", dispatch.meta.reports_dir),
         ("meta.tracker", dispatch.meta.tracker),
     ):
-        normalized = value.replace("\\", "/")
-        if value and any(
-            marker in normalized
-            for marker in (
-                "/.claude/",
-                "/.codex/",
-                "/.gemini/",
-                "/.cursor/",
-                "/.vibecrafted/",
-            )
-        ):
+        if value and _forbidden_runtime_write_root(value):
             errors.append(
                 f"{field}: provider-specific or repo-local runtime roots are recovery-only; new writes use ~/.vibecrafted/artifacts"
             )
@@ -493,6 +484,59 @@ def _doctor_policy_errors(dispatch: Dispatch) -> list[str]:
             "policy.concurrency: shared CARGO_TARGET_DIR is forbidden for concurrent plans; unset CARGO_TARGET_DIR — Vibecrafted assigns $PWD/target per worker"
         )
     return errors
+
+
+_PROVIDER_RUNTIME_MARKERS = (
+    "/.claude/",
+    "/.codex/",
+    "/.gemini/",
+    "/.cursor/",
+)
+
+
+def _posix(path: Path) -> str:
+    return str(path).replace("\\", "/")
+
+
+def _is_under(path: Path, root: Path) -> bool:
+    path_posix = _posix(path)
+    root_posix = _posix(root)
+    return path_posix == root_posix or path_posix.startswith(root_posix + "/")
+
+
+def _canonical_artifacts_roots() -> tuple[Path, ...]:
+    """Write roots the doctor names in its own refusal: home artifacts plane."""
+    return (
+        (Path.home() / ".vibecrafted" / "artifacts").expanduser(),
+        (vibecrafted_home() / "artifacts").expanduser(),
+    )
+
+
+def _is_canonical_artifacts_write(value: str) -> bool:
+    """True for ``~/.vibecrafted/artifacts`` and ``$VIBECRAFTED_HOME/artifacts``."""
+    raw = value.replace("\\", "/").strip()
+    if raw.startswith("~/.vibecrafted/artifacts"):
+        return True
+    expanded = Path(value).expanduser()
+    return any(_is_under(expanded, root) for root in _canonical_artifacts_roots())
+
+
+def _forbidden_runtime_write_root(value: str) -> bool:
+    """Reject provider-private and repo-local ``.vibecrafted`` write roots.
+
+    The previous substring ``/.vibecrafted/`` also matched the canonical
+    ``~/.vibecrafted/artifacts`` plane named by the error message.
+    """
+    if _is_canonical_artifacts_write(value):
+        return False
+    raw = value.replace("\\", "/")
+    expanded = _posix(Path(value).expanduser())
+    haystack = f"{raw}/{expanded}/"
+    if any(marker in haystack for marker in _PROVIDER_RUNTIME_MARKERS):
+        return True
+    return "/.vibecrafted/" in haystack or haystack.rstrip("/").endswith(
+        "/.vibecrafted"
+    )
 
 
 def _parse_verify(value: Any, cut_index: int, errors: list[str]) -> list[Verify]:

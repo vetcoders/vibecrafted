@@ -59,6 +59,29 @@ RESULT_SCHEMA = "vibecrafted.dispatch-result.v1"
 _MTIME_TOLERANCE_S = 1.0
 
 
+def prefer_live_descendant_head(
+    candidate: str,
+    live_head: str,
+    *,
+    is_ancestor: Callable[[str, str], bool],
+) -> str:
+    """Prefer checkout HEAD when it is a descendant of the planned baseline.
+
+    Dispatch receipts freeze an integrator SHA. If the living-tree checkout
+    later advances past that SHA, workers must see the descendant HEAD rather
+    than the stale receipt commit.
+    """
+    planned = str(candidate or "").strip()
+    head = str(live_head or "").strip()
+    if not planned:
+        return head
+    if not head or head == planned:
+        return planned
+    if is_ancestor(planned, head):
+        return head
+    return planned
+
+
 class CellContractError(RuntimeError):
     """The external runtime ended without a trustworthy delivery envelope."""
 
@@ -736,9 +759,20 @@ class DispatchSupervisor:
             artifact_path=geometry.artifact_path,
         )
 
+    def _prefer_live_head(self, candidate: str) -> str:
+        return prefer_live_descendant_head(
+            candidate,
+            self._git_head(),
+            is_ancestor=lambda ancestor, descendant: self._git_ok(
+                ["merge-base", "--is-ancestor", ancestor, descendant]
+            ),
+        )
+
     def _baseline_for(self, cut: Cut, verdicts: dict[str, Verdict]) -> str:
         if not cut.depends_on:
-            return str(self.dispatch.meta.baseline.get("head") or self._git_head())
+            return self._prefer_live_head(
+                str(self.dispatch.meta.baseline.get("head") or self._git_head())
+            )
         dependency_commits = [
             verdicts[dependency].commit
             for dependency in cut.depends_on
@@ -781,7 +815,7 @@ class DispatchSupervisor:
                 raise WorktreeContractError(
                     f"[{cut.id}] dependency tips are not an integrated ancestry chain; add a named integrator cut"
                 )
-        return candidate
+        return self._prefer_live_head(candidate)
 
     def _baton_from_verdicts(self, verdicts: dict[str, Verdict]) -> Baton:
         baton = self.dispatch.empty_baton()

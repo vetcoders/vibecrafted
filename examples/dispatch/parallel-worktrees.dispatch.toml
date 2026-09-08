@@ -34,9 +34,9 @@
 # `meta.repo` correctly and the baseline follows — bind it wrong and every cut
 # branches off the wrong tree.
 #
-# reports_dir/tracker are deliberately absent: the dispatch doctor refuses any
-# path containing `/.vibecrafted/`, and the runtime picks the canonical
-# artifact plane itself.
+# reports_dir/tracker are optional. Canonical `~/.vibecrafted/artifacts/...`
+# is allowed; repo-local `.vibecrafted` and provider homes (`~/.codex` etc.)
+# remain recovery-only. This example omits both so the runtime allocates.
 schema = "vibecrafted.dispatch.v1"
 
 [meta]
