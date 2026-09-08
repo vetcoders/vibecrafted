@@ -251,9 +251,19 @@ fn runs_from_envelope(envelope: StateEnvelope, now: SystemTime) -> Vec<ObserveRu
 /// never a second live-session registry.
 pub fn project_control_plane(state: &crate::state::ControlPlaneState) -> Vec<ObserveRun> {
     let now = chrono::Utc::now();
-    crate::state::render_runs(state)
+    let runs = crate::state::render_runs(state)
         .into_iter()
         .filter(|run| crate::state::is_actionable_kind(run.kind, &run.snapshot, now))
+        .collect::<Vec<_>>();
+    project_rendered_runs(&runs)
+}
+
+/// Adapt the already-selected cockpit rows for Observe. Scope, workspace,
+/// search, and asynchronous control-plane refresh are decided by `App::runs`;
+/// Observe is a transcript/session projection of that same collection.
+pub fn project_rendered_runs(runs: &[crate::state::RenderedRun]) -> Vec<ObserveRun> {
+    runs.iter()
+        .cloned()
         .map(|run| {
             let snapshot = run.snapshot;
             let state_label = snapshot.display_state();

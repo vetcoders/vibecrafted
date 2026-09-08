@@ -128,9 +128,11 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
     let mut items = Vec::new();
     if app.observe.runs.is_empty() {
         let empty_message = match app.observe.status {
-            ObserveHealth::Live => "no live sessions in canonical control plane",
-            ObserveHealth::Degraded => "canonical state stale; showing no cached sessions",
-            ObserveHealth::Offline => "canonical control plane unavailable",
+            ObserveHealth::Live => return_empty_scope_message(app.queue_scope.label()),
+            ObserveHealth::Degraded => {
+                "canonical state stale; showing no cached sessions".to_string()
+            }
+            ObserveHealth::Offline => "canonical control plane unavailable".to_string(),
         };
         items.push(ListItem::new(Line::from(Span::styled(
             empty_message,
@@ -216,7 +218,10 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
         }
     } else {
         body.push(Line::from(Span::styled(
-            "Select a live session from the canonical control plane.",
+            format!(
+                "Select a {} run from the canonical control plane.",
+                app.queue_scope.label()
+            ),
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -230,6 +235,10 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
             ))),
         columns.transcript,
     );
+}
+
+fn return_empty_scope_message(scope: &str) -> String {
+    format!("no {scope} runs in canonical control plane")
 }
 
 fn draw_memory_overlay(frame: &mut Frame, app: &App) {
@@ -1762,6 +1771,61 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>()
+    }
+
+    #[test]
+    fn observe_scope_uses_the_rendered_collection_and_clears_hidden_transcript() {
+        use crate::state::ControlPlaneState;
+        use std::collections::HashSet;
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let live_transcript = dir.path().join("live.log");
+        let history_transcript = dir.path().join("history.log");
+        fs::write(&live_transcript, "live transcript only").unwrap();
+        fs::write(&history_transcript, "history transcript only").unwrap();
+
+        let mut live = sample_run("live-run", "codex", "live-session");
+        live.snapshot.root = Some("/tmp/repo".to_string());
+        let now = chrono::Utc::now().to_rfc3339();
+        live.snapshot.started_at = Some(now.clone());
+        live.snapshot.updated_at = Some(now.clone());
+        live.snapshot.last_heartbeat = Some(now);
+        live.snapshot.latest_transcript = Some(live_transcript.display().to_string());
+        let mut history = sample_run("history-run", "claude", "history-session");
+        history.snapshot.root = Some("/tmp/repo".to_string());
+        history.snapshot.state = Some("completed".to_string());
+        history.snapshot.latest_transcript = Some(history_transcript.display().to_string());
+
+        let mut app = sample_app();
+        app.config.view = crate::observe::ConsoleView::Observe;
+        app.state = ControlPlaneState {
+            root: dir.path().to_path_buf(),
+            retained_runs: vec![live.snapshot.clone(), history.snapshot.clone()],
+            runs: vec![live.snapshot, history.snapshot],
+            events: Vec::new(),
+            archived_run_ids: HashSet::new(),
+        };
+        app.refresh_rendered_runs();
+        app.refresh_observe();
+        assert_eq!(app.observe.runs[app.observe.selected].run_id, "live-run");
+        assert!(render_to_string(&app).contains("live transcript only"));
+
+        app.toggle_filter();
+        assert_eq!(app.queue_scope, QueueScope::History);
+        assert_eq!(app.observe.runs.len(), 1);
+        assert_eq!(app.observe.runs[app.observe.selected].run_id, "history-run");
+        let history_view = render_to_string(&app);
+        assert!(history_view.contains("history transcript only"));
+        assert!(!history_view.contains("live transcript only"));
+
+        app.set_search_query("does-not-match");
+        assert!(app.observe.runs.is_empty());
+        assert!(app.observe.transcript.is_empty());
+        assert!(app.observe.transcript_run_id.is_none());
+        assert!(app.observe_switch_command().is_none());
+        assert!(render_to_string(&app).contains("no history runs in canonical control plane"));
     }
 
     #[test]

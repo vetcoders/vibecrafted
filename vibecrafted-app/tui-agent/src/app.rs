@@ -475,6 +475,7 @@ impl App {
             self.selected = index;
         }
         self.sync_selection();
+        self.refresh_observe();
     }
 
     /// Recompute only time-derived labels and filters from cached state.
@@ -499,19 +500,34 @@ impl App {
             self.selected = index;
         }
         self.sync_selection();
+        self.refresh_observe();
     }
 
     /// Refresh the remote Observe projection on its own bounded cadence.
     /// Returns whether the fetch succeeded so the scheduler can back off.
     pub fn refresh_observe(&mut self) -> bool {
+        let selected_run_id = self
+            .observe
+            .runs
+            .get(self.observe.selected)
+            .map(|run| run.run_id.clone());
         self.observe.origin = format!("control-plane:{}", self.config.state_root.display());
         self.observe.generated_at = chrono::Utc::now().to_rfc3339();
         self.observe.status = ObserveHealth::Live;
         self.observe.error = None;
-        self.observe.runs = observe::project_control_plane(&self.state);
-        if self.observe.selected >= self.observe.runs.len() {
-            self.observe.selected = self.observe.runs.len().saturating_sub(1);
-        }
+        self.observe.runs = observe::project_rendered_runs(&self.runs);
+        self.observe.selected = selected_run_id
+            .and_then(|run_id| {
+                self.observe
+                    .runs
+                    .iter()
+                    .position(|run| run.run_id == run_id)
+            })
+            .unwrap_or_else(|| {
+                self.observe
+                    .selected
+                    .min(self.observe.runs.len().saturating_sub(1))
+            });
         self.refresh_observe_transcript();
         true
     }

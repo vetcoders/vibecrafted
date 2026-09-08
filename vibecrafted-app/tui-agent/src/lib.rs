@@ -631,7 +631,7 @@ fn click_hit(app: &mut App, hit: crate::layout::HitTarget) -> anyhow::Result<()>
             }
         }
         HitTarget::MonitorStat(2) => {
-            app.queue_scope = app.queue_scope.next();
+            app.toggle_filter();
         }
         HitTarget::ControlsActions { inner_row } => {
             let index =
