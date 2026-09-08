@@ -2158,17 +2158,16 @@ def service_status(config: SupervisorConfig) -> ServiceStatus:
     environment = _child_environment(config.paths)
     pair_snapshot = _managed_pair_snapshot(config.paths)
     launcher_current = _launcher_matches_identity(config.launcher, identity)
-    pair_healthy = (
-        launcher_current
-        and _managed_pair_healthy(pair_snapshot)
-        and _pair_healthy(
-            config.launcher,
-            environment,
-            timeout=config.command_timeout,
-            paths=config.paths,
-            host=config.host,
-            port=config.port,
-        )
+    # Generation handoff: a live Server/Guardian pair is reconcilable even
+    # when the PATH launcher SHA no longer matches the installed LaunchAgent.
+    # SHA drift belongs on build_current; pair_healthy is process+HTTP truth.
+    pair_healthy = _managed_pair_healthy(pair_snapshot) and _pair_healthy(
+        config.launcher,
+        environment,
+        timeout=config.command_timeout,
+        paths=config.paths,
+        host=config.host,
+        port=config.port,
     )
     return ServiceStatus(
         installed=installed,

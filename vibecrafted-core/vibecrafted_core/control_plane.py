@@ -163,6 +163,10 @@ RUNTIME_TRANSCRIPT_COLD_TAIL_BYTES_ENV = (
 )
 RUNTIME_TMP_MAX_AGE_SECONDS = 60 * 60
 CONTROL_PLANE_WRITE_RESERVE_BYTES = 1024 * 1024
+# Per-write reserve keeps one snapshot atomic. Launch preflight uses a larger
+# floor so a cargo-heavy fleet is refused before ENOSPC kills in-flight runs.
+LAUNCH_MIN_FREE_BYTES = 512 * 1024 * 1024
+LAUNCH_MIN_FREE_BYTES_ENV = "VIBECRAFTED_LAUNCH_MIN_FREE_BYTES"
 EVENT_SEGMENT_SCHEMA = "vibecrafted.event-stream-segment.v1"
 EVENT_MAX_LINE_BYTES = 256 * 1024
 RECENT_RUN_LIMIT = 12
@@ -801,6 +805,31 @@ def _configured_nonnegative_int(env_name: str, default: int) -> int:
         return max(int(raw), 0)
     except ValueError:
         return default
+
+
+def ensure_launch_storage(path: Path | None = None) -> None:
+    """Refuse a new launch when the control-plane volume is already too full.
+
+    The 1 MiB atomic-write reserve is enough to fail one snapshot cleanly; it
+    is not enough to stop a cargo-heavy wave before the disk is gone. Launch
+    preflight uses a larger floor so dispatch fails closed with a degraded
+    error instead of workers dying mid-run on ENOSPC.
+    """
+    target = path or control_plane_home()
+    target.mkdir(parents=True, exist_ok=True)
+    required = _configured_nonnegative_int(
+        LAUNCH_MIN_FREE_BYTES_ENV, LAUNCH_MIN_FREE_BYTES
+    )
+    try:
+        free = _storage_free_bytes(target)
+    except OSError:
+        return
+    if required > 0 and free < required:
+        raise ControlPlaneStorageError(
+            "control-plane degraded: insufficient disk space to launch "
+            f"(need {required} free bytes including launch floor, {free} free). "
+            "Free disk space, then retry."
+        )
 
 
 def _state_health(state: str, updated_at: str) -> str:
@@ -3993,6 +4022,101 @@ def _await_progress_fingerprint(run: dict[str, Any] | None) -> tuple[Any, ...]:
     )
 
 
+_LOOP_LOCK_TERMINAL_STATUSES = {
+    "failed",
+    "cancelled",
+    "canceled",
+    "completed",
+    "stopped",
+    "closed",
+    "settled",
+}
+_LOOP_LOCK_ACTIVE_STATUSES = {"running", "active", "paused"}
+
+
+def _loop_lock_owner_is_alive(payload: dict[str, str], run_id: str) -> bool:
+    """True when the lock's recorded owner still matches a live process.
+
+    A stale pid on disk is not liveness. Identity fields, when present, have
+    to match the current process; otherwise pid+pgid must still be the same
+    live group. A lock with no owner pid cannot prove anything.
+    """
+    pid = _coerce_int(
+        payload.get("pid") or payload.get("owner_pid") or payload.get("worker_pid")
+    )
+    if pid is None or not _pid_is_alive(pid):
+        return False
+    pgid = _coerce_int(
+        payload.get("pgid") or payload.get("owner_pgid") or payload.get("worker_pgid")
+    )
+    start_token = str(payload.get("start_token") or "").strip()
+    command_sha256 = str(payload.get("command_sha256") or "").strip()
+    if start_token and command_sha256 and pgid is not None:
+        ppid = _coerce_int(payload.get("ppid"))
+        return _worker_is_alive(
+            {
+                "run_id": run_id,
+                "worker_pid": pid,
+                "worker_pgid": pgid,
+                "worker_identity": {
+                    "pid": pid,
+                    "ppid": ppid if ppid is not None else 0,
+                    "pgid": pgid,
+                    "start_token": start_token,
+                    "command_sha256": command_sha256,
+                    "run_id": run_id,
+                },
+            }
+        )
+    if pgid is not None:
+        try:
+            return os.getpgid(pid) == pgid
+        except OSError:
+            return False
+    return True
+
+
+def _loop_lock_children_are_alive(run_id: str) -> bool:
+    """True when a current child of this loop parent still owns a live process."""
+    children = _await_child_runs({"active_runs": [], "recent_runs": []}, run_id)
+    return any(_await_process_is_alive(child) for child in children)
+
+
+def _loop_lock_is_running(run_id: str) -> bool:
+    """True when a marbles/polarize lock still names this run as live work.
+
+    Guardian settlement can stamp the parent ``settled`` while a *live* lock
+    still carries ``status=running`` and ``current < total``. Await must keep
+    waiting in that case. A terminal failed/cancelled lock overrides leftover
+    counters, and a stale lock with a dead owner cannot prove liveness on its
+    own — only current owner identity or a live child can.
+    """
+    target = str(run_id or "").strip()
+    if not target:
+        return False
+    for path in _iter_lock_files():
+        payload = _parse_kv_file(path)
+        if str(payload.get("run_id") or "").strip() != target:
+            continue
+        status = (
+            str(payload.get("status") or payload.get("state") or "").strip().lower()
+        )
+        if status in _LOOP_LOCK_TERMINAL_STATUSES:
+            continue
+        current = _coerce_int(payload.get("current"))
+        total = _coerce_int(payload.get("total") or payload.get("loops"))
+        claimed_in_progress = status in _LOOP_LOCK_ACTIVE_STATUSES or (
+            current is not None and total is not None and 0 <= current < total
+        )
+        if not claimed_in_progress:
+            continue
+        if _loop_lock_owner_is_alive(payload, target) or _loop_lock_children_are_alive(
+            target
+        ):
+            return True
+    return False
+
+
 def _await_child_runs(snapshot: dict[str, Any], target: str) -> list[dict[str, Any]]:
     """Child runs of a loop parent (marbles/polarize ``<parent>-<kind>-L<n>``).
 
@@ -4004,12 +4128,33 @@ def _await_child_runs(snapshot: dict[str, Any], target: str) -> list[dict[str, A
     """
     prefix = f"{target}-"
     children: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for key in ("active_runs", "recent_runs"):
         for run in snapshot.get(key) or []:
             if not isinstance(run, dict):
                 continue
-            if str(run.get("run_id") or "").startswith(prefix):
+            child_id = str(run.get("run_id") or "")
+            if child_id.startswith(prefix) and child_id not in seen:
+                seen.add(child_id)
                 children.append(run)
+    root = _runtime_runs_dir()
+    if root.is_dir():
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            entries = []
+        for child_dir in entries:
+            if not child_dir.is_dir() or not child_dir.name.startswith(prefix):
+                continue
+            if child_dir.name in seen:
+                continue
+            meta = _read_json(child_dir / "meta.json")
+            if not meta:
+                continue
+            seen.add(child_dir.name)
+            payload = dict(meta)
+            payload["run_id"] = child_dir.name
+            children.append(payload)
     return children
 
 
@@ -4244,6 +4389,7 @@ def await_run(
                 projected = {}
             last_run = _select_run(projected, target) if projected else None
 
+        projected: dict[str, Any] = {}
         if kind == "missing":
             # One scoped reconciliation materializes legacy artifact meta and
             # its settlement event — a single triad read per wake, not a poller.
@@ -4254,13 +4400,23 @@ def await_run(
             projected_run = _select_run(projected, target) if projected else None
             if projected_run is not None:
                 last_run = projected_run
-            child_runs = _await_child_runs(projected, target) if projected else []
+
+        child_source = projected or {
+            "active_runs": [last_run] if last_run else [],
+            "recent_runs": [],
+        }
+        child_runs = _await_child_runs(child_source, target)
+        lock_running = _loop_lock_is_running(target)
 
         if on_poll is not None:
             on_poll(last_run)
 
         if kind == "timeout":
-            worker_alive = bool(last_run and _await_process_is_alive(last_run))
+            worker_alive = bool(
+                lock_running
+                or (last_run and _await_process_is_alive(last_run))
+                or any(_await_process_is_alive(child) for child in child_runs)
+            )
             return _finalize_await_result(
                 target,
                 last_run,
@@ -4272,12 +4428,15 @@ def await_run(
             )
 
         signal_woke = kind in {"terminal", "eof", "identity_changed"}
-        terminal = bool(last_run and _run_is_terminal(last_run))
+        terminal = bool(last_run and _run_is_terminal(last_run) and not lock_running)
+        child_alive = any(_await_process_is_alive(child) for child in child_runs)
         worker_alive = bool(
-            not (terminal and kind == "terminal")
-            and (
-                (last_run is not None and _await_process_is_alive(last_run))
-                or any(_await_process_is_alive(child) for child in child_runs)
+            lock_running
+            or child_alive
+            or (
+                not (terminal and kind == "terminal")
+                and last_run is not None
+                and _await_process_is_alive(last_run)
             )
         )
         delivered_report = str(
@@ -4290,7 +4449,10 @@ def await_run(
             delivered_report and _report_file_written(delivered_report)
         )
         completed = bool(
-            not worker_alive and last_run is not None and (terminal or report_written)
+            not worker_alive
+            and not lock_running
+            and last_run is not None
+            and (terminal or report_written)
         )
         if completed:
             reason = "terminal" if terminal else kind
@@ -4310,18 +4472,32 @@ def await_run(
             result["signal_ts"] = str(signal.get("ts") or "")
             return result
 
-        if (
-            kind in {"missing", "eof"}
-            and worker_alive
-            and rearm_deadline is not None
-            and time.monotonic() + rearm_interval <= rearm_deadline
-        ):
-            # No socket to block on, but the launcher/worker is demonstrably
-            # alive: a mid-finalize return here would hand the supervisor a
-            # premature "not completed" and force hedge polling. Re-arm the
-            # canonical wait until the process dies or the budget lapses.
-            time.sleep(rearm_interval)
-            continue
+        loop_live = lock_running or child_alive
+        if kind in {"missing", "eof"} and worker_alive:
+            # No socket to block on, but the launcher/worker/loop is
+            # demonstrably alive. Loop parents (polarize/marbles) stay open
+            # until the lock/children die or an explicit hard cap fires —
+            # timeout_seconds is not a "run disappeared" signal. A stale
+            # lock never reaches here because it cannot set worker_alive.
+            if loop_live and hard_cap is None:
+                time.sleep(rearm_interval)
+                continue
+            if (
+                rearm_deadline is not None
+                and time.monotonic() + rearm_interval <= rearm_deadline
+            ):
+                time.sleep(rearm_interval)
+                continue
+            if loop_live and rearm_deadline is not None:
+                return _finalize_await_result(
+                    target,
+                    last_run,
+                    completed=False,
+                    timed_out=True,
+                    reason="hard_cap",
+                    worker_alive=True,
+                    attempts=1,
+                )
 
         result = _finalize_await_result(
             target,

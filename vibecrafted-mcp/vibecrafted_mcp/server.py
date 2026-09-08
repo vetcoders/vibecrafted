@@ -673,6 +673,14 @@ def build_server() -> Any:
         if mode is not None:
             payload["mode"] = mode
         with _override_vibecrafted_home(home):
+            try:
+                _control_plane.ensure_launch_storage()
+            except _control_plane.ControlPlaneStorageError as exc:
+                return {
+                    "ok": False,
+                    "status": "refused",
+                    "error": str(exc),
+                }
             spec = _workflow.normalize_launch_spec(payload, source_dir)
             return _workflow.launch_workflow(spec, source_dir, env=dict(os.environ))
 

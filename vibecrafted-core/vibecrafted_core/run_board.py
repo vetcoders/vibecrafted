@@ -16,7 +16,11 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from .control_plane import ControlPlaneStorageError, sync_state
+from .control_plane import (
+    ControlPlaneLockBusy,
+    ControlPlaneStorageError,
+    sync_state,
+)
 from .runtime_paths import vibecrafted_home
 
 _LIFECYCLE_ACTIVITY_SCHEMA = "vibecrafted.lifecycle-activity.v1"
@@ -224,7 +228,7 @@ def status_main(argv: Sequence[str] | None = None) -> int:
             if args.activity
             else collect_board(all_days=bool(args.all), limit=int(args.limit))
         )
-    except ControlPlaneStorageError as exc:
+    except (ControlPlaneStorageError, ControlPlaneLockBusy) as exc:
         print(f"status: {exc}", file=sys.stderr)
         return 2
     if args.json:
