@@ -2301,6 +2301,85 @@ def recover_launch_receipt(
     return stored
 
 
+def _legacy_dispatch_receipt_matches(
+    *,
+    key: str,
+    provider_run_id: str,
+    cut_id: str,
+    root: str,
+    branch: str,
+    baseline_sha: str,
+) -> bool:
+    """Verify legacy dispatch identity from its exact durable scheduler receipt.
+
+    Old run projections can lack the dispatch fields, but their launch key is
+    still namespaced by the parent dispatch.  Never search receipts by a loose
+    provider id: derive one path from that authenticated key and require every
+    topology field to agree before using it as the missing projection.
+    """
+    suffix = f":cut:{cut_id}:attempt:initial"
+    if not key.startswith("dispatch:") or not key.endswith(suffix):
+        return False
+    dispatch_run_id = key[len("dispatch:") : -len(suffix)]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", dispatch_run_id):
+        return False
+    ledger = _read_json_object(
+        control_plane_home() / "dispatches" / dispatch_run_id / "receipts.json"
+    )
+    cuts = ledger.get("cuts")
+    receipt = cuts.get(cut_id) if isinstance(cuts, dict) else None
+    if not isinstance(receipt, dict):
+        return False
+    if not (
+        ledger.get("schema") == "vibecrafted.dispatch-receipts.v1"
+        and str(ledger.get("run_id") or "") == dispatch_run_id
+        and str(receipt.get("cut_id") or "") == cut_id
+        and str(receipt.get("provider_run_id") or "") == provider_run_id
+        and str(receipt.get("branch") or "") == branch
+        and str(receipt.get("baseline_sha") or "") == baseline_sha
+    ):
+        return False
+    try:
+        return Path(str(receipt.get("worktree_path") or "")).resolve(
+            strict=False
+        ) == Path(root).resolve(strict=False)
+    except OSError:
+        return False
+
+
+def _legacy_worktree_matches(*, root: str, branch: str, baseline_sha: str) -> bool:
+    """Confirm a recovered receipt still names the original linked checkout."""
+    try:
+        top = subprocess.run(
+            ["git", "-C", root, "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        ).stdout.strip()
+        observed_branch = subprocess.run(
+            ["git", "-C", root, "symbolic-ref", "--quiet", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        ).stdout.strip()
+        observed_head = subprocess.run(
+            ["git", "-C", root, "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return (
+        Path(top).resolve(strict=False) == Path(root).resolve(strict=False)
+        and observed_branch == branch
+        and observed_head == baseline_sha
+    )
+
+
 def recover_legacy_dispatch_identity(
     spec: WorkflowLaunchSpec,
     *,
@@ -2385,6 +2464,19 @@ def recover_legacy_dispatch_identity(
         and historical_root == root
     ):
         return None, "legacy dispatch record conflicts with the requested cut"
+    if not _legacy_dispatch_receipt_matches(
+        key=key,
+        provider_run_id=provider_run_id,
+        cut_id=cut_id,
+        root=root,
+        branch=branch,
+        baseline_sha=baseline_sha,
+    ):
+        return None, "legacy dispatch receipt identity is incomplete or conflicts"
+    if not _legacy_worktree_matches(
+        root=root, branch=branch, baseline_sha=baseline_sha
+    ):
+        return None, "legacy dispatch worktree identity is incomplete or conflicts"
     canonical = lookup_run(provider_run_id)
     observed_root = str(
         (canonical or {}).get("resolved_worktree_path")
@@ -2399,9 +2491,12 @@ def recover_legacy_dispatch_identity(
         and observed_root
         and Path(observed_root).resolve(strict=False)
         == Path(root).resolve(strict=False)
-        and str(canonical.get("branch") or "") == branch
-        and str(canonical.get("baseline_sha") or "") == baseline_sha
-        and str(canonical.get("cut_id") or "") == cut_id
+        and (not canonical.get("branch") or str(canonical["branch"]) == branch)
+        and (
+            not canonical.get("baseline_sha")
+            or str(canonical["baseline_sha"]) == baseline_sha
+        )
+        and (not canonical.get("cut_id") or str(canonical["cut_id"]) == cut_id)
         and str(canonical.get("agent") or "").lower() == spec.agent.lower()
         and str(canonical.get("skill") or "") == spec.skill
         and canonical.get("worker_alive") is False

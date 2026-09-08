@@ -572,10 +572,11 @@ def test_legacy_dispatch_identity_recovers_only_from_bound_historical_record(
     dispatch = _dispatch(repo, _cut("W0-c"))
     manager = WorktreeManager(repo, day="2026_0907")
     geometry = manager.prepare("W0-c", baseline)
+    dispatch_run_id = "life-ship-260907-234034-86089-implement-fleet"
+    store = DispatchReceiptStore(dispatch_run_id, dispatch.cuts)
     prompt = tmp_path / "historical-prompt.md"
     prompt.write_text("preserved W0-c prompt\n", encoding="utf-8")
     run_id = "impl-260907-234041-50924"
-    dispatch_run_id = "life-ship-260907-234034-86089-implement-fleet"
     key = f"dispatch:{dispatch_run_id}:cut:W0-c:attempt:initial"
     historical = workflow.WorkflowLaunchSpec(
         agent="codex",
@@ -611,12 +612,17 @@ def test_legacy_dispatch_identity_recovers_only_from_bound_historical_record(
             },
         },
     )
+    store.update(
+        "W0-c",
+        "failed",
+        provider_run_id=run_id,
+        worktree_path=geometry.worktree_path,
+        branch=geometry.branch,
+        baseline_sha=baseline,
+    )
     canonical = {
         "run_id": run_id,
         "root": geometry.worktree_path,
-        "cut_id": "W0-c",
-        "branch": geometry.branch,
-        "baseline_sha": baseline,
         "agent": "codex",
         "skill": "implement",
         "worker_alive": False,
@@ -709,6 +715,8 @@ def test_legacy_dispatch_identity_recovers_real_writer_safe_spec_only_when_bound
     baseline = _repo(repo)
     geometry = WorktreeManager(repo, day="2026_0907").prepare("W0-c", baseline)
     dispatch_run_id = "life-ship-260907-234034-86089-implement-fleet"
+    dispatch = _dispatch(repo, _cut("W0-c"))
+    store = DispatchReceiptStore(dispatch_run_id, dispatch.cuts)
     key = f"dispatch:{dispatch_run_id}:cut:W0-c:attempt:initial"
     source_spec = workflow.WorkflowLaunchSpec(
         agent="codex",
@@ -743,13 +751,18 @@ def test_legacy_dispatch_identity_recovers_real_writer_safe_spec_only_when_bound
     assert record["spec_digest"] == workflow._launch_spec_digest(source_spec)
     safe = workflow.WorkflowLaunchSpec(**stored_spec)
     assert workflow._launch_spec_digest(safe) != record["spec_digest"]
+    store.update(
+        "W0-c",
+        "failed",
+        provider_run_id=provider_run_id,
+        worktree_path=geometry.worktree_path,
+        branch=geometry.branch,
+        baseline_sha=baseline,
+    )
 
     canonical = {
         "run_id": provider_run_id,
         "root": geometry.worktree_path,
-        "cut_id": "W0-c",
-        "branch": geometry.branch,
-        "baseline_sha": baseline,
         "agent": "codex",
         "skill": "implement",
         "worker_alive": False,
@@ -879,9 +892,6 @@ def test_cross_day_legacy_resume_reuses_original_checkout_and_leaves_settled_sib
     canonical = {
         "run_id": provider_run_id,
         "root": str(dirty_root),
-        "cut_id": "W0-c",
-        "branch": geometries["W0-c"].branch,
-        "baseline_sha": baseline,
         "agent": "codex",
         "skill": "implement",
         "worker_alive": False,
