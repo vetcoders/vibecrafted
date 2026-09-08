@@ -6,37 +6,110 @@ spawn_sync_control_plane() {
   fi
 }
 
+spawn_is_safe_run_id() {
+  # Same grammar as control-core is_safe_run_id: ASCII token, no traversal.
+  local run_id="${1:-}"
+  [[ -n "$run_id" && ${#run_id} -le 255 ]] || return 1
+  [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
+}
+
 spawn_runtime_meta_path() {
   # Canonical receipt: $VIBECRAFTED_HOME/control_plane/runtime_runs/<id>/meta.json
   # Never advertise control_plane/runs/<id>.json — that file is not written here.
+  # Destination identity is the validated token, never a path fragment.
   local run_id="${1:-${SPAWN_RUN_ID:-}}"
-  [[ -n "$run_id" ]] || return 1
+  spawn_is_safe_run_id "$run_id" || return 1
   printf '%s/control_plane/runtime_runs/%s/meta.json\n' \
     "${VIBECRAFTED_HOME:-$HOME/.vibecrafted}" "$run_id"
 }
 
 spawn_mirror_meta_to_runtime_runs() {
+  # Canonical dest comes from the source document's run_id, not SPAWN_RUN_ID.
+  # finish/reap/GC may run with a different ambient run in the environment.
   local src="${1:-}"
-  local run_id="${SPAWN_RUN_ID:-}"
-  local canonical=""
   [[ -n "$src" && -f "$src" ]] || return 0
-  [[ -n "$run_id" ]] || return 0
-  canonical="$(spawn_runtime_meta_path "$run_id")" || return 0
-  mkdir -p "$(dirname "$canonical")"
-  if [[ "$(spawn_abspath "$src" 2>/dev/null || printf '%s' "$src")" == \
-        "$(spawn_abspath "$canonical" 2>/dev/null || printf '%s' "$canonical")" ]]; then
-    return 0
-  fi
-  "$(spawn_python_bin)" - "$src" "$canonical" <<'PY'
+  "$(spawn_python_bin)" - "$src" <<'PY'
+import json
 import os
 import shutil
 import sys
 
-src, dest = sys.argv[1:3]
-os.makedirs(os.path.dirname(dest), exist_ok=True)
+src = sys.argv[1]
+home = os.environ.get("VIBECRAFTED_HOME") or os.path.join(
+    os.path.expanduser("~"), ".vibecrafted"
+)
+
+def is_safe_run_id(run_id: object) -> bool:
+    if not isinstance(run_id, str) or not run_id or len(run_id) > 255:
+        return False
+    if not run_id[0].isalnum() or not run_id[0].isascii():
+        return False
+    allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
+    return all(ch in allowed for ch in run_id)
+
+try:
+    with open(src, encoding="utf-8") as handle:
+        payload = json.load(handle)
+except (OSError, json.JSONDecodeError, UnicodeError):
+    raise SystemExit(1)
+
+if not isinstance(payload, dict):
+    raise SystemExit(1)
+
+run_id = payload.get("run_id")
+if not is_safe_run_id(run_id):
+    raise SystemExit(1)
+
+runtime_runs = os.path.join(os.path.abspath(home), "control_plane", "runtime_runs")
+dest_dir = os.path.join(runtime_runs, run_id)
+dest = os.path.join(dest_dir, "meta.json")
+if os.path.basename(dest) != "meta.json" or os.path.dirname(dest) != dest_dir:
+    raise SystemExit(1)
+if os.path.commonpath([runtime_runs, dest_dir]) != runtime_runs:
+    raise SystemExit(1)
+
+real_root = os.path.realpath(runtime_runs)
+if os.path.lexists(dest_dir):
+    real_dir = os.path.realpath(dest_dir)
+    if real_dir != real_root and not real_dir.startswith(real_root + os.sep):
+        raise SystemExit(1)
+    if os.path.basename(real_dir) != run_id:
+        raise SystemExit(1)
+
+src_real = os.path.realpath(src)
+if src_real.startswith(real_root + os.sep):
+    rel = os.path.relpath(src_real, real_root)
+    path_id = rel.split(os.sep, 1)[0]
+    if path_id != run_id:
+        raise SystemExit(1)
+
+if os.path.isfile(dest):
+    try:
+        with open(dest, encoding="utf-8") as handle:
+            existing = json.load(handle)
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        existing = None
+    if isinstance(existing, dict):
+        existing_id = existing.get("run_id")
+        if existing_id is not None and existing_id != run_id:
+            raise SystemExit(1)
+    try:
+        if os.path.samefile(src, dest):
+            raise SystemExit(0)
+    except OSError:
+        pass
+
+os.makedirs(dest_dir, exist_ok=True)
 tmp = f"{dest}.tmp.{os.getpid()}"
-shutil.copyfile(src, tmp)
-os.replace(tmp, dest)
+try:
+    shutil.copyfile(src, tmp)
+    os.replace(tmp, dest)
+except OSError:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise SystemExit(1)
 PY
 }
 

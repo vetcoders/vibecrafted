@@ -96,6 +96,30 @@ def test_fail_g3_doctor_rejects_existing_symlink_escape_without_leaf(
     assert any(_PROVIDER_ERROR in error for error in result.errors), result.errors
 
 
+def test_fail_g3_doctor_rejects_unresolved_escaping_symlink_on_resolve_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Resolve raising must not admit a lexical artifacts/escape path as canonical."""
+    isolated = Path(os.environ["VIBECRAFTED_HOME"])
+    artifacts = isolated / "artifacts"
+    artifacts.mkdir(parents=True)
+    provider = tmp_path / "provider-codex"
+    provider.mkdir()
+    escape = artifacts / "escape"
+    escape.symlink_to(provider)
+    reports_dir = str(escape / "report.md")
+    original_resolve = Path.resolve
+
+    def resolve_or_raise(self: Path, *args: object, **kwargs: object) -> Path:
+        if str(escape) in str(self):
+            raise OSError("Too many levels of symbolic links")
+        return original_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve_or_raise)
+    result = doctor_dispatch(_with_reports_dir(reports_dir), base_dir=FIXTURES)
+    assert any(_PROVIDER_ERROR in error for error in result.errors), result.errors
+
+
 def test_fail_g3_worktree_baseline_prefers_descendant_head() -> None:
     """A later living-tree HEAD that contains the receipt SHA wins.
 

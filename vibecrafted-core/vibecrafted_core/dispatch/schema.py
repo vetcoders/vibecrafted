@@ -498,17 +498,31 @@ def _posix(path: Path) -> str:
     return str(path).replace("\\", "/")
 
 
-def _normalize_write_path(value: str) -> Path:
-    """Expand ``~`` and collapse traversal / existing symlinks without requiring the leaf.
+def _resolve_write_path(value: str) -> Path | None:
+    """Follow existing symlink components. ``None`` means resolution failed.
 
-    ``Path.resolve(strict=False)`` follows existing symlink components and
-    normalizes ``..`` even when the destination file does not yet exist.
+    A failed resolve is not a safe artifacts write. Callers must not treat the
+    lexical fallback as proof that the path stayed inside the artifacts plane.
     """
     expanded = Path(value).expanduser()
     try:
         return expanded.resolve(strict=False)
     except (OSError, RuntimeError):
-        return Path(os.path.normpath(str(expanded)))
+        return None
+
+
+def _normalize_write_path(value: str) -> Path:
+    """Expand ``~`` and collapse traversal / existing symlinks without requiring the leaf.
+
+    ``Path.resolve(strict=False)`` follows existing symlink components and
+    normalizes ``..`` even when the destination file does not yet exist.
+    Resolution errors fall back to a lexical collapse for haystack matching
+    only — that fallback is not canonical-artifacts admission.
+    """
+    resolved = _resolve_write_path(value)
+    if resolved is not None:
+        return resolved
+    return Path(os.path.normpath(str(Path(value).expanduser())))
 
 
 def _is_under(path: Path, root: Path) -> bool:
@@ -546,9 +560,15 @@ def _lexical_artifacts_roots() -> tuple[Path, ...]:
 
 
 def _is_canonical_artifacts_write(value: str) -> bool:
-    """True only inside the canonical artifacts *directory*, after symlink resolution."""
-    normalized = _normalize_write_path(value)
-    return any(_is_under(normalized, root) for root in _canonical_artifacts_roots())
+    """True only inside the canonical artifacts *directory*, after symlink resolution.
+
+    An unresolved path is not canonical. Lexical ``normpath`` after ``resolve``
+    raised would keep an escaping symlink looking like ``.../artifacts/escape``.
+    """
+    resolved = _resolve_write_path(value)
+    if resolved is None:
+        return False
+    return any(_is_under(resolved, root) for root in _canonical_artifacts_roots())
 
 
 def _lexically_under_artifacts(value: str) -> bool:
@@ -564,6 +584,7 @@ def _forbidden_runtime_write_root(value: str) -> bool:
     ``artifacts-typo`` or ``artifacts/../../.codex`` are not the artifacts plane.
     Existing symlink components are followed even when the leaf does not exist.
     A path that is lexically inside artifacts but resolves outside is an escape.
+    If resolution raises, the path is not admitted as the artifacts plane.
     """
     if _is_canonical_artifacts_write(value):
         return False

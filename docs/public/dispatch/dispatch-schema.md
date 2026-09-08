@@ -70,7 +70,8 @@ canonical global artifact plane (`~/.vibecrafted/artifacts` or
 as `~/.vibecrafted/artifacts-typo` are not that plane. Traversal
 (`artifacts/../../.codex`) and existing symlink escapes are resolved even
 when the destination file does not yet exist, then checked against the
-directory boundary. New dispatch writes that omit them allocate there:
+directory boundary. If symlink resolution raises, the path is not admitted
+as the canonical artifacts plane. New dispatch writes that omit them allocate there:
 
 ```text
 ~/.vibecrafted/artifacts/<org>/<repo>/YYYY_MMDD/{plans,reports,...}
