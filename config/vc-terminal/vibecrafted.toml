@@ -199,7 +199,10 @@ mods = "Command"
 chars = "\u001b[1;9B"
 
 [[keyboard.bindings]]
-key = "Period"
+# vc-terminal matches the shifted logical key for Command+Shift+Period on
+# macOS (`>`), rather than `key_without_modifiers` (`.`).  Bind the key the
+# native matcher receives so this emits the Super+Shift CSI-u sequence.
+key = ">"
 mods = "Command|Shift"
 chars = "\u001b[46;10u"
 

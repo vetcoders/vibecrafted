@@ -3698,7 +3698,7 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
         )
         assert prose_result.stdout == str(target)
     assert 'mods = "Command"' in terminal
-    assert 'key = "Period"' in terminal
+    assert 'key = ">"' in terminal
     assert 'mods = "Command|Shift"' in terminal
     assert 'chars = "\\u001b[46;10u"' in terminal
     assert 'key = "N"' in terminal
