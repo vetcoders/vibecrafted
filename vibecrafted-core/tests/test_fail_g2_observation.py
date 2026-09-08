@@ -375,3 +375,204 @@ def test_ensure_launch_storage_can_be_disabled_for_tiny_fixtures(
     monkeypatch.setenv("VIBECRAFTED_LAUNCH_MIN_FREE_BYTES", "0")
     monkeypatch.setattr(control_plane, "_storage_free_bytes", lambda _path: 0)
     control_plane.ensure_launch_storage(tmp_path)
+
+
+def _boom_observe(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise TimeoutError("observe timeout")
+
+    monkeypatch.setattr(server_observation, "_origin", lambda: "http://127.0.0.1:9")
+    monkeypatch.setattr(server_observation.urllib.request, "urlopen", _boom)
+
+
+def _patch_lookup_run(monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any]) -> None:
+    monkeypatch.setattr(control_plane, "lookup_run", lambda _run_id: dict(payload))
+
+
+def test_observe_fallback_completed_status_is_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Independent probe (a): status=completed, exit_code=0 must resolve terminal."""
+    _boom_observe(monkeypatch)
+    _patch_lookup_run(
+        monkeypatch,
+        {"run_id": "probe", "status": "completed", "exit_code": 0},
+    )
+
+    payload = server_observation.observe_run("probe")
+
+    assert payload["found"] is True
+    assert payload["terminal"] is True
+    assert payload["worker_alive"] is False
+    assert payload["process_truth"] == "terminal"
+    assert payload["evidence_disagreement"] is False
+    assert payload["source"] == "local_control_plane_fallback"
+
+
+def test_observe_fallback_unknown_running_is_not_death(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Independent probe (b): missing worker evidence is not proof of death."""
+    _boom_observe(monkeypatch)
+    _patch_lookup_run(
+        monkeypatch,
+        {"run_id": "probe", "state": "running", "process_truth": "unknown"},
+    )
+
+    payload = server_observation.observe_run("probe")
+
+    assert payload["found"] is True
+    assert payload["terminal"] is False
+    assert payload["worker_alive"] is None
+    assert payload["process_truth"] == "unknown"
+    assert payload["evidence_disagreement"] is True
+    assert (
+        "canonical_writer_revalidation_unavailable" in payload["disagreement_reasons"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("fields", "expect"),
+    [
+        (
+            {},
+            {
+                "terminal": False,
+                "worker_alive": None,
+                "process_truth": "unknown",
+                "disagreement": True,
+                "reasons": (
+                    "unknown_control_plane_state",
+                    "canonical_writer_revalidation_unavailable",
+                ),
+            },
+        ),
+        (
+            {"terminal": True},
+            {
+                "terminal": True,
+                "worker_alive": False,
+                "process_truth": "terminal",
+                "disagreement": False,
+                "reasons": (),
+            },
+        ),
+        (
+            {"state": "running", "exit_code": 0},
+            {
+                "terminal": False,
+                "worker_alive": None,
+                "process_truth": "unknown",
+                "disagreement": True,
+                "reasons": (
+                    "conflicting_active_state_and_terminal_evidence",
+                    "canonical_writer_revalidation_unavailable",
+                ),
+            },
+        ),
+        (
+            {"status": "completed", "state": "running", "exit_code": 0},
+            {
+                "terminal": False,
+                "worker_alive": None,
+                "process_truth": "unknown",
+                "disagreement": True,
+                "reasons": (
+                    "conflicting_status_and_state",
+                    "canonical_writer_revalidation_unavailable",
+                ),
+            },
+        ),
+        (
+            {
+                "status": "completed",
+                "exit_code": 0,
+                "process_truth": "live",
+                "worker_alive": True,
+            },
+            {
+                "terminal": False,
+                "worker_alive": True,
+                "process_truth": "live",
+                "disagreement": True,
+                "reasons": ("terminal_state_with_live_worker",),
+            },
+        ),
+        (
+            {"state": "running", "process_truth": "live", "worker_alive": True},
+            {
+                "terminal": False,
+                "worker_alive": True,
+                "process_truth": "live",
+                "disagreement": False,
+                "reasons": (),
+            },
+        ),
+        (
+            {
+                "state": "running",
+                "worker_alive": False,
+                "liveness": "pid_gone",
+            },
+            {
+                "terminal": False,
+                "worker_alive": False,
+                "process_truth": "ghost",
+                "disagreement": True,
+                "reasons": ("canonical_writer_revalidation_unavailable",),
+            },
+        ),
+        (
+            {"state": "running", "liveness": "pid_alive"},
+            {
+                "terminal": False,
+                "worker_alive": None,
+                "process_truth": "unknown",
+                "disagreement": True,
+                "reasons": (
+                    "persisted_pid_alive_without_current_proof",
+                    "canonical_writer_revalidation_unavailable",
+                ),
+            },
+        ),
+    ],
+)
+def test_local_observation_classifies_uncertainty_without_sealing(
+    fields: dict[str, Any], expect: dict[str, Any]
+) -> None:
+    payload = server_observation._observation_from_payload(
+        "probe",
+        {"run_id": "probe", **fields},
+        reason="local_fallback_after_server_error:TimeoutError",
+    )
+
+    assert payload["found"] is True
+    assert payload["terminal"] is expect["terminal"]
+    assert payload["worker_alive"] is expect["worker_alive"]
+    assert payload["process_truth"] == expect["process_truth"]
+    assert payload["evidence_disagreement"] is expect["disagreement"]
+    for reason in expect["reasons"]:
+        assert reason in payload["disagreement_reasons"]
+
+
+def test_observe_fallback_timeout_keeps_stale_read_uncertain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _boom_observe(monkeypatch)
+    _patch_lookup_run(
+        monkeypatch,
+        {"run_id": "probe", "state": "running", "liveness": "pid_alive"},
+    )
+
+    payload = server_observation.observe_run("probe")
+
+    assert payload["found"] is True
+    assert payload["terminal"] is False
+    assert payload["worker_alive"] is None
+    assert payload["evidence_disagreement"] is True
+    assert (
+        "canonical_writer_revalidation_unavailable" in payload["disagreement_reasons"]
+    )
+    assert (
+        "persisted_pid_alive_without_current_proof" in payload["disagreement_reasons"]
+    )
