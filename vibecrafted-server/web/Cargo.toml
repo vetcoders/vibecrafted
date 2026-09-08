@@ -98,6 +98,11 @@ name = "tools_http"
 path = "tests/tools_http.rs"
 required-features = ["ssr"]
 
+[[test]]
+name = "scaffold_shell_http"
+path = "tests/scaffold_shell_http.rs"
+required-features = ["ssr"]
+
 [package.metadata.leptos]
 output-name = "vibecrafted-server-web"
 site-root = "target/site"

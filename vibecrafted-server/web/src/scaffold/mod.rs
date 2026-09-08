@@ -14,6 +14,8 @@ pub mod api {
     };
     use serde::Deserialize;
 
+    use crate::chrome::{ServerDocument, ServerSection, render_document};
+
     #[derive(Debug, Clone, Deserialize)]
     pub struct ScaffoldQuery {
         org: Option<String>,
@@ -454,6 +456,22 @@ pub mod api {
             .into_response()
     }
 
+    /// Every scaffold HTML state mounts inside the shared operator chrome
+    /// (`chrome::ServerFrame`): one global sidebar, one navbar, one `<main>`.
+    /// The studio owns only its canvas, its stylesheet and its scripts, so it
+    /// can never replace the page or grow a second navigation vocabulary.
+    fn studio_document(title: &str, status: &str, canvas: &str, scripts: &str) -> String {
+        let head = format!("<style>{}</style>", editor_css());
+        render_document(&ServerDocument {
+            title,
+            active: ServerSection::Scaffold,
+            status,
+            head_html: &head,
+            body_html: canvas,
+            tail_html: scripts,
+        })
+    }
+
     fn render_editor(workspace: &ScaffoldWorkspace) -> String {
         let first_id = workspace
             .artifacts
@@ -478,39 +496,13 @@ pub mod api {
             .filter(|artifact| artifact.checkpoint.approved)
             .count();
         let total = workspace.artifacts.len();
-        format!(
-            r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Scaffold review</title>
-<style>{}</style>
-</head>
-<body>
-<div class="studio-app-shell">
-  <header class="studio-navbar">
-    <a class="studio-navbar-brand" href="/" target="_top">
-      <span class="studio-brand-mark" aria-hidden="true">⌁</span>
-      <span><strong>Vibecrafted server</strong><small>scaffold studio</small></span>
-    </a>
-    <nav class="studio-global-nav" aria-label="Server routes">
-      <a href="/" target="_top">Overview</a>
-      <a href="/workspaces" target="_top">Workspaces</a>
-      <a href="/sessions" target="_top">Sessions</a>
-      <a href="/agents" target="_top">Agent Manager</a>
-      <a href="/runs" target="_top">Runs</a>
-      <a href="/lifecycle" target="_top">Control</a>
-      <a href="/activity" target="_top">Activity</a>
-      <a href="/structure" target="_top">Structure</a>
-      <a class="is-active" href="/scaffold" target="_top">Scaffold</a>
-    </nav>
-    <a class="studio-back-link" href="/scaffold/library">All plans</a>
-  </header>
-
-<main class="review-shell" data-first-artifact="{}">
+        let canvas = format!(
+            r#"<div class="review-shell" data-first-artifact="{}">
   <nav class="review-sidebar" aria-label="Scaffold artifacts">
-    <div class="brand">Artifact index</div>
+    <div class="review-sidebar-head">
+      <div class="brand">Artifact index</div>
+      <a class="review-library-link" href="/scaffold/library">All plans</a>
+    </div>
     <div class="summary">
       <strong>{}</strong>
       <span>{} / {} checkpointed</span>
@@ -561,14 +553,7 @@ pub mod api {
       <a class="api-link" href="/api/scaffold/changes?org={}&repo={}&day={}&plan_id={}" target="_blank" rel="noopener noreferrer">change endpoint ↗</a>
     </div>
   </aside>
-</main>
-</div>
-{}
-{}
-{}
-</body>
-</html>"#,
-            editor_css(),
+</div>"#,
             escape_attr(first_id),
             escape_html(&workspace.repo),
             approved,
@@ -588,9 +573,18 @@ pub mod api {
             url_component(&workspace.repo),
             url_component(&workspace.day),
             url_component(&workspace.plan_id),
+        );
+        let scripts = format!(
+            "{}\n{}\n{}",
             save_on_close_guard(),
             render_mode_script(),
             panel_nav_script()
+        );
+        studio_document(
+            "scaffold review - vc-server",
+            &format!("{approved} / {total} checkpointed"),
+            &canvas,
+            &scripts,
         )
     }
 
@@ -663,32 +657,9 @@ pub mod api {
                 rows
             )
         };
-        format!(
-            r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Scaffold plans</title>
-<style>{}</style>
-</head>
-<body>
-<main class="plan-library">
+        let canvas = format!(
+            r#"<div class="plan-library">
   <header class="library-header">
-    <nav class="library-nav" aria-label="Scaffold navigation">
-      <a class="studio-navbar-brand" href="/" target="_top">
-        <span class="studio-brand-mark" aria-hidden="true">⌁</span>
-        <span><strong>Vibecrafted server</strong><small>scaffold library</small></span>
-      </a>
-      <div class="library-nav-links">
-        <a href="/" target="_top">Overview</a>
-        <a href="/runs" target="_top">Runs</a>
-        <a href="/lifecycle" target="_top">Lifecycle</a>
-        <a href="/activity" target="_top">Activity</a>
-        <a href="/structure" target="_top">Structure</a>
-        <span class="library-mode">Scaffold</span>
-      </div>
-    </nav>
     <div class="library-intro">
       <div>
         <p class="eyebrow">Plan control room</p>
@@ -726,11 +697,7 @@ pub mod api {
     </div>
   </section>
   {}
-</main>
-{}
-</body>
-</html>"#,
-            editor_css(),
+</div>"#,
             plans.len(),
             repositories,
             reviewable_count,
@@ -739,6 +706,15 @@ pub mod api {
             plans.len(),
             cards,
             invalid_band,
+        );
+        let status = match plans.len() {
+            1 => "1 plan".to_string(),
+            n => format!("{n} plans"),
+        };
+        studio_document(
+            "scaffold plans - vc-server",
+            &status,
+            &canvas,
             plan_picker_script(),
         )
     }
@@ -829,27 +805,9 @@ pub mod api {
                 )
             });
         let issue_count = report.map_or(1, |report| report.errors.len().max(1));
-        format!(
-            r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Scaffold plan blocked</title>
-<style>{}</style>
-</head>
-<body>
-<main class="blocked-plan-shell">
-  <nav class="library-nav">
-    <a class="studio-navbar-brand" href="/" target="_top">
-      <span class="studio-brand-mark" aria-hidden="true">⌁</span>
-      <span><strong>Vibecrafted server</strong><small>blocked scaffold</small></span>
-    </a>
-    <div class="library-nav-links">
-      <a href="/" target="_top">Overview</a>
-      <a class="back-link" href="/scaffold/library">← Scaffold library</a>
-    </div>
-  </nav>
+        let canvas = format!(
+            r#"<div class="blocked-plan-shell">
+  <p class="blocked-plan-nav"><a class="back-link" href="/scaffold/library">← Scaffold library</a></p>
   <header class="blocked-plan-head">
     <div>
       <p class="eyebrow">{}/{}</p>
@@ -876,10 +834,7 @@ pub mod api {
       <ol>{}</ol>
     </section>
   </div>
-</main>
-</body>
-</html>"#,
-            editor_css(),
+</div>"#,
             escape_html(&plan.org),
             escape_html(&plan.repo),
             escape_html(&humanize_plan_id(&plan.plan_id)),
@@ -889,6 +844,12 @@ pub mod api {
             escape_html(&plan.plan_root),
             issue_count,
             issues,
+        );
+        studio_document(
+            "scaffold plan blocked - vc-server",
+            &format!("{issue_count} contract issues"),
+            &canvas,
+            "",
         )
     }
 
@@ -957,15 +918,32 @@ pub mod api {
 </script>"#
     }
 
+    /// Empty / unavailable state. It is a normal route page inside the shared
+    /// chrome (same header and panel vocabulary as the Leptos pages), so an
+    /// operator with no plans still has the sidebar, Home and the library.
     fn render_empty(message: &str) -> String {
-        format!(
-            r#"<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Scaffold review unavailable</title><style>{}</style></head>
-<body><main class="empty"><a class="back-link" href="/" target="_top">← Back to console</a><h1>Scaffold review</h1><p>{}</p></main></body>
-</html>"#,
-            editor_css(),
+        let canvas = format!(
+            r#"<div class="server-console-shell route-page-shell scaffold-empty">
+  <section class="run-detail-header route-page-header">
+    <div>
+      <p class="section-eyebrow">Plans / Scaffold</p>
+      <h1 class="run-detail-title">Scaffold review</h1>
+      <p class="route-page-description">{}</p>
+    </div>
+  </section>
+  <section class="control-panel control-panel-wide" aria-label="Scaffold empty state">
+    <div class="control-panel-head"><h2>No plan to open</h2><span>scaffold</span></div>
+    <p class="control-empty">Manifest-backed plans appear here as soon as a scaffold package lands under <code>artifacts/&lt;org&gt;/&lt;repo&gt;/&lt;day&gt;/plans/&lt;plan_id&gt;/manifest.json</code> in the runtime home.</p>
+    <p class="server-console-links"><a class="server-console-link server-console-link-primary" href="/scaffold/library">Open plan library</a><a class="server-console-link" href="/">Back to overview</a></p>
+  </section>
+</div>"#,
             escape_html(message)
+        );
+        studio_document(
+            "scaffold review - vc-server",
+            "no plan selected",
+            &canvas,
+            "",
         )
     }
 
@@ -1887,65 +1865,69 @@ pub mod api {
 
     fn editor_css() -> &'static str {
         r#"
-:root{color-scheme:dark;--bg:#0a0a0b;--panel:#121214;--panel-lift:#1a1a1e;--line:#27272a;--text:#f4f4f5;--muted:#a1a1aa;--accent:#d4d4d8;--teal:#d4d4d8;--amber:#d4d4d8;--warn:#fbbf24;--bad:#f87171}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,ui-sans-serif,system-ui,sans-serif}
-a{color:inherit}
-/* Studio editor locks the viewport; plan library / blocked pages still scroll. */
-body:has(.review-shell){height:100vh;overflow:hidden}
-.plan-library{min-height:100vh;background:radial-gradient(circle at 83% 7%,rgba(77,155,142,.13),transparent 31rem),var(--bg)}
+/* The studio palette is a projection of the shared chrome tokens (tokens.css),
+ * so every scaffold state follows the navbar theme toggle. Element selectors
+ * are scoped with :where() (zero specificity) so they never leak into the
+ * frame's navbar or sidebar. */
+.server-route-document{--bg:var(--surface-page);--panel:var(--surface-card);--panel-lift:var(--surface-elevated);--line:var(--border-subtle);--line-strong:var(--border-active);--text:var(--text-primary);--muted:var(--text-secondary);--accent:var(--text-primary);--warn:var(--status-warning);--bad:var(--status-danger);height:100%;min-height:0;color:var(--text);font:14px/1.45 var(--font-body)}
+:where(.server-route-document) *{box-sizing:border-box}
+:where(.server-route-document) a{color:inherit}
+.plan-library{min-height:100%;background:radial-gradient(circle at 83% 7%,rgba(77,155,142,.13),transparent 31rem),var(--bg)}
 .library-header{padding:26px clamp(24px,5vw,76px) 54px;border-bottom:1px solid var(--line)}
-.library-nav{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:clamp(64px,9vw,130px)}
-.library-nav .brand{text-decoration:none}.library-mode{color:var(--muted);font:11px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.14em}
 .library-intro{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(280px,.6fr);gap:clamp(28px,6vw,90px);align-items:end}
-.library-intro h1{max-width:850px;margin:12px 0 0;font:400 clamp(48px,7vw,102px)/.89 Georgia,'Times New Roman',serif;letter-spacing:-.055em}
+.library-intro h1{max-width:850px;margin:12px 0 0;font:400 clamp(48px,7vw,102px)/.89 var(--font-display);letter-spacing:-.055em}
 .library-lede{max-width:540px;margin:0 0 8px;color:var(--muted);font-size:clamp(15px,1.5vw,19px);line-height:1.55}
 .library-stats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));max-width:920px;margin:54px 0 0;border-top:1px solid var(--line)}
-.plan-card-invalid{border-color:rgba(255,209,102,.35);background:linear-gradient(145deg,#1b1914,#111415);cursor:default}
+.plan-card-invalid{border-color:rgba(255,209,102,.35);background:linear-gradient(145deg,#1b1914,var(--bg));cursor:default}
 .plan-card-invalid:hover{transform:none;border-color:rgba(255,209,102,.45)}
 .plan-skip-reason{margin:0;color:var(--warn);font-size:13px;line-height:1.45}
-.plan-skip-path{margin:8px 0 0;color:var(--muted);font:11px ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
+.plan-skip-path{margin:8px 0 0;color:var(--muted);font:11px var(--font-mono);overflow-wrap:anywhere}
 .plan-invalid-field{padding-top:8px;border-top:1px solid var(--line)}
-.library-stats div{padding:14px 24px 0 0}.library-stats dt,.plan-card-meta dt{color:var(--muted);font:10px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.12em}
-.library-stats dd{margin:2px 0 0;color:var(--amber);font:28px ui-monospace,SFMono-Regular,Menlo,monospace}
+.library-stats div{padding:14px 24px 0 0}.library-stats dt,.plan-card-meta dt{color:var(--muted);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.12em}
+.library-stats dd{margin:2px 0 0;color:var(--amber);font:28px var(--font-mono)}
 .plan-field{padding:42px clamp(24px,5vw,76px) 80px}
-.plan-toolbar{display:flex;align-items:end;justify-content:space-between;gap:30px}.plan-toolbar h2{margin:5px 0 0;font:400 34px/1.05 Georgia,'Times New Roman',serif}
-.plan-search{position:relative;display:grid;gap:7px;width:min(100%,390px);color:var(--muted);font:10px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.12em}
-.plan-search input{width:100%;border:0;border-bottom:1px solid var(--line);outline:0;background:transparent;color:var(--text);padding:8px 34px 10px 0;font:15px Inter,ui-sans-serif,system-ui,sans-serif;text-transform:none;letter-spacing:0}
-.plan-search input:focus{border-color:var(--teal)}.plan-search kbd{position:absolute;right:0;bottom:10px;border:1px solid var(--line);border-radius:4px;padding:1px 6px;color:var(--muted);font:11px ui-monospace,SFMono-Regular,Menlo,monospace}
-.result-count{margin:32px 0 14px;color:var(--muted);font:11px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.1em}
+.plan-toolbar{display:flex;align-items:end;justify-content:space-between;gap:30px}.plan-toolbar h2{margin:5px 0 0;font:400 34px/1.05 var(--font-display)}
+.plan-search{position:relative;display:grid;gap:7px;width:min(100%,390px);color:var(--muted);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.12em}
+.plan-search input{width:100%;border:0;border-bottom:1px solid var(--line);outline:0;background:transparent;color:var(--text);padding:8px 34px 10px 0;font:15px var(--font-body);text-transform:none;letter-spacing:0}
+.plan-search input:focus{border-color:var(--teal)}.plan-search kbd{position:absolute;right:0;bottom:10px;border:1px solid var(--line);border-radius:4px;padding:1px 6px;color:var(--muted);font:11px var(--font-mono)}
+.result-count{margin:32px 0 14px;color:var(--muted);font:11px var(--font-mono);text-transform:uppercase;letter-spacing:.1em}
 .plan-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:12px}
-.plan-card{min-height:290px;display:flex;flex-direction:column;justify-content:space-between;gap:28px;padding:22px;border:1px solid var(--line);border-radius:9px;background:linear-gradient(145deg,var(--panel),#111415);text-decoration:none;transition:transform .18s ease,border-color .18s ease,background .18s ease}
+.plan-card{min-height:290px;display:flex;flex-direction:column;justify-content:space-between;gap:28px;padding:22px;border:1px solid var(--line);border-radius:9px;background:linear-gradient(145deg,var(--panel),var(--bg));text-decoration:none;transition:transform .18s ease,border-color .18s ease,background .18s ease}
 .plan-card:hover,.plan-card:focus-visible{transform:translateY(-3px);border-color:var(--teal);background:var(--panel-lift);outline:none}
-.plan-card-blocked{border-color:rgba(255,138,138,.28);background:linear-gradient(145deg,#1b1617,#111415)}.plan-card-blocked .plan-access{border-color:rgba(255,138,138,.35);color:var(--bad)}
+.plan-card-blocked{border-color:rgba(255,138,138,.28);background:linear-gradient(145deg,#1b1617,var(--bg))}.plan-card-blocked .plan-access{border-color:rgba(255,138,138,.35);color:var(--bad)}
 .plan-card[hidden]{display:none}.plan-card-top,.plan-card-meta,.plan-open{display:flex;align-items:center;justify-content:space-between;gap:16px}
-.plan-number{color:var(--amber);font:12px ui-monospace,SFMono-Regular,Menlo,monospace}.plan-access{border:1px solid var(--line);border-radius:99px;padding:4px 8px;color:var(--muted);font:9px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.1em}
-.plan-card-title p{margin:0 0 9px;color:var(--teal);font:11px ui-monospace,SFMono-Regular,Menlo,monospace}.plan-card-title h3{max-width:470px;margin:0;font:400 28px/1.03 Georgia,'Times New Roman',serif;letter-spacing:-.025em}
-.plan-card-meta{margin:0;padding-top:14px;border-top:1px solid var(--line)}.plan-card-meta div{display:grid;gap:3px}.plan-card-meta div:last-child{text-align:right}.plan-card-meta dd{margin:0;color:var(--text);font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
+.plan-number{color:var(--amber);font:12px var(--font-mono)}.plan-access{border:1px solid var(--line);border-radius:99px;padding:4px 8px;color:var(--muted);font:9px var(--font-mono);text-transform:uppercase;letter-spacing:.1em}
+.plan-card-title p{margin:0 0 9px;color:var(--teal);font:11px var(--font-mono)}.plan-card-title h3{max-width:470px;margin:0;font:400 28px/1.03 var(--font-display);letter-spacing:-.025em}
+.plan-card-meta{margin:0;padding-top:14px;border-top:1px solid var(--line)}.plan-card-meta div{display:grid;gap:3px}.plan-card-meta div:last-child{text-align:right}.plan-card-meta dd{margin:0;color:var(--text);font:12px var(--font-mono)}
 .plan-open{color:var(--muted);font-weight:700}.plan-open b{color:var(--accent);font-size:18px}.plan-card:hover .plan-open{color:var(--text)}
-.plan-no-results{margin-top:12px;border:1px dashed var(--line);border-radius:9px;padding:50px 24px;text-align:center;color:var(--muted)}.plan-no-results strong{display:block;color:var(--text);font:400 24px Georgia,'Times New Roman',serif}.plan-no-results button{justify-self:auto;margin:20px 0 0}
-.blocked-plan-shell{min-height:100vh;padding:26px clamp(24px,5vw,76px) 80px;background:radial-gradient(circle at 85% 5%,rgba(255,138,138,.08),transparent 32rem),var(--bg)}.blocked-plan-shell .library-nav{margin-bottom:clamp(60px,8vw,110px)}.back-link{color:var(--muted);font:11px ui-monospace,SFMono-Regular,Menlo,monospace;text-decoration:none;text-transform:uppercase;letter-spacing:.12em}.back-link:hover{color:var(--text)}
-.blocked-plan-head{display:flex;align-items:end;justify-content:space-between;gap:30px;padding-bottom:36px;border-bottom:1px solid var(--line)}.blocked-plan-head h1{max-width:900px;margin:10px 0 0;font:400 clamp(44px,6.5vw,88px)/.92 Georgia,'Times New Roman',serif;letter-spacing:-.045em}.blocked-pill{flex:0 0 auto;border:1px solid rgba(255,138,138,.35);border-radius:99px;padding:7px 11px;color:var(--bad);font:10px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.1em}
-.blocked-plan-grid{display:grid;grid-template-columns:minmax(280px,.72fr) minmax(0,1.28fr);gap:clamp(36px,7vw,110px);padding-top:42px}.blocked-explainer h2{margin:8px 0 18px;font:400 clamp(31px,4vw,52px)/.98 Georgia,'Times New Roman',serif}.blocked-explainer>p:not(.eyebrow){max-width:520px;color:var(--muted);font-size:16px;line-height:1.6}.blocked-explainer dl{display:grid;gap:12px;margin:36px 0 0}.blocked-explainer dl div{display:grid;grid-template-columns:80px 1fr;gap:16px;padding-top:10px;border-top:1px solid var(--line)}.blocked-explainer dt{color:var(--muted);font:10px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase}.blocked-explainer dd{min-width:0;margin:0;overflow-wrap:anywhere;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
-.blocked-findings{border:1px solid var(--line);border-radius:9px;background:var(--panel);overflow:hidden}.blocked-findings-head{display:flex;align-items:end;justify-content:space-between;gap:20px;padding:18px 20px;border-bottom:1px solid var(--line)}.blocked-findings-head p{margin:0}.blocked-findings-head strong{color:var(--bad);font:11px ui-monospace,SFMono-Regular,Menlo,monospace}.blocked-findings ol{max-height:68vh;margin:0;padding:0;overflow:auto;list-style:none}.blocked-findings li{padding:17px 20px;border-bottom:1px solid var(--line)}.blocked-findings li:last-child{border:0}.blocked-findings li div{display:flex;justify-content:space-between;gap:14px}.blocked-findings li span{color:var(--bad);font:11px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase}.blocked-findings li code{color:var(--teal);font:11px ui-monospace,SFMono-Regular,Menlo,monospace}.blocked-findings li p{margin:8px 0 0;color:var(--muted);line-height:1.5}
+.plan-no-results{margin-top:12px;border:1px dashed var(--line);border-radius:9px;padding:50px 24px;text-align:center;color:var(--muted)}.plan-no-results strong{display:block;color:var(--text);font:400 24px var(--font-display)}.plan-library .plan-no-results button{justify-self:auto;margin:20px 0 0}
+.blocked-plan-shell{min-height:100%;padding:26px clamp(24px,5vw,76px) 80px;background:radial-gradient(circle at 85% 5%,rgba(255,138,138,.08),transparent 32rem),var(--bg)}.blocked-plan-nav{margin:0 0 26px}.blocked-plan-nav .back-link{display:inline-block;margin:0}.back-link{color:var(--muted);font:11px var(--font-mono);text-decoration:none;text-transform:uppercase;letter-spacing:.12em}.back-link:hover{color:var(--text)}
+.blocked-plan-head{display:flex;align-items:end;justify-content:space-between;gap:30px;padding-bottom:36px;border-bottom:1px solid var(--line)}.blocked-plan-head h1{max-width:900px;margin:10px 0 0;font:400 clamp(44px,6.5vw,88px)/.92 var(--font-display);letter-spacing:-.045em}.blocked-pill{flex:0 0 auto;border:1px solid rgba(255,138,138,.35);border-radius:99px;padding:7px 11px;color:var(--bad);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.1em}
+.blocked-plan-grid{display:grid;grid-template-columns:minmax(280px,.72fr) minmax(0,1.28fr);gap:clamp(36px,7vw,110px);padding-top:42px}.blocked-explainer h2{margin:8px 0 18px;font:400 clamp(31px,4vw,52px)/.98 var(--font-display)}.blocked-explainer>p:not(.eyebrow){max-width:520px;color:var(--muted);font-size:16px;line-height:1.6}.blocked-explainer dl{display:grid;gap:12px;margin:36px 0 0}.blocked-explainer dl div{display:grid;grid-template-columns:80px 1fr;gap:16px;padding-top:10px;border-top:1px solid var(--line)}.blocked-explainer dt{color:var(--muted);font:10px var(--font-mono);text-transform:uppercase}.blocked-explainer dd{min-width:0;margin:0;overflow-wrap:anywhere;font:12px var(--font-mono)}
+.blocked-findings{border:1px solid var(--line);border-radius:9px;background:var(--panel);overflow:hidden}.blocked-findings-head{display:flex;align-items:end;justify-content:space-between;gap:20px;padding:18px 20px;border-bottom:1px solid var(--line)}.blocked-findings-head p{margin:0}.blocked-findings-head strong{color:var(--bad);font:11px var(--font-mono)}.blocked-findings ol{max-height:68vh;margin:0;padding:0;overflow:auto;list-style:none}.blocked-findings li{padding:17px 20px;border-bottom:1px solid var(--line)}.blocked-findings li:last-child{border:0}.blocked-findings li div{display:flex;justify-content:space-between;gap:14px}.blocked-findings li span{color:var(--bad);font:11px var(--font-mono);text-transform:uppercase}.blocked-findings li code{color:var(--teal);font:11px var(--font-mono)}.blocked-findings li p{margin:8px 0 0;color:var(--muted);line-height:1.5}
 /* --- Scaffold studio shell (GlyphPulse shape: nav | canvas | inspector + stats) --- */
-.review-shell{display:grid;grid-template-columns:280px minmax(0,1fr) 300px;height:100vh;overflow:hidden;background:var(--bg)}
-.review-sidebar{border-right:1px solid var(--line);padding:18px 14px;height:100vh;display:flex;flex-direction:column;gap:14px;background:#101314;min-height:0;overflow:hidden}
-.brand{font:700 12px/1.1 ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.08em;color:var(--accent)}
+.review-shell{display:grid;grid-template-columns:280px minmax(0,1fr) 300px;height:100%;overflow:hidden;background:var(--bg)}
+.review-sidebar{border-right:1px solid var(--line);padding:18px 14px;height:100%;display:flex;flex-direction:column;gap:14px;background:var(--panel);min-height:0;overflow:hidden}
+.brand{font:700 12px/1.1 var(--font-mono);text-transform:uppercase;letter-spacing:.08em;color:var(--accent)}
+/* Plan-level navigation stays inside the studio canvas; global routes live in the frame sidebar. */
+.review-sidebar-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.review-library-link{display:inline-flex;align-items:center;min-height:26px;border:1px solid var(--line);border-radius:999px;padding:0 10px;color:var(--muted);font:550 11px/1 var(--font-body);text-decoration:none;white-space:nowrap}
+.review-library-link:hover,.review-library-link:focus-visible{border-color:var(--line-strong);background:var(--panel-lift);color:var(--text);outline:none}
 .summary{display:grid;gap:3px;color:var(--muted);flex:0 0 auto}.summary strong{color:var(--text);font-size:16px}
 .tabs{display:flex;flex-direction:column;gap:6px;overflow:auto;padding-right:4px;min-height:0;flex:1 1 auto}
-.tab{display:grid;gap:2px;text-decoration:none;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px 10px;background:#171b1d}
+.tab{display:grid;gap:2px;text-decoration:none;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px 10px;background:var(--panel-lift)}
 .tab:hover,.tab:focus{border-color:var(--accent);outline:none}
 .tab.is-active{border-color:var(--teal);background:var(--panel-lift);box-shadow:inset 2px 0 0 var(--accent)}
-.tab small{color:var(--muted);font:11px ui-monospace,SFMono-Regular,Menlo,monospace}.tab-done{border-color:#4d7041}
+.tab small{color:var(--muted);font:11px var(--font-mono)}.tab-done{border-color:#4d7041}
 .tab-done.is-active{border-color:var(--accent)}
-.api-link{display:block;color:var(--accent);font:12px ui-monospace,SFMono-Regular,Menlo,monospace;text-decoration:none;margin:6px 0}
+.api-link{display:block;color:var(--accent);font:12px var(--font-mono);text-decoration:none;margin:6px 0}
 .api-link:hover{text-decoration:underline}
 /* Center column: topbar + one document + statusbar */
-.review-workspace{display:grid;grid-template-rows:auto minmax(0,1fr) auto;min-width:0;min-height:0;height:100vh;overflow:hidden;border-right:1px solid var(--line)}
-.review-topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 16px;border-bottom:1px solid var(--line);background:#101314;min-height:52px;flex:0 0 auto}
+.review-workspace{display:grid;grid-template-rows:auto minmax(0,1fr) auto;min-width:0;min-height:0;height:100%;overflow:hidden;border-right:1px solid var(--line)}
+.review-topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel);min-height:52px;flex:0 0 auto}
 .review-topbar-id{display:grid;gap:2px;min-width:0}
-.review-topbar-id .mono-cap{color:var(--teal);font:10px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.12em}
-.review-topbar-id strong{font:600 15px/1.2 Inter,ui-sans-serif,system-ui,sans-serif;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.review-topbar-id .mono-cap{color:var(--teal);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.12em}
+.review-topbar-id strong{font:600 15px/1.2 var(--font-body);color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .review-topbar-id .path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .review-topbar-actions{display:flex;align-items:center;gap:8px;flex:0 0 auto}
 .review-main{position:relative;min-height:0;overflow:hidden;padding:0;display:block;background:var(--bg)}
@@ -1969,29 +1951,29 @@ body:has(.review-shell){height:100vh;overflow:hidden}
 .render-mode-btn,.checkpoint-state,.inspector-pill{
   display:inline-flex;align-items:center;justify-content:center;align-self:center;
   margin:0;border:1px solid var(--line);border-radius:999px;padding:5px 11px;
-  font:12px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.02em;
-  background:#171b1d;color:var(--muted);white-space:nowrap
+  font:12px/1.2 var(--font-mono);letter-spacing:.02em;
+  background:var(--panel-lift);color:var(--muted);white-space:nowrap
 }
-button.render-mode-btn{cursor:pointer;font-weight:500;color:var(--text);background:#1b1f20}
+button.render-mode-btn{cursor:pointer;font-weight:500;color:var(--text);background:var(--panel-lift)}
 button.render-mode-btn:hover,button.render-mode-btn:focus-visible{border-color:var(--teal);color:var(--text);outline:none;background:var(--panel-lift)}
 button.render-mode-btn[data-next="rich"]{border-color:rgba(184,239,125,.45);color:var(--accent);background:rgba(184,239,125,.08)}
 .checkpoint-state{color:var(--warn)}.checkpoint-state:empty{display:none}
 .inspector-pill{color:var(--warn)}.inspector-pill.is-done{color:var(--accent);border-color:#4d7041}
-.eyebrow,.path{margin:0;color:var(--muted);font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
+.eyebrow,.path{margin:0;color:var(--muted);font:12px var(--font-mono)}
 .editor-form{display:grid;grid-template-rows:1fr auto;min-height:0}
 .editor-body{position:relative;min-height:0}
 .editor-form textarea.raw-pane{
   position:absolute;inset:0;box-sizing:border-box;width:100%;height:100%;min-height:0;
   resize:none;border:0;margin:0;outline:none;
-  background:#0f1213;color:var(--text);-webkit-text-fill-color:var(--text);caret-color:var(--accent);
-  padding:16px 18px;font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;overflow:auto;white-space:pre-wrap
+  background:var(--panel);color:var(--text);-webkit-text-fill-color:var(--text);caret-color:var(--accent);
+  padding:16px 18px;font:13px/1.55 var(--font-mono);overflow:auto;white-space:pre-wrap
 }
 .editor-form textarea.raw-pane:focus{outline:none;box-shadow:inset 0 0 0 1px rgba(77,155,142,.35)}
 .rich-pane.md-body{
   position:absolute;inset:0;box-sizing:border-box;min-height:0;
   padding:22px clamp(18px,3vw,36px) 36px;border:0;
-  background:linear-gradient(180deg,#101314 0%,#0c0e0f 100%);color:var(--text);
-  font:14.5px/1.6 Inter,ui-sans-serif,system-ui,sans-serif;overflow:auto
+  background:var(--panel);color:var(--text);
+  font:14.5px/1.6 var(--font-body);overflow:auto
 }
 .rich-pane.md-body h1,.rich-pane.md-body h2,.rich-pane.md-body h3,.rich-pane.md-body h4{margin:1.25em 0 .5em;line-height:1.22;letter-spacing:-.02em;color:var(--text);font-weight:600}
 .rich-pane.md-body h1{font-size:1.65em;padding-bottom:.35em;border-bottom:1px solid var(--line)}
@@ -2003,24 +1985,24 @@ button.render-mode-btn[data-next="rich"]{border-color:rgba(184,239,125,.45);colo
 .rich-pane.md-body li.md-task{list-style:none;margin-left:-.4em;display:flex;align-items:flex-start;gap:8px}
 .rich-pane.md-body blockquote{margin:.8em 0;padding:.2em 0 .2em 14px;border-left:3px solid rgba(77,155,142,.55);color:var(--muted)}
 .rich-pane.md-body hr{border:0;border-top:1px solid var(--line);margin:1.2em 0}
-.rich-pane.md-body code{font:12.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--accent);background:rgba(184,239,125,.08);padding:.1em .35em;border-radius:4px}
-.rich-pane.md-body pre.md-code{margin:.85em 0;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:#0a0c0d;overflow:auto}
+.rich-pane.md-body code{font:12.5px/1.45 var(--font-mono);color:var(--accent);background:rgba(184,239,125,.08);padding:.1em .35em;border-radius:4px}
+.rich-pane.md-body pre.md-code{margin:.85em 0;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:var(--bg);overflow:auto}
 .rich-pane.md-body pre.md-code code{background:transparent;padding:0;color:var(--text);font-size:12.5px;line-height:1.5;white-space:pre}
-.rich-pane.md-body a{color:var(--teal)}.rich-pane.md-body strong{color:#fff;font-weight:650}
+.rich-pane.md-body a{color:var(--teal)}.rich-pane.md-body strong{color:var(--text);font-weight:650}
 /* Frontmatter as meta card (Notion property table vibe) */
 .md-frontmatter{display:grid;gap:6px;margin:0 0 1.4em;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:rgba(27,31,32,.85)}
 .md-fm-row{display:grid;grid-template-columns:minmax(96px,160px) minmax(0,1fr);gap:10px;align-items:baseline;padding:3px 0}
-.md-fm-key{color:var(--muted);font:11px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.06em}
-.md-fm-val{font:12.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--text);overflow-wrap:anywhere}
+.md-fm-key{color:var(--muted);font:11px var(--font-mono);text-transform:uppercase;letter-spacing:.06em}
+.md-fm-val{font:12.5px/1.45 var(--font-mono);color:var(--text);overflow-wrap:anywhere}
 /* GFM tables */
-.md-table-wrap{margin:.9em 0 1.1em;overflow:auto;border:1px solid var(--line);border-radius:10px;background:#0f1213}
+.md-table-wrap{margin:.9em 0 1.1em;overflow:auto;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
 .md-table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.45}
 .md-table th,.md-table td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
-.md-table th{color:var(--muted);font:11px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.06em;background:rgba(255,255,255,.02);position:sticky;top:0}
+.md-table th{color:var(--muted);font:11px var(--font-mono);text-transform:uppercase;letter-spacing:.06em;background:rgba(255,255,255,.02);position:sticky;top:0}
 .md-table tr:last-child td{border-bottom:0}
 .md-table tr:hover td{background:rgba(255,255,255,.015)}
 /* Rolling status chips — Codescribe tray Auto Format affordance */
-button.md-status{display:inline-flex;align-items:center;gap:6px;margin:0 2px;padding:2px 8px 2px 6px;border:1px solid var(--line);border-radius:999px;background:#171b1d;color:var(--muted);font:11px ui-monospace,SFMono-Regular,Menlo,monospace;cursor:pointer;vertical-align:middle;line-height:1.3;transition:border-color .12s ease,color .12s ease,background .12s ease}
+button.md-status{display:inline-flex;align-items:center;gap:6px;margin:0 2px;padding:2px 8px 2px 6px;border:1px solid var(--line);border-radius:999px;background:var(--panel-lift);color:var(--muted);font:11px var(--font-mono);cursor:pointer;vertical-align:middle;line-height:1.3;transition:border-color .12s ease,color .12s ease,background .12s ease}
 button.md-status:hover,button.md-status:focus-visible{border-color:var(--teal);color:var(--text);outline:none}
 button.md-status .md-status-glyph{font-weight:700;letter-spacing:.02em}
 button.md-status .md-status-label{opacity:.85;text-transform:lowercase}
@@ -2029,7 +2011,7 @@ button.md-status.md-status-run{border-color:rgba(216,166,64,.55);color:var(--amb
 button.md-status.md-status-maybe{border-color:rgba(77,155,142,.5);color:var(--teal);background:rgba(77,155,142,.08)}
 button.md-status.md-status-blocked{border-color:rgba(255,138,138,.55);color:var(--bad);background:rgba(255,138,138,.08)}
 button.md-status.md-status-done{border-color:rgba(184,239,125,.55);color:var(--accent);background:rgba(184,239,125,.08)}
-button{justify-self:start;margin:12px 16px;border:1px solid #5e7f47;background:#22321f;color:var(--text);border-radius:7px;padding:8px 12px;font-weight:700;cursor:pointer}
+:where(.server-route-document) button{justify-self:start;margin:12px 16px;border:1px solid #5e7f47;background:#22321f;color:var(--text);border-radius:7px;padding:8px 12px;font-weight:700;cursor:pointer}
 /* Save sits in the form's bottom auto-row (not floating in the black void). */
 .artifact-panel .save-artifact-btn{
   margin:0;padding:8px 14px;justify-self:start;align-self:center;
@@ -2038,93 +2020,69 @@ button{justify-self:start;margin:12px 16px;border:1px solid #5e7f47;background:#
 .artifact-panel.is-active .editor-form>.save-artifact-btn{margin:8px 16px 12px}
 .checkpoint-form{display:flex;flex-direction:column;align-items:stretch;gap:10px;padding:0;margin:0}
 .checkpoint-form label{display:flex;align-items:center;gap:8px;color:var(--text);font-size:13px}
-.checkpoint-form input[name=note]{width:100%;min-width:0;border:1px solid var(--line);background:#0f1213;color:var(--text);border-radius:7px;padding:8px;font:13px Inter,ui-sans-serif,system-ui,sans-serif}
+.checkpoint-form input[name=note]{width:100%;min-width:0;border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:7px;padding:8px;font:13px var(--font-body)}
 .checkpoint-form button{margin:0;width:100%;justify-self:stretch}
 /* Right inspector (tools + status) */
-.review-inspector{height:100vh;min-height:0;overflow:auto;padding:14px 14px 20px;background:#0f1213;display:flex;flex-direction:column;gap:14px}
-.inspector-head{color:var(--muted);font:10px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.14em;padding-bottom:6px;border-bottom:1px solid var(--line)}
+.review-inspector{height:100%;min-height:0;overflow:auto;padding:14px 14px 20px;background:var(--panel);display:flex;flex-direction:column;gap:14px}
+.inspector-head{color:var(--muted);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.14em;padding-bottom:6px;border-bottom:1px solid var(--line)}
 .inspector-block{display:grid;gap:8px;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
-.inspector-block h3{margin:0;font:600 12px/1.2 Inter,ui-sans-serif,system-ui,sans-serif;color:var(--text);letter-spacing:.02em}
-.inspector-meta{margin:0;color:var(--muted);font:11px ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
+.inspector-block h3{margin:0;font:600 12px/1.2 var(--font-body);color:var(--text);letter-spacing:.02em}
+.inspector-meta{margin:0;color:var(--muted);font:11px var(--font-mono);overflow-wrap:anywhere}
 .inspector-hint{margin:0;color:var(--muted);font-size:12px;line-height:1.45}
-.mono-cap{font:10px ui-monospace,SFMono-Regular,Menlo,monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--muted)}
+.mono-cap{font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.12em;color:var(--muted)}
 /* Bottom stats bar */
-.review-statusbar{display:flex;flex-wrap:wrap;align-items:center;gap:14px;padding:8px 16px;border-top:1px solid var(--line);background:#101314;color:var(--muted);font:11px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;flex:0 0 auto}
+.review-statusbar{display:flex;flex-wrap:wrap;align-items:center;gap:14px;padding:8px 16px;border-top:1px solid var(--line);background:var(--panel);color:var(--muted);font:11px/1.3 var(--font-mono);flex:0 0 auto}
 .review-statusbar b{color:var(--text);font-weight:600}
 .review-statusbar .stat-plan{margin-left:auto;color:var(--teal)}
-.empty{max-width:720px;margin:12vh auto;border:1px solid var(--line);border-radius:8px;padding:24px;background:var(--panel)}
 @media(max-width:1100px){
   .review-shell{grid-template-columns:240px minmax(0,1fr) 260px}
 }
 @media(max-width:820px){
   .library-intro,.blocked-plan-grid{grid-template-columns:1fr}
-  .library-nav{margin-bottom:64px}.library-stats{max-width:none}
+  .library-stats{max-width:none}
   .plan-toolbar{align-items:stretch;flex-direction:column}.plan-search{width:100%}
   .blocked-plan-head{align-items:start;flex-direction:column}
-  body:has(.review-shell){height:auto;overflow:auto}
-  .review-shell{grid-template-columns:1fr;grid-template-rows:auto minmax(60vh,1fr) auto;height:auto;min-height:100vh;overflow:visible}
+  .review-shell{grid-template-columns:1fr;grid-template-rows:auto minmax(60vh,1fr) auto;height:auto;min-height:100%;overflow:visible}
   .review-sidebar{position:relative;height:auto;max-height:40vh;border-right:0;border-bottom:1px solid var(--line)}
   .review-workspace{height:auto;min-height:60vh;border-right:0}
   .review-inspector{height:auto;border-top:1px solid var(--line)}
   .artifact-panel.is-active{min-height:50vh}
   .review-statusbar .stat-plan{margin-left:0}
 }
-/* Shared vc-server chrome: the scaffold renderer is raw HTML, so it mirrors
- * the Leptos ServerFrame contract without importing a second routing system. */
-.studio-app-shell{display:grid;grid-template-rows:58px minmax(0,1fr);height:100vh;min-height:100vh;overflow:hidden;background:var(--bg)}
-.studio-navbar{position:relative;z-index:30;display:flex;align-items:center;justify-content:space-between;gap:18px;height:58px;padding:0 18px;border-bottom:1px solid var(--line);background:rgba(10,10,11,.94);backdrop-filter:blur(18px)}
-.studio-navbar-brand{display:inline-flex;align-items:center;gap:10px;min-width:0;color:var(--text);text-decoration:none}
-.studio-navbar-brand>span:last-child{display:grid;min-width:0;line-height:1.15}
-.studio-navbar-brand strong{font:650 13px/1.2 Inter,ui-sans-serif,system-ui,sans-serif;white-space:nowrap}
-.studio-navbar-brand small{color:var(--muted);font:10px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap}
-.studio-brand-mark{display:grid;place-items:center;flex:0 0 auto;width:30px;height:30px;border:1px solid var(--line);border-radius:8px;background:var(--panel-lift);color:var(--muted);font:700 16px/1 ui-monospace,SFMono-Regular,Menlo,monospace}
-.studio-global-nav,.library-nav-links{display:flex;align-items:center;gap:5px}
-.studio-global-nav a,.library-nav-links a,.library-nav-links span,.studio-back-link{min-height:32px;display:inline-flex;align-items:center;padding:0 10px;border:1px solid transparent;border-radius:8px;color:var(--muted);font:550 11px/1 Inter,ui-sans-serif,system-ui,sans-serif;text-decoration:none;white-space:nowrap}
-.studio-global-nav a:hover,.studio-global-nav a:focus-visible,.library-nav-links a:hover,.library-nav-links a:focus-visible,.studio-back-link:hover,.studio-back-link:focus-visible{border-color:var(--line);background:var(--panel-lift);color:var(--text);outline:none}
-.studio-global-nav a.is-active,.library-nav-links span{border-color:var(--line);background:var(--panel);color:var(--text)}
-.studio-back-link{border-color:var(--line);background:var(--panel);color:var(--text)}
+/* Zinc restyle layer (kept after the base rules so it wins). */
 .review-shell{height:100%;min-height:0}
 .review-sidebar,.review-workspace,.review-inspector{height:100%}
-.review-sidebar,.review-topbar,.review-statusbar{background:#0f0f11}
-.review-inspector{background:#0d0d0f}
-.tab,.render-mode-btn,.checkpoint-state,.inspector-pill{background:#18181b}
-.tab.is-active{border-color:#52525b;background:#202024;box-shadow:inset 2px 0 0 #d4d4d8}
+.review-sidebar,.review-topbar,.review-statusbar{background:var(--panel)}
+.review-inspector{background:var(--panel)}
+.tab,.render-mode-btn,.checkpoint-state,.inspector-pill{background:var(--panel-lift)}
+.tab.is-active{border-color:var(--line-strong);background:var(--panel-lift);box-shadow:inset 2px 0 0 var(--text)}
 .tab:hover,.tab:focus,.api-link{color:var(--text)}
 .plan-library{background:radial-gradient(700px 320px at 15% -8%,rgba(63,63,70,.2),transparent 64%),var(--bg)}
-.library-header{padding:0 0 30px;border-bottom:1px solid var(--line)}
-.library-nav{position:sticky;top:0;z-index:20;height:58px;margin:0 0 30px;padding:0 clamp(18px,3vw,38px);border-bottom:1px solid var(--line);background:rgba(10,10,11,.94);backdrop-filter:blur(18px)}
+.library-header{padding:26px 0 30px;border-bottom:1px solid var(--line)}
 .library-intro,.library-stats{margin-left:auto;margin-right:auto;width:min(calc(100% - 48px),1152px)}
 .library-intro{grid-template-columns:minmax(0,1fr) minmax(280px,.72fr);gap:40px}
-.library-intro h1{max-width:760px;margin:9px 0 0;font:650 clamp(32px,4.4vw,54px)/.98 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:-.055em}
+.library-intro h1{max-width:760px;margin:9px 0 0;font:650 clamp(32px,4.4vw,54px)/.98 var(--font-mono);letter-spacing:-.055em}
 .library-lede{font-size:14px;line-height:1.6}
 .library-stats{margin-top:30px;border-top:1px solid var(--line)}
 .library-stats div{padding-top:12px}.library-stats dd{color:var(--text);font-size:22px}
 .plan-field{width:min(100%,1200px);margin:0 auto;padding:28px 24px 68px}
-.plan-toolbar h2{font:650 26px/1.05 ui-monospace,SFMono-Regular,Menlo,monospace}
-.plan-card{min-height:230px;border-radius:16px;background:linear-gradient(145deg,var(--panel),#0f0f11);box-shadow:0 1px 0 rgba(255,255,255,.025)}
-.plan-card:hover,.plan-card:focus-visible{transform:translateY(-2px);border-color:#52525b;background:var(--panel-lift)}
-.plan-card-title h3{font:600 22px/1.08 Inter,ui-sans-serif,system-ui,sans-serif}
+.plan-toolbar h2{font:650 26px/1.05 var(--font-mono)}
+.plan-card{min-height:230px;border-radius:16px;background:linear-gradient(145deg,var(--panel),var(--panel));box-shadow:0 1px 0 rgba(255,255,255,.025)}
+.plan-card:hover,.plan-card:focus-visible{transform:translateY(-2px);border-color:var(--line-strong);background:var(--panel-lift)}
+.plan-card-title h3{font:600 22px/1.08 var(--font-body)}
 .plan-card-title p,.plan-number,.plan-open b{color:var(--text)}
-.blocked-plan-shell{padding:0 clamp(24px,5vw,76px) 80px;background:radial-gradient(700px 320px at 15% -8%,rgba(63,63,70,.2),transparent 64%),var(--bg)}
-.blocked-plan-shell .library-nav{margin-inline:calc(clamp(24px,5vw,76px) * -1);margin-bottom:42px}
-.blocked-plan-head h1,.blocked-explainer h2{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.empty{border-radius:16px}
+.blocked-plan-shell{padding:22px clamp(24px,5vw,76px) 80px;background:radial-gradient(700px 320px at 15% -8%,rgba(63,63,70,.2),transparent 64%),var(--bg)}
+.blocked-plan-head h1,.blocked-explainer h2{font-family:var(--font-mono)}
 @media(max-width:820px){
-  .studio-app-shell{height:auto;min-height:100vh;overflow:visible}
-  .studio-navbar{height:auto;min-height:54px;padding:8px 12px;flex-wrap:wrap}
-  .studio-global-nav{order:3;flex:1 1 100%;overflow-x:auto;overflow-y:hidden;padding-bottom:4px;scrollbar-width:thin}
-  .review-shell{height:auto;min-height:calc(100vh - 54px)}
+  .server-route-document{height:auto;min-height:100%}
+  .review-shell{height:auto;min-height:100%}
   .review-sidebar{height:auto;max-height:none}
   .tabs{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(190px,72vw);overflow-x:auto;overflow-y:hidden;padding:0 0 5px}
   .review-workspace{min-height:64vh}
   .review-inspector{height:auto}
   .library-intro{grid-template-columns:1fr}
-  .library-nav{margin-bottom:24px}
 }
 @media(max-width:620px){
-  .studio-navbar-brand small{display:none}
-  .studio-back-link{padding-inline:8px;font-size:10px}
-  .library-nav-links a:not(.back-link){display:none}
   .library-intro,.library-stats{width:min(calc(100% - 32px),1152px)}
   .library-stats{grid-template-columns:repeat(2,minmax(0,1fr))}
   .library-intro h1{font-size:32px}
@@ -2348,12 +2306,184 @@ button{justify-self:start;margin:12px 16px;border:1px solid #5e7f47;background:#
                     || html.contains("border-radius:999px"),
                 "Edit control must share pill geometry with checkpoint-state"
             );
-            assert!(html.contains(r#"class="studio-navbar""#));
-            assert!(html.contains(r#"href="/" target="_top""#));
-            assert!(html.contains(r#"href="/scaffold/library""#));
+            // Plan-level "All plans" lives inside the studio canvas; global
+            // routes come from the shared frame, never from a studio navbar.
+            assert!(html.contains(r#"class="review-library-link" href="/scaffold/library""#));
             assert!(html.contains("All plans"));
-            assert!(html.contains(r#"href="/runs" target="_top""#));
             assert!(html.contains(r##""#artifact/" + encodeURIComponent(panel.id)"##));
+            assert_shared_server_frame(&html, "editor");
+        }
+
+        fn count(haystack: &str, needle: &str) -> usize {
+            haystack.matches(needle).count()
+        }
+
+        /// One shared canvas: every scaffold HTML state is a route page inside
+        /// `chrome::ServerFrame` — one navbar, one global sidebar, one `<main>`,
+        /// Plans / Scaffold active, Home reachable, no second chrome vocabulary.
+        fn assert_shared_server_frame(html: &str, state: &str) {
+            assert!(
+                html.starts_with("<!DOCTYPE html>"),
+                "{state}: full document"
+            );
+            assert!(
+                html.contains("<title>scaffold "),
+                "{state}: route-owned title"
+            );
+            assert_eq!(
+                count(html, r#"class="server-navbar""#),
+                1,
+                "{state}: one navbar"
+            );
+            assert_eq!(
+                count(html, r#"class="server-sidebar""#),
+                1,
+                "{state}: one global sidebar"
+            );
+            assert_eq!(
+                count(html, r#"class="server-mobile-nav""#),
+                1,
+                "{state}: one mobile nav"
+            );
+            assert_eq!(
+                count(html, "<main"),
+                1,
+                "{state}: the frame owns the only <main>"
+            );
+            assert!(
+                html.contains(
+                    r#"<main class="server-route-main"><div class="server-route-document">"#
+                ),
+                "{state}: canvas mounts inside the frame main"
+            );
+            assert_eq!(
+                count(
+                    html,
+                    r#"href="/scaffold" class="server-nav-link is-active""#
+                ),
+                2,
+                "{state}: Plans / Scaffold active in sidebar and mobile nav"
+            );
+            assert!(
+                html.contains(r#"href="/" aria-label="Vibecrafted server overview""#),
+                "{state}: brand link is the browser Home"
+            );
+            assert!(
+                html.contains(r#"class="server-theme-toggle""#),
+                "{state}: theme toggle"
+            );
+            assert!(
+                html.contains("server-theme-toggle');"),
+                "{state}: theme control script"
+            );
+            assert!(
+                html.contains(".review-shell{display:grid;grid-template-columns:280px"),
+                "{state}: studio stylesheet is route-owned"
+            );
+            for dead in [
+                "studio-app-shell",
+                "studio-navbar",
+                "studio-global-nav",
+                "studio-back-link",
+                "library-nav",
+                "library-mode",
+                r#"target="_top""#,
+                "<body><main",
+            ] {
+                assert!(
+                    !html.contains(dead),
+                    "{state}: duplicate chrome vocabulary `{dead}`"
+                );
+            }
+        }
+
+        #[test]
+        fn every_scaffold_html_state_shares_the_server_frame() {
+            let plan = ScaffoldPlanSummary {
+                plan_id: "runtime-truth-v1".into(),
+                org: "vetcoders".into(),
+                repo: "vibecrafted".into(),
+                day: "2026_0727".into(),
+                plan_root: "/tmp/runtime-truth-v1".into(),
+                artifact_count: 12,
+                legacy_read_only: false,
+            };
+
+            let editor = render_editor(&fixture());
+            assert_shared_server_frame(&editor, "editor");
+            assert!(editor.contains("1 / 1 checkpointed") || editor.contains("0 / 1 checkpointed"));
+
+            let library = render_plan_picker(
+                &[ScaffoldPlanCard {
+                    plan: plan.clone(),
+                    reviewable: true,
+                }],
+                &[],
+            );
+            assert_shared_server_frame(&library, "library");
+            assert!(library.contains(r#"class="plan-library""#));
+            assert!(library.contains(">1 plan</span>"));
+
+            let empty = render_plan_picker(&[], &[]);
+            assert_shared_server_frame(&empty, "empty");
+            assert!(empty.contains("No manifest-backed scaffold plans are available."));
+            assert!(
+                empty.contains(r#"class="server-console-shell route-page-shell scaffold-empty""#)
+            );
+            assert!(empty.contains(r#"href="/scaffold/library""#));
+
+            let blocked = render_plan_blocked(&plan, None, "invalid manifest");
+            assert_shared_server_frame(&blocked, "blocked");
+            assert!(blocked.contains("The plan exists."));
+            assert!(blocked.contains(r#"class="back-link" href="/scaffold/library""#));
+
+            let unavailable = render_empty("Scaffold artifacts unavailable: <boom>");
+            assert_shared_server_frame(&unavailable, "unavailable");
+            assert!(unavailable.contains("Scaffold artifacts unavailable: &lt;boom&gt;"));
+            assert!(!unavailable.contains("<boom>"));
+        }
+
+        #[test]
+        fn editor_keeps_artifact_index_inside_the_canvas_with_one_active_document() {
+            let mut workspace = fixture();
+            let mut second = workspace.artifacts[0].clone();
+            second.id = "tracker".into();
+            second.title = "Tracker".into();
+            second.role = ScaffoldArtifactRole::Tracker;
+            workspace.artifacts.push(second);
+            let html = render_editor(&workspace);
+
+            // Global sidebar closes before the studio canvas opens, and the
+            // artifact tabs sit inside that canvas — never in the global nav.
+            let sidebar_start = html
+                .find(r#"class="server-sidebar""#)
+                .expect("global sidebar");
+            let sidebar_end =
+                html[sidebar_start..].find("</aside>").expect("sidebar end") + sidebar_start;
+            let canvas = html
+                .find(r#"class="server-route-document""#)
+                .expect("canvas");
+            let tabs = html
+                .find(r#"class="tabs" role="tablist""#)
+                .expect("artifact tabs");
+            assert!(
+                sidebar_end < canvas && canvas < tabs,
+                "artifact index must live inside the canvas"
+            );
+            let sidebar = &html[sidebar_start..sidebar_end];
+            assert!(!sidebar.contains("Master Dispatch") && !sidebar.contains("Tracker"));
+            assert!(!sidebar.contains("Artifact index"));
+
+            // One active document; the second panel stays hidden.
+            assert_eq!(count(&html, r#"class="artifact-panel is-active""#), 1);
+            assert_eq!(count(&html, r#"class="artifact-panel" id="tracker""#), 1);
+            assert_eq!(count(&html, r#"class="review-inspector""#), 1);
+            assert_eq!(count(&html, r#"class="review-statusbar""#), 1);
+            // Machine endpoints open beside the studio (native host reference tab).
+            assert!(
+                html.contains(r#"target="_blank" rel="noopener noreferrer">artifact endpoint"#)
+            );
+            assert!(html.contains(r#"target="_blank" rel="noopener noreferrer">change endpoint"#));
         }
 
         #[test]

@@ -9,37 +9,6 @@ use serde::{Deserialize, Serialize};
 use crate::chrome::{ServerFrame, ServerSection};
 use crate::run_detail::RunDetailPage;
 
-#[cfg(feature = "ssr")]
-fn theme_head_script() -> &'static str {
-    r#"(() => {
-  try {
-    const saved = localStorage.getItem('loct-theme');
-    document.documentElement.dataset.theme = saved === 'light' ? 'light' : 'dark';
-  } catch (_) {
-    document.documentElement.dataset.theme = 'dark';
-  }
-})();"#
-}
-
-#[cfg(feature = "ssr")]
-fn theme_control_script() -> &'static str {
-    r#"(() => {
-  const button = document.querySelector('.server-theme-toggle');
-  if (!button) return;
-  const apply = (theme) => {
-    const next = theme === 'light' ? 'light' : 'dark';
-    document.documentElement.dataset.theme = next;
-    button.textContent = next;
-    button.setAttribute('aria-pressed', String(next === 'light'));
-    try { localStorage.setItem('loct-theme', next); } catch (_) {}
-  };
-  apply(document.documentElement.dataset.theme);
-  button.addEventListener('click', () => {
-    apply(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
-  });
-})();"#
-}
-
 const DASHBOARD_EMBED_ID: &str = "vc-dashboard-data";
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -775,9 +744,9 @@ fn settlement_board(settlement: DashboardSettlement) -> impl IntoView {
 pub fn shell(_options: leptos::config::LeptosOptions) -> impl IntoView {
     use leptos_meta::MetaTags;
 
-    const STYLE_TOKENS: &str = include_str!("../styles/tokens.css");
-    const STYLE_FONTS: &str = include_str!("../styles/fonts.css");
-    const STYLE_MAIN: &str = include_str!("../styles/main.css");
+    use crate::chrome::{
+        STYLE_FONTS, STYLE_MAIN, STYLE_TOKENS, theme_control_script, theme_head_script,
+    };
 
     view! {
         <!DOCTYPE html>
