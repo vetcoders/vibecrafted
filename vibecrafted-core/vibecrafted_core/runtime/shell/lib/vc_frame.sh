@@ -213,8 +213,10 @@ _vetcoders_open_entry_in_vc_terminal() {
   # its group leader, and whether bash/zsh hands `&` its own pgid here is
   # shell/mode-dependent) — so a short-lived foreground driver spawns one
   # detached writer that outlives it.
-  command -v python3 >/dev/null 2>&1 || {
-    printf 'vc-terminal: python3 is required to open an independent terminal session but is not on PATH.\n' >&2
+  local python_bin=""
+  python_bin="$(_vetcoders_internal_python)"
+  command -v "$python_bin" >/dev/null 2>&1 || {
+    printf 'vc-terminal: a supported internal Python interpreter is required to open an independent terminal session.\n' >&2
     rm -rf "$receipt_dir"
     return 1
   }
@@ -233,7 +235,7 @@ _vetcoders_open_entry_in_vc_terminal() {
   # caller's side can never reach into a still-running terminal.
   #
   # This FOREGROUND driver's own exit status is load-bearing: an interpreter
-  # that fails to start at all (a broken/shimmed python3), or whose own
+  # that fails to start at all (a broken/shimmed internal interpreter), or whose own
   # subprocess.Popen call below (the one spawning the detached writer -- NOT
   # the writer's own later exec of the host, already handled by the receipt)
   # raises, must never fall through to the receipt-polling loop and be
@@ -243,7 +245,7 @@ _vetcoders_open_entry_in_vc_terminal() {
   # first, before the poll below ever starts.
   local driver_rc=0
   VC_TERMINAL_ARGV_FILE="$argv_file" VC_TERMINAL_RECEIPT="$receipt" \
-    VIBECRAFTED_TERMINAL_ENTRY=1 python3 - <<'PY'
+    VIBECRAFTED_TERMINAL_ENTRY=1 "$python_bin" - <<'PY'
 import os
 import subprocess
 import sys
@@ -508,7 +510,9 @@ _vetcoders_atuin_bin() {
 }
 
 _vetcoders_strip_ansi() {
-  python3 -c 'import re, sys; print(re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", sys.stdin.read()), end="")'
+  local python_bin=""
+  python_bin="$(_vetcoders_internal_python)"
+  "$python_bin" -c 'import re, sys; print(re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", sys.stdin.read()), end="")'
 }
 
 _vetcoders_vc_frame_session_state() {
@@ -665,9 +669,11 @@ _vetcoders_effective_worker_session() {
   root_dir="$(_vetcoders_effective_project_root)"
 
   local resolved=""
-  if command -v python3 >/dev/null 2>&1; then
+  local python_bin=""
+  python_bin="$(_vetcoders_internal_python)"
+  if command -v "$python_bin" >/dev/null 2>&1; then
     resolved="$(
-      SPAWN_ROOT="$root_dir" VIBECRAFTED_ROOT="$root_dir" python3 - <<'PY' 2>/dev/null
+      SPAWN_ROOT="$root_dir" VIBECRAFTED_ROOT="$root_dir" "$python_bin" - <<'PY' 2>/dev/null
 import os
 from pathlib import Path
 root = os.environ.get("SPAWN_ROOT") or os.environ.get("VIBECRAFTED_ROOT") or os.getcwd()

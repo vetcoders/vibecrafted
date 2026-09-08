@@ -172,7 +172,7 @@ _vetcoders_aicx_resume_fallback() {
   python_spec="$(_vetcoders_core_python_spec 2>/dev/null || true)"
   py="${python_spec%%$'\t'*}"
   if [[ -z "$py" ]]; then
-    py="$(command -v python3 2>/dev/null || true)"
+    py="$(_vetcoders_internal_python)"
   fi
   if [[ -z "$py" || -z "$module" ]]; then
     echo "Vibecrafted session-chain assembler unavailable (python or module missing)." >&2
@@ -890,13 +890,9 @@ _vetcoders_resume_command() {
 _vetcoders_agent_for_session() {
   local session_id="$1"
   [[ -n "$session_id" ]] || return 1
-  # NOT converted to _vetcoders_internal_python, unlike its siblings in this
-  # facade: tests/tui/test_spawn_common.py::_write_fake_core_python installs a
-  # VIBECRAFTED_PYTHON that answers only `-c` and `-m vibecrafted_core.cli`,
-  # so this tree still treats that variable as a core-CLI runner rather than a
-  # generic interpreter. Reconciling the two meanings needs its own cut and its
-  # own proof; silently widening the stub to admit a change is not that proof.
-  python3 - "$session_id" "${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/artifacts" <<'PY'
+  local python_bin=""
+  python_bin="$(_vetcoders_internal_python)"
+  "$python_bin" - "$session_id" "${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/artifacts" <<'PY'
 import json
 import pathlib
 import sys
