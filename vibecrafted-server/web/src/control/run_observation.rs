@@ -104,13 +104,20 @@ impl RunObservationV1 {
                 disagreement_reasons.push("persisted_pid_alive_without_current_proof".to_string());
             }
         }
-        if writer_revalidation != "ok"
-            && writer_revalidation != "disabled_for_test"
-            && run.is_none()
-        {
-            // Writer lag on a found live run is not disappearance. Fail-closed
-            // disagreement is reserved for "we could not read the run at all".
-            disagreement_reasons.push("canonical_writer_revalidation_unavailable".to_string());
+        let writer_unavailable =
+            writer_revalidation != "ok" && writer_revalidation != "disabled_for_test";
+        if writer_unavailable {
+            let found_currently_live = run.as_ref().is_some_and(|item| {
+                !item.is_terminal()
+                    && (item.process_truth == "live" || item.worker_alive == Some(true))
+            });
+            let found_terminal = run.as_ref().is_some_and(RunStatus::is_terminal);
+            if !found_currently_live && !found_terminal {
+                // Missing run, or a stale found snapshot without current
+                // ownership, stays visibly uncertain. A live found run is
+                // writer lag, not disappearance; a real terminal is certain.
+                disagreement_reasons.push("canonical_writer_revalidation_unavailable".to_string());
+            }
         }
         Self {
             schema: "vibecrafted.run-observation.v1",
@@ -295,8 +302,7 @@ impl HubState {
             // run, is not a reason to close the monitor. Closing here made
             // await return evidence_disagreement / not_found while the worker
             // was still writing runtime_runs/.
-            let should_close = terminal
-                || (observed.evidence_disagreement && !observed.found);
+            let should_close = terminal || (observed.evidence_disagreement && !observed.found);
             entry.sender.send_replace(observed);
             if should_close {
                 break;
@@ -597,6 +603,8 @@ mod tests {
     }
 
     fn write_meta(home: &std::path::Path, state: &str, exit_code: Option<i32>) {
+        fs::create_dir_all(home.join("control_plane/runtime_runs/run-1"))
+            .expect("fixture run directory");
         let payload = json!({
             "run_id": "run-1",
             "status": state,
@@ -809,7 +817,13 @@ mod tests {
             .await
             .expect("fast path registry cleanup");
             assert_eq!(hub.monitors_started.load(Ordering::Acquire), 1);
-            assert_eq!(hub.underlying_reads.load(Ordering::Acquire), 1);
+            if expected_found {
+                assert_eq!(hub.underlying_reads.load(Ordering::Acquire), 1);
+            } else {
+                // Missing is launch lag, not a close. The monitor may poll
+                // until the last subscriber's empty grace elapses.
+                assert!(hub.underlying_reads.load(Ordering::Acquire) >= 1);
+            }
             let _ = fs::remove_dir_all(home);
         }
     }
@@ -873,7 +887,7 @@ mod tests {
         assert_process_reaped(pid).await;
         assert_eq!(witness.borrow().writer_revalidation, "writer_cancelled");
         assert!(witness.borrow().found);
-        assert!(!witness.borrow().evidence_disagreement);
+        assert!(witness.borrow().evidence_disagreement);
         let reads_after_cleanup = hub.underlying_reads.load(Ordering::Acquire);
         sleep(Duration::from_millis(80)).await;
         assert_eq!(
@@ -911,7 +925,15 @@ mod tests {
         let observation = subscriber.receiver.borrow().clone();
         assert_eq!(observation.writer_revalidation, "writer_timeout");
         assert!(observation.found);
-        assert!(!observation.evidence_disagreement);
+        assert!(observation.evidence_disagreement);
+        assert!(
+            observation
+                .disagreement_reasons
+                .iter()
+                .any(|reason| reason == "canonical_writer_revalidation_unavailable"),
+            "stale found run with writer timeout must stay uncertain: {:?}",
+            observation.disagreement_reasons
+        );
         assert_process_reaped(pid).await;
         drop(subscriber);
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -954,6 +976,71 @@ mod tests {
         assert_eq!(observed.process_truth, "live");
         assert_eq!(observed.worker_alive, Some(true));
         assert!(!observed.evidence_disagreement);
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[tokio::test]
+    async fn observe_missing_then_found_launch_transition() {
+        let home = fixture_home("launch-transition");
+        fs::remove_dir_all(home.join("control_plane/runtime_runs")).expect("clear run dir");
+        let missing = observe_once(ControlPlane::new(&home), "run-1".to_string(), None, None).await;
+        assert!(!missing.found);
+        assert!(!missing.terminal);
+
+        write_meta(&home, "running", None);
+        let found = observe_once(ControlPlane::new(&home), "run-1".to_string(), None, None).await;
+        assert!(found.found);
+        assert!(!found.terminal);
+        assert_eq!(found.run_id, "run-1");
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[tokio::test]
+    async fn writer_timeout_on_live_found_run_is_not_disappearance() {
+        let home = fixture_home("writer-timeout-live");
+        let payload = json!({
+            "run_id": "run-1",
+            "status": "running",
+            "state": "running",
+            "agent": "codex",
+            "mode": "implement",
+            "root": "/repo",
+            "updated_at": Utc::now().to_rfc3339(),
+            "liveness": "pid_alive",
+            "process_truth": "live",
+            "worker_alive": true
+        });
+        fs::write(
+            home.join("control_plane/runtime_runs/run-1/meta.json"),
+            serde_json::to_vec(&payload).expect("JSON"),
+        )
+        .expect("write meta");
+        let observation = RunObservationV1::from_run(
+            &ControlPlane::new(&home),
+            "run-1",
+            ControlPlane::new(&home).lookup_run("run-1"),
+            "writer_timeout".to_string(),
+        );
+        assert!(observation.found);
+        assert!(!observation.terminal);
+        assert_eq!(observation.worker_alive, Some(true));
+        assert!(!observation.evidence_disagreement);
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[tokio::test]
+    async fn real_terminal_found_run_stays_certain_when_writer_times_out() {
+        let home = fixture_home("writer-timeout-terminal");
+        write_meta(&home, "completed", Some(0));
+        let observation = RunObservationV1::from_run(
+            &ControlPlane::new(&home),
+            "run-1",
+            ControlPlane::new(&home).lookup_run("run-1"),
+            "writer_timeout".to_string(),
+        );
+        assert!(observation.found);
+        assert!(observation.terminal);
+        assert!(!observation.evidence_disagreement);
         let _ = fs::remove_dir_all(home);
     }
 }

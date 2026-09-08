@@ -4022,12 +4022,74 @@ def _await_progress_fingerprint(run: dict[str, Any] | None) -> tuple[Any, ...]:
     )
 
 
-def _loop_lock_is_running(run_id: str) -> bool:
-    """True when a marbles/polarize lock still names this run as in progress.
+_LOOP_LOCK_TERMINAL_STATUSES = {
+    "failed",
+    "cancelled",
+    "canceled",
+    "completed",
+    "stopped",
+    "closed",
+    "settled",
+}
+_LOOP_LOCK_ACTIVE_STATUSES = {"running", "active", "paused"}
 
-    Guardian settlement can stamp the parent ``settled`` while the lock file
-    still carries ``status=running`` and ``current < total``. Await must treat
-    that lock as live work, not a terminal parent.
+
+def _loop_lock_owner_is_alive(payload: dict[str, str], run_id: str) -> bool:
+    """True when the lock's recorded owner still matches a live process.
+
+    A stale pid on disk is not liveness. Identity fields, when present, have
+    to match the current process; otherwise pid+pgid must still be the same
+    live group. A lock with no owner pid cannot prove anything.
+    """
+    pid = _coerce_int(
+        payload.get("pid") or payload.get("owner_pid") or payload.get("worker_pid")
+    )
+    if pid is None or not _pid_is_alive(pid):
+        return False
+    pgid = _coerce_int(
+        payload.get("pgid") or payload.get("owner_pgid") or payload.get("worker_pgid")
+    )
+    start_token = str(payload.get("start_token") or "").strip()
+    command_sha256 = str(payload.get("command_sha256") or "").strip()
+    if start_token and command_sha256 and pgid is not None:
+        ppid = _coerce_int(payload.get("ppid"))
+        return _worker_is_alive(
+            {
+                "run_id": run_id,
+                "worker_pid": pid,
+                "worker_pgid": pgid,
+                "worker_identity": {
+                    "pid": pid,
+                    "ppid": ppid if ppid is not None else 0,
+                    "pgid": pgid,
+                    "start_token": start_token,
+                    "command_sha256": command_sha256,
+                    "run_id": run_id,
+                },
+            }
+        )
+    if pgid is not None:
+        try:
+            return os.getpgid(pid) == pgid
+        except OSError:
+            return False
+    return True
+
+
+def _loop_lock_children_are_alive(run_id: str) -> bool:
+    """True when a current child of this loop parent still owns a live process."""
+    children = _await_child_runs({"active_runs": [], "recent_runs": []}, run_id)
+    return any(_await_process_is_alive(child) for child in children)
+
+
+def _loop_lock_is_running(run_id: str) -> bool:
+    """True when a marbles/polarize lock still names this run as live work.
+
+    Guardian settlement can stamp the parent ``settled`` while a *live* lock
+    still carries ``status=running`` and ``current < total``. Await must keep
+    waiting in that case. A terminal failed/cancelled lock overrides leftover
+    counters, and a stale lock with a dead owner cannot prove liveness on its
+    own — only current owner identity or a live child can.
     """
     target = str(run_id or "").strip()
     if not target:
@@ -4039,11 +4101,18 @@ def _loop_lock_is_running(run_id: str) -> bool:
         status = (
             str(payload.get("status") or payload.get("state") or "").strip().lower()
         )
-        if status in {"running", "active", "paused"}:
-            return True
+        if status in _LOOP_LOCK_TERMINAL_STATUSES:
+            continue
         current = _coerce_int(payload.get("current"))
         total = _coerce_int(payload.get("total") or payload.get("loops"))
-        if current is not None and total is not None and 0 <= current < total:
+        claimed_in_progress = status in _LOOP_LOCK_ACTIVE_STATUSES or (
+            current is not None and total is not None and 0 <= current < total
+        )
+        if not claimed_in_progress:
+            continue
+        if _loop_lock_owner_is_alive(payload, target) or _loop_lock_children_are_alive(
+            target
+        ):
             return True
     return False
 
@@ -4408,7 +4477,8 @@ def await_run(
             # No socket to block on, but the launcher/worker/loop is
             # demonstrably alive. Loop parents (polarize/marbles) stay open
             # until the lock/children die or an explicit hard cap fires —
-            # timeout_seconds is not a "run disappeared" signal.
+            # timeout_seconds is not a "run disappeared" signal. A stale
+            # lock never reaches here because it cannot set worker_alive.
             if loop_live and hard_cap is None:
                 time.sleep(rearm_interval)
                 continue
@@ -4418,6 +4488,16 @@ def await_run(
             ):
                 time.sleep(rearm_interval)
                 continue
+            if loop_live and rearm_deadline is not None:
+                return _finalize_await_result(
+                    target,
+                    last_run,
+                    completed=False,
+                    timed_out=True,
+                    reason="hard_cap",
+                    worker_alive=True,
+                    attempts=1,
+                )
 
         result = _finalize_await_result(
             target,

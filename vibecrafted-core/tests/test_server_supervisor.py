@@ -1380,7 +1380,7 @@ def test_launcher_fingerprint_is_enforced_by_run_and_service_status(
 
     status = supervisor.service_status(config)
     assert not status.build_current
-    assert not status.pair_healthy
+    assert status.pair_healthy
     assert supervisor._runtime_status(config.paths) == 1
     assert "Supervision: BROKEN" in capsys.readouterr().out
     with pytest.raises(supervisor.SupervisorError, match="launcher hash differs"):

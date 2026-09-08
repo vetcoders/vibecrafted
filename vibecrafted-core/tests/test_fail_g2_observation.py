@@ -75,10 +75,66 @@ def test_observe_run_falls_back_to_runtime_runs_after_http_timeout(
     assert str((payload.get("run") or {}).get("state") or "") == "running"
 
 
-def test_await_does_not_complete_settled_parent_while_loop_lock_is_running(
+def _write_loop_lock(home: Path, run_id: str, **fields: object) -> Path:
+    locks = home / "locks" / ".vibecrafted"
+    locks.mkdir(parents=True, exist_ok=True)
+    payload = {"run_id": run_id, **fields}
+    path = locks / f"{run_id}.lock"
+    path.write_text(
+        "\n".join(f"{key}={value}" for key, value in payload.items()) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_failed_lock_with_counters_and_dead_pid_is_not_running(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    run_id = "review-loop"
+    _write_loop_lock(
+        home,
+        run_id,
+        status="failed",
+        current=1,
+        total=5,
+        pid=99999999,
+        agent="claude",
+        root=tmp_path,
+    )
+    assert control_plane._loop_lock_is_running(run_id) is False
+
+
+def test_running_lock_with_dead_owner_is_not_running(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    run_id = "review-loop"
+    _write_loop_lock(
+        home,
+        run_id,
+        status="running",
+        current=1,
+        total=5,
+        pid=99999999,
+        agent="claude",
+        root=tmp_path,
+    )
+    assert control_plane._loop_lock_is_running(run_id) is False
+
+
+def test_await_does_not_complete_settled_parent_while_live_loop_lock_is_owned(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import subprocess
+    import sys
+
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
     run_id = "polr-lock-parent"
     _write_runtime_meta(
@@ -93,22 +149,153 @@ def test_await_does_not_complete_settled_parent_while_loop_lock_is_running(
             "latest_transcript": "",
         },
     )
-    locks = home / "locks" / ".vibecrafted"
-    locks.mkdir(parents=True, exist_ok=True)
-    (locks / f"{run_id}.lock").write_text(
-        "\n".join(
-            [
-                f"run_id={run_id}",
-                "status=running",
-                "current=3",
-                "total=5",
-                "agent=claude",
-                f"root={tmp_path}",
-                "started=2026-09-04T20:00:00+00:00",
-            ]
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _write_loop_lock(
+            home,
+            run_id,
+            status="running",
+            current=3,
+            total=5,
+            pid=child.pid,
+            pgid=os.getpgid(child.pid),
+            agent="claude",
+            root=tmp_path,
+            started="2026-09-04T20:00:00+00:00",
         )
-        + "\n",
-        encoding="utf-8",
+        assert control_plane._loop_lock_is_running(run_id) is True
+        payload = control_plane.await_run(
+            run_id,
+            timeout_seconds=0.15,
+            interval_seconds=0.05,
+            hard_cap_seconds=0.35,
+        )
+    finally:
+        child.terminate()
+        child.wait()
+
+    assert payload["completed"] is False
+    assert payload["worker_alive"] is True
+    assert payload["run_id"] == run_id
+
+
+def test_await_hard_cap_fires_while_live_loop_lock_is_owned(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import subprocess
+    import sys
+
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    run_id = "polr-lock-hard-cap"
+    _write_runtime_meta(
+        home,
+        run_id,
+        {
+            "state": "settled",
+            "status": "settled",
+            "agent": "guardian",
+            "liveness": "lock_present",
+        },
+    )
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _write_loop_lock(
+            home,
+            run_id,
+            status="running",
+            current=1,
+            total=5,
+            pid=child.pid,
+            pgid=os.getpgid(child.pid),
+        )
+        payload = control_plane.await_run(
+            run_id,
+            timeout_seconds=0.05,
+            interval_seconds=0.05,
+            hard_cap_seconds=0.2,
+        )
+    finally:
+        child.terminate()
+        child.wait()
+
+    assert payload["completed"] is False
+    assert payload["worker_alive"] is True
+    assert payload["timed_out"] is True
+    assert payload["reason"] == "hard_cap"
+
+
+def test_loop_lock_stays_running_when_child_process_is_alive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import subprocess
+    import sys
+
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setattr(process_control, "build_env_index", dict)
+    parent = "polr-child-lock"
+    _write_loop_lock(
+        home,
+        parent,
+        status="running",
+        current=1,
+        total=5,
+        pid=99999999,
+    )
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        identity = process_control.process_identity_receipt(
+            child.pid, run_id=f"{parent}-claude-L1"
+        )
+        assert identity is not None
+        _write_runtime_meta(
+            home,
+            f"{parent}-claude-L1",
+            {
+                "state": "running",
+                "status": "running",
+                "agent": "claude",
+                "worker_pid": child.pid,
+                "worker_pgid": os.getpgid(child.pid),
+                "worker_identity": identity,
+                "liveness": "pid_alive",
+            },
+        )
+        assert control_plane._loop_lock_is_running(parent) is True
+    finally:
+        child.terminate()
+        child.wait()
+
+
+def test_await_idle_stale_lock_does_not_keep_settled_parent_alive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    run_id = "polr-stale-idle"
+    _write_runtime_meta(
+        home,
+        run_id,
+        {
+            "state": "settled",
+            "status": "settled",
+            "agent": "guardian",
+            "liveness": "lock_present",
+            "latest_report": "",
+            "latest_transcript": "",
+        },
+    )
+    _write_loop_lock(
+        home,
+        run_id,
+        status="failed",
+        current=1,
+        total=5,
+        pid=99999999,
     )
 
     payload = control_plane.await_run(
@@ -118,9 +305,8 @@ def test_await_does_not_complete_settled_parent_while_loop_lock_is_running(
         hard_cap_seconds=0.35,
     )
 
-    assert payload["completed"] is False
-    assert payload["worker_alive"] is True
-    assert payload["run_id"] == run_id
+    assert payload["worker_alive"] is False
+    assert payload["completed"] is True
 
 
 def test_await_finds_loop_children_in_runtime_runs_without_snapshot(

@@ -26,7 +26,8 @@ use crate::model::{
     LifecycleRun, LifecycleRunSummary, OperatorAgentPolicyProjection, OperatorAgentProjection,
     RECENT_RUN_LIMIT, RUN_STALL_SECONDS, RunStatus, SettlementBoard, SettlementTui,
     SettlementVerdict, SupervisionRelationProjection, TrustReceiptV1, coerce_int_value,
-    is_final_state, merge_status, operator_session_name, parse_iso, skill_from_code, state_health,
+    is_active_state, is_final_state, merge_status, operator_session_name, parse_iso,
+    skill_from_code, state_health,
 };
 
 /// Resolve `~`-prefixed paths against `$HOME`. Other paths pass through.
@@ -378,18 +379,27 @@ impl ControlPlane {
         let status = string("status");
         let state = string("state");
         let meta_state = if !status.is_empty() { status } else { state };
+        let meta_run_id = string("run_id");
+        if !meta_run_id.is_empty() && meta_run_id != run.run_id {
+            return;
+        }
         let exit_code = payload.get("exit_code").and_then(coerce_int_value);
         let completed_at = string("completed_at");
-        let terminal_meta =
-            is_final_state(meta_state) || exit_code.is_some() || !completed_at.is_empty();
-        if !terminal_meta {
+        if !runtime_meta_is_consistently_terminal(meta_state, exit_code, completed_at) {
             return;
         }
         let worker_pid = payload
             .get("worker_pid")
             .and_then(coerce_int_value)
             .or(run.worker_pid);
-        if worker_pid.is_some_and(pid_is_alive) {
+        let owner_pid = payload
+            .get("owner_pid")
+            .and_then(coerce_int_value)
+            .or(run.owner_pid);
+        if worker_pid.is_some_and(pid_is_alive) || owner_pid.is_some_and(pid_is_alive) {
+            return;
+        }
+        if run.process_truth == "live" {
             return;
         }
         if !meta_state.is_empty() {
@@ -471,7 +481,7 @@ impl ControlPlane {
             .and_then(|payload| payload.get("exit_code"))
             .and_then(coerce_int_value);
         let completed_at = value("completed_at");
-        let terminal = is_final_state(&state) || exit_code.is_some() || !completed_at.is_empty();
+        let terminal = runtime_meta_is_consistently_terminal(&state, exit_code, &completed_at);
         let transcript = dir.join("transcript.log");
         let latest_transcript = {
             let declared = value("transcript");
@@ -1412,6 +1422,20 @@ fn pid_is_alive(pid: i64) -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
+}
+
+fn runtime_meta_is_consistently_terminal(
+    meta_state: &str,
+    exit_code: Option<i64>,
+    completed_at: &str,
+) -> bool {
+    if is_final_state(meta_state) {
+        return true;
+    }
+    if is_active_state(meta_state) {
+        return false;
+    }
+    exit_code.is_some() || !completed_at.is_empty()
 }
 
 fn is_pytest_temp_path(path: &Path) -> bool {

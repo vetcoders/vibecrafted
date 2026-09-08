@@ -435,3 +435,50 @@ fn compute_view_does_not_count_completed_runtime_meta_as_active() {
 
     fs::remove_dir_all(home).ok();
 }
+
+#[test]
+fn overlay_does_not_stamp_final_from_contradictory_running_meta() {
+    let home = temp_home("contradictory-runtime-meta");
+    let runs_dir = home.join("control_plane").join("runs");
+    fs::create_dir_all(&runs_dir).expect("runs dir");
+    write_snapshot(&runs_dir, "work-live", "running", None);
+
+    let run_dir = home
+        .join("control_plane")
+        .join("runtime_runs")
+        .join("work-live");
+    fs::create_dir_all(&run_dir).expect("runtime dir");
+    fs::write(
+        run_dir.join("meta.json"),
+        serde_json::to_vec(&json!({
+            "run_id": "work-live",
+            "status": "running",
+            "state": "running",
+            "exit_code": 0,
+            "completed_at": "2026-08-28T05:00:00+00:00",
+            "worker_pid": 999_999_999i64,
+        }))
+        .expect("meta JSON"),
+    )
+    .expect("write runtime meta");
+
+    let plane = ControlPlane::new(&home);
+    let run = plane.lookup_run("work-live").expect("snapshot");
+    assert_eq!(run.run_id, "work-live");
+    assert_eq!(run.state, "running");
+    assert_ne!(run.liveness, "terminal");
+    assert_ne!(run.health, "final");
+    let view = plane.compute_view(Utc::now());
+    let seen = view
+        .active_runs
+        .iter()
+        .chain(view.stalled_runs.iter())
+        .chain(view.recent_runs.iter())
+        .find(|item| item.run_id == "work-live")
+        .expect("contradictory running meta remains visible");
+    assert_eq!(seen.state, "running");
+    assert_ne!(seen.liveness, "terminal");
+    assert_ne!(seen.health, "final");
+
+    fs::remove_dir_all(home).ok();
+}
