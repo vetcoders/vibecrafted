@@ -535,6 +535,12 @@ materialize_runtime_payload() {
   # environment or the checkout that happened to assemble the carrier.
   /bin/cp -R "$REPO_ROOT/vibecrafted-mcp/vibecrafted_mcp" \
     "$runtime/vibecrafted-mcp/"
+  # The MCP package's source VERSION is the release version.  Once copied
+  # into a Runtime Pack it must identify the exact signed generation, just as
+  # vibecrafted-core does below; both --version and MCP initialize serverInfo
+  # resolve this one package-owned file.
+  printf '%s\n' "$RUNTIME_VERSION" \
+    > "$runtime/vibecrafted-mcp/vibecrafted_mcp/VERSION"
   printf '%s\n' "$RUNTIME_VERSION" \
     > "$runtime/vibecrafted-core/vibecrafted_core/VERSION"
   /bin/cp -R "$REPO_ROOT/config/." "$runtime/config/"
