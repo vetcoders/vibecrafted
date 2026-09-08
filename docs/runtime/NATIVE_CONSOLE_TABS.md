@@ -51,6 +51,17 @@ Every tab is an `NSWindow` in one tab group (`tabbingIdentifier`
 
 A destination or URL that is already open is focused, never duplicated.
 
+Every tab also has a **scope**, fixed at creation, that a page can never widen:
+
+| Scope           | Confined to                                         | Follows the runtime endpoint | Website data store                                 |
+| --------------- | --------------------------------------------------- | ---------------------------- | -------------------------------------------------- |
+| `runtime`       | the caretaker-resolved runtime origin               | yes                          | shared (console) or ephemeral for isolated content |
+| `localDocument` | exactly one local HTML file                         | no                           | ephemeral                                          |
+| `service`       | the origin of a console configured in `config.toml` | no                           | ephemeral                                          |
+
+No tab of any role or scope has a JavaScript-to-native channel: there is no
+`WKScriptMessageHandler` anywhere in the App.
+
 ## Route versus response
 
 `WebNavigationPolicy.decide` still admits every same-origin route (a UI path
@@ -68,15 +79,61 @@ session treats that as a decision, not a failure.
 
 ## Destinations
 
-| Destination         | Contract used                                                                                                                                   | When unavailable                                                                        |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| Loctree Report      | `/structure/report` on the connected runtime (served by the WEB-contract cut; the baseline server answers 404)                                  | no runtime → menu item disabled with reason; 404 → tab shows "Server returned HTTP 404" |
-| AICX Dashboard      | `aicx dashboard` output at `~/.aicx/aicx-dashboard.html` (or `$AICX_HOME`), loaded with read access to that one file, non-persistent data store | file missing → reason names the path and `aicx dashboard`                               |
-| Slack Agent Console | none; `vc-slack-agent` only has a dev server (`make portal`, :4300)                                                                             | always unavailable, reason shown; no port is guessed                                    |
+| Destination         | Contract used                                                                                                                                                                                                                                                                  | When unavailable                                                                                                                                                                           |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Loctree Report      | `/structure/report` on the connected runtime. The server serves `<root>/.loctree/report.html` of a canonical run root under a CSP `sandbox` (opaque origin, no `fetch`, no forms) with its sibling assets on `/structure/report/{asset}`; the App adds an ephemeral data store | no runtime → menu item disabled with reason; no report → tab shows "Server returned HTTP 404" and the server names `loct report --output .loctree/report.html`                             |
+| AICX Dashboard      | `aicx dashboard` output at `~/.aicx/aicx-dashboard.html` (or `$AICX_HOME`), loaded with read access to that one file, non-persistent data store                                                                                                                                | file missing → reason names the path and `aicx dashboard`                                                                                                                                  |
+| Slack Agent Console | `[tools.slack-console] url` in `~/.config/vibecrafted/config.toml` (the operator-owned file that also holds `[server]`; `XDG_CONFIG_HOME` honoured). Opens in a `service`-scoped tab on that URL's origin                                                                      | not configured → reason names the owner (`vc-slack-agent` portal `/console`, `make portal-preview` :4300 or its deploy) and the file; invalid table → reason quotes the contract violation |
 
 `View ▸ Open in Tab` and `View ▸ Open in Browser` list the catalog. Local
 documents use Reveal in Finder for the external action, through the typed
 native bridge and its home-directory root.
+
+### Configured tool consoles
+
+Consoles owned outside this repository are never guessed. The operator names
+the served surface once, in the one product config file:
+
+```toml
+# ~/.config/vibecrafted/config.toml
+[server]
+bind_host = "127.0.0.1"
+port = 3024
+public_url = "http://127.0.0.1:3024"
+
+[tools.slack-console]
+url = "http://100.82.232.70:4300/console"   # what `make portal-preview` (or the deploy) serves
+```
+
+`vibecrafted_core.server_config.load_tool_destinations` and the App's
+`ToolDestinationConfiguration` apply one contract: known keys only
+(`slack-console`), one `url` per key, `http(s)` with a host, no credentials,
+query or fragment. An empty `url` means "not configured". The tab is scoped to
+that URL's origin: same-origin navigation stays, foreign http(s) leaves through
+the system browser, the runtime endpoint has no influence on it, and it shares
+nothing with the console's website data store. ATS applies as for the runtime:
+cleartext `http` is admitted for loopback / local-network IP literals only.
+
+### Server-side boundaries the tabs rely on
+
+- `/structure/report` and `/structure/report/{asset}` (`vibecrafted-server/web/src/tools.rs`):
+  the report's own `<meta http-equiv="Content-Security-Policy">` is removed and
+  replaced by a header policy — `sandbox allow-scripts allow-popups`, scripts
+  from the page and from `<host>/structure/report/` only, `connect-src 'none'`,
+  `form-action 'none'`, `frame-ancestors 'none'`. Assets are regular files in
+  the report's directory with a known extension; symlinks and traversal are
+  refused. The document keeps its interactive graph and holds no control-plane
+  authority.
+- `/api/aicx/search` and `/api/aicx/reference`: the AICX corpus is private to
+  the host. Both routes require a verified local peer — loopback, or the same
+  interface the listener is bound to (a tailnet bind reached from this
+  machine) — and fail closed when the peer is unknown. Search runs the
+  installed `aicx` CLI with a bounded argv (`--json --no-semantic --limit 12`,
+  optional exact `owner/repo`), a timeout, and projects hits to identity, date,
+  snippets and a server-owned reference route; raw paths and diagnostics never
+  leave the host. The reference route serves one authorised extract (regular
+  file under `$AICX_HOME/extracts`, text extension, 256 KiB cap) as
+  `text/plain`, which the console diverts into a read-only reference tab.
 
 ## Proof
 
@@ -85,5 +142,10 @@ with `swiftc` and drives a real `WKWebView` against a loopback fixture:
 endpoint link and `_blank` keep the Scaffold DOM/edit state/history; tab
 dedupe and tab-group membership; Home/back isolation in both directions;
 closing a tab keeps the console window and web view; unavailable destinations
-open nothing; a local document tab shows only its file; runtime loss is shown;
-the bridged toolbar exists with a stable item set at 800 px and 1200 px.
+open nothing; a local document tab shows only its file; the report tab uses an
+ephemeral store; a configured service tab opens without a runtime, stays on
+its origin, hands foreign links to the system browser and ignores runtime
+loss; runtime loss is shown on runtime tabs; the bridged toolbar exists with a
+stable item set at 800 px and 1200 px. `vibecrafted-server/web/tests/tools_http.rs`
+proves the server boundaries (sandbox headers, asset confinement, peer gate,
+argv, projection, timeout, reference authorisation).

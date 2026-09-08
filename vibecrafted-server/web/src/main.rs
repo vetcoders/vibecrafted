@@ -17,6 +17,9 @@ async fn main() {
     use vibecrafted_server_web::app::{App, shell};
     use vibecrafted_server_web::control::api::control_routes;
     use vibecrafted_server_web::scaffold::api::scaffold_routes;
+    use vibecrafted_server_web::tools::api::{
+        aicx_reference, aicx_search, loctree_report, loctree_report_asset,
+    };
 
     /// Canonical default bind — matches Makefile `SERVER_ADDR` and
     /// `Cargo.toml` leptos site-addr. Bare `vc-server` must not invent a
@@ -202,6 +205,13 @@ Examples:
     let routes = generate_route_list(App);
 
     let app: Router = Router::new()
+        // Owner-backed tool surfaces carry their own boundaries (see `tools`):
+        // the report runs sandboxed on this origin, the AICX corpus is served
+        // to a verified local peer only.
+        .route("/structure/report", get(loctree_report))
+        .route("/structure/report/{asset}", get(loctree_report_asset))
+        .route("/api/aicx/search", get(aicx_search))
+        .route("/api/aicx/reference", get(aicx_reference))
         .leptos_routes(&leptos_options, routes, {
             let opts = leptos_options.clone();
             move || shell(opts.clone())
@@ -216,9 +226,14 @@ Examples:
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("bind site_addr");
-    axum::serve(listener, app.into_make_service())
-        .await
-        .expect("axum::serve");
+    // Peer addresses reach handlers as `ConnectInfo`; the AICX boundary fails
+    // closed without them.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .expect("axum::serve");
 }
 
 #[cfg(not(feature = "ssr"))]

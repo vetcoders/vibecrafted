@@ -44,6 +44,9 @@
 //!   metrics and the run board named as projections of this one control plane
 //!   (with their routes and source paths), never as independent stores; see
 //!   [`observability`].
+//!
+//! The Loctree report and AICX routes are not part of this router: they carry
+//! their own boundaries and live in [`crate::tools`].
 
 #[cfg(feature = "ssr")]
 mod caretaker;

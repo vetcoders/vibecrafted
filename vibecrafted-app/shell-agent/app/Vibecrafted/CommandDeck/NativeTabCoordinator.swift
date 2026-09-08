@@ -191,7 +191,9 @@ final class NativeTabCoordinator {
     guard runtimeEndpoint != endpoint else { return }
     runtimeEndpoint = endpoint
     for tab in tabs.values {
-      if case .localDocument? = tab.session.scope { continue }
+      // Local documents and configured services have their own scope; only
+      // runtime-scoped tabs follow the caretaker endpoint.
+      guard let scope = tab.session.scope, scope.followsRuntimeEndpoint else { continue }
       if let endpoint {
         tab.model.unavailableReason = nil
         if case .runtimeRoute(let path)? = tab.destination?.target {
@@ -213,14 +215,18 @@ final class NativeTabCoordinator {
       switch resolve(destination) {
       case .unavailable(let reason):
         return .unavailable(reason: reason)
-      case .available(_, let scope):
+      case .available(let url, let scope):
         if let existing = tabs[destination.id] {
           focus(existing)
           return .focused(destination.id)
         }
+        // Generated documents, local files and foreign services never share
+        // the console's persistent store: nothing they set survives the tab,
+        // and nothing the console holds is visible to them.
+        let ephemeral = scope.isLocalDocument || scope.isService || destination.isolatedContent
         let session = WebConsoleSession(
           role: destination.role,
-          websiteDataStore: scope.isLocalDocument ? .nonPersistent() : websiteDataStore)
+          websiteDataStore: ephemeral ? .nonPersistent() : websiteDataStore)
         makeTab(key: destination.id, title: destination.title, destination: destination, session: session)
         switch scope {
         case .runtime:
@@ -229,6 +235,8 @@ final class NativeTabCoordinator {
           }
         case .localDocument(let document):
           session.present(localDocument: document)
+        case .service:
+          session.present(service: url)
         }
         return .opened(destination.id)
       }
@@ -298,6 +306,17 @@ final class NativeTabCoordinator {
 extension WebTabScope {
   var isLocalDocument: Bool {
     if case .localDocument = self { return true }
+    return false
+  }
+
+  var isService: Bool {
+    if case .service = self { return true }
+    return false
+  }
+
+  /// Only runtime-scoped tabs move with the caretaker endpoint.
+  var followsRuntimeEndpoint: Bool {
+    if case .runtime = self { return true }
     return false
   }
 }

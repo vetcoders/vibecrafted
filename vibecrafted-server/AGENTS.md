@@ -74,6 +74,12 @@ Footer: `Vibecrafted. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI`
 ## 5) Security / cloud notes
 
 - Local default bind `127.0.0.1` — public cloud needs Tailscale + GitHub OAuth (operator-owned).
+- `web/src/tools.rs` owns two boundaries: `/structure/report{,/{asset}}` serves the
+  canonical Loctree report under a CSP `sandbox` (opaque origin, explicit sibling
+  assets, no `fetch`/forms); `/api/aicx/{search,reference}` serve the private AICX
+  corpus to a verified local peer only (loopback, or the bound interface itself),
+  fail closed without `ConnectInfo`, run `aicx` with a bounded argv and a timeout,
+  and never emit raw paths — hits carry a server-owned reference route.
 - No Slack tokens here — use `vc-slack` for agency into Slack.
 - Future: `VC_SERVER_TOKEN` for fleet observer (see vc-slack `docs/STACK.md`) — not wired yet.
 

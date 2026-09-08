@@ -1,4 +1,6 @@
-"""Operator-owned `[server]` config.toml: load, validate, and seed-once semantics."""
+"""Operator-owned `~/.config/vibecrafted/config.toml`: the `[server]` table
+(load, validate, seed-once) and the optional `[tools]` table naming
+served tool consoles the native App may open in a tab."""
 
 from __future__ import annotations
 
@@ -14,6 +16,14 @@ import tomllib
 
 DEFAULT_BIND_HOST = "127.0.0.1"
 DEFAULT_PORT = 3024
+
+#: Tool destinations the native App knows how to open. Each is an optional
+#: ``[tools.<key>]`` table with one ``url`` — the *served* surface of a tool
+#: owned outside this repository. No default URL is invented for any of them:
+#: an absent table means "not configured", which the App reports as such.
+#: - ``slack-console``: the vc-slack operator console (``/console`` route of
+#:   the vc-slack-agent portal; ``make portal-preview`` serves it, or a deploy).
+TOOL_DESTINATION_KEYS: tuple[str, ...] = ("slack-console",)
 
 
 class ServerConfigError(ValueError):
@@ -102,6 +112,85 @@ def load_server_config(
         port=section.get("port", DEFAULT_PORT),
         public_url=section.get("public_url", ""),
     )
+
+
+def load_tool_destinations(
+    path: Path | None = None,
+    *,
+    operator_home: Path | None = None,
+) -> dict[str, str]:
+    """Load the optional ``[tools]`` table as ``{key: url}``.
+
+    Returns ``{}`` when the file or table is absent. Raises `ServerConfigError`
+    for unreadable/invalid TOML, an unknown tool key, a non-table entry, or a
+    URL that is not an ``http(s)`` location without credentials, query, or
+    fragment. The App and the Python owner apply the same contract, so a URL
+    the App opens is one this owner would accept.
+    """
+
+    resolved = path or config_path(operator_home=operator_home)
+    try:
+        raw = resolved.read_bytes()
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise ServerConfigError(
+            f"cannot read server config at {resolved}: {exc}"
+        ) from exc
+    try:
+        payload = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ServerConfigError(
+            f"invalid TOML in server config at {resolved}: {exc}"
+        ) from exc
+    section = payload.get("tools")
+    if section is None:
+        return {}
+    if not isinstance(section, dict):
+        raise ServerConfigError("[tools] must be a TOML table")
+    unknown = sorted(set(section) - set(TOOL_DESTINATION_KEYS))
+    if unknown:
+        raise ServerConfigError("unsupported [tools] key(s): " + ", ".join(unknown))
+    destinations: dict[str, str] = {}
+    for key, entry in section.items():
+        if not isinstance(entry, dict):
+            raise ServerConfigError(f"[tools.{key}] must be a TOML table")
+        extra = sorted(set(entry) - {"url"})
+        if extra:
+            raise ServerConfigError(
+                f"unsupported [tools.{key}] key(s): " + ", ".join(extra)
+            )
+        url = entry.get("url", "")
+        if url == "":
+            continue
+        destinations[key] = _validate_tool_url(key, url)
+    return destinations
+
+
+def _validate_tool_url(key: str, value: object) -> str:
+    """Require an ``http(s)`` URL with a host and no credentials, query, or
+    fragment; a path (such as ``/console``) is allowed."""
+
+    if not isinstance(value, str):
+        raise ServerConfigError(f"tools.{key}.url must be a string")
+    parsed = urlsplit(value.strip())
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or any(char.isspace() for char in value.strip())
+    ):
+        raise ServerConfigError(
+            f"tools.{key}.url must be an HTTP(S) URL without credentials, query, or fragment"
+        )
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise ServerConfigError(f"tools.{key}.url has an invalid port: {exc}") from exc
+    return value.strip()
 
 
 def has_server_config(

@@ -6,6 +6,7 @@ pub mod control;
 pub mod run_detail;
 pub mod scaffold;
 pub mod theme;
+pub mod tools;
 
 #[cfg(feature = "hydrate")]
 #[wasm_bindgen::prelude::wasm_bindgen]

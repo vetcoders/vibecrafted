@@ -80,9 +80,14 @@ final class WebConsoleSession: NSObject {
   private(set) var appliedEndpoint: URL?
   private(set) var scope: WebTabScope?
 
+  /// The http(s) origin this tab is confined to: the runtime for console and
+  /// runtime tool tabs, the configured service for a service tab. `nil` for
+  /// a local document and before any scope is set.
   var runtimeOrigin: WebRuntimeOrigin? {
-    if case .runtime(let origin) = scope { return origin }
-    return nil
+    switch scope {
+    case .runtime(let origin), .service(let origin): return origin
+    case .localDocument, nil: return nil
+    }
   }
 
   private var activeNavigation: WKNavigation?
@@ -117,14 +122,14 @@ final class WebConsoleSession: NSObject {
   }
 
   private func rememberRoute(_ url: URL) {
-    guard case .runtime(let origin) = scope, origin.covers(url),
+    guard let origin = runtimeOrigin, origin.covers(url),
       let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
     route = components
   }
 
   private func scopeCovers(_ url: URL) -> Bool {
     switch scope {
-    case .runtime(let origin): return origin.covers(url)
+    case .runtime(let origin), .service(let origin): return origin.covers(url)
     case .localDocument(let document):
       return url.isFileURL && url.standardizedFileURL.path == document.standardizedFileURL.path
     case nil: return false
@@ -229,6 +234,31 @@ final class WebConsoleSession: NSObject {
     apply(endpoint: endpoint)
   }
 
+  /// Shows a configured tool console on its own origin. The tab is scoped to
+  /// that origin: same-origin navigation stays, foreign http(s) leaves through
+  /// the system browser, everything else is refused — the runtime endpoint
+  /// plays no part, so a lost runtime never blanks this tab.
+  func present(service url: URL) {
+    guard let origin = WebRuntimeOrigin(url: url),
+      var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+    else {
+      events.navigationBlocked(url, "a configured service must be an http(s) URL with a host")
+      return
+    }
+    let path = components.path.isEmpty ? "/" : components.path
+    homeRoute = URLComponents(string: path) ?? URLComponents(string: "/")!
+    homeRoute.percentEncodedQuery = components.percentEncodedQuery
+    route = homeRoute
+    components.path = "/"
+    components.query = nil
+    components.fragment = nil
+    lastCommittedURL = nil
+    appliedEndpoint = components.url
+    scope = .service(origin)
+    didAutoRecoverFromTermination = false
+    if let target = routeURL { load(target) }
+  }
+
   /// Shows exactly one local HTML document. WebKit read access is granted to
   /// that file alone, so the page cannot enumerate or load anything else from
   /// disk; links out go through the system browser via the policy.
@@ -250,7 +280,7 @@ final class WebConsoleSession: NSObject {
   /// Safe to call from a retry button; does nothing before a first endpoint.
   func retry() {
     switch scope {
-    case .runtime:
+    case .runtime, .service:
       guard appliedEndpoint != nil else { return }
       didAutoRecoverFromTermination = false
       if let url = routeURL { load(url) }
@@ -268,7 +298,7 @@ final class WebConsoleSession: NSObject {
   /// records the wish so the next applied endpoint lands on Home.
   func goHome() {
     switch scope {
-    case .runtime:
+    case .runtime, .service:
       route = homeRoute
       retry()
     case .localDocument(let document):
@@ -449,7 +479,7 @@ extension WebConsoleSession: WKNavigationDelegate {
     guard scope != nil else { return }
     activeNavigation = navigation
     switch scope {
-    case .runtime: if let url = routeURL { updateState(.loading(url)) }
+    case .runtime, .service: if let url = routeURL { updateState(.loading(url)) }
     case .localDocument(let document): updateState(.loading(document))
     case nil: break
     }
@@ -503,7 +533,7 @@ extension WebConsoleSession: WKNavigationDelegate {
     // Exactly one automatic recovery; anything further is the user's call.
     didAutoRecoverFromTermination = true
     switch scope {
-    case .runtime: if let url = routeURL { load(url) }
+    case .runtime, .service: if let url = routeURL { load(url) }
     case .localDocument(let document): present(localDocument: document)
     case nil: break
     }

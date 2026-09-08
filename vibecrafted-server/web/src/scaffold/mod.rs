@@ -496,8 +496,11 @@ pub mod api {
     </a>
     <nav class="studio-global-nav" aria-label="Server routes">
       <a href="/" target="_top">Overview</a>
+      <a href="/workspaces" target="_top">Workspaces</a>
+      <a href="/sessions" target="_top">Sessions</a>
+      <a href="/agents" target="_top">Agent Manager</a>
       <a href="/runs" target="_top">Runs</a>
-      <a href="/lifecycle" target="_top">Lifecycle</a>
+      <a href="/lifecycle" target="_top">Control</a>
       <a href="/activity" target="_top">Activity</a>
       <a href="/structure" target="_top">Structure</a>
       <a class="is-active" href="/scaffold" target="_top">Scaffold</a>
@@ -2108,8 +2111,8 @@ button{justify-self:start;margin:12px 16px;border:1px solid #5e7f47;background:#
 .empty{border-radius:16px}
 @media(max-width:820px){
   .studio-app-shell{height:auto;min-height:100vh;overflow:visible}
-  .studio-navbar{height:auto;min-height:54px;padding:8px 12px}
-  .studio-global-nav{display:none}
+  .studio-navbar{height:auto;min-height:54px;padding:8px 12px;flex-wrap:wrap}
+  .studio-global-nav{order:3;flex:1 1 100%;overflow-x:auto;overflow-y:hidden;padding-bottom:4px;scrollbar-width:thin}
   .review-shell{height:auto;min-height:calc(100vh - 54px)}
   .review-sidebar{height:auto;max-height:none}
   .tabs{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(190px,72vw);overflow-x:auto;overflow-y:hidden;padding:0 0 5px}

@@ -238,13 +238,52 @@ struct CommandDeckIntegrationTests {
       overrideFile.path == overridden.path
     else { throw Failure(message: "AICX_HOME override was ignored") }
 
-    guard case .unavailable(let slackReason) = ToolDestination.named("slack-agent-console")!.resolve(
-      in: context(endpoint: endpoint, exists: { _ in true })), slackReason.contains("make portal")
-    else { throw Failure(message: "Slack console pretended to have a launch contract") }
+    // Slack console: owner-backed through the operator's config.toml [tools]
+    // table. Unset reads as a boundary that names the owner and the file.
+    let slack = ToolDestination.named("slack-agent-console")!
+    func configured(_ toml: String?, xdg: String? = nil) -> ToolDestinationContext {
+      var env: [String: String] = [:]
+      if let xdg { env["XDG_CONFIG_HOME"] = xdg }
+      return ToolDestinationContext(runtimeEndpoint: endpoint, homeDirectory: home, environment: env,
+        fileExists: { _ in true }, readConfiguration: { _ in toml })
+    }
+    guard case .unavailable(let slackReason) = slack.resolve(in: configured(nil)),
+      slackReason.contains("vc-slack-agent"), slackReason.contains("/fixture/home/.config/vibecrafted/config.toml"),
+      slackReason.contains("[tools.slack-console]")
+    else { throw Failure(message: "Unconfigured Slack console did not name its owner and the config file") }
+    guard case .unavailable(let onlyServer) = slack.resolve(in: configured("[server]\nport = 3025\n")),
+      onlyServer.contains("not configured")
+    else { throw Failure(message: "A config.toml with only [server] was not read as unconfigured") }
+    guard case .available(let consoleURL, .service(let consoleOrigin)) = slack.resolve(in: configured(
+      "# operator config\n[server]\nport = 3025\n\n[tools.slack-console]\nurl = \"http://100.82.232.70:4300/console\" # served by make portal-preview\n")),
+      consoleURL.absoluteString == "http://100.82.232.70:4300/console",
+      consoleOrigin == WebRuntimeOrigin(url: URL(string: "http://100.82.232.70:4300/")!)!
+    else { throw Failure(message: "Configured Slack console did not resolve to a service scope on its own origin") }
+    try require(ToolDestinationConfiguration.configurationFile(homeDirectory: home, environment: ["XDG_CONFIG_HOME": "/fixture/xdg"]).path
+      == "/fixture/xdg/vibecrafted/config.toml", "XDG_CONFIG_HOME was ignored for config.toml")
+    guard case .unavailable(let emptyReason) = slack.resolve(in: configured("[tools.slack-console]\nurl = \"\"\n")),
+      emptyReason.contains("not configured")
+    else { throw Failure(message: "An empty url was not read as unconfigured") }
+    for invalid in [
+      "[tools.slack-console]\nurl = \"ftp://x/console\"\n",
+      "[tools.slack-console]\nurl = \"http://u:p@x/console\"\n",
+      "[tools.slack-console]\nurl = \"http://x/console?token=1\"\n",
+      "[tools.slack-console]\nurl = \"http://x/console#frag\"\n",
+      "[tools.slack-console]\nurl = 4300\n",
+      "[tools.slack-console]\nport = 4300\n",
+      "[tools.portal]\nurl = \"http://x/\"\n",
+      "[tools]\nslack-console = 1\n",
+    ] {
+      guard case .unavailable(let reason) = slack.resolve(in: configured(invalid)), reason.contains("invalid [tools] table")
+      else { throw Failure(message: "Invalid [tools] contract was accepted: \(invalid)") }
+    }
     try require(!ToolDestination.catalog.contains { destination in
       if case .runtimeRoute(let path) = destination.target { return path.contains("://") || path.contains(":") }
+      if case .unavailable = destination.target { return true }
       return false
-    }, "A destination hardcodes a host or port")
+    }, "A destination hardcodes a host or port, or is registered as permanently unavailable")
+    try require(report.isolatedContent && !dashboard.isolatedContent,
+      "Generated report must be isolated; the AICX dashboard is a plain local document")
   }
 
   static func hasFixtureCookie(_ store: WKHTTPCookieStore) async -> Bool {
@@ -501,15 +540,65 @@ struct CommandDeckIntegrationTests {
     guard case .unavailable = coordinator.open(.destination(slack)) else {
       throw Failure(message: "Slack console opened without a contract")
     }
+    try require(coordinator.tabs.count == 2, "Unconfigured service created a tab")
+
+    // 6b. The Loctree report is a generated document: its own tab, an
+    //     ephemeral data store, the console's store untouched.
+    let reportDestination = ToolDestination.named("loctree-report")!
+    try require(coordinator.open(.destination(reportDestination)) == .opened("loctree-report"), "Report tab did not open")
+    let report = coordinator.tabs["loctree-report"]!
+    try require(!report.session.webView.configuration.websiteDataStore.isPersistent,
+      "Generated report shares the console's persistent website data store")
+    try require(report.session.webView !== consoleView && report.session.role == .tool, "Report tab identity")
+    try require(report.session.scope == .runtime(WebRuntimeOrigin(url: endpoint)!), "Report tab scope")
+    try require(coordinator.open(.destination(reportDestination)) == .focused("loctree-report"), "Report tab duplicated")
+
+    // 6c. A configured service console: its own origin, its own store, no
+    //     runtime coupling, foreign links leave through the system browser.
+    let serviceHome = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let configDir = serviceHome.appendingPathComponent(".config/vibecrafted", isDirectory: true)
+    try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: serviceHome) }
+    try "[tools.slack-console]\nurl = \"http://127.0.0.1:\(endpoint.port!)/console\"\n"
+      .write(to: configDir.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
+    var serviceExternals: [URL] = []
+    let serviceCoordinator = NativeTabCoordinator(
+      anchorWindow: { controller.window }, openExternally: { serviceExternals.append($0) },
+      websiteDataStore: .nonPersistent(), homeDirectory: serviceHome, environment: [:],
+      fileExists: { FileManager.default.fileExists(atPath: $0.path) })
+    // No runtime endpoint applied on purpose: a service does not need one.
+    try require(serviceCoordinator.open(.destination(slack)) == .opened("slack-agent-console"),
+      "Configured service did not open without a runtime")
+    let service = serviceCoordinator.tabs["slack-agent-console"]!
+    try require(service.session.scope == .service(WebRuntimeOrigin(url: endpoint)!), "Service tab scope")
+    try require(!service.session.webView.configuration.websiteDataStore.isPersistent, "Service tab shares the console store")
+    try await waitFor { if case .loaded(let url) = service.session.loadState { return url.path == "/console" }; return false }
+    try require(service.model.presentation.exposesCanvas, "Service tab did not expose its canvas")
+    service.session.navigate(path: "/console/wire")
+    try await waitFor { if case .loaded(let url) = service.session.loadState { return url.path == "/console/wire" }; return false }
+    service.navigate(.home)
+    try await waitFor { if case .loaded(let url) = service.session.loadState { return url.path == "/console" }; return false }
+    try await evaluate("location.href = 'https://example.com/foreign'", in: service.session.webView)
+    try await waitFor { !serviceExternals.isEmpty }
+    try require(serviceExternals.last?.host == "example.com" && service.session.webView.url?.path == "/console",
+      "Foreign navigation from the service tab did not leave via the system browser")
+    serviceCoordinator.apply(runtimeEndpoint: endpoint)
+    serviceCoordinator.apply(runtimeEndpoint: nil)
+    try require(service.model.presentation.exposesCanvas && service.session.webView.url?.path == "/console",
+      "Service tab was tied to the runtime endpoint")
+    try require(serviceCoordinator.open(.destination(slack)) == .focused("slack-agent-console"), "Service tab duplicated")
+    service.close()
 
     // 7. Losing the runtime: runtime tabs say so, the local document does not care.
     coordinator.apply(runtimeEndpoint: nil)
     try require(reference.model.presentation.phase == .recovering && !reference.model.presentation.exposesCanvas,
       "Runtime tab kept a cached page after the endpoint vanished")
+    try require(report.model.presentation.phase == .recovering, "Report tab kept a cached page after the endpoint vanished")
     try require(local.model.presentation.exposesCanvas, "Local document tab was tied to the runtime")
     coordinator.apply(runtimeEndpoint: endpoint)
     try await waitFor { reference.model.presentation.exposesCanvas }
-    print("Witness: destinations resolve honestly, local report tab is confined to one file, runtime loss is shown")
+    report.close()
+    print("Witness: destinations resolve honestly, report and service tabs are isolated, local document confined, runtime loss shown")
 
     // 8. One chrome: the bridged toolbar exists at compact and regular widths; no content chrome row.
     try await waitFor { controller.window?.toolbar != nil }

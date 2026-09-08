@@ -54,6 +54,36 @@ def test_single_native_host_source_contract() -> None:
     assert "func decideLocalDocumentNavigation" in policy
     assert delegate.count("NativeTabCoordinator(") == 1
     assert "tabs.apply(runtimeEndpoint: endpoint)" in delegate
+    # Destinations: owner-backed configuration, never a guessed host/port or a
+    # permanently-unavailable stub; generated documents are isolated.
+    destinations = (APP / "CommandDeck/ToolDestinations.swift").read_text()
+    assert '.configuredService(key: "slack-console"' in destinations
+    assert "vibecrafted/config.toml" in destinations
+    assert "target: .unavailable(reason:" not in destinations
+    assert (
+        'target: .runtimeRoute("/structure/report"), isolatedContent: true'
+        in destinations
+    )
+    assert "func present(service url: URL)" in host
+    assert "case .runtime(let origin), .service(let origin): return origin" in host
+    assert "scope.followsRuntimeEndpoint" in coordinator
+    assert (
+        ".available(let url, .runtime), .available(let url, .service): openExternalURL(url)"
+        in delegate
+    )
+    # The server owns the report boundary: sandboxed CSP, explicit assets,
+    # and the AICX corpus behind a verified local peer.
+    tools = (ROOT / "vibecrafted-server/web/src/tools.rs").read_text()
+    server_main = (ROOT / "vibecrafted-server/web/src/main.rs").read_text()
+    assert "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox" in tools
+    assert "sandbox allow-scripts allow-same-origin" not in tools
+    assert "fn local_peer_access" in tools
+    assert "into_make_service_with_connect_info::<SocketAddr>()" in server_main
+    assert 'route("/structure/report/{asset}"' in server_main
+    assert 'route("/api/aicx/reference"' in server_main
+    app_rs = (ROOT / "vibecrafted-server/web/src/app.rs").read_text()
+    assert "'file://'" not in app_rs and "href='file://" not in app_rs
+    assert "item.reference" in app_rs
     # Scaffold endpoint links open outside the studio document.
     assert scaffold.count('class="api-link" href="/api/scaffold/') == 2
     assert (
