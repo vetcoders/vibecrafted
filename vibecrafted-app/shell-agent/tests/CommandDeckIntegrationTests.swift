@@ -482,7 +482,9 @@ struct CommandDeckIntegrationTests {
     try await waitFor { if case .loaded(let url) = tool.session.loadState { return url.path == "/workspaces" }; return false }
     try require(tool.model.presentation.exposesCanvas, "Tool tab did not expose its canvas")
 
-    // 4. Home/back in the tool tab move only the tool tab.
+    // 4. Home/back in the tool tab move only the tool tab. Home in a tab
+    //    opened from a link is the runtime overview, never the URL that
+    //    opened it; Back still reaches that page.
     tool.session.navigate(path: "/runs")
     try await waitFor { if case .loaded(let url) = tool.session.loadState { return url.path == "/runs" }; return false }
     try await waitFor { tool.session.navigation.canGoBack }
@@ -490,10 +492,12 @@ struct CommandDeckIntegrationTests {
     try await waitFor { tool.session.webView.url?.path == "/workspaces" }
     try await waitFor { tool.session.navigation.canGoForward }
     tool.navigate(.home)
-    try await waitFor { if case .loaded(let url) = tool.session.loadState { return url.path == "/workspaces" }; return false }
+    try await waitFor { if case .loaded(let url) = tool.session.loadState { return url.path == "/" }; return false }
     try require(consoleView.url?.path == "/scaffold" && console.loadState == .loaded(consoleView.url!),
       "Tool tab Home/back mutated the console tab")
     try require(reference.session.webView.url?.path == "/api/scaffold/artifacts", "Tool tab Home mutated the reference tab")
+    tool.navigate(.back)
+    try await waitFor { tool.session.webView.url?.path == "/workspaces" }
     controller.navigate(.home)
     try await waitFor { if case .loaded(let url) = console.loadState { return url.path == "/" }; return false }
     try require(tool.session.webView.url?.path == "/workspaces", "Console Home mutated the tool tab")
@@ -622,6 +626,139 @@ struct CommandDeckIntegrationTests {
     print("Witness: unified toolbar bridged into the window; item set stable across widths")
   }
 
+  /// Home ownership on a real WKWebView. The Scaffold Inspector's artifact
+  /// endpoint link (`target=_blank`, answered with JSON) opens a tool tab;
+  /// Home returns that tab to the runtime overview on the same origin, from
+  /// the JSON and from an error page, with its own history intact and every
+  /// sibling untouched. A destination keeps its own overview and a reference
+  /// view keeps its document. No host or port is ever named by the App.
+  static func homeContract(_ endpoint: URL, reconnectEndpoint: URL) async throws {
+    let model = AppModel()
+    let console = WebConsoleSession(websiteDataStore: .nonPersistent(), downloadDestinationProvider: { _, _, _ in nil })
+    var opened: [(URL, WebTabRole)] = []
+    var externals: [URL] = []
+    console.events.openInTab = { opened.append(($0, $1)) }
+    console.events.openExternally = { externals.append($0) }
+    let actions = Actions()
+    let controller = MainWindowController(model: model, session: console, actions: actions,
+      openExternally: { externals.append($0) })
+    controller.showWindow(nil)
+    let consoleView = console.webView
+    console.apply(endpoint: endpoint)
+    try await waitFor { if case .loaded = console.loadState { return true }; return false }
+    console.navigate(path: "/scaffold")
+    try await waitFor { if case .loaded(let url) = console.loadState { return url.path == "/scaffold" }; return false }
+    try await evaluate("document.getElementById('draft').value = 'edited-draft'", in: consoleView)
+
+    // The Inspector's artifact endpoint link: target=_blank on a JSON route.
+    try await evaluate("document.getElementById('api-blank').click()", in: consoleView)
+    try await waitFor { opened.count == 1 }
+    let endpointURL = opened[0].0
+    try require(opened[0].1 == .tool && endpointURL.path == "/api/scaffold/artifacts"
+      && endpointURL.query == "org=o&repo=r&day=d&plan_id=p",
+      "_blank endpoint link did not request a tool tab with its query")
+
+    let coordinator = NativeTabCoordinator(
+      anchorWindow: { controller.window }, openExternally: { externals.append($0) },
+      websiteDataStore: .nonPersistent(),
+      homeDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true),
+      environment: [:], fileExists: { _ in false })
+    coordinator.apply(runtimeEndpoint: endpoint)
+    guard case .opened(let rawKey) = coordinator.open(.url(endpointURL, .tool)) else {
+      throw Failure(message: "Raw endpoint tool tab did not open")
+    }
+    let raw = coordinator.tabs[rawKey]!
+    try await waitFor { if case .loaded(let url) = raw.session.loadState { return url.path == "/api/scaffold/artifacts" }; return false }
+    try require(raw.session.webView.url?.query == "org=o&repo=r&day=d&plan_id=p", "Tool tab lost the endpoint query")
+    try require(raw.model.presentation.phase == .online && raw.model.presentation.exposesCanvas,
+      "Loaded JSON left the tool toolbar in \(raw.model.presentation.phase)")
+    try require(!raw.session.navigation.canGoBack, "A fresh tool tab claimed history")
+
+    // 1. Home from raw JSON: the runtime overview on the same origin, as a
+    //    new history entry; the console and its edit state stay put.
+    raw.navigate(.home)
+    try await waitFor { if case .loaded(let url) = raw.session.loadState { return url.path == "/" }; return false }
+    let overview = raw.session.webView.url!
+    try require(overview.host == endpoint.host && overview.port == endpoint.port && overview.query == nil,
+      "Home left the runtime origin or kept the endpoint query: \(overview)")
+    try require(try await evaluateString("document.getElementById('fixture').textContent", in: raw.session.webView) == "Ready",
+      "Home did not render the product overview")
+    try require(raw.model.presentation.phase == .online, "Home left the toolbar in \(raw.model.presentation.phase)")
+    try await waitFor { raw.session.navigation.canGoBack }
+    try require(consoleView.url?.path == "/scaffold" && console.loadState == .loaded(consoleView.url!),
+      "Tool tab Home moved the console")
+    try require(try await evaluateString("document.getElementById('draft').value", in: consoleView) == "edited-draft",
+      "Tool tab Home discarded Scaffold edit state")
+    raw.navigate(.back)
+    try await waitFor { raw.session.webView.url?.path == "/api/scaffold/artifacts" }
+    try await waitFor { raw.session.navigation.canGoForward }
+    raw.navigate(.forward)
+    try await waitFor { raw.session.webView.url?.path == "/" }
+    print("Witness: _blank raw endpoint tab: Home returned to the runtime overview; Back/Forward kept the JSON in the tab's own history")
+
+    // 2. Home from an error page recovers the tab.
+    raw.session.navigate(path: "/failure")
+    try await waitFor { if case .failed = raw.session.loadState { return true }; return false }
+    try require(raw.model.presentation.phase == .recovering, "HTTP failure did not surface in the tool tab")
+    raw.navigate(.home)
+    try await waitFor { if case .loaded(let url) = raw.session.loadState { return url.path == "/" }; return false }
+    try require(raw.model.presentation.phase == .online, "Home from an error page did not recover the tab")
+
+    // 3. Same-origin classification: only the connected runtime gets a tab,
+    //    and Home follows the endpoint the caretaker resolved, never a host
+    //    or port of its own.
+    var foreign = URLComponents(url: endpointURL, resolvingAgainstBaseURL: false)!
+    foreign.port = (endpoint.port ?? 0) + 1
+    guard case .unavailable = coordinator.open(.url(foreign.url!, .tool)) else {
+      throw Failure(message: "A foreign origin was given a runtime tab")
+    }
+    coordinator.apply(runtimeEndpoint: reconnectEndpoint)
+    try await waitFor { raw.session.webView.url?.port == reconnectEndpoint.port }
+    raw.session.navigate(path: "/workspaces")
+    try await waitFor { if case .loaded(let url) = raw.session.loadState { return url.path == "/workspaces" }; return false }
+    raw.navigate(.home)
+    try await waitFor {
+      if case .loaded(let url) = raw.session.loadState { return url.path == "/" && url.port == reconnectEndpoint.port }
+      return false
+    }
+    coordinator.apply(runtimeEndpoint: endpoint)
+    try await waitFor { raw.session.webView.url?.port == endpoint.port }
+    print("Witness: Home followed the replacement endpoint; a foreign origin got no tab")
+
+    // 4. A destination keeps its own overview: the Loctree report returns to
+    //    the report, not to the product root.
+    let reportDestination = ToolDestination.named("loctree-report")!
+    try require(coordinator.open(.destination(reportDestination)) == .opened("loctree-report"), "Report tab did not open")
+    let report = coordinator.tabs["loctree-report"]!
+    try await waitFor { if case .loaded(let url) = report.session.loadState { return url.path == "/structure/report" }; return false }
+    report.session.navigate(path: "/structure/report/graph")
+    try await waitFor { if case .loaded(let url) = report.session.loadState { return url.path == "/structure/report/graph" }; return false }
+    report.navigate(.home)
+    try await waitFor { if case .loaded(let url) = report.session.loadState { return url.path == "/structure/report" }; return false }
+    try require(report.session.webView.url?.port == endpoint.port, "Report Home left its origin")
+    try require(raw.session.webView.url?.path == "/", "Report Home moved the raw endpoint tab")
+
+    // 5. A reference view (JSON diverted from a plain link) runs no script,
+    //    so it has no product to return to: Home re-presents its document.
+    try await evaluate("document.getElementById('api').click()", in: consoleView)
+    try await waitFor { opened.count == 2 }
+    try require(opened[1].1 == .reference, "Plain endpoint link was not diverted to a reference view")
+    guard case .opened(let referenceKey) = coordinator.open(.url(opened[1].0, .reference)) else {
+      throw Failure(message: "Reference tab did not open")
+    }
+    let reference = coordinator.tabs[referenceKey]!
+    try await waitFor { if case .loaded(let url) = reference.session.loadState { return url.path == "/api/scaffold/artifacts" }; return false }
+    reference.navigate(.home)
+    try await waitFor { if case .loaded(let url) = reference.session.loadState { return url.path == "/api/scaffold/artifacts" }; return false }
+    try require(reference.session.role == .reference
+      && !reference.session.webView.configuration.defaultWebpagePreferences.allowsContentJavaScript,
+      "Reference Home changed the view's role")
+    print("Witness: destination Home stayed on the report; reference Home stayed on its document")
+
+    for tab in coordinator.tabs.values { tab.close() }
+    controller.close()
+  }
+
   static func main() async throws {
     _ = NSApplication.shared
     let endpoint = URL(string: CommandLine.arguments[1])!
@@ -637,6 +774,7 @@ struct CommandDeckIntegrationTests {
     try destinationContract(endpoint)
     try await webContract(endpoint)
     try await tabsContract(endpoint, reconnectEndpoint: reconnectEndpoint)
+    try await homeContract(endpoint, reconnectEndpoint: reconnectEndpoint)
     print("CommandDeckIntegrationTests passed")
   }
 }

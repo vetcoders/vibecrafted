@@ -37,6 +37,14 @@ It never hardcodes a host or port and never restarts or reinstalls anything.
 It stays valid while the page shows an error or a machine document; without a
 runtime it records the wish and the next applied endpoint lands on Home.
 
+Where Home returns is owned by whoever opens the tab (`WebTabHome`), never by
+the URL that happened to open it. The console and every tool tab opened from a
+link inside the product (`target=_blank`, including a raw API endpoint) return
+to `/`; a destination returns to its own route (the Loctree report to
+`/structure/report`), a configured service to its configured path, and a
+read-only reference view or local document tab re-presents its one document.
+Home is a real load on the tab's origin, so Back still reaches the page it left.
+
 ## Tabs
 
 Every tab is an `NSWindow` in one tab group (`tabbingIdentifier`
@@ -156,6 +164,11 @@ open nothing; a local document tab shows only its file; the report tab uses an
 ephemeral store; a configured service tab opens without a runtime, stays on
 its origin, hands foreign links to the system browser and ignores runtime
 loss; runtime loss is shown on runtime tabs; the bridged toolbar exists with a
-stable item set at 800 px and 1200 px. `vibecrafted-server/web/tests/tools_http.rs`
+stable item set at 800 px and 1200 px; Home ownership: a `target=_blank` raw
+endpoint tab returns from JSON and from an HTTP error to the runtime overview
+on the same origin (and on a replacement endpoint) with Back/Forward intact
+and the console untouched, a foreign origin gets no tab, the report
+destination returns to the report and a reference view to its document.
+`vibecrafted-server/web/tests/tools_http.rs`
 proves the server boundaries (sandbox headers, asset confinement, peer gate,
 argv, projection, timeout, reference authorisation).

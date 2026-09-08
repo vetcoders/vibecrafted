@@ -204,8 +204,9 @@ final class NativeTabCoordinator {
       if let endpoint {
         tab.model.unavailableReason = nil
         if case .runtimeRoute(let path)? = tab.destination?.target {
-          tab.session.apply(endpoint: endpoint, homePath: path)
+          tab.session.apply(endpoint: endpoint, route: path, home: .route(path))
         } else {
+          // A link-opened tab keeps its own route and home inside the session.
           tab.session.apply(endpoint: endpoint)
         }
       } else {
@@ -239,8 +240,10 @@ final class NativeTabCoordinator {
           followsRuntimeEndpoint: scope.followsRuntimeEndpoint)
         switch scope {
         case .runtime:
+          // A destination owns its overview: the Loctree report returns to
+          // the report, not to the product root.
           if case .runtimeRoute(let path) = destination.target, let endpoint = runtimeEndpoint {
-            session.apply(endpoint: endpoint, homePath: path)
+            session.apply(endpoint: endpoint, route: path, home: .route(path))
           }
         case .localDocument(let document):
           session.present(localDocument: document)
@@ -266,7 +269,13 @@ final class NativeTabCoordinator {
       let session = WebConsoleSession(role: role, websiteDataStore: websiteDataStore)
       let title = role == .reference ? "Reference · \(components.path)" : components.path
       makeTab(key: key, title: title, destination: nil, session: session, followsRuntimeEndpoint: true)
-      session.apply(endpoint: endpoint, homePath: path)
+      // The URL that opened the tab is where it starts, not where Home goes.
+      // A tool tab (a `target=_blank` page, raw JSON, an error) returns to
+      // the runtime's product overview. A reference view runs no script and
+      // exists for exactly one machine document, so its overview is that
+      // document, as a local document tab's is its file.
+      let home: WebTabHome = role == .reference ? .route(path) : .runtimeOverview
+      session.apply(endpoint: endpoint, route: path, home: home)
       return .opened(key)
     }
   }

@@ -18,6 +18,31 @@ enum WebTabScope: Equatable, Sendable {
   case service(WebRuntimeOrigin)
 }
 
+/// Where Home returns a tab on an http(s) origin.
+///
+/// Decided by the owner that opens the tab, from what the tab is *for*, never
+/// from the URL that happened to open it. A page reached through
+/// `target=_blank` or a diverted API endpoint is where a tab starts; it is not
+/// a place the user asked to come back to, so Home from raw JSON or an error
+/// page returns to the product overview instead of reloading the same bytes.
+enum WebTabHome: Equatable, Sendable {
+  /// The connected runtime's product overview (`/`). The console lives here,
+  /// and so does every tool tab opened from a link inside the product.
+  case runtimeOverview
+  /// A surface's own overview, owned by its `ToolDestination` (the Loctree
+  /// report returns to the report) or by the document a read-only reference
+  /// view exists for.
+  case route(String)
+
+  /// The route Home selects. Only ever a path on the tab's own origin.
+  var path: String {
+    switch self {
+    case .runtimeOverview: return "/"
+    case .route(let path): return path
+    }
+  }
+}
+
 /// A registered tool surface the App can open in a native tab.
 ///
 /// Only surfaces with a real, resolvable contract are registered. Nothing here

@@ -93,8 +93,10 @@ final class WebConsoleSession: NSObject {
   private var activeNavigation: WKNavigation?
   private var lastCommittedURL: URL?
   private var route = URLComponents(string: "/")!
-  /// Where Home goes for a runtime tab. The console always returns to the
-  /// product overview; a tool tab returns to the route it was opened on.
+  /// Where Home goes for a runtime or service tab. The product overview by
+  /// default; a destination or service sets its own overview through
+  /// `apply(endpoint:route:home:)` / `present(service:)`. The first route a
+  /// tab shows never becomes its home on its own.
   private var homeRoute = URLComponents(string: "/")!
 
   /// Native entrypoints select a route, never another window or origin.
@@ -224,12 +226,17 @@ final class WebConsoleSession: NSObject {
     if let url = routeURL { load(url) }
   }
 
-  /// Applies an endpoint and selects the route this tab is for. Used by tool
-  /// tabs: Home returns here, not to the product overview.
-  func apply(endpoint: URL, homePath: String) {
-    if let components = Self.routeComponents(homePath) {
+  /// Applies an endpoint, selects the first route this tab shows and fixes
+  /// where Home returns. The two are deliberately separate arguments: a tab
+  /// opened from a `target=_blank` link starts on that link's route but its
+  /// Home is the runtime overview, while a destination starts on and returns
+  /// to its own route. A malformed route leaves the current one in place.
+  func apply(endpoint: URL, route: String, home: WebTabHome) {
+    if let components = Self.routeComponents(route) {
+      self.route = components
+    }
+    if let components = Self.routeComponents(home.path) {
       homeRoute = components
-      route = components
     }
     apply(endpoint: endpoint)
   }
@@ -294,8 +301,10 @@ final class WebConsoleSession: NSObject {
   // MARK: - History
 
   /// Home is always valid: with a runtime it returns to this tab's home route
-  /// even while the page shows an error or a machine document; without one it
-  /// records the wish so the next applied endpoint lands on Home.
+  /// (the product overview unless the tab's owner named its own) even while
+  /// the page shows an error or a machine document; without one it records
+  /// the wish so the next applied endpoint lands on Home. The move is a real
+  /// load on the same origin, so Back still reaches the page it left.
   func goHome() {
     switch scope {
     case .runtime, .service:
