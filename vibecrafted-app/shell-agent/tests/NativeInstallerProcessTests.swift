@@ -112,6 +112,34 @@ struct NativeInstallerProcessTests {
     try require(kill(pid, 0) == -1 && errno == ESRCH, "owned child survived timeout settlement")
   }
 
+  static func testRetainedPipeDescriptorCompletesWithinGrace(_ root: URL) throws {
+    let script = root.appendingPathComponent("retained-pipe.sh")
+    try writeExecutable(script, """
+      #!/usr/bin/env bash
+      set -eu
+      printf retained-before-parent-exit
+      sleep 4 &
+      exit 0
+      """)
+    var result: BoundedProcessResult?
+    let started = Date()
+    try NativeInstallerProcess.run(process(script), timeout: 0.2, label: "retained pipe",
+      onTimeout: { _ in fatalError("exited parent unexpectedly timed out") }) { finished in
+        precondition(Thread.isMainThread)
+        result = finished
+      }
+    try wait(seconds: 1.5) { result != nil }
+    let elapsed = Date().timeIntervalSince(started)
+    try require(elapsed < 1.5, "retained descriptor blocked completion for \(elapsed)s")
+    try require(result?.clean == true && result?.terminationStatus == 0,
+      "retained descriptor changed the parent outcome")
+    try require(result?.timedOut == false, "parent exit incorrectly reported a process timeout")
+    try require(result?.pipeDrainTimedOut == true,
+      "retained descriptor was not reported as a bounded post-exit drain timeout")
+    try require(String(data: result!.stdout, encoding: .utf8)?.contains("retained-before-parent-exit") == true,
+      "available bytes were not retained before ending the post-exit drain")
+  }
+
   static func testSpawnFailureDoesNotDeliverLateCallback() throws {
     let task = Process()
     task.executableURL = URL(fileURLWithPath: "/definitely/not/an/executable")
@@ -131,6 +159,7 @@ struct NativeInstallerProcessTests {
     defer { try? FileManager.default.removeItem(at: root) }
     try testPipeOverflowKeepsMainActorResponsive(root)
     try testTimeoutWaitsForOwnedChildSettlement(root)
+    try testRetainedPipeDescriptorCompletesWithinGrace(root)
     try testSpawnFailureDoesNotDeliverLateCallback()
     print("NativeInstallerProcessTests passed")
   }
