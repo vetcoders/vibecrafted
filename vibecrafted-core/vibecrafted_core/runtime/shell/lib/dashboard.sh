@@ -263,12 +263,84 @@ except (OSError, ValueError, subprocess.TimeoutExpired) as error:
 PY_RUNTIME_ADMIT
 }
 
+# Project-start owns exactly one project flag before any terminal, workspace, or
+# Frame work begins. This is deliberately a projection, not a second Frame
+# parser: every non-project argument remains byte-for-byte Frame input. Keeping
+# that boundary here prevents `--root` from reaching vc-frame (which rightly
+# rejects it as an unknown Frame argument), while preserving existing Frame
+# layouts and options.
+_vetcoders_start_prepare_arguments() {
+  local raw_root="" normalized_root="" arg
+  _vetcoders_start_frame_argv=()
+  while (($#)); do
+    arg="$1"
+    case "$arg" in
+      --root)
+        shift
+        if (($# == 0)) || [[ -z "$1" ]]; then
+          printf 'vc-start: --root requires an existing directory value.\n' >&2
+          return 2
+        fi
+        raw_root="$1"
+        ;;
+      --root=*)
+        raw_root="${arg#--root=}"
+        if [[ -z "$raw_root" ]]; then
+          printf 'vc-start: --root requires an existing directory value.\n' >&2
+          return 2
+        fi
+        ;;
+      --)
+        _vetcoders_start_frame_argv+=("$arg")
+        shift
+        _vetcoders_start_frame_argv+=("$@")
+        break
+        ;;
+      *)
+        _vetcoders_start_frame_argv+=("$arg")
+        ;;
+    esac
+    shift
+  done
+
+  unset VIBECRAFTED_START_ROOT
+  [[ -n "$raw_root" ]] || return 0
+  normalized_root="$(_vetcoders_absolute_physical_path "$raw_root")"
+  if [[ -z "$normalized_root" || ! -d "$normalized_root" ]]; then
+    printf 'vc-start: --root is not an existing directory: %s\n' "$raw_root" >&2
+    return 2
+  fi
+  export VIBECRAFTED_START_ROOT="$normalized_root"
+}
+
+_vetcoders_start_open_terminal_if_needed() {
+  local project_root="$1"
+  shift
+  unset VIBECRAFTED_START_ESCALATED
+  if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" == "1" ]] ||
+    ! command -v _vetcoders_needs_vc_terminal_entry >/dev/null 2>&1 ||
+    ! _vetcoders_needs_vc_terminal_entry; then
+    return 0
+  fi
+  local front_door=""
+  front_door="$(_vetcoders_product_front_door vc-start 2>/dev/null || true)"
+  if [[ -z "$front_door" ]]; then
+    printf 'vc-start: no TTY and no installed vc-start front door to open a terminal with.\n' >&2
+    printf 'Run vc-start from a terminal, or install the runtime so bin/vc-terminal and bin/vc-start exist.\n' >&2
+    return 1
+  fi
+  _vetcoders_open_entry_in_vc_terminal "$front_door" "$project_root" "$@" || return 1
+  VIBECRAFTED_START_ESCALATED=1
+  export VIBECRAFTED_START_ESCALATED
+  return 0
+}
+
 # Product lifecycle choke shared by shell `vc-start` and deck `cmd_start`.
 # Reads installed product config and scripts, then prepares workspace/control
 # state. Configuration publication belongs exclusively to explicit installation.
 _vetcoders_product_entry_prepare() {
-  local requested_root owner_root required entry_status=0
-  requested_root="$(pwd -P)" || return $?
+  local requested_root="${1:-}" owner_root required entry_status=0
+  [[ -n "$requested_root" ]] || requested_root="$(pwd -P)" || return $?
   unset VIBECRAFTED_PRODUCT_ENTRY VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS
 
   owner_root="$(_vetcoders_vc_frame_owner_root)" || {

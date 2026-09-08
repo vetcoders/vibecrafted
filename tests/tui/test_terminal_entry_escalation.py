@@ -427,6 +427,54 @@ def test_bare_start_without_tty_opens_terminal_with_its_front_door(
     assert hosted[1].endswith("/bin/vc-start")
 
 
+def test_start_explicit_root_is_consumed_before_terminal_escalation(
+    tmp_path: Path,
+) -> None:
+    """Public start owns --root; Frame must never receive the project flag."""
+    other = tmp_path / "project with spaces"
+    other.mkdir()
+
+    result, launch = _run_entry(
+        tmp_path, f"vc-start --root={shlex.quote(str(other))} operator"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert launch is not None, result.stderr
+    assert _working_directory(launch) == other.resolve()
+    hosted = _hosted_argv(launch)
+    assert hosted[2:] == ["operator"], hosted
+
+
+@pytest.mark.parametrize("root_arg", ["--root", "--root=", "--root /no/such/project"])
+def test_start_rejects_invalid_root_before_terminal_or_workspace_side_effects(
+    tmp_path: Path, root_arg: str
+) -> None:
+    result, launch = _run_entry(
+        tmp_path, f"vc-start {root_arg}", expect_launch=False
+    )
+
+    assert result.returncode != 0
+    assert launch is None
+    assert "--root" in result.stderr
+    assert not (tmp_path / "aicx-called.txt").exists()
+
+
+def test_start_explicit_root_preserves_resume_without_forwarding_root(
+    tmp_path: Path,
+) -> None:
+    other = tmp_path / "resume project"
+    other.mkdir()
+
+    result, launch = _run_entry(
+        tmp_path, f"vc-start resume --root {shlex.quote(str(other))}"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert launch is not None, result.stderr
+    assert _working_directory(launch) == other.resolve()
+    assert _hosted_argv(launch)[2:] == ["resume"]
+
+
 def test_start_preserves_exact_argv_including_quoting(tmp_path: Path) -> None:
     """argv is preserved verbatim -- a spaced argument stays one argument."""
     result, launch = _run_entry(
