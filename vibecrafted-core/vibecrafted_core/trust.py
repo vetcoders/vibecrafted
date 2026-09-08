@@ -28,6 +28,7 @@ from typing import Any
 
 from . import control_plane
 from .clock import utc_now_iso
+from .repo_selection import add_repo_arguments, select_repository
 from .run_mutation import run_mutation_locks
 from .settlement import (
     Settlement,
@@ -2163,7 +2164,7 @@ def _parser() -> argparse.ArgumentParser:
         description="Append-only vc-trust journal and settlement helper.",
     )
     parser.add_argument("--journal", type=Path, default=default_journal_path())
-    parser.add_argument("--repo", type=Path, default=Path.cwd())
+    add_repo_arguments(parser)
     commands = parser.add_subparsers(dest="command", required=True)
 
     enumerate_parser = commands.add_parser("enumerate")
@@ -2207,7 +2208,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point dispatching to the vc-trust journal/settlement subcommands."""
     args = _parser().parse_args(argv)
     try:
-        repo = _repo_root(args.repo)
+        selection = select_repository(
+            args.repo, args.root, fallback=Path.cwd, require_git=True, label="vc-trust"
+        )
+        repo = _repo_root(Path(selection.path))
         journal = args.journal.expanduser()
         if args.command == "enumerate":
             result: Any = enumerate_commits(

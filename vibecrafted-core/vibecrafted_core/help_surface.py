@@ -358,6 +358,10 @@ WORKFLOW_HELP: dict[str, WorkflowHelp] = {
         (
             'vibecrafted workflow codex --prompt "Examine and implement the fix"',
             "vc-workflow claude --file /path/to/brief.md",
+            (
+                "vibecrafted workflow claude --model claude-fable-5-1 --worktree true "
+                '--repo ~/Projects/app --prompt "Ship it in an isolated checkout"'
+            ),
         ),
     ),
 }
@@ -399,7 +403,7 @@ Commands:
   init [agent]         Orient an agent in this repo
   <skill> <agent>      Run a workflow with an agent
   resume <agent>       Continue a stopped run (--run-id) or a provider session
-  fork <agent>         Branch a provider session in the current vc-frame tab
+  fork <agent>         Branch a provider session (--session | --run-id) into a new one: claude, codex, grok
   resume-session       Continue an exact provider session as a tracked run
   relocate             Snapshot open sessions + worktrees for a machine move (snapshot|restore)
   status               Today's agent activity
@@ -421,7 +425,13 @@ Examples:
   vibecrafted init claude
   vibecrafted implement codex -p "Ship dark mode"
   vibecrafted marbles claude -p "Loop until clean"
+  vibecrafted workflow claude --model claude-fable-5-1 --worktree true --repo ~/Projects/app -p "Ship it"
   vibecrafted uninstall --dry-run
+
+Repository:
+  --repo <path>  selects the repository for every repository-aware command, from any
+                 directory (even outside Git). --root is the legacy spelling; passing
+                 both with different paths is an error, never a silent pick.
 
 Words:
   run        one dispatched agent job; its report + transcript live under ~/.vibecrafted
@@ -447,7 +457,7 @@ Options:
   -f, --prompt-file <path>  Read the continuation prompt from a file
   --prompt-stdin            Read the prompt from stdin and keep it out of argv
   --runtime                 Not accepted: this command is always headless
-  --root <path>             Repository root
+  --repo <path>             Repository, usable from any directory (--root: legacy spelling)
   --source-dir <path>       Vibecrafted core source/package root
   --model <name>            Agent model override where the runner supports it
   --json                    Machine-readable launch receipt
@@ -494,7 +504,7 @@ def _option_lines(topic: str) -> list[str]:
     if topic == "paste":
         return [
             "  --skill <workflow>              Workflow to prepare (default: workflow)",
-            "  --root <path>                   Repository root",
+            "  --repo <path>                   Repository, from any directory (--root: legacy)",
             "  --print-prompt                  Print the prepared prompt",
             "  --dry-run                       Resolve without launching",
             "  --json                          Machine-readable output",
@@ -504,14 +514,15 @@ def _option_lines(topic: str) -> list[str]:
             "  -p, --prompt <text>            Extra seed context for /vc-partner (not a job)",
             "  -f, --file <path.md>           Extra seed file context (not a job)",
             "  --runtime <terminal|visible|plain>  Interactive face (default: terminal)",
-            "  --root <path>                  Repository root",
+            "  --repo <path>                  Repository, from any directory (--root: legacy)",
         ]
     lines = [
         "  -p, --prompt <text>            Inline prompt",
         "  -f, --file <path.md>           Input file as prompt context",
         "  --prompt-stdin                 Read prompt from stdin; no argv/temp copy",
         "  --runtime <terminal|headless>  Worker surface (default: headless)",
-        "  --root <path>                  Repository root",
+        "  --repo <path>                  Repository, from any directory (--root: legacy spelling)",
+        "  --worktree [true|false]        Run in a fresh linked checkout of --repo (clean Git root required)",
         "  --model <name>                 Agent model override",
     ]
     definition = workflow_definition(topic)

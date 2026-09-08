@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from .control_plane import _is_pytest_temp_path, control_plane_home
+from .repo_selection import RepoSelectionError, add_repo_arguments, select_repository
 from .runtime_paths import read_version_file
 
 CATALOG_SCHEMA = "vibecrafted.workspace-catalog.v1"
@@ -2169,7 +2170,7 @@ def workspace_cli_main(argv: Sequence[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="action", required=True)
 
     create_p = sub.add_parser("create", help="create a durable workspace")
-    create_p.add_argument("--root", default=os.getcwd())
+    add_repo_arguments(create_p)
     create_p.add_argument("--label", default="")
     create_p.add_argument("--workspace-id", default="")
     create_p.add_argument("--notes", default="")
@@ -2212,13 +2213,13 @@ def workspace_cli_main(argv: Sequence[str] | None = None) -> int:
         "materialize", help="bind a live workspace_instance to current build_id"
     )
     materialize_p.add_argument("workspace_id")
-    materialize_p.add_argument("--root", default=os.getcwd())
+    add_repo_arguments(materialize_p)
     materialize_p.add_argument("--json", action="store_true")
 
     resolve_p = sub.add_parser(
         "resolve", help="resolve or create the workspace used by vc-start"
     )
-    resolve_p.add_argument("--root", default="")
+    add_repo_arguments(resolve_p)
     resolve_p.add_argument("--env", action="store_true")
     resolve_p.add_argument("--json", action="store_true")
 
@@ -2244,6 +2245,21 @@ def workspace_cli_main(argv: Sequence[str] | None = None) -> int:
     counts_p.add_argument("--json", action="store_true")
 
     args = parser.parse_args(list(argv) if argv is not None else None)
+    if hasattr(args, "repo"):
+        # ``resolve`` keeps an empty root so its own catalogue fallback decides;
+        # ``create``/``materialize`` operate on the caller's directory by default.
+        explicit = bool(str(args.repo or "").strip() or str(args.root or "").strip())
+        if explicit or args.action != "resolve":
+            try:
+                args.root = select_repository(
+                    args.repo,
+                    args.root,
+                    fallback=os.getcwd,
+                    label=f"workspace {args.action}",
+                ).path
+            except RepoSelectionError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
 
     def _emit(payload: Mapping[str, Any], *, as_json: bool) -> int:
         if as_json:
