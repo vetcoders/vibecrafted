@@ -522,7 +522,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   @objc private func openDestinationExternally(_ sender: NSMenuItem) {
     guard let id = sender.representedObject as? String, let destination = ToolDestination.named(id) else { return }
     switch tabs.resolve(destination) {
-    case .available(let url, .runtime): openExternalURL(url)
+    case .available(let url, .runtime), .available(let url, .service): openExternalURL(url)
     case .available(let url, .localDocument): revealNativePath(url)
     case .unavailable(let reason): showNativeMessage("\(destination.title) is unavailable", reason)
     }

@@ -10,6 +10,7 @@ pub enum ServerSection {
     Overview,
     Workspaces,
     Sessions,
+    Agents,
     Runs,
     Lifecycle,
     Activity,
@@ -72,23 +73,26 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
                         <a class=active.nav_class(ServerSection::Sessions) href="/sessions">
                             <span>"03"</span><strong>"Sessions"</strong>
                         </a>
-                        <a class=active.nav_class(ServerSection::Runs) href="/runs">
+                        <a class=active.nav_class(ServerSection::Agents) href="/agents">
                             <span>"04"</span><strong>"Agent Manager"</strong>
                         </a>
+                        <a class=active.nav_class(ServerSection::Runs) href="/runs">
+                            <span>"05"</span><strong>"Live runs"</strong>
+                        </a>
                         <a class=active.nav_class(ServerSection::Lifecycle) href="/lifecycle">
-                            <span>"05"</span><strong>"Control"</strong>
+                            <span>"06"</span><strong>"Control"</strong>
                         </a>
                         <a class=active.nav_class(ServerSection::Activity) href="/activity">
-                            <span>"06"</span><strong>"Activity"</strong>
+                            <span>"07"</span><strong>"Activity"</strong>
                         </a>
                         <a class=active.nav_class(ServerSection::Structure) href="/structure">
-                            <span>"07"</span><strong>"Structure"</strong>
+                            <span>"08"</span><strong>"Structure"</strong>
                         </a>
                         <a class=active.nav_class(ServerSection::Scaffold) href="/scaffold">
-                            <span>"08"</span><strong>"Plans / Scaffold"</strong>
+                            <span>"09"</span><strong>"Plans / Scaffold"</strong>
                         </a>
                         <a class=active.nav_class(ServerSection::Guide) href="/guide">
-                            <span>"09"</span><strong>"Guide"</strong>
+                            <span>"10"</span><strong>"Guide"</strong>
                         </a>
                     </nav>
                     <div class="server-sidebar-note">
@@ -113,23 +117,26 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
                 <a class=active.nav_class(ServerSection::Sessions) href="/sessions">
                     <span>"03"</span><strong>"Sessions"</strong>
                 </a>
-                <a class=active.nav_class(ServerSection::Runs) href="/runs">
+                <a class=active.nav_class(ServerSection::Agents) href="/agents">
                     <span>"04"</span><strong>"Agents"</strong>
                 </a>
+                <a class=active.nav_class(ServerSection::Runs) href="/runs">
+                    <span>"05"</span><strong>"Runs"</strong>
+                </a>
                 <a class=active.nav_class(ServerSection::Lifecycle) href="/lifecycle">
-                    <span>"05"</span><strong>"Control"</strong>
+                    <span>"06"</span><strong>"Control"</strong>
                 </a>
                 <a class=active.nav_class(ServerSection::Activity) href="/activity">
-                    <span>"06"</span><strong>"Activity"</strong>
+                    <span>"07"</span><strong>"Activity"</strong>
                 </a>
                 <a class=active.nav_class(ServerSection::Structure) href="/structure">
-                    <span>"07"</span><strong>"Structure"</strong>
+                    <span>"08"</span><strong>"Structure"</strong>
                 </a>
                 <a class=active.nav_class(ServerSection::Scaffold) href="/scaffold">
-                    <span>"08"</span><strong>"Plans"</strong>
+                    <span>"09"</span><strong>"Plans"</strong>
                 </a>
                 <a class=active.nav_class(ServerSection::Guide) href="/guide">
-                    <span>"09"</span><strong>"Guide"</strong>
+                    <span>"10"</span><strong>"Guide"</strong>
                 </a>
             </nav>
         </div>

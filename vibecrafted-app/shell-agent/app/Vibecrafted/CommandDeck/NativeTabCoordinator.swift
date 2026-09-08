@@ -157,6 +157,12 @@ final class NativeTabCoordinator {
 
   private(set) var tabs: [String: ToolTabWindowController] = [:]
   private(set) var runtimeEndpoint: URL?
+  /// Runtime ownership survives an endpoint withdrawal. `WebConsoleSession`
+  /// intentionally clears its transient scope while unavailable so WebKit
+  /// completions from the previous server cannot affect a later connection.
+  /// The coordinator therefore keeps this durable affiliation separately,
+  /// allowing the tab to rejoin either the same or a replacement endpoint.
+  private var runtimeTabKeys: Set<String> = []
 
   init(
     anchorWindow: @escaping @MainActor () -> NSWindow?,
@@ -191,7 +197,10 @@ final class NativeTabCoordinator {
     guard runtimeEndpoint != endpoint else { return }
     runtimeEndpoint = endpoint
     for tab in tabs.values {
-      if case .localDocument? = tab.session.scope { continue }
+      // Local documents and configured services have their own scope. Do not
+      // infer runtime affiliation from `session.scope`: that scope is cleared
+      // during an outage by design, while this durable ownership remains.
+      guard runtimeTabKeys.contains(tab.key) else { continue }
       if let endpoint {
         tab.model.unavailableReason = nil
         if case .runtimeRoute(let path)? = tab.destination?.target {
@@ -213,15 +222,21 @@ final class NativeTabCoordinator {
       switch resolve(destination) {
       case .unavailable(let reason):
         return .unavailable(reason: reason)
-      case .available(_, let scope):
+      case .available(let url, let scope):
         if let existing = tabs[destination.id] {
           focus(existing)
           return .focused(destination.id)
         }
+        // Generated documents, local files and foreign services never share
+        // the console's persistent store: nothing they set survives the tab,
+        // and nothing the console holds is visible to them.
+        let ephemeral = scope.isLocalDocument || scope.isService || destination.isolatedContent
         let session = WebConsoleSession(
           role: destination.role,
-          websiteDataStore: scope.isLocalDocument ? .nonPersistent() : websiteDataStore)
-        makeTab(key: destination.id, title: destination.title, destination: destination, session: session)
+          websiteDataStore: ephemeral ? .nonPersistent() : websiteDataStore)
+        makeTab(
+          key: destination.id, title: destination.title, destination: destination, session: session,
+          followsRuntimeEndpoint: scope.followsRuntimeEndpoint)
         switch scope {
         case .runtime:
           if case .runtimeRoute(let path) = destination.target, let endpoint = runtimeEndpoint {
@@ -229,6 +244,8 @@ final class NativeTabCoordinator {
           }
         case .localDocument(let document):
           session.present(localDocument: document)
+        case .service:
+          session.present(service: url)
         }
         return .opened(destination.id)
       }
@@ -248,7 +265,7 @@ final class NativeTabCoordinator {
       if let fragment = components.percentEncodedFragment { path += "#" + fragment }
       let session = WebConsoleSession(role: role, websiteDataStore: websiteDataStore)
       let title = role == .reference ? "Reference · \(components.path)" : components.path
-      makeTab(key: key, title: title, destination: nil, session: session)
+      makeTab(key: key, title: title, destination: nil, session: session, followsRuntimeEndpoint: true)
       session.apply(endpoint: endpoint, homePath: path)
       return .opened(key)
     }
@@ -265,7 +282,8 @@ final class NativeTabCoordinator {
 
   @discardableResult
   private func makeTab(
-    key: String, title: String, destination: ToolDestination?, session: WebConsoleSession
+    key: String, title: String, destination: ToolDestination?, session: WebConsoleSession,
+    followsRuntimeEndpoint: Bool
   ) -> ToolTabWindowController {
     let tab = ToolTabWindowController(
       key: key, title: title, destination: destination, session: session, openExternally: openExternally)
@@ -280,8 +298,12 @@ final class NativeTabCoordinator {
         openExternally(url)
       }
     }
-    tab.onClose = { [weak self] in self?.tabs.removeValue(forKey: key) }
+    tab.onClose = { [weak self] in
+      self?.tabs.removeValue(forKey: key)
+      self?.runtimeTabKeys.remove(key)
+    }
     tabs[key] = tab
+    if followsRuntimeEndpoint { runtimeTabKeys.insert(key) }
     if let anchor = anchorWindow(), let window = tab.window {
       anchor.addTabbedWindow(window, ordered: .above)
     }
@@ -298,6 +320,17 @@ final class NativeTabCoordinator {
 extension WebTabScope {
   var isLocalDocument: Bool {
     if case .localDocument = self { return true }
+    return false
+  }
+
+  var isService: Bool {
+    if case .service = self { return true }
+    return false
+  }
+
+  /// Only runtime-scoped tabs move with the caretaker endpoint.
+  var followsRuntimeEndpoint: Bool {
+    if case .runtime = self { return true }
     return false
   }
 }

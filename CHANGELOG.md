@@ -19,10 +19,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   document, its edits and history stay in place. `target=_blank` becomes a
   tool tab, never a replacement of the current page.
 - macOS App: `View ▸ Open in Tab / Open in Browser` register the Loctree report
-  route and the generated AICX dashboard file; the Slack agent console is
-  listed as unavailable because no launch contract exists.
+  route (isolated, ephemeral data store) and the generated AICX dashboard file.
+  The Slack agent console is an owner-backed configured destination: the
+  operator names the served `/console` URL in `[tools.slack-console]` of
+  `~/.config/vibecrafted/config.toml`; unset reads as "not configured" with
+  the owner named, never a guessed port. Configured consoles open in a
+  `service`-scoped tab on their own origin.
 - Server web: Scaffold inspector endpoint links open outside the studio
-  document (`target="_blank"`).
+  document (`target="_blank"`). The studio's global navigation carries the
+  full route vocabulary (Workspaces, Sessions, Agent Manager, Runs, Control,
+  Activity, Structure, Scaffold) and stays reachable on narrow viewports as a
+  scrollable row; the artifact index remains the second, document-level
+  navigation.
+- Server web: navigation separates **Agent Manager** (`/agents`, provider and
+  launcher catalog) from **Live runs** (`/runs`); **Sessions** lists the
+  canonical run transcripts joined by logical session identity. Sidebar and
+  mobile numbering agree (01–10).
+- Server web: `/structure/report` serves the canonical Loctree report under a
+  Content-Security-Policy `sandbox` (opaque origin, no `fetch`/forms/frames)
+  with its sibling assets on `/structure/report/{asset}`, so the interactive
+  graph works without control-plane authority. `/api/aicx/search` and
+  `/api/aicx/reference` serve the private AICX corpus to a verified local peer
+  only, with a bounded `aicx` argv, a timeout, projected hits and a
+  server-owned reference route instead of `file://` links; `/aicx` is the
+  search page.
+- control-core: `logical_session_id` (aliases `vibecrafted_session_id`,
+  `workspace_session_id`) is projected from snapshots, runtime meta and the
+  event stream with one alias order and is never borrowed from the provider
+  `session_id`.
+- Configuration owner: `vibecrafted_core.server_config.load_tool_destinations`
+  validates the optional `[tools]` table of `config.toml` with the same
+  contract the App applies.
 
 See `docs/runtime/NATIVE_CONSOLE_TABS.md`.
 
