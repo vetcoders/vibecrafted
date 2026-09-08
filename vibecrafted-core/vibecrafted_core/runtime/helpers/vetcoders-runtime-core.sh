@@ -88,6 +88,63 @@ _vetcoders_absolute_physical_path() {
   esac
 }
 
+# One repository selector for every deck and shell verb — the twin of
+# vibecrafted_core.repo_selection.select_repository, same rules, same words:
+#   _vetcoders_select_repo <label> <--repo value> <--root value>
+# Prints the normalized absolute path when either flag carried one, prints
+# nothing when neither did (the caller keeps its own fallback), and exits 2
+# with a stderr reason on a conflicting pair or a missing/non-directory path.
+# It never demands Git: the selected directory is the answer, and only verbs
+# that truly need a work tree check for one themselves.
+_vetcoders_select_repo() {
+  local label="${1:-vibecrafted}" repo_raw="${2:-}" root_raw="${3:-}"
+  local repo_norm="" root_norm="" chosen="" flag="" normalized=""
+  if [[ -n "$repo_raw" && -n "$root_raw" ]]; then
+    repo_norm="$(_vetcoders_absolute_physical_path "$repo_raw")"
+    root_norm="$(_vetcoders_absolute_physical_path "$root_raw")"
+    if [[ "$repo_norm" != "$root_norm" ]]; then
+      printf '%s: conflicting --repo %s and --root %s; pass one repository (--repo is the standard spelling)\n' \
+        "$label" "$repo_raw" "$root_raw" >&2
+      return 2
+    fi
+  fi
+  if [[ -n "$repo_raw" ]]; then
+    chosen="$repo_raw"
+    flag="--repo"
+  elif [[ -n "$root_raw" ]]; then
+    chosen="$root_raw"
+    flag="--root"
+  else
+    return 0
+  fi
+  normalized="$(_vetcoders_absolute_physical_path "$chosen")"
+  if [[ -z "$normalized" || ! -e "$normalized" ]]; then
+    printf '%s: %s is not an existing directory: %s\n' "$label" "$flag" "$chosen" >&2
+    return 2
+  fi
+  if [[ ! -d "$normalized" ]]; then
+    printf '%s: %s is not a directory: %s\n' "$label" "$flag" "$chosen" >&2
+    return 2
+  fi
+  printf '%s\n' "$normalized"
+}
+
+# `--worktree` takes an optional boolean word. These two helpers keep the
+# shell parser and the core launcher's parse_worktree_flag in step.
+_vetcoders_is_worktree_word() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on|0|false|no|off) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_vetcoders_worktree_word_value() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) printf 'true\n' ;;
+    *) printf 'false\n' ;;
+  esac
+}
+
 # The runtime generation is NOT a project. Every product front door exports
 # VIBECRAFTED_ROOT and VIBECRAFTED_RUNTIME_ROOT to the same generation path
 # (vc_start.rs run(), scripts/vc-terminal-product-entry.sh,

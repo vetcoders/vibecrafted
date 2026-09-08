@@ -42,6 +42,12 @@ _vetcoders_contract_reset() {
   _vetcoders_contract_parent_session=""
   _vetcoders_contract_continuity_parent=""
   _vetcoders_contract_root=""
+  # Raw `--repo` value; reconciled into _vetcoders_contract_root at the end of
+  # the parse through _vetcoders_select_repo (one selector, one set of words).
+  _vetcoders_contract_repo=""
+  # "true" | "false" | "" — `--worktree` requests an isolated linked checkout;
+  # only the core launcher can honour it.
+  _vetcoders_contract_worktree=""
   _vetcoders_contract_tail=""
   _vetcoders_contract_dry_run=""
   _vetcoders_contract_no_aicx=""
@@ -179,6 +185,33 @@ _vetcoders_parse_contract() {
         [[ $# -gt 0 ]] || { echo "Missing value for --root" >&2; return 1; }
         _vetcoders_contract_root="$1"
         ;;
+      --root=*)
+        _vetcoders_contract_root="${1#--root=}"
+        [[ -n "$_vetcoders_contract_root" ]] || { echo "Missing value for --root" >&2; return 1; }
+        ;;
+      --repo)
+        shift
+        [[ $# -gt 0 ]] || { echo "Missing value for --repo" >&2; return 1; }
+        _vetcoders_contract_repo="$1"
+        ;;
+      --repo=*)
+        _vetcoders_contract_repo="${1#--repo=}"
+        [[ -n "$_vetcoders_contract_repo" ]] || { echo "Missing value for --repo" >&2; return 1; }
+        ;;
+      --worktree)
+        _vetcoders_contract_worktree="true"
+        if [[ $# -gt 1 ]] && _vetcoders_is_worktree_word "$2"; then
+          shift
+          _vetcoders_contract_worktree="$(_vetcoders_worktree_word_value "$1")"
+        fi
+        ;;
+      --worktree=*)
+        if ! _vetcoders_is_worktree_word "${1#--worktree=}"; then
+          printf -- '--worktree expects true or false, got: %s\n' "${1#--worktree=}" >&2
+          return 1
+        fi
+        _vetcoders_contract_worktree="$(_vetcoders_worktree_word_value "${1#--worktree=}")"
+        ;;
       --)
         shift
         while [[ $# -gt 0 ]]; do
@@ -204,6 +237,17 @@ _vetcoders_parse_contract() {
 
   if [[ -z "$_vetcoders_contract_prompt" && -n "$_vetcoders_contract_tail" ]]; then
     _vetcoders_contract_prompt="$_vetcoders_contract_tail"
+  fi
+
+  # Repository selection is decided ONCE, here, for every verb that parses the
+  # shared contract (init / partner / operator / resume / every shell skill):
+  # `--repo` and the legacy `--root` go through the same selector, a conflicting
+  # pair is refused, and the surviving value is already an existing absolute
+  # directory so no later step re-derives it against a different cwd.
+  if [[ -n "$_vetcoders_contract_repo" || -n "$_vetcoders_contract_root" ]]; then
+    local _contract_selected_root=""
+    _contract_selected_root="$(_vetcoders_select_repo "vibecrafted" "$_vetcoders_contract_repo" "$_vetcoders_contract_root")" || return $?
+    _vetcoders_contract_root="$_contract_selected_root"
   fi
 }
 
@@ -249,10 +293,15 @@ _vetcoders_rewrite_contract_root_argv() {
   # from 1 — of the LAST accepted --root value before --prompt/-p/-- ends the
   # scan. `skip` steps over a value that follows a value-taking flag so it is
   # never itself read as a flag.
+  # `--repo` is the standard spelling and `--root` the legacy one; both carry
+  # the repository, so the LAST of either is the one the parser keeps. An
+  # inline `--repo=X` / `--root=X` is rewritten as the same inline token.
   local -i ordinal=0 root_ordinal=0 skip=0
-  local _arg
+  local _arg root_inline_flag="" _next_index=0
+  local -a _argv_copy=("${_vetcoders_contract_argv[@]}")
   for _arg in "${_vetcoders_contract_argv[@]}"; do
     ordinal+=1
+    _next_index=$ordinal
     if ((skip > 0)); then
       skip=$((skip - 1))
       continue
@@ -263,9 +312,23 @@ _vetcoders_rewrite_contract_root_argv() {
       -p | --prompt | --)
         break
         ;;
-      --root)
+      --root | --repo)
         root_ordinal=$((ordinal + 1))
+        root_inline_flag=""
         skip=1
+        ;;
+      --root=* | --repo=*)
+        root_ordinal=$ordinal
+        root_inline_flag="${_arg%%=*}"
+        ;;
+      --worktree)
+        # Optional boolean word: step over it only when it is one, so a later
+        # `--worktree --root X` still sees `--root` as a flag.
+        local _worktree_peek=""
+        _worktree_peek="$(_vetcoders_argv_element "$_next_index" "${_argv_copy[@]}")"
+        if _vetcoders_is_worktree_word "$_worktree_peek"; then
+          skip=1
+        fi
         ;;
       # Value-taking flags: step over the VALUE too, so a value that happens to
       # spell a flag is never read as one.
@@ -287,12 +350,32 @@ _vetcoders_rewrite_contract_root_argv() {
   for _arg in "${_vetcoders_contract_argv[@]}"; do
     ordinal+=1
     if ((ordinal == root_ordinal)); then
-      _rewritten+=("$normalized_root")
+      if [[ -n "$root_inline_flag" ]]; then
+        _rewritten+=("${root_inline_flag}=${normalized_root}")
+      else
+        _rewritten+=("$normalized_root")
+      fi
     else
       _rewritten+=("$_arg")
     fi
   done
   _vetcoders_contract_argv=("${_rewritten[@]}")
+}
+
+# Element AFTER the 1-based ordinal `$1` of the vector `$2..`, without ever
+# subscripting an array with a computed index (bash is 0-based, zsh 1-based).
+_vetcoders_argv_element() {
+  local -i wanted="$1" seen=0
+  shift
+  local _item
+  for _item in "$@"; do
+    seen+=1
+    if ((seen == wanted + 1)); then
+      printf '%s\n' "$_item"
+      return 0
+    fi
+  done
+  return 0
 }
 
 # Skill launchers own model selection. Keep the shared parser fail-closed for
@@ -301,9 +384,11 @@ _vetcoders_rewrite_contract_root_argv() {
 _vetcoders_parse_skill_contract() {
   _vetcoders_contract_allow_model=1
   _vetcoders_parse_contract "$@"
-  local status=$?
+  # `status` is a read-only special parameter in zsh; assigning it aborts the
+  # whole function there and the skill contract silently never parses.
+  local _parse_status=$?
   unset _vetcoders_contract_allow_model
-  return "$status"
+  return "$_parse_status"
 }
 
 # Explicit operator job text — not a positional tail and not an AICX pack.
