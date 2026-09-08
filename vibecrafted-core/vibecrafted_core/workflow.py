@@ -13,7 +13,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -1805,6 +1805,45 @@ def _launch_spec_digest(spec: WorkflowLaunchSpec) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _legacy_preassembly_spec(
+    stored_spec: WorkflowLaunchSpec, *, expected_digest: str
+) -> WorkflowLaunchSpec | None:
+    """Recover a prompt-origin spec from an old redacted launch receipt.
+
+    Pre-dispatch runtimes calculated the idempotency digest before wrapping the
+    caller's prompt, but persisted only ``safe_spec`` afterwards.  That shape
+    has an empty ``prompt`` and a generated ``prompt.md`` in ``file``.  The
+    generated wrapper retains the original prompt after its unambiguous final
+    ``Operator prompt:`` delimiter.  Rebuild the old material only when its
+    digest still exactly matches the immutable stored digest.  File-origin
+    launches cannot safely recover their original file path and remain denied.
+    """
+    if stored_spec.prompt or not stored_spec.file:
+        return None
+    try:
+        rendered = (
+            Path(stored_spec.file)
+            .expanduser()
+            .read_text(encoding="utf-8", errors="replace")
+        )
+    except OSError:
+        return None
+    marker = "Operator prompt:\n"
+    if not rendered.startswith("You are running under Vibecrafted core runtime.\n"):
+        return None
+    _wrapper, separator, source_with_newline = rendered.partition(marker)
+    # _runtime_prompt always appends precisely one newline after the source.
+    # Do not normalize whitespace: it is part of the authenticated source.
+    if not separator or not source_with_newline.endswith("\n"):
+        return None
+    recovered = replace(
+        stored_spec,
+        prompt=source_with_newline[:-1],
+        file="",
+    )
+    return recovered if _launch_spec_digest(recovered) == expected_digest else None
+
+
 def _launch_idempotency_registry() -> Path:
     """Directory for launch-idempotency records under the control-plane home."""
     registry = control_plane_home() / "launch_idempotency"
@@ -2314,13 +2353,22 @@ def recover_legacy_dispatch_identity(
         )
     except (KeyError, TypeError, ValueError):
         return None, "legacy dispatch idempotency spec is incomplete"
+    stored_digest = str(record.get("spec_digest") or "")
+    bound_spec = historical
+    if _launch_spec_digest(bound_spec) != stored_digest:
+        recovered_spec = _legacy_preassembly_spec(
+            historical, expected_digest=stored_digest
+        )
+        if recovered_spec is None:
+            return None, "legacy dispatch idempotency record does not bind its launch"
+        bound_spec = recovered_spec
     if (
         record.get("schema") != LAUNCH_IDEMPOTENCY_SCHEMA
         or str(record.get("idempotency_key") or "") != key
         or str(record.get("state") or "") != "dispatched"
         or record.get("accepted") is not True
-        or not str(record.get("spec_digest") or "")
-        or _launch_spec_digest(historical) != str(record.get("spec_digest") or "")
+        or not stored_digest
+        or _launch_spec_digest(bound_spec) != stored_digest
     ):
         return None, "legacy dispatch idempotency record does not bind its launch"
     root = str(Path(spec.root).expanduser().resolve(strict=False))

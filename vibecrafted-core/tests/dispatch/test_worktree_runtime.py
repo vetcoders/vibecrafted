@@ -695,6 +695,113 @@ def test_legacy_dispatch_identity_recovers_only_from_bound_historical_record(
     assert "conflicts" in denied_reason
 
 
+def test_legacy_dispatch_identity_recovers_real_writer_safe_spec_only_when_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production writer redacts the receipt after hashing source input.
+
+    This deliberately exercises ``launch_workflow`` rather than manufacturing
+    a digest-compatible fixture: its stored safe spec names generated
+    ``prompt.md`` while the idempotency record binds the pre-assembly prompt.
+    """
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    repo = tmp_path / "repo"
+    baseline = _repo(repo)
+    geometry = WorktreeManager(repo, day="2026_0907").prepare("W0-c", baseline)
+    dispatch_run_id = "life-ship-260907-234034-86089-implement-fleet"
+    key = f"dispatch:{dispatch_run_id}:cut:W0-c:attempt:initial"
+    source_spec = workflow.WorkflowLaunchSpec(
+        agent="codex",
+        mode="implement",
+        skill="implement",
+        prompt="preserved original W0-c source prompt",
+        file="",
+        runtime="headless",
+        root=geometry.worktree_path,
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_stdin_command",
+        lambda _agent: ["sh", "-c", "exit 0"],
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_resolve_agent_command",
+        lambda _agent, command, _env: list(command),
+    )
+    launched = workflow.launch_workflow(
+        source_spec,
+        repo,
+        env={workflow.LAUNCH_IDEMPOTENCY_KEY_ENV: key},
+    )
+    assert launched["accepted"] is True
+    provider_run_id = str(launched["run_id"])
+    record = workflow._read_launch_idempotency_record(key)
+    stored_spec = record["receipt"]["spec"]
+    assert stored_spec["prompt"] == ""
+    assert stored_spec["file"] != source_spec.file
+    assert record["spec_digest"] == workflow._launch_spec_digest(source_spec)
+    safe = workflow.WorkflowLaunchSpec(**stored_spec)
+    assert workflow._launch_spec_digest(safe) != record["spec_digest"]
+
+    canonical = {
+        "run_id": provider_run_id,
+        "root": geometry.worktree_path,
+        "cut_id": "W0-c",
+        "branch": geometry.branch,
+        "baseline_sha": baseline,
+        "agent": "codex",
+        "skill": "implement",
+        "worker_alive": False,
+        "worker_pid": 66836,
+        "worker_identity": {
+            "pid": 66836,
+            "pgid": 66836,
+            "start_token": "start:83602922338560",
+            "command_sha256": "4aefeb389b1fd968b989295da222f517d3243e83eb43fba74581e6e20cecb141",
+            "run_id": provider_run_id,
+        },
+    }
+    monkeypatch.setattr(
+        workflow,
+        "lookup_run",
+        lambda observed: canonical if observed == provider_run_id else None,
+    )
+    recovered, reason = workflow.recover_legacy_dispatch_identity(
+        workflow.WorkflowLaunchSpec(
+            agent="codex",
+            mode="implement",
+            skill="implement",
+            prompt="",
+            file="",
+            runtime="headless",
+            root=geometry.worktree_path,
+        ),
+        env={workflow.LAUNCH_IDEMPOTENCY_KEY_ENV: key},
+        provider_run_id=provider_run_id,
+        cut_id="W0-c",
+        branch=geometry.branch,
+        baseline_sha=baseline,
+    )
+    assert reason == ""
+    assert recovered is not None
+
+    prompt_path = Path(stored_spec["file"])
+    prompt_path.write_text("tampered generated prompt\n", encoding="utf-8")
+    denied, denied_reason = workflow.recover_legacy_dispatch_identity(
+        source_spec,
+        env={workflow.LAUNCH_IDEMPOTENCY_KEY_ENV: key},
+        provider_run_id=provider_run_id,
+        cut_id="W0-c",
+        branch=geometry.branch,
+        baseline_sha=baseline,
+    )
+    assert denied is None
+    assert (
+        denied_reason == "legacy dispatch idempotency record does not bind its launch"
+    )
+
+
 def test_cross_day_legacy_resume_reuses_original_checkout_and_leaves_settled_siblings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
