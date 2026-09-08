@@ -290,6 +290,81 @@ def test_non_overlapping_kdl_upgrade_merges_user_preference_and_new_defaults(
     _resolve(roots, capsys, status="ready")
 
 
+def test_kdl_upgrade_merges_user_scalar_with_shipped_nested_keybinds_and_retries(
+    tmp_path, roots, capsys
+):
+    """The 4.3.0 -> 4.3.1 incident: scalar user preference plus new binds."""
+    reproducer = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "fixtures/kdl-runtime-preference-upgrade.json"
+        ).read_text(encoding="utf-8")
+    )
+    incoming = (
+        Path(__file__).resolve().parents[2]
+        / "vibecrafted-core/vibecrafted_core/config/vc-frame/config.kdl"
+    ).read_text(encoding="utf-8")
+    shipped_keybinds = reproducer["shipped_keybinds"]
+    assert shipped_keybinds in incoming
+    previous = incoming.replace(shipped_keybinds, "")
+    initial = _install(
+        seed_runtime_pack(
+            tmp_path / "pack-a", version="9.9.9+a", frame_config=previous
+        ),
+        capsys,
+    )
+    config = roots["product_config"] / "vc-frame/config.kdl"
+    config.write_bytes(
+        config.read_bytes().replace(
+            reproducer["user_anchor"].encode(),
+            f'{reproducer["user_anchor"]}\n{reproducer["user_scalar"]}'.encode(),
+        )
+    )
+    payload_b = seed_runtime_pack(
+        tmp_path / "pack-b", version="9.9.10+b", frame_config=incoming
+    )
+
+    upgraded = _install(payload_b, capsys)
+    expected = incoming.replace(
+        reproducer["user_anchor"],
+        f'{reproducer["user_anchor"]}\n{reproducer["user_scalar"]}',
+    ).encode()
+    assert config.read_bytes() == expected
+    assert b'bind "Super n" {' in config.read_bytes()
+    assert b'bind "Super Shift ." {' in config.read_bytes()
+    assert upgraded["root"] != initial["root"]
+
+    _install(payload_b, capsys)
+    assert config.read_bytes() == expected
+    _resolve(roots, capsys, status="ready")
+
+
+def test_kdl_upgrade_rejects_malformed_user_structure_without_publication(
+    installed, tmp_path, capsys
+):
+    paths, _, result = installed
+    config = paths["product_config"] / "vc-frame/config.kdl"
+    config.write_bytes(config.read_bytes() + b"\n}\n")
+    before = _snapshot(paths["product_config"])
+    active = (paths["runtime_home"] / "active.json").read_bytes()
+    source = (
+        Path(result["root"])
+        / "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
+    )
+    payload_b = seed_runtime_pack(
+        tmp_path / "pack-b",
+        version="9.9.10+b",
+        frame_config=source.read_text(encoding="utf-8").replace(
+            "mouse_mode true", "mouse_mode false"
+        ),
+    )
+    with pytest.raises(RuntimeError, match="KDL structure is unbalanced"):
+        _install(payload_b, capsys)
+    capsys.readouterr()
+    assert _snapshot(paths["product_config"]) == before
+    assert (paths["runtime_home"] / "active.json").read_bytes() == active
+
+
 def test_same_setting_kdl_conflict_refuses_publication_and_preserves_evidence(
     installed, tmp_path, capsys
 ):

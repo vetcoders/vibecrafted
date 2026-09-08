@@ -1,0 +1,5 @@
+{
+  "user_anchor": "copy_command \"pbcopy\"",
+  "user_scalar": "copy_on_select true",
+  "shipped_keybinds": "        // Create new workspace through the existing Session Manager. This is\n        // intentionally a plugin focus, never a direct NewTab shortcut.\n        bind \"Super n\" {\n            LaunchOrFocusPlugin \"session-manager\" {\n                floating true\n                move_to_focused_tab true\n            };\n        }\n        // Quick cmd uses the active compact-bar's existing click path. Keep\n        // this in shared so the host's Cmd+Shift+. CSI-u event works in LOCK\n        // too; the bar itself selects only its active tab instance.\n        bind \"Super Shift .\" {\n            MessagePlugin \"compact-bar\" {\n                name \"vc_quick_cmd\"\n            };\n        }\n"
+}
