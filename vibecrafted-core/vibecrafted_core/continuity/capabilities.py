@@ -423,7 +423,9 @@ class CursorCliSurface:
 
 
 _PROBE_CACHE: dict[str, ProbeResult] = {}
-_CURSOR_SURFACE_CACHE: dict[str, CursorCliSurface] = {}
+# Path → (binary identity, surface). Identity invalidates when the file at the
+# same path changes (provider upgrade/downgrade on a shared install location).
+_CURSOR_SURFACE_CACHE: dict[str, tuple[str, CursorCliSurface]] = {}
 
 
 def clear_cursor_surface_cache() -> None:
@@ -435,6 +437,21 @@ def clear_probe_cache() -> None:
     """Drop cached provider probes and cursor help surfaces."""
     _PROBE_CACHE.clear()
     clear_cursor_surface_cache()
+
+
+def _executable_identity(path: str | None) -> str:
+    """Stable identity for the file currently at ``path`` (content-sensitive).
+
+    Uses device/inode/size/mtime so a binary replaced at the same PATH entry
+    invalidates the surface cache without requiring ``refresh=True``.
+    """
+    if not path:
+        return "missing"
+    try:
+        st = os.stat(path, follow_symlinks=True)
+    except OSError:
+        return "missing"
+    return f"{st.st_dev}:{st.st_ino}:{st.st_size}:{st.st_mtime_ns}"
 
 
 def _default_runner(timeout: float) -> Runner:
@@ -622,14 +639,26 @@ def probe_cursor_cli_surface(
     Read-only: ``--version`` / ``--help`` only (or an injected ``help_text`` for
     tests). Missing binaries are ``probe_failed`` — not proof of incapability,
     but enough to refuse a launch that would otherwise guess flags.
+
+    Only a *successful* bounded ``--help`` may establish flags. Nonzero exit,
+    timeout, or empty help stays ``probe_failed`` — error prose that happens to
+    mention ``--force`` / ``--trust`` is never capability evidence.
     """
     checked_at = utc_now_iso()
     recipe = capability_for("cursor").probe_recipe
     assert recipe is not None  # cursor always declares a recipe
     resolved = executable or shutil.which(recipe.cli, path=agent_tool_search_path())
     cache_key = resolved or f"missing:{recipe.cli}"
-    if not refresh and help_text is None and cache_key in _CURSOR_SURFACE_CACHE:
-        return _CURSOR_SURFACE_CACHE[cache_key]
+    identity = _executable_identity(resolved)
+    if not refresh and help_text is None:
+        cached = _CURSOR_SURFACE_CACHE.get(cache_key)
+        if cached is not None and cached[0] == identity:
+            return cached[1]
+
+    def _store(surface: CursorCliSurface) -> CursorCliSurface:
+        if help_text is None:
+            _CURSOR_SURFACE_CACHE[cache_key] = (identity, surface)
+        return surface
 
     if help_text is not None:
         surface_text = help_text
@@ -639,20 +668,20 @@ def probe_cursor_cli_surface(
         exe = resolved
     else:
         if resolved is None:
-            result = CursorCliSurface(
-                executable=None,
-                version=None,
-                help_text="",
-                flags={flag: False for flag in CURSOR_TRACKED_FLAGS},
-                state=PROBE_FAILED,
-                detail=(
-                    f"{recipe.cli} not found on $PATH — cannot verify required "
-                    "cursor flags; refusing to guess"
-                ),
-                checked_at=checked_at,
+            return _store(
+                CursorCliSurface(
+                    executable=None,
+                    version=None,
+                    help_text="",
+                    flags={flag: False for flag in CURSOR_TRACKED_FLAGS},
+                    state=PROBE_FAILED,
+                    detail=(
+                        f"{recipe.cli} not found on $PATH — cannot verify required "
+                        "cursor flags; refusing to guess"
+                    ),
+                    checked_at=checked_at,
+                )
             )
-            _CURSOR_SURFACE_CACHE[cache_key] = result
-            return result
 
         run = runner or _default_runner(timeout)
         version_probe = run([resolved, *recipe.version_args])
@@ -660,39 +689,63 @@ def probe_cursor_cli_surface(
             reason = (
                 version_probe.stderr or version_probe.stdout or "non-zero exit"
             ).strip()
-            result = CursorCliSurface(
-                executable=resolved,
-                version=None,
-                help_text="",
-                flags={flag: False for flag in CURSOR_TRACKED_FLAGS},
-                state=PROBE_FAILED,
-                detail=(
-                    f"{recipe.cli} present at {resolved} but failed to execute: "
-                    f"{reason} — cannot verify required cursor flags"
-                ),
-                checked_at=checked_at,
+            return _store(
+                CursorCliSurface(
+                    executable=resolved,
+                    version=None,
+                    help_text="",
+                    flags={flag: False for flag in CURSOR_TRACKED_FLAGS},
+                    state=PROBE_FAILED,
+                    detail=(
+                        f"{recipe.cli} present at {resolved} but failed to execute: "
+                        f"{reason} — cannot verify required cursor flags"
+                    ),
+                    checked_at=checked_at,
+                )
             )
-            _CURSOR_SURFACE_CACHE[cache_key] = result
-            return result
 
         version_text = _first_line(version_probe.stdout or version_probe.stderr)
         help_probe = run([resolved, *recipe.help_args])
+        # Success-gated: never parse flag names out of failed --help stderr.
+        if not help_probe.ok:
+            reason = (help_probe.stderr or help_probe.stdout or "non-zero exit").strip()
+            exit_bit = (
+                "timed out"
+                if reason == "timeout"
+                else f"failed (exit {help_probe.returncode})"
+            )
+            return _store(
+                CursorCliSurface(
+                    executable=resolved,
+                    version=version_text,
+                    help_text="",
+                    flags={flag: False for flag in CURSOR_TRACKED_FLAGS},
+                    state=PROBE_FAILED,
+                    detail=(
+                        f"{recipe.cli} {version_text or '(unknown version)'} --help "
+                        f"{exit_bit}: {reason} — cannot verify required cursor flags; "
+                        "refusing to treat error prose as capability evidence"
+                    ),
+                    checked_at=checked_at,
+                )
+            )
+
         surface_text = (help_probe.stdout or "") + "\n" + (help_probe.stderr or "")
         if not surface_text.strip():
-            result = CursorCliSurface(
-                executable=resolved,
-                version=version_text,
-                help_text="",
-                flags={flag: False for flag in CURSOR_TRACKED_FLAGS},
-                state=PROBE_FAILED,
-                detail=(
-                    f"{recipe.cli} {version_text or '(unknown version)'} returned "
-                    "empty --help — cannot verify required cursor flags"
-                ),
-                checked_at=checked_at,
+            return _store(
+                CursorCliSurface(
+                    executable=resolved,
+                    version=version_text,
+                    help_text="",
+                    flags={flag: False for flag in CURSOR_TRACKED_FLAGS},
+                    state=PROBE_FAILED,
+                    detail=(
+                        f"{recipe.cli} {version_text or '(unknown version)'} returned "
+                        "empty --help — cannot verify required cursor flags"
+                    ),
+                    checked_at=checked_at,
+                )
             )
-            _CURSOR_SURFACE_CACHE[cache_key] = result
-            return result
         state = PROBE_CONFIRMED
         detail = (
             f"{recipe.cli} {version_text or '(unknown version)'} help surface "
@@ -703,18 +756,17 @@ def probe_cursor_cli_surface(
     flags = {
         flag: _help_mentions_flag(surface_text, flag) for flag in CURSOR_TRACKED_FLAGS
     }
-    result = CursorCliSurface(
-        executable=exe,
-        version=version_text,
-        help_text=surface_text,
-        flags=flags,
-        state=state,
-        detail=detail,
-        checked_at=checked_at,
+    return _store(
+        CursorCliSurface(
+            executable=exe,
+            version=version_text,
+            help_text=surface_text,
+            flags=flags,
+            state=state,
+            detail=detail,
+            checked_at=checked_at,
+        )
     )
-    if help_text is None:
-        _CURSOR_SURFACE_CACHE[cache_key] = result
-    return result
 
 
 def require_cursor_flags(

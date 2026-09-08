@@ -79,26 +79,44 @@ spawn_validate_runtime "$runtime"
 spawn_prepare_paths cursor "$plan_file" "$root" "$mode" "$dry_run"
 spawn_scan_active "${SPAWN_LOG_DIR:-$SPAWN_REPORT_DIR}"
 
-# Probe the *selected* cursor-agent --help before writing launch meta/receipts.
-# Headless bypass requires --force and --trust (spawn.py PERMISSION_CONTRACT).
-# Missing required flags fail closed — never silently drop them for an older CLI.
-# Probe before spawn_write_meta so a refused launch never leaves status=launching.
+# Probe the *selected* cursor-agent via the canonical Python surface before
+# writing launch meta/receipts. Headless bypass requires --force and --trust
+# (spawn.py PERMISSION_CONTRACT). Only a successful bounded --help may establish
+# flags — never swallow nonzero help or parse error prose. Probe before
+# spawn_write_meta so a refused launch never leaves status=launching.
 cursor_perm_flags="--force --trust"
 if (( !dry_run )); then
   spawn_require_command cursor-agent
-  cursor_version="$(cursor-agent --version 2>/dev/null | head -n1 || true)"
-  cursor_help="$(cursor-agent --help 2>&1 || true)"
-  if [[ -z "${cursor_help//[[:space:]]/}" ]]; then
-    spawn_die "cursor-agent ${cursor_version:-unknown} returned empty --help; cannot verify required flags --force --trust"
-  fi
-  missing_flags=()
-  for flag in --force --trust; do
-    if ! printf '%s' "$cursor_help" | grep -E "(^|[^A-Za-z0-9_-])${flag}([^A-Za-z0-9_-]|$)" >/dev/null 2>&1; then
-      missing_flags+=("$flag")
-    fi
-  done
-  if ((${#missing_flags[@]})); then
-    spawn_die "cursor-agent ${cursor_version:-unknown} lacks required flag(s) ${missing_flags[*]} for headless bypass; refusing to launch (no silent downgrade). Update cursor-agent or select a binary that exposes these flags."
+  probe_core="$(spawn_python_core_path 2>/dev/null || { cd "$SCRIPT_DIR/../../.." && pwd; })"
+  probe_py="$(spawn_python_bin)"
+  cursor_probe_timeout="${VIBECRAFTED_CURSOR_PROBE_TIMEOUT_S:-10}"
+  set +e
+  cursor_probe_out="$(
+    PYTHONPATH="$probe_core${PYTHONPATH:+:$PYTHONPATH}" \
+      "$probe_py" - "$cursor_probe_timeout" <<'PY' 2>&1
+import sys
+
+from vibecrafted_core.continuity.capabilities import (
+    probe_cursor_cli_surface,
+    require_cursor_flags,
+)
+
+timeout = float(sys.argv[1]) if len(sys.argv) > 1 else 10.0
+try:
+    surface = probe_cursor_cli_surface(timeout=timeout, refresh=True)
+    require_cursor_flags(
+        ("--force", "--trust"), surface, permissions="bypass"
+    )
+except Exception as exc:  # noqa: BLE001 — surface refusal to spawn_die
+    print(exc)
+    raise SystemExit(1) from exc
+print(surface.version or "unknown")
+PY
+  )"
+  cursor_probe_rc=$?
+  set -e
+  if (( cursor_probe_rc != 0 )); then
+    spawn_die "${cursor_probe_out:-cursor-agent capability probe failed; cannot verify required flags --force --trust (no silent downgrade)}"
   fi
 fi
 

@@ -152,9 +152,7 @@ def test_old_cli_missing_trust_fails_closed_no_silent_downgrade(
 
     # Never approximate by dropping --trust.
     with pytest.raises(ValueError, match="--trust"):
-        spawn.interactive_policy_command(
-            "cursor", "hi", "local-native", "bypass"
-        )
+        spawn.interactive_policy_command("cursor", "hi", "local-native", "bypass")
 
 
 def test_invalid_resume_brief_path_rejected(
@@ -217,16 +215,16 @@ def test_best_of_n_never_invented(
 def test_failure_exit_and_receipt_paths_preserved_in_spawn_wrapper() -> None:
     """Public shell launch path keeps prompt-file stdin + nonzero salvage."""
     repo = Path(__file__).resolve().parents[2]
-    wrapper = (
-        repo
-        / "vibecrafted-core/vibecrafted_core/runtime/scripts/cursor_spawn.sh"
-    )
+    wrapper = repo / "vibecrafted-core/vibecrafted_core/runtime/scripts/cursor_spawn.sh"
     body = wrapper.read_text(encoding="utf-8")
-    assert "cursor-agent --help" in body
+    assert "probe_cursor_cli_surface" in body
+    assert "require_cursor_flags" in body
     assert "no silent downgrade" in body
-    assert "lacks required flag" in body
     # Capability probe must precede spawn_write_meta (no launching ghost).
-    assert body.index("cursor-agent --help") < body.index("spawn_write_meta")
+    assert body.index("surface = probe_cursor_cli_surface") < body.index(
+        'spawn_write_meta "$SPAWN_META"'
+    )
+    assert "cursor-agent --help 2>&1 || true" not in body
     assert "< $qruntime" in body
     assert "pipeline_status" in body
     assert "status: failed" in body
