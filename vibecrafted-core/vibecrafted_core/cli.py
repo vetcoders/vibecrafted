@@ -23,6 +23,12 @@ from .control_plane import (
     sync_state,
 )
 from .package_resources import deck_path, package_root
+from .repo_selection import (
+    RepoSelectionError,
+    add_repo_arguments,
+    parse_worktree_flag,
+    select_repository,
+)
 from .runtime_paths import is_operator_home_root, resolve_operator_launch_root
 from .server_observation import (
     ServerObservationError,
@@ -45,6 +51,7 @@ from .workflow import (
     normalize_launch_spec,
     operator_continue_run,
     recover_launch_receipt,
+    resolve_fork_source,
 )
 
 AGENTS = {"claude", "codex", "agy", "junie", "grok", "cursor", "swarm"}
@@ -193,7 +200,7 @@ def _add_launch_parser(sub: argparse._SubParsersAction, name: str) -> None:
         run.add_argument("agent", nargs="?")
     if name == "paste":
         run.add_argument("--skill", default="workflow")
-        run.add_argument("--root", default="")
+        add_repo_arguments(run)
         run.add_argument("--print-prompt", action="store_true")
         run.add_argument("--dry-run", action="store_true")
         run.add_argument("--json", action="store_true")
@@ -206,7 +213,15 @@ def _add_launch_parser(sub: argparse._SubParsersAction, name: str) -> None:
         help="read the prompt from stdin and keep it out of argv/temp files",
     )
     run.add_argument("--runtime", default="")
-    run.add_argument("--root", default="")
+    add_repo_arguments(run)
+    run.add_argument(
+        "--worktree",
+        nargs="?",
+        const="true",
+        default="",
+        metavar="true|false",
+        help="run the worker in a fresh linked checkout of the selected repository",
+    )
     run.add_argument("--mode", default="")
     run.add_argument("--count", type=int)
     run.add_argument("--depth", type=int)
@@ -417,10 +432,22 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="read the continuation prompt from stdin (keeps it out of argv)",
     )
-    resume.add_argument("--root", default="")
+    add_repo_arguments(resume)
     resume.add_argument("--source-dir", default="")
     resume.add_argument("--model", default="")
     resume.add_argument("--json", action="store_true")
+    fork_source = sub.add_parser(
+        "fork-source",
+        help="resolve the provider session a `vibecrafted fork` branches from",
+    )
+    fork_source.add_argument(
+        "agent",
+        choices=sorted(AGENTS - {"swarm"}),
+        help="provider that owns the source session",
+    )
+    fork_source.add_argument("--run-id", default="")
+    fork_source.add_argument("--session", default="")
+    fork_source.add_argument("--json", action="store_true")
     for name in LAUNCHERS:
         _add_launch_parser(sub, name)
     return parser
@@ -571,6 +598,10 @@ def _print_launch_receipt(payload: dict[str, Any]) -> None:
     print(f"agent:      {agent}")
     print(f"skill:      {_field(payload, 'skill')}")
     print(f"root:       {_field(payload, 'root')}")
+    if payload.get("worktree"):
+        print(f"worktree:   {_field(payload, 'worktree_branch')}")
+        print(f"parent:     {_field(payload, 'parent_root')}")
+        print(f"baseline:   {_field(payload, 'worktree_baseline_sha')}")
     print(f"dispatch:   {_field(payload, 'dispatch', '0')}")
     print(f"status:     {_field(payload, 'status', 'launching')}")
     reasons = _launch_receipt_reasons(payload)
@@ -942,11 +973,23 @@ def _agent_resume(agent: str, argv: Sequence[str]) -> int:
     parser.add_argument("--session", default="")
     parser.add_argument("-p", "--prompt", default="")
     parser.add_argument("-f", "--file", dest="prompt_file", default="")
-    parser.add_argument("--root", default="")
+    add_repo_arguments(parser)
     parser.add_argument("--source-dir", default="")
     parser.add_argument("--model", default="")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(list(argv))
+
+    resume_root = ""
+    if str(args.repo or "").strip() or str(args.root or "").strip():
+        # An explicit repository must exist and must not conflict; an absent one
+        # deliberately stays empty so the parent run's recorded root wins.
+        try:
+            resume_root = select_repository(
+                args.repo, args.root, label=f"resume {agent}"
+            ).path
+        except RepoSelectionError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
     session = str(args.session or "").strip()
     run_id = str(args.run_id or "").strip()
@@ -1018,7 +1061,7 @@ def _agent_resume(agent: str, argv: Sequence[str]) -> int:
         source_dir=args.source_dir or package_root(),
         prompt=prompt,
         expected_agent=agent,
-        root=args.root,
+        root=resume_root,
         model=args.model,
     )
     if args.json:
@@ -1327,6 +1370,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "control-plane-revalidate",
         "dispatch",
         "doctor",
+        "fork-source",
         "paste",
         "procs",
         "reap",
@@ -1688,11 +1732,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else:
                     _print_resume_session_receipt(resume_result)
                 return 2
-        resume_root = args.root or resolve_operator_launch_root()
+        try:
+            resume_root = select_repository(
+                args.repo,
+                args.root,
+                fallback=resolve_operator_launch_root,
+                label="resume-session",
+            ).path
+        except RepoSelectionError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         if is_operator_home_root(resume_root):
             print(
                 "error: refusing to launch against the home directory; "
-                "open a workspace in Vibecrafted or pass --root",
+                "open a workspace in Vibecrafted or pass --repo",
                 file=sys.stderr,
             )
             return 2
@@ -1709,9 +1762,38 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             _print_resume_session_receipt(resume_result)
         return 0 if resume_result.get("accepted") else 1
+    if args.command == "fork-source":
+        fork_result = resolve_fork_source(
+            args.agent, run_id=args.run_id, session=args.session
+        )
+        if args.json:
+            print(json.dumps(fork_result, ensure_ascii=False, indent=2))
+        elif fork_result.get("accepted"):
+            print(f"agent:              {fork_result.get('agent')}")
+            print(f"agent_session_id:   {fork_result.get('agent_session_id')}")
+            print(f"source_run_id:      {fork_result.get('source_run_id') or ''}")
+            print(f"identity_source:    {fork_result.get('identity_source')}")
+            print(f"native_fork:        {fork_result.get('native_fork')}")
+        else:
+            print(
+                f"error: cannot resolve fork source: {fork_result.get('reason')}",
+                file=sys.stderr,
+            )
+            for key in ("detail", "hint"):
+                value = str(fork_result.get(key) or "").strip()
+                if value:
+                    print(f"{key}: {value}", file=sys.stderr)
+        return 0 if fork_result.get("accepted") else 2
     if args.command == "paste":
         from .paste import run_namespace
 
+        try:
+            args.root = select_repository(
+                args.repo, args.root, fallback=Path.cwd, label="paste"
+            ).path
+        except RepoSelectionError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         return run_namespace(args, source_dir=package_root())
 
     source_dir = args.source_dir or package_root()
@@ -1724,11 +1806,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     research_agents = ()
     if args.command == "research" and isinstance(agent_arg, list):
         research_agents = tuple(agent_arg) if len(agent_arg) > 1 else ()
-    launch_root = args.root or str(resolve_operator_launch_root())
+    try:
+        worktree_requested = parse_worktree_flag(
+            getattr(args, "worktree", ""), label=f"vibecrafted {args.command}"
+        )
+        launch_root = select_repository(
+            args.repo,
+            args.root,
+            fallback=resolve_operator_launch_root,
+            require_git=worktree_requested,
+            label=f"vibecrafted {args.command}",
+        ).path
+    except RepoSelectionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if is_operator_home_root(launch_root):
         print(
             "error: refusing to launch against the home directory; "
-            "open a workspace in Vibecrafted or pass --root",
+            "open a workspace in Vibecrafted or pass --repo",
             file=sys.stderr,
         )
         return 2
@@ -1739,6 +1834,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "file": args.file,
         "runtime": _default_runtime(args.runtime, launch_root),
         "root": launch_root,
+        "worktree": worktree_requested,
         "mode": args.mode or args.command,
         "count": args.count,
         "depth": args.depth,

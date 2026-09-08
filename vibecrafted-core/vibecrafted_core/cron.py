@@ -15,6 +15,7 @@ from . import ui
 from .autonomy_surface import destructive_remote_push
 from .clock import utc_now, utc_now_compact, utc_now_z
 from .loop import default_state_file
+from .repo_selection import RepoSelectionError, add_repo_arguments, select_repository
 from .runtime_paths import vibecrafted_home
 
 HARD_STOP_NEEDLES = (
@@ -371,7 +372,7 @@ def _build_parser() -> argparse.ArgumentParser:
     tick_parser = sub.add_parser(
         "tick", help="append one LOOP heartbeat and optional context snapshot"
     )
-    tick_parser.add_argument("--root", default="")
+    add_repo_arguments(tick_parser)
     tick_parser.add_argument("--state-file", default="")
     tick_parser.add_argument("--journal", default="")
     tick_parser.add_argument(
@@ -388,7 +389,7 @@ def _build_parser() -> argparse.ArgumentParser:
     tick_parser.add_argument("--context-timeout", type=int, default=60)
 
     line_parser = sub.add_parser("line", help="print a crontab line for LOOP heartbeat")
-    line_parser.add_argument("--root", default="")
+    add_repo_arguments(line_parser)
     line_parser.add_argument("--every-minutes", type=int, default=10)
     line_parser.add_argument("--after-idle-minutes", type=int, default=10)
     line_parser.add_argument("--then-cmd", default="")
@@ -405,6 +406,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     """CLI entrypoint: dispatch to ``tick`` or ``line``, else print help and return 2."""
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.action in {"tick", "line"}:
+        try:
+            args.root = select_repository(
+                args.repo, args.root, fallback=Path.cwd, label=f"cron {args.action}"
+            ).path
+        except RepoSelectionError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     if args.action == "tick":
         return tick(args)
     if args.action == "line":

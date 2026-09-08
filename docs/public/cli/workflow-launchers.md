@@ -9,8 +9,11 @@ order: 30
 
 Every skill is a launcher: `vibecrafted <skill> <agent>` dispatches one agent
 into one workflow and produces a tracked run with a report. Skills share the
-[uniform flag contract](/docs/cli-overview/) (`--prompt`, `--file`, `--count`,
-`--depth`, `--session`), and each also installs a `vc-<skill>` shortcut.
+[uniform flag contract](/docs/cli-overview/) (`--prompt`, `--file`, `--repo`,
+`--worktree`, `--model`, `--count`, `--depth`, `--session`), and each also
+installs a `vc-<skill>` shortcut. `--repo <path>` selects the repository from
+any working directory; `--worktree true` runs the worker in a fresh linked
+checkout of that repository.
 
 ## Canonical pipeline order
 

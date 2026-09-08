@@ -2961,6 +2961,11 @@ def test_fork_codex_opens_named_pane_in_current_vc_frame_tab(
     env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
     env["VIBECRAFTED_RUNTIME_BIN"] = str(fake_bin)
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
+    # A checkout carries no product vc-frame entry; the same-tab fork pane is
+    # proven through the developer-mode selector with the fake binary.
+    env["VIBECRAFTED_PREFER_REPO_VC_FRAME"] = "1"
+    env["VIBECRAFTED_VC_FRAME_BIN"] = str(fake_bin / "vc-frame")
+    env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
     env["VC_FRAME_PANE_ID"] = "7"
     env["VC_FRAME_SESSION_NAME"] = "operator-test"
     env["CAPTURE_FILE"] = str(capture_file)
@@ -3020,6 +3025,11 @@ def test_fork_codex_supports_floating_same_tab_placement(tmp_path: Path) -> None
     env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
     env["VIBECRAFTED_RUNTIME_BIN"] = str(fake_bin)
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
+    # A checkout carries no product vc-frame entry; the same-tab fork pane is
+    # proven through the developer-mode selector with the fake binary.
+    env["VIBECRAFTED_PREFER_REPO_VC_FRAME"] = "1"
+    env["VIBECRAFTED_VC_FRAME_BIN"] = str(fake_bin / "vc-frame")
+    env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
     env["VC_FRAME_PANE_ID"] = "7"
     env["VC_FRAME_SESSION_NAME"] = "operator-test"
     env["CAPTURE_FILE"] = str(capture_file)

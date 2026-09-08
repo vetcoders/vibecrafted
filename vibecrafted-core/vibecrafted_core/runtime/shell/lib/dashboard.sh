@@ -270,7 +270,7 @@ PY_RUNTIME_ADMIT
 # rejects it as an unknown Frame argument), while preserving existing Frame
 # layouts and options.
 _vetcoders_start_prepare_arguments() {
-  local raw_root="" normalized_root="" arg
+  local raw_root="" raw_repo="" normalized_root="" arg
   _vetcoders_start_frame_argv=()
   while (($#)); do
     arg="$1"
@@ -290,6 +290,21 @@ _vetcoders_start_prepare_arguments() {
           return 2
         fi
         ;;
+      --repo)
+        shift
+        if (($# == 0)) || [[ -z "$1" ]]; then
+          printf 'vc-start: --repo requires an existing directory value.\n' >&2
+          return 2
+        fi
+        raw_repo="$1"
+        ;;
+      --repo=*)
+        raw_repo="${arg#--repo=}"
+        if [[ -z "$raw_repo" ]]; then
+          printf 'vc-start: --repo requires an existing directory value.\n' >&2
+          return 2
+        fi
+        ;;
       --)
         _vetcoders_start_frame_argv+=("$arg")
         shift
@@ -304,12 +319,11 @@ _vetcoders_start_prepare_arguments() {
   done
 
   unset VIBECRAFTED_START_ROOT
-  [[ -n "$raw_root" ]] || return 0
-  normalized_root="$(_vetcoders_absolute_physical_path "$raw_root")"
-  if [[ -z "$normalized_root" || ! -d "$normalized_root" ]]; then
-    printf 'vc-start: --root is not an existing directory: %s\n' "$raw_root" >&2
-    return 2
-  fi
+  [[ -n "$raw_root" || -n "$raw_repo" ]] || return 0
+  # Same selector as every other public verb: `--repo` standard, `--root`
+  # legacy, conflicting pair refused, path must already exist.
+  normalized_root="$(_vetcoders_select_repo "vc-start" "$raw_repo" "$raw_root")" || return $?
+  [[ -n "$normalized_root" ]] || return 0
   export VIBECRAFTED_START_ROOT="$normalized_root"
 }
 

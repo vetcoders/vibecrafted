@@ -50,17 +50,28 @@ supervised run.
 
 Every skill launcher accepts the same flag contract:
 
-| Flag                   | Meaning                                    |
-| ---------------------- | ------------------------------------------ |
-| `-p, --prompt <text>`  | Inline prompt                              |
-| `-f, --file <path.md>` | Input file as prompt context               |
-| `--count <n>`          | Marbles / Polarize loop count (default: 3) |
-| `--depth <n>`          | Marbles plan crawl depth (default: 3)      |
-| `--session <id>`       | Session ID for `vibecrafted resume`        |
+| Flag                       | Meaning                                                                |
+| -------------------------- | ---------------------------------------------------------------------- |
+| `-p, --prompt <text>`      | Inline prompt                                                          |
+| `-f, --file <path.md>`     | Input file as prompt context                                           |
+| `--repo <path>`            | Repository to work in, from any directory (`--root`: legacy)           |
+| `--worktree [true\|false]` | Run in a fresh linked checkout of `--repo` (clean Git root)            |
+| `--model <name>`           | Agent model override (passed through exactly, e.g. `claude-fable-5-1`) |
+| `--count <n>`              | Marbles / Polarize loop count (default: 3)                             |
+| `--depth <n>`              | Marbles plan crawl depth (default: 3)                                  |
+| `--session <id>`           | Session ID for `vibecrafted resume` / `vibecrafted fork`               |
 
-`--verbose` is a global option for detailed output. Model overrides exist for
-claude (`--model`), codex (`-m`) and cursor (`--model`); other agents run
-their defaults.
+`--verbose` is a global option for detailed output. `--repo` and the legacy
+`--root` go through one selector everywhere: passing both with different
+paths is an error, never a silent pick. Model overrides exist for claude
+(`--model`), codex (`-m`), grok (`-m`) and cursor (`--model`); other agents
+run their defaults.
+
+```bash
+cd ~/Downloads   # not a Git checkout
+vibecrafted workflow claude --model claude-fable-5-1 --worktree true \
+  --repo ~/Projects/app --prompt "Ship it in an isolated checkout"
+```
 
 ## Action-first agent modes
 

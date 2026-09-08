@@ -224,6 +224,14 @@ _vetcoders_skill() {
     echo "--session is only supported by vibecrafted resume." >&2
     return 1
   }
+  # An isolated checkout is owned by the core launcher (WorktreeManager via
+  # launch_workflow). The deck routes `--worktree` launches there before this
+  # helper is reached; if one still lands here, refuse instead of silently
+  # running in the shared checkout under a flag that promised isolation.
+  [[ "${_vetcoders_contract_worktree:-}" != "true" ]] || {
+    printf -- '--worktree true is honoured by the core launcher only: vibecrafted %s %s --worktree true ... (the shell skill helper cannot create a checkout).\n' "$skill" "$tool" >&2
+    return 1
+  }
   local skill_code root run_id run_lock
   skill_code="$(_vetcoders_skill_prefix "$skill")"
   root="${_vetcoders_contract_root:-$(_vetcoders_repo_root)}"

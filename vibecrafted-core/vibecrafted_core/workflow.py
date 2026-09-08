@@ -22,6 +22,7 @@ from .artifacts import validate_artifacts
 from .continuity.capabilities import (
     PROBE_CONFIRMED,
     SUPPORTED,
+    UNSUPPORTED,
     UNVERIFIED,
     capability_for,
     probe_provider,
@@ -45,6 +46,7 @@ from .init_resume import init_resume_block
 from .model_overrides import _model_override_receipt, _with_model_override
 from .package_resources import deck_path as package_deck_path
 from .process_control import process_identity_receipt, validate_process_identity
+from .repo_selection import git_toplevel, parse_worktree_flag
 from .report_contract import CLAIM_DIGEST_ENV, reserve_launcher_report_template
 from .research_config import ResearchAgentSelection, resolve_research_runtime_config
 from .run_mutation import mutate_run_meta, run_mutation_locks
@@ -114,6 +116,11 @@ class WorkflowLaunchSpec:
     # session/new) may reserve one through reserve_run_id(). Empty keeps the
     # historical launch-time allocation path.
     run_id: str = ""
+    # ``--worktree true``: the worker runs in a fresh linked checkout prepared
+    # by the canonical WorktreeManager (dispatch/worktrees.py). ``root`` then
+    # names that checkout and ``parent_root`` keeps the selected repository.
+    worktree: bool = False
+    parent_root: str = ""
 
     def to_payload(self) -> dict[str, Any]:
         """Serialize the spec to a plain dict for launch logs and events."""
@@ -1549,6 +1556,9 @@ def normalize_launch_spec(
         raise ValueError("Launch requires either --prompt text or --file path.")
     if file_path and not Path(file_path).expanduser().is_file():
         raise ValueError(f"Prompt file does not exist or is not a file: {file_path}")
+    worktree = parse_worktree_flag(payload.get("worktree"))
+    if worktree and not root:
+        raise ValueError("--worktree requires a selected repository (--repo <path>).")
 
     return WorkflowLaunchSpec(
         agent=agent,
@@ -1565,6 +1575,69 @@ def normalize_launch_spec(
         research_synthesizer=research_synthesizer,
         research_synthesizer_model=research_synthesizer_model,
         run_id=str(payload.get("run_id") or "").strip(),
+        worktree=worktree,
+    )
+
+
+def _git_head(repo: Path) -> str:
+    """Current HEAD of ``repo`` or ``""`` when Git cannot answer."""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def _prepare_launch_worktree(
+    spec: WorkflowLaunchSpec, run_id: str
+) -> tuple[WorkflowLaunchSpec, dict[str, Any]]:
+    """Materialize the ``--worktree`` checkout through the canonical manager.
+
+    Reuses the same substrate as dispatch plans and interactive Agent
+    Workspaces (``WorktreeManager.prepare_agent_launch``): a clean selected
+    repository, a linked checkout under ``~/.vibecrafted/worktrees``, branch
+    ``cut/<agent>-<run_id>`` at the selected HEAD. The receipt names both the
+    checkout and the repository it was cut from. Raises ``ValueError`` with an
+    operator-readable reason; the caller turns that into a refused launch.
+    """
+    from .dispatch.worktrees import WorktreeContractError, WorktreeManager
+
+    parent = Path(spec.root or "").expanduser().resolve()
+    toplevel = git_toplevel(parent)
+    if not toplevel:
+        raise ValueError(
+            f"--worktree requires a Git repository; {parent} is not inside one"
+        )
+    if Path(toplevel) != parent:
+        raise ValueError(
+            "--worktree requires the selected repository root, not a "
+            f"subdirectory: pass --repo {toplevel}"
+        )
+    baseline = _git_head(parent)
+    if not baseline:
+        raise ValueError(f"--worktree needs at least one commit in {parent}")
+    manager = WorktreeManager(parent)
+    try:
+        geometry = manager.prepare_agent_launch(spec.agent, run_id, baseline)
+    except WorktreeContractError as exc:
+        raise ValueError(f"--worktree: {exc}") from exc
+    worktree_path = str(Path(geometry.worktree_path).resolve())
+    receipt: dict[str, Any] = {
+        "worktree": True,
+        "worktree_path": worktree_path,
+        "worktree_branch": geometry.branch,
+        "worktree_baseline_sha": geometry.baseline_sha,
+        "parent_root": str(parent),
+    }
+    return (
+        replace(spec, root=worktree_path, parent_root=str(parent)),
+        receipt,
     )
 
 
@@ -1756,7 +1829,7 @@ def machine_launch_receipt(payload: dict[str, Any]) -> dict[str, Any]:
         or ("launching" if accepted else payload.get("reason") or "rejected")
     )
     agent = str(payload.get("agent") or "")
-    return {
+    receipt: dict[str, Any] = {
         "schema": LAUNCH_RECEIPT_SCHEMA,
         "run_id": str(payload.get("run_id") or ""),
         "agent": agent,
@@ -1767,6 +1840,16 @@ def machine_launch_receipt(payload: dict[str, Any]) -> dict[str, Any]:
         "replayed": bool(payload.get("replayed")),
         "idempotency_key": str(payload.get("idempotency_key") or ""),
     }
+    if payload.get("worktree"):
+        receipt["worktree"] = True
+        for key in (
+            "worktree_path",
+            "worktree_branch",
+            "worktree_baseline_sha",
+            "parent_root",
+        ):
+            receipt[key] = str(payload.get(key) or "")
+    return receipt
 
 
 def _launch_idempotency_enabled() -> bool:
@@ -2614,6 +2697,29 @@ def launch_workflow(
     run_id = spec.run_id or claimed_run_id or reserve_run_id(spec.skill)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
         raise ValueError("run_id must be a safe 1-128 character identifier")
+    worktree_receipt: dict[str, Any] = {}
+    if spec.worktree:
+        try:
+            spec, worktree_receipt = _prepare_launch_worktree(spec, run_id)
+        except ValueError as exc:
+            return _finish_launch_idempotency(
+                idem_key,
+                {
+                    "accepted": False,
+                    "message": f"Failed to launch {spec.skill}: {exc}",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "reason": "worktree_rejected",
+                    "run_id": run_id,
+                    "agent": spec.agent,
+                    "skill": spec.skill,
+                    "root": spec.root,
+                    "parent_root": spec.root,
+                    "worktree": True,
+                    "status": "failed",
+                    "control_plane": {"sync": "deferred", "run_id": run_id},
+                },
+                spec_digest=idem_spec_digest,
+            )
     artifacts = _run_artifact_paths(run_id)
     runtime_kind = workflow_registry.workflow_runtime_kind(spec.skill)
     research_selection = (
@@ -2653,6 +2759,9 @@ def launch_workflow(
     initial_meta: dict[str, Any] = dict(launch_meta or {})
     initial_meta["run_id"] = run_id
     initial_meta["runtime"] = spec.runtime
+    if worktree_receipt:
+        initial_meta["root"] = spec.root
+        initial_meta.update(worktree_receipt)
     if claim_digest:
         initial_meta["claim_digest"] = claim_digest
     if len(initial_meta) > 1:
@@ -2806,6 +2915,7 @@ def launch_workflow(
             "mode": spec.mode,
             "runtime": spec.runtime,
             "root": spec.root,
+            **worktree_receipt,
             "operator_session": operator_session,
             "session_id": session_id,
             "identity_required": True,
@@ -3080,6 +3190,7 @@ def launch_workflow(
             "agent": spec.agent,
             "skill": spec.skill,
             "root": spec.root,
+            **worktree_receipt,
             "dispatch": 0,
             "status": "launching",
             "control": str(run_snapshot_dir() / f"{run_id}.json"),
@@ -4562,6 +4673,206 @@ def find_run_for_identity_token(token: str) -> dict[str, Any] | None:
             run_id = str(payload.get("run_id") or path.parent.name)
             return lookup_run(run_id) or payload
     return None
+
+
+FORK_SOURCE_SCHEMA = "vibecrafted.fork_source.v1"
+
+
+def _fork_source_rejection(
+    agent: str,
+    reason: str,
+    *,
+    detail: str = "",
+    hint: str = "",
+    run_id: str = "",
+    session: str = "",
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "schema": FORK_SOURCE_SCHEMA,
+        "accepted": False,
+        "agent": agent,
+        "reason": reason,
+        "agent_session_id": "",
+        "source_run_id": run_id,
+        "requested_session": session,
+    }
+    if detail:
+        payload["detail"] = detail
+    if hint:
+        payload["hint"] = hint
+    return payload
+
+
+def resolve_fork_source(
+    agent: str,
+    *,
+    run_id: str = "",
+    session: str = "",
+) -> dict[str, Any]:
+    """Resolve the stable provider identity a ``vibecrafted fork`` branches from.
+
+    One identity per call: ``--session <provider-session-id>`` names it
+    directly, ``--run-id <control-plane-run>`` reads the provider session the
+    run recorded. The source is only ever read; forking happens in the
+    provider and must leave that session untouched. Providers without a native
+    fork surface are refused here, with the capability table as evidence, so
+    no caller can present a plain resume as a fork.
+    """
+    normalized_agent = str(agent or "").strip().lower()
+    target_run = str(run_id or "").strip()
+    target_session = str(session or "").strip()
+    if not normalized_agent:
+        return _fork_source_rejection("", "missing_agent")
+    try:
+        capability = capability_for(normalized_agent)
+    except ValueError as exc:
+        return _fork_source_rejection(
+            normalized_agent, "unknown_agent", detail=str(exc)
+        )
+    if capability.native_fork == UNSUPPORTED:
+        return _fork_source_rejection(
+            normalized_agent,
+            "native_fork_unsupported",
+            detail=capability.fork_runtime_restrictions,
+            hint=(
+                f"vibecrafted resume {normalized_agent} --session <id> continues the "
+                "original session (that is a resume, not a fork)"
+            ),
+        )
+    if target_run and target_session:
+        return _fork_source_rejection(
+            normalized_agent,
+            "conflicting_identity",
+            detail="--session and --run-id cannot be combined; use one identity",
+            run_id=target_run,
+            session=target_session,
+        )
+    if not target_run and not target_session:
+        return _fork_source_rejection(
+            normalized_agent,
+            "missing_identity",
+            hint=(
+                f"vibecrafted fork {normalized_agent} --session <provider-session-id> | "
+                "--run-id <work-...>"
+            ),
+        )
+
+    if target_session:
+        kind = classify_resume_identity(target_session)
+        if kind == "run_id" or looks_like_control_plane_run_id(target_session):
+            return _fork_source_rejection(
+                normalized_agent,
+                "run_id_not_session",
+                detail="that token is a control-plane run id, not a provider session",
+                hint=f"vibecrafted fork {normalized_agent} --run-id {target_session}",
+                session=target_session,
+            )
+        if kind == "vibecrafted_session":
+            found = find_run_for_identity_token(target_session) or {}
+            provider = _provider_session_for_continue(found)
+            return _fork_source_rejection(
+                normalized_agent,
+                "vibecrafted_session_not_provider_session",
+                detail=(
+                    "that token is VIBECRAFTED_SESSION_ID / runtime_session_id, "
+                    "not a provider session"
+                ),
+                hint=(
+                    f"vibecrafted fork {normalized_agent} --session {provider}"
+                    if provider
+                    else ""
+                ),
+                session=target_session,
+            )
+        found = find_run_for_identity_token(target_session) or {}
+        recorded_agent = str(found.get("agent") or "").strip().lower()
+        if recorded_agent and recorded_agent != normalized_agent:
+            return _fork_source_rejection(
+                normalized_agent,
+                "agent_mismatch",
+                detail=f"recorded={recorded_agent} requested={normalized_agent}",
+                session=target_session,
+            )
+        return {
+            "schema": FORK_SOURCE_SCHEMA,
+            "accepted": True,
+            "agent": normalized_agent,
+            "agent_session_id": target_session,
+            "source_run_id": str(found.get("run_id") or ""),
+            "source_root": str(found.get("root") or ""),
+            "identity_source": "recorded_session" if found else "explicit_session",
+            "native_fork": capability.native_fork,
+            "fork_runtime_restrictions": capability.fork_runtime_restrictions,
+        }
+
+    kind = classify_resume_identity(target_run)
+    if kind == "provider_session":
+        return _fork_source_rejection(
+            normalized_agent,
+            "provider_session_not_run_id",
+            detail="that token is a provider session, not a control-plane run id",
+            hint=f"vibecrafted fork {normalized_agent} --session {target_run}",
+            run_id=target_run,
+        )
+    if kind == "vibecrafted_session":
+        found = find_run_for_identity_token(target_run) or {}
+        found_id = str(found.get("run_id") or "")
+        return _fork_source_rejection(
+            normalized_agent,
+            "vibecrafted_session_not_run_id",
+            detail=(
+                "that token is VIBECRAFTED_SESSION_ID / runtime_session_id, "
+                "not a control-plane run and not a provider session"
+            ),
+            hint=f"vibecrafted fork {normalized_agent} --run-id {found_id}"
+            if found_id
+            else "",
+            run_id=target_run,
+        )
+    if kind == "unknown" and not looks_like_control_plane_run_id(target_run):
+        return _fork_source_rejection(
+            normalized_agent,
+            "not_a_run_id",
+            detail="pass a control-plane run id such as work-YYMMDD-HHMMSS-xxxxx",
+            run_id=target_run,
+        )
+    run = lookup_run(target_run)
+    if run is None:
+        return _fork_source_rejection(
+            normalized_agent, "run_not_found", run_id=target_run
+        )
+    parent = _merge_run_and_meta(run, _native_resume_meta(target_run, run))
+    recorded_agent = str(parent.get("agent") or "").strip().lower()
+    if recorded_agent and recorded_agent != normalized_agent:
+        return _fork_source_rejection(
+            normalized_agent,
+            "agent_mismatch",
+            detail=f"recorded={recorded_agent} requested={normalized_agent}",
+            run_id=target_run,
+        )
+    native_session = _provider_session_for_continue(parent)
+    if not native_session:
+        return _fork_source_rejection(
+            normalized_agent,
+            "no_provider_session",
+            detail=(
+                "the run recorded no provider session id; a fork needs a native "
+                "session to branch from and never replays the prompt as a fork"
+            ),
+            hint=f"vibecrafted resume {normalized_agent} --run-id {target_run}",
+            run_id=target_run,
+        )
+    return {
+        "schema": FORK_SOURCE_SCHEMA,
+        "accepted": True,
+        "agent": normalized_agent,
+        "agent_session_id": native_session,
+        "source_run_id": target_run,
+        "source_root": str(parent.get("root") or ""),
+        "identity_source": "run_meta",
+        "native_fork": capability.native_fork,
+        "fork_runtime_restrictions": capability.fork_runtime_restrictions,
+    }
 
 
 def _operator_continue_rejection(

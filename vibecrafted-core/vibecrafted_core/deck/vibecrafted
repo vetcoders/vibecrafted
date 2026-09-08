@@ -747,9 +747,10 @@ _print_skill_specific_flags() {
       printf '  --run-id <work-...>            Continue a stopped/failed control-plane run\n'
       printf '  --last                         Resume the most recent run for this agent\n'
       printf '  --session <id>                 Provider session UUID (not work-* / VIBECRAFTED_SESSION_ID)\n'
+      printf '  --repo <path>                  Repository, usable from any directory (--root: legacy spelling)\n'
       printf '  -p, --prompt <text>            Continue with extra prompt text\n'
       printf '  -f, --file <path.md>           Continue with prompt context from file\n'
-      printf '  --fork-session                 Branch into a NEW session id, base untouched (claude only)\n'
+      printf '  --fork-session                 Branch into a NEW session id, base untouched (claude only; see vibecrafted fork)\n'
       printf '  (no --session/--run-id)        AICX 48h multi-agent continuity fallback\n'
       ;;
   esac
@@ -909,22 +910,22 @@ cmd_start_help() {
   printf '%bUsage:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted start\n'
   printf '  vibecrafted start operator\n'
-  printf '  vibecrafted start --root <project-path> [operator|resume]\n'
+  printf '  vibecrafted start --repo <project-path> [operator|resume]\n'
   printf '  vc-start\n'
   printf '  vc-start operator\n'
-  printf '  vc-start --root <project-path> [operator|resume]\n'
+  printf '  vc-start --repo <project-path> [operator|resume]\n'
   printf '  vc-start resume\n'
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted start\n'
-  printf '  vibecrafted start --root ~/Projects/example\n'
+  printf '  vibecrafted start --repo ~/Projects/example\n'
   printf '  vc-start operator\n'
-  printf '  vc-start --root ~/Projects/example resume\n'
+  printf '  vc-start --repo ~/Projects/example resume\n'
   printf '  vc-start resume\n'
   printf '\n'
   printf '  Direct %bvc-<workflow> <agent>%b calls outside vc-frame auto-enter the\n' "$_cyan" "$_reset"
   printf '  operator session and run the workflow in a new tab.\n'
-  printf '  --root is consumed by the public launcher before vc-frame starts.\n'
+  printf '  --repo (legacy spelling: --root) is consumed by the public launcher before vc-frame starts.\n'
   printf '\n'
 }
 
@@ -1092,7 +1093,8 @@ cmd_resume_help() {
   printf '  A bare resume stays interactive; the AICX pack is continuity transport,\n'
   printf '  not operator job text and not a native attach. Never resumes the last\n'
   printf '  same-agent match. Native provider resume requires --session <id>.\n'
-  printf '  --root / a project filter narrows AICX; it does not pick an id.\n'
+  printf '  --repo (or legacy --root) selects the repository from any directory and\n'
+  printf '  narrows AICX; it does not pick an id.\n'
   printf '  The session catalog in the pack is evidence, not a swipe list.\n'
   printf '  Explicit --prompt/--file without --session starts a new tracked\n'
   printf '  headless job and does not adopt a historical session.\n'
@@ -1115,17 +1117,27 @@ cmd_fork_help() {
   printf '\n'
   printf '%b⚒%b  %bfork%b\n' "$_copper" "$_reset" "$_bold" "$_reset"
   printf '%b─────────────────────────────────────────%b\n' "$_steel" "$_reset"
-  printf '  Branch an exact Codex session into a new provider session.\n'
-  printf '  The source stays untouched; visible launches open a pane in this vc-frame tab.\n'
+  printf '  Branch a provider session into a NEW session; the source session stays untouched.\n'
+  printf '  Native forks: codex (codex fork), claude and grok (--resume <id> --fork-session).\n'
+  printf '  cursor, agy and junie expose no fork surface: vibecrafted resume <agent> --session <id>\n'
+  printf '  continues the ORIGINAL session there (a resume, never presented as a fork).\n'
   printf '\n%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted fork codex --session current|previous|<session-id> [flags]\n'
+  printf '  vibecrafted fork <claude|codex|grok> --session <provider-session-id> [flags]\n'
+  printf '  vibecrafted fork <claude|codex|grok> --run-id <work-...> [flags]\n'
+  printf '  vibecrafted fork codex --session current|previous [flags]   # AICX resolves the id\n'
   printf '\n%bOptions:%b\n' "$_bold" "$_reset"
-  printf '  --runtime visible|terminal|headless  visible/terminal use this tab; headless is rejected by Codex TUI\n'
+  printf '  --session <id|current|previous>     provider session to branch from (never a work-* run id)\n'
+  printf '  --run-id <work-...>                 control-plane run; its recorded provider session is the source\n'
+  printf '  --repo <path>                       repository the fork runs in, from any directory (--root: legacy spelling)\n'
+  printf '  --runtime visible|terminal          pane in this vc-frame tab, or exec in a plain TTY (headless is refused)\n'
   printf '  --placement right|floating          pane shape (default: right)\n'
-  printf '  --model <name>                      Codex model override\n'
-  printf '  --permissions bypass|auto|read-only Codex approval/sandbox contract (default: current config)\n'
-  printf '  --root <path>                       repository root (default: current repo)\n'
+  printf '  --model <name>                      provider model override\n'
+  printf '  --permissions bypass|auto|accept-edits|read-only  provider permission contract (codex: no accept-edits)\n'
   printf '  -p, --prompt <text>                 optional first prompt in the fork\n'
+  printf '\n%bExamples:%b\n' "$_bold" "$_reset"
+  printf '  vibecrafted fork codex --session current --runtime visible\n'
+  printf '  vibecrafted fork claude --run-id work-260908-194325-30219 --repo ~/Projects/app\n'
+  printf '  vibecrafted fork grok --session 3f2b8c1e-0d2a-4f6b-9c1d-5e7a8b9c0d1e --placement floating -p "Try the other approach"\n'
   printf '\n'
 }
 
@@ -1295,8 +1307,9 @@ cmd_telemetry_help() {
   printf '  Smoke the marbles telemetry path through the installed command deck.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  telemetry smoke [--agent <claude|codex|agy|junie|grok|cursor>] [--count <n>] [--root <path>] [--no-watch|--watch]\n'
-  printf '  vibecrafted telemetry smoke [--agent <claude|codex|agy|junie|grok|cursor>] [--count <n>] [--root <path>] [--no-watch|--watch]\n'
+  printf '  telemetry smoke [--agent <claude|codex|agy|junie|grok|cursor>] [--count <n>] [--repo <path>] [--no-watch|--watch]\n'
+  printf '  vibecrafted telemetry smoke [--agent <claude|codex|agy|junie|grok|cursor>] [--count <n>] [--repo <path>] [--no-watch|--watch]\n'
+  printf '  (--root is the legacy spelling of --repo; the smoke root may be created on demand)\n'
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
   printf '  telemetry smoke --count 1 --no-watch\n'
@@ -1359,6 +1372,8 @@ cmd_telemetry_smoke() {
   local agent="codex"
   local count="1"
   local root=""
+  local telemetry_repo=""
+  local telemetry_root_legacy=""
   local runtime="headless"
   local marbles_script=""
   local smoke_root=""
@@ -1389,7 +1404,21 @@ cmd_telemetry_smoke() {
           echo "Missing value for --root" >&2
           return 1
         }
-        root="$1"
+        telemetry_root_legacy="$1"
+        ;;
+      --root=*)
+        telemetry_root_legacy="${1#--root=}"
+        ;;
+      --repo)
+        shift
+        [[ $# -gt 0 ]] || {
+          echo "Missing value for --repo" >&2
+          return 1
+        }
+        telemetry_repo="$1"
+        ;;
+      --repo=*)
+        telemetry_repo="${1#--repo=}"
         ;;
       --watch)
         runtime="terminal"
@@ -1420,6 +1449,14 @@ cmd_telemetry_smoke() {
     printf '%b✗%b Unknown agent: %s\n' "$_red" "$_reset" "$agent" >&2
     return 1
   }
+  # Same words as _vetcoders_select_repo, but the smoke root is CREATED on
+  # demand, so only the conflicting-pair rule applies here (no existence check).
+  if [[ -n "$telemetry_repo" && -n "$telemetry_root_legacy" && "$telemetry_repo" != "$telemetry_root_legacy" ]]; then
+    printf 'telemetry: conflicting --repo %s and --root %s; pass one repository (--repo is the standard spelling)\n' \
+      "$telemetry_repo" "$telemetry_root_legacy" >&2
+    return 2
+  fi
+  root="${telemetry_repo:-$telemetry_root_legacy}"
   _ensure_helpers_loaded || return 1
   marbles_script="$(_vetcoders_spawn_script "$agent" "marbles_spawn.sh")" || return 1
   smoke_root="$(_telemetry_smoke_root "$root")"
@@ -4692,7 +4729,7 @@ cmd_help() {
   printf '  %binit%b [agent]         Orient an agent in this repo\n' "$_cyan" "$_reset"
   printf '  %b<skill> <agent>%b      Run a workflow with an agent\n' "$_cyan" "$_reset"
   printf '  %bresume%b <agent>       Continue a stopped run or a provider session\n' "$_cyan" "$_reset"
-  printf '  %bfork%b <agent>         Branch a provider session in this vc-frame tab\n' "$_cyan" "$_reset"
+  printf '  %bfork%b <agent>         Branch a provider session (--session | --run-id) into a new one; claude, codex, grok\n' "$_cyan" "$_reset"
   printf '  %bobserve%b <agent>      Check a run report or transcript\n' "$_cyan" "$_reset"
   printf '  %bawait%b <agent>        Wait for a run to settle\n' "$_cyan" "$_reset"
   printf '  %bstop%b <agent>         Stop a tracked launcher process group\n' "$_cyan" "$_reset"
@@ -4764,6 +4801,7 @@ cmd_help_full() {
   printf '  %bvibecrafted stop <agent>%b      --last      Stop the tracked launcher process group\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted resume <agent>%b    --last      Continue as a new tracked job\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted fork codex%b        --session current --runtime visible\n' "$_cyan" "$_reset"
+  printf '  %bvibecrafted fork claude%b       --run-id work-... --repo ~/Projects/app\n' "$_cyan" "$_reset"
   printf '\n'
   printf '%b=== RESEARCH (launcher) ===%b\n' "$_bold" "$_reset"
   printf '\n'
@@ -5887,6 +5925,56 @@ _vibecrafted_fork_session_id() {
   printf '%s\n' "$previous_id"
 }
 
+# Ask core for the stable provider identity a fork branches from. Prints
+# `<agent_session_id>\t<source_run_id>` on success. On refusal relays core's
+# reason / detail / hint to stderr and returns 2. Core (workflow.resolve_fork_source)
+# is the single owner of identity classification and of the provider fork
+# capability verdict, so the deck never re-implements either.
+_vibecrafted_fork_source() {
+  local agent="$1" identity_flag="$2" identity="$3"
+  local payload="" status=0 python_bin core_dir
+  # Same core resolver as cmd_lifecycle / cmd_core_workflow_skill: the deck's
+  # own generation (checkout or installed), never whichever interpreter on the
+  # caller's PATH happens to import an older vibecrafted_core.
+  core_dir="$(_dispatcher_core_dir 2>/dev/null || true)"
+  [[ -n "$core_dir" ]] || {
+    printf '%b✗%b Vibecrafted Core module not found.\n' "$_red" "$_reset" >&2
+    return 2
+  }
+  python_bin="$(_vibecrafted_python)"
+  payload="$(PYTHONPATH="$core_dir${PYTHONPATH:+:$PYTHONPATH}" "$python_bin" -m vibecrafted_core.cli fork-source "$agent" "$identity_flag" "$identity" --json)" || status=$?
+  if [[ -z "$payload" ]]; then
+    printf 'fork: Vibecrafted core did not answer the fork-source query (exit %s).\n' "$status" >&2
+    return 2
+  fi
+  "$python_bin" - "$status" "$payload" <<'PYFORK'
+import json
+import sys
+
+status = int(sys.argv[1])
+try:
+    payload = json.loads(sys.argv[2])
+except ValueError:
+    print("fork: core returned an unreadable fork-source receipt", file=sys.stderr)
+    raise SystemExit(2)
+if status != 0 or not payload.get("accepted"):
+    reason = str(payload.get("reason") or "refused")
+    print(f"fork: cannot resolve the source session ({reason})", file=sys.stderr)
+    for key in ("detail", "hint"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            print(f"  {key}: {value}", file=sys.stderr)
+    raise SystemExit(2)
+print(
+    str(payload.get("agent_session_id") or "")
+    + "\t"
+    + str(payload.get("source_run_id") or "")
+    + "\t"
+    + str(payload.get("source_root") or "")
+)
+PYFORK
+}
+
 cmd_fork() {
   local agent="${1:-}"
   shift || true
@@ -5894,71 +5982,169 @@ cmd_fork() {
     cmd_fork_help
     [[ -n "$agent" ]] && return 0 || return 1
   fi
-  [[ "$agent" == codex ]] || {
-    printf 'Native fork is currently proven only for codex; unsupported provider: %s\n' "$agent" >&2
-    return 2
+  if [[ "$agent" == "gemini" ]]; then
+    printf '%b✗ gemini CLI is deprecated.%b Use agy (Google Antigravity CLI) instead.\n' "$_red" "$_reset" >&2
+    return 1
+  fi
+  _has_agent "$agent" || {
+    printf '%b✗%b Unknown agent: %s\n' "$_red" "$_reset" "$agent" >&2
+    return 1
   }
 
-  local selector="" runtime="visible" placement="right"
-  local model="" permissions="" root_dir="" prompt=""
+  local selector="" run_id="" runtime="visible" placement="right"
+  local model="" permissions="" repo_dir="" root_dir="" prompt=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --session) shift; [[ $# -gt 0 ]] || { echo "Missing value for --session" >&2; return 2; }; selector="$1" ;;
+      --session=*) selector="${1#--session=}" ;;
+      --run-id) shift; [[ $# -gt 0 ]] || { echo "Missing value for --run-id" >&2; return 2; }; run_id="$1" ;;
+      --run-id=*) run_id="${1#--run-id=}" ;;
+      --repo) shift; [[ $# -gt 0 ]] || { echo "Missing value for --repo" >&2; return 2; }; repo_dir="$1" ;;
+      --repo=*) repo_dir="${1#--repo=}" ;;
+      --root) shift; [[ $# -gt 0 ]] || { echo "Missing value for --root" >&2; return 2; }; root_dir="$1" ;;
+      --root=*) root_dir="${1#--root=}" ;;
+      --worktree|--worktree=*)
+        echo "fork has no --worktree: a fork reuses the source session's checkout. Run a launcher with --worktree true for an isolated cut." >&2
+        return 2 ;;
       --runtime) shift; [[ $# -gt 0 ]] || { echo "Missing value for --runtime" >&2; return 2; }; runtime="$1" ;;
       --placement) shift; [[ $# -gt 0 ]] || { echo "Missing value for --placement" >&2; return 2; }; placement="$1" ;;
       --floating) placement="floating" ;;
       --model) shift; [[ $# -gt 0 ]] || { echo "Missing value for --model" >&2; return 2; }; model="$1" ;;
       --permissions) shift; [[ $# -gt 0 ]] || { echo "Missing value for --permissions" >&2; return 2; }; permissions="$1" ;;
-      --root) shift; [[ $# -gt 0 ]] || { echo "Missing value for --root" >&2; return 2; }; root_dir="$1" ;;
       -p|--prompt) shift; [[ $# -gt 0 ]] || { echo "Missing value for --prompt" >&2; return 2; }; prompt="$1" ;;
       -h|--help) cmd_fork_help; return 0 ;;
       *) printf 'Unknown fork argument: %s\n' "$1" >&2; return 2 ;;
     esac
     shift
   done
-  [[ -n "$selector" ]] || { echo "fork requires --session current|previous|<session-id>." >&2; return 2; }
+  [[ -n "$selector" || -n "$run_id" ]] || {
+    echo "fork requires --session current|previous|<provider-session-id> or --run-id <work-...>." >&2
+    return 2
+  }
+  [[ -z "$selector" || -z "$run_id" ]] || {
+    echo "fork takes one identity: --session or --run-id, not both." >&2
+    return 2
+  }
   case "$runtime" in
     visible|terminal) ;;
-    headless) echo "codex fork is an interactive TUI; --runtime headless cannot preserve a usable fork." >&2; return 2 ;;
-    *) echo "Unknown fork runtime: ${runtime} (use visible, terminal, or headless)." >&2; return 2 ;;
+    headless)
+      case "$agent" in
+        codex) echo "codex fork is an interactive TUI; --runtime headless cannot preserve a usable fork." >&2 ;;
+        claude|grok)
+          printf '%s --resume <id> --fork-session is an interactive fork; a headless tracked fork is not wired in this release.\n' "$agent" >&2
+          printf '  Use --runtime terminal|visible, or continue the ORIGINAL session headlessly with:\n' >&2
+          printf '    vibecrafted resume-session %s --agent-session-id <id> --prompt "..."   (a resume, not a fork)\n' "$agent" >&2
+          ;;
+        *) printf '%s has no native fork surface; --runtime headless changes nothing about that.\n' "$agent" >&2 ;;
+      esac
+      return 2
+      ;;
+    *) echo "Unknown fork runtime: ${runtime} (use visible or terminal; headless is refused)." >&2; return 2 ;;
   esac
   case "$placement" in
     right|floating) ;;
     *) echo "Unknown fork placement: ${placement} (use right or floating)." >&2; return 2 ;;
   esac
   case "$permissions" in
-    ""|bypass|auto|read-only) ;;
-    *) echo "Unsupported codex fork permissions: ${permissions}." >&2; return 2 ;;
+    ""|bypass|auto|accept-edits|read-only) ;;
+    *) echo "Unsupported fork permissions: ${permissions} (use bypass, auto, accept-edits or read-only)." >&2; return 2 ;;
   esac
+  if [[ "$agent" == codex && "$permissions" == accept-edits ]]; then
+    echo "codex exposes no native accept-edits policy; use bypass, auto or read-only." >&2
+    return 2
+  fi
 
   _ensure_helpers_loaded || return 1
+  # Provider capability first: a provider without a fork surface is refused
+  # before any CLI or session lookup, with the capability table as evidence.
+  case "$agent" in
+    claude|codex|grok) ;;
+    *)
+      _vibecrafted_fork_source "$agent" --session "capability-probe" >/dev/null || return 2
+      ;;
+  esac
   _require_agent_cli "$agent" || return 1
-  root_dir="${root_dir:-$(_repo_root)}"
+  # Explicit --repo/--root wins. Without one, `current|previous` mean "this
+  # repository" (AICX picks the session for the caller's checkout), while an
+  # explicit session id or a --run-id fall back to the repository the source
+  # run recorded, and only then to the caller's checkout.
+  local explicit_root=""
+  explicit_root="$(_vetcoders_select_repo "fork" "$repo_dir" "$root_dir")" || return $?
+  root_dir="${explicit_root:-$(_repo_root)}"
   root_dir="$(cd "$root_dir" 2>/dev/null && pwd -P)" || {
     printf 'Fork root is not a directory: %s\n' "$root_dir" >&2
     return 2
   }
-  local session_id
-  session_id="$(_vibecrafted_fork_session_id "$agent" "$selector" "$root_dir")" || return 1
-  _vetcoders_looks_like_run_id "$session_id" && {
-    printf 'That is a control-plane run id, not a provider session: %s\n' "$session_id" >&2
+
+  local session_id="" source_run_id="" source_root="" source_fields=""
+  if [[ -n "$selector" ]]; then
+    session_id="$(_vibecrafted_fork_session_id "$agent" "$selector" "$root_dir")" || return 1
+    if _vetcoders_looks_like_run_id "$session_id"; then
+      printf 'That is a control-plane run id, not a provider session: %s\n' "$session_id" >&2
+      printf '  Use: vibecrafted fork %s --run-id %s\n' "$agent" "$session_id" >&2
+      return 2
+    fi
+    source_fields="$(_vibecrafted_fork_source "$agent" --session "$session_id")" || return 2
+  else
+    source_fields="$(_vibecrafted_fork_source "$agent" --run-id "$run_id")" || return 2
+  fi
+  session_id="${source_fields%%$'\t'*}"
+  source_fields="${source_fields#*$'\t'}"
+  source_run_id="${source_fields%%$'\t'*}"
+  source_root="${source_fields#*$'\t'}"
+  [[ -n "$session_id" ]] || {
+    echo "fork: core resolved no provider session id." >&2
     return 2
   }
+  if [[ -z "$explicit_root" && -n "$source_root" && -d "$source_root" ]] \
+    && [[ "$selector" != current && "$selector" != previous ]]; then
+    root_dir="$(cd "$source_root" 2>/dev/null && pwd -P)" || root_dir="$root_dir"
+  fi
 
-  local -a provider_argv=(codex fork --cd "$root_dir")
-  [[ -z "$model" ]] || provider_argv+=(--model "$model")
-  case "$permissions" in
-    bypass) provider_argv+=(--dangerously-bypass-approvals-and-sandbox) ;;
-    auto) provider_argv+=(--ask-for-approval on-request --sandbox workspace-write) ;;
-    read-only) provider_argv+=(--ask-for-approval never --sandbox read-only) ;;
+  # Provider fork argv. The source session id is only READ: codex `fork`
+  # creates a new conversation, claude/grok `--resume … --fork-session` mint a
+  # new session id. grok never gets --restore-code or --worktree (capability
+  # table forbidden flags: both mutate or leave the shared checkout).
+  local -a provider_argv=()
+  case "$agent" in
+    codex)
+      provider_argv=(codex fork --cd "$root_dir")
+      [[ -z "$model" ]] || provider_argv+=(--model "$model")
+      case "$permissions" in
+        bypass) provider_argv+=(--dangerously-bypass-approvals-and-sandbox) ;;
+        auto) provider_argv+=(--ask-for-approval on-request --sandbox workspace-write) ;;
+        read-only) provider_argv+=(--ask-for-approval never --sandbox read-only) ;;
+      esac
+      provider_argv+=("$session_id")
+      ;;
+    claude)
+      provider_argv=(claude --resume "$session_id" --fork-session)
+      [[ -z "$model" ]] || provider_argv+=(--model "$model")
+      case "$permissions" in
+        bypass) provider_argv+=(--permission-mode bypassPermissions) ;;
+        auto) provider_argv+=(--permission-mode auto) ;;
+        accept-edits) provider_argv+=(--permission-mode acceptEdits) ;;
+        read-only) provider_argv+=(--permission-mode plan) ;;
+      esac
+      ;;
+    grok)
+      provider_argv=(grok --resume "$session_id" --fork-session --cwd "$root_dir" --no-alt-screen)
+      [[ -z "$model" ]] || provider_argv+=(--model "$model")
+      case "$permissions" in
+        bypass) provider_argv+=(--permission-mode bypassPermissions) ;;
+        auto) provider_argv+=(--permission-mode auto) ;;
+        accept-edits) provider_argv+=(--permission-mode acceptEdits) ;;
+        read-only) provider_argv+=(--permission-mode plan) ;;
+      esac
+      ;;
   esac
-  provider_argv+=("$session_id")
   [[ -z "$prompt" ]] || provider_argv+=("$prompt")
   local command_text
   command_text="$(_vetcoders_shell_quote_join "${provider_argv[@]}")" || return 1
 
   if ! _vetcoders_in_vc_frame; then
     if [[ "$runtime" == terminal && -t 0 && -t 1 ]]; then
+      cd "$root_dir" || return 1
       exec "${provider_argv[@]}"
     fi
     echo "Same-tab fork needs an attached vc-frame pane (VC_FRAME_PANE_ID + VC_FRAME_SESSION_NAME)." >&2
@@ -5970,7 +6156,7 @@ cmd_fork() {
   vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 1
   session_name="$VC_FRAME_SESSION_NAME"
   repo_label="$(basename "$(dirname "$root_dir")")/$(basename "$root_dir")"
-  pane_title="codex fork @${repo_label} ${session_id}"
+  pane_title="${agent} fork @${repo_label} ${session_id}"
   cmd_script="$(_vetcoders_tmp_script_path "vc-fork-cmd" "$root_dir")"
   _vetcoders_write_command_script "$cmd_script" "$command_text" || return 1
 
@@ -5989,6 +6175,8 @@ cmd_fork() {
   printf 'Fork launched in current vc-frame tab:\n'
   printf '  agent:     %s\n' "$agent"
   printf '  session:   %s\n' "$session_id"
+  [[ -z "$source_run_id" ]] || printf '  source:    %s\n' "$source_run_id"
+  printf '  repo:      %s\n' "$root_dir"
   printf '  pane:      %s\n' "$placement"
   [[ -z "$pane_id" ]] || printf '  pane-id:   %s\n' "$pane_id"
   printf '  title:     %s\n' "$pane_title"
@@ -6143,6 +6331,19 @@ run_mode() {
   _run_helper "${agent}-${mode}" "$@"
 }
 
+# True when the argument vector carries `--worktree` / `--worktree=<word>`
+# before the greedy `--prompt` / `-p` or the literal `--` tail.
+_argv_requests_worktree() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      -p|--prompt|--) return 1 ;;
+      --worktree|--worktree=*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 run_skill() {
   local skill="$1"
   local agent="${2:-}"
@@ -6227,6 +6428,15 @@ run_skill() {
       return
       ;;
   esac
+
+  # `--worktree` asks for an isolated linked checkout. Only the core launcher
+  # (launch_workflow → WorktreeManager) can create one, and cli.py owns every
+  # LAUNCHERS skill, so a launch carrying the flag routes there instead of the
+  # shell helper, which would otherwise run in the shared checkout.
+  if _argv_requests_worktree "$@"; then
+    cmd_core_workflow_skill "$skill" "$agent" "$@"
+    return
+  fi
 
   local dispatch_skill="$skill"
   [[ "$dispatch_skill" != "implement" ]] || dispatch_skill="justdo"

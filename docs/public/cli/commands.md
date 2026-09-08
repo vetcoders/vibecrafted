@@ -13,20 +13,50 @@ past runs. They launch no workflows themselves — that is the job of the
 
 ## Reference table
 
-| Command                              | Purpose                                             |
-| ------------------------------------ | --------------------------------------------------- |
-| `vibecrafted init [agent]`           | Orient an agent in this repo                        |
-| `vibecrafted status`                 | Today's agent activity                              |
-| `vibecrafted doctor`                 | Installation health — pass/fail                     |
-| `vibecrafted receipt [--json]`       | Delivery/runtime receipt (source ↔ installed)       |
-| `vibecrafted settlements <action>`   | Read-only f/x/n ledger query                        |
-| `vibecrafted update`                 | Update to the latest release                        |
-| `vibecrafted resume <agent>`         | Continue a stopped run or a provider session        |
-| `vibecrafted fork codex`             | Branch a Codex session in the current vc-frame tab  |
-| `vibecrafted resume-session <agent>` | Continue an exact provider session as a tracked run |
-| `vibecrafted version`                | Print version                                       |
-| `vibecrafted uninstall`              | Reverse the install                                 |
-| `vibecrafted help [topic\|--all]`    | Command deck · full reference                       |
+| Command                              | Purpose                                                        |
+| ------------------------------------ | -------------------------------------------------------------- |
+| `vibecrafted init [agent]`           | Orient an agent in this repo                                   |
+| `vibecrafted status`                 | Today's agent activity                                         |
+| `vibecrafted doctor`                 | Installation health — pass/fail                                |
+| `vibecrafted receipt [--json]`       | Delivery/runtime receipt (source ↔ installed)                  |
+| `vibecrafted settlements <action>`   | Read-only f/x/n ledger query                                   |
+| `vibecrafted update`                 | Update to the latest release                                   |
+| `vibecrafted resume <agent>`         | Continue a stopped run or a provider session                   |
+| `vibecrafted fork <agent>`           | Branch a provider session into a new one (claude, codex, grok) |
+| `vibecrafted resume-session <agent>` | Continue an exact provider session as a tracked run            |
+| `vibecrafted version`                | Print version                                                  |
+| `vibecrafted uninstall`              | Reverse the install                                            |
+| `vibecrafted help [topic\|--all]`    | Command deck · full reference                                  |
+
+## Selecting the repository: `--repo`
+
+Every repository-aware command takes `--repo <path>` and works from **any**
+working directory, including one that is not inside Git:
+
+```bash
+cd ~/Downloads
+vibecrafted workflow claude --repo ~/Projects/app --prompt "Ship it"
+vibecrafted fork claude --run-id work-260908-194325-30219 --repo ~/Projects/app
+vibecrafted start --repo ~/Projects/app
+vibecrafted resume codex --repo ~/Projects/app --session <provider-uuid>
+```
+
+`--root <path>` is the legacy spelling with identical semantics. Passing both
+with different paths is an error (`conflicting --repo … and --root …`), never a
+silent pick; a missing path fails with the flag that carried it. Commands that
+do not need a repository (`version`, `help`, `doctor`, `receipt`,
+`settlements`, `fork-source`) never require Git to run.
+
+Skill launchers add `--worktree [true|false]`: the worker runs in a fresh
+linked checkout of `--repo` (branch `cut/<agent>-<run_id>` at the selected
+HEAD, under `~/.vibecrafted/worktrees/`). The selected repository must be a
+clean Git work-tree root; the launch receipt reports `worktree_path`,
+`worktree_branch`, `worktree_baseline_sha` and `parent_root`.
+
+```bash
+vibecrafted workflow claude --model claude-fable-5-1 --worktree true \
+  --repo ~/Projects/app --prompt "Ujednolić polecenie fork"
+```
 
 ## init
 
@@ -140,11 +170,11 @@ otherwise the original prompt is replayed as `resume-new-session`.
 `01a00…` / `VIBECRAFTED_SESSION_ID` is the Vibecrafted runtime session, not
 Claude or Codex.
 
-Bare `vibecrafted resume <agent>` (optional `--root`) opens a **new**
+Bare `vibecrafted resume <agent>` (optional `--repo`) opens a **new**
 interactive session and attaches an AICX continuity pack. It never
-native-attaches the last same-agent candidate. `--root` is an AICX project
-filter, not a session picker. The catalog in the pack is evidence, not a
-swipe list.
+native-attaches the last same-agent candidate. `--repo` (legacy `--root`)
+selects the repository from any directory and narrows AICX; it is not a
+session picker. The catalog in the pack is evidence, not a swipe list.
 
 ```bash
 printf '%s' "continue safely" | vibecrafted resume-session codex \
@@ -153,28 +183,59 @@ printf '%s' "continue safely" | vibecrafted resume-session codex \
 
 `resume-session` continues one exact provider-owned session as a tracked,
 detached headless run. The prompt comes from `-p <text>`, `-f <path>`, or
-`--prompt-stdin` (keeps the prompt out of argv). Optional flags: `--root
-<path>`, `--model <name>`, `--json` for a machine-readable launch receipt.
-This command is always headless; it does not pretend to be an interactive
-session.
+`--prompt-stdin` (keeps the prompt out of argv). Optional flags: `--repo
+<path>` (legacy `--root`), `--model <name>`, `--json` for a machine-readable
+launch receipt. This command is always headless; it does not pretend to be
+an interactive session.
 
 ## fork
 
 ```bash
+vibecrafted fork claude --run-id work-260908-194325-30219 --repo ~/Projects/app
+vibecrafted fork claude --session <provider-uuid> --model claude-fable-5-1
+vibecrafted fork grok --session <provider-uuid> --placement floating
 vibecrafted fork codex --session current --runtime visible
 vibecrafted fork codex --session previous --placement floating
-vibecrafted fork codex --session <provider-uuid> --model <model>
 ```
 
-`fork` leaves the source Codex session untouched and creates a new provider
-session. `current` resolves the attached Codex session through AICX;
-`previous` selects the newest same-repository Codex session other than
-`current`; an exact UUID bypasses discovery. Inside vc-frame, `visible` and
-`terminal` open a pane in the current tab: break-right by default or floating
-with `--placement floating`. Native `codex fork` is an interactive TUI, so
-`--runtime headless` fails closed instead of creating an inaccessible process.
+`fork` branches a provider session into a **new** session and leaves the
+source untouched. One identity per call:
 
-The pane title is `codex fork @<owner>/<repo> <source-session-id>`.
+- `--session <provider-session-id>` names the source directly. `current` and
+  `previous` (AICX discovery for the caller's repository) stay available.
+- `--run-id <work-…>` names a control-plane run; the provider session that run
+  recorded is the source, and its recorded repository is the default `--repo`.
+  A run that recorded no provider session is refused — the prompt is never
+  replayed and presented as a fork.
+
+The two shapes are never confused: a `work-…` id in `--session` or a provider
+UUID in `--run-id` fails with the corrected command. Identity resolution and
+the provider capability verdict are owned by `vibecrafted fork-source <agent>
+(--session | --run-id) [--json]`, which the deck consults.
+
+Provider coverage (verified on the installed CLIs):
+
+| Provider | Native fork                                                                 | `vibecrafted fork`                                                                                |
+| -------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| codex    | `codex fork <id> [prompt]`                                                  | supported                                                                                         |
+| claude   | `claude --resume <id> --fork-session`                                       | supported                                                                                         |
+| grok     | `grok --resume <id> --fork-session` (never `--restore-code` / `--worktree`) | supported                                                                                         |
+| cursor   | none (`--resume [chatId]` only)                                             | refused: `vibecrafted resume cursor --session <id>` continues the original (a resume, not a fork) |
+| agy      | none (`--conversation <id>` only)                                           | refused, same hint                                                                                |
+| junie    | none (`--session-id … --resume` only)                                       | refused, same hint                                                                                |
+
+Inside vc-frame, `--runtime visible|terminal` opens a pane in the current tab
+(break-right by default, `--placement floating` otherwise); in a plain TTY,
+`--runtime terminal` execs the provider directly. `--runtime headless` is
+refused for every provider: `codex fork` is an interactive TUI, and a headless
+tracked fork for claude/grok is not wired in this release (`resume-session`
+continues the original headlessly, which is a resume, not a fork).
+`--permissions bypass|auto|accept-edits|read-only` maps onto each provider's
+own permission contract (codex has no `accept-edits` cell); `--model` passes
+through unchanged. `fork` has no `--worktree`: a fork reuses the source
+session's checkout; use a launcher with `--worktree true` for an isolated cut.
+
+The pane title is `<agent> fork @<owner>/<repo> <source-session-id>`.
 
 ## version, uninstall, help
 

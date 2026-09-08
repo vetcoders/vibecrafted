@@ -15,6 +15,7 @@ from typing import Any
 
 from . import control_plane, ui
 from .clock import utc_now_z
+from .repo_selection import RepoSelectionError, add_repo_arguments, select_repository
 
 
 def repo_root(start: Path | None = None) -> Path:
@@ -654,7 +655,7 @@ def _build_parser() -> argparse.ArgumentParser:
     spanko.add_argument("--tracker", default="")
     spanko.add_argument("--cut-id", default="")
     spanko.add_argument("--then", default="")
-    spanko.add_argument("--root", default="")
+    add_repo_arguments(spanko)
     spanko.add_argument("--timeout-seconds", type=float, default=300)
     spanko.add_argument("--interval-seconds", type=float, default=5)
     spanko.set_defaults(func=cmd_spanko)
@@ -668,6 +669,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not hasattr(args, "func"):
         parser.print_help()
         return 2
+    explicit_repo = bool(
+        str(getattr(args, "repo", "") or "").strip()
+        or str(getattr(args, "root", "") or "").strip()
+    )
+    if explicit_repo:
+        # Only an explicit --repo/--root goes through the selector; the bare
+        # form keeps the subcommand's own cwd default without extra probes.
+        try:
+            args.root = select_repository(
+                args.repo, args.root, fallback=Path.cwd, label="vibecrafted loop"
+            ).path
+        except RepoSelectionError as exc:
+            ui.err(str(exc), fix="pass one existing repository with --repo <path>")
+            return 2
     try:
         return int(args.func(args))
     except FileNotFoundError as exc:
