@@ -22,6 +22,8 @@ DISPATCH = (
     / "lib"
     / "dispatch.sh"
 )
+DECK = REPO_ROOT / "vibecrafted-core" / "vibecrafted_core" / "deck" / "vibecrafted"
+CHECKOUT_DECK = REPO_ROOT / "scripts" / "vibecrafted"
 MARBLES = (
     REPO_ROOT
     / "vibecrafted-core"
@@ -101,6 +103,21 @@ def test_sync_script_covers_both_deck_paths() -> None:
     assert 'copy_one "$CANONICAL_DECK" "$GEN/scripts/vibecrafted"' in body
     assert "runtime/shell/lib/dispatch.sh" in body
     assert "runtime/shell/lib/marbles.sh" in body
+
+
+def test_public_start_aliases_share_the_root_ownership_contract() -> None:
+    """The packaged deck is canonical and its checkout mirror stays exact."""
+    deck = DECK.read_text(encoding="utf-8")
+    assert CHECKOUT_DECK.read_text(encoding="utf-8") == deck
+    assert '_vetcoders_start_prepare_arguments "$@"' in deck
+    assert "vibecrafted start --root <project-path>" in deck
+    start_body = (
+        DISPATCH.read_text(encoding="utf-8")
+        .split("vc-start()")[1]
+        .split("vc-dashboard()")[0]
+    )
+    assert '_vetcoders_start_prepare_arguments "$@"' in start_body
+    assert '"${_vetcoders_start_frame_argv[@]}"' in start_body
 
 
 def test_interactive_zsh_resume_help_does_not_create_runs(tmp_path: Path) -> None:

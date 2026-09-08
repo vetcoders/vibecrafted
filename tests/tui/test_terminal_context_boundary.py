@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pytest
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PRODUCT_ENTRY = REPO_ROOT / "scripts" / "vc-terminal-product-entry.sh"
 ATTACHMENT_MARKERS = (
@@ -52,7 +51,9 @@ def _generation(tmp_path: Path) -> tuple[Path, Path]:
     return wrapper, capture
 
 
-@pytest.mark.parametrize("inherited", [False, True], ids=["detached", "attached-parent"])
+@pytest.mark.parametrize(
+    "inherited", [False, True], ids=["detached", "attached-parent"]
+)
 def test_new_terminal_drops_inherited_attachment_context_but_preserves_root_and_argv(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inherited: bool
 ) -> None:

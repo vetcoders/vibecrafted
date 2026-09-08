@@ -108,6 +108,9 @@ every provider — bare resume stays interactive.
 ## Lifecycle (clean install)
 
 1. `vc-start` / `vibecrafted start` → operator layout (`vibecrafted` / `operator.kdl`).
+   Both public entries accept `--root <project-path>` (or `--root=<project-path>`).
+   The launcher validates and normalizes that path before workspace admission or
+   terminal escalation, then consumes it; `vc-frame` never receives `--root`.
 2. Tab **Start here** = Guide / onboarding (map + picker when productized).
 3. **Start 1st Operator session** → pick agent + root → `vibecrafted init <agent>`
    → new tab on the **human seat** with `/vc-init` seed, **interactive**.

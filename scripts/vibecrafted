@@ -890,17 +890,22 @@ cmd_start_help() {
   printf '%bUsage:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted start\n'
   printf '  vibecrafted start operator\n'
+  printf '  vibecrafted start --root <project-path> [operator|resume]\n'
   printf '  vc-start\n'
   printf '  vc-start operator\n'
+  printf '  vc-start --root <project-path> [operator|resume]\n'
   printf '  vc-start resume\n'
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted start\n'
+  printf '  vibecrafted start --root ~/Projects/example\n'
   printf '  vc-start operator\n'
+  printf '  vc-start --root ~/Projects/example resume\n'
   printf '  vc-start resume\n'
   printf '\n'
   printf '  Direct %bvc-<workflow> <agent>%b calls outside vc-frame auto-enter the\n' "$_cyan" "$_reset"
   printf '  operator session and run the workflow in a new tab.\n'
+  printf '  --root is consumed by the public launcher before vc-frame starts.\n'
   printf '\n'
 }
 
@@ -4791,7 +4796,14 @@ cmd_start() {
     printf 'vc-start: required product preparation helper missing\n' >&2
     return 1
   fi
-  _vetcoders_product_entry_prepare || return $?
+  _vetcoders_start_prepare_arguments "$@" || return $?
+  local start_project_root="${VIBECRAFTED_START_ROOT:-}"
+  [[ -n "$start_project_root" ]] || start_project_root="$(_vetcoders_effective_project_root)"
+  _vetcoders_start_open_terminal_if_needed \
+    "$start_project_root" "${_vetcoders_start_frame_argv[@]}" || return $?
+  [[ -z "${VIBECRAFTED_START_ESCALATED:-}" ]] || return 0
+  set -- "${_vetcoders_start_frame_argv[@]}"
+  _vetcoders_product_entry_prepare "${VIBECRAFTED_START_ROOT:-}" || return $?
   if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" == "1" ]]; then
     if ! declare -F _vetcoders_product_entry_probe_print >/dev/null 2>&1; then
       printf 'vc-start: required product probe helper missing\n' >&2

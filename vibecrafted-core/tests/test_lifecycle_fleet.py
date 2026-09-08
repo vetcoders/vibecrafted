@@ -835,8 +835,8 @@ def test_parent_handoff_never_overwrites_a_stop_accepted_during_popen(
     repo = tmp_path / "repo"
     _seed_repo(repo)
     plan = _plan(repo, ("W0-a",), ("codex",))
-    from vibecrafted_core.dispatch.doctor import diagnose_file
     import vibecrafted_core.lifecycle_fleet as fleet_module
+    from vibecrafted_core.dispatch.doctor import diagnose_file
 
     dispatch = diagnose_file(plan).dispatch
     assert dispatch is not None
