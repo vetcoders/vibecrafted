@@ -24,7 +24,7 @@ def _generation_python_candidates() -> list[str]:
     """Interpreters that can import vibecrafted_core without host PYTHONPATH.
 
     vc-frame ``bash -lc`` panes do not inherit the deck wrapper.  Match
-    ``spawn_python_bin`` in runtime/scripts/lib/meta.sh: env override, then the
+    ``spawn_python_bin`` in runtime/scripts/lib/util.sh: env override, then the
     uv tool venv, then generation ``bin/python3``.  Never fall through to
     Homebrew ``python3`` — that is the 3.14 ModuleNotFoundError class.
     """

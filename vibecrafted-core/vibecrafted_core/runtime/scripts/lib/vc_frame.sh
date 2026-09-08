@@ -185,7 +185,7 @@ spawn_current_tab_id() {
     vc_frame_cmd+=(--session "$session_name")
   fi
   raw="$("${vc_frame_cmd[@]}" action current-tab-info --json 2>/dev/null || true)"
-  python3 - "$raw" <<'PY'
+  "$(spawn_python_bin)" - "$raw" <<'PY'
 import json
 import sys
 
@@ -223,7 +223,7 @@ spawn_tab_id_by_name() {
     vc_frame_cmd+=(--session "$session_name")
   fi
   raw="$("${vc_frame_cmd[@]}" action list-tabs --json 2>/dev/null || true)"
-  python3 - "$tab_name" "$raw" <<'PY'
+  "$(spawn_python_bin)" - "$tab_name" "$raw" <<'PY'
 import json
 import sys
 
@@ -272,7 +272,7 @@ spawn_current_focused_pane_id() {
   local vc_frame_bin=""
   vc_frame_bin="$(spawn_vc_frame_bin)" || return 1
   raw="$("$vc_frame_bin" action list-panes --json --state 2>/dev/null || true)"
-  python3 - "$raw" <<'PY'
+  "$(spawn_python_bin)" - "$raw" <<'PY'
 import json
 import sys
 
@@ -549,7 +549,7 @@ spawn_record_host_session_failure() {
   printf 'host session launch failed: %s\n' "$err" >&2
   local meta_path="${SPAWN_META:-}"
   [[ -n "$meta_path" && -f "$meta_path" ]] || return 0
-  python3 - "$meta_path" "$err" <<'PY' 2>/dev/null || true
+  "$(spawn_python_bin)" - "$meta_path" "$err" <<'PY' 2>/dev/null || true
 import datetime as dt
 import json
 import os
