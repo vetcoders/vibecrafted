@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: BUSL-1.1" src="https://img.shields.io/badge/license-BUSL--1.1-blue.svg"></a>
-  <a href="VERSION"><img alt="Version 4.3.0" src="https://img.shields.io/badge/version-4.3.0-informational.svg"></a>
+  <a href="VERSION"><img alt="Version 4.3.1" src="https://img.shields.io/badge/version-4.3.1-informational.svg"></a>
   <a href="docs/INSTALL.md"><img alt="Platform: macOS, Linux, Windows (WSL2)" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20(WSL2)-lightgrey.svg"></a>
 </p>
 

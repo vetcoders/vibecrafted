@@ -7,7 +7,7 @@
 # docs/RELEASE_CHECKLIST.md has been run and the operator pastes the
 # real Vibecrafted_<version>-<YYYYMMDD>-<sha8>.dmg coordinates.
 cask "vibecrafted-app" do
-  version "4.3.0,YYYYMMDD,sha8"
+  version "4.3.1,YYYYMMDD,sha8"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
 
   url "https://github.com/vetcoders/vibecrafted/releases/download/v#{version.csv.first}/Vibecrafted_#{version.csv.first}-#{version.csv.second}-#{version.csv.third}.dmg"
