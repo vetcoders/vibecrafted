@@ -10,7 +10,7 @@ from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
-from _runtime_pack_fixture import seed_runtime_pack
+from _runtime_pack_fixture import _write_test_source_provenance, seed_runtime_pack
 
 from scripts import vetcoders_install as installer
 
@@ -474,6 +474,86 @@ def test_runtime_launcher_public_name_never_claims_foreign_tools() -> None:
         # vendored copy, never wrapped into a `vibecrafted-*` shim on the
         # user's PATH. The vendored binary stays generation-private.
         assert installer._runtime_launcher_public_name(foreign) is None
+
+
+def test_public_launcher_keeps_user_foundations_and_removes_retired_generation_bins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Public children never inherit a private foundation-tool precedence."""
+    home = tmp_path / "home"
+    runtime_home = home / "runtime"
+    launcher_home = home / "bin"
+    user_bin = home / "user-bin"
+    old_bins = [
+        runtime_home / "releases" / generation / "bin"
+        for generation in ("f861d136", "9547ff35", "ae650a83")
+    ]
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(launcher_home))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
+    for tool in ("aicx", "loct", "prview", "screenscribe"):
+        _write_executable(user_bin / tool, f"#!/bin/sh\nprintf 'user-{tool}\\n'\n")
+    for old_bin in old_bins:
+        for tool in ("aicx", "loct", "prview", "screenscribe"):
+            _write_executable(
+                old_bin / tool, f"#!/bin/sh\nprintf 'retired-{tool}\\n'\n"
+            )
+    monkeypatch.setenv(
+        "PATH",
+        ":".join([str(user_bin), *(str(path) for path in old_bins), "/usr/bin:/bin"]),
+    )
+
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    entry = payload / "bin/vc-start"
+    _write_executable(
+        entry,
+        "#!/bin/bash\n"
+        'for tool in aicx loct prview screenscribe; do command -v "$tool"; done\n'
+        "printf 'runtime=%s\\n' \"$VIBECRAFTED_RUNTIME_ROOT\"\n"
+        "printf 'python=%s\\n' \"$VIBECRAFTED_PYTHON\"\n"
+        "printf 'path=%s\\n' \"$PATH\"\n",
+    )
+    # Carrier provenance binds source payload before the native donor helper is
+    # added; retain that production ordering when this test changes vc-start.
+    native_donor = payload / "libexec"
+    staged_donor = tmp_path / "native-donor"
+    native_donor.rename(staged_donor)
+    _write_test_source_provenance(payload)
+    staged_donor.rename(native_donor)
+    args = Namespace(
+        payload_root=str(payload),
+        app_root=str(terminal_host.parents[2]),
+        terminal_host=str(terminal_host),
+        frame_helper=str(frame_helper),
+    )
+    assert installer.cmd_runtime_install(args) == 0
+    capsys.readouterr()
+
+    result = subprocess.run(
+        [str(launcher_home / "vc-start")],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=os.environ.copy(),
+    )
+    generation = runtime_home / "releases/9.9.9+g12345678"
+    lines = result.stdout.splitlines()
+    assert lines[:4] == [
+        str(user_bin / tool) for tool in ("aicx", "loct", "prview", "screenscribe")
+    ]
+    assert f"runtime={generation}" in lines
+    assert f"python={generation / 'bin/python3'}" in lines
+    path_line = next(line for line in lines if line.startswith("path="))
+    assert str(user_bin) in path_line
+    assert str(generation / "bin") not in path_line
+    for old_bin in old_bins:
+        assert str(old_bin) not in path_line
+    assert not any(
+        (launcher_home / tool).exists()
+        for tool in ("aicx", "loct", "prview", "screenscribe")
+    )
 
 
 def test_runtime_pack_restores_public_owner_when_retiring_old_bare_shim(

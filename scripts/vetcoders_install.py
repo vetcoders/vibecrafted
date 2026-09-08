@@ -15420,7 +15420,6 @@ def _runtime_launcher_body(
     executable: Path,
     leading_arguments: Sequence[str] = (),
     environment: Mapping[str, str] | None = None,
-    prepend_generation_bin: bool = True,
 ) -> str:
     quoted_arguments = " ".join(shlex_quote(value) for value in leading_arguments)
     prefix = f"{quoted_arguments} " if quoted_arguments else ""
@@ -15433,6 +15432,7 @@ def _runtime_launcher_body(
         f"export VIBECRAFTED_RUNTIME_ROOT={shlex_quote(str(generation))}",
         f"export VIBECRAFTED_ROOT={shlex_quote(str(generation))}",
         f"export VIBECRAFTED_PYTHON={shlex_quote(str(generation / 'bin/python3'))}",
+        f"export VIBECRAFTED_RUNTIME_BIN={shlex_quote(str(generation / 'bin'))}",
         f"export VIBECRAFTED_VC_FRAME_BIN={shlex_quote(str(generation / 'libexec/vc-frame'))}",
         f"export VC_FRAME_CONFIG_DIR={shlex_quote(str(frame_config))}",
     ]
@@ -15440,12 +15440,26 @@ def _runtime_launcher_body(
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
             raise ValueError(f"invalid runtime launcher environment name: {name!r}")
         lines.append(f"export {name}={shlex_quote(value)}")
-    if prepend_generation_bin:
-        lines.append(
-            f'export PATH="{generation / "bin"}:${{PATH:-/usr/bin:/bin:/usr/sbin:/sbin}}"'
-        )
-    else:
-        lines.append('export PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"')
+    # Public launchers own only the vc-* namespace.  The generation is still
+    # selected through absolute executable paths and explicit runtime variables
+    # above, but its bundled foundations must never become an ambient PATH
+    # dependency.  Old owned release bins can survive in a login shell after an
+    # upgrade; remove exactly those entries while preserving every other user
+    # PATH component (including host foundation tools).
+    lines.extend(
+        [
+            "_vibecrafted_path_entries=()",
+            'IFS=":" read -r -a _vibecrafted_path_entries <<< "${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"',
+            "_vibecrafted_clean_path=()",
+            'for _vibecrafted_path_entry in "${_vibecrafted_path_entries[@]}"; do',
+            f'  case "$_vibecrafted_path_entry" in {shlex_quote(str(runtime_home / "releases"))}/*/bin) continue ;; esac',
+            '  _vibecrafted_clean_path+=("$_vibecrafted_path_entry")',
+            "done",
+            'PATH="$(IFS=:; printf "%s" "${_vibecrafted_clean_path[*]}")"',
+            'export PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"',
+            "unset _vibecrafted_path_entries _vibecrafted_clean_path _vibecrafted_path_entry",
+        ]
+    )
     lines.extend(
         [
             'export VIBECRAFTED_DECLARED_LAUNCHER="$0"',
@@ -17133,7 +17147,6 @@ def cmd_runtime_resolve(args: argparse.Namespace) -> int:
                     runtime_home=runtime_home,
                     frame_config=product / "vc-frame",
                     executable=generation / "bin" / name,
-                    prepend_generation_bin=name != "vc-terminal",
                 )
                 if _capture_runtime_bound_file(
                     paths["launcher_home"] / name
@@ -17435,7 +17448,6 @@ def _install_runtime_pack(args: argparse.Namespace) -> int:
         runtime_home=runtime_home,
         frame_config=frame_config,
         executable=generation_terminal_entry,
-        prepend_generation_bin=False,
     )
     stage_launcher(terminal_launcher, terminal_body)
 
