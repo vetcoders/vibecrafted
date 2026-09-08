@@ -10,6 +10,13 @@ MODEL_OVERRIDE_FLAGS = {
     "claude": "--model",
     "codex": "-m",
     "cursor": "--model",
+    # grok 1.0.21 documents both `-m` and `--model`; inject the long form to
+    # match grok_spawn.sh, and treat `-m` as an existing pin.
+    "grok": "--model",
+}
+
+MODEL_OVERRIDE_FLAG_ALIASES: dict[str, tuple[str, ...]] = {
+    "grok": ("--model", "-m"),
 }
 
 
@@ -37,34 +44,46 @@ def _model_override_receipt(
     return receipt
 
 
-def _existing_model_value(command: Sequence[str], flag: str) -> tuple[bool, str | None]:
+def _existing_model_value(
+    command: Sequence[str], flags: str | Sequence[str]
+) -> tuple[bool, str | None]:
     """Return one unambiguous existing model value before ``--``.
 
-    A request with multiple pins is deliberately not idempotent, even when the
-    values happen to match.  The provider owns duplicate-flag semantics, so the
-    adapter must reject that ambiguous command instead of reporting a pin as
-    applied.  Likewise, a bare flag or an empty ``--model=`` is malformed rather
-    than an invitation to insert another flag.
+    ``flags`` may be one injection flag or a set of aliases (Grok's
+    ``--model`` / ``-m``). A request with multiple pins is deliberately not
+    idempotent, even when the values happen to match.  The provider owns
+    duplicate-flag semantics, so the adapter must reject that ambiguous
+    command instead of reporting a pin as applied.  Likewise, a bare flag or
+    an empty ``--model=`` is malformed rather than an invitation to insert
+    another flag.
     """
 
+    flag_list = (flags,) if isinstance(flags, str) else tuple(flags)
     values: list[str] = []
     index = 0
     while index < len(command):
         argument = command[index]
         if argument == "--":
             break
-        if argument == flag:
-            if index + 1 >= len(command) or command[index + 1].startswith("-"):
-                raise ValueError("model_override_missing_existing_model")
-            values.append(command[index + 1])
-            index += 2
-            continue
-        if flag.startswith("--") and argument.startswith(f"{flag}="):
-            value = argument.removeprefix(f"{flag}=")
-            if not value:
-                raise ValueError("model_override_missing_existing_model")
-            values.append(value)
-        index += 1
+        matched = False
+        for flag in flag_list:
+            if argument == flag:
+                if index + 1 >= len(command) or command[index + 1].startswith("-"):
+                    raise ValueError("model_override_missing_existing_model")
+                values.append(command[index + 1])
+                index += 2
+                matched = True
+                break
+            if flag.startswith("--") and argument.startswith(f"{flag}="):
+                value = argument.removeprefix(f"{flag}=")
+                if not value:
+                    raise ValueError("model_override_missing_existing_model")
+                values.append(value)
+                index += 1
+                matched = True
+                break
+        if not matched:
+            index += 1
 
     if not values:
         return False, None
@@ -130,12 +149,18 @@ def _with_agy_model_override(
 
 
 def _with_direct_model_override(
-    command: Sequence[str], flag: str, requested: str
+    command: Sequence[str],
+    flag: str,
+    requested: str,
+    *,
+    existing_flags: Sequence[str] | None = None,
 ) -> list[str]:
     """Inject one direct argv pin, rejecting a conflicting existing pin."""
 
     command_list = list(command)
-    already_pinned, existing_model = _existing_model_value(command_list, flag)
+    already_pinned, existing_model = _existing_model_value(
+        command_list, existing_flags if existing_flags is not None else (flag,)
+    )
     if already_pinned:
         if existing_model == requested:
             return command_list
@@ -165,6 +190,9 @@ def _with_model_override(
     flag = MODEL_OVERRIDE_FLAGS.get(agent)
     if not requested.strip() or not flag or not command_list:
         return command_list
+    aliases = MODEL_OVERRIDE_FLAG_ALIASES.get(agent, (flag,))
     if agent == "agy":
         return _with_agy_model_override(command_list, flag, requested)
-    return _with_direct_model_override(command_list, flag, requested)
+    return _with_direct_model_override(
+        command_list, flag, requested, existing_flags=aliases
+    )
