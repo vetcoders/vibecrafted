@@ -78,13 +78,33 @@ spawn_require_file "$plan_file"
 spawn_validate_runtime "$runtime"
 spawn_prepare_paths cursor "$plan_file" "$root" "$mode" "$dry_run"
 spawn_scan_active "${SPAWN_LOG_DIR:-$SPAWN_REPORT_DIR}"
+
+# Probe the *selected* cursor-agent --help before writing launch meta/receipts.
+# Headless bypass requires --force and --trust (spawn.py PERMISSION_CONTRACT).
+# Missing required flags fail closed — never silently drop them for an older CLI.
+# Probe before spawn_write_meta so a refused launch never leaves status=launching.
+cursor_perm_flags="--force --trust"
+if (( !dry_run )); then
+  spawn_require_command cursor-agent
+  cursor_version="$(cursor-agent --version 2>/dev/null | head -n1 || true)"
+  cursor_help="$(cursor-agent --help 2>&1 || true)"
+  if [[ -z "${cursor_help//[[:space:]]/}" ]]; then
+    spawn_die "cursor-agent ${cursor_version:-unknown} returned empty --help; cannot verify required flags --force --trust"
+  fi
+  missing_flags=()
+  for flag in --force --trust; do
+    if ! printf '%s' "$cursor_help" | grep -E "(^|[^A-Za-z0-9_-])${flag}([^A-Za-z0-9_-]|$)" >/dev/null 2>&1; then
+      missing_flags+=("$flag")
+    fi
+  done
+  if ((${#missing_flags[@]})); then
+    spawn_die "cursor-agent ${cursor_version:-unknown} lacks required flag(s) ${missing_flags[*]} for headless bypass; refusing to launch (no silent downgrade). Update cursor-agent or select a binary that exposes these flags."
+  fi
+fi
+
 runtime_input="$SPAWN_TMP_DIR/${SPAWN_TS}_${SPAWN_RUN_ID}_${SPAWN_SLUG}_cursor_prompt.md"
 spawn_build_runtime_prompt "$SPAWN_PLAN" "$runtime_input" "$SPAWN_REPORT" cursor "$model"
 spawn_write_meta "$SPAWN_META" "launching" "cursor" "$mode" "$SPAWN_ROOT" "$SPAWN_PLAN" "$SPAWN_REPORT" "$SPAWN_TRANSCRIPT" "$SPAWN_LAUNCHER" "$model"
-
-if (( !dry_run )); then
-  spawn_require_command cursor-agent
-fi
 
 qroot="$(spawn_shell_quote "$SPAWN_ROOT")"
 qruntime="$(spawn_shell_quote "$runtime_input")"
@@ -126,15 +146,16 @@ salvage_success_report="if [[ \$pipeline_status -eq 0 && ! -s $qreport && -s $ql
 salvage_failure_report="if [[ \$pipeline_status -ne 0 && ! -s $qreport ]]; then { printf '%s\n' '---'; printf 'run_id: %s\n' \"\${SPAWN_RUN_ID:-unknown}\"; printf 'prompt_id: %s\n' \"\${SPAWN_PROMPT_ID:-unknown}\"; printf 'agent: %s\n' \"\${SPAWN_AGENT:-cursor}\"; printf 'skill: %s\n' \"\${SPAWN_SKILL_CODE:-unknown}\"; printf 'model: %s\n' \"\${SPAWN_MODEL:-unknown}\"; printf 'status: failed\n'; printf 'session_id: %s\n' \"\${SPAWN_SESSION_ID:-pending}\"; printf 'repo_path: %s\n' \"\${SPAWN_ROOT:-unknown}\"; printf 'tokens_input: 0\n'; printf 'tokens_output: 0\n'; printf 'tokens_total: 0\n'; printf 'cost_usd: unknown\n'; printf '%s\n\n' '---'; if [[ -s $qlast_message ]]; then cat $qlast_message; else printf '%s\n' 'Cursor failed before writing a standalone report file, and no final message was captured.'; printf '%s\n' 'See transcript for the full event stream:'; printf '%s\n' $qtranscript; printf '%s\n' 'Last message path checked:'; printf '%s\n' $qlast_message; fi; } > $qreport; fi;"
 # Human pane: AgentStreamParser. Raw stream-json teed to transcript for await.
 # cursor-agent emits claude-shaped init/assistant/result events; `-p` reads the
-# prompt from stdin. `--force --trust` mirror the headless bypass policy in
-# spawn.py (PERMISSION_POLICIES cursor lane).
+# prompt from stdin. Permission flags are probed above against the selected
+# binary (spawn.py PERMISSION_POLICIES cursor lane) — never invent --best-of-n;
+# --resume takes chatId, not a brief path.
 # Prefer the runtime's shared resolver because checkout launchers live at
 # <repo>/runtime/scripts while wheel launchers live under vibecrafted_core.
 filter_core="$(spawn_python_core_path 2>/dev/null || { cd "$SCRIPT_DIR/../../.." && pwd; })"
 qfilter_py="$(spawn_shell_quote "$(spawn_python_bin)")"
 qfilter_core="$(spawn_shell_quote "$filter_core")"
 qfilter_cmd="PYTHONPATH=$qfilter_core $qfilter_py -m vibecrafted_core.agent_stream --agent cursor"
-launch_cmd="set -o pipefail && cd $qroot && { rm -f $qlast_message; cursor-agent -p --output-format stream-json --force --trust $model_flag < $qruntime 2>&1 | tee -a $qtranscript | $qfilter_cmd; pipeline_status=\$?; $last_message_extract $salvage_success_report $salvage_failure_report exit \$pipeline_status; }"
+launch_cmd="set -o pipefail && cd $qroot && { rm -f $qlast_message; cursor-agent -p --output-format stream-json $cursor_perm_flags $model_flag < $qruntime 2>&1 | tee -a $qtranscript | $qfilter_cmd; pipeline_status=\$?; $last_message_extract $salvage_success_report $salvage_failure_report exit \$pipeline_status; }"
 
 combined_success="${cursor_success_hook}${success_hook_extra:+
 $success_hook_extra}"
