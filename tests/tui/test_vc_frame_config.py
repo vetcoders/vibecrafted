@@ -70,6 +70,22 @@ def test_vc_frame_config_enables_kitty_protocol_for_super_switcher() -> None:
     assert "support_kitty_keyboard_protocol true" in payload
 
 
+def test_quick_cmd_shortcut_reuses_active_compact_bar_including_locked_mode() -> None:
+    """Cmd+Shift+. is a shared message, not a second quick-command launcher."""
+    payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
+    shared = payload[payload.index("    shared {") : payload.index("    shared_except")]
+    quick_cmd = shared[
+        shared.index('bind "Super Shift ."') : shared.index(
+            "        // Command Composer"
+        )
+    ]
+
+    assert 'bind "Super Shift ."' in quick_cmd
+    assert 'MessagePlugin "compact-bar"' in quick_cmd
+    assert 'name "vc_quick_cmd"' in quick_cmd
+    assert "Run " not in quick_cmd
+
+
 def test_vc_frame_config_ctrl_q_closes_focus_not_session() -> None:
     payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
     active_lines = [

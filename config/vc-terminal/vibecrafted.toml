@@ -67,7 +67,7 @@ post_processing = true
 persist = false
 mouse = { enabled = true, mods = "Command" }
 binding = { key = "P", mods = "Control|Shift" }
-regex = '(~|\.\.?|[A-Za-z0-9._@%+=,-]+)?(/[A-Za-z0-9._@%+=,~:-]+)+'
+regex = '(~|\.\.?|[A-Za-z0-9._@%+=,-]+)?(/[A-Za-z0-9._@%+=,~: -]+)+'
 
 
 # Polish diacritics on either Option key, while keeping Option as Alt/Meta.

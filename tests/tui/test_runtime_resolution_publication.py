@@ -126,6 +126,25 @@ def test_ready_resolution_uses_generation_host_and_one_physical_config(
     assert not (Path.home().parent / "foreign-config").exists()
 
 
+def test_runtime_install_projects_quick_cmd_binding_to_active_compact_bar(
+    installed, capsys
+):
+    """The install projection must retain the shared Cmd+Shift+. route."""
+    paths, _, result = installed
+    projected = paths["product_config"] / "vc-frame/config.kdl"
+    generated = (
+        Path(result["root"])
+        / "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
+    )
+    assert projected.read_bytes() == generated.read_bytes()
+    shared = projected.read_text(encoding="utf-8")
+    shared = shared[shared.index("    shared {") : shared.index("    shared_except")]
+    assert 'bind "Super Shift ."' in shared
+    assert 'MessagePlugin "compact-bar"' in shared
+    assert 'name "vc_quick_cmd"' in shared
+    _resolve(paths, capsys, status="ready")
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
