@@ -20,6 +20,15 @@ COMMON_SH = (
     / "scripts"
     / "common.sh"
 )
+UTIL_SH = (
+    REPO_ROOT
+    / "vibecrafted-core"
+    / "vibecrafted_core"
+    / "runtime"
+    / "scripts"
+    / "lib"
+    / "util.sh"
+)
 SHELL_SH = (
     REPO_ROOT
     / "vibecrafted-core"
@@ -430,6 +439,189 @@ def test_spawn_require_command_never_selects_owned_generation_copy(
     accepted = _run(custom_bin)
     assert accepted.returncode == 0, accepted.stderr
     assert accepted.stdout.strip() == str(custom_bin / command_name)
+
+
+def _write_hostile_python(directory: Path) -> Path:
+    """A public ``python3`` that would wreck any internal runtime call.
+
+    It fails the resolver's 3.11 version probe and, when actually executed,
+    prints a marker and exits 79 instead of doing the work — so selecting it is
+    impossible to mistake for success.  This stands in for the real host
+    interpreter that the launcher tree started reaching once the owned
+    generation bin left PATH (macOS ``/usr/bin/python3`` 3.9.6, or any shim).
+    """
+
+    directory.mkdir(parents=True, exist_ok=True)
+    tool = directory / "python3"
+    tool.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        "  -c) exit 1 ;;\n"
+        "esac\n"
+        "printf 'HOST_PYTHON_SELECTED\\n'\n"
+        "exit 79\n",
+        encoding="utf-8",
+    )
+    tool.chmod(0o755)
+    return tool
+
+
+def _fake_generation_bin(tmp_path: Path) -> Path:
+    """A generation bin whose ``python3`` is a real, capable interpreter."""
+
+    generation_bin = tmp_path / "generation" / "bin"
+    generation_bin.mkdir(parents=True, exist_ok=True)
+    (generation_bin / "python3").symlink_to(sys.executable)
+    return generation_bin
+
+
+_NEEDS_MODERN_PYTHON = pytest.mark.skipif(
+    sys.version_info < (3, 11),
+    reason="needs a 3.11+ interpreter to stand in for the generation python",
+)
+
+
+@_NEEDS_MODERN_PYTHON
+def test_internal_runtime_python_is_explicit_while_public_python3_stays_the_founders(
+    tmp_path: Path,
+) -> None:
+    """Two owners, one PATH: public python3 is the Founder's, internal is ours.
+
+    Removing the owned generation bin from PATH closed a real leak, but it also
+    silently re-pointed every *internal* runtime Python call at whatever
+    ``python3`` the Founder's PATH offers.  ``spawn_shell_quote`` is the proven
+    casualty: it is called by every ``*_spawn.sh`` launcher, so a hostile or
+    merely stale host interpreter corrupted the quoting of every dispatched
+    command line.  Internal execution must name its interpreter; public
+    resolution must stay untouched.
+    """
+
+    home = tmp_path / "home"
+    home.mkdir()
+    hostile_bin = tmp_path / "hostile-bin"
+    _write_hostile_python(hostile_bin)
+    generation_bin = _fake_generation_bin(tmp_path)
+
+    result = _bash(
+        _ENV_SANITIZE
+        + f"""
+        set -euo pipefail
+        export HOME="{home}"
+        export XDG_DATA_HOME="{home / ".local" / "share"}"
+        export PATH="{hostile_bin}:/usr/bin:/bin"
+        export VIBECRAFTED_PYTHON="{generation_bin / "python3"}"
+        export VIBECRAFTED_RUNTIME_BIN="{generation_bin}"
+        source "{COMMON_SH}"
+        spawn_prepend_agent_tool_paths
+        printf 'quote=%s\\n' "$(spawn_shell_quote 'file with spaces')"
+        printf 'public_python3=%s\\n' "$(command -v python3)"
+        printf 'internal_python=%s\\n' "$(spawn_python_bin)"
+        printf 'python3_kind=%s\\n' "$(type -t python3)"
+        printf 'PATH=%s\\n' "$PATH"
+        """
+    )
+
+    fields = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+
+    # The regression: this returned exit 79 / HOST_PYTHON_SELECTED.
+    assert fields["quote"] == "'file with spaces'"
+    assert "HOST_PYTHON_SELECTED" not in result.stdout
+
+    # Public resolution is still the Founder's, hostile or not — we do not
+    # repair the host's python3, and we never shadow it with a shell function.
+    assert fields["public_python3"] == str(hostile_bin / "python3")
+    assert fields["python3_kind"] == "file"
+
+    # Internal execution names the runtime interpreter explicitly...
+    assert fields["internal_python"] == str(generation_bin / "python3")
+    # ...without the private carrier re-entering ambient lookup.
+    assert str(generation_bin) not in fields["PATH"].split(os.pathsep)
+
+
+@_NEEDS_MODERN_PYTHON
+def test_internal_python_owner_resolves_from_the_selected_generation_bin(
+    tmp_path: Path,
+) -> None:
+    """``VIBECRAFTED_RUNTIME_BIN`` alone is enough to own internal execution.
+
+    A private-only foundation must stay absent from PATH, so the owner has to be
+    reachable purely through the explicit runtime environment — with no
+    ``VIBECRAFTED_PYTHON`` set and a hostile public ``python3`` in the lead.
+    """
+
+    home = tmp_path / "home"
+    home.mkdir()
+    hostile_bin = tmp_path / "hostile-bin"
+    _write_hostile_python(hostile_bin)
+    generation_bin = _fake_generation_bin(tmp_path)
+
+    result = _bash(
+        _ENV_SANITIZE
+        + f"""
+        set -euo pipefail
+        unset VIBECRAFTED_PYTHON
+        export HOME="{home}"
+        export XDG_DATA_HOME="{home / ".local" / "share"}"
+        export PATH="{hostile_bin}:/usr/bin:/bin"
+        export VIBECRAFTED_RUNTIME_BIN="{generation_bin}"
+        source "{COMMON_SH}"
+        spawn_prepend_agent_tool_paths
+        printf 'quote=%s\\n' "$(spawn_shell_quote 'file with spaces')"
+        printf 'internal_python=%s\\n' "$(spawn_python_bin)"
+        printf 'framework_version=%s\\n' "$(spawn_framework_version)"
+        printf 'PATH=%s\\n' "$PATH"
+        """
+    )
+
+    fields = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    assert fields["quote"] == "'file with spaces'"
+    assert fields["internal_python"] == str(generation_bin / "python3")
+    # The sibling internal reader in the same module must not regress either.
+    assert fields["framework_version"] != ""
+    assert "HOST_PYTHON_SELECTED" not in result.stdout
+    assert str(generation_bin) not in fields["PATH"].split(os.pathsep)
+
+
+@_NEEDS_MODERN_PYTHON
+def test_internal_python_owner_survives_standalone_util_sourcing(
+    tmp_path: Path,
+) -> None:
+    """``util.sh`` is sourced on its own (capability probes do exactly this).
+
+    The interpreter owner therefore lives in ``util.sh`` beside the PATH
+    sanitizer that created the need for it, so no module has to guard on
+    ``common.sh`` load order to reach it.
+    """
+
+    home = tmp_path / "home"
+    home.mkdir()
+    hostile_bin = tmp_path / "hostile-bin"
+    _write_hostile_python(hostile_bin)
+    generation_bin = _fake_generation_bin(tmp_path)
+
+    result = _bash(
+        _ENV_SANITIZE
+        + f"""
+        set -euo pipefail
+        export HOME="{home}"
+        export XDG_DATA_HOME="{home / ".local" / "share"}"
+        export PATH="{hostile_bin}:/usr/bin:/bin"
+        export VIBECRAFTED_PYTHON="{generation_bin / "python3"}"
+        source "{UTIL_SH}"
+        spawn_prepend_agent_tool_paths
+        printf 'quote=%s\\n' "$(spawn_shell_quote 'file with spaces')"
+        """
+    )
+
+    fields = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    assert fields["quote"] == "'file with spaces'"
+    assert "HOST_PYTHON_SELECTED" not in result.stdout
 
 
 def test_skill_dry_run_reaches_spawn_launcher_without_launching(tmp_path: Path) -> None:

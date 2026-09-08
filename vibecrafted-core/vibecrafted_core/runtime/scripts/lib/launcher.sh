@@ -246,10 +246,12 @@ spawn_launch_headless() {
   # that group, the "detached" run is killed before it writes a transcript.
   # macOS has no setsid(1); use Python's start_new_session (posix setsid) for a
   # portable true-detach, with stdio fully off the parent's (possibly piped) fds.
-  # Fall back to nohup+& only where python3 is unavailable.
+  # Fall back to nohup+& only where the resolved runtime python is absent.
   local launcher_pid=""
-  if command -v python3 >/dev/null 2>&1; then
-    launcher_pid="$(VC_LAUNCHER="$launcher" python3 - <<'PY'
+  local launcher_python=""
+  launcher_python="$(spawn_python_bin)"
+  if command -v "$launcher_python" >/dev/null 2>&1; then
+    launcher_pid="$(VC_LAUNCHER="$launcher" "$launcher_python" - <<'PY'
 import os, subprocess
 proc = subprocess.Popen(
     [os.environ["VC_LAUNCHER"]],

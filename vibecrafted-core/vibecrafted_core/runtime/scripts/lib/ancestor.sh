@@ -5,7 +5,7 @@ spawn_ancestor_mtime_iso() {
 
   [[ -n "$ancestor_plan" ]] || return 0
 
-  python3 - "$ancestor_plan" <<'PY'
+  "$(spawn_python_bin)" - "$ancestor_plan" <<'PY'
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
@@ -25,7 +25,7 @@ spawn_ancestor_mtime_epoch() {
 
   [[ -n "$ancestor_plan" ]] || return 0
 
-  python3 - "$ancestor_plan" <<'PY'
+  "$(spawn_python_bin)" - "$ancestor_plan" <<'PY'
 from pathlib import Path
 import sys
 

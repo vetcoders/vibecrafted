@@ -10,7 +10,7 @@ spawn_find_meta_for_run_id() {
   local reports_dir="$1"
   local target_run_id="$2"
 
-  python3 - "$reports_dir" "$target_run_id" <<'PY'
+  "$(spawn_python_bin)" - "$reports_dir" "$target_run_id" <<'PY'
 import json
 import os
 import sys
@@ -39,7 +39,7 @@ spawn_read_meta_field() {
   local meta_path="$1"
   local field_name="$2"
 
-  python3 - "$meta_path" "$field_name" <<'PY'
+  "$(spawn_python_bin)" - "$meta_path" "$field_name" <<'PY'
 import json
 import sys
 
@@ -141,7 +141,7 @@ spawn_update_meta_pid() {
   [[ -f "$meta_path" ]] || return 0
   [[ -n "$pid" ]] || return 0
 
-  python3 - "$meta_path" "$pid" <<'PY'
+  "$(spawn_python_bin)" - "$meta_path" "$pid" <<'PY'
 import json
 import os
 import sys
@@ -177,7 +177,7 @@ spawn_mark_meta_running() {
   local meta_path="$1"
   [[ -f "$meta_path" ]] || return 0
 
-  python3 - "$meta_path" <<'PY'
+  "$(spawn_python_bin)" - "$meta_path" <<'PY'
 import datetime as dt
 import json
 import os
@@ -222,7 +222,7 @@ spawn_reap_dead_run() {
   local meta_path="$1"
   [[ -f "$meta_path" ]] || return 0
 
-  python3 - "$meta_path" <<'PY'
+  "$(spawn_python_bin)" - "$meta_path" <<'PY'
 import datetime as dt
 import json
 import os
@@ -270,7 +270,7 @@ spawn_mark_unknown_liveness() {
   local meta_path="$1"
   [[ -f "$meta_path" ]] || return 0
 
-  python3 - "$meta_path" <<'PY'
+  "$(spawn_python_bin)" - "$meta_path" <<'PY'
 import datetime as dt
 import json
 import os
@@ -357,31 +357,10 @@ spawn_python_core_path() {
   return 1
 }
 
-# RESOLVER TRUTH: This resolver is kept exclusively for runtime-side/split-brain
-# ./runtime execution where the uv shim might not be directly in the execution chain.
-# This is NOT a deck-level plaster.
-#
-# Resolve an interpreter that can import vibecrafted_core. The package needs
-# tomllib (Python 3.11+); bare `python3` on macOS is often /usr/bin/python3 3.9.6
-# which lacks tomllib, so vibecrafted_core dies with ModuleNotFoundError. Prefer
-# the uv tool venv python (has the package + deps), then VIBECRAFTED_PYTHON, then
-# any 3.11+ python on PATH.
-spawn_python_bin() {
-  local candidate
-  for candidate in \
-    "${VIBECRAFTED_PYTHON:-}" \
-    "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/vibecrafted/bin/python3" \
-    "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/vibecrafted-core/bin/python3" \
-    python3.13 python3.12 python3.11 python3; do
-    [[ -n "$candidate" ]] || continue
-    command -v "$candidate" >/dev/null 2>&1 || continue
-    if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-  printf 'python3\n'
-}
+# spawn_python_bin lives in util.sh — beside spawn_prepend_agent_tool_paths, the
+# sanitizer that removed the owned generation bin from PATH and therefore created
+# the need for an explicit interpreter owner. util.sh is the no-deps layer sourced
+# first, so every module below it can name the runtime interpreter.
 
 spawn_python_module() {
   local core_path py

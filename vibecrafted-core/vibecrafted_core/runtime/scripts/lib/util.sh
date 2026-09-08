@@ -130,6 +130,43 @@ spawn_prepend_agent_tool_paths() {
   export PATH="$result"
 }
 
+# RESOLVER TRUTH: This resolver is kept exclusively for runtime-side/split-brain
+# ./runtime execution where the uv shim might not be directly in the execution chain.
+# This is NOT a deck-level plaster.
+#
+# Resolve an interpreter that can import vibecrafted_core. The package needs
+# tomllib (Python 3.11+); bare `python3` on macOS is often /usr/bin/python3 3.9.6
+# which lacks tomllib, so vibecrafted_core dies with ModuleNotFoundError. Prefer
+# the explicit owner env (VIBECRAFTED_PYTHON, then the selected generation bin),
+# then the uv tool venv python (has the package + deps), then any 3.11+ python.
+#
+# INTERNAL EXECUTION OWNER: it sits beside spawn_prepend_agent_tool_paths on
+# purpose. That sanitizer drops the owned generation bin from PATH, so a bare
+# `python3` in this launcher tree now resolves to whatever the Founder's PATH
+# offers — a 3.9.6 host interpreter, or in the worst case an unrelated shim.
+# Public tools must keep resolving that way; internal runtime Python must not.
+# Every internal call below therefore names its interpreter through this owner.
+# It lives in util.sh (the no-deps layer, sourced first and also sourced
+# standalone by the capability-probe tests) so no module has to guard on load
+# order to reach it.
+spawn_python_bin() {
+  local candidate
+  for candidate in \
+    "${VIBECRAFTED_PYTHON:-}" \
+    "${VIBECRAFTED_RUNTIME_BIN:+$VIBECRAFTED_RUNTIME_BIN/python3}" \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/vibecrafted/bin/python3" \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/vibecrafted-core/bin/python3" \
+    python3.13 python3.12 python3.11 python3; do
+    [[ -n "$candidate" ]] || continue
+    command -v "$candidate" >/dev/null 2>&1 || continue
+    if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  printf 'python3\n'
+}
+
 spawn_require_positive_int() {
   local value="${1:-}"
   local flag_name="${2:-value}"
@@ -139,7 +176,7 @@ spawn_require_positive_int() {
 spawn_shell_quote() {
   local value="${1-}"
   # printf '%q' can emit byte sequences that break vc_frame's UTF-8 validation.
-  python3 - "$value" <<'PY'
+  "$(spawn_python_bin)" - "$value" <<'PY'
 import shlex
 import sys
 
@@ -204,7 +241,7 @@ spawn_framework_version() {
     [[ -n "$state_file" ]] || continue
     [[ -f "$state_file" ]] || continue
     state_version="$(
-      python3 - "$state_file" <<'PY'
+      "$(spawn_python_bin)" - "$state_file" <<'PY'
 import json
 import sys
 

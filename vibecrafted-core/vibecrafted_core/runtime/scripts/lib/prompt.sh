@@ -22,7 +22,7 @@ spawn_frontmatter_field() {
   local source_file="$1"
   local field_name="$2"
 
-  python3 - "$source_file" "$field_name" <<'PY'
+  "$(spawn_python_bin)" - "$source_file" "$field_name" <<'PY'
 import pathlib
 import sys
 
@@ -96,7 +96,7 @@ spawn_strip_frontmatter_to_file() {
   local source_file="$1"
   local target_file="$2"
 
-  python3 - "$source_file" "$target_file" <<'PY'
+  "$(spawn_python_bin)" - "$source_file" "$target_file" <<'PY'
 import pathlib
 import sys
 
