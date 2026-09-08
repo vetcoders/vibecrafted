@@ -498,6 +498,19 @@ def _posix(path: Path) -> str:
     return str(path).replace("\\", "/")
 
 
+def _normalize_write_path(value: str) -> Path:
+    """Expand ``~`` and collapse traversal / existing symlinks without requiring the leaf.
+
+    ``Path.resolve(strict=False)`` follows existing symlink components and
+    normalizes ``..`` even when the destination file does not yet exist.
+    """
+    expanded = Path(value).expanduser()
+    try:
+        return expanded.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return Path(os.path.normpath(str(expanded)))
+
+
 def _is_under(path: Path, root: Path) -> bool:
     path_posix = _posix(path)
     root_posix = _posix(root)
@@ -506,32 +519,60 @@ def _is_under(path: Path, root: Path) -> bool:
 
 def _canonical_artifacts_roots() -> tuple[Path, ...]:
     """Write roots the doctor names in its own refusal: home artifacts plane."""
-    return (
-        (Path.home() / ".vibecrafted" / "artifacts").expanduser(),
-        (vibecrafted_home() / "artifacts").expanduser(),
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for raw in (
+        Path.home() / ".vibecrafted" / "artifacts",
+        vibecrafted_home() / "artifacts",
+    ):
+        normalized = _normalize_write_path(str(raw))
+        key = _posix(normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(normalized)
+    return tuple(roots)
+
+
+def _lexical_artifacts_roots() -> tuple[Path, ...]:
+    """Artifacts roots with ``..`` collapsed but symlinks not followed."""
+    return tuple(
+        Path(os.path.normpath(str(Path(raw).expanduser())))
+        for raw in (
+            Path.home() / ".vibecrafted" / "artifacts",
+            vibecrafted_home() / "artifacts",
+        )
     )
 
 
 def _is_canonical_artifacts_write(value: str) -> bool:
-    """True for ``~/.vibecrafted/artifacts`` and ``$VIBECRAFTED_HOME/artifacts``."""
-    raw = value.replace("\\", "/").strip()
-    if raw.startswith("~/.vibecrafted/artifacts"):
-        return True
-    expanded = Path(value).expanduser()
-    return any(_is_under(expanded, root) for root in _canonical_artifacts_roots())
+    """True only inside the canonical artifacts *directory*, after symlink resolution."""
+    normalized = _normalize_write_path(value)
+    return any(_is_under(normalized, root) for root in _canonical_artifacts_roots())
+
+
+def _lexically_under_artifacts(value: str) -> bool:
+    """True when the non-symlink-resolved path sits inside an artifacts directory."""
+    lexical = Path(os.path.normpath(str(Path(value).expanduser())))
+    return any(_is_under(lexical, root) for root in _lexical_artifacts_roots())
 
 
 def _forbidden_runtime_write_root(value: str) -> bool:
     """Reject provider-private and repo-local ``.vibecrafted`` write roots.
 
-    The previous substring ``/.vibecrafted/`` also matched the canonical
-    ``~/.vibecrafted/artifacts`` plane named by the error message.
+    Admission is a normalized directory-boundary check: prefix matches such as
+    ``artifacts-typo`` or ``artifacts/../../.codex`` are not the artifacts plane.
+    Existing symlink components are followed even when the leaf does not exist.
+    A path that is lexically inside artifacts but resolves outside is an escape.
     """
     if _is_canonical_artifacts_write(value):
         return False
+    if _lexically_under_artifacts(value):
+        return True
     raw = value.replace("\\", "/")
     expanded = _posix(Path(value).expanduser())
-    haystack = f"{raw}/{expanded}/"
+    normalized = _posix(_normalize_write_path(value))
+    haystack = f"{raw}/{expanded}/{normalized}/"
     if any(marker in haystack for marker in _PROVIDER_RUNTIME_MARKERS):
         return True
     return "/.vibecrafted/" in haystack or haystack.rstrip("/").endswith(

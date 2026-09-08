@@ -244,6 +244,33 @@ _vetcoders_run_core_cli() {
   fi
 }
 
+# Cursor --force/--trust admission uses the shared Cursor probe (commit
+# 7597d881: probe_cursor_cli_surface / require_cursor_flags). Fail closed —
+# never hardcode flags from error prose or a missing probe.
+_vetcoders_cursor_permission_flags() {
+  local python_spec py import_root timeout
+  python_spec="$(_vetcoders_core_python_spec)" || return 1
+  py="${python_spec%%$'\t'*}"
+  import_root="${python_spec#*$'\t'}"
+  timeout="${VIBECRAFTED_CURSOR_PROBE_TIMEOUT_S:-10}"
+  if [[ -n "$import_root" ]]; then
+    PYTHONPATH="$import_root${PYTHONPATH:+:$PYTHONPATH}" \
+      "$py" - "$timeout" <<'PY'
+import sys
+from vibecrafted_core.cursor_admission import cursor_permission_flag_string
+
+print(cursor_permission_flag_string(timeout=float(sys.argv[1])))
+PY
+  else
+    "$py" - "$timeout" <<'PY'
+import sys
+from vibecrafted_core.cursor_admission import cursor_permission_flag_string
+
+print(cursor_permission_flag_string(timeout=float(sys.argv[1])))
+PY
+  fi
+}
+
 _vetcoders_core_source_dir() {
   local python_spec py import_root
   python_spec="$(_vetcoders_core_python_spec)" || return 1
@@ -368,12 +395,17 @@ _vetcoders_fresh_session_command() {
       fi
       ;;
     cursor)
-      # cursor-agent: `-p` reads the prompt positionally; --force --trust mirror
-      # the headless bypass policy (spawn.py PERMISSION_POLICIES cursor lane).
+      # cursor-agent: `-p` reads the prompt positionally. Bypass flags come
+      # only from the shared Cursor probe (7597d881) — no hardcoded --force/--trust.
+      local cursor_perm_flags=""
+      cursor_perm_flags="$(_vetcoders_cursor_permission_flags)" || {
+        echo "cursor-agent capability probe refused --force/--trust (Cursor 7597d881 required; no silent downgrade)." >&2
+        return 1
+      }
       if [[ "$mode" == headless ]]; then
-        printf 'cursor-agent -p --output-format stream-json --force --trust %s\n' "$quoted_prompt"
+        printf 'cursor-agent -p --output-format stream-json %s %s\n' "$cursor_perm_flags" "$quoted_prompt"
       else
-        printf 'cursor-agent --force --trust %s\n' "$quoted_prompt"
+        printf 'cursor-agent %s %s\n' "$cursor_perm_flags" "$quoted_prompt"
       fi
       ;;
     *)

@@ -7,7 +7,10 @@ from pathlib import Path
 
 from vibecrafted_core.cli import main as cli_main
 from vibecrafted_core.dispatch.schema import doctor_dispatch
-from vibecrafted_core.dispatch.supervisor import prefer_live_descendant_head
+from vibecrafted_core.dispatch.supervisor import (
+    prefer_live_descendant_head,
+    select_live_descendant_head,
+)
 from vibecrafted_core.help_surface import render_workflow_help
 from vibecrafted_core.research_config import _yaml_lanes
 
@@ -57,6 +60,42 @@ def test_fail_g3_doctor_still_rejects_repo_local_and_provider_roots(
         )
 
 
+def test_fail_g3_doctor_rejects_artifacts_typo_and_traversal_without_existing_leaf() -> (
+    None
+):
+    """Admission is a normalized directory boundary, not a prefix or example list.
+
+    Neither ``artifacts-typo`` nor ``artifacts/../../.codex`` is the canonical
+    plane. The leaf does not need to exist for the refusal.
+    """
+    typo = "~/.vibecrafted/artifacts-typo/report.md"
+    traversal = "~/.vibecrafted/artifacts/../../.codex/report.md"
+    for reports_dir in (typo, traversal):
+        result = doctor_dispatch(_with_reports_dir(reports_dir), base_dir=FIXTURES)
+        assert any(_PROVIDER_ERROR in error for error in result.errors), (
+            reports_dir,
+            result.errors,
+        )
+
+
+def test_fail_g3_doctor_rejects_existing_symlink_escape_without_leaf(
+    tmp_path: Path,
+) -> None:
+    """Follow an existing symlink out of artifacts even if the output file is absent."""
+    isolated = Path(os.environ["VIBECRAFTED_HOME"])
+    artifacts = isolated / "artifacts"
+    artifacts.mkdir(parents=True)
+    provider = tmp_path / "provider-codex"
+    provider.mkdir()
+    escape = artifacts / "escape"
+    escape.symlink_to(provider)
+    reports_dir = str(escape / "report.md")
+    assert not Path(reports_dir).exists()
+
+    result = doctor_dispatch(_with_reports_dir(reports_dir), base_dir=FIXTURES)
+    assert any(_PROVIDER_ERROR in error for error in result.errors), result.errors
+
+
 def test_fail_g3_worktree_baseline_prefers_descendant_head() -> None:
     """A later living-tree HEAD that contains the receipt SHA wins.
 
@@ -80,6 +119,14 @@ def test_fail_g3_worktree_baseline_prefers_descendant_head() -> None:
         prefer_live_descendant_head(receipt, unrelated, is_ancestor=is_ancestor)
         == receipt
     )
+    kept = select_live_descendant_head(receipt, unrelated, is_ancestor=is_ancestor)
+    assert kept.selected == receipt
+    assert kept.planned == receipt
+    assert kept.reason == "frozen_baseline_kept_head_not_descendant"
+    drifted = select_live_descendant_head(receipt, later, is_ancestor=is_ancestor)
+    assert drifted.selected == later
+    assert drifted.reason == "live_descendant_head"
+    assert "local-069" in drifted.source_requirement
 
 
 def test_fail_g3_research_help_documents_yaml_n_lanes_not_only_trio() -> None:

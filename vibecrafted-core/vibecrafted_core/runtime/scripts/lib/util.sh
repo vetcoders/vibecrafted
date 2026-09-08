@@ -2,6 +2,9 @@
 
 spawn_die() {
   printf 'Error: %s\n' "$*" >&2
+  if declare -F spawn_settle_early_failure >/dev/null 2>&1; then
+    spawn_settle_early_failure "$*" || true
+  fi
   exit 1
 }
 
