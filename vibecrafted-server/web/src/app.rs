@@ -29,8 +29,9 @@ fn theme_control_script() -> &'static str {
   const apply = (theme) => {
     const next = theme === 'light' ? 'light' : 'dark';
     document.documentElement.dataset.theme = next;
-    button.textContent = next;
-    button.setAttribute('aria-pressed', String(next === 'light'));
+    const target = next === 'light' ? 'dark' : 'light';
+    button.textContent = target;
+    button.setAttribute('aria-label', `Switch to ${target} theme`);
     try { localStorage.setItem('loct-theme', next); } catch (_) {}
   };
   apply(document.documentElement.dataset.theme);

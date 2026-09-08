@@ -51,10 +51,9 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
                         <button
                             type="button"
                             class="server-theme-toggle"
-                            aria-label="Toggle color theme"
-                            aria-pressed="false"
+                            aria-label="Switch to light theme"
                         >
-                            "dark"
+                            "light"
                         </button>
                     </div>
                 </div>
