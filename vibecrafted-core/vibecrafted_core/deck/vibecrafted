@@ -1062,7 +1062,11 @@ cmd_tui_help() {
   printf '%bUsage:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted tui [voc flags...]\n'
   printf '  voc [flags...]\n'
-  printf '  vibecrafted tui [--state-root <dir>] [--deck <path>] [--root <path>] [--runtime <headless|terminal|visible>] [--tick-ms <ms>]\n'
+  printf '  vibecrafted tui [--state-root <dir>] [--deck <path>] [--repo <path>] [--runtime <headless|terminal|visible>] [--tick-ms <ms>]\n'
+  printf '\n'
+  printf '%bRepository:%b\n' "$_bold" "$_reset"
+  printf '  --repo <path>   workspace root passed through to launched workflows (--root: legacy spelling;\n'
+  printf '                  both with different paths is an error, never a silent pick)\n'
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted tui\n'
@@ -6344,6 +6348,22 @@ _argv_requests_worktree() {
   return 1
 }
 
+# True when the argument vector carries a public execution control
+# (`--permissions <policy>` / `--sandbox [word]`) before the prompt tail. Only
+# the core launcher resolves these against the installed provider CLI
+# (execution_controls.resolve_execution_controls) and refuses what cannot be
+# enforced; the shell skill helper would accept-and-ignore them.
+_argv_requests_execution_controls() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      -p|--prompt|--) return 1 ;;
+      --permissions|--permissions=*|--sandbox|--sandbox=*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 run_skill() {
   local skill="$1"
   local agent="${2:-}"
@@ -6433,7 +6453,7 @@ run_skill() {
   # (launch_workflow → WorktreeManager) can create one, and cli.py owns every
   # LAUNCHERS skill, so a launch carrying the flag routes there instead of the
   # shell helper, which would otherwise run in the shared checkout.
-  if _argv_requests_worktree "$@"; then
+  if _argv_requests_worktree "$@" || _argv_requests_execution_controls "$@"; then
     cmd_core_workflow_skill "$skill" "$agent" "$@"
     return
   fi

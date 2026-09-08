@@ -232,6 +232,14 @@ _vetcoders_skill() {
     printf -- '--worktree true is honoured by the core launcher only: vibecrafted %s %s --worktree true ... (the shell skill helper cannot create a checkout).\n' "$skill" "$tool" >&2
     return 1
   }
+  # Execution controls are resolved against the installed provider CLI by the
+  # core launcher (execution_controls) and refused when unenforceable. The deck
+  # routes them there; a helper reached with one must refuse, never launch a
+  # worker under a policy it silently dropped.
+  [[ -z "${_vetcoders_contract_permissions:-}" && -z "${_vetcoders_contract_sandbox:-}" ]] || {
+    printf -- '--permissions/--sandbox are honoured by the core launcher only: vibecrafted %s %s --permissions <bypass|auto|accept-edits|read-only> --sandbox <true|false> ... (the shell skill helper cannot enforce them).\n' "$skill" "$tool" >&2
+    return 1
+  }
   local skill_code root run_id run_lock
   skill_code="$(_vetcoders_skill_prefix "$skill")"
   root="${_vetcoders_contract_root:-$(_vetcoders_repo_root)}"
