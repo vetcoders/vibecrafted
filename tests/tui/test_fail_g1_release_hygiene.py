@@ -23,6 +23,17 @@ def _run(
     merged = os.environ.copy()
     merged.pop("PYTHONPATH", None)
     merged.pop("PYTHONHOME", None)
+    for key in (
+        "NOTARY_PROFILE",
+        "NOTARY_ENV",
+        "NOTARY_API_KEY_PATH",
+        "NOTARY_API_KEY_ID",
+        "NOTARY_API_ISSUER",
+        "NOTARY_FALLBACK_PROFILE",
+        "NOTARY_APPLE_ID",
+        "NOTARY_PASSWORD",
+    ):
+        merged.pop(key, None)
     if env:
         merged.update(env)
     return subprocess.run(
@@ -142,6 +153,26 @@ def test_fail_g1_notary_profile_is_read_without_sourcing_secrets(
     assert 'source "$NOTARY_ENV"' not in helper
 
 
+def _notary_submit_script(helper: str, body: str) -> str:
+    log_die = helper[helper.index("log() {") : helper.index("require() {")]
+    profile = helper[
+        helper.index("notary_profile_from_env_file() {") : helper.index(
+            "notary_submit() {"
+        )
+    ]
+    submit = helper[
+        helper.index("notary_submit() {") : helper.index("strip_debug_stabs() {")
+    ]
+    return (
+        "set -euo pipefail\n"
+        + log_die
+        + profile
+        + submit
+        + "xcrun() { printf 'XCRUN:%s\\n' \"$*\"; }\n"
+        + body
+    )
+
+
 def test_fail_g1_headless_notary_uses_keychain_profile_not_raw_apple_id() -> None:
     helper = RELEASE.read_text(encoding="utf-8")
     notary = helper[
@@ -153,8 +184,68 @@ def test_fail_g1_headless_notary_uses_keychain_profile_not_raw_apple_id() -> Non
     )
     assert '--keychain-profile "$profile"' in notary
     assert "--password" not in notary
-    # Default Keychain profile is usable headlessly; raw Apple-ID stays TTY-only.
-    assert 'profile="${NOTARY_FALLBACK_PROFILE:-vibecrafted-notary}"' in notary
+    # store-credentials may name a new profile; submit must not invent one.
+    assert 'fallback_profile="${NOTARY_FALLBACK_PROFILE:-vibecrafted-notary}"' in notary
+    invented = notary.split('if [[ -n "$profile" ]]; then', 1)[0]
+    assert "vibecrafted-notary" not in invented
+
+
+def test_fail_g1_notary_explicit_profile_beats_api_keys(tmp_path: Path) -> None:
+    helper = RELEASE.read_text(encoding="utf-8")
+    key = tmp_path / "AuthKey_TEST.p8"
+    key.write_text("not-a-real-key\n", encoding="utf-8")
+    script = _notary_submit_script(
+        helper,
+        "NOTARY_ENV=/nonexistent-notary.env\n"
+        "NOTARY_PROFILE=founder-profile\n"
+        f"NOTARY_API_KEY_PATH={key.as_posix()}\n"
+        "NOTARY_API_KEY_ID=KEYID\n"
+        "NOTARY_API_ISSUER=ISSUER\n"
+        "notary_submit artifact.zip\n",
+    )
+    result = _run(script)
+    assert result.returncode == 0, result.stderr
+    assert "--keychain-profile founder-profile" in result.stdout
+    assert "--key " not in result.stdout
+    assert "not-a-real-key" not in result.stdout
+    assert "KEYID" not in result.stdout
+
+
+def test_fail_g1_notary_api_keys_used_when_profile_unset(tmp_path: Path) -> None:
+    helper = RELEASE.read_text(encoding="utf-8")
+    key = tmp_path / "AuthKey_TEST.p8"
+    key.write_text("not-a-real-key\n", encoding="utf-8")
+    script = _notary_submit_script(
+        helper,
+        "NOTARY_ENV=/nonexistent-notary.env\n"
+        "unset NOTARY_PROFILE\n"
+        f"NOTARY_API_KEY_PATH={key.as_posix()}\n"
+        "NOTARY_API_KEY_ID=KEYID\n"
+        "NOTARY_API_ISSUER=ISSUER\n"
+        "notary_submit artifact.zip\n",
+    )
+    result = _run(script)
+    assert result.returncode == 0, result.stderr
+    assert f"--key {key.as_posix()}" in result.stdout
+    assert "--keychain-profile" not in result.stdout
+    assert "vibecrafted-notary" not in result.stdout
+    assert "not-a-real-key" not in result.stdout
+
+
+def test_fail_g1_headless_notary_does_not_invent_a_profile() -> None:
+    helper = RELEASE.read_text(encoding="utf-8")
+    script = _notary_submit_script(
+        helper,
+        "NOTARY_ENV=/nonexistent-notary.env\n"
+        "unset NOTARY_PROFILE NOTARY_API_KEY_PATH NOTARY_API_KEY_ID NOTARY_API_ISSUER\n"
+        "notary_submit artifact.zip\n",
+    )
+    result = _run(script)
+    assert result.returncode == 1
+    combined = result.stdout + result.stderr
+    assert "NOTARY_PROFILE is unset" in combined
+    assert "XCRUN:" not in combined
+    assert "vibecrafted-notary" not in combined
 
 
 def test_fail_g1_release_die_writes_stdout_and_release_log(tmp_path: Path) -> None:

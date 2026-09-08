@@ -251,9 +251,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   }
 
   func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
-    // Loginwindow restore resurrected vc-terminal with a pytest session
-    // identity after reboot. The App is a view over a durable runtime; it
-    // must not restitch windows or test sockets across login.
+    // NSSecureCoding support is not a restoration-off switch. Window restore
+    // is owned by Info.plist NSQuitAlwaysKeepsWindows=false, isRestorable=false
+    // on CommandDeck windows, and the two methods below. Returning true keeps
+    // secure coding if any restorable state is ever encoded.
+    true
+  }
+
+  func applicationShouldRestoreApplicationState(_ app: NSApplication) -> Bool {
+    // Loginwindow must not restitch App windows or pytest session identities.
+    // vc-terminal and live sessions are not children of this restore graph.
+    false
+  }
+
+  func applicationShouldSaveApplicationState(_ app: NSApplication) -> Bool {
     false
   }
 

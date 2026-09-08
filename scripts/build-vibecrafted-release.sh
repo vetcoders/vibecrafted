@@ -391,8 +391,13 @@ notary_submit() {
   if [[ -z "$profile" ]]; then
     profile="$(notary_profile_from_env_file "$NOTARY_ENV")"
   fi
-  if [[ -z "$profile" ]]; then
-    profile="${NOTARY_FALLBACK_PROFILE:-vibecrafted-notary}"
+  # Explicit Founder profile (env or .notary.env name-only) beats API keys.
+  # Do not invent a default Keychain profile; that made Apple-ID unreachable
+  # and submitted against credentials nobody configured.
+  if [[ -n "$profile" ]]; then
+    xcrun notarytool submit "$artifact" --keychain-profile "$profile" \
+      --wait --timeout 30m
+    return
   fi
   if [[ -n "${NOTARY_API_KEY_PATH:-}" || -n "${NOTARY_API_KEY_ID:-}" || -n "${NOTARY_API_ISSUER:-}" ]]; then
     : "${NOTARY_API_KEY_PATH:?NOTARY_API_KEY_PATH missing}"
@@ -402,11 +407,6 @@ notary_submit() {
       || die "Notary API private key is missing: $NOTARY_API_KEY_PATH"
     xcrun notarytool submit "$artifact" --key "$NOTARY_API_KEY_PATH" \
       --key-id "$NOTARY_API_KEY_ID" --issuer "$NOTARY_API_ISSUER" \
-      --wait --timeout 30m
-    return
-  fi
-  if [[ -n "$profile" ]]; then
-    xcrun notarytool submit "$artifact" --keychain-profile "$profile" \
       --wait --timeout 30m
     return
   fi

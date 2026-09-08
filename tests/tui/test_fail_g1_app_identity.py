@@ -37,14 +37,36 @@ def test_fail_g1_debug_bundle_id_is_not_the_product_id() -> None:
 
 
 def test_fail_g1_app_does_not_restore_windows_across_login() -> None:
+    """Secure coding stays on; restoration ownership is the actual off switch."""
     delegate = APP_DELEGATE.read_text(encoding="utf-8")
-    body = delegate.split("applicationSupportsSecureRestorableState")[1].split("func ")[
+    secure = delegate.split("func applicationSupportsSecureRestorableState")[1].split(
+        "func "
+    )[0]
+    restore = delegate.split("func applicationShouldRestoreApplicationState")[1].split(
+        "func "
+    )[0]
+    save = delegate.split("func applicationShouldSaveApplicationState")[1].split(
+        "func "
+    )[0]
+    assert "\n    true\n" in secure
+    assert "\n    false\n" not in secure
+    assert "\n    false\n" in restore
+    assert "\n    true\n" not in restore
+    assert "\n    false\n" in save
+    assert "\n    true\n" not in save
+    factory = (
+        REPO_ROOT
+        / "vibecrafted-app/shell-agent/app/Vibecrafted/Views/MainWindowController.swift"
+    ).read_text(encoding="utf-8")
+    make_window = factory.split("static func makeWindow")[1].split("static func mount")[
         0
     ]
-    assert "false" in body
-    assert "true" not in body
+    assert "window.isRestorable = false" in make_window
+    assert "window.restorationClass = nil" in make_window
+    assert "disableRelaunchOnLogin" not in delegate
     plist = INFO_PLIST.read_text(encoding="utf-8")
     assert "<key>NSQuitAlwaysKeepsWindows</key>" in plist
+    assert "<false/>" in plist.split("<key>NSQuitAlwaysKeepsWindows</key>", 1)[1][:80]
     assert "<key>NSSupportsAutomaticTermination</key>" in plist
     assert "<key>NSSupportsSuddenTermination</key>" in plist
 

@@ -25,6 +25,10 @@ enum CommandDeckWindowFactory {
     window.tabbingMode = .preferred
     window.toolbarStyle = .unified
     window.titleVisibility = .visible
+    // Frame autosave is geometry only. Restorable state would restitch the
+    // Command Deck across loginwindow and is owned off here.
+    window.isRestorable = false
+    window.restorationClass = nil
     if let frameAutosaveName {
       window.setFrameAutosaveName(frameAutosaveName)
     }
