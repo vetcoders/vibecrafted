@@ -72,19 +72,19 @@ first path a founder sees.
 
 Current runtime is not a future scaffold. It is active.
 
-| Surface                                 | Status                                                                                 |
-| --------------------------------------- | -------------------------------------------------------------------------------------- |
-| `scripts/vibecrafted`                   | Live command deck and routing layer                                                    |
-| `runtime/scripts/`                      | Active spawn, await, meta, watcher, marbles, and installer scripts                     |
-| `runtime/scripts/lib/`                  | Shared launcher/session/path/meta library                                              |
-| `runtime/shell/lib/`                    | Installed shell facade modules                                                         |
-| `runtime/vc-marbles/`                   | Extracted per-workflow runtime pattern                                                 |
-| `runtime/vc-research/`                  | Extracted research shell runtime                                                       |
-| `runtime/vc-operator/`                  | Mission-control helpers, not a public `vibecrafted operator` command                   |
-| `vibecrafted dispatch`                  | Deterministic dispatch supervisor and async lifecycle lane                             |
-| `vibecrafted gui` / `tui` / `dashboard` | Operator surfaces, second-visit tools                                                  |
+| Surface                                 | Status                                                                                                             |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `scripts/vibecrafted`                   | Live command deck and routing layer                                                                                |
+| `runtime/scripts/`                      | Active spawn, await, meta, watcher, marbles, and installer scripts                                                 |
+| `runtime/scripts/lib/`                  | Shared launcher/session/path/meta library                                                                          |
+| `runtime/shell/lib/`                    | Installed shell facade modules                                                                                     |
+| `runtime/vc-marbles/`                   | Extracted per-workflow runtime pattern                                                                             |
+| `runtime/vc-research/`                  | Extracted research shell runtime                                                                                   |
+| `runtime/vc-operator/`                  | Mission-control helpers, not a public `vibecrafted operator` command                                               |
+| `vibecrafted dispatch`                  | Deterministic dispatch supervisor and async lifecycle lane                                                         |
+| `vibecrafted gui` / `tui` / `dashboard` | Operator surfaces, second-visit tools                                                                              |
 | Run observability ownership             | Server/VOC canonical browsing; terminal triage is manual compatibility — see `docs/runtime/TRIAGE_AND_SESSIONS.md` |
-| Tools home vs checkout                  | Daily CLI runs staged `vibecrafted-current`, not floating git HEAD                     |
+| Tools home vs checkout                  | Daily CLI runs staged `vibecrafted-current`, not floating git HEAD                                                 |
 
 When docs need to discuss what is planned, say "planned" or "partial." Do not
 leave old design language that says a live directory is reserved for later.
