@@ -281,7 +281,10 @@ WORKFLOW_HELP: dict[str, WorkflowHelp] = {
             "vc-research codex agy --file /path/to/research-plan.md",
             'vibecrafted research trio claude codex agy --prompt "Compare independent evidence"',
         ),
-        ("uno|duo|trio declare an exact lane count and require that many agents.",),
+        (
+            "uno|duo|trio declare an exact positional lane count and require that many agents.",
+            "omitting uno|duo|trio uses research.yaml lanes (any N, including four); lane_count truncates that roster.",
+        ),
     ),
     "review": WorkflowHelp(
         "Bounded PR, branch, commit-range, or artifact-pack review with findings-first output.",
@@ -470,7 +473,7 @@ def _usage_lines(topic: str) -> list[str]:
             "  vibecrafted research [agents...] [flags]",
             "  vibecrafted research <uno|duo|trio> <agents...> [flags]",
             "  vibecrafted swarm [agents...] [flags]  # alias for research",
-            "  vc-research [agents...] [flags]",
+            "  vc-research [agents...] [flags]  # YAML lanes when arity is omitted",
         ]
     if topic == "paste":
         return ["  vibecrafted paste [--skill <workflow>] [flags]"]

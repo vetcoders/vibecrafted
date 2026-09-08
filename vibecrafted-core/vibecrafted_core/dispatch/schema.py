@@ -13,6 +13,7 @@ import tomllib
 
 from vibecrafted_core.autonomy_surface import destructive_remote_push
 from vibecrafted_core.delivery.model import ContractError, ExecutionEnvelope
+from vibecrafted_core.runtime_paths import vibecrafted_home
 from vibecrafted_core.workflow import SUPPORTED_WORKFLOWS
 
 from .model import (
@@ -473,17 +474,7 @@ def _doctor_policy_errors(dispatch: Dispatch) -> list[str]:
         ("meta.reports_dir", dispatch.meta.reports_dir),
         ("meta.tracker", dispatch.meta.tracker),
     ):
-        normalized = value.replace("\\", "/")
-        if value and any(
-            marker in normalized
-            for marker in (
-                "/.claude/",
-                "/.codex/",
-                "/.gemini/",
-                "/.cursor/",
-                "/.vibecrafted/",
-            )
-        ):
+        if value and _forbidden_runtime_write_root(value):
             errors.append(
                 f"{field}: provider-specific or repo-local runtime roots are recovery-only; new writes use ~/.vibecrafted/artifacts"
             )
@@ -493,6 +484,121 @@ def _doctor_policy_errors(dispatch: Dispatch) -> list[str]:
             "policy.concurrency: shared CARGO_TARGET_DIR is forbidden for concurrent plans; unset CARGO_TARGET_DIR — Vibecrafted assigns $PWD/target per worker"
         )
     return errors
+
+
+_PROVIDER_RUNTIME_MARKERS = (
+    "/.claude/",
+    "/.codex/",
+    "/.gemini/",
+    "/.cursor/",
+)
+
+
+def _posix(path: Path) -> str:
+    return str(path).replace("\\", "/")
+
+
+def _resolve_write_path(value: str) -> Path | None:
+    """Follow existing symlink components. ``None`` means resolution failed.
+
+    A failed resolve is not a safe artifacts write. Callers must not treat the
+    lexical fallback as proof that the path stayed inside the artifacts plane.
+    """
+    expanded = Path(value).expanduser()
+    try:
+        return expanded.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+
+
+def _normalize_write_path(value: str) -> Path:
+    """Expand ``~`` and collapse traversal / existing symlinks without requiring the leaf.
+
+    ``Path.resolve(strict=False)`` follows existing symlink components and
+    normalizes ``..`` even when the destination file does not yet exist.
+    Resolution errors fall back to a lexical collapse for haystack matching
+    only — that fallback is not canonical-artifacts admission.
+    """
+    resolved = _resolve_write_path(value)
+    if resolved is not None:
+        return resolved
+    return Path(os.path.normpath(str(Path(value).expanduser())))
+
+
+def _is_under(path: Path, root: Path) -> bool:
+    path_posix = _posix(path)
+    root_posix = _posix(root)
+    return path_posix == root_posix or path_posix.startswith(root_posix + "/")
+
+
+def _canonical_artifacts_roots() -> tuple[Path, ...]:
+    """Write roots the doctor names in its own refusal: home artifacts plane."""
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for raw in (
+        Path.home() / ".vibecrafted" / "artifacts",
+        vibecrafted_home() / "artifacts",
+    ):
+        normalized = _normalize_write_path(str(raw))
+        key = _posix(normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(normalized)
+    return tuple(roots)
+
+
+def _lexical_artifacts_roots() -> tuple[Path, ...]:
+    """Artifacts roots with ``..`` collapsed but symlinks not followed."""
+    return tuple(
+        Path(os.path.normpath(str(Path(raw).expanduser())))
+        for raw in (
+            Path.home() / ".vibecrafted" / "artifacts",
+            vibecrafted_home() / "artifacts",
+        )
+    )
+
+
+def _is_canonical_artifacts_write(value: str) -> bool:
+    """True only inside the canonical artifacts *directory*, after symlink resolution.
+
+    An unresolved path is not canonical. Lexical ``normpath`` after ``resolve``
+    raised would keep an escaping symlink looking like ``.../artifacts/escape``.
+    """
+    resolved = _resolve_write_path(value)
+    if resolved is None:
+        return False
+    return any(_is_under(resolved, root) for root in _canonical_artifacts_roots())
+
+
+def _lexically_under_artifacts(value: str) -> bool:
+    """True when the non-symlink-resolved path sits inside an artifacts directory."""
+    lexical = Path(os.path.normpath(str(Path(value).expanduser())))
+    return any(_is_under(lexical, root) for root in _lexical_artifacts_roots())
+
+
+def _forbidden_runtime_write_root(value: str) -> bool:
+    """Reject provider-private and repo-local ``.vibecrafted`` write roots.
+
+    Admission is a normalized directory-boundary check: prefix matches such as
+    ``artifacts-typo`` or ``artifacts/../../.codex`` are not the artifacts plane.
+    Existing symlink components are followed even when the leaf does not exist.
+    A path that is lexically inside artifacts but resolves outside is an escape.
+    If resolution raises, the path is not admitted as the artifacts plane.
+    """
+    if _is_canonical_artifacts_write(value):
+        return False
+    if _lexically_under_artifacts(value):
+        return True
+    raw = value.replace("\\", "/")
+    expanded = _posix(Path(value).expanduser())
+    normalized = _posix(_normalize_write_path(value))
+    haystack = f"{raw}/{expanded}/{normalized}/"
+    if any(marker in haystack for marker in _PROVIDER_RUNTIME_MARKERS):
+        return True
+    return "/.vibecrafted/" in haystack or haystack.rstrip("/").endswith(
+        "/.vibecrafted"
+    )
 
 
 def _parse_verify(value: Any, cut_index: int, errors: list[str]) -> list[Verify]:

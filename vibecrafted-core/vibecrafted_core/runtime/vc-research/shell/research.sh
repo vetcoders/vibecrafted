@@ -283,7 +283,7 @@ _vetcoders_research_help() {
   cat <<'HELP'
 ⚒  research
 ─────────────────────────────────────────
-Configurable triple-agent research swarm launcher.
+Configurable N-lane research swarm launcher (YAML lanes, including four).
 
   Usage:
     vc-research --prompt "Question to research"
@@ -312,11 +312,12 @@ One invocation is one full swarm. Positional agents override the YAML lane set f
 Agent picking policy (explicit, fail-closed):
   1. positional agents           highest priority, honored exactly as given
   2. VIBECRAFTED_RESEARCH_AGENTS env override
-  3. research.yaml lanes         ~/.vibecrafted/config/research.yaml
+  3. research.yaml lanes         ~/.vibecrafted/config/research.yaml (any N, including four; lane_count truncates)
   4. config.toml default_agents  [runtime.picking.research]
   5. builtin default             claude codex agy
 The resolved lanes and their source are always printed at launch.
-`uno|duo|trio <agents>` declare arity and must match the agent count exactly.
+`uno|duo|trio <agents>` declare exact positional arity and must match the agent count.
+Omitting those keywords uses the YAML roster as-is — help that says "trio only" is stale.
 Unknown tokens abort the launch — nothing is silently rerouted to config defaults.
 HELP
 }

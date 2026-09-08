@@ -230,6 +230,7 @@ fi
 EOF_LAUNCH
 
   if ! spawn_check_shell_syntax "$launcher" "generated launcher"; then
+    spawn_settle_early_failure "generated launcher has invalid shell syntax" || true
     if [[ -f "$meta_path" ]]; then
       spawn_finish_meta "$meta_path" "failed" "1" 2>/dev/null || true
     fi
@@ -268,6 +269,18 @@ PY
   if [[ -z "$launcher_pid" ]]; then
     nohup "$launcher" >/dev/null 2>&1 &
     launcher_pid=$!
+  fi
+  if [[ -n "$launcher_pid" ]]; then
+    if [[ -n "${SPAWN_META:-}" ]]; then
+      spawn_update_meta_pid "$SPAWN_META" "$launcher_pid"
+    fi
+    if [[ -n "${SPAWN_RUN_ID:-}" ]]; then
+      local canonical_meta=""
+      canonical_meta="$(spawn_runtime_meta_path "$SPAWN_RUN_ID" 2>/dev/null || true)"
+      if [[ -n "$canonical_meta" ]]; then
+        spawn_update_meta_pid "$canonical_meta" "$launcher_pid"
+      fi
+    fi
   fi
   printf 'Spawned headless launcher (pid=%s): %s\n' "$launcher_pid" "$launcher"
 }
@@ -383,10 +396,20 @@ spawn_print_launch() {
   local _reset='\033[0m'
   local _bar="${_steel}──────────────────────────────────${_reset}"
 
+  local meta_receipt="${SPAWN_META:-—}"
+  if [[ -n "${SPAWN_RUN_ID:-}" ]]; then
+    local canonical_receipt=""
+    canonical_receipt="$(spawn_runtime_meta_path "$SPAWN_RUN_ID" 2>/dev/null || true)"
+    if [[ -n "$canonical_receipt" ]]; then
+      meta_receipt="$canonical_receipt"
+    fi
+  fi
+
   printf '\n%b ⚒  𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. · %s-%s%b\n' "$_bold$_copper" "$agent" "$mode" "$_reset"
   printf '%b\n' "$_bar"
   printf '%b  plan:    %b%s%b\n'   "$_steel" "$_reset" "${SPAWN_PLAN:-—}" "$_reset"
   printf '%b  report:  %b%s%b\n'   "$_steel" "$_reset" "${SPAWN_REPORT:-—}" "$_reset"
+  printf '%b  meta:    %b%s%b\n'   "$_steel" "$_reset" "$meta_receipt" "$_reset"
   printf '%b  trace:   %b%s%b\n'   "$_steel" "$_reset" "${SPAWN_TRANSCRIPT:-—}" "$_reset"
   printf '%b  runtime: %b%s%b\n'   "$_steel" "$_reset" "$runtime" "$_reset"
   printf '%b\n' "$_bar"

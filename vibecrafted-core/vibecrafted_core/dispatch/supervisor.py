@@ -59,6 +59,74 @@ RESULT_SCHEMA = "vibecrafted.dispatch-result.v1"
 _MTIME_TOLERANCE_S = 1.0
 
 
+_BASELINE_SOURCE_REQUIREMENT = (
+    "local-069/071: prefer living-tree HEAD iff it is a descendant of the "
+    "frozen integrator/receipt SHA so between-cut checkout fixes are visible; "
+    "keep the frozen SHA when HEAD is not a descendant"
+)
+
+
+@dataclass(frozen=True)
+class BaselineSelection:
+    """Planned vs selected worker baseline with an explicit, recorded reason."""
+
+    planned: str
+    selected: str
+    reason: str
+    source_requirement: str = _BASELINE_SOURCE_REQUIREMENT
+
+
+def select_live_descendant_head(
+    candidate: str,
+    live_head: str,
+    *,
+    is_ancestor: Callable[[str, str], bool],
+) -> BaselineSelection:
+    """Choose HEAD only when the current contract requires descendant follow.
+
+    Explicit frozen baselines do not drift when HEAD is unrelated. Drift is
+    allowed only for local-069/071 (living-tree HEAD is a descendant of the
+    frozen SHA) and must be recorded on the worker receipt.
+    """
+    planned = str(candidate or "").strip()
+    head = str(live_head or "").strip()
+    if not planned:
+        return BaselineSelection(
+            planned="",
+            selected=head,
+            reason="no_planned_baseline",
+        )
+    if not head or head == planned:
+        return BaselineSelection(
+            planned=planned,
+            selected=planned,
+            reason="planned_matches_head",
+        )
+    if is_ancestor(planned, head):
+        return BaselineSelection(
+            planned=planned,
+            selected=head,
+            reason="live_descendant_head",
+        )
+    return BaselineSelection(
+        planned=planned,
+        selected=planned,
+        reason="frozen_baseline_kept_head_not_descendant",
+    )
+
+
+def prefer_live_descendant_head(
+    candidate: str,
+    live_head: str,
+    *,
+    is_ancestor: Callable[[str, str], bool],
+) -> str:
+    """Return the selected SHA from :func:`select_live_descendant_head`."""
+    return select_live_descendant_head(
+        candidate, live_head, is_ancestor=is_ancestor
+    ).selected
+
+
 class CellContractError(RuntimeError):
     """The external runtime ended without a trustworthy delivery envelope."""
 
@@ -668,7 +736,8 @@ class DispatchSupervisor:
     def _prepare_runtime_cut(self, cut: Cut, verdicts: dict[str, Verdict]) -> Cut:
         if self.worktrees is None:
             return cut
-        baseline = self._baseline_for(cut, verdicts)
+        selection = self._baseline_for(cut, verdicts)
+        baseline = selection.selected
         previous = self._receipt_store.cut(cut.id)
         previous_root = Path(str(previous.get("worktree_path") or "")).expanduser()
         recovering_active = (
@@ -717,6 +786,7 @@ class DispatchSupervisor:
                 allow_reuse=bool(previous.get("worktree_path")),
             )
         self._geometries[cut.id] = geometry
+        recovered = recovering_active or recovering_owned_progress
         self._receipt_store.update(
             cut.id,
             scheduler_slot=cut.scheduler_slot,
@@ -725,6 +795,11 @@ class DispatchSupervisor:
             artifact_path=geometry.artifact_path,
             branch=geometry.branch,
             baseline_sha=geometry.baseline_sha,
+            planned_baseline_sha=selection.planned,
+            baseline_selection_reason=(
+                "recovered_existing_worktree" if recovered else selection.reason
+            ),
+            baseline_source_requirement=selection.source_requirement,
             integrator_exclusivity=geometry.integrator_exclusive,
         )
         return replace(
@@ -736,9 +811,22 @@ class DispatchSupervisor:
             artifact_path=geometry.artifact_path,
         )
 
-    def _baseline_for(self, cut: Cut, verdicts: dict[str, Verdict]) -> str:
+    def _prefer_live_head(self, candidate: str) -> BaselineSelection:
+        return select_live_descendant_head(
+            candidate,
+            self._git_head(),
+            is_ancestor=lambda ancestor, descendant: self._git_ok(
+                ["merge-base", "--is-ancestor", ancestor, descendant]
+            ),
+        )
+
+    def _baseline_for(
+        self, cut: Cut, verdicts: dict[str, Verdict]
+    ) -> BaselineSelection:
         if not cut.depends_on:
-            return str(self.dispatch.meta.baseline.get("head") or self._git_head())
+            return self._prefer_live_head(
+                str(self.dispatch.meta.baseline.get("head") or self._git_head())
+            )
         dependency_commits = [
             verdicts[dependency].commit
             for dependency in cut.depends_on
@@ -749,7 +837,12 @@ class DispatchSupervisor:
                 f"[{cut.id}] dependencies supplied no delivered commit SHA"
             )
         if cut.integrator:
-            return self._git_head()
+            head = self._git_head()
+            return BaselineSelection(
+                planned=head,
+                selected=head,
+                reason="integrator_live_head",
+            )
         by_id = {planned.id: planned for planned in self.dispatch.cuts}
         non_integrated = [
             dependency
@@ -781,7 +874,7 @@ class DispatchSupervisor:
                 raise WorktreeContractError(
                     f"[{cut.id}] dependency tips are not an integrated ancestry chain; add a named integrator cut"
                 )
-        return candidate
+        return self._prefer_live_head(candidate)
 
     def _baton_from_verdicts(self, verdicts: dict[str, Verdict]) -> Baton:
         baton = self.dispatch.empty_baton()

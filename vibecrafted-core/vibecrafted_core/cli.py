@@ -115,7 +115,11 @@ _EX_TEMPFAIL = 75
 
 
 def _normalize_research_arity_args(args: Sequence[str]) -> list[str]:
-    """Expand the stable uno/duo/trio contract before argparse sees agents."""
+    """Expand the stable uno/duo/trio contract before argparse sees agents.
+
+    Omitting these keywords leaves YAML ``lanes`` / ``lane_count`` in charge,
+    including four-agent rosters. The keywords only pin exact positional arity.
+    """
     normalized = list(args)
     if len(normalized) < 2 or normalized[0] != "research":
         return normalized
@@ -222,6 +226,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("dispatch", help="run or validate a dispatch plan")
+    ship = sub.add_parser(
+        "ship",
+        help="lifecycle launcher, DeliverySeal issuer, and roadmap projection",
+    )
+    ship.add_argument(
+        "ship_argv",
+        nargs=argparse.REMAINDER,
+        help="ship subcommand args (see vibecrafted ship --help / vc-ship)",
+    )
     claims = sub.add_parser("claims", help="atomic local repository-mutation claims")
     claims.add_argument(
         "claims_argv",
@@ -1322,6 +1335,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "resume-session",
         "settle",
         "settlements",
+        "ship",
         "stop",
     } | set(LAUNCHERS)
     agent_python_verbs = {"observe", "await", "stop", "resume"}
@@ -1389,6 +1403,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .dispatch.cli import main as dispatch_main
 
         return dispatch_main(raw_args[1:])
+    if raw_args and raw_args[0] == "ship":
+        from .ship import main as ship_main
+
+        return ship_main(raw_args[1:])
     if raw_args and raw_args[0] == "claims":
         from .repository_claims import claims_cli_main
 

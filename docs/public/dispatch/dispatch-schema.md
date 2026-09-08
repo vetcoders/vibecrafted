@@ -64,15 +64,22 @@ prompt = "Implement cut {id} in {repo}."
 | `reports_dir` | no       | Rendered into `{reports_dir}`                     |
 | `tracker`     | no       | Tracker path, rendered into `{tracker}`           |
 
-`reports_dir` and `tracker` are recovery-only compatibility inputs. New
-dispatch writes ignore them and allocate under the canonical global artifact
-plane:
+`reports_dir` and `tracker` are optional. When set, they must live under the
+canonical global artifact plane (`~/.vibecrafted/artifacts` or
+`$VIBECRAFTED_HOME/artifacts`) after path normalization. Prefix matches such
+as `~/.vibecrafted/artifacts-typo` are not that plane. Traversal
+(`artifacts/../../.codex`) and existing symlink escapes are resolved even
+when the destination file does not yet exist, then checked against the
+directory boundary. If symlink resolution raises, the path is not admitted
+as the canonical artifacts plane. New dispatch writes that omit them allocate there:
 
 ```text
 ~/.vibecrafted/artifacts/<org>/<repo>/YYYY_MMDD/{plans,reports,...}
 ```
 
-Provider-specific roots and repo-local `.vibecrafted` paths fail doctor.
+Provider-specific roots (`~/.claude`, `~/.codex`, `~/.gemini`, `~/.cursor`)
+and repo-local `.vibecrafted` paths fail doctor. The canonical artifacts
+plane itself is accepted.
 
 ## `[policy]`
 
