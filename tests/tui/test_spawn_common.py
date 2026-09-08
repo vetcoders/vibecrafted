@@ -250,100 +250,186 @@ def test_visible_launch_wrapper_foregrounds_transcript_tail(tmp_path: Path) -> N
     assert 'wait "$pid"' in result.stdout
 
 
-def test_spawn_tool_paths_follow_silver_runtime_contract(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    rogue_bin = tmp_path / "rogue" / "bin"
-    for rel in (
-        "tools/scripts",
-        ".local/bin",
-        ".local/share/vibecrafted/bin",
-        ".cargo/bin",
-        ".claude/plugins/cache/example/tool/bin",
-        "bin",
-        "tools",
-        "Git/tools",
-    ):
-        (home / rel).mkdir(parents=True, exist_ok=True)
-    rogue_bin.mkdir(parents=True)
-
-    result = _bash(
-        f'''
-        set -euo pipefail
-        export HOME="{home}"
-        export PATH="{rogue_bin}:{home / ".local" / "share" / "vibecrafted" / "bin"}:{home / ".cargo" / "bin"}:{home / ".claude" / "plugins" / "cache" / "example" / "tool" / "bin"}:{home / "tools"}:{home / "bin"}:{home / ".local" / "bin"}:/usr/bin:/bin:/usr/bin"
-        source "{COMMON_SH}"
-        spawn_prepend_agent_tool_paths
-        printf '%s\n' "$PATH" | tr ':' '\n'
-        '''
-    )
-
-    expected_prefix = [
-        str(home / ".local" / "share" / "vibecrafted" / "bin"),
-        str(home / ".local" / "bin"),
-        str(home / ".cargo" / "bin"),
-        str(home / "tools" / "scripts"),
-    ]
-    if Path("/opt/homebrew/bin").is_dir():
-        expected_prefix.append("/opt/homebrew/bin")
-    if Path("/opt/homebrew/sbin").is_dir():
-        expected_prefix.append("/opt/homebrew/sbin")
-    expected_prefix.extend(
-        [
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-            "/usr/sbin",
-            "/sbin",
-        ]
-    )
-
-    entries = result.stdout.splitlines()
-    assert entries[: len(expected_prefix)] == expected_prefix
-    assert len(entries) == len(set(entries))
-    assert str(rogue_bin) not in entries
-    assert (
-        str(home / ".claude" / "plugins" / "cache" / "example" / "tool" / "bin")
-        not in entries
-    )
-    assert str(home / "bin") not in entries
-    assert str(home / "tools") not in entries
-    assert str(home / "Git" / "tools") not in entries
+def _write_probe_tool(directory: Path, name: str, marker: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    tool = directory / name
+    tool.write_text(f"#!/bin/sh\nprintf '{marker}\\n'\n", encoding="utf-8")
+    tool.chmod(0o755)
+    return tool
 
 
-def test_spawn_require_command_rejects_non_contract_path_entries(
+def test_spawn_agent_path_keeps_founder_tools_and_drops_owned_generation_bins(
     tmp_path: Path,
 ) -> None:
+    """A detached agent child resolves the Founder's tools, never a private copy.
+
+    The launcher used to replace the inherited PATH with a closed allowlist, so
+    an agent child could neither see the operator's own directories nor avoid
+    the bundled generation bin that the allowlist put first.  Both halves are
+    asserted behaviourally: a real executable is resolved through ``command -v``
+    rather than by string-matching the PATH.
+    """
+
     home = tmp_path / "home"
-    rogue_bin = tmp_path / "rogue" / "bin"
-    rogue_bin.mkdir(parents=True)
-    command_name = "vc-test-rogue-agent"
-    fake_agent = rogue_bin / command_name
-    fake_agent.write_text(
-        "#!/usr/bin/env bash\nprintf 'rogue-agent\\n'\n", encoding="utf-8"
-    )
-    fake_agent.chmod(0o755)
+    runtime_home = home / ".local" / "share" / "vibecrafted"
+    stale_generation = runtime_home / "releases" / "4.3.0+gSTALE" / "bin"
+    public_bin = home / ".local" / "bin"
+    custom_bin = home / "custom" / "bin"
+    # Not owned by Vibecrafted: a framework checkout in the operator's own
+    # tree.  It merely looks like a generation bin and must be preserved.
+    lookalike_bin = home / "dev" / "vibecrafted" / "releases" / "1.0" / "bin"
 
-    result = subprocess.run(
-        [
-            "bash",
-            "-lc",
+    _write_probe_tool(public_bin, "claude", "public-claude")
+    _write_probe_tool(stale_generation, "claude", "private-claude")
+    _write_probe_tool(custom_bin, "founder-tool", "founder-tool")
+    _write_probe_tool(lookalike_bin, "checkout-tool", "checkout-tool")
+
+    inherited = os.pathsep.join(
+        (
+            str(stale_generation),
+            str(custom_bin),
+            str(lookalike_bin),
+            str(public_bin),
+            "/usr/bin",
+            "/bin",
+        )
+    )
+
+    result = _bash(
+        _ENV_SANITIZE
+        + f"""
+        set -euo pipefail
+        unset VIBECRAFTED_RUNTIME_ROOT VIBECRAFTED_RUNTIME_BIN VIBECRAFTED_RUNTIME_HOME
+        export HOME="{home}"
+        export XDG_DATA_HOME="{home / ".local" / "share"}"
+        export PATH="{inherited}"
+        source "{COMMON_SH}"
+        spawn_prepend_agent_tool_paths
+        printf 'PATH=%s\\n' "$PATH"
+        printf 'claude=%s\\n' "$(command -v claude)"
+        printf 'founder=%s\\n' "$(command -v founder-tool)"
+        printf 'checkout=%s\\n' "$(command -v checkout-tool)"
+        """
+    )
+
+    fields = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    entries = fields["PATH"].split(os.pathsep)
+
+    # The operator's own order survives verbatim, minus the owned generation.
+    assert entries[:5] == [
+        str(custom_bin),
+        str(lookalike_bin),
+        str(public_bin),
+        "/usr/bin",
+        "/bin",
+    ]
+    assert str(stale_generation) not in entries
+    assert len(entries) == len(set(entries))
+
+    # Behavioural proof, not a substring check.
+    assert fields["claude"] == str(public_bin / "claude")
+    assert fields["founder"] == str(custom_bin / "founder-tool")
+    assert fields["checkout"] == str(lookalike_bin / "checkout-tool")
+
+
+def test_spawn_agent_path_anchors_sanitation_on_custom_runtime_home(
+    tmp_path: Path,
+) -> None:
+    """Sanitation follows VIBECRAFTED_RUNTIME_HOME, not a name-shaped glob.
+
+    A custom runtime home has no ``vibecrafted`` path component, so a pattern
+    match on ``*/vibecrafted/releases/*/bin`` leaves its stale generations on
+    PATH — the exact leak this cut closes.
+    """
+
+    home = tmp_path / "home"
+    runtime_home = tmp_path / "opt" / "vcrt"
+    stale_generation = runtime_home / "releases" / "4.3.0+gSTALE" / "bin"
+    public_bin = home / ".local" / "bin"
+
+    _write_probe_tool(public_bin, "aicx", "public-aicx")
+    _write_probe_tool(stale_generation, "aicx", "private-aicx")
+
+    result = _bash(
+        _ENV_SANITIZE
+        + f"""
+        set -euo pipefail
+        unset VIBECRAFTED_RUNTIME_ROOT VIBECRAFTED_RUNTIME_BIN
+        export HOME="{home}"
+        export XDG_DATA_HOME="{home / ".local" / "share"}"
+        export VIBECRAFTED_RUNTIME_HOME="{runtime_home}"
+        export PATH="{stale_generation}:{public_bin}:/usr/bin:/bin"
+        source "{COMMON_SH}"
+        spawn_prepend_agent_tool_paths
+        printf 'PATH=%s\\n' "$PATH"
+        printf 'aicx=%s\\n' "$(command -v aicx)"
+        """
+    )
+
+    fields = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    assert str(stale_generation) not in fields["PATH"].split(os.pathsep)
+    assert fields["aicx"] == str(public_bin / "aicx")
+
+
+def test_spawn_require_command_never_selects_owned_generation_copy(
+    tmp_path: Path,
+) -> None:
+    """A missing public foundation stays missing instead of falling back.
+
+    The bundled generation carries its own ``aicx``/``loct``/``prview``, so the
+    dangerous outcome is not a hard failure — it is a silent success against a
+    stale private binary.  Refusal is the product behaviour: the caller prints
+    canonical install guidance rather than running the private copy.
+    """
+
+    home = tmp_path / "home"
+    runtime_home = home / ".local" / "share" / "vibecrafted"
+    stale_generation = runtime_home / "releases" / "4.3.0+gSTALE" / "bin"
+    custom_bin = home / "custom" / "bin"
+    command_name = "vc-test-foundation-probe"
+
+    _write_probe_tool(stale_generation, command_name, "private-copy")
+
+    def _run(extra_path: Path | None) -> subprocess.CompletedProcess[str]:
+        path_entries = [str(stale_generation)]
+        if extra_path is not None:
+            path_entries.append(str(extra_path))
+        path_entries.extend(("/usr/bin", "/bin"))
+        script = (
             _ENV_SANITIZE
-            + f'''
-            set -euo pipefail
-            export HOME="{home}"
-            export PATH="{rogue_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
-            source "{COMMON_SH}"
-            spawn_require_command "{command_name}"
-            ''',
-        ],
-        check=False,
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-    )
+            + f"""
+        set -euo pipefail
+        unset VIBECRAFTED_RUNTIME_ROOT VIBECRAFTED_RUNTIME_BIN VIBECRAFTED_RUNTIME_HOME
+        export HOME="{home}"
+        export XDG_DATA_HOME="{home / ".local" / "share"}"
+        export PATH="{os.pathsep.join(path_entries)}"
+        source "{COMMON_SH}"
+        spawn_require_command "{command_name}"
+        command -v "{command_name}"
+        """
+        )
+        return subprocess.run(
+            ["bash", "-lc", script],
+            check=False,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
 
-    assert result.returncode == 1
-    assert f"Required command not found: {command_name}" in result.stderr
+    refused = _run(None)
+    assert refused.returncode == 1
+    assert f"Required command not found: {command_name}" in refused.stderr
+    assert "private-copy" not in refused.stdout
+
+    # Control: the same name in the operator's own directory is legitimate.
+    _write_probe_tool(custom_bin, command_name, "founder-copy")
+    accepted = _run(custom_bin)
+    assert accepted.returncode == 0, accepted.stderr
+    assert accepted.stdout.strip() == str(custom_bin / command_name)
 
 
 def test_skill_dry_run_reaches_spawn_launcher_without_launching(tmp_path: Path) -> None:
