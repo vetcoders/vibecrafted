@@ -661,7 +661,7 @@ repo-full() {
 
   local cwd root repo branch head_short head_full upstream origin_url default_remote default_branch
   local last_tag stash_count staged_count unstaged_count untracked_count worktree_count
-  local upstream_ahead upstream_behind
+  local upstream_ahead upstream_behind upstream_status
 
   cwd="$(pwd)"
   root="$(git rev-parse --show-toplevel 2>/dev/null)"
@@ -687,11 +687,55 @@ repo-full() {
 
   # shellcheck disable=SC1083 # @{u} is git upstream ref syntax, not shell braces
   if git rev-parse '@{u}' >/dev/null 2>&1; then
-    read -r upstream_ahead upstream_behind <<< "$(git rev-list --left-right --count HEAD...'@{u}' 2>/dev/null)"
+    if read -r upstream_ahead upstream_behind <<< "$(git rev-list --left-right --count HEAD...'@{u}' 2>/dev/null)" && [[ "$upstream_ahead" =~ ^[0-9]+$ && "$upstream_behind" =~ ^[0-9]+$ ]]; then
+      upstream_status="known"
+    else
+      upstream_ahead="unknown"
+      upstream_behind="unknown"
+      upstream_status="unknown"
+    fi
   else
-    upstream_ahead="-"
-    upstream_behind="-"
+    upstream_ahead="not configured"
+    upstream_behind="not configured"
+    upstream_status="not configured"
   fi
+
+  _repo_full_worktree_truth() {
+    local wt_path="" wt_head="" wt_branch="detached" locked="false" prunable="false" line integration unmatched staged unstaged untracked
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      if [[ -z "$line" ]]; then
+        [[ -n "$wt_path" ]] || continue
+        integration="unknown"
+        unmatched=""
+        if [[ -n "$wt_head" ]] && git merge-base --is-ancestor "$wt_head" "$head_full" >/dev/null 2>&1; then
+          integration="merged (exact ancestor)"
+        elif [[ -n "$wt_head" ]] && unmatched="$(git cherry --abbrev "$head_full" "$wt_head" 2>/dev/null)"; then
+          if [[ -z "$(printf '%s\n' "$unmatched" | awk '$1 == "+" { print; exit }')" ]]; then
+            integration="integrated by patch equivalence"
+          else
+            integration="WARN unmerged ($(printf '%s\n' "$unmatched" | awk '$1 == "+" { count++ } END { print count+0 }') unmatched commits)"
+          fi
+        fi
+        if [[ -d "$wt_path" ]]; then
+          staged="$(git -C "$wt_path" diff --cached --name-only 2>/dev/null | wc -l | tr -d ' ')"
+          unstaged="$(git -C "$wt_path" diff --name-only 2>/dev/null | wc -l | tr -d ' ')"
+          untracked="$(git -C "$wt_path" ls-files --others --exclude-standard 2>/dev/null | wc -l | tr -d ' ')"
+        else
+          staged="unknown"; unstaged="unknown"; untracked="unknown"
+        fi
+        printf 'Worktree: %s [%s] %s\n  Comparison target: HEAD %s\n  Integration: %s\n  Dirt: staged %s, unstaged %s, untracked %s; locked %s; prunable %s\n' "$wt_path" "$wt_branch" "${wt_head:0:9}" "${head_full:0:9}" "$integration" "$staged" "$unstaged" "$untracked" "$locked" "$prunable"
+        wt_path=""; wt_head=""; wt_branch="detached"; locked="false"; prunable="false"
+        continue
+      fi
+      case "$line" in
+        worktree\ *) wt_path="${line#worktree }" ;;
+        HEAD\ *) wt_head="${line#HEAD }" ;;
+        branch\ *) wt_branch="${line#branch refs/heads/}" ;;
+        locked*) locked="true" ;;
+        prunable*) prunable="true" ;;
+      esac
+    done < <(git worktree list --porcelain 2>/dev/null)
+  }
 
   _repo_full_compare_ref() {
     local ref="$1"
@@ -726,7 +770,8 @@ repo-full() {
   echo "Default remote:    $default_remote"
   echo "Default branch:    $default_branch"
   echo "Upstream:          $upstream"
-  echo "Ahead / Behind:    $upstream_ahead / $upstream_behind"
+  echo "Ahead:             $upstream_ahead (vs $upstream; $upstream_status)"
+  echo "Behind:            $upstream_behind (vs $upstream; $upstream_status)"
   echo "Origin:            $origin_url"
   echo "HEAD short:        $head_short"
   echo "HEAD full:         $head_full"
@@ -790,6 +835,9 @@ repo-full() {
 
   echo "==================== WORKTREES ===================="
   git worktree list 2>/dev/null
+  echo
+  echo "==================== WORKTREE INTEGRATION ===================="
+  _repo_full_worktree_truth
   echo
 
   echo "==================== SUBMODULES ===================="
