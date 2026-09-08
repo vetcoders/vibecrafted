@@ -5,6 +5,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Changed
+
+- macOS App: the console window uses one native unified toolbar (Back,
+  Forward, Home, runtime status, Retry/Repair/Terminal/Diagnostics, Open in
+  Browser) instead of a second content-row chrome; the recovery card keeps one
+  primary verb plus Stop Runtime.
+- macOS App: tool and reference views open as native AppKit tabs in the
+  console's tab group, one `WKWebView` per tab; repeated destinations focus the
+  existing tab, and closing a tab never touches the runtime or other tabs.
+- macOS App: a same-origin machine document (JSON endpoint) answering a
+  main-frame navigation is shown in a read-only reference tab; the Scaffold
+  document, its edits and history stay in place. `target=_blank` becomes a
+  tool tab, never a replacement of the current page.
+- macOS App: `View ▸ Open in Tab / Open in Browser` register the Loctree report
+  route and the generated AICX dashboard file; the Slack agent console is
+  listed as unavailable because no launch contract exists.
+- Server web: Scaffold inspector endpoint links open outside the studio
+  document (`target="_blank"`).
+
+See `docs/runtime/NATIVE_CONSOLE_TABS.md`.
+
 ## 4.3.0 — prepared, not published
 
 ### Changed

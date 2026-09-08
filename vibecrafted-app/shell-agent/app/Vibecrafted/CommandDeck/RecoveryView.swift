@@ -40,7 +40,7 @@ struct RecoveryView: View {
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .background(theme.palette.surface)
     .focusSection()
-    .defaultFocus($focusedControl, .retryConnection)
+    .defaultFocus($focusedControl, phase == .blocked ? .repairRuntime : .retryConnection)
     .accessibilityElement(children: .contain)
     .accessibilityLabel(phase == .blocked ? "Runtime blocked" : "Runtime recovery")
   }
@@ -105,7 +105,7 @@ private struct RecoveryCopy: View {
   private var fallbackSummary: LocalizedStringResource {
     phase == .blocked
       ? "Repair through the installed runtime owner. Closing this window does not stop the runtime."
-      : "Retry against the current endpoint, or repair the installed runtime. Workspaces stay in the web canvas once it is connected."
+      : "Retry against the current endpoint. Repair Runtime, Open Terminal and Diagnostics stay in the toolbar above. Workspaces return to this canvas once it is connected."
   }
 }
 
@@ -132,7 +132,6 @@ private struct RecoveryActionRow: View {
         actions?.handle(.retryConnection)
       }
       .buttonStyle(.commandDeckAccent)
-      .keyboardShortcut("r", modifiers: .command)
       .focused(focusedControl, equals: .retryConnection)
       .accessibilityHint("Tries the current runtime endpoint again.")
       .accessibilityInputLabels(["Retry", "Retry Connection"])
@@ -141,8 +140,7 @@ private struct RecoveryActionRow: View {
       Button("Repair Runtime", systemImage: "wrench.and.screwdriver") {
         actions?.handle(.repairRuntime)
       }
-      .buttonStyle(.commandDeckQuiet)
-      .keyboardShortcut("r", modifiers: [.command, .shift])
+      .buttonStyle(.commandDeckAccent)
       .focused(focusedControl, equals: .repairRuntime)
       .accessibilityHint("Repairs or reinstalls through the installed runtime owner.")
       .accessibilityInputLabels(["Repair", "Repair Runtime"])
@@ -152,7 +150,6 @@ private struct RecoveryActionRow: View {
         actions?.handle(.openTerminal)
       }
       .buttonStyle(.commandDeckQuiet)
-      .keyboardShortcut("t", modifiers: [.command, .option])
       .focused(focusedControl, equals: .openTerminal)
       .accessibilityHint("Opens the generation-owned terminal. Closing it does not stop the runtime.")
     }

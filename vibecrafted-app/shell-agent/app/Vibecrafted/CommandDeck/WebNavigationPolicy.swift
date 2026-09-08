@@ -61,6 +61,34 @@ enum WebNavigationDecision: Equatable, Sendable {
 enum WebResponseDecision: Equatable, Sendable {
   case allowInApp
   case startDownload
+  /// A machine document (JSON, plain text, XML…) answered a main-frame
+  /// navigation inside the console. The console keeps its current document
+  /// and the App shows the response in a read-only reference tab instead.
+  case divertToReferenceTab
+  case block(reason: String)
+}
+
+/// What one native tab is for. The role decides how much a web document may
+/// do inside it, never the other way round: a page cannot promote itself.
+enum WebTabRole: String, Equatable, Sendable {
+  /// The product console. Interactive, keeps the runtime session, and never
+  /// lets a machine document replace its main document.
+  case console
+  /// An interactive tool surface (server page opened via `target=_blank`, a
+  /// generated report). Same containment as the console, no runtime routing.
+  case tool
+  /// A read-only reference view for machine documents. Scripts are off.
+  case reference
+
+  var allowsContentJavaScript: Bool { self != .reference }
+}
+
+/// Where a `window.open` / `target=_blank` request goes. There is never a
+/// WebKit-created second view; every new view is a native tab the App owns.
+enum WebNewWindowDecision: Equatable, Sendable {
+  case openInTab(URL, WebTabRole)
+  case openExternally(URL)
+  case startDownload(URL)
   case block(reason: String)
 }
 
@@ -155,6 +183,33 @@ enum WebNavigationPolicy {
     url: URL?, runtime: WebRuntimeOrigin?, isMainFrame: Bool,
     canShowMIMEType: Bool, statusCode: Int?
   ) -> WebResponseDecision {
+    decideResponse(url: url, runtime: runtime, isMainFrame: isMainFrame,
+      canShowMIMEType: canShowMIMEType, statusCode: statusCode, mimeType: nil, role: .tool)
+  }
+
+  /// MIME types WebKit renders as a page the user works in. Everything else
+  /// WebKit can show (JSON, plain text, XML, CSV…) is a machine document: a
+  /// legitimate thing to read, never a replacement for the console's document.
+  static func isInteractiveDocumentMIME(_ mimeType: String) -> Bool {
+    let essence = mimeType.split(separator: ";").first.map {
+      $0.trimmingCharacters(in: .whitespaces).lowercased()
+    } ?? ""
+    switch essence {
+    case "text/html", "application/xhtml+xml", "image/svg+xml", "application/pdf":
+      return true
+    default:
+      return essence.hasPrefix("image/") || essence.hasPrefix("video/") || essence.hasPrefix("audio/")
+    }
+  }
+
+  /// Role-aware response decision. The route already passed `decide`; this is
+  /// where the *response* MIME is allowed to change the outcome, so a UI route
+  /// and an API endpoint on the same origin are told apart by what the server
+  /// actually answered, not by guessing from the path.
+  static func decideResponse(
+    url: URL?, runtime: WebRuntimeOrigin?, isMainFrame: Bool,
+    canShowMIMEType: Bool, statusCode: Int?, mimeType: String?, role: WebTabRole
+  ) -> WebResponseDecision {
     guard let url else { return .block(reason: "response has no URL") }
     if isMainFrame, let statusCode, statusCode >= 400 {
       return .block(reason: "Server returned HTTP \(statusCode).")
@@ -162,11 +217,64 @@ enum WebNavigationPolicy {
     let action = decide(url: url, runtime: runtime, isMainFrame: isMainFrame,
       shouldPerformDownload: !canShowMIMEType)
     switch action {
-    case .allowInApp: return .allowInApp
+    case .allowInApp:
+      if role == .console, isMainFrame, let mimeType, !isInteractiveDocumentMIME(mimeType) {
+        return .divertToReferenceTab
+      }
+      return .allowInApp
     case .startDownload: return .startDownload
     case .openExternally: return .block(reason: "response left the runtime origin")
     case .block(let reason): return .block(reason: reason)
     }
+  }
+
+  /// Decides a `window.open` / `target=_blank` request from `role`.
+  ///
+  /// Same-origin pages become a native tool tab so the requesting document is
+  /// never replaced. Foreign http(s) goes to the system browser. A tab may not
+  /// open a tab of a more privileged role, and reference views open nothing.
+  static func decideNewWindow(
+    url: URL?, runtime: WebRuntimeOrigin?, role: WebTabRole, shouldPerformDownload: Bool
+  ) -> WebNewWindowDecision {
+    guard role != .reference else {
+      return .block(reason: "a reference view may not open new windows")
+    }
+    switch decide(url: url, runtime: runtime, isMainFrame: true, shouldPerformDownload: shouldPerformDownload) {
+    case .allowInApp:
+      guard let url else { return .block(reason: "a navigation arrived without a URL") }
+      guard url.absoluteString != "about:blank" else {
+        return .block(reason: "an empty window has nothing to show")
+      }
+      return .openInTab(url, .tool)
+    case .startDownload:
+      guard let url else { return .block(reason: "a download arrived without a URL") }
+      return .startDownload(url)
+    case .openExternally(let external): return .openExternally(external)
+    case .block(let reason): return .block(reason: reason)
+    }
+  }
+
+  /// Navigation inside a tab that shows one local HTML document (a generated
+  /// report). The tab may show that file and nothing else on disk: fragments
+  /// and queries of the same file stay, http(s) links leave through the
+  /// system browser, every other scheme and every sub-frame is refused.
+  static func decideLocalDocumentNavigation(
+    url: URL?, document: URL, isMainFrame: Bool, shouldPerformDownload: Bool
+  ) -> WebNavigationDecision {
+    guard let url else { return .block(reason: "a navigation arrived without a URL") }
+    guard let scheme = URLComponents(url: url, resolvingAgainstBaseURL: false)?.scheme?.lowercased()
+    else { return .block(reason: "a navigation arrived without a scheme") }
+    if url.absoluteString == "about:blank", !shouldPerformDownload { return .allowInApp }
+    guard isMainFrame else { return .block(reason: "a local document may not embed frames") }
+    if shouldPerformDownload { return .block(reason: "a local document may not start downloads") }
+    if scheme == "file" {
+      let same = url.standardizedFileURL.path == document.standardizedFileURL.path
+      return same ? .allowInApp : .block(reason: "a local document may only show itself")
+    }
+    guard externallyOpenableSchemes.contains(scheme) else {
+      return .block(reason: "the scheme '\(scheme)' is not allowed to leave the App")
+    }
+    return .openExternally(url)
   }
 
   /// Decides an authentication challenge.
