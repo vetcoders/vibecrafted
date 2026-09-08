@@ -630,8 +630,10 @@ struct CommandDeckIntegrationTests {
   /// endpoint link (`target=_blank`, answered with JSON) opens a tool tab;
   /// Home returns that tab to the runtime overview on the same origin, from
   /// the JSON and from an error page, with its own history intact and every
-  /// sibling untouched. A destination keeps its own overview and a reference
-  /// view keeps its document. No host or port is ever named by the App.
+  /// sibling untouched. A destination keeps its own overview. An ordinary
+  /// endpoint link lands in a script-less reference view; Home from there
+  /// reaches the overview through the coordinator in an interactive tab.
+  /// No host or port is ever named by the App.
   static func homeContract(_ endpoint: URL, reconnectEndpoint: URL) async throws {
     let model = AppModel()
     let console = WebConsoleSession(websiteDataStore: .nonPersistent(), downloadDestinationProvider: { _, _, _ in nil })
@@ -738,8 +740,15 @@ struct CommandDeckIntegrationTests {
     try require(report.session.webView.url?.port == endpoint.port, "Report Home left its origin")
     try require(raw.session.webView.url?.path == "/", "Report Home moved the raw endpoint tab")
 
-    // 5. A reference view (JSON diverted from a plain link) runs no script,
-    //    so it has no product to return to: Home re-presents its document.
+    print("Witness: destination Home stayed on the report")
+
+    // 5. The ordinary endpoint link: JSON diverted from a plain `<a>` into a
+    //    read-only reference view. That view runs no script, so it cannot
+    //    render the product overview itself; Home from it must still bring
+    //    the user to the overview, through the coordinator, in an
+    //    interactive tool tab on the same origin. The reference view keeps
+    //    its document, role, no-script setting and history; the console
+    //    keeps its edit state; no sibling tab moves.
     try await evaluate("document.getElementById('api').click()", in: consoleView)
     try await waitFor { opened.count == 2 }
     try require(opened[1].1 == .reference, "Plain endpoint link was not diverted to a reference view")
@@ -748,12 +757,84 @@ struct CommandDeckIntegrationTests {
     }
     let reference = coordinator.tabs[referenceKey]!
     try await waitFor { if case .loaded(let url) = reference.session.loadState { return url.path == "/api/scaffold/artifacts" }; return false }
+    try require(!reference.session.webView.configuration.defaultWebpagePreferences.allowsContentJavaScript,
+      "Reference view runs page script")
+    // The overview is derived here from the fixture endpoint, not read from
+    // the App, so this witness also holds against product code that lacks it.
+    var overviewComponents = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)!
+    overviewComponents.path = "/"
+    overviewComponents.query = nil
+    overviewComponents.fragment = nil
+    let overviewKey = NativeTabCoordinator.key(for: overviewComponents.url!, role: .tool)
+    let tabsBeforeHome = coordinator.tabs.count
+    try require(coordinator.tabs[overviewKey] == nil, "An overview tab existed before Home")
     reference.navigate(.home)
-    try await waitFor { if case .loaded(let url) = reference.session.loadState { return url.path == "/api/scaffold/artifacts" }; return false }
+    try await waitFor { coordinator.tabs[overviewKey] != nil }
+    let overviewTab = coordinator.tabs[overviewKey]!
+    try require(coordinator.tabs.count == tabsBeforeHome + 1, "Reference Home opened more than one tab")
+    try require(overviewTab.session.role == .tool && overviewTab.session.webView !== reference.session.webView
+      && overviewTab.session.webView !== consoleView, "Overview tab identity")
+    try await waitFor { if case .loaded(let url) = overviewTab.session.loadState { return url.path == "/" }; return false }
+    let overviewURL = overviewTab.session.webView.url!
+    try require(overviewURL.host == endpoint.host && overviewURL.port == endpoint.port && overviewURL.query == nil,
+      "Reference Home left the runtime origin: \(overviewURL)")
+    try require(try await evaluateString("document.getElementById('fixture').textContent", in: overviewTab.session.webView) == "Ready",
+      "Reference Home did not render the product overview")
+    try require(overviewTab.model.presentation.phase == .online && overviewTab.model.presentation.exposesCanvas,
+      "Overview tab toolbar in \(overviewTab.model.presentation.phase)")
+    try require(overviewTab.window?.tabGroup != nil && overviewTab.window?.tabGroup === controller.window?.tabGroup,
+      "Overview tab is not in the console's native tab group")
+    try require(overviewTab.window?.tabGroup?.selectedWindow === overviewTab.window,
+      "Reference Home did not bring the overview tab forward")
+    try await tick()
+    try require(reference.session.webView.url?.path == "/api/scaffold/artifacts"
+      && reference.session.loadState == .loaded(reference.session.webView.url!),
+      "Reference Home reloaded or moved the reference view")
+    try require(!reference.session.navigation.canGoBack, "Reference Home added a history entry to the reference view")
     try require(reference.session.role == .reference
       && !reference.session.webView.configuration.defaultWebpagePreferences.allowsContentJavaScript,
-      "Reference Home changed the view's role")
-    print("Witness: destination Home stayed on the report; reference Home stayed on its document")
+      "Reference Home changed the view's role or enabled script")
+    try require(consoleView.url?.path == "/scaffold" && console.loadState == .loaded(consoleView.url!),
+      "Reference Home moved the console")
+    try require(try await evaluateString("document.getElementById('draft').value", in: consoleView) == "edited-draft",
+      "Reference Home discarded Scaffold edit state")
+    try require(raw.session.webView.url?.path == "/" && report.session.webView.url?.path == "/structure/report",
+      "Reference Home moved a sibling tab")
+    print("Witness: ordinary API link -> reference view -> Home reached the product overview in an interactive tab; the reference view, console and siblings stayed put")
+
+    // 5b. Home again from the reference view focuses that overview tab; no twin.
+    reference.window?.tabGroup?.selectedWindow = reference.window
+    try require(overviewTab.window?.tabGroup?.selectedWindow === reference.window, "Fixture could not reselect the reference tab")
+    reference.navigate(.home)
+    try await tick()
+    try require(coordinator.tabs.count == tabsBeforeHome + 1 && coordinator.tabs[overviewKey] === overviewTab,
+      "Repeated reference Home opened a twin overview tab")
+    try require(overviewTab.window?.tabGroup?.selectedWindow === overviewTab.window,
+      "Repeated reference Home did not focus the existing overview tab")
+    // The overview tab is an ordinary tool tab: its own Home is `/`.
+    overviewTab.session.navigate(path: "/workspaces")
+    try await waitFor { if case .loaded(let url) = overviewTab.session.loadState { return url.path == "/workspaces" }; return false }
+    overviewTab.navigate(.home)
+    try await waitFor { if case .loaded(let url) = overviewTab.session.loadState { return url.path == "/" }; return false }
+    try require(reference.session.webView.url?.path == "/api/scaffold/artifacts", "Overview Home moved the reference view")
+
+    // 5c. Without a runtime there is no overview to show: Home from the
+    //     reference view opens nothing, and the reconnect re-presents the
+    //     document the view exists for.
+    overviewTab.close()
+    try await waitFor { coordinator.tabs[overviewKey] == nil }
+    coordinator.apply(runtimeEndpoint: nil)
+    try require(reference.model.presentation.phase == .recovering, "Runtime loss was not shown on the reference view")
+    reference.navigate(.home)
+    try await tick()
+    try require(coordinator.tabs.count == tabsBeforeHome && coordinator.tabs[overviewKey] == nil,
+      "Reference Home opened a tab without a connected runtime")
+    coordinator.apply(runtimeEndpoint: endpoint)
+    try await waitFor { reference.model.presentation.exposesCanvas }
+    try require(reference.session.webView.url?.path == "/api/scaffold/artifacts"
+      && reference.session.webView.url?.port == endpoint.port,
+      "Reconnect moved the reference view off its document")
+    print("Witness: repeated reference Home focused the one overview tab; no runtime, no tab; reconnect kept the document")
 
     for tab in coordinator.tabs.values { tab.close() }
     controller.close()

@@ -30,8 +30,10 @@ enum WebTabHome: Equatable, Sendable {
   /// and so does every tool tab opened from a link inside the product.
   case runtimeOverview
   /// A surface's own overview, owned by its `ToolDestination` (the Loctree
-  /// report returns to the report) or by the document a read-only reference
-  /// view exists for.
+  /// report returns to the report). A read-only reference view also keeps its
+  /// one document here as the route a reconnect re-presents; its Home button,
+  /// though, is answered by `NativeTabCoordinator.openProductOverview()`,
+  /// because a script-less view cannot render the product overview itself.
   case route(String)
 
   /// The route Home selects. Only ever a path on the tab's own origin.
