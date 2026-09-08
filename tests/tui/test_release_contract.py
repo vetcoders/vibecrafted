@@ -356,6 +356,11 @@ def test_builder_emits_the_canonical_versioned_dmg_and_checksum() -> None:
     assert "build-server-release" in builder
     assert 'install -m 0755 "$server_source" "$runtime/bin/vc-server"' in builder
     assert '"$runtime/server/site/"' in builder
+    mcp_copy = '/bin/cp -R "$REPO_ROOT/vibecrafted-mcp/vibecrafted_mcp" \\\n    "$runtime/vibecrafted-mcp/"'
+    mcp_generation_version = 'printf \'%s\\n\' "$RUNTIME_VERSION" \\\n    > "$runtime/vibecrafted-mcp/vibecrafted_mcp/VERSION"'
+    assert mcp_copy in builder
+    assert mcp_generation_version in builder
+    assert builder.index(mcp_copy) < builder.index(mcp_generation_version)
     assert '"$REPO_ROOT/scripts/render-python-entrypoint-launchers.py"' in builder
     assert '"$REPO_ROOT/vibecrafted-core/pyproject.toml"' in builder
     assert '"$runtime/runtime"' not in builder

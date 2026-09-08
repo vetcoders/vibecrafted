@@ -508,7 +508,8 @@ materialize_runtime_payload() {
   log "Materializing the App-independent Runtime Pack payload"
   rm -rf "$runtime"
   mkdir -p "$runtime/bin" "$runtime/libexec" "$runtime/scripts" \
-    "$runtime/vibecrafted-core" "$runtime/config" "$runtime/server/site"
+    "$runtime/vibecrafted-core" "$runtime/vibecrafted-mcp" \
+    "$runtime/config" "$runtime/server/site"
   printf '%s\n' "$RUNTIME_VERSION" > "$runtime/VERSION"
   canonical_deck="$REPO_ROOT/vibecrafted-core/vibecrafted_core/deck/vibecrafted"
   install -m 0755 "$canonical_deck" "$runtime/scripts/vibecrafted"
@@ -529,6 +530,17 @@ materialize_runtime_payload() {
   /bin/cp -R "$REPO_ROOT/bin/." "$runtime/bin/"
   /bin/cp -R "$REPO_ROOT/vibecrafted-core/vibecrafted_core" \
     "$runtime/vibecrafted-core/"
+  # MCP is a Vibecrafted-owned public command. Keep it in the signed
+  # generation so its installed launcher never depends on a mutable uv tool
+  # environment or the checkout that happened to assemble the carrier.
+  /bin/cp -R "$REPO_ROOT/vibecrafted-mcp/vibecrafted_mcp" \
+    "$runtime/vibecrafted-mcp/"
+  # The MCP package's source VERSION is the release version.  Once copied
+  # into a Runtime Pack it must identify the exact signed generation, just as
+  # vibecrafted-core does below; both --version and MCP initialize serverInfo
+  # resolve this one package-owned file.
+  printf '%s\n' "$RUNTIME_VERSION" \
+    > "$runtime/vibecrafted-mcp/vibecrafted_mcp/VERSION"
   printf '%s\n' "$RUNTIME_VERSION" \
     > "$runtime/vibecrafted-core/vibecrafted_core/VERSION"
   /bin/cp -R "$REPO_ROOT/config/." "$runtime/config/"
@@ -562,7 +574,8 @@ materialize_runtime_payload() {
   mkdir -p "$runtime/python" "$runtime/python-site"
   /bin/cp -RL "$python_home/." "$runtime/python/"
   uv pip install --python "$seed_python" --target "$runtime/python-site" \
-    'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7' 'screenscribe==0.1.19'
+    'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7' 'screenscribe==0.1.19' \
+    'fastmcp>=2.0,<3'
   install_name_tool -id '@loader_path/libpython3.12.dylib' \
     "$runtime/python/lib/libpython3.12.dylib"
   rm -rf "$runtime/python-site/bin"
@@ -578,13 +591,17 @@ materialize_runtime_payload() {
     'runtime_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"' \
     'export PYTHONNOUSERSITE=1' \
     'export PYTHONDONTWRITEBYTECODE=1' \
-    'export PYTHONPATH="$runtime_root/vibecrafted-core:$runtime_root/python-site"' \
+    'export PYTHONPATH="$runtime_root/vibecrafted-core:$runtime_root/vibecrafted-mcp:$runtime_root/python-site"' \
     'exec "$runtime_root/python/bin/python3.12" "$@"' \
     > "$runtime/bin/python3"
   chmod 0755 "$runtime/bin/python3"
   "$REPO_ROOT/scripts/project-python" \
     "$REPO_ROOT/scripts/render-python-entrypoint-launchers.py" \
     --pyproject "$REPO_ROOT/vibecrafted-core/pyproject.toml" \
+    --bin-dir "$runtime/bin"
+  "$REPO_ROOT/scripts/project-python" \
+    "$REPO_ROOT/scripts/render-python-entrypoint-launchers.py" \
+    --pyproject "$REPO_ROOT/vibecrafted-mcp/pyproject.toml" \
     --bin-dir "$runtime/bin"
   # shellcheck disable=SC2016
   printf '%s\n' \

@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import select
 import shutil
 import subprocess
+import sys
+import time
 from argparse import Namespace
 from contextlib import nullcontext
 from pathlib import Path
@@ -448,6 +451,184 @@ def test_runtime_pack_refuses_missing_required_agent_foundation(
         )
 
     assert not (home / "bin/vibecrafted").exists()
+
+
+def test_runtime_reinstall_replaces_broken_vc_owned_mcp_launcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A reinstall takes ownership from the stale uv MCP entrypoint, not the checkout."""
+    home = tmp_path / "home"
+    launcher_home = home / ".local/bin"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(launcher_home))
+    monkeypatch.setenv(
+        "VIBECRAFTED_RUNTIME_HOME", str(home / ".local/share/vibecrafted")
+    )
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / ".vibecrafted"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    mcp = payload / "bin/vibecrafted-mcp"
+    mcp.write_text("#!/bin/sh\nprintf 'generation-owned-mcp\\n'\n", encoding="utf-8")
+    mcp.chmod(0o755)
+    broken_uv = tmp_path / "uv-tools/vibecrafted-mcp/bin/vibecrafted-mcp"
+    _write_executable(broken_uv, "#!/bin/sh\nexit 1\n")
+    launcher_home.mkdir(parents=True)
+    (launcher_home / "vibecrafted-mcp").symlink_to(broken_uv)
+    codex_config = home / ".codex/config.toml"
+    codex_config.parent.mkdir(parents=True)
+    config_bytes = b"[mcp_servers.aicx]\nurl = 'https://example.invalid/mcp'\n"
+    codex_config.write_bytes(config_bytes)
+
+    assert (
+        installer.cmd_runtime_install(
+            Namespace(
+                payload_root=str(payload),
+                app_root=str(terminal_host.parents[2]),
+                terminal_host=str(terminal_host),
+                frame_helper=str(frame_helper),
+            )
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    public = launcher_home / "vibecrafted-mcp"
+    assert public.is_file() and not public.is_symlink()
+    assert str(payload) not in public.read_text(encoding="utf-8")
+    launched = subprocess.run(
+        [str(public), "--help"], check=True, capture_output=True, text=True
+    )
+    assert launched.stdout == "generation-owned-mcp\n"
+    assert codex_config.read_bytes() == config_bytes
+    receipt = json.loads(
+        (home / ".local/share/vibecrafted/install-receipt.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert str(public) in receipt["owned_files"]
+
+
+def test_generation_owned_mcp_launcher_reports_generation_over_stdio(
+    tmp_path: Path,
+) -> None:
+    """The public launcher must work away from checkout/uv and name its generation."""
+    pytest.importorskip("fastmcp")
+    generation = tmp_path / "runtime" / "4.3.1+gdeadbeef"
+    runtime_mcp = generation / "vibecrafted-mcp" / "vibecrafted_mcp"
+    runtime_core = generation / "vibecrafted-core" / "vibecrafted_core"
+    shutil.copytree(REPO_ROOT / "vibecrafted-mcp" / "vibecrafted_mcp", runtime_mcp)
+    shutil.copytree(REPO_ROOT / "vibecrafted-core" / "vibecrafted_core", runtime_core)
+    expected_version = "4.3.1+gdeadbeef"
+    (runtime_mcp / "VERSION").write_text(expected_version + "\n", encoding="utf-8")
+
+    bin_dir = generation / "bin"
+    bin_dir.mkdir()
+    interpreter = bin_dir / "python3"
+    interpreter.write_text(
+        "#!/bin/bash\n"
+        "set -euo pipefail\n"
+        'runtime_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"\n'
+        "unset PYTHONHOME PYTHONPATH\n"
+        'export PYTHONPATH="$runtime_root/vibecrafted-core:$runtime_root/vibecrafted-mcp"\n'
+        f'exec {sys.executable!s} "$@"\n',
+        encoding="utf-8",
+    )
+    interpreter.chmod(0o755)
+    subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "render-python-entrypoint-launchers.py"),
+            "--pyproject",
+            str(REPO_ROOT / "vibecrafted-mcp" / "pyproject.toml"),
+            "--bin-dir",
+            str(bin_dir),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    launcher = bin_dir / "vibecrafted-mcp"
+    isolated_cwd = tmp_path / "arbitrary-cwd"
+    isolated_cwd.mkdir()
+    environment = {
+        "HOME": str(tmp_path / "home"),
+        "PATH": "/usr/bin:/bin",
+        "PYTHONNOUSERSITE": "1",
+    }
+
+    version = subprocess.run(
+        [str(launcher), "--version"],
+        cwd=isolated_cwd,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert version.stdout.strip() == expected_version
+
+    child = subprocess.Popen(
+        [str(launcher)],
+        cwd=isolated_cwd,
+        env=environment,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert child.stdin is not None
+    assert child.stdout is not None
+    try:
+
+        def request(message: dict[str, object]) -> None:
+            child.stdin.write(json.dumps(message) + "\n")
+            child.stdin.flush()
+
+        def response(request_id: int) -> dict[str, object]:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                ready, _, _ = select.select(
+                    [child.stdout], [], [], max(deadline - time.monotonic(), 0)
+                )
+                if not ready:
+                    break
+                line = child.stdout.readline()
+                if not line:
+                    break
+                payload = json.loads(line)
+                if payload.get("id") == request_id:
+                    return payload
+            pytest.fail(
+                f"MCP response {request_id} was not received before the 10-second deadline "
+                f"(child exit={child.poll()!r})"
+            )
+
+        request(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {"name": "generation-test", "version": "1"},
+                },
+            }
+        )
+        initialized = response(1)
+        assert initialized["result"]["serverInfo"]["version"] == expected_version
+        request({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        request({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+        tools = response(2)
+        assert any(tool["name"] == "vc_repo_full" for tool in tools["result"]["tools"])
+    finally:
+        child.terminate()
+        try:
+            child.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=10)
 
 
 def test_runtime_launcher_public_name_never_claims_foreign_tools() -> None:

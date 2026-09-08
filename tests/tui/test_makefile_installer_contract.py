@@ -1419,6 +1419,13 @@ def test_make_install_verifies_server_supervisor_entrypoint() -> None:
     assert "vibecrafted vc-workflow vc-guardian vc-server-supervisor" in (
         install_tools_block
     )
+    # Every Python entrypoint, including the separately-owned MCP tool, must
+    # import under its own uv interpreter before the install can succeed. A
+    # valid shebang alone previously allowed a missing `vibecrafted_mcp`
+    # package to ship and surface as MCP CONNECTION_CLOSED at initialize.
+    assert 'env -u PYTHONPATH -u PYTHONHOME "$$entrypoint_path" --help' in (
+        install_tools_block
+    )
     assert "expected executable entrypoint" in install_tools_block
     assert '"$$resolved" --help' in install_tools_block
     # --color never is load-bearing: FORCE_COLOR-style env makes `uv tool dir`

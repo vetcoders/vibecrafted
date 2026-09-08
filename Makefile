@@ -412,6 +412,10 @@ install-tools-held:
 				fi ;; \
 			*) echo "[install-tools] FATAL: uv tool entrypoint $$entrypoint is not owned by the uv interpreter: $$entrypoint_shebang" >&2; exit 1 ;; \
 		esac; \
+		if ! env -u PYTHONPATH -u PYTHONHOME "$$entrypoint_path" --help >/dev/null 2>&1; then \
+			echo "[install-tools] FATAL: uv tool entrypoint $$entrypoint does not execute successfully" >&2; \
+			exit 1; \
+		fi; \
 	done; \
 	for entrypoint in vibecrafted vc-workflow vc-guardian vc-server-supervisor verify-vibecrafted-walkaround; do \
 		resolved="$$(command -v "$$entrypoint" 2>/dev/null || true)"; \

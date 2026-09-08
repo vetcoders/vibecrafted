@@ -17967,6 +17967,7 @@ def _install_runtime_pack(args: argparse.Namespace) -> int:
     # accepted, but that hint never selects executable truth over this generation.
     required = [
         generation / "bin/vibecrafted",
+        generation / "bin/vibecrafted-mcp",
         generation / "bin/loct",
         generation / "bin/loctree-mcp",
         generation / "bin/aicx",
