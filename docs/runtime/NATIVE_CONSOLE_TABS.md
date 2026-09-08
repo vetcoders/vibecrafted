@@ -79,11 +79,11 @@ session treats that as a decision, not a failure.
 
 ## Destinations
 
-| Destination         | Contract used                                                                                                                                                                                                                                                                  | When unavailable                                                                                                                                                                           |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Loctree Report      | `/structure/report` on the connected runtime. The server serves `<root>/.loctree/report.html` of a canonical run root under a CSP `sandbox` (opaque origin, no `fetch`, no forms) with its sibling assets on `/structure/report/{asset}`; the App adds an ephemeral data store | no runtime → menu item disabled with reason; no report → tab shows "Server returned HTTP 404" and the server names `loct report --output .loctree/report.html`                             |
-| AICX Dashboard      | `aicx dashboard` output at `~/.aicx/aicx-dashboard.html` (or `$AICX_HOME`), loaded with read access to that one file, non-persistent data store                                                                                                                                | file missing → reason names the path and `aicx dashboard`                                                                                                                                  |
-| Slack Agent Console | `[tools.slack-console] url` in `~/.config/vibecrafted/config.toml` (the operator-owned file that also holds `[server]`; `XDG_CONFIG_HOME` honoured). Opens in a `service`-scoped tab on that URL's origin                                                                      | not configured → reason names the owner (`vc-slack-agent` portal `/console`, `make portal-preview` :4300 or its deploy) and the file; invalid table → reason quotes the contract violation |
+| Destination         | Contract used                                                                                                                                                                                                                                                                                                                                                                | When unavailable                                                                                                                                                                           |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Loctree Report      | `/structure/report` on the connected runtime (redirects to the directory-style `/structure/report/`). The server serves `<root>/.loctree/report.html` of a canonical run root under a CSP `sandbox` (opaque origin, no `fetch`, no forms) with its sibling assets on `/structure/report/{asset}` and an in-memory Web Storage stand-in; the App adds an ephemeral data store | no runtime → menu item disabled with reason; no report → tab shows "Server returned HTTP 404" and the server names `loct report --output .loctree/report.html`                             |
+| AICX Dashboard      | `aicx dashboard` output at `~/.aicx/aicx-dashboard.html` (or `$AICX_HOME`), loaded with read access to that one file, non-persistent data store                                                                                                                                                                                                                              | file missing → reason names the path and `aicx dashboard`                                                                                                                                  |
+| Slack Agent Console | `[tools.slack-console] url` in `~/.config/vibecrafted/config.toml` (the operator-owned file that also holds `[server]`; `XDG_CONFIG_HOME` honoured). Opens in a `service`-scoped tab on that URL's origin                                                                                                                                                                    | not configured → reason names the owner (`vc-slack-agent` portal `/console`, `make portal-preview` :4300 or its deploy) and the file; invalid table → reason quotes the contract violation |
 
 `View ▸ Open in Tab` and `View ▸ Open in Browser` list the catalog. Local
 documents use Reveal in Finder for the external action, through the typed
@@ -116,12 +116,22 @@ cleartext `http` is admitted for loopback / local-network IP literals only.
 
 ### Server-side boundaries the tabs rely on
 
-- `/structure/report` and `/structure/report/{asset}` (`vibecrafted-server/web/src/tools.rs`):
-  the report's own `<meta http-equiv="Content-Security-Policy">` is removed and
-  replaced by a header policy — `sandbox allow-scripts allow-popups`, scripts
-  from the page and from `<host>/structure/report/` only, `connect-src 'none'`,
-  `form-action 'none'`, `frame-ancestors 'none'`. Assets are regular files in
-  the report's directory with a known extension; symlinks and traversal are
+- `/structure/report/` and `/structure/report/{asset}` (`vibecrafted-server/web/src/tools.rs`;
+  `/structure/report` answers `308` to the slash form): the document is served
+  at a directory-style URL so Loctree's relative `<script src="loctree-*.js">`
+  resolve onto the asset route. The report's own
+  `<meta http-equiv="Content-Security-Policy">` is removed and replaced by a
+  header policy — `sandbox allow-scripts allow-popups`, scripts from the page
+  and from `<host>/structure/report/` only, `connect-src 'none'`,
+  `form-action 'none'`, `frame-ancestors 'none'`. Because the sandboxed
+  document has an opaque origin, `window.localStorage` throws there; the
+  server installs a per-document in-memory stand-in as the first script so the
+  report's tab wiring and theme toggle run — one independent storage per name
+  (`localStorage` and `sessionStorage` never see or clear each other; proven
+  by `web/tests/acceptance/storage_shim_probe.mjs`, run from the crate's unit
+  tests when `node` is present). Nothing persists and `allow-same-origin` is
+  never granted. Assets are regular files in the
+  report's directory with a known extension; symlinks and traversal are
   refused. The document keeps its interactive graph and holds no control-plane
   authority.
 - `/api/aicx/search` and `/api/aicx/reference`: the AICX corpus is private to
