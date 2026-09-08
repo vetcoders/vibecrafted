@@ -14,13 +14,24 @@
 //!   peer is unknown fails closed. Search hits never carry raw filesystem
 //!   paths; each one gets a server-owned reference route that is authorised
 //!   against the AICX extracts root at read time.
-//! * **Loctree report** (`/structure/report`, `/structure/report/{asset}`) is
+//! * **Loctree report** (`/structure/report/`, `/structure/report/{asset}`) is
 //!   a generated, script-bearing document. It is served on the runtime origin
 //!   but inside a Content-Security-Policy `sandbox`, so it runs with an opaque
 //!   origin: no cookies, no `fetch` to `/api/*`, no form posts, no frames. Its
 //!   own scripts and the sibling assets Loctree writes next to it are allowed
 //!   explicitly, so the interactive graph keeps working. Nothing in this module
 //!   ever gives generated HTML control-plane authority.
+//!
+//!   The document is served at the directory-style URL `/structure/report/`
+//!   (`/structure/report` redirects there) because Loctree writes it for the
+//!   `file://` case: its `<script src="loctree-cytoscape.min.js">` references
+//!   are relative to the document, so the document URL has to end in the same
+//!   segment that serves the assets. Two adaptations happen at serve time,
+//!   neither of which widens the sandbox: the report's own `<meta>` CSP is
+//!   removed (see [`api::strip_meta_csp`]) and an in-memory `localStorage` /
+//!   `sessionStorage` stand-in is installed for the opaque origin (see
+//!   [`api::inject_storage_shim`]), where the real Web Storage getters throw
+//!   and the report's top-level scripts would die before wiring their tabs.
 
 #[cfg(feature = "ssr")]
 pub mod api {
@@ -472,6 +483,74 @@ pub mod api {
         out
     }
 
+    /// Script installed at the top of `<head>` when the report is served under
+    /// the sandbox policy. The document's origin is opaque, so `window.localStorage`
+    /// and `window.sessionStorage` throw `SecurityError` on access (Chromium,
+    /// WebKit) — and Loctree's inline scripts read them at top level, so the
+    /// tab wiring and the theme toggle never get installed. The stand-in is a
+    /// per-document in-memory `Storage` look-alike (`getItem`, `setItem`,
+    /// `removeItem`, `clear`, `key`, `length`): nothing persists across loads and
+    /// nothing crosses the origin boundary. Where the real storage is usable the
+    /// script leaves it alone.
+    const STORAGE_SHIM: &str = concat!(
+        "<script data-vibecrafted=\"storage-shim\">",
+        "(function(){var names=[\"localStorage\",\"sessionStorage\"];",
+        "for(var i=0;i<names.length;i++){var name=names[i];var usable=false;",
+        "try{var real=window[name];if(real){real.getItem(\"vibecrafted-storage-probe\");usable=true;}}catch(e){}",
+        "if(usable){continue;}",
+        "var store=Object.create(null);",
+        "var shim={",
+        "getItem:function(k){k=String(k);return k in store?store[k]:null;},",
+        "setItem:function(k,v){store[String(k)]=String(v);},",
+        "removeItem:function(k){delete store[String(k)];},",
+        "clear:function(){store=Object.create(null);},",
+        "key:function(n){var keys=Object.keys(store);return n<keys.length?keys[n]:null;}};",
+        "Object.defineProperty(shim,\"length\",{get:function(){return Object.keys(store).length;}});",
+        "try{Object.defineProperty(window,name,{value:shim,configurable:true,writable:true});}catch(e){}",
+        "}})();",
+        "</script>"
+    );
+
+    /// Position just past the opening `<head>` tag (or `<html>` when the
+    /// document has no head), matched case-insensitively on ASCII.
+    fn opening_tag_end(html: &str, tag: &str) -> Option<usize> {
+        let lower = html.to_ascii_lowercase();
+        let mut from = 0;
+        while let Some(rel) = lower[from..].find(tag) {
+            let start = from + rel;
+            let after = start + tag.len();
+            let boundary = lower[after..]
+                .chars()
+                .next()
+                .is_some_and(|c| c == '>' || c.is_ascii_whitespace() || c == '/');
+            if boundary {
+                return lower[after..].find('>').map(|gt| after + gt + 1);
+            }
+            from = after;
+        }
+        None
+    }
+
+    /// Installs [`STORAGE_SHIM`] as the first script of the document so it
+    /// runs before any report script. Idempotent: a document that already
+    /// carries the shim is returned unchanged.
+    pub(crate) fn inject_storage_shim(html: &str) -> String {
+        if html.contains("data-vibecrafted=\"storage-shim\"") {
+            return html.to_string();
+        }
+        let at = opening_tag_end(html, "<head").or_else(|| opening_tag_end(html, "<html"));
+        match at {
+            Some(at) => format!("{}{}{}", &html[..at], STORAGE_SHIM, &html[at..]),
+            None => format!("{STORAGE_SHIM}{html}"),
+        }
+    }
+
+    /// The document as served: Loctree's `file://` policy removed, the
+    /// storage stand-in installed. Everything else is the report as written.
+    pub(crate) fn adapt_report(html: &str) -> String {
+        inject_storage_shim(&strip_meta_csp(html))
+    }
+
     /// A `Host` header value safe to place in a CSP source expression.
     fn csp_host(headers: &HeaderMap) -> Option<&str> {
         let host = headers.get(header::HOST)?.to_str().ok()?.trim();
@@ -522,7 +601,20 @@ pub mod api {
         (status, [(header::CACHE_CONTROL, "no-store")], body).into_response()
     }
 
-    /// `GET /structure/report`
+    /// `GET /structure/report` — the document lives at the directory-style URL
+    /// so its relative asset references resolve; send the caller there.
+    pub async fn loctree_report_redirect() -> Response {
+        (
+            StatusCode::PERMANENT_REDIRECT,
+            [
+                (header::LOCATION, "/structure/report/"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+        )
+            .into_response()
+    }
+
+    /// `GET /structure/report/`
     pub async fn loctree_report(headers: HeaderMap) -> Response {
         let plane = ControlPlane::from_env();
         let Some(report) = locate_report(&plane) else {
@@ -541,7 +633,7 @@ pub mod api {
         (
             StatusCode::OK,
             report_headers("text/html; charset=utf-8", &csp),
-            strip_meta_csp(&html),
+            adapt_report(&html),
         )
             .into_response()
     }
@@ -698,6 +790,41 @@ pub mod api {
                 "script-src 'unsafe-inline' 'unsafe-eval' 127.0.0.1:3024/structure/report/"
             ));
             assert!(!report_csp(None).contains("/structure/report/"));
+        }
+
+        #[test]
+        fn storage_shim_is_the_first_script_and_installs_once() {
+            let html = "<!DOCTYPE html>\n<html><head><meta charset=\"UTF-8\"><title>R</title></head><body><script>localStorage.getItem('loctree-theme')</script><script src=\"loctree-cytoscape.min.js\"></script></body></html>";
+            let adapted = adapt_report(html);
+            let shim_at = adapted
+                .find("<script data-vibecrafted=\"storage-shim\">")
+                .expect("shim present");
+            assert_eq!(
+                &adapted[..shim_at],
+                "<!DOCTYPE html>\n<html><head>",
+                "shim goes right after <head>"
+            );
+            assert!(shim_at < adapted.find("localStorage.getItem").expect("report script"));
+            assert_eq!(adapted.matches("storage-shim").count(), 1);
+            assert_eq!(adapt_report(&adapted), adapted, "adapting twice is a no-op");
+            assert!(adapted.ends_with("</script></body></html>"));
+            // The shim itself only ever replaces a storage that throws.
+            assert!(STORAGE_SHIM.contains("catch(e){}"));
+            assert!(STORAGE_SHIM.contains("if(usable){continue;}"));
+            assert!(!STORAGE_SHIM.contains("allow-same-origin"));
+
+            // Uppercase / attributed head, then no head at all.
+            let upper =
+                inject_storage_shim("<HTML><HEAD lang=\"en\"><TITLE>x</TITLE></HEAD></HTML>");
+            assert!(upper.starts_with("<HTML><HEAD lang=\"en\"><script data-vibecrafted"));
+            let headless = inject_storage_shim("<html><body>report</body></html>");
+            assert!(headless.starts_with("<html><script data-vibecrafted"));
+            let bare = inject_storage_shim("<p>fragment</p>");
+            assert!(bare.starts_with("<script data-vibecrafted"));
+            assert!(bare.ends_with("<p>fragment</p>"));
+            // `<header>` is not `<head>`.
+            let header_only = inject_storage_shim("<header>x</header>");
+            assert!(header_only.starts_with("<script data-vibecrafted"));
         }
     }
 }

@@ -21,7 +21,7 @@ use leptos::config::{Env, LeptosOptions};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use vibecrafted_server_web::tools::api::{
-    aicx_reference, aicx_search, loctree_report, loctree_report_asset,
+    aicx_reference, aicx_search, loctree_report, loctree_report_asset, loctree_report_redirect,
 };
 
 struct Fixture {
@@ -165,7 +165,8 @@ fn router(bind: &str) -> Router {
         .reload_port(0)
         .build();
     Router::new()
-        .route("/structure/report", get(loctree_report))
+        .route("/structure/report", get(loctree_report_redirect))
+        .route("/structure/report/", get(loctree_report))
         .route("/structure/report/{asset}", get(loctree_report_asset))
         .route("/api/aicx/search", get(aicx_search))
         .route("/api/aicx/reference", get(aicx_reference))
@@ -221,8 +222,15 @@ async fn tool_surfaces_keep_their_boundaries() {
     let fixture = Fixture::new();
     let app = router("127.0.0.1:3024");
 
-    // ---- Loctree report: served sandboxed, its meta CSP removed, assets explicit.
-    let (status, headers, body) = call(&app, "/structure/report", Some("192.168.1.9:4000")).await;
+    // ---- Loctree report: the document lives at the directory-style URL so its
+    // relative `<script src>` resolve onto the asset route; the bare path redirects.
+    let (status, headers, _) = call(&app, "/structure/report", Some("192.168.1.9:4000")).await;
+    assert_eq!(status, StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(header(&headers, "location"), "/structure/report/");
+    assert_eq!(header(&headers, "cache-control"), "no-store");
+
+    // Served sandboxed, its meta CSP removed, storage stand-in first, assets explicit.
+    let (status, headers, body) = call(&app, "/structure/report/", Some("192.168.1.9:4000")).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -234,6 +242,14 @@ async fn tool_surfaces_keep_their_boundaries() {
         "meta CSP must not survive: {html}"
     );
     assert!(html.contains("<script src=\"loctree-cytoscape.min.js\">"));
+    let shim_at = html
+        .find("<script data-vibecrafted=\"storage-shim\">")
+        .expect("storage stand-in installed");
+    assert!(
+        shim_at < html.find("<script src=").expect("report script"),
+        "stand-in must run before any report script: {html}"
+    );
+    assert_eq!(html.matches("storage-shim").count(), 1);
     assert!(header(&headers, "content-type").starts_with("text/html"));
     let csp = header(&headers, "content-security-policy").to_string();
     assert!(csp.contains("sandbox allow-scripts"), "{csp}");
