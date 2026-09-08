@@ -42,6 +42,14 @@ from .control_plane import (
 from .cron import parse_frontmatter
 from .delivery.store import atomic_write_json
 from .events import append_event
+from .execution_controls import (
+    SUPERVISED_RUNTIME_KINDS,
+    ExecutionControls,
+    ExecutionControlsError,
+    parse_permissions_word,
+    parse_sandbox_word,
+    resolve_execution_controls,
+)
 from .init_resume import init_resume_block
 from .model_overrides import _model_override_receipt, _with_model_override
 from .package_resources import deck_path as package_deck_path
@@ -121,6 +129,13 @@ class WorkflowLaunchSpec:
     # names that checkout and ``parent_root`` keeps the selected repository.
     worktree: bool = False
     parent_root: str = ""
+    # Public execution controls (``--permissions`` / ``--sandbox``). Empty /
+    # ``None`` keeps the historical provider default (bypass; auto for junie;
+    # sandbox left to the provider). Both are resolved through
+    # execution_controls.resolve_execution_controls, which refuses anything the
+    # installed provider CLI cannot enforce before any process is launched.
+    permissions: str = ""
+    sandbox: bool | None = None
 
     def to_payload(self) -> dict[str, Any]:
         """Serialize the spec to a plain dict for launch logs and events."""
@@ -1559,6 +1574,17 @@ def normalize_launch_spec(
     worktree = parse_worktree_flag(payload.get("worktree"))
     if worktree and not root:
         raise ValueError("--worktree requires a selected repository (--repo <path>).")
+    permissions = parse_permissions_word(payload.get("permissions"))
+    sandbox = parse_sandbox_word(payload.get("sandbox"))
+    if permissions or sandbox is not None:
+        if definition.runtime_kind in SUPERVISED_RUNTIME_KINDS:
+            raise ValueError(
+                f"--permissions/--sandbox are not carried into the {skill} "
+                "supervised runtime yet; omit them or launch a direct agent skill."
+            )
+        # Refuse before any control-plane write: the resolver raises with the
+        # provider's exact supported alternative (never a silent downgrade).
+        resolve_execution_controls(agent, permissions=permissions, sandbox=sandbox)
 
     return WorkflowLaunchSpec(
         agent=agent,
@@ -1576,7 +1602,38 @@ def normalize_launch_spec(
         research_synthesizer_model=research_synthesizer_model,
         run_id=str(payload.get("run_id") or "").strip(),
         worktree=worktree,
+        permissions=permissions,
+        sandbox=sandbox,
     )
+
+
+def launch_execution_controls(spec: WorkflowLaunchSpec) -> ExecutionControls | None:
+    """Resolved controls for a direct-agent launch; ``None`` for supervised kinds.
+
+    Always computed (also when both flags were omitted) so every launch receipt
+    states the effective permission policy and sandbox state next to what was
+    requested. Raises :class:`ExecutionControlsError` for a refused request.
+    """
+    runtime_kind = workflow_registry.workflow_runtime_kind(spec.skill)
+    if runtime_kind in SUPERVISED_RUNTIME_KINDS or spec.agent == "swarm":
+        if spec.permissions or spec.sandbox is not None:
+            raise ExecutionControlsError(
+                f"--permissions/--sandbox are not carried into the {spec.skill} "
+                "supervised runtime yet; omit them or launch a direct agent skill."
+            )
+        return None
+    return resolve_execution_controls(
+        spec.agent, permissions=spec.permissions, sandbox=spec.sandbox
+    )
+
+
+def _execution_controls_receipt(
+    controls: ExecutionControls | None,
+) -> dict[str, Any]:
+    """Launch-event / meta / receipt projection of the resolved controls."""
+    if controls is None:
+        return {}
+    return {"execution_controls": controls.receipt()}
 
 
 def _git_head(repo: Path) -> str:
@@ -1766,7 +1823,14 @@ def build_launch_command(
         return launch_command
 
     worker_agent = spec.agent
-    return _with_model_override(worker_agent, _stdin_command(worker_agent), spec.model)
+    controls = launch_execution_controls(spec)
+    # The default shape stays byte-identical to the historical command; the
+    # resolved argv is injected only when the caller asked for a control.
+    if controls is not None and controls.requested:
+        worker_command = _stdin_command(worker_agent, controls=controls)
+    else:
+        worker_command = _stdin_command(worker_agent)
+    return _with_model_override(worker_agent, worker_command, spec.model)
 
 
 def _sweep_stale_runs() -> None:
@@ -1849,6 +1913,8 @@ def machine_launch_receipt(payload: dict[str, Any]) -> dict[str, Any]:
             "parent_root",
         ):
             receipt[key] = str(payload.get(key) or "")
+    if isinstance(payload.get("execution_controls"), dict):
+        receipt["execution_controls"] = dict(payload["execution_controls"])
     return receipt
 
 
@@ -2756,12 +2822,36 @@ def launch_workflow(
     )
     prompt_path = _write_prompt_file(artifacts["prompt"], prompt_body)
     claim_digest = str(spec.claim_digest or "").strip()
+    try:
+        controls_receipt = _execution_controls_receipt(launch_execution_controls(spec))
+    except ExecutionControlsError as exc:
+        return _finish_launch_idempotency(
+            idem_key,
+            {
+                "accepted": False,
+                "message": f"Failed to launch {spec.skill}: {exc}",
+                "error": f"{type(exc).__name__}: {exc}",
+                "reason": "execution_controls_rejected",
+                "run_id": run_id,
+                "agent": spec.agent,
+                "skill": spec.skill,
+                "root": spec.root,
+                "permissions_requested": spec.permissions,
+                "sandbox_requested": ""
+                if spec.sandbox is None
+                else str(spec.sandbox).lower(),
+                "status": "failed",
+                "control_plane": {"sync": "deferred", "run_id": run_id},
+            },
+            spec_digest=idem_spec_digest,
+        )
     initial_meta: dict[str, Any] = dict(launch_meta or {})
     initial_meta["run_id"] = run_id
     initial_meta["runtime"] = spec.runtime
     if worktree_receipt:
         initial_meta["root"] = spec.root
         initial_meta.update(worktree_receipt)
+    initial_meta.update(controls_receipt)
     if claim_digest:
         initial_meta["claim_digest"] = claim_digest
     if len(initial_meta) > 1:
@@ -2807,6 +2897,9 @@ def launch_workflow(
     model_receipt = _model_override_receipt(spec.agent, spec.model)
     if spec.model and runtime_kind == "supervised_research":
         model_receipt = {"model_requested": spec.model}
+    # Execution controls ride the same receipt channel as the model pin: every
+    # accepted/refused payload that spreads model_receipt carries them too.
+    model_receipt = {**model_receipt, **controls_receipt}
     dispatch_command = _dispatcher_command(
         run_id=run_id,
         root=spec.root,

@@ -222,6 +222,27 @@ def _add_launch_parser(sub: argparse._SubParsersAction, name: str) -> None:
         metavar="true|false",
         help="run the worker in a fresh linked checkout of the selected repository",
     )
+    run.add_argument(
+        "--permissions",
+        default="",
+        metavar="bypass|auto|accept-edits|read-only",
+        help=(
+            "permission policy enforced by the agent's own CLI "
+            "(default: bypass; junie: auto); refused before launch when the "
+            "installed CLI cannot enforce it"
+        ),
+    )
+    run.add_argument(
+        "--sandbox",
+        nargs="?",
+        const="true",
+        default="",
+        metavar="true|false",
+        help=(
+            "require (true) or refuse (false) the agent CLI's own sandbox; "
+            "refused before launch when the installed CLI cannot enforce it"
+        ),
+    )
     run.add_argument("--mode", default="")
     run.add_argument("--count", type=int)
     run.add_argument("--depth", type=int)
@@ -602,6 +623,18 @@ def _print_launch_receipt(payload: dict[str, Any]) -> None:
         print(f"worktree:   {_field(payload, 'worktree_branch')}")
         print(f"parent:     {_field(payload, 'parent_root')}")
         print(f"baseline:   {_field(payload, 'worktree_baseline_sha')}")
+    controls = payload.get("execution_controls")
+    if isinstance(controls, dict):
+        requested = str(controls.get("permissions_requested") or "") or "(default)"
+        print(
+            f"permissions: {controls.get('permissions_effective', '')}"
+            f"  (requested: {requested})"
+        )
+        sandbox_requested = str(controls.get("sandbox_requested") or "") or "(default)"
+        print(
+            f"sandbox:    {controls.get('sandbox_effective', '')}"
+            f"  (requested: {sandbox_requested})"
+        )
     print(f"dispatch:   {_field(payload, 'dispatch', '0')}")
     print(f"status:     {_field(payload, 'status', 'launching')}")
     reasons = _launch_receipt_reasons(payload)
@@ -1835,6 +1868,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "runtime": _default_runtime(args.runtime, launch_root),
         "root": launch_root,
         "worktree": worktree_requested,
+        "permissions": getattr(args, "permissions", ""),
+        "sandbox": getattr(args, "sandbox", ""),
         "mode": args.mode or args.command,
         "count": args.count,
         "depth": args.depth,

@@ -363,7 +363,8 @@ WORKFLOW_HELP: dict[str, WorkflowHelp] = {
             "vc-workflow claude --file /path/to/brief.md",
             (
                 "vibecrafted workflow claude --model claude-fable-5-1 --worktree true "
-                '--repo ~/Projects/app --prompt "Ship it in an isolated checkout"'
+                "--permissions auto --sandbox true --repo ~/Projects/app "
+                '--prompt "Ship it in an isolated, sandboxed checkout"'
             ),
         ),
     ),
@@ -428,7 +429,7 @@ Examples:
   vibecrafted init claude
   vibecrafted implement codex -p "Ship dark mode"
   vibecrafted marbles claude -p "Loop until clean"
-  vibecrafted workflow claude --model claude-fable-5-1 --worktree true --repo ~/Projects/app -p "Ship it"
+  vibecrafted workflow claude --model claude-fable-5-1 --worktree true --permissions auto --sandbox true --repo ~/Projects/app -p "Ship it"
   vibecrafted uninstall --dry-run
 
 Repository:
@@ -526,6 +527,8 @@ def _option_lines(topic: str) -> list[str]:
         "  --runtime <terminal|headless>  Worker surface (default: headless)",
         "  --repo <path>                  Repository, from any directory (--root: legacy spelling)",
         "  --worktree [true|false]        Run in a fresh linked checkout of --repo (clean Git root required)",
+        "  --permissions <policy>         bypass|auto|accept-edits|read-only, enforced by the agent CLI (default: bypass)",
+        "  --sandbox [true|false]         Agent CLI sandbox on/off; refused before launch when it cannot be enforced",
         "  --model <name>                 Agent model override",
     ]
     definition = workflow_definition(topic)
