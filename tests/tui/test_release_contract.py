@@ -392,6 +392,7 @@ def test_runtime_pack_signing_happens_after_final_copy_and_before_archive() -> N
         'install -m 0755 "$terminal_source" "$runtime/libexec/vc-terminal"'
         in materializer
     )
+    assert 'install -m 0755 "$voc_source" "$runtime/bin/voc"' in materializer
     assert (
         'install -m 0755 "$runtime/scripts/vc-terminal-product-entry.sh"'
         in materializer
@@ -402,6 +403,7 @@ def test_runtime_pack_signing_happens_after_final_copy_and_before_archive() -> N
         not in materializer
     )
     assert 'install -m 0755 "$frame_source" "$runtime/libexec/vc-frame"' in materializer
+    assert "cargo build -p voc --bin vc-start --bin voc --release" in builder
     assert 'install -m 0644 "$RUNTIME_PACK" "$EMBEDDED_RUNTIME_PACK"' in embed
     assert '--codesign-identity "$SIGNING_IDENTITY"' in builder
     assert (

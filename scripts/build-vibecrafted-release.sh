@@ -499,9 +499,10 @@ materialize_runtime_payload() {
   local terminal_source="$2"
   local frame_source="$3"
   local start_source="$4"
-  local server_source="$5"
-  local server_site="$6"
-  local scaffold_doctor_source="$7"
+  local voc_source="$5"
+  local server_source="$6"
+  local server_site="$7"
+  local scaffold_doctor_source="$8"
   local canonical_deck python_seed seed_python python_home
 
   log "Materializing the App-independent Runtime Pack payload"
@@ -533,6 +534,7 @@ materialize_runtime_payload() {
   /bin/cp -R "$REPO_ROOT/config/." "$runtime/config/"
   /bin/cp -R "$server_site/." "$runtime/server/site/"
   install -m 0755 "$start_source" "$runtime/bin/vc-start"
+  install -m 0755 "$voc_source" "$runtime/bin/voc"
   install -m 0755 "$server_source" "$runtime/bin/vc-server"
   install -m 0755 "$server_source" "$runtime/bin/vibecrafted-server-web"
   install -m 0755 "$scaffold_doctor_source" "$runtime/bin/scaffold-doctor"
@@ -660,11 +662,14 @@ build_product() {
   [[ -x "$frame_source" ]] || die "vc-frame release binary is missing"
   chmod 0755 "$frame_source"
 
-  log "Building the native hermetic vc-start"
-  (cd "$REPO_ROOT/vibecrafted-app" && cargo build -p voc --bin vc-start --release)
+  log "Building the native hermetic vc-start and VOC"
+  (cd "$REPO_ROOT/vibecrafted-app" && cargo build -p voc --bin vc-start --bin voc --release)
   local start_source="$REPO_ROOT/vibecrafted-app/target/release/vc-start"
   [[ -x "$start_source" ]] || die "vc-start release binary is missing"
   chmod 0755 "$start_source"
+  local voc_source="$REPO_ROOT/vibecrafted-app/target/release/voc"
+  [[ -x "$voc_source" ]] || die "VOC release binary is missing"
+  chmod 0755 "$voc_source"
 
   log "Building the bundled Vibecrafted Server and hydrated site"
   local server_build_root="$BUILD_DIR/cargo"
@@ -683,7 +688,7 @@ build_product() {
   chmod 0755 "$scaffold_doctor_source"
 
   materialize_runtime_payload "$RUNTIME_PAYLOAD" \
-    "$terminal_source" "$frame_source" "$start_source" \
+    "$terminal_source" "$frame_source" "$start_source" "$voc_source" \
     "$server_source" "$server_site" "$scaffold_doctor_source"
   produce_runtime_pack
   [[ "$MODE" == "runtime-pack" ]] && return
