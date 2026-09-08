@@ -2,8 +2,37 @@
 set -euo pipefail
 
 log() { printf '\n==> %s\n' "$*"; }
-die() { printf 'FATAL: %s\n' "$*" >&2; exit 1; }
+die() {
+  # Dual-stream FATAL so `zsh -ic` / redirected make logs cannot swallow the
+  # reason (HAK-72). Also append to the release log when BUILD_DIR exists.
+  local msg="FATAL: $*"
+  printf '%s\n' "$msg" >&2
+  printf '%s\n' "$msg"
+  if [[ -n "${BUILD_DIR:-}" ]]; then
+    mkdir -p "$BUILD_DIR" 2>/dev/null || true
+    printf '%s\n' "$msg" >> "$BUILD_DIR/release.log" 2>/dev/null || true
+  fi
+  exit 1
+}
 require() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
+
+prefer_rustup_cargo() {
+  # Homebrew `rust` (helix-db/pake) often shadows rustup on login PATH and
+  # then `cargo leptos` dies with a content-free wasm32 E0463. Prefer rustup.
+  if [[ -d "${HOME}/.cargo/bin" ]]; then
+    PATH="${HOME}/.cargo/bin:${PATH}"
+    export PATH
+  fi
+  if command -v rustup >/dev/null 2>&1; then
+    local rustup_cargo
+    rustup_cargo="$(rustup which cargo 2>/dev/null || true)"
+    if [[ -n "$rustup_cargo" && -x "$rustup_cargo" ]]; then
+      PATH="$(dirname "$rustup_cargo"):${PATH}"
+      export PATH
+    fi
+  fi
+}
+prefer_rustup_cargo
 
 # A --remap-path-prefix whose prefix still contains `..` never matches the path
 # the compiler actually sees, because the match is textual. The donor roots used
@@ -348,12 +377,22 @@ run_bundled_verifier() {
     "$verifier" -m vibecrafted_core.product_contract "$@"
 }
 
+notary_profile_from_env_file() {
+  # Read ONLY the profile name. Never source .notary.env — that file may hold
+  # Apple-ID passwords and must not enter process argv or the shell environment.
+  local file="${1:-}"
+  [[ -f "$file" ]] || return 0
+  sed -n 's/^NOTARY_PROFILE=//p' "$file" | head -n1 | tr -d '\r"'
+}
+
 notary_submit() {
   local artifact="$1"
-  if [[ -n "${NOTARY_PROFILE:-}" ]]; then
-    xcrun notarytool submit "$artifact" --keychain-profile "$NOTARY_PROFILE" \
-      --wait --timeout 30m
-    return
+  local profile="${NOTARY_PROFILE:-}"
+  if [[ -z "$profile" ]]; then
+    profile="$(notary_profile_from_env_file "$NOTARY_ENV")"
+  fi
+  if [[ -z "$profile" ]]; then
+    profile="${NOTARY_FALLBACK_PROFILE:-vibecrafted-notary}"
   fi
   if [[ -n "${NOTARY_API_KEY_PATH:-}" || -n "${NOTARY_API_KEY_ID:-}" || -n "${NOTARY_API_ISSUER:-}" ]]; then
     : "${NOTARY_API_KEY_PATH:?NOTARY_API_KEY_PATH missing}"
@@ -363,6 +402,11 @@ notary_submit() {
       || die "Notary API private key is missing: $NOTARY_API_KEY_PATH"
     xcrun notarytool submit "$artifact" --key "$NOTARY_API_KEY_PATH" \
       --key-id "$NOTARY_API_KEY_ID" --issuer "$NOTARY_API_ISSUER" \
+      --wait --timeout 30m
+    return
+  fi
+  if [[ -n "$profile" ]]; then
+    xcrun notarytool submit "$artifact" --keychain-profile "$profile" \
       --wait --timeout 30m
     return
   fi
@@ -567,9 +611,25 @@ materialize_runtime_payload() {
 
   log "Embedding a private Python runtime; no shell profile or host Python is used"
   python_seed="$(mktemp -d "$BUILD_DIR/python-seed.XXXXXX")"
-  uv python install 3.12.3 --install-dir "$python_seed" --no-bin
-  seed_python="$(find "$python_seed" -type f -path '*/bin/python3.12' -print -quit)"
-  [[ -n "$seed_python" ]] || die "uv did not produce the requested CPython"
+  mkdir -p "$python_seed"
+  # uv 0.9.7 has a transient ENOENT while creating the seed symlink. Retry
+  # the cheap Python staging step; do not repeat native compilation for it.
+  seed_python=""
+  local python_attempt
+  for python_attempt in 1 2 3; do
+    if uv python install 3.12.3 --install-dir "$python_seed" --no-bin; then
+      seed_python="$(find "$python_seed" -type f -path '*/bin/python3.12' -print -quit)"
+      if [[ -n "$seed_python" && -x "$seed_python" ]]; then
+        break
+      fi
+    fi
+    seed_python=""
+    rm -rf "$python_seed"
+    mkdir -p "$python_seed"
+    sleep "$python_attempt"
+  done
+  [[ -n "$seed_python" && -x "$seed_python" ]] \
+    || die "uv did not produce the requested CPython after retries"
   python_home="$(cd "$(dirname "$seed_python")/.." && pwd)"
   mkdir -p "$runtime/python" "$runtime/python-site"
   /bin/cp -RL "$python_home/." "$runtime/python/"
@@ -699,6 +759,10 @@ build_product() {
 
   log "Building the bundled Vibecrafted Server and hydrated site"
   local server_build_root="$BUILD_DIR/cargo"
+  if command -v rustup >/dev/null 2>&1; then
+    rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$' \
+      || die "rustup is missing wasm32-unknown-unknown; run: rustup target add wasm32-unknown-unknown"
+  fi
   make -C "$REPO_ROOT" CARGO_BUILD_ROOT="$server_build_root" build-server-release
   local server_source="$server_build_root/vibecrafted-server/release/vibecrafted-server-web"
   local server_site="$server_build_root/vibecrafted-server/site"
