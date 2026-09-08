@@ -200,6 +200,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, CommandDeckActionHandling {
   private var runtimeResolutionFailure: String?
   /// A non-fatal note about the shared service, rendered under the runtime line.
   private var runtimeAdvisory: String?
+  /// The owner's last word on configuration, for the diagnostics surface.
+  private var lastConfigRepair: ConfigRepairEnvelope?
+  private var configRepairProcess: Process?
   private var terminalLaunch: TerminalLauncher.Launch?
   private var terminalRegistration: TerminalRegistrationObservation?
   private var terminalRegistrationTimer: Timer?
@@ -372,7 +375,75 @@ class AppDelegate: NSObject, NSApplicationDelegate, CommandDeckActionHandling {
         return
       }
       self.reconcileControlPlaneEye(install: install, environment: environment)
+      self.inspectConfigurationAtLaunch()
       self.refreshServerStatus()
+    }
+  }
+
+  /// Read-only configuration check at launch.
+  ///
+  /// A plan writes nothing — not a merge, not a backup, not a receipt — so a
+  /// valid configuration is untouched on the first launch and on every launch
+  /// after it. The unconditional startup regeneration this replaces could not
+  /// make that promise: it rewrote first and asked nothing. Drift now becomes a
+  /// line in the tray and an offer behind Repair Runtime.
+  private func inspectConfigurationAtLaunch() {
+    let epoch = runtimeResolveEpoch
+    runConfigRepair(plan: true) { [weak self] outcome in
+      guard let self, epoch == self.runtimeResolveEpoch else { return }
+      switch outcome {
+      case .healthy(let envelope):
+        self.lastConfigRepair = envelope
+      case .repairable(let envelope), .conflict(let envelope), .repaired(let envelope):
+        self.lastConfigRepair = envelope
+        if let advisory = configRepairAdvisory(envelope) {
+          self.surfaceRuntimeAdvisory(advisory)
+        }
+      case .absent, .unusable:
+        // The runtime itself is what is wrong, and the resolver has already
+        // said so in the place this would otherwise overwrite.
+        break
+      }
+      self.renderServerStatus()
+    }
+  }
+
+  /// Ask the configuration owner: the installed generation's own installer.
+  ///
+  /// Never this App's carrier copy. The generation that is running is the one
+  /// entitled to say what its configuration should be, which is also what lets
+  /// a repair work on an installation newer than this bundle.
+  private func runConfigRepair(
+    plan: Bool, completion: @escaping (ConfigRepairOutcome) -> Void
+  ) {
+    let runtimeHome = currentRuntimeHome()
+    switch runtimeResolverBootstrap(runtimeHome: runtimeHome, probe: .live) {
+    case .absent(let reason): completion(.absent(reason))
+    case .unusable(let reason): completion(.unusable(reason))
+    case .ask(let python, let installer):
+      let process = Process()
+      process.executableURL = python
+      process.arguments = runtimeRepairArguments(
+        installer: installer, runtimeHome: runtimeHome, plan: plan)
+      process.environment = runtimeResolverEnvironment()
+      do {
+        try runBounded(
+          process, timeout: plan ? 20 : 180,
+          label: plan ? "runtime-repair --plan" : "runtime-repair"
+        ) { [weak self] result in
+          self?.configRepairProcess = nil
+          completion(
+            decodeConfigRepair(
+              stdout: result.stdout, stderr: result.stderr,
+              terminationStatus: result.terminationStatus, clean: result.clean))
+        }
+        configRepairProcess = process
+      } catch {
+        configRepairProcess = nil
+        completion(
+          .unusable(
+            "the configuration owner could not be started: \(error.localizedDescription)"))
+      }
     }
   }
 
@@ -402,7 +473,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, CommandDeckActionHandling {
       case .openTerminal: openTerminalFromStatusItem()
       case .retryConnection: try nativeBridge.perform(.retryConnection)
       case .requestStopRuntime: try nativeBridge.perform(.requestRuntimeStop)
-      case .repairRuntime: repairRuntimeFromBundledPack()
+      case .repairRuntime: repairRuntime()
       case .showDiagnostics: showServerDiagnostics()
       }
     } catch { showNativeMessage("Native action failed", error.localizedDescription) }
@@ -1129,10 +1200,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, CommandDeckActionHandling {
     let result = output.fileHandleForReading.readDataToEndOfFile()
     let failure = errors.fileHandleForReading.readDataToEndOfFile()
     guard process.terminationStatus == 0 else {
+      // The installer is a Python program and prints a traceback when it
+      // refuses. Reducing it to the owner's actual message is what keeps a
+      // stack of interpreter frames out of a normal repair dialog.
+      let diagnostic = boundedResolverDiagnostic(
+        stdout: result, stderr: failure, limit: 480)
       let detail =
-        String(data: failure.isEmpty ? result : failure, encoding: .utf8)?
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-        ?? "installer exited \(process.terminationStatus)"
+        "the Runtime Pack installer exited \(process.terminationStatus)\(diagnostic)"
       throw NSError(
         domain: "io.vetcoders.vibecrafted.install",
         code: Int(process.terminationStatus),
@@ -1331,11 +1405,107 @@ class AppDelegate: NSObject, NSApplicationDelegate, CommandDeckActionHandling {
     NSPasteboard.general.setString(blob, forType: .string)
   }
 
-  /// Explicit repair: publish this App's signed carrier over the current
-  /// installation. Normal opening never reaches here — it resolves whatever is
-  /// installed — so replacing a runtime stays something the Founder asks for,
-  /// with the generation that would be written named before the fact.
-  @objc private func repairRuntimeFromBundledPack() {
+  /// Explicit repair, proportionate to what is actually wrong.
+  ///
+  /// The owner is asked first, read-only. Configuration drift is then repaired
+  /// *as configuration*, through the same merge, lease and transaction a
+  /// reinstall uses — because republishing this App's carrier to fix a merge is
+  /// both heavier than the problem and refused outright when the installation
+  /// is newer than the carrier. That refusal is how a merge problem became a
+  /// dead end. Reinstalling stays available, named, and the Founder's choice.
+  @objc private func repairRuntime() {
+    guard !repairInFlight, runtimeActionPreflight == nil, serverActionInFlight == nil
+    else { return }
+    repairInFlight = true
+    updateDeckPresentation()
+    runConfigRepair(plan: true) { [weak self] outcome in
+      guard let self else { return }
+      self.repairInFlight = false
+      self.updateDeckPresentation()
+      switch outcome {
+      case .repairable(let envelope), .conflict(let envelope), .repaired(let envelope):
+        self.lastConfigRepair = envelope
+        self.offerConfigurationRepair(envelope)
+      case .healthy(let envelope):
+        self.lastConfigRepair = envelope
+        self.offerRuntimePackReinstall(
+          configuration: "Configuration already matches the installed generation.")
+      case .absent(let reason):
+        self.offerRuntimePackReinstall(configuration: reason)
+      case .unusable(let reason):
+        self.offerRuntimePackReinstall(
+          configuration: "Configuration could not be inspected: \(reason)")
+      }
+    }
+  }
+
+  /// Put the small remedy first and the large one beside it, both named.
+  private func offerConfigurationRepair(_ envelope: ConfigRepairEnvelope) {
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "Repair Vibecrafted configuration?"
+    alert.informativeText =
+      configRepairSummary(envelope)
+      + "\n\nRepairing keeps your settings and preserves a copy of anything it changes. "
+      + "It does not replace the installed runtime."
+    alert.addButton(withTitle: "Cancel")
+    alert.addButton(withTitle: "Repair Configuration")
+    alert.addButton(withTitle: "Reinstall Runtime…")
+    switch alert.runModal() {
+    case .alertSecondButtonReturn: applyConfigurationRepair()
+    case .alertThirdButtonReturn:
+      offerRuntimePackReinstall(configuration: configRepairSummary(envelope))
+    default: return
+    }
+  }
+
+  /// Run the owner for real, on the generation that is installed now.
+  private func applyConfigurationRepair() {
+    guard !repairInFlight, runtimeActionPreflight == nil, serverActionInFlight == nil
+    else { return }
+    repairInFlight = true
+    updateDeckPresentation()
+    runConfigRepair(plan: false) { [weak self] outcome in
+      guard let self else { return }
+      self.repairInFlight = false
+      switch outcome {
+      case .repaired(let envelope), .healthy(let envelope), .conflict(let envelope),
+        .repairable(let envelope):
+        self.lastConfigRepair = envelope
+        // Configuration moved under the installation, so any cached answer
+        // about it is stale by construction.
+        self.cachedResolution = nil
+        self.presentConfigRepairResult(envelope)
+        self.refreshServerStatus()
+      case .absent(let reason), .unusable(let reason):
+        self.showNativeMessage("Vibecrafted could not repair its configuration", reason)
+      }
+      self.updateDeckPresentation()
+    }
+  }
+
+  /// The visible typed outcome: counts, files, reasons, preserved copies.
+  private func presentConfigRepairResult(_ envelope: ConfigRepairEnvelope) {
+    lifecycleLog(
+      "configuration repair: \(envelope.status ?? "unknown") "
+        + "repaired=\(envelope.repaired ?? 0) conflicts=\(envelope.conflicts ?? 0)")
+    runtimeAdvisory = configRepairAdvisory(envelope)
+    let alert = NSAlert()
+    alert.alertStyle = envelope.status == "conflict" ? .warning : .informational
+    alert.messageText = "Vibecrafted configuration"
+    alert.informativeText = configRepairSummary(envelope)
+    alert.addButton(withTitle: "OK")
+    alert.runModal()
+  }
+
+  /// Publish this App's signed carrier over the current installation.
+  ///
+  /// Normal opening never reaches here — it resolves whatever is installed —
+  /// so replacing a runtime stays something the Founder asks for, with the
+  /// generation that would be written named before the fact.
+  private func offerRuntimePackReinstall(configuration: String) {
+    guard !repairInFlight, runtimeActionPreflight == nil, serverActionInFlight == nil
+    else { return }
     let confirmation = NSAlert()
     confirmation.alertStyle = .warning
     confirmation.messageText = "Reinstall the Vibecrafted runtime from this App?"
@@ -1343,15 +1513,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, CommandDeckActionHandling {
       ?? "No usable runtime is currently installed.\n"
     confirmation.informativeText =
       installed
+      + configuration + "\n"
       + "This publishes the Runtime Pack carried by this App"
       + (signedCarrierRevisions.map { " (source \(String($0.source.prefix(8))))" } ?? "")
       + ". The installer refuses to replace a newer runtime with an older carrier."
     confirmation.addButton(withTitle: "Cancel")
     confirmation.addButton(withTitle: "Reinstall")
     guard confirmation.runModal() == .alertSecondButtonReturn else { return }
-
-    guard !repairInFlight, runtimeActionPreflight == nil,
-      serverActionInFlight == nil else { return }
     repairInFlight = true
     updateDeckPresentation()
     defer { repairInFlight = false; updateDeckPresentation() }
@@ -1602,8 +1770,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, CommandDeckActionHandling {
     let alert = NSAlert()
     alert.alertStyle = envelope?.verdict?.health == "healthy" ? .informational : .warning
     alert.messageText = "Vibecrafted Server"
-    alert.informativeText = caretakerDiagnosticsLines(data: lastCaretakerData)
-      .joined(separator: "\n")
+    var lines = caretakerDiagnosticsLines(data: lastCaretakerData)
+    if let configuration = lastConfigRepair {
+      lines.append("")
+      lines.append("Configuration")
+      lines.append(configRepairSummary(configuration))
+    }
+    alert.informativeText = lines.joined(separator: "\n")
     alert.addButton(withTitle: "OK")
     alert.addButton(withTitle: "Open Console")
     if alert.runModal() == .alertSecondButtonReturn {

@@ -507,17 +507,57 @@ func decodeRuntimeResolution<Runtime: Decodable>(
   }
 }
 
-/// One short single-line excerpt of what the resolver said, for the tray and
-/// the log. Bounded so a chatty failure cannot become the whole menu.
-func boundedResolverDiagnostic(stdout: Data, stderr: Data, limit: Int = 240) -> String {
-  let source = stderr.isEmpty ? stdout : stderr
-  guard let text = String(data: source, encoding: .utf8) else { return "" }
-  let collapsed =
+/// True of the banner and frames of a Python traceback, false of anything an
+/// operator can act on.
+func isTracebackScaffolding(_ line: String) -> Bool {
+  if line == "Traceback (most recent call last):" { return true }
+  if line.hasPrefix("File \"") && line.contains(", line ") { return true }
+  if line.hasPrefix("During handling of the above exception") { return true }
+  if line.hasPrefix("The above exception was the direct cause") { return true }
+  return false
+}
+
+/// Drop interpreter frames, keep what the owner actually said.
+///
+/// A frame is followed by the source line it points at, so both go: an
+/// operator cannot act on either, and together they crowd out the exception
+/// line that carries the real message. If a payload turns out to be *only*
+/// scaffolding, the last line is kept rather than returning nothing — an empty
+/// diagnostic is worse than a noisy one.
+func meaningfulOwnerLines(_ text: String) -> [String] {
+  let lines =
     text
     .split(whereSeparator: { $0.isNewline })
     .map { $0.trimmingCharacters(in: .whitespaces) }
     .filter { !$0.isEmpty }
-    .joined(separator: " · ")
+  var kept: [String] = []
+  var skipSource = false
+  for line in lines {
+    if isTracebackScaffolding(line) {
+      skipSource = line.hasPrefix("File \"")
+      continue
+    }
+    if skipSource {
+      skipSource = false
+      continue
+    }
+    kept.append(line)
+  }
+  return kept.isEmpty ? Array(lines.suffix(1)) : kept
+}
+
+/// One short single-line excerpt of what the owner said, for the tray, the
+/// dialogs and the log.
+///
+/// Python traceback scaffolding is removed rather than flattened. The
+/// 4.3.0 -> 4.3.1 incident is exactly what it looks like when a stack of
+/// interpreter frames reaches a modal: the final exception line was the only
+/// actionable part, and it was buried. Bounded, so a chatty failure cannot
+/// become the whole menu either.
+func boundedResolverDiagnostic(stdout: Data, stderr: Data, limit: Int = 240) -> String {
+  let source = stderr.isEmpty ? stdout : stderr
+  guard let text = String(data: source, encoding: .utf8) else { return "" }
+  let collapsed = meaningfulOwnerLines(text).joined(separator: " · ")
   guard !collapsed.isEmpty else { return "" }
   return ": " + (collapsed.count > limit ? String(collapsed.prefix(limit)) + "…" : collapsed)
 }
@@ -718,4 +758,186 @@ func runtimeResolveDelivery(
         + "(\(limit + 1) attempts); the next status poll reads it again")
   }
   return .reresolve
+}
+
+// MARK: - Configuration self-repair
+
+// Configuration drift used to have exactly one remedy behind Repair Runtime:
+// republish this App's bundled Runtime Pack. That is a whole-runtime action,
+// the installer refuses it outright when the installation is newer than the
+// carrier, and it turned a merge problem into a dead end that surfaced as raw
+// installer text. The owner now answers `runtime-repair`, and this file does
+// with it exactly what it does with `runtime-resolve`: decodes the envelope
+// and stops. What drift is, what may be merged, and what a backup is worth
+// remain the installer's judgement.
+
+let configRepairSchema = "vibecrafted.config-repair.v1"
+
+/// One file in the owner's reconciliation plan.
+///
+/// Paths, actions and reasons only — the owner redacts preference values
+/// before they reach here, which is what makes this structure safe to render
+/// in a dialog and paste into a report.
+struct ConfigRepairFile: Decodable {
+  let path: String
+  let action: String
+  let reason: String
+  let backup: String
+}
+
+/// `vibecrafted.config-repair.v1`. Unknown keys are ignored on purpose — a
+/// newer owner may report more without invalidating this read.
+struct ConfigRepairEnvelope: Decodable {
+  let schema: String?
+  let status: String?
+  let mode: String?
+  let reason: String?
+  let generation: String?
+  let repaired: Int?
+  let conflicts: Int?
+  let rolledBack: Bool?
+  let files: [ConfigRepairFile]?
+  let at: String?
+
+  enum CodingKeys: String, CodingKey {
+    case schema, status, mode, reason, generation, repaired, conflicts, files, at
+    case rolledBack = "rolled_back"
+  }
+}
+
+/// The owner's verdict on configuration, as the App is allowed to understand it.
+enum ConfigRepairOutcome {
+  /// Configuration already agrees with the selected generation. In both modes
+  /// this means nothing was written — a valid config is never regenerated.
+  case healthy(ConfigRepairEnvelope)
+  /// Drift the owner can reconcile. From `--plan`, nothing has happened yet.
+  case repairable(ConfigRepairEnvelope)
+  /// Repair ran and published atomically.
+  case repaired(ConfigRepairEnvelope)
+  /// Something needs a human choice. The owner preserved the user's bytes and
+  /// published nothing; the backup location travels in the entries.
+  case conflict(ConfigRepairEnvelope)
+  /// Nothing is installed, so there is no configuration to repair.
+  case absent(String)
+  /// The owner could not be asked, or refuses to speak about this
+  /// installation. Never a licence to overwrite anything.
+  case unusable(String)
+}
+
+/// The whole invocation of the configuration owner.
+///
+/// `-B` precedes the script for the same reason it does for `runtime-resolve`:
+/// asking what is wrong must not write bytecode into the installation being
+/// inspected.
+func runtimeRepairArguments(installer: URL, runtimeHome: URL, plan: Bool) -> [String] {
+  var arguments = [
+    "-B", installer.path, "runtime-repair",
+    "--runtime-home", runtimeHome.path, "--json",
+  ]
+  if plan { arguments.append("--plan") }
+  return arguments
+}
+
+/// Turn one owner invocation into a configuration verdict.
+///
+/// Exit 0 carries `healthy`, `repairable`, `repaired` or `absent`; exit 2
+/// carries `conflict` or `unusable` and is still decoded, because that
+/// envelope is where the actionable reason and the backup location live.
+/// Everything else — a signal, the watchdog, unparseable bytes, an unknown
+/// schema — is `unusable`, and `unusable` never authorises a rewrite.
+func decodeConfigRepair(
+  stdout: Data,
+  stderr: Data,
+  terminationStatus: Int32,
+  clean: Bool
+) -> ConfigRepairOutcome {
+  let diagnostic = boundedResolverDiagnostic(stdout: stdout, stderr: stderr)
+  guard clean else {
+    return .unusable("the configuration owner did not exit cleanly\(diagnostic)")
+  }
+  guard terminationStatus == 0 || terminationStatus == 2 else {
+    return .unusable("the configuration owner exited \(terminationStatus)\(diagnostic)")
+  }
+  guard
+    let envelope = try? JSONDecoder().decode(ConfigRepairEnvelope.self, from: stdout)
+  else {
+    return .unusable("the configuration owner returned no readable result\(diagnostic)")
+  }
+  guard envelope.schema == configRepairSchema else {
+    return .unusable("the configuration owner answered with schema \(envelope.schema ?? "none")")
+  }
+  let reason = envelope.reason.flatMap { $0.isEmpty ? nil : $0 }
+  switch envelope.status {
+  case "healthy": return .healthy(envelope)
+  case "repairable": return .repairable(envelope)
+  case "repaired": return .repaired(envelope)
+  case "conflict": return .conflict(envelope)
+  case "absent": return .absent(reason ?? "no Vibecrafted runtime is installed yet")
+  case "unusable": return .unusable(reason ?? "the installed configuration cannot be repaired")
+  default:
+    return .unusable("the configuration owner answered with status \(envelope.status ?? "none")")
+  }
+}
+
+/// The concise visible result for the diagnostics and repair surface.
+///
+/// Counts, file names, the owner's own reason, and where a preserved copy
+/// went. Bounded, so a configuration with many drifted files cannot become an
+/// unreadable wall — and never a traceback, because the owner already reduced
+/// its failures to typed reasons before this point.
+func configRepairSummary(_ envelope: ConfigRepairEnvelope, limit: Int = 6) -> String {
+  let generation = (envelope.generation?.isEmpty == false) ? envelope.generation! : "unknown"
+  var lines: [String] = []
+  switch envelope.status {
+  case "healthy":
+    lines.append(
+      "Configuration already matches generation \(generation). Nothing was changed.")
+  case "repairable":
+    lines.append(
+      "Configuration has drifted from generation \(generation). "
+        + "Nothing has been changed yet.")
+  case "repaired":
+    lines.append(
+      "Repaired \(envelope.repaired ?? 0) configuration file(s) "
+        + "against generation \(generation).")
+  case "conflict":
+    lines.append(
+      "\(envelope.conflicts ?? 0) configuration file(s) need your choice. "
+        + "Your copy was preserved and nothing was published.")
+  default:
+    lines.append(envelope.reason ?? "The configuration owner returned no verdict.")
+  }
+  if envelope.rolledBack == true {
+    lines.append("An interrupted configuration publication was rolled back first.")
+  }
+  let notable = (envelope.files ?? []).filter { $0.action != "unchanged" }
+  for file in notable.prefix(limit) {
+    var line = "• \((file.path as NSString).lastPathComponent) — \(file.action)"
+    if !file.reason.isEmpty { line += ": \(file.reason)" }
+    if !file.backup.isEmpty { line += " (your copy is preserved at \(file.backup))" }
+    lines.append(line)
+  }
+  if notable.count > limit {
+    lines.append("…and \(notable.count - limit) more.")
+  }
+  if let at = envelope.at, !at.isEmpty { lines.append("Checked \(at).") }
+  return lines.joined(separator: "\n")
+}
+
+/// One short line for the tray, when a launch-time plan found drift.
+///
+/// A plan writes nothing, so this is an invitation rather than a verdict: it
+/// must never read as though the App has already changed the operator's
+/// configuration.
+func configRepairAdvisory(_ envelope: ConfigRepairEnvelope) -> String? {
+  let notable = (envelope.files ?? []).filter { $0.action != "unchanged" }
+  switch envelope.status {
+  case "repairable":
+    return "Configuration drift in \(notable.count) file(s) — use Repair Runtime…"
+  case "conflict":
+    return "\(envelope.conflicts ?? notable.count) configuration file(s) need your choice "
+      + "— use Repair Runtime…"
+  default:
+    return nil
+  }
 }
