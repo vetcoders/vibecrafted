@@ -182,6 +182,101 @@ def test_wrapper_rejects_ambient_shell_wrapper_instead_of_recursing(
     assert "real binary not found" in proc.stderr
 
 
+def _write_probe_tool(directory: Path, name: str, marker: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    tool = directory / name
+    tool.write_text(f"#!/bin/sh\nprintf '{marker}\\n'\n", encoding="utf-8")
+    tool.chmod(0o755)
+    return tool
+
+
+def test_product_entry_path_preparation_never_reintroduces_private_generation(
+    tmp_path: Path,
+) -> None:
+    """Drive the shipped sanitizer that vc-start uses before workspace resolve.
+
+    ``_vetcoders_product_entry_prepare`` exports the PATH produced here (see
+    the ordering assertion above), so this is the public product-preparation
+    surface.  It used to PREPEND the selected generation's own bin, which made
+    a stale private ``aicx``/``loct``/``prview``/``screenscribe`` answer for a
+    public foundation, and pushed the Founder's own directories down the list.
+
+    Resolution is proved with ``command -v`` against the produced PATH — not by
+    matching substrings.
+    """
+
+    home = tmp_path / "home"
+    runtime_home = home / ".local" / "share" / "vibecrafted"
+    stale_generation = runtime_home / "releases" / "4.3.0+gSTALE" / "bin"
+    selected_generation = runtime_home / "releases" / "4.3.0+gSELECTED" / "bin"
+    public_bin = home / ".local" / "bin"
+    custom_bin = home / "opt" / "founder-tools"
+
+    for name in ("aicx", "loct", "prview", "screenscribe"):
+        _write_probe_tool(public_bin, name, f"public-{name}")
+        _write_probe_tool(stale_generation, name, f"stale-{name}")
+        _write_probe_tool(selected_generation, name, f"selected-{name}")
+    # Only the private carrier ships this one: it must stay unresolved so the
+    # caller prints canonical install guidance instead of running a copy.
+    _write_probe_tool(selected_generation, "vc-private-only", "private-only")
+    _write_probe_tool(custom_bin, "founder-tool", "founder-tool")
+
+    inherited = ":".join(
+        (
+            str(stale_generation),
+            str(custom_bin),
+            str(public_bin),
+            "/usr/bin",
+            "/bin",
+        )
+    )
+
+    script = textwrap.dedent(
+        f"""
+        set -euo pipefail
+        source "{HELPER}" >/dev/null 2>&1
+        export HOME="{home}"
+        export XDG_DATA_HOME="{home / ".local" / "share"}"
+        export VIBECRAFTED_RUNTIME_ROOT="{selected_generation.parent}"
+        PATH="$(_vetcoders_path_with_bundled_bin_priority "{inherited}")"
+        export PATH
+        printf 'PATH=%s\\n' "$PATH"
+        for tool in aicx loct prview screenscribe founder-tool; do
+          printf '%s=%s\\n' "$tool" "$(command -v "$tool" || printf 'MISSING')"
+        done
+        printf 'private-only=%s\\n' "$(command -v vc-private-only || printf 'MISSING')"
+        """
+    )
+    proc = subprocess.run(
+        ["bash", "-lc", script],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO),
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    fields = dict(
+        line.split("=", 1) for line in proc.stdout.splitlines() if "=" in line
+    )
+    entries = fields["PATH"].split(":")
+
+    # Neither the inherited stale generation nor the selected one may appear.
+    assert str(stale_generation) not in entries
+    assert str(selected_generation) not in entries
+
+    # The Founder's own entries keep their identity and relative order.
+    assert entries[:4] == [str(custom_bin), str(public_bin), "/usr/bin", "/bin"]
+
+    # Public foundations resolve to the operator's copies.
+    for name in ("aicx", "loct", "prview", "screenscribe"):
+        assert fields[name] == str(public_bin / name)
+    assert fields["founder-tool"] == str(custom_bin / "founder-tool")
+
+    # A foundation that exists only inside the carrier stays missing.
+    assert fields["private-only"] == "MISSING"
+
+
 def test_product_entry_prepare_exists_in_shipped_dashboard() -> None:
     """Shell prepare is the real choke (vc-start never enters deck cmd_start)."""
     text = DASHBOARD.read_text(encoding="utf-8")

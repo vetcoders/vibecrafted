@@ -95,17 +95,68 @@ _vetcoders_default_runtime() {
   printf '%s\n' "${VETCODERS_SPAWN_RUNTIME:-headless}"
 }
 
-_vetcoders_bundled_bin_dirs() {
-  local xdg_data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
-  # A public launcher may have selected an immutable generation already.
-  # Never let an inherited legacy runtime-bin pull this shell back to another
-  # generation; source lanes without a selected root retain their old override.
-  local runtime_bin="${VIBECRAFTED_RUNTIME_ROOT:+$VIBECRAFTED_RUNTIME_ROOT/bin}"
-  runtime_bin="${runtime_bin:-${VIBECRAFTED_RUNTIME_BIN:-${VIBECRAFTED_RUNTIME_HOME:-$xdg_data_home/vibecrafted}/bin}}"
-  [[ -d "$runtime_bin" ]] && printf '%s\n' "$runtime_bin"
+# Owned runtime roots — the anchor for private-carrier sanitation.
+#
+# A generation's own bin (aicx, loct, prview, screenscribe, vc-*, python3) is
+# the PRIVATE carrier.  Internal execution reaches it through explicit owner
+# paths only: VIBECRAFTED_RUNTIME_BIN / VIBECRAFTED_PYTHON exported by
+# _vetcoders_product_entry_prepare, and _vetcoders_vc_frame_bin for the engine.
+# It must never participate in ambient PATH lookup, or a stale generation
+# answers for a public foundation or a provider CLI.
+#
+# Anchoring on real owned roots (not a floating */vibecrafted/releases/*/bin
+# glob) is what makes a custom VIBECRAFTED_RUNTIME_HOME sanitize correctly
+# while an unrelated lookalike user directory is preserved.
+#
+# Keep this grammar in lockstep with:
+#   runtime/scripts/lib/util.sh:spawn_prepend_agent_tool_paths
+#   runtime_paths.py:agent_tool_search_path
+#   scripts/vetcoders_install.py:_runtime_launcher_body (public wrapper)
+_vetcoders_owned_runtime_homes() {
+  local xdg_data_home="${XDG_DATA_HOME:-${HOME:+$HOME/.local/share}}"
+  local candidate
+  for candidate in \
+    "${VIBECRAFTED_RUNTIME_HOME:-}" \
+    "${xdg_data_home:+$xdg_data_home/vibecrafted}"
+  do
+    [[ -n "$candidate" ]] && printf '%s\n' "${candidate%/}"
+  done
+  return 0
 }
 
-# Host CLIs (node/codex/claude) live outside the hermetic system PATH.
+# True when $1 is a Vibecrafted-owned generation bin: the selected root's bin,
+# or exactly <owned runtime home>/releases/<generation>/bin.  A user directory
+# that merely looks similar (~/dev/vibecrafted/releases/1.0/bin) is not owned.
+_vetcoders_is_owned_generation_bin() {
+  local entry="${1:-}"
+  local runtime_home generation leaf selected
+  [[ -n "$entry" ]] || return 1
+  entry="${entry%/}"
+  [[ "$entry" == */bin ]] || return 1
+  generation="${entry%/bin}"
+
+  selected="${VIBECRAFTED_RUNTIME_ROOT:-}"
+  if [[ -n "$selected" && "$generation" == "${selected%/}" ]]; then
+    return 0
+  fi
+
+  while IFS= read -r runtime_home; do
+    [[ -n "$runtime_home" ]] || continue
+    [[ "$generation" == "$runtime_home/releases/"* ]] || continue
+    leaf="${generation#"$runtime_home/releases/"}"
+    if [[ -n "$leaf" && "$leaf" != */* ]]; then
+      return 0
+    fi
+  done < <(_vetcoders_owned_runtime_homes)
+  return 1
+}
+
+# Host CLIs (node/codex/claude) and the public launcher shims live outside any
+# generation.  A detached or App-launched parent can arrive with a minimal
+# launchd PATH, so these are APPENDED as a discovery suffix — never prepended.
+# Prepending is what let /opt/homebrew/bin/python3 outrank the generation
+# interpreter during product preparation (R8 missing-python trace), and it is
+# also how the Founder's own tool order got overridden.
 # Keep this list in lockstep with runtime_paths.agent_tool_search_path.
 _vetcoders_host_agent_bin_dirs() {
   local home="${HOME:-}"
@@ -116,24 +167,59 @@ _vetcoders_host_agent_bin_dirs() {
     "${home:+$home/tools/scripts}" \
     /opt/homebrew/bin \
     /opt/homebrew/sbin \
-    /usr/local/bin
+    /usr/local/bin \
+    /usr/bin \
+    /bin \
+    /usr/sbin \
+    /sbin
   do
     [[ -n "$dir" && -d "$dir" ]] && printf '%s\n' "$dir"
   done
+  return 0
 }
 
+# Public/interactive PATH preparation for the product entry.  Two invariants:
+#
+#   1. Every inherited entry the Founder owns keeps its identity and relative
+#      order, including unrelated custom directories.  Only empty entries
+#      (implicit CWD) and later duplicates are dropped.
+#   2. No Vibecrafted-owned generation bin participates.  A missing public
+#      foundation therefore stays missing and the caller prints canonical
+#      install guidance, instead of silently resolving a bundled private copy.
+#
+# The host discovery suffix is appended, so a minimal launchd PATH still finds
+# provider CLIs while public/user ordering remains authoritative.
 _vetcoders_path_with_bundled_bin_priority() {
   local current_path="${1:-}"
-  local bundled_path=""
-  local dir
+  local remainder="$current_path"
+  local entry dir result="" consumed=0
+
+  while (( ! consumed )); do
+    if [[ "$remainder" == *:* ]]; then
+      entry="${remainder%%:*}"
+      remainder="${remainder#*:}"
+    else
+      entry="$remainder"
+      consumed=1
+    fi
+    [[ -n "$entry" ]] || continue
+    _vetcoders_is_owned_generation_bin "$entry" && continue
+    case ":$result:" in
+      *":$entry:"*) continue ;;
+    esac
+    result="${result:+$result:}$entry"
+  done
+
   while IFS= read -r dir; do
     [[ -n "$dir" ]] || continue
-    case ":$current_path:" in
-      *":$dir:"*) ;;
-      *) bundled_path="${bundled_path:+$bundled_path:}$dir" ;;
+    _vetcoders_is_owned_generation_bin "$dir" && continue
+    case ":$result:" in
+      *":$dir:"*) continue ;;
     esac
-  done < <({ _vetcoders_bundled_bin_dirs; _vetcoders_host_agent_bin_dirs; })
-  printf '%s\n' "${bundled_path:+$bundled_path${current_path:+:}}$current_path"
+    result="${result:+$result:}$dir"
+  done < <(_vetcoders_host_agent_bin_dirs)
+
+  printf '%s\n' "$result"
 }
 
 _vetcoders_aicx_bin() {

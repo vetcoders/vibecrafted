@@ -281,34 +281,63 @@ def vibecrafted_launcher_bin() -> Path:
     return resolve_env_path("VIBECRAFTED_LAUNCHER_BIN", Path.home() / ".local" / "bin")
 
 
-def agent_tool_search_path(environment: Mapping[str, str] | None = None) -> str:
-    """Return the canonical allowlisted PATH for detached provider processes.
+def _owned_runtime_homes(environment: Mapping[str, str]) -> list[str]:
+    """Owned runtime roots whose generation bins are private carriers.
 
-    Launchd and other supervisors intentionally provide a minimal environment.
-    Provider discovery must therefore not depend on interactive shell startup,
-    but it must also not trust arbitrary inherited PATH entries.  Keep this in
-    lockstep with ``runtime/scripts/lib/util.sh:spawn_prepend_agent_tool_paths``.
+    Anchoring on real owned roots — rather than a floating
+    ``*/vibecrafted/releases/*/bin`` glob — is what lets a custom
+    ``VIBECRAFTED_RUNTIME_HOME`` sanitize correctly while an unrelated
+    lookalike user directory is preserved.
     """
 
-    env = selected_runtime_environment(environment)
-    raw_home = str(env.get("HOME", "")).strip()
+    raw_home = str(environment.get("HOME", "")).strip()
     home = Path(raw_home).expanduser() if raw_home else Path.home()
-    raw_xdg_data = str(env.get("XDG_DATA_HOME", "")).strip()
+    raw_xdg_data = str(environment.get("XDG_DATA_HOME", "")).strip()
     xdg_data = (
         Path(raw_xdg_data).expanduser() if raw_xdg_data else home / ".local/share"
     )
-    raw_runtime_home = str(env.get("VIBECRAFTED_RUNTIME_HOME", "")).strip()
-    runtime_home = (
-        Path(raw_runtime_home).expanduser()
-        if raw_runtime_home
-        else xdg_data / "vibecrafted"
-    )
-    raw_runtime_bin = str(env.get("VIBECRAFTED_RUNTIME_BIN", "")).strip()
-    runtime_bin = (
-        Path(raw_runtime_bin).expanduser() if raw_runtime_bin else runtime_home / "bin"
-    )
-    candidates = (
-        runtime_bin,
+    raw_runtime_home = str(environment.get("VIBECRAFTED_RUNTIME_HOME", "")).strip()
+
+    homes: list[str] = []
+    if raw_runtime_home:
+        homes.append(str(Path(raw_runtime_home).expanduser()).rstrip("/"))
+    homes.append(str(xdg_data / "vibecrafted").rstrip("/"))
+    return homes
+
+
+def _is_owned_generation_bin(entry: str, environment: Mapping[str, str]) -> bool:
+    """True for the selected root's bin or ``<owned home>/releases/<gen>/bin``."""
+
+    candidate = entry.rstrip("/")
+    if not candidate.endswith("/bin"):
+        return False
+    generation = candidate[: -len("/bin")]
+
+    selected = str(environment.get("VIBECRAFTED_RUNTIME_ROOT", "")).strip().rstrip("/")
+    if selected and generation == selected:
+        return True
+
+    for runtime_home in _owned_runtime_homes(environment):
+        prefix = f"{runtime_home}/releases/"
+        if not generation.startswith(prefix):
+            continue
+        leaf = generation[len(prefix) :]
+        if leaf and "/" not in leaf:
+            return True
+    return False
+
+
+def _host_agent_bin_dirs(environment: Mapping[str, str]) -> list[Path]:
+    """Host CLI + public launcher directories, appended for minimal PATHs.
+
+    Keep this list in lockstep with
+    ``runtime/shell/lib/core.sh:_vetcoders_host_agent_bin_dirs`` and
+    ``runtime/scripts/lib/util.sh:spawn_host_agent_bin_dirs``.
+    """
+
+    raw_home = str(environment.get("HOME", "")).strip()
+    home = Path(raw_home).expanduser() if raw_home else Path.home()
+    return [
         home / ".local/bin",
         home / ".cargo/bin",
         home / "tools/scripts",
@@ -319,10 +348,50 @@ def agent_tool_search_path(environment: Mapping[str, str] | None = None) -> str:
         Path("/bin"),
         Path("/usr/sbin"),
         Path("/sbin"),
-    )
+    ]
+
+
+def agent_tool_search_path(environment: Mapping[str, str] | None = None) -> str:
+    """PATH for a detached provider process: Founder order, no private carrier.
+
+    Launchd and other supervisors intentionally provide a minimal environment,
+    so provider discovery must not depend on interactive shell startup — the
+    host directories above are therefore APPENDED as a discovery suffix.  The
+    inherited PATH is not discarded: a public child resolves the Founder's own
+    ``aicx`` / ``loct`` / ``prview`` / ``screenscribe`` and any unrelated custom
+    entry from user paths, in the user's own order.
+
+    Removed is exactly one class: a Vibecrafted-owned generation bin.  Internal
+    dependencies reach the private carrier through explicit owner paths
+    (``VIBECRAFTED_RUNTIME_BIN`` / ``VIBECRAFTED_PYTHON``), so a missing host
+    tool stays missing instead of silently resolving a bundled — possibly
+    stale — private copy.
+
+    Keep this in lockstep with
+    ``runtime/scripts/lib/util.sh:spawn_prepend_agent_tool_paths`` and
+    ``runtime/shell/lib/core.sh:_vetcoders_path_with_bundled_bin_priority``.
+    """
+
+    env = selected_runtime_environment(environment)
+    inherited = str(env.get("PATH", os.defpath))
+
     resolved: list[str] = []
-    for candidate in candidates:
+    seen: set[str] = set()
+    for entry in inherited.split(os.pathsep):
+        if not entry or entry in seen:
+            continue
+        if _is_owned_generation_bin(entry, env):
+            continue
+        seen.add(entry)
+        resolved.append(entry)
+
+    for candidate in _host_agent_bin_dirs(env):
         text = str(candidate)
-        if candidate.is_dir() and text not in resolved:
-            resolved.append(text)
+        if text in seen or not candidate.is_dir():
+            continue
+        if _is_owned_generation_bin(text, env):
+            continue
+        seen.add(text)
+        resolved.append(text)
+
     return os.pathsep.join(resolved)
