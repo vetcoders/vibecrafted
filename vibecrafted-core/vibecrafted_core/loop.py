@@ -669,7 +669,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not hasattr(args, "func"):
         parser.print_help()
         return 2
-    if hasattr(args, "repo"):
+    explicit_repo = bool(
+        str(getattr(args, "repo", "") or "").strip()
+        or str(getattr(args, "root", "") or "").strip()
+    )
+    if explicit_repo:
+        # Only an explicit --repo/--root goes through the selector; the bare
+        # form keeps the subcommand's own cwd default without extra probes.
         try:
             args.root = select_repository(
                 args.repo, args.root, fallback=Path.cwd, label="vibecrafted loop"

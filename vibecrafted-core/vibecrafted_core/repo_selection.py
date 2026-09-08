@@ -100,9 +100,11 @@ def git_toplevel(path: Path, *, env: Mapping[str, str] | None = None) -> str:
         )
     except (OSError, ValueError):
         return ""
-    if proc.returncode != 0:
+    # Callers stub subprocess.run in tests with bare namespaces; a missing
+    # field is "no answer", never a crash inside the selector.
+    if getattr(proc, "returncode", 1) != 0:
         return ""
-    top = proc.stdout.strip()
+    top = str(getattr(proc, "stdout", "") or "").strip()
     if not top:
         return ""
     return str(Path(top).expanduser().resolve(strict=False))
