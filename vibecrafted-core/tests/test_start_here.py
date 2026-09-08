@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import curses
 import importlib.util
 import os
 import stat
@@ -219,3 +220,238 @@ def test_start_here_mouse_targets_the_same_actions_as_keyboard() -> None:
     assert start_here.action_for_mouse_row(10, targets, 9) == "agents"
     assert start_here.action_for_mouse_row(13, targets, 28) == "shell"
     assert start_here.action_for_mouse_row(12, targets, 9) is None
+
+
+# ── Theme and responsive layout ───────────────────────────────────────────────
+
+READY = ("ready", "VC Server is healthy — this workspace is ready")
+
+
+def _rows_text(rows) -> str:
+    return "\n".join(row.text for row in rows)
+
+
+def _action_rows(rows):
+    return [row for row in rows if row.action is not None]
+
+
+def test_layout_wraps_product_line_inside_reading_width_at_80x24() -> None:
+    start_here = _load()
+    rows = start_here.layout_rows(24, 80, selected=0, readiness=READY)
+    left, canvas = start_here.canvas_geometry(80)
+
+    assert rows[-1].row < 24
+    assert max(row.col + len(row.text) for row in rows) <= left + canvas
+    prose = [row.text for row in rows if row.action is None]
+    assert " ".join(prose).count(start_here.PRODUCT_LINE) == 1
+    assert "RUNTIME [ready] VC Server is healthy — this workspace is ready" in prose
+    assert "…" not in _rows_text(rows)
+    assert {row.action for row in _action_rows(rows)} == {
+        "agents",
+        "shell",
+        "console",
+        "help",
+    }
+    assert start_here.HELP_LINE in prose
+
+
+def test_layout_is_left_anchored_and_bounded_on_wide_panes() -> None:
+    start_here = _load()
+    rows = start_here.layout_rows(50, 220, selected=0, readiness=READY)
+    left, canvas = start_here.canvas_geometry(220)
+
+    assert left == 4
+    assert canvas == start_here.READABLE_WIDTH
+    assert min(row.col for row in rows) == left
+    assert max(row.col + len(row.text) for row in rows) <= left + canvas
+
+
+def test_layout_keeps_every_action_and_help_visible_in_compact_panes() -> None:
+    start_here = _load()
+    # 40x12 is the smallest pane this layout promises to serve completely.
+    for height, width in ((16, 50), (12, 40), (24, 60), (20, 44)):
+        rows = start_here.layout_rows(height, width, selected=2, readiness=READY)
+        left, canvas = start_here.canvas_geometry(width)
+        text = _rows_text(rows)
+        assert max(row.col + len(row.text) for row in rows) <= left + canvas, (
+            height,
+            width,
+        )
+        for index, (title, _, action) in enumerate(start_here.ACTIONS):
+            titled = [
+                row
+                for row in rows
+                if row.action == action and f"[{index + 1}] {title}" in row.text
+            ]
+            assert titled and titled[0].row < height, (height, width, title)
+        assert "Enter open" in text and "q close" in text
+        help_rows = [row for row in rows if "q close" in row.text]
+        assert help_rows[0].row < height, (height, width)
+        assert "RUNTIME [ready]" in text
+
+
+def test_layout_never_relies_on_dim_or_colour_for_meaning() -> None:
+    start_here = _load()
+    for readiness in (
+        READY,
+        ("attention", "VC Server needs attention — open Help & diagnostics"),
+    ):
+        rows = start_here.layout_rows(24, 80, selected=3, readiness=readiness)
+        assert all(not row.attr & curses.A_DIM for row in rows)
+        assert all(not row.attr & curses.A_COLOR for row in rows)
+        assert f"RUNTIME [{readiness[0]}]" in _rows_text(rows)
+        selected = [row for row in rows if row.action == "help" and "▶" in row.text]
+        assert len(selected) == 1
+        assert selected[0].attr & curses.A_REVERSE
+        others = [
+            row for row in rows if row.action not in (None, "help") and "[" in row.text
+        ]
+        assert others and all(not row.attr & curses.A_REVERSE for row in others)
+
+
+def test_mouse_targets_follow_wrapped_rows_and_resize() -> None:
+    start_here = _load()
+    wide = start_here.layout_rows(24, 80, selected=0, readiness=READY)
+    wide_targets = start_here.mouse_targets(wide, 80)
+    assert {row for row, *_ in wide_targets} == {row.row for row in _action_rows(wide)}
+    detail = next(
+        row
+        for row in wide
+        if row.action == "shell" and "▶" not in row.text and "[" not in row.text
+    )
+    assert (
+        start_here.action_for_mouse_row(detail.row, wide_targets, detail.col + 3)
+        == "shell"
+    )
+
+    narrow = start_here.layout_rows(16, 50, selected=0, readiness=READY)
+    narrow_targets = start_here.mouse_targets(narrow, 50)
+    console_rows = [row.row for row in narrow if row.action == "console"]
+    assert len(console_rows) == 2, (
+        "console detail wraps onto a second clickable row at 50 columns"
+    )
+    for row in console_rows:
+        assert start_here.action_for_mouse_row(row, narrow_targets, 10) == "console"
+    assert narrow_targets != wide_targets
+
+
+def _run_in_pty(script: Path, cols: int, rows: int, home: Path) -> bytes:
+    import fcntl
+    import pty
+    import select
+    import struct
+    import sys
+    import termios
+    import time
+
+    stubs = home / "bin"
+    stubs.mkdir(parents=True)
+    healthy = {
+        "installed": True,
+        "loaded": True,
+        "supervisor_live": True,
+        "supervisor_verified": True,
+        "supervisor_service_managed": True,
+        "build_current": True,
+        "pair_healthy": True,
+    }
+    payload = __import__("json").dumps(healthy)
+    (stubs / "vibecrafted").write_text(
+        f"#!/bin/sh\nprintf '%s' '{payload}'\n", encoding="utf-8"
+    )
+    (stubs / "vc-frame").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    for stub in (stubs / "vibecrafted", stubs / "vc-frame"):
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    env = {
+        "PATH": f"{stubs}:/usr/bin:/bin",
+        "TERM": "xterm-256color",
+        "HOME": str(home),
+        "VIBECRAFTED_HOME": str(home / ".vibecrafted"),
+        "LANG": "en_US.UTF-8",
+        "LC_ALL": "en_US.UTF-8",
+    }
+    env["LINES"] = str(rows)
+    env["COLUMNS"] = str(cols)
+    pid, master = pty.fork()
+    if pid == 0:  # child: size the controlling terminal, then become the pane
+        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        os.execve(sys.executable, [sys.executable, str(script)], env)
+    captured = b""
+    quit_sent = False
+    deadline = time.monotonic() + 15
+    status = None
+    try:
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([master], [], [], 0.25)
+            if ready:
+                try:
+                    chunk = os.read(master, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                captured += chunk
+            elif captured and not quit_sent:
+                os.write(master, b"q")
+                quit_sent = True
+            else:
+                finished, status = os.waitpid(pid, os.WNOHANG)
+                if finished:
+                    break
+        if status is None:
+            _, status = os.waitpid(pid, 0)
+    finally:
+        os.close(master)
+    assert os.waitstatus_to_exitcode(status) == 0, captured[-400:]
+    return captured
+
+
+def _sgr_params(output: bytes) -> set[str]:
+    import re
+
+    params: set[str] = set()
+    for sequence in re.findall(rb"\x1b\[([0-9;]*)m", output):
+        params.update(sequence.decode("ascii").split(";") if sequence else {"0"})
+    return params
+
+
+def test_start_here_draws_with_terminal_default_colours_in_a_real_pty(
+    tmp_path: Path,
+) -> None:
+    """Source-binary contract: the pane inherits the host palette live.
+
+    ``vc-theme`` (the tab-bar switcher) republishes the terminal palette; the
+    pane must therefore emit only the default colour pair (SGR 39/49) and
+    never palette black/white or dim, otherwise light and moon modes both show
+    the opaque purple block the founder rejected.
+    """
+    output = _run_in_pty(SCRIPT, 80, 24, tmp_path)
+    params = _sgr_params(output)
+
+    assert b"\x1b[39;49m" in output
+    forbidden = {
+        "2",
+        "38",
+        "48",
+        *(str(n) for n in range(30, 38)),
+        *(str(n) for n in range(40, 48)),
+    }
+    assert not params & forbidden, sorted(params)
+    assert {"1", "7"} <= params, sorted(params)
+    text = output.decode("utf-8", "replace")
+    assert "visible proof." in text
+    assert "RUNTIME [ready] VC Server is healthy — this workspace is ready" in text
+    assert "q close" in text
+
+
+def test_start_here_wraps_into_a_narrow_real_pty_without_clipping(
+    tmp_path: Path,
+) -> None:
+    output = _run_in_pty(SCRIPT, 50, 16, tmp_path)
+    text = output.decode("utf-8", "replace")
+
+    assert "…" not in text
+    for title in ("Agent Workspaces", "Shell", "VC Console", "Help & diagnostics"):
+        assert title in text
+    assert "q close" in text
+    assert not _sgr_params(output) & {"2", "37", "40"}
