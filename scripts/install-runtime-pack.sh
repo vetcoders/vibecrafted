@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 pack="${VIBECRAFTED_RUNTIME_PACK:-}"
 temporary=""
+installer_child_pid=""
 operation="install"
 dry_run="0"
 verify_only="0"
@@ -44,7 +45,35 @@ cleanup() {
   fi
   return "$status"
 }
-trap cleanup EXIT INT TERM HUP
+terminate_installer_child() {
+  local signal="$1"
+  local attempt
+
+  # The App owns this bootstrap process, while this bootstrap owns precisely
+  # one Python installer.  Do not let a UI timeout reap only Bash and leave the
+  # Python transaction holding its publication lease after the App has made the
+  # repair control available again.  This is deliberately a PID, not a broad
+  # process-group kill: helper/service processes outside this invocation are
+  # never ours to signal.
+  if [[ -n "$installer_child_pid" ]] && kill -0 "$installer_child_pid" 2>/dev/null; then
+    kill -"$signal" "$installer_child_pid" 2>/dev/null || true
+    for attempt in {1..10}; do
+      kill -0 "$installer_child_pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "$installer_child_pid" 2>/dev/null; then
+      kill -KILL "$installer_child_pid" 2>/dev/null || true
+    fi
+    wait "$installer_child_pid" 2>/dev/null || true
+  fi
+  installer_child_pid=""
+  exit 143
+}
+
+trap cleanup EXIT
+trap 'terminate_installer_child TERM' TERM
+trap 'terminate_installer_child INT' INT
+trap 'terminate_installer_child HUP' HUP
 
 while (($#)); do
   case "$1" in
@@ -315,7 +344,11 @@ if [[ "$operation" == "install" && -n "$app_root" ]]; then
 fi
 
 if [[ -n "$temporary" ]]; then
-  "$pack_python" "$pack_installer" "${arguments[@]}"
-  exit 0
+  "$pack_python" "$pack_installer" "${arguments[@]}" &
+  installer_child_pid="$!"
+  wait "$installer_child_pid"
+  installer_status=$?
+  installer_child_pid=""
+  exit "$installer_status"
 fi
 exec "$pack_python" "$pack_installer" "${arguments[@]}"

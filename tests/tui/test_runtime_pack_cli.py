@@ -66,6 +66,13 @@ def _fake_runtime_payload(root: Path, capture: Path) -> None:
         'if [[ "${1:-}" == "-m" ]]; then\n'
         f'  exec "{sys.executable}" "$@"\n'
         "fi\n"
+        'if [[ "${INSTALLER_CHILD_FIXTURE:-}" == "1" ]]; then\n'
+        '  printf "%s" "$$" > "$INSTALLER_CHILD_PID"\n'
+        "  trap '' TERM\n"
+        '  sleep "${INSTALLER_CHILD_SLEEP:-2}"\n'
+        '  printf mutation > "$INSTALLER_CHILD_MUTATION"\n'
+        "  exit 0\n"
+        "fi\n"
         'printf "%s\\n" "$@" > "$CAPTURE"\n',
         encoding="utf-8",
     )

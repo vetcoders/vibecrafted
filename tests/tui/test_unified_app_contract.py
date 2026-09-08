@@ -1078,7 +1078,7 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "resolveInstalledRuntime { [weak self] resolution in" in workspace_launch
     assert "case .ready:" in workspace_launch
     assert "case .absent(let reason):" in workspace_launch
-    assert "try self.installCanonicalRuntime()" in workspace_launch
+    assert "self.installCanonicalRuntime { [weak self] result in" in workspace_launch
     assert "case .unusable(let reason):" in workspace_launch
     assert "self.openWorkspaceTerminal(install: install)" in workspace_launch
     # The selected generation's terminal wrapper receives the explicit primary
@@ -1125,6 +1125,56 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert '"--terminal-host", terminalHost.path' in delegate
     assert '"--frame-helper", frameHelper.path' in delegate
     assert "JSONDecoder().decode(CanonicalRuntimeInstall.self" in delegate
+    native_runner = (
+        REPO_ROOT
+        / "vibecrafted-app/shell-agent/app/Vibecrafted/NativeInstallerProcess.swift"
+    ).read_text()
+    # UI installation never waits on the App's main actor. Every UI-reachable
+    # caller joins the one carrier publication, and both streams are drained
+    # from process start with finite capture rather than after waitUntilExit.
+    async_installer = delegate[
+        delegate.index(
+            "private func installCanonicalRuntime(\n    completion:"
+        ) : delegate.index("private func runtimePackInstallArguments")
+    ]
+    assert "runtimeInstallProcess != nil" in async_installer
+    assert "runtimeInstallWaiters.append(completion)" in async_installer
+    assert (
+        "runRuntimePackInstaller(arguments: runtimePackInstallArguments())"
+        in async_installer
+    )
+    ui_installer = delegate[
+        delegate.index(
+            "private func runRuntimePackInstaller(\n    arguments: [String], completion:"
+        ) : delegate.index("private func runtimePackInstallerProcess")
+    ]
+    assert (
+        'runBounded(process, timeout: 300, label: "runtime pack install")'
+        in ui_installer
+    )
+    assert "waitUntilExit()" not in ui_installer
+    sync_installer = delegate[
+        delegate.index(
+            "private func runRuntimePackInstaller(arguments: [String])"
+        ) : delegate.index("/// Asynchronous UI launch")
+    ]
+    assert "DispatchQueue.global" in sync_installer
+    assert "readers.wait()" in sync_installer
+    assert "waitUntilExit()" in sync_installer
+    assert "storage = Data(chunk.suffix(limit))" in native_runner
+    assert "storage.removeFirst(storage.count - limit)" in native_runner
+    assert "let timedOut: Bool" in native_runner
+    assert "timeoutFlag.mark()" in native_runner
+    assert "MainActor.assumeIsolated { completion(result) }" in native_runner
+    assert "process.terminationHandler = nil" in native_runner
+    assert "durable transaction will recover or report its lease state" in delegate
+    reinstall = delegate[
+        delegate.index("private func offerRuntimePackReinstall") : delegate.index(
+            "@objc private func openConsoleFromStatusItem"
+        )
+    ]
+    assert "installCanonicalRuntime { [weak self] result in" in reinstall
+    assert "defer { repairInFlight" not in reinstall
     # The installer returns POSIX paths, not URL strings. Decoding them directly
     # as URL produces relative URLs whose `.path` passes file checks but which
     # Foundation.Process rejects as an executableURL on macOS.
