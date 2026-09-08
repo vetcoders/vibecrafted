@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- nosemgrep: swift.insecure-communication.ats.ats-pinning.ATS-consider-pinning -- The caretaker selects the local/Tailscale HTTP endpoint. WebKit navigation is confined by WebNavigationPolicy; system TLS validation remains enabled. -->
+<!-- nosemgrep: swift.insecure-communication.ats.ats-pinning.ATS-consider-pinning -- The caretaker selects the local/Tailscale HTTP endpoint. NSAllowsLocalNetworking is the narrow ATS declaration required for IP-literal local networking on macOS 14+; WebKit navigation is confined by WebNavigationPolicy and system TLS validation remains enabled. -->
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
@@ -27,8 +27,7 @@
 	<false/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<key>NSAllowsArbitraryLoadsInWebContent</key>
-		<true/>
+		<!-- nosemgrep: swift.insecure-communication.ats.ats-local.ATS-local-networking -- Required for the caretaker-selected loopback or Tailscale IP-literal HTTP runtime. Apple documents NSAllowsLocalNetworking as the narrow macOS 14+ ATS declaration for local IP resources; WebNavigationPolicy admits HTTP only for that exact resolved origin. -->
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
