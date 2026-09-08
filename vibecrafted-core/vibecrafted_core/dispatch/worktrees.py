@@ -180,7 +180,13 @@ class WorktreeManager:
             self._validate_target(Path(geometry.worktree_path))
 
     def recover_active(self, geometry: WorktreeGeometry) -> None:
-        """Validate an already-live legacy checkout without relocating or dirt checks."""
+        """Validate an already-live checkout without relocating or dirt checks.
+
+        A resume receipt is allowed to preserve a dirty worker root, but it may
+        not turn an arbitrary directory with a matching branch name into that
+        worker.  In particular, the original baseline remains part of the
+        identity even when the worker committed (or staged) progress after it.
+        """
         root = Path(geometry.worktree_path)
         if not root.is_dir():
             raise WorktreeContractError(f"active recovery worktree is missing: {root}")
@@ -193,6 +199,39 @@ class WorktreeManager:
         if observed_branch != geometry.branch:
             raise WorktreeContractError(
                 f"active recovery branch mismatch: expected {geometry.branch}, observed {observed_branch or '<detached>'}"
+            )
+        main_common_dir = _git(
+            self.main_repo, "rev-parse", "--path-format=absolute", "--git-common-dir"
+        )
+        worker_common_dir = _git(
+            root, "rev-parse", "--path-format=absolute", "--git-common-dir"
+        )
+        if not _same_filesystem_location(main_common_dir, worker_common_dir):
+            raise WorktreeContractError(
+                f"active recovery worktree is not owned by selected repository: {root}"
+            )
+        registered_roots = [
+            line.removeprefix("worktree ")
+            for line in _git(
+                self.main_repo, "worktree", "list", "--porcelain"
+            ).splitlines()
+            if line.startswith("worktree ")
+        ]
+        if not any(
+            _same_filesystem_location(candidate, root) for candidate in registered_roots
+        ):
+            raise WorktreeContractError(
+                f"active recovery root is not registered by selected repository: {root}"
+            )
+        baseline = _git(
+            root, "rev-parse", "--verify", f"{geometry.baseline_sha}^{{commit}}"
+        )
+        head = _git(root, "rev-parse", "HEAD")
+        ancestor = _git(root, "merge-base", baseline, head) if baseline and head else ""
+        if not baseline or not head or ancestor != baseline:
+            raise WorktreeContractError(
+                "active recovery baseline mismatch: receipt baseline is not an ancestor "
+                f"of {root} HEAD"
             )
         target = Path(geometry.target_path)
         if target != root / "target":

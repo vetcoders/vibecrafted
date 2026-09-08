@@ -13,7 +13,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -1805,6 +1805,45 @@ def _launch_spec_digest(spec: WorkflowLaunchSpec) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _legacy_preassembly_spec(
+    stored_spec: WorkflowLaunchSpec, *, expected_digest: str
+) -> WorkflowLaunchSpec | None:
+    """Recover a prompt-origin spec from an old redacted launch receipt.
+
+    Pre-dispatch runtimes calculated the idempotency digest before wrapping the
+    caller's prompt, but persisted only ``safe_spec`` afterwards.  That shape
+    has an empty ``prompt`` and a generated ``prompt.md`` in ``file``.  The
+    generated wrapper retains the original prompt after its unambiguous final
+    ``Operator prompt:`` delimiter.  Rebuild the old material only when its
+    digest still exactly matches the immutable stored digest.  File-origin
+    launches cannot safely recover their original file path and remain denied.
+    """
+    if stored_spec.prompt or not stored_spec.file:
+        return None
+    try:
+        rendered = (
+            Path(stored_spec.file)
+            .expanduser()
+            .read_text(encoding="utf-8", errors="replace")
+        )
+    except OSError:
+        return None
+    marker = "Operator prompt:\n"
+    if not rendered.startswith("You are running under Vibecrafted core runtime.\n"):
+        return None
+    _wrapper, separator, source_with_newline = rendered.partition(marker)
+    # _runtime_prompt always appends precisely one newline after the source.
+    # Do not normalize whitespace: it is part of the authenticated source.
+    if not separator or not source_with_newline.endswith("\n"):
+        return None
+    recovered = replace(
+        stored_spec,
+        prompt=source_with_newline[:-1],
+        file="",
+    )
+    return recovered if _launch_spec_digest(recovered) == expected_digest else None
+
+
 def _launch_idempotency_registry() -> Path:
     """Directory for launch-idempotency records under the control-plane home."""
     registry = control_plane_home() / "launch_idempotency"
@@ -2262,6 +2301,101 @@ def recover_launch_receipt(
     return stored
 
 
+def _legacy_dispatch_receipt_matches(
+    *,
+    key: str,
+    provider_run_id: str,
+    cut_id: str,
+    root: str,
+    branch: str,
+    baseline_sha: str,
+) -> bool:
+    """Verify legacy dispatch identity from its exact durable scheduler receipt.
+
+    Old run projections can lack the dispatch fields, but their launch key is
+    still namespaced by the parent dispatch.  Never search receipts by a loose
+    provider id: derive one path from that authenticated key and require every
+    topology field to agree before using it as the missing projection.
+    """
+    suffix = f":cut:{cut_id}:attempt:initial"
+    if not key.startswith("dispatch:") or not key.endswith(suffix):
+        return False
+    dispatch_run_id = key[len("dispatch:") : -len(suffix)]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", dispatch_run_id):
+        return False
+    ledger = _read_json_object(
+        control_plane_home() / "dispatches" / dispatch_run_id / "receipts.json"
+    )
+    cuts = ledger.get("cuts")
+    receipt = cuts.get(cut_id) if isinstance(cuts, dict) else None
+    if not isinstance(receipt, dict):
+        return False
+    if not (
+        ledger.get("schema") == "vibecrafted.dispatch-receipts.v1"
+        and str(ledger.get("run_id") or "") == dispatch_run_id
+        and str(receipt.get("cut_id") or "") == cut_id
+        and str(receipt.get("provider_run_id") or "") == provider_run_id
+        and str(receipt.get("branch") or "") == branch
+        and str(receipt.get("baseline_sha") or "") == baseline_sha
+    ):
+        return False
+    try:
+        return Path(str(receipt.get("worktree_path") or "")).resolve(
+            strict=False
+        ) == Path(root).resolve(strict=False)
+    except OSError:
+        return False
+
+
+def _legacy_worktree_matches(*, root: str, branch: str, baseline_sha: str) -> bool:
+    """Confirm a recovered receipt still names the original linked checkout.
+
+    A worker can legitimately commit its owned work after the dispatch baseline.
+    The baseline is therefore an ancestry floor, not an exact ``HEAD`` value;
+    staged and unstaged progress must remain untouched by recovery as well.
+    """
+    try:
+        top = subprocess.run(
+            ["git", "-C", root, "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        ).stdout.strip()
+        observed_branch = subprocess.run(
+            ["git", "-C", root, "symbolic-ref", "--quiet", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        ).stdout.strip()
+        baseline_is_ancestor = (
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    root,
+                    "merge-base",
+                    "--is-ancestor",
+                    baseline_sha,
+                    "HEAD",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            ).returncode
+            == 0
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return (
+        Path(top).resolve(strict=False) == Path(root).resolve(strict=False)
+        and observed_branch == branch
+        and baseline_is_ancestor
+    )
+
+
 def recover_legacy_dispatch_identity(
     spec: WorkflowLaunchSpec,
     *,
@@ -2314,13 +2448,22 @@ def recover_legacy_dispatch_identity(
         )
     except (KeyError, TypeError, ValueError):
         return None, "legacy dispatch idempotency spec is incomplete"
+    stored_digest = str(record.get("spec_digest") or "")
+    bound_spec = historical
+    if _launch_spec_digest(bound_spec) != stored_digest:
+        recovered_spec = _legacy_preassembly_spec(
+            historical, expected_digest=stored_digest
+        )
+        if recovered_spec is None:
+            return None, "legacy dispatch idempotency record does not bind its launch"
+        bound_spec = recovered_spec
     if (
         record.get("schema") != LAUNCH_IDEMPOTENCY_SCHEMA
         or str(record.get("idempotency_key") or "") != key
         or str(record.get("state") or "") != "dispatched"
         or record.get("accepted") is not True
-        or not str(record.get("spec_digest") or "")
-        or _launch_spec_digest(historical) != str(record.get("spec_digest") or "")
+        or not stored_digest
+        or _launch_spec_digest(bound_spec) != stored_digest
     ):
         return None, "legacy dispatch idempotency record does not bind its launch"
     root = str(Path(spec.root).expanduser().resolve(strict=False))
@@ -2337,6 +2480,19 @@ def recover_legacy_dispatch_identity(
         and historical_root == root
     ):
         return None, "legacy dispatch record conflicts with the requested cut"
+    if not _legacy_dispatch_receipt_matches(
+        key=key,
+        provider_run_id=provider_run_id,
+        cut_id=cut_id,
+        root=root,
+        branch=branch,
+        baseline_sha=baseline_sha,
+    ):
+        return None, "legacy dispatch receipt identity is incomplete or conflicts"
+    if not _legacy_worktree_matches(
+        root=root, branch=branch, baseline_sha=baseline_sha
+    ):
+        return None, "legacy dispatch worktree identity is incomplete or conflicts"
     canonical = lookup_run(provider_run_id)
     observed_root = str(
         (canonical or {}).get("resolved_worktree_path")
@@ -2351,9 +2507,12 @@ def recover_legacy_dispatch_identity(
         and observed_root
         and Path(observed_root).resolve(strict=False)
         == Path(root).resolve(strict=False)
-        and str(canonical.get("branch") or "") == branch
-        and str(canonical.get("baseline_sha") or "") == baseline_sha
-        and str(canonical.get("cut_id") or "") == cut_id
+        and (not canonical.get("branch") or str(canonical["branch"]) == branch)
+        and (
+            not canonical.get("baseline_sha")
+            or str(canonical["baseline_sha"]) == baseline_sha
+        )
+        and (not canonical.get("cut_id") or str(canonical["cut_id"]) == cut_id)
         and str(canonical.get("agent") or "").lower() == spec.agent.lower()
         and str(canonical.get("skill") or "") == spec.skill
         and canonical.get("worker_alive") is False
