@@ -385,7 +385,10 @@ def test_repository_independent_commands_do_not_need_git(tmp_path: Path) -> None
     assert workflow_help.returncode == 0
     assert "--repo <path>" in workflow_help.stdout
     assert "--worktree [true|false]" in workflow_help.stdout
-    assert "--model claude-fable-5-1 --worktree true --repo" in workflow_help.stdout
+    assert (
+        "--model claude-fable-5-1 --worktree true --permissions auto --sandbox true "
+        "--repo" in workflow_help.stdout
+    )
 
     fork_source = _cli(
         [
