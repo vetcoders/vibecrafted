@@ -92,51 +92,6 @@ final class EventObserver: @unchecked Sendable, EventCallback {
 /// is serialised by a lock. Draining continuously is what stops a child from
 /// blocking forever on a full pipe buffer; the ceiling is what stops a chatty
 /// failure from becoming unbounded memory behind the tray.
-private final class BoundedOutputSink: @unchecked Sendable {
-  private let lock = NSLock()
-  private let limit: Int
-  private var storage = Data()
-
-  init(limit: Int) {
-    self.limit = limit
-  }
-
-  func absorb(_ chunk: Data) {
-    guard !chunk.isEmpty else { return }
-    lock.lock()
-    defer { lock.unlock() }
-    let room = limit - storage.count
-    guard room > 0 else { return }
-    storage.append(chunk.count <= room ? chunk : chunk.prefix(room))
-  }
-
-  var collected: Data {
-    lock.lock()
-    defer { lock.unlock() }
-    return storage
-  }
-}
-
-/// The outcome of one bounded subprocess.
-private struct BoundedProcessResult {
-  let stdout: Data
-  let stderr: Data
-  let terminationStatus: Int32
-  /// The child exited on its own rather than being signalled or timed out.
-  let clean: Bool
-}
-
-/// Take whatever a pipe still holds. Safe only once the writer is gone, which
-/// is why this runs from the termination handler and not before it.
-private func drainRemainder(_ handle: FileHandle, into sink: BoundedOutputSink) {
-  handle.readabilityHandler = nil
-  var tail = handle.availableData
-  while !tail.isEmpty {
-    sink.absorb(tail)
-    tail = handle.availableData
-  }
-}
-
 extension RuntimeIdentityProbe {
   /// The real filesystem. `exists` is deliberately positive presence, so an
   /// existing file this App cannot read stays an installation rather than
@@ -172,6 +127,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     openExternally: { [unowned self] url in self.openExternalURL(url) })
   private var tray: StatusItemController?
   private var repairInFlight = false
+  /// The App has one installer owner too: callers join this one launch rather
+  /// than racing separate carrier publications against the installer's lease.
+  private var runtimeInstallProcess: Process?
+  private var runtimeInstallWaiters: [(Result<CanonicalRuntimeInstall, Error>) -> Void] = []
   private var confirmedStopRoot: URL?
   private var terminalWorkingDirectory = FileManager.default.homeDirectoryForCurrentUser
   private var signedCarrierRevisions: (source: String, terminal: String, frame: String)?
@@ -373,19 +332,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     resolveInstalledRuntime { [weak self] resolution in
       guard let self else { return }
       // First onboarding and explicit repair remain in the existing installer.
-      let adopted: RuntimeContract
       if case .absent = resolution {
-        do {
-          adopted = .ready(try self.installCanonicalRuntime())
-          self.cachedResolution = nil
-        } catch {
-          self.applyResolution(resolution)
-          let reason = "Runtime onboarding failed: \(error.localizedDescription)"
-          self.runtimeResolutionFailure = reason
-          self.model.block(reason: reason)
-          return
+        self.installCanonicalRuntime { [weak self] result in
+          guard let self else { return }
+          switch result {
+          case .success(let install):
+            self.cachedResolution = nil
+            self.finishConnectingCommandDeck(with: .ready(install))
+          case .failure(let error):
+            self.applyResolution(resolution)
+            let reason = "Runtime onboarding failed: \(error.localizedDescription)"
+            self.runtimeResolutionFailure = reason
+            self.model.block(reason: reason)
+          }
         }
-      } else { adopted = resolution }
+        return
+      }
+      self.finishConnectingCommandDeck(with: resolution)
+    }
+  }
+
+  private func finishConnectingCommandDeck(with adopted: RuntimeContract) {
       guard let install = self.applyResolution(adopted),
         let environment = self.canonicalRuntimeEnvironment else {
         self.renderServerStatus()
@@ -394,7 +361,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       self.reconcileControlPlaneEye(install: install, environment: environment)
       self.inspectConfigurationAtLaunch()
       self.refreshServerStatus()
-    }
   }
 
   /// Read-only configuration check at launch.
@@ -643,20 +609,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
         // that can exist. Publishing it here is first onboarding.
         self.applyResolution(resolution)
         lifecycleLog("no installed runtime (\(reason)); bootstrapping the bundled carrier")
-        let install: CanonicalRuntimeInstall
-        do {
-          install = try self.installCanonicalRuntime()
-        } catch {
-          self.terminalLaunchInFlight = false
-          self.reportWorkspaceLaunchFailure(
-            "Cannot publish the canonical Vibecrafted runtime: \(error.localizedDescription)")
-          return
+        self.installCanonicalRuntime { [weak self] result in
+          guard let self else { return }
+          switch result {
+          case .success(let install):
+            // The bootstrap just changed what is installed, so the cached answer is
+            // stale by construction.
+            self.cachedResolution = nil
+            self.applyResolution(.ready(install))
+            self.openWorkspaceTerminal(install: install)
+          case .failure(let error):
+            self.terminalLaunchInFlight = false
+            self.reportWorkspaceLaunchFailure(
+              "Cannot publish the canonical Vibecrafted runtime: \(error.localizedDescription)")
+          }
         }
-        // The bootstrap just changed what is installed, so the cached answer is
-        // stale by construction.
-        self.cachedResolution = nil
-        self.applyResolution(.ready(install))
-        self.openWorkspaceTerminal(install: install)
       case .unusable(let reason):
         // An installation exists but the owner refuses it. Overwriting it from
         // the bundled carrier would be an automatic downgrade of the Founder's
@@ -1024,64 +991,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     stderrLimit: Int = 1 << 16,
     completion: @escaping @MainActor @Sendable (BoundedProcessResult) -> Void
   ) throws {
-    let output = Pipe()
-    let errors = Pipe()
-    let stdout = BoundedOutputSink(limit: stdoutLimit)
-    let stderr = BoundedOutputSink(limit: stderrLimit)
-    process.standardOutput = output
-    process.standardError = errors
-    output.fileHandleForReading.readabilityHandler = { handle in
-      let chunk = handle.availableData
-      if chunk.isEmpty {
-        handle.readabilityHandler = nil
-      } else {
-        stdout.absorb(chunk)
-      }
-    }
-    errors.fileHandleForReading.readabilityHandler = { handle in
-      let chunk = handle.availableData
-      if chunk.isEmpty {
-        handle.readabilityHandler = nil
-      } else {
-        stderr.absorb(chunk)
-      }
-    }
-    process.terminationHandler = { finished in
-      drainRemainder(output.fileHandleForReading, into: stdout)
-      drainRemainder(errors.fileHandleForReading, into: stderr)
-      let result = BoundedProcessResult(
-        stdout: stdout.collected,
-        stderr: stderr.collected,
-        terminationStatus: finished.terminationStatus,
-        clean: finished.terminationReason == .exit)
-      // Foundation runs this handler on its own queue, so the completion has to
-      // hop before it touches anything the delegate owns. Once it is on the
-      // main queue the isolation is a fact, not an assumption, and asserting it
-      // keeps the callback main-actor typed instead of laundering tray state
-      // through unchecked mutable sharing.
-      DispatchQueue.main.async {
-        MainActor.assumeIsolated {
-          completion(result)
-        }
-      }
-    }
-    do {
-      try process.run()
-    } catch {
-      output.fileHandleForReading.readabilityHandler = nil
-      errors.fileHandleForReading.readabilityHandler = nil
-      process.terminationHandler = nil
-      throw error
-    }
-    DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak process] in
-      guard let process, process.isRunning else { return }
-      lifecycleLog("\(label) exceeded \(Int(timeout))s; terminating pid=\(process.processIdentifier)")
-      process.terminate()
-      DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak process] in
-        guard let process, process.isRunning else { return }
-        kill(process.processIdentifier, SIGKILL)
-      }
-    }
+    try NativeInstallerProcess.run(
+      process, timeout: timeout, label: label, stdoutLimit: stdoutLimit, stderrLimit: stderrLimit,
+      onTimeout: { lifecycleLog($0) }, completion: completion)
   }
 
   /// Ensure the canonical shared service exists.
@@ -1203,6 +1115,40 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   }
 
   private func installCanonicalRuntime() throws -> CanonicalRuntimeInstall {
+    try decodeCanonicalRuntimeInstall(from: runRuntimePackInstaller(arguments: runtimePackInstallArguments()))
+  }
+
+  /// The UI form never waits on the main actor. All callers join the one
+  /// carrier publication, which preserves the installer's lease/transaction
+  /// boundary instead of introducing a second installer owner in the App.
+  private func installCanonicalRuntime(
+    completion: @escaping (Result<CanonicalRuntimeInstall, Error>) -> Void
+  ) {
+    if runtimeInstallProcess != nil {
+      runtimeInstallWaiters.append(completion)
+      return
+    }
+    do {
+      try runRuntimePackInstaller(arguments: runtimePackInstallArguments()) { [weak self] result in
+        guard let self else { return }
+        let outcome: Result<CanonicalRuntimeInstall, Error>
+        switch result {
+        case .success(let output):
+          outcome = Result { try self.decodeCanonicalRuntimeInstall(from: output) }
+        case .failure(let error): outcome = .failure(error)
+        }
+        self.runtimeInstallProcess = nil
+        let waiters = self.runtimeInstallWaiters
+        self.runtimeInstallWaiters.removeAll()
+        completion(outcome)
+        waiters.forEach { $0(outcome) }
+      }
+    } catch {
+      completion(.failure(error))
+    }
+  }
+
+  private func runtimePackInstallArguments() throws -> [String] {
     let appRoot = Bundle.main.bundleURL
     let resources = appRoot.appendingPathComponent("Contents/Resources", isDirectory: true)
     let carrierDirectory = resources.appendingPathComponent("runtime-pack", isDirectory: true)
@@ -1220,7 +1166,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     let terminalHost = appRoot.appendingPathComponent(
       "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty")
     let frameHelper = appRoot.appendingPathComponent("Contents/Helpers/vc-frame")
-    let output = try runRuntimePackInstaller(arguments: [
+    return [
       "--pack", carriers[0].path,
       "--app-root", appRoot.path,
       "--terminal-host", terminalHost.path,
@@ -1228,7 +1174,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       "--expected-source-revision", sourceRevision,
       "--expected-terminal-revision", terminalRevision,
       "--expected-frame-revision", frameRevision,
-    ])
+    ]
+  }
+
+  private func decodeCanonicalRuntimeInstall(from output: Data) throws -> CanonicalRuntimeInstall {
     do {
       return try JSONDecoder().decode(CanonicalRuntimeInstall.self, from: output)
     } catch {
@@ -1246,6 +1195,53 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   }
 
   private func runRuntimePackInstaller(arguments: [String]) throws -> Data {
+    let process = try runtimePackInstallerProcess(arguments: arguments)
+    let output = Pipe()
+    let errors = Pipe()
+    let stdout = BoundedOutputSink(limit: 1 << 20)
+    let stderr = BoundedOutputSink(limit: 1 << 16)
+    process.standardOutput = output
+    process.standardError = errors
+    let readers = DispatchGroup()
+    for (handle, sink) in [(output.fileHandleForReading, stdout), (errors.fileHandleForReading, stderr)] {
+      readers.enter()
+      DispatchQueue.global(qos: .userInitiated).async {
+        defer { readers.leave() }
+        while true {
+          let chunk = handle.availableData
+          guard !chunk.isEmpty else { return }
+          sink.absorb(chunk)
+        }
+      }
+    }
+    try process.run()
+    process.waitUntilExit()
+    readers.wait()
+    return try runtimePackInstallerResult(
+      stdout: stdout.collected, stderr: stderr.collected,
+      terminationStatus: process.terminationStatus, clean: process.terminationReason == .exit)
+  }
+
+  /// Asynchronous UI launch. `runBounded` drains both pipes from process start
+  /// and reports its result on MainActor; its timeout only terminates this
+  /// installer helper, never a discovered runtime/service process.
+  private func runRuntimePackInstaller(
+    arguments: [String], completion: @escaping (Result<Data, Error>) -> Void
+  ) throws {
+    let process = try runtimePackInstallerProcess(arguments: arguments)
+    try runBounded(process, timeout: 300, label: "runtime pack install") { [weak self] result in
+      guard let self else { return }
+      completion(Result {
+        try self.runtimePackInstallerResult(
+          stdout: result.stdout, stderr: result.stderr,
+          terminationStatus: result.terminationStatus, clean: result.clean,
+          timedOut: result.timedOut)
+      })
+    }
+    runtimeInstallProcess = process
+  }
+
+  private func runtimePackInstallerProcess(arguments: [String]) throws -> Process {
     let carrierDirectory = Bundle.main.bundleURL.appendingPathComponent(
       "Contents/Resources/runtime-pack", isDirectory: true)
     let installer = carrierDirectory.appendingPathComponent("install-runtime-pack.sh")
@@ -1262,8 +1258,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     }
 
     let process = Process()
-    let output = Pipe()
-    let errors = Pipe()
     process.executableURL = URL(fileURLWithPath: "/bin/bash")
     process.arguments = [installer.path] + arguments
     var environment = ProcessInfo.processInfo.environment
@@ -1271,27 +1265,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY"] = publicKey.path
     process.environment = environment
-    process.standardOutput = output
-    process.standardError = errors
-    try process.run()
-    process.waitUntilExit()
+    return process
+  }
 
-    let result = output.fileHandleForReading.readDataToEndOfFile()
-    let failure = errors.fileHandleForReading.readDataToEndOfFile()
-    guard process.terminationStatus == 0 else {
+  private func runtimePackInstallerResult(
+    stdout: Data, stderr: Data, terminationStatus: Int32, clean: Bool,
+    timedOut: Bool = false
+  ) throws -> Data {
+    guard clean, terminationStatus == 0 else {
       // The installer is a Python program and prints a traceback when it
       // refuses. Reducing it to the owner's actual message is what keeps a
       // stack of interpreter frames out of a normal repair dialog.
       let diagnostic = boundedResolverDiagnostic(
-        stdout: result, stderr: failure, limit: 480)
+        stdout: stdout, stderr: stderr, limit: 480)
       let detail =
-        "the Runtime Pack installer exited \(process.terminationStatus)\(diagnostic)"
+        timedOut
+        ? "the Runtime Pack installer timed out; its durable transaction will recover or report its lease state\(diagnostic)"
+        : "the Runtime Pack installer exited \(terminationStatus)\(diagnostic)"
       throw NSError(
         domain: "io.vetcoders.vibecrafted.install",
-        code: Int(process.terminationStatus),
+        code: Int(terminationStatus),
         userInfo: [NSLocalizedDescriptionKey: detail])
     }
-    return result
+    return stdout
   }
 
   /// Inherited PATH first, then the signed generation fallback; use the minimal
@@ -1601,36 +1597,36 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     guard confirmation.runModal() == .alertSecondButtonReturn else { return }
     repairInFlight = true
     updateDeckPresentation()
-    defer { repairInFlight = false; updateDeckPresentation() }
-    let install: CanonicalRuntimeInstall
-    do {
-      install = try installCanonicalRuntime()
-    } catch {
-      lifecycleLog("runtime repair failed: \(error.localizedDescription)")
-      let failure = NSAlert()
-      failure.alertStyle = .critical
-      failure.messageText = "Vibecrafted could not reinstall its runtime"
-      failure.informativeText = error.localizedDescription
-      failure.addButton(withTitle: "OK")
-      failure.runModal()
-      return
+    installCanonicalRuntime { [weak self] result in
+      guard let self else { return }
+      self.repairInFlight = false
+      defer { self.updateDeckPresentation() }
+      switch result {
+      case .failure(let error):
+        lifecycleLog("runtime repair failed: \(error.localizedDescription)")
+        let failure = NSAlert()
+        failure.alertStyle = .critical
+        failure.messageText = "Vibecrafted could not reinstall its runtime"
+        failure.informativeText = error.localizedDescription
+        failure.addButton(withTitle: "OK")
+        failure.runModal()
+      case .success(let install):
+        // Repair just republished the installation, so any cached resolution — and
+        // any reading or action still in flight for the previous generation — is
+        // stale by construction.
+        self.cachedResolution = nil
+        guard let repaired = self.applyResolution(.ready(install)),
+          let environment = self.canonicalRuntimeEnvironment
+        else { return }
+        // A repaired install is allowed to report its launch failures again.
+        self.workspaceLaunchFailureReported = false
+        lifecycleLog("runtime repaired to generation \(repaired.root.lastPathComponent)")
+        self.reconcileControlPlaneEye(install: repaired, environment: environment)
+        self.applyRuntimePackMenuState()
+        self.refreshServerStatus()
+        self.webSession.retry()
+      }
     }
-    // Repair just republished the installation, so any cached resolution — and
-    // any reading or action still in flight for the previous generation — is
-    // stale by construction.
-    cachedResolution = nil
-    guard let repaired = applyResolution(.ready(install)),
-      let environment = canonicalRuntimeEnvironment
-    else {
-      return
-    }
-    // A repaired install is allowed to report its launch failures again.
-    workspaceLaunchFailureReported = false
-    lifecycleLog("runtime repaired to generation \(repaired.root.lastPathComponent)")
-    reconcileControlPlaneEye(install: repaired, environment: environment)
-    applyRuntimePackMenuState()
-    refreshServerStatus()
-    webSession.retry()
   }
 
   @objc private func openConsoleFromStatusItem() { openRoute("/") }
