@@ -58,6 +58,46 @@ vibecrafted workflow claude --model claude-fable-5-1 --worktree true \
   --repo ~/Projects/app --prompt "Ujednolić polecenie fork"
 ```
 
+The Rust cockpit accepts the same selector: `vibecrafted tui --repo <path>`
+(`voc --repo <path>`), with `--root` as the legacy spelling and the same
+conflict rule.
+
+### Execution controls: `--permissions`, `--sandbox`
+
+Skill launchers also take `--permissions <bypass|auto|accept-edits|read-only>`
+and `--sandbox [true|false]`. Both are real execution contracts, resolved
+against the _installed_ provider CLI before any process starts: the launcher
+maps a control only where the provider can enforce it, and refuses the launch
+(exit 2, no run record) with the exact supported alternative otherwise.
+`--permissions auto` is never downgraded to `bypassPermissions`; `--sandbox
+true` is never downgraded to an unsandboxed run. Omitting both keeps the
+historical default (`bypass`; `auto` for junie; sandbox left to the provider).
+
+```bash
+vibecrafted workflow claude --model claude-fable-5-1 --worktree true \
+  --permissions auto --sandbox true --repo ~/Projects/app --prompt "Ship it"
+```
+
+The launch receipt (`--json`, the human receipt, `meta.json`, the launch
+event) carries `execution_controls` with `permissions_requested` /
+`permissions_effective`, `sandbox_requested` / `sandbox_effective`, the exact
+provider flags and the evidence line. Provider mapping as probed on
+2026-09-08 (read-only `--help` of the installed CLIs):
+
+| Provider                   | `--permissions`                                                                                                                           | `--sandbox true`                                                                                                       | `--sandbox false`                                                       |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| claude 2.1.263             | `--permission-mode bypassPermissions\|auto\|acceptEdits\|plan`                                                                            | `--settings '{"sandbox":{"enabled":true}}'`                                                                            | `--settings '{"sandbox":{"enabled":false}}'`                            |
+| codex 0.154 (`codex exec`) | bypass → `--dangerously-bypass-approvals-and-sandbox`; auto → `--approve-for-me`; read-only → `--sandbox read-only`; accept-edits refused | bypass → `--sandbox workspace-write` (bypass flag dropped, approvals never prompted); auto/read-only already sandboxed | bypass only; auto/read-only refused (their sandbox enforces the policy) |
+| grok 1.0.21                | `--permission-mode …`                                                                                                                     | `--sandbox workspace` (`read-only` profile under read-only)                                                            | `--sandbox off`                                                         |
+| cursor-agent 2026.09.08    | `--force --trust` / `--trust` / `--mode ask --trust`; accept-edits refused                                                                | `--sandbox enabled` (verified against `--help`)                                                                        | `--sandbox disabled`                                                    |
+| agy 1.1.27                 | `--dangerously-skip-permissions` / default / `--mode accept-edits` / `--mode plan`                                                        | `--sandbox`                                                                                                            | no flag (opt-in only; receipted as `disabled`)                          |
+| junie 26.8.31              | `auto` only in headless runs                                                                                                              | refused (no sandbox surface)                                                                                           | refused                                                                 |
+
+`research` and `marbles` run under a supervised runtime that does not carry
+these controls yet; passing them there is refused, not ignored. The shell
+skill helpers and the interactive `init` / `operator` / `partner` sessions
+refuse `--sandbox` for the same reason.
+
 ## init
 
 ```bash
