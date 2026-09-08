@@ -1058,22 +1058,49 @@ def test_release_binaries_never_probe_the_machine_that_compiled_them() -> None:
 
 
 def test_release_strips_linker_paths_and_pins_frame_source_identity() -> None:
-    """Final Mach-O bytes must not retain snapshot or DerivedData object paths."""
+    """Final Mach-O bytes must not retain snapshot or DerivedData object paths.
+
+    One shared boundary, no per-binary lists. MEASURED 2026-09-08 on the
+    f131b81b candidate: the Runtime Pack step named libexec/vc-terminal and
+    libexec/vc-frame and left bin/voc, bin/vc-start, bin/scaffold-doctor,
+    bin/aicx, bin/aicx-mcp and bin/prview carrying the rustup sysroot and the
+    Cargo target directory in linker stabs; the hygiene gate refused the build
+    before packaging. Both payloads now pass every Mach-O executable through
+    scripts/lib/macho-signing.sh::strip_macho_debug_tree before the gate reads
+    the bytes and before any signature is spent.
+    """
     builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
         encoding="utf-8"
     )
+    helper = (REPO_ROOT / "scripts/lib/macho-signing.sh").read_text(encoding="utf-8")
 
     assert (
         'CARGO_PROFILE_RELEASE_STRIP=false make -C "$FRAME_REPO" plugins-assets'
         in builder
     )
     assert "VC_FRAME_SOURCE_MANIFEST_DIR=/usr/src/vc-frame/zellij-utils" in builder
-    assert '"$APP/Contents/MacOS/Vibecrafted"' in builder
-    assert '"$terminal_app/Contents/MacOS/alacritty"' in builder
-    assert '"$APP/Contents/Helpers/vc-frame"' in builder
-    strip_at = builder.index("/usr/bin/strip -S")
-    hygiene_at = builder.index('assert_payload_is_anonymous "$APP"')
-    assert strip_at < hygiene_at
+    assert "strip_macho_debug_tree() {" in helper
+    assert "strip -S" not in builder, "per-binary strip lists came back"
+
+    runtime_strip = builder.index(
+        'strip_macho_debug_tree "$runtime/bin" "$runtime/libexec"'
+    )
+    runtime_gate = builder.index(
+        'assert_payload_is_anonymous "$runtime" "Runtime Pack payload"'
+    )
+    runtime_signing = builder.index("\n  produce_runtime_pack\n")
+    assert runtime_strip < runtime_gate < runtime_signing
+
+    app_strip = builder[builder.index("strip_debug_stabs() {") :]
+    app_strip = app_strip[: app_strip.index("\n}\n")]
+    assert (
+        'strip_macho_debug_tree "$APP/Contents/MacOS" "$APP/Contents/Helpers"'
+        in app_strip
+    )
+    app_strip_call = builder.index("\n  strip_debug_stabs\n")
+    app_gate = builder.index('assert_payload_is_anonymous "$APP"')
+    app_signing = builder.index('sign_macho_tree "$APP/Contents"')
+    assert app_strip_call < app_gate < app_signing
 
 
 def test_windows_entry_point_does_not_drift_between_its_two_copies() -> None:

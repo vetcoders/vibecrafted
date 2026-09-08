@@ -3956,3 +3956,288 @@ def test_production_release_receipt_platform_passes_staged_bundled_schema_verifi
         text=True,
     )
     assert verified.returncode == 0, verified.stderr
+
+
+# --- Runtime Pack debug-record boundary --------------------------------------
+#
+# MEASURED 2026-09-08 on the f131b81b release candidate: the Runtime Pack payload
+# carried 31 Mach-O files; bin/voc, bin/vc-start, bin/scaffold-doctor, bin/aicx,
+# bin/aicx-mcp and bin/prview reached the hygiene gate naming the rustup sysroot
+# and the Cargo target directory in linker N_OSO stabs, because only
+# libexec/vc-terminal and libexec/vc-frame were ever stripped and cargo's own
+# `strip` had aborted in rust-objcopy with a warning. These tests drive the
+# shared boundary, scripts/lib/macho-signing.sh::strip_macho_debug_tree, with
+# real compiled Mach-O fixtures and the real payload scanner.
+
+MACHO_SIGNING = REPO_ROOT / "scripts/lib/macho-signing.sh"
+PAYLOAD_SCANNER = REPO_ROOT / "scripts/payload_hygiene.py"
+
+
+def _compile_macho_with_debug_object(
+    path: Path, object_dir: Path, *, shared_library: bool = False
+) -> None:
+    """Two-step compile that leaves the object's path in the linker's N_OSO stab.
+
+    `_compile_macho` compiles from stdin in one step, so its object lives in
+    the OS temp root and names nobody. The release failure this guards against
+    is an object path the linker recorded verbatim, so the fixture is linked
+    from an object whose directory the test controls.
+    """
+    xcrun = _clang()
+    object_dir.mkdir(parents=True, exist_ok=True)
+    source = object_dir / "fixture.c"
+    source.write_text(
+        "int answer(void) { return 42; }\nint main(void) { return 0; }\n",
+        encoding="utf-8",
+    )
+    obj = object_dir / "fixture.o"
+    common = [
+        xcrun,
+        "--sdk",
+        "macosx",
+        "clang",
+        "-arch",
+        "arm64",
+        "-mmacosx-version-min=14.0",
+        "-g",
+    ]
+    compiled = subprocess.run(
+        [*common, "-c", str(source), "-o", str(obj)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+    link = list(common)
+    if shared_library:
+        link += ["-dynamiclib", f"-Wl,-install_name,@rpath/{path.name}"]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    linked = subprocess.run(
+        [*link, str(obj), "-o", str(path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert linked.returncode == 0, linked.stderr
+    path.chmod(0o755)
+    assert str(object_dir).encode() in path.read_bytes(), (
+        "the fixture does not expose its object path; this falsifier is void"
+    )
+
+
+def _oso_stabs(path: Path) -> list[str]:
+    result = subprocess.run(
+        [_clang(), "nm", "-ap", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return [line for line in result.stdout.splitlines() if " OSO " in line]
+
+
+def _strip_macho_debug_tree(
+    *roots: Path, prelude: str = ""
+) -> subprocess.CompletedProcess[str]:
+    shell = (
+        'set -euo pipefail; source "$1"; shift; '
+        + prelude
+        + 'strip_macho_debug_tree "$@"'
+    )
+    return subprocess.run(
+        ["bash", "-c", shell, "macho-strip", str(MACHO_SIGNING), *map(str, roots)],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _scan_payload(root: Path, *forbidden: str) -> subprocess.CompletedProcess[str]:
+    arguments = [
+        sys.executable,
+        str(PAYLOAD_SCANNER),
+        "--root",
+        str(root),
+        "--label",
+        "fixture payload",
+    ]
+    for literal in forbidden:
+        arguments += ["--forbid", literal]
+    return subprocess.run(arguments, check=False, capture_output=True, text=True)
+
+
+def test_runtime_payload_strip_reaches_every_executable_before_the_gate(
+    tmp_path: Path,
+) -> None:
+    """Executables the old two-name list never visited are normalized too."""
+    payload = tmp_path / "payload/VibecraftedRuntime"
+    workshop = tmp_path / "Volumes/workshop"
+    build_host = workshop / "checkout/target/release/deps"
+    executables = [
+        payload / "bin/foundation-tool",
+        payload / "libexec/nested/deeper/helper",
+    ]
+    for executable in executables:
+        _compile_macho_with_debug_object(executable, build_host / executable.name)
+        assert _oso_stabs(executable)
+    refused = _scan_payload(payload, str(workshop))
+    assert refused.returncode == 1, refused.stdout + refused.stderr
+
+    result = _strip_macho_debug_tree(payload / "bin", payload / "libexec")
+
+    assert result.returncode == 0, result.stderr
+    assert "2 executable(s) stripped of debugging records" in result.stdout
+    for executable in executables:
+        assert not _oso_stabs(executable)
+        assert str(workshop).encode() not in executable.read_bytes()
+        run = subprocess.run([str(executable)], check=False, capture_output=True)
+        assert run.returncode == 0, run.stderr
+        # strip re-seals the linker's ad-hoc signature; the file stays loadable
+        # and verifiable exactly as the release binaries did.
+        verify = subprocess.run(
+            ["codesign", "--verify", "--strict", str(executable)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert verify.returncode == 0, verify.stderr
+    gate = _scan_payload(payload, str(workshop))
+    assert gate.returncode == 0, gate.stdout + gate.stderr
+
+
+def test_runtime_payload_strip_leaves_plain_literals_for_the_gate_to_refuse(
+    tmp_path: Path,
+) -> None:
+    """Only debugging records go; a path written as text stays the gate's call."""
+    payload = tmp_path / "payload/VibecraftedRuntime"
+    workshop = str(tmp_path / "Volumes/workshop")
+    launcher = payload / "bin/launcher"
+    _write_executable(launcher, f'#!/bin/sh\nexec {workshop}/checkout/bin/tool "$@"\n')
+    manifest = payload / "bin/runtime-foundations.json"
+    manifest.write_text(json.dumps({"built_at": workshop}), encoding="utf-8")
+    before = {path: path.read_bytes() for path in (launcher, manifest)}
+
+    result = _strip_macho_debug_tree(payload / "bin")
+
+    assert result.returncode == 0, result.stderr
+    assert "0 executable(s) stripped" in result.stdout
+    assert {path: path.read_bytes() for path in before} == before
+    assert _scan_payload(payload, workshop).returncode == 1
+
+
+def test_runtime_payload_strip_never_follows_a_symlink_out_of_the_payload(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside/tool"
+    _compile_macho_with_debug_object(outside, tmp_path / "outside/objects")
+    original = outside.read_bytes()
+    payload = tmp_path / "payload/VibecraftedRuntime"
+    (payload / "bin").mkdir(parents=True)
+    (payload / "bin/tool").symlink_to(outside)
+    (payload / "bin/vendor").symlink_to(tmp_path / "outside", target_is_directory=True)
+
+    result = _strip_macho_debug_tree(payload / "bin")
+
+    assert result.returncode == 0, result.stderr
+    assert "0 executable(s) stripped" in result.stdout
+    assert outside.read_bytes() == original
+    assert (payload / "bin/tool").is_symlink()
+    assert (payload / "bin/vendor").is_symlink()
+
+
+def test_runtime_payload_strip_leaves_shared_libraries_to_the_gate(
+    tmp_path: Path,
+) -> None:
+    """Dylibs are not rewritten; the gate still reads every byte of them.
+
+    Measured on the f131b81b payload: every host path sat in an executable
+    under bin/, while the 24 dylibs and bundles of the uv-seeded CPython and
+    its wheels carried only their CI builders' object paths. The host `strip`
+    has a recorded history of writing dylibs dyld refuses (Xcode 27 beta, see
+    the release builder), so a library is never rewritten for a leak it does
+    not have — and one that does leak is refused exactly as before.
+    """
+    payload = tmp_path / "payload/VibecraftedRuntime"
+    workshop = tmp_path / "Volumes/workshop"
+    library = payload / "libexec/lib/libfixture.dylib"
+    _compile_macho_with_debug_object(library, workshop / "objects", shared_library=True)
+    before = library.read_bytes()
+    assert _oso_stabs(library)
+
+    result = _strip_macho_debug_tree(payload / "libexec")
+
+    assert result.returncode == 0, result.stderr
+    assert "0 executable(s) stripped" in result.stdout
+    assert library.read_bytes() == before
+    assert _scan_payload(payload, str(workshop)).returncode == 1
+
+
+def test_runtime_payload_strip_fails_closed_on_a_malformed_executable(
+    tmp_path: Path,
+) -> None:
+    payload = tmp_path / "payload/VibecraftedRuntime"
+    healthy = payload / "bin/healthy"
+    _compile_macho_with_debug_object(healthy, tmp_path / "objects")
+    broken = payload / "bin/broken"
+    # Header intact, segments cut: `file` still calls it a Mach-O executable
+    # and strip refuses to rewrite it.
+    broken.write_bytes(healthy.read_bytes()[:4096])
+    broken.chmod(0o755)
+
+    result = _strip_macho_debug_tree(payload / "bin")
+
+    assert result.returncode != 0
+    assert "strip -S failed on" in result.stderr
+    assert "truncated or malformed" in result.stderr
+
+
+def test_runtime_payload_strip_rewrites_adhoc_and_leaves_real_signatures_alone(
+    tmp_path: Path,
+) -> None:
+    """An ad-hoc seal is staging state; a real signature marks a finished artifact.
+
+    Measured 2026-09-08: the four Loctree binaries from npm arrive Developer ID
+    signed with zero debugging records; `strip -S` left them 64–80 bytes larger
+    with an invalidated signature. Whatever codesign does not report as ad-hoc
+    or unsigned is left exactly as delivered. A `codesign -s -` seal, unlike
+    the linker's, is NOT re-sealed by strip (measured here) — which is fine
+    only because the packager re-signs every Mach-O with the release identity
+    afterwards; this test performs that step to prove the file is still
+    signable and runs.
+    """
+    payload = tmp_path / "payload/VibecraftedRuntime"
+    adhoc = payload / "bin/adhoc-tool"
+    _compile_macho_with_debug_object(adhoc, tmp_path / "objects/adhoc")
+    _codesign_macho(adhoc)
+    vendor = payload / "bin/vendor-tool"
+    _compile_macho_with_debug_object(vendor, tmp_path / "objects/vendor")
+    vendor_before = vendor.read_bytes()
+    # No Developer ID is available to a test; answer codesign's question for
+    # the vendor binary the way a vendor-signed Mach-O does.
+    prelude = (
+        'codesign() { case "$*" in '
+        '*vendor-tool*) printf "Executable=%s\\nCodeDirectory v=20500 '
+        "flags=0x10000(runtime)\\nSignature size=9040\\n"
+        'TeamIdentifier=MW223P3NPX\\n" "${!#}";; '
+        '*) command codesign "$@";; esac; }; '
+    )
+
+    result = _strip_macho_debug_tree(payload / "bin", prelude=prelude)
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        "1 executable(s) stripped of debugging records, 1 signed left as delivered"
+        in result.stdout
+    )
+    assert vendor.read_bytes() == vendor_before
+    assert not _oso_stabs(adhoc)
+    _codesign_macho(adhoc)
+    verify = subprocess.run(
+        ["codesign", "--verify", "--strict", str(adhoc)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert verify.returncode == 0, verify.stderr
+    run = subprocess.run([str(adhoc)], check=False, capture_output=True)
+    assert run.returncode == 0, run.stderr
