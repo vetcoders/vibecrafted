@@ -1,6 +1,18 @@
 # shellcheck shell=bash
 # Extracted from vetcoders.sh; sourced only by the compatibility facade.
 
+# `--sandbox` is a skill-launcher control (execution_controls in core). The
+# interactive init/operator/partner spawn contract does not carry it yet, so it
+# is refused here instead of being accepted and silently ignored.
+_vetcoders_refuse_interactive_sandbox() {
+  local verb="$1"
+  [[ -z "${_vetcoders_contract_sandbox:-}" ]] || {
+    printf -- '--sandbox is not carried into vibecrafted %s (interactive session); use a skill launcher: vibecrafted workflow <agent> --sandbox true ...\n' "$verb" >&2
+    return 1
+  }
+  return 0
+}
+
 _vetcoders_skill_init() {
   local tool="$1"
   shift
@@ -19,6 +31,7 @@ _vetcoders_skill_init() {
     echo "--session is not supported by vibecrafted init." >&2
     return 1
   }
+  _vetcoders_refuse_interactive_sandbox init || return 1
 
   runtime="$(_vetcoders_init_runtime "${_vetcoders_contract_runtime:-terminal}")" || return 1
   init_prompt="$(_vetcoders_compose_init_prompt "$_vetcoders_contract_prompt" "$_vetcoders_contract_file")" || return 1
@@ -83,6 +96,7 @@ _vetcoders_skill_operator() {
     echo "--session is not supported by vibecrafted operator." >&2
     return 1
   }
+  _vetcoders_refuse_interactive_sandbox operator || return 1
 
   _vetcoders_require_vc_frame || return 1
 
@@ -116,6 +130,7 @@ _vetcoders_skill_partner() {
     echo "--session is not supported by vibecrafted partner." >&2
     return 1
   }
+  _vetcoders_refuse_interactive_sandbox partner || return 1
 
   runtime="$(_vetcoders_partner_runtime "${_vetcoders_contract_runtime:-terminal}")" || return 1
   partner_prompt="$(_vetcoders_compose_partner_prompt "$_vetcoders_contract_prompt" "$_vetcoders_contract_file")" || return 1

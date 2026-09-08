@@ -50,16 +50,18 @@ supervised run.
 
 Every skill launcher accepts the same flag contract:
 
-| Flag                       | Meaning                                                                |
-| -------------------------- | ---------------------------------------------------------------------- |
-| `-p, --prompt <text>`      | Inline prompt                                                          |
-| `-f, --file <path.md>`     | Input file as prompt context                                           |
-| `--repo <path>`            | Repository to work in, from any directory (`--root`: legacy)           |
-| `--worktree [true\|false]` | Run in a fresh linked checkout of `--repo` (clean Git root)            |
-| `--model <name>`           | Agent model override (passed through exactly, e.g. `claude-fable-5-1`) |
-| `--count <n>`              | Marbles / Polarize loop count (default: 3)                             |
-| `--depth <n>`              | Marbles plan crawl depth (default: 3)                                  |
-| `--session <id>`           | Session ID for `vibecrafted resume` / `vibecrafted fork`               |
+| Flag                       | Meaning                                                                              |
+| -------------------------- | ------------------------------------------------------------------------------------ |
+| `-p, --prompt <text>`      | Inline prompt                                                                        |
+| `-f, --file <path.md>`     | Input file as prompt context                                                         |
+| `--repo <path>`            | Repository to work in, from any directory (`--root`: legacy)                         |
+| `--worktree [true\|false]` | Run in a fresh linked checkout of `--repo` (clean Git root)                          |
+| `--permissions <policy>`   | `bypass\|auto\|accept-edits\|read-only`, enforced by the agent CLI (default: bypass) |
+| `--sandbox [true\|false]`  | Agent CLI sandbox on/off; refused before launch when it cannot be enforced           |
+| `--model <name>`           | Agent model override (passed through exactly, e.g. `claude-fable-5-1`)               |
+| `--count <n>`              | Marbles / Polarize loop count (default: 3)                                           |
+| `--depth <n>`              | Marbles plan crawl depth (default: 3)                                                |
+| `--session <id>`           | Session ID for `vibecrafted resume` / `vibecrafted fork`                             |
 
 `--verbose` is a global option for detailed output. `--repo` and the legacy
 `--root` go through one selector everywhere: passing both with different
@@ -70,8 +72,15 @@ run their defaults.
 ```bash
 cd ~/Downloads   # not a Git checkout
 vibecrafted workflow claude --model claude-fable-5-1 --worktree true \
-  --repo ~/Projects/app --prompt "Ship it in an isolated checkout"
+  --permissions auto --sandbox true \
+  --repo ~/Projects/app --prompt "Ship it in an isolated, sandboxed checkout"
 ```
+
+`--permissions` and `--sandbox` are resolved against the installed provider
+CLI before launch and refused with a supported alternative when the provider
+cannot enforce them — never a silent downgrade. See
+[Commands → Execution controls](/docs/commands/#execution-controls-permissions-sandbox)
+for the per-provider mapping.
 
 ## Action-first agent modes
 

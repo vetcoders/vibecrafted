@@ -27,6 +27,7 @@ from .agent_dispatch import extract_session_id, sandbox_supported
 from .clock import utc_now_iso
 from .control_plane import control_plane_home, ensure_session_id, normalize_run_root
 from .events import append_event
+from .execution_controls import PERMISSION_POLICIES, ExecutionControls
 from .report_contract import (
     CLAIM_DIGEST_ENV,
     materialize_launcher_report_template,
@@ -46,7 +47,8 @@ AGENT_BINARY_NAMES: dict[str, str] = {
     "cursor": "cursor-agent",
 }
 RUNTIME_POLICIES = ("local-native", "local-worktrees", "local-vm", "cloud-soon")
-PERMISSION_POLICIES = ("bypass", "auto", "accept-edits", "read-only")
+# The public permission words live in execution_controls (one owner for the
+# core launcher and the shell contract); re-exported here for the policy API.
 POLICY_MODES = ("interactive", "headless")
 QUOTA_PRESET_TOKENS = 250_000
 QUOTA_MAX_TOKENS = 10_000_000
@@ -319,6 +321,25 @@ _PERMISSION_CONTRACT: dict[str, dict[str, tuple[tuple[str, ...], str] | None]] =
         "read-only": (
             ("--mode", "ask", "--trust"),
             "ask mode is read-only Q&A; no edits or execution",
+        ),
+    },
+}
+
+
+# Headless overlay: `codex exec` (codex-cli 0.154.0-alpha.3 --help) has no
+# --ask-for-approval, so the interactive cells above would be rejected by the
+# binary. exec offers --approve-for-me (automatic review inside the
+# workspace-write sandbox) and -s/--sandbox; these cells carry the same meaning
+# in the headless shape. Evidence: execution_controls.SANDBOX_EVIDENCE["codex"].
+_HEADLESS_PERMISSION_CONTRACT: dict[str, dict[str, tuple[tuple[str, ...], str]]] = {
+    "codex": {
+        "auto": (
+            ("--approve-for-me",),
+            "codex reviews approvals automatically inside the workspace-write sandbox",
+        ),
+        "read-only": (
+            ("--sandbox", "read-only"),
+            "read-only sandbox; writes and escalations fail closed",
         ),
     },
 }
@@ -750,6 +771,8 @@ def resolve_provider_policy(
             reason="local worktrees are available only for interactive Agent Workspaces",
         )
     cell = _PERMISSION_CONTRACT[provider][permissions]
+    if mode == "headless":
+        cell = _HEADLESS_PERMISSION_CONTRACT.get(provider, {}).get(permissions, cell)
     if cell is None:
         return ProviderPolicy(
             provider,
@@ -2591,7 +2614,33 @@ def _set_child_pgid() -> None:
         pass
 
 
-def _default_command(agent: str, prompt: str) -> list[str]:
+def _headless_policy_flags(
+    agent: str, controls: ExecutionControls | None
+) -> tuple[list[str], str]:
+    """Provider flags + effective permission word for one headless launch.
+
+    Without explicit controls this is the historical default (bypass; auto for
+    junie). With controls, the resolved argv from execution_controls is used
+    verbatim — the resolver already refused anything the provider cannot
+    enforce, so nothing here approximates a requested restriction.
+    """
+    if controls is not None:
+        if controls.provider != agent:
+            raise ValueError(
+                f"execution controls resolved for {controls.provider}, not {agent}"
+            )
+        return list(controls.provider_flags), controls.permissions_effective
+    policy = resolve_provider_policy(
+        agent, "local-native", "auto" if agent == "junie" else "bypass", "headless"
+    )
+    if not policy.supported:
+        raise ValueError(policy.reason)
+    return list(policy.flags), policy.permissions
+
+
+def _default_command(
+    agent: str, prompt: str, controls: ExecutionControls | None = None
+) -> list[str]:
     """Build the argv for launching *agent* with *prompt* passed inline (ARG_MAX risk).
 
     Raises ValueError for the deprecated gemini CLI and any unsupported agent.
@@ -2602,12 +2651,7 @@ def _default_command(agent: str, prompt: str) -> list[str]:
             "Use 'vibecrafted workflow agy --prompt ...' (or agy in other launchers). "
             "No execution path may launch the gemini binary."
         )
-    policy = resolve_provider_policy(
-        agent, "local-native", "auto" if agent == "junie" else "bypass", "headless"
-    )
-    if not policy.supported:
-        raise ValueError(policy.reason)
-    flags = list(policy.flags)
+    flags, permissions = _headless_policy_flags(agent, controls)
     if agent == "claude":
         return [
             "claude",
@@ -2652,7 +2696,9 @@ def _default_command(agent: str, prompt: str) -> list[str]:
             prompt,
         ]
     if agent == "cursor":
-        flags = list(_materialize_cursor_permission_flags(flags, permissions="bypass"))
+        flags = list(
+            _materialize_cursor_permission_flags(flags, permissions=permissions)
+        )
         return [
             "cursor-agent",
             "-p",
@@ -2664,11 +2710,14 @@ def _default_command(agent: str, prompt: str) -> list[str]:
     raise ValueError(f"unsupported agent: {agent}")
 
 
-def _stdin_command(agent: str) -> list[str]:
+def _stdin_command(agent: str, controls: ExecutionControls | None = None) -> list[str]:
     """Build an agent command that receives the full prompt on stdin.
 
     The command argv must carry flags and paths only; large prompt bodies belong
-    on stdin so they do not leak through ps(1) or hit ARG_MAX.
+    on stdin so they do not leak through ps(1) or hit ARG_MAX. ``controls``
+    (execution_controls.resolve_execution_controls) replaces the default
+    permission flags with the caller's resolved ``--permissions`` /
+    ``--sandbox`` argv.
     """
 
     if agent == "gemini":
@@ -2677,12 +2726,7 @@ def _stdin_command(agent: str) -> list[str]:
             "Use 'vibecrafted workflow agy --prompt ...' (or agy in other launchers). "
             "No execution path may launch the gemini binary."
         )
-    policy = resolve_provider_policy(
-        agent, "local-native", "auto" if agent == "junie" else "bypass", "headless"
-    )
-    if not policy.supported:
-        raise ValueError(policy.reason)
-    flags = list(policy.flags)
+    flags, permissions = _headless_policy_flags(agent, controls)
     if agent == "claude":
         return [
             "claude",
@@ -2736,7 +2780,9 @@ def _stdin_command(agent: str) -> list[str]:
             "/dev/stdin",
         ]
     if agent == "cursor":
-        flags = list(_materialize_cursor_permission_flags(flags, permissions="bypass"))
+        flags = list(
+            _materialize_cursor_permission_flags(flags, permissions=permissions)
+        )
         return [
             "cursor-agent",
             "-p",

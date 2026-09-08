@@ -48,6 +48,11 @@ _vetcoders_contract_reset() {
   # "true" | "false" | "" — `--worktree` requests an isolated linked checkout;
   # only the core launcher can honour it.
   _vetcoders_contract_worktree=""
+  # "true" | "false" | "" — `--sandbox` asks the provider's own sandbox on/off.
+  # Same words as --worktree; only the core launcher can resolve it against
+  # the installed provider CLI (execution_controls), so the shell helpers
+  # refuse it rather than accept-and-ignore.
+  _vetcoders_contract_sandbox=""
   _vetcoders_contract_tail=""
   _vetcoders_contract_dry_run=""
   _vetcoders_contract_no_aicx=""
@@ -212,6 +217,20 @@ _vetcoders_parse_contract() {
         fi
         _vetcoders_contract_worktree="$(_vetcoders_worktree_word_value "${1#--worktree=}")"
         ;;
+      --sandbox)
+        _vetcoders_contract_sandbox="true"
+        if [[ $# -gt 1 ]] && _vetcoders_is_worktree_word "$2"; then
+          shift
+          _vetcoders_contract_sandbox="$(_vetcoders_worktree_word_value "$1")"
+        fi
+        ;;
+      --sandbox=*)
+        if ! _vetcoders_is_worktree_word "${1#--sandbox=}"; then
+          printf -- '--sandbox expects true or false, got: %s\n' "${1#--sandbox=}" >&2
+          return 1
+        fi
+        _vetcoders_contract_sandbox="$(_vetcoders_worktree_word_value "${1#--sandbox=}")"
+        ;;
       --)
         shift
         while [[ $# -gt 0 ]]; do
@@ -321,7 +340,7 @@ _vetcoders_rewrite_contract_root_argv() {
         root_ordinal=$ordinal
         root_inline_flag="${_arg%%=*}"
         ;;
-      --worktree)
+      --worktree | --sandbox)
         # Optional boolean word: step over it only when it is one, so a later
         # `--worktree --root X` still sees `--root` as a flag.
         local _worktree_peek=""

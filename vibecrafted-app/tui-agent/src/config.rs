@@ -47,8 +47,22 @@ pub struct AppConfig {
 }
 
 pub fn parse_args() -> anyhow::Result<CliOptions> {
+    parse_args_from(env::args().skip(1))
+}
+
+/// Parse the public `voc` argument vector (process name already stripped).
+///
+/// `--repo <path>` is the standard repository selector shared with every
+/// repository-aware `vibecrafted` command; `--root <path>` is the legacy
+/// spelling with identical semantics. Passing both with different paths is
+/// an error (never a silent pick); the same path spelled twice is accepted.
+pub fn parse_args_from<I>(args: I) -> anyhow::Result<CliOptions>
+where
+    I: IntoIterator<Item = String>,
+{
     let mut options = CliOptions::default();
-    let mut args = env::args().skip(1);
+    let mut args = args.into_iter();
+    let mut repo_selection: Option<(&'static str, PathBuf)> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => {
@@ -81,14 +95,23 @@ pub fn parse_args() -> anyhow::Result<CliOptions> {
                     .unwrap_or_default();
                 options.command_deck = Some(PathBuf::from(value));
             }
-            "--root" => {
+            "--repo" | "--root" => {
+                let flag: &'static str = if arg == "--repo" { "--repo" } else { "--root" };
                 let value = args
                     .next()
-                    .ok_or_else(|| anyhow::anyhow!("--root requires a value"))?;
-                options.launch_root = Some(PathBuf::from(value));
+                    .ok_or_else(|| anyhow::anyhow!("{flag} requires a value"))?;
+                select_launch_root(&mut repo_selection, flag, PathBuf::from(value))?;
             }
-            _ if arg.starts_with("--root=") => {
-                options.launch_root = Some(PathBuf::from(arg.trim_start_matches("--root=")));
+            _ if arg.starts_with("--repo=") || arg.starts_with("--root=") => {
+                let (flag, value) = arg
+                    .split_once('=')
+                    .map(|(flag, value)| (flag.to_string(), value.to_string()))
+                    .unwrap_or_default();
+                let flag: &'static str = if flag == "--repo" { "--repo" } else { "--root" };
+                if value.is_empty() {
+                    anyhow::bail!("{flag} requires a value");
+                }
+                select_launch_root(&mut repo_selection, flag, PathBuf::from(value))?;
             }
             "--runtime" => {
                 let value = args
@@ -148,7 +171,56 @@ pub fn parse_args() -> anyhow::Result<CliOptions> {
             }
         }
     }
+    options.launch_root = repo_selection.map(|(_, path)| path);
     Ok(options)
+}
+
+/// One repository selector for `--repo` (standard) and `--root` (legacy).
+///
+/// Mirrors `vibecrafted_core.repo_selection.select_repository`: the first
+/// selection wins only when every later one names the same path; a different
+/// path is a hard conflict naming both flags, never a silent pick.
+fn select_launch_root(
+    selection: &mut Option<(&'static str, PathBuf)>,
+    flag: &'static str,
+    path: PathBuf,
+) -> anyhow::Result<()> {
+    if let Some((previous_flag, previous)) = selection {
+        if same_repository(previous, &path) {
+            return Ok(());
+        }
+        if *previous_flag == flag {
+            anyhow::bail!(
+                "{flag} passed twice with different paths: {} and {}; pass one repository",
+                path_display(previous),
+                path_display(&path)
+            );
+        }
+        let (repo, root) = if flag == "--repo" {
+            (&path, &*previous)
+        } else {
+            (&*previous, &path)
+        };
+        anyhow::bail!(
+            "conflicting --repo {} and --root {}; pass one repository",
+            path_display(repo),
+            path_display(root)
+        );
+    }
+    *selection = Some((flag, path));
+    Ok(())
+}
+
+/// Two spellings of one repository: lexically equal, or canonicalizing to
+/// the same existing directory (`repo` vs `repo/.` vs a symlinked twin).
+fn same_repository(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 pub fn build_config(options: CliOptions) -> AppConfig {
@@ -253,7 +325,7 @@ fn print_help() {
     println!("Voc Agent");
     println!();
     println!("Usage:");
-    println!("  voc [--view observe|full] [--server <url>] [--state-root <dir>] [--root <path>]");
+    println!("  voc [--view observe|full] [--server <url>] [--state-root <dir>] [--repo <path>]");
     println!();
     println!("Options:");
     println!("  --view observe|full  Default observe: server-backed live board + AICX memory");
@@ -262,7 +334,12 @@ fn print_help() {
     );
     println!("  --state-root <dir>   Control-plane state root under VIBECRAFTED_HOME");
     println!("  --deck <path>        Command deck binary or script to launch workflows");
-    println!("  --root <path>        Workspace root passed through to launched workflows");
+    println!(
+        "  --repo <path>        Repository (workspace root) passed through to launched workflows"
+    );
+    println!(
+        "  --root <path>        Legacy spelling of --repo; both with different paths is an error"
+    );
     println!("  --runtime <kind>     Launch runtime (headless|terminal|visible)");
     println!(
         "  --terminal-binary <path>  Terminal multiplexer binary (default: vc-frame, vc_frame fallback)"
@@ -272,4 +349,102 @@ fn print_help() {
 
 pub fn path_display(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> anyhow::Result<CliOptions> {
+        parse_args_from(args.iter().map(|arg| arg.to_string()))
+    }
+
+    #[test]
+    fn repo_is_the_standard_selector_and_root_the_legacy_spelling() {
+        let repo = parse(&["--repo", "/tmp/app"]).unwrap();
+        assert_eq!(repo.launch_root, Some(PathBuf::from("/tmp/app")));
+        let root = parse(&["--root", "/tmp/app"]).unwrap();
+        assert_eq!(root.launch_root, Some(PathBuf::from("/tmp/app")));
+        let inline = parse(&["--repo=/tmp/app with space"]).unwrap();
+        assert_eq!(
+            inline.launch_root,
+            Some(PathBuf::from("/tmp/app with space"))
+        );
+        assert_eq!(parse(&[]).unwrap().launch_root, None);
+    }
+
+    #[test]
+    fn same_path_spelled_twice_is_accepted() {
+        let both = parse(&["--repo", "/tmp/app", "--root", "/tmp/app"]).unwrap();
+        assert_eq!(both.launch_root, Some(PathBuf::from("/tmp/app")));
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_path_buf();
+        let dotted = dir.join(".");
+        let mixed = parse(&[
+            "--repo",
+            dir.to_str().unwrap(),
+            "--root",
+            dotted.to_str().unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(mixed.launch_root, Some(dir));
+    }
+
+    #[test]
+    fn conflicting_repo_and_root_is_an_error_naming_both_flags() {
+        for argv in [
+            ["--repo", "/tmp/left", "--root", "/tmp/right"],
+            ["--root", "/tmp/right", "--repo", "/tmp/left"],
+        ] {
+            let error = parse(&argv).unwrap_err().to_string();
+            assert_eq!(
+                error,
+                "conflicting --repo /tmp/left and --root /tmp/right; pass one repository"
+            );
+        }
+        let twice = parse(&["--repo", "/tmp/a", "--repo=/tmp/b"])
+            .unwrap_err()
+            .to_string();
+        assert!(twice.contains("--repo passed twice"), "{twice}");
+    }
+
+    #[test]
+    fn missing_values_and_unknown_flags_still_fail_closed() {
+        assert_eq!(
+            parse(&["--repo"]).unwrap_err().to_string(),
+            "--repo requires a value"
+        );
+        assert_eq!(
+            parse(&["--repo="]).unwrap_err().to_string(),
+            "--repo requires a value"
+        );
+        assert_eq!(
+            parse(&["--root"]).unwrap_err().to_string(),
+            "--root requires a value"
+        );
+        assert!(
+            parse(&["--repository", "/tmp/x"])
+                .unwrap_err()
+                .to_string()
+                .starts_with("unknown argument")
+        );
+    }
+
+    #[test]
+    fn other_flags_keep_their_behaviour_next_to_repo() {
+        let options = parse(&[
+            "--repo",
+            "/tmp/app",
+            "--tick-ms",
+            "500",
+            "--no-verify-gate",
+            "--runtime",
+            "headless",
+        ])
+        .unwrap();
+        assert_eq!(options.launch_root, Some(PathBuf::from("/tmp/app")));
+        assert_eq!(options.tick_ms, 500);
+        assert!(options.no_verify_gate);
+        assert_eq!(options.launch_runtime, Some(LaunchRuntime::Headless));
+    }
 }
