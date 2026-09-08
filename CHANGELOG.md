@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Fixed
+
+- Server web: the Loctree report opens whole in a browser. The document now
+  lives at the directory-style `/structure/report/` (`/structure/report`
+  redirects there), so Loctree's relative `loctree-*.js` references resolve
+  onto `/structure/report/{asset}` instead of `/structure/*` (404 under the
+  sandbox policy); and because the sandboxed document has an opaque origin
+  where `window.localStorage` throws, the server installs an in-memory Web
+  Storage stand-in as the first script — the report's tabs (Graph included)
+  and theme toggle work again. `allow-same-origin` is still never granted.
+
 ### Changed
 
 - macOS App: the console window uses one native unified toolbar (Back,
