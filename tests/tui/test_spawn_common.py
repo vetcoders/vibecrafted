@@ -3907,6 +3907,10 @@ def _generation_bin_carrying_core(tmp_path: Path) -> Path:
     generation_bin = tmp_path / "gene ration" / "bin"
     generation_bin.mkdir(parents=True, exist_ok=True)
     interpreter = generation_bin / "python3"
+    # A stale fixture may leave this path as a symlink.  ``write_text`` follows
+    # it, so remove the link itself before creating this fixture-owned wrapper.
+    if interpreter.is_symlink():
+        interpreter.unlink()
     interpreter.write_text(
         "#!/bin/sh\n"
         f"PYTHONPATH={shlex.quote(str(CORE_PACKAGE_DIR))} "
@@ -3915,6 +3919,26 @@ def _generation_bin_carrying_core(tmp_path: Path) -> Path:
     )
     interpreter.chmod(0o755)
     return generation_bin
+
+
+def test_generation_bin_wrapper_replaces_symlink_without_writing_target(
+    tmp_path: Path,
+) -> None:
+    """The fixture wrapper must never overwrite a symlink's target."""
+
+    sentinel = tmp_path / "private-sentinel"
+    sentinel_bytes = b"private sentinel must remain unchanged\n"
+    sentinel.write_bytes(sentinel_bytes)
+
+    generation_bin = tmp_path / "gene ration" / "bin"
+    generation_bin.mkdir(parents=True)
+    interpreter = generation_bin / "python3"
+    interpreter.symlink_to(sentinel)
+
+    assert _generation_bin_carrying_core(tmp_path) == generation_bin
+    assert sentinel.read_bytes() == sentinel_bytes
+    assert not interpreter.is_symlink()
+    assert interpreter.is_file()
 
 
 def _entrypoint_env(tmp_path: Path) -> tuple[dict[str, str], Path, Path]:
