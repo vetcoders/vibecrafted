@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import os
+import platform
 import plistlib
 import re
 import shutil
@@ -3973,8 +3974,16 @@ MACHO_SIGNING = REPO_ROOT / "scripts/lib/macho-signing.sh"
 PAYLOAD_SCANNER = REPO_ROOT / "scripts/payload_hygiene.py"
 
 
+FIXTURE_SOURCE = "int answer(void) { return 42; }\nint main(void) { return 0; }\n"
+
+
 def _compile_macho_with_debug_object(
-    path: Path, object_dir: Path, *, shared_library: bool = False
+    path: Path,
+    object_dir: Path,
+    *,
+    shared_library: bool = False,
+    source_text: str = FIXTURE_SOURCE,
+    extra_link: tuple[str, ...] = (),
 ) -> None:
     """Two-step compile that leaves the object's path in the linker's N_OSO stab.
 
@@ -3986,10 +3995,7 @@ def _compile_macho_with_debug_object(
     xcrun = _clang()
     object_dir.mkdir(parents=True, exist_ok=True)
     source = object_dir / "fixture.c"
-    source.write_text(
-        "int answer(void) { return 42; }\nint main(void) { return 0; }\n",
-        encoding="utf-8",
-    )
+    source.write_text(source_text, encoding="utf-8")
     obj = object_dir / "fixture.o"
     common = [
         xcrun,
@@ -4011,6 +4017,7 @@ def _compile_macho_with_debug_object(
     link = list(common)
     if shared_library:
         link += ["-dynamiclib", f"-Wl,-install_name,@rpath/{path.name}"]
+    link += list(extra_link)
     path.parent.mkdir(parents=True, exist_ok=True)
     linked = subprocess.run(
         [*link, str(obj), "-o", str(path)],
@@ -4036,20 +4043,73 @@ def _oso_stabs(path: Path) -> list[str]:
 
 
 def _strip_macho_debug_tree(
-    *roots: Path, prelude: str = ""
+    *roots: Path, prelude: str = "", shared_libraries: bool = False
 ) -> subprocess.CompletedProcess[str]:
     shell = (
         'set -euo pipefail; source "$1"; shift; '
         + prelude
         + 'strip_macho_debug_tree "$@"'
     )
+    arguments = ["--shared-libraries"] if shared_libraries else []
     return subprocess.run(
-        ["bash", "-c", shell, "macho-strip", str(MACHO_SIGNING), *map(str, roots)],
+        [
+            "bash",
+            "-c",
+            shell,
+            "macho-strip",
+            str(MACHO_SIGNING),
+            *arguments,
+            *map(str, roots),
+        ],
         cwd=REPO_ROOT,
         check=False,
         capture_output=True,
         text=True,
     )
+
+
+def _public_shape(path: Path) -> str:
+    """Exports and load commands: what a consumer of the library binds to."""
+    exports = subprocess.run(
+        [_clang(), "nm", "-gU", str(path)], check=True, capture_output=True, text=True
+    ).stdout
+    load_commands = subprocess.run(
+        [_clang(), "otool", "-l", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    kept = [
+        line
+        for line in load_commands.splitlines()
+        if re.match(r"^ *(cmd|name|path) ", line)
+    ]
+    return exports + "\n".join(kept)
+
+
+def _call_answer_through_dyld(library: Path) -> int:
+    """Load the library the way the Swift host does — dlopen — and call it.
+
+    Runs in a child of this interpreter so a library dyld refuses cannot take
+    the test process down with it. `codesign --verify` is not dyld acceptance.
+    """
+    if platform.machine() != "arm64":
+        pytest.skip("fixture libraries are linked for arm64")
+    probe = (
+        "import ctypes, signal, sys; signal.alarm(20); "
+        "lib = ctypes.CDLL(sys.argv[1], mode=ctypes.RTLD_LOCAL); "
+        "lib.answer.restype = ctypes.c_int; lib.answer.argtypes = []; "
+        "print(lib.answer())"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe, str(library)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return int(result.stdout.strip())
 
 
 def _scan_payload(root: Path, *forbidden: str) -> subprocess.CompletedProcess[str]:
@@ -4148,14 +4208,16 @@ def test_runtime_payload_strip_never_follows_a_symlink_out_of_the_payload(
 def test_runtime_payload_strip_leaves_shared_libraries_to_the_gate(
     tmp_path: Path,
 ) -> None:
-    """Dylibs are not rewritten; the gate still reads every byte of them.
+    """Without --shared-libraries a dylib is not rewritten; the gate reads it.
 
     Measured on the f131b81b payload: every host path sat in an executable
     under bin/, while the 24 dylibs and bundles of the uv-seeded CPython and
     its wheels carried only their CI builders' object paths. The host `strip`
     has a recorded history of writing dylibs dyld refuses (Xcode 27 beta, see
-    the release builder), so a library is never rewritten for a leak it does
-    not have — and one that does leak is refused exactly as before.
+    the release builder), so a vendor library is never rewritten for a leak it
+    does not have — and one that does leak is refused exactly as before. The
+    roots this build links its own libraries into opt in explicitly; see the
+    app_frameworks_strip tests below.
     """
     payload = tmp_path / "payload/VibecraftedRuntime"
     workshop = tmp_path / "Volumes/workshop"
@@ -4241,3 +4303,191 @@ def test_runtime_payload_strip_rewrites_adhoc_and_leaves_real_signatures_alone(
     assert verify.returncode == 0, verify.stderr
     run = subprocess.run([str(adhoc)], check=False, capture_output=True)
     assert run.returncode == 0, run.stderr
+
+
+# --- App Frameworks: the libraries this build links --------------------------
+#
+# MEASURED 2026-09-09 on the aa12980d release candidate: the Runtime Pack
+# passed its gate (6739 files) and the App gate refused
+# Contents/Frameworks/libvibecrafted_shell_ffi.dylib — 17 N_OSO stabs, 11
+# naming the Cargo target directory and 6 the rustup sysroot, nothing else in
+# the file naming the host. That dylib is linked by the "Build Rust FFI"
+# phase and embedded by Xcode as it came, so the shared boundary owns it under
+# --shared-libraries, scoped to that one root. The same helper proved on the
+# real library that exports and load commands stayed identical and dyld loads
+# it afterwards; these fixtures make that contract falsifiable here.
+
+
+def test_app_frameworks_strip_normalizes_own_shared_library_and_keeps_it_loadable(
+    tmp_path: Path,
+) -> None:
+    app = tmp_path / "Vibecrafted.app"
+    workshop = tmp_path / "Volumes/workshop"
+    library = app / "Contents/Frameworks/libfixture.dylib"
+    _compile_macho_with_debug_object(
+        library, workshop / "checkout/target/release/deps", shared_library=True
+    )
+    assert _oso_stabs(library)
+    shape_before = _public_shape(library)
+    assert "answer" in shape_before
+    assert _scan_payload(app, str(workshop)).returncode == 1
+
+    result = _strip_macho_debug_tree(app / "Contents/Frameworks", shared_libraries=True)
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        "0 executable(s) and 1 shared library(ies) stripped of debugging records"
+        in result.stdout
+    )
+    assert not _oso_stabs(library)
+    assert str(workshop).encode() not in library.read_bytes()
+    assert _public_shape(library) == shape_before
+    verify = subprocess.run(
+        ["codesign", "--verify", "--strict", str(library)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert verify.returncode == 0, verify.stderr
+    # The packager re-signs every Mach-O afterwards; the library must survive
+    # that and still be the one the Swift host dlopens.
+    _codesign_macho(library)
+    assert _call_answer_through_dyld(library) == 42
+    assert _scan_payload(app, str(workshop)).returncode == 0
+
+
+def test_app_frameworks_strip_leaves_symlinks_vendor_seals_and_plain_text_alone(
+    tmp_path: Path,
+) -> None:
+    """Only the libraries this build linked are rewritten; the gate keeps the rest."""
+    app = tmp_path / "Vibecrafted.app"
+    frameworks = app / "Contents/Frameworks"
+    workshop = tmp_path / "Volumes/workshop"
+    own = frameworks / "libown.dylib"
+    _compile_macho_with_debug_object(own, workshop / "own-objects", shared_library=True)
+    vendor = frameworks / "libvendor.dylib"
+    _compile_macho_with_debug_object(
+        vendor, workshop / "vendor-objects", shared_library=True
+    )
+    vendor_before = vendor.read_bytes()
+    outside = tmp_path / "outside/liboutside.dylib"
+    _compile_macho_with_debug_object(
+        outside, tmp_path / "outside/objects", shared_library=True
+    )
+    outside_before = outside.read_bytes()
+    (frameworks / "liblinked.dylib").symlink_to(outside)
+    notice = frameworks / "NOTICE.txt"
+    notice.write_text(f"built at {workshop}\n", encoding="utf-8")
+    notice_before = notice.read_bytes()
+    prelude = (
+        'codesign() { case "$*" in '
+        '*libvendor.dylib*) printf "Executable=%s\\nCodeDirectory v=20500 '
+        "flags=0x10000(runtime)\\nSignature size=9040\\n"
+        'TeamIdentifier=MW223P3NPX\\n" "${!#}";; '
+        '*) command codesign "$@";; esac; }; '
+    )
+
+    result = _strip_macho_debug_tree(frameworks, prelude=prelude, shared_libraries=True)
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        "0 executable(s) and 1 shared library(ies) stripped of debugging records, "
+        "1 signed left as delivered" in result.stdout
+    )
+    assert not _oso_stabs(own)
+    assert vendor.read_bytes() == vendor_before
+    assert outside.read_bytes() == outside_before
+    assert (frameworks / "liblinked.dylib").is_symlink()
+    assert notice.read_bytes() == notice_before
+    # The vendor library still names the workshop and so does the notice:
+    # the gate, not the strip, is what refuses them.
+    assert _scan_payload(app, str(workshop)).returncode == 1
+
+
+def test_app_frameworks_strip_fails_closed_when_the_library_no_longer_loads(
+    tmp_path: Path,
+) -> None:
+    """`strip -S` succeeding is not acceptance; only a real dyld load is.
+
+    A library whose dependency is gone strips cleanly and verifies, and the
+    Swift host would crash at launch. The boundary must refuse the build.
+    """
+    app = tmp_path / "Vibecrafted.app"
+    dependency_dir = tmp_path / "deps"
+    dependency = dependency_dir / "libgone.dylib"
+    _compile_macho_with_debug_object(
+        dependency,
+        tmp_path / "deps-objects",
+        shared_library=True,
+        source_text="int gone_answer(void) { return 42; }\n",
+    )
+    library = app / "Contents/Frameworks/libfixture.dylib"
+    _compile_macho_with_debug_object(
+        library,
+        tmp_path / "Volumes/workshop/objects",
+        shared_library=True,
+        source_text="int gone_answer(void);\nint answer(void) { return gone_answer(); }\n",
+        extra_link=("-L", str(dependency_dir), "-lgone"),
+    )
+    dependency.unlink()
+
+    result = _strip_macho_debug_tree(app / "Contents/Frameworks", shared_libraries=True)
+
+    assert result.returncode != 0
+    assert "stripped library does not load" in result.stderr
+    assert "libgone.dylib" in result.stderr
+
+
+def test_app_frameworks_strip_fails_closed_on_a_malformed_shared_library(
+    tmp_path: Path,
+) -> None:
+    app = tmp_path / "Vibecrafted.app"
+    healthy = app / "Contents/Frameworks/libhealthy.dylib"
+    _compile_macho_with_debug_object(healthy, tmp_path / "objects", shared_library=True)
+    broken = app / "Contents/Frameworks/libbroken.dylib"
+    broken.write_bytes(healthy.read_bytes()[:4096])
+    broken.chmod(0o755)
+
+    result = _strip_macho_debug_tree(app / "Contents/Frameworks", shared_libraries=True)
+
+    assert result.returncode != 0
+    assert "libbroken.dylib" in result.stderr
+
+
+def test_app_frameworks_strip_runs_the_strip_the_selected_toolchain_resolves(
+    tmp_path: Path,
+) -> None:
+    """The strip that rewrites a library is the one xcrun resolves for the caller.
+
+    The release builder exports DEVELOPER_DIR for the verified stable Xcode
+    and refuses a beta; the Xcode 27 beta strip has written chained-fixups
+    dylibs dyld refused (measured 2026-08-28). Whatever `strip` PATH names is
+    not the contract — `xcrun --find strip` under the caller's DEVELOPER_DIR
+    is, and the log names it.
+    """
+    app = tmp_path / "Vibecrafted.app"
+    library = app / "Contents/Frameworks/libfixture.dylib"
+    _compile_macho_with_debug_object(
+        library, tmp_path / "Volumes/workshop/objects", shared_library=True
+    )
+    ledger = tmp_path / "strip-invocations.log"
+    toolchain_strip = tmp_path / "toolchain/usr/bin/strip"
+    toolchain_strip.parent.mkdir(parents=True)
+    toolchain_strip.write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{ledger}"\nexec /usr/bin/strip "$@"\n',
+        encoding="utf-8",
+    )
+    toolchain_strip.chmod(0o755)
+    prelude = (
+        'xcrun() { if [[ "$1" == "--find" && "$2" == "strip" ]]; then '
+        f'printf "%s\\n" "{toolchain_strip}"; else command xcrun "$@"; fi; }}; '
+    )
+
+    result = _strip_macho_debug_tree(
+        app / "Contents/Frameworks", prelude=prelude, shared_libraries=True
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"macho-strip: tool {toolchain_strip}" in result.stdout
+    assert ledger.read_text(encoding="utf-8").splitlines() == [f"-S {library}"]
+    assert not _oso_stabs(library)
