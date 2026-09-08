@@ -416,7 +416,10 @@ def test_cursor_spawn_wrapper_exists_and_probes_cursor_agent() -> None:
     body = wrapper.read_text(encoding="utf-8")
     # Probes the fleet binary, not the editor CLI.
     assert "spawn_require_command cursor-agent" in body
-    # Headless lane mirrors spawn.py's cursor permission policy.
-    assert "cursor-agent -p --output-format stream-json --force --trust" in body
+    # Headless lane uses canonical Python probe; requires --force/--trust.
+    assert "probe_cursor_cli_surface" in body
+    assert "require_cursor_flags" in body
+    assert "no silent downgrade" in body
+    assert "cursor-agent -p --output-format stream-json $cursor_perm_flags" in body
     # Stream events flow through the shared filter as the cursor lane.
     assert "vibecrafted_core.agent_stream --agent cursor" in body

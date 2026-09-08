@@ -776,6 +776,30 @@ def resolve_provider_policy(
     return ProviderPolicy(provider, runtime, permissions, mode, True, flags, behavior)
 
 
+def _materialize_cursor_permission_flags(
+    flags: Sequence[str],
+    *,
+    permissions: str,
+    executable: str | None = None,
+    surface: Any | None = None,
+) -> tuple[str, ...]:
+    """Enforce cursor permission flags against the selected binary's --help.
+
+    Declared contract flags are required semantics. Missing flags fail closed;
+    they are never dropped to approximate an older CLI.
+    """
+    from .continuity.capabilities import (
+        probe_cursor_cli_surface,
+        reject_unsupported_cursor_argv,
+        require_cursor_flags,
+    )
+
+    cli_surface = surface or probe_cursor_cli_surface(executable=executable)
+    verified = require_cursor_flags(flags, cli_surface, permissions=permissions)
+    reject_unsupported_cursor_argv(verified)
+    return verified
+
+
 def runtime_policy_capabilities(provider: str) -> dict[str, dict[str, Any]]:
     """Report host substrate separately from canonical-launcher availability."""
     provider_executable = which(agent_cli_name(provider), path=agent_tool_search_path())
@@ -862,6 +886,14 @@ def interactive_policy_command(
             "--use-local-cache",
         ]
     if provider == "cursor":
+        from .continuity.capabilities import (
+            reject_unsupported_cursor_argv,
+            validate_cursor_resume_chat_id,
+        )
+
+        flags = list(
+            _materialize_cursor_permission_flags(flags, permissions=permissions)
+        )
         session_flags: list[str] = []
         if continuity.mode == "bare-fork":
             # Interactive resume exists; bare-fork is unsupported — fail closed
@@ -870,8 +902,11 @@ def interactive_policy_command(
                 "cursor native fork is unsupported; use fresh or interactive --resume"
             )
         if provider_session_id:
-            session_flags = ["--resume", provider_session_id]
-        return ["cursor-agent", *flags, *session_flags, prompt]
+            chat_id = validate_cursor_resume_chat_id(provider_session_id)
+            session_flags = ["--resume", chat_id]
+        argv = ["cursor-agent", *flags, *session_flags, prompt]
+        reject_unsupported_cursor_argv(argv)
+        return argv
     if provider == "grok":
         session_flags = []
         if continuity.mode == "bare-fork":
@@ -2617,6 +2652,7 @@ def _default_command(agent: str, prompt: str) -> list[str]:
             prompt,
         ]
     if agent == "cursor":
+        flags = list(_materialize_cursor_permission_flags(flags, permissions="bypass"))
         return [
             "cursor-agent",
             "-p",
@@ -2700,6 +2736,7 @@ def _stdin_command(agent: str) -> list[str]:
             "/dev/stdin",
         ]
     if agent == "cursor":
+        flags = list(_materialize_cursor_permission_flags(flags, permissions="bypass"))
         return [
             "cursor-agent",
             "-p",
