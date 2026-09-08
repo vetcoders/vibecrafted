@@ -158,10 +158,18 @@ private typealias RuntimeContract = RuntimeResolution<CanonicalRuntimeInstall>
 private let activityTruthTimeout: TimeInterval = 15
 
 @MainActor
-class AppDelegate: NSObject, NSApplicationDelegate, CommandDeckActionHandling {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, CommandDeckActionHandling {
   var mainWindow: MainWindowController?
   private let model = AppModel()
   private lazy var webSession = WebConsoleSession()
+  /// Tool and reference tabs. Owns windows and their web sessions only; the
+  /// runtime, supervisor and terminal stay here.
+  private lazy var tabs = NativeTabCoordinator(
+    anchorWindow: { [unowned self] in
+      self.showMainWindowIfNeeded()
+      return self.mainWindow?.window
+    },
+    openExternally: { [unowned self] url in self.openExternalURL(url) })
   private var tray: StatusItemController?
   private var repairInFlight = false
   private var confirmedStopRoot: URL?
@@ -207,7 +215,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, CommandDeckActionHandling {
 
   func showMainWindowIfNeeded() {
     if mainWindow == nil {
-      mainWindow = MainWindowController(model: model, session: webSession, actions: self)
+      mainWindow = MainWindowController(model: model, session: webSession, actions: self,
+        openExternally: { [unowned self] url in self.openExternalURL(url) })
     }
     mainWindow?.showWindow(nil)
     mainWindow?.window?.makeKeyAndOrderFront(nil)
@@ -333,12 +342,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, CommandDeckActionHandling {
   }
 
   private func configureCommandDeck() {
-    model.endpointDidChange = { [weak self] endpoint in self?.webSession.apply(endpoint: endpoint) }
+    model.endpointDidChange = { [weak self] endpoint in
+      self?.webSession.apply(endpoint: endpoint)
+      self?.tabs.apply(runtimeEndpoint: endpoint)
+    }
     model.setStateChangeHandler { [weak self] _ in self?.updateDeckPresentation() }
     webSession.events.stateDidChange = { [weak self] state in self?.model.receiveWebState(state) }
-    webSession.events.openExternally = { [weak self] url in
-      do { try self?.nativeBridge.perform(.openExternalURL(try .init(value: url.absoluteString))) }
-      catch { self?.reportWorkspaceLaunchFailure(error.localizedDescription) }
+    webSession.events.openExternally = { [weak self] url in self?.openExternalURL(url) }
+    // A `target=_blank` page or a machine document (JSON endpoint) never
+    // replaces the console document; it gets its own native tab.
+    webSession.events.openInTab = { [weak self] url, role in
+      guard let self else { return }
+      if case .unavailable(let reason) = self.tabs.open(.url(url, role)) {
+        self.showNativeMessage("Cannot open in a tab", reason)
+      }
     }
     webSession.events.navigationBlocked = { [weak self] _, reason in
       self?.showNativeMessage("Navigation blocked", reason)
@@ -394,6 +411,68 @@ class AppDelegate: NSObject, NSApplicationDelegate, CommandDeckActionHandling {
       },
       confirmRuntimeStop: { [unowned self] in self.confirmRuntimeStop() },
       stopRuntime: { [unowned self] in self.performServerAction(.stop) }))
+  }
+
+  /// Every hand-off to the system browser goes through the typed bridge, so a
+  /// URL is validated the same way whichever tab asked.
+  private func openExternalURL(_ url: URL) {
+    do { try nativeBridge.perform(.openExternalURL(try .init(value: url.absoluteString))) }
+    catch { reportWorkspaceLaunchFailure(error.localizedDescription) }
+  }
+
+  // MARK: - Tabs and history (selected window only)
+
+  /// The navigation owner of the key window: the console or one tool tab.
+  private func selectedNavigationHandler() -> (any CommandDeckNavigationHandling)? {
+    let key = NSApp.keyWindow
+    if let mainWindow, mainWindow.window === key { return mainWindow }
+    if let tab = tabs.controller(for: key) { return tab }
+    return mainWindow
+  }
+
+  private func selectedSession() -> WebConsoleSession? {
+    let key = NSApp.keyWindow
+    if let mainWindow, mainWindow.window === key { return webSession }
+    return tabs.controller(for: key)?.session ?? (mainWindow == nil ? nil : webSession)
+  }
+
+  @objc private func goHome() { selectedNavigationHandler()?.navigate(.home) }
+  @objc private func goBack() { selectedNavigationHandler()?.navigate(.back) }
+  @objc private func goForward() { selectedNavigationHandler()?.navigate(.forward) }
+  @objc private func openSelectedPageInBrowser() { selectedNavigationHandler()?.navigate(.openInBrowser) }
+
+  @objc private func openDestinationInTab(_ sender: NSMenuItem) {
+    guard let id = sender.representedObject as? String, let destination = ToolDestination.named(id) else { return }
+    if case .unavailable(let reason) = tabs.open(.destination(destination)) {
+      showNativeMessage("\(destination.title) is unavailable", reason)
+    }
+  }
+
+  @objc private func openDestinationExternally(_ sender: NSMenuItem) {
+    guard let id = sender.representedObject as? String, let destination = ToolDestination.named(id) else { return }
+    switch tabs.resolve(destination) {
+    case .available(let url, .runtime): openExternalURL(url)
+    case .available(let url, .localDocument): revealNativePath(url)
+    case .unavailable(let reason): showNativeMessage("\(destination.title) is unavailable", reason)
+    }
+  }
+
+  func validateMenuItem(_ item: NSMenuItem) -> Bool {
+    switch item.action {
+    case #selector(goBack): return selectedSession()?.navigation.canGoBack ?? false
+    case #selector(goForward): return selectedSession()?.navigation.canGoForward ?? false
+    case #selector(goHome): return selectedSession() != nil
+    case #selector(openSelectedPageInBrowser):
+      guard let url = selectedSession()?.navigation.currentURL else { return false }
+      return url.scheme == "http" || url.scheme == "https"
+    case #selector(openDestinationInTab(_:)), #selector(openDestinationExternally(_:)):
+      guard let id = item.representedObject as? String, let destination = ToolDestination.named(id) else { return false }
+      switch tabs.resolve(destination) {
+      case .available: item.toolTip = nil; return true
+      case .unavailable(let reason): item.toolTip = reason; return false
+      }
+    default: return true
+    }
   }
 
   func handle(_ action: CommandDeckChromeAction) {
@@ -1710,6 +1789,35 @@ class AppDelegate: NSObject, NSApplicationDelegate, CommandDeckActionHandling {
       let item = viewMenu.addItem(withTitle: title, action: selector, keyEquivalent: key)
       item.target = self
     }
+    viewMenu.addItem(.separator())
+    // History verbs act on the selected tab only; validation reads its state.
+    let home = viewMenu.addItem(withTitle: "Home", action: #selector(goHome), keyEquivalent: "h")
+    home.keyEquivalentModifierMask = [.command, .shift]
+    home.target = self
+    let back = viewMenu.addItem(withTitle: "Back", action: #selector(goBack), keyEquivalent: "[")
+    back.target = self
+    let forward = viewMenu.addItem(withTitle: "Forward", action: #selector(goForward), keyEquivalent: "]")
+    forward.target = self
+    let inBrowser = viewMenu.addItem(
+      withTitle: "Open Page in Browser", action: #selector(openSelectedPageInBrowser), keyEquivalent: "")
+    inBrowser.target = self
+    viewMenu.addItem(.separator())
+    let openInTab = NSMenu(title: "Open in Tab")
+    let openExternal = NSMenu(title: "Open in Browser")
+    for destination in ToolDestination.catalog {
+      let tabItem = openInTab.addItem(
+        withTitle: destination.title, action: #selector(openDestinationInTab(_:)), keyEquivalent: "")
+      tabItem.target = self
+      tabItem.representedObject = destination.id
+      let externalItem = openExternal.addItem(
+        withTitle: destination.title, action: #selector(openDestinationExternally(_:)), keyEquivalent: "")
+      externalItem.target = self
+      externalItem.representedObject = destination.id
+    }
+    let openInTabItem = viewMenu.addItem(withTitle: "Open in Tab", action: nil, keyEquivalent: "")
+    openInTabItem.submenu = openInTab
+    let openExternalItem = viewMenu.addItem(withTitle: "Open in Browser", action: nil, keyEquivalent: "")
+    openExternalItem.submenu = openExternal
     let viewMenuItem = NSMenuItem()
     viewMenuItem.submenu = viewMenu
     mainMenu.addItem(viewMenuItem)
@@ -1729,6 +1837,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, CommandDeckActionHandling {
       withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
     windowMenu.addItem(
       withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+    windowMenu.addItem(.separator())
+    // Native tab verbs: AppKit implements them for any window in a tab group.
+    let previousTab = windowMenu.addItem(
+      withTitle: "Show Previous Tab", action: #selector(NSWindow.selectPreviousTab(_:)), keyEquivalent: "{")
+    previousTab.keyEquivalentModifierMask = [.command, .shift]
+    let nextTab = windowMenu.addItem(
+      withTitle: "Show Next Tab", action: #selector(NSWindow.selectNextTab(_:)), keyEquivalent: "}")
+    nextTab.keyEquivalentModifierMask = [.command, .shift]
+    windowMenu.addItem(
+      withTitle: "Merge All Windows", action: #selector(NSWindow.mergeAllWindows(_:)), keyEquivalent: "")
 
     let windowMenuItem = NSMenuItem()
     windowMenuItem.submenu = windowMenu

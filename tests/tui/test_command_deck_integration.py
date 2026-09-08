@@ -28,8 +28,38 @@ def test_single_native_host_source_contract() -> None:
     assert "if mainWindow == nil" in delegate
     assert "NSApp.setActivationPolicy(.regular)" in delegate
     assert main.index("NSApplication.shared") < main.index("AppDelegate()")
+    coordinator = (APP / "CommandDeck/NativeTabCoordinator.swift").read_text()
+    policy = (APP / "CommandDeck/WebNavigationPolicy.swift").read_text()
+    scaffold = (ROOT / "vibecrafted-server/web/src/scaffold/mod.rs").read_text()
     assert "window.isReleasedWhenClosed = false" in window
-    assert "CommandDeckView(presentation: model.presentation" in window
+    assert "presentation: model.presentation" in window
+    # One chrome: the SwiftUI toolbar is bridged into the native titlebar and
+    # every tab window shares one tab group; no second content row exists.
+    assert "hosting.sceneBridgingOptions = [.toolbars]" in window
+    assert "window.tabbingIdentifier = tabbingIdentifier" in window
+    assert "window.toolbarStyle = .unified" in window
+    assert (
+        "CommandDeckChromeBar"
+        not in (APP / "CommandDeck/CommandDeckView.swift").read_text()
+    )
+    # One WKWebView per tab: the coordinator adds native tabs and never a
+    # WebKit-created view; the console session stays the App's single one.
+    assert "addTabbedWindow" in coordinator
+    assert (
+        "WKScriptMessageHandler" not in coordinator
+        and "userContentController.add" not in coordinator
+    )
+    assert "return nil" in host and "createWebViewWith" in host
+    assert "case divertToReferenceTab" in policy
+    assert "func decideLocalDocumentNavigation" in policy
+    assert delegate.count("NativeTabCoordinator(") == 1
+    assert "tabs.apply(runtimeEndpoint: endpoint)" in delegate
+    # Scaffold endpoint links open outside the studio document.
+    assert scaffold.count('class="api-link" href="/api/scaffold/') == 2
+    assert (
+        scaffold.count('target="_blank" rel="noopener noreferrer">artifact endpoint')
+        == 1
+    )
     assert host.count("WKWebView(frame:") == 1
     assert "websiteDataStore: WKWebsiteDataStore = .default()" in host
     assert "configuration.websiteDataStore = websiteDataStore" in host
@@ -131,6 +161,23 @@ def test_native_session_state_routes_and_reopen(tmp_path: Path) -> None:
                 self.end_headers()
                 self.wfile.write(b"server-download")
                 return
+            if self.path.startswith("/api/scaffold/artifacts"):
+                body = b'{"artifacts":[{"id":"fixture","approved":false}]}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if self.path.startswith("/scaffold"):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"""<!doctype html><title>Scaffold fixture</title>
+<main><textarea id="draft">plan</textarea>
+<a id="api" href="/api/scaffold/artifacts?org=o&repo=r&day=d&plan_id=p">artifact endpoint</a>
+<a id="blank" href="/workspaces" target="_blank" rel="noopener noreferrer">Workspaces</a></main>""")
+                return
             self.send_response(503 if self.path.startswith("/failure") else 200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             # Reconnect must retain the original cookie; later responses must
@@ -157,7 +204,7 @@ def test_native_session_state_routes_and_reopen(tmp_path: Path) -> None:
             [str(binary), f"http://127.0.0.1:{server.server_port}/"],
             capture_output=True,
             text=True,
-            timeout=90,
+            timeout=150,
             check=True,
         )
         assert "CommandDeckIntegrationTests passed" in result.stdout

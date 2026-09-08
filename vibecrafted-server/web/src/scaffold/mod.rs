@@ -554,8 +554,8 @@ pub mod api {
     </div>
     <div class="inspector-block">
       <h3>Endpoints</h3>
-      <a class="api-link" href="/api/scaffold/artifacts?org={}&repo={}&day={}&plan_id={}">artifact endpoint</a>
-      <a class="api-link" href="/api/scaffold/changes?org={}&repo={}&day={}&plan_id={}">change endpoint</a>
+      <a class="api-link" href="/api/scaffold/artifacts?org={}&repo={}&day={}&plan_id={}" target="_blank" rel="noopener noreferrer">artifact endpoint ↗</a>
+      <a class="api-link" href="/api/scaffold/changes?org={}&repo={}&day={}&plan_id={}" target="_blank" rel="noopener noreferrer">change endpoint ↗</a>
     </div>
   </aside>
 </main>
