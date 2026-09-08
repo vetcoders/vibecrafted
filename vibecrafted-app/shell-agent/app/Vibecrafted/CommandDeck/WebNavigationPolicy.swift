@@ -132,12 +132,13 @@ enum WebNavigationPolicy {
     }
     if shouldPerformDownload { return .block(reason: "downloads must originate from the runtime") }
 
-    // A foreign sub-frame is a page's own business; WebKit already sandboxes
-    // it. Opening the system browser from an iframe would be hostile, so only
-    // top-level navigations are allowed to leave.
+    // Foreign sub-frames can never use cleartext transport. The sole allowed
+    // HTTP origin is the caretaker-selected runtime above; a foreign iframe
+    // must use HTTPS, so removing the broad WebContent ATS exemption does not
+    // leave an application-level cleartext escape hatch.
     if !isMainFrame {
-      guard scheme == "http" || scheme == "https" else {
-        return .block(reason: "a sub-frame requested the unsupported scheme '\(scheme)'")
+      guard scheme == "https" else {
+        return .block(reason: "a foreign sub-frame requested the unsupported scheme '\(scheme)'")
       }
       return .allowInApp
     }

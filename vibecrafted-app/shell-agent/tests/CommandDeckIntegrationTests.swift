@@ -85,6 +85,25 @@ struct CommandDeckIntegrationTests {
         isMainFrame: true, shouldPerformDownload: true)
       guard case .block = decision else { throw Failure(message: "Download flag bypassed scheme policy") }
     }
+
+    // The caretaker may select either loopback or a Tailscale IP literal for
+    // its local HTTP server. Both remain the exact in-app runtime origin.
+    for value in ["http://127.0.0.1:4107/console", "http://100.64.0.7:4107/console"] {
+      let runtimeURL = URL(string: value)!
+      let runtime = WebRuntimeOrigin(url: runtimeURL)!
+      try require(WebNavigationPolicy.decide(url: runtimeURL, runtime: runtime,
+        isMainFrame: true, shouldPerformDownload: false) == .allowInApp,
+        "Caretaker-selected local runtime was rejected: \(value)")
+    }
+
+    let foreignHTTPS = URL(string: "https://foreign.example/frame")!
+    try require(WebNavigationPolicy.decide(url: foreignHTTPS, runtime: origin,
+      isMainFrame: false, shouldPerformDownload: false) == .allowInApp,
+      "Secure foreign sub-frame was rejected")
+    let foreignHTTP = URL(string: "http://foreign.example/frame")!
+    guard case .block = WebNavigationPolicy.decide(url: foreignHTTP, runtime: origin,
+      isMainFrame: false, shouldPerformDownload: false)
+    else { throw Failure(message: "Foreign cleartext sub-frame bypassed runtime boundary") }
   }
 
   static func authenticationAndDownloadContract(_ endpoint: URL) throws {
