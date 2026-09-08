@@ -228,10 +228,19 @@ def test_native_session_state_routes_and_reopen(tmp_path: Path) -> None:
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
+    reconnect_server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
+    reconnect_thread = threading.Thread(
+        target=reconnect_server.serve_forever, daemon=True
+    )
     thread.start()
+    reconnect_thread.start()
     try:
         result = subprocess.run(
-            [str(binary), f"http://127.0.0.1:{server.server_port}/"],
+            [
+                str(binary),
+                f"http://127.0.0.1:{server.server_port}/",
+                f"http://127.0.0.1:{reconnect_server.server_port}/",
+            ],
             capture_output=True,
             text=True,
             timeout=150,
@@ -243,3 +252,6 @@ def test_native_session_state_routes_and_reopen(tmp_path: Path) -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+        reconnect_server.shutdown()
+        reconnect_server.server_close()
+        reconnect_thread.join(timeout=5)

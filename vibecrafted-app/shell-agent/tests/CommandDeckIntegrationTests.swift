@@ -402,7 +402,7 @@ struct CommandDeckIntegrationTests {
   /// console document, its DOM edit state and its history untouched; tabs are
   /// deduplicated; Home/back in a tool tab never move the console; closing a
   /// tab keeps the console and its web view.
-  static func tabsContract(_ endpoint: URL) async throws {
+  static func tabsContract(_ endpoint: URL, reconnectEndpoint: URL) async throws {
     let model = AppModel()
     let console = WebConsoleSession(websiteDataStore: .nonPersistent(), downloadDestinationProvider: { _, _, _ in nil })
     var opened: [(URL, WebTabRole)] = []
@@ -597,8 +597,15 @@ struct CommandDeckIntegrationTests {
     try require(local.model.presentation.exposesCanvas, "Local document tab was tied to the runtime")
     coordinator.apply(runtimeEndpoint: endpoint)
     try await waitFor { reference.model.presentation.exposesCanvas }
-    report.close()
-    print("Witness: destinations resolve honestly, report and service tabs are isolated, local document confined, runtime loss shown")
+    try await waitFor { report.model.presentation.exposesCanvas }
+    try require(reference.session.webView.url?.port == endpoint.port && report.session.webView.url?.port == endpoint.port,
+      "Runtime tabs did not reconnect to the same endpoint")
+    coordinator.apply(runtimeEndpoint: reconnectEndpoint)
+    try await waitFor { reference.model.presentation.exposesCanvas && report.model.presentation.exposesCanvas }
+    try require(reference.session.webView.url?.port == reconnectEndpoint.port
+      && report.session.webView.url?.port == reconnectEndpoint.port,
+      "Runtime tabs did not reconnect to the replacement endpoint")
+    print("Witness: destinations resolve honestly, report and service tabs are isolated, local document confined, runtime loss and same/new endpoint reconnect shown")
 
     // 8. One chrome: the bridged toolbar exists at compact and regular widths; no content chrome row.
     try await waitFor { controller.window?.toolbar != nil }
@@ -618,15 +625,18 @@ struct CommandDeckIntegrationTests {
   static func main() async throws {
     _ = NSApplication.shared
     let endpoint = URL(string: CommandLine.arguments[1])!
+    let reconnectEndpoint = URL(string: CommandLine.arguments[2])!
     try require(endpoint.scheme == "http" && endpoint.host == "127.0.0.1" && endpoint.port != nil,
       "Only a loopback fixture endpoint is permitted")
+    try require(reconnectEndpoint.scheme == "http" && reconnectEndpoint.host == "127.0.0.1" && reconnectEndpoint.port != nil,
+      "Only a loopback reconnect endpoint is permitted")
     try stateContract(endpoint)
     try policyContract(endpoint)
     try authenticationAndDownloadContract(endpoint)
     try tabPolicyContract(endpoint)
     try destinationContract(endpoint)
     try await webContract(endpoint)
-    try await tabsContract(endpoint)
+    try await tabsContract(endpoint, reconnectEndpoint: reconnectEndpoint)
     print("CommandDeckIntegrationTests passed")
   }
 }
