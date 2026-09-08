@@ -298,17 +298,26 @@ final class NativeTabCoordinator {
   }
 
   /// Shows the connected runtime's product overview in an interactive tool
-  /// tab: the overview tab already open is focused, otherwise one opens. This
-  /// is how Home leaves a view that cannot render the overview itself (a
-  /// read-only reference view reached from an ordinary API link). It reuses
-  /// the same route, key and origin check as any link-opened tool tab, moves
-  /// no sibling tab and changes no script setting anywhere.
+  /// tab: the overview tab already open is focused and brought back to `/`,
+  /// otherwise one opens on `/`. This is how Home leaves a view that cannot
+  /// render the overview itself (a read-only reference view reached from an
+  /// ordinary API link). It reuses the same route, key and origin check as
+  /// any link-opened tool tab, moves no other tab and changes no script
+  /// setting anywhere.
   @discardableResult
   func openProductOverview() -> Outcome {
     guard let endpoint = runtimeEndpoint, let overview = Self.productOverviewURL(for: endpoint) else {
       return .unavailable(reason: "The product overview needs a connected runtime.")
     }
-    return open(.url(overview, .tool))
+    let outcome = open(.url(overview, .tool))
+    // Focusing the existing tab is not Home: since it opened the user may have
+    // navigated it to `/runs` or into an error. Its own Home is `/` on the
+    // current endpoint and a real load, so Back still reaches the page it
+    // left. A tab that just opened is already loading `/`.
+    if case .focused(let key) = outcome, let tab = tabs[key] {
+      tab.session.goHome()
+    }
+    return outcome
   }
 
   /// `/` on the endpoint the caretaker resolved, query and fragment dropped.

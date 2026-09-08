@@ -181,7 +181,9 @@ and the console untouched, a foreign origin gets no tab, the report
 destination returns to the report; an ordinary API link diverted into a
 reference view → Home opens the interactive overview tab on `/` of the same
 origin (rendered, online, selected in the tab group), a second Home focuses
-that one tab instead of a twin, the reference view keeps its document,
+that one tab instead of a twin, an overview tab navigated to `/runs` or into
+an HTTP error is brought back to `/` in place with its Back history kept, the
+reference view keeps its document,
 no-script setting and empty history, the console keeps its edit state, and
 without a runtime Home opens nothing while the reconnect re-presents the
 document.

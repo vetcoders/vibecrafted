@@ -818,6 +818,39 @@ struct CommandDeckIntegrationTests {
     try await waitFor { if case .loaded(let url) = overviewTab.session.loadState { return url.path == "/" }; return false }
     try require(reference.session.webView.url?.path == "/api/scaffold/artifacts", "Overview Home moved the reference view")
 
+    // 5b'. The overview tab was navigated away, then failed, since it opened.
+    //      Home from the reference view must bring that same tab back to `/`
+    //      of the current runtime, not merely focus whatever it shows now,
+    //      with the tab's Back history kept and no twin opened.
+    overviewTab.session.navigate(path: "/runs")
+    try await waitFor { if case .loaded(let url) = overviewTab.session.loadState { return url.path == "/runs" }; return false }
+    reference.window?.tabGroup?.selectedWindow = reference.window
+    reference.navigate(.home)
+    try await waitFor {
+      if case .loaded(let url) = overviewTab.session.loadState { return url.path == "/" && url.port == endpoint.port }
+      return false
+    }
+    try require(coordinator.tabs.count == tabsBeforeHome + 1 && coordinator.tabs[overviewKey] === overviewTab,
+      "Reference Home over a navigated-away overview tab opened a twin")
+    try require(overviewTab.window?.tabGroup?.selectedWindow === overviewTab.window,
+      "Reference Home did not select the reused overview tab")
+    try require(try await evaluateString("document.getElementById('fixture').textContent", in: overviewTab.session.webView) == "Ready",
+      "Reused overview tab did not render the product overview")
+    try require(overviewTab.session.navigation.canGoBack, "Reference Home over a navigated-away overview tab discarded its history")
+    overviewTab.navigate(.back)
+    try await waitFor { overviewTab.session.webView.url?.path == "/runs" }
+    try require(reference.session.webView.url?.path == "/api/scaffold/artifacts" && !reference.session.navigation.canGoBack,
+      "Reusing the overview tab touched the reference view")
+    overviewTab.session.navigate(path: "/failure")
+    try await waitFor { if case .failed = overviewTab.session.loadState { return true }; return false }
+    try require(overviewTab.model.presentation.phase == .recovering, "HTTP failure did not surface in the overview tab")
+    reference.window?.tabGroup?.selectedWindow = reference.window
+    reference.navigate(.home)
+    try await waitFor { if case .loaded(let url) = overviewTab.session.loadState { return url.path == "/" }; return false }
+    try require(overviewTab.model.presentation.phase == .online && coordinator.tabs.count == tabsBeforeHome + 1,
+      "Reference Home did not recover the failed overview tab in place")
+    print("Witness: reference Home brought a navigated-away and then a failed overview tab back to `/` with history kept and no twin")
+
     // 5c. Without a runtime there is no overview to show: Home from the
     //     reference view opens nothing, and the reconnect re-presents the
     //     document the view exists for.
