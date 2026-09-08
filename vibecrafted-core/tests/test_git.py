@@ -49,6 +49,17 @@ def _vc_git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _repo_full(repo: Path, shell: str) -> subprocess.CompletedProcess[str]:
+    dispatch = Path(git.__file__).parent / "runtime" / "shell" / "lib" / "dispatch.sh"
+    return subprocess.run(
+        [shell, "-c", 'source "$1"; repo-full', "repo-full", str(dispatch)],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=repo,
+    )
+
+
 def test_repo_full_reports_git_availability_and_commit(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -286,6 +297,21 @@ def test_vc_git_does_not_call_unique_merge_patch_equivalent(tmp_path: Path) -> N
     assert item["integration"]["unique_merge_commits"] == [merge]
     assert "integrated by patch equivalence" not in rich
     assert "unique merge commits" in rich
+    assert (
+        "WARN unmerged (1 unique merge commits; patch equivalence unavailable)"
+        in git.repo_full_summary(repo)
+    )
+
+
+@pytest.mark.parametrize("shell", ["/bin/bash", "/bin/zsh"])
+def test_repo_full_runs_under_bash_and_zsh(tmp_path: Path, shell: str) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    rich = _repo_full(repo, shell).stdout
+
+    assert "==================== REPO FULL ====================" in rich
+    assert "Staged changes:    0" in rich
 
 
 def test_vc_git_reports_failed_worktree_status_as_unknown(tmp_path: Path) -> None:

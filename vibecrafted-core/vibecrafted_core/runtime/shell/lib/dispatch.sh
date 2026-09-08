@@ -674,8 +674,8 @@ repo-full() {
   last_tag="$(git describe --tags --abbrev=0 2>/dev/null || echo "no tags")"
   stash_count="$(git stash list 2>/dev/null | wc -l | tr -d ' ')"
   _repo_full_status_counts() {
-    local status line staged=0 unstaged=0 untracked=0
-    if ! status="$(git -C "$1" status --porcelain 2>/dev/null)"; then
+    local porcelain line staged=0 unstaged=0 untracked=0
+    if ! porcelain="$(git -C "$1" status --porcelain 2>/dev/null)"; then
       printf 'unknown unknown unknown'
       return 1
     fi
@@ -687,7 +687,7 @@ repo-full() {
         [[ "${line:0:1}" != ' ' ]] && ((staged += 1))
         [[ "${line:1:1}" != ' ' ]] && ((unstaged += 1))
       fi
-    done <<< "$status"
+    done <<< "$porcelain"
     printf '%s %s %s' "$staged" "$unstaged" "$untracked"
   }
   local root_status

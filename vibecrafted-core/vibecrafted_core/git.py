@@ -337,7 +337,14 @@ def repo_full_summary(path: str | Path = ".") -> str:
         integration = worktree["integration"]
         state_label = integration["status"].replace("_", " ")
         if integration["status"] == "unmerged":
-            state_label = f"WARN unmerged ({len(integration['unmatched_commits'])} unmatched commits)"
+            if "unmatched_commits" in integration:
+                state_label = f"WARN unmerged ({len(integration['unmatched_commits'])} unmatched commits)"
+            else:
+                state_label = (
+                    "WARN unmerged "
+                    f"({len(integration.get('unique_merge_commits', []))} unique merge commits; "
+                    "patch equivalence unavailable)"
+                )
         lines.append(
             f"- {worktree['path']} [{branch}] {head}; target {worktree['comparison_target'][:9] or 'unknown'}; {state_label}; "
             f"dirty {worktree['status']}; locked {worktree['locked']}; prunable {worktree['prunable']}"
