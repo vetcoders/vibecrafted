@@ -227,7 +227,7 @@ def _fake_generation(
     # Product terminal entry records the launch instead of opening a window.
     _write(
         generation / "bin" / "vc-terminal",
-        "#!/usr/bin/env python3\n"
+        f"#!{sys.executable}\n"
         "import json, os, sys\n"
         f"open({str(capture)!r}, 'w').write(json.dumps("
         "{'argv': sys.argv[1:], 'cwd': os.getcwd(),"
@@ -282,6 +282,9 @@ def _run_entry(
         "VIBECRAFTED_TERMINAL_ENTRY",
         "VIBECRAFTED_ROOT",
         "VIBECRAFTED_RUNTIME_ROOT",
+        "VIBECRAFTED_RUNTIME_BIN",
+        "VIBECRAFTED_RUNTIME_HOME",
+        "VIBECRAFTED_PYTHON",
         "SPAWN_ROOT",
         "VC_FRAME",
         "VC_FRAME_PANE_ID",
@@ -294,6 +297,7 @@ def _run_entry(
     env["HOME"] = str(home)
     env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
     env["XDG_CONFIG_HOME"] = str(home / ".config")
+    env["XDG_DATA_HOME"] = str(home / ".local" / "share")
     env["TEST_AICX_CAPTURE"] = str(tmp_path / "aicx-called.txt")
     env.update(extra_env or {})
 
@@ -2314,6 +2318,31 @@ def test_bare_resume_without_tty_opens_terminal_under_zsh(tmp_path: Path) -> Non
     assert not (tmp_path / "aicx-called.txt").exists()
 
 
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_terminal_entry_uses_internal_python_with_hostile_public_python(
+    tmp_path: Path, shell: str
+) -> None:
+    """The detached terminal driver remains runtime-owned after PATH sanitation."""
+    hostile_bin = tmp_path / "hostile public bin"
+    _write(
+        hostile_bin / "python3",
+        "#!/bin/sh\nprintf 'HOST_PYTHON_SELECTED\\n' >&2\nexit 79\n",
+    )
+    result, launch = _run_entry(
+        tmp_path,
+        "vc-resume codex",
+        extra_env={
+            "PATH": f"{hostile_bin}:/usr/bin:/bin:/usr/sbin:/sbin",
+            "VIBECRAFTED_PYTHON": sys.executable,
+        },
+        shell=shell,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert launch is not None, result.stderr
+    assert "HOST_PYTHON_SELECTED" not in result.stdout + result.stderr
+
+
 # --------------------------------------------------------------------------
 # Truthful admission: the foreground spawner's OWN failures, not the host's
 # --------------------------------------------------------------------------
@@ -2354,7 +2383,7 @@ def test_interpreter_start_failure_is_not_reported_as_accepted(
     result, launch = _run_entry(
         tmp_path,
         "vc-resume codex",
-        extra_env={"PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"},
+        extra_env={"PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"},
         expect_launch=False,
         shell=shell,
     )
@@ -2392,7 +2421,7 @@ def test_driver_popen_failure_is_not_reported_as_accepted(
     result, launch = _run_entry(
         tmp_path,
         "vc-resume codex",
-        extra_env={"PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"},
+        extra_env={"PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"},
         expect_launch=False,
         shell=shell,
     )

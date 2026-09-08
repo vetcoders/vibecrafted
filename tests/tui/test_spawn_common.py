@@ -181,7 +181,7 @@ def _legacy_expected_operator_session(run_id: str | None = None) -> str:
 
 
 def _write_fake_core_python(path: Path) -> None:
-    """Capture a tracked core launch without importing core or spawning an agent."""
+    """Capture core CLI calls; delegate ordinary Python work to a pinned interpreter."""
     path.write_text(
         """#!/usr/bin/env bash
 set -euo pipefail
@@ -193,13 +193,16 @@ if [[ "${1:-}" == "-c" ]]; then
 fi
 if [[ "${1:-}" == "-m" && "${2:-}" == "vibecrafted_core.cli" ]]; then
   shift 2
+  [[ "${1:-}" == "resume-session" && "${2:-}" == "codex" ]] || {
+    printf 'unexpected fake-core agent invocation: %s\\n' "$*" >&2
+    exit 98
+  }
   printf "%s\\0" "$@" > "$FAKE_CORE_ARGV_FILE"
   cat > "$FAKE_CORE_PROMPT_FILE"
   printf '%s\\n' '=============== MANUAL EXPLICIT RESUME RECEIPT ===============' 'run_id:             rsme-fixture-1' "agent_session_id:   ${FAKE_CORE_SESSION_ID}" 'resume_mode:        manual_explicit'
   exit 0
 fi
-printf "unexpected fake-core invocation: %s\\n" "$*" >&2
-exit 98
+exec "${FAKE_REAL_PYTHON:?FAKE_REAL_PYTHON must name the pinned test interpreter}" "$@"
 """,
         encoding="utf-8",
     )
@@ -2173,6 +2176,7 @@ def test_vc_resume_can_infer_agent_from_session_meta(tmp_path: Path) -> None:
     core_prompt = tmp_path / "core-prompt.txt"
     core_source = tmp_path / "core-source"
     provider_called = tmp_path / "provider-called"
+    hostile_python = _write_hostile_python(tmp_path / "hostile public bin")
     core_source.mkdir()
     _write_fake_core_python(fake_core)
     meta_dir = (
@@ -2189,6 +2193,8 @@ def test_vc_resume_can_infer_agent_from_session_meta(tmp_path: Path) -> None:
         set -euo pipefail
         export VIBECRAFTED_HOME="{crafted_home}"
         export VIBECRAFTED_PYTHON="{fake_core}"
+        export FAKE_REAL_PYTHON="{sys.executable}"
+        export PATH="{hostile_python.parent}:/usr/bin:/bin:/usr/sbin:/sbin"
         export FAKE_CORE_ARGV_FILE="{core_argv}"
         export FAKE_CORE_PROMPT_FILE="{core_prompt}"
         export FAKE_CORE_SOURCE_DIR="{core_source}"
@@ -2215,6 +2221,46 @@ def test_vc_resume_can_infer_agent_from_session_meta(tmp_path: Path) -> None:
     ]
     assert core_prompt.read_text(encoding="utf-8") == "hello"
     assert not provider_called.exists()
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_vc_frame_helpers_use_internal_python_with_hostile_public_python(
+    tmp_path: Path, shell: str
+) -> None:
+    """ANSI parsing and worker-host inference do not select public ``python3``."""
+    hostile_python = _write_hostile_python(tmp_path / "hostile public bin")
+    project_root = tmp_path / "project root with spaces"
+    project_root.mkdir()
+    script = f'''
+    set -euo pipefail
+    export HOME="{tmp_path / "home with spaces"}"
+    export PATH="{hostile_python.parent}:/usr/bin:/bin:/usr/sbin:/sbin"
+    export VIBECRAFTED_PYTHON="{sys.executable}"
+    export SPAWN_ROOT="{project_root}"
+    source "{SHELL_SH}"
+    printf 'ansi='
+    printf '\\033[31mready\\033[0m' | _vetcoders_strip_ansi
+    printf '\\nhost=%s\\n' "$(_vetcoders_effective_worker_session)"
+    '''
+    if shell == "bash":
+        result = _bash(script)
+    else:
+        env = os.environ.copy()
+        env["HOME"] = str(tmp_path / "ambient home")
+        result = subprocess.run(
+            ["zsh", "-f", "-c", _ENV_SANITIZE + script],
+            check=True,
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+    lines = result.stdout.splitlines()
+    assert lines[0] == "ansi=ready"
+    assert lines[1].startswith("host=project-root-with-spaces-")
+    assert lines[1].endswith("-w")
+    assert "HOST_PYTHON_SELECTED" not in result.stdout + result.stderr
 
 
 def test_generated_launcher_marks_meta_failed_before_failure_hook(
