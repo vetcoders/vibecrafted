@@ -1649,6 +1649,81 @@ def test_installed_launcher_tui_uses_shared_state_and_voc_binary(
     assert "--tick-ms 500" in tui_args
 
 
+def test_tui_prefers_declared_runtime_voc_over_host_and_source(
+    tmp_path: Path,
+) -> None:
+    """An installed generation owns VOC; stale host/source candidates cannot mask it."""
+    home = tmp_path / "home"
+    runtime = tmp_path / "runtime"
+    hostile_bin = tmp_path / "host-bin"
+    runtime_capture = tmp_path / "runtime-voc-args.txt"
+    hostile_capture = tmp_path / "host-voc-args.txt"
+
+    home.mkdir()
+    hostile_bin.mkdir()
+    (runtime / "bin").mkdir(parents=True)
+    (runtime / "server" / "site").mkdir(parents=True)
+    _write_capture_script(runtime / "bin" / "voc", runtime_capture)
+    _write_capture_script(hostile_bin / "voc", hostile_capture)
+    _write_capture_script(runtime / "bin" / "vc-server", tmp_path / "server-args.txt")
+
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
+    env["VIBECRAFTED_RUNTIME_ROOT"] = str(runtime)
+    env["PATH"] = f"{hostile_bin}:/bin:/usr/bin"
+    env.pop("PYTHONPATH", None)
+
+    subprocess.run(
+        ["bash", str(LAUNCHER), "tui", "--runtime", "headless"],
+        check=True,
+        cwd=tmp_path,
+        env=env,
+    )
+
+    assert "--runtime headless" in runtime_capture.read_text(encoding="utf-8")
+    assert not hostile_capture.exists()
+
+
+def test_tui_declared_runtime_missing_voc_fails_without_host_fallback(
+    tmp_path: Path,
+) -> None:
+    """A partial Runtime Pack gets product repair guidance, never cargo/PATH rescue."""
+    home = tmp_path / "home"
+    runtime = tmp_path / "runtime"
+    hostile_bin = tmp_path / "host-bin"
+    hostile_capture = tmp_path / "host-voc-args.txt"
+
+    home.mkdir()
+    hostile_bin.mkdir()
+    (runtime / "bin").mkdir(parents=True)
+    (runtime / "server" / "site").mkdir(parents=True)
+    _write_capture_script(hostile_bin / "voc", hostile_capture)
+    _write_capture_script(runtime / "bin" / "vc-server", tmp_path / "server-args.txt")
+
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
+    env["VIBECRAFTED_RUNTIME_ROOT"] = str(runtime)
+    env["PATH"] = f"{hostile_bin}:/bin:/usr/bin"
+    env.pop("PYTHONPATH", None)
+
+    result = subprocess.run(
+        ["bash", str(LAUNCHER), "tui", "--runtime", "headless"],
+        check=False,
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "Installed Runtime Pack is missing its VOC binary" in result.stderr
+    assert "vibecrafted update" in result.stderr
+    assert "cargo" not in result.stderr
+    assert not hostile_capture.exists()
+
+
 def test_tui_uses_voc_from_path_when_local_build_missing(
     tmp_path: Path,
 ) -> None:

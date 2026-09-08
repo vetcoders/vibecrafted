@@ -619,24 +619,18 @@ _operator_tui_dir() {
 }
 
 _resolve_voc_binary() {
-  # Canonical product binary is `voc` (make install-app-binaries). Prefer an
-  # installed real file, then a local release/debug build, then legacy names.
-  # vc-frame `bash -lc` panes often lack ~/.local/bin on PATH — still look there.
-  local app_dir candidate
-  if candidate="$(command -v voc 2>/dev/null)" && [[ -n "$candidate" && -x "$candidate" ]]; then
-    printf '%s\n' "$candidate"
-    return 0
-  fi
-  for candidate in \
-    "${VIBECRAFTED_LAUNCHER_BIN:-$HOME/.local/bin}/voc" \
-    "$HOME/.local/bin/voc" \
-    "${VIBECRAFTED_RUNTIME_BIN:-}/voc" \
-    "${VIBECRAFTED_RUNTIME_ROOT:-}/bin/voc"; do
-    if [[ -n "$candidate" && -x "$candidate" ]]; then
+  # A declared Runtime Pack owns VOC.  Do not let an old host install or a
+  # source build mask a generation that failed to carry its promised binary.
+  local app_dir candidate runtime_root
+  runtime_root="$(_runtime_payload_root 2>/dev/null || true)"
+  if [[ -n "$runtime_root" ]]; then
+    candidate="$runtime_root/bin/voc"
+    if [[ -x "$candidate" ]]; then
       printf '%s\n' "$candidate"
       return 0
     fi
-  done
+    return 1
+  fi
   app_dir="$(_voc_app_dir 2>/dev/null || true)"
   if [[ -n "$app_dir" ]]; then
     for candidate in \
@@ -649,6 +643,20 @@ _resolve_voc_binary() {
         return 0
       fi
     done
+  fi
+  # Development has no declared product generation, so keep the explicit
+  # developer/host path for source workflows without taking over other tools.
+  for candidate in \
+    "${VIBECRAFTED_LAUNCHER_BIN:-$HOME/.local/bin}/voc" \
+    "$HOME/.local/bin/voc"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  if candidate="$(command -v voc 2>/dev/null)" && [[ -n "$candidate" && -x "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
   fi
   # Compat: pre-rename operator binary / package names.
   local name found
@@ -4401,12 +4409,13 @@ cmd_server() {
 
 
 cmd_tui() {
-  local app_dir binary_path deck_path state_root
+  local app_dir binary_path deck_path state_root runtime_root
   if _is_help_flag "${1:-}"; then
     cmd_tui_help
     return 0
   fi
   app_dir="$(_voc_app_dir 2>/dev/null || true)"
+  runtime_root="$(_runtime_payload_root 2>/dev/null || true)"
   binary_path="$(_resolve_voc_binary 2>/dev/null || true)"
   deck_path="$(_repo_source_root 2>/dev/null || true)"
   if [[ -z "$deck_path" && -f "$crafted_tools/scripts/vibecrafted" ]]; then
@@ -4424,6 +4433,12 @@ cmd_tui() {
   if [[ -n "${binary_path:-}" && -x "$binary_path" ]]; then
     "$binary_path" --state-root "$state_root" --deck "$deck_path" "$@"
     return $?
+  fi
+
+  if [[ -n "$runtime_root" ]]; then
+    printf '%b✗%b Installed Runtime Pack is missing its VOC binary.\n' "$_red" "$_reset" >&2
+    printf '  Repair the installed product Runtime Pack, then retry: vibecrafted update\n' >&2
+    return 1
   fi
 
   [[ -n "$app_dir" ]] || {
