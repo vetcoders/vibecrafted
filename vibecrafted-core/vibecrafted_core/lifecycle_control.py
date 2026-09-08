@@ -411,7 +411,9 @@ def interrupt_workflow(
     if fleet.get("present"):
         from .lifecycle_fleet import request_stage_dispatch_stop
 
-        scheduler_stop = request_stage_dispatch_stop(str(fleet.get("dispatch_run_id") or ""))
+        scheduler_stop = request_stage_dispatch_stop(
+            str(fleet.get("dispatch_run_id") or "")
+        )
 
     # Stopping the stage worker does not reach the cuts it dispatched: those
     # are detached provider runs owned by the dispatcher's ledger.  Interrupt

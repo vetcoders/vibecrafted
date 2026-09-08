@@ -307,7 +307,12 @@ def test_dashboard_default_aliases_resolve_to_the_shipped_operator_layout() -> N
 
     assert result.returncode == 0
     assert result.stderr == ""
-    assert result.stdout.splitlines() == ["operator", "operator", "operator", "operator"]
+    assert result.stdout.splitlines() == [
+        "operator",
+        "operator",
+        "operator",
+        "operator",
+    ]
 
 
 def test_dashboard_names_the_idempotent_same_workspace_noop(tmp_path: Path) -> None:

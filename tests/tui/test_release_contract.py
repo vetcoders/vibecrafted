@@ -609,7 +609,9 @@ def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
 
 
 def test_mission_control_failure_board_exposes_absolute_failure_time() -> None:
-    view = (REPO_ROOT / "vibecrafted-server/web/src/run_detail.rs").read_text(encoding="utf-8")
+    view = (REPO_ROOT / "vibecrafted-server/web/src/run_detail.rs").read_text(
+        encoding="utf-8"
+    )
     ffi = (REPO_ROOT / "vibecrafted-app/shell-agent/ffi/src/lib.rs").read_text(
         encoding="utf-8"
     )
@@ -618,7 +620,7 @@ def test_mission_control_failure_board_exposes_absolute_failure_time() -> None:
     ).read_text(encoding="utf-8")
 
     assert 'fact("completed", run.completed_at)' in view
-    assert 'completed_at: run.completed_at' in view
+    assert "completed_at: run.completed_at" in view
     assert "pub occurred_at: Option<String>" in ffi
     assert "occurred_at: Some(record.completed_at.to_rfc3339())" in mission
 

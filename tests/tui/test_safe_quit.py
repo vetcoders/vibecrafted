@@ -79,11 +79,19 @@ def test_app_quit_is_ui_only_and_stop_has_native_confirmation() -> None:
     ).read_text(encoding="utf-8")
     assert 'process.arguments = ["status", "--activity", "--json"]' in delegate
     assert "func applicationShouldTerminate(" in delegate
-    termination = delegate[delegate.index("func applicationShouldTerminate("):delegate.index("func applicationSupportsSecureRestorableState")]
+    termination = delegate[
+        delegate.index("func applicationShouldTerminate(") : delegate.index(
+            "func applicationSupportsSecureRestorableState"
+        )
+    ]
     assert ".terminateNow" in termination
     assert "activeRunSummary" not in termination
     assert "performServerAction" not in termination
-    confirmation = delegate[delegate.index("private func confirmRuntimeStop()"):delegate.index("private func showNativeMessage")]
+    confirmation = delegate[
+        delegate.index("private func confirmRuntimeStop()") : delegate.index(
+            "private func showNativeMessage"
+        )
+    ]
     assert "activeRunSummary()" in confirmation
     assert 'alert.addButton(withTitle: "Cancel")' in confirmation
     assert 'alert.addButton(withTitle: "Stop Runtime Service")' in confirmation
