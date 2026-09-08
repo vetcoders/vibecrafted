@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from .repo_selection import RepoSelectionError, add_repo_arguments, select_repository
 from .run_signal import RunSignalServer
 from .supervisor_async import AsyncSupervisor, transcript_human_path
 
@@ -25,7 +26,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
     run = sub.add_parser("run", help="spawn, observe, validate, and close one run")
     run.add_argument("--run-id", required=True)
-    run.add_argument("--root", default=".")
+    add_repo_arguments(run, root_default="")
     run.add_argument("--meta")
     run.add_argument("--report")
     run.add_argument("--transcript")
@@ -216,6 +217,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command != "run":
         parser.print_help(sys.stderr)
+        return 2
+    try:
+        args.root = select_repository(
+            args.repo, args.root, fallback=Path.cwd, label="dispatcher run"
+        ).path
+    except RepoSelectionError as exc:
+        print(f"dispatcher: {exc}", file=sys.stderr)
         return 2
     if "--tee-output" in (argv or sys.argv[1:]):
         os.environ["VIBECRAFTED_TEE_OUTPUT"] = "1"
