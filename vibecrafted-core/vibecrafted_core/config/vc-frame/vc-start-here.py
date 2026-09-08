@@ -19,8 +19,70 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import textwrap
+from pathlib import Path
 from typing import Any, NamedTuple
+
+
+def _generation_python_candidates() -> list[str]:
+    """Interpreters that can import vibecrafted_core without host PYTHONPATH."""
+    home = Path.home()
+    data = Path(os.environ.get("XDG_DATA_HOME") or (home / ".local" / "share"))
+    ordered: list[str] = []
+    wanted = os.environ.get("VIBECRAFTED_PYTHON", "").strip()
+    if wanted:
+        ordered.append(wanted)
+    for key in ("VIBECRAFTED_RUNTIME_ROOT", "VIBECRAFTED_ROOT"):
+        root = os.environ.get(key, "").strip()
+        if root:
+            ordered.append(str(Path(root) / "bin" / "python3"))
+    ordered.extend(
+        (
+            str(data / "uv" / "tools" / "vibecrafted" / "bin" / "python3"),
+            str(data / "uv" / "tools" / "vibecrafted" / "bin" / "python"),
+            str(data / "uv" / "tools" / "vibecrafted-core" / "bin" / "python3"),
+            str(
+                data
+                / "vibecrafted"
+                / "tools"
+                / "vibecrafted-current"
+                / "bin"
+                / "python3"
+            ),
+        )
+    )
+    seen: set[str] = set()
+    unique: list[str] = []
+    for item in ordered:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        unique.append(item)
+    return unique
+
+
+def ensure_generation_python() -> None:
+    """Re-exec a generation interpreter when host python3 lacks vibecrafted_core."""
+    try:
+        import vibecrafted_core  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        return
+    here = os.path.realpath(sys.executable)
+    for wanted in _generation_python_candidates():
+        if not os.access(wanted, os.X_OK):
+            continue
+        if os.path.realpath(wanted) == here:
+            continue
+        os.execv(wanted, [wanted, *sys.argv])
+    raise SystemExit(
+        "vc-start-here: no module named 'vibecrafted_core'; "
+        "set VIBECRAFTED_PYTHON to the generation python3 "
+        "(or run through vc-start so the Runtime Pack is on PATH)"
+    )
+
 
 PRODUCT_LINE = (
     "Vibecrafted is a workspace where you start and coordinate AI Agents "
@@ -418,4 +480,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    ensure_generation_python()
     raise SystemExit(main())

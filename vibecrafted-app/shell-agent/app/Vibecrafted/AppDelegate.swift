@@ -251,7 +251,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   }
 
   func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
-    true
+    // Loginwindow restore resurrected vc-terminal with a pytest session
+    // identity after reboot. The App is a view over a durable runtime; it
+    // must not restitch windows or test sockets across login.
+    false
   }
 
   func application(_ application: NSApplication, open urls: [URL]) {
