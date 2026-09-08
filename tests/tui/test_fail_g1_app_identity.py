@@ -37,23 +37,20 @@ def test_fail_g1_debug_bundle_id_is_not_the_product_id() -> None:
 
 
 def test_fail_g1_app_does_not_restore_windows_across_login() -> None:
-    """Secure coding stays on; restoration ownership is the actual off switch."""
+    """Secure coding stays on; AppKit window + plist own the restore-off switch.
+
+    Active MacOSX SDK AppKit declares applicationSupportsSecureRestorableState.
+    It does not declare applicationShouldSave/RestoreApplicationState, so those
+    one-argument methods are not callbacks and must not own save/restore policy.
+    """
     delegate = APP_DELEGATE.read_text(encoding="utf-8")
     secure = delegate.split("func applicationSupportsSecureRestorableState")[1].split(
         "func "
     )[0]
-    restore = delegate.split("func applicationShouldRestoreApplicationState")[1].split(
-        "func "
-    )[0]
-    save = delegate.split("func applicationShouldSaveApplicationState")[1].split(
-        "func "
-    )[0]
     assert "\n    true\n" in secure
     assert "\n    false\n" not in secure
-    assert "\n    false\n" in restore
-    assert "\n    true\n" not in restore
-    assert "\n    false\n" in save
-    assert "\n    true\n" not in save
+    assert "func applicationShouldRestoreApplicationState" not in delegate
+    assert "func applicationShouldSaveApplicationState" not in delegate
     factory = (
         REPO_ROOT
         / "vibecrafted-app/shell-agent/app/Vibecrafted/Views/MainWindowController.swift"
