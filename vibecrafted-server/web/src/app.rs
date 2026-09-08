@@ -1615,7 +1615,7 @@ mod tests {
         assert!(html.contains("final"));
         assert!(html.contains("failed"));
         assert!(html.contains("attention"));
-        assert!(html.contains("aria-label=\"Toggle color theme\""));
+        assert!(html.contains("aria-label=\"Switch to light theme\""));
         assert!(html.contains("http://127.0.0.1:8033/"));
         assert!(html.contains("Vibecrafted server navigation"));
         assert!(html.contains("server-sidebar"));
