@@ -620,6 +620,20 @@ materialize_runtime_payload() {
   assert_payload_is_anonymous "$runtime" "Runtime Pack payload"
 }
 
+build_native_voc() {
+  NATIVE_VOC_BUILD_ROOT="$BUILD_DIR/cargo/vibecrafted-app"
+  log "Building the native hermetic vc-start and VOC"
+  (cd "$REPO_ROOT/vibecrafted-app" \
+    && CARGO_TARGET_DIR="$NATIVE_VOC_BUILD_ROOT" \
+      cargo build --locked -p voc --bin vc-start --bin voc --release)
+  NATIVE_VC_START_SOURCE="$NATIVE_VOC_BUILD_ROOT/release/vc-start"
+  [[ -x "$NATIVE_VC_START_SOURCE" ]] || die "vc-start release binary is missing"
+  chmod 0755 "$NATIVE_VC_START_SOURCE"
+  NATIVE_VOC_SOURCE="$NATIVE_VOC_BUILD_ROOT/release/voc"
+  [[ -x "$NATIVE_VOC_SOURCE" ]] || die "VOC release binary is missing"
+  chmod 0755 "$NATIVE_VOC_SOURCE"
+}
+
 build_product() {
   materialize_donor_snapshots
   require_clean_repo "$REPO_ROOT" vibecrafted
@@ -679,14 +693,9 @@ build_product() {
   [[ -x "$frame_source" ]] || die "vc-frame release binary is missing"
   chmod 0755 "$frame_source"
 
-  log "Building the native hermetic vc-start and VOC"
-  (cd "$REPO_ROOT/vibecrafted-app" && cargo build -p voc --bin vc-start --bin voc --release)
-  local start_source="$REPO_ROOT/vibecrafted-app/target/release/vc-start"
-  [[ -x "$start_source" ]] || die "vc-start release binary is missing"
-  chmod 0755 "$start_source"
-  local voc_source="$REPO_ROOT/vibecrafted-app/target/release/voc"
-  [[ -x "$voc_source" ]] || die "VOC release binary is missing"
-  chmod 0755 "$voc_source"
+  build_native_voc
+  local start_source="$NATIVE_VC_START_SOURCE"
+  local voc_source="$NATIVE_VOC_SOURCE"
 
   log "Building the bundled Vibecrafted Server and hydrated site"
   local server_build_root="$BUILD_DIR/cargo"

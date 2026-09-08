@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -25,6 +26,108 @@ INSTALL_PS1_SHA256 = "12c2ca5b95195a2fcee0f4987962fd35ec52dde85588c226f68bcab468
 # brew install it. Calling one of these from a `run:` line is fatal at the
 # step, with no fallback.
 ABSENT_FROM_MACOS_RUNNER_IMAGE = ("rg", "fd")
+
+
+def _native_voc_build_function() -> str:
+    """Extract the builder helper so this test executes its actual command path."""
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(
+        r"^build_native_voc\(\) \{\n.*?^\}\n",
+        builder,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert match, "release builder must own native vc-start/VOC construction"
+    return match.group(0)
+
+
+def _run_native_voc_build(
+    tmp_path: Path, *, outputs: tuple[str, ...]
+) -> subprocess.CompletedProcess[str]:
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    captured_target = tmp_path / "captured-target"
+    fake_cargo = fake_bin / "cargo"
+    fake_cargo.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf "%s\\n" "$CARGO_TARGET_DIR" > "$CAPTURED_TARGET"\n'
+        'printf "%s\\n" "$@" > "$CAPTURED_ARGS"\n'
+        'mkdir -p "$CARGO_TARGET_DIR/release"\n'
+        "for binary in ${FAKE_CARGO_OUTPUTS}; do\n"
+        '  printf "#!/usr/bin/env bash\\nexit 0\\n" > "$CARGO_TARGET_DIR/release/$binary"\n'
+        '  chmod 0755 "$CARGO_TARGET_DIR/release/$binary"\n'
+        "done\n",
+        encoding="utf-8",
+    )
+    fake_cargo.chmod(0o755)
+    harness = tmp_path / "native-voc-harness.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "log() { :; }\n"
+        'die() { printf "FATAL: %s\\n" "$*" >&2; exit 1; }\n'
+        + _native_voc_build_function()
+        + 'build_native_voc\nprintf "%s\\n%s\\n" "$NATIVE_VC_START_SOURCE" "$NATIVE_VOC_SOURCE"\n',
+        encoding="utf-8",
+    )
+    harness.chmod(0o755)
+    hostile_target = tmp_path / "hostile-cargo-target"
+    env = dict(os.environ)
+    env.update(
+        {
+            "BUILD_DIR": str(tmp_path / "release-build"),
+            "CAPTURED_TARGET": str(captured_target),
+            "CAPTURED_ARGS": str(tmp_path / "captured-args"),
+            "CARGO_TARGET_DIR": str(hostile_target),
+            "FAKE_CARGO_OUTPUTS": " ".join(outputs),
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "REPO_ROOT": str(REPO_ROOT),
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(harness)], env=env, text=True, capture_output=True, check=False
+    )
+    result.captured_target = captured_target  # type: ignore[attr-defined]
+    result.captured_args = tmp_path / "captured-args"  # type: ignore[attr-defined]
+    result.hostile_target = hostile_target  # type: ignore[attr-defined]
+    return result
+
+
+def test_native_voc_build_owns_release_target_despite_ambient_cargo_target(
+    tmp_path: Path,
+) -> None:
+    result = _run_native_voc_build(tmp_path, outputs=("vc-start", "voc"))
+    assert result.returncode == 0, result.stderr
+    owned_target = tmp_path / "release-build/cargo/vibecrafted-app"
+    assert (
+        Path(result.captured_target.read_text(encoding="utf-8").strip()) == owned_target
+    )
+    assert owned_target != result.hostile_target
+    assert result.captured_args.read_text(encoding="utf-8").splitlines() == [
+        "build",
+        "--locked",
+        "-p",
+        "voc",
+        "--bin",
+        "vc-start",
+        "--bin",
+        "voc",
+        "--release",
+    ]
+    assert result.stdout.splitlines() == [
+        str(owned_target / "release/vc-start"),
+        str(owned_target / "release/voc"),
+    ]
+
+
+def test_native_voc_build_fails_when_owned_release_output_is_missing(
+    tmp_path: Path,
+) -> None:
+    result = _run_native_voc_build(tmp_path, outputs=("vc-start",))
+    assert result.returncode != 0
+    assert "VOC release binary is missing" in result.stderr
 
 
 def test_public_install_surfaces_name_all_release_carriers() -> None:
@@ -408,7 +511,7 @@ def test_runtime_pack_signing_happens_after_final_copy_and_before_archive() -> N
         not in materializer
     )
     assert 'install -m 0755 "$frame_source" "$runtime/libexec/vc-frame"' in materializer
-    assert "cargo build -p voc --bin vc-start --bin voc --release" in builder
+    assert "cargo build --locked -p voc --bin vc-start --bin voc --release" in builder
     assert 'install -m 0644 "$RUNTIME_PACK" "$EMBEDDED_RUNTIME_PACK"' in embed
     assert '--codesign-identity "$SIGNING_IDENTITY"' in builder
     assert (
