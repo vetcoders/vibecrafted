@@ -489,13 +489,13 @@ def test_await_stage_reports_delivery_and_death(
 # at the lowest boundary (CellLauncher).
 # --------------------------------------------------------------------------
 
-from vibecrafted_core.dispatch.receipts import DispatchReceiptStore  # noqa: E402
-from vibecrafted_core.lifecycle_control import (  # noqa: E402
+from vibecrafted_core.dispatch.receipts import DispatchReceiptStore
+from vibecrafted_core.lifecycle_control import (
     approve_transition,
     await_stage,
     interrupt_workflow,
 )
-from vibecrafted_core.lifecycle_fleet import (  # noqa: E402
+from vibecrafted_core.lifecycle_fleet import (
     dispatch_recorded_children,
     dispatcher_fleet_launch,
     mission_cuts,
@@ -503,7 +503,7 @@ from vibecrafted_core.lifecycle_fleet import (  # noqa: E402
     stage_dispatch_run_id,
 )
 
-from .test_lifecycle_fleet import (  # noqa: E402
+from .test_lifecycle_fleet import (
     _plan,
     _report_writer,
     _seed_repo,

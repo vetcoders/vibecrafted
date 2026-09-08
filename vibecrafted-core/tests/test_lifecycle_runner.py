@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 from vibecrafted_core import control_plane, ship, wrappers
-from vibecrafted_core.lifecycle_delivery import claim_digest_for_text
 from vibecrafted_core.dispatch.supervisor import CellRun
+from vibecrafted_core.lifecycle_delivery import claim_digest_for_text
 from vibecrafted_core.lifecycle_fleet import (
     CutDispatchContract,
     join_stage_dispatch,
