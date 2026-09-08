@@ -22,6 +22,11 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER = REPO_ROOT / "scripts" / "vibecrafted"
+# Claude Code's documented no-fallback hard gate (core execution_controls owner).
+CLAUDE_SANDBOX_ON = (
+    '{"sandbox":{"enabled":true,"failIfUnavailable":true,'
+    '"allowUnsandboxedCommands":false}}'
+)
 FACADE = (
     REPO_ROOT
     / "vibecrafted-core"
@@ -252,7 +257,7 @@ def test_deck_routes_a_shell_skill_with_controls_to_the_core_launcher(
         "--permission-mode",
         "auto",
         "--settings",
-        '{"sandbox":{"enabled":true}}',
+        CLAUDE_SANDBOX_ON,
     ]
     # No vc-frame pane was opened: the shell helper never ran.
     assert not deck.capture.exists()
@@ -264,7 +269,7 @@ def test_deck_routes_a_shell_skill_with_controls_to_the_core_launcher(
         "--permission-mode",
         "auto",
         "--settings",
-        '{"sandbox":{"enabled":true}}',
+        CLAUDE_SANDBOX_ON,
     ]
 
 

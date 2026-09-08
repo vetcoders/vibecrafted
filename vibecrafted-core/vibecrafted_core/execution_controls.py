@@ -13,6 +13,24 @@ One owner for three things:
   ``--permissions auto`` never becomes ``bypassPermissions`` and
   ``--sandbox true`` never becomes an unsandboxed run.
 
+What ``--sandbox`` means is the *provider's own command sandbox* — the boundary
+each provider draws around the shell commands its agent runs (for Claude: the
+Bash tool and its child processes under macOS Seatbelt / Linux bubblewrap). It
+is not whole-agent or VM isolation: file tools, web fetches and MCP servers
+stay outside it. Every receipt names that boundary (``boundary``).
+
+Two rules follow from "requested is never silently downgraded":
+
+* ``sandbox_effective`` reports what the launcher *configured through the
+  provider's supported interface*. The launcher never observes OS enforcement
+  from argv, and says so in the behavior note.
+* ``--sandbox false`` is emitted only where the provider has a verified explicit
+  disable interface (Claude ``sandbox.enabled=false``, grok ``--sandbox off``,
+  cursor ``--sandbox disabled``, codex bypass). Where the only surface is an
+  opt-in flag (agy), "no flag" is *not* "disabled" — persistent provider
+  settings may still enable the sandbox — so explicit ``false`` is refused with
+  the supported alternative. Omission always stays ``provider-default``.
+
 Permission semantics stay with :func:`vibecrafted_core.spawn.resolve_provider_policy`
 (the ``_PERMISSION_CONTRACT`` owner); this module only composes the sandbox
 axis on top of that decision and reports both requested and effective values.
@@ -36,9 +54,18 @@ SUPERVISED_RUNTIME_KINDS = frozenset({"supervised_research", "supervised_marbles
 # can name where a mapping came from; re-probe when a provider is upgraded.
 SANDBOX_EVIDENCE: dict[str, str] = {
     "claude": (
-        "claude 2.1.263 --help: no --sandbox flag; --settings <file-or-json>; "
-        "binary carries settings keys sandbox.enabled, autoAllowBashIfSandboxed, "
-        "excludedCommands, allowUnsandboxedCommands and seatbelt/bubblewrap runtime"
+        "claude 2.1.263 --help: no --sandbox flag; --settings <file-or-json> "
+        "(command-line level: overrides user/project/local scalar keys, below "
+        "managed settings; array keys such as sandbox.excludedCommands merge "
+        "across scopes). Binary settings schema: sandbox.enabled; "
+        "sandbox.failIfUnavailable ('when false (default), a warning is shown and "
+        "commands run unsandboxed'); sandbox.allowUnsandboxedCommands ('when "
+        "false, the dangerouslyDisableSandbox parameter is completely ignored and "
+        "all commands must run sandboxed. Default: true'); "
+        "sandbox.excludedCommands exempts listed commands; "
+        "autoAllowBashIfSandboxed only decides prompting. Boundary per Claude Code "
+        "docs: OS-level (Seatbelt / bubblewrap) for Bash commands and their child "
+        "processes only"
     ),
     "codex": (
         "codex-cli 0.154.0-alpha.3 `codex exec --help`: -s/--sandbox "
@@ -53,13 +80,56 @@ SANDBOX_EVIDENCE: dict[str, str] = {
     "cursor": "cursor-agent 2026.09.08 --help: --sandbox <mode> enabled|disabled",
     "agy": (
         "agy 1.1.27 --help: --sandbox is a boolean opt-in "
-        "('Run in a sandbox with terminal restrictions enabled'); no opt-out flag"
+        "('Run in a sandbox with terminal restrictions enabled'); no opt-out flag. "
+        "--sandbox=false and --sandbox=not-a-boolean both exit 0 with --help / "
+        "--version, so argv parsing proves nothing about enforcement. The binary "
+        "also carries persistent terminal-sandbox settings (sandboxMode, "
+        "enableTerminalSandbox, GlobalSandboxEnabled, 'Sandbox Mode: Enable or "
+        "disable terminal sandboxing per project'), so an omitted flag does not "
+        "prove the sandbox is off"
     ),
     "junie": "junie 26.8.31 --help: no sandbox surface",
 }
 
-_CLAUDE_SANDBOX_ON = json.dumps({"sandbox": {"enabled": True}}, separators=(",", ":"))
-_CLAUDE_SANDBOX_OFF = json.dumps({"sandbox": {"enabled": False}}, separators=(",", ":"))
+# What each provider's sandbox actually confines. Named in every receipt so a
+# reader never mistakes "sandbox enabled" for whole-agent or VM isolation.
+SANDBOX_BOUNDARY: dict[str, str] = {
+    "claude": (
+        "Claude Code Bash-tool sandbox: OS-level (macOS Seatbelt / Linux "
+        "bubblewrap) confinement of Bash commands and their child processes only; "
+        "file tools, WebFetch and MCP servers run outside it. Configured through "
+        "--settings; the launcher does not observe OS enforcement"
+    ),
+    "codex": (
+        "codex exec sandbox policy for model-generated shell commands "
+        "(read-only | workspace-write | danger-full-access)"
+    ),
+    "grok": "grok built-in sandbox profile for agent commands",
+    "cursor": "cursor-agent sandbox mode for agent commands",
+    "agy": "agy terminal sandbox ('terminal restrictions') for agent commands",
+    "junie": "",
+}
+
+# Claude Code's documented hard-gate shape: the sandbox must be on, a missing
+# backend fails the run instead of silently running unsandboxed, and the
+# model's dangerouslyDisableSandbox escape hatch is ignored. Scalar keys passed
+# through --settings win over user/project/local settings (not over managed).
+_CLAUDE_SANDBOX_ON_SETTINGS: dict[str, Any] = {
+    "sandbox": {
+        "enabled": True,
+        "failIfUnavailable": True,
+        "allowUnsandboxedCommands": False,
+    }
+}
+_CLAUDE_SANDBOX_OFF_SETTINGS: dict[str, Any] = {"sandbox": {"enabled": False}}
+_CLAUDE_SANDBOX_ON = json.dumps(_CLAUDE_SANDBOX_ON_SETTINGS, separators=(",", ":"))
+_CLAUDE_SANDBOX_OFF = json.dumps(_CLAUDE_SANDBOX_OFF_SETTINGS, separators=(",", ":"))
+
+
+def claude_sandbox_settings(enabled: bool) -> dict[str, Any]:
+    """The exact ``--settings`` document emitted for Claude ``--sandbox``."""
+    settings = _CLAUDE_SANDBOX_ON_SETTINGS if enabled else _CLAUDE_SANDBOX_OFF_SETTINGS
+    return json.loads(json.dumps(settings))
 
 
 class ExecutionControlsError(ValueError):
@@ -118,6 +188,7 @@ class ExecutionControls:
     provider_flags: tuple[str, ...]
     behavior: str
     evidence: str
+    boundary: str = ""
 
     @property
     def requested(self) -> bool:
@@ -136,6 +207,7 @@ class ExecutionControls:
             "provider_flags": list(self.provider_flags),
             "behavior": self.behavior,
             "evidence": self.evidence,
+            "boundary": self.boundary,
         }
 
 
@@ -157,13 +229,34 @@ def _apply_sandbox(
     """
     if provider == "claude":
         if sandbox is None:
-            return base_flags, "provider-default", "sandbox left to Claude settings"
-        setting = _CLAUDE_SANDBOX_ON if sandbox else _CLAUDE_SANDBOX_OFF
-        state = "enabled" if sandbox else "disabled"
+            return (
+                base_flags,
+                "provider-default",
+                "Bash-tool sandbox left to the inherited Claude settings",
+            )
+        if sandbox:
+            return (
+                (*base_flags, "--settings", _CLAUDE_SANDBOX_ON),
+                "enabled",
+                (
+                    "Bash-tool sandbox required through --settings: "
+                    "sandbox.enabled=true, failIfUnavailable=true (a missing "
+                    "sandbox backend fails the run instead of running commands "
+                    "unsandboxed), allowUnsandboxedCommands=false (the model's "
+                    "dangerouslyDisableSandbox retry is ignored). Commands listed "
+                    "in inherited sandbox.excludedCommands still run outside the "
+                    "sandbox (array keys merge across settings scopes); managed "
+                    "settings outrank --settings. Configured, not observed: the "
+                    "launcher does not watch OS enforcement"
+                ),
+            )
         return (
-            (*base_flags, "--settings", setting),
-            state,
-            f"sandbox {state} through --settings (sandbox.enabled)",
+            (*base_flags, "--settings", _CLAUDE_SANDBOX_OFF),
+            "disabled",
+            (
+                "Bash-tool sandbox disabled through --settings "
+                "(sandbox.enabled=false); managed settings outrank --settings"
+            ),
         )
 
     if provider == "codex":
@@ -234,17 +327,28 @@ def _apply_sandbox(
 
     if provider == "agy":
         if sandbox is None:
-            return base_flags, "provider-default", "sandbox left to agy config"
+            return (
+                base_flags,
+                "provider-default",
+                "terminal sandbox left to agy's own settings",
+            )
         if sandbox:
             return (
                 (*base_flags, "--sandbox"),
                 "enabled",
-                "agy --sandbox (terminal restrictions)",
+                "agy --sandbox (terminal restrictions; configured, not observed)",
             )
-        return (
-            base_flags,
-            "disabled",
-            "agy sandbox is opt-in only; no flag emitted",
+        # agy 1.1.27 has only the opt-in flag. Omitting it does not prove the
+        # sandbox is off: the binary carries persistent terminal-sandbox settings
+        # (sandboxMode / enableTerminalSandbox). No verified disable interface
+        # exists, so an explicit false fails closed instead of being receipted
+        # as "disabled".
+        raise _refuse(
+            provider,
+            "agy 1.1.27 exposes only the opt-in --sandbox flag and keeps its own "
+            "persistent terminal-sandbox settings, so --sandbox false cannot be "
+            "enforced from the launcher. Omit --sandbox to keep agy's own setting "
+            "(receipted as provider-default) or pass --sandbox true.",
         )
 
     if provider == "junie":
@@ -315,4 +419,5 @@ def resolve_execution_controls(
         provider_flags=tuple(flags),
         behavior=behavior,
         evidence=SANDBOX_EVIDENCE.get(provider, ""),
+        boundary=SANDBOX_BOUNDARY.get(provider, ""),
     )

@@ -18,7 +18,18 @@ from pathlib import Path
 import pytest
 
 CORE_ROOT = Path(__file__).resolve().parents[1]
-CLAUDE_SANDBOX_ON = '{"sandbox":{"enabled":true}}'
+# Claude Code's documented hard gate (see execution_controls.SANDBOX_EVIDENCE).
+CLAUDE_SANDBOX_ON = (
+    '{"sandbox":{"enabled":true,"failIfUnavailable":true,'
+    '"allowUnsandboxedCommands":false}}'
+)
+CLAUDE_SANDBOX_ON_SETTINGS = {
+    "sandbox": {
+        "enabled": True,
+        "failIfUnavailable": True,
+        "allowUnsandboxedCommands": False,
+    }
+}
 FOUNDER_PROMPT = "Ujednolić i ustandaryzować polecenie fork — bez zmian bajtów"
 
 
@@ -170,10 +181,19 @@ def test_founder_command_enforces_auto_permissions_and_sandbox(world: _World) ->
         CLAUDE_SANDBOX_ON,
     ]
     assert "2.1.263" in controls["evidence"]
+    # The receipt names the real boundary (Claude's Bash-tool sandbox), the
+    # inherited hole it cannot close (excludedCommands) and that enforcement is
+    # configured, not observed.
+    assert "Bash-tool sandbox" in controls["boundary"]
+    assert "MCP servers run outside" in controls["boundary"]
+    assert "excludedCommands" in controls["behavior"]
+    assert "not observed" in controls["behavior"]
     # The worker argv the dispatcher was handed.
     worker = receipt["worker_command"]
     assert worker[1:3] == ["--model", "claude-fable-5-1"]
     assert worker[-4:] == ["--permission-mode", "auto", "--settings", CLAUDE_SANDBOX_ON]
+    # The exact settings document Claude receives: the no-fallback hard gate.
+    assert json.loads(worker[-1]) == CLAUDE_SANDBOX_ON_SETTINGS
     assert "bypassPermissions" not in worker
 
     # The provider stub actually received that argv, in the worktree, with the
@@ -234,9 +254,10 @@ def test_sandbox_false_is_an_explicit_setting(world: _World) -> None:
         "--settings",
         '{"sandbox":{"enabled":false}}',
     ]
-    # Bare --sandbox means true.
     argv = _await_argv(world.argv_file)
     assert argv[-1] == '{"sandbox":{"enabled":false}}'
+    # Off touches one scalar key; none of the hard-gate keys leak into it.
+    assert json.loads(argv[-1]) == {"sandbox": {"enabled": False}}
 
 
 def test_bare_sandbox_flag_means_true(world: _World) -> None:
@@ -308,6 +329,16 @@ def test_invalid_values_are_refused_before_any_control_plane_write(
             ["--permissions", "accept-edits"],
             "supported: bypass, auto, read-only",
         ),
+        (
+            "agy",
+            ["--sandbox", "false"],
+            "Omit --sandbox to keep agy's own setting",
+        ),
+        (
+            "agy",
+            ["--permissions", "auto", "--sandbox", "off"],
+            "persistent terminal-sandbox settings",
+        ),
     ],
 )
 def test_unenforceable_combinations_are_refused_with_the_alternative(
@@ -325,6 +356,53 @@ def test_unenforceable_combinations_are_refused_with_the_alternative(
     assert not (_runtime_runs(world.env)).exists() or not any(
         _runtime_runs(world.env).iterdir()
     )
+
+
+def test_agy_sandbox_false_is_refused_before_the_provider_launches(
+    tmp_path: Path,
+) -> None:
+    """Explicit false fails closed: exit 2, no run record, stub never runs.
+
+    Omission and explicit true keep working: omission is receipted as
+    ``provider-default`` with no ``--sandbox`` on the stub's argv; true puts the
+    opt-in flag on the argv and is receipted as ``enabled``.
+    """
+    world = _World(tmp_path, provider="agy")
+    runs = _runtime_runs(world.env)
+
+    refused = world.launch(
+        "workflow", "agy", "--sandbox", "false", "--repo", str(world.repo), "-p", "x"
+    )
+    assert refused.returncode == 2, refused.stdout
+    assert "error: agy: agy 1.1.27 exposes only the opt-in --sandbox" in refused.stderr
+    assert "Omit --sandbox to keep agy's own setting" in refused.stderr
+    assert "disabled" not in refused.stdout
+    assert refused.stdout.strip() == ""
+    assert not world.argv_file.exists()
+    assert not runs.exists() or not any(runs.iterdir())
+
+    omitted = world.launch(
+        "workflow", "agy", "--repo", str(world.repo), "-p", "keep agy's setting"
+    )
+    assert omitted.returncode == 0, omitted.stderr
+    receipt = json.loads(omitted.stdout)
+    controls = receipt["execution_controls"]
+    assert controls["sandbox_requested"] == ""
+    assert controls["sandbox_effective"] == "provider-default"
+    assert "terminal sandbox" in controls["boundary"]
+    argv = _await_argv(world.argv_file)
+    assert "--sandbox" not in argv
+    world.argv_file.unlink()
+    world.argv_file.with_suffix(".txt.stdin").unlink()
+
+    enabled = world.launch(
+        "workflow", "agy", "--sandbox", "true", "--repo", str(world.repo), "-p", "x"
+    )
+    assert enabled.returncode == 0, enabled.stderr
+    receipt = json.loads(enabled.stdout)
+    assert receipt["execution_controls"]["sandbox_effective"] == "enabled"
+    argv = _await_argv(world.argv_file)
+    assert "--sandbox" in argv
 
 
 def test_codex_auto_uses_the_exec_surface(tmp_path: Path) -> None:

@@ -7,6 +7,7 @@ a fake ``--help`` surface.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -18,13 +19,20 @@ from vibecrafted_core.continuity.capabilities import (
 )
 from vibecrafted_core.execution_controls import (
     PERMISSION_POLICIES,
+    SANDBOX_BOUNDARY,
     ExecutionControlsError,
+    claude_sandbox_settings,
     parse_permissions_word,
     parse_sandbox_word,
     resolve_execution_controls,
 )
 
-CLAUDE_SANDBOX_ON = '{"sandbox":{"enabled":true}}'
+# Claude Code's documented hard gate: on, fail when the backend is missing, and
+# never let the model retry a command outside the sandbox.
+CLAUDE_SANDBOX_ON = (
+    '{"sandbox":{"enabled":true,"failIfUnavailable":true,'
+    '"allowUnsandboxedCommands":false}}'
+)
 CLAUDE_SANDBOX_OFF = '{"sandbox":{"enabled":false}}'
 
 
@@ -73,6 +81,41 @@ def test_claude_auto_and_sandbox_true_map_to_supported_interfaces() -> None:
     assert receipt["schema"] == "vibecrafted.execution_controls.v1"
     assert receipt["sandbox_requested"] == "true"
     assert receipt["provider_flags"] == list(controls.provider_flags)
+    assert receipt["boundary"] == SANDBOX_BOUNDARY["claude"]
+
+
+def test_claude_sandbox_true_emits_the_documented_no_fallback_hard_gate() -> None:
+    """The exact --settings document: enabled, fail-closed, no unsandboxed retry.
+
+    ``sandbox.enabled`` alone would let inherited settings negate the request:
+    ``allowUnsandboxedCommands`` defaults to true (the model may retry a failed
+    command with ``dangerouslyDisableSandbox``) and ``failIfUnavailable``
+    defaults to false (a missing backend runs commands unsandboxed with a
+    warning). Both are scalar keys, so the command-line ``--settings`` level
+    overrides user/project/local values.
+    """
+    controls = resolve_execution_controls("claude", permissions="auto", sandbox=True)
+    assert controls.provider_flags[-2] == "--settings"
+    settings = json.loads(controls.provider_flags[-1])
+    assert settings == {
+        "sandbox": {
+            "enabled": True,
+            "failIfUnavailable": True,
+            "allowUnsandboxedCommands": False,
+        }
+    }
+    assert settings == claude_sandbox_settings(True)
+    # Key order is part of the argv contract the subprocess tests pin.
+    assert controls.provider_flags[-1] == CLAUDE_SANDBOX_ON
+    # The receipt names the real boundary and the remaining inherited hole, and
+    # does not claim the launcher observed OS enforcement.
+    assert "Bash-tool sandbox" in controls.boundary
+    assert "child processes" in controls.boundary
+    assert "MCP servers run outside" in controls.boundary
+    assert "VM" not in controls.boundary
+    assert "excludedCommands" in controls.behavior
+    assert "managed settings outrank --settings" in controls.behavior
+    assert "not observed" in controls.behavior
 
 
 def test_claude_sandbox_false_is_explicit_not_omitted() -> None:
@@ -80,6 +123,10 @@ def test_claude_sandbox_false_is_explicit_not_omitted() -> None:
     assert controls.permissions_effective == "bypass"
     assert controls.sandbox_effective == "disabled"
     assert controls.provider_flags[-2:] == ("--settings", CLAUDE_SANDBOX_OFF)
+    # Disabling touches one scalar key only; no hard-gate keys leak into "off".
+    assert json.loads(controls.provider_flags[-1]) == {"sandbox": {"enabled": False}}
+    assert claude_sandbox_settings(False) == {"sandbox": {"enabled": False}}
+    assert controls.boundary == SANDBOX_BOUNDARY["claude"]
 
 
 def test_omitted_controls_keep_provider_defaults() -> None:
@@ -89,6 +136,14 @@ def test_omitted_controls_keep_provider_defaults() -> None:
     assert claude.permissions_effective == "bypass"
     assert claude.sandbox_effective == "provider-default"
     assert claude.provider_flags == ("--permission-mode", "bypassPermissions")
+    assert claude.boundary == SANDBOX_BOUNDARY["claude"]
+
+    # Omission stays provider-default for agy too: the launcher neither emits
+    # nor infers anything about agy's persistent terminal-sandbox settings.
+    agy = resolve_execution_controls("agy")
+    assert agy.sandbox_effective == "provider-default"
+    assert "--sandbox" not in agy.provider_flags
+    assert "agy's own settings" in agy.behavior
 
     junie = resolve_execution_controls("junie")
     assert junie.permissions_effective == "auto"
@@ -127,6 +182,8 @@ def test_codex_bypass_with_sandbox_true_keeps_the_sandbox() -> None:
         ("junie", "", True, "Omit --sandbox"),
         ("junie", "auto", False, "Omit --sandbox"),
         ("junie", "bypass", None, "supported: auto"),
+        ("agy", "", False, "Omit --sandbox to keep agy's own setting"),
+        ("agy", "auto", False, "or pass --sandbox true"),
         ("codex", "accept-edits", None, "supported: bypass, auto, read-only"),
         ("cursor", "accept-edits", True, "supported: bypass, auto, read-only"),
     ],
@@ -162,10 +219,28 @@ def test_grok_and_cursor_and_agy_sandbox_words() -> None:
 
     agy_on = resolve_execution_controls("agy", permissions="auto", sandbox=True)
     assert agy_on.provider_flags == ("--sandbox",)
-    agy_off = resolve_execution_controls("agy", permissions="auto", sandbox=False)
-    assert agy_off.provider_flags == ()
-    assert agy_off.sandbox_effective == "disabled"
-    assert "opt-in" in agy_off.behavior
+    assert agy_on.sandbox_effective == "enabled"
+    assert agy_on.boundary == SANDBOX_BOUNDARY["agy"]
+
+
+def test_agy_sandbox_false_fails_closed_instead_of_claiming_disabled() -> None:
+    """agy has only an opt-in flag; "no flag" is not evidence of "disabled".
+
+    agy 1.1.27 keeps persistent terminal-sandbox settings (sandboxMode /
+    enableTerminalSandbox in the binary), so omitting ``--sandbox`` may still
+    run sandboxed. Without a verified explicit disable interface the resolver
+    refuses explicit false with the supported alternatives; nothing is receipted
+    as ``disabled`` on the strength of an absent flag.
+    """
+    for permissions in ("", "bypass", "auto", "accept-edits", "read-only"):
+        with pytest.raises(ExecutionControlsError) as excinfo:
+            resolve_execution_controls("agy", permissions=permissions, sandbox=False)
+        message = str(excinfo.value)
+        assert message.startswith("agy: agy 1.1.27 exposes only the opt-in --sandbox")
+        assert "persistent terminal-sandbox settings" in message
+        assert "Omit --sandbox to keep agy's own setting" in message
+        assert "pass --sandbox true" in message
+    assert "sandboxMode" in resolve_execution_controls("agy").evidence
 
 
 def test_stdin_command_default_shape_is_unchanged() -> None:
@@ -308,6 +383,11 @@ def test_normalize_launch_spec_parses_and_refuses_before_launch(
         workflow.normalize_launch_spec(
             {**payload, "agent": "codex", "sandbox": "false"}, tmp_path
         )
+    with pytest.raises(ValueError, match="agy: agy 1.1.27 exposes only the opt-in"):
+        workflow.normalize_launch_spec(
+            {**payload, "agent": "agy", "permissions": "", "sandbox": "false"},
+            tmp_path,
+        )
     with pytest.raises(ValueError, match="not carried into the research"):
         workflow.normalize_launch_spec(
             {**payload, "skill": "research", "agent": ["claude"]}, tmp_path
@@ -381,6 +461,7 @@ def test_machine_launch_receipt_projects_execution_controls() -> None:
     receipt = workflow.machine_launch_receipt(payload)
     assert receipt["execution_controls"]["permissions_effective"] == "auto"
     assert receipt["execution_controls"]["sandbox_effective"] == "enabled"
+    assert receipt["execution_controls"]["boundary"] == SANDBOX_BOUNDARY["claude"]
     assert "execution_controls" not in workflow.machine_launch_receipt(
         {k: v for k, v in payload.items() if k != "execution_controls"}
     )
