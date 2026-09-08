@@ -15677,13 +15677,16 @@ def _assert_kdl_preference_merge_is_unambiguous(
     current: str,
     incoming: str,
 ) -> None:
-    """Permit only independent top-level scalar KDL preference changes.
+    """Merge user scalars with trusted shipped KDL structure conservatively.
 
     The text merge below preserves comments and exact formatting, but line
     positions are not KDL identity: the same setting can be inserted at two
     different positions. We deliberately do not grow a KDL parser here.
-    Instead, reject edits to blocks/nested content and compare changed
-    top-level scalar names before applying the ordinary three-way merge.
+    The user side is restricted to independent top-level scalar preferences;
+    an incoming generation is already manifest-bound and may legitimately add
+    nested keybinds, layouts, or other shipped structure. Both documents still
+    receive the same conservative structural validation before the ordinary
+    three-way merge applies their disjoint edits.
     """
 
     def line_without_comment(line: str) -> str:
@@ -15746,9 +15749,16 @@ def _assert_kdl_preference_merge_is_unambiguous(
                 settings[name] = body
         return settings
 
+    # Validate all three documents before deciding which edits are owned. This
+    # catches malformed user input without treating a shipped nested block as
+    # a user ambiguity.
     base_depths = depths(base)
+    depths(current.splitlines(keepends=True))
+    depths(incoming.splitlines(keepends=True))
 
-    def assert_scalar_edits(edits_to_check: list[tuple[int, int, list[str]]]) -> None:
+    def assert_user_scalar_edits(
+        edits_to_check: list[tuple[int, int, list[str]]]
+    ) -> None:
         for start, end, replacement in edits_to_check:
             if start != end and any(depth != 0 for depth in base_depths[start:end]):
                 raise ValueError("KDL edit changes nested or structural content")
@@ -15761,8 +15771,7 @@ def _assert_kdl_preference_merge_is_unambiguous(
                 if body and scalar_setting.fullmatch(body) is None:
                     raise ValueError("KDL edit uses unsupported changed scalar syntax")
 
-    assert_scalar_edits(user_edits)
-    assert_scalar_edits(upstream_edits)
+    assert_user_scalar_edits(user_edits)
     previous_settings = scalar_settings(previous)
     user_settings = scalar_settings(current)
     incoming_settings = scalar_settings(incoming)
