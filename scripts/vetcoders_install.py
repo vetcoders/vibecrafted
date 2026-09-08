@@ -9,6 +9,7 @@ Subcommands:
     restore         Restore pre-install state from backup
     runtime-install Install a signed/offline Runtime Pack for the native app or CLI
     runtime-resolve Read installed Runtime Pack identity without mutation
+    runtime-repair  Reconcile product configuration with the selected generation
     runtime-uninstall
                     Remove exactly the Runtime Pack surfaces recorded at install
 
@@ -20,6 +21,7 @@ Usage:
     python3 scripts/vetcoders_install.py restore [--dry-run]
     python3 scripts/vetcoders_install.py runtime-install --payload-root PATH [--app-root PATH]
     python3 -B scripts/vetcoders_install.py runtime-resolve --runtime-home ABSOLUTE_PATH --json
+    python3 -B scripts/vetcoders_install.py runtime-repair --runtime-home ABSOLUTE_PATH --plan --json
     python3 scripts/vetcoders_install.py runtime-uninstall [--dry-run]
 """
 
@@ -62,8 +64,10 @@ from pathlib import Path
 from typing import Any, Literal
 from xml.parsers.expat import ExpatError
 
-# Resolution imports must not populate bytecode in an installed generation.
-if "runtime-resolve" in sys.argv[1:2]:
+# Read-only inspection must not populate bytecode in an installed generation.
+if sys.argv[1:2] == ["runtime-resolve"] or (
+    sys.argv[1:2] == ["runtime-repair"] and "--plan" in sys.argv[2:]
+):
     sys.dont_write_bytecode = True
 
 try:
@@ -15669,6 +15673,60 @@ def _merge_runtime_preferences(
     return "".join(result)
 
 
+def _kdl_line_without_comment(line: str) -> str:
+    """Strip a `//` comment, honouring quoted strings and escapes."""
+    quoted = False
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+        elif char == "\\" and quoted:
+            escaped = True
+        elif char == '"':
+            quoted = not quoted
+        elif not quoted and line[index : index + 2] == "//":
+            return line[:index]
+    return line
+
+
+def _kdl_line_depths(lines: list[str]) -> list[int]:
+    """Brace depth entering each line; raises when the document does not close.
+
+    This is the repository's only structural reading of KDL. The preference
+    merge uses it to decide which edits are top-level, and `runtime-repair`
+    uses it to decide whether a user document is intact at all — one judgement,
+    so the two can never disagree about what "malformed" means.
+    """
+    depth = 0
+    result: list[int] = []
+    for line in lines:
+        result.append(depth)
+        body = _kdl_line_without_comment(line)
+        quoted = False
+        escaped = False
+        for char in body:
+            if escaped:
+                escaped = False
+            elif char == "\\" and quoted:
+                escaped = True
+            elif char == '"':
+                quoted = not quoted
+            elif not quoted and char == "{":
+                depth += 1
+            elif not quoted and char == "}":
+                depth -= 1
+                if depth < 0:
+                    raise ValueError("KDL structure is unbalanced")
+    if depth:
+        raise ValueError("KDL structure is unbalanced")
+    return result
+
+
+def _assert_kdl_structure_is_balanced(text: str) -> None:
+    """Refuse a KDL document whose braces do not close."""
+    _kdl_line_depths(text.splitlines(keepends=True))
+
+
 def _assert_kdl_preference_merge_is_unambiguous(
     base: list[str],
     user_edits: list[tuple[int, int, list[str]]],
@@ -15689,44 +15747,8 @@ def _assert_kdl_preference_merge_is_unambiguous(
     three-way merge applies their disjoint edits.
     """
 
-    def line_without_comment(line: str) -> str:
-        quoted = False
-        escaped = False
-        for index, char in enumerate(line):
-            if escaped:
-                escaped = False
-            elif char == "\\" and quoted:
-                escaped = True
-            elif char == '"':
-                quoted = not quoted
-            elif not quoted and line[index : index + 2] == "//":
-                return line[:index]
-        return line
-
-    def depths(lines: list[str]) -> list[int]:
-        depth = 0
-        result: list[int] = []
-        for line in lines:
-            result.append(depth)
-            body = line_without_comment(line)
-            quoted = False
-            escaped = False
-            for char in body:
-                if escaped:
-                    escaped = False
-                elif char == "\\" and quoted:
-                    escaped = True
-                elif char == '"':
-                    quoted = not quoted
-                elif not quoted and char == "{":
-                    depth += 1
-                elif not quoted and char == "}":
-                    depth -= 1
-                    if depth < 0:
-                        raise ValueError("KDL structure is unbalanced")
-        if depth:
-            raise ValueError("KDL structure is unbalanced")
-        return result
+    line_without_comment = _kdl_line_without_comment
+    depths = _kdl_line_depths
 
     scalar_setting = re.compile(
         r"([A-Za-z_][A-Za-z0-9_-]*)\s+"
@@ -15757,7 +15779,7 @@ def _assert_kdl_preference_merge_is_unambiguous(
     depths(incoming.splitlines(keepends=True))
 
     def assert_user_scalar_edits(
-        edits_to_check: list[tuple[int, int, list[str]]]
+        edits_to_check: list[tuple[int, int, list[str]]],
     ) -> None:
         for start, end, replacement in edits_to_check:
             if start != end and any(depth != 0 for depth in base_depths[start:end]):
@@ -15814,6 +15836,148 @@ def _validate_runtime_preference(path: Path) -> None:
         tomllib.loads(text)
 
 
+# The preference files the owner reconciles, mapped to the shipped defaults
+# inside a generation. One table, so `runtime-install` and `runtime-repair`
+# cannot drift into reconciling different sets of files.
+_RUNTIME_PREFERENCE_SOURCES: tuple[tuple[str, str], ...] = (
+    (
+        "vc-frame/config.kdl",
+        "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl",
+    ),
+    ("terminal-policy.toml", "config/vc-terminal/vibecrafted.toml"),
+)
+
+
+def _runtime_preference_sources(product_config: Path) -> dict[Path, Path]:
+    """Destination -> generation-relative shipped default, for every preference."""
+    return {
+        product_config / destination: Path(relative)
+        for destination, relative in _RUNTIME_PREFERENCE_SOURCES
+    }
+
+
+def _reconcile_runtime_preference(
+    destination: Path,
+    relative: Path,
+    generation: Path,
+    *,
+    runtime_home: Path,
+    previous: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Decide one preference file's postimage without writing anything.
+
+    This is the single reconciliation decision shared by `runtime-install` and
+    `runtime-repair`: the same baseline lineage, the same merge, the same
+    refusals. It is deliberately free of side effects, so a read-only repair
+    plan and a real publication can never disagree about what a file should
+    become — the plan is the decision, not a second guess at it.
+
+    `error` carries the reason the file cannot be merged safely;
+    `backup_destination` names what a writing caller must preserve first.
+    """
+    defaults = previous.get("config_defaults", {})
+    prior_generation = previous.get("owned_symlinks", {}).get(
+        str(runtime_home / "tools/vibecrafted-current")
+    )
+    # An unreadable shipped default is generation corruption, not user drift:
+    # it propagates rather than degrading into a resolvable conflict.
+    incoming_source = generation / relative
+    incoming = incoming_source.read_bytes().decode("utf-8")
+    old = defaults.get(str(destination), {})
+    baseline: str | None = None
+    baseline_source: Path | None = None
+    outcome: dict[str, Any] = {
+        "path": destination,
+        "backup_destination": destination,
+        "incoming_defaults": incoming_source,
+        "baseline_source": None,
+        "current_sha256": None,
+        "present": False,
+        "body": None,
+        "defaults": None,
+        "error": None,
+    }
+    try:
+        aliases = [
+            path for path in (destination, *destination.parents) if path.is_symlink()
+        ]
+        if aliases:
+            outcome["backup_destination"] = aliases[-1]
+            raise ValueError(
+                "product preference path is aliased; resolve its ownership explicitly"
+            )
+        if _path_present(destination) and not destination.is_file():
+            raise ValueError("product preference is not a regular file")
+        current_raw = destination.read_bytes() if destination.is_file() else None
+        outcome["present"] = current_raw is not None
+        outcome["current_sha256"] = (
+            hashlib.sha256(current_raw).hexdigest() if current_raw is not None else None
+        )
+        if previous.get("config_pending"):
+            raise ValueError(
+                "legacy partial configuration publication requires explicit "
+                "backup recovery; per-file markers cannot prove a complete install"
+            )
+        old_generation = old.get("generation", prior_generation)
+        if old_generation:
+            old_root = Path(old_generation)
+            if (
+                not old_root.is_absolute()
+                or old_root.parent != runtime_home / "releases"
+            ):
+                raise ValueError("previous defaults escape the receipted release root")
+            baseline_source = old_root / relative
+            outcome["baseline_source"] = baseline_source
+            if any(
+                path.is_symlink()
+                for path in (baseline_source, *baseline_source.parents)
+            ):
+                raise ValueError("previous shipped defaults are aliased")
+            if not baseline_source.is_file():
+                raise ValueError("previous shipped defaults are missing")
+            manifest, manifest_error = _load_runtime_generation_manifest(old_root)
+            if manifest is None:
+                raise ValueError(
+                    manifest_error or "previous generation manifest is invalid"
+                )
+            raw = baseline_source.read_bytes()
+            digest = hashlib.sha256(raw).hexdigest()
+            expected_digest = (
+                old.get("sha256")
+                or manifest["hashes"].get(relative.as_posix())
+                or previous.get("owned_files", {}).get(str(destination))
+            )
+            if not expected_digest or digest != expected_digest:
+                raise ValueError("previous shipped defaults differ from their receipt")
+            bound_digest = manifest["hashes"].get(relative.as_posix())
+            if bound_digest and digest != bound_digest:
+                raise ValueError("previous shipped defaults differ from their manifest")
+            baseline = raw.decode("utf-8")
+        current = current_raw.decode("utf-8") if current_raw is not None else None
+        body = (
+            incoming
+            if current is None
+            else _merge_runtime_preferences(
+                baseline, current, incoming, kdl=destination.suffix == ".kdl"
+            )
+        )
+        if not body.strip() or "\0" in body:
+            raise ValueError("merged preference file is empty or invalid")
+        if destination.suffix == ".toml":
+            import tomllib
+
+            tomllib.loads(body)
+    except (OSError, UnicodeError, ValueError) as exc:
+        outcome["error"] = str(exc)
+        return outcome
+    outcome["body"] = body
+    outcome["defaults"] = {
+        "generation": str(generation),
+        "sha256": hashlib.sha256(incoming.encode("utf-8")).hexdigest(),
+    }
+    return outcome
+
+
 def _prepare_runtime_preferences(
     generation: Path,
     product_config: Path,
@@ -15827,110 +15991,25 @@ def _prepare_runtime_preferences(
     Defaults are read from the old receipted generation, never from the last
     installed user bytes. Per-file default lineage in the same install receipt
     also makes retries after a partially completed installation unambiguous.
+
+    The per-file decision itself belongs to `_reconcile_runtime_preference`;
+    this function owns only the writing half — backups, receipt conflicts and
+    the refusal to publish.
     """
-    sources = {
-        product_config / "vc-frame/config.kdl": Path(
-            "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
-        ),
-        product_config / "terminal-policy.toml": Path(
-            "config/vc-terminal/vibecrafted.toml"
-        ),
-    }
-    prior_generation = previous.get("owned_symlinks", {}).get(
-        str(runtime_home / "tools/vibecrafted-current")
-    )
-    defaults = previous.get("config_defaults", {})
     prepared: dict[Path, dict[str, Any]] = {}
     conflicts: list[dict[str, str]] = []
-    for destination, relative in sources.items():
-        incoming_source = generation / relative
-        incoming = incoming_source.read_bytes().decode("utf-8")
-        old = defaults.get(str(destination), {})
-        baseline: str | None = None
-        baseline_source: Path | None = None
-        backup_destination = destination
-        try:
-            aliases = [
-                path
-                for path in (destination, *destination.parents)
-                if path.is_symlink()
-            ]
-            if aliases:
-                backup_destination = aliases[-1]
-                raise ValueError(
-                    "product preference path is aliased; "
-                    "resolve its ownership explicitly"
-                )
-            if _path_present(destination) and not destination.is_file():
-                raise ValueError("product preference is not a regular file")
-            current_raw = destination.read_bytes() if destination.is_file() else None
-            current_hash = (
-                hashlib.sha256(current_raw).hexdigest()
-                if current_raw is not None
-                else None
-            )
-            if previous.get("config_pending"):
-                raise ValueError(
-                    "legacy partial configuration publication requires explicit "
-                    "backup recovery; per-file markers cannot prove a complete install"
-                )
-            old_generation = old.get("generation", prior_generation)
-            if old_generation:
-                old_root = Path(old_generation)
-                if (
-                    not old_root.is_absolute()
-                    or old_root.parent != runtime_home / "releases"
-                ):
-                    raise ValueError(
-                        "previous defaults escape the receipted release root"
-                    )
-                baseline_source = old_root / relative
-                if any(
-                    path.is_symlink()
-                    for path in (baseline_source, *baseline_source.parents)
-                ):
-                    raise ValueError("previous shipped defaults are aliased")
-                if not baseline_source.is_file():
-                    raise ValueError("previous shipped defaults are missing")
-                manifest, manifest_error = _load_runtime_generation_manifest(old_root)
-                if manifest is None:
-                    raise ValueError(
-                        manifest_error or "previous generation manifest is invalid"
-                    )
-                raw = baseline_source.read_bytes()
-                digest = hashlib.sha256(raw).hexdigest()
-                expected_digest = (
-                    old.get("sha256")
-                    or manifest["hashes"].get(relative.as_posix())
-                    or previous.get("owned_files", {}).get(str(destination))
-                )
-                if not expected_digest or digest != expected_digest:
-                    raise ValueError(
-                        "previous shipped defaults differ from their receipt"
-                    )
-                bound_digest = manifest["hashes"].get(relative.as_posix())
-                if bound_digest and digest != bound_digest:
-                    raise ValueError(
-                        "previous shipped defaults differ from their manifest"
-                    )
-                baseline = raw.decode("utf-8")
-            current = current_raw.decode("utf-8") if current_raw is not None else None
-            body = (
-                incoming
-                if current is None
-                else _merge_runtime_preferences(
-                    baseline, current, incoming, kdl=destination.suffix == ".kdl"
-                )
-            )
-            if not body.strip() or "\0" in body:
-                raise ValueError("merged preference file is empty or invalid")
-            if destination.suffix == ".toml":
-                import tomllib
-
-                tomllib.loads(body)
-        except (OSError, UnicodeError, ValueError) as exc:
+    for destination, relative in _runtime_preference_sources(product_config).items():
+        outcome = _reconcile_runtime_preference(
+            destination,
+            relative,
+            generation,
+            runtime_home=runtime_home,
+            previous=previous,
+        )
+        if outcome["error"] is not None:
             # Reuse the installer's backup and receipt, without installing a
             # conflict-marker file or creating another preference directory.
+            backup_destination = outcome["backup_destination"]
             backup = ""
             if _path_present(backup_destination):
                 backup = str(
@@ -15944,20 +16023,17 @@ def _prepare_runtime_preferences(
             conflicts.append(
                 {
                     "path": str(destination),
-                    "reason": str(exc),
+                    "reason": outcome["error"],
                     "backup": backup,
-                    "previous_defaults": str(baseline_source or ""),
-                    "incoming_defaults": str(incoming_source),
+                    "previous_defaults": str(outcome["baseline_source"] or ""),
+                    "incoming_defaults": str(outcome["incoming_defaults"]),
                 }
             )
             continue
         prepared[destination] = {
-            "body": body,
-            "current_sha256": current_hash,
-            "defaults": {
-                "generation": str(generation),
-                "sha256": hashlib.sha256(incoming.encode("utf-8")).hexdigest(),
-            },
+            "body": outcome["body"],
+            "current_sha256": outcome["current_sha256"],
+            "defaults": outcome["defaults"],
         }
     if conflicts:
         receipt["config_conflicts"] = conflicts
@@ -17196,6 +17272,555 @@ def cmd_runtime_resolve(args: argparse.Namespace) -> int:
     return 2 if envelope["status"] == "unusable" else 0
 
 
+# MARK: - Configuration self-repair
+
+# `runtime-repair` exists because a configuration that drifted from the
+# selected generation used to have exactly one remedy: republish the App's
+# bundled Runtime Pack. That is a whole-runtime action, it is refused outright
+# when the installation is newer than the carrier, and it made a merge problem
+# look like a broken product. Repair reconciles configuration alone — against
+# the generation the owner already selected, through the very same merge,
+# staging and publication transaction a reinstall uses. There is no second
+# repair engine and no second configuration store.
+CONFIG_REPAIR_SCHEMA = "vibecrafted.config-repair.v1"
+
+# Enough repair history to explain a machine's recent past without letting the
+# receipt grow without bound.
+_CONFIG_REPAIR_HISTORY = 10
+
+
+def _runtime_repair_selected_generation(
+    paths: Mapping[str, Path],
+) -> tuple[Path, dict[str, Any]]:
+    """The generation the owner selected, plus the receipt that binds it.
+
+    Only the identity a configuration merge actually depends on is validated
+    here. Payload integrity, launcher parity and native hosts remain
+    `runtime-resolve`'s judgement: a runtime that fails those needs a Runtime
+    Pack repair, and answering it with a config merge would be a lie.
+    """
+    runtime_home = paths["runtime_home"]
+    active_path = runtime_home / "active.json"
+    receipt_path = _runtime_receipt_path(runtime_home)
+    if not active_path.is_file() or not receipt_path.is_file():
+        raise RuntimeError(
+            "runtime identity is partial; explicit Runtime Pack repair required"
+        )
+    active = json.loads(_capture_runtime_bound_file(active_path))
+    receipt = _load_runtime_install_receipt(receipt_path)
+    if (
+        not isinstance(active, dict)
+        or active.get("schema") != "vibecrafted.active-runtime.v1"
+    ):
+        raise RuntimeError("unsupported active runtime identity")
+    if receipt.get("roots") != {name: str(path) for name, path in paths.items()}:
+        raise RuntimeError("runtime receipt roots do not match requested installation")
+    version = active.get("version")
+    if (
+        not isinstance(version, str)
+        or not re.fullmatch(r"[A-Za-z0-9.+_-]+", version)
+        or version != receipt.get("version")
+    ):
+        raise RuntimeError("runtime identity versions disagree")
+    generation = runtime_home / "releases" / version
+    if active.get("runtime_root") != str(generation):
+        raise RuntimeError("active runtime escapes its receipted generation")
+    _assert_runtime_physical_path(generation)
+    if not generation.is_dir():
+        raise RuntimeError(
+            "selected generation is missing; Runtime Pack repair required"
+        )
+    current = runtime_home / "tools/vibecrafted-current"
+    _assert_runtime_physical_path(current, leaf_symlink=True)
+    if (
+        not current.is_symlink()
+        or current.resolve(strict=True) != generation
+        or receipt.get("owned_symlinks", {}).get(str(current)) != str(generation)
+    ):
+        raise RuntimeError("runtime selectors disagree; Runtime Pack repair required")
+    return generation, receipt
+
+
+def _runtime_managed_config_plan(
+    generation: Path, product_config: Path
+) -> list[dict[str, str]]:
+    """Installer-owned trees, compared exactly as publication staging compares them.
+
+    A missing tree is seedable. A tree that is present but different is *not*
+    auto-repairable: it may be a custom layout, theme or script, and staging
+    refuses to discard it. Saying so here keeps the plan honest about what an
+    apply would actually do.
+    """
+    entries: list[dict[str, str]] = []
+    for relative, source in (
+        (
+            "vc-frame",
+            generation / "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame",
+        ),
+        ("shell", generation / "vibecrafted-core/vibecrafted_core/runtime/shell"),
+    ):
+        destination = product_config / relative
+        defaults = _runtime_config_inventory(source)
+        if defaults is None:
+            continue
+        installed = _runtime_config_inventory(destination)
+        if installed is None:
+            entries.append(
+                {
+                    "path": str(destination),
+                    "action": "seed",
+                    "reason": "managed product config is missing",
+                    "backup": "",
+                }
+            )
+            continue
+        if relative == "vc-frame":
+            # config.kdl is the user's; it is reconciled as a preference above.
+            installed.pop("config.kdl", None)
+            defaults.pop("config.kdl", None)
+        if installed != defaults:
+            entries.append(
+                {
+                    "path": str(destination),
+                    "action": "conflict",
+                    "reason": (
+                        "managed product config differs from the selected "
+                        "generation; restore or resolve the preserved tree"
+                    ),
+                    "backup": "",
+                }
+            )
+    return entries
+
+
+def _runtime_preference_structure_error(destination: Path) -> str | None:
+    """The contract a preference must satisfy on its own, independent of a merge.
+
+    `_merge_runtime_preferences` only inspects a user document when shipped
+    defaults also moved — correct for an upgrade, blind for a launch. Repair is
+    the verb reached for *because* something is wrong, so it reads the document
+    directly, through the same balance check the merge uses rather than a
+    second parser. Returns the reason it is unusable, or None.
+    """
+    try:
+        _validate_runtime_preference(destination)
+        if destination.suffix == ".kdl":
+            _assert_kdl_structure_is_balanced(destination.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, RuntimeError) as exc:
+        return str(exc)
+    return None
+
+
+def _runtime_config_repair_plan(
+    generation: Path,
+    paths: Mapping[str, Path],
+    previous: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    """The read-only reconciliation plan for the whole product configuration.
+
+    Every preference verdict comes from `_reconcile_runtime_preference` — the
+    same call `runtime-install` makes — so a plan can never promise a merge the
+    publication would refuse, and a healthy configuration can never be talked
+    into a rewrite it does not need.
+
+    Entries carry paths, actions and reasons only. Preference *values* never
+    enter this structure: the plan is designed to be printed into a receipt and
+    a dialog.
+    """
+    product_config = paths["product_config"]
+    entries: list[dict[str, str]] = []
+    for destination, relative in _runtime_preference_sources(product_config).items():
+        outcome = _reconcile_runtime_preference(
+            destination,
+            relative,
+            generation,
+            runtime_home=paths["runtime_home"],
+            previous=previous,
+        )
+        structure = (
+            _runtime_preference_structure_error(destination)
+            if outcome["present"]
+            else None
+        )
+        error = outcome["error"] or structure
+        if error is not None:
+            entries.append(
+                {
+                    "path": str(destination),
+                    "action": "conflict",
+                    "reason": str(error),
+                    "backup": "",
+                }
+            )
+            continue
+        if not outcome["present"]:
+            entries.append(
+                {
+                    "path": str(destination),
+                    "action": "seed",
+                    "reason": "product preference is missing",
+                    "backup": "",
+                }
+            )
+            continue
+        body = str(outcome["body"]).encode("utf-8")
+        if hashlib.sha256(body).hexdigest() == outcome["current_sha256"]:
+            entries.append(
+                {
+                    "path": str(destination),
+                    "action": "unchanged",
+                    "reason": "",
+                    "backup": "",
+                }
+            )
+            continue
+        lineage = previous.get("config_defaults", {}).get(str(destination), {})
+        stale = lineage.get("generation") != str(generation) or lineage.get(
+            "sha256"
+        ) != _sha256_path(generation / relative)
+        entries.append(
+            {
+                "path": str(destination),
+                "action": "repair",
+                "reason": (
+                    "shipped defaults for the selected generation were never "
+                    "merged into this preference"
+                    if stale
+                    else "preference diverges from its reconciled postimage"
+                ),
+                "backup": "",
+            }
+        )
+    entries.extend(_runtime_managed_config_plan(generation, product_config))
+    return entries
+
+
+def _publish_runtime_config_repair(
+    generation: Path,
+    paths: Mapping[str, Path],
+    previous: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Apply the plan through the installer's own publication transaction.
+
+    Nothing here is repair-specific except the absence of everything a
+    reinstall additionally does: no generation is unpacked, no selector moves,
+    no launcher is restaged. Configuration is the only thing that changes, and
+    it changes atomically or not at all.
+    """
+    runtime_home = paths["runtime_home"]
+    product_config = paths["product_config"]
+    receipt: dict[str, Any] = json.loads(json.dumps(previous))
+    receipt.setdefault("owned_files", {})
+    receipt.setdefault("owned_dirs", [])
+    preferences = _prepare_runtime_preferences(
+        generation,
+        product_config,
+        runtime_home=runtime_home,
+        receipt=receipt,
+        previous=dict(previous),
+    )
+    product_before = _runtime_config_digest(product_config)
+    backup_root = runtime_home / ".installer-backups"
+    backup_root.mkdir(parents=True, exist_ok=True)
+    # The staging root is not scratch space: the transaction writes the
+    # preimage of every replaced path into it, and the receipt keeps pointing
+    # at those bytes as the durable backup. Deleting it would destroy the very
+    # evidence a repair is supposed to leave behind.
+    staging_root = Path(tempfile.mkdtemp(prefix="repair-", dir=backup_root))
+    staged_config = staging_root / "product-config"
+    _stage_runtime_product_config(
+        generation,
+        paths,
+        preferences,
+        staged_config,
+        receipt,
+        previous,
+    )
+    _publish_runtime_config_transaction(
+        paths,
+        receipt,
+        previous,
+        [(product_config, staged_config)],
+        staging_root,
+        product_before,
+    )
+    # A repair performs no ancillary install work, so it must not leave the
+    # receipt claiming a reinstall is halfway through one.
+    receipt.pop("install_phase", None)
+    return receipt
+
+
+def _record_runtime_config_repair(
+    paths: Mapping[str, Path],
+    previous: Mapping[str, Any],
+    *,
+    generation: Path,
+    at: str,
+    rolled_back: bool,
+    files: Sequence[Mapping[str, str]],
+    receipt: dict[str, Any] | None = None,
+) -> None:
+    """Append one bounded, redacted repair record to the install receipt.
+
+    Paths, actions, reasons and backup locations only — a preference *value*
+    never reaches this structure, so the receipt stays safe to read over a
+    shoulder or paste into a report.
+    """
+    runtime_home = paths["runtime_home"]
+    target = (
+        receipt
+        if receipt is not None
+        else _load_runtime_install_receipt(_runtime_receipt_path(runtime_home))
+    )
+    record = {
+        "at": at,
+        "generation": str(generation),
+        "rolled_back": rolled_back,
+        "files": [
+            {
+                "path": entry["path"],
+                "action": entry["action"],
+                "reason": entry["reason"],
+                "backup": entry["backup"],
+            }
+            for entry in files
+        ],
+    }
+    target["config_repairs"] = (list(previous.get("config_repairs", [])) + [record])[
+        -_CONFIG_REPAIR_HISTORY:
+    ]
+    _checkpoint_runtime_install_receipt(runtime_home, target)
+
+
+def _preserve_runtime_config_conflicts(
+    paths: Mapping[str, Path], conflicts: list[dict[str, str]]
+) -> None:
+    """Preserve the user's bytes and say exactly where they went.
+
+    Uses the installer's own drift backup, so a conflict surfaced by repair is
+    recoverable from the same place a conflict surfaced by a reinstall is. Each
+    entry is annotated in place, so the dialog the operator reads and the
+    receipt they can inspect name the same file.
+
+    Deliberately does *not* write `config_conflicts` into the receipt: that key
+    makes `runtime-resolve` refuse the installation, and repair must never turn
+    a runtime that still works into one that does not. Surfacing and preserving
+    is the whole job; escalation belongs to the installer.
+    """
+    runtime_home = paths["runtime_home"]
+    receipt = _load_runtime_install_receipt(_runtime_receipt_path(runtime_home))
+    for entry in conflicts:
+        path = Path(entry["path"])
+        if _path_present(path):
+            entry["backup"] = str(
+                _backup_runtime_drift(
+                    path,
+                    runtime_home=runtime_home,
+                    receipt=receipt,
+                    reason="product configuration conflict",
+                )
+            )
+    _checkpoint_runtime_install_receipt(runtime_home, receipt)
+
+
+def cmd_runtime_repair(args: argparse.Namespace) -> int:
+    """Reconcile product configuration against the generation already selected.
+
+    Repair never chooses, publishes or downgrades a generation, and it never
+    regenerates a configuration that is already correct: a healthy install is
+    answered with `healthy` and zero writes, on the first launch and on every
+    launch after it. `--plan` is read-only by construction — it reaches the
+    decision through the side-effect-free reconciler and stops there.
+    """
+    plan_only = bool(getattr(args, "plan", False))
+    envelope: dict[str, Any] = {
+        "schema": CONFIG_REPAIR_SCHEMA,
+        "status": "unusable",
+        "mode": "plan" if plan_only else "apply",
+        "reason": "",
+        "generation": "",
+        "repaired": 0,
+        "conflicts": 0,
+        "rolled_back": False,
+        "files": [],
+        "receipt": "",
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    descriptor: int | None = None
+    try:
+        paths = _runtime_install_paths(getattr(args, "runtime_home", None))
+        for path in paths.values():
+            _assert_runtime_physical_path(path)
+        runtime_home = paths["runtime_home"]
+        current_link = runtime_home / "tools/vibecrafted-current"
+        _assert_runtime_physical_path(current_link, leaf_symlink=True)
+        active_path = runtime_home / "active.json"
+        receipt_path = _runtime_receipt_path(runtime_home)
+        envelope["receipt"] = str(receipt_path)
+        if not _path_present(active_path) and not _path_present(receipt_path):
+            # Nothing is installed. Seeding configuration here would create a
+            # second store beside an installation that does not exist yet;
+            # onboarding belongs to the Runtime Pack installer.
+            envelope.update(
+                status="absent",
+                reason="no Vibecrafted runtime is installed yet",
+                receipt="",
+            )
+        elif plan_only:
+            lock_path = _tools_install_lease_path(current_link)
+            _assert_runtime_physical_path(lock_path)
+            try:
+                descriptor = os.open(
+                    lock_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                _validate_tools_lease_descriptor(descriptor, lock_path)
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                except BlockingIOError as exc:
+                    raise RuntimeError("runtime publication is in progress") from exc
+            pending = _load_runtime_install_receipt(receipt_path)
+            if pending.get("config_transaction"):
+                # A crashed publication is precisely when selectors do not
+                # agree yet, so this is read before the generation is demanded.
+                envelope["files"] = [
+                    {
+                        "path": str(receipt_path),
+                        "action": "rollback",
+                        "reason": (
+                            "an interrupted configuration publication is pending"
+                        ),
+                        "backup": "",
+                    }
+                ]
+                envelope["status"] = "repairable"
+            else:
+                generation, previous = _runtime_repair_selected_generation(paths)
+                envelope["generation"] = generation.name
+                envelope["files"] = _runtime_config_repair_plan(
+                    generation, paths, previous
+                )
+                envelope["status"] = _runtime_repair_status(envelope["files"])
+            envelope["conflicts"] = sum(
+                1 for entry in envelope["files"] if entry["action"] == "conflict"
+            )
+        else:
+            with (
+                _tools_install_lease(current_link, operation="runtime-repair") as lease,
+                _inherited_tools_install_lease(lease),
+            ):
+                previous = _load_runtime_install_receipt(receipt_path)
+                if previous.get("config_transaction"):
+                    # The same crash recovery a reinstall performs, so an
+                    # interrupted publication cannot be read as user drift.
+                    _rollback_runtime_config_transaction(paths, previous)
+                    envelope["rolled_back"] = True
+                generation, previous = _runtime_repair_selected_generation(paths)
+                envelope["generation"] = generation.name
+                plan = _runtime_config_repair_plan(generation, paths, previous)
+                actionable = [
+                    entry for entry in plan if entry["action"] in {"repair", "seed"}
+                ]
+                conflicts = [entry for entry in plan if entry["action"] == "conflict"]
+                if conflicts:
+                    # Nothing is published while any part of the configuration
+                    # still needs a human choice. Publishing the merged half
+                    # would pair a generation with a configuration that never
+                    # validated — the mixed state acceptance forbids.
+                    _preserve_runtime_config_conflicts(paths, conflicts)
+                    _record_runtime_config_repair(
+                        paths,
+                        previous,
+                        generation=generation,
+                        at=str(envelope["at"]),
+                        rolled_back=bool(envelope["rolled_back"]),
+                        files=conflicts,
+                    )
+                    envelope.update(
+                        status="conflict",
+                        files=plan,
+                        conflicts=len(conflicts),
+                        reason=(
+                            "product configuration needs an explicit choice; the "
+                            "preserved copy is listed against each conflicting "
+                            "path and nothing was published"
+                        ),
+                    )
+                elif not actionable:
+                    # Acceptance in one branch: a valid configuration is not
+                    # rewritten, not backed up, and not touched at all.
+                    if envelope["rolled_back"]:
+                        # Rolling an interrupted publication back *is* work, and
+                        # it must leave the same durable trace a merge does.
+                        _record_runtime_config_repair(
+                            paths,
+                            previous,
+                            generation=generation,
+                            at=str(envelope["at"]),
+                            rolled_back=True,
+                            files=[],
+                        )
+                    envelope.update(
+                        status="healthy", files=plan, repaired=0, conflicts=0
+                    )
+                else:
+                    receipt = _publish_runtime_config_repair(
+                        generation, paths, previous
+                    )
+                    for entry in plan:
+                        if entry["action"] == "repair":
+                            entry["action"] = "repaired"
+                        elif entry["action"] == "seed":
+                            entry["action"] = "seeded"
+                    _record_runtime_config_repair(
+                        paths,
+                        previous,
+                        generation=generation,
+                        at=str(envelope["at"]),
+                        rolled_back=bool(envelope["rolled_back"]),
+                        files=[
+                            entry for entry in plan if entry["action"] != "unchanged"
+                        ],
+                        receipt=receipt,
+                    )
+                    envelope.update(
+                        status="repaired",
+                        files=plan,
+                        repaired=len(actionable),
+                        conflicts=0,
+                    )
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+        KeyError,
+        AttributeError,
+    ) as exc:
+        envelope.update(
+            status="unusable",
+            reason=str(exc)[:1200] or "configuration repair failed",
+            files=[],
+            repaired=0,
+        )
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    print(json.dumps(envelope, sort_keys=True))
+    return 2 if envelope["status"] in {"unusable", "conflict"} else 0
+
+
+def _runtime_repair_status(entries: Sequence[Mapping[str, str]]) -> str:
+    """One word for what a plan found, before anything is written."""
+    if any(entry["action"] == "conflict" for entry in entries):
+        return "conflict"
+    if any(entry["action"] in {"repair", "seed", "rollback"} for entry in entries):
+        return "repairable"
+    return "healthy"
+
+
 def cmd_runtime_install(args: argparse.Namespace) -> int:
     paths = _runtime_install_paths()
     for path in paths.values():
@@ -18166,6 +18791,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_runtime_resolve.add_argument("--runtime-home", metavar="ABSOLUTE_PATH")
     p_runtime_resolve.add_argument("--json", action="store_true")
 
+    p_runtime_repair = sub.add_parser(
+        "runtime-repair",
+        help="Reconcile product configuration with the selected generation",
+    )
+    p_runtime_repair.add_argument("--runtime-home", metavar="ABSOLUTE_PATH")
+    p_runtime_repair.add_argument(
+        "--plan",
+        action="store_true",
+        help="Report the reconciliation plan without writing anything",
+    )
+    p_runtime_repair.add_argument("--json", action="store_true")
+
     p_runtime_uninstall = sub.add_parser(
         "runtime-uninstall", help="Undo the receipted Runtime Pack install"
     )
@@ -18194,6 +18831,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_runtime_install(args)
     elif args.command == "runtime-resolve":
         return cmd_runtime_resolve(args)
+    elif args.command == "runtime-repair":
+        return cmd_runtime_repair(args)
     elif args.command == "runtime-uninstall":
         return cmd_runtime_uninstall(args)
 

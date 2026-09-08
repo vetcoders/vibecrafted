@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import stat
 import subprocess
 import sys
@@ -317,7 +319,7 @@ def test_kdl_upgrade_merges_user_scalar_with_shipped_nested_keybinds_and_retries
     config.write_bytes(
         config.read_bytes().replace(
             reproducer["user_anchor"].encode(),
-            f'{reproducer["user_anchor"]}\n{reproducer["user_scalar"]}'.encode(),
+            f"{reproducer['user_anchor']}\n{reproducer['user_scalar']}".encode(),
         )
     )
     payload_b = seed_runtime_pack(
@@ -327,7 +329,7 @@ def test_kdl_upgrade_merges_user_scalar_with_shipped_nested_keybinds_and_retries
     upgraded = _install(payload_b, capsys)
     expected = incoming.replace(
         reproducer["user_anchor"],
-        f'{reproducer["user_anchor"]}\n{reproducer["user_scalar"]}',
+        f"{reproducer['user_anchor']}\n{reproducer['user_scalar']}",
     ).encode()
     assert config.read_bytes() == expected
     assert b'bind "Super n" {' in config.read_bytes()
@@ -937,3 +939,292 @@ def test_terminal_wrapper_pins_physical_owner_and_preserves_payload_argv(
     else:
         assert "--config-file is product-owned" in result.stderr
         assert not result.stdout
+
+
+# MARK: - Configuration self-repair
+#
+# `runtime-repair` is the owner the App calls at launch and behind Repair
+# Runtime. It shares `_reconcile_runtime_preference`, the publication
+# transaction and the install lease with `runtime-install`, so these tests
+# assert the two verbs converge rather than that a second engine also works.
+
+
+def _repair(paths: dict, capsys, *, plan: bool, status: str) -> dict:
+    code = installer.cmd_runtime_repair(
+        Namespace(runtime_home=str(paths["runtime_home"]), plan=plan)
+    )
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["schema"] == installer.CONFIG_REPAIR_SCHEMA
+    assert envelope["status"] == status, envelope
+    assert envelope["mode"] == ("plan" if plan else "apply")
+    assert code == (2 if status in {"unusable", "conflict"} else 0)
+    # A repair envelope is printed into receipts and dialogs: it carries paths,
+    # actions and reasons, never preference values.
+    for entry in envelope["files"]:
+        assert set(entry) == {"path", "action", "reason", "backup"}
+    return envelope
+
+
+def _backups(paths: dict) -> dict[str, tuple]:
+    return _snapshot(paths["runtime_home"] / ".installer-backups")
+
+
+def test_config_repair_reports_absent_without_creating_roots(roots, capsys):
+    """Nothing installed is not something to repair: onboarding owns that."""
+    envelope = _repair(roots, capsys, plan=True, status="absent")
+    assert envelope["files"] == []
+    assert not roots["runtime_home"].exists()
+    assert not roots["product_config"].exists()
+    _repair(roots, capsys, plan=False, status="absent")
+    assert not roots["runtime_home"].exists()
+    assert not roots["product_config"].exists()
+
+
+def test_config_repair_leaves_valid_configuration_untouched_on_every_launch(
+    installed, capsys
+):
+    """Acceptance 1: a healthy install is never rewritten, first launch or tenth."""
+    paths, _, _ = installed
+    product = _snapshot(paths["product_config"])
+    receipt_path = paths["runtime_home"] / installer.RUNTIME_INSTALL_RECEIPT
+    receipt = receipt_path.read_bytes()
+    active = (paths["runtime_home"] / "active.json").read_bytes()
+    backups = _backups(paths)
+
+    # The read-only plan is held to the resolver's standard: nothing under the
+    # whole home may move, not even a lock file.
+    home = _snapshot(Path.home())
+    for _ in range(2):
+        envelope = _repair(paths, capsys, plan=True, status="healthy")
+        assert {entry["action"] for entry in envelope["files"]} == {"unchanged"}
+        assert envelope["repaired"] == 0 and envelope["conflicts"] == 0
+        assert _snapshot(Path.home()) == home
+
+    for _ in range(2):
+        envelope = _repair(paths, capsys, plan=False, status="healthy")
+        assert envelope["repaired"] == 0
+        assert _snapshot(paths["product_config"]) == product
+        assert receipt_path.read_bytes() == receipt
+        assert (paths["runtime_home"] / "active.json").read_bytes() == active
+        assert _backups(paths) == backups
+    _resolve(paths, capsys, status="ready")
+
+
+def test_config_repair_seeds_a_missing_preference_from_the_selected_generation(
+    installed, capsys
+):
+    """Acceptance 4: seeding goes through the canonical store, with provenance."""
+    paths, _, result = installed
+    policy = paths["product_config"] / "terminal-policy.toml"
+    shipped = (
+        Path(result["root"]) / "config/vc-terminal/vibecrafted.toml"
+    ).read_bytes()
+    policy.unlink()
+    # Acceptance 8: repair publishes configuration and nothing else. Launcher
+    # ownership and the selected generation are the installer's to move.
+    launchers = _snapshot(paths["launcher_home"])
+    selector = (paths["runtime_home"] / "tools/vibecrafted-current").readlink()
+
+    home = _snapshot(Path.home())
+    plan = _repair(paths, capsys, plan=True, status="repairable")
+    seed = next(entry for entry in plan["files"] if entry["path"] == str(policy))
+    assert seed["action"] == "seed"
+    assert seed["reason"] == "product preference is missing"
+    assert _snapshot(Path.home()) == home, "a plan must not seed anything"
+
+    envelope = _repair(paths, capsys, plan=False, status="repaired")
+    assert _snapshot(paths["launcher_home"]) == launchers
+    assert (paths["runtime_home"] / "tools/vibecrafted-current").readlink() == selector
+    assert envelope["repaired"] == 1
+    assert envelope["generation"] == Path(result["root"]).name
+    assert policy.read_bytes() == shipped
+    receipt = json.loads(
+        (paths["runtime_home"] / installer.RUNTIME_INSTALL_RECEIPT).read_text()
+    )
+    lineage = receipt["config_defaults"][str(policy)]
+    assert lineage["generation"] == result["root"]
+    # A second repair is a no-op, and the runtime is usable again.
+    _repair(paths, capsys, plan=False, status="healthy")
+    _resolve(paths, capsys, status="ready")
+
+
+def test_config_repair_merges_stale_lineage_preserving_scalar_and_shipped_binds(
+    tmp_path, roots, capsys
+):
+    """Acceptance 2+3: the 4.3.0 -> 4.3.1 merge, reached through repair.
+
+    Models an operator who restored their pre-upgrade configuration and its
+    receipt lineage from `.installer-backups` while the new generation stayed
+    selected. Repair must carry the user's scalar onto the shipped keybinds —
+    the same merge the reinstall performs, not a second interpretation of it.
+    """
+    reproducer = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "fixtures/kdl-runtime-preference-upgrade.json"
+        ).read_text(encoding="utf-8")
+    )
+    incoming = (
+        Path(__file__).resolve().parents[2]
+        / "vibecrafted-core/vibecrafted_core/config/vc-frame/config.kdl"
+    ).read_text(encoding="utf-8")
+    shipped_keybinds = reproducer["shipped_keybinds"]
+    assert shipped_keybinds in incoming
+    previous = incoming.replace(shipped_keybinds, "")
+    old = _install(
+        seed_runtime_pack(
+            tmp_path / "pack-a", version="9.9.9+a", frame_config=previous
+        ),
+        capsys,
+    )
+    new = _install(
+        seed_runtime_pack(
+            tmp_path / "pack-b", version="9.9.10+b", frame_config=incoming
+        ),
+        capsys,
+    )
+    config = roots["product_config"] / "vc-frame/config.kdl"
+    user = previous.replace(
+        reproducer["user_anchor"],
+        f"{reproducer['user_anchor']}\n{reproducer['user_scalar']}",
+    )
+    config.write_text(user, encoding="utf-8")
+    receipt_path = roots["runtime_home"] / installer.RUNTIME_INSTALL_RECEIPT
+    receipt = json.loads(receipt_path.read_text())
+    old_source = (
+        Path(old["root"])
+        / "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
+    )
+    assert old_source.is_file(), "the previous generation must survive to be a baseline"
+    receipt["config_defaults"][str(config)] = {
+        "generation": old["root"],
+        "sha256": installer._sha256_path(old_source),
+    }
+    receipt_path.write_text(json.dumps(receipt, indent=2) + "\n")
+
+    plan = _repair(roots, capsys, plan=True, status="repairable")
+    entry = next(item for item in plan["files"] if item["path"] == str(config))
+    assert entry["action"] == "repair"
+    assert "never merged" in entry["reason"]
+    assert config.read_text(encoding="utf-8") == user, "a plan must not merge"
+
+    envelope = _repair(roots, capsys, plan=False, status="repaired")
+    assert envelope["repaired"] == 1
+    expected = incoming.replace(
+        reproducer["user_anchor"],
+        f"{reproducer['user_anchor']}\n{reproducer['user_scalar']}",
+    )
+    assert config.read_text(encoding="utf-8") == expected
+    assert reproducer["user_scalar"] in config.read_text(encoding="utf-8")
+    assert 'bind "Super n" {' in config.read_text(encoding="utf-8")
+    assert 'bind "Super Shift ." {' in config.read_text(encoding="utf-8")
+    # Retry is idempotent and the generation is the one already selected.
+    assert envelope["generation"] == Path(new["root"]).name
+    _repair(roots, capsys, plan=False, status="healthy")
+    assert config.read_text(encoding="utf-8") == expected
+    _resolve(roots, capsys, status="ready")
+
+
+def test_config_repair_refuses_malformed_user_preference_with_typed_conflict(
+    installed, capsys
+):
+    """Acceptance 5: preserve, back up, name the conflict — never reset to defaults."""
+    paths, _, _ = installed
+    config = paths["product_config"] / "vc-frame/config.kdl"
+    damaged = config.read_bytes() + b"\n}\n"
+    config.write_bytes(damaged)
+
+    home = _snapshot(Path.home())
+    plan = _repair(paths, capsys, plan=True, status="conflict")
+    entry = next(item for item in plan["files"] if item["path"] == str(config))
+    assert entry["action"] == "conflict"
+    assert "unbalanced" in entry["reason"]
+    assert _snapshot(Path.home()) == home, "a plan must not back anything up"
+
+    envelope = _repair(paths, capsys, plan=False, status="conflict")
+    assert envelope["conflicts"] == 1
+    conflict = next(item for item in envelope["files"] if item["path"] == str(config))
+    assert conflict["action"] == "conflict"
+    backup = Path(conflict["backup"])
+    assert backup.is_file() and backup.read_bytes() == damaged
+    # The user's bytes are still theirs: nothing was reset to shipped defaults.
+    assert config.read_bytes() == damaged
+    # And the envelope stays a typed structure, not a rendered exception.
+    assert "Traceback" not in json.dumps(envelope)
+
+
+def test_config_repair_reports_managed_tree_drift_as_a_conflict(installed, capsys):
+    """Acceptance 5: a custom layout is evidence, not something to silently discard."""
+    paths, _, _ = installed
+    layout = paths["product_config"] / "vc-frame/layouts/operator.kdl"
+    layout.write_text("// operator's own layout\n")
+    plan = _repair(paths, capsys, plan=True, status="conflict")
+    entry = next(
+        item
+        for item in plan["files"]
+        if item["path"] == str(paths["product_config"] / "vc-frame")
+    )
+    assert entry["action"] == "conflict"
+    assert "selected generation" in entry["reason"]
+    assert layout.read_text() == "// operator's own layout\n"
+
+
+def test_config_repair_rolls_back_an_interrupted_publication(
+    installed, tmp_path, capsys
+):
+    """Acceptance 9: recovery uses the installer's own rollback, not a new one."""
+    paths, _, _ = installed
+    payload_b = seed_runtime_pack(tmp_path / "pack-b", version="9.9.10+b")
+    _crash_install(payload_b, paths, "launcher")
+    receipt_path = paths["runtime_home"] / installer.RUNTIME_INSTALL_RECEIPT
+    assert "config_transaction" in json.loads(receipt_path.read_text())
+    _resolve(paths, capsys, status="unusable")
+
+    plan = _repair(paths, capsys, plan=True, status="repairable")
+    assert [entry["action"] for entry in plan["files"]] == ["rollback"]
+    assert "config_transaction" in json.loads(receipt_path.read_text())
+
+    envelope = _repair(paths, capsys, plan=False, status="healthy")
+    assert envelope["rolled_back"] is True
+    receipt = json.loads(receipt_path.read_text())
+    assert "config_transaction" not in receipt
+    # Recovery is work, and it leaves the same durable trace a merge does.
+    assert receipt["config_repairs"][-1]["rolled_back"] is True
+    _resolve(paths, capsys, status="ready")
+
+
+def test_config_repair_refuses_while_a_publication_holds_the_lease(installed, capsys):
+    """Acceptance 6: one lease, so a launch cannot race a reinstall."""
+    paths, _, _ = installed
+    current = paths["runtime_home"] / "tools/vibecrafted-current"
+    lock = installer._tools_install_lease_path(current)
+    descriptor = os.open(lock, os.O_RDWR)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        envelope = _repair(paths, capsys, plan=True, status="unusable")
+        assert "publication is in progress" in envelope["reason"]
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+    _repair(paths, capsys, plan=True, status="healthy")
+
+
+def test_config_repair_records_one_redacted_receipt(installed, capsys):
+    """Acceptance 7: durable evidence with fields and reasons, never values."""
+    paths, _, result = installed
+    policy = paths["product_config"] / "terminal-policy.toml"
+    secret = policy.read_text(encoding="utf-8")
+    policy.unlink()
+    _repair(paths, capsys, plan=False, status="repaired")
+    receipt = json.loads(
+        (paths["runtime_home"] / installer.RUNTIME_INSTALL_RECEIPT).read_text()
+    )
+    repairs = receipt["config_repairs"]
+    assert len(repairs) == 1
+    record = repairs[0]
+    assert record["generation"] == result["root"]
+    assert [entry["action"] for entry in record["files"]] == ["seeded"]
+    assert record["files"][0]["path"] == str(policy)
+    blob = json.dumps(receipt)
+    assert secret.strip() not in blob
+    assert "Traceback" not in blob
