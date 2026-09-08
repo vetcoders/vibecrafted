@@ -602,7 +602,30 @@ _vetcoders_resume_agent() {
   # _vetcoders_prepare_operator_runtime itself already gives them (an explicit
   # override must never even consult the catalogue, let alone be overridden by
   # it).
-  if [[ -z "$resume_explicit_input" ]] &&
+  #
+  # DECLARED workspace (2026-09-09): an explicit `--root/--repo R` is the
+  # target, full stop. Neither an attached frame nor an ambient
+  # VIBECRAFTED_OPERATOR_SESSION may skip this gate for it -- that skip is how
+  # `resume codex --session <id> --root <repo>` run from a stale/foreign frame
+  # marker was silently re-homed onto the marker's session (and panicked on the
+  # missing host). Binding R here keeps the identity exported for
+  # _vetcoders_prepare_declared_workspace_target below, which verifies liveness,
+  # creates R's own session when absent and decides how it is entered.
+  local resume_declared_root="${_vetcoders_contract_root:-}"
+  local resume_ambient_operator="${VIBECRAFTED_OPERATOR_SESSION:-}"
+  if [[ -z "$resume_explicit_input" && -n "$resume_declared_root" ]] &&
+    command -v _vetcoders_ensure_canonical_workspace_identity >/dev/null 2>&1; then
+    _vetcoders_ensure_canonical_workspace_identity "$resume_declared_root" || {
+      local _resume_identity_status=$?
+      printf 'resume: could not resolve the canonical workspace owner for the declared root %s.\n' "$resume_declared_root" >&2
+      printf 'resume: refusing to assemble continuity or open a provider session without an owned target; inspect '"'"'vibecrafted workspace list'"'"'.\n' >&2
+      return "$_resume_identity_status"
+    }
+    if [[ -n "$resume_ambient_operator" && "$resume_ambient_operator" != "${VIBECRAFTED_OPERATOR_SESSION:-}" ]]; then
+      printf 'resume: VIBECRAFTED_OPERATOR_SESSION=%s is ambient context, not the declared workspace; using %s for %s\n' \
+        "$resume_ambient_operator" "${VIBECRAFTED_OPERATOR_SESSION:-}" "$resume_declared_root" >&2
+    fi
+  elif [[ -z "$resume_explicit_input" ]] &&
     [[ -z "${VIBECRAFTED_OPERATOR_SESSION:-}" ]] &&
     command -v _vetcoders_ensure_canonical_workspace_identity >/dev/null 2>&1 &&
     { ! command -v _vetcoders_in_vc_frame >/dev/null 2>&1 || ! _vetcoders_in_vc_frame; }; then
@@ -753,11 +776,15 @@ _vetcoders_resume_agent() {
     # not hand the terminal to a foreground client yet — that client blocks
     # until detach, so the provider tab below would only be created after the
     # operator closed the window they were waiting for.
-    _vetcoders_prepare_operator_runtime "$runtime" defer-attach || return 1
+    # A declared root hands preparation to the declared-workspace owner; a
+    # bare resume keeps the generic detection (explicit env | in-frame |
+    # canonical bound live | create).
+    _vetcoders_prepare_operator_runtime "$runtime" defer-attach "$resume_declared_root" || return 1
     if [[ -n "${VIBECRAFTED_OPERATOR_SESSION:-}" ]]; then
       _vetcoders_spawn_into_operator_session "$(_vetcoders_operator_face_tab "$tool")" "$resume_cmd" || return 1
       printf 'Resume launched in operator session: %s\n' "$VIBECRAFTED_OPERATOR_SESSION"
       printf '  agent:   %s\n' "$tool"
+      [[ -z "$resume_declared_root" ]] || printf '  root:    %s\n' "$resume_declared_root"
       if [[ -n "$_vetcoders_contract_session" ]]; then
         printf '  session: %s\n' "$_vetcoders_contract_session"
       else

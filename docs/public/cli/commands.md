@@ -231,6 +231,22 @@ native-attaches the last same-agent candidate. `--repo` (legacy `--root`)
 selects the repository from any directory and narrows AICX; it is not a
 session picker. The catalog in the pack is evidence, not a swipe list.
 
+`--repo <path>` (or `--root <path>`) on an interactive resume is a
+**workspace declaration**: the agent is resumed inside that repository's own
+vc-frame session, bound through the workspace catalog. The session is
+created when absent and reused when live — never duplicated, and never
+replaced by whatever session the calling shell happens to be attached to
+(a stale or foreign `VC_FRAME_SESSION_NAME` is ambient context, not a
+target). Entering it follows the caller: a live attached client is switched
+onto the workspace, a plain terminal attaches to it, and a caller with
+neither is told the `vc-frame attach <session>` command instead of being
+downgraded to a headless run. Other sessions are left untouched.
+
+```bash
+# From any shell, including one attached to another project's frame:
+vibecrafted resume codex --session <provider-uuid> --repo ~/Projects/other-repo
+```
+
 ```bash
 printf '%s' "continue safely" | vibecrafted resume-session codex \
   --agent-session-id <provider-session-id> --prompt-stdin

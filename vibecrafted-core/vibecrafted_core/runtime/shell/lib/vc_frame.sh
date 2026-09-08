@@ -901,6 +901,32 @@ _vetcoders_mark_pending_vc_frame_attach() {
 # so the parent shell's targeting state and the explicit session argument are
 # untouched, only the child's inherited attachment context is.
 _vetcoders_attach_prepared_vc_frame_session() {
+  # Declared-workspace entry from a LIVE attached client elsewhere: move that
+  # client onto the prepared session (Frame's own switch-session, the same
+  # shared-canvas move _vetcoders_ensure_vc_frame_session makes inside a frame)
+  # instead of nesting a second foreground client, which Frame refuses. The
+  # spec is "<ambient session>\t<target>" recorded by
+  # _vetcoders_prepare_declared_workspace_target BEFORE this shell exported the
+  # target as its own VC_FRAME_SESSION_NAME; the action is therefore addressed
+  # to the ambient server explicitly, where our client actually is.
+  if [[ -n "${VIBECRAFTED_PENDING_VC_FRAME_SWITCH:-}" ]]; then
+    local switch_spec="$VIBECRAFTED_PENDING_VC_FRAME_SWITCH"
+    unset VIBECRAFTED_PENDING_VC_FRAME_SWITCH
+    local switch_from="${switch_spec%%$'\t'*}"
+    local switch_to="${switch_spec#*$'\t'}"
+    [[ -n "$switch_from" && -n "$switch_to" ]] || return 0
+    local switch_bin=""
+    switch_bin="$(_vetcoders_vc_frame_bin)" || return 1
+    _vetcoders_record_vc_frame_attachment live "$switch_to" || true
+    VC_FRAME_SESSION_NAME="$switch_from" ZELLIJ_SESSION_NAME="$switch_from" \
+      "$switch_bin" --session "$switch_from" action switch-session "$switch_to" || {
+      local switch_rc=$?
+      printf 'resume: could not move the attached client from %s to %s (exit %s); the workspace and its provider tab exist: vc-frame attach %s\n' \
+        "$switch_from" "$switch_to" "$switch_rc" "$switch_to" >&2
+      return "$switch_rc"
+    }
+    return 0
+  fi
   local session_name="${1:-${VIBECRAFTED_PENDING_VC_FRAME_ATTACH:-}}"
   [[ -n "$session_name" ]] || return 0
   unset VIBECRAFTED_PENDING_VC_FRAME_ATTACH
@@ -1043,6 +1069,133 @@ _vetcoders_ensure_vc_frame_session() {
   esac
 }
 
+# Declared workspace target (2026-09-09, P0 on the installed 4.3.1 line):
+# `vibecrafted resume <tool> --session <native id> --root R` is a DECLARATION
+# ("to jest deklaracja"): open R's workspace and resume the agent THERE. Three
+# identities are kept apart on purpose:
+#   * native agent session  -- the provider id, only ever read into the argv;
+#   * workspace identity    -- R's binding in the one canonical catalogue
+#                              (_vetcoders_ensure_canonical_workspace_identity),
+#                              which names the place session to host the tab;
+#   * transport attachment  -- VC_FRAME_PANE_ID/VC_FRAME_SESSION_NAME, i.e.
+#                              where THIS process happens to be attached.
+# The third is ambient parent context. The generic branch below adopts it
+# unconditionally ("already inside a frame -> attach to it"), which is exactly
+# how an explicit repo was overridden: a stale `vibecrafted` marker became the
+# target, the host was missing, the bounded create inherited that same marker
+# and Frame's native guard panicked (src/commands.rs:844). Merely unsetting the
+# marker would keep the wrong target; this owner resolves the RIGHT one.
+#
+# Contract, in order:
+#   1. bind R through the canonical owner (creates the workspace when absent;
+#      an ambient VIBECRAFTED_OPERATOR_SESSION only survives when it IS R's);
+#   2. if the attached client already lives in R's live place session, reuse
+#      it -- no create, no second client;
+#   3. otherwise R's place session is the target: live -> reuse as is (never a
+#      duplicate); dead -> preserved, a recovery incarnation is created;
+#      missing -> created detached with the client context cleared;
+#   4. decide how the Founder ENTERS it, executed last by
+#      _vetcoders_attach_prepared_vc_frame_session once the provider tab
+#      exists: live attached client elsewhere -> switch that client; a
+#      controlling terminal -> foreground attach with a clean env; neither
+#      (stale marker, no TTY) -> say so and print the attach command.
+# Other sessions are never killed, renamed or re-targeted. A failed create is
+# a failed resume: nothing is launched anywhere else instead.
+_vetcoders_prepare_declared_workspace_target() {
+  local declared_root="${1:-}"
+  [[ -n "$declared_root" && -d "$declared_root" ]] || {
+    printf 'resume: declared workspace root is not a directory: %s\n' "$declared_root" >&2
+    return 1
+  }
+  command -v _vetcoders_ensure_canonical_workspace_identity >/dev/null || {
+    printf 'resume: the canonical workspace owner is unavailable; cannot bind %s\n' "$declared_root" >&2
+    return 1
+  }
+
+  # Captured BEFORE any targeting export below overwrites the marker: the
+  # ambient session is the only handle that can later move the attached
+  # client, and its liveness decides whether that move is possible at all.
+  local ambient_session="" ambient_state="missing"
+  if _vetcoders_in_vc_frame; then
+    ambient_session="$(_vetcoders_current_vc_frame_session_name)"
+    [[ -z "$ambient_session" ]] || ambient_state="$(_vetcoders_vc_frame_session_state "$ambient_session")"
+  fi
+  local ambient_operator="${VIBECRAFTED_OPERATOR_SESSION:-}"
+  unset VIBECRAFTED_PENDING_VC_FRAME_ATTACH VIBECRAFTED_PENDING_VC_FRAME_SWITCH
+
+  _vetcoders_ensure_canonical_workspace_identity "$declared_root" || return $?
+  local place="${VIBECRAFTED_OPERATOR_SESSION:-}"
+  if _vetcoders_is_legacy_operator_session_name "$place"; then
+    place="$(_vetcoders_operator_session_name)"
+  fi
+  [[ -n "$place" ]] || {
+    printf 'resume: the workspace owner bound %s to no place session; refusing to guess one.\n' "$declared_root" >&2
+    return 1
+  }
+  if [[ -n "$ambient_operator" && "$ambient_operator" != "$place" ]]; then
+    printf 'resume: VIBECRAFTED_OPERATOR_SESSION=%s is ambient context, not the declared workspace; using %s for %s\n' \
+      "$ambient_operator" "$place" "$declared_root" >&2
+  fi
+  export VIBECRAFTED_DECLARED_WORKSPACE_ROOT="$declared_root"
+
+  local state=""
+  state="$(_vetcoders_vc_frame_session_state "$place")"
+
+  if [[ -n "$ambient_session" && "$ambient_session" == "$place" && "$state" == live ]]; then
+    # The attached client already lives in the declared workspace.
+    export VIBECRAFTED_OPERATOR_SESSION="$place"
+    export VC_FRAME_SESSION_NAME="$place"
+    export ZELLIJ_SESSION_NAME="$place"
+    return 0
+  fi
+  if [[ -n "$ambient_session" ]]; then
+    printf 'resume: attached vc-frame session %s (%s) is ambient context, not the declared workspace %s for %s\n' \
+      "$ambient_session" "$ambient_state" "$place" "$declared_root" >&2
+  fi
+
+  local vc_frame_bin=""
+  _vetcoders_require_vc_frame || return 1
+  _vetcoders_pin_vc_frame_config_dir || return $?
+  vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 1
+
+  if [[ "$state" != live ]]; then
+    local layout_file=""
+    layout_file="$(_vetcoders_operator_layout_file 2>/dev/null || true)"
+    [[ -n "$layout_file" ]] || {
+      printf 'resume: no operator layout is available; cannot create the workspace session %s for %s.\n' \
+        "$place" "$declared_root" >&2
+      return 1
+    }
+    if [[ "$state" == dead ]]; then
+      # Dead incarnations are recovery evidence; never recreate the same name.
+      local dead_place="$place"
+      _vetcoders_record_vc_frame_attachment dead "$dead_place" || return $?
+      place="$(_vetcoders_recovery_vc_frame_session_name "$dead_place")"
+      printf "Session '%s' is dead; preserving it and creating '%s'.\n" \
+        "$dead_place" "$place" >&2
+    fi
+    if ! _vetcoders_create_vc_frame_session_detached "$vc_frame_bin" "$place" "$layout_file"; then
+      printf 'resume: could not create the workspace session %s for %s; nothing was launched elsewhere.\n' \
+        "$place" "$declared_root" >&2
+      return 1
+    fi
+    place="${VIBECRAFTED_PREPARED_VC_FRAME_SESSION:-$place}"
+  fi
+
+  export VIBECRAFTED_OPERATOR_SESSION="$place"
+  export VC_FRAME_SESSION_NAME="$place"
+  export ZELLIJ_SESSION_NAME="$place"
+  if [[ -n "$ambient_session" && "$ambient_state" == live ]]; then
+    export VIBECRAFTED_PENDING_VC_FRAME_SWITCH="${ambient_session}"$'\t'"${place}"
+  elif [[ -t 0 && -t 1 ]]; then
+    export VIBECRAFTED_PENDING_VC_FRAME_ATTACH="$place"
+  else
+    printf 'resume: no live attached client and no controlling terminal here; enter the workspace with: vc-frame attach %s\n' \
+      "$place" >&2
+  fi
+  return 0
+}
+
 _vetcoders_prepare_operator_runtime() {
   vc_raise_launcher_limits
   local PATH="${PATH:-}"
@@ -1053,6 +1206,10 @@ _vetcoders_prepare_operator_runtime() {
   # _vetcoders_attach_prepared_vc_frame_session. Opt-in, so the six existing
   # callers keep their exact foreground behaviour.
   local defer_attach="${2:-}"
+  # declared root: an explicit, already-normalized `--root/--repo` from a
+  # public entry. Opt-in as well; only the declared-workspace owner above
+  # treats the attached frame as ambient context.
+  local declared_root="${3:-}"
   local session_name layout_file
   _vetcoders_normalize_ambient_context
   unset VIBECRAFTED_PENDING_VC_FRAME_ATTACH
@@ -1061,6 +1218,11 @@ _vetcoders_prepare_operator_runtime() {
     terminal|visible) ;;
     *) return 0 ;;
   esac
+
+  if [[ -n "$declared_root" ]]; then
+    _vetcoders_prepare_declared_workspace_target "$declared_root"
+    return $?
+  fi
 
   # If we are already inside a vc-frame session, naturally attach to it.
   if _vetcoders_in_vc_frame; then
@@ -1223,7 +1385,17 @@ _vetcoders_vc_frame_create_host_session() {
   local session_name="${2:-}"
   [[ -n "$vc_frame_bin" && -n "$session_name" ]] || return 1
   local out="" action_status=0
-  out="$("$vc_frame_bin" attach --create-background "$session_name" 2>&1)" || action_status=$?
+  # Bounded create runs with the CURRENT client's attachment context cleared,
+  # and only that (2026-09-09): the caller's targeting export or a stale pane
+  # marker can name exactly the session being resurrected here, and Frame's
+  # native guard (src/commands.rs:844, after envs::normalize_vc_frame_env_aliases
+  # mirrors VC_FRAME_SESSION_NAME into ZELLIJ_SESSION_NAME) panics on that as an
+  # illegal nested reattach instead of creating anything. Same contract as
+  # _vetcoders_create_vc_frame_session_detached; the explicit session argument
+  # and the parent shell's own state are untouched.
+  out="$(env -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME \
+    -u ZELLIJ -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME \
+    "$vc_frame_bin" attach --create-background "$session_name" 2>&1)" || action_status=$?
   if [[ -n "$out" ]]; then
     printf '%s\n' "$out" >&2
   fi
