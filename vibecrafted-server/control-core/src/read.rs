@@ -351,7 +351,59 @@ impl ControlPlane {
         if probe_worker_alive {
             refresh_worker_liveness(&mut run);
         }
+        self.overlay_runtime_meta_terminal(&mut run);
         run
+    }
+
+    /// Prefer terminal runtime meta over a stale active snapshot.
+    ///
+    /// `/api/control/state` counted completed runs as active when
+    /// `runs/<id>.json` lagged `runtime_runs/<id>/meta.json`. A dead PID plus
+    /// a completed/failed meta stamp is durable truth; a live worker still
+    /// wins so we do not seal a running job.
+    fn overlay_runtime_meta_terminal(&self, run: &mut RunStatus) {
+        if !is_safe_run_id(&run.run_id) {
+            return;
+        }
+        let path = self.runtime_run_dir(&run.run_id).join("meta.json");
+        let Some(payload) = read_json::<serde_json::Value>(&path) else {
+            return;
+        };
+        let string = |key: &str| {
+            payload
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+        };
+        let status = string("status");
+        let state = string("state");
+        let meta_state = if !status.is_empty() { status } else { state };
+        let exit_code = payload.get("exit_code").and_then(coerce_int_value);
+        let completed_at = string("completed_at");
+        let terminal_meta =
+            is_final_state(meta_state) || exit_code.is_some() || !completed_at.is_empty();
+        if !terminal_meta {
+            return;
+        }
+        let worker_pid = payload
+            .get("worker_pid")
+            .and_then(coerce_int_value)
+            .or(run.worker_pid);
+        if worker_pid.is_some_and(pid_is_alive) {
+            return;
+        }
+        if !meta_state.is_empty() {
+            run.state = meta_state.to_string();
+        }
+        run.health = "final".to_string();
+        run.liveness = "terminal".to_string();
+        if run.exit_code.is_none() {
+            run.exit_code = exit_code;
+        }
+        if run.completed_at.is_empty() && !completed_at.is_empty() {
+            run.completed_at = completed_at.to_string();
+        }
+        run.worker_alive = Some(false);
     }
 
     /// Read `delivery-seal.json` under the runtime run directory, if present
@@ -829,6 +881,7 @@ impl ControlPlane {
             absorb_status(&mut merged, status);
         }
         for run in &mut merged {
+            self.overlay_runtime_meta_terminal(run);
             let operator_stopped = run.state == "stopped" && !run.stop_reason.trim().is_empty();
             if operator_stopped {
                 run.health = "final".to_string();

@@ -394,3 +394,44 @@ fn lookup_run_returns_none_when_run_not_on_disk_yet() {
         "a run with nothing on disk resolves to None (still launching -> await)"
     );
 }
+
+#[test]
+fn compute_view_does_not_count_completed_runtime_meta_as_active() {
+    let home = temp_home("completed-runtime-meta");
+    let runs_dir = home.join("control_plane").join("runs");
+    fs::create_dir_all(&runs_dir).expect("runs dir");
+    write_snapshot(&runs_dir, "work-ghost", "running", None);
+
+    let run_dir = home
+        .join("control_plane")
+        .join("runtime_runs")
+        .join("work-ghost");
+    fs::create_dir_all(&run_dir).expect("runtime dir");
+    fs::write(
+        run_dir.join("meta.json"),
+        serde_json::to_vec(&json!({
+            "run_id": "work-ghost",
+            "status": "completed",
+            "state": "completed",
+            "exit_code": 0,
+            "completed_at": "2026-08-28T05:00:00+00:00",
+            "worker_pid": 999_999_999i64,
+        }))
+        .expect("meta JSON"),
+    )
+    .expect("write runtime meta");
+
+    let view = ControlPlane::new(&home).compute_view(Utc::now());
+    assert!(
+        view.active_runs
+            .iter()
+            .all(|run| run.run_id != "work-ghost"),
+        "completed runtime meta with a dead pid must not stay in active_runs: {:?}",
+        view.active_runs
+            .iter()
+            .map(|run| &run.run_id)
+            .collect::<Vec<_>>()
+    );
+
+    fs::remove_dir_all(home).ok();
+}

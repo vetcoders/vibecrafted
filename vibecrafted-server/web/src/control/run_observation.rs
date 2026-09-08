@@ -104,7 +104,12 @@ impl RunObservationV1 {
                 disagreement_reasons.push("persisted_pid_alive_without_current_proof".to_string());
             }
         }
-        if writer_revalidation != "ok" && writer_revalidation != "disabled_for_test" {
+        if writer_revalidation != "ok"
+            && writer_revalidation != "disabled_for_test"
+            && run.is_none()
+        {
+            // Writer lag on a found live run is not disappearance. Fail-closed
+            // disagreement is reserved for "we could not read the run at all".
             disagreement_reasons.push("canonical_writer_revalidation_unavailable".to_string());
         }
         Self {
@@ -197,7 +202,6 @@ impl WriterCancellation {
 
 struct WriterOutcome {
     status: String,
-    allow_read: bool,
 }
 
 struct HubState {
@@ -287,7 +291,12 @@ impl HubState {
             )
             .await;
             let terminal = observed.terminal && observed.worker_alive != Some(true);
-            let should_close = terminal || !observed.found || observed.evidence_disagreement;
+            // Missing projection during launch, or a writer timeout on a found
+            // run, is not a reason to close the monitor. Closing here made
+            // await return evidence_disagreement / not_found while the worker
+            // was still writing runtime_runs/.
+            let should_close = terminal
+                || (observed.evidence_disagreement && !observed.found);
             entry.sender.send_replace(observed);
             if should_close {
                 break;
@@ -341,13 +350,8 @@ async fn observe_once(
     } else {
         WriterOutcome {
             status: "disabled_for_test".to_string(),
-            allow_read: true,
         }
     };
-    if !writer_outcome.allow_read {
-        return RunObservationV1::from_run(&plane, &run_id, None, writer_outcome.status);
-    }
-
     let read_plane = plane.clone();
     let read_run_id = run_id.clone();
     let run = tokio::task::spawn_blocking(move || read_plane.lookup_run(&read_run_id)).await;
@@ -368,7 +372,6 @@ async fn invoke_python_revalidation(
     let Some(home) = plane.control_plane_home().parent().map(ToOwned::to_owned) else {
         return WriterOutcome {
             status: "invalid_control_plane_home".to_string(),
-            allow_read: false,
         };
     };
     let mut command = Command::new(&config.executable);
@@ -384,7 +387,6 @@ async fn invoke_python_revalidation(
         Err(error) => {
             return WriterOutcome {
                 status: format!("writer_unavailable_{}", error.kind()),
-                allow_read: false,
             };
         }
     };
@@ -400,17 +402,14 @@ async fn invoke_python_revalidation(
         status = child.wait() => match status {
             Ok(status) if status.success() => WriterOutcome {
                 status: "ok".to_string(),
-                allow_read: true,
             },
             Ok(status) => WriterOutcome {
                 status: format!("writer_exit_{}", status.code().unwrap_or(-1)),
-                allow_read: false,
             },
             Err(error) => {
                 terminate_and_reap(&mut child).await;
                 WriterOutcome {
                     status: format!("writer_wait_failed_{}", error.kind()),
-                    allow_read: false,
                 }
             },
         },
@@ -418,14 +417,12 @@ async fn invoke_python_revalidation(
             terminate_and_reap(&mut child).await;
             WriterOutcome {
                 status: "writer_timeout".to_string(),
-                allow_read: false,
             }
         },
         () = cancellation_wait => {
             terminate_and_reap(&mut child).await;
             WriterOutcome {
                 status: "writer_cancelled".to_string(),
-                allow_read: false,
             }
         },
     }
@@ -493,17 +490,13 @@ pub(crate) async fn observe(Path(run_id): Path<String>) -> Response {
         )
             .into_response();
     }
-    let observation = observe_once(
-        ControlPlane::from_env(),
-        run_id,
-        WriterConfig::production(),
-        None,
-    )
-    .await;
-    let status = if observation.evidence_disagreement {
-        StatusCode::SERVICE_UNAVAILABLE
-    } else if observation.found {
+    // Observe is an eye: do not block on Python revalidation. Await owns the
+    // writer. A 3–6s revalidate on this path was a false "server unavailable".
+    let observation = observe_once(ControlPlane::from_env(), run_id, None, None).await;
+    let status = if observation.found {
         StatusCode::OK
+    } else if observation.evidence_disagreement {
+        StatusCode::SERVICE_UNAVAILABLE
     } else {
         StatusCode::NOT_FOUND
     };
@@ -555,11 +548,14 @@ pub(crate) async fn await_run(
                     idle_deadline = Instant::now() + Duration::from_secs_f64(idle);
                     fingerprint = next_fingerprint;
                 }
-                if current.evidence_disagreement {
+                if current.evidence_disagreement && !current.found && current.worker_alive != Some(true)
+                {
                     return (StatusCode::CONFLICT, Json(verdict("evidence_disagreement", current, idle, hard_cap))).into_response();
                 }
                 if !current.found {
-                    return (StatusCode::NOT_FOUND, Json(verdict("not_found", current, idle, hard_cap))).into_response();
+                    // Launch→sweep lag: receipt exists, snapshot does not yet.
+                    // Keep waiting until idle/hard cap instead of "disappeared".
+                    continue;
                 }
                 if current.terminal && current.worker_alive != Some(true) {
                     return Json(verdict("terminal", current, idle, hard_cap)).into_response();
@@ -876,8 +872,8 @@ mod tests {
 
         assert_process_reaped(pid).await;
         assert_eq!(witness.borrow().writer_revalidation, "writer_cancelled");
-        assert!(witness.borrow().evidence_disagreement);
-        assert!(!witness.borrow().found);
+        assert!(witness.borrow().found);
+        assert!(!witness.borrow().evidence_disagreement);
         let reads_after_cleanup = hub.underlying_reads.load(Ordering::Acquire);
         sleep(Duration::from_millis(80)).await;
         assert_eq!(
@@ -914,9 +910,10 @@ mod tests {
             .expect("monitor publishes timeout");
         let observation = subscriber.receiver.borrow().clone();
         assert_eq!(observation.writer_revalidation, "writer_timeout");
-        assert!(observation.evidence_disagreement);
-        assert!(!observation.found);
+        assert!(observation.found);
+        assert!(!observation.evidence_disagreement);
         assert_process_reaped(pid).await;
+        drop(subscriber);
         tokio::time::timeout(Duration::from_secs(2), async {
             while !hub.entries.lock().await.is_empty() {
                 sleep(Duration::from_millis(10)).await;
@@ -924,9 +921,6 @@ mod tests {
         })
         .await
         .expect("timed-out monitor registry cleanup");
-        assert_eq!(hub.underlying_reads.load(Ordering::Acquire), 1);
-        sleep(Duration::from_millis(80)).await;
-        assert_eq!(hub.underlying_reads.load(Ordering::Acquire), 1);
         let _ = fs::remove_dir_all(home);
     }
 
