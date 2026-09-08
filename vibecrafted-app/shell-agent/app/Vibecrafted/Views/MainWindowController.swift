@@ -25,6 +25,12 @@ enum CommandDeckWindowFactory {
     window.tabbingMode = .preferred
     window.toolbarStyle = .unified
     window.titleVisibility = .visible
+    // Frame autosave is geometry only. AppKit window restoration is owned
+    // here: titled windows default restorable; these two assignments are the
+    // verified off switch (NSWindowRestoration.h). Loginwindow must not
+    // restitch the Command Deck.
+    window.isRestorable = false
+    window.restorationClass = nil
     if let frameAutosaveName {
       window.setFrameAutosaveName(frameAutosaveName)
     }

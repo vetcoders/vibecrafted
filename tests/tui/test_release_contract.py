@@ -550,11 +550,12 @@ def test_notary_authentication_never_puts_the_password_in_process_argv() -> None
         builder.index("notary_submit() {") : builder.index("strip_debug_stabs() {")
     ]
 
-    assert '--keychain-profile "$NOTARY_PROFILE"' in notary_function
+    assert '--keychain-profile "$profile"' in notary_function
     assert '--key "$NOTARY_API_KEY_PATH"' in notary_function
     assert "--password" not in notary_function
     assert "NOTARY_PASSWORD" not in notary_function
     assert 'source "$NOTARY_ENV"' not in notary_function
+    assert "notary_profile_from_env_file" in builder
     assert 'notarytool store-credentials "$fallback_profile"' in notary_function
     assert "if [[ ! -t 0 || ! -t 1 ]]; then" in notary_function
     assert "raw Apple-ID notarization credentials are not accepted headlessly" in (

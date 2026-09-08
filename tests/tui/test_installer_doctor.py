@@ -989,7 +989,7 @@ def test_runtime_verifier_python_falls_back_only_when_none_is_carried(
     dangling_root = tmp_path / "dangling"
     (dangling_root / "bin").mkdir(parents=True)
     (dangling_root / "bin/python3").symlink_to(tmp_path / "missing")
-    with pytest.raises(OSError, match="not executable"):
+    with pytest.raises(OSError, match="dangling link"):
         installer._runtime_verifier_python(dangling_root)
 
 

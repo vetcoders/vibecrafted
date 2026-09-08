@@ -32,7 +32,6 @@ targets:
           ./shell-agent/scripts/normalize-bindings.sh shell-agent/app/Vibecrafted/Bridge
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: io.vetcoders.vibecrafted
         MARKETING_VERSION: "4.3.1"
         CURRENT_PROJECT_VERSION: 1
         GENERATE_INFOPLIST_FILE: false
@@ -56,7 +55,12 @@ targets:
         LIBRARY_SEARCH_PATHS:
           - "$(PROJECT_DIR)/../../target/release"
       configs:
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER: io.vetcoders.vibecrafted.dev
+          PRODUCT_NAME: VibecraftedDev
         Release:
+          PRODUCT_BUNDLE_IDENTIFIER: io.vetcoders.vibecrafted
+          PRODUCT_NAME: Vibecrafted
           SWIFT_OPTIMIZATION_LEVEL: "-O"
           GCC_OPTIMIZATION_LEVEL: "s"
           SWIFT_COMPILATION_MODE: wholemodule

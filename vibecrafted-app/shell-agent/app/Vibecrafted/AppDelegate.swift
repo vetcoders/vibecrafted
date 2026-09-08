@@ -251,6 +251,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   }
 
   func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
+    // AppKit NSApplicationDelegate declares this (NSApplication.h). Returning
+    // true opts into secure NSCoding if any restorable state is encoded.
+    // It is not a save/restore policy switch. That policy is owned by
+    // window.isRestorable = false, restorationClass = nil on Command Deck
+    // windows, and Info.plist NSQuitAlwaysKeepsWindows = false. Active AppKit
+    // headers have no applicationShouldSave/RestoreApplicationState callback.
     true
   }
 

@@ -3179,6 +3179,9 @@ _RUNTIME_SERVICE_LABEL = "io.vetcoders.vibecrafted.server"
 _RUNTIME_SERVICE_COMMAND_TIMEOUT_SECONDS = 45.0
 _RUNTIME_SERVICE_ACTIVATION_TIMEOUT_SECONDS = 120.0
 _RUNTIME_SERVICE_SETTLEMENT_TIMEOUT_SECONDS = 30.0
+# A shrinking activation deadline must not fire a doomed sub-100ms probe
+# (div0-030). Remaining budget below this floor is "budget exhausted".
+_RUNTIME_SERVICE_PROBE_MIN_TIMEOUT_SECONDS = 1.0
 _SERVICE_LIFECYCLE_LOCK_MARKER = (
     b"readonly VIBECRAFTED_SERVICE_LIFECYCLE_LOCK_CONTRACT=1"
 )
@@ -4769,6 +4772,27 @@ def _runtime_service_environment(
     return environment
 
 
+def _runtime_service_remaining_probe_budget(deadline: float) -> float:
+    """Return remaining probe seconds, or fail closed below the floor.
+
+    Remaining budget that cannot pay for a real observation must not spawn a
+    doomed ``status --json`` shot. Callers report that as budget exhausted,
+    not as a 96ms timeout observation.
+    """
+    remaining = deadline - time.monotonic()
+    if remaining < _RUNTIME_SERVICE_PROBE_MIN_TIMEOUT_SECONDS:
+        raise TimeoutError(
+            "runtime service observation budget exhausted "
+            f"(remaining {max(0.0, remaining):.4f}s below "
+            f"{_RUNTIME_SERVICE_PROBE_MIN_TIMEOUT_SECONDS:g}s probe floor)"
+        )
+    return remaining
+
+
+def _runtime_service_observation_is_budget_exhausted(exc: BaseException) -> bool:
+    return isinstance(exc, TimeoutError) and "budget exhausted" in str(exc)
+
+
 def _run_runtime_service_command(
     launcher: Path,
     shared_home: Path,
@@ -4781,10 +4805,9 @@ def _run_runtime_service_command(
     timeout_seconds = _RUNTIME_SERVICE_COMMAND_TIMEOUT_SECONDS
     deadline = _RUNTIME_SERVICE_COMMAND_DEADLINE.get()
     if deadline is not None:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("runtime service observation deadline expired")
-        timeout_seconds = min(timeout_seconds, remaining)
+        timeout_seconds = min(
+            timeout_seconds, _runtime_service_remaining_probe_budget(deadline)
+        )
     return subprocess.run(
         [str(launcher), "server", *arguments],
         check=False,
@@ -5003,6 +5026,11 @@ def _wait_for_runtime_service_settlement(
             TimeoutError,
         ) as exc:
             last_observation = str(exc)
+            if _runtime_service_observation_is_budget_exhausted(exc):
+                raise OSError(
+                    "runtime service did not settle within "
+                    f"{timeout_seconds:g}s (last observation: {last_observation})"
+                ) from exc
         else:
             if snapshot is None:
                 raise OSError(
@@ -5217,6 +5245,12 @@ def activate_runtime_service_after_install(
             TimeoutError,
         ) as exc:
             last_observation = str(exc)
+            if _runtime_service_observation_is_budget_exhausted(exc):
+                raise OSError(
+                    "new runtime service activation did not prove a healthy managed "
+                    f"pair within {_RUNTIME_SERVICE_ACTIVATION_TIMEOUT_SECONDS:g}s "
+                    f"(last observation: {last_observation})"
+                ) from exc
         else:
             if active is not None and active[1].healthy and active[2] == "running":
                 break
@@ -9043,11 +9077,41 @@ def _owned_temporary_directory(*, prefix: str) -> Iterator[Path]:
 
 
 def _runtime_verifier_python(runtime_root: Path) -> Path:
-    """Use a carried interpreter when present, otherwise the source installer's."""
+    """Use a carried interpreter when present, otherwise the source installer's.
+
+    Genuine source-staging absence (no ``bin/python3`` inode) falls back to the
+    installer interpreter so preflight can finish *before* any live pair is
+    drained. A packaged or staged path that exists as a dangling link,
+    directory, unreadable inode, or non-executable target is corruption and
+    fail-closes before drain or publication. Never treat those as host Python.
+    """
     runtime_python = runtime_root / "bin/python3"
-    if not runtime_python.exists() and not runtime_python.is_symlink():
+    try:
+        st = runtime_python.lstat()
+    except FileNotFoundError:
         return Path(sys.executable)
-    if not runtime_python.is_file() or not os.access(runtime_python, os.X_OK):
+    except OSError as exc:
+        raise OSError(
+            f"candidate runtime Python is unreadable: {runtime_python}"
+        ) from exc
+    try:
+        resolved = runtime_python.resolve(strict=True)
+        resolved_st = resolved.stat()
+    except FileNotFoundError as exc:
+        raise OSError(
+            f"candidate runtime Python is a dangling link: {runtime_python}"
+        ) from exc
+    except OSError as exc:
+        raise OSError(
+            f"candidate runtime Python is unreadable: {runtime_python}"
+        ) from exc
+    if stat.S_ISDIR(st.st_mode) or stat.S_ISDIR(resolved_st.st_mode):
+        raise OSError(f"candidate runtime Python is a directory: {runtime_python}")
+    if not stat.S_ISREG(resolved_st.st_mode):
+        raise OSError(
+            f"candidate runtime Python is not an executable file: {runtime_python}"
+        )
+    if not os.access(resolved, os.X_OK):
         raise OSError(f"candidate runtime Python is not executable: {runtime_python}")
     return runtime_python
 
@@ -17865,7 +17929,11 @@ def _install_runtime_pack(args: argparse.Namespace) -> int:
         ):
             raise RuntimeError("pre-publication receipt history is invalid")
         _restore_runtime_publication_receipt(paths, previous, saved)
-    _refuse_runtime_pack_downgrade(payload_root, runtime_home)
+    _refuse_runtime_pack_downgrade(
+        payload_root,
+        runtime_home,
+        allow_older=bool(getattr(args, "allow_older_runtime", False)),
+    )
     if previous.get("config_pending"):
         raise RuntimeError(
             "legacy partial config publication requires explicit backup recovery before install"
@@ -18239,7 +18307,12 @@ def _runtime_pack_downgrade(
     return reasons
 
 
-def _refuse_runtime_pack_downgrade(payload_root: Path, runtime_home: Path) -> None:
+def _refuse_runtime_pack_downgrade(
+    payload_root: Path,
+    runtime_home: Path,
+    *,
+    allow_older: bool = False,
+) -> None:
     active_path = runtime_home / "active.json"
     if not active_path.is_file():
         return
@@ -18257,6 +18330,13 @@ def _refuse_runtime_pack_downgrade(payload_root: Path, runtime_home: Path) -> No
     if not reasons:
         return
     detail = "\n  ".join(reasons)
+    if allow_older:
+        print(
+            "allowing explicit Runtime Pack downgrade (--allow-older-runtime):\n  "
+            + detail,
+            file=sys.stderr,
+        )
+        return
     raise RuntimeError(
         "refusing to replace a newer active runtime with an older Runtime Pack "
         "(an upgrade never takes the Founder's tools backwards):\n  " + detail
@@ -18785,6 +18865,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_runtime_install.add_argument("--payload-root", required=True)
     p_runtime_install.add_argument("--app-root")
     p_runtime_install.add_argument("--terminal-host")
+    p_runtime_install.add_argument(
+        "--allow-older-runtime",
+        action="store_true",
+        help="Install a Runtime Pack older than the active generation (explicit downgrade)",
+    )
 
     p_runtime_resolve = sub.add_parser(
         "runtime-resolve", help="Read installed Runtime Pack identity without repair"
