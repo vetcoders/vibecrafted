@@ -489,24 +489,30 @@ pub mod api {
     /// WebKit) — and Loctree's inline scripts read them at top level, so the
     /// tab wiring and the theme toggle never get installed. The stand-in is a
     /// per-document in-memory `Storage` look-alike (`getItem`, `setItem`,
-    /// `removeItem`, `clear`, `key`, `length`): nothing persists across loads and
-    /// nothing crosses the origin boundary. Where the real storage is usable the
-    /// script leaves it alone.
+    /// `removeItem`, `clear`, `key`, `length`), one independent instance per
+    /// storage name: nothing persists across loads, nothing crosses the origin
+    /// boundary, and `localStorage` never sees `sessionStorage`. Where the real
+    /// storage is usable the script leaves it alone. Behaviour is proven by
+    /// `tests/acceptance/storage_shim_probe.mjs` (run from
+    /// [`tests::storage_stand_ins_are_independent`] when `node` is on `PATH`).
     const STORAGE_SHIM: &str = concat!(
         "<script data-vibecrafted=\"storage-shim\">",
-        "(function(){var names=[\"localStorage\",\"sessionStorage\"];",
-        "for(var i=0;i<names.length;i++){var name=names[i];var usable=false;",
-        "try{var real=window[name];if(real){real.getItem(\"vibecrafted-storage-probe\");usable=true;}}catch(e){}",
-        "if(usable){continue;}",
-        "var store=Object.create(null);",
-        "var shim={",
+        "(function(){",
+        // One stand-in per call: `store` belongs to that call's closure alone,
+        // so `localStorage` and `sessionStorage` never share or clear each other.
+        "function standIn(){var store=Object.create(null);var shim={",
         "getItem:function(k){k=String(k);return k in store?store[k]:null;},",
         "setItem:function(k,v){store[String(k)]=String(v);},",
         "removeItem:function(k){delete store[String(k)];},",
         "clear:function(){store=Object.create(null);},",
         "key:function(n){var keys=Object.keys(store);return n<keys.length?keys[n]:null;}};",
         "Object.defineProperty(shim,\"length\",{get:function(){return Object.keys(store).length;}});",
-        "try{Object.defineProperty(window,name,{value:shim,configurable:true,writable:true});}catch(e){}",
+        "return shim;}",
+        "var names=[\"localStorage\",\"sessionStorage\"];",
+        "for(var i=0;i<names.length;i++){var name=names[i];var usable=false;",
+        "try{var real=window[name];if(real){real.getItem(\"vibecrafted-storage-probe\");usable=true;}}catch(e){}",
+        "if(usable){continue;}",
+        "try{Object.defineProperty(window,name,{value:standIn(),configurable:true,writable:true});}catch(e){}",
         "}})();",
         "</script>"
     );
@@ -812,6 +818,12 @@ pub mod api {
             assert!(STORAGE_SHIM.contains("catch(e){}"));
             assert!(STORAGE_SHIM.contains("if(usable){continue;}"));
             assert!(!STORAGE_SHIM.contains("allow-same-origin"));
+            // Each storage gets its own closure, never a loop-shared binding.
+            assert!(STORAGE_SHIM.contains("value:standIn()"));
+            assert_eq!(STORAGE_SHIM.matches("var store=").count(), 1);
+            assert!(
+                STORAGE_SHIM.find("var store=").unwrap() < STORAGE_SHIM.find("for(var i").unwrap()
+            );
 
             // Uppercase / attributed head, then no head at all.
             let upper =
@@ -825,6 +837,44 @@ pub mod api {
             // `<header>` is not `<head>`.
             let header_only = inject_storage_shim("<header>x</header>");
             assert!(header_only.starts_with("<script data-vibecrafted"));
+        }
+
+        /// The injected script, evaluated as a browser would under an opaque
+        /// origin: `localStorage` and `sessionStorage` must be two independent
+        /// stand-ins, and a usable real storage must be left alone. Skips with a
+        /// note when `node` is not runnable on this host.
+        #[test]
+        fn storage_stand_ins_are_independent() {
+            let probe = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/acceptance/storage_shim_probe.mjs");
+            assert!(probe.is_file(), "missing {}", probe.display());
+            let html = adapt_report(
+                "<!DOCTYPE html><html><head><title>R</title></head><body></body></html>",
+            );
+            let dir =
+                std::env::temp_dir().join(format!("vc-storage-shim-probe-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("probe dir");
+            let document = dir.join("report.html");
+            std::fs::write(&document, html).expect("probe document");
+            let output = std::process::Command::new("node")
+                .arg(&probe)
+                .arg(&document)
+                .output();
+            let _ = std::fs::remove_dir_all(&dir);
+            let output = match output {
+                Ok(output) => output,
+                Err(error) => {
+                    println!("skipped: `node` is not runnable on this host ({error})");
+                    return;
+                }
+            };
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "storage stand-ins are not independent:\n{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(stdout.contains("\"pass\": true"), "{stdout}");
         }
     }
 }

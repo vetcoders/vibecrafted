@@ -8,7 +8,9 @@
 //   * every sub-resource the report asks for answers 2xx (relative assets
 //     resolve against the document URL);
 //   * `window.localStorage` is usable from the sandboxed document (the report's
-//     scripts touch it at top level and die otherwise);
+//     scripts touch it at top level and die otherwise), and `localStorage` /
+//     `sessionStorage` are two independent storages (a key written to one is
+//     invisible to the other; clearing one leaves the other intact);
 //   * a real mouse click on the "Graph" sidebar item switches the active panel
 //     and, when the report carries graph data, Cytoscape draws into it
 //     (`graphDataDeclared` in the verdict says which case ran);
@@ -192,6 +194,11 @@ record.finalUrl = await evaluate("location.href");
 record.checks.storage = await evaluate(
   `(() => { try { localStorage.setItem('vc-acceptance', '1'); const v = localStorage.getItem('vc-acceptance'); localStorage.removeItem('vc-acceptance'); return { ok: v === '1' }; } catch (e) { return { ok: false, error: e.name + ': ' + e.message }; } })()`,
 );
+// The two storages must be independent objects. Only `sessionStorage` is
+// cleared here: the report keeps its own state (theme) in `localStorage`.
+record.checks.storageIsolation = await evaluate(
+  `(() => { try { const before = [localStorage.length, sessionStorage.length]; localStorage.setItem('vc-only-local', 'L'); sessionStorage.setItem('vc-only-session', 'S'); const crossed = sessionStorage.getItem('vc-only-local') !== null || localStorage.getItem('vc-only-session') !== null; const grew = localStorage.length === before[0] + 1 && sessionStorage.length === before[1] + 1; sessionStorage.clear(); const localKept = localStorage.getItem('vc-only-local') === 'L' && localStorage.length === before[0] + 1 && sessionStorage.length === 0; localStorage.removeItem('vc-only-local'); const restored = localStorage.length === before[0] && localStorage.getItem('vc-only-local') === null; const distinct = localStorage !== sessionStorage; return { ok: distinct && !crossed && grew && localKept && restored, distinct, crossed, grew, localKept, restored, before }; } catch (e) { return { ok: false, error: e.name + ': ' + e.message }; } })()`,
+);
 record.checks.cytoscapeGlobal = await evaluate("typeof cytoscape");
 record.checks.initialActivePanel = await evaluate(
   "document.querySelector('.tab-panel.active')?.dataset.tabName ?? null",
@@ -293,6 +300,7 @@ const verdict = {
     record.checks.subresourceFailures.length === 0 &&
     subresources.some((r) => r.type === "Script" && r.status === 200),
   storageOk: record.checks.storage.ok === true,
+  storageIsolated: record.checks.storageIsolation.ok === true,
   // The panel must switch on a real click. Cytoscape can only draw when the
   // report carries graph data (`window.__LOCTREE_GRAPHS`); a report of a tiny
   // fixture has an empty Graph panel by construction, which is recorded, not

@@ -15,6 +15,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   where `window.localStorage` throws, the server installs an in-memory Web
   Storage stand-in as the first script — the report's tabs (Graph included)
   and theme toggle work again. `allow-same-origin` is still never granted.
+  The stand-in gives `localStorage` and `sessionStorage` two independent
+  stores (an earlier cut shared one store between them, so a key written to
+  one was visible in the other and `clear()` emptied both); the behaviour is
+  pinned by an executable probe evaluated from the crate's tests and by the
+  real-browser acceptance script.
 
 ### Changed
 

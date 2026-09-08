@@ -126,8 +126,11 @@ cleartext `http` is admitted for loopback / local-network IP literals only.
   `form-action 'none'`, `frame-ancestors 'none'`. Because the sandboxed
   document has an opaque origin, `window.localStorage` throws there; the
   server installs a per-document in-memory stand-in as the first script so the
-  report's tab wiring and theme toggle run. Nothing persists and
-  `allow-same-origin` is never granted. Assets are regular files in the
+  report's tab wiring and theme toggle run — one independent storage per name
+  (`localStorage` and `sessionStorage` never see or clear each other; proven
+  by `web/tests/acceptance/storage_shim_probe.mjs`, run from the crate's unit
+  tests when `node` is present). Nothing persists and `allow-same-origin` is
+  never granted. Assets are regular files in the
   report's directory with a known extension; symlinks and traversal are
   refused. The document keeps its interactive graph and holds no control-plane
   authority.
