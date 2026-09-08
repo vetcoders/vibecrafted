@@ -3404,23 +3404,32 @@ def test_healthy_runtime_snapshot_uses_one_correlated_service_observation(
     assert calls == [("service", "status", "--json")]
 
 
-def test_runtime_service_probe_honors_transaction_deadline(
+@contextmanager
+def _leased_probe_launcher(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+    *,
+    body: str,
+):
+    """Yield (launcher, shared_home, marker) under a real inherited lease.
+
+    ``marker`` is written by the launcher script when it actually starts, so a
+    test can prove whether a child process was launched at all.
+    """
     home = tmp_path / "home"
     shared_home = home / ".vibecrafted"
     tools = home / ".local" / "share" / "vibecrafted" / "tools"
     current = tools / "vibecrafted-current"
-    launcher = tmp_path / "slow-launcher"
+    launcher = tmp_path / "launcher"
+    marker = tmp_path / "launched.marker"
     _write_executable(
         launcher,
-        f"#!{sys.executable}\nimport time\ntime.sleep(5)\n",
+        f"#!{sys.executable}\nimport pathlib, time\n"
+        f"pathlib.Path({str(marker)!r}).write_text('launched')\n" + body,
     )
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("VIBECRAFTED_HOME", str(shared_home))
     monkeypatch.setenv("VIBECRAFTED_TOOLS_HOME", str(tools))
-
     with (
         installer._tools_install_lease(
             current,
@@ -3428,10 +3437,36 @@ def test_runtime_service_probe_honors_transaction_deadline(
         ) as descriptor,
         installer._inherited_tools_install_lease(descriptor),
     ):
-        token = installer._RUNTIME_SERVICE_COMMAND_DEADLINE.set(time.monotonic() + 0.1)
+        yield launcher, shared_home, marker
+
+
+@pytest.mark.parametrize(
+    "remaining_seconds",
+    (0.1, 0.0, -5.0),
+    ids=("sub-floor", "exact-deadline", "already-exhausted"),
+)
+def test_runtime_service_probe_refuses_budget_below_floor_without_a_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    remaining_seconds: float,
+) -> None:
+    """div0-030 contract: a budget that cannot pay for one real observation is
+    refused *before* launch as a typed ``TimeoutError`` subclass, never as a
+    ``subprocess.TimeoutExpired`` manufactured by a doomed sub-floor child."""
+    with _leased_probe_launcher(tmp_path, monkeypatch, body="time.sleep(5)\n") as (
+        launcher,
+        shared_home,
+        marker,
+    ):
+        token = installer._RUNTIME_SERVICE_COMMAND_DEADLINE.set(
+            time.monotonic() + remaining_seconds
+        )
         started = time.monotonic()
         try:
-            with pytest.raises(subprocess.TimeoutExpired):
+            with pytest.raises(
+                installer._RuntimeServiceBudgetExhausted,
+                match="budget exhausted .* below 1s probe floor",
+            ) as raised:
                 installer._run_runtime_service_command(
                     launcher,
                     shared_home,
@@ -3442,7 +3477,140 @@ def test_runtime_service_probe_honors_transaction_deadline(
         finally:
             installer._RUNTIME_SERVICE_COMMAND_DEADLINE.reset(token)
 
+    assert time.monotonic() - started < 0.5
+    assert not marker.exists(), "sub-floor budget must not launch a child"
+    # Drain callers catch (OSError, SubprocessError); the top-level installer
+    # maps TimeoutError to EX_TEMPFAIL. Both contracts stay reachable.
+    assert isinstance(raised.value, TimeoutError)
+    assert isinstance(raised.value, OSError)
+    assert not isinstance(raised.value, subprocess.SubprocessError)
+
+
+def test_runtime_service_probe_honors_transaction_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Above the floor the remaining budget, not the 45s ceiling, bounds a real
+    child; the observed timeout is the typed ``subprocess.TimeoutExpired``."""
+    remaining = 1.5
+    with _leased_probe_launcher(tmp_path, monkeypatch, body="time.sleep(5)\n") as (
+        launcher,
+        shared_home,
+        marker,
+    ):
+        token = installer._RUNTIME_SERVICE_COMMAND_DEADLINE.set(
+            time.monotonic() + remaining
+        )
+        started = time.monotonic()
+        try:
+            with pytest.raises(subprocess.TimeoutExpired) as raised:
+                installer._run_runtime_service_command(
+                    launcher,
+                    shared_home,
+                    "service",
+                    "status",
+                    "--json",
+                )
+        finally:
+            installer._RUNTIME_SERVICE_COMMAND_DEADLINE.reset(token)
+
+    elapsed = time.monotonic() - started
+    assert elapsed < 3.5, f"probe was not bounded by the deadline ({elapsed:.2f}s)"
+    assert marker.exists(), "above-floor budget must launch the real probe"
+    assert installer._RUNTIME_SERVICE_PROBE_MIN_TIMEOUT_SECONDS <= raised.value.timeout
+    assert raised.value.timeout <= remaining
+    assert not installer._runtime_service_observation_is_budget_exhausted(raised.value)
+
+
+def test_runtime_service_probe_with_sufficient_budget_completes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ordinary probe under a comfortable deadline still runs to completion."""
+    with _leased_probe_launcher(
+        tmp_path,
+        monkeypatch,
+        body="import sys\nsys.stdout.write('probe-ok\\n')\nraise SystemExit(0)\n",
+    ) as (launcher, shared_home, marker):
+        token = installer._RUNTIME_SERVICE_COMMAND_DEADLINE.set(time.monotonic() + 30)
+        try:
+            result = installer._run_runtime_service_command(
+                launcher,
+                shared_home,
+                "service",
+                "status",
+                "--json",
+            )
+        finally:
+            installer._RUNTIME_SERVICE_COMMAND_DEADLINE.reset(token)
+
+    assert marker.exists()
+    assert result.returncode == 0
+    assert result.stdout == "probe-ok\n"
+    assert result.args[1:] == ["server", "service", "status", "--json"]
+
+
+def test_runtime_service_settlement_short_circuits_on_exhausted_probe_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The settlement loop must not spin until its own deadline once a probe
+    refuses the remaining budget: the typed exhaustion ends the wait at once
+    with the bounded ``did not settle`` verdict."""
+    calls = 0
+
+    def exhausted_snapshot(_shared_home: Path):
+        nonlocal calls
+        calls += 1
+        raise installer._RuntimeServiceBudgetExhausted(
+            "runtime service observation budget exhausted "
+            "(remaining 0.0958s below 1s probe floor)"
+        )
+
+    monkeypatch.setattr(installer, "_runtime_service_snapshot", exhausted_snapshot)
+
+    started = time.monotonic()
+    with pytest.raises(
+        OSError,
+        match=r"did not settle within 30s \(last observation: .*budget exhausted",
+    ) as raised:
+        installer._wait_for_runtime_service_settlement(tmp_path, allow_healthy=False)
+
     assert time.monotonic() - started < 1
+    assert calls == 1
+    assert isinstance(raised.value.__cause__, installer._RuntimeServiceBudgetExhausted)
+
+
+def test_runtime_service_settlement_treats_plain_timeout_as_bounded_transition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the typed budget exhaustion short-circuits; a generic ``TimeoutError``
+    or a real ``TimeoutExpired`` stays a transient observation bounded by the
+    loop's own deadline."""
+    observations = iter(
+        (
+            TimeoutError("runtime service observation budget exhausted-lookalike"),
+            subprocess.TimeoutExpired(["vibecrafted", "server", "status"], 1.0),
+        )
+    )
+
+    monkeypatch.setattr(
+        installer,
+        "_runtime_service_snapshot",
+        lambda _shared_home: (_ for _ in ()).throw(next(observations)),
+    )
+    monkeypatch.setattr(installer.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(
+        OSError,
+        match=r"did not settle within 0s \(last observation: .*lookalike",
+    ):
+        installer._wait_for_runtime_service_settlement(
+            tmp_path,
+            allow_healthy=False,
+            timeout_seconds=0,
+        )
 
 
 @pytest.mark.parametrize(

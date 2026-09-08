@@ -3199,6 +3199,18 @@ class _RuntimeServiceTransition(OSError):
     """A structurally valid service snapshot that may still converge."""
 
 
+class _RuntimeServiceBudgetExhausted(TimeoutError):
+    """The transaction deadline can no longer pay for one real probe.
+
+    Raised *before* any child launches. This is deliberately not
+    ``subprocess.TimeoutExpired``: that type means a child ran and was killed
+    at its bounded timeout, while this one means the installer refused to
+    spawn a doomed sub-floor probe (div0-030). Callers that loop on
+    observations short-circuit on this type; every other timeout remains a
+    transient observation bounded by the loop's own deadline.
+    """
+
+
 @dataclass(frozen=True)
 class _RuntimeServiceStatus:
     """Point-in-time read of the launchd-managed runtime service's supervisor/pair health."""
@@ -4781,7 +4793,7 @@ def _runtime_service_remaining_probe_budget(deadline: float) -> float:
     """
     remaining = deadline - time.monotonic()
     if remaining < _RUNTIME_SERVICE_PROBE_MIN_TIMEOUT_SECONDS:
-        raise TimeoutError(
+        raise _RuntimeServiceBudgetExhausted(
             "runtime service observation budget exhausted "
             f"(remaining {max(0.0, remaining):.4f}s below "
             f"{_RUNTIME_SERVICE_PROBE_MIN_TIMEOUT_SECONDS:g}s probe floor)"
@@ -4790,7 +4802,7 @@ def _runtime_service_remaining_probe_budget(deadline: float) -> float:
 
 
 def _runtime_service_observation_is_budget_exhausted(exc: BaseException) -> bool:
-    return isinstance(exc, TimeoutError) and "budget exhausted" in str(exc)
+    return isinstance(exc, _RuntimeServiceBudgetExhausted)
 
 
 def _run_runtime_service_command(
@@ -4800,6 +4812,13 @@ def _run_runtime_service_command(
 ) -> subprocess.CompletedProcess[str]:
     """Run `<launcher> server <arguments>` under the inherited install lease, with a bounded
     timeout.
+
+    Two distinct timeout outcomes exist on purpose:
+
+    * ``_RuntimeServiceBudgetExhausted`` (a ``TimeoutError``) — the transaction
+      deadline left less than the probe floor, so no child is launched.
+    * ``subprocess.TimeoutExpired`` — a child was launched with the remaining
+      budget (never above the 45s ceiling) and was killed when it ran out.
     """
     descriptor = _require_inherited_tools_install_lease(shared_home)
     timeout_seconds = _RUNTIME_SERVICE_COMMAND_TIMEOUT_SECONDS
