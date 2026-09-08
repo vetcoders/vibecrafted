@@ -2113,8 +2113,7 @@ a.control-run-id:focus-visible {
   padding: 0 18px;
 }
 
-.server-navbar-brand,
-.studio-navbar-brand {
+.server-navbar-brand {
   display: inline-flex;
   align-items: center;
   min-width: 0;
@@ -2123,8 +2122,7 @@ a.control-run-id:focus-visible {
   text-decoration: none;
 }
 
-.server-brand-mark,
-.studio-brand-mark {
+.server-brand-mark {
   display: grid;
   place-items: center;
   flex: 0 0 auto;
@@ -2143,8 +2141,7 @@ a.control-run-id:focus-visible {
   line-height: 1.15;
 }
 
-.server-brand-copy strong,
-.studio-navbar-brand strong {
+.server-brand-copy strong {
   overflow: hidden;
   color: var(--text-primary);
   font: 650 13px/1.2 var(--font-body);
@@ -2152,8 +2149,7 @@ a.control-run-id:focus-visible {
   white-space: nowrap;
 }
 
-.server-brand-copy small,
-.studio-navbar-brand small {
+.server-brand-copy small {
   overflow: hidden;
   color: var(--text-muted);
   font: 10px/1.3 var(--font-mono);
