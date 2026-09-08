@@ -450,6 +450,62 @@ def test_runtime_pack_refuses_missing_required_agent_foundation(
     assert not (home / "bin/vibecrafted").exists()
 
 
+def test_runtime_reinstall_replaces_broken_vc_owned_mcp_launcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A reinstall takes ownership from the stale uv MCP entrypoint, not the checkout."""
+    home = tmp_path / "home"
+    launcher_home = home / ".local/bin"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(launcher_home))
+    monkeypatch.setenv(
+        "VIBECRAFTED_RUNTIME_HOME", str(home / ".local/share/vibecrafted")
+    )
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / ".vibecrafted"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+
+    payload, terminal_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    mcp = payload / "bin/vibecrafted-mcp"
+    mcp.write_text("#!/bin/sh\nprintf 'generation-owned-mcp\\n'\n", encoding="utf-8")
+    mcp.chmod(0o755)
+    broken_uv = tmp_path / "uv-tools/vibecrafted-mcp/bin/vibecrafted-mcp"
+    _write_executable(broken_uv, "#!/bin/sh\nexit 1\n")
+    launcher_home.mkdir(parents=True)
+    (launcher_home / "vibecrafted-mcp").symlink_to(broken_uv)
+    codex_config = home / ".codex/config.toml"
+    codex_config.parent.mkdir(parents=True)
+    config_bytes = b"[mcp_servers.aicx]\nurl = 'https://example.invalid/mcp'\n"
+    codex_config.write_bytes(config_bytes)
+
+    assert (
+        installer.cmd_runtime_install(
+            Namespace(
+                payload_root=str(payload),
+                app_root=str(terminal_host.parents[2]),
+                terminal_host=str(terminal_host),
+                frame_helper=str(frame_helper),
+            )
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    public = launcher_home / "vibecrafted-mcp"
+    assert public.is_file() and not public.is_symlink()
+    assert str(payload) not in public.read_text(encoding="utf-8")
+    launched = subprocess.run(
+        [str(public), "--help"], check=True, capture_output=True, text=True
+    )
+    assert launched.stdout == "generation-owned-mcp\n"
+    assert codex_config.read_bytes() == config_bytes
+    receipt = json.loads(
+        (home / ".local/share/vibecrafted/install-receipt.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert str(public) in receipt["owned_files"]
+
+
 def test_runtime_launcher_public_name_never_claims_foreign_tools() -> None:
     for own in (
         "vc-start",

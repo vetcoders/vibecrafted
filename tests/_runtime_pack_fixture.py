@@ -113,6 +113,7 @@ def seed_runtime_pack(
         target.chmod(0o755)
     for name in (
         "vibecrafted",
+        "vibecrafted-mcp",
         "loct",
         "loctree-mcp",
         "aicx",
