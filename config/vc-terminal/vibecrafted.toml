@@ -61,7 +61,7 @@ regex = '(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:
 # LaunchServices to open the file. Command is an explicit host gesture, so the
 # Vibecrafted terminal host keeps this hint active even during mouse reporting.
 [[hints.enabled]]
-command = { program = "/bin/zsh", args = ["-lc", 'target="$0"; target="${target/#\~/$HOME}"; candidate="$target"; if [[ "$candidate" =~ ":[0-9]+$" ]]; then candidate="${candidate%:*}"; [[ "$candidate" =~ ":[0-9]+$" ]] && candidate="${candidate%:*}"; [[ -e "$candidate" ]] && target="$candidate"; fi; exec /usr/bin/open -- "$target"'] }
+command = { program = "/bin/zsh", args = ["-lc", 'target="$0"; target="${target/#\~/$HOME}"; candidate="$target"; if [[ "$candidate" =~ ":[0-9]+$" ]]; then candidate="${candidate%:*}"; [[ "$candidate" =~ ":[0-9]+$" ]] && candidate="${candidate%:*}"; fi; while [[ ! -e "$candidate" && "$candidate" == *" "* ]]; do candidate="${candidate% *}"; done; [[ -e "$candidate" ]] || exit 0; exec /usr/bin/open -- "$candidate"'] }
 hyperlinks = false
 post_processing = true
 persist = false
@@ -207,6 +207,11 @@ chars = "\u001b[46;10u"
 key = "E"
 mods = "Command"
 chars = "\u001b[101;9u"
+
+[[keyboard.bindings]]
+key = "N"
+mods = "Command"
+chars = "\u001b[110;9u"
 
 [scrolling]
 # Keep enough output to actually browse after long make/help dumps.

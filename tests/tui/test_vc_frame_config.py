@@ -86,6 +86,21 @@ def test_quick_cmd_shortcut_reuses_active_compact_bar_including_locked_mode() ->
     assert "Run " not in quick_cmd
 
 
+def test_cmd_n_opens_existing_session_manager_not_a_direct_tab() -> None:
+    """Cmd+N is Create new workspace through the existing Session Manager."""
+    payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
+    shared = payload[payload.index("    shared {") : payload.index("    shared_except")]
+    workspace = shared[
+        shared.index('bind "Super n"') : shared.index('bind "Super Shift ."')
+    ]
+
+    assert 'bind "Super n"' in workspace
+    assert 'LaunchOrFocusPlugin "session-manager"' in workspace
+    assert "floating true" in workspace
+    assert "move_to_focused_tab true" in workspace
+    assert "NewTab" not in workspace
+
+
 def test_vc_frame_config_ctrl_q_closes_focus_not_session() -> None:
     payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
     active_lines = [

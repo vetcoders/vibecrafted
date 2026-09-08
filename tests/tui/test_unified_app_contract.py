@@ -3681,19 +3681,28 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
         target.touch()
         assert path_pattern.fullmatch(f"{target}:12:3")
         probe = path_command.replace(
-            'exec /usr/bin/open -- "$target"', 'printf %s "$target"'
+            'exec /usr/bin/open -- "$candidate"', 'printf %s "$candidate"'
         )
-        result = subprocess.run(
+        line_result = subprocess.run(
             ["/bin/zsh", "-lc", probe, f"{target}:12:3"],
             check=True,
             capture_output=True,
             text=True,
         )
-        assert result.stdout == str(target)
+        assert line_result.stdout == str(target)
+        prose_result = subprocess.run(
+            ["/bin/zsh", "-lc", probe, f"{target} was saved"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert prose_result.stdout == str(target)
     assert 'mods = "Command"' in terminal
     assert 'key = "Period"' in terminal
     assert 'mods = "Command|Shift"' in terminal
     assert 'chars = "\\u001b[46;10u"' in terminal
+    assert 'key = "N"' in terminal
+    assert 'chars = "\\u001b[110;9u"' in terminal
     assert "launch-primary-shell.zsh" in terminal
     assert (
         "$VIBECRAFTED_RUNTIME_ROOT/config/alacritty/launch-primary-shell.zsh"
