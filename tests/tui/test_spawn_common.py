@@ -3834,3 +3834,288 @@ def test_shell_run_id_allocators_share_canonical_grammar() -> None:
         segments = run_id.split("-")
         assert len(segments) == 4, run_id
         assert len(segments[-1]) == 5 and segments[-1].isdigit(), run_id
+
+
+# ── Top-level entrypoints own their interpreter ───────────────────────────
+#
+# The library above is closed, but the scripts a Founder actually types were
+# still executing bare `python3` in their own heredocs.  These probes drive the
+# real entrypoints, not their source text.
+
+RUNTIME_SCRIPTS_DIR = (
+    REPO_ROOT / "vibecrafted-core" / "vibecrafted_core" / "runtime" / "scripts"
+)
+CODEX_LAUNCH_PREFIX = "Dry run mode: launcher generated only: "
+
+
+def _generation_bin_carrying_core(tmp_path: Path) -> Path:
+    """A generation bin whose ``python3`` can import ``vibecrafted_core``.
+
+    A real release bin ships the package alongside its own interpreter, so the
+    module entrypoints (``python3 -m vibecrafted_core.…``) only prove something
+    if the stand-in carries it too.  The directory name holds a space on
+    purpose: the resolved path travels through command substitution and, for
+    the codex bridge, into a generated command line.
+    """
+
+    generation_bin = tmp_path / "gene ration" / "bin"
+    generation_bin.mkdir(parents=True, exist_ok=True)
+    interpreter = generation_bin / "python3"
+    interpreter.write_text(
+        "#!/bin/sh\n"
+        f"PYTHONPATH={shlex.quote(str(CORE_PACKAGE_DIR))} "
+        f'exec {shlex.quote(sys.executable)} "$@"\n',
+        encoding="utf-8",
+    )
+    interpreter.chmod(0o755)
+    return generation_bin
+
+
+def _entrypoint_env(tmp_path: Path) -> tuple[dict[str, str], Path, Path]:
+    """Hostile public ``python3``, valid runtime interpreter, isolated home.
+
+    PYTHONPATH is absent rather than emptied: the runtime exports a global one
+    on installed hosts, and inheriting it would let the host answer for the
+    package the entrypoint is supposed to reach through its own interpreter.
+    """
+
+    home = tmp_path / "home with space"
+    home.mkdir(parents=True, exist_ok=True)
+    hostile_bin = tmp_path / "hostile-bin"
+    _write_hostile_python(hostile_bin)
+    generation_bin = _generation_bin_carrying_core(tmp_path)
+
+    env = {
+        "PATH": f"{hostile_bin}{os.pathsep}/usr/bin{os.pathsep}/bin",
+        "HOME": str(home),
+        "XDG_DATA_HOME": str(home / ".local" / "share"),
+        "VIBECRAFTED_HOME": str(home / ".vibecrafted"),
+        "VIBECRAFTED_PYTHON": str(generation_bin / "python3"),
+        "VIBECRAFTED_RUNTIME_BIN": str(generation_bin),
+    }
+    return env, hostile_bin, generation_bin
+
+
+def _run_entrypoint(
+    script: str,
+    args: list[str],
+    env: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", str(RUNTIME_SCRIPTS_DIR / script), *args],
+        env=env,
+        cwd=REPO_ROOT,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+
+_ENTRYPOINT_CASES = [
+    # The independently proven failure: await.sh sources common.sh and then
+    # execs a bare python3 heredoc, so it exited 79 on a hostile host.
+    pytest.param("await.sh", ["--help"], id="await-help"),
+    pytest.param("observe.sh", ["--help"], id="observe-help"),
+    pytest.param(
+        "marbles_ctl.sh", ["session", "--json"], id="marbles-ctl-session-json"
+    ),
+    pytest.param("marbles_ctl.sh", ["gc", "--dry-run"], id="marbles-ctl-gc-dry-run"),
+    pytest.param("marbles_spawn.sh", ["--help"], id="marbles-spawn-help"),
+    pytest.param("codex_spawn.sh", ["--help"], id="codex-spawn-help"),
+    # Module entrypoints: no sourced library at all before this cut.
+    pytest.param("vibecrafted-cron.sh", ["--help"], id="cron-help"),
+    pytest.param("vibecrafted-loop.sh", ["--help"], id="loop-help"),
+    pytest.param("vibecrafted-recall.sh", [], id="recall"),
+    pytest.param("vibecrafted-precompact.sh", [], id="precompact"),
+    pytest.param("vibecrafted-postcompact.sh", [], id="postcompact"),
+]
+
+
+@_NEEDS_MODERN_PYTHON
+@pytest.mark.parametrize(("script", "args"), _ENTRYPOINT_CASES)
+def test_top_level_entrypoint_runs_on_the_runtime_interpreter(
+    tmp_path: Path,
+    script: str,
+    args: list[str],
+) -> None:
+    """A hostile host ``python3`` must not reach a help/describe/dry-run path.
+
+    Each of these exits 79 with ``HOST_PYTHON_SELECTED`` before the cut: the
+    heredocs inside the entrypoints never named their interpreter, so closing
+    the PATH leak left them reaching for whatever the Founder's PATH offers.
+    """
+
+    env, _hostile_bin, _generation_bin = _entrypoint_env(tmp_path)
+    result = _run_entrypoint(script, args, env)
+
+    combined = result.stdout + result.stderr
+    assert "HOST_PYTHON_SELECTED" not in combined, combined
+    assert result.returncode == 0, combined
+
+
+@_NEEDS_MODERN_PYTHON
+def test_entrypoints_leave_public_tool_resolution_to_the_founder(
+    tmp_path: Path,
+) -> None:
+    """Owning internal execution must not repair or shadow the public surface.
+
+    ``python3`` still resolves to the Founder's hostile binary as a file (never
+    a shell function), and a private-only foundation stays missing rather than
+    being answered by a bundled generation copy.
+    """
+
+    env, hostile_bin, generation_bin = _entrypoint_env(tmp_path)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                'source "$1"\n'
+                "spawn_prepend_agent_tool_paths\n"
+                'printf "public_python3=%s\\n" "$(command -v python3)"\n'
+                'printf "python3_kind=%s\\n" "$(type -t python3)"\n'
+                'printf "internal_python=%s\\n" "$(spawn_python_bin)"\n'
+                "for tool in aicx loct prview screenscribe; do\n"
+                '  printf "%s=%s\\n" "$tool" "$(command -v "$tool" || echo MISSING)"\n'
+                "done\n"
+                'printf "PATH=%s\\n" "$PATH"\n'
+            ),
+            "_",
+            str(COMMON_SH),
+        ],
+        env=env,
+        cwd=REPO_ROOT,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    fields = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    assert fields["public_python3"] == str(hostile_bin / "python3")
+    assert fields["python3_kind"] == "file"
+    assert fields["internal_python"] == str(generation_bin / "python3")
+    # Public foundations either resolve to a user-owned tool or stay missing.
+    # What they must never do is get answered by the generation bin we just
+    # named for internal work — that is the leak the PATH closure removed.
+    for tool in ("aicx", "loct", "prview", "screenscribe"):
+        resolved = fields[tool]
+        assert not resolved.startswith(str(generation_bin)), f"{tool} -> {resolved}"
+    assert str(generation_bin) not in fields["PATH"].split(os.pathsep)
+
+
+@_NEEDS_MODERN_PYTHON
+def test_generated_codex_launcher_bridge_runs_on_the_runtime_interpreter(
+    tmp_path: Path,
+) -> None:
+    """The stream bridge is ours, so its interpreter is ours — generated or not.
+
+    ``codex exec`` in the same command line is the Founder's tool and stays
+    untouched; ``codex_stream_bridge.py`` beside it is a runtime internal, and
+    a hostile host python3 took the whole codex pipeline down with it.  The
+    check is behavioural: the interpreter the launcher actually names is pulled
+    out and made to run the real bridge.
+    """
+
+    env, _hostile_bin, generation_bin = _entrypoint_env(tmp_path)
+    root = _isolated_git_root(tmp_path)
+    plan = root / "plan.md"
+    plan.write_text("# plan\n", encoding="utf-8")
+
+    dry_run = _run_entrypoint(
+        "codex_spawn.sh", ["--dry-run", "--root", str(root), str(plan)], env
+    )
+    combined = dry_run.stdout + dry_run.stderr
+    assert "HOST_PYTHON_SELECTED" not in combined, combined
+    assert dry_run.returncode == 0, combined
+
+    launcher = next(
+        Path(line.split(CODEX_LAUNCH_PREFIX, 1)[1].strip())
+        for line in combined.splitlines()
+        if CODEX_LAUNCH_PREFIX in line
+    )
+    # The launch command is embedded in the launcher single-quoted, so any
+    # quoted argument inside it appears in the `'"'"'` escape form. Undo that
+    # one deterministic transform, then read the two tokens that were piped
+    # into -- shlex-ing the whole body is not stable, because the fallback
+    # heredocs legitimately carry unbalanced quotes.
+    body = launcher.read_text(encoding="utf-8").replace("""'"'"'""", "'")
+    piped = re.search(
+        r"\|\s*(?P<interp>'[^']*'|[^\s|]+)\s+(?P<bridge>'[^']*'|[^\s|]+)\s+--transcript",
+        body,
+    )
+    assert piped is not None, body
+    interpreter = shlex.split(piped.group("interp"))[0]
+    assert shlex.split(piped.group("bridge"))[0] == str(CODEX_STREAM_BRIDGE)
+
+    # Run the real bridge under exactly the interpreter the launcher named.
+    proof = subprocess.run(
+        [interpreter, str(CODEX_STREAM_BRIDGE), "--help"],
+        env=env,
+        cwd=REPO_ROOT,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert "HOST_PYTHON_SELECTED" not in proof.stdout + proof.stderr
+    assert proof.returncode == 0, proof.stderr
+    assert interpreter == str(generation_bin / "python3")
+
+
+@_NEEDS_MODERN_PYTHON
+def test_interactive_shell_quoting_survives_a_hostile_host_python(
+    tmp_path: Path,
+) -> None:
+    """The shell facade's quoter is the launcher casualty's twin.
+
+    ``_vetcoders_shell_quote`` did not merely fail on a hostile host: it
+    returned the marker string *as the quoted value*, and
+    ``_vetcoders_write_command_script`` writes that result into a script it
+    then executes.  The user's shell owns public resolution; it does not own
+    the interpreter our own helpers need.
+    """
+
+    env, hostile_bin, generation_bin = _entrypoint_env(tmp_path)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                'source "$1"\n'
+                'PATH="$(_vetcoders_path_with_bundled_bin_priority "$PATH")"\n'
+                "export PATH\n"
+                'printf "public_python3=%s\\n" "$(command -v python3)"\n'
+                'printf "python3_kind=%s\\n" "$(type -t python3)"\n'
+                'printf "internal_python=%s\\n" "$(_vetcoders_internal_python)"\n'
+                'printf "quote=%s\\n" "$(_vetcoders_shell_quote "file with spaces")"\n'
+                'printf "join=%s\\n" "$(_vetcoders_shell_quote_join "a b" "c;d")"\n'
+            ),
+            "_",
+            str(SHELL_SH),
+        ],
+        env=env,
+        cwd=REPO_ROOT,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    combined = result.stdout + result.stderr
+    assert "HOST_PYTHON_SELECTED" not in combined, combined
+    assert result.returncode == 0, combined
+
+    fields = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    assert fields["quote"] == "'file with spaces'"
+    assert fields["join"] == "'a b' 'c;d'"
+    assert fields["internal_python"] == str(generation_bin / "python3")
+    # Public resolution is still the Founder's, hostile or not.
+    assert fields["public_python3"] == str(hostile_bin / "python3")
+    assert fields["python3_kind"] == "file"

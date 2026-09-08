@@ -39,8 +39,10 @@ report_poll_s=5
 _state_scalar() {
   local key="$1"
   local fallback="${2:-}"
-  if [[ -f "$state_file" ]] && command -v python3 >/dev/null 2>&1; then
-    python3 - "$state_file" "$key" "$fallback" <<'PY'
+  local py
+  py="$(spawn_python_bin)"
+  if [[ -f "$state_file" ]] && command -v "$py" >/dev/null 2>&1; then
+    "$py" - "$state_file" "$key" "$fallback" <<'PY'
 import json
 import sys
 
@@ -73,9 +75,11 @@ _state_json_edit() {
   local mutator="$1"
   shift
 
-  command -v python3 >/dev/null 2>&1 || return 1
+  local py
+  py="$(spawn_python_bin)"
+  command -v "$py" >/dev/null 2>&1 || return 1
 
-  STATE_JSON_MUTATOR="$mutator" python3 - "$state_file" "$@" <<'PY'
+  STATE_JSON_MUTATOR="$mutator" "$py" - "$state_file" "$@" <<'PY'
 import datetime
 import fcntl
 import json
@@ -135,8 +139,10 @@ _find_meta_for_loop() {
 
 _read_loop_state() {
   local loop_nr="$1"
-  if [[ -f "$state_file" ]] && command -v python3 >/dev/null 2>&1; then
-    python3 - "$state_file" "$loop_nr" <<'PY'
+  local py
+  py="$(spawn_python_bin)"
+  if [[ -f "$state_file" ]] && command -v "$py" >/dev/null 2>&1; then
+    "$py" - "$state_file" "$loop_nr" <<'PY'
 import json
 import sys
 
@@ -161,14 +167,16 @@ PY
 _read_session_id() {
   local loop_nr="$1"
   local meta_path=""
+  local py
   meta_path="$(_find_meta_for_loop "$loop_nr")"
   if [[ -n "$meta_path" ]]; then
     spawn_read_meta_field "$meta_path" "session_id"
     return 0
   fi
 
-  if [[ -f "$state_file" ]] && command -v python3 >/dev/null 2>&1; then
-    python3 - "$state_file" "$loop_nr" <<'PY'
+  py="$(spawn_python_bin)"
+  if [[ -f "$state_file" ]] && command -v "$py" >/dev/null 2>&1; then
+    "$py" - "$state_file" "$loop_nr" <<'PY'
 import json
 import sys
 
@@ -315,7 +323,7 @@ _rewrite_loop_plan_frontmatter() {
 
   [[ -f "$loop_plan" ]] || return 0
 
-  python3 - "$loop_plan" "$loop_agent" "$loop_model" <<'PY'
+  "$(spawn_python_bin)" - "$loop_plan" "$loop_agent" "$loop_model" <<'PY'
 import pathlib
 import re
 import sys
@@ -873,8 +881,9 @@ fi
 # Capture ancestor_mtime BEFORE refresh so the steering check below can detect
 # whether the child modified ancestor.md during this loop.
 _pre_refresh_ancestor_mtime=""
-if [[ -f "$state_file" ]] && command -v python3 >/dev/null 2>&1; then
-  _pre_refresh_ancestor_mtime="$(python3 -c "
+_marbles_next_py="$(spawn_python_bin)"
+if [[ -f "$state_file" ]] && command -v "$_marbles_next_py" >/dev/null 2>&1; then
+  _pre_refresh_ancestor_mtime="$("$_marbles_next_py" -c "
 import json, sys
 with open(sys.argv[1], encoding='utf-8') as f:
     print(json.load(f).get('ancestor_mtime', ''))
@@ -941,8 +950,8 @@ _seed_agent=""
 # After refresh, state.json.ancestor_mtime == current file mtime, hiding
 # changes the child made during this loop.
 _stored_ancestor_mtime="$_pre_refresh_ancestor_mtime"
-if [[ -f "$state_file" ]] && command -v python3 >/dev/null 2>&1; then
-  read -r _rotation_mode _seed_agent < <(python3 - "$state_file" <<'PY'
+if [[ -f "$state_file" ]] && command -v "$_marbles_next_py" >/dev/null 2>&1; then
+  read -r _rotation_mode _seed_agent < <("$_marbles_next_py" - "$state_file" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
     d = json.load(f)

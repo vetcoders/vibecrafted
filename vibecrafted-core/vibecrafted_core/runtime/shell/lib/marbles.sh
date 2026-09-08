@@ -890,6 +890,12 @@ _vetcoders_resume_command() {
 _vetcoders_agent_for_session() {
   local session_id="$1"
   [[ -n "$session_id" ]] || return 1
+  # NOT converted to _vetcoders_internal_python, unlike its siblings in this
+  # facade: tests/tui/test_spawn_common.py::_write_fake_core_python installs a
+  # VIBECRAFTED_PYTHON that answers only `-c` and `-m vibecrafted_core.cli`,
+  # so this tree still treats that variable as a core-CLI runner rather than a
+  # generic interpreter. Reconciling the two meanings needs its own cut and its
+  # own proof; silently widening the stub to admit a change is not that proof.
   python3 - "$session_id" "${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/artifacts" <<'PY'
 import json
 import pathlib

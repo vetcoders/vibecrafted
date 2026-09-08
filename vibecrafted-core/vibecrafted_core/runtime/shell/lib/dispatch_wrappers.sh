@@ -382,7 +382,7 @@ _vetcoders_current_focused_vc_frame_pane_id() {
   local vc_frame_bin="$1"
   local raw=""
   raw="$("$vc_frame_bin" action list-panes --json --state 2>/dev/null || true)"
-  python3 - "$raw" <<'PY'
+  "$(_vetcoders_internal_python)" - "$raw" <<'PY'
 import json
 import sys
 
@@ -429,7 +429,7 @@ _vetcoders_current_focused_vc_frame_tab_id() {
   local vc_frame_bin="$1"
   local raw=""
   raw="$("$vc_frame_bin" action list-panes --json --state 2>/dev/null || true)"
-  python3 - "$raw" <<'PY'
+  "$(_vetcoders_internal_python)" - "$raw" <<'PY'
 import json
 import sys
 
