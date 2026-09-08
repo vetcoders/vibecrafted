@@ -4,7 +4,7 @@
 _vetcoders_shell_quote() {
   local value="${1-}"
   # printf '%q' can emit invalid UTF-8 byte sequences for multibyte input.
-  python3 - "$value" <<'PY'
+  "$(_vetcoders_internal_python)" - "$value" <<'PY'
 import shlex
 import sys
 

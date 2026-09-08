@@ -31,7 +31,7 @@ export VIBECRAFTED_AWAIT_STORE_DIR="$store_dir"
 export VIBECRAFTED_AWAIT_REPORTS_DIR="$reports_dir"
 export VIBECRAFTED_AWAIT_REPO_ROOT="$root"
 
-exec python3 - "$@" <<'PY'
+exec "$(spawn_python_bin)" - "$@" <<'PY'
 import json
 import os
 import shlex

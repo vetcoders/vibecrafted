@@ -222,6 +222,38 @@ _vetcoders_path_with_bundled_bin_priority() {
   printf '%s\n' "$result"
 }
 
+# Internal runtime Python for this shell facade — the mirror of
+# runtime/scripts/lib/util.sh:spawn_python_bin, and it must stay in lockstep
+# with it, exactly like the PATH grammar above.
+#
+# The sanitizer keeps the owned generation bin out of ambient lookup, which is
+# correct; the consequence is that a bare `python3` in this tree resolves to
+# whatever the Founder's PATH offers.  Public resolution stays the Founder's;
+# internal helpers name their interpreter instead.
+#
+# This is deliberately NOT _vetcoders_core_python_spec: that resolver also
+# proves `import vibecrafted_core` and derives an import root from BASH_SOURCE,
+# which is empty under zsh in this directory.  Helpers that only need stdlib
+# (shlex, json, re) must not inherit either dependency.
+_vetcoders_internal_python() {
+  local candidate
+  for candidate in \
+    "${VIBECRAFTED_PYTHON:-}" \
+    "${VIBECRAFTED_RUNTIME_BIN:+$VIBECRAFTED_RUNTIME_BIN/python3}" \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/vibecrafted/bin/python3" \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/vibecrafted-core/bin/python3" \
+    python3.13 python3.12 python3.11 python3; do
+    [[ -n "$candidate" ]] || continue
+    command -v "$candidate" >/dev/null 2>&1 || continue
+    if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
+      >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  printf 'python3\n'
+}
+
 _vetcoders_aicx_bin() {
   local xdg_data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
   local runtime_bin="${VIBECRAFTED_RUNTIME_ROOT:+$VIBECRAFTED_RUNTIME_ROOT/bin}"
