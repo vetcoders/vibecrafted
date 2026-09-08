@@ -211,7 +211,9 @@ _repo_root() {
 _realpath_quiet() {
   local target="${1:-}"
   [[ -n "$target" ]] || return 1
-  env -u PYTHONHOME -u PYTHONPATH python3 - "$target" <<'PY'
+  # Physical path resolution is product-internal: it runs on the interpreter
+  # this generation owns, isolated from PYTHON* env, never on a PATH python3.
+  "$(_vibecrafted_python)" -I - "$target" <<'PY'
 import os
 import sys
 
@@ -539,10 +541,11 @@ _vibecrafted_python_owned_by_current() {
   [[ "$candidate_real" == "$current_real/"* ]]
 }
 
-# Resolve the interpreter that owns vibecrafted_core. A Runtime Pack's own
-# interpreter wins; a source generation falls through to an owned override or
-# the uv-tool shim shebang on PATH.
-_vibecrafted_python() {
+# Resolve the interpreter this generation owns, with no host fallback. A
+# Runtime Pack's own interpreter wins; a source generation falls through to an
+# owned override or the uv-tool shim shebang on PATH. Returns 1 when nothing
+# owned exists, so each caller decides whether a host python3 is acceptable.
+_vibecrafted_owned_python() {
   local resolved shebang py runtime_root
   runtime_root="$(_runtime_payload_root 2>/dev/null || true)"
   if [[ -n "$runtime_root" && -x "$runtime_root/bin/python3" ]]; then
@@ -577,6 +580,14 @@ _vibecrafted_python() {
       fi
     fi
   done
+  return 1
+}
+
+# Resolve the interpreter that owns vibecrafted_core, accepting a host python
+# as the last resort for development checkouts and best-effort tooling. Server
+# control never takes that fallback: see _server_helper_python.
+_vibecrafted_python() {
+  _vibecrafted_owned_python && return 0
   command -v python3 2>/dev/null || command -v python 2>/dev/null || printf 'python3\n'
 }
 
@@ -1668,8 +1679,69 @@ _pid_file_value() {
   printf '%s\n' "$value"
 }
 
+# Interpreter for the internal server helper (_server_python). The supervisor
+# hands its children a PATH that starts with ~/.local/bin, so a bare python3
+# there -- an operator's own toolchain link -- used to answer the product's
+# origin and health probes, and its output became the server URL. An installed
+# generation therefore runs the helper only on the interpreter it owns: the
+# Runtime Pack's bin/python3, else the generation-owned chain. A missing or
+# corrupt owned interpreter is a hard failure, never a host python3. A
+# development checkout keeps the ordinary owner chain with its host fallback.
+# The verified result is cached per process; cmd_server warms it up front.
+_SERVER_HELPER_PYTHON=""
+
+_server_helper_python_verify() {
+  local candidate="${1:-}" origin="${2:-}" reason=""
+  if [[ ! -e "$candidate" ]]; then
+    reason="is missing"
+  elif [[ -d "$candidate" || ! -x "$candidate" ]]; then
+    reason="is not an executable file"
+  elif [[ "$("$candidate" -I -c 'import sys; print("vibecrafted-python", sys.version_info[0])' 2>/dev/null || true)" \
+    != "vibecrafted-python 3" ]]; then
+    # Exit status alone is not proof: a shell script parked at bin/python3
+    # ignores `-I -c` and exits 0, so the probe must answer as Python itself.
+    reason="does not run as Python 3"
+  fi
+  [[ -n "$reason" ]] || return 0
+  printf '%b✗%b %s Python interpreter %s: %s\n' \
+    "$_red" "$_reset" "$origin" "$reason" "$candidate" >&2
+  printf '  Server control never falls back to a host python3; reinstall Vibecrafted.\n' >&2
+  return 78
+}
+
+_server_helper_python() {
+  local runtime_root owner_root candidate origin
+  if [[ -n "$_SERVER_HELPER_PYTHON" ]]; then
+    printf '%s\n' "$_SERVER_HELPER_PYTHON"
+    return 0
+  fi
+  runtime_root="$(_runtime_payload_root 2>/dev/null || true)"
+  owner_root="$(_script_owner_root 2>/dev/null || true)"
+  if [[ -n "$runtime_root" ]]; then
+    candidate="$runtime_root/bin/python3"
+    origin="Packaged"
+  elif _is_installed_generation_root "$owner_root"; then
+    candidate="$(_vibecrafted_owned_python 2>/dev/null || true)"
+    if [[ -z "$candidate" ]]; then
+      printf '%b✗%b Installed generation owns no Python interpreter for server control: %s\n' \
+        "$_red" "$_reset" "$owner_root" >&2
+      printf '  Server control never falls back to a host python3; reinstall Vibecrafted.\n' >&2
+      return 78
+    fi
+    origin="Generation-owned"
+  else
+    candidate="$(_vibecrafted_python)"
+    origin="Development"
+  fi
+  _server_helper_python_verify "$candidate" "$origin" || return $?
+  _SERVER_HELPER_PYTHON="$candidate"
+  printf '%s\n' "$candidate"
+}
+
 _server_python() {
-  python3 - "$@" <<'PY'
+  local python_bin
+  python_bin="$(_server_helper_python)" || return $?
+  "$python_bin" -I - "$@" <<'PY'
 from __future__ import annotations
 
 import ctypes
@@ -3743,6 +3815,11 @@ cmd_server() {
     cmd_server_help
     return 0
   fi
+  # Every remaining verb drives the internal helper (locks, probes, status).
+  # Resolve its interpreter once, up front, so a missing or corrupt owned
+  # interpreter is reported here instead of vanishing inside a silenced
+  # `$(... 2>/dev/null)` probe further down.
+  _SERVER_HELPER_PYTHON="$(_server_helper_python)" || return $?
   case "$verb" in
     install|reconcile|uninstall)
       # Persistent service management lives under `service`; the bare verb is
