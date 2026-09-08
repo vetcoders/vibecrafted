@@ -260,8 +260,15 @@ def _run_server_helper(
 
 def _server_helper_source(*, definitions_only: bool = False) -> str:
     launcher = LAUNCHER.read_text(encoding="utf-8")
-    marker = "_server_python() {\n  python3 - \"$@\" <<'PY'\n"
-    helper_source = launcher.split(marker, 1)[1].split("\nPY\n}", 1)[0]
+    # The helper head resolves the generation-owned interpreter first; the
+    # Python body begins at the heredoc marker that follows it.
+    head_marker = "_server_python() {\n"
+    body_marker = " - \"$@\" <<'PY'\n"
+    helper_source = (
+        launcher.split(head_marker, 1)[1]
+        .split(body_marker, 1)[1]
+        .split("\nPY\n}", 1)[0]
+    )
     if definitions_only:
         helper_source = helper_source.split(
             "\noperation = sys.argv[1]",
