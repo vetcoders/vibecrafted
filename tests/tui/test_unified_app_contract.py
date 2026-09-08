@@ -1033,8 +1033,16 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "showMainWindowIfNeeded()" in launch_handler
     assert "\t<key>LSUIElement</key>\n\t<false/>" in info
     assert "\t<key>NSQuitAlwaysKeepsWindows</key>\n\t<false/>" in info
-    tray = (REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted/CommandDeck/StatusItemController.swift").read_text()
-    for title in ["Show Command Deck", "Open Terminal", "Stop Runtime…", "Repair Runtime…"]:
+    tray = (
+        REPO_ROOT
+        / "vibecrafted-app/shell-agent/app/Vibecrafted/CommandDeck/StatusItemController.swift"
+    ).read_text()
+    for title in [
+        "Show Command Deck",
+        "Open Terminal",
+        "Stop Runtime…",
+        "Repair Runtime…",
+    ]:
         assert f'withTitle: "{title}"' in tray
     assert 'withTitle: "About Vibecrafted"' in delegate
     assert 'withTitle: "Quit Vibecrafted"' in delegate
@@ -1078,11 +1086,21 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     # never the direct launch target of the App.
     assert "NSWorkspace.shared.openApplication(" not in terminal_launch
     assert "generationRoot: install.root, terminal: install.terminal" in terminal_launch
-    terminal_owner = (REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted/CommandDeck/TerminalLauncher.swift").read_text()
-    assert 'arguments = ["-e", primaryShell.path, start.path, "operator"]' in terminal_owner
-    assert "process.currentDirectoryURL = specification.workingDirectory" in terminal_owner
+    terminal_owner = (
+        REPO_ROOT
+        / "vibecrafted-app/shell-agent/app/Vibecrafted/CommandDeck/TerminalLauncher.swift"
+    ).read_text()
+    assert (
+        'arguments = ["-e", primaryShell.path, start.path, "operator"]'
+        in terminal_owner
+    )
+    assert (
+        "process.currentDirectoryURL = specification.workingDirectory" in terminal_owner
+    )
     assert "environment: environment" in terminal_launch
-    assert "terminalLaunch = try TerminalLauncher.launch(specification)" in terminal_launch
+    assert (
+        "terminalLaunch = try TerminalLauncher.launch(specification)" in terminal_launch
+    )
     assert "process.executableURL = install.terminalHost" not in terminal_launch
     assert "\t<key>CFBundleIconFile</key>\n\t<string>Vibecrafted.icns</string>" in info
     assert "NSApp.applicationIconImage.copy()" not in delegate
@@ -1153,7 +1171,11 @@ def test_tray_menu_supervises_runtime_pack_carrier_drift() -> None:
     # live generation is a first-class status line and the submenu carries the
     # supervision actions (reveal home, reveal control files, copy identity).
     tray = (app_dir / "CommandDeck/StatusItemController.swift").read_text()
-    for title in ["Reveal Runtime Home", "Reveal Control Plane Files", "Copy Runtime Identity"]:
+    for title in [
+        "Reveal Runtime Home",
+        "Reveal Control Plane Files",
+        "Copy Runtime Identity",
+    ]:
         assert title in tray
     assert "case .revealRuntime: revealRuntimeHomeFromStatusItem()" in delegate
     assert "case .revealControlPlane: openControlPlaneFromStatusItem()" in delegate
@@ -3646,6 +3668,7 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     path_pattern = re.compile(path_hint["regex"])
     for rendered_path in (
         "/Volumes/vc-workspace/README.md",
+        "/Volumes/vc-workspace/Project With Spaces/README.md",
         "~/Documents/proof.pdf",
         "./report.md:12",
         "../report.md:12:3",
@@ -3654,22 +3677,32 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
         assert path_pattern.fullmatch(rendered_path), rendered_path
 
     with tempfile.TemporaryDirectory() as temp_dir:
-        target = Path(temp_dir) / "proof.md"
+        target = Path(temp_dir) / "proof with spaces.md"
         target.touch()
+        assert path_pattern.fullmatch(f"{target}:12:3")
         probe = path_command.replace(
-            'exec /usr/bin/open -- "$target"', 'printf %s "$target"'
+            'exec /usr/bin/open -- "$candidate"', 'printf %s "$candidate"'
         )
-        result = subprocess.run(
+        line_result = subprocess.run(
             ["/bin/zsh", "-lc", probe, f"{target}:12:3"],
             check=True,
             capture_output=True,
             text=True,
         )
-        assert result.stdout == str(target)
+        assert line_result.stdout == str(target)
+        prose_result = subprocess.run(
+            ["/bin/zsh", "-lc", probe, f"{target} was saved"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert prose_result.stdout == str(target)
     assert 'mods = "Command"' in terminal
     assert 'key = "Period"' in terminal
     assert 'mods = "Command|Shift"' in terminal
     assert 'chars = "\\u001b[46;10u"' in terminal
+    assert 'key = "N"' in terminal
+    assert 'chars = "\\u001b[110;9u"' in terminal
     assert "launch-primary-shell.zsh" in terminal
     assert (
         "$VIBECRAFTED_RUNTIME_ROOT/config/alacritty/launch-primary-shell.zsh"
@@ -3686,8 +3719,14 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     assert "NSWorkspace.shared.openApplication(" not in terminal_launch
     assert "generationRoot: install.root, terminal: install.terminal" in terminal_launch
     assert "environment: environment" in terminal_launch
-    terminal_owner = (REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted/CommandDeck/TerminalLauncher.swift").read_text()
-    assert 'arguments = ["-e", primaryShell.path, start.path, "operator"]' in terminal_owner
+    terminal_owner = (
+        REPO_ROOT
+        / "vibecrafted-app/shell-agent/app/Vibecrafted/CommandDeck/TerminalLauncher.swift"
+    ).read_text()
+    assert (
+        'arguments = ["-e", primaryShell.path, start.path, "operator"]'
+        in terminal_owner
+    )
     assert 'product_config / "vc-terminal" / "vc-terminal.toml"' in installer
     assert 'product_config / "terminal-entry.toml"' not in installer
     assert 'for debris in terminal.glob("launch-*.zsh"):' in installer

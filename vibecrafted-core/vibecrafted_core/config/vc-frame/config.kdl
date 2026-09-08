@@ -148,6 +148,22 @@ keybinds {
                 payload "down"
             };
         }
+        // Create new workspace through the existing Session Manager. This is
+        // intentionally a plugin focus, never a direct NewTab shortcut.
+        bind "Super n" {
+            LaunchOrFocusPlugin "session-manager" {
+                floating true
+                move_to_focused_tab true
+            };
+        }
+        // Quick cmd uses the active compact-bar's existing click path. Keep
+        // this in shared so the host's Cmd+Shift+. CSI-u event works in LOCK
+        // too; the bar itself selects only its active tab instance.
+        bind "Super Shift ." {
+            MessagePlugin "compact-bar" {
+                name "vc_quick_cmd"
+            };
+        }
         // Command Composer (spec 1.2 §A): Super+e / Cmd+E. Alt+e unbound so
         // macOS Option types Polish `ę`. Uses the one installed product config.
         bind "Super e" {
