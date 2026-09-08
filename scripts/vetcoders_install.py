@@ -9043,13 +9043,29 @@ def _owned_temporary_directory(*, prefix: str) -> Iterator[Path]:
 
 
 def _runtime_verifier_python(runtime_root: Path) -> Path:
-    """Use a carried interpreter when present, otherwise the source installer's."""
+    """Use a carried interpreter when present, otherwise the source installer's.
+
+    Source staging often has no ``bin/python3``, or a dangling symlink left by
+    a previous interrupted publish. Those are not a carried Runtime Pack
+    interpreter — fall back to the installer python so preflight can finish
+    *before* any live pair is drained. A regular file that exists but is not
+    executable is pack corruption and stays fail-closed.
+    """
     runtime_python = runtime_root / "bin/python3"
-    if not runtime_python.exists() and not runtime_python.is_symlink():
+    try:
+        resolved = runtime_python.resolve(strict=True)
+    except OSError:
         return Path(sys.executable)
-    if not runtime_python.is_file() or not os.access(runtime_python, os.X_OK):
+    if (
+        runtime_python.is_file()
+        and os.access(runtime_python, os.X_OK)
+        and resolved.is_file()
+        and os.access(resolved, os.X_OK)
+    ):
+        return runtime_python
+    if runtime_python.is_file() and not runtime_python.is_symlink():
         raise OSError(f"candidate runtime Python is not executable: {runtime_python}")
-    return runtime_python
+    return Path(sys.executable)
 
 
 def _validate_runtime_verifier_semantics(runtime_root: Path) -> None:
@@ -17865,7 +17881,11 @@ def _install_runtime_pack(args: argparse.Namespace) -> int:
         ):
             raise RuntimeError("pre-publication receipt history is invalid")
         _restore_runtime_publication_receipt(paths, previous, saved)
-    _refuse_runtime_pack_downgrade(payload_root, runtime_home)
+    _refuse_runtime_pack_downgrade(
+        payload_root,
+        runtime_home,
+        allow_older=bool(getattr(args, "allow_older_runtime", False)),
+    )
     if previous.get("config_pending"):
         raise RuntimeError(
             "legacy partial config publication requires explicit backup recovery before install"
@@ -18239,7 +18259,12 @@ def _runtime_pack_downgrade(
     return reasons
 
 
-def _refuse_runtime_pack_downgrade(payload_root: Path, runtime_home: Path) -> None:
+def _refuse_runtime_pack_downgrade(
+    payload_root: Path,
+    runtime_home: Path,
+    *,
+    allow_older: bool = False,
+) -> None:
     active_path = runtime_home / "active.json"
     if not active_path.is_file():
         return
@@ -18257,6 +18282,13 @@ def _refuse_runtime_pack_downgrade(payload_root: Path, runtime_home: Path) -> No
     if not reasons:
         return
     detail = "\n  ".join(reasons)
+    if allow_older:
+        print(
+            "allowing explicit Runtime Pack downgrade (--allow-older-runtime):\n  "
+            + detail,
+            file=sys.stderr,
+        )
+        return
     raise RuntimeError(
         "refusing to replace a newer active runtime with an older Runtime Pack "
         "(an upgrade never takes the Founder's tools backwards):\n  " + detail
@@ -18785,6 +18817,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_runtime_install.add_argument("--payload-root", required=True)
     p_runtime_install.add_argument("--app-root")
     p_runtime_install.add_argument("--terminal-host")
+    p_runtime_install.add_argument(
+        "--allow-older-runtime",
+        action="store_true",
+        help="Install a Runtime Pack older than the active generation (explicit downgrade)",
+    )
 
     p_runtime_resolve = sub.add_parser(
         "runtime-resolve", help="Read installed Runtime Pack identity without repair"
