@@ -436,16 +436,17 @@ notary_submit() {
 # .../target/release/deps/alacritty-*.o and DerivedData/Intermediates.noindex/...
 # — verbatim. MEASURED 2026-08-19 on a fresh af98ebfe build: alacritty carried
 # 249 such stabs and Contents/MacOS/Vibecrafted 40, all naming the build root.
-# `strip -S` removes debugging symbol table entries only; code, exports and
-# the indirect symbol table are untouched, and it runs before any signature.
+# Rust 1.95 applies profile `strip = true` while compiling host proc-macros,
+# which makes crates such as include_dir and vte_generate_state_changes
+# disappear before their dependants are compiled, so vc-frame is built
+# unstripped and normalized here instead. The one shared boundary is
+# strip_macho_debug_tree in scripts/lib/macho-signing.sh: the same step the
+# Runtime Pack payload passes through in materialize_runtime_payload, so no
+# binary is ever named twice and none is forgotten. It runs before any
+# signature.
 strip_debug_stabs() {
-  local candidate
-  while IFS= read -r -d '' candidate; do
-    if /usr/bin/file -b "$candidate" | grep -q 'Mach-O'; then
-      strip -S "$candidate" 2>/dev/null \
-        || die "strip -S failed on ${candidate#"$APP"/}"
-    fi
-  done < <(find "$APP/Contents/MacOS" "$APP/Contents/Helpers" -type f -print0)
+  strip_macho_debug_tree "$APP/Contents/MacOS" "$APP/Contents/Helpers" \
+    || die "Vibecrafted.app debug-record strip failed"
 }
 
 sign_nested_app_bundles() {
@@ -673,7 +674,15 @@ materialize_runtime_payload() {
   chmod 0755 "$runtime/bin/screenscribe"
   "$runtime/bin/screenscribe" --version >/dev/null
 
-  /usr/bin/strip -S "$runtime/libexec/vc-terminal" "$runtime/libexec/vc-frame"
+  # Every executable this payload carries — the ones compiled above, the ones
+  # stage-runtime-foundations built from pinned sources, and the donors' — goes
+  # through one debug-record boundary before the gate reads the bytes and
+  # before the packager signs them. MEASURED 2026-09-08 on the f131b81b
+  # candidate: two named files here left six others carrying the rustup
+  # sysroot and the Cargo target directory in linker stabs.
+  log "Stripping linker debug records from the Runtime Pack executables"
+  strip_macho_debug_tree "$runtime/bin" "$runtime/libexec" \
+    || die "Runtime Pack payload debug-record strip failed"
   if find "$runtime" -type l -print -quit | grep -q .; then
     die "Runtime Pack payload contains symlinks"
   fi
@@ -845,17 +854,6 @@ build_product() {
     || die "vc-terminal helper bundle icon contract is invalid"
   install -m 0755 "$frame_source" "$APP/Contents/Helpers/vc-frame"
 
-  # Rust 1.95 applies profile `strip = true` while compiling host proc-macros,
-  # which makes crates such as include_dir and vte_generate_state_changes
-  # disappear before their dependants are compiled. Build vc-frame unstripped
-  # above, then strip the finished Mach-O products here. This also removes the
-  # linker object-file table that otherwise preserves the snapshot/DerivedData
-  # checkout path even when compiler source paths were prefix-mapped.
-  log "Stripping local object-file paths from final Mach-O products"
-  /usr/bin/strip -S \
-    "$APP/Contents/MacOS/Vibecrafted" \
-    "$terminal_app/Contents/MacOS/alacritty" \
-    "$APP/Contents/Helpers/vc-frame"
   install -m 0644 "$REPO_ROOT/config/vc-terminal/vibecrafted.toml" \
     "$resources/terminal/vibecrafted.toml"
 

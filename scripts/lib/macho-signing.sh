@@ -12,6 +12,89 @@ is_macho_file() {
   LC_ALL=C /usr/bin/file -b "$1" | grep -q 'Mach-O'
 }
 
+is_macho_executable() {
+  LC_ALL=C /usr/bin/file -b "$1" | grep -q 'Mach-O.*executable'
+}
+
+# macho_signature_kind <file> — prints `unsigned`, `adhoc` or `signed`.
+#
+# Linker-signed and `codesign -s -` seals are `adhoc`: dyld demands one on
+# arm64, `strip` re-seals a linker-signed file after rewriting it (measured on
+# voc, aicx and prview: `codesign --verify --strict` passes afterwards), and
+# the packager re-signs every Mach-O with the release identity anyway, so no
+# ad-hoc seal ever reaches the product. Anything else is a real signature and
+# marks somebody's finished, signed artifact. `-dv` is the
+# verbosity that prints the `Signature=` line; `--verbose=0` stops after
+# `Executable=` and would classify every file as signed (measured 2026-09-08).
+macho_signature_kind() {
+  local report
+  report="$(codesign -dv "$1" 2>&1 || true)"
+  case "$report" in
+    *"not signed at all"*) printf 'unsigned\n' ;;
+    *"Signature=adhoc"*) printf 'adhoc\n' ;;
+    *) printf 'signed\n' ;;
+  esac
+}
+
+# strip_macho_debug_tree <root>...
+#
+# Remove debugging records — and only those — from every Mach-O EXECUTABLE
+# under the given roots. Runs on a staged, still unsigned payload, before the
+# hygiene gate reads it and before any signature is spent.
+#
+# WHY. rustc's --remap-path-prefix and clang's -ffile-prefix-map rewrite
+# SOURCE paths; the linker still records every object file it consumed as an
+# N_OSO stab, verbatim: `$HOME/.rustup/toolchains/.../libstd-*.rlib(...)` and
+# the Cargo target directory under the checkout. Cargo's own `strip` profile
+# is not a boundary: the 2026-09-08 f131b81b release compiled clean while
+# rustc's `rust-objcopy` aborted with "Library not loaded: @rpath/libLLVM.dylib"
+# — a warning, not an error — so voc, vc-start, scaffold-doctor, aicx, aicx-mcp
+# and prview reached the Runtime Pack payload carrying 1–28 such stabs each and
+# the payload gate refused the build. `strip -S` removes debugging symbol table
+# entries only; code, exports and the indirect symbol table are untouched.
+#
+# WHY EXECUTABLES ONLY. MEASURED on that payload (31 Mach-O files): every host
+# path sat in an executable under bin/. The 24 dylibs and bundles — the uv-seeded
+# CPython's libpython and the wheels' extension modules — carry N_OSO stabs of
+# their own CI builders, none naming this host. They were not linked here, the
+# host `strip` has a recorded history of writing dylibs dyld refuses (see the
+# Xcode-beta guard in scripts/build-vibecrafted-release.sh), and the hygiene
+# scan still reads every byte of them afterwards. Nothing here narrows the gate.
+#
+# Files carrying a real (non ad-hoc) signature are left exactly as delivered:
+# MEASURED on the same payload, the four Loctree binaries from npm arrive with
+# a Developer ID seal and zero debugging records; `strip -S` made them 64–80
+# bytes larger with an invalidated signature, for nothing. The gate decides
+# whether such a file may ship.
+#
+# `find` does not follow symlinks and `-type f` excludes them, so nothing outside
+# the roots is ever rewritten. Any strip failure fails the whole step.
+strip_macho_debug_tree() {
+  local root candidate kind output stripped=0 signed=0
+  local -a roots=()
+  [[ $# -gt 0 ]] \
+    || macho_signing_die "strip_macho_debug_tree needs at least one root" || return 1
+  for root in "$@"; do
+    [[ -d "$root" ]] || macho_signing_die "missing tree: $root" || return 1
+    roots+=("$(cd "$root" && pwd)")
+  done
+  while IFS= read -r -d '' candidate; do
+    is_macho_executable "$candidate" || continue
+    kind="$(macho_signature_kind "$candidate")"
+    if [[ "$kind" == "signed" ]]; then
+      signed=$((signed + 1))
+      continue
+    fi
+    if ! output="$(/usr/bin/strip -S "$candidate" 2>&1)"; then
+      printf '%s\n' "$output" >&2
+      macho_signing_die "strip -S failed on $candidate" || return 1
+    fi
+    stripped=$((stripped + 1))
+  done < <(find "${roots[@]}" -type f -print0)
+  printf 'macho-strip: %d executable(s) stripped of debugging records, %d signed left as delivered\n' \
+    "$stripped" "$signed"
+}
+
 sign_macho_tree() {
   local root="$1" excluded="${2:-}" candidate
   [[ -d "$root" ]] || macho_signing_die "missing tree: $root" || return 1
