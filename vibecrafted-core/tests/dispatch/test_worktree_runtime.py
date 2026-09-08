@@ -823,8 +823,8 @@ def test_cross_day_legacy_resume_reuses_original_checkout_and_leaves_settled_sib
     The only launcher used here is a test double.  The old receipt, legacy
     launch-idempotency record, real linked checkouts, receipt restoration, and
     current-day supervisor are production code.  A successful resume must use
-    the 2026_0907 checkout, retain dirty W0-c progress, and never relaunch its
-    already-settled W0-a/W0-b siblings.
+    the 2026_0907 checkout, retain committed, staged, and unstaged W0-c
+    progress, and never relaunch its already-settled W0-a/W0-b siblings.
     """
     home = tmp_path / ".vibecrafted"
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
@@ -840,7 +840,18 @@ def test_cross_day_legacy_resume_reuses_original_checkout_and_leaves_settled_sib
         for cut_id in ("W0-a", "W0-b", "W0-c")
     }
     dirty_root = Path(geometries["W0-c"].worktree_path)
-    (dirty_root / "owned-progress.txt").write_text("keep this work\n", encoding="utf-8")
+    committed_progress = dirty_root / "committed-owned-progress.txt"
+    committed_progress.write_text("keep this commit\n", encoding="utf-8")
+    _git(dirty_root, "add", committed_progress.name)
+    _git(dirty_root, "commit", "-qm", "owned W0-c progress")
+    committed_head = _git(dirty_root, "rev-parse", "HEAD")
+    assert committed_head != baseline
+    staged_progress = dirty_root / "staged-owned-progress.txt"
+    staged_progress.write_text("keep this staged work\n", encoding="utf-8")
+    _git(dirty_root, "add", staged_progress.name)
+    committed_progress.write_text(
+        "keep this commit plus unstaged work\n", encoding="utf-8"
+    )
 
     store = DispatchReceiptStore(run_id, dispatch.cuts, concurrency=3)
     for cut_id in ("W0-a", "W0-b"):
@@ -956,9 +967,14 @@ def test_cross_day_legacy_resume_reuses_original_checkout_and_leaves_settled_sib
 
     assert result.states == {"W0-a": "[x]", "W0-b": "[x]", "W0-c": "[x]"}
     assert launches == [("W0-c", "resume-1", str(dirty_root))]
-    assert (dirty_root / "owned-progress.txt").read_text(
-        encoding="utf-8"
-    ) == "keep this work\n"
+    assert _git(dirty_root, "rev-parse", "HEAD") == committed_head
+    assert (
+        committed_progress.read_text(encoding="utf-8")
+        == "keep this commit plus unstaged work\n"
+    )
+    assert staged_progress.read_text(encoding="utf-8") == "keep this staged work\n"
+    assert _git(dirty_root, "diff", "--cached", "--name-only") == staged_progress.name
+    assert _git(dirty_root, "diff", "--name-only") == committed_progress.name
     assert not (WorktreeManager(repo).worktree_root / "W0-c").exists()
 
 

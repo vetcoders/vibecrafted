@@ -2348,7 +2348,12 @@ def _legacy_dispatch_receipt_matches(
 
 
 def _legacy_worktree_matches(*, root: str, branch: str, baseline_sha: str) -> bool:
-    """Confirm a recovered receipt still names the original linked checkout."""
+    """Confirm a recovered receipt still names the original linked checkout.
+
+    A worker can legitimately commit its owned work after the dispatch baseline.
+    The baseline is therefore an ancestry floor, not an exact ``HEAD`` value;
+    staged and unstaged progress must remain untouched by recovery as well.
+    """
     try:
         top = subprocess.run(
             ["git", "-C", root, "rev-parse", "--show-toplevel"],
@@ -2364,19 +2369,30 @@ def _legacy_worktree_matches(*, root: str, branch: str, baseline_sha: str) -> bo
             timeout=5,
             check=True,
         ).stdout.strip()
-        observed_head = subprocess.run(
-            ["git", "-C", root, "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=True,
-        ).stdout.strip()
+        baseline_is_ancestor = (
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    root,
+                    "merge-base",
+                    "--is-ancestor",
+                    baseline_sha,
+                    "HEAD",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            ).returncode
+            == 0
+        )
     except (OSError, subprocess.SubprocessError):
         return False
     return (
         Path(top).resolve(strict=False) == Path(root).resolve(strict=False)
         and observed_branch == branch
-        and observed_head == baseline_sha
+        and baseline_is_ancestor
     )
 
 
