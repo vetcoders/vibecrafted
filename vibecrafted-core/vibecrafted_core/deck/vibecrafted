@@ -4748,6 +4748,7 @@ cmd_help() {
   printf '  %bstatus%b               Today'"'"'s agent activity\n' "$_cyan" "$_reset"
   printf '  %bdoctor%b               Installation health — pass/fail\n' "$_cyan" "$_reset"
   printf '  %breceipt%b              Delivery/runtime receipt (source ↔ installed)\n' "$_cyan" "$_reset"
+  printf '  %bcapabilities%b         Launcher catalog: agents, models, controls, environments (--json)\n' "$_cyan" "$_reset"
   printf '  %bupdate%b               Update to the latest release\n' "$_cyan" "$_reset"
   printf '  %buninstall%b            Remove runtime; preserve Founder data and unknowns\n' "$_cyan" "$_reset"
   printf '  %bhelp%b [topic|--all]   This deck · full reference\n' "$_cyan" "$_reset"
@@ -6286,6 +6287,19 @@ cmd_lifecycle() {
   PYTHONPATH="$core_dir${PYTHONPATH:+:$PYTHONPATH}" "$(_vibecrafted_python)" -m vibecrafted_core.cli "$agent" "$verb" "$@"
 }
 
+# Launcher catalog for GUI/TUI clients: agents, model-pin support, permission /
+# sandbox cells and environment availability, straight from core (read-only).
+# VOC loads this instead of carrying its own agent list.
+cmd_capabilities() {
+  local core_dir
+  core_dir="$(_dispatcher_core_dir 2>/dev/null || true)"
+  [[ -n "$core_dir" ]] || {
+    printf '%b✗%b Vibecrafted Core module not found.\n' "$_red" "$_reset" >&2
+    return 1
+  }
+  PYTHONPATH="$core_dir${PYTHONPATH:+:$PYTHONPATH}" "$(_vibecrafted_python)" -m vibecrafted_core.cli capabilities "$@"
+}
+
 cmd_lifecycle_help() {
   local verb="$1"
   local agent="${2:-<claude|codex|agy|junie|grok|cursor>}"
@@ -6661,6 +6675,7 @@ main() {
     tui) cmd_tui "$@" ;;
     doctor|check) cmd_doctor "$@" ;;
     receipt) cmd_receipt "$@" ;;
+    capabilities) cmd_capabilities "$@" ;;
     control-plane-revalidate) cmd_control_plane_revalidate "$@" ;;
     workspace) cmd_workspace "$@" ;;
     scaffold-doctor) cmd_scaffold_doctor "$@" ;;
