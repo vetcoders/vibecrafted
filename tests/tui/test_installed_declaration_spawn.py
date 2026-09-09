@@ -36,7 +36,10 @@ unset and a hermetic login shell, executing the generated command for real:
   partner;
 * the raw-interpreter form of the very same invocation still fails exactly
   the way the candidate failed -- the fixture reproduces the defect rather
-  than dodging it.
+  than dodging it;
+* the provider environment boundary holds (HAK-32): core bootstrapped through
+  the wrapper chain, yet the provider sees no ``PYTHONPATH`` and the project's
+  own Python cannot import the runtime's private package.
 
 Only the provider executable is a stub.
 
@@ -105,12 +108,21 @@ PROVIDER_STUB = (
     'if [ "${1:-}" = "--version" ]; then echo "codex-cli 0.0.0-fixture"; exit 0; fi\n'
     "stdin_tty=false; [ -t 0 ] && stdin_tty=true\n"
     "stdout_tty=false; [ -t 1 ] && stdout_tty=true\n"
+    # The project's own Python, as a provider would run it: it must not see
+    # the runtime's private package through inherited bootstrap state.
+    'project_python="$(command -v python3 || true)"\n'
+    "core_import_rc=127\n"
+    'if [ -n "$project_python" ]; then'
+    ' "$project_python" -c "import vibecrafted_core" >/dev/null 2>&1;'
+    " core_import_rc=$?; fi\n"
     'printf \'{"pid": %s, "cwd": "%s", "stdin_tty": %s, "stdout_tty": %s,'
     ' "argc": %s, "run_id": "%s", "session_id": "%s", "workspace_id": "%s",'
-    ' "pythonpath": "%s"}\\n\' '
+    ' "pythonpath": "%s", "nousersite": "%s", "project_python": "%s",'
+    ' "core_import_rc": %s}\\n\' '
     '"$$" "$PWD" "$stdin_tty" "$stdout_tty" "$#" "${VIBECRAFTED_RUN_ID:-}"'
     ' "${VIBECRAFTED_SESSION_ID:-}" "${VIBECRAFTED_WORKSPACE_ID:-}"'
-    ' "${PYTHONPATH:-}" >> "$VC_FIXTURE_EVENTS"\n'
+    ' "${PYTHONPATH:-}" "${PYTHONNOUSERSITE:-}" "$project_python"'
+    ' "$core_import_rc" >> "$VC_FIXTURE_EVENTS"\n'
     'printf \'%s\\n\' "$@" > "$VC_FIXTURE_EVENTS.argv"\n'
     "printf 'PROVIDER FIXTURE reached\\n'\n"
     "exit 0\n"
@@ -333,9 +345,12 @@ def _assert_reached_once(host: PaneHost, result, root: Path) -> dict:
     assert event["stdin_tty"] and event["stdout_tty"], event
     assert Path(event["cwd"]).resolve() == root.resolve(), event
     assert event["run_id"] and event["session_id"] and event["workspace_id"], event
-    # The generation-private bootstrap reaches the provider as process state
-    # of the wrapper chain; nothing else exported it.
-    assert str(host.generation / "vibecrafted-core") in event["pythonpath"], event
+    # Provider environment boundary: core bootstrapped through the wrapper
+    # chain, but the provider -- and the project Python it runs -- inherits
+    # none of the generation-private import state (HAK-32).
+    assert event["pythonpath"] == "" and event["nousersite"] == "", event
+    assert event["project_python"], event
+    assert event["core_import_rc"] != 0, event
     argv = host.provider_argv()
     assert PROMPT in argv, argv
     receipts = [r for r in host.receipts() if r.get("run_id") == event["run_id"]]

@@ -2041,3 +2041,101 @@ def test_unmetered_launch_reaches_a_provider_without_a_usage_sidechannel(
     assert receipt["status"] == "completed"
     assert receipt["quota_policy"]["selection"] == "unmetered"
     assert receipt["usage_capability"]["supported"] is False
+
+
+# --------------------------------------------------------------------------
+# provider environment boundary (HAK-32): the generation bootstrap's process
+# state stops at the provider; the Founder's own PYTHONPATH survives
+# --------------------------------------------------------------------------
+
+
+def test_provider_boundary_drops_the_selected_generation_bootstrap_state(
+    tmp_path: Path,
+) -> None:
+    gen = _stamped_generation(tmp_path)
+    policy = resolve_continuity_policy("fresh", provider="codex", env={})
+    child = _fresh_child_environment(
+        {
+            "PATH": "/tools",
+            "HOME": str(tmp_path / "home"),
+            "VIBECRAFTED_RUNTIME_ROOT": str(gen),
+            "PYTHONPATH": os.pathsep.join(
+                [
+                    str(gen / "vibecrafted-core"),
+                    str(gen / "vibecrafted-mcp"),
+                    str(gen / "python-site"),
+                    "/founder/project/src",
+                ]
+            ),
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        policy,
+    )
+
+    assert child["PYTHONPATH"] == "/founder/project/src"
+    assert "PYTHONNOUSERSITE" not in child and "PYTHONDONTWRITEBYTECODE" not in child
+    assert child["VIBECRAFTED_RUNTIME_ROOT"] == str(gen)
+
+
+def test_provider_boundary_drops_an_owned_release_tree_and_its_own_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No selected root: an owned ``<runtime home>/releases/<gen>`` entry and
+    an entry of the generation whose raw interpreter runs this process are
+    runtime-owned; a lookalike user directory is not."""
+    home = tmp_path / "home"
+    owned = home / ".local" / "share" / "vibecrafted" / "releases" / "0.0.0+gabc1234"
+    gen = _stamped_generation(tmp_path)
+    monkeypatch.setattr(sys, "executable", str(gen / "python" / "bin" / "python3.12"))
+    policy = resolve_continuity_policy("fresh", provider="codex", env={})
+    child = _fresh_child_environment(
+        {
+            "HOME": str(home),
+            "PYTHONPATH": os.pathsep.join(
+                [
+                    str(owned / "vibecrafted-core"),
+                    str(gen / "python-site"),
+                    str(home / "vibecrafted" / "releases" / "lookalike" / "src"),
+                ]
+            ),
+            "PYTHONNOUSERSITE": "1",
+        },
+        policy,
+    )
+
+    assert child["PYTHONPATH"] == str(
+        home / "vibecrafted" / "releases" / "lookalike" / "src"
+    )
+    assert "PYTHONNOUSERSITE" not in child
+
+
+def test_provider_boundary_leaves_a_founder_environment_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("VIBECRAFTED_RUNTIME_ROOT", raising=False)
+    policy = resolve_continuity_policy("fresh", provider="codex", env={})
+    founder = {
+        "HOME": str(tmp_path),
+        "PYTHONPATH": "/founder/project/src:/founder/lib",
+        "PYTHONNOUSERSITE": "1",
+    }
+
+    assert _fresh_child_environment(dict(founder), policy) == founder
+
+
+def test_owned_generation_path_anchors_on_real_owned_roots(tmp_path: Path) -> None:
+    from vibecrafted_core.runtime_paths import is_owned_generation_path
+
+    env = {"HOME": str(tmp_path), "VIBECRAFTED_RUNTIME_ROOT": str(tmp_path / "sel")}
+    assert is_owned_generation_path(str(tmp_path / "sel" / "vibecrafted-core"), env)
+    assert is_owned_generation_path(str(tmp_path / "sel"), env)
+    assert not is_owned_generation_path(str(tmp_path / "selected-lookalike"), env)
+    owned = (
+        tmp_path / ".local" / "share" / "vibecrafted" / "releases" / "1.0.0+gabcdef0"
+    )
+    assert is_owned_generation_path(str(owned / "python-site"), env)
+    assert not is_owned_generation_path(
+        str(tmp_path / ".local" / "share" / "vibecrafted" / "releases"), env
+    )
+    assert not is_owned_generation_path("", env)

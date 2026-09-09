@@ -327,6 +327,34 @@ def _is_owned_generation_bin(entry: str, environment: Mapping[str, str]) -> bool
     return False
 
 
+def is_owned_generation_path(entry: str, environment: Mapping[str, str]) -> bool:
+    """True when *entry* lies inside the selected root or an owned
+    ``<runtime home>/releases/<generation>`` tree.
+
+    Same anchoring as :func:`_is_owned_generation_bin`, for whole subtrees: the
+    generation's private import roots (``vibecrafted-core``, ``vibecrafted-mcp``,
+    ``python-site``) are what its ``bin/python3`` bootstrap exports, and a
+    provider spawned by the runtime must not inherit them (HAK-32).
+    """
+
+    candidate = entry.rstrip("/")
+    if not candidate:
+        return False
+
+    selected = str(environment.get("VIBECRAFTED_RUNTIME_ROOT", "")).strip().rstrip("/")
+    if selected and (candidate == selected or candidate.startswith(selected + "/")):
+        return True
+
+    for runtime_home in _owned_runtime_homes(environment):
+        prefix = f"{runtime_home}/releases/"
+        if not candidate.startswith(prefix):
+            continue
+        leaf = candidate[len(prefix) :].split("/", 1)[0]
+        if leaf:
+            return True
+    return False
+
+
 def _host_agent_bin_dirs(environment: Mapping[str, str]) -> list[Path]:
     """Host CLI + public launcher directories, appended for minimal PATHs.
 

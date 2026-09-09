@@ -35,6 +35,7 @@ from .report_contract import (
 )
 from .runtime_paths import (
     agent_tool_search_path,
+    is_owned_generation_path,
     read_version_file,
     selected_runtime_environment,
     version_is_stamped,
@@ -571,6 +572,52 @@ def _materialize_continuity(
     )
 
 
+_BOOTSTRAP_FLAGS = ("PYTHONNOUSERSITE", "PYTHONDONTWRITEBYTECODE")
+
+
+def _is_runtime_owned_import_root(entry: str, environment: Mapping[str, str]) -> bool:
+    """A ``PYTHONPATH`` entry inside a generation the runtime owns: the selected
+    root, an owned ``releases/<gen>`` tree, or the generation whose raw
+    interpreter is running this very process (the bootstrap's exec target)."""
+    if is_owned_generation_path(entry, environment):
+        return True
+    bootstrap = _generation_bootstrap_for(sys.executable)
+    if bootstrap is None:
+        return False
+    generation = str(bootstrap.parent.parent).rstrip("/")
+    candidate = entry.rstrip("/")
+    return candidate == generation or candidate.startswith(generation + "/")
+
+
+def _scrub_runtime_bootstrap(child: dict[str, str]) -> dict[str, str]:
+    """Drop the generation bootstrap's process state at the provider boundary.
+
+    ``bin/python3`` exports ``PYTHONPATH=<gen>/vibecrafted-core:<gen>/vibecrafted-mcp:
+    <gen>/python-site`` plus ``PYTHONNOUSERSITE``/``PYTHONDONTWRITEBYTECODE`` for
+    the runtime's own interpreter. A provider -- and any project Python it runs
+    -- must not inherit the runtime's private import roots (HAK-32). Only
+    runtime-owned entries go; a Founder's own ``PYTHONPATH`` entries stay, and
+    the two flags go only when a runtime-owned root was actually present, since
+    the bootstrap is the one thing that exports the three together.
+    """
+    raw = child.get("PYTHONPATH", "")
+    if not raw:
+        return child
+    entries = [entry for entry in raw.split(os.pathsep) if entry]
+    kept = [
+        entry for entry in entries if not _is_runtime_owned_import_root(entry, child)
+    ]
+    if len(kept) == len(entries):
+        return child
+    if kept:
+        child["PYTHONPATH"] = os.pathsep.join(kept)
+    else:
+        child.pop("PYTHONPATH", None)
+    for flag in _BOOTSTRAP_FLAGS:
+        child.pop(flag, None)
+    return child
+
+
 def _fresh_child_environment(
     env: dict[str, str], policy: ContinuityPolicy
 ) -> dict[str, str]:
@@ -581,7 +628,7 @@ def _fresh_child_environment(
         for name in tuple(child):
             if name.startswith(("VIBECRAFTED_RESUME_", "AICX_CONTINUITY_")):
                 child.pop(name, None)
-    return child
+    return _scrub_runtime_bootstrap(child)
 
 
 def continuity_policy_capabilities(
