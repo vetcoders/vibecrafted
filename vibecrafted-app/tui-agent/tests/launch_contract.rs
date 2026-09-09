@@ -18,8 +18,8 @@ use std::time::Duration;
 use tempfile::{TempDir, tempdir};
 use voc::catalog::{CatalogState, LauncherCatalog};
 use voc::launch::{
-    Admission, Confirmation, Environment, LaunchOutcome, PermissionPolicy, Presentation,
-    SandboxChoice,
+    Admission, Confirmation, Environment, LaunchOutcome, LauncherRun, PermissionPolicy,
+    Presentation, SandboxChoice,
 };
 
 mod support;
@@ -29,6 +29,9 @@ use support::{agent_index, fixture_app};
 const PATIENT: Duration = Duration::from_secs(30);
 /// Short enough that a deliberately silent deck is still running when it ends.
 const IMPATIENT: Duration = Duration::from_millis(400);
+/// Long enough for a talkative deck to have said its piece, short enough that
+/// it is still running — and still unanswered — when the wait ends.
+const PATIENT_ENOUGH_TO_SPEAK: Duration = Duration::from_secs(3);
 
 fn install(dir: &Path, script: String) -> PathBuf {
     let deck = dir.join("deck.sh");
@@ -69,6 +72,50 @@ fn admit_then_hang_deck(dir: &Path, body: &str) -> PathBuf {
     install(
         dir,
         format!("#!/bin/sh\ncat <<'RECEIPT'\n{body}\nRECEIPT\nsleep 30\n"),
+    )
+}
+
+/// A deck that mutates the admission side of the control plane and is then
+/// terminated by a signal before it can print a receipt. `ExitStatus::code()`
+/// is `None` for a signalled child, which must never be read as "the launcher
+/// never ran": the artifact below proves work already happened.
+fn admit_then_signal_deck(dir: &Path) -> PathBuf {
+    install(
+        dir,
+        "#!/bin/sh\n: > \"$(dirname \"$0\")/admission-side-artifact\"\nkill -TERM $$\nsleep 5\n"
+            .to_string(),
+    )
+}
+
+/// A deck that floods stdout with JSON-shaped noise far beyond the retention
+/// cap and only then prints its receipt, plus stderr noise past the cap. The
+/// receipt is the last object on stdout; no volume of preceding output may
+/// hide it.
+fn noisy_then_receipt_deck(
+    dir: &Path,
+    body: &str,
+    noise_lines: usize,
+    stderr_bytes: usize,
+) -> PathBuf {
+    install(
+        dir,
+        format!(
+            "#!/bin/sh\nawk 'BEGIN{{for(i=0;i<{noise_lines};i++)printf \"{{\\\"log\\\":\\\"noise\\\",\\\"i\\\":%d}}\\n\", i}}'\nawk 'BEGIN{{for(i=0;i<{stderr_bytes};i++)printf \"d\"}}' >&2\ncat <<'RECEIPT'\n{body}\nRECEIPT\n"
+        ),
+    )
+}
+
+/// A deck that never answers, floods stderr far past anything VOC should
+/// retain, and is still alive and still holding its pipes when the client
+/// deadline passes. The burst is finite so this fixture does not starve the
+/// tests running beside it; unbounded draining to EOF is proved directly in
+/// the transport's own unit tests.
+fn noisy_then_silent_deck(dir: &Path, noise_lines: usize) -> PathBuf {
+    install(
+        dir,
+        format!(
+            "#!/bin/sh\nawk 'BEGIN{{for(i=0;i<{noise_lines};i++)printf \"noise %d with padding to move real bytes\\n\", i}}' >&2\nsleep 30\n"
+        ),
     )
 }
 
@@ -490,6 +537,174 @@ fn a_launcher_that_admits_and_keeps_running_still_reports_its_run() {
         "an unobserved exit must be named as unverified: {:?}",
         audit.unverified
     );
+}
+
+#[test]
+fn a_launcher_killed_before_its_receipt_is_unknown_not_a_failed_start() {
+    let (dir, repo, roots) = workspace();
+    let deck = admit_then_signal_deck(dir.path());
+    let mut app = fixture_app(&repo, &deck, &roots);
+    app.launch_agent = agent_index("claude");
+
+    let command = app.launch_plan().unwrap();
+    let outcome = LaunchOutcome::from_run(
+        command.preview(),
+        app.launch_expectation(),
+        command.run_capturing(PATIENT),
+    );
+
+    assert!(
+        dir.path().join("admission-side-artifact").exists(),
+        "the fixture must prove the launcher ran and reached the admission side"
+    );
+    // A signalled child carries no exit code. That is a fact about how it
+    // ended, never evidence that VOC failed to hand over the declaration.
+    assert_eq!(outcome.exit_code, None);
+    assert_eq!(
+        outcome.admission(),
+        Admission::Unknown,
+        "a launcher killed mid-flight may already have admitted a run: {}",
+        outcome.trail_line()
+    );
+    let trail = outcome.trail_line();
+    assert!(
+        !trail.contains("failed before the launcher started"),
+        "a launcher that demonstrably ran must never be reported as never started: {trail}"
+    );
+    assert!(
+        trail.contains("a worker may already be running"),
+        "the operator must be told to check Live Runs before relaunching: {trail}"
+    );
+    let detail = outcome.detail_lines().join("\n");
+    assert!(
+        detail.contains("signal"),
+        "the kill itself must reach the operator, not just the missing receipt: {detail}"
+    );
+}
+
+#[test]
+fn a_receipt_behind_output_beyond_the_retention_cap_is_still_read() {
+    let (dir, repo, roots) = workspace();
+    // ~1.2 MB of JSON-shaped stdout ahead of the receipt, and 400 KiB of
+    // stderr: both far past anything VOC should retain, with the real
+    // receipt last on stdout where the contract puts it.
+    let deck = noisy_then_receipt_deck(dir.path(), &confirmed_receipt(&repo), 40_000, 400 * 1024);
+    let mut app = fixture_app(&repo, &deck, &roots);
+    app.launch_agent = agent_index("claude");
+
+    let command = app.launch_plan().unwrap();
+    let outcome = LaunchOutcome::from_run(
+        command.preview(),
+        app.launch_expectation(),
+        command.run_capturing(PATIENT),
+    );
+
+    assert_eq!(
+        outcome.admission(),
+        Admission::Admitted,
+        "a valid trailing receipt must survive any volume of preceding output: {}",
+        outcome.trail_line()
+    );
+    assert_eq!(outcome.run_id(), Some("work-260909-120000-11111"));
+    assert!(
+        outcome.stderr.len() < 400 * 1024,
+        "retained diagnostics must be bounded, not the launcher's whole stream: {} bytes",
+        outcome.stderr.len()
+    );
+}
+
+#[test]
+fn a_noisy_launcher_that_never_answers_bounds_what_voc_retains() {
+    let (dir, repo, roots) = workspace();
+    // ~1.6 MB of stderr, five times over anything VOC keeps, from a deck
+    // that is still running when the wait ends.
+    let deck = noisy_then_silent_deck(dir.path(), 40_000);
+    let mut app = fixture_app(&repo, &deck, &roots);
+    app.launch_agent = agent_index("claude");
+
+    let command = app.launch_plan().unwrap();
+    let outcome = LaunchOutcome::from_run(
+        command.preview(),
+        app.launch_expectation(),
+        command.run_capturing(PATIENT_ENOUGH_TO_SPEAK),
+    );
+
+    assert!(
+        outcome.timed_out().is_some(),
+        "the wait must still be bounded: {}",
+        outcome.trail_line()
+    );
+    assert_eq!(
+        outcome.admission(),
+        Admission::Unknown,
+        "noise is not an answer, and nothing was killed to tidy up the wait"
+    );
+    assert!(
+        !outcome.stderr.is_empty(),
+        "the fixture must actually produce output for this to mean anything"
+    );
+    assert!(
+        outcome.stderr.len() <= 512 * 1024,
+        "a launcher that never stops talking must not grow what VOC retains without bound: {} bytes",
+        outcome.stderr.len()
+    );
+}
+
+#[test]
+fn a_wait_lost_after_the_spawn_is_unknown_not_an_absent_launcher() {
+    let (dir, repo, roots) = workspace();
+    let deck = fake_deck(dir.path(), &confirmed_receipt(&repo));
+    let mut app = fixture_app(&repo, &deck, &roots);
+    app.launch_agent = agent_index("claude");
+    let command = app.launch_plan().unwrap();
+
+    // The spawn succeeded and VOC then lost the ability to wait on the
+    // child. That arrives at the transport boundary as its own outcome:
+    // provoking a real `waitpid` failure would mean reaping the child from
+    // underneath the transport, which is a race, not a test.
+    let blind = LaunchOutcome::from_run(
+        command.preview(),
+        app.launch_expectation(),
+        Ok(LauncherRun::Unobservable {
+            error: "failed to wait for launcher: No child processes (os error 10)".to_string(),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }),
+    );
+
+    assert_eq!(
+        blind.admission(),
+        Admission::Unknown,
+        "losing sight of a launcher says nothing about whether it started: {}",
+        blind.trail_line()
+    );
+    assert!(
+        blind.launcher_started,
+        "the spawn succeeded and that fact must survive the lost wait"
+    );
+    let trail = blind.trail_line();
+    assert!(
+        !trail.contains("failed before the launcher started"),
+        "a blind wait must never be reported as an absent launcher: {trail}"
+    );
+    assert!(
+        trail.contains("a worker may already be running"),
+        "the operator must be sent to Live Runs rather than told nothing ran: {trail}"
+    );
+
+    // And whatever the launcher did manage to say still counts: an admission
+    // already on stdout is not lost because the wait was.
+    let spoke_first = LaunchOutcome::from_run(
+        command.preview(),
+        app.launch_expectation(),
+        Ok(LauncherRun::Unobservable {
+            error: "failed to wait for launcher: No child processes (os error 10)".to_string(),
+            stdout: confirmed_receipt(&repo).into_bytes(),
+            stderr: Vec::new(),
+        }),
+    );
+    assert_eq!(spoke_first.admission(), Admission::Admitted);
+    assert_eq!(spoke_first.run_id(), Some("work-260909-120000-11111"));
 }
 
 #[test]

@@ -15,7 +15,7 @@
 
 use anyhow::Context;
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -51,6 +51,21 @@ pub const CATALOG_ANSWER_DEADLINE: Duration = Duration::from_secs(30);
 const READER_FLUSH_GRACE: Duration = Duration::from_millis(250);
 
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// How much of each stream VOC keeps from the front: enough to hold a
+/// launcher's opening diagnostics whole.
+pub const DIAGNOSTIC_HEAD_CAP: usize = 256 * 1024;
+
+/// How much VOC keeps from the end. The receipt is the last object the
+/// launcher prints, so the tail is what can still prove a run exists after a
+/// noisy launcher has outrun the head.
+pub const DIAGNOSTIC_TAIL_CAP: usize = 64 * 1024;
+
+/// How far back from the end VOC looks for the receipt, and how many
+/// candidates it will try there. Bounded on purpose: output full of braces
+/// must not turn receipt parsing into quadratic work.
+const RECEIPT_SCAN_WINDOW: usize = DIAGNOSTIC_TAIL_CAP;
+const RECEIPT_SCAN_CANDIDATES: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchKind {
@@ -462,16 +477,85 @@ pub enum LauncherRun {
         stdout: Vec<u8>,
         stderr: Vec<u8>,
     },
+    /// The launcher was spawned, but VOC then lost the ability to observe
+    /// it: waiting on the child failed. The spawn already succeeded, so a
+    /// worker may exist — this is an unknown outcome, never a failed start.
+    Unobservable {
+        error: String,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    },
 }
 
-/// Drain one child stream into a shared buffer on its own thread, marking
-/// itself done in `finished`. Incremental by design: the caller can snapshot
-/// whatever arrived even when the reader never reaches EOF.
+/// One stream's retained bytes: a head, a tail, and an honest count of what
+/// fell between them.
+///
+/// Draining and retaining are separate duties. The reader below never stops
+/// draining — a launcher that may already have admitted a run must not be
+/// stopped by a full pipe — but what VOC *keeps* costs a fixed amount of
+/// memory however long that launcher talks. The head holds the opening
+/// diagnostics; the tail holds the receipt, which the launcher prints last.
+#[derive(Default)]
+struct BoundedCapture {
+    head: Vec<u8>,
+    tail: VecDeque<u8>,
+    dropped: u64,
+}
+
+impl BoundedCapture {
+    fn push(&mut self, bytes: &[u8]) {
+        let mut rest = bytes;
+        if self.head.len() < DIAGNOSTIC_HEAD_CAP {
+            let take = (DIAGNOSTIC_HEAD_CAP - self.head.len()).min(rest.len());
+            self.head.extend_from_slice(&rest[..take]);
+            rest = &rest[take..];
+        }
+        if rest.is_empty() {
+            return;
+        }
+        // A single write larger than the tail replaces it outright, so no
+        // amount of output is ever held line by line or frame by frame.
+        if rest.len() >= DIAGNOSTIC_TAIL_CAP {
+            self.dropped += (self.tail.len() + rest.len() - DIAGNOSTIC_TAIL_CAP) as u64;
+            self.tail.clear();
+            self.tail.extend(&rest[rest.len() - DIAGNOSTIC_TAIL_CAP..]);
+            return;
+        }
+        self.tail.extend(rest);
+        while self.tail.len() > DIAGNOSTIC_TAIL_CAP {
+            self.tail.pop_front();
+            self.dropped += 1;
+        }
+    }
+
+    /// The retained bytes as one stream. Nothing is elided silently: the gap
+    /// is named in place, in VOC's own words and counts — never in bytes
+    /// carried over from the launcher.
+    fn snapshot(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.head.len() + self.tail.len() + 96);
+        out.extend_from_slice(&self.head);
+        if self.dropped > 0 {
+            out.extend_from_slice(
+                format!(
+                    "\n… [VOC kept the first {DIAGNOSTIC_HEAD_CAP} and last {DIAGNOSTIC_TAIL_CAP} bytes; {} elided] …\n",
+                    self.dropped
+                )
+                .as_bytes(),
+            );
+        }
+        out.extend(self.tail.iter().copied());
+        out
+    }
+}
+
+/// Drain one child stream on its own thread, retaining a bounded window of it
+/// and marking itself done in `finished`. Incremental by design: the caller
+/// can snapshot whatever arrived even when the reader never reaches EOF.
 fn pump<R: Read + Send + 'static>(
     source: Option<R>,
     finished: &Arc<AtomicU8>,
-) -> Arc<Mutex<Vec<u8>>> {
-    let buffer = Arc::new(Mutex::new(Vec::new()));
+) -> Arc<Mutex<BoundedCapture>> {
+    let buffer = Arc::new(Mutex::new(BoundedCapture::default()));
     let Some(mut source) = source else {
         finished.fetch_add(1, Ordering::SeqCst);
         return buffer;
@@ -485,7 +569,7 @@ fn pump<R: Read + Send + 'static>(
                 Ok(0) | Err(_) => break,
                 Ok(read) => {
                     if let Ok(mut guard) = sink.lock() {
-                        guard.extend_from_slice(&chunk[..read]);
+                        guard.push(&chunk[..read]);
                     }
                 }
             }
@@ -495,13 +579,45 @@ fn pump<R: Read + Send + 'static>(
     buffer
 }
 
-fn snapshot(buffer: &Arc<Mutex<Vec<u8>>>) -> Vec<u8> {
-    buffer.lock().map(|guard| guard.clone()).unwrap_or_default()
+/// Whether the `{` at `offset` opens a line rather than sitting inside a
+/// larger object. The launcher prints its receipt as output of its own; a
+/// nested block never begins one.
+fn opens_a_line(text: &str, offset: usize) -> bool {
+    text[..offset]
+        .rsplit('\n')
+        .next()
+        .is_some_and(|prefix| prefix.trim().is_empty())
+}
+
+/// The signal that ended a child, when one did. `ExitStatus::code()` is
+/// `None` for a signalled child, and that silence must never be mistaken for
+/// a launcher that never ran.
+#[cfg(unix)]
+fn termination_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal()
+}
+
+#[cfg(not(unix))]
+fn termination_signal(_status: &std::process::ExitStatus) -> Option<i32> {
+    None
+}
+
+fn snapshot(buffer: &Arc<Mutex<BoundedCapture>>) -> Vec<u8> {
+    buffer
+        .lock()
+        .map(|guard| guard.snapshot())
+        .unwrap_or_default()
 }
 
 /// Spawn `command` with both output streams drained concurrently and the
 /// private stdin payload written on its own thread, then wait at most
 /// `deadline` for it to exit.
+///
+/// Returns `Err` for one outcome only: a child that could never be spawned.
+/// That is the single fact which proves no worker exists. Everything after a
+/// successful spawn — an exit, a signal, a deadline, even a lost wait — comes
+/// back as `Ok`, because by then a run may already have been admitted.
 ///
 /// Every direction moves at once on purpose. A launcher that writes a long
 /// diagnostic to stderr before reading a single byte of a large prompt would
@@ -555,8 +671,15 @@ pub(crate) fn run_bounded(
                 }));
             }
             Ok(None) => {}
+            // The spawn already succeeded, so this is not a failure to
+            // start: VOC has merely gone blind to a launcher that may
+            // already have admitted a run.
             Err(error) => {
-                return Err(anyhow::Error::new(error).context(format!("failed to wait for {what}")));
+                return Ok(LauncherRun::Unobservable {
+                    error: format!("failed to wait for {what}: {error}"),
+                    stdout: snapshot(&stdout),
+                    stderr: snapshot(&stderr),
+                });
             }
         }
         let waited = started.elapsed();
@@ -717,10 +840,50 @@ impl LaunchReceipt {
         if trimmed.is_empty() {
             anyhow::bail!("launcher printed no receipt");
         }
-        // The receipt is the last JSON object on stdout; tolerate leading
-        // human lines from wrappers by scanning for the first `{`.
+        // The receipt is the last JSON object on stdout. Scanning back from
+        // the end keeps it readable behind any volume of preceding output —
+        // including output VOC itself elided — so a launcher that admitted a
+        // run is never read as silent merely because it was also noisy. The
+        // window and the candidate count bound the work.
+        let floor = trimmed.len().saturating_sub(RECEIPT_SCAN_WINDOW);
+        let window_start = (floor..=trimmed.len())
+            .find(|index| trimmed.is_char_boundary(*index))
+            .unwrap_or(trimmed.len());
+        let window = &trimmed[window_start..];
+        for (offset, _) in window.rmatch_indices('{').take(RECEIPT_SCAN_CANDIDATES) {
+            if !opens_a_line(window, offset) {
+                continue;
+            }
+            if let Ok(receipt) = Self::read_object(&window[offset..])
+                && receipt.names_a_launch()
+            {
+                return Ok(receipt);
+            }
+        }
+        // Nothing in the tail identified itself as a receipt. Fall back to
+        // the whole document, so a bare object still parses and the error the
+        // operator reads is the one the launcher actually caused.
         let start = trimmed.find('{').unwrap_or(0);
         serde_json::from_str(&trimmed[start..]).context("launch receipt is not valid JSON")
+    }
+
+    /// Read one object from the front of `text`, ignoring whatever follows
+    /// it. Output that continues after the receipt is normal: the launcher
+    /// keeps talking while the detached worker starts.
+    fn read_object(text: &str) -> Result<Self, serde_json::Error> {
+        let mut deserializer = serde_json::Deserializer::from_str(text);
+        Self::deserialize(&mut deserializer)
+    }
+
+    /// Whether this object speaks about a launch at all, rather than being
+    /// other JSON the launcher happened to print — including the receipt's
+    /// own nested blocks, which carry a schema but never a verdict.
+    ///
+    /// Deliberately generous about *which* launch: a receipt stamped with
+    /// another schema version is still a receipt, and refusing it is the
+    /// audit's job, not the parser's.
+    fn names_a_launch(&self) -> bool {
+        self.accepted || !self.run_id.trim().is_empty() || !self.status.trim().is_empty()
     }
 
     pub fn refusal_reason(&self) -> String {
@@ -856,6 +1019,15 @@ pub struct LaunchOutcome {
     pub preview: String,
     pub expectation: LaunchExpectation,
     pub exit_code: Option<i32>,
+    /// Whether VOC actually handed the declaration to a launcher process.
+    ///
+    /// Kept apart from `exit_code` on purpose. A signalled child reports no
+    /// exit code at all, and a lost wait reports nothing either; neither says
+    /// anything about whether the launcher started. Only a spawn that never
+    /// happened proves no worker exists.
+    pub launcher_started: bool,
+    /// The signal that ended the launcher, when one did.
+    pub termination_signal: Option<i32>,
     pub receipt: Option<LaunchReceipt>,
     pub stderr: String,
     /// Set when VOC could not start the launcher, or it exited without a
@@ -882,6 +1054,8 @@ impl LaunchOutcome {
                     preview,
                     expectation,
                     exit_code: output.status.code(),
+                    launcher_started: true,
+                    termination_signal: termination_signal(&output.status),
                     receipt,
                     stderr,
                     transport_error,
@@ -899,15 +1073,37 @@ impl LaunchOutcome {
                 // Partial stdout can already carry the receipt: the launcher
                 // may admit a run and keep running. Failing to parse one here
                 // is the absence of an answer, not a transport failure.
+                launcher_started: true,
+                termination_signal: None,
                 receipt: LaunchReceipt::parse(&stdout).ok(),
                 stderr: String::from_utf8_lossy(&stderr).into_owned(),
                 transport_error: None,
                 undecided_after: Some(waited),
             },
+            // The spawn succeeded and the streams are what the launcher did
+            // say, so a partial receipt still counts. Losing the wait is a
+            // gap in VOC's sight, not proof of an absent launcher.
+            Ok(LauncherRun::Unobservable {
+                error,
+                stdout,
+                stderr,
+            }) => Self {
+                preview,
+                expectation,
+                exit_code: None,
+                launcher_started: true,
+                termination_signal: None,
+                receipt: LaunchReceipt::parse(&stdout).ok(),
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                transport_error: Some(error),
+                undecided_after: None,
+            },
             Err(error) => Self {
                 preview,
                 expectation,
                 exit_code: None,
+                launcher_started: false,
+                termination_signal: None,
                 receipt: None,
                 stderr: String::new(),
                 transport_error: Some(format!("{error:#}")),
@@ -925,10 +1121,13 @@ impl LaunchOutcome {
             // Acceptance without a name still means a worker may exist.
             Some(receipt) if receipt.accepted => Admission::Unknown,
             Some(_) => Admission::Refused,
-            // The launcher was started but said nothing VOC can read. It may
-            // have mutated the control plane before dying or before the wait
-            // ended, so the outcome is unknown, not empty.
-            None if self.transport_error.is_some() && self.exit_code.is_none() => Admission::Failed,
+            // Nothing was ever handed over, so nothing can have started.
+            // This is the only evidence that proves an empty outcome.
+            None if !self.launcher_started => Admission::Failed,
+            // The launcher ran but said nothing VOC can read. It may have
+            // mutated the control plane before dying, before the wait ended,
+            // or before VOC lost sight of it — unknown, not empty. A missing
+            // exit code is how a signalled child ends, not how a spawn fails.
             None => Admission::Unknown,
         }
     }
@@ -982,12 +1181,17 @@ impl LaunchOutcome {
                 .push("run: the launcher reported acceptance without naming a run".to_string());
         }
 
-        match self.exit_code {
-            Some(0) => {}
-            Some(code) => audit.mismatched.push(format!(
+        match (self.exit_code, self.termination_signal) {
+            (Some(0), _) => {}
+            (Some(code), _) => audit.mismatched.push(format!(
                 "launcher exit: reported acceptance and then exited {code}"
             )),
-            None => audit.unverified.push(
+            // A signalled launcher did exit — it was killed. Reporting that
+            // as "not observed" would bury a termination the operator needs.
+            (None, Some(signal)) => audit.mismatched.push(format!(
+                "launcher exit: reported acceptance and was then terminated by signal {signal}"
+            )),
+            (None, None) => audit.unverified.push(
                 "launcher exit: not observed — the launcher had not exited when the wait ended"
                     .to_string(),
             ),
@@ -1272,6 +1476,11 @@ impl LaunchOutcome {
         {
             return "the launcher reported acceptance without naming a run".to_string();
         }
+        if let Some(signal) = self.termination_signal {
+            return format!(
+                "the launcher was terminated by signal {signal} before it printed a receipt"
+            );
+        }
         match (&self.transport_error, self.exit_code) {
             (Some(error), Some(code)) => {
                 format!("launcher exited {code} without a receipt: {error}")
@@ -1415,6 +1624,11 @@ impl LaunchOutcome {
                 ));
                 if let Some(code) = self.exit_code {
                     lines.push(format!("launcher exit code: {code}"));
+                } else if let Some(signal) = self.termination_signal {
+                    // A signalled launcher has no exit code to show. Saying
+                    // nothing here would leave the operator reading silence
+                    // where a kill belongs.
+                    lines.push(format!("launcher terminated by signal: {signal}"));
                 }
             }
         }
@@ -1847,6 +2061,85 @@ mod tests {
     }
 
     #[test]
+    fn a_drained_stream_retains_a_bounded_head_and_tail() {
+        let finished = Arc::new(AtomicU8::new(0));
+        // Far more than VOC keeps, ending in the bytes a receipt would
+        // occupy. The reader runs to EOF: draining is not what is bounded.
+        let mut source = vec![b'n'; 4 * 1024 * 1024];
+        source.extend_from_slice(b"TAIL-MARKER\n");
+        let buffer = pump(Some(std::io::Cursor::new(source)), &finished);
+
+        let deadline = Instant::now();
+        while finished.load(Ordering::SeqCst) < 1 && deadline.elapsed() < Duration::from_secs(5) {
+            thread::sleep(CHILD_POLL_INTERVAL);
+        }
+        assert_eq!(
+            finished.load(Ordering::SeqCst),
+            1,
+            "the reader must reach EOF"
+        );
+
+        let kept = snapshot(&buffer);
+        assert!(
+            kept.len() <= DIAGNOSTIC_HEAD_CAP + DIAGNOSTIC_TAIL_CAP + 128,
+            "a stream that outruns the caps must still cost a fixed amount: {} bytes",
+            kept.len()
+        );
+        assert!(
+            kept.ends_with(b"TAIL-MARKER\n"),
+            "the end of the stream is where the receipt lives and must survive"
+        );
+        assert!(
+            kept.starts_with(&[b'n'; 64][..]),
+            "the launcher's opening diagnostics must be kept"
+        );
+        assert!(
+            String::from_utf8_lossy(&kept).contains("elided"),
+            "the gap must be named rather than dropped silently"
+        );
+    }
+
+    #[test]
+    fn a_single_write_larger_than_the_tail_is_never_held_whole() {
+        let mut capture = BoundedCapture::default();
+        // One write bigger than everything VOC keeps — the shape a frame- or
+        // line-buffered reader would hold entirely before trimming.
+        let mut burst = vec![b'x'; DIAGNOSTIC_HEAD_CAP + 4 * DIAGNOSTIC_TAIL_CAP];
+        burst.extend_from_slice(b"END");
+        capture.push(&burst);
+
+        let kept = capture.snapshot();
+        assert!(
+            kept.len() <= DIAGNOSTIC_HEAD_CAP + DIAGNOSTIC_TAIL_CAP + 128,
+            "{} bytes retained from a single oversized write",
+            kept.len()
+        );
+        assert!(kept.ends_with(b"END"), "the end of the write must survive");
+        assert_eq!(
+            capture.dropped,
+            (burst.len() - DIAGNOSTIC_HEAD_CAP - DIAGNOSTIC_TAIL_CAP) as u64,
+            "the elided count must be the truth, not an estimate"
+        );
+    }
+
+    #[test]
+    fn a_receipt_is_read_from_the_tail_behind_json_shaped_noise() {
+        let mut stdout = Vec::new();
+        for index in 0..2000 {
+            stdout.extend_from_slice(format!("{{\"log\":\"noise\",\"i\":{index}}}\n").as_bytes());
+        }
+        stdout.extend_from_slice(br#"{"schema":"vibecrafted.launch_receipt.v1","accepted":true,"run_id":"work-tail","status":"launching","execution_controls":{"schema":"vibecrafted.execution_controls.v1","provider":"claude","provider_flags":[]}}"#);
+        stdout.extend_from_slice(b"\nthe launcher keeps talking after the receipt\n");
+
+        let receipt = LaunchReceipt::parse(&stdout).expect("the trailing receipt must be found");
+        assert_eq!(receipt.run_id, "work-tail");
+        assert!(receipt.accepted);
+        // The nested controls block carries a schema of its own and must
+        // never be mistaken for the receipt around it.
+        assert_eq!(receipt.schema, LAUNCH_RECEIPT_SCHEMA);
+    }
+
+    #[test]
     fn a_bounded_wait_leaves_a_silent_launcher_running_and_the_outcome_unknown() {
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "sleep 30"]);
@@ -1854,6 +2147,9 @@ mod tests {
         let waited = match run {
             LauncherRun::Undecided { waited, .. } => waited,
             LauncherRun::Completed(_) => panic!("a sleeping launcher must not report completion"),
+            LauncherRun::Unobservable { error, .. } => {
+                panic!("the wait on a healthy sleeping child must not be lost: {error}")
+            }
         };
         assert!(waited >= Duration::from_millis(200));
 

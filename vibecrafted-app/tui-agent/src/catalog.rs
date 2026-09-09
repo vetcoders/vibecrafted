@@ -169,6 +169,9 @@ impl LauncherCatalog {
             crate::launch::LauncherRun::Undecided { waited, .. } => {
                 anyhow::bail!("{what} did not answer within {}s", waited.as_secs().max(1))
             }
+            // Likewise for a probe VOC lost sight of: no catalog arrived, so
+            // there is no catalog — and every launch stays refused.
+            crate::launch::LauncherRun::Unobservable { error, .. } => anyhow::bail!("{error}"),
         };
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
