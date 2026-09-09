@@ -16,6 +16,58 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 host="$root/libexec/vc-terminal"
 config="$HOME/.config/vibecrafted/vc-terminal/vc-terminal.toml"
 
+# This terminal starts a fresh interactive shell. Old Runtime Pack bins from
+# its parent must not become ambient commands there. Mirror the runtime shell's
+# anchored ownership grammar: only direct children of this runtime home's
+# releases directory are owned; user lookalikes stay untouched.
+_vc_terminal_runtime_home() {
+  # The physical wrapper selects the generation. A parent can carry a stale
+  # runtime-root from an earlier launch, which must not choose this boundary.
+  local selected="$root" generation
+  if [[ -n "${VIBECRAFTED_RUNTIME_HOME:-}" ]]; then
+    printf '%s\n' "${VIBECRAFTED_RUNTIME_HOME%/}"
+  elif [[ "$selected" == */releases/* ]]; then
+    generation="${selected##*/releases/}"
+    if [[ -n "$generation" && "$generation" != */* ]]; then
+      printf '%s\n' "${selected%/releases/*}"
+      return
+    fi
+    printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted"
+  elif [[ -n "${XDG_DATA_HOME:-}" ]]; then
+    printf '%s\n' "${XDG_DATA_HOME%/}/vibecrafted"
+  else
+    printf '%s\n' "$HOME/.local/share/vibecrafted"
+  fi
+}
+
+_vc_terminal_is_owned_generation_bin() {
+  local entry="${1:-}" runtime_home generation leaf
+  runtime_home="$(_vc_terminal_runtime_home)"
+  entry="${entry%/}"
+  [[ -n "$runtime_home" && "$entry" == "$runtime_home/releases/"*/bin ]] || return 1
+  generation="${entry#"$runtime_home/releases/"}"
+  leaf="${generation%/bin}"
+  [[ -n "$leaf" && "$leaf" != */* ]]
+}
+
+_vc_terminal_sanitize_inherited_path() {
+  local inherited="${PATH-}" remaining entry
+  local -a retained=()
+  # A sentinel preserves an empty final component. Empty PATH entries name the
+  # caller's working directory, so they are retained rather than normalized.
+  remaining="${inherited}:"
+  while [[ -n "$remaining" ]]; do
+    entry="${remaining%%:*}"
+    remaining="${remaining#*:}"
+    _vc_terminal_is_owned_generation_bin "$entry" || retained+=("$entry")
+  done
+  PATH="$(IFS=:; printf '%s' "${retained[*]}")"
+  export PATH
+}
+
+_vc_terminal_sanitize_inherited_path
+unset -f _vc_terminal_runtime_home _vc_terminal_is_owned_generation_bin _vc_terminal_sanitize_inherited_path
+
 export VIBECRAFTED_RUNTIME_ROOT="$root"
 export VIBECRAFTED_ROOT="$root"
 export VIBECRAFTED_RUNTIME_BIN="$root/bin"

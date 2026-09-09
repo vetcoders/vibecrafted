@@ -2392,6 +2392,141 @@ def test_bare_resume_without_tty_opens_terminal_under_zsh(tmp_path: Path) -> Non
     assert not (tmp_path / "aicx-called.txt").exists()
 
 
+def _run_terminal_path_entry(
+    tmp_path: Path,
+    *,
+    runtime_home: Path,
+    inherited_path: str,
+    declare_runtime_home: bool = True,
+    inherited_runtime_root: Path | None = None,
+) -> dict[str, object]:
+    """Run the physical terminal entry against a host that records its child env."""
+    home = tmp_path / "home"
+    generation = runtime_home / "releases" / "4.3.1+gSELECTED"
+    capture = tmp_path / "terminal-path.json"
+    entry = generation / "scripts" / "vc-terminal-product-entry.sh"
+    _write(
+        entry,
+        (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
+            encoding="utf-8"
+        ),
+    )
+    _write(home / ".config/vibecrafted/vc-terminal/vc-terminal.toml", "[window]\n")
+    _write(
+        generation / "libexec/vc-terminal",
+        f"#!{sys.executable}\n"
+        "import json, os, shutil\n"
+        f"open({str(capture)!r}, 'w').write(json.dumps({{\n"
+        "  'path': os.environ.get('PATH', ''),\n"
+        "  'founder_tool': shutil.which('founder-tool'),\n"
+        "  'runtime_home': os.environ.get('VIBECRAFTED_RUNTIME_HOME'),\n"
+        "  'runtime_root': os.environ.get('VIBECRAFTED_RUNTIME_ROOT'),\n"
+        "  'runtime_bin': os.environ.get('VIBECRAFTED_RUNTIME_BIN'),\n"
+        "}))\n",
+    )
+    env = os.environ.copy()
+    for name in (
+        "VIBECRAFTED_RUNTIME_HOME",
+        "VIBECRAFTED_RUNTIME_ROOT",
+        "VIBECRAFTED_ROOT",
+        "VIBECRAFTED_RUNTIME_BIN",
+        "VIBECRAFTED_PYTHON",
+        "VIBECRAFTED_VC_FRAME_BIN",
+        "VIBECRAFTED_TERMINAL_HOST",
+    ):
+        env.pop(name, None)
+    env.update({"HOME": str(home), "PATH": inherited_path})
+    if declare_runtime_home:
+        env["VIBECRAFTED_RUNTIME_HOME"] = str(runtime_home)
+    if inherited_runtime_root is not None:
+        env["VIBECRAFTED_RUNTIME_ROOT"] = str(inherited_runtime_root)
+    result = subprocess.run(
+        [str(entry)], capture_output=True, text=True, env=env, check=False
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return json.loads(capture.read_text(encoding="utf-8"))
+
+
+def test_terminal_entry_drops_owned_generation_bins_from_a_polluted_parent(
+    tmp_path: Path,
+) -> None:
+    """A fresh terminal keeps user ordering but removes each owned generation."""
+    runtime_home = tmp_path / "custom runtime home"
+    stale_bins = [
+        runtime_home / "releases" / version / "bin"
+        for version in ("4.3.0+gf861d136", "4.3.0+g9547ff35", "4.3.0+gae650a83")
+    ]
+    selected_bin = runtime_home / "releases" / "4.3.1+gSELECTED" / "bin"
+    founder_bin = tmp_path / "founder bin"
+    lookalike = tmp_path / "user/vibecrafted/releases/1.0/bin"
+    for directory in [*stale_bins, selected_bin, founder_bin, lookalike]:
+        directory.mkdir(parents=True, exist_ok=True)
+    _write(founder_bin / "founder-tool", "#!/bin/sh\nprintf founder-tool\n")
+    inherited = os.pathsep.join(
+        [
+            "", str(stale_bins[0]), str(founder_bin), str(stale_bins[1]),
+            str(lookalike), str(selected_bin), str(stale_bins[2]), "", "/usr/bin", "/bin", "",
+        ]
+    )
+
+    receipt = _run_terminal_path_entry(
+        tmp_path, runtime_home=runtime_home, inherited_path=inherited
+    )
+    assert str(receipt["path"]).split(os.pathsep) == [
+        "", str(founder_bin), str(lookalike), "", "/usr/bin", "/bin", ""
+    ]
+    assert receipt["founder_tool"] == str(founder_bin / "founder-tool")
+    assert receipt["runtime_home"] == str(runtime_home)
+    assert receipt["runtime_root"] == str(runtime_home / "releases/4.3.1+gSELECTED")
+    assert receipt["runtime_bin"] == str(selected_bin)
+
+
+def test_terminal_entry_path_sanitation_is_idempotent_for_clean_custom_root(
+    tmp_path: Path,
+) -> None:
+    runtime_home = tmp_path / "noncanonical-runtime"
+    founder_bin = tmp_path / "founder-bin"
+    lookalike = tmp_path / "lookalike/releases/4.3.0+gSTALE/bin"
+    for directory in (founder_bin, lookalike):
+        directory.mkdir(parents=True, exist_ok=True)
+    _write(founder_bin / "founder-tool", "#!/bin/sh\nprintf founder-tool\n")
+    clean = os.pathsep.join([str(founder_bin), "", str(lookalike), "/usr/bin", "/bin"])
+
+    receipt = _run_terminal_path_entry(tmp_path, runtime_home=runtime_home, inherited_path=clean)
+    assert receipt["path"] == clean
+    assert receipt["founder_tool"] == str(founder_bin / "founder-tool")
+
+
+def test_terminal_entry_anchors_custom_release_cleanup_on_its_selected_root(
+    tmp_path: Path,
+) -> None:
+    runtime_home = tmp_path / "custom runtime home"
+    stale = runtime_home / "releases/4.3.0+gSTALE/bin"
+    selected = runtime_home / "releases/4.3.1+gSELECTED/bin"
+    lookalike = tmp_path / "unowned/releases/4.3.0+gSTALE/bin"
+    stale_parent_root = tmp_path / "stale parent runtime/releases/4.2.0+gPARENT"
+    stale_parent_bin = stale_parent_root / "bin"
+    for directory in (stale, selected, lookalike, stale_parent_bin):
+        directory.mkdir(parents=True, exist_ok=True)
+    inherited = os.pathsep.join(
+        [str(stale), str(lookalike), str(selected), str(stale_parent_bin), "/usr/bin", "/bin"]
+    )
+
+    receipt = _run_terminal_path_entry(
+        tmp_path,
+        runtime_home=runtime_home,
+        inherited_path=inherited,
+        declare_runtime_home=False,
+        inherited_runtime_root=stale_parent_root,
+    )
+    # The wrapper's physical root wins over a hostile root left by its parent.
+    assert receipt["path"] == os.pathsep.join(
+        [str(lookalike), str(stale_parent_bin), "/usr/bin", "/bin"]
+    )
+    assert receipt["runtime_home"] is None
+    assert receipt["runtime_root"] == str(runtime_home / "releases/4.3.1+gSELECTED")
+
+
 @pytest.mark.parametrize("shell", ["bash", "zsh"])
 def test_terminal_entry_uses_internal_python_with_hostile_public_python(
     tmp_path: Path, shell: str
