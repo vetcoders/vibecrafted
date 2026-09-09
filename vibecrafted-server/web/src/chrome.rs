@@ -286,4 +286,61 @@ mod tests {
         // Shared bytes, not a second stylesheet copy.
         assert!(html.contains(STYLE_MAIN));
     }
+
+    /// Founder contract: the button names where a click takes you, never the
+    /// theme you are already in. Server-rendered default is dark, so the button
+    /// must offer "light"; the control script must keep flipping the noun.
+    #[test]
+    fn theme_toggle_names_its_destination_not_the_active_theme() {
+        let html = render_document(&ServerDocument {
+            title: "t",
+            active: ServerSection::Overview,
+            status: "ok",
+            head_html: "",
+            body_html: "",
+            tail_html: "",
+        });
+
+        // Dark is the pre-paint default, so the offer is light.
+        assert!(html.contains("aria-label=\"Switch to light theme\""));
+        let button_start = html.find("server-theme-toggle").expect("toggle");
+        let button_end = html[button_start..].find("</button>").expect("close") + button_start;
+        let button = &html[button_start..button_end];
+        assert!(button.contains("light"), "dark active must offer light");
+        assert!(!button.contains(">dark<"), "the button must not name the active theme");
+
+        // And the destination keeps flipping at runtime.
+        let script = theme_control_script();
+        assert!(
+            script.contains("const target = next === 'light' ? 'dark' : 'light';"),
+            "the label must always be the theme a click switches TO"
+        );
+        assert!(
+            script.contains("button.textContent = target;"),
+            "the visible noun must follow the destination"
+        );
+        assert!(
+            script.contains("button.setAttribute('aria-label', `Switch to ${target} theme`);"),
+            "the accessible name must follow the same destination"
+        );
+    }
+
+    /// One theme contract for every route: the raw-HTML document and the Leptos
+    /// shell must ship the same pre-paint restore and the same control script.
+    #[test]
+    fn every_route_shares_one_theme_contract() {
+        let html = render_document(&ServerDocument {
+            title: "t",
+            active: ServerSection::Scaffold,
+            status: "ok",
+            head_html: "",
+            body_html: "",
+            tail_html: "",
+        });
+
+        assert_eq!(count(&html, "server-theme-toggle"), 2, "one toggle, one script hook");
+        assert_eq!(count(&html, "loct-theme"), 2, "one storage key, read once and written once");
+        assert!(theme_head_script().contains("localStorage.getItem('loct-theme')"));
+        assert!(theme_control_script().contains("localStorage.setItem('loct-theme', next)"));
+    }
 }

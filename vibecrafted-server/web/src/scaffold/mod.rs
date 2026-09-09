@@ -1117,7 +1117,7 @@ pub mod api {
   // same rolling-state affordance as Codescribe tray Auto Format.
   var STATUS_CYCLE = [" ", "~", "?", "!", "x"];
   var STATUS_META = {
-    " ": { label: "todo", glyph: " " },
+    " ": { label: "todo", glyph: "\u00a0" },
     "~": { label: "running", glyph: "~" },
     "?": { label: "done?", glyph: "?" },
     "!": { label: "blocked", glyph: "!" },
@@ -1932,7 +1932,7 @@ pub mod api {
 .review-topbar-actions{display:flex;align-items:center;gap:8px;flex:0 0 auto}
 .review-main{position:relative;min-height:0;overflow:hidden;padding:0;display:block;background:var(--bg)}
 .review-main>.status{position:absolute;z-index:5;left:16px;right:16px;top:12px;margin:0}
-.status{display:none;border:1px solid #4d7041;background:#162114;padding:10px;border-radius:8px}.status:target{display:block}.status-error{border-color:var(--bad);background:#2b1717}
+.status{display:none;border:1px solid color-mix(in srgb,var(--status-success) 45%,transparent);background:var(--panel);color:var(--text);padding:10px;border-radius:8px}.status:target{display:block}.status-error{border-color:var(--bad);background:var(--panel)}
 /* One active document only — never stack every artifact */
 /* Rows: editor-form fills, trailing forms (pre-JS checkpoint) auto. The
  * .artifact-head is permanently display:none (chrome lives in the topbar) and
@@ -1990,7 +1990,7 @@ button.render-mode-btn[data-next="rich"]{border-color:rgba(184,239,125,.45);colo
 .rich-pane.md-body pre.md-code code{background:transparent;padding:0;color:var(--text);font-size:12.5px;line-height:1.5;white-space:pre}
 .rich-pane.md-body a{color:var(--teal)}.rich-pane.md-body strong{color:var(--text);font-weight:650}
 /* Frontmatter as meta card (Notion property table vibe) */
-.md-frontmatter{display:grid;gap:6px;margin:0 0 1.4em;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:rgba(27,31,32,.85)}
+.md-frontmatter{display:grid;gap:6px;margin:0 0 1.4em;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
 .md-fm-row{display:grid;grid-template-columns:minmax(96px,160px) minmax(0,1fr);gap:10px;align-items:baseline;padding:3px 0}
 .md-fm-key{color:var(--muted);font:11px var(--font-mono);text-transform:uppercase;letter-spacing:.06em}
 .md-fm-val{font:12.5px/1.45 var(--font-mono);color:var(--text);overflow-wrap:anywhere}
@@ -1998,19 +1998,37 @@ button.render-mode-btn[data-next="rich"]{border-color:rgba(184,239,125,.45);colo
 .md-table-wrap{margin:.9em 0 1.1em;overflow:auto;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
 .md-table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.45}
 .md-table th,.md-table td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
-.md-table th{color:var(--muted);font:11px var(--font-mono);text-transform:uppercase;letter-spacing:.06em;background:rgba(255,255,255,.02);position:sticky;top:0}
+.md-table th{color:var(--muted);font:11px var(--font-mono);text-transform:uppercase;letter-spacing:.06em;background:var(--bg);position:sticky;top:0}
 .md-table tr:last-child td{border-bottom:0}
-.md-table tr:hover td{background:rgba(255,255,255,.015)}
+.md-table tr:hover td{background:var(--btn-bg-hover)}
 /* Rolling status chips — Codescribe tray Auto Format affordance */
-button.md-status{display:inline-flex;align-items:center;gap:6px;margin:0 2px;padding:2px 8px 2px 6px;border:1px solid var(--line);border-radius:999px;background:var(--panel-lift);color:var(--muted);font:11px var(--font-mono);cursor:pointer;vertical-align:middle;line-height:1.3;transition:border-color .12s ease,color .12s ease,background .12s ease}
-button.md-status:hover,button.md-status:focus-visible{border-color:var(--teal);color:var(--text);outline:none}
-button.md-status .md-status-glyph{font-weight:700;letter-spacing:.02em}
-button.md-status .md-status-label{opacity:.85;text-transform:lowercase}
-button.md-status.md-status-todo{border-color:rgba(169,177,180,.35);color:var(--muted)}
-button.md-status.md-status-run{border-color:rgba(216,166,64,.55);color:var(--amber);background:rgba(216,166,64,.08)}
-button.md-status.md-status-maybe{border-color:rgba(77,155,142,.5);color:var(--teal);background:rgba(77,155,142,.08)}
-button.md-status.md-status-blocked{border-color:rgba(255,138,138,.55);color:var(--bad);background:rgba(255,138,138,.08)}
-button.md-status.md-status-done{border-color:rgba(184,239,125,.55);color:var(--accent);background:rgba(184,239,125,.08)}
+/* The chip is ONE atomic control. Under a narrow tracker column the flex items
+ * used to shrink below their content and the todo glyph broke across lines,
+ * rendering as a stray [ over a stray ]. nowrap + non-shrinking items keep every
+ * state on one line; the table wrap already owns the horizontal scroll, so a
+ * squeezed column scrolls visibly instead of hiding or mangling state. */
+button.md-status{display:inline-flex;align-items:center;flex:0 0 auto;gap:6px;margin:0 2px;padding:2px 8px 2px 6px;border:1px solid var(--line);border-radius:999px;background:var(--panel-lift);color:var(--muted);font:11px var(--font-mono);cursor:pointer;vertical-align:middle;line-height:1.3;white-space:nowrap;overflow-wrap:normal;word-break:normal;transition:border-color var(--motion-fast) var(--ease-ui),color var(--motion-fast) var(--ease-ui),background var(--motion-fast) var(--ease-ui)}
+button.md-status:hover,button.md-status:focus-visible{border-color:var(--line-strong);color:var(--text);outline:none}
+button.md-status:focus-visible{outline:2px solid var(--text);outline-offset:2px}
+button.md-status .md-status-glyph{flex:0 0 auto;white-space:pre;font-weight:700;letter-spacing:.02em;font-variant-ligatures:none}
+button.md-status .md-status-label{flex:0 0 auto;white-space:nowrap;opacity:.85;text-transform:lowercase}
+/* State rides the glyph, never the label — the same split the native recovery
+ * card uses (colored symbol, ink title). Label text therefore stays readable on
+ * both themes, and state survives without relying on color alone. */
+button.md-status.md-status-todo{border-color:var(--line-strong)}
+button.md-status.md-status-todo .md-status-glyph{color:var(--muted)}
+button.md-status.md-status-run{border-color:color-mix(in srgb,var(--status-warning) 55%,transparent);background:color-mix(in srgb,var(--status-warning) 10%,transparent)}
+button.md-status.md-status-run .md-status-glyph{color:var(--status-warning)}
+button.md-status.md-status-maybe{border-color:color-mix(in srgb,var(--status-info) 50%,transparent);background:color-mix(in srgb,var(--status-info) 10%,transparent)}
+button.md-status.md-status-maybe .md-status-glyph{color:var(--status-info)}
+button.md-status.md-status-blocked{border-color:color-mix(in srgb,var(--status-danger) 55%,transparent);background:color-mix(in srgb,var(--status-danger) 10%,transparent)}
+button.md-status.md-status-blocked .md-status-glyph{color:var(--status-danger)}
+button.md-status.md-status-done{border-color:color-mix(in srgb,var(--status-success) 55%,transparent);background:color-mix(in srgb,var(--status-success) 10%,transparent)}
+button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
+/* Native parity: CommandDeckMetrics thickens the stroke at increased contrast
+ * and CommandDeckTheme honours reduced motion; the web chip now matches. */
+@media (prefers-contrast: more){button.md-status{border-width:1.5px}}
+@media (prefers-reduced-motion: reduce){button.md-status{transition:none}}
 :where(.server-route-document) button{justify-self:start;margin:12px 16px;border:1px solid #5e7f47;background:#22321f;color:var(--text);border-radius:7px;padding:8px 12px;font-weight:700;cursor:pointer}
 /* Save sits in the form's bottom auto-row (not floating in the black void). */
 .artifact-panel .save-artifact-btn{
@@ -2530,6 +2548,157 @@ button.md-status.md-status-done{border-color:rgba(184,239,125,.55);color:var(--a
             assert!(
                 html.contains("return res.json()"),
                 "a successful chip write must reconcile with canonical server bytes"
+            );
+        }
+
+        /// The supplied regression: in a narrow tracker column the `todo` chip
+        /// rendered `[` and `]` on separate lines. The glyph was the only one
+        /// carrying an internal space, and nothing stopped the flex items from
+        /// shrinking below their content.
+        #[test]
+        fn status_chip_stays_one_unbreakable_control_in_a_narrow_column() {
+            let html = render_editor(&fixture());
+
+            assert!(
+                html.contains(
+                    "white-space:nowrap;overflow-wrap:normal;word-break:normal"
+                ),
+                "the chip itself must never wrap, whatever the column width"
+            );
+            assert!(
+                html.contains("button.md-status{display:inline-flex;align-items:center;flex:0 0 auto;"),
+                "the chip must not shrink below its content inside a table cell"
+            );
+            assert!(
+                html.contains("button.md-status .md-status-glyph{flex:0 0 auto;white-space:pre;"),
+                "the bracket glyph must be non-shrinking and keep its literal spacing"
+            );
+            assert!(
+                html.contains("button.md-status .md-status-label{flex:0 0 auto;white-space:nowrap;"),
+                "the state label must not wrap away from its glyph"
+            );
+            // Belt and braces: even with the stylesheet stripped, the todo glyph
+            // no longer offers a break opportunity between its brackets.
+            assert!(
+                html.contains(r#"" ": { label: "todo", glyph: "\u00a0" }"#),
+                "todo must render a non-breaking space between its brackets"
+            );
+            assert!(
+                !html.contains(r#"" ": { label: "todo", glyph: " " }"#),
+                "a bare space between brackets is what split [ and ] across lines"
+            );
+        }
+
+        /// Every state, not just the one that happened to break, is a cohesive
+        /// control; and state colour rides the glyph so the label stays legible
+        /// on the light theme too.
+        #[test]
+        fn every_status_state_is_a_cohesive_readable_control() {
+            let html = render_editor(&fixture());
+
+            for (state, token) in [
+                ("todo", "var(--muted)"),
+                ("run", "var(--status-warning)"),
+                ("maybe", "var(--status-info)"),
+                ("blocked", "var(--status-danger)"),
+                ("done", "var(--status-success)"),
+            ] {
+                assert!(
+                    html.contains(&format!(
+                        "button.md-status.md-status-{state} .md-status-glyph{{color:{token}}}"
+                    )),
+                    "state {state} must carry its colour on the glyph"
+                );
+            }
+
+            // The old palette coloured the *label*, using accents that collapsed
+            // to a neutral grey — invisible on the light theme.
+            assert!(
+                !html.contains("color:var(--amber);background:rgba(216,166,64,.08)"),
+                "stale chip palette must not come back"
+            );
+            assert!(
+                !html.contains("border-color:rgba(169,177,180,.35)"),
+                "stale chip palette must not come back"
+            );
+        }
+
+        /// Presentation changed; the source markers and the save path did not.
+        #[test]
+        fn status_presentation_change_leaves_the_persistence_contract_intact() {
+            let html = render_editor(&fixture());
+
+            assert!(
+                html.contains(r#"STATUS_CYCLE = [" ", "~", "?", "!", "x"]"#),
+                "the cycle still moves through the real source markers"
+            );
+            assert!(
+                html.contains("([ xX~!?])"),
+                "the source-marker scanner must still match the raw tracker tokens"
+            );
+            assert!(
+                html.contains("replaceStatusOcc"),
+                "a click still rewrites the matching occurrence in the raw textarea"
+            );
+            assert!(
+                html.contains(r#"chip.getAttribute("data-mark")"#),
+                "the next mark is derived from the real marker, never from the glyph"
+            );
+            assert!(
+                html.contains("markFormDirty"),
+                "checkpoint/save dirty tracking is unchanged"
+            );
+            assert!(
+                html.contains("statusRequestSeq"),
+                "stale-response reconciliation is unchanged"
+            );
+        }
+
+        /// Founder direction: keep the light theme. These surfaces were pinned to
+        /// dark slabs, so light mode rendered near-black text on a dark card.
+        #[test]
+        fn studio_surfaces_follow_the_theme_contract_not_hardcoded_dark_slabs() {
+            let html = render_editor(&fixture());
+
+            assert!(
+                !html.contains("background:rgba(27,31,32,.85)"),
+                "the frontmatter card must not be pinned to a dark slab"
+            );
+            assert!(
+                !html.contains("background:#162114") && !html.contains("background:#2b1717"),
+                "save/error banners must not be pinned to dark fills"
+            );
+            assert!(
+                html.contains("letter-spacing:.06em;background:var(--bg);position:sticky"),
+                "a sticky header needs an opaque surface; --panel is alpha on light"
+            );
+            assert!(
+                html.contains(".md-table tr:hover td{background:var(--btn-bg-hover)}"),
+                "row hover must use the themed hover token, not white alpha"
+            );
+        }
+
+        /// Parity with the native command deck, which already thickens its stroke
+        /// at increased contrast and honours reduced motion.
+        #[test]
+        fn status_chip_honours_reduced_motion_and_increased_contrast() {
+            let html = render_editor(&fixture());
+
+            assert!(
+                html.contains("@media (prefers-reduced-motion: reduce){button.md-status{transition:none}}"),
+                "chip motion must be opt-out"
+            );
+            assert!(
+                html.contains("@media (prefers-contrast: more){button.md-status{border-width:1.5px}}"),
+                "increased contrast must thicken the chip stroke, as the native deck does"
+            );
+            assert!(
+                html.contains("transition:border-color var(--motion-fast) var(--ease-ui)"),
+                "chip motion must come from the shared motion dictionary"
+            );
+            assert!(
+                html.contains("button.md-status:focus-visible{outline:2px solid var(--text)"),
+                "keyboard focus must stay visible on both themes"
             );
         }
 
