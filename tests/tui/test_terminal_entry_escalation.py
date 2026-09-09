@@ -13,9 +13,14 @@ stdin-is-not-a-TTY guard.
 The contract proven here: vc-frame keeps refusing pipes (it is internal), but a
 PUBLIC entry owes the operator a visible terminal. The escalation reuses the one
 owner Vibecrafted.app already uses -- vc-terminal -e <launch-primary-shell.zsh>
-<front door> [argv] -- and then, inside that terminal, the child completes the
-resume in the right ORDER: exactly one AICX pack, exactly one provider tab, and
-only afterwards the blocking foreground attach.
+<child owner> --. Start's child owner is still the generation ``bin/vc-start``.
+Resume/init/operator/partner hand off through
+``env PYTHONPATH=<sourced-core> <python> -m vibecrafted_core.spawn
+interactive-handoff --command <interactive-launch …>``, never a PATH-resolved
+``bin/vibecrafted`` and never a guessed ``argv[2] == resume``. Inside that
+terminal the child completes the resume in the right ORDER: exactly one
+continuity/admission pack, exactly one provider tab, and only afterwards the
+blocking foreground attach.
 
 Four properties are load-bearing and each has a case below:
   * project identity -- explicit --root wins, and the runtime generation is
@@ -43,9 +48,9 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+CORE_IMPORT_ROOT = REPO_ROOT / "vibecrafted-core"
 SHELL_SH = (
-    REPO_ROOT
-    / "vibecrafted-core"
+    CORE_IMPORT_ROOT
     / "vibecrafted_core"
     / "runtime"
     / "shell"
@@ -283,12 +288,14 @@ def _run_entry(
     terminal_exit: int = 0,
     expect_launch: bool = True,
     shell: str = "bash",
+    prelude: str = "",
 ) -> tuple[subprocess.CompletedProcess[str], dict | None]:
     capture = tmp_path / "terminal-launch.json"
     home = tmp_path / "home"
     home.mkdir(parents=True, exist_ok=True)
     project_dir = tmp_path / project
-    project_dir.mkdir(parents=True, exist_ok=True)
+    if not (project_dir / ".git").exists():
+        _commit_fixture_repo(project_dir)
     if with_canonical_launcher:
         _install_canonical_launcher(home)
     # Create-only start (2026-09-09): a caller without a TTY creates the
@@ -309,6 +316,8 @@ def _run_entry(
         "VIBECRAFTED_RUNTIME_BIN",
         "VIBECRAFTED_RUNTIME_HOME",
         "VIBECRAFTED_PYTHON",
+        "PYTHONPATH",
+        "PYTHONHOME",
         "SPAWN_ROOT",
         "VC_FRAME",
         "VC_FRAME_PANE_ID",
@@ -343,8 +352,10 @@ def _run_entry(
             "_vetcoders_aicx_resume_fallback() { printf 'called\\n' "
             ">> \"$TEST_AICX_CAPTURE\"; printf 'MODE=new_session\\n'; }"
         ),
-        invocation,
     ]
+    if prelude:
+        lines.append(prelude)
+    lines.append(invocation)
 
     result = subprocess.run(
         _shell_argv(shell, "\n".join(lines)),
@@ -377,30 +388,119 @@ def _working_directory(launch: dict) -> Path:
     return Path(argv[argv.index("--working-directory") + 1]).resolve()
 
 
-def _child_effective_root(tmp_path: Path, launch: dict) -> Path:
-    """The project the CHILD lands on, resolved from the argv it was handed.
+def _flag_value(argv: list[str], flag: str) -> str:
+    try:
+        index = argv.index(flag)
+    except ValueError as exc:
+        raise AssertionError(f"{flag} missing from {argv}") from exc
+    assert index + 1 < len(argv), argv
+    return argv[index + 1]
 
-    The child re-parses the forwarded vector from the terminal's working
-    directory. That SECOND parse is where a raw relative --root resolves one
-    level too deep, so asserting on the parent's cwd alone cannot see it.
+
+def _is_spawn_handoff(hosted: list[str]) -> bool:
+    return "vibecrafted_core.spawn" in hosted and "interactive-handoff" in hosted
+
+
+def _product_front_door(hosted: list[str]) -> str:
+    """Start-family owner: generation ``bin/vc-start`` after the primary shell."""
+    assert hosted, hosted
+    assert hosted[0].endswith("launch-primary-shell.zsh"), hosted
+    assert not _is_spawn_handoff(hosted), hosted
+    return hosted[1]
+
+
+def _product_args(hosted: list[str]) -> list[str]:
+    _product_front_door(hosted)
+    return hosted[2:]
+
+
+def _spawn_owner_argv(hosted: list[str]) -> list[str]:
+    """The child owner after the primary shell.
+
+    Sourced resume/init escalate through
+    ``_vetcoders_enter_admitted_interactive``: either
+    ``/usr/bin/env PYTHONPATH=<core> <python> -m vibecrafted_core.spawn
+    interactive-handoff --command …`` or the same vector without the env
+    wrapper when core is already importable. Never a PATH-resolved
+    ``bin/vibecrafted resume`` and never a fixed verb index.
     """
-    hosted = _hosted_argv(launch)
-    assert hosted[2] == "resume", hosted
-    contract_args = hosted[4:]
-    script = "\n".join(
-        [
-            f'source "{SHELL_SH}"',
-            "_vetcoders_parse_contract "
-            + " ".join(shlex.quote(arg) for arg in contract_args),
-            'printf "CHILD_ROOT=[%s]\\n" "$(_vetcoders_effective_project_root)"',
-        ]
-    )
+    assert hosted, hosted
+    assert hosted[0].endswith("launch-primary-shell.zsh"), hosted
+    owner = hosted[1:]
+    assert "vibecrafted_core.spawn" in owner, owner
+    assert "interactive-handoff" in owner, owner
+    assert "--command" in owner, owner
+    assert not any(token.endswith("/bin/vibecrafted") for token in hosted), hosted
+    return owner
+
+
+def _handoff_command_text(owner: list[str]) -> str:
+    return _flag_value(owner, "--command")
+
+
+def _inner_launch_argv(command_text: str) -> list[str]:
+    tokens = shlex.split(command_text)
+    assert "vibecrafted_core.spawn" in tokens, tokens
+    assert "interactive-launch" in tokens, tokens
+    return tokens[tokens.index("interactive-launch") :]
+
+
+def _admission_payload(launch_argv: list[str]) -> dict:
+    path = Path(_flag_value(launch_argv, "--admission-file"))
+    assert path.is_file(), path
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _spawn_handoff(hosted: list[str]) -> tuple[list[str], list[str], dict]:
+    """Parse the real child protocol: owner argv, inner launch, admission."""
+    owner = _spawn_owner_argv(hosted)
+    pythonpath_tokens = [token for token in owner if token.startswith("PYTHONPATH=")]
+    assert pythonpath_tokens, owner
+    imported = Path(pythonpath_tokens[0].split("=", 1)[1].split(os.pathsep)[0]).resolve()
+    assert imported == CORE_IMPORT_ROOT.resolve(), owner
+    if Path(owner[0]).name == "env":
+        assert owner[1].startswith("PYTHONPATH="), owner
+        python_bin = Path(owner[2]).name
+    else:
+        python_bin = Path(owner[0]).name
+    assert python_bin.startswith("python"), owner
+    assert owner[owner.index("-m") + 1] == "vibecrafted_core.spawn", owner
+    inner = _inner_launch_argv(_handoff_command_text(owner))
+    admission = _admission_payload(inner)
+    return owner, inner, admission
+
+
+def _parent_aicx_calls(tmp_path: Path) -> list[str]:
+    capture = tmp_path / "aicx-called.txt"
+    if not capture.exists():
+        return []
+    return [line for line in capture.read_text(encoding="utf-8").splitlines() if line]
+
+
+def _child_effective_root(tmp_path: Path, launch: dict) -> Path:
+    """The project the CHILD lands on after the actual owner handoff.
+
+    The parent already resolved root by running this same spawn vector with
+    ``--root-only``. The child re-enters ``interactive-handoff`` from the
+    terminal's working directory. Invoking that owner again with
+    ``--root-only`` from that cwd is the second parse; asserting on the
+    parent's ``--working-directory`` alone cannot see a relative --root
+    walking one level too deep.
+    """
+    owner = _spawn_owner_argv(_hosted_argv(launch))
     env = os.environ.copy()
-    for key in ("VIBECRAFTED_ROOT", "VIBECRAFTED_RUNTIME_ROOT", "SPAWN_ROOT"):
+    for key in (
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "VIBECRAFTED_ROOT",
+        "VIBECRAFTED_RUNTIME_ROOT",
+        "SPAWN_ROOT",
+    ):
         env.pop(key, None)
     env["HOME"] = str(tmp_path / "home")
+    env["VIBECRAFTED_HOME"] = str(tmp_path / "home" / ".vibecrafted")
     result = subprocess.run(
-        ["bash", "--noprofile", "--norc", "-c", script],
+        [*owner, "--root-only"],
         check=False,
         cwd=_working_directory(launch),
         env=env,
@@ -408,9 +508,12 @@ def _child_effective_root(tmp_path: Path, launch: dict) -> Path:
         text=True,
         timeout=60,
     )
-    marker = "CHILD_ROOT=["
-    assert marker in result.stdout, result.stdout + result.stderr
-    return Path(result.stdout.split(marker, 1)[1].split("]", 1)[0]).resolve()
+    assert result.returncode == 0, result.stdout + result.stderr
+    printed = result.stdout.strip().splitlines()[-1]
+    root = Path(printed)
+    if not root.is_absolute():
+        root = _working_directory(launch) / root
+    return root.resolve()
 
 
 # --------------------------------------------------------------------------
@@ -431,17 +534,23 @@ def test_bare_resume_without_tty_opens_terminal_on_this_project(
     # Exact cwd: the session belongs to the project the operator ran this in.
     assert _working_directory(launch) == (tmp_path / "mlx-batch-runner").resolve()
 
-    # The existing owner contract, not a private launcher.
+    # The sourced-shell owner, not a PATH-resolved vibecrafted wrapper.
     hosted = _hosted_argv(launch)
-    assert hosted[0].endswith("launch-primary-shell.zsh")
-    assert hosted[1].endswith("/bin/vibecrafted")
-    assert hosted[2:] == ["resume", "codex"]
+    _owner, inner, admission = _spawn_handoff(hosted)
+    project = (tmp_path / "mlx-batch-runner").resolve()
+    assert inner[1] == "codex", inner
+    assert Path(_flag_value(inner, "--root")).resolve() == project
+    assert admission["skill"] == "resume", admission
+    assert admission["agent"] == "codex", admission
+    assert Path(admission["root"]).resolve() == project
+    assert _child_effective_root(tmp_path, launch) == project
 
     # The child re-enters the same entry; the boundary must ride with it.
     assert launch["boundary"] == "1"
 
-    # Nothing may be launched twice: no AICX pack in the escalating parent.
-    assert not (tmp_path / "aicx-called.txt").exists()
+    # The parent composes exactly one continuity pack into the handoff
+    # command. The child is interactive-handoff, not a second vc-resume.
+    assert _parent_aicx_calls(tmp_path) == ["called"]
     assert "refusing to downgrade" not in result.stderr
 
 
@@ -455,7 +564,7 @@ def test_bare_start_without_tty_opens_terminal_with_its_front_door(
     assert launch is not None, f"no terminal was opened: {result.stderr}"
     hosted = _hosted_argv(launch)
     assert hosted[0].endswith("launch-primary-shell.zsh")
-    assert hosted[1].endswith("/bin/vc-start")
+    assert _product_front_door(hosted).endswith("/bin/vc-start")
 
 
 def test_start_explicit_root_is_consumed_before_terminal_escalation(
@@ -475,7 +584,7 @@ def test_start_explicit_root_is_consumed_before_terminal_escalation(
     # Create-only start: the child is handed the resolved repository as the
     # standard `--repo` so it enters the SAME workspace the parent created,
     # whatever its own cwd/Git context is. Frame never sees --root/--repo.
-    assert hosted[2:] == ["operator", "--repo", str(other.resolve())], hosted
+    assert _product_args(hosted) == ["operator", "--repo", str(other.resolve())], hosted
 
 
 @pytest.mark.parametrize("root_arg", ["--root", "--root=", "--root /no/such/project"])
@@ -502,7 +611,11 @@ def test_start_explicit_root_preserves_resume_without_forwarding_root(
     assert result.returncode == 0, result.stderr
     assert launch is not None, result.stderr
     assert _working_directory(launch) == other.resolve()
-    assert _hosted_argv(launch)[2:] == ["resume", "--repo", str(other.resolve())]
+    assert _product_args(_hosted_argv(launch)) == [
+        "resume",
+        "--repo",
+        str(other.resolve()),
+    ]
 
 
 def test_start_preserves_exact_argv_including_quoting(tmp_path: Path) -> None:
@@ -516,7 +629,7 @@ def test_start_preserves_exact_argv_including_quoting(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert launch is not None
-    assert _hosted_argv(launch)[2:] == [
+    assert _product_args(_hosted_argv(launch)) == [
         "two words",
         "--repo",
         str((tmp_path / "mlx-batch-runner").resolve()),
@@ -541,7 +654,12 @@ def test_explicit_absolute_root_binds_the_terminal_not_the_cwd(
     assert result.returncode == 0, result.stderr
     assert launch is not None, result.stderr
     assert _working_directory(launch) == other.resolve()
-    assert _hosted_argv(launch)[2:4] == ["resume", "codex"]
+    _owner, inner, admission = _spawn_handoff(_hosted_argv(launch))
+    assert inner[1] == "codex", inner
+    assert Path(_flag_value(inner, "--root")).resolve() == other.resolve()
+    assert admission["skill"] == "resume", admission
+    assert Path(admission["root"]).resolve() == other.resolve()
+    assert _child_effective_root(tmp_path, launch) == other.resolve()
 
 
 def test_relative_explicit_root_is_resolved_against_the_caller(
@@ -555,7 +673,12 @@ def test_relative_explicit_root_is_resolved_against_the_caller(
     assert launch is not None, result.stderr
     assert _working_directory(launch) == other.resolve()
     # A sibling token resolves back onto itself from the new cwd, so this case
-    # is forgiving by accident. Check the child too, or it proves nothing.
+    # is forgiving by accident. Check the child owner too, or it proves nothing.
+    _owner, inner, admission = _spawn_handoff(_hosted_argv(launch))
+    forwarded_root = Path(_flag_value(inner, "--root"))
+    assert forwarded_root.is_absolute(), inner
+    assert forwarded_root.resolve() == other.resolve()
+    assert Path(admission["root"]).resolve() == other.resolve()
     assert _child_effective_root(tmp_path, launch) == other.resolve()
 
 
@@ -577,32 +700,41 @@ def test_nested_relative_root_survives_the_child_reparse(tmp_path: Path) -> None
     assert launch is not None, result.stderr
     assert _working_directory(launch) == nested.resolve()
 
-    hosted = _hosted_argv(launch)
-    assert hosted[4] == "--root", hosted
-    assert Path(hosted[5]).is_absolute(), f"a relative root crossed the cwd: {hosted}"
-    assert Path(hosted[5]).resolve() == nested.resolve()
+    _owner, inner, admission = _spawn_handoff(_hosted_argv(launch))
+    forwarded_root = Path(_flag_value(inner, "--root"))
+    assert forwarded_root.is_absolute(), f"a relative root crossed the cwd: {inner}"
+    assert forwarded_root.resolve() == nested.resolve()
+    assert Path(admission["root"]).resolve() == nested.resolve()
     assert _child_effective_root(tmp_path, launch) == nested.resolve()
 
 
 def test_root_rewrite_preserves_every_other_argument(tmp_path: Path) -> None:
-    """Only the root VALUE is rewritten; flags, order and provider args stay."""
+    """Only the root VALUE is rewritten; provider and surviving flags stay.
+
+    Resume no longer forwards the raw ``vc-resume`` vector. ``--fork-session``
+    is a closed refuse (resume must not silently become a fork). The extra
+    flag that still rides the child owner is ``--permissions``.
+    """
     project = tmp_path / "mlx-batch-runner"
     project.mkdir(parents=True, exist_ok=True)
     nested = _commit_fixture_repo(project / "child")
 
     result, launch = _run_entry(
         tmp_path,
-        "vc-resume claude --fork-session --root child --runtime terminal",
+        "vc-resume claude --root child --permissions accept-edits",
     )
 
     assert result.returncode == 0, result.stderr
     assert launch is not None, result.stderr
 
-    hosted = _hosted_argv(launch)[2:]
-    assert hosted[:3] == ["resume", "claude", "--fork-session"], hosted
-    assert hosted[3] == "--root", hosted
-    assert Path(hosted[4]).resolve() == nested.resolve()
-    assert hosted[5:] == ["--runtime", "terminal"], hosted
+    _owner, inner, admission = _spawn_handoff(_hosted_argv(launch))
+    assert inner[1] == "claude", inner
+    assert _flag_value(inner, "--permissions") == "accept-edits", inner
+    assert Path(_flag_value(inner, "--root")).resolve() == nested.resolve()
+    assert admission["skill"] == "resume", admission
+    assert admission["agent"] == "claude", admission
+    assert Path(admission["root"]).resolve() == nested.resolve()
+    assert _child_effective_root(tmp_path, launch) == nested.resolve()
 
 
 def test_explicit_root_that_does_not_exist_is_refused(tmp_path: Path) -> None:
@@ -1534,17 +1666,28 @@ def test_rejected_terminal_launch_is_reported_as_a_failure(
 
 
 def test_missing_front_door_stops_before_any_aicx_work(tmp_path: Path) -> None:
-    """No front door means no PTY is obtainable -- do not assemble a 48h pack."""
+    """No spawn owner means no PTY is obtainable -- do not assemble a 48h pack.
+
+    Resume no longer uses generation ``bin/vibecrafted`` as the hosted front
+    door. The child owner is ``_vetcoders_core_python_spec`` plus
+    ``vibecrafted_core.spawn``. A missing ``bin/vibecrafted`` stub is not a
+    refusal anymore; a failed core python spec is.
+    """
+    _commit_fixture_repo(tmp_path / "mlx-batch-runner")
     result, launch = _run_entry(
         tmp_path,
         "vc-resume codex",
-        front_doors=("vc-start",),
         expect_launch=False,
+        prelude=(
+            "_vetcoders_core_python_spec() { "
+            'echo "Vibecrafted core unavailable: cannot import vibecrafted_core." >&2; '
+            "return 1; }"
+        ),
     )
 
     assert launch is None
     assert result.returncode != 0
-    assert "no installed vibecrafted front door" in result.stderr
+    assert "vibecrafted_core" in result.stderr
     assert not (tmp_path / "aicx-called.txt").exists()
 
 
@@ -2250,15 +2393,14 @@ def test_rewrite_contract_root_argv_preserves_prompt_and_dashdash_payload(
 def test_nested_relative_root_survives_the_child_reparse_under_zsh(
     tmp_path: Path,
 ) -> None:
-    """The bash P0 fix (test_nested_relative_root_survives_the_child_reparse)
+    """    The bash P0 fix (test_nested_relative_root_survives_the_child_reparse)
     held only under bash: the same `--root child` case must open the correct
-    nested project, and the hosted argv must carry the absolute rewrite, when
+    nested project, and the child owner must carry the absolute rewrite, when
     the operator's login shell is zsh.
     """
     project = tmp_path / "mlx-batch-runner"
     project.mkdir(parents=True, exist_ok=True)
-    nested = project / "child"
-    nested.mkdir()
+    nested = _commit_fixture_repo(project / "child")
 
     result, launch = _run_entry(tmp_path, "vc-resume codex --root child", shell="zsh")
 
@@ -2266,10 +2408,12 @@ def test_nested_relative_root_survives_the_child_reparse_under_zsh(
     assert launch is not None, result.stderr
     assert _working_directory(launch) == nested.resolve()
 
-    hosted = _hosted_argv(launch)
-    assert hosted[4] == "--root", hosted
-    assert Path(hosted[5]).is_absolute(), f"a relative root crossed the cwd: {hosted}"
-    assert Path(hosted[5]).resolve() == nested.resolve()
+    _owner, inner, admission = _spawn_handoff(_hosted_argv(launch))
+    forwarded_root = Path(_flag_value(inner, "--root"))
+    assert forwarded_root.is_absolute(), f"a relative root crossed the cwd: {inner}"
+    assert forwarded_root.resolve() == nested.resolve()
+    assert Path(admission["root"]).resolve() == nested.resolve()
+    assert _child_effective_root(tmp_path, launch) == nested.resolve()
 
 
 # --------------------------------------------------------------------------
@@ -2407,16 +2551,16 @@ def test_bare_resume_without_tty_opens_terminal_under_zsh(tmp_path: Path) -> Non
     whether the host admitted the launch must not silently read the wrong
     variable.
     """
+    _commit_fixture_repo(tmp_path / "mlx-batch-runner")
     result, launch = _run_entry(tmp_path, "vc-resume codex", shell="zsh")
 
     assert result.returncode == 0, result.stderr
     assert launch is not None, f"no terminal was opened: {result.stderr}"
     assert "read-only variable" not in result.stderr, result.stderr
-    hosted = _hosted_argv(launch)
-    assert hosted[0].endswith("launch-primary-shell.zsh")
-
-    # Nothing may be launched twice: no AICX pack in the escalating parent.
-    assert not (tmp_path / "aicx-called.txt").exists()
+    _owner, inner, admission = _spawn_handoff(_hosted_argv(launch))
+    assert inner[1] == "codex", inner
+    assert admission["skill"] == "resume", admission
+    assert _parent_aicx_calls(tmp_path) == ["called"]
 
 
 def _run_terminal_path_entry(
