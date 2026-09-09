@@ -1820,6 +1820,136 @@ def test_toml_merge_comment_on_sibling_survives_disjoint_edit():
     assert "# keep-chrome" in merged
 
 
+_TOML_WINDOW_FORMS = ("nested", "dotted", "inline")
+_TOML_WINDOW_FORM_TRIPLES = tuple(
+    (previous_form, current_form, incoming_form)
+    for previous_form in _TOML_WINDOW_FORMS
+    for current_form in _TOML_WINDOW_FORMS
+    for incoming_form in _TOML_WINDOW_FORMS
+)
+_ORACLE_MISSING = object()
+
+
+def _window_pref_text(
+    form: str, *, opacity: float, decorations: str | None
+) -> str:
+    if form == "nested":
+        text = f"[window]\nopacity = {opacity}\n"
+        if decorations is not None:
+            text += f'decorations = "{decorations}"\n'
+        return text
+    if form == "dotted":
+        text = f"window.opacity = {opacity}\n"
+        if decorations is not None:
+            text += f'window.decorations = "{decorations}"\n'
+        return text
+    if form == "inline":
+        if decorations is None:
+            return f"window = {{ opacity = {opacity} }}\n"
+        return f'window = {{ opacity = {opacity}, decorations = "{decorations}" }}\n'
+    raise AssertionError(form)
+
+
+def _oracle_leaf_map(text: str) -> dict[str, object]:
+    """Independent tomllib walk — not installer flatten or atomic exceptions."""
+
+    def walk(node: object, prefix: str) -> dict[str, object]:
+        if not isinstance(node, dict):
+            return {prefix: node} if prefix else {}
+        leaves: dict[str, object] = {}
+        for key, value in node.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if isinstance(value, dict):
+                leaves.update(walk(value, path))
+            else:
+                leaves[path] = value
+        return leaves
+
+    return walk(tomllib.loads(text), "")
+
+
+def _oracle_three_way_tree(previous: str, current: str, incoming: str) -> dict:
+    prev = _oracle_leaf_map(previous)
+    curr = _oracle_leaf_map(current)
+    inc = _oracle_leaf_map(incoming)
+    resolved: dict[str, object] = {}
+    for key in sorted(set(prev) | set(curr) | set(inc)):
+        prev_value = prev.get(key, _ORACLE_MISSING)
+        curr_value = curr.get(key, _ORACLE_MISSING)
+        inc_value = inc.get(key, _ORACLE_MISSING)
+        if curr_value == inc_value:
+            if curr_value is not _ORACLE_MISSING:
+                resolved[key] = curr_value
+            continue
+        if curr_value == prev_value:
+            if inc_value is not _ORACLE_MISSING:
+                resolved[key] = inc_value
+            continue
+        if inc_value == prev_value:
+            if curr_value is not _ORACLE_MISSING:
+                resolved[key] = curr_value
+            continue
+        raise AssertionError(
+            f"oracle conflict on {key}: {prev_value!r} {curr_value!r} {inc_value!r}"
+        )
+    tree: dict = {}
+    for dotted, value in resolved.items():
+        node = tree
+        parts = dotted.split(".")
+        for part in parts[:-1]:
+            child = node.get(part)
+            if child is None:
+                child = {}
+                node[part] = child
+            node = child
+        node[parts[-1]] = value
+    return tree
+
+
+def test_toml_overlay_dotted_raw_keeps_nested_table_path():
+    incoming = '[window]\nopacity = 0.8\ndecorations = "None"\n'
+    overlayed = installer._overlay_toml_assignment(
+        incoming, "window.opacity", "window.opacity = 0.9\n"
+    )
+    assert tomllib.loads(overlayed) == {
+        "window": {"opacity": 0.9, "decorations": "None"}
+    }
+    after_header = overlayed.split("[window]", 1)[-1]
+    assert "window.opacity" not in after_header
+
+
+@pytest.mark.parametrize(
+    "previous_form,current_form,incoming_form", _TOML_WINDOW_FORM_TRIPLES
+)
+def test_toml_merge_all_window_forms_keep_independent_leaves(
+    previous_form, current_form, incoming_form
+):
+    previous = _window_pref_text(previous_form, opacity=0.8, decorations="Full")
+    current = _window_pref_text(current_form, opacity=0.9, decorations="Full")
+    incoming = _window_pref_text(incoming_form, opacity=0.8, decorations="None")
+    expected = _oracle_three_way_tree(previous, current, incoming)
+    assert expected == {"window": {"opacity": 0.9, "decorations": "None"}}
+    merged = installer._merge_toml_runtime_preferences(previous, current, incoming)
+    assert tomllib.loads(merged) == expected
+
+
+@pytest.mark.parametrize(
+    "previous_form,current_form,incoming_form", _TOML_WINDOW_FORM_TRIPLES
+)
+def test_toml_merge_all_window_forms_honor_incoming_deletion(
+    previous_form, current_form, incoming_form
+):
+    previous = _window_pref_text(previous_form, opacity=0.8, decorations="Full")
+    current = _window_pref_text(current_form, opacity=0.9, decorations="Full")
+    incoming = _window_pref_text(incoming_form, opacity=0.8, decorations=None)
+    expected = _oracle_three_way_tree(previous, current, incoming)
+    assert expected == {"window": {"opacity": 0.9}}
+    merged = installer._merge_toml_runtime_preferences(previous, current, incoming)
+    parsed = tomllib.loads(merged)
+    assert parsed == expected
+    assert "decorations" not in parsed.get("window", {})
+
+
 def test_published_previous_receipt_rejects_config_conflicts():
     healthy = {
         "schema": installer.RUNTIME_INSTALL_SCHEMA,

@@ -16466,6 +16466,27 @@ def _merge_toml_runtime_preferences(
     return merged
 
 
+def _toml_adapt_assignment_spelling(line: str, raw_assignment: str) -> str:
+    """Keep canvas key spelling; take the raw RHS.
+
+    A dotted current line such as ``window.opacity = 0.9`` is a legal
+    assignment. Pasting that full LHS under a nested ``[window]`` table
+    rebinds the path to ``window.window.opacity``. Convert to the
+    destination key (``opacity``) instead of declaring dotted keys
+    unsupported. Preserve the canvas indent and comment; if the canvas
+    line has no comment, keep the source comment.
+    """
+    key = _toml_assignment_key(line)
+    if key is None:
+        raise ValueError("unsupported TOML preference value")
+    literal = _toml_assignment_value_text(raw_assignment)
+    comment = _toml_hash_comment(line) or _toml_hash_comment(raw_assignment)
+    indent = line[: len(line) - len(line.lstrip())]
+    newline = "\n" if line.endswith("\n") else ""
+    suffix = f" {comment}" if comment else ""
+    return f"{indent}{key} = {literal}{suffix}{newline}"
+
+
 def _overlay_toml_assignment(text: str, dotted: str, raw_assignment: str) -> str:
     """Put the user's exact assignment onto the incoming canvas."""
     lines = text.splitlines(keepends=True)
@@ -16497,9 +16518,7 @@ def _overlay_toml_assignment(text: str, dotted: str, raw_assignment: str) -> str
                 raise ValueError(
                     "multiline TOML assignment cannot be merged by setting identity"
                 )
-            newline = "\n" if raw_assignment.endswith("\n") or line.endswith("\n") else ""
-            assignment = raw_assignment if raw_assignment.endswith("\n") else raw_assignment + newline
-            lines[index] = assignment
+            lines[index] = _toml_adapt_assignment_spelling(line, raw_assignment)
             return "".join(lines)
     text = _toml_remove_nested_table("".join(lines), dotted)
     if "=" in raw_assignment and not raw_assignment.lstrip().startswith("["):
