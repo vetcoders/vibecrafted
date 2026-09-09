@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -33,7 +33,13 @@ from .report_contract import (
     materialize_launcher_report_template,
     stamp_launcher_report_identity,
 )
-from .runtime_paths import agent_tool_search_path
+from .runtime_paths import (
+    agent_tool_search_path,
+    is_owned_generation_path,
+    read_version_file,
+    selected_runtime_environment,
+    version_is_stamped,
+)
 from .runtime_transcript import write_runtime_transcript_manifest
 from .settlement import BareMarkdownError, require_bound_markdown
 from .telemetry import estimate_cost_usd
@@ -566,6 +572,52 @@ def _materialize_continuity(
     )
 
 
+_BOOTSTRAP_FLAGS = ("PYTHONNOUSERSITE", "PYTHONDONTWRITEBYTECODE")
+
+
+def _is_runtime_owned_import_root(entry: str, environment: Mapping[str, str]) -> bool:
+    """A ``PYTHONPATH`` entry inside a generation the runtime owns: the selected
+    root, an owned ``releases/<gen>`` tree, or the generation whose raw
+    interpreter is running this very process (the bootstrap's exec target)."""
+    if is_owned_generation_path(entry, environment):
+        return True
+    bootstrap = _generation_bootstrap_for(sys.executable)
+    if bootstrap is None:
+        return False
+    generation = str(bootstrap.parent.parent).rstrip("/")
+    candidate = entry.rstrip("/")
+    return candidate == generation or candidate.startswith(generation + "/")
+
+
+def _scrub_runtime_bootstrap(child: dict[str, str]) -> dict[str, str]:
+    """Drop the generation bootstrap's process state at the provider boundary.
+
+    ``bin/python3`` exports ``PYTHONPATH=<gen>/vibecrafted-core:<gen>/vibecrafted-mcp:
+    <gen>/python-site`` plus ``PYTHONNOUSERSITE``/``PYTHONDONTWRITEBYTECODE`` for
+    the runtime's own interpreter. A provider -- and any project Python it runs
+    -- must not inherit the runtime's private import roots (HAK-32). Only
+    runtime-owned entries go; a Founder's own ``PYTHONPATH`` entries stay, and
+    the two flags go only when a runtime-owned root was actually present, since
+    the bootstrap is the one thing that exports the three together.
+    """
+    raw = child.get("PYTHONPATH", "")
+    if not raw:
+        return child
+    entries = [entry for entry in raw.split(os.pathsep) if entry]
+    kept = [
+        entry for entry in entries if not _is_runtime_owned_import_root(entry, child)
+    ]
+    if len(kept) == len(entries):
+        return child
+    if kept:
+        child["PYTHONPATH"] = os.pathsep.join(kept)
+    else:
+        child.pop("PYTHONPATH", None)
+    for flag in _BOOTSTRAP_FLAGS:
+        child.pop(flag, None)
+    return child
+
+
 def _fresh_child_environment(
     env: dict[str, str], policy: ContinuityPolicy
 ) -> dict[str, str]:
@@ -576,7 +628,7 @@ def _fresh_child_environment(
         for name in tuple(child):
             if name.startswith(("VIBECRAFTED_RESUME_", "AICX_CONTINUITY_")):
                 child.pop(name, None)
-    return child
+    return _scrub_runtime_bootstrap(child)
 
 
 def continuity_policy_capabilities(
@@ -952,6 +1004,57 @@ def interactive_policy_command(
     raise ValueError(f"unsupported provider: {provider}")
 
 
+def _generation_bootstrap_for(executable: str | os.PathLike[str]) -> Path | None:
+    """``<generation>/bin/python3`` when *executable* is the raw
+    ``python/bin/pythonX.Y`` of a stamped Runtime Pack generation, else ``None``.
+
+    The path is read as invoked, never resolved: a generation's raw interpreter
+    is what the bootstrap wrapper execs, and its physical target is not the
+    generation.
+    """
+    raw = Path(executable)
+    if raw.parent.name != "bin" or raw.parent.parent.name != "python":
+        return None
+    generation = raw.parent.parent.parent
+    bootstrap = generation / "bin" / "python3"
+    if not version_is_stamped(read_version_file(generation)):
+        return None
+    if not bootstrap.is_file() or not os.access(bootstrap, os.X_OK):
+        return None
+    return bootstrap
+
+
+def interactive_launch_interpreter(
+    environment: Mapping[str, str] | None = None,
+) -> tuple[str, bool]:
+    """The interpreter a pane may invoke by path and still reach core.
+
+    Returns ``(argv0, bootstraps)``. A pane command script runs in the Frame
+    server's fresh login shell: no ``PYTHONPATH``, nothing exported by the
+    process that composed it. In a Runtime Pack that composer itself runs under
+    the generation's ``bin/python3`` -- the bootstrap wrapper that exports the
+    generation-private ``PYTHONPATH`` and execs the raw ``python/bin/python3.12``
+    -- so ``sys.executable`` is the raw interpreter, and raw is exactly what
+    the 8177a33d candidate wrote into the pane (``ModuleNotFoundError: No module
+    named 'vibecrafted_core'`` before any provider ran).
+
+    Ownership, in order: the selected generation (``VIBECRAFTED_RUNTIME_ROOT``,
+    the contract every public launcher and the deck export; validated by
+    :func:`selected_runtime_environment`, which names the generation's own
+    ``bin/python3``); a raw interpreter sitting inside a stamped generation
+    names that generation's bootstrap; anything else is a source lane and keeps
+    ``sys.executable``. A malformed selected root is an identity failure and
+    raises, as everywhere else on this route.
+    """
+    env = selected_runtime_environment(environment)
+    if env.get("VIBECRAFTED_RUNTIME_ROOT"):
+        return env["VIBECRAFTED_PYTHON"], True
+    bootstrap = _generation_bootstrap_for(sys.executable)
+    if bootstrap is not None:
+        return str(bootstrap), True
+    return sys.executable, False
+
+
 def interactive_workspace_command(
     provider: str,
     prompt: str,
@@ -964,7 +1067,15 @@ def interactive_workspace_command(
     parent_session_id: str = "",
     parent_lineage_id: str = "",
 ) -> list[str]:
-    """Build the portable wrapper argv used by the exact ``init`` route."""
+    """Build the portable wrapper argv used by the exact ``init`` route.
+
+    ``argv[0]`` is :func:`interactive_launch_interpreter`: in an installed
+    generation the generation's own bootstrap, so the pane reaches core without
+    any exported ``PYTHONPATH``. The explicit source-lane import root
+    (``VIBECRAFTED_INTERACTIVE_IMPORT_ROOT``) is prefixed only in front of a
+    plain interpreter; a bootstrap carries its own import path and would
+    override the prefix anyway.
+    """
     decision = resolve_provider_policy(provider, runtime, permissions, "interactive")
     if not decision.supported:
         raise ValueError(decision.reason)
@@ -981,8 +1092,9 @@ def interactive_workspace_command(
         parent_session_id=parent_session_id,
         parent_lineage_id=parent_lineage_id,
     )
+    interpreter, bootstraps = interactive_launch_interpreter()
     command = [
-        sys.executable,
+        interpreter,
         "-m",
         "vibecrafted_core.spawn",
         "interactive-launch",
@@ -1013,7 +1125,7 @@ def interactive_workspace_command(
             continuity_policy.lineage_id,
         ]
     import_root = os.environ.get("VIBECRAFTED_INTERACTIVE_IMPORT_ROOT", "").strip()
-    if import_root:
+    if import_root and not bootstraps:
         pythonpath = import_root
         if os.environ.get("PYTHONPATH"):
             pythonpath = f"{pythonpath}{os.pathsep}{os.environ['PYTHONPATH']}"
@@ -1481,7 +1593,12 @@ def launch_interactive_workspace(
     )
     resolved = _resolve_agent_command(provider, command, child_env)
     capability = resolve_provider_usage_capability(provider, executable=resolved[0])
-    if not capability.supported:
+    # The same admission the composer and the preparation apply (80742a4c): a
+    # measured budget needs a usage side channel; an unmetered declaration does
+    # not. This owner kept the unconditional refusal, so every non-Claude
+    # ``interactive-launch`` died here -- unseen while the installed pane could
+    # not even reach core.
+    if quota.kind in {"safe", "bounded"} and not capability.supported:
         raise ValueError(capability.reason)
     launch = prepare_interactive_workspace_launch(
         provider=provider,
@@ -1730,7 +1847,9 @@ def _launch_supervised_interactive_workspace(
     child_capability = resolve_provider_usage_capability(
         provider, executable=child_resolved[0]
     )
-    if not child_capability.supported:
+    # Same admission as the direct owner: measured budgets need the side
+    # channel, an unmetered declaration does not.
+    if quota.kind in {"safe", "bounded"} and not child_capability.supported:
         raise ValueError(child_capability.reason)
     launch = prepare_interactive_workspace_launch(
         provider=provider,

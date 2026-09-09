@@ -26,6 +26,7 @@ from vibecrafted_core.spawn import (
     _fresh_child_environment,
     _materialize_continuity,
     _validate_operator_protocol_event,
+    interactive_launch_interpreter,
     interactive_policy_command,
     interactive_workspace_command,
     launch_interactive_workspace,
@@ -1846,3 +1847,295 @@ def test_interactive_workspace_command_defaults_to_unmetered_for_providers_witho
         )
         assert "--token-budget" in cmd
         assert cmd[cmd.index("--token-budget") + 1] == "unmetered"
+
+
+# --------------------------------------------------------------------------
+# installed generation: the pane invokes the generation bootstrap, never the
+# raw interpreter (8177a33d: ModuleNotFoundError before any provider ran)
+# --------------------------------------------------------------------------
+
+
+def _stamped_generation(tmp_path: Path) -> Path:
+    """A Runtime-Pack-shaped generation: stamped VERSION, ``bin/python3``
+    bootstrap, raw ``python/bin/python3.12`` beside it."""
+    gen = tmp_path / "releases" / "0.0.0+g8177a33d"
+    (gen / "bin").mkdir(parents=True)
+    (gen / "python" / "bin").mkdir(parents=True)
+    (gen / "VERSION").write_text("0.0.0+g8177a33d\n", encoding="utf-8")
+    bootstrap = gen / "bin" / "python3"
+    bootstrap.write_text('#!/bin/bash\nexec python3 "$@"\n', encoding="utf-8")
+    bootstrap.chmod(0o755)
+    (gen / "python" / "bin" / "python3.12").write_text("", encoding="utf-8")
+    return gen
+
+
+def test_interactive_launch_interpreter_is_the_selected_generation_bootstrap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gen = _stamped_generation(tmp_path)
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_ROOT", str(gen))
+    # Inherited process state from another generation must not split the pane.
+    monkeypatch.setenv("VIBECRAFTED_PYTHON", "/stale/other-generation/bin/python3")
+
+    assert interactive_launch_interpreter() == (
+        str(gen.resolve() / "bin" / "python3"),
+        True,
+    )
+
+
+def test_interactive_launch_interpreter_names_the_bootstrap_of_its_own_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No selected root exported, but the composer IS a generation's raw
+    interpreter: it names that generation's bootstrap, read as invoked."""
+    gen = _stamped_generation(tmp_path)
+    monkeypatch.delenv("VIBECRAFTED_RUNTIME_ROOT", raising=False)
+    monkeypatch.setattr(sys, "executable", str(gen / "python" / "bin" / "python3.12"))
+
+    assert interactive_launch_interpreter() == (str(gen / "bin" / "python3"), True)
+
+
+def test_interactive_launch_interpreter_keeps_sys_executable_for_a_source_lane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("VIBECRAFTED_RUNTIME_ROOT", raising=False)
+    assert interactive_launch_interpreter() == (sys.executable, False)
+
+    # An unstamped tree around the interpreter is not a generation.
+    (tmp_path / "python" / "bin").mkdir(parents=True)
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "python3").write_text("#!/bin/bash\n", encoding="utf-8")
+    (tmp_path / "bin" / "python3").chmod(0o755)
+    monkeypatch.setattr(
+        sys, "executable", str(tmp_path / "python" / "bin" / "python3.12")
+    )
+    assert interactive_launch_interpreter() == (sys.executable, False)
+
+
+def test_interactive_launch_interpreter_refuses_a_malformed_selected_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_ROOT", str(tmp_path / "missing"))
+    with pytest.raises(ValueError, match="selected runtime root"):
+        interactive_launch_interpreter()
+
+
+def test_interactive_workspace_command_invokes_the_selected_generation_bootstrap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The installed lane: the composer runs under the generation bootstrap
+    (so ``sys.executable`` is the raw interpreter); the pane it composes must
+    invoke that bootstrap, carry no import-root prefix in front of it, and
+    keep every execution option of the plain form."""
+    gen = _stamped_generation(tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    plain_executable = sys.executable
+    monkeypatch.setattr(
+        "vibecrafted_core.spawn.resolve_provider_usage_capability",
+        lambda _provider: _TEST_USAGE_CAPABILITY,
+    )
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_ROOT", str(gen))
+    monkeypatch.setenv(
+        "VIBECRAFTED_INTERACTIVE_IMPORT_ROOT", str(tmp_path / "checkout")
+    )
+    monkeypatch.setattr(sys, "executable", str(gen / "python" / "bin" / "python3.12"))
+
+    installed = interactive_workspace_command(
+        "codex",
+        "/vc-init",
+        "local-native",
+        "bypass",
+        repo,
+        token_budget="unmetered",
+        operator="none",
+        continuity="fresh",
+    )
+
+    assert installed[:4] == [
+        str(gen.resolve() / "bin" / "python3"),
+        "-m",
+        "vibecrafted_core.spawn",
+        "interactive-launch",
+    ]
+    assert "env" not in installed
+    assert not any(arg.startswith("PYTHONPATH=") for arg in installed)
+    assert str(gen / "python" / "bin" / "python3.12") not in installed
+
+    monkeypatch.delenv("VIBECRAFTED_RUNTIME_ROOT")
+    monkeypatch.delenv("VIBECRAFTED_INTERACTIVE_IMPORT_ROOT")
+    monkeypatch.setattr(sys, "executable", plain_executable)
+    plain = interactive_workspace_command(
+        "codex",
+        "/vc-init",
+        "local-native",
+        "bypass",
+        repo,
+        token_budget="unmetered",
+        operator="none",
+        continuity="fresh",
+    )
+    assert plain[0] == plain_executable
+    assert plain[1:] == installed[1:]
+
+
+def test_interactive_workspace_command_keeps_the_import_root_prefix_for_a_plain_interpreter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Source lane, prior behaviour retained: an interpreter that cannot
+    import core by itself gets the explicit import root in front."""
+    monkeypatch.setattr(
+        "vibecrafted_core.spawn.resolve_provider_usage_capability",
+        lambda _provider: _TEST_USAGE_CAPABILITY,
+    )
+    monkeypatch.delenv("VIBECRAFTED_RUNTIME_ROOT", raising=False)
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.setenv(
+        "VIBECRAFTED_INTERACTIVE_IMPORT_ROOT", str(tmp_path / "checkout")
+    )
+
+    command = interactive_workspace_command(
+        "claude", "/vc-init", "local-worktrees", "read-only", tmp_path
+    )
+
+    assert command[:3] == ["env", f"PYTHONPATH={tmp_path / 'checkout'}", sys.executable]
+    assert command[3:6] == ["-m", "vibecrafted_core.spawn", "interactive-launch"]
+
+
+def test_unmetered_launch_reaches_a_provider_without_a_usage_sidechannel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """80742a4c admitted an unmetered declaration in the composer and the
+    preparation; the launch owner still refused every non-Claude provider
+    ("no verified live … usage side channel"), unseen while the installed
+    pane could not reach core at all. Now the provider is started once and
+    the run settles."""
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    _repo(repo)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    capture = tmp_path / "provider-argv.txt"
+    provider = fake_bin / "codex"
+    provider.write_text(
+        '#!/bin/sh\nprintf \'%s\\n\' "$@" >> "$SMOKE_CAPTURE"\nexit 0\n',
+        encoding="utf-8",
+    )
+    provider.chmod(0o755)
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(fake_bin))
+    monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("SMOKE_CAPTURE", str(capture))
+
+    assert (
+        launch_interactive_workspace(
+            "codex", "/vc-init", "local-native", "bypass", repo, "unmetered"
+        )
+        == 0
+    )
+
+    assert capture.read_text(encoding="utf-8").count("/vc-init") == 1
+    receipts = list((home / "control_plane" / "runtime_runs").glob("*/meta.json"))
+    assert len(receipts) == 1
+    receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+    assert receipt["status"] == "completed"
+    assert receipt["quota_policy"]["selection"] == "unmetered"
+    assert receipt["usage_capability"]["supported"] is False
+
+
+# --------------------------------------------------------------------------
+# provider environment boundary (HAK-32): the generation bootstrap's process
+# state stops at the provider; the Founder's own PYTHONPATH survives
+# --------------------------------------------------------------------------
+
+
+def test_provider_boundary_drops_the_selected_generation_bootstrap_state(
+    tmp_path: Path,
+) -> None:
+    gen = _stamped_generation(tmp_path)
+    policy = resolve_continuity_policy("fresh", provider="codex", env={})
+    child = _fresh_child_environment(
+        {
+            "PATH": "/tools",
+            "HOME": str(tmp_path / "home"),
+            "VIBECRAFTED_RUNTIME_ROOT": str(gen),
+            "PYTHONPATH": os.pathsep.join(
+                [
+                    str(gen / "vibecrafted-core"),
+                    str(gen / "vibecrafted-mcp"),
+                    str(gen / "python-site"),
+                    "/founder/project/src",
+                ]
+            ),
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        policy,
+    )
+
+    assert child["PYTHONPATH"] == "/founder/project/src"
+    assert "PYTHONNOUSERSITE" not in child and "PYTHONDONTWRITEBYTECODE" not in child
+    assert child["VIBECRAFTED_RUNTIME_ROOT"] == str(gen)
+
+
+def test_provider_boundary_drops_an_owned_release_tree_and_its_own_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No selected root: an owned ``<runtime home>/releases/<gen>`` entry and
+    an entry of the generation whose raw interpreter runs this process are
+    runtime-owned; a lookalike user directory is not."""
+    home = tmp_path / "home"
+    owned = home / ".local" / "share" / "vibecrafted" / "releases" / "0.0.0+gabc1234"
+    gen = _stamped_generation(tmp_path)
+    monkeypatch.setattr(sys, "executable", str(gen / "python" / "bin" / "python3.12"))
+    policy = resolve_continuity_policy("fresh", provider="codex", env={})
+    child = _fresh_child_environment(
+        {
+            "HOME": str(home),
+            "PYTHONPATH": os.pathsep.join(
+                [
+                    str(owned / "vibecrafted-core"),
+                    str(gen / "python-site"),
+                    str(home / "vibecrafted" / "releases" / "lookalike" / "src"),
+                ]
+            ),
+            "PYTHONNOUSERSITE": "1",
+        },
+        policy,
+    )
+
+    assert child["PYTHONPATH"] == str(
+        home / "vibecrafted" / "releases" / "lookalike" / "src"
+    )
+    assert "PYTHONNOUSERSITE" not in child
+
+
+def test_provider_boundary_leaves_a_founder_environment_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("VIBECRAFTED_RUNTIME_ROOT", raising=False)
+    policy = resolve_continuity_policy("fresh", provider="codex", env={})
+    founder = {
+        "HOME": str(tmp_path),
+        "PYTHONPATH": "/founder/project/src:/founder/lib",
+        "PYTHONNOUSERSITE": "1",
+    }
+
+    assert _fresh_child_environment(dict(founder), policy) == founder
+
+
+def test_owned_generation_path_anchors_on_real_owned_roots(tmp_path: Path) -> None:
+    from vibecrafted_core.runtime_paths import is_owned_generation_path
+
+    env = {"HOME": str(tmp_path), "VIBECRAFTED_RUNTIME_ROOT": str(tmp_path / "sel")}
+    assert is_owned_generation_path(str(tmp_path / "sel" / "vibecrafted-core"), env)
+    assert is_owned_generation_path(str(tmp_path / "sel"), env)
+    assert not is_owned_generation_path(str(tmp_path / "selected-lookalike"), env)
+    owned = (
+        tmp_path / ".local" / "share" / "vibecrafted" / "releases" / "1.0.0+gabcdef0"
+    )
+    assert is_owned_generation_path(str(owned / "python-site"), env)
+    assert not is_owned_generation_path(
+        str(tmp_path / ".local" / "share" / "vibecrafted" / "releases"), env
+    )
+    assert not is_owned_generation_path("", env)
