@@ -51,6 +51,14 @@ def test_dispatch_defines_passthrough_helper() -> None:
         r"vc-research\(\)\s*\{\s*_vetcoders_vc_passthrough research",
         text,
     )
+    assert re.search(
+        r"vc-fork\(\)\s*\{\s*_vetcoders_vc_passthrough fork",
+        text,
+    )
+    assert re.search(
+        r"vc-canary\(\)\s*\{\s*_vetcoders_vc_passthrough canary",
+        text,
+    )
     assert "vc-research() { _vetcoders_research" not in text
     # start/dashboard MUST implement launch locally (no full-verb passthrough
     # re-entry: Python→deck→helper→Python fork-bombs).

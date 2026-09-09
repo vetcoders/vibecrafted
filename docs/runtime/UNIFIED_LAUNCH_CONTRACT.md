@@ -121,6 +121,33 @@ end-to-end privacy admission.
 | VOC/App/MCP                                                                                                                             | their owned declarations -> core                                                  | capability additions required below                               | capability additions required below                                       | sibling integrations and installed acceptance pending                                                                                |
 | observe/await/status and other read-only commands                                                                                       | existing observation owners                                                       | no meaningless work flags                                         | no prompt launch contract                                                 | unchanged                                                                                                                            |
 
+## Public `vc-*` / `vibecrafted <verb>` alias matrix
+
+One semantic owner: the packaged deck (`vibecrafted-core/vibecrafted_core/deck/vibecrafted`, mirrored at `scripts/vibecrafted`). Python `cli.SHELL_WRAPPER_VERBS` only prepends the deck verb when the installed name is a symlink or hatch-less shim to `vibecrafted`. Runtime install writes that verb into the shim (`_RUNTIME_WRAPPER_VERBS`) because `#!` rebuilds argv. Interactive zsh uses `_vetcoders_vc_passthrough`. A PATH symlink alone is not enough: `run_wrapper` falls back to `_has_skill`, and fork/operator are not skills.
+
+| Pair | Owner / route | Publication | Evidence boundary |
+| --- | --- | --- | --- |
+| `vc-workflow` ↔ `vibecrafted workflow` (and the other `LAUNCHERS` / `SKILL_WRAPPER_NAMES` skills, including `canary`) | deck `run_skill` / core `LAUNCHERS` | skill wrappers: `bin/vc-*` + wheel `[project.scripts]` when listed in `PYTHON_ENTRYPOINT_LAUNCHERS`; `canary` is a deck-verb shim (`SHELL_WRAPPER_VERBS`), not a hatch script | source tests compare both spellings at the same launch boundary; skill semantics unchanged |
+| `vc-init` ↔ `vibecrafted init` | deck `cmd_init` | `LAUNCHER_WRAPPERS` + `SHELL_WRAPPER_VERBS` + `_RUNTIME_WRAPPER_VERBS` + `run_wrapper` + `dispatch.sh` | existing resume/init wrapper tests |
+| `vc-resume` ↔ `vibecrafted resume` | deck `cmd_resume` | same deck-verb family | existing wrapper tests; native session/PTY acceptance remains open |
+| `vc-fork` ↔ `vibecrafted fork` | deck `cmd_fork` only — no `fork_main`, no hatch script | same deck-verb family (`vc-fork` added to the four coordinated maps + `run_wrapper` + `dispatch.sh`) | authored source tests invoke both spellings; compare help, refusal rc/text, and normalized child/admission argv. No live provider. Installed PATH on a frozen generation is the next admission, not this cut |
+| `vc-operator` ↔ `vibecrafted operator` | deck `cmd_operator` | same deck-verb family (shell `dispatch.sh` already passed through; installer/PATH now matches) | help/refusal parity tests; live operator TTY is native acceptance |
+| `vc-start` ↔ `vibecrafted start` | shared start owner (not a full-arg passthrough — re-entry bomb) | `vc-start` binary / deck `cmd_start` | existing start tests |
+| `vc-dashboard` / `vc-dispatch` / `vc-help` / `vc-doctor` / `vc-status` / `vc-update` / `vc-receipt` / `telemetry` | deck verbs via `SHELL_WRAPPER_VERBS` | deck-verb shims | existing catalog/set-equality tests |
+| `vc-justdo` ↔ `vibecrafted justdo` | deck `run_skill justdo` (not implement) | deck-verb shim | ADR-0001; existing justdo tests |
+
+Explicitly **not** equivalent — do not invent a silent twin:
+
+| Name | Why it is not a 1:1 public pair | What to use |
+| --- | --- | --- |
+| `vc-partner` (wheel/`wrappers.partner_main`) vs `vibecrafted partner` | in-session skill wrapper vs TTY/frame launcher | `vibecrafted partner` / shell passthrough for the TTY face; `/vc-partner` inside a session |
+| `vc-observe` / `vc-await` / `vc-stop` | no public `vc-*` alias; read-only verbs stay on the deck/core owner and must not grow work/model flags | `vibecrafted observe\|await\|stop <agent>` |
+| `vc-research-await` / `vc-research-synthesize` / `vc-sandbox` / `vc-paste` / `vc-git` | standalone or sidecar binaries (alias matrix `STANDALONE`) | the named binary; no `vibecrafted <verb>` requirement |
+| `vc-frame` / `vc-terminal` / `voc` / `vc-server` / `vc-slack` | product binaries, not workflow aliases | those binaries |
+| Wheel `[project.scripts]` | publishes `PYTHON_ENTRYPOINT_LAUNCHERS` only | deck-verb aliases (`vc-fork`, `vc-init`, …) are installer/runtime shims, same as today's `vc-init` |
+
+Help text may mention both spellings. Tests must compare actual normalized request/child semantics, help, and failure behavior — not merely that the strings `vc-fork` or `cmd_fork` exist. This cut does not certify every provider adapter or a live installed generation.
+
 ## Provider and presentation capability matrix
 
 | Provider      | Model argument                                         | Private prompt mechanism in current source | Status                                                   |

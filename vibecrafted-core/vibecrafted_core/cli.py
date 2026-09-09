@@ -91,12 +91,15 @@ LAUNCH_ALIASES: dict[str, str] = {}
 # argument as the command.
 SHELL_WRAPPER_VERBS = {
     "telemetry": "telemetry",
+    "vc-canary": "canary",
     "vc-dashboard": "dashboard",
     "vc-dispatch": "dispatch",
     "vc-doctor": "doctor",
+    "vc-fork": "fork",
     "vc-help": "help",
     "vc-init": "init",
     "vc-justdo": "justdo",
+    "vc-operator": "operator",
     "vc-receipt": "receipt",
     "vc-resume": "resume",
     "vc-start": "start",

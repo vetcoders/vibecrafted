@@ -1178,8 +1178,11 @@ cmd_fork_help() {
   printf '  continues the ORIGINAL session there (a resume, never presented as a fork).\n'
   printf '\n%bUsage:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted fork <claude|codex|grok> --session <provider-session-id> [flags]\n'
+  printf '  vc-fork <claude|codex|grok> --session <provider-session-id> [flags]\n'
   printf '  vibecrafted fork <claude|codex|grok> --run-id <work-...> [flags]\n'
+  printf '  vc-fork <claude|codex|grok> --run-id <work-...> [flags]\n'
   printf '  vibecrafted fork codex --session current|last [flags]   # explicit context or scoped run records\n'
+  printf '  vc-fork codex --session current|last [flags]\n'
   printf '\n%bOptions:%b\n' "$_bold" "$_reset"
   printf '  --session <id|current|last>     provider session to branch from (never a work-* run id)\n'
   printf '  --run-id <work-...>                 control-plane run; its recorded provider session is the source\n'
@@ -4763,7 +4766,7 @@ cmd_help() {
       cmd_skill_help "implement"
       return
       ;;
-    audit|decorate|delegate|dou|followup|guard|hydrate|intents|justdo|marbles|ownership|polarize|prune|release|research|review|scaffold|trust|workflow)
+    audit|canary|decorate|delegate|dou|followup|guard|hydrate|intents|justdo|marbles|ownership|polarize|prune|release|research|review|scaffold|trust|workflow)
       cmd_skill_help "$topic"
       return
       ;;
@@ -6470,6 +6473,14 @@ run_wrapper() {
   fi
   if [[ "$wrapper" == "vc-resume" ]]; then
     cmd_resume "$@"
+    return
+  fi
+  if [[ "$wrapper" == "vc-fork" ]]; then
+    cmd_fork "$@"
+    return
+  fi
+  if [[ "$wrapper" == "vc-operator" ]]; then
+    cmd_operator "$@"
     return
   fi
   if [[ "$wrapper" == "vc-agents" ]]; then

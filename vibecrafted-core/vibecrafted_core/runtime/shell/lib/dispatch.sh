@@ -406,7 +406,9 @@ fi
 # that is the interactive-zsh split-brain (2026-07-28 audit).
 # Deck/LAUNCHERS skills → exact pass-through (help/flags owned by Python CLI).
 vc-audit() { _vetcoders_vc_passthrough audit "$@"; }
+vc-canary() { _vetcoders_vc_passthrough canary "$@"; }
 vc-decorate() { _vetcoders_vc_passthrough decorate "$@"; }
+vc-fork() { _vetcoders_vc_passthrough fork "$@"; }
 vc-delegate() { _vetcoders_vc_passthrough delegate "$@"; }
 vc-dou() { _vetcoders_vc_passthrough dou "$@"; }
 vc-hydrate() { _vetcoders_vc_passthrough hydrate "$@"; }
