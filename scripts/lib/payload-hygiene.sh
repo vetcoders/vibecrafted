@@ -8,10 +8,10 @@
 # release must never contain, so both release channels ask the same question.
 #
 # The literal set is exactly "every absolute path that exists only on the build
-# host": the operator's home, the checkout, both donors, and — under
-# --snapshot-donors — the ephemeral snapshot roots. If one of these appears in
-# a shipped byte, a customer can read the founder's account name and directory
-# layout out of a signed, notarized artifact.
+# host": the operator's home, the checkout, both donors, the main-source
+# snapshot, and — under --snapshot-donors — the ephemeral donor snapshot roots.
+# If one of these appears in a shipped byte, a customer can read the founder's
+# account name and directory layout out of a signed, notarized artifact.
 #
 # Measured 2026-08-18 on Vibecrafted_4.1.0-20260817-237d2814.dmg: 8 of 2955
 # files offended, across five unrelated producers. See payload_hygiene.py for
@@ -85,6 +85,7 @@ payload_hygiene_literals() {
   for root in \
     "${HOME:-}" \
     "${PAYLOAD_HYGIENE_REPO_ROOT:-${REPO_ROOT:-}}" \
+    "${SOURCE_ROOT:-}" \
     "${TERMINAL_DONOR:-}" \
     "${FRAME_DONOR:-}" \
     "${TERMINAL_REPO:-}" \
@@ -114,6 +115,7 @@ payload_hygiene_literals() {
   for candidate in \
     "${HOME:-}" \
     "${PAYLOAD_HYGIENE_REPO_ROOT:-${REPO_ROOT:-}}" \
+    "${SOURCE_ROOT:-}" \
     "${TERMINAL_DONOR:-}" \
     "${FRAME_DONOR:-}" \
     "${TERMINAL_REPO:-}" \

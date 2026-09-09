@@ -27,6 +27,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LIBRARY = REPO_ROOT / "scripts/lib/donor-snapshot.sh"
+SELECTION = REPO_ROOT / "scripts/lib/runtime-pack-selection.sh"
 
 
 def _git(*args: str, cwd: Path) -> str:
@@ -220,5 +221,127 @@ def test_builder_never_captures_the_snapshot_through_command_substitution() -> N
         encoding="utf-8"
     )
     assert "$(donor_snapshot_create" not in builder
+    assert 'donor_snapshot_create "$REPO_ROOT" "$SOURCE_ROOT" "$ROOT_SHA"' in builder
     assert 'terminal_head="$DONOR_SNAPSHOT_HEAD"' in builder
     assert 'frame_head="$DONOR_SNAPSHOT_HEAD"' in builder
+
+
+def test_snapshot_pins_an_earlier_revision_after_living_head_moves(
+    tmp_path: Path,
+) -> None:
+    """HEAD moving after launch must not relabel the frozen generation."""
+
+    donor = _make_donor(tmp_path / "donor")
+    launch = _git("rev-parse", "HEAD", cwd=donor)
+    (donor / "committed.txt").write_text("committed\n", encoding="utf-8")
+    (donor / "later.txt").write_text("parent kept moving\n", encoding="utf-8")
+    _git("add", "later.txt", cwd=donor)
+    _git("commit", "--quiet", "-m", "after launch", cwd=donor)
+    moved = _git("rev-parse", "HEAD", cwd=donor)
+    assert moved != launch
+
+    snapshot = tmp_path / "work/donor-snapshots/vibecrafted"
+    result = _run_driver(
+        f'donor_snapshot_create "{donor}" "{snapshot}" "{launch}"\n'
+        'printf "%s\\n" "$DONOR_SNAPSHOT_HEAD"\n',
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == launch
+    assert _git("rev-parse", "HEAD", cwd=snapshot) == launch
+    assert not (snapshot / "later.txt").exists()
+    assert _git("rev-parse", "HEAD", cwd=donor) == moved
+    assert (donor / "later.txt").exists()
+
+
+def test_reaper_leaves_retained_artifact_paths_outside_the_snapshot(
+    tmp_path: Path,
+) -> None:
+    """DIST, selection and cargo caches live beside the snapshot, not inside it."""
+
+    donor = _make_donor(tmp_path / "donor")
+    build = tmp_path / "work/unified-release"
+    snapshot = build / "donor-snapshots/vibecrafted"
+    dist = tmp_path / "work/dist"
+    selection = tmp_path / "work/runtime-pack-selection.json"
+    cargo = build / "cargo/vibecrafted-app/release"
+    dist.mkdir(parents=True)
+    cargo.mkdir(parents=True)
+    pack = dist / "Vibecrafted_RuntimePack_retained.tar.gz"
+    pack.write_bytes(b"carrier-bytes")
+    selection.write_text('{"status":"ready"}\n', encoding="utf-8")
+    (cargo / "voc").write_text("cached\n", encoding="utf-8")
+
+    result = _run_driver(
+        "trap 'donor_snapshot_reap || true' EXIT INT TERM HUP\n"
+        f'donor_snapshot_create "{donor}" "{snapshot}"\n'
+        f'test -d "{snapshot}"\n'
+        "donor_snapshot_reap\n",
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not snapshot.exists()
+    assert pack.read_bytes() == b"carrier-bytes"
+    assert selection.read_text(encoding="utf-8") == '{"status":"ready"}\n'
+    assert (cargo / "voc").read_text(encoding="utf-8") == "cached\n"
+
+
+def test_failed_snapshot_leaves_prior_selection_non_current(tmp_path: Path) -> None:
+    """A build that dies after pinning must not leave the previous pack current."""
+
+    donor = _make_donor(tmp_path / "donor")
+    snapshot = tmp_path / "work/donor-snapshots/vibecrafted"
+    dist = tmp_path / "work/dist"
+    dist.mkdir(parents=True)
+    prior = dist / "Vibecrafted_RuntimePack_prior.tar.gz"
+    prior.write_bytes(b"previous-generation")
+    (tmp_path / "work/build").mkdir(parents=True)
+    ready = tmp_path / "work/build/runtime-pack-selection.json"
+    ready.write_text(
+        "{\n"
+        '  "schema": "vibecrafted.runtime-pack-selection.v1",\n'
+        '  "status": "ready",\n'
+        '  "attempt": "old-attempt",\n'
+        f'  "pack": "{prior}",\n'
+        '  "carrier_basename": "Vibecrafted_RuntimePack_prior.tar.gz",\n'
+        '  "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",\n'
+        '  "size": "19",\n'
+        '  "version": "0.0.0",\n'
+        '  "platform": "darwin-arm64",\n'
+        '  "architecture": "arm64",\n'
+        '  "source_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",\n'
+        '  "terminal_revision": "cccccccccccccccccccccccccccccccccccccccc",\n'
+        '  "frame_revision": "dddddddddddddddddddddddddddddddddddddddd",\n'
+        '  "completed_at": "2026-01-01T00:00:00Z"\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    launch = _git("rev-parse", "HEAD", cwd=donor)
+    driver = tmp_path / "driver.sh"
+    driver.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f'. "{SELECTION}"\n'
+        f'. "{LIBRARY}"\n'
+        "trap 'donor_snapshot_reap || true' EXIT INT TERM HUP\n"
+        f'repo="{tmp_path / "work"}"\n'
+        f'attempt="$(runtime_pack_selection_attempt_id)"\n'
+        f'runtime_pack_selection_begin "$repo" "$attempt" "{launch}"\n'
+        f'donor_snapshot_create "{donor}" "{snapshot}" "{launch}"\n'
+        'printf "boom\\n" >&2\n'
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["bash", str(driver)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 1, result.stderr
+    record = ready.read_text(encoding="utf-8")
+    assert '"status": "pending"' in record
+    assert '"status": "ready"' not in record
+    assert prior.read_bytes() == b"previous-generation"
+    assert not snapshot.exists()
