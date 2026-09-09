@@ -16,7 +16,7 @@ _vetcoders_refuse_interactive_sandbox() {
 _vetcoders_skill_init() {
   local tool="$1"
   shift
-  local runtime init_prompt command_text permissions
+  local runtime init_prompt command_text permissions escalation
 
   _vetcoders_parse_contract "$@" || return 1
   [[ -z "$_vetcoders_contract_count" ]] || {
@@ -42,8 +42,15 @@ _vetcoders_skill_init() {
   # product terminal on this project and re-enter there -- BEFORE the prompt
   # is composed, so the continuity extraction and the provider start happen
   # exactly once, in the child. Shared owner with operator/partner/resume/fork.
-  _vetcoders_declaration_escalate_if_needed init "$tool" "$@"
-  case $? in
+  #
+  # The owner is tri-state (0 escalated, 1 escalation failed, 2 direct path)
+  # and the public deck runs under `set -euo pipefail`: a bare call returning
+  # 2 killed the whole `vibecrafted init` before `case` ever ran (2026-09-09
+  # parent repro: exit 2, nothing composed, no engine call). Capture the
+  # status the way resume does, so errexit never sees the expected 2.
+  escalation=0
+  _vetcoders_declaration_escalate_if_needed init "$tool" "$@" || escalation=$?
+  case "$escalation" in
     0) return 0 ;;
     1) return 1 ;;
   esac
@@ -96,7 +103,7 @@ _vetcoders_init_in_current_terminal() {
 _vetcoders_skill_operator() {
   local tool="$1"
   shift
-  local runtime operator_prompt command_text permissions
+  local runtime operator_prompt command_text permissions escalation
 
   _vetcoders_parse_contract "$@" || return 1
   [[ -z "$_vetcoders_contract_count" ]] || {
@@ -119,8 +126,10 @@ _vetcoders_skill_operator() {
   runtime="$(_vetcoders_operator_runtime "${_vetcoders_contract_runtime:-terminal}")" || return 1
   # Same declaration contract as init: a caller with no visible surface is
   # handed a real terminal on this project before any prompt is composed.
-  _vetcoders_declaration_escalate_if_needed operator "$tool" "$@"
-  case $? in
+  # Tri-state captured, never bare: the deck's errexit would end on the 2.
+  escalation=0
+  _vetcoders_declaration_escalate_if_needed operator "$tool" "$@" || escalation=$?
+  case "$escalation" in
     0) return 0 ;;
     1) return 1 ;;
   esac
@@ -138,7 +147,7 @@ _vetcoders_skill_operator() {
 _vetcoders_skill_partner() {
   local tool="$1"
   shift
-  local runtime partner_prompt command_text permissions
+  local runtime partner_prompt command_text permissions escalation
 
   _vetcoders_parse_contract "$@" || return 1
   [[ -z "$_vetcoders_contract_count" ]] || {
@@ -158,8 +167,10 @@ _vetcoders_skill_partner() {
 
   runtime="$(_vetcoders_partner_runtime "${_vetcoders_contract_runtime:-terminal}")" || return 1
   # Same declaration contract as init (partner is the init family).
-  _vetcoders_declaration_escalate_if_needed partner "$tool" "$@"
-  case $? in
+  # Tri-state captured, never bare: the deck's errexit would end on the 2.
+  escalation=0
+  _vetcoders_declaration_escalate_if_needed partner "$tool" "$@" || escalation=$?
+  case "$escalation" in
     0) return 0 ;;
     1) return 1 ;;
   esac

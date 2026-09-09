@@ -33,7 +33,10 @@ launch owner shared by init, operator, partner, resume and fork:
   provider; the child does each exactly once, in the order create -> tab ->
   handover, and a child that still has no terminal fails closed;
 * inside a watched pane the in-workspace semantics stay (fork: same-tab pane);
-* a rejected terminal launch is a failure, never a "launched".
+* a rejected terminal launch is a failure, never a "launched";
+* the admission survives the shell it really runs in: the public deck is
+  ``set -euo pipefail``, and the launch owner's tri-state answer (2 = direct
+  path) must be captured, never left bare for errexit to end the entry on.
 
 Stubs: the catalogue owner, the Frame engine (refusing what the engine
 refuses, answering ``list-clients`` the way 0.47.3 does), the terminal host
@@ -115,6 +118,12 @@ FACES = {
 }
 
 
+# ``pty.spawn`` returns the raw ``waitpid`` status; ``sys.exit`` of that word
+# reports a child that died with 2 as 0 (512 & 0xff). The wrapper's exit must
+# be the child's exit, or an entry killed by errexit looks like a launch.
+_PTY_SPAWN = "import os, pty, sys; sys.exit(os.waitstatus_to_exitcode(pty.spawn("
+
+
 def _run_face(
     scene: Scene,
     invocation: str,
@@ -124,12 +133,16 @@ def _run_face(
     tty: bool = False,
     terminal_entry: bool = True,
     cwd: Path | None = None,
+    strict: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run a public shell face (init/operator/partner/resume) on the facade.
 
     ``terminal_entry`` marks the process as the child a terminal already
     opened; ``tty`` gives it a real controlling terminal. The default cwd is
     the scene's repository (a bare face declares the repository it runs in).
+    ``strict`` runs the face under ``set -euo pipefail`` -- the shell options
+    the public deck really has -- so an expected non-zero status left bare
+    ends the shell exactly as it would end ``vibecrafted <verb>``.
     """
     env = scene.env(extra_env)
     env["TEST_COMPOSE_CAPTURE"] = str(scene.tmp_path / "compose-called.txt")
@@ -138,6 +151,7 @@ def _run_face(
         env["VIBECRAFTED_TERMINAL_ENTRY"] = "1"
     script = "\n".join(
         [
+            *(["set -euo pipefail"] if strict else []),
             f'source "{SHELL_SH}"',
             f'_vetcoders_vc_frame_loaded_root="{scene.generation}"',
             COMPOSER_STUBS,
@@ -150,9 +164,7 @@ def _run_face(
         argv = [
             sys.executable,
             "-c",
-            "import pty, sys; sys.exit(pty.spawn("
-            + repr(_shell_argv(shell, script))
-            + "))",
+            _PTY_SPAWN + repr(_shell_argv(shell, script)) + ")))",
         ]
         stdin = None
     else:
@@ -552,7 +564,10 @@ def generation(tmp_path_factory: pytest.TempPathFactory) -> Path:
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
     (gen / "runtime-manifest.json").write_text("{}\n", encoding="utf-8")
-    (gen / "VERSION").write_text("0.0.0-test\n", encoding="utf-8")
+    # The deck exports this tree as VIBECRAFTED_RUNTIME_ROOT; the real prompt
+    # composer (spawn interactive-command) admits only a stamped generation
+    # with its own bin/python3. The provider it composes is never started.
+    (gen / "VERSION").write_text("0.0.0+g00000000\n", encoding="utf-8")
     _write(gen / "libexec" / "vc-frame", VC_FRAME_STUB)
     _write(gen / "bin" / "vc-frame", VC_FRAME_STUB)
     _write(gen / "libexec" / "vc-terminal", "#!/bin/bash\nexit 0\n")
@@ -569,12 +584,14 @@ def generation(tmp_path_factory: pytest.TempPathFactory) -> Path:
     )
     for verb in ("vc-start", "vibecrafted"):
         _write(gen / "bin" / verb, "#!/bin/bash\nexit 0\n")
+    (gen / "bin" / "python3").symlink_to(sys.executable)
     return gen
 
 
 class DeckScene:
     """One isolated home, catalogue owner, Frame stub state, provider and
-    AICX stubs for a public `vibecrafted fork` run through the deck."""
+    AICX stubs for a public verb run through the REAL deck (its own
+    ``set -euo pipefail``), never through the sourced facade."""
 
     def __init__(
         self,
@@ -665,8 +682,9 @@ class DeckScene:
         env.update(extra or {})
         return env
 
-    def fork(
+    def run(
         self,
+        verb: str,
         *args: str,
         cwd: Path | None = None,
         extra_env: dict[str, str] | None = None,
@@ -679,15 +697,11 @@ class DeckScene:
         deck_argv = [
             "bash",
             str(self.generation / "scripts" / "vibecrafted"),
-            "fork",
+            verb,
             *args,
         ]
         if tty:
-            argv = [
-                sys.executable,
-                "-c",
-                "import pty, sys; sys.exit(pty.spawn(" + repr(deck_argv) + "))",
-            ]
+            argv = [sys.executable, "-c", _PTY_SPAWN + repr(deck_argv) + ")))"]
             stdin = None
         else:
             argv = deck_argv
@@ -702,6 +716,9 @@ class DeckScene:
             text=True,
             timeout=180,
         )
+
+    def fork(self, *args: str, **kwargs) -> subprocess.CompletedProcess[str]:
+        return self.run("fork", *args, **kwargs)
 
     def calls(self) -> list[dict]:
         if not self.frame_log.exists():
@@ -925,6 +942,221 @@ def test_fork_still_refuses_what_it_does_not_support(
     assert worktree.returncode == 2 and "fork has no --worktree" in worktree.stderr
     assert not scene.aicx_calls()
     assert scene.terminal_launch(wait=0.5) is None
+
+
+# --------------------------------------------------------------------------
+# errexit admission: the shell the faces really run in
+# --------------------------------------------------------------------------
+#
+# Parent repro on 6e800344 (2026-09-09): the very same init/operator/partner
+# child that composes once and calls the engine six times under a plain
+# shell composes nothing and calls the engine zero times once `set -e` is on
+# -- the shell ends with status 2, the launch owner's "direct path" answer,
+# before `case $?` runs. The public deck IS `set -euo pipefail`, so every
+# `vibecrafted init|operator|partner <agent>` from a terminal died there.
+# resume already captured the status; the three faces did not.
+
+
+@pytest.mark.parametrize("verb", ["init", "operator", "partner"])
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_face_child_under_strict_mode_reaches_the_provider_once(
+    tmp_path: Path, verb: str, shell: str
+) -> None:
+    """Falsifier: red on 6e800344 (shell exit 2, no composition, no engine
+    call), green with the tri-state captured. Same scene as the plain child."""
+    scene = Scene(tmp_path, live=[FOREIGN_LIVE], project="vibecrafted")
+    result = _run_face(
+        scene,
+        f"{FACES[verb]} codex --token-budget unmetered --prompt CONTINUITY",
+        shell=shell,
+        tty=True,
+        terminal_entry=True,
+        strict=True,
+    )
+    calls = scene.calls()
+    place = _expected_place(scene)
+
+    assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
+    _assert_no_panic(result, calls)
+    assert _composed(scene) == [f"{verb} tool=codex budget=unmetered"], _composed(scene)
+    creates = _creates(calls)
+    assert len(creates) == 1 and creates[0]["argv"][-1] == place, calls
+    tabs = _new_tabs(calls)
+    assert len(tabs) == 1 and _session_of(tabs[0]) == place, calls
+    assert f"codex --vc-face {verb} --token-budget unmetered" in _tab_script(tabs[0])
+    attaches = _attaches(calls)
+    assert len(attaches) == 1 and attaches[0]["argv"] == ["attach", place], calls
+    created_at, tab_at, attach_at = _order(calls)
+    assert created_at < tab_at < attach_at, [c["argv"] for c in calls]
+    assert f"{verb} launched in workspace session: {place}" in result.stdout
+    _assert_no_foreign_mutation(calls, (FOREIGN_LIVE,))
+
+
+@pytest.mark.parametrize("verb", ["init", "operator", "partner"])
+def test_face_under_strict_mode_without_a_tty_still_opens_the_terminal(
+    tmp_path: Path, verb: str
+) -> None:
+    """The escalated half of the tri-state (0) under errexit: the terminal is
+    opened with the exact declaration and the parent composes nothing."""
+    scene = Scene(tmp_path, live=[FOREIGN_LIVE], project="vibecrafted")
+    result = _run_face(
+        scene,
+        f"{FACES[verb]} codex --token-budget unmetered --prompt CONTINUITY",
+        terminal_entry=False,
+        extra_env=STALE,
+        strict=True,
+    )
+    calls = scene.calls()
+    launch = scene.terminal_launch()
+
+    assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
+    assert launch is not None, f"no terminal was opened: {result.stderr}"
+    assert _working_directory(launch) == scene.root.resolve()
+    assert _hosted(launch)[2:] == [
+        verb,
+        "codex",
+        "--token-budget",
+        "unmetered",
+        "--prompt",
+        "CONTINUITY",
+    ], _hosted(launch)
+    assert launch["boundary"] == "1", launch
+    assert not _composes(scene) and not _composed(scene)
+    assert not _creates(calls) and not _new_tabs(calls), calls
+    assert not _attaches(calls) and not _switches(calls), calls
+
+
+@pytest.mark.parametrize("verb", ["init", "operator", "partner"])
+def test_face_under_strict_mode_rejected_terminal_is_nonzero(
+    tmp_path: Path, verb: str
+) -> None:
+    """The failed half (1) under errexit stays a failure: non-zero, nothing
+    composed, nothing created -- capturing the status must not soften it."""
+    scene = Scene(tmp_path, live=[FOREIGN_LIVE], project="vibecrafted")
+    result = _run_face(
+        scene,
+        f"{FACES[verb]} codex --token-budget unmetered --prompt CONTINUITY",
+        terminal_entry=False,
+        extra_env={**STALE, "VC_TERMINAL_EXIT": "1"},
+        strict=True,
+    )
+    calls = scene.calls()
+
+    assert result.returncode != 0, (result.returncode, result.stdout, result.stderr)
+    assert "RC=[0]" not in result.stdout, result.stdout
+    assert scene.terminal_launch(wait=0.5) is not None, "the host was never asked"
+    assert not _composes(scene) and not _composed(scene)
+    assert not _creates(calls) and not _new_tabs(calls), calls
+
+
+@pytest.mark.parametrize("verb", ["init", "operator", "partner"])
+def test_public_deck_face_child_reaches_the_provider_once(
+    tmp_path: Path, generation: Path, verb: str
+) -> None:
+    """The REAL public deck (`scripts/vibecrafted`, its own `set -euo
+    pipefail`) as the terminal's child: the repository's own workspace is
+    created detached, the provider tab is hung on it with the command the
+    real composer produced (no composer stubs here), and the terminal is
+    handed over last. Red on 6e800344: exit 2 right after the banner."""
+    scene = DeckScene(tmp_path, generation, live=[FOREIGN_LIVE], project="vibecrafted")
+    result = scene.run(
+        verb,
+        "codex",
+        "--token-budget",
+        "unmetered",
+        "--prompt",
+        "CONTINUITY",
+        tty=True,
+        terminal_entry=True,
+    )
+    calls = scene.calls()
+    place = "session-vibecrafted"
+
+    assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+    _assert_no_panic(result, calls)
+    creates = _creates(calls)
+    assert len(creates) == 1 and creates[0]["argv"][-1] == place, calls
+    assert creates[0]["VC_FRAME_SESSION_NAME"] is None, creates
+    tabs = _new_tabs(calls)
+    assert len(tabs) == 1 and _session_of(tabs[0]) == place, calls
+    assert _cwd_of(tabs[0]) == scene.root.resolve(), tabs
+    script = _tab_script(tabs[0])
+    assert "interactive-launch codex" in script, script
+    assert "--token-budget unmetered" in script, script
+    assert f"/vc-{verb}" in script and "CONTINUITY" in script, script
+    attaches = _attaches(calls)
+    assert len(attaches) == 1 and attaches[0]["argv"] == ["attach", place], calls
+    created_at, tab_at, attach_at = _order(calls)
+    assert created_at < tab_at < attach_at, [c["argv"] for c in calls]
+    assert f"{verb} launched in workspace session: {place}" in result.stdout, (
+        result.stdout
+    )
+    assert scene.terminal_launch(wait=0.5) is None, "the child opened a terminal"
+    _assert_no_foreign_mutation(calls, (FOREIGN_LIVE,))
+
+
+@pytest.mark.parametrize("verb", ["init", "operator", "partner"])
+def test_public_deck_face_without_a_tty_opens_the_terminal_with_exact_argv(
+    tmp_path: Path, generation: Path, verb: str
+) -> None:
+    """The Founder's agent-shell shape through the real deck: one terminal
+    request on this repository with the declaration intact, and the deck
+    itself composes nothing, creates nothing, starts nothing."""
+    scene = DeckScene(tmp_path, generation, live=[FOREIGN_LIVE], project="vibecrafted")
+    result = scene.run(
+        verb,
+        "codex",
+        "--token-budget",
+        "unmetered",
+        "--prompt",
+        "CONTINUITY",
+        extra_env=STALE,
+    )
+    calls = scene.calls()
+    launch = scene.terminal_launch()
+
+    assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+    assert launch is not None, f"no terminal was opened: {result.stderr}"
+    assert _working_directory(launch) == scene.root.resolve()
+    assert _hosted(launch)[2:] == [
+        verb,
+        "codex",
+        "--token-budget",
+        "unmetered",
+        "--prompt",
+        "CONTINUITY",
+    ], _hosted(launch)
+    assert launch["boundary"] == "1", launch
+    assert all(value is None for value in launch["markers"].values()), launch
+    assert not _creates(calls) and not _new_tabs(calls), calls
+    assert not _attaches(calls) and not _switches(calls), calls
+    _assert_no_foreign_mutation(calls, (STALE_MARKER, FOREIGN_LIVE))
+
+
+@pytest.mark.parametrize("verb", ["init", "operator", "partner"])
+def test_public_deck_face_rejected_terminal_is_a_failure(
+    tmp_path: Path, generation: Path, verb: str
+) -> None:
+    """A host that refuses the window is a failed declaration through the
+    real deck too: non-zero, no "launched", nothing created."""
+    scene = DeckScene(tmp_path, generation, live=[FOREIGN_LIVE], project="vibecrafted")
+    result = scene.run(
+        verb,
+        "codex",
+        "--token-budget",
+        "unmetered",
+        "--prompt",
+        "CONTINUITY",
+        extra_env={**STALE, "VC_TERMINAL_EXIT": "1"},
+    )
+    calls = scene.calls()
+
+    assert result.returncode != 0, (result.returncode, result.stdout, result.stderr)
+    assert "launched in workspace session" not in result.stdout, result.stdout
+    assert scene.terminal_launch(wait=0.5) is not None, "the host was never asked"
+    assert not _creates(calls) and not _new_tabs(calls), calls
 
 
 # --------------------------------------------------------------------------
