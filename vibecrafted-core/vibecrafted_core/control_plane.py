@@ -1114,6 +1114,14 @@ def _reconcile_dead_launcher(run: dict[str, Any]) -> dict[str, Any]:
         return result
     owner_pid = _coerce_int(result.get("owner_pid"))
     if owner_pid is not None:
+        if liveness == "terminal":
+            # The interactive owner terminalizes its receipt atomically
+            # (status + liveness + exit_code + completed_at) before the pair
+            # is torn down. `cancelled` is not a FINAL_STATES member, so
+            # without this guard an owner-signalled (Ctrl-C / SIGTERM) or
+            # provider-signalled exit was relabelled failed/pid_gone with a
+            # recovery demand — closed history resurrected as an alert.
+            return result
         owner_alive = _pid_is_alive(owner_pid)
         provider_alive = any(
             _pid_is_alive(pid)
@@ -1498,6 +1506,14 @@ def _worker_process_truth(run: dict[str, Any]) -> tuple[bool, str]:
     worker_pid = _coerce_int(run.get("worker_pid"))
     worker_pgid = _coerce_int(run.get("worker_pgid"))
     receipt = run.get("worker_identity")
+    if worker_pgid is None and isinstance(receipt, dict):
+        # An interactive Agent Workspace never publishes ``worker_pgid``: its
+        # provider inherits the terminal pane's process group, and that key is
+        # also the first stop-signal target (``killpg``). The qualified identity
+        # receipt still names the group the provider was captured in, which is
+        # enough to prove the same process is alive here — observation only,
+        # the pane group never becomes a signal target through this path.
+        worker_pgid = _coerce_int(receipt.get("pgid"))
     if not run_id or worker_pid is None or worker_pgid is None:
         return False, "qualified_identity_unavailable"
     valid, reason, _identity = validate_process_identity(

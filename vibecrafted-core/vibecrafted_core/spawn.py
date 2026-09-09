@@ -7,6 +7,7 @@ import datetime as dt
 import hashlib
 import inspect
 import json
+import logging
 import os
 import re
 import shlex
@@ -25,7 +26,14 @@ from typing import Any
 
 from .agent_dispatch import extract_session_id, sandbox_supported
 from .clock import utc_now_iso
-from .control_plane import control_plane_home, ensure_session_id, normalize_run_root
+from .control_plane import (
+    ControlPlaneLockBusy,
+    ControlPlaneStorageError,
+    control_plane_home,
+    ensure_session_id,
+    normalize_run_root,
+    sync_state,
+)
 from .events import append_event
 from .execution_controls import PERMISSION_POLICIES, ExecutionControls
 from .report_contract import (
@@ -1567,6 +1575,7 @@ def launch_interactive_workspace(
             "continuity validation failed before provider spawn",
             {**failed, "meta": str(meta_path)},
         )
+        _flush_terminal_projection(run_id, failed, meta_path=meta_path)
         raise
     if operator_policy.provider is not None:
         return _launch_supervised_interactive_workspace(
@@ -1709,7 +1718,14 @@ def launch_interactive_workspace(
             signal.signal(signum, _forward_owner_signal)
 
     # Publish the mandatory roles immediately after successful child creation.
-    # Stronger process fingerprints are a subsequent best-effort enrichment.
+    # The qualified process fingerprints travel with that first publication:
+    # the canonical snapshot folds the lifecycle event, never the runtime meta,
+    # and an idle provider proves it is alive only through its identity
+    # receipt. Capture stays best-effort — a deterministic fast-exit provider
+    # may already be terminal — and never delays the mandatory PID + role truth.
+    _attach_interactive_process_identity(
+        receipt, run_id=launch.run_id, worker_pid=child.pid
+    )
     _write_meta(launch.meta_path, receipt)
     append_event(
         "lifecycle:active",
@@ -1717,20 +1733,10 @@ def launch_interactive_workspace(
         "interactive Agent Workspace provider child is live",
         {**receipt, "meta": str(launch.meta_path), "identity_required": True},
     )
-    try:
-        from .process_control import process_identity_receipt
-
-        owner_identity = process_identity_receipt(os.getpid(), run_id=launch.run_id)
-        worker_identity = process_identity_receipt(child.pid, run_id=launch.run_id)
-        if owner_identity is not None:
-            receipt["owner_identity"] = owner_identity
-        if worker_identity is not None:
-            receipt["worker_identity"] = worker_identity
-        _write_meta(launch.meta_path, receipt)
-    except (OSError, RuntimeError, ValueError):
-        # PID + role truth remains mandatory; stronger identity is best-effort
-        # because a deterministic fast-exit provider may already be terminal.
-        pass
+    projection = _InteractiveProjection(
+        run_id=launch.run_id, meta_path=launch.meta_path, receipt=receipt
+    )
+    projection.publish()
     quota_exhausted = False
     provider_returncode: int
     try:
@@ -1741,6 +1747,9 @@ def launch_interactive_workspace(
                 receipt["measured_usage"] = measured_usage
                 receipt["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
                 _write_meta(launch.meta_path, receipt)
+            # Owned recovery of a deferred ACTIVE publication: same owner,
+            # same poll loop, no observer required while the provider idles.
+            projection.pump()
             if (
                 current_returncode is None
                 and not received_signal
@@ -2134,6 +2143,55 @@ def _launch_supervised_interactive_workspace(
         worker_pid=operator_child.pid,
         supervision=active_relation,
     )
+    received_signal: list[int] = []
+    previous_handlers: dict[int, Any] = {}
+
+    def _forward_owner_signal(signum: int, _frame: Any) -> None:
+        if not received_signal:
+            received_signal.append(signum)
+        for owned_process in (child, operator_child):
+            if owned_process.poll() is None:
+                try:
+                    owned_process.send_signal(signum)
+                except ProcessLookupError:
+                    pass
+
+    # Own the pair's signals before publishing, exactly like the direct owner:
+    # both providers already exist, and a SIGINT/SIGTERM landing during the
+    # publication window used to hit the default handler — the owner died
+    # unsettled and left two orphaned providers behind.
+    if threading.current_thread() is threading.main_thread():
+        for signum in (
+            signal.SIGINT,
+            signal.SIGTERM,
+            getattr(signal, "SIGHUP", signal.SIGTERM),
+        ):
+            if signum in previous_handlers:
+                continue
+            previous_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, _forward_owner_signal)
+
+    # Same publication contract as the direct owner: identity receipts ride the
+    # first ACTIVE publication so the snapshot can prove an idle pair alive.
+    identity_table = _process_table_or_none()
+    _attach_interactive_process_identity(
+        child_receipt,
+        run_id=launch.run_id,
+        worker_pid=child.pid,
+        table=identity_table,
+    )
+    _attach_interactive_process_identity(
+        operator_receipt,
+        run_id=operator_run_id,
+        worker_pid=operator_child.pid,
+        table=identity_table,
+    )
+    child_projection = _InteractiveProjection(
+        run_id=launch.run_id, meta_path=launch.meta_path, receipt=child_receipt
+    )
+    operator_projection = _InteractiveProjection(
+        run_id=operator_run_id, meta_path=operator_meta_path, receipt=operator_receipt
+    )
     try:
         _write_meta(launch.meta_path, child_receipt)
         _write_meta(operator_meta_path, operator_receipt)
@@ -2157,7 +2215,11 @@ def _launch_supervised_interactive_workspace(
                 "identity_required": True,
             },
         )
+        child_projection.publish()
+        operator_projection.publish()
     except Exception as exc:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
         child_code = _stop_owned_process(child)
         operator_code = _stop_owned_process(operator_child)
         operator_log.close()
@@ -2181,30 +2243,6 @@ def _launch_supervised_interactive_workspace(
         )
         raise
 
-    received_signal: list[int] = []
-    previous_handlers: dict[int, Any] = {}
-
-    def _forward_owner_signal(signum: int, _frame: Any) -> None:
-        if not received_signal:
-            received_signal.append(signum)
-        for owned_process in (child, operator_child):
-            if owned_process.poll() is None:
-                try:
-                    owned_process.send_signal(signum)
-                except ProcessLookupError:
-                    pass
-
-    if threading.current_thread() is threading.main_thread():
-        for signum in (
-            signal.SIGINT,
-            signal.SIGTERM,
-            getattr(signal, "SIGHUP", signal.SIGTERM),
-        ):
-            if signum in previous_handlers:
-                continue
-            previous_handlers[signum] = signal.getsignal(signum)
-            signal.signal(signum, _forward_owner_signal)
-
     quota_exhausted = False
     supervision_lost = False
     stop_actor_run_id = ""
@@ -2220,6 +2258,8 @@ def _launch_supervised_interactive_workspace(
                     dt.timezone.utc
                 ).isoformat()
                 _write_meta(launch.meta_path, child_receipt)
+            child_projection.pump()
+            operator_projection.pump()
             events, protocol_offset = _poll_operator_protocol(
                 protocol_path, protocol_offset
             )
@@ -2350,10 +2390,17 @@ def _launch_supervised_interactive_workspace(
     )
     terminal_observation_confirmed = False
     settlement_error = ""
-    if not supervision_lost and not received_signal and operator_child.poll() is None:
+    if not supervision_lost and not received_signal:
         deadline = time.monotonic() + 1.0
         try:
-            while time.monotonic() < deadline:
+            while True:
+                # Sample the Operator Agent's exit BEFORE reading: the protocol
+                # file outlives its writer, so an Operator that appends its
+                # terminal observation and exits at once is still read on this
+                # pass. Gating the whole window on a live operator skipped a
+                # fast operator's final truth whenever the child's terminal
+                # publication took longer than the operator's last write.
+                operator_exited = operator_child.poll() is not None
                 events, protocol_offset = _poll_operator_protocol(
                     protocol_path, protocol_offset
                 )
@@ -2379,7 +2426,11 @@ def _launch_supervised_interactive_workspace(
                             },
                         }
                         _write_meta(operator_meta_path, operator_receipt)
-                if terminal_observation_confirmed or operator_child.poll() is not None:
+                if (
+                    terminal_observation_confirmed
+                    or operator_exited
+                    or time.monotonic() >= deadline
+                ):
                     break
                 time.sleep(0.05)
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
@@ -2556,7 +2607,333 @@ def _terminalize_related_receipt(
         f"Operator Agent terminal: {terminal_reason}",
         {**terminal, "meta": str(meta_path), "identity_required": True},
     )
+    _flush_terminal_projection(run_id, terminal, meta_path=meta_path)
     return terminal
+
+
+def _process_table_or_none() -> Sequence[Any] | None:
+    """One process-table capture shared by several identity receipts."""
+    try:
+        from .process_control import build_process_table
+
+        return build_process_table()
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _attach_interactive_process_identity(
+    receipt: dict[str, Any],
+    *,
+    run_id: str,
+    worker_pid: int,
+    owner_pid: int | None = None,
+    table: Sequence[Any] | None = None,
+) -> None:
+    """Stamp best-effort owner/worker identity receipts onto *receipt*.
+
+    Deliberately publishes no top-level ``worker_pgid``: an interactive
+    provider inherits the terminal pane's process group, and ``worker_pgid``
+    is the first stop-signal target (``killpg``). The receipts still carry the
+    captured group, which is all the liveness reconciler needs.
+    """
+    try:
+        from .process_control import process_identity_receipt
+
+        shared_table = table if table is not None else _process_table_or_none()
+        owner_identity = process_identity_receipt(
+            int(owner_pid or os.getpid()), run_id=run_id, table=shared_table
+        )
+        worker_identity = process_identity_receipt(
+            int(worker_pid), run_id=run_id, table=shared_table
+        )
+    except (OSError, RuntimeError, ValueError):
+        # PID + role truth remains mandatory; stronger identity is best-effort
+        # because a deterministic fast-exit provider may already be terminal.
+        return
+    if owner_identity is not None:
+        receipt["owner_identity"] = owner_identity
+    if worker_identity is not None:
+        receipt["worker_identity"] = worker_identity
+
+
+# --- Canonical snapshot publication: owned, bounded recovery -----------------
+#
+# Lifecycle ownership. The interactive owner process (the pane launcher that
+# holds the provider child) owns its run's ``runs/<id>.json`` publication for
+# exactly as long as it lives. Recovery after a transient failure therefore
+# runs on the owner's own poll loop (no thread, no helper process, nothing to
+# reap or leak at exit) and, at terminalization, as one synchronous bounded
+# flush before the owner returns. The snapshot authority stays single and the
+# scope stays exact: every attempt is the same ``sync_state(only_run_id=...)``.
+# Persistent terminal failure is abandoned loudly — stderr, a durable
+# ``projection:abandoned`` event and the meta receipt — while meta.json plus the
+# lifecycle event remain the durable truth a later full board sync re-projects.
+#
+# Retry bound. ACTIVE phase retries for the lifetime of its still-live owner,
+# with exponential backoff 0.5s·2^(n-1) capped at 30s. The cap constrains
+# frequency rather than declaring a healthy owner permanently invisible after
+# an arbitrary number of transient storage failures.
+# TERMINAL phase (owner exit): a bounded retry-scheduling/sleep budget of
+# _PROJECTION_TERMINAL_BUDGET_SECONDS and _PROJECTION_TERMINAL_ATTEMPT_LIMIT
+# attempts, interrupt-safe. A blocking filesystem syscall remains outside that
+# budget.
+_PROJECTION_RETRY_INITIAL_SECONDS = 0.5
+_PROJECTION_RETRY_MAX_SECONDS = 30.0
+# The first power that reaches the 30-second ceiling: 0.5 * 2**6 == 32.
+# Clamp the exponent before calculating the power so an arbitrarily long
+# storage outage cannot make retry scheduling itself overflow.
+_PROJECTION_RETRY_MAX_EXPONENT = 6
+_PROJECTION_TERMINAL_BUDGET_SECONDS = 5.0
+_PROJECTION_TERMINAL_ATTEMPT_LIMIT = 6
+# ControlPlaneLockBusy is kept for completeness: the scoped projection takes no
+# global sync lock, so the live failure classes here are storage/OS errors and
+# a refused run-meta mutation (ValueError), not the board-sync lock.
+_PROJECTION_ERRORS: tuple[type[BaseException], ...] = (
+    ControlPlaneLockBusy,
+    ControlPlaneStorageError,
+    OSError,
+    RuntimeError,
+    ValueError,
+)
+_projection_log = logging.getLogger(__name__)
+
+
+def _project_interactive_snapshot(run_id: str) -> str:
+    """One scoped canonical projection attempt: '' on success, else the error."""
+    try:
+        sync_state(only_run_id=run_id)
+    except _PROJECTION_ERRORS as exc:
+        return f"{type(exc).__name__}: {exc}"
+    return ""
+
+
+def _projection_backoff_seconds(failures: int) -> float:
+    exponent = min(max(int(failures) - 1, 0), _PROJECTION_RETRY_MAX_EXPONENT)
+    return min(
+        _PROJECTION_RETRY_MAX_SECONDS,
+        _PROJECTION_RETRY_INITIAL_SECONDS * (2.0**exponent),
+    )
+
+
+def _record_projection_abandoned(
+    run_id: str,
+    *,
+    phase: str,
+    attempts: int,
+    last_error: str,
+    receipt: Mapping[str, Any],
+) -> None:
+    """Make a persistent projection failure observable without inventing truth."""
+    _projection_log.error(
+        "interactive run %s canonical snapshot projection abandoned after %d %s "
+        "attempt(s); meta.json and the lifecycle event remain the durable truth "
+        "(run `vibecrafted control-plane sync` once the cause is fixed): %s",
+        run_id,
+        attempts,
+        phase,
+        last_error,
+    )
+    try:
+        append_event(
+            "projection:abandoned",
+            run_id,
+            f"canonical snapshot projection abandoned ({phase})",
+            {
+                "run_id": run_id,
+                "phase": phase,
+                "attempts": int(attempts),
+                "last_error": last_error,
+                "state": str(receipt.get("status") or ""),
+                "liveness": str(receipt.get("liveness") or ""),
+            },
+        )
+    except _PROJECTION_ERRORS as exc:
+        _projection_log.error(
+            "interactive run %s projection abandonment event not durable: %s",
+            run_id,
+            exc,
+        )
+
+
+@dataclass
+class _InteractiveProjection:
+    """Owner-side ACTIVE publication of one run's canonical snapshot.
+
+    ``publish`` is the first attempt right after the ``lifecycle:active``
+    event; ``pump`` is called from the owner's existing provider poll loop and
+    retries a pending publication when its backoff is due. No thread, no
+    timer: the retry lives and dies with the owner, and a terminalization
+    supersedes any pending ACTIVE publication with its own bounded flush.
+    """
+
+    run_id: str
+    meta_path: Path
+    receipt: dict[str, Any]
+    clock: Callable[[], float] = time.monotonic
+    attempts: int = 0
+    failures: int = 0
+    next_attempt_at: float = 0.0
+    status: str = "unpublished"
+    last_error: str = ""
+    first_failed_at: str = ""
+
+    def publish(self) -> str:
+        return self._attempt()
+
+    def pump(self) -> str:
+        if self.status != "pending" or self.clock() < self.next_attempt_at:
+            return self.status
+        return self._attempt()
+
+    def _attempt(self) -> str:
+        self.attempts += 1
+        error = _project_interactive_snapshot(self.run_id)
+        if not error:
+            if self.failures:
+                _projection_log.warning(
+                    "interactive run %s snapshot projection recovered on attempt %d",
+                    self.run_id,
+                    self.attempts,
+                )
+            self.status = "published"
+            self.last_error = ""
+            self._stamp(published_at=utc_now_iso())
+            return self.status
+        self.failures += 1
+        self.last_error = error
+        if not self.first_failed_at:
+            self.first_failed_at = utc_now_iso()
+        delay = _projection_backoff_seconds(self.failures)
+        self.next_attempt_at = self.clock() + delay
+        self.status = "pending"
+        # A live owner may legitimately outlast an outage. Log the first
+        # defer only, so recovery does not become an unbounded log stream.
+        if self.attempts == 1:
+            _projection_log.warning(
+                "interactive run %s snapshot projection deferred; owner retries "
+                "with capped %.1fs backoff: %s",
+                self.run_id,
+                _PROJECTION_RETRY_MAX_SECONDS,
+                error,
+            )
+        self._stamp()
+        return self.status
+
+    def _stamp(self, **extra: Any) -> None:
+        """Mirror the publication state into the owner's meta receipt (best-effort)."""
+        self.receipt["projection"] = {
+            "status": self.status,
+            "attempts": self.attempts,
+            "last_error": self.last_error,
+            "first_failed_at": self.first_failed_at,
+            **extra,
+        }
+        try:
+            _write_meta(self.meta_path, self.receipt)
+        except OSError:
+            # The same storage fault that blocks the snapshot may block meta;
+            # the log line above already carries the truth.
+            pass
+
+
+def _flush_terminal_projection(
+    run_id: str,
+    receipt: dict[str, Any],
+    *,
+    meta_path: Path | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> str:
+    """Bounded synchronous recovery of the terminal snapshot before owner exit.
+
+    Runs after the terminal meta and lifecycle event are durable, so the
+    retained terminal truth is never at stake — only its visibility. The retry
+    budget limits scheduling and sleep; it cannot bound a blocking filesystem
+    syscall inside the canonical writer. It never spawns anything, and a
+    Ctrl-C during the flush abandons it instead of unwinding the owner's exit
+    path.
+    """
+    deadline = clock() + _PROJECTION_TERMINAL_BUDGET_SECONDS
+    attempts = 0
+    last_error = ""
+    while True:
+        attempts += 1
+        try:
+            last_error = _project_interactive_snapshot(run_id)
+        except KeyboardInterrupt:
+            last_error = "KeyboardInterrupt: terminal projection interrupted"
+            break
+        if not last_error:
+            if attempts > 1:
+                _projection_log.warning(
+                    "interactive run %s terminal snapshot projection recovered "
+                    "on attempt %d",
+                    run_id,
+                    attempts,
+                )
+            _stamp_terminal_projection(
+                receipt, meta_path, status="published", attempts=attempts
+            )
+            return "published"
+        remaining = deadline - clock()
+        if attempts >= _PROJECTION_TERMINAL_ATTEMPT_LIMIT or remaining <= 0:
+            break
+        delay = min(_projection_backoff_seconds(attempts), remaining)
+        _projection_log.warning(
+            "interactive run %s terminal snapshot projection deferred (attempt "
+            "%d/%d, owner retries in %.1fs within a %.0fs exit budget): %s",
+            run_id,
+            attempts,
+            _PROJECTION_TERMINAL_ATTEMPT_LIMIT,
+            delay,
+            _PROJECTION_TERMINAL_BUDGET_SECONDS,
+            last_error,
+        )
+        try:
+            sleep(delay)
+        except KeyboardInterrupt:
+            last_error = "KeyboardInterrupt: terminal projection interrupted"
+            break
+    _record_projection_abandoned(
+        run_id,
+        phase="terminal",
+        attempts=attempts,
+        last_error=last_error,
+        receipt=receipt,
+    )
+    _stamp_terminal_projection(
+        receipt,
+        meta_path,
+        status="abandoned",
+        attempts=attempts,
+        last_error=last_error,
+    )
+    return "abandoned"
+
+
+def _stamp_terminal_projection(
+    receipt: dict[str, Any],
+    meta_path: Path | None,
+    *,
+    status: str,
+    attempts: int,
+    last_error: str = "",
+) -> None:
+    """Retain terminal publication outcome without creating another writer."""
+    receipt["projection"] = {
+        "phase": "terminal",
+        "status": status,
+        "attempts": attempts,
+        "last_error": last_error,
+        "published_at": utc_now_iso() if status == "published" else "",
+    }
+    if meta_path is None:
+        return
+    try:
+        _write_meta(meta_path, receipt)
+    except OSError:
+        # The terminal lifecycle receipt remains durable from before this flush.
+        pass
 
 
 def _cleanup_unspawned_interactive_launch(launch: InteractiveWorkspaceLaunch) -> str:
@@ -2617,6 +2994,7 @@ def _terminalize_interactive_launch(
         f"interactive Agent Workspace terminal: {terminal_reason}",
         {**terminal, "meta": str(launch.meta_path), "identity_required": True},
     )
+    _flush_terminal_projection(launch.run_id, terminal, meta_path=launch.meta_path)
     return terminal
 
 
