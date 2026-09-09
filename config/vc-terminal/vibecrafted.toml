@@ -6,7 +6,9 @@ live_config_reload = true
 
 [terminal]
 # A terminal is usable without a Frame workspace. vc-start is explicit.
-shell = { program = "/bin/zsh", args = ["-l"] }
+# Expand the product path without first loading the user's login profile.
+# The entrypoint sets ZDOTDIR before starting the interactive zsh.
+shell = { program = "/bin/sh", args = ["-c", "exec \"$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh\""] }
 
 [window]
 blur = true

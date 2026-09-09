@@ -104,6 +104,38 @@ def test_absent_resolution_does_not_create_roots_or_lease(roots, capsys):
     assert not roots["product_config"].exists()
 
 
+def test_reinstall_preserves_shell_preferences_and_private_shell_state(
+    tmp_path, roots, capsys
+):
+    private = Path.home() / ".config/atuin"
+    private.mkdir(parents=True)
+    (private / "config.toml").write_text('style = "compact"\n')
+    private_rc = Path.home() / ".zshrc"
+    private_rc.write_text("# My terminal\nexport PERSONAL_SHELL=1\n")
+    private_history = Path.home() / ".zsh_history"
+    private_history.write_text("private history sentinel\n")
+    before = _snapshot(private)
+    pack = seed_runtime_pack(tmp_path / "shell-pack", version="9.9.9+shell")
+    _install(pack, capsys)
+    product = roots["product_config"]
+    preferences = {
+        "starship.toml": 'add_newline = false\n',
+        "atuin/config.toml": 'style = "compact"\n',
+    }
+    for name, body in preferences.items():
+        (product / name).write_text(body)
+    _install(pack, capsys)
+    for name, body in preferences.items():
+        assert (product / name).read_text() == body
+    assert (product / "vc-terminal/interactive.zsh").read_bytes() == (
+        pack / "config/vc-terminal/interactive.zsh"
+    ).read_bytes()
+    assert 'launch-primary-shell.zsh' in (product / "vc-terminal/.zshrc").read_text()
+    assert _snapshot(private) == before
+    assert private_rc.read_text() == "# My terminal\nexport PERSONAL_SHELL=1\n"
+    assert private_history.read_text() == "private history sentinel\n"
+
+
 @pytest.mark.parametrize("identity", ["active.json", installer.RUNTIME_INSTALL_RECEIPT])
 def test_partial_identity_is_unusable_without_repair(roots, capsys, identity):
     roots["runtime_home"].mkdir(parents=True)

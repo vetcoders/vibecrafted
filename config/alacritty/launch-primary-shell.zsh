@@ -9,11 +9,20 @@
 # themselves — do not smcup the whole session.
 #
 # Product install path (installer-owned):
-#   ${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-terminal/launch-primary-shell.zsh
+#   $HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh
 # Private ~/.config/alacritty is not a product surface.
 #
 # Source of truth in this repo: config/alacritty/launch-primary-shell.zsh
 # 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
+
+# The private .zshrc sources this entry; return instead of replacing that shell.
+if [[ -n "${ZSH_VERSION:-}" && "${ZSH_EVAL_CONTEXT:-}" == *:file ]]; then
+  source "$HOME/.config/vibecrafted/vc-terminal/interactive.zsh"
+  return $?
+fi
+
+# Isolate all interactive startup from the user's .zshrc/.bashrc.
+export ZDOTDIR="$HOME/.config/vibecrafted/vc-terminal"
 
 tty_path="/dev/tty"
 

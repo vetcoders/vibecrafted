@@ -93,6 +93,8 @@ def seed_runtime_pack(
         "vibecrafted-core/vibecrafted_core/runtime_paths.py",
         "scripts/vc-terminal-product-entry.sh",
         "scripts/vc-frame-product-entry.sh",
+        "config/starship.toml",
+        "config/atuin/config.toml",
     ):
         target = payload / relative
         target.parent.mkdir(parents=True, exist_ok=True)

@@ -16333,6 +16333,18 @@ def _stage_runtime_product_config(
         generation / "config/alacritty/launch-primary-shell.zsh",
         terminal / _PRODUCT_PRIMARY_SHELL_NAME,
     )
+    shutil.copy2(
+        generation / "config/vc-terminal/interactive.zsh", terminal / "interactive.zsh"
+    )
+    (terminal / ".zshrc").write_text(
+        'source "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"\n',
+        encoding="utf-8",
+    )
+    for relative in ("starship.toml", "atuin/config.toml"):
+        destination = staged / relative
+        if not destination.exists():
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(generation / "config" / relative, destination)
     if str(product / "vc-terminal") not in receipt["owned_dirs"]:
         receipt["owned_dirs"].append(str(product / "vc-terminal"))
     for raw in list(receipt["owned_files"]):
