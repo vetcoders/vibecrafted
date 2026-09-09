@@ -23,6 +23,11 @@ Three identities were being conflated, and each case below keeps them apart:
   ambient context: it never overrides the declared workspace, and a bounded
   create never inherits it (that inheritance is the native panic).
 
+A caller with no visible surface at all (no TTY, and a marker the engine does
+not confirm as a watched session) is not told an attach command: the public
+entry opens the product terminal on the declared repository and re-enters
+there, and the child -- which has a terminal -- attaches last.
+
 Only the catalogue boundary and the Frame engine are stubbed. The stub refuses
 what the real engine refuses, with the real engine's words, so a baseline that
 targets the wrong session fails here the way it failed for the Founder. The
@@ -70,6 +75,10 @@ IDENTITY_ENV = (
     "VIBECRAFTED_PENDING_VC_FRAME_SWITCH",
     "VIBECRAFTED_PREPARED_VC_FRAME_SESSION",
     "VIBECRAFTED_TERMINAL_ENTRY",
+    # The suite-wide no-PTY create bypass (tests/conftest.py) would let a
+    # caller with no terminal create and "enter" a session; these scenes model
+    # real callers, with a pty where a terminal is meant.
+    "VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME",
     "VIBECRAFTED_ROOT",
     "VIBECRAFTED_RUNTIME_ROOT",
     "VIBECRAFTED_RUNTIME_BIN",
@@ -84,6 +93,18 @@ IDENTITY_ENV = (
     "ZELLIJ",
     "ZELLIJ_PANE_ID",
     "ZELLIJ_SESSION_NAME",
+)
+
+# Attachment-context keys a terminal child must never inherit from the process
+# that opened it (the window is, by construction, outside that frame).
+MARKER_KEYS = (
+    "VC_FRAME",
+    "VC_FRAME_PANE_ID",
+    "VC_FRAME_SESSION_NAME",
+    "ZELLIJ",
+    "ZELLIJ_PANE_ID",
+    "ZELLIJ_SESSION_NAME",
+    "VIBECRAFTED_OPERATOR_SESSION",
 )
 
 # A stand-in for the Frame engine that refuses what the engine refuses:
@@ -226,6 +247,19 @@ if rest[:1] == ["action"]:
     if verb == "list-tabs":
         print("TAB_ID  POSITION  NAME")
         sys.exit(0)
+    if verb == "list-clients":
+        # vc-frame 0.47.3: a header, then one row per attached client. With
+        # VC_FRAME_CLIENTS unset every live session counts as watched; when it
+        # names a file, only the sessions listed there have a client.
+        print("CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND")
+        clients_file = os.environ.get("VC_FRAME_CLIENTS", "")
+        if not clients_file:
+            print("1         terminal_1     zsh ")
+        elif os.path.exists(clients_file) and target in [
+            line.strip() for line in open(clients_file) if line.strip()
+        ]:
+            print("1         terminal_1     zsh ")
+        sys.exit(0)
     sys.exit(0)
 
 sys.exit(0)
@@ -281,9 +315,12 @@ def _generation(root: Path, terminal_capture: Path) -> Path:
         generation / "bin" / "vc-terminal",
         f"#!{sys.executable}\n"
         "import json, os, sys\n"
+        f"MARKER_KEYS = {MARKER_KEYS!r}\n"
         f"open({str(terminal_capture)!r}, 'w').write(json.dumps("
-        "{'argv': sys.argv[1:], 'cwd': os.getcwd()}))\n"
-        "sys.exit(0)\n",
+        "{'argv': sys.argv[1:], 'cwd': os.getcwd(),"
+        " 'boundary': os.environ.get('VIBECRAFTED_TERMINAL_ENTRY', ''),"
+        " 'markers': {k: os.environ.get(k) for k in MARKER_KEYS}}))\n"
+        f"sys.exit(int(os.environ.get('VC_TERMINAL_EXIT', '0')))\n",
     )
     for verb in ("vc-start", "vibecrafted"):
         _write(generation / "bin" / verb, "#!/bin/bash\nexit 0\n")
@@ -293,7 +330,14 @@ def _generation(root: Path, terminal_capture: Path) -> Path:
 class Scene:
     """One isolated home, generation, catalogue owner and Frame stub."""
 
-    def __init__(self, tmp_path: Path, *, live: list[str], project: str) -> None:
+    def __init__(
+        self,
+        tmp_path: Path,
+        *,
+        live: list[str],
+        project: str,
+        clients: list[str] | None = None,
+    ) -> None:
         self.tmp_path = tmp_path
         self.home = tmp_path / "home"
         self.home.mkdir(parents=True, exist_ok=True)
@@ -320,6 +364,14 @@ class Scene:
         self.frame_log = tmp_path / "frame.log"
         self.live_file = tmp_path / "live-sessions.txt"
         self.live_file.write_text("".join(f"{n}\n" for n in live), encoding="utf-8")
+        # None: every live session is watched (older-engine shape); a list:
+        # exactly these live sessions have an attached client.
+        self.clients_file: Path | None = None
+        if clients is not None:
+            self.clients_file = tmp_path / "attached-clients.txt"
+            self.clients_file.write_text(
+                "".join(f"{n}\n" for n in clients), encoding="utf-8"
+            )
         self.aicx_capture = tmp_path / "aicx-called.txt"
         # The caller's cwd is deliberately NOT the declared root.
         self.cwd = tmp_path / "elsewhere"
@@ -338,6 +390,8 @@ class Scene:
         env["VIBECRAFTED_PRODUCT_CORE_CLI"] = str(self.owner)
         env["VC_FRAME_LOG"] = str(self.frame_log)
         env["VC_FRAME_LIVE"] = str(self.live_file)
+        if self.clients_file is not None:
+            env["VC_FRAME_CLIENTS"] = str(self.clients_file)
         env["TEST_AICX_CAPTURE"] = str(self.aicx_capture)
         env.update(extra or {})
         return env
@@ -502,7 +556,7 @@ def _assert_no_foreign_mutation(calls: list[dict], foreign: tuple[str, ...]) -> 
 
 
 @pytest.mark.parametrize("shell", ["bash", "zsh"])
-def test_explicit_root_from_stale_attached_marker_targets_the_declared_workspace(
+def test_explicit_root_from_stale_attached_marker_opens_the_declared_workspace(
     tmp_path: Path, shell: str
 ) -> None:
     """The exact shape the Founder hit, without a TTY (an agent shell).
@@ -510,13 +564,22 @@ def test_explicit_root_from_stale_attached_marker_targets_the_declared_workspace
     Baseline: the in-frame branch adopts the stale marker `vibecrafted` as the
     target, the tab action fails with "Session 'vibecrafted' not found; active
     session is 'host-a'", the bounded create inherits the marker and
-    panics at src/commands.rs:844, and the launch fails with status 2.
+    panics at src/commands.rs:844, and the launch fails with status 2. The
+    first cut then prepared the workspace and printed `vc-frame attach …`,
+    which the parent rejected: a declaration ENTERS the workspace.
+
+    Now: the stale marker is not a surface (the engine has no such session),
+    so the public entry opens the product terminal ON the declared repository
+    and hands the child the same declaration -- native id, absolute root --
+    with the stale attachment context stripped. The parent itself creates,
+    launches and assembles nothing.
     """
     scene = Scene(tmp_path, live=[FOREIGN_LIVE], project="Sentry-Selfhosted")
     result = _run_resume(
         scene,
         _declared(scene),
         shell=shell,
+        terminal_entry=False,
         extra_env={
             "VC_FRAME": "1",
             "VC_FRAME_PANE_ID": "7",
@@ -524,44 +587,67 @@ def test_explicit_root_from_stale_attached_marker_targets_the_declared_workspace
         },
     )
     calls = scene.calls()
-    place = _expected_place(scene)
+    launch = scene.terminal_launch()
 
     assert "RC=[0]" in result.stdout, result.stdout + result.stderr
     _assert_no_panic(result, calls)
     assert "launch failed" not in result.stderr, result.stderr
-
-    # Workspace identity: the declared repo, bound through the catalogue.
-    assert f"TARGET=[{place}]" in result.stdout, result.stdout + result.stderr
-    assert f"WORKSPACE_ROOT=[{scene.root}]" in result.stdout, result.stdout
-    assert f"DECLARED=[{scene.root}]" in result.stdout, result.stdout
-
-    # The absent workspace session is created -- once, detached, and with the
-    # current-client context cleared so the native guard cannot fire.
-    creates = _creates(calls)
-    assert len(creates) == 1, calls
-    assert creates[0]["argv"][-1] == place, creates
-    assert creates[0]["VC_FRAME_SESSION_NAME"] is None, creates
-    assert creates[0]["ZELLIJ_SESSION_NAME"] is None, creates
-
-    # Native session identity: the provider argv resumes THE given id, in the
-    # declared repo, inside the declared workspace session.
-    tabs = _new_tabs(calls)
-    assert len(tabs) == 1, calls
-    assert _session_of(tabs[0]) == place, tabs
-    assert _cwd_of(tabs[0]) == scene.root, tabs
-    assert f"codex resume {NATIVE_SESSION}" in _tab_script(tabs[0])
-
-    # Transport attachment: the stale marker and the foreign live session are
-    # ambient context -- named as such, never targeted, never mutated.
+    assert launch is not None, f"no terminal was opened: {result.stderr}"
+    argv = launch["argv"]
+    assert (
+        Path(argv[argv.index("--working-directory") + 1]).resolve()
+        == scene.root.resolve()
+    )
+    hosted = argv[argv.index("-e") + 1 :]
+    assert hosted[2:] == [
+        "resume",
+        "codex",
+        "--session",
+        NATIVE_SESSION,
+        "--root",
+        str(scene.root),
+    ], hosted
+    # The child is outside the frame the parent inherited its markers from.
+    assert launch["boundary"] == "1", launch
+    assert all(value is None for value in launch["markers"].values()), launch
+    # The escalating parent does nothing else: no create, no tab, no client,
+    # no AICX, nothing addressed to the stale or the foreign session.
+    assert not _creates(calls) and not _new_tabs(calls), calls
+    assert not _attaches(calls) and not _switches(calls), calls
     _assert_no_foreign_mutation(calls, (STALE_MARKER, FOREIGN_LIVE))
-    assert "ambient context" in result.stderr, result.stderr
-    # No live attached client and no TTY: entering is reported honestly, not
-    # faked with a second client and not downgraded to a headless run.
-    assert not _attaches(calls), calls
-    assert not _switches(calls), calls
-    assert f"vc-frame attach {place}" in result.stderr, result.stderr
-    assert "refusing to downgrade" not in result.stderr
     assert not scene.aicx_capture.exists(), "an explicit --session assembled AICX"
+    assert "vc-frame attach" not in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_child_shape_without_a_terminal_fails_closed_before_creating(
+    tmp_path: Path, shell: str
+) -> None:
+    """The escalated-child shape (re-entry boundary set) but still no PTY: a
+    broken terminal host, or a bypassed entry. The declaration must not leave
+    a workspace session behind that nobody can see, nor claim a launch."""
+    scene = Scene(tmp_path, live=[FOREIGN_LIVE], project="Sentry-Selfhosted")
+    result = _run_resume(
+        scene,
+        _declared(scene),
+        shell=shell,
+        terminal_entry=True,
+        extra_env={
+            "VC_FRAME": "1",
+            "VC_FRAME_PANE_ID": "7",
+            "VC_FRAME_SESSION_NAME": STALE_MARKER,
+        },
+    )
+    calls = scene.calls()
+
+    assert "RC=[0]" not in result.stdout, result.stdout + result.stderr
+    assert "cannot be entered from this process" in result.stderr, result.stderr
+    assert "Resume launched" not in result.stdout, result.stdout
+    assert scene.terminal_launch(wait=1.0) is None
+    assert not _creates(calls) and not _new_tabs(calls), calls
+    assert not _attaches(calls) and not _switches(calls), calls
+    _assert_no_foreign_mutation(calls, (STALE_MARKER, FOREIGN_LIVE))
+    assert not scene.aicx_capture.exists()
 
 
 def test_stale_marker_with_a_terminal_enters_the_declared_workspace(
@@ -726,6 +812,7 @@ def test_ambient_operator_session_env_does_not_override_the_declared_root(
         scene,
         _declared(scene),
         shell=shell,
+        tty=True,
         extra_env={"VIBECRAFTED_OPERATOR_SESSION": "chosen-elsewhere"},
     )
     calls = scene.calls()
@@ -735,9 +822,10 @@ def test_ambient_operator_session_env_does_not_override_the_declared_root(
     assert f"TARGET=[{place}]" in result.stdout, result.stdout + result.stderr
     tabs = _new_tabs(calls)
     assert len(tabs) == 1 and _session_of(tabs[0]) == place, calls
+    # Under a pty the shell's stderr is merged into the captured stream.
     assert (
         "VIBECRAFTED_OPERATOR_SESSION=chosen-elsewhere is ambient context"
-        in result.stderr
+        in result.stdout + result.stderr
     )
     _assert_no_foreign_mutation(calls, ("chosen-elsewhere",))
 
@@ -808,8 +896,8 @@ def test_no_tty_outside_a_frame_escalates_with_session_and_absolute_root(
 def test_repo_and_root_are_one_declaration(tmp_path: Path) -> None:
     root_scene = Scene(tmp_path / "a", live=[], project="project-b")
     repo_scene = Scene(tmp_path / "b", live=[], project="project-b")
-    by_root = _run_resume(root_scene, _declared(root_scene, "--root"))
-    by_repo = _run_resume(repo_scene, _declared(repo_scene, "--repo"))
+    by_root = _run_resume(root_scene, _declared(root_scene, "--root"), tty=True)
+    by_repo = _run_resume(repo_scene, _declared(repo_scene, "--repo"), tty=True)
 
     for result in (by_root, by_repo):
         assert "RC=[0]" in result.stdout, result.stdout + result.stderr
@@ -840,6 +928,7 @@ def test_declared_root_with_spaces_binds_the_exact_cwd_and_session(
         scene,
         _declared(scene),
         shell=shell,
+        tty=True,
         extra_env={
             "VC_FRAME": "1",
             "VC_FRAME_PANE_ID": "7",
