@@ -298,7 +298,7 @@ def test_native_carrier_embeds_every_required_agent_foundation() -> None:
     assert "'screenscribe==0.1.19'" in builder
     assert '"$runtime/bin/screenscribe" --version' in builder
     assert '"$runtime/source-provenance.json"' in builder
-    assert 'carrier --source "$REPO_ROOT"' in builder
+    assert 'carrier --source "$SOURCE_ROOT"' in builder
     assert "provenance_stage" not in builder
     assert '"$runtime/scripts/vc-frame-product-entry.sh"' in builder
     for command in ("loct", "loctree-mcp", "aicx", "aicx-mcp", "prview"):
@@ -572,7 +572,7 @@ def test_xcodegen_project_is_generated_from_one_tracked_source() -> None:
     assert (REPO_ROOT / "vibecrafted-app/shell-agent/app/project.yml").is_file()
     assert "/vibecrafted-app/shell-agent/app/Vibecrafted.xcodeproj/" in ignore
     assert (
-        'git -C "$REPO_ROOT" ls-files --error-unmatch "$generated_project"' in builder
+        'git -C "$SOURCE_ROOT" ls-files --error-unmatch "$generated_project"' in builder
     )
     assert "generated Xcode project must not be tracked" in builder
 
@@ -1342,7 +1342,9 @@ def test_standalone_selection_is_not_the_app_dmg_release_tuple() -> None:
     assert "build/$RUNTIME_PACK_SELECTION_BASENAME" in library
 
 
-def test_main_source_snapshot_pins_launch_sha_across_payload_app_and_selection() -> None:
+def test_main_source_snapshot_pins_launch_sha_across_payload_app_and_selection() -> (
+    None
+):
     """Living Tree movement after launch must not mint a mixed generation.
 
     ROOT_SHA is captured once. Payload copies, the App manifest, pack names
@@ -1355,13 +1357,11 @@ def test_main_source_snapshot_pins_launch_sha_across_payload_app_and_selection()
     builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
         encoding="utf-8"
     )
-    library = (REPO_ROOT / "scripts/lib/donor-snapshot.sh").read_text(
-        encoding="utf-8"
-    )
+    library = (REPO_ROOT / "scripts/lib/donor-snapshot.sh").read_text(encoding="utf-8")
 
     assert 'SOURCE_ROOT="$DONOR_SNAPSHOT_ROOT/vibecrafted"' in builder
     assert 'donor_snapshot_create "$REPO_ROOT" "$SOURCE_ROOT" "$ROOT_SHA"' in builder
-    assert 'require_bound_revision() {' in builder
+    assert "require_bound_revision() {" in builder
     assert 'require_bound_revision "$SOURCE_ROOT" vibecrafted "$ROOT_SHA"' in builder
     assert '--vibecrafted-sha "$ROOT_SHA"' in builder
     assert 'git_sha "$REPO_ROOT"' not in builder
@@ -1380,7 +1380,10 @@ def test_main_source_snapshot_pins_launch_sha_across_payload_app_and_selection()
     product = builder.split("build_product() {", 1)[1].split("\n}\n", 1)[0]
     assert 'require_clean_repo "$SOURCE_ROOT" vibecrafted' in product
     assert 'require_clean_repo "$REPO_ROOT" vibecrafted' not in product
-    assert product.count('require_bound_revision "$SOURCE_ROOT" vibecrafted "$ROOT_SHA"') == 2
+    assert (
+        product.count('require_bound_revision "$SOURCE_ROOT" vibecrafted "$ROOT_SHA"')
+        == 2
+    )
 
     # A failed snapshot build has already claimed the selection and still reaps.
     begin_at = builder.index("runtime_pack_selection_begin")
@@ -1406,11 +1409,11 @@ def test_main_snapshot_does_not_own_selection_or_artifact_output() -> None:
     )
 
     assert 'SOURCE_ROOT="$DONOR_SNAPSHOT_ROOT/vibecrafted"' in builder
-    assert "runtime_pack_selection_begin \"$SOURCE_ROOT\"" not in builder
-    assert "runtime_pack_selection_publish \"$SOURCE_ROOT\"" not in builder
+    assert 'runtime_pack_selection_begin "$SOURCE_ROOT"' not in builder
+    assert 'runtime_pack_selection_publish "$SOURCE_ROOT"' not in builder
     assert 'DIST_DIR="${VIBECRAFTED_RELEASE_DIR:-$SOURCE_ROOT/dist}"' not in builder
     assert 'BUILD_DIR="$SOURCE_ROOT/build/unified-release"' not in builder
     assert "build/$RUNTIME_PACK_SELECTION_BASENAME" in selection
     assert "$1/build/$RUNTIME_PACK_SELECTION_BASENAME" in selection or (
-        'printf \'%s\\n\' "$1/build/$RUNTIME_PACK_SELECTION_BASENAME"' in selection
+        "printf '%s\\n' \"$1/build/$RUNTIME_PACK_SELECTION_BASENAME\"" in selection
     )
