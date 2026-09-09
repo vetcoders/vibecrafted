@@ -3769,8 +3769,11 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
         not in terminal
     )
     assert terminal_policy["terminal"]["shell"] == {
-        "program": "/bin/zsh",
-        "args": ["-l"],
+        "program": "/bin/sh",
+        "args": [
+            "-c",
+            'exec "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"',
+        ],
     }
     assert "${1##*/}" in primary_shell
     assert '"$0" "$@"' in primary_shell
@@ -3823,7 +3826,7 @@ def test_installed_deck_resolves_server_binary_and_site_from_its_generation() ->
     assert 'source "$candidate"' in deck
 
 
-def test_primary_shell_exits_instead_of_reusing_pty_after_vc_start_failure(
+def test_primary_shell_retains_error_and_usable_shell_after_vc_start_failure(
     tmp_path: Path,
 ) -> None:
     failing_start = tmp_path / "vc-start"
@@ -3840,12 +3843,15 @@ def test_primary_shell_exits_instead_of_reusing_pty_after_vc_start_failure(
         cwd=REPO_ROOT,
         env={**os.environ, "HOME": str(tmp_path)},
         capture_output=True,
+        input="printf 'NEXT_COMMAND_WORKS\\n'; exit 0\n",
         text=True,
         check=False,
         timeout=10,
     )
 
-    assert result.returncode == 7
+    assert result.returncode == 0
+    assert "exit 7" in result.stderr
+    assert "NEXT_COMMAND_WORKS" in result.stdout
 
 
 def test_manifest_producer_emits_an_app_accepted_by_the_runtime_verifier(

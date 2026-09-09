@@ -119,7 +119,7 @@ def test_reinstall_preserves_shell_preferences_and_private_shell_state(
     _install(pack, capsys)
     product = roots["product_config"]
     preferences = {
-        "starship.toml": 'add_newline = false\n',
+        "starship.toml": "add_newline = false\n",
         "atuin/config.toml": 'style = "compact"\n',
     }
     for name, body in preferences.items():
@@ -130,7 +130,7 @@ def test_reinstall_preserves_shell_preferences_and_private_shell_state(
     assert (product / "vc-terminal/interactive.zsh").read_bytes() == (
         pack / "config/vc-terminal/interactive.zsh"
     ).read_bytes()
-    assert 'launch-primary-shell.zsh' in (product / "vc-terminal/.zshrc").read_text()
+    assert "launch-primary-shell.zsh" in (product / "vc-terminal/.zshrc").read_text()
     assert _snapshot(private) == before
     assert private_rc.read_text() == "# My terminal\nexport PERSONAL_SHELL=1\n"
     assert private_history.read_text() == "private history sentinel\n"

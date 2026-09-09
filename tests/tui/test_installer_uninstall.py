@@ -214,7 +214,12 @@ def test_runtime_install_reclaims_leftover_alacritty_and_alt_screen(
     names = sorted(
         path.name for path in debris_dir.iterdir() if path.name != ".DS_Store"
     )
-    assert names == ["launch-primary-shell.zsh", "vc-terminal.toml"]
+    assert names == [
+        ".zshrc",
+        "interactive.zsh",
+        "launch-primary-shell.zsh",
+        "vc-terminal.toml",
+    ]
     lines = sorted(
         str(path.relative_to(product_config))
         for path in product_config.rglob("*")
