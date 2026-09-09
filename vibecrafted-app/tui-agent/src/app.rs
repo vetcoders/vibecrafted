@@ -1004,19 +1004,30 @@ impl App {
                     "--permissions/--sandbox are not carried into the {} supervised runtime; leave both at provider default",
                     self.launch_kind.label()
                 ));
-            } else if let Some(cell) =
-                provider.control_cell(self.launch_permissions.word(), self.launch_sandbox.word())
-                && !cell.supported
-            {
-                refusals.push(if cell.reason.is_empty() {
-                    format!(
-                        "{agent} cannot enforce permissions {} with sandbox {}",
+            } else {
+                // An absent cell is not a permissive one. The catalog is a
+                // full cross product of the public words, so silence about a
+                // combination means this launcher cannot describe it — and an
+                // undescribed combination is never launched.
+                match provider
+                    .control_cell(self.launch_permissions.word(), self.launch_sandbox.word())
+                {
+                    None => refusals.push(format!(
+                        "{agent}: the launcher catalog does not report permissions {} with sandbox {}; update vibecrafted",
                         self.launch_permissions.label(),
                         self.launch_sandbox.label()
-                    )
-                } else {
-                    cell.reason.clone()
-                });
+                    )),
+                    Some(cell) if !cell.supported => refusals.push(if cell.reason.is_empty() {
+                        format!(
+                            "{agent} cannot enforce permissions {} with sandbox {}",
+                            self.launch_permissions.label(),
+                            self.launch_sandbox.label()
+                        )
+                    } else {
+                        cell.reason.clone()
+                    }),
+                    Some(_) => {}
+                }
             }
         }
         if crate::config::is_operator_home_root(&self.config.repo) {
@@ -1046,6 +1057,21 @@ impl App {
 
     pub fn launch_command(&self) -> LaunchCommand {
         build_launch_command(&self.config.command_deck, &self.launch_request())
+    }
+
+    /// The declaration paired with the catalog cell the launcher published
+    /// for it, so the receipt can be judged against the launcher's own
+    /// promise rather than against VOC's assumptions.
+    pub fn launch_expectation(&self) -> crate::launch::LaunchExpectation {
+        let request = self.launch_request();
+        let cell = self
+            .catalog
+            .ready()
+            .and_then(|catalog| catalog.provider(self.selected_agent()))
+            .and_then(|provider| {
+                provider.control_cell(self.launch_permissions.word(), self.launch_sandbox.word())
+            });
+        crate::launch::LaunchExpectation::new(&request, cell)
     }
 
     /// Sanitized command preview: argv plus the size of the private prompt,

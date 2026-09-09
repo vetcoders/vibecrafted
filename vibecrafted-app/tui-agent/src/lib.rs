@@ -160,8 +160,9 @@ pub use app::{App, AppTab, DeepAction, DispatchFocus, LaunchFocus, QueueScope};
 pub use catalog::{CatalogState, LauncherCatalog};
 pub use config::{AppConfig, CliOptions, build_config, parse_args};
 pub use launch::{
-    Environment, LaunchCommand, LaunchKind, LaunchOutcome, LaunchReceipt, PermissionPolicy,
-    Presentation, SandboxChoice,
+    Admission, Confirmation, DeclarationAudit, Environment, LaunchCommand, LaunchExpectation,
+    LaunchKind, LaunchOutcome, LaunchReceipt, LauncherRun, PermissionPolicy, Presentation,
+    SandboxChoice,
 };
 pub use mission_control::{
     ActionPriority, ActionQueueItem, ActionQueueKind, ActiveDispatch, AgentStatsRow, DataQuality,
@@ -180,6 +181,12 @@ pub use skills_catalog::{SkillEntry, SkillPayloadKind};
 pub enum BackgroundMessage {
     Catalog(CatalogState),
     Launch(Box<LaunchOutcome>),
+    /// Stopped on the worker thread before the launcher was started, so
+    /// nothing was admitted and there is nothing to be uncertain about.
+    LaunchHalted {
+        summary: String,
+        detail: Vec<String>,
+    },
 }
 
 /// Ask the launcher for its catalog off the UI thread.
@@ -261,6 +268,10 @@ fn run_app(config: AppConfig) -> anyhow::Result<()> {
                 match message {
                     BackgroundMessage::Catalog(state) => app.set_catalog(state),
                     BackgroundMessage::Launch(outcome) => app.record_launch_outcome(*outcome),
+                    BackgroundMessage::LaunchHalted { summary, detail } => {
+                        app.pending_launch = None;
+                        app.show_error(format!("launch halted: {summary}"), detail);
+                    }
                 }
             }
 
@@ -867,25 +878,6 @@ fn launch_selected(app: &mut App, tx: &Sender<BackgroundMessage>) -> anyhow::Res
         ));
         return Ok(());
     }
-    if !app.config.no_verify_gate && app.launch_presentation != launch::Presentation::Headless {
-        let client_kind = match app.selected_agent() {
-            "claude" => rmcp_mux::ipc::ClientKind::Claude,
-            "codex" => rmcp_mux::ipc::ClientKind::Codex,
-            "cursor" => rmcp_mux::ipc::ClientKind::Cursor,
-            "junie" => rmcp_mux::ipc::ClientKind::Junie,
-            other => rmcp_mux::ipc::ClientKind::Generic {
-                name: other.to_string(),
-            },
-        };
-        if let Err(halt) = launch::pre_launch_verify(client_kind) {
-            let error = LaunchRunError::ClientDrift(halt);
-            app.show_error(
-                "launch failed: client drift",
-                error.detail_lines(String::new()),
-            );
-            return Ok(());
-        }
-    }
     let request = app.launch_request();
     let command = match app.launch_plan() {
         Ok(command) => command,
@@ -900,15 +892,43 @@ fn launch_selected(app: &mut App, tx: &Sender<BackgroundMessage>) -> anyhow::Res
             return Ok(());
         }
     };
+    // The readiness probe talks to the mux over a unix socket with its own
+    // timeouts. It runs on the worker thread with the launch, never in the
+    // draw path: a slow or wedged mux must not freeze the console.
+    let verify = (!app.config.no_verify_gate
+        && app.launch_presentation != launch::Presentation::Headless)
+        .then(|| match app.selected_agent() {
+            "claude" => rmcp_mux::ipc::ClientKind::Claude,
+            "codex" => rmcp_mux::ipc::ClientKind::Codex,
+            "cursor" => rmcp_mux::ipc::ClientKind::Cursor,
+            "junie" => rmcp_mux::ipc::ClientKind::Junie,
+            other => rmcp_mux::ipc::ClientKind::Generic {
+                name: other.to_string(),
+            },
+        });
     let summary = request.summary();
     let preview = command.preview();
-    let expectation = launch::LaunchExpectation::from(&request);
+    let expectation = app.launch_expectation();
     app.pending_launch = Some(summary.clone());
     app.append_status(format!("launching {summary}…"));
     let tx = tx.clone();
     thread::spawn(move || {
-        let outcome =
-            launch::LaunchOutcome::from_output(preview, expectation, command.run_capturing());
+        if let Some(client_kind) = verify
+            && let Err(halt) = launch::pre_launch_verify(client_kind)
+        {
+            // Halted before the launcher was ever started: nothing exists to
+            // be uncertain about.
+            let _ = tx.send(BackgroundMessage::LaunchHalted {
+                summary,
+                detail: LaunchRunError::ClientDrift(halt).detail_lines(String::new()),
+            });
+            return;
+        }
+        let outcome = launch::LaunchOutcome::from_run(
+            preview,
+            expectation,
+            command.run_capturing(launch::LAUNCH_ANSWER_DEADLINE),
+        );
         let _ = tx.send(BackgroundMessage::Launch(Box::new(outcome)));
     });
     Ok(())

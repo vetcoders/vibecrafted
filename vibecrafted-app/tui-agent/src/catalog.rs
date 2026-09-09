@@ -12,7 +12,7 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct ControlCell {
@@ -146,21 +146,30 @@ impl LauncherCatalog {
         })
     }
 
-    /// Ask the canonical launcher for its catalog. Read-only on the
-    /// launcher side; blocks the calling thread, so callers run it off the
-    /// UI loop.
+    /// Ask the canonical launcher for its catalog. Read-only on the launcher
+    /// side and bounded by `CATALOG_ANSWER_DEADLINE`; blocks the calling
+    /// thread, so callers run it off the UI loop.
     pub fn load(deck: &Path, env: &BTreeMap<String, OsString>) -> anyhow::Result<Self> {
         // `deck` is the operator's configured command deck (a path from --command-deck
         // or the resolved default), and every argument below is a fixed literal. No
         // shell is involved and no caller-supplied string reaches argv.
-        let output = Command::new(deck) // nosemgrep: rust.actix.command-injection.rust-actix-command-injection.rust-actix-command-injection
-            .args(["capabilities", "--json"])
-            .envs(env)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .with_context(|| format!("failed to run {} capabilities --json", deck.display()))?;
+        let mut command = Command::new(deck); // nosemgrep: rust.actix.command-injection.rust-actix-command-injection.rust-actix-command-injection
+        command.args(["capabilities", "--json"]).envs(env);
+        let what = format!("{} capabilities --json", deck.display());
+        let output = match crate::launch::run_bounded(
+            command,
+            None,
+            crate::launch::CATALOG_ANSWER_DEADLINE,
+            &what,
+        )? {
+            crate::launch::LauncherRun::Completed(output) => output,
+            // The probe starts nothing, so an unanswered catalog is simply an
+            // unavailable catalog — and every launch stays refused until one
+            // arrives.
+            crate::launch::LauncherRun::Undecided { waited, .. } => {
+                anyhow::bail!("{what} did not answer within {}s", waited.as_secs().max(1))
+            }
+        };
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             anyhow::bail!(

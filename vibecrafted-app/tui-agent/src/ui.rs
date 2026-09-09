@@ -1,4 +1,5 @@
 use crate::app::{App, AppTab, LaunchFocus, wrap_operator_line};
+use crate::launch;
 use crate::layout::{
     PaneId, controls_layout, dispatch_layout, mission_layout, monitor_layout, mux_panel_height,
     observe_layout, polarize_panel_height,
@@ -1604,18 +1605,25 @@ fn draw_model_overlay(frame: &mut Frame, app: &App) {
 fn draw_confirmation_overlay(frame: &mut Frame, app: &App) {
     let area = centered_rect(78, 68, frame.area());
     frame.render_widget(Clear, area);
-    let accepted = app
-        .launch_outcome
-        .as_ref()
-        .is_some_and(|outcome| outcome.accepted());
-    let honored = app
-        .launch_outcome
-        .as_ref()
-        .is_some_and(|outcome| outcome.declaration_mismatches().is_empty());
-    let (title, colour) = match (accepted, honored) {
-        (true, true) => ("Launch accepted", Color::Green),
-        (true, false) => ("Launch accepted — declaration NOT honored", Color::Yellow),
-        (false, _) => ("Launch refused", Color::Red),
+    // Admission and confirmation are two different facts, and the headline
+    // states both: a named run whose declaration the receipt does not confirm
+    // must never read as an accepted launch.
+    let (title, colour) = match app.launch_outcome.as_ref() {
+        None => ("Launch", Color::Cyan),
+        Some(outcome) => match outcome.admission() {
+            launch::Admission::Admitted => match outcome.audit().confirmation() {
+                launch::Confirmation::Confirmed => ("Launch accepted and confirmed", Color::Green),
+                launch::Confirmation::Unverified => {
+                    ("Run started — declaration NOT confirmed", Color::Yellow)
+                }
+                launch::Confirmation::Mismatched => {
+                    ("Run started — declaration NOT honored", Color::Red)
+                }
+            },
+            launch::Admission::Refused => ("Launch refused", Color::Red),
+            launch::Admission::Failed => ("Launcher never started", Color::Red),
+            launch::Admission::Unknown => ("Outcome UNKNOWN — a worker may exist", Color::Magenta),
+        },
     };
     let lines = app
         .confirmation_lines()
