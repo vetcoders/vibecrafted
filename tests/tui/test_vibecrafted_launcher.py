@@ -81,6 +81,7 @@ def _tracked_resume_fixture(
     session_id: str,
 ) -> tuple[dict[str, str], Path, Path, Path]:
     home = tmp_path / "home"
+    fake_bin = tmp_path / "fake-bin"
     fake_bin = tmp_path / "bin"
     provider_called = tmp_path / "provider-called"
     core_argv = tmp_path / "core-argv.bin"
@@ -135,6 +136,7 @@ def _write_fake_python(bin_dir: Path, capture_file: Path) -> None:
                 "#!/usr/bin/env bash",
                 "set -euo pipefail",
                 'printf "%s\\n" "$@" > "$CAPTURE_FILE"',
+                'if [[ -n "${CAPTURE_STDIN_FILE:-}" ]]; then cat > "$CAPTURE_STDIN_FILE"; fi',
             ]
         )
         + "\n",
@@ -163,6 +165,17 @@ def _initialize_git_fixture(root: Path) -> None:
         ],
         check=True,
     )
+
+
+def _assert_generic_launch(
+    home: Path, root: Path, skill: str, prompt: str, marker: Path
+) -> None:
+    assert marker.read_text(encoding="utf-8").splitlines()[:2] == ["exec", "--json"]
+    launch = next((home / ".vibecrafted" / "control_plane" / "launches").glob("*.log"))
+    receipt = json.loads(launch.read_text(encoding="utf-8").splitlines()[0])
+    spec = receipt["spec"]
+    assert (spec["agent"], spec["skill"], spec["root"]) == ("codex", skill, str(root))
+    assert Path(receipt["source_snapshot"]).read_text(encoding="utf-8") == prompt
 
 
 def _seed_launcher_ulimits(script_path: Path) -> None:
@@ -666,6 +679,8 @@ def test_bare_shell_face_opens_interactive_tab_without_print_mode(
     env["HOME"] = str(home)
     env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
     env["CAPTURE_FILE"] = str(capture_file)
+    stdin_capture = tmp_path / "python-stdin.txt"
+    env["CAPTURE_STDIN_FILE"] = str(stdin_capture)
     env["SESSION_STATE_FILE"] = str(session_state_file)
     env["VETCODERS_SPAWN_RUNTIME"] = "headless"
     env["VIBECRAFTED_OSASCRIPT_BIN"] = str(fake_bin / "osascript")
@@ -2028,6 +2043,8 @@ def test_autonomous_delivery_skills_route_to_core_async_launcher(
 
     env = os.environ.copy()
     env["CAPTURE_FILE"] = str(capture_file)
+    stdin_capture = tmp_path / "python-stdin.txt"
+    env["CAPTURE_STDIN_FILE"] = str(stdin_capture)
     env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env["VIBECRAFTED_PYTHON"] = str(fake_bin / "python3")
@@ -2045,6 +2062,7 @@ def test_autonomous_delivery_skills_route_to_core_async_launcher(
     assert str(REPO_ROOT) in args
     assert "--prompt-stdin" in args
     assert "Ship the cut" not in args
+    assert stdin_capture.read_text(encoding="utf-8") == "Ship the cut"
 
 
 @pytest.mark.parametrize(
@@ -2089,6 +2107,8 @@ def test_research_preserves_optional_variadic_agents_for_core_parser(
 
     env = os.environ.copy()
     env["CAPTURE_FILE"] = str(capture_file)
+    stdin_capture = tmp_path / "python-stdin.txt"
+    env["CAPTURE_STDIN_FILE"] = str(stdin_capture)
     env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env["VIBECRAFTED_PYTHON"] = str(fake_bin / "python3")
@@ -2112,6 +2132,7 @@ def test_research_preserves_optional_variadic_agents_for_core_parser(
     expected = [item for item in expected if item != "Check Codescribe"]
     assert args[2 : 2 + len(expected)] == expected
     assert args[-2:] == ["--source-dir", str(REPO_ROOT)]
+    assert stdin_capture.read_text(encoding="utf-8") == "Check Codescribe"
 
 
 def test_compact_help_teaches_implement_before_alias() -> None:
@@ -2211,6 +2232,7 @@ def test_generic_skill_fallback_routes_unwrapped_skills(
     tmp_path: Path, skill: str, prompt: str
 ) -> None:
     home = tmp_path / "home"
+    fake_bin = tmp_path / "fake-bin"
     wrapper = tmp_path / "vibecrafted"
     capture_file = tmp_path / "generic-skill-args.txt"
     helper = (
@@ -2228,13 +2250,16 @@ def test_generic_skill_fallback_routes_unwrapped_skills(
     )
 
     home.mkdir()
+    fake_bin.mkdir()
     _initialize_git_fixture(tmp_path)
     wrapper.symlink_to(LAUNCHER)
     _write_generic_skill_helper(helper)
+    _write_fake_agent(fake_bin, "codex", capture_file)
 
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["CAPTURE_FILE"] = str(capture_file)
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
 
     subprocess.run(
         ["bash", str(wrapper), skill, "codex", "--prompt", prompt],
@@ -2243,8 +2268,7 @@ def test_generic_skill_fallback_routes_unwrapped_skills(
         env=env,
     )
 
-    payload = capture_file.read_text(encoding="utf-8").splitlines()
-    assert payload == ["codex", skill, "--prompt", prompt]
+    _assert_generic_launch(home, tmp_path, skill, prompt, capture_file)
 
 
 @pytest.mark.parametrize(
@@ -2262,6 +2286,7 @@ def test_generic_skill_fallback_routes_skill_wrappers(
     tmp_path: Path, wrapper_name: str, skill: str, prompt: str
 ) -> None:
     home = tmp_path / "home"
+    fake_bin = tmp_path / "fake-bin"
     wrapper = tmp_path / wrapper_name
     capture_file = tmp_path / "generic-wrapper-args.txt"
     helper = (
@@ -2279,13 +2304,16 @@ def test_generic_skill_fallback_routes_skill_wrappers(
     )
 
     home.mkdir()
+    fake_bin.mkdir()
     _initialize_git_fixture(tmp_path)
     wrapper.symlink_to(LAUNCHER)
     _write_generic_skill_helper(helper)
+    _write_fake_agent(fake_bin, "codex", capture_file)
 
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["CAPTURE_FILE"] = str(capture_file)
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
 
     subprocess.run(
         ["bash", str(wrapper), "codex", "--prompt", prompt],
@@ -2294,8 +2322,7 @@ def test_generic_skill_fallback_routes_skill_wrappers(
         env=env,
     )
 
-    payload = capture_file.read_text(encoding="utf-8").splitlines()
-    assert payload == ["codex", skill, "--prompt", prompt]
+    _assert_generic_launch(home, tmp_path, skill, prompt, capture_file)
 
 
 def test_marbles_help_lists_delete_control_subcommand() -> None:

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -282,16 +283,19 @@ def test_installed_resume_inside_a_checkout_uses_its_own_generation(
     hosted = _hosted_argv(launch)
     assert hosted[0].endswith("launch-primary-shell.zsh")
     assert f"PYTHONPATH={world['generation'] / 'vibecrafted-core'}" in hosted
-    assert str(world["generation"] / "bin" / "python3") in _interactive_handoff_command(
-        launch
-    )
-    assert str(world["checkout"]) not in _interactive_handoff_command(launch)
+    handoff_tokens = shlex.split(_interactive_handoff_command(launch))
+    assert handoff_tokens[:5] == [
+        str(world["generation"] / "bin" / "python3"),
+        "-m",
+        "vibecrafted_core.spawn",
+        "interactive-launch",
+        "codex",
+    ]
+    assert str(world["checkout"]) not in handoff_tokens
 
     # Project identity is independent, and --root survives exactly.
     assert _working_directory(launch) == project.resolve()
-    handoff = _interactive_handoff_command(launch)
-    assert "interactive-launch codex" in handoff
-    assert f"--root {project}" in handoff
+    assert handoff_tokens[handoff_tokens.index("--root") + 1] == str(project)
     assert launch["boundary"] == "1"
 
 
