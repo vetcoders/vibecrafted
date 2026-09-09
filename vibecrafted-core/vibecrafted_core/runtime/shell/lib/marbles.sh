@@ -479,6 +479,18 @@ _vetcoders_resume_agent() {
     ""|living-tree|local-worktrees) ;;
     *) printf 'Unsupported execution runtime: no host adapter.\n' >&2; return 2 ;;
   esac
+  if [[ -n "${_vetcoders_contract_last:-}" ]]; then
+    printf 'Use --session last; resume --last is retired.\n' >&2
+    return 2
+  fi
+  if [[ -n "${_vetcoders_contract_session:-}" && -n "${_vetcoders_contract_run_id:-}" ]]; then
+    printf 'Choose one identity: --session or --run-id.\n' >&2
+    return 2
+  fi
+  if [[ -n "${_vetcoders_contract_prompt_explicit:-}${_vetcoders_contract_file_explicit:-}" && -n "${_vetcoders_contract_runtime:-}" && "$_vetcoders_contract_runtime" != headless ]]; then
+    printf 'Task resume is noninteractive; use --runtime headless.\n' >&2
+    return 2
+  fi
   # Normalize an explicit --root ONCE, before anything changes cwd (shared
   # owner with the init family; see _vetcoders_normalize_declared_contract_root).
   _vetcoders_normalize_declared_contract_root resume || return 1
@@ -486,8 +498,15 @@ _vetcoders_resume_agent() {
     echo "Resume a provider session or a stopped control-plane run." >&2
     echo "  vibecrafted resume ${tool} --session <provider-uuid>" >&2
     echo "  vibecrafted resume ${tool} --run-id <work-...>" >&2
-    echo "  vibecrafted resume ${tool} --run-id <work-...> | --last" >&2
+    echo "  vibecrafted resume ${tool} --session current|last" >&2
     return 0
+  fi
+  if [[ -n "${_vetcoders_contract_session:-}" ]]; then
+    _vetcoders_contract_session="$(_vetcoders_run_core_cli session-source "$tool" --session "$_vetcoders_contract_session" --root "${_vetcoders_contract_root:-$(_vetcoders_repo_root)}" --id-only)" || return 2
+  fi
+  if [[ -n "${_vetcoders_contract_execution_runtime:-}${_vetcoders_contract_worktree:-}" && -n "${_vetcoders_contract_prompt_explicit:-}${_vetcoders_contract_file_explicit:-}" ]]; then
+    printf 'Noninteractive resume preserves its checkout; execution/worktree overrides require fork.\n' >&2
+    return 2
   fi
   if [[ -n "${_vetcoders_contract_run_id:-}" || -n "${_vetcoders_contract_last:-}" ]] && [[ -n "${_vetcoders_contract_prompt_explicit:-}${_vetcoders_contract_file_explicit:-}" ]]; then
     if [[ -n "${_vetcoders_contract_session:-}" ]]; then

@@ -452,17 +452,6 @@ def resolve_continuity_policy(
     )
     if parent_lineage_id:
         raise ValueError("bare-fork accepts only an explicit provider-session parent")
-    current_ids = {
-        str(ambient.get(name) or "").strip()
-        for name in (
-            "CODEX_SESSION_ID",
-            "CLAUDE_CODE_SESSION_ID",
-            "VIBECRAFTED_OPERATOR_SESSION_ID",
-            "VIBECRAFTED_PROVIDER_SESSION_ID",
-        )
-    }
-    if parent in current_ids:
-        raise ValueError("bare-fork parent is the current provider session")
     from .continuity.capabilities import (
         PROBE_CONFIRMED,
         SUPPORTED,
@@ -1133,6 +1122,18 @@ def interactive_workspace_command(
 
     if skill not in {"init", "partner", "operator", "resume", "fork"}:
         raise ValueError("unsupported interactive launcher")
+    if skill != "resume" and (native_session or resume_run_id or resume_last):
+        raise ValueError(
+            "session/run selectors apply to resume; fork uses its source identity"
+        )
+    if native_session and (resume_run_id or resume_last):
+        raise ValueError("choose one identity: --session or --run-id")
+    if native_session:
+        from .workflow import resolve_session_selection
+
+        native_session = resolve_session_selection(provider, native_session, root)[
+            "agent_session_id"
+        ]
     parent = {}
     selected_model_source = ""
     if resume_last:
@@ -1225,7 +1226,7 @@ def interactive_workspace_command(
         native_session = _validated_continuity_id(
             native_session, label="native session"
         )
-        if provider not in {"codex", "claude"}:
+        if provider not in {"codex", "claude", "grok", "agy", "junie", "cursor"}:
             raise ValueError(f"interactive native resume unsupported for {provider}")
         from .workflow import _worker_process_alive, find_run_for_identity_token
 
@@ -1780,7 +1781,8 @@ def launch_interactive_workspace(
         )
     quota = resolve_quota_policy(token_budget, runtime=runtime)
     child_env = _fresh_child_environment(os.environ.copy(), continuity_policy)
-    provider_session_id = str(uuid.uuid4())
+    native_session = str(admission.get("agent_session_id") or "")
+    provider_session_id = native_session or str(uuid.uuid4())
     command = interactive_policy_command(
         provider,
         f"Read and follow the private task file: {control_plane_home() / 'runtime_runs' / run_id / 'prompt.md'}",
@@ -1798,6 +1800,14 @@ def launch_interactive_workspace(
             command[1:1] = ["--resume", native_session]
         elif provider == "codex":
             command[1:1] = ["resume", native_session]
+        elif provider == "grok":
+            command[1:1] = ["--resume", native_session]
+        elif provider == "agy":
+            command[1:1] = ["--conversation", native_session]
+        elif provider == "junie":
+            command[1:1] = ["--resume", "--session-id", native_session]
+        elif provider == "cursor":
+            pass  # interactive_policy_command already supplied the exact chat ID
         else:
             raise ValueError(f"interactive native resume unsupported for {provider}")
         provider_session_id = native_session

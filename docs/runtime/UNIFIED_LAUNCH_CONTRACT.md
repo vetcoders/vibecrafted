@@ -125,22 +125,22 @@ end-to-end privacy admission.
 
 | Provider      | Model argument                                         | Private prompt mechanism in current source | Status                                                   |
 | ------------- | ------------------------------------------------------ | ------------------------------------------ | -------------------------------------------------------- |
-| Codex         | `-m` after `exec`, including absolute executable paths | stdin                                      | source tested; real account execution not performed      |
+| Codex         | `-m` after `exec`, including absolute executable paths | stdin                                      | source tested; two live native Codex forks verified      |
 | Claude        | `--model`                                              | print-mode stdin                           | source tested; native session/account acceptance pending |
 | Grok          | `--model` (`-m` recognized)                            | `--prompt-file /dev/stdin`                 | adapter inspected; runtime acceptance pending            |
 | Cursor        | `--model`                                              | existing stream/stdin contract             | adapter admission retained; runtime acceptance pending   |
-| Junie         | no supported model override in current registry        | existing text input                        | explicit model pin refuses; native behavior unverified   |
+| Junie         | advertised `--model` is forwarded                      | existing text input                        | native resume concurrency remains unverified             |
 | Agy           | `--model` builder exists                               | current inner argv transport is unsafe     | direct workflow rejected pending spawn-owner correction  |
 | Gemini legacy | deprecated                                             | no supported launch                        | rejected; no substitution of requested model             |
 
-No active provider process, native UI, VM or cloud run was used as a fixture.
+Codex native fork acceptance uses an isolated live interactive source; other native provider concurrency remains unverified.
 
 ## Workspace creation and Frame dependency
 
 The recovered START implementation uses one parser for the deck and shell.
 It chooses the explicit workspace name or repository basename, validates it,
-reads live/exited engine inventory, and refuses duplicates before preparation
-or terminal creation. No silent attach, replacement, suffix, kill or deletion.
+reads live/exited engine inventory, and refuses duplicate engine creation.
+Worktree materialization currently precedes this check; that ordering remains open. No silent attach, replacement, suffix, kill or deletion.
 Inventory failures refuse rather than treating uncertainty as an empty list.
 Outside Frame, creation is exclusive; a no-TTY caller opens VC Terminal only
 after successful creation, carrying the exact root and created-session marker.
@@ -190,10 +190,50 @@ Dispatch stores the admitted original source independently of its assembled runt
 instructions. Research model pins belong to the selected provider role, not swarm.
 
 Remaining acceptance includes native Frame viewer detachment and cold-start host
-handoff, supervised transcript echo filtering, native fork fixtures, complete native-
+handoff, supervised transcript echo filtering, other-provider native fork acceptance, complete native-
 session mutual exclusion across interactive and noninteractive paths, and all-surface
 idempotency/crash/cleanup. Explicit provider-session resume without a recorded run
 still cannot accept an unrecorded baseline override. These are not passes.
 
 Review and integrate the local commits before a clean signed build. The Operator
 owns installation, notarization, live UI/provider acceptance and release.
+
+## Shared session selection and native task forks
+
+Resume and fork use `--session <session_id|current|last>`. `--run-id` is a
+separate control-plane identity and cannot be combined with `--session`.
+`resume --last` and `--session previous` are retired and refuse explicitly.
+
+`current` requires one explicit provider identity from parent process context;
+it never means newest mtime. A recorded source must match the selected checkout.
+`last` selects the newest timezone-aware start timestamp among **recorded native
+sessions in the selected checkout and provider**. It includes the current session
+if that session is newest. Equal timestamps for different sessions refuse as
+ambiguous. Native sessions absent from control-plane records are outside this
+selector's inventory; pass their exact native ID. This is a deliberate scoped
+inventory rule, not provider-global history selection.
+
+Bare fork remains interactive. `--prompt`, `--file` or `--prompt-stdin` selects
+a tracked noninteractive fork; an explicit incompatible presentation refuses.
+Codex uses `exec ... fork <source> -`, with parent exec flags before the fork
+subcommand. Claude and Grok compose native resume with `--fork-session`.
+The normal permission/model/repository/worktree owners still apply. Original
+input is retained in a private byte-exact source snapshot; the provider receives
+the runtime instruction envelope through stdin. Child metadata records
+`native_fork`, `fork_source_session_id` and `parent_run_id`. The parent session ID
+is never seeded as the child's identity. A successful process without a distinct
+native child ID is a failed fork.
+
+The installed help advertises no verified native fork mechanism for Agy, Junie
+or Cursor. Their refusal describes this adapter limit; it is not exhaustive proof
+that their product can never fork. Interactive exact-session resume uses Agy's
+`--conversation`, Junie's `--resume --session-id`, Cursor's `--resume`, and Grok's
+`--resume`. These argv contracts have help evidence; their real live-source
+concurrency is not certified by Codex acceptance.
+
+Full launcher parity remains incomplete: all-entrypoint request idempotency,
+prepared-admission failure recovery, workspace duplicate-before-materialization,
+slow-display backpressure, supervised partial-echo/log-view privacy, and installed
+Frame/VOC lifecycle acceptance retain their separate proof obligations. Output
+capture follows terminal geometry during quiet periods; this is not full keyboard
+or every-terminal SIGWINCH acceptance.

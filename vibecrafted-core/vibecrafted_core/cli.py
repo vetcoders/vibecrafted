@@ -476,6 +476,27 @@ def _build_parser() -> argparse.ArgumentParser:
     fork_source.add_argument("--run-id", default="")
     fork_source.add_argument("--session", default="")
     fork_source.add_argument("--json", action="store_true")
+    session_source = sub.add_parser(
+        "session-source", help="resolve shared provider session selector"
+    )
+    session_source.add_argument("agent", choices=sorted(AGENTS - {"swarm"}))
+    session_source.add_argument("--session", required=True)
+    session_source.add_argument("--root", required=True)
+    session_source.add_argument("--id-only", action="store_true")
+    task_fork = sub.add_parser("fork-session", help="tracked native task fork")
+    task_fork.add_argument("agent", choices=sorted(AGENTS - {"swarm"}))
+    task_fork.add_argument("--session", required=True)
+    task_fork.add_argument("--parent-run-id", default="")
+    task_fork.add_argument("--root", required=True)
+    task_fork.add_argument("--model", default=None)
+    task_fork.add_argument("--base", default="")
+    task_fork.add_argument("--permissions", default="")
+    task_fork.add_argument("--worktree", default=None)
+    task_fork.add_argument("--execution-runtime", default="")
+    task_fork.add_argument("--source-dir", default="")
+    inputs = task_fork.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--file", default="")
+    inputs.add_argument("--prompt-stdin", action="store_true")
     for name in LAUNCHERS:
         _add_launch_parser(sub, name)
     return parser
@@ -1050,6 +1071,12 @@ def _agent_resume(agent: str, argv: Sequence[str]) -> int:
 
     session = str(args.session or "").strip()
     run_id = str(args.run_id or "").strip()
+    if sum((bool(session), bool(run_id), bool(args.last))) > 1:
+        parser.error(
+            "choose one identity: --session or --run-id (--last is deprecated)"
+        )
+    if args.last:
+        parser.error("--last is retired for resume; use --session last")
     if session and not run_id:
         kind = classify_resume_identity(session)
         if kind in {"run_id", "vibecrafted_session"} or looks_like_control_plane_run_id(
@@ -1437,6 +1464,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "dispatch",
         "doctor",
         "fork-source",
+        "session-source",
+        "fork-session",
         "paste",
         "procs",
         "reap",
@@ -1834,6 +1863,44 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             _print_resume_session_receipt(resume_result)
         return 0 if resume_result.get("accepted") else 1
+    if args.command == "fork-session":
+        from .workflow import manual_fork_session
+
+        try:
+            prompt = (
+                Path(args.file).expanduser().read_bytes().decode("utf-8")
+                if args.file
+                else read_prompt_stream(sys.stdin)
+            )
+            result = manual_fork_session(
+                args.agent,
+                args.session,
+                args.source_dir or package_root(),
+                prompt=prompt,
+                root=args.root,
+                model=args.model,
+                base=args.base,
+                worktree=args.worktree,
+                execution_runtime=args.execution_runtime,
+                source_path=args.file,
+                parent_run_id=args.parent_run_id,
+                permissions=args.permissions,
+            )
+        except (ValueError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(result, ensure_ascii=False, default=str))
+        return 0 if result.get("accepted") else 2
+    if args.command == "session-source":
+        from .workflow import resolve_session_selection
+
+        try:
+            result = resolve_session_selection(args.agent, args.session, args.root)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(result["agent_session_id"] if args.id_only else json.dumps(result))
+        return 0
     if args.command == "fork-source":
         fork_result = resolve_fork_source(
             args.agent, run_id=args.run_id, session=args.session

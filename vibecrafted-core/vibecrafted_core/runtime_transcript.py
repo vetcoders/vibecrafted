@@ -363,9 +363,22 @@ class InteractiveTranscriptCapture:
 
     def _drain(self) -> None:
         import errno
+        import fcntl
+        import select
+        import termios
 
         try:
             while True:
+                # The provider sees this output PTY, so keep its geometry in
+                # step with the original terminal even during quiet periods.
+                try:
+                    size = fcntl.ioctl(self.display_fd, termios.TIOCGWINSZ, b"\0" * 8)
+                    fcntl.ioctl(self.master, termios.TIOCSWINSZ, size)
+                except (OSError, ValueError):
+                    pass
+                ready, _, _ = select.select([self.master], [], [], 0.1)
+                if not ready:
+                    continue
                 try:
                     chunk = os.read(self.master, 65536)
                 except OSError as exc:

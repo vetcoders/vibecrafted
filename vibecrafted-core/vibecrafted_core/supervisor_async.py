@@ -759,6 +759,16 @@ class AsyncSupervisor:
             return handle
 
         handle.exit_code = handle.process.returncode
+        if handle.meta_path is not None:
+            try:
+                fork_meta = json.loads(handle.meta_path.read_text())
+            except (OSError, ValueError):
+                fork_meta = {}
+            if fork_meta.get("native_fork") and (
+                not handle.agent_session_id
+                or handle.agent_session_id == fork_meta.get("fork_source_session_id")
+            ):
+                handle.exit_code = 1
         handle.completed_at = _utc_now()
         operator_stop = await asyncio.to_thread(
             _accepted_operator_stop,

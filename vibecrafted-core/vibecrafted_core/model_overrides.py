@@ -11,6 +11,7 @@ MODEL_OVERRIDE_FLAGS = {
     "claude": "--model",
     "codex": "-m",
     "cursor": "--model",
+    "junie": "--model",
     # grok 1.0.21 documents both `-m` and `--model`; inject the long form to
     # match grok_spawn.sh, and treat `-m` as an existing pin.
     "grok": "--model",

@@ -1665,7 +1665,7 @@ def test_full_lineage_requires_explicit_parent_evidence() -> None:
     assert "--fork-session" not in command
 
 
-def test_bare_fork_rejects_missing_malformed_current_and_unsupported_parent(
+def test_bare_fork_rejects_missing_malformed_and_unsupported_parent(
     monkeypatch,
 ) -> None:
     for parent in ("", "bad parent", "*"):
@@ -1673,13 +1673,6 @@ def test_bare_fork_rejects_missing_malformed_current_and_unsupported_parent(
             resolve_continuity_policy(
                 "bare-fork", provider="claude", parent_session_id=parent, env={}
             )
-    with pytest.raises(ValueError, match="current provider session"):
-        resolve_continuity_policy(
-            "bare-fork",
-            provider="claude",
-            parent_session_id="same-session",
-            env={"CLAUDE_CODE_SESSION_ID": "same-session"},
-        )
     with pytest.raises(ValueError, match="unsupported for agy"):
         resolve_continuity_policy(
             "bare-fork", provider="agy", parent_session_id="agy-parent", env={}

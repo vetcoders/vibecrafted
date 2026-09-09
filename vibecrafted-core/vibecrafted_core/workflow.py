@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -2055,6 +2056,9 @@ def _launch_tracking_payload(
             "resume_root",
             "attempt",
             "native_resume",
+            "native_fork",
+            "fork_source_session_id",
+            "parent_run_id",
             "resume_idempotency_key",
             "dispatch_run_id",
             "dispatch_cut_id",
@@ -3192,7 +3196,10 @@ def launch_workflow(
         emit_json=spec.runtime not in {"terminal", "visible"},
         quiet=spec.runtime in {"terminal", "visible"},
         lifecycle_state_path=spec.lifecycle_state_path,
-        salvage_report_from_stream=bool((launch_meta or {}).get("native_resume")),
+        salvage_report_from_stream=bool(
+            (launch_meta or {}).get("native_resume")
+            or (launch_meta or {}).get("native_fork")
+        ),
     )
     launch_dir = control_plane_home() / "launches"
     launch_dir.mkdir(parents=True, exist_ok=True)
@@ -4966,12 +4973,112 @@ def manual_resume_session(
     }
 
 
+def manual_fork_session(
+    agent: str,
+    session: str,
+    source_dir: str | Path,
+    *,
+    prompt: str,
+    root: str | Path,
+    model: str | None = None,
+    base: str = "",
+    worktree: str | bool | None = None,
+    execution_runtime: str = "",
+    source_path: str = "",
+    parent_run_id: str = "",
+    permissions: str = "",
+) -> dict[str, Any]:
+    """Admit a native task fork using the existing private tracked launcher."""
+    source = resolve_fork_source(agent, session=session)
+    if not source.get("accepted"):
+        return source
+    try:
+        command, probe_state, version = _verified_native_resume_command(agent, session)
+        if agent == "codex":
+            # The resume probe alone is insufficient evidence of exec fork.
+            probe = subprocess.run(
+                [command[0], "exec", "fork", "--help"],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            if (
+                probe.returncode
+                or b"<SESSION_ID>" not in probe.stdout
+                or b"stdin" not in probe.stdout
+            ):
+                raise ValueError(
+                    "installed Codex does not confirm exec fork stdin contract"
+                )
+        elif agent not in {"claude", "grok"}:
+            raise ValueError("native task fork is unverified for this provider")
+        spec = normalize_launch_spec(
+            {
+                "agent": agent,
+                "skill": "workflow",
+                "prompt": prompt,
+                "root": str(root),
+                "repo_selector": True,
+                "runtime": "headless",
+                "model": model,
+                "base": base,
+                "worktree": worktree,
+                "execution_runtime": execution_runtime,
+                "permissions": permissions,
+            },
+            source_dir,
+        )
+        # Reuse the normal permission owner; only native continuation differs.
+        executable = command[0]
+        command = _stdin_command(agent, controls=launch_execution_controls(spec))
+        if agent == "codex":
+            command = [*command[:-1], "fork", session, "-"]
+        else:
+            command.extend(["--resume", session, "--fork-session"])
+        command[0] = executable
+        command = _with_model_override(agent, command, spec.model)
+        spec = replace(
+            spec,
+            run_id=reserve_run_id("fork"),
+            mode="native_fork",
+            source_path=source_path,
+            plan_source=prompt,
+        )
+        runtime_session = ensure_session_id()
+        return launch_workflow(
+            spec,
+            source_dir,
+            env={
+                "VIBECRAFTED_SESSION_ID": runtime_session,
+                "VIBECRAFTED_AGENT_SESSION_ID": "",
+                "VIBECRAFTED_FORK_SOURCE_SESSION_ID": session,
+            },
+            worker_command_override=command,
+            launch_meta={
+                "native_fork": True,
+                "fork_source_session_id": session,
+                "parent_run_id": parent_run_id or source.get("source_run_id", ""),
+                "runtime_session_id": runtime_session,
+                "provider_probe_state": probe_state,
+                "provider_version": version,
+            },
+        )
+    except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "accepted": False,
+            "reason": "native_fork_admission_failed",
+            "detail": str(exc),
+            "agent": agent,
+        }
+
+
 CONTROL_PLANE_RUN_PREFIXES = frozenset(
     {
         "work",
         "impl",
         "wflw",
         "rsme",
+        "fork",
         "marb",
         "just",
         "scaf",
@@ -5119,11 +5226,112 @@ def _fork_source_rejection(
     return payload
 
 
+def resolve_session_selection(
+    agent: str,
+    selector: str,
+    root: str | Path,
+    *,
+    environment: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Resolve public current/last without global recency or implicit cloning.
+
+    Last is the newest recorded native session in this exact checkout/provider;
+    equal timestamps for different sessions are ambiguous, never arbitrary.
+    Current requires explicit process context and agrees with recorded ownership.
+    """
+    provider = agent.strip().lower()
+    selected_root = str(Path(root).expanduser().resolve())
+    token = selector.strip()
+    if token == "previous":
+        raise ValueError(
+            "--session previous is retired; use current, last or an exact ID"
+        )
+    provenance = "explicit_session"
+    if token == "current":
+        context = os.environ if environment is None else environment
+        identities: set[str] = set()
+        keys = {
+            "codex": ("CODEX_THREAD_ID", "CODEX_SESSION_ID"),
+            "claude": ("CLAUDE_CODE_SESSION_ID",),
+            "grok": ("GROK_SESSION_ID",),
+        }.get(provider, ())
+        for key in keys:
+            if context.get(key):
+                identities.add(context[key])
+        if context.get("VIBECRAFTED_AGENT") == provider and context.get(
+            "VIBECRAFTED_AGENT_SESSION_ID"
+        ):
+            identities.add(context["VIBECRAFTED_AGENT_SESSION_ID"])
+        parent_id = context.get("VIBECRAFTED_RUN_ID", "")
+        parent = lookup_run(parent_id) if parent_id else None
+        if parent and parent.get("agent") == provider:
+            native = _provider_session_for_continue(parent)
+            if native:
+                identities.add(native)
+        if len(identities) != 1:
+            raise ValueError(
+                "current requires one explicit provider session in parent context"
+            )
+        token = identities.pop()
+        provenance = "explicit_parent_context"
+        if (
+            not find_run_for_identity_token(token)
+            and str(Path.cwd().resolve()) != selected_root
+        ):
+            raise ValueError(
+                "unrecorded current session belongs to caller checkout; explicit repo differs"
+            )
+    elif token == "last":
+        candidates: dict[str, tuple[float, dict[str, Any]]] = {}
+        for path in (control_plane_home() / "runtime_runs").glob("*/meta.json"):
+            row = _read_json_object(path)
+            if row.get("agent") != provider or not row.get("root"):
+                continue
+            if str(Path(row["root"]).resolve()) != selected_root:
+                continue
+            native = _provider_session_for_continue(row)
+            stamp = str(row.get("started_at") or row.get("created_at") or "")
+            try:
+                instant = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                if instant.tzinfo is None:
+                    continue
+                timestamp = instant.astimezone(timezone.utc).timestamp()
+            except ValueError:
+                continue
+            if native and timestamp > candidates.get(native, (float("-inf"), {}))[0]:
+                candidates[native] = (timestamp, row)
+        if not candidates:
+            raise ValueError(
+                "no recorded native session for selected repository/provider"
+            )
+        newest = max(value[0] for value in candidates.values())
+        winners = [native for native, value in candidates.items() if value[0] == newest]
+        if len(winners) != 1:
+            raise ValueError(
+                "last is ambiguous: equal timestamps for different native sessions"
+            )
+        token = winners[0]
+        provenance = "repository_provider_latest_started"
+    result = resolve_fork_source(provider, session=token, require_native_fork=False)
+    if not result.get("accepted"):
+        raise ValueError(str(result.get("detail") or result.get("reason")))
+    recorded_root = result.get("source_root")
+    if recorded_root and str(Path(recorded_root).resolve()) != selected_root:
+        raise ValueError("selected session belongs to a different repository checkout")
+    return {
+        **result,
+        "session_selector": selector,
+        "identity_source": provenance,
+        "selection_root": selected_root,
+    }
+
+
 def resolve_fork_source(
     agent: str,
     *,
     run_id: str = "",
     session: str = "",
+    require_native_fork: bool = True,
 ) -> dict[str, Any]:
     """Resolve the stable provider identity a ``vibecrafted fork`` branches from.
 
@@ -5145,7 +5353,7 @@ def resolve_fork_source(
         return _fork_source_rejection(
             normalized_agent, "unknown_agent", detail=str(exc)
         )
-    if capability.native_fork == UNSUPPORTED:
+    if require_native_fork and capability.native_fork == UNSUPPORTED:
         return _fork_source_rejection(
             normalized_agent,
             "native_fork_unsupported",
@@ -5174,6 +5382,12 @@ def resolve_fork_source(
         )
 
     if target_session:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", target_session):
+            return _fork_source_rejection(
+                normalized_agent,
+                "invalid_session_id",
+                detail="use a native session ID, not flags, paths or a title",
+            )
         kind = classify_resume_identity(target_session)
         if kind == "run_id" or looks_like_control_plane_run_id(target_session):
             return _fork_source_rejection(

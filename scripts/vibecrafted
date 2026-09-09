@@ -1126,7 +1126,7 @@ cmd_resume_help() {
   printf '%bExamples:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted resume claude --run-id work-260816-213657-08420\n'
   printf '  vibecrafted resume claude --run-id work-260816-213657-08420 --prompt "continue"\n'
-  printf '  vibecrafted resume claude --last\n'
+  printf '  vibecrafted resume claude --session last\n'
   printf '  vibecrafted resume claude --session abc123\n'
   printf '  vibecrafted resume codex --session abc123 --prompt "Continue from the failing test"\n'
   printf '  vibecrafted resume grok\n'
@@ -1142,19 +1142,18 @@ cmd_fork_help() {
   printf '%b─────────────────────────────────────────%b\n' "$_steel" "$_reset"
   printf '  Branch a provider session into a NEW session; the source session stays untouched.\n'
   printf '  Native forks: codex (codex fork), claude and grok (--resume <id> --fork-session).\n'
-  printf '  cursor, agy and junie expose no fork surface: vibecrafted resume <agent> --session <id>\n'
+  printf '  cursor, agy and junie have no verified native fork adapter: vibecrafted resume <agent> --session <id>\n'
   printf '  continues the ORIGINAL session there (a resume, never presented as a fork).\n'
   printf '\n%bUsage:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted fork <claude|codex|grok> --session <provider-session-id> [flags]\n'
   printf '  vibecrafted fork <claude|codex|grok> --run-id <work-...> [flags]\n'
-  printf '  vibecrafted fork codex --session current|previous [flags]   # AICX resolves the id\n'
+  printf '  vibecrafted fork codex --session current|last [flags]   # explicit context or scoped run records\n'
   printf '\n%bOptions:%b\n' "$_bold" "$_reset"
-  printf '  --session <id|current|previous>     provider session to branch from (never a work-* run id)\n'
+  printf '  --session <id|current|last>     provider session to branch from (never a work-* run id)\n'
   printf '  --run-id <work-...>                 control-plane run; its recorded provider session is the source\n'
   printf '  --repo <path|org/name>              canonical repository (--root: equivalent legacy alias)\n'
-  printf '  --runtime visible|terminal          pane in this vc-frame tab; outside a watched pane the repo'"'"'s own workspace\n'
-  printf '                                      session hosts the fork as a tab (a terminal is opened when there is none;\n'
-  printf '                                      --runtime terminal in a plain TTY execs the provider directly); headless is refused\n'
+  printf '  --runtime visible|terminal          bare interactive fork (default: visible)\n'
+  printf '  --runtime headless                  task fork with --prompt/--file (default with input)\n'
   printf '  --placement right|floating          pane shape (default: right)\n'
   printf '  --model <name>                      provider model override\n'
   printf '  --permissions bypass|auto|accept-edits|read-only  provider permission contract (codex: no accept-edits)\n'
@@ -5912,50 +5911,7 @@ cmd_agents() {
 }
 
 _vibecrafted_fork_session_id() {
-  local agent="$1" selector="$2" root_dir="$3"
-  if [[ "$selector" != current && "$selector" != previous ]]; then
-    printf '%s\n' "$selector"
-    return 0
-  fi
-  command -v aicx >/dev/null 2>&1 || {
-    echo "aicx is required for --session ${selector}; pass an exact session id instead." >&2
-    return 1
-  }
-
-  local python_bin current_json current_fields current_id current_agent
-  python_bin="$(_vibecrafted_python)"
-  current_json="$(cd "$root_dir" && aicx sessions current --json)" || return 1
-  current_fields="$(
-    printf '%s' "$current_json" | "$python_bin" -c \
-      'import json,sys; p=json.load(sys.stdin); print(str(p.get("session_id") or "")+"\t"+str(p.get("agent") or ""))'
-  )" || return 1
-  current_id="${current_fields%%$'\t'*}"
-  current_agent="${current_fields#*$'\t'}"
-  [[ -n "$current_id" ]] || {
-    echo "AICX did not resolve a current provider session in ${root_dir}." >&2
-    return 1
-  }
-  [[ "$current_agent" == "$agent" ]] || {
-    printf 'AICX current session belongs to %s, not %s; pass an exact session id.\n' "${current_agent:-unknown}" "$agent" >&2
-    return 1
-  }
-  if [[ "$selector" == current ]]; then
-    printf '%s\n' "$current_id"
-    return 0
-  fi
-
-  local sessions_json previous_id
-  sessions_json="$(cd "$root_dir" && aicx sessions list --cwd --agent "$agent" --limit 20 --format json)" || return 1
-  previous_id="$(
-    printf '%s' "$sessions_json" | "$python_bin" -c \
-      'import json,sys; current=sys.argv[1]; rows=json.load(sys.stdin); print(next((str(row.get("session_id") or "") for row in rows if str(row.get("session_id") or "") and str(row.get("session_id")) != current), ""))' \
-      "$current_id"
-  )" || return 1
-  [[ -n "$previous_id" ]] || {
-    echo "AICX found no previous ${agent} session for ${root_dir}." >&2
-    return 1
-  }
-  printf '%s\n' "$previous_id"
+  _vetcoders_run_core_cli session-source "$1" --session "$2" --root "$3" --id-only
 }
 
 # Ask core for the stable provider identity a fork branches from. Prints
@@ -6024,7 +5980,8 @@ cmd_fork() {
     return 1
   }
 
-  local selector="" run_id="" runtime="visible" placement="right"
+  local selector="" run_id="" runtime="" placement="right"
+  local input_explicit=""
   local model="" permissions="" repo_dir="" root_dir="" prompt=""
   local plan_file="" base="" execution="" worktree=""
   while [[ $# -gt 0 ]]; do
@@ -6037,8 +5994,8 @@ cmd_fork() {
       --repo=*) repo_dir="${1#--repo=}" ;;
       --root) shift; [[ $# -gt 0 ]] || { echo "Missing value for --root" >&2; return 2; }; root_dir="$1" ;;
       --root=*) root_dir="${1#--root=}" ;;
-      --file) shift; [[ $# -gt 0 ]] || return 2; plan_file="$1" ;;
-      --prompt-stdin) IFS= read -r -d '' prompt || true; [[ -n "$prompt" ]] || { echo "Empty --prompt-stdin" >&2; return 2; } ;;
+      --file) shift; [[ $# -gt 0 ]] || return 2; plan_file="$1"; input_explicit=1 ;;
+      --prompt-stdin) input_explicit=1; IFS= read -r -d '' prompt || true; [[ -n "$prompt" ]] || { echo "Empty --prompt-stdin" >&2; return 2; } ;;
       --base) shift; [[ $# -gt 0 ]] || return 2; base="$1" ;;
       --execution-runtime) shift; [[ $# -gt 0 ]] || return 2; execution="$1" ;;
       --worktree) worktree=true; if [[ $# -gt 1 && "$2" =~ ^(true|false)$ ]]; then shift; worktree="$1"; fi ;;
@@ -6048,36 +6005,28 @@ cmd_fork() {
       --floating) placement="floating" ;;
       --model) shift; [[ $# -gt 0 ]] || { echo "Missing value for --model" >&2; return 2; }; model="$1" ;;
       --permissions) shift; [[ $# -gt 0 ]] || { echo "Missing value for --permissions" >&2; return 2; }; permissions="$1" ;;
-      -p|--prompt) shift; [[ $# -gt 0 ]] || { echo "Missing value for --prompt" >&2; return 2; }; prompt="$1" ;;
+      -p|--prompt) shift; [[ $# -gt 0 ]] || { echo "Missing value for --prompt" >&2; return 2; }; prompt="$1"; input_explicit=1 ;;
       -h|--help) cmd_fork_help; return 0 ;;
       *) printf 'Unknown fork argument: %s\n' "$1" >&2; return 2 ;;
     esac
     shift
   done
   [[ -n "$selector" || -n "$run_id" ]] || {
-    echo "fork requires --session current|previous|<provider-session-id> or --run-id <work-...>." >&2
+    echo "fork requires --session current|last|<provider-session-id> or --run-id <work-...>." >&2
     return 2
   }
   [[ -z "$selector" || -z "$run_id" ]] || {
     echo "fork takes one identity: --session or --run-id, not both." >&2
     return 2
   }
-  case "$runtime" in
-    visible|terminal) ;;
-    headless)
-      case "$agent" in
-        codex) echo "codex fork is an interactive TUI; --runtime headless cannot preserve a usable fork." >&2 ;;
-        claude|grok)
-          printf '%s --resume <id> --fork-session is an interactive fork; a headless tracked fork is not wired in this release.\n' "$agent" >&2
-          printf '  Use --runtime terminal|visible, or continue the ORIGINAL session headlessly with:\n' >&2
-          printf '    vibecrafted resume-session %s --agent-session-id <id> --prompt "..."   (a resume, not a fork)\n' "$agent" >&2
-          ;;
-        *) printf '%s has no native fork surface; --runtime headless changes nothing about that.\n' "$agent" >&2 ;;
-      esac
-      return 2
-      ;;
-    *) echo "Unknown fork runtime: ${runtime} (use visible or terminal; headless is refused)." >&2; return 2 ;;
-  esac
+  if [[ -n "$input_explicit" ]]; then
+    runtime="${runtime:-headless}"
+    [[ "$runtime" == headless ]] || { echo "Task fork is noninteractive; use --runtime headless." >&2; return 2; }
+    [[ -z "$plan_file" || -z "$prompt" ]] || { echo "Use one of --file or --prompt." >&2; return 2; }
+  else
+    runtime="${runtime:-visible}"
+    case "$runtime" in visible|terminal) ;; *) echo "Bare fork requires visible or terminal runtime." >&2; return 2 ;; esac
+  fi
   case "$placement" in
     right|floating) ;;
     *) echo "Unknown fork placement: ${placement} (use right or floating)." >&2; return 2 ;;
@@ -6101,7 +6050,7 @@ cmd_fork() {
       ;;
   esac
   _require_agent_cli "$agent" || return 1
-  # Explicit --repo/--root wins. Without one, `current|previous` mean "this
+  # Explicit --repo/--root wins. Without one, `current|last` mean "this
   # repository" (AICX picks the session for the caller's checkout), while an
   # explicit session id or a --run-id fall back to the repository the source
   # run recorded, and only then to the caller's checkout.
@@ -6136,8 +6085,24 @@ cmd_fork() {
     return 2
   }
   if [[ -z "$explicit_root" && -n "$source_root" && -d "$source_root" ]] \
-    && [[ "$selector" != current && "$selector" != previous ]]; then
+    && [[ "$selector" != current && "$selector" != last ]]; then
     root_dir="$(cd "$source_root" 2>/dev/null && pwd -P)" || return 1
+  fi
+
+  if [[ -n "$input_explicit" ]]; then
+    local -a task_args=(fork-session "$agent" --session "$session_id" --root "$root_dir")
+    [[ -z "$permissions" ]] || task_args+=(--permissions "$permissions")
+    [[ -z "$source_run_id" ]] || task_args+=(--parent-run-id "$source_run_id")
+    [[ -z "$model" ]] || task_args+=(--model "$model")
+    [[ -z "$base" ]] || task_args+=(--base "$base")
+    [[ -z "$execution" ]] || task_args+=(--execution-runtime "$execution")
+    [[ -z "$worktree" ]] || task_args+=(--worktree "$worktree")
+    if [[ -n "$plan_file" ]]; then
+      _vetcoders_run_core_cli "${task_args[@]}" --file "$plan_file"
+    else
+      printf '%s' "$prompt" | _vetcoders_run_core_cli "${task_args[@]}" --prompt-stdin
+    fi
+    return $?
   fi
 
   # The existing interactive owner admits the fork, snapshots its source and
