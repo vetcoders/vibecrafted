@@ -182,6 +182,18 @@ def test_native_session_state_routes_and_reopen(tmp_path: Path) -> None:
 
     class Fixture(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:
+            if self.path == "/stall":
+                # A healthy listener that never completes its first document.
+                # The native harness has its own short WebKit deadline and must
+                # surface a retryable failure before this response arrives.
+                import time
+
+                time.sleep(2)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"<!doctype html><title>late fixture</title>")
+                return
             if self.path == "/download":
                 self.send_response(200)
                 self.send_header("Content-Type", "application/octet-stream")

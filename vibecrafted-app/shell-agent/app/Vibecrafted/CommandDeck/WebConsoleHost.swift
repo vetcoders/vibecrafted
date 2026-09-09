@@ -139,6 +139,12 @@ final class WebConsoleSession: NSObject {
   }
 
   private let downloads: WebDownloadCoordinator
+  /// A first document that neither finishes nor fails leaves the native shell
+  /// covered forever. Bound that one proof obligation; later navigation keeps
+  /// the already committed canvas while it loads.
+  private let initialLoadTimeout: Duration
+  private var initialLoadWatchdog: Task<Void, Never>?
+  private var loadGeneration: UInt64 = 0
   /// Guards the single automatic reload after a content-process death, so a
   /// repeatedly crashing page can never become a reload loop.
   private var didAutoRecoverFromTermination = false
@@ -147,11 +153,13 @@ final class WebConsoleSession: NSObject {
     role: WebTabRole = .console,
     events: WebConsoleEvents = WebConsoleEvents(),
     websiteDataStore: WKWebsiteDataStore = .default(),
+    initialLoadTimeout: Duration = .seconds(15),
     downloadDestinationProvider: @escaping WebDownloadDestinationProvider = WebDownloadCoordinator.savePanelDestinationProvider
   ) {
     self.role = role
     self.events = events
     self.downloads = WebDownloadCoordinator(destinationProvider: downloadDestinationProvider)
+    self.initialLoadTimeout = initialLoadTimeout
     self.webView = WKWebView(frame: .zero, configuration: Self.makeConfiguration(role: role, websiteDataStore: websiteDataStore))
     super.init()
 
@@ -206,6 +214,7 @@ final class WebConsoleSession: NSObject {
   func apply(endpoint: URL?) {
     guard let endpoint else {
       // Preserve cookies and route, but fence completions from the old owner.
+      replaceLoadGeneration()
       activeNavigation = nil
       lastCommittedURL = nil
       appliedEndpoint = nil
@@ -259,6 +268,7 @@ final class WebConsoleSession: NSObject {
     components.path = "/"
     components.query = nil
     components.fragment = nil
+    replaceLoadGeneration()
     lastCommittedURL = nil
     appliedEndpoint = components.url
     scope = .service(origin)
@@ -275,6 +285,7 @@ final class WebConsoleSession: NSObject {
       return
     }
     let document = localDocument.standardizedFileURL
+    replaceLoadGeneration()
     appliedEndpoint = nil
     lastCommittedURL = nil
     scope = .localDocument(document)
@@ -331,16 +342,63 @@ final class WebConsoleSession: NSObject {
 
   private func load(_ url: URL) {
     rememberRoute(url)
+    let generation = replaceLoadGeneration()
     updateState(.loading(url))
     var request = URLRequest(url: url)
     // A restarted server must not be answered out of the cache.
     request.cachePolicy = .reloadIgnoringLocalCacheData
     activeNavigation = webView.load(request)
+    if lastCommittedURL == nil {
+      armInitialLoadWatchdog(for: url, generation: generation)
+    }
+  }
+
+  /// Replacing or withdrawing a navigation makes every callback and deadline
+  /// associated with the former document stale before WebKit is asked to stop
+  /// or begin the next one.
+  @discardableResult
+  private func replaceLoadGeneration() -> UInt64 {
+    loadGeneration &+= 1
+    initialLoadWatchdog?.cancel()
+    initialLoadWatchdog = nil
+    return loadGeneration
+  }
+
+  /// The first successful document is the only evidence that may uncover the
+  /// canvas. If WebKit loses both its completion and failure callback, turn
+  /// that silence into the ordinary retryable failure state instead of leaving
+  /// an opaque Connecting cover indefinitely.
+  private func armInitialLoadWatchdog(for url: URL, generation: UInt64) {
+    let timeout = initialLoadTimeout
+    initialLoadWatchdog = Task { @MainActor [weak self] in
+      try? await Task.sleep(for: timeout)
+      guard !Task.isCancelled else { return }
+      self?.expireInitialLoad(for: url, generation: generation)
+    }
+  }
+
+  private func expireInitialLoad(for url: URL, generation: UInt64) {
+    guard self.loadGeneration == generation,
+      lastCommittedURL == nil,
+      case .loading = loadState
+    else { return }
+    activeNavigation = nil
+    webView.stopLoading()
+    updateState(.failed(
+      url: url,
+      reason: "The server page did not finish loading. Retry Connection to try again."))
   }
 
   private func updateState(_ state: WebConsoleLoadState) {
     syncNavigation()
     guard loadState != state else { return }
+    switch state {
+    case .idle, .loaded, .failed, .interrupted:
+      initialLoadWatchdog?.cancel()
+      initialLoadWatchdog = nil
+    case .loading:
+      break
+    }
     loadState = state
     events.stateDidChange(state)
   }

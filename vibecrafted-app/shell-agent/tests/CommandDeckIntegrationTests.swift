@@ -397,6 +397,59 @@ struct CommandDeckIntegrationTests {
     controller.close()
   }
 
+  /// A live endpoint can still leave WebKit without a completion callback.
+  /// Before the watchdog this fixture waited until the harness timeout while
+  /// the Command Deck stayed Connecting. The timeout must instead become a
+  /// retryable web failure, and it must reach the AppModel rather than merely
+  /// changing a private session field.
+  static func firstLoadTimeoutContract(_ endpoint: URL, reconnectEndpoint: URL) async throws {
+    let resolver = RuntimeEndpointResolver { _ in
+      ServerNavigationState(server: endpoint, workspaces: endpoint, unavailableReason: nil)
+    }
+    let model = AppModel(endpointResolver: resolver)
+    let session = WebConsoleSession(
+      websiteDataStore: .nonPersistent(), initialLoadTimeout: .milliseconds(200),
+      downloadDestinationProvider: { _, _, _ in nil })
+    session.navigate(path: "/stall")
+    model.endpointDidChange = { session.apply(endpoint: $0) }
+    session.events.stateDidChange = { model.receiveWebState($0) }
+    model.refreshEndpoint(caretakerData: nil, runtimeReady: true)
+
+    try await waitFor {
+      if case .failed(_, let reason) = session.loadState {
+        return reason.contains("did not finish loading")
+      }
+      return false
+    }
+    guard case .recovering(let reason) = model.state else {
+      throw Failure(message: "Timed-out first load left the model in \(model.state)")
+    }
+    try require(reason.contains("did not finish loading"), "First-load timeout was not actionable")
+    try require(!model.presentation.exposesCanvas, "Timed-out first load exposed an unproven canvas")
+
+    // Withdrawing or replacing an endpoint invalidates the older watchdog.
+    // Its eventual timeout must never overwrite the state of the later owner.
+    let replacement = WebConsoleSession(
+      websiteDataStore: .nonPersistent(), initialLoadTimeout: .milliseconds(200),
+      downloadDestinationProvider: { _, _, _ in nil })
+    replacement.navigate(path: "/stall")
+    replacement.apply(endpoint: endpoint)
+    try await tick()
+    replacement.apply(endpoint: nil)
+    try await Task.sleep(for: .milliseconds(300))
+    try require(replacement.loadState == .idle, "Withdrawn endpoint accepted a stale timeout")
+
+    replacement.apply(endpoint: endpoint)
+    try await tick()
+    replacement.apply(endpoint: reconnectEndpoint)
+    try await waitFor {
+      if case .failed(let url, let reason) = replacement.loadState {
+        return url?.port == reconnectEndpoint.port && reason.contains("did not finish loading")
+      }
+      return false
+    }
+  }
+
 
   /// Real WKWebView proof: an endpoint link and a `_blank` link leave the
   /// console document, its DOM edit state and its history untouched; tabs are
@@ -887,6 +940,7 @@ struct CommandDeckIntegrationTests {
     try tabPolicyContract(endpoint)
     try destinationContract(endpoint)
     try await webContract(endpoint)
+    try await firstLoadTimeoutContract(endpoint, reconnectEndpoint: reconnectEndpoint)
     try await tabsContract(endpoint, reconnectEndpoint: reconnectEndpoint)
     try await homeContract(endpoint, reconnectEndpoint: reconnectEndpoint)
     print("CommandDeckIntegrationTests passed")
