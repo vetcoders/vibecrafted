@@ -7,6 +7,7 @@ import datetime as dt
 import hashlib
 import inspect
 import json
+import logging
 import os
 import re
 import shlex
@@ -1574,7 +1575,7 @@ def launch_interactive_workspace(
             "continuity validation failed before provider spawn",
             {**failed, "meta": str(meta_path)},
         )
-        _publish_interactive_projection(run_id)
+        _flush_terminal_projection(run_id, failed)
         raise
     if operator_policy.provider is not None:
         return _launch_supervised_interactive_workspace(
@@ -1732,7 +1733,10 @@ def launch_interactive_workspace(
         "interactive Agent Workspace provider child is live",
         {**receipt, "meta": str(launch.meta_path), "identity_required": True},
     )
-    _publish_interactive_projection(launch.run_id)
+    projection = _InteractiveProjection(
+        run_id=launch.run_id, meta_path=launch.meta_path, receipt=receipt
+    )
+    projection.publish()
     quota_exhausted = False
     provider_returncode: int
     try:
@@ -1743,6 +1747,9 @@ def launch_interactive_workspace(
                 receipt["measured_usage"] = measured_usage
                 receipt["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
                 _write_meta(launch.meta_path, receipt)
+            # Owned recovery of a deferred ACTIVE publication: same owner,
+            # same poll loop, no observer required while the provider idles.
+            projection.pump()
             if (
                 current_returncode is None
                 and not received_signal
@@ -2179,6 +2186,12 @@ def _launch_supervised_interactive_workspace(
         worker_pid=operator_child.pid,
         table=identity_table,
     )
+    child_projection = _InteractiveProjection(
+        run_id=launch.run_id, meta_path=launch.meta_path, receipt=child_receipt
+    )
+    operator_projection = _InteractiveProjection(
+        run_id=operator_run_id, meta_path=operator_meta_path, receipt=operator_receipt
+    )
     try:
         _write_meta(launch.meta_path, child_receipt)
         _write_meta(operator_meta_path, operator_receipt)
@@ -2202,8 +2215,8 @@ def _launch_supervised_interactive_workspace(
                 "identity_required": True,
             },
         )
-        _publish_interactive_projection(launch.run_id)
-        _publish_interactive_projection(operator_run_id)
+        child_projection.publish()
+        operator_projection.publish()
     except Exception as exc:
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
@@ -2245,6 +2258,8 @@ def _launch_supervised_interactive_workspace(
                     dt.timezone.utc
                 ).isoformat()
                 _write_meta(launch.meta_path, child_receipt)
+            child_projection.pump()
+            operator_projection.pump()
             events, protocol_offset = _poll_operator_protocol(
                 protocol_path, protocol_offset
             )
@@ -2592,7 +2607,7 @@ def _terminalize_related_receipt(
         f"Operator Agent terminal: {terminal_reason}",
         {**terminal, "meta": str(meta_path), "identity_required": True},
     )
-    _publish_interactive_projection(run_id)
+    _flush_terminal_projection(run_id, terminal)
     return terminal
 
 
@@ -2641,40 +2656,249 @@ def _attach_interactive_process_identity(
         receipt["worker_identity"] = worker_identity
 
 
-def _publish_interactive_projection(run_id: str) -> str:
-    """Project one interactive run into its canonical ``runs/<id>.json`` snapshot.
+# --- Canonical snapshot publication: owned, bounded recovery -----------------
+#
+# Lifecycle ownership. The interactive owner process (the pane launcher that
+# holds the provider child) owns its run's ``runs/<id>.json`` publication for
+# exactly as long as it lives. Recovery after a transient failure therefore
+# runs on the owner's own poll loop (no thread, no helper process, nothing to
+# reap or leak at exit) and, at terminalization, as one synchronous bounded
+# flush before the owner returns. The snapshot authority stays single and the
+# scope stays exact: every attempt is the same ``sync_state(only_run_id=...)``.
+# Persistent failure is abandoned loudly — stderr, a durable
+# ``projection:abandoned`` event and the meta receipt — while meta.json plus the
+# lifecycle event remain the durable truth a later full board sync re-projects.
+#
+# Retry bound. ACTIVE phase: at most _PROJECTION_ACTIVE_ATTEMPT_LIMIT attempts
+# with exponential backoff 0.5s·2^(n-1) capped at 30s (≈7 min of coverage).
+# TERMINAL phase (owner exit): at most _PROJECTION_TERMINAL_BUDGET_SECONDS of
+# wall clock and _PROJECTION_TERMINAL_ATTEMPT_LIMIT attempts, interrupt-safe.
+_PROJECTION_RETRY_INITIAL_SECONDS = 0.5
+_PROJECTION_RETRY_MAX_SECONDS = 30.0
+_PROJECTION_ACTIVE_ATTEMPT_LIMIT = 20
+_PROJECTION_TERMINAL_BUDGET_SECONDS = 5.0
+_PROJECTION_TERMINAL_ATTEMPT_LIMIT = 6
+# ControlPlaneLockBusy is kept for completeness: the scoped projection takes no
+# global sync lock, so the live failure classes here are storage/OS errors and
+# a refused run-meta mutation (ValueError), not the board-sync lock.
+_PROJECTION_ERRORS: tuple[type[BaseException], ...] = (
+    ControlPlaneLockBusy,
+    ControlPlaneStorageError,
+    OSError,
+    RuntimeError,
+    ValueError,
+)
+_projection_log = logging.getLogger(__name__)
 
-    The public server projection (``/api/control/state`` → control-core
-    ``read_state_view``) trusts the retained snapshots the Python writer
-    produces; it folds neither ``runtime_runs/`` nor the event stream on its
-    own. Headless dispatch reaches that snapshot through the workflow board
-    sync, but an interactive Agent Workspace published only ``meta.json`` plus
-    a ``lifecycle:*`` event — a living provider stayed invisible in Live Runs
-    until some observer happened to call ``sync_state``. Publish the scoped
-    projection here, at the same moments the lifecycle event is appended.
 
-    Scoped to this run id: an unrelated stale, dead or test run is never
-    re-projected or promoted by an interactive launch. Best-effort by design:
-    meta and the event stream stay the durable truth and the next sync
-    re-projects from them, so a projection failure is logged instead of
-    killing a live provider child.
-    """
+def _project_interactive_snapshot(run_id: str) -> str:
+    """One scoped canonical projection attempt: '' on success, else the error."""
     try:
         sync_state(only_run_id=run_id)
-    except (
-        ControlPlaneLockBusy,
-        ControlPlaneStorageError,
-        OSError,
-        RuntimeError,
-        ValueError,
-    ) as exc:
-        import logging
+    except _PROJECTION_ERRORS as exc:
+        return f"{type(exc).__name__}: {exc}"
+    return ""
 
-        logging.getLogger(__name__).warning(
-            "interactive run %s snapshot projection deferred: %s", run_id, exc
+
+def _projection_backoff_seconds(failures: int) -> float:
+    exponent = max(int(failures) - 1, 0)
+    return min(
+        _PROJECTION_RETRY_MAX_SECONDS,
+        _PROJECTION_RETRY_INITIAL_SECONDS * (2.0**exponent),
+    )
+
+
+def _record_projection_abandoned(
+    run_id: str,
+    *,
+    phase: str,
+    attempts: int,
+    last_error: str,
+    receipt: Mapping[str, Any],
+) -> None:
+    """Make a persistent projection failure observable without inventing truth."""
+    _projection_log.error(
+        "interactive run %s canonical snapshot projection abandoned after %d %s "
+        "attempt(s); meta.json and the lifecycle event remain the durable truth "
+        "(run `vibecrafted control-plane sync` once the cause is fixed): %s",
+        run_id,
+        attempts,
+        phase,
+        last_error,
+    )
+    try:
+        append_event(
+            "projection:abandoned",
+            run_id,
+            f"canonical snapshot projection abandoned ({phase})",
+            {
+                "run_id": run_id,
+                "phase": phase,
+                "attempts": int(attempts),
+                "last_error": last_error,
+                "state": str(receipt.get("status") or ""),
+                "liveness": str(receipt.get("liveness") or ""),
+            },
         )
-        return f"deferred:{exc}"
-    return "published"
+    except _PROJECTION_ERRORS as exc:
+        _projection_log.error(
+            "interactive run %s projection abandonment event not durable: %s",
+            run_id,
+            exc,
+        )
+
+
+@dataclass
+class _InteractiveProjection:
+    """Owner-side ACTIVE publication of one run's canonical snapshot.
+
+    ``publish`` is the first attempt right after the ``lifecycle:active``
+    event; ``pump`` is called from the owner's existing provider poll loop and
+    retries a pending publication when its backoff is due. No thread, no
+    timer: the retry lives and dies with the owner, and a terminalization
+    supersedes any pending ACTIVE publication with its own bounded flush.
+    """
+
+    run_id: str
+    meta_path: Path
+    receipt: dict[str, Any]
+    clock: Callable[[], float] = time.monotonic
+    attempts: int = 0
+    failures: int = 0
+    next_attempt_at: float = 0.0
+    status: str = "unpublished"
+    last_error: str = ""
+    first_failed_at: str = ""
+
+    def publish(self) -> str:
+        return self._attempt()
+
+    def pump(self) -> str:
+        if self.status != "pending" or self.clock() < self.next_attempt_at:
+            return self.status
+        return self._attempt()
+
+    def _attempt(self) -> str:
+        self.attempts += 1
+        error = _project_interactive_snapshot(self.run_id)
+        if not error:
+            if self.failures:
+                _projection_log.warning(
+                    "interactive run %s snapshot projection recovered on attempt %d",
+                    self.run_id,
+                    self.attempts,
+                )
+            self.status = "published"
+            self.last_error = ""
+            self._stamp(published_at=utc_now_iso())
+            return self.status
+        self.failures += 1
+        self.last_error = error
+        if not self.first_failed_at:
+            self.first_failed_at = utc_now_iso()
+        if self.attempts >= _PROJECTION_ACTIVE_ATTEMPT_LIMIT:
+            self.status = "abandoned"
+            self._stamp()
+            _record_projection_abandoned(
+                self.run_id,
+                phase="active",
+                attempts=self.attempts,
+                last_error=error,
+                receipt=self.receipt,
+            )
+            return self.status
+        delay = _projection_backoff_seconds(self.failures)
+        self.next_attempt_at = self.clock() + delay
+        self.status = "pending"
+        _projection_log.warning(
+            "interactive run %s snapshot projection deferred (attempt %d/%d, "
+            "owner retries in %.1fs): %s",
+            self.run_id,
+            self.attempts,
+            _PROJECTION_ACTIVE_ATTEMPT_LIMIT,
+            delay,
+            error,
+        )
+        self._stamp()
+        return self.status
+
+    def _stamp(self, **extra: Any) -> None:
+        """Mirror the publication state into the owner's meta receipt (best-effort)."""
+        self.receipt["projection"] = {
+            "status": self.status,
+            "attempts": self.attempts,
+            "last_error": self.last_error,
+            "first_failed_at": self.first_failed_at,
+            **extra,
+        }
+        try:
+            _write_meta(self.meta_path, self.receipt)
+        except OSError:
+            # The same storage fault that blocks the snapshot may block meta;
+            # the log line above already carries the truth.
+            pass
+
+
+def _flush_terminal_projection(
+    run_id: str,
+    receipt: Mapping[str, Any],
+    *,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> str:
+    """Bounded synchronous recovery of the terminal snapshot before owner exit.
+
+    Runs after the terminal meta and lifecycle event are durable, so the
+    retained terminal truth is never at stake — only its visibility. Never
+    exceeds the budget, never spawns anything, and a Ctrl-C during the flush
+    abandons it instead of unwinding the owner's exit path.
+    """
+    deadline = clock() + _PROJECTION_TERMINAL_BUDGET_SECONDS
+    attempts = 0
+    last_error = ""
+    while True:
+        attempts += 1
+        try:
+            last_error = _project_interactive_snapshot(run_id)
+        except KeyboardInterrupt:
+            last_error = "KeyboardInterrupt: terminal projection interrupted"
+            break
+        if not last_error:
+            if attempts > 1:
+                _projection_log.warning(
+                    "interactive run %s terminal snapshot projection recovered "
+                    "on attempt %d",
+                    run_id,
+                    attempts,
+                )
+            return "published"
+        remaining = deadline - clock()
+        if attempts >= _PROJECTION_TERMINAL_ATTEMPT_LIMIT or remaining <= 0:
+            break
+        delay = min(_projection_backoff_seconds(attempts), remaining)
+        _projection_log.warning(
+            "interactive run %s terminal snapshot projection deferred (attempt "
+            "%d/%d, owner retries in %.1fs within a %.0fs exit budget): %s",
+            run_id,
+            attempts,
+            _PROJECTION_TERMINAL_ATTEMPT_LIMIT,
+            delay,
+            _PROJECTION_TERMINAL_BUDGET_SECONDS,
+            last_error,
+        )
+        try:
+            sleep(delay)
+        except KeyboardInterrupt:
+            last_error = "KeyboardInterrupt: terminal projection interrupted"
+            break
+    _record_projection_abandoned(
+        run_id,
+        phase="terminal",
+        attempts=attempts,
+        last_error=last_error,
+        receipt=receipt,
+    )
+    return "abandoned"
 
 
 def _cleanup_unspawned_interactive_launch(launch: InteractiveWorkspaceLaunch) -> str:
@@ -2735,7 +2959,7 @@ def _terminalize_interactive_launch(
         f"interactive Agent Workspace terminal: {terminal_reason}",
         {**terminal, "meta": str(launch.meta_path), "identity_required": True},
     )
-    _publish_interactive_projection(launch.run_id)
+    _flush_terminal_projection(launch.run_id, terminal)
     return terminal
 
 

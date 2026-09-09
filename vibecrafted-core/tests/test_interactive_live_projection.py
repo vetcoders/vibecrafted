@@ -335,3 +335,449 @@ def test_reconcile_honours_owner_terminalized_cancelled_receipt() -> None:
     }
     reconciled = control_plane._reconcile_dead_launcher(dict(receipt))
     assert reconciled == receipt
+
+
+# --- Owned, bounded recovery of a deferred publication -----------------------
+#
+# The transient fault is injected below the writer boundary, in the real
+# filesystem: ``control_plane/runs`` is made non-writable, so the scoped
+# ``sync_state`` raises the exact storage error ``_project_interactive_snapshot``
+# reports. Nothing in production code knows it is under test. Releasing the
+# directory while the provider idles must be enough — no observe/status/await
+# runs between the release and the read.
+
+
+def _snapshot_dir(home: Path) -> Path:
+    path = home / "control_plane" / "runs"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _events_for(home: Path, run_id: str) -> list[dict[str, object]]:
+    stream = home / "control_plane" / "events.jsonl"
+    if not stream.is_file():
+        return []
+    events: list[dict[str, object]] = []
+    for line in stream.read_text(encoding="utf-8").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("run_id") == run_id:
+            events.append(event)
+    return events
+
+
+def _meta(home: Path, run_id: str) -> dict[str, object]:
+    path = home / "control_plane" / "runtime_runs" / run_id / "meta.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _wait_until(predicate, *, timeout: float, what: str) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"timed out waiting for {what}")
+
+
+def _drain_pty(master_fd: int) -> str:
+    import select
+
+    chunks: list[bytes] = []
+    while True:
+        ready, _, _ = select.select([master_fd], [], [], 0.2)
+        if not ready:
+            break
+        try:
+            chunk = os.read(master_fd, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+def _wait_owner(
+    owner: subprocess.Popen[bytes], master_fd: int, *, timeout: float
+) -> tuple[int, str]:
+    """Wait for the owner while draining its pty (a full pty blocks stderr)."""
+    deadline = time.monotonic() + timeout
+    output: list[str] = []
+    while True:
+        output.append(_drain_pty(master_fd))
+        code = owner.poll()
+        if code is not None:
+            output.append(_drain_pty(master_fd))
+            return code, "".join(output)
+        if time.monotonic() >= deadline:
+            raise AssertionError("timed out waiting for the owner to exit")
+
+
+def _spawn_blocking_owner(
+    tmp_path: Path, home: Path
+) -> tuple[subprocess.Popen[bytes], int, Path]:
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    capture = tmp_path / "provider.json"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    _fake_blocking_provider(fake_bin / "claude")
+    env = _launcher_env(home, fake_bin, SMOKE_CAPTURE=str(capture), SMOKE_BLOCK="1")
+    master_fd, slave_fd = pty.openpty()
+    owner = subprocess.Popen(
+        _interactive_argv(repo),
+        cwd=CORE_DIR,
+        env=env,
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        start_new_session=True,
+    )
+    os.close(slave_fd)
+    return owner, master_fd, capture
+
+
+def test_active_projection_recovers_after_transient_storage_failure(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    snapshots = _snapshot_dir(home)
+    snapshots.chmod(0o500)  # transient: the ACTIVE publication cannot land
+    owner, master_fd, capture = _spawn_blocking_owner(tmp_path, home)
+    try:
+        _wait_for(capture)
+        run_id = json.loads(capture.read_text(encoding="utf-8"))["run_id"]
+        _wait_until(
+            lambda: any(
+                e["kind"] == "lifecycle:active" for e in _events_for(home, run_id)
+            ),
+            timeout=5.0,
+            what="lifecycle:active event",
+        )
+        time.sleep(0.3)
+        # The fault held: the run is durable (meta + event) but not projected.
+        assert not (snapshots / f"{run_id}.json").exists()
+        assert _meta(home, run_id)["status"] == "active"
+
+        # Release the contention while the provider idles. Nothing else runs.
+        snapshots.chmod(0o755)
+        _wait_for(snapshots / f"{run_id}.json", timeout=6.0)
+        live = _snapshot(home, run_id)
+        assert live["state"] == "active"
+        assert live["health"] == "active"
+        assert live["liveness"] == "active"
+        assert "worker_pgid" not in live
+        assert _stop_signal_target(live) == ("worker_pid", live["worker_pid"])
+        assert sorted(path.stem for path in snapshots.glob("*.json")) == [run_id]
+        projection = _meta(home, run_id)["projection"]
+        assert projection["status"] == "published"
+        assert projection["attempts"] >= 2
+        assert projection["first_failed_at"]
+        assert "PermissionError" in _drain_pty(master_fd)
+
+        owner.send_signal(signal.SIGTERM)
+        assert _wait_owner(owner, master_fd, timeout=10)[0] == 128 + signal.SIGTERM
+        terminal = _snapshot(home, run_id)
+        assert terminal["state"] == "cancelled"
+        assert terminal["liveness"] == "terminal"
+    finally:
+        snapshots.chmod(0o755)
+        if owner.poll() is None:
+            owner.kill()
+            owner.wait()
+        os.close(master_fd)
+
+
+def test_terminal_projection_recovers_with_retained_terminal_truth(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    snapshots = _snapshot_dir(home)
+    owner, master_fd, capture = _spawn_blocking_owner(tmp_path, home)
+    try:
+        _wait_for(capture)
+        run_id = json.loads(capture.read_text(encoding="utf-8"))["run_id"]
+        _wait_for(snapshots / f"{run_id}.json")
+        assert _snapshot(home, run_id)["state"] == "active"
+
+        snapshots.chmod(0o500)  # transient: the TERMINAL publication cannot land
+        owner.send_signal(signal.SIGTERM)
+        _wait_until(
+            lambda: _meta(home, run_id).get("liveness") == "terminal",
+            timeout=5.0,
+            what="terminal meta receipt",
+        )
+        # Retained terminal truth is durable before any projection succeeds.
+        blocked_meta = _meta(home, run_id)
+        assert blocked_meta["status"] == "cancelled"
+        assert blocked_meta["exit_code"] == 128 + signal.SIGTERM
+        assert _snapshot(home, run_id)["state"] == "active"  # stale, not wrong
+        assert owner.poll() is None  # the owner is inside its bounded flush
+
+        time.sleep(0.6)
+        snapshots.chmod(0o755)
+        code, output = _wait_owner(owner, master_fd, timeout=10)
+        assert code == 128 + signal.SIGTERM
+        assert "terminal snapshot projection recovered" in output
+        terminal = _snapshot(home, run_id)
+        assert terminal["state"] == "cancelled"
+        assert terminal["health"] == "final"
+        assert terminal["liveness"] == "terminal"
+        assert terminal["exit_code"] == 128 + signal.SIGTERM
+        assert terminal["worker_alive"] is False
+        assert not any(
+            e["kind"] == "projection:abandoned" for e in _events_for(home, run_id)
+        )
+    finally:
+        snapshots.chmod(0o755)
+        if owner.poll() is None:
+            owner.kill()
+            owner.wait()
+        os.close(master_fd)
+
+
+def test_terminal_projection_abandons_observably_when_failure_persists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    snapshots = _snapshot_dir(home)
+    owner, master_fd, capture = _spawn_blocking_owner(tmp_path, home)
+    try:
+        _wait_for(capture)
+        run_id = json.loads(capture.read_text(encoding="utf-8"))["run_id"]
+        _wait_for(snapshots / f"{run_id}.json")
+
+        snapshots.chmod(0o500)  # persistent: never released before exit
+        started = time.monotonic()
+        owner.send_signal(signal.SIGTERM)
+        returncode, output = _wait_owner(owner, master_fd, timeout=20)
+        elapsed = time.monotonic() - started
+        # Bounded owner exit: the flush budget, not an unbounded wait.
+        assert returncode == 128 + signal.SIGTERM
+        assert elapsed < 5.0 + 4.0
+        assert _snapshot(home, run_id)["state"] == "active"  # stale, visible
+        abandoned = [
+            e for e in _events_for(home, run_id) if e["kind"] == "projection:abandoned"
+        ]
+        assert len(abandoned) == 1
+        payload = abandoned[0]["payload"]
+        assert payload["phase"] == "terminal"
+        assert payload["attempts"] >= 2
+        assert payload["state"] == "cancelled"
+        assert "PermissionError" in payload["last_error"]
+        assert "canonical snapshot projection abandoned" in output
+        assert _meta(home, run_id)["liveness"] == "terminal"
+
+        # The durable truth re-projects once the cause is fixed; the abandoned
+        # event never becomes lifecycle authority.
+        snapshots.chmod(0o755)
+        # The real owner used this per-test home.  The test process itself is
+        # isolated by conftest into another home, so make the public reader
+        # inspect the owner's actual canonical snapshots rather than an empty
+        # fixture control plane.
+        monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+        board = control_plane.sync_state()
+        settled = {run["run_id"]: run for run in board["recent_runs"]}[run_id]
+        assert settled["state"] == "cancelled"
+        assert settled["liveness"] == "terminal"
+        assert settled["exit_code"] == 128 + signal.SIGTERM
+    finally:
+        snapshots.chmod(0o755)
+        if owner.poll() is None:
+            owner.kill()
+            owner.wait()
+        os.close(master_fd)
+
+
+def test_supervised_launch_recovers_both_projections_after_transient_failure(
+    tmp_path: Path,
+) -> None:
+    import threading
+
+    home = tmp_path / "home"
+    snapshots = _snapshot_dir(home)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _fake_supervision_provider(fake_bin / "claude")
+    env = _launcher_env(home, fake_bin, SUPERVISION_CAPTURES=str(captures))
+    snapshots.chmod(0o500)
+    release = threading.Timer(1.0, lambda: snapshots.chmod(0o755))
+    release.start()
+    try:
+        completed = subprocess.run(
+            _interactive_argv(repo, "--operator", "auto"),
+            cwd=CORE_DIR,
+            env=env,
+            check=False,
+            timeout=30,
+        )
+    finally:
+        release.cancel()
+        release.join(timeout=2)
+        snapshots.chmod(0o755)
+    assert completed.returncode == 0
+    captured = {
+        role: json.loads((captures / f"{role}.json").read_text(encoding="utf-8"))
+        for role in ("operator", "agent")
+    }
+    agent = _snapshot(home, captured["agent"]["run_id"])
+    operator = _snapshot(home, captured["operator"]["run_id"])
+    assert agent["state"] == "completed"
+    assert agent["liveness"] == "terminal"
+    assert operator["state"] == "completed"
+    assert operator["liveness"] == "terminal"
+    for snapshot in (agent, operator):
+        assert "worker_pgid" not in snapshot
+        assert not any(
+            e["kind"] == "projection:abandoned"
+            for e in _events_for(home, snapshot["run_id"])
+        )
+
+
+def test_active_projection_retry_is_bounded_and_observable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibecrafted_core import spawn
+
+    home = Path(os.environ["VIBECRAFTED_HOME"])
+    run_id = "init-260909-000000-00003"
+    meta_path = home / "control_plane" / "runtime_runs" / run_id / "meta.json"
+    meta_path.parent.mkdir(parents=True)
+    scopes: list[str | None] = []
+
+    def failing(only_run_id: str | None = None) -> dict[str, object]:
+        scopes.append(only_run_id)
+        raise ControlPlaneStorageErrorProxy("control-plane degraded: disk full")
+
+    ControlPlaneStorageErrorProxy = control_plane.ControlPlaneStorageError
+    monkeypatch.setattr(spawn, "sync_state", failing)
+    now = [1000.0]
+    receipt: dict[str, object] = {
+        "run_id": run_id,
+        "status": "active",
+        "liveness": "active",
+    }
+    projection = spawn._InteractiveProjection(
+        run_id=run_id, meta_path=meta_path, receipt=receipt, clock=lambda: now[0]
+    )
+    assert projection.publish() == "pending"
+    assert projection.attempts == 1
+    assert projection.pump() == "pending"  # not due yet: no busy retry
+    assert projection.attempts == 1
+    delays: list[float] = []
+    while projection.status == "pending":
+        delays.append(projection.next_attempt_at - now[0])
+        now[0] = projection.next_attempt_at
+        projection.pump()
+    assert projection.status == "abandoned"
+    assert projection.attempts == spawn._PROJECTION_ACTIVE_ATTEMPT_LIMIT == 20
+    assert delays[:6] == [0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
+    assert max(delays) == 30.0 and sum(delays) < 8 * 60
+    assert set(scopes) == {run_id}  # exact scope on every attempt
+    stamped = json.loads(meta_path.read_text(encoding="utf-8"))["projection"]
+    assert stamped["status"] == "abandoned"
+    assert stamped["attempts"] == 20
+    assert "disk full" in stamped["last_error"]
+    abandoned = [
+        e for e in _events_for(home, run_id) if e["kind"] == "projection:abandoned"
+    ]
+    assert len(abandoned) == 1
+    assert abandoned[0]["payload"]["phase"] == "active"
+    assert abandoned[0]["payload"]["state"] == "active"
+
+    # Recovery stops the retry: a published projection is never re-pumped.
+    monkeypatch.setattr(spawn, "sync_state", lambda only_run_id=None: {})
+    recovered = spawn._InteractiveProjection(
+        run_id=run_id, meta_path=meta_path, receipt=receipt, clock=lambda: now[0]
+    )
+    assert recovered.publish() == "published"
+    now[0] += 3600
+    assert recovered.pump() == "published"
+    assert recovered.attempts == 1
+    assert json.loads(meta_path.read_text(encoding="utf-8"))["projection"][
+        "published_at"
+    ]
+
+
+def test_terminal_projection_flush_is_bounded_and_interrupt_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibecrafted_core import spawn
+
+    home = Path(os.environ["VIBECRAFTED_HOME"])
+    run_id = "init-260909-000000-00004"
+    receipt = {"run_id": run_id, "status": "cancelled", "liveness": "terminal"}
+    now = [50.0]
+    slept: list[float] = []
+
+    def sleep(delay: float) -> None:
+        slept.append(delay)
+        now[0] += delay
+
+    monkeypatch.setattr(
+        spawn,
+        "sync_state",
+        lambda only_run_id=None: (_ for _ in ()).throw(OSError(13, "denied")),
+    )
+    result = spawn._flush_terminal_projection(
+        run_id, receipt, clock=lambda: now[0], sleep=sleep
+    )
+    assert result == "abandoned"
+    assert sum(slept) <= spawn._PROJECTION_TERMINAL_BUDGET_SECONDS
+    assert len(slept) + 1 <= spawn._PROJECTION_TERMINAL_ATTEMPT_LIMIT
+    abandoned = [
+        e for e in _events_for(home, run_id) if e["kind"] == "projection:abandoned"
+    ]
+    assert [e["payload"]["phase"] for e in abandoned] == ["terminal"]
+    assert abandoned[0]["payload"]["state"] == "cancelled"
+
+    # Transient: two failures then success returns published, no abandonment.
+    outcomes = iter([OSError(13, "denied"), OSError(13, "denied"), None])
+
+    def flaky(only_run_id: str | None = None) -> dict[str, object]:
+        outcome = next(outcomes)
+        if outcome is not None:
+            raise outcome
+        return {}
+
+    monkeypatch.setattr(spawn, "sync_state", flaky)
+    slept.clear()
+    assert (
+        spawn._flush_terminal_projection(
+            "init-260909-000000-00005", receipt, clock=lambda: now[0], sleep=sleep
+        )
+        == "published"
+    )
+    assert slept == [0.5, 1.0]
+
+    # Ctrl-C inside the flush abandons it instead of unwinding the owner exit.
+    def interrupting(delay: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        spawn,
+        "sync_state",
+        lambda only_run_id=None: (_ for _ in ()).throw(OSError(13, "denied")),
+    )
+    assert (
+        spawn._flush_terminal_projection(
+            "init-260909-000000-00006",
+            receipt,
+            clock=lambda: now[0],
+            sleep=interrupting,
+        )
+        == "abandoned"
+    )
+    interrupted = [
+        e
+        for e in _events_for(home, "init-260909-000000-00006")
+        if e["kind"] == "projection:abandoned"
+    ]
+    assert "KeyboardInterrupt" in interrupted[0]["payload"]["last_error"]
