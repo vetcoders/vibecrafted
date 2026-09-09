@@ -151,7 +151,7 @@ _vetcoders_aicx_resume_fallback() {
   local agent="$1"
   local root="${2:-$(_vetcoders_repo_root)}"
   local hours="${VIBECRAFTED_RESUME_AICX_HOURS:-48}"
-  local tmp_dir context_file meta_file aicx_bin python_spec py import_root
+  local tmp_dir context_file meta_file aicx_bin python_spec py import_root module source_dir
   aicx_bin="$(_vetcoders_aicx_bin 2>/dev/null)" || {
     echo "aicx foundation not found in the Vibecrafted runtime, ~/.local/bin, ~/.cargo/bin, or PATH." >&2
     echo "Install the AICX foundation or pass --session <session_id>." >&2
@@ -162,67 +162,56 @@ _vetcoders_aicx_resume_fallback() {
   context_file="$tmp_dir/resume-aicx-${agent}-$(date +%Y%m%d_%H%M%S).md"
   meta_file="${context_file}.meta.json"
 
-  # Prefer the module next to this shell file so a stale installed
-  # vibecrafted_core cannot hide the live assembler.
-  source_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || true)"
+  # Prefer the module in the owned core so a stale installed package cannot
+  # hide the live assembler. Do not rediscover through BASH_SOURCE (empty
+  # under zsh).
   module=""
-  if [[ -n "$source_dir" && -f "$source_dir/../../../aicx_session_chain.py" ]]; then
-    module="$(cd "$source_dir/../../.." && pwd)/aicx_session_chain.py"
+  source_dir="$(_vetcoders_owned_core_dir 2>/dev/null || true)"
+  if [[ -n "$source_dir" && -f "$source_dir/vibecrafted_core/aicx_session_chain.py" ]]; then
+    module="$source_dir/vibecrafted_core/aicx_session_chain.py"
   fi
-  python_spec="$(_vetcoders_core_python_spec 2>/dev/null || true)"
+  python_spec="$(_vetcoders_core_python_spec)" || return 1
   py="${python_spec%%$'\t'*}"
-  if [[ -z "$py" ]]; then
-    py="$(_vetcoders_internal_python)"
-  fi
+  import_root="${python_spec#*$'\t'}"
   if [[ -z "$py" || -z "$module" ]]; then
     echo "Vibecrafted session-chain assembler unavailable (python or module missing)." >&2
     return 1
   fi
-  "$py" "$module" resume-pack \
-    --agent "$agent" \
-    --root "$root" \
-    --hours "$hours" \
-    --aicx "$aicx_bin" \
-    --context-file "$context_file" \
-    --meta-file "$meta_file"
+  if [[ -n "$import_root" ]]; then
+    PYTHONPATH="$import_root" "$py" "$module" resume-pack \
+      --agent "$agent" \
+      --root "$root" \
+      --hours "$hours" \
+      --aicx "$aicx_bin" \
+      --context-file "$context_file" \
+      --meta-file "$meta_file"
+  else
+    "$py" "$module" resume-pack \
+      --agent "$agent" \
+      --root "$root" \
+      --hours "$hours" \
+      --aicx "$aicx_bin" \
+      --context-file "$context_file" \
+      --meta-file "$meta_file"
+  fi
 }
 
-# Resolve one Python >=3.11 that can import the live vibecrafted_core package.
+# Resolve one owned Python >=3.11 that can import the live vibecrafted_core
+# package. Interpreter selection is `_vetcoders_owned_python_bin` (installed
+# generation fail-closed; source checkout keeps the development fallback).
+# Import root is the captured/owned core dir — never empty zsh BASH_SOURCE.
 # Output is: <python-path><TAB><optional-PYTHONPATH-import-root>.
+# PYTHONPATH is applied only for this proof, never exported.
 _vetcoders_core_python_spec() {
-  local py="" candidate package_parent="" source_dir=""
-  for candidate in \
-    "${VIBECRAFTED_PYTHON:-}" \
-    "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/vibecrafted-core/bin/python3" \
-    python3.13 python3.12 python3.11 python3; do
-    [[ -n "$candidate" ]] || continue
-    command -v "$candidate" >/dev/null 2>&1 || continue
-    if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
-      >/dev/null 2>&1; then
-      py="$(command -v "$candidate")"
-      break
-    fi
-  done
-  [[ -n "$py" ]] || {
-    echo "Vibecrafted core requires Python >=3.11; no eligible interpreter found." >&2
-    return 1
-  }
+  local py="" package_parent=""
+  py="$(_vetcoders_owned_python_bin)" || return 1
+  package_parent="$(_vetcoders_owned_core_dir)" || return 1
   if "$py" -c 'import vibecrafted_core' >/dev/null 2>&1; then
     printf '%s\t\n' "$py"
     return 0
   fi
-  source_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || true)"
-  # Packaged layout: shell/lib → … → vibecrafted-core (parent of
-  # vibecrafted_core). Checkout layout is a hardlinked runtime twin under
-  # <repo>/runtime, so its import root is <repo>/vibecrafted-core instead.
-  if [[ -n "$source_dir" ]]; then
-    package_parent="$(cd "$source_dir/../../../.." && pwd 2>/dev/null || true)"
-    if [[ ! -d "$package_parent/vibecrafted_core" ]]; then
-      package_parent="$(cd "$source_dir/../../.." && pwd 2>/dev/null || true)/vibecrafted-core"
-    fi
-  fi
-  if [[ -n "$package_parent" && -d "$package_parent/vibecrafted_core" ]] &&
-    PYTHONPATH="$package_parent${PYTHONPATH:+:$PYTHONPATH}" \
+  if [[ -d "$package_parent/vibecrafted_core" ]] &&
+    PYTHONPATH="$package_parent" \
       "$py" -c 'import vibecrafted_core' >/dev/null 2>&1; then
     printf '%s\t%s\n' "$py" "$package_parent"
     return 0
@@ -615,6 +604,11 @@ _vetcoders_resume_agent() {
   fi
   # Admission resolves the checkout before the Frame target owner is consulted.
   local resume_declared_root="${_vetcoders_contract_root:-}"
+
+  # Missing owned interpreter/import-root is a real refusal. Prove it before
+  # AICX continuity or provider composition so a broken/foreign owner cannot
+  # assemble a pack and then fail.
+  _vetcoders_core_python_spec >/dev/null || return 1
 
   local aicx_fallback_mode=""
   local aicx_context_file=""

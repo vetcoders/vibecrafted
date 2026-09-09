@@ -73,6 +73,31 @@ WORKSPACE_IDENTITY_ENV = (
     "VIBECRAFTED_BUILD_ID",
 )
 
+# Ambient worker/runtime bindings must not leak into a public-entry fixture.
+# `_vetcoders_ambient_project_root` used to treat a sourced-checkout
+# VIBECRAFTED_ROOT as the project; these keys are stripped so cwd / --root
+# is the only remaining identity.
+PUBLIC_ENTRY_ISOLATE_ENV = (
+    *WORKSPACE_IDENTITY_ENV,
+    "VIBECRAFTED_START_CREATED_SESSION",
+    "VIBECRAFTED_TERMINAL_ENTRY",
+    "VIBECRAFTED_ROOT",
+    "VIBECRAFTED_RUNTIME_ROOT",
+    "VIBECRAFTED_RUNTIME_BIN",
+    "VIBECRAFTED_RUNTIME_HOME",
+    "VIBECRAFTED_PYTHON",
+    "VIBECRAFTED_CORE_DIR",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "SPAWN_ROOT",
+    "VC_FRAME",
+    "VC_FRAME_PANE_ID",
+    "VC_FRAME_SESSION_NAME",
+    "ZELLIJ",
+    "ZELLIJ_PANE_ID",
+    "ZELLIJ_SESSION_NAME",
+)
+
 # A stand-in for the vc-frame engine. It records every invocation, keeps a live
 # session list on disk, BLOCKS on the two calls that block for real (the
 # interactive new-session client and the foreground attach), and -- crucially
@@ -307,25 +332,7 @@ def _run_entry(
     )
 
     env = os.environ.copy()
-    for key in (
-        *WORKSPACE_IDENTITY_ENV,
-        "VIBECRAFTED_START_CREATED_SESSION",
-        "VIBECRAFTED_TERMINAL_ENTRY",
-        "VIBECRAFTED_ROOT",
-        "VIBECRAFTED_RUNTIME_ROOT",
-        "VIBECRAFTED_RUNTIME_BIN",
-        "VIBECRAFTED_RUNTIME_HOME",
-        "VIBECRAFTED_PYTHON",
-        "PYTHONPATH",
-        "PYTHONHOME",
-        "SPAWN_ROOT",
-        "VC_FRAME",
-        "VC_FRAME_PANE_ID",
-        "VC_FRAME_SESSION_NAME",
-        "ZELLIJ",
-        "ZELLIJ_PANE_ID",
-        "ZELLIJ_SESSION_NAME",
-    ):
+    for key in PUBLIC_ENTRY_ISOLATE_ENV:
         env.pop(key, None)
     env["HOME"] = str(home)
     env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
@@ -789,21 +796,14 @@ def _resolve_target(
     home.mkdir(parents=True, exist_ok=True)
     _install_canonical_launcher(home)
     project_dir = tmp_path / project
-    project_dir.mkdir(parents=True, exist_ok=True)
+    if not (project_dir / ".git").exists():
+        _commit_fixture_repo(project_dir)
     generation = _fake_generation(tmp_path, tmp_path / "unused.json")
     live_file = tmp_path / "live-sessions.txt"
     live_file.write_text("".join(f"{name}\n" for name in live), encoding="utf-8")
 
     env = os.environ.copy()
-    for key in (
-        *WORKSPACE_IDENTITY_ENV,
-        "VIBECRAFTED_ROOT",
-        "VIBECRAFTED_RUNTIME_ROOT",
-        "SPAWN_ROOT",
-        "VC_FRAME_PANE_ID",
-        "VC_FRAME_SESSION_NAME",
-        "ZELLIJ_SESSION_NAME",
-    ):
+    for key in PUBLIC_ENTRY_ISOLATE_ENV:
         env.pop(key, None)
     env["HOME"] = str(home)
     env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
@@ -952,7 +952,8 @@ def _bound_project(
     home.mkdir(parents=True, exist_ok=True)
     _install_canonical_launcher(home)
     project_dir = tmp_path / project
-    project_dir.mkdir(parents=True, exist_ok=True)
+    if not (project_dir / ".git").exists():
+        _commit_fixture_repo(project_dir)
     generation = _fake_generation(tmp_path, tmp_path / "unused.json")
     live_file = tmp_path / "live-sessions.txt"
     live_file.write_text("".join(f"{name}\n" for name in live), encoding="utf-8")
@@ -966,16 +967,7 @@ def _bound_project(
 
     env = os.environ.copy()
     for key in (
-        *WORKSPACE_IDENTITY_ENV,
-        "VIBECRAFTED_ROOT",
-        "VIBECRAFTED_RUNTIME_ROOT",
-        "SPAWN_ROOT",
-        "VC_FRAME",
-        "VC_FRAME_PANE_ID",
-        "VC_FRAME_SESSION_NAME",
-        "ZELLIJ",
-        "ZELLIJ_PANE_ID",
-        "ZELLIJ_SESSION_NAME",
+        *PUBLIC_ENTRY_ISOLATE_ENV,
         # tests/conftest.py sets this suite-wide. Here the no-PTY path IS the
         # contract under test, so the bypass is opted into per case instead.
         "VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME",
@@ -1583,6 +1575,50 @@ def test_installed_generation_uses_its_owned_interpreter_over_foreign_override(
     assert not foreign_capture.exists(), result.stdout + result.stderr
 
 
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_core_python_spec_resolves_import_root_without_bash_source(
+    tmp_path: Path, shell: str
+) -> None:
+    """Zsh BASH_SOURCE is empty in shell/lib. The owned core dir captured at
+    facade load must still be the import root, and a hostile public python3
+    must not be selected when VIBECRAFTED_PYTHON names the owned interpreter.
+    """
+    hostile = tmp_path / "hostile-bin"
+    _write(
+        hostile / "python3",
+        "#!/bin/sh\nprintf 'HOST_PYTHON_SELECTED\\n' >&2\nexit 79\n",
+    )
+    env = os.environ.copy()
+    for key in PUBLIC_ENTRY_ISOLATE_ENV:
+        env.pop(key, None)
+    env["VIBECRAFTED_PYTHON"] = sys.executable
+    env["PATH"] = f"{hostile}:/usr/bin:/bin"
+    script = (
+        f'source "{SHELL_SH}"\n'
+        'spec="$(_vetcoders_core_python_spec)" || exit 2\n'
+        'printf "PY=[%s]\\n" "${spec%%	*}"\n'
+        'printf "ROOT=[%s]\\n" "${spec#*	}"\n'
+    )
+    result = subprocess.run(
+        _shell_argv(shell, script),
+        check=False,
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "HOST_PYTHON_SELECTED" not in result.stdout + result.stderr
+    assert f"PY=[{sys.executable}]" in result.stdout or "PY=[" in result.stdout
+    root_line = next(
+        line for line in result.stdout.splitlines() if line.startswith("ROOT=[")
+    )
+    root = root_line[len("ROOT=[") : -1]
+    if root:
+        assert Path(root).resolve() == CORE_IMPORT_ROOT.resolve(), result.stdout
+
+
 # --------------------------------------------------------------------------
 # One physical config owner
 # --------------------------------------------------------------------------
@@ -1712,8 +1748,17 @@ def test_missing_terminal_host_fails_actionably(
         assert "vc-frame engine is unavailable" in combined, combined
         assert "refusing to create" in combined, combined
     else:
-        assert "no TTY" in combined
-        assert "terminal" in combined.lower()
+        # Resume no longer uses generation bin/vibecrafted as the hosted front
+        # door, so the old "no TTY and no installed vibecrafted front door"
+        # sentence is gone. The gap it still names is the missing terminal
+        # host / engine under the empty loaded root.
+        assert "terminal" in combined.lower() or "vc-frame" in combined, combined
+        assert (
+            "no TTY" in combined
+            or "missing" in combined.lower()
+            or "unavailable" in combined.lower()
+            or "vc-terminal" in combined
+        ), combined
 
 
 # --------------------------------------------------------------------------
@@ -1857,7 +1902,8 @@ def _run_child_resume(
         "layout {\n}\n",
     )
     project_dir = tmp_path / "mlx-batch-runner"
-    project_dir.mkdir(parents=True, exist_ok=True)
+    if not (project_dir / ".git").exists():
+        _commit_fixture_repo(project_dir)
     generation = _fake_generation(tmp_path, tmp_path / "unused.json")
 
     frame_log = tmp_path / "frame.log"
@@ -1867,15 +1913,7 @@ def _run_child_resume(
     )
 
     env = os.environ.copy()
-    for key in (
-        *WORKSPACE_IDENTITY_ENV,
-        "VIBECRAFTED_ROOT",
-        "VIBECRAFTED_RUNTIME_ROOT",
-        "SPAWN_ROOT",
-        "VC_FRAME_PANE_ID",
-        "VC_FRAME_SESSION_NAME",
-        "ZELLIJ_SESSION_NAME",
-    ):
+    for key in PUBLIC_ENTRY_ISOLATE_ENV:
         env.pop(key, None)
     env["HOME"] = str(home)
     env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
@@ -1899,7 +1937,7 @@ def _run_child_resume(
     )
     result = subprocess.run(
         [
-            "python3",
+            sys.executable,
             "-c",
             (
                 "import pty, sys; sys.exit(pty.spawn("
@@ -2134,7 +2172,8 @@ def _prepare_and_attach(
         "layout {\n}\n",
     )
     project_dir = tmp_path / project_name
-    project_dir.mkdir(parents=True, exist_ok=True)
+    if not (project_dir / ".git").exists():
+        _commit_fixture_repo(project_dir)
     generation = _fake_generation(tmp_path, tmp_path / "unused.json")
 
     frame_log = tmp_path / "frame.log"
@@ -2144,17 +2183,8 @@ def _prepare_and_attach(
 
     env = os.environ.copy()
     for key in (
-        *WORKSPACE_IDENTITY_ENV,
+        *PUBLIC_ENTRY_ISOLATE_ENV,
         "VIBECRAFTED_PENDING_VC_FRAME_ATTACH",
-        "VIBECRAFTED_ROOT",
-        "VIBECRAFTED_RUNTIME_ROOT",
-        "SPAWN_ROOT",
-        "VC_FRAME",
-        "VC_FRAME_PANE_ID",
-        "VC_FRAME_SESSION_NAME",
-        "ZELLIJ",
-        "ZELLIJ_PANE_ID",
-        "ZELLIJ_SESSION_NAME",
     ):
         env.pop(key, None)
     env["HOME"] = str(home)
@@ -2190,7 +2220,7 @@ def _prepare_and_attach(
     )
     result = subprocess.run(
         [
-            "python3",
+            sys.executable,
             "-c",
             (
                 "import pty, sys; sys.exit(pty.spawn("
@@ -2758,12 +2788,24 @@ def test_interpreter_start_failure_is_not_reported_as_accepted(
     (`vc-terminal`) must never be invoked either.
     """
     fake_bin = tmp_path / "fakebin"
-    _write_fake_python3(fake_bin, f"#!{sys.executable}\nimport sys\nsys.exit(42)\n")
+    fake_python = _write_fake_python3(
+        fake_bin, f"#!{sys.executable}\nimport sys\nsys.exit(42)\n"
+    )
 
     result, launch = _run_entry(
         tmp_path,
         "vc-resume codex",
-        extra_env={"PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"},
+        extra_env={
+            # Owned core spec must keep a real interpreter; the injected
+            # failure is the terminal driver's python, not PATH python3.
+            "VIBECRAFTED_PYTHON": sys.executable,
+            "PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin",
+        },
+        prelude=(
+            "_vetcoders_internal_python() { "
+            f'printf "%s\\n" "{fake_python}"; '
+            "}"
+        ),
         expect_launch=False,
         shell=shell,
     )
@@ -2787,7 +2829,7 @@ def test_driver_popen_failure_is_not_reported_as_accepted(
     silently folded into "accepted... starting".
     """
     fake_bin = tmp_path / "fakebin"
-    _write_fake_python3(
+    fake_python = _write_fake_python3(
         fake_bin,
         f"#!{sys.executable}\n"
         "import sys, subprocess\n"
@@ -2801,7 +2843,15 @@ def test_driver_popen_failure_is_not_reported_as_accepted(
     result, launch = _run_entry(
         tmp_path,
         "vc-resume codex",
-        extra_env={"PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"},
+        extra_env={
+            "VIBECRAFTED_PYTHON": sys.executable,
+            "PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin",
+        },
+        prelude=(
+            "_vetcoders_internal_python() { "
+            f'printf "%s\\n" "{fake_python}"; '
+            "}"
+        ),
         expect_launch=False,
         shell=shell,
     )

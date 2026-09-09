@@ -91,6 +91,14 @@ _vetcoders_source_runtime_helpers || {
   fi
   exit "${_vetcoders_runtime_source_status}"
 }
+# Capture the physical vibecrafted-core import root now. `_vetcoders_script_dir`
+# and `_vetcoders_shell_lib_dir` are both unset after facade load; later
+# resolvers must not rediscover the owner through empty zsh BASH_SOURCE.
+_vetcoders_loaded_core_dir="$(
+  _vetcoders_lib_dir="$(_vetcoders_script_dir)" || exit 1
+  cd -P "$_vetcoders_lib_dir/../../../.." && pwd -P
+)" || _vetcoders_loaded_core_dir=""
+unset _vetcoders_lib_dir
 unset -f _vetcoders_script_dir \
   _vetcoders_runtime_owner_root \
   _vetcoders_runtime_helper_candidates \
@@ -227,36 +235,86 @@ _vetcoders_path_with_bundled_bin_priority() {
   printf '%s\n' "$result"
 }
 
-# Internal runtime Python for this shell facade — the mirror of
-# runtime/scripts/lib/util.sh:spawn_python_bin, and it must stay in lockstep
-# with it, exactly like the PATH grammar above.
+# Physical vibecrafted-core import root for this loaded facade. VIBECRAFTED_CORE_DIR
+# wins at call time (tests pin a generation); otherwise the path captured at
+# source time. Never rediscover through BASH_SOURCE — it is empty under zsh.
+_vetcoders_owned_core_dir() {
+  if [[ -n "${VIBECRAFTED_CORE_DIR:-}" ]]; then
+    (cd -P "${VIBECRAFTED_CORE_DIR}" && pwd -P)
+    return $?
+  fi
+  [[ -n "${_vetcoders_loaded_core_dir:-}" ]] || return 1
+  printf '%s\n' "$_vetcoders_loaded_core_dir"
+}
+
+# Installed generations live at <runtime-home>/releases/<generation> — the same
+# physical shape _vetcoders_product_core_cli already used to fail closed.
+_vetcoders_is_installed_generation_product() {
+  local product_root="${1:-}"
+  [[ -n "$product_root" ]] || return 1
+  [[ "$(basename "$(dirname "$product_root")")" == "releases" ]]
+}
+
+# One owned-interpreter selector for the facade.
 #
-# The sanitizer keeps the owned generation bin out of ambient lookup, which is
-# correct; the consequence is that a bare `python3` in this tree resolves to
-# whatever the Founder's PATH offers.  Public resolution stays the Founder's;
-# internal helpers name their interpreter instead.
+# Installed generation: only <generation>/bin/python3, never execute inherited
+# VIBECRAFTED_PYTHON or a public PATH python. Missing owned interpreter is a
+# real refusal.
 #
-# This is deliberately NOT _vetcoders_core_python_spec: that resolver also
-# proves `import vibecrafted_core` and derives an import root from BASH_SOURCE,
-# which is empty under zsh in this directory.  Helpers that only need stdlib
-# (shlex, json, re) must not inherit either dependency.
-_vetcoders_internal_python() {
-  local candidate
+# Source checkout: documented development fallback (VIBECRAFTED_PYTHON, .venv,
+# embedded, project-python, then public PATH >=3.11). Public PATH of foreign
+# products is only a last-resort lookup, never overwritten.
+_vetcoders_owned_python_bin() {
+  local core_dir product_root embedded checkout_python project_python candidate
+  core_dir="$(_vetcoders_owned_core_dir)" || return 1
+  product_root="$(cd -P "$core_dir/.." && pwd -P)" || return 1
+  embedded="$product_root/bin/python3"
+  if _vetcoders_is_installed_generation_product "$product_root"; then
+    if [[ -x "$embedded" ]]; then
+      printf '%s\n' "$embedded"
+      return 0
+    fi
+    printf 'installed runtime is missing its own interpreter: %s\n' "$embedded" >&2
+    printf 'refusing to substitute a host python3; explicit upgrade/repair required\n' >&2
+    return 1
+  fi
+  checkout_python="$product_root/.venv/bin/python3"
+  project_python="$product_root/scripts/project-python"
   for candidate in \
     "${VIBECRAFTED_PYTHON:-}" \
-    "${VIBECRAFTED_RUNTIME_BIN:+$VIBECRAFTED_RUNTIME_BIN/python3}" \
-    "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/vibecrafted/bin/python3" \
-    "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/vibecrafted-core/bin/python3" \
-    python3.13 python3.12 python3.11 python3; do
-    [[ -n "$candidate" ]] || continue
-    command -v "$candidate" >/dev/null 2>&1 || continue
+    "$checkout_python" \
+    "$embedded" \
+    "$project_python"
+  do
+    [[ -n "$candidate" && -x "$candidate" ]] || continue
     if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
       >/dev/null 2>&1; then
       printf '%s\n' "$candidate"
       return 0
     fi
   done
-  printf 'python3\n'
+  for candidate in \
+    "${VIBECRAFTED_RUNTIME_BIN:+$VIBECRAFTED_RUNTIME_BIN/python3}" \
+    python3.13 python3.12 python3.11 python3
+  do
+    [[ -n "$candidate" ]] || continue
+    command -v "$candidate" >/dev/null 2>&1 || continue
+    if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
+      >/dev/null 2>&1; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+  printf 'Vibecrafted core requires Python >=3.11; no eligible interpreter found.\n' >&2
+  return 1
+}
+
+# Internal runtime Python for this shell facade — the same owned selector as
+# `_vetcoders_core_python_spec`, without proving `import vibecrafted_core`.
+# Helpers that only need stdlib (shlex, json, re) must not inherit the import
+# proof, but they must not run a foreign interpreter before ownership either.
+_vetcoders_internal_python() {
+  _vetcoders_owned_python_bin
 }
 
 _vetcoders_aicx_bin() {

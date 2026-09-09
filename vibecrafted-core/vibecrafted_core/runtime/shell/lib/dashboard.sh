@@ -38,7 +38,7 @@ _vetcoders_dashboard_session_name() {
 }
 
 _vetcoders_product_core_cli() {
-  local core_dir product_root python_bin python_dir checkout_python project_python embedded_python
+  local core_dir python_bin python_dir
   local config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
   # Product preferences are canonical without changing Atuin/Starship's XDG
   # environment in the parent shell.
@@ -49,57 +49,10 @@ _vetcoders_product_core_cli() {
     "$VIBECRAFTED_PRODUCT_CORE_CLI" "$@"
     return $?
   fi
-  # This module's own physical location selects the core — the same
-  # physical-helper-owner rule core.sh applies — and it must resolve in BOTH
-  # shells. `BASH_SOURCE` is empty under zsh, and the primary shell is
-  # `zsh -lic`: there `dirname ""` is `.`, so the core was sought four levels
-  # above the caller's CWD, the `cli.py` probe below failed, and this owner
-  # returned 1 without ever reaching the catalogue. Every caller then fell
-  # through to its own weaker guess. The zsh source-file form is the one
-  # already used by _vetcoders_vc_frame_owner_root and the facade.
-  core_dir="${VIBECRAFTED_CORE_DIR:-}"
-  if [[ -z "$core_dir" ]]; then
-    local source_file="${BASH_SOURCE[0]:-}"
-    if [[ -z "$source_file" && -n "${ZSH_VERSION:-}" ]]; then
-      source_file="$(eval 'printf "%s\n" "${(%):-%x}"')"
-    fi
-    [[ -n "$source_file" ]] || return 1
-    core_dir="$(cd -P "$(dirname "$source_file")/../../../.." && pwd -P)" || return 1
-  fi
-  product_root="$(cd "$core_dir/.." && pwd)" || return 1
-  checkout_python="$product_root/.venv/bin/python3"
-  project_python="$product_root/scripts/project-python"
-  embedded_python="$product_root/bin/python3"
-  if [[ "$(basename "$(dirname "$product_root")")" == "releases" ]]; then
-    # Installed generations live at <runtime-home>/releases/<generation> --
-    # the same physical shape _vetcoders_product_runtime_admit already checks
-    # (owner.parent.name == "releases"). There, the generation's own bundled
-    # interpreter is the only legitimate candidate: a bare `python3` lookup
-    # would resolve through whatever PATH the caller happened to have
-    # (Homebrew, pyenv, ...) and silently substitute a foreign interpreter for
-    # a missing/incomplete installed payload — the catalogue would then be
-    # read (or not) by an interpreter nobody selected. Refuse instead of
-    # guessing. A bare source/developer checkout (this file's own repo, a
-    # worktree, a test fixture) never has this shape and keeps the existing
-    # fallback chain below unchanged.
-    if [[ -x "$embedded_python" ]]; then
-      python_bin="$embedded_python"
-    else
-      printf 'vc-start: installed runtime is missing its own interpreter: %s\n' "$embedded_python" >&2
-      printf 'vc-start: refusing to substitute a host python3; explicit upgrade/repair required\n' >&2
-      return 1
-    fi
-  elif [[ -n "${VIBECRAFTED_PYTHON:-}" && -x "$VIBECRAFTED_PYTHON" ]]; then
-    python_bin="$VIBECRAFTED_PYTHON"
-  elif [[ -x "$checkout_python" ]]; then
-    python_bin="$checkout_python"
-  elif [[ -x "$embedded_python" ]]; then
-    python_bin="$embedded_python"
-  elif [[ -x "$project_python" ]]; then
-    python_bin="$project_python"
-  else
-    python_bin="python3"
-  fi
+  # Same owned interpreter + import-root as `_vetcoders_core_python_spec` /
+  # `_vetcoders_owned_python_bin`. Do not re-walk BASH_SOURCE here.
+  core_dir="$(_vetcoders_owned_core_dir)" || return 1
+  python_bin="$(_vetcoders_owned_python_bin)" || return 1
   python_dir=""
   [[ "$python_bin" == */* ]] && python_dir="$(dirname "$python_bin")"
   [[ -f "$core_dir/vibecrafted_core/cli.py" ]] || return 1
