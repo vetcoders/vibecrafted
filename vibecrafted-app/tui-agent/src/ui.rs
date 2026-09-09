@@ -1,4 +1,5 @@
-use crate::app::{App, AppTab, DispatchFocus, LaunchFocus, wrap_operator_line};
+use crate::app::{App, AppTab, LaunchFocus, wrap_operator_line};
+use crate::launch;
 use crate::layout::{
     PaneId, controls_layout, dispatch_layout, mission_layout, monitor_layout, mux_panel_height,
     observe_layout, polarize_panel_height,
@@ -34,6 +35,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
     match app.focus {
         LaunchFocus::Help => draw_help_overlay(frame, app),
         LaunchFocus::EditPrompt => draw_prompt_overlay(frame, app),
+        LaunchFocus::EditModel => draw_model_overlay(frame, app),
+        LaunchFocus::Confirmation => draw_confirmation_overlay(frame, app),
         LaunchFocus::Search => draw_search_overlay(frame, app),
         LaunchFocus::Error => draw_error_overlay(frame, app),
         LaunchFocus::Artifact => draw_artifact_overlay(frame, app),
@@ -74,7 +77,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 
     let workspace = app
         .config
-        .launch_root
+        .repo
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("—");
@@ -468,11 +471,7 @@ fn draw_polarize_panel(frame: &mut Frame, area: Rect, lines: &[String], total_in
 
 fn draw_dispatch(frame: &mut Frame, area: Rect, app: &App) {
     let layout = dispatch_layout(area);
-    let selected_stat = match app.dispatch_focus() {
-        DispatchFocus::Kind => Some(0),
-        DispatchFocus::Agent | DispatchFocus::Runtime => Some(1),
-        DispatchFocus::Prompt => Some(2),
-    };
+    let selected_stat = Some(app.dispatch_focus().stat_index());
 
     draw_stat_strip(
         frame,
@@ -489,20 +488,44 @@ fn draw_dispatch(frame: &mut Frame, area: Rect, app: &App) {
             (
                 "Operator",
                 vec![
-                    format!("agent {}", app.selected_agent()),
-                    format!("runtime {}", app.launch_runtime.label()),
+                    format!(
+                        "agent {}",
+                        if app.selected_agent().is_empty() {
+                            "—"
+                        } else {
+                            app.selected_agent()
+                        }
+                    ),
+                    format!(
+                        "model {}",
+                        if app.launch_model.trim().is_empty() {
+                            "agent default"
+                        } else {
+                            app.launch_model.trim()
+                        }
+                    ),
                 ],
                 Color::Blue,
             ),
             (
-                "Prompt",
+                "Execution",
                 vec![
-                    if app.focus == LaunchFocus::EditPrompt {
-                        "Editing live prompt".to_string()
-                    } else {
-                        "Ready to launch".to_string()
+                    format!(
+                        "{} · {}",
+                        app.launch_environment.label(),
+                        app.launch_presentation.label()
+                    ),
+                    match app.pending_launch.as_deref() {
+                        Some(_) => "launching — awaiting receipt".to_string(),
+                        None => {
+                            let refusals = app.declaration_refusals().len();
+                            if refusals == 0 {
+                                format!("{} chars staged", app.launch_prompt.chars().count())
+                            } else {
+                                format!("{refusals} blocking issue(s)")
+                            }
+                        }
                     },
-                    format!("{} chars staged", app.launch_prompt.chars().count()),
                 ],
                 Color::Magenta,
             ),
@@ -517,7 +540,9 @@ fn draw_dispatch(frame: &mut Frame, area: Rect, app: &App) {
         Line::from("Dispatch posture"),
         Line::from(""),
         Line::from("Shape the next worker before you launch it."),
-        Line::from("Use mission kind for intent, agent for style, runtime for surface."),
+        Line::from("Mission, agent and model say WHAT runs; environment and"),
+        Line::from("presentation say WHERE it runs and whether you watch it."),
+        Line::from("Unsupported combinations are refused before any worker starts."),
         Line::from("Prompt edit is the last mile: keep it sharp and bounded."),
         Line::from(""),
         Line::from("Click a cell to focus it. Wheel scrolls only that pane."),
@@ -1558,6 +1583,64 @@ fn draw_prompt_overlay(frame: &mut Frame, app: &App) {
     frame.render_widget(prompt, area);
 }
 
+fn draw_model_overlay(frame: &mut Frame, app: &App) {
+    let area = centered_rect(66, 40, frame.area());
+    frame.render_widget(Clear, area);
+    let lines = app
+        .model_edit_lines()
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    let model = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Model pin")
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(model, area);
+}
+
+fn draw_confirmation_overlay(frame: &mut Frame, app: &App) {
+    let area = centered_rect(78, 68, frame.area());
+    frame.render_widget(Clear, area);
+    // Admission and confirmation are two different facts, and the headline
+    // states both: a named run whose declaration the receipt does not confirm
+    // must never read as an accepted launch.
+    let (title, colour) = match app.launch_outcome.as_ref() {
+        None => ("Launch", Color::Cyan),
+        Some(outcome) => match outcome.admission() {
+            launch::Admission::Admitted => match outcome.audit().confirmation() {
+                launch::Confirmation::Confirmed => ("Launch accepted and confirmed", Color::Green),
+                launch::Confirmation::Unverified => {
+                    ("Run started — declaration NOT confirmed", Color::Yellow)
+                }
+                launch::Confirmation::Mismatched => {
+                    ("Run started — declaration NOT honored", Color::Red)
+                }
+            },
+            launch::Admission::Refused => ("Launch refused", Color::Red),
+            launch::Admission::Failed => ("Launcher never started", Color::Red),
+            launch::Admission::Unknown => ("Outcome UNKNOWN — a worker may exist", Color::Magenta),
+        },
+    };
+    let lines = app
+        .confirmation_lines()
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    let panel = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(Style::default().fg(colour)),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(panel, area);
+}
+
 fn draw_error_overlay(frame: &mut Frame, app: &App) {
     let area = centered_rect(76, 56, frame.area());
     frame.render_widget(Clear, area);
@@ -1680,8 +1763,9 @@ pub fn draw_client_drift_overlay(frame: &mut Frame, area: Rect, halt: &crate::la
 mod tests {
     use super::*;
     use crate::app::{DispatchFocus, LaunchFocus, QueueScope};
+    use crate::catalog::{CatalogState, fixture_catalog};
     use crate::config::AppConfig;
-    use crate::launch::{LaunchKind, LaunchRuntime};
+    use crate::launch::{Environment, LaunchKind, PermissionPolicy, Presentation, SandboxChoice};
     use crate::state::{ControlPlaneState, RenderedRun, RunKind, RunSnapshot};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -1720,9 +1804,8 @@ mod tests {
                 no_verify_gate: false,
                 state_root: "/tmp/state".into(),
                 command_deck: "/usr/bin/vibecrafted".into(),
-                launch_root: "/tmp/repo".into(),
-                launch_runtime: LaunchRuntime::Terminal,
-                terminal_binary: "vc-frame".into(),
+                repo: "/tmp/repo".into(),
+                presentation: Presentation::Terminal,
                 tick_rate: Duration::from_millis(250),
                 server: "http://127.0.0.1:3024".into(),
                 view: crate::observe::ConsoleView::Full,
@@ -1737,7 +1820,14 @@ mod tests {
             launch_kind: LaunchKind::Workflow,
             launch_agent: 0,
             launch_prompt: "Ship the operator surface.".to_string(),
-            launch_runtime: LaunchRuntime::Terminal,
+            launch_model: String::new(),
+            launch_presentation: Presentation::Terminal,
+            launch_environment: Environment::LivingTree,
+            launch_permissions: PermissionPolicy::Default,
+            launch_sandbox: SandboxChoice::Default,
+            catalog: CatalogState::Ready(fixture_catalog()),
+            pending_launch: None,
+            launch_outcome: None,
             dispatch_selected: DispatchFocus::Kind as usize,
             focus: LaunchFocus::Browse,
             status_line: String::new(),

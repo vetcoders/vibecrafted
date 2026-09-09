@@ -883,11 +883,14 @@ def _materialize_cursor_permission_flags(
     return verified
 
 
-def runtime_policy_capabilities(provider: str) -> dict[str, dict[str, Any]]:
-    """Report host substrate separately from canonical-launcher availability."""
-    provider_executable = which(agent_cli_name(provider), path=agent_tool_search_path())
-    provider_found = provider_executable is not None
-    usage = resolve_provider_usage_capability(provider, executable=provider_executable)
+def host_substrate_capabilities() -> dict[str, bool]:
+    """Host substrate facts every runtime-policy availability row derives from.
+
+    One probe owner for the interactive picker (``runtime_policy_capabilities``)
+    and the machine-readable launcher catalog (``workflow_capabilities``), so a
+    GUI/TUI client and the ``init`` picker can never disagree about whether the
+    host can cut worktrees or has a VM substrate.
+    """
     git_found = which("git") is not None
     try:
         from .dispatch.supervisor import run_dispatch
@@ -897,8 +900,22 @@ def runtime_policy_capabilities(provider: str) -> dict[str, dict[str, Any]]:
         )
     except (ImportError, ValueError):
         dispatch_manages_worktrees = False
-    worktree_substrate = git_found and dispatch_manages_worktrees
-    vm_found = which("docker") is not None or which("colima") is not None
+    return {
+        "git": git_found,
+        "dispatch_manages_worktrees": dispatch_manages_worktrees,
+        "worktree_substrate": git_found and dispatch_manages_worktrees,
+        "vm": which("docker") is not None or which("colima") is not None,
+    }
+
+
+def runtime_policy_capabilities(provider: str) -> dict[str, dict[str, Any]]:
+    """Report host substrate separately from canonical-launcher availability."""
+    provider_executable = which(agent_cli_name(provider), path=agent_tool_search_path())
+    provider_found = provider_executable is not None
+    usage = resolve_provider_usage_capability(provider, executable=provider_executable)
+    substrate = host_substrate_capabilities()
+    worktree_substrate = substrate["worktree_substrate"]
+    vm_found = substrate["vm"]
     return {
         "local-native": {
             "available": provider_found,
