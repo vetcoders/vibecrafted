@@ -397,6 +397,32 @@ struct CommandDeckIntegrationTests {
     controller.close()
   }
 
+  /// A normal server response must prove both WebKit completion and script
+  /// execution before the AppModel exposes the canvas. This keeps HTTP 200
+  /// distinct from a merely reachable endpoint.
+  static func inlineScriptSuccessContract(_ endpoint: URL) async throws {
+    let resolver = RuntimeEndpointResolver { _ in
+      ServerNavigationState(server: endpoint, workspaces: endpoint, unavailableReason: nil)
+    }
+    let model = AppModel(endpointResolver: resolver)
+    let session = WebConsoleSession(
+      websiteDataStore: .nonPersistent(), downloadDestinationProvider: { _, _, _ in nil })
+    session.navigate(path: "/inline-script")
+    model.endpointDidChange = { session.apply(endpoint: $0) }
+    session.events.stateDidChange = { model.receiveWebState($0) }
+    model.refreshEndpoint(caretakerData: nil, runtimeReady: true)
+
+    try await waitFor {
+      if case .loaded(let url) = session.loadState { return url.path == "/inline-script" }
+      return false
+    }
+    try require(model.presentation.phase == .online && model.presentation.exposesCanvas,
+      "HTTP 200 inline document did not reach the AppModel canvas")
+    try require(try await evaluateString("document.documentElement.dataset.inlineFixture", in: session.webView)
+      == "ready", "Inline script did not execute before the canvas was exposed")
+    print("Witness: HTTP 200 inline script committed through WebKit and exposed the AppModel canvas")
+  }
+
   /// A live endpoint can still leave WebKit without a completion callback.
   /// Before the watchdog this fixture waited until the harness timeout while
   /// the Command Deck stayed Connecting. The timeout must instead become a
@@ -976,6 +1002,7 @@ struct CommandDeckIntegrationTests {
     try tabPolicyContract(endpoint)
     try destinationContract(endpoint)
     try await webContract(endpoint)
+    try await inlineScriptSuccessContract(endpoint)
     try await firstLoadTimeoutContract(endpoint, reconnectEndpoint: reconnectEndpoint)
     try await tabsContract(endpoint, reconnectEndpoint: reconnectEndpoint)
     try await homeContract(endpoint, reconnectEndpoint: reconnectEndpoint)

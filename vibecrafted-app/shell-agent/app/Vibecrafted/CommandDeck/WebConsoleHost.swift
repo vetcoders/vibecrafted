@@ -232,6 +232,7 @@ final class WebConsoleSession: NSObject {
     appliedEndpoint = endpoint
     scope = .runtime(origin)
     didAutoRecoverFromTermination = false
+    navigationReceipt("endpoint-apply", generation: loadGeneration, url: endpoint)
     if let url = routeURL { load(url) }
   }
 
@@ -348,6 +349,7 @@ final class WebConsoleSession: NSObject {
     // A restarted server must not be answered out of the cache.
     request.cachePolicy = .reloadIgnoringLocalCacheData
     activeNavigation = webView.load(request)
+    navigationReceipt("load-request", generation: generation, url: url)
     if lastCommittedURL == nil {
       armInitialLoadWatchdog(for: url, generation: generation)
     }
@@ -381,12 +383,29 @@ final class WebConsoleSession: NSObject {
     guard self.loadGeneration == generation,
       lastCommittedURL == nil,
       case .loading = loadState
-    else { return }
+    else {
+      navigationReceipt("watchdog-rejected", generation: generation, url: url, reason: "stale-generation-or-state")
+      return
+    }
+    navigationReceipt("watchdog-expired", generation: generation, url: url)
     activeNavigation = nil
     webView.stopLoading()
     updateState(.failed(
       url: url,
       reason: "The server page did not finish loading. Retry Connection to try again."))
+  }
+
+  /// Writes a bounded native navigation receipt into the existing lifecycle
+  /// trail. URLs are reduced to their origin so paths, query values and page
+  /// content never enter the durable log.
+  private func navigationReceipt(
+    _ event: String, generation: UInt64, url: URL? = nil, reason: String? = nil
+  ) {
+    let origin = url.flatMap(WebRuntimeOrigin.init(url:)).map {
+      "\($0.scheme)://\($0.host):\($0.port)"
+    } ?? "none"
+    let suffix = reason.map { " reason=\($0)" } ?? ""
+    lifecycleLog("web-navigation event=\(event) generation=\(generation) origin=\(origin)\(suffix)")
   }
 
   private func updateState(_ state: WebConsoleLoadState) {
@@ -543,11 +562,20 @@ extension WebConsoleSession: WKNavigationDelegate {
   }
 
   func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-    guard scope != nil else { return }
+    guard scope != nil else {
+      navigationReceipt("did-start-rejected", generation: loadGeneration, reason: "missing-scope")
+      return
+    }
     activeNavigation = navigation
     switch scope {
-    case .runtime, .service: if let url = routeURL { updateState(.loading(url)) }
-    case .localDocument(let document): updateState(.loading(document))
+    case .runtime, .service:
+      if let url = routeURL {
+        navigationReceipt("did-start", generation: loadGeneration, url: url)
+        updateState(.loading(url))
+      }
+    case .localDocument(let document):
+      navigationReceipt("did-start", generation: loadGeneration, url: document)
+      updateState(.loading(document))
     case nil: break
     }
   }
@@ -558,8 +586,23 @@ extension WebConsoleSession: WKNavigationDelegate {
 
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
     syncNavigation()
-    guard let navigation, navigation === activeNavigation,
-      let url = webView.url, scopeCovers(url) else { return }
+    guard let navigation else {
+      navigationReceipt("did-finish-rejected", generation: loadGeneration, reason: "missing-navigation")
+      return
+    }
+    guard navigation === activeNavigation else {
+      navigationReceipt("did-finish-rejected", generation: loadGeneration, reason: "not-active")
+      return
+    }
+    guard let url = webView.url else {
+      navigationReceipt("did-finish-rejected", generation: loadGeneration, reason: "missing-url")
+      return
+    }
+    guard scopeCovers(url) else {
+      navigationReceipt("did-finish-rejected", generation: loadGeneration, url: url, reason: "outside-scope")
+      return
+    }
+    navigationReceipt("did-finish", generation: loadGeneration, url: url)
     didAutoRecoverFromTermination = false
     lastCommittedURL = url
     rememberRoute(url)
@@ -571,12 +614,26 @@ extension WebConsoleSession: WKNavigationDelegate {
     didFailProvisionalNavigation navigation: WKNavigation!,
     withError error: Error
   ) {
-    guard let navigation, navigation === activeNavigation else { return }
+    guard let navigation else {
+      navigationReceipt("did-fail-rejected", generation: loadGeneration, reason: "missing-navigation")
+      return
+    }
+    guard navigation === activeNavigation else {
+      navigationReceipt("did-fail-rejected", generation: loadGeneration, reason: "not-active")
+      return
+    }
     report(error)
   }
 
   func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-    guard let navigation, navigation === activeNavigation else { return }
+    guard let navigation else {
+      navigationReceipt("did-fail-rejected", generation: loadGeneration, reason: "missing-navigation")
+      return
+    }
+    guard navigation === activeNavigation else {
+      navigationReceipt("did-fail-rejected", generation: loadGeneration, reason: "not-active")
+      return
+    }
     report(error)
   }
 
@@ -589,8 +646,11 @@ extension WebConsoleSession: WKNavigationDelegate {
     // refusals already set their own state where the decision was made.
     let interruptedByPolicy = nsError.domain == "WebKitErrorDomain" && nsError.code == 102
     guard !(nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled), !interruptedByPolicy else {
+      navigationReceipt("did-fail-rejected", generation: loadGeneration, url: appliedEndpoint, reason: "cancelled-by-policy")
       return
     }
+    navigationReceipt("did-fail", generation: loadGeneration, url: appliedEndpoint,
+      reason: "error-domain-\(nsError.domain)-code-\(nsError.code)")
     updateState(.failed(url: appliedEndpoint, reason: nsError.localizedDescription))
   }
 
