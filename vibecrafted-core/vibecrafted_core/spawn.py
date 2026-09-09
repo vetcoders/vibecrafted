@@ -1575,7 +1575,7 @@ def launch_interactive_workspace(
             "continuity validation failed before provider spawn",
             {**failed, "meta": str(meta_path)},
         )
-        _flush_terminal_projection(run_id, failed)
+        _flush_terminal_projection(run_id, failed, meta_path=meta_path)
         raise
     if operator_policy.provider is not None:
         return _launch_supervised_interactive_workspace(
@@ -2607,7 +2607,7 @@ def _terminalize_related_receipt(
         f"Operator Agent terminal: {terminal_reason}",
         {**terminal, "meta": str(meta_path), "identity_required": True},
     )
-    _flush_terminal_projection(run_id, terminal)
+    _flush_terminal_projection(run_id, terminal, meta_path=meta_path)
     return terminal
 
 
@@ -2669,13 +2669,14 @@ def _attach_interactive_process_identity(
 # ``projection:abandoned`` event and the meta receipt — while meta.json plus the
 # lifecycle event remain the durable truth a later full board sync re-projects.
 #
-# Retry bound. ACTIVE phase: at most _PROJECTION_ACTIVE_ATTEMPT_LIMIT attempts
-# with exponential backoff 0.5s·2^(n-1) capped at 30s (≈7 min of coverage).
+# Retry bound. ACTIVE phase retries for the lifetime of its still-live owner,
+# with exponential backoff 0.5s·2^(n-1) capped at 30s. The cap constrains
+# frequency rather than declaring a healthy owner permanently invisible after
+# an arbitrary number of transient storage failures.
 # TERMINAL phase (owner exit): at most _PROJECTION_TERMINAL_BUDGET_SECONDS of
 # wall clock and _PROJECTION_TERMINAL_ATTEMPT_LIMIT attempts, interrupt-safe.
 _PROJECTION_RETRY_INITIAL_SECONDS = 0.5
 _PROJECTION_RETRY_MAX_SECONDS = 30.0
-_PROJECTION_ACTIVE_ATTEMPT_LIMIT = 20
 _PROJECTION_TERMINAL_BUDGET_SECONDS = 5.0
 _PROJECTION_TERMINAL_ATTEMPT_LIMIT = 6
 # ControlPlaneLockBusy is kept for completeness: the scoped projection takes no
@@ -2796,29 +2797,19 @@ class _InteractiveProjection:
         self.last_error = error
         if not self.first_failed_at:
             self.first_failed_at = utc_now_iso()
-        if self.attempts >= _PROJECTION_ACTIVE_ATTEMPT_LIMIT:
-            self.status = "abandoned"
-            self._stamp()
-            _record_projection_abandoned(
-                self.run_id,
-                phase="active",
-                attempts=self.attempts,
-                last_error=error,
-                receipt=self.receipt,
-            )
-            return self.status
         delay = _projection_backoff_seconds(self.failures)
         self.next_attempt_at = self.clock() + delay
         self.status = "pending"
-        _projection_log.warning(
-            "interactive run %s snapshot projection deferred (attempt %d/%d, "
-            "owner retries in %.1fs): %s",
-            self.run_id,
-            self.attempts,
-            _PROJECTION_ACTIVE_ATTEMPT_LIMIT,
-            delay,
-            error,
-        )
+        # A live owner may legitimately outlast an outage. Log the first
+        # defer only, so recovery does not become an unbounded log stream.
+        if self.attempts == 1:
+            _projection_log.warning(
+                "interactive run %s snapshot projection deferred; owner retries "
+                "with capped %.1fs backoff: %s",
+                self.run_id,
+                _PROJECTION_RETRY_MAX_SECONDS,
+                error,
+            )
         self._stamp()
         return self.status
 
@@ -2841,17 +2832,20 @@ class _InteractiveProjection:
 
 def _flush_terminal_projection(
     run_id: str,
-    receipt: Mapping[str, Any],
+    receipt: dict[str, Any],
     *,
+    meta_path: Path | None = None,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> str:
     """Bounded synchronous recovery of the terminal snapshot before owner exit.
 
     Runs after the terminal meta and lifecycle event are durable, so the
-    retained terminal truth is never at stake — only its visibility. Never
-    exceeds the budget, never spawns anything, and a Ctrl-C during the flush
-    abandons it instead of unwinding the owner's exit path.
+    retained terminal truth is never at stake — only its visibility. The retry
+    budget limits scheduling and sleep; it cannot bound a blocking filesystem
+    syscall inside the canonical writer. It never spawns anything, and a
+    Ctrl-C during the flush abandons it instead of unwinding the owner's exit
+    path.
     """
     deadline = clock() + _PROJECTION_TERMINAL_BUDGET_SECONDS
     attempts = 0
@@ -2871,6 +2865,9 @@ def _flush_terminal_projection(
                     run_id,
                     attempts,
                 )
+            _stamp_terminal_projection(
+                receipt, meta_path, status="published", attempts=attempts
+            )
             return "published"
         remaining = deadline - clock()
         if attempts >= _PROJECTION_TERMINAL_ATTEMPT_LIMIT or remaining <= 0:
@@ -2898,7 +2895,39 @@ def _flush_terminal_projection(
         last_error=last_error,
         receipt=receipt,
     )
+    _stamp_terminal_projection(
+        receipt,
+        meta_path,
+        status="abandoned",
+        attempts=attempts,
+        last_error=last_error,
+    )
     return "abandoned"
+
+
+def _stamp_terminal_projection(
+    receipt: dict[str, Any],
+    meta_path: Path | None,
+    *,
+    status: str,
+    attempts: int,
+    last_error: str = "",
+) -> None:
+    """Retain terminal publication outcome without creating another writer."""
+    receipt["projection"] = {
+        "phase": "terminal",
+        "status": status,
+        "attempts": attempts,
+        "last_error": last_error,
+        "published_at": utc_now_iso() if status == "published" else "",
+    }
+    if meta_path is None:
+        return
+    try:
+        _write_meta(meta_path, receipt)
+    except OSError:
+        # The terminal lifecycle receipt remains durable from before this flush.
+        pass
 
 
 def _cleanup_unspawned_interactive_launch(launch: InteractiveWorkspaceLaunch) -> str:
@@ -2959,7 +2988,7 @@ def _terminalize_interactive_launch(
         f"interactive Agent Workspace terminal: {terminal_reason}",
         {**terminal, "meta": str(launch.meta_path), "identity_required": True},
     )
-    _flush_terminal_projection(launch.run_id, terminal)
+    _flush_terminal_projection(launch.run_id, terminal, meta_path=launch.meta_path)
     return terminal
 
 

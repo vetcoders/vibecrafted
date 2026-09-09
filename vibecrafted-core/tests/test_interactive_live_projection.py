@@ -641,7 +641,7 @@ def test_supervised_launch_recovers_both_projections_after_transient_failure(
         )
 
 
-def test_active_projection_retry_is_bounded_and_observable(
+def test_active_projection_recovers_same_owner_after_former_attempt_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from vibecrafted_core import spawn
@@ -672,35 +672,31 @@ def test_active_projection_retry_is_bounded_and_observable(
     assert projection.pump() == "pending"  # not due yet: no busy retry
     assert projection.attempts == 1
     delays: list[float] = []
-    while projection.status == "pending":
+    while projection.attempts <= 20:
         delays.append(projection.next_attempt_at - now[0])
         now[0] = projection.next_attempt_at
         projection.pump()
-    assert projection.status == "abandoned"
-    assert projection.attempts == spawn._PROJECTION_ACTIVE_ATTEMPT_LIMIT == 20
+    assert projection.status == "pending"
+    assert projection.attempts == 21
     assert delays[:6] == [0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
-    assert max(delays) == 30.0 and sum(delays) < 8 * 60
+    assert max(delays) == 30.0
     assert set(scopes) == {run_id}  # exact scope on every attempt
     stamped = json.loads(meta_path.read_text(encoding="utf-8"))["projection"]
-    assert stamped["status"] == "abandoned"
-    assert stamped["attempts"] == 20
+    assert stamped["status"] == "pending"
+    assert stamped["attempts"] == 21
     assert "disk full" in stamped["last_error"]
-    abandoned = [
+    assert not [
         e for e in _events_for(home, run_id) if e["kind"] == "projection:abandoned"
     ]
-    assert len(abandoned) == 1
-    assert abandoned[0]["payload"]["phase"] == "active"
-    assert abandoned[0]["payload"]["state"] == "active"
 
-    # Recovery stops the retry: a published projection is never re-pumped.
+    # Storage heals while the same owner remains live: no fresh projection
+    # object, observe call, or manual sync is needed for recovery.
     monkeypatch.setattr(spawn, "sync_state", lambda only_run_id=None: {})
-    recovered = spawn._InteractiveProjection(
-        run_id=run_id, meta_path=meta_path, receipt=receipt, clock=lambda: now[0]
-    )
-    assert recovered.publish() == "published"
+    now[0] = projection.next_attempt_at
+    assert projection.pump() == "published"
     now[0] += 3600
-    assert recovered.pump() == "published"
-    assert recovered.attempts == 1
+    assert projection.pump() == "published"
+    assert projection.attempts == 22
     assert json.loads(meta_path.read_text(encoding="utf-8"))["projection"][
         "published_at"
     ]
@@ -713,7 +709,17 @@ def test_terminal_projection_flush_is_bounded_and_interrupt_safe(
 
     home = Path(os.environ["VIBECRAFTED_HOME"])
     run_id = "init-260909-000000-00004"
-    receipt = {"run_id": run_id, "status": "cancelled", "liveness": "terminal"}
+    # An ACTIVE success must not remain the terminal meta's projection truth
+    # when the later terminal flush exhausts.
+    receipt = {
+        "run_id": run_id,
+        "status": "cancelled",
+        "liveness": "terminal",
+        "projection": {"phase": "active", "status": "published"},
+    }
+    meta_path = home / "control_plane" / "runtime_runs" / run_id / "meta.json"
+    meta_path.parent.mkdir(parents=True)
+    meta_path.write_text(json.dumps(receipt), encoding="utf-8")
     now = [50.0]
     slept: list[float] = []
 
@@ -727,7 +733,7 @@ def test_terminal_projection_flush_is_bounded_and_interrupt_safe(
         lambda only_run_id=None: (_ for _ in ()).throw(OSError(13, "denied")),
     )
     result = spawn._flush_terminal_projection(
-        run_id, receipt, clock=lambda: now[0], sleep=sleep
+        run_id, receipt, meta_path=meta_path, clock=lambda: now[0], sleep=sleep
     )
     assert result == "abandoned"
     assert sum(slept) <= spawn._PROJECTION_TERMINAL_BUDGET_SECONDS
@@ -737,6 +743,9 @@ def test_terminal_projection_flush_is_bounded_and_interrupt_safe(
     ]
     assert [e["payload"]["phase"] for e in abandoned] == ["terminal"]
     assert abandoned[0]["payload"]["state"] == "cancelled"
+    exhausted_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert exhausted_meta["projection"]["phase"] == "terminal"
+    assert exhausted_meta["projection"]["status"] == "abandoned"
 
     # Transient: two failures then success returns published, no abandonment.
     outcomes = iter([OSError(13, "denied"), OSError(13, "denied"), None])
@@ -749,13 +758,26 @@ def test_terminal_projection_flush_is_bounded_and_interrupt_safe(
 
     monkeypatch.setattr(spawn, "sync_state", flaky)
     slept.clear()
+    # Conversely, a failed ACTIVE publication must be replaced by a successful
+    # terminal flush, not preserved as stale active-phase metadata.
+    terminal_success = {
+        "run_id": "init-260909-000000-00005",
+        "status": "cancelled",
+        "liveness": "terminal",
+        "projection": {"phase": "active", "status": "pending"},
+    }
     assert (
         spawn._flush_terminal_projection(
-            "init-260909-000000-00005", receipt, clock=lambda: now[0], sleep=sleep
+            "init-260909-000000-00005",
+            terminal_success,
+            clock=lambda: now[0],
+            sleep=sleep,
         )
         == "published"
     )
     assert slept == [0.5, 1.0]
+    assert terminal_success["projection"]["phase"] == "terminal"
+    assert terminal_success["projection"]["status"] == "published"
 
     # Ctrl-C inside the flush abandons it instead of unwinding the owner exit.
     def interrupting(delay: float) -> None:
