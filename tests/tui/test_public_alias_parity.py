@@ -21,21 +21,31 @@ import pytest
 
 from scripts import vetcoders_install
 from vibecrafted_core import cli
+from vibecrafted_core.runtime_paths import version_is_stamped
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DECK = REPO_ROOT / "scripts" / "vibecrafted"
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
+# Founder launches use a heredoc-shaped --prompt. A newline-free paragraph
+# cannot prove argv/stdin preservation across the public spellings.
 LONG_PROMPT = (
-    "Preserve this exact argv payload: quotes \"inner\", dollars $HOME, "
-    "and a newline-free paragraph " + ("word " * 40)
+    "Preserve this exact argv payload: quotes \"inner\", dollars $HOME,\n"
+    "and a heredoc paragraph\n\n" + ("word " * 40) + "\ntrailing line"
 )
 
+STAMPED_GENERATION_VERSION = "4.3.0+g1234567"
 
-def _run_deck(argv: list[str], *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+
+def _run_deck(
+    argv: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["bash", str(DECK), *argv],
-        cwd=REPO_ROOT,
+        cwd=cwd or REPO_ROOT,
         env=env or os.environ.copy(),
         capture_output=True,
         text=True,
@@ -43,15 +53,22 @@ def _run_deck(argv: list[str], *, env: dict[str, str] | None = None) -> subproce
     )
 
 
-def _run_named(wrapper_name: str, argv: list[str], tmp_path: Path) -> subprocess.CompletedProcess[str]:
+def _run_named(
+    wrapper_name: str,
+    argv: list[str],
+    tmp_path: Path,
+    *,
+    env: dict[str, str] | None = None,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
     wrapper = tmp_path / wrapper_name
     if wrapper.exists() or wrapper.is_symlink():
         wrapper.unlink()
     wrapper.symlink_to(DECK)
     return subprocess.run(
         ["bash", str(wrapper), *argv],
-        cwd=REPO_ROOT,
-        env=os.environ.copy(),
+        cwd=cwd or REPO_ROOT,
+        env=env or os.environ.copy(),
         capture_output=True,
         text=True,
         check=False,
@@ -81,7 +98,6 @@ def _assert_same_public_result(
         ("vc-fork", "fork", ["codex", "--session", "sess-1", "--runtime", "headless"]),
         ("vc-fork", "fork", ["not-an-agent", "--session", "sess-1"]),
         ("vc-fork", "fork", ["codex", "--session", "sess-1", "--unknown-flag"]),
-        ("vc-fork", "fork", ["codex", "--session", "sess-1", "--prompt", LONG_PROMPT, "--runtime", "headless"]),
         ("vc-operator", "operator", ["--help"]),
         ("vc-canary", "canary", ["--help"]),
     ],
@@ -100,6 +116,155 @@ def test_fork_help_names_both_spellings(tmp_path: Path) -> None:
     assert "vc-fork" in result.stdout
     assert "vibecrafted fork" in result.stdout
     assert "Bare fork requires visible or terminal" not in result.stderr
+
+
+def _write_fork_launch_boundary_python(
+    path: Path, *, capture: Path, session_id: str, root: Path
+) -> None:
+    """Intercept fork-source / fork-session; exec the host interpreter otherwise."""
+    path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        f"REAL = {sys.executable!r}\n"
+        f"CAPTURE = {str(capture)!r}\n"
+        f"SESSION = {session_id!r}\n"
+        f"ROOT = {str(root)!r}\n"
+        "args = sys.argv[1:]\n"
+        "stripped = [item for item in args if item != '-I']\n"
+        "if stripped[:2] == ['-m', 'vibecrafted_core.cli'] and len(stripped) > 2:\n"
+        "    command = stripped[2]\n"
+        "    rest = stripped[3:]\n"
+        "    if command == 'fork-source':\n"
+        "        print(json.dumps({\n"
+        "            'accepted': True,\n"
+        "            'agent_session_id': SESSION,\n"
+        "            'source_run_id': 'source',\n"
+        "            'selection_root': ROOT,\n"
+        "            'source_root': ROOT,\n"
+        "        }))\n"
+        "        raise SystemExit(0)\n"
+        "    if command == 'fork-session':\n"
+        "        open(CAPTURE, 'w', encoding='utf-8').write(json.dumps({\n"
+        "            'argv': rest,\n"
+        "            'stdin': sys.stdin.read(),\n"
+        "        }))\n"
+        "        print(json.dumps({'accepted': True, 'run_id': 'fork-fixture-1'}))\n"
+        "        raise SystemExit(0)\n"
+        "os.execv(REAL, [REAL, *args])\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def _isolated_alias_env(
+    *,
+    home: Path,
+    extra_bin: Path,
+    python: Path,
+) -> dict[str, str]:
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key
+        not in {
+            "PYTHONPATH",
+            "PYTHONHOME",
+            "VIBECRAFTED_ROOT",
+            "VIBECRAFTED_RUNTIME_ROOT",
+            "VIBECRAFTED_RUNTIME_BIN",
+            "VIBECRAFTED_PYTHON",
+            "VIBECRAFTED_PREFER_REPO_SPAWN",
+            "VIBECRAFTED_AGENT",
+            "VIBECRAFTED_AGENT_SESSION_ID",
+            "VIBECRAFTED_RUN_ID",
+            "CODEX_SESSION_ID",
+            "CODEX_THREAD_ID",
+        }
+    }
+    env["HOME"] = str(home)
+    env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
+    env["PATH"] = f"{extra_bin}:{env.get('PATH', '')}"
+    env["VIBECRAFTED_PYTHON"] = str(python)
+    return env
+
+
+def test_fork_prompt_spellings_share_normalized_launch_boundary(tmp_path: Path) -> None:
+    """`--prompt` is a task launch. Compare captured argv/stdin, not live stdout."""
+    home = tmp_path / "home"
+    extra_bin = tmp_path / "bin"
+    root = tmp_path / "repo"
+    capture = tmp_path / "fork-session.json"
+    spy = extra_bin / "python3"
+    home.mkdir()
+    extra_bin.mkdir()
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "README.md"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    (extra_bin / "codex").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (extra_bin / "codex").chmod(0o755)
+    _write_fork_launch_boundary_python(
+        spy, capture=capture, session_id="sess-1", root=root
+    )
+    env = _isolated_alias_env(home=home, extra_bin=extra_bin, python=spy)
+    payload = [
+        "codex",
+        "--session",
+        "sess-1",
+        "--prompt",
+        LONG_PROMPT,
+        "--runtime",
+        "headless",
+        "--root",
+        str(root),
+        "--base",
+        "538576ac",
+        "--model",
+        "gpt-test",
+    ]
+
+    results: list[dict[str, object]] = []
+    for label, runner in (
+        ("wrapper", lambda: _run_named("vc-fork", payload, tmp_path / "wrapper", env=env, cwd=root)),
+        ("deck", lambda: _run_deck(["fork", *payload], env=env, cwd=root)),
+    ):
+        if capture.exists():
+            capture.unlink()
+        proc = runner()
+        assert proc.returncode == 0, f"{label}: {proc.stderr}\n{proc.stdout}"
+        assert "Bare fork requires" not in proc.stderr
+        assert "accepted" in proc.stdout
+        recorded = json.loads(capture.read_text(encoding="utf-8"))
+        argv = recorded["argv"]
+        assert isinstance(argv, list)
+        assert argv[0] == "fork-session"
+        assert argv[1] == "codex"
+        assert argv[argv.index("--session") + 1] == "sess-1"
+        assert argv[argv.index("--root") + 1] == str(root)
+        assert argv[argv.index("--model") + 1] == "gpt-test"
+        assert argv[argv.index("--base") + 1] == "538576ac"
+        assert "--prompt-stdin" in argv
+        assert LONG_PROMPT not in argv
+        assert recorded["stdin"] == LONG_PROMPT
+        results.append(recorded)
+
+    assert results[0]["argv"] == results[1]["argv"]
+    assert results[0]["stdin"] == results[1]["stdin"] == LONG_PROMPT
 
 
 @pytest.mark.parametrize(
@@ -137,24 +302,37 @@ def test_python_entry_and_deck_verb_share_child_argv(
     assert deck_argv == wrapper_argv
 
 
-def test_runtime_shim_and_deck_verb_share_child_argv(tmp_path: Path) -> None:
-    capture = tmp_path / "deck-argv.txt"
-    fake_deck = tmp_path / "generation" / "bin" / "vibecrafted"
-    fake_deck.parent.mkdir(parents=True)
-    fake_deck.write_text(
-        "#!/usr/bin/env bash\n"
-        "printf '%s\\n' \"$0\" \"$@\" > \"$CAPTURE_FILE\"\n",
+def _write_json_argv_capture(script: Path) -> None:
+    """Record argv as JSON so a multiline --prompt stays one field."""
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "Path(os.environ['CAPTURE_FILE']).write_text("
+        "json.dumps(sys.argv), encoding='utf-8')\n",
         encoding="utf-8",
     )
-    fake_deck.chmod(0o755)
+    script.chmod(0o755)
+
+
+def test_runtime_shim_and_deck_verb_share_child_argv(tmp_path: Path) -> None:
+    capture = tmp_path / "deck-argv.json"
+    generation = tmp_path / "generation"
+    fake_deck = generation / "bin" / "vibecrafted"
+    _write_json_argv_capture(fake_deck)
+    verb = vetcoders_install._RUNTIME_WRAPPER_VERBS["vc-fork"]
+    assert "vc-fork" in vetcoders_install._runtime_published_launcher_names(
+        fake_deck.parent
+    )
     body = vetcoders_install._runtime_launcher_body(
-        generation=tmp_path / "generation",
+        generation=generation,
         config_home=tmp_path / "config",
         crafted_home=tmp_path / "crafted",
         runtime_home=tmp_path / "runtime",
         frame_config=tmp_path / "frame",
         executable=fake_deck,
-        leading_arguments=("fork",),
+        leading_arguments=(verb,),
     )
     shim = tmp_path / "vc-fork"
     shim.write_text(body, encoding="utf-8")
@@ -171,21 +349,22 @@ def test_runtime_shim_and_deck_verb_share_child_argv(tmp_path: Path) -> None:
         text=True,
         check=False,
     )
-    assert shim_run.returncode == 0
-    shim_argv = capture.read_text(encoding="utf-8").splitlines()
+    assert shim_run.returncode == 0, shim_run.stderr
+    shim_argv = json.loads(capture.read_text(encoding="utf-8"))
     capture.write_text("", encoding="utf-8")
     deck_run = subprocess.run(
-        [str(fake_deck), "fork", *payload],
+        [str(fake_deck), verb, *payload],
         cwd=REPO_ROOT,
         env=env,
         capture_output=True,
         text=True,
         check=False,
     )
-    assert deck_run.returncode == 0
-    deck_argv = capture.read_text(encoding="utf-8").splitlines()
-    assert shim_argv[1:] == ["fork", *payload]
+    assert deck_run.returncode == 0, deck_run.stderr
+    deck_argv = json.loads(capture.read_text(encoding="utf-8"))
+    assert shim_argv[1:] == [verb, *payload]
     assert deck_argv[1:] == shim_argv[1:]
+    assert LONG_PROMPT in shim_argv
 
 
 def _write_fake_vc_frame(bin_dir: Path, capture_file: Path, session_name: str) -> None:
@@ -244,7 +423,13 @@ def _installed_generation(tmp_path: Path, home: Path, frame_source: Path) -> Pat
         REPO_ROOT / "vibecrafted-core/vibecrafted_core",
         generation / "vibecrafted-core" / "vibecrafted_core",
     )
-    (generation / "VERSION").write_text("4.3.1+gtest\n", encoding="utf-8")
+    # Same immutable stamp the production guard requires: X.Y.Z+g + hex SHA.
+    # `+gtest` is not stamped (`s` is outside hex). Receipt file is the
+    # deck's installed-generation marker; a checkout never carries it.
+    assert version_is_stamped(STAMPED_GENERATION_VERSION)
+    assert not version_is_stamped("4.3.1+gtest")
+    (generation / "VERSION").write_text(f"{STAMPED_GENERATION_VERSION}\n", encoding="utf-8")
+    (generation / "runtime-manifest.json").write_text("{}\n", encoding="utf-8")
     python = generation / "bin" / "python3"
     python.write_text(f"#!/bin/sh\nexec {sys.executable!r} \"$@\"\n", encoding="utf-8")
     python.chmod(0o755)
@@ -325,10 +510,20 @@ def test_fork_spellings_share_normalized_child_admission(tmp_path: Path) -> None
         env["VC_FRAME_SESSION_NAME"] = "operator-test"
         env["CAPTURE_FILE"] = str(capture)
         env["CODEX_THREAD_ID"] = "current-codex-session"
-        env.pop("CODEX_SESSION_ID", None)
-        env.pop("VIBECRAFTED_AGENT", None)
-        env.pop("VIBECRAFTED_AGENT_SESSION_ID", None)
-        env.pop("VIBECRAFTED_RUN_ID", None)
+        for key in (
+            "CODEX_SESSION_ID",
+            "VIBECRAFTED_AGENT",
+            "VIBECRAFTED_AGENT_SESSION_ID",
+            "VIBECRAFTED_RUN_ID",
+            "VIBECRAFTED_ROOT",
+            "VIBECRAFTED_RUNTIME_ROOT",
+            "VIBECRAFTED_RUNTIME_BIN",
+            "VIBECRAFTED_PYTHON",
+            "VIBECRAFTED_PREFER_REPO_SPAWN",
+            "PYTHONPATH",
+            "PYTHONHOME",
+        ):
+            env.pop(key, None)
         proc = subprocess.run(
             [
                 *argv,
