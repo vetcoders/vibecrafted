@@ -162,7 +162,7 @@ impl LauncherCatalog {
             crate::launch::CATALOG_ANSWER_DEADLINE,
             &what,
         )? {
-            crate::launch::LauncherRun::Completed(output) => output,
+            crate::launch::LauncherRun::Completed { output, .. } => output,
             // The probe starts nothing, so an unanswered catalog is simply an
             // unavailable catalog — and every launch stays refused until one
             // arrives.

@@ -15,8 +15,6 @@
 
 use anyhow::Context;
 use serde::Deserialize;
-use serde::de::IgnoredAny;
-use serde_json::error::Category;
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -68,6 +66,13 @@ pub const DIAGNOSTIC_HEAD_CAP: usize = 256 * 1024;
 /// launcher prints, so the tail is what can still prove a run exists after a
 /// noisy launcher has outrun the head.
 pub const DIAGNOSTIC_TAIL_CAP: usize = 64 * 1024;
+
+/// How much of one top-level value VOC is willing to hold while deciding
+/// whether it is the receipt. A launch receipt is a small object; anything
+/// larger is a diagnostic, and it is stepped over structurally rather than
+/// held. This is what keeps a single value — however long — from costing
+/// memory in proportion to its size.
+pub const RECEIPT_FRAME_CAP: usize = 128 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchKind {
@@ -467,10 +472,19 @@ impl LaunchCommand {
 }
 
 /// What a bounded launcher invocation produced.
+///
+/// Every variant carries `answer` beside its streams. The streams are what
+/// VOC will show — bounded, and elided in the middle when a launcher outruns
+/// that budget. The answer is what the reader proved while the stream was
+/// still whole. Keeping them apart is what stops a display budget from
+/// deciding whether a run was admitted.
 #[derive(Debug)]
 pub enum LauncherRun {
     /// The launcher exited on its own; the streams below are what it wrote.
-    Completed(Output),
+    Completed {
+        output: Output,
+        answer: StdoutAnswer,
+    },
     /// The deadline passed with the launcher still running. Nothing was
     /// killed and nothing is retried: a worker may already exist, so the
     /// outcome is unknown rather than failed.
@@ -478,6 +492,7 @@ pub enum LauncherRun {
         waited: Duration,
         stdout: Vec<u8>,
         stderr: Vec<u8>,
+        answer: StdoutAnswer,
     },
     /// The launcher was spawned, but VOC then lost the ability to observe
     /// it: waiting on the child failed. The spawn already succeeded, so a
@@ -486,8 +501,216 @@ pub enum LauncherRun {
         error: String,
         stdout: Vec<u8>,
         stderr: Vec<u8>,
+        answer: StdoutAnswer,
     },
 }
+
+/// Where the reader stands in the launcher's stdout, byte by byte.
+///
+/// The three states are exhaustive over a stream: either nothing is open,
+/// or a line of chatter is being passed over, or a top-level value is being
+/// read. Nothing else can be true of a position in the output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Scan {
+    /// Outside every value. The next byte that is not blank either opens one
+    /// or begins a line the launcher wrote as prose.
+    #[default]
+    Between,
+    /// Inside a line that did not begin a value. Every byte up to the next
+    /// newline is text, whatever it looks like.
+    Chatter,
+    /// Inside a top-level value, at a depth this reader has counted itself.
+    Frame,
+}
+
+/// Reads the launcher's answer out of stdout *as it arrives*, while the
+/// stream is still whole.
+///
+/// This is the one place that knows what is nested inside what, and it knows
+/// it for the only reason that constitutes knowledge here: it saw every byte
+/// the launcher wrote, in order, before anything was dropped to fit a display
+/// budget. A value is top-level because the reader stood outside every other
+/// value when it began reading that one — not because of where it sat on a
+/// line, what followed it, or what survived into the text an operator sees.
+///
+/// The distinction matters because the display text has a hole in it. Once
+/// the middle of a long stream is elided, a frame opened before the gap and
+/// a frame opened after it are indistinguishable in what remains; a nested
+/// object at the tail reads exactly like a top-level one. Deciding here, at
+/// the point of arrival, is what removes that ambiguity instead of resolving
+/// it by assumption in either direction — neither inventing an admission
+/// from a fragment, nor discarding an answer that legitimately came last.
+///
+/// Nothing about this state can be reached by anything the launcher prints.
+/// The gap notice is written by the display projection and never returns
+/// here, so a launcher echoing that notice is a launcher printing text.
+///
+/// Cost is fixed and the work is linear: each byte is examined once, chatter
+/// and oversized values are counted rather than kept, and at most
+/// `RECEIPT_FRAME_CAP` bytes of one candidate value are ever held.
+#[derive(Default)]
+struct ReceiptScanner {
+    scan: Scan,
+    /// Structural depth inside the value being read. Only zero can end it.
+    depth: usize,
+    in_string: bool,
+    escaped: bool,
+    /// The value being read, while it is still small enough to be a receipt.
+    frame: Vec<u8>,
+    /// The value outgrew what VOC will hold. Its boundary is still counted —
+    /// losing the bytes must not mean losing the structure.
+    oversized: bool,
+    /// The last complete top-level value that stated a verdict under this
+    /// contract. Later output can add an answer; it cannot retract one.
+    receipt: Option<LaunchReceipt>,
+    /// Complete top-level values that were valid JSON, whatever they said.
+    readable: usize,
+    /// Why some value could not be read, kept for the operator when no
+    /// answer was found at all. The first reason is the informative one.
+    breakage: Option<String>,
+    /// Whether the launcher wrote anything but whitespace.
+    spoke: bool,
+}
+
+impl ReceiptScanner {
+    fn push(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            match self.scan {
+                Scan::Between => {
+                    if byte.is_ascii_whitespace() {
+                        continue;
+                    }
+                    self.spoke = true;
+                    if byte == b'{' || byte == b'[' {
+                        self.scan = Scan::Frame;
+                        self.depth = 1;
+                        self.in_string = false;
+                        self.escaped = false;
+                        self.oversized = false;
+                        self.frame.clear();
+                        self.frame.push(byte);
+                    } else {
+                        self.scan = Scan::Chatter;
+                    }
+                }
+                Scan::Chatter => {
+                    self.spoke = true;
+                    if byte == b'\n' {
+                        self.scan = Scan::Between;
+                    }
+                }
+                Scan::Frame => self.step_through_frame(byte),
+            }
+        }
+    }
+
+    /// One byte inside a top-level value: keep it if the value can still be
+    /// a receipt, and count what it does to the structure either way.
+    fn step_through_frame(&mut self, byte: u8) {
+        if self.oversized {
+            // Nothing is kept, but the boundary is still counted: a value
+            // too large to be an answer must not take the reader's place in
+            // the stream with it.
+        } else if self.frame.len() >= RECEIPT_FRAME_CAP {
+            self.oversized = true;
+            self.frame = Vec::new();
+        } else {
+            self.frame.push(byte);
+        }
+
+        if self.escaped {
+            self.escaped = false;
+            return;
+        }
+        if self.in_string {
+            match byte {
+                b'\\' => self.escaped = true,
+                b'"' => self.in_string = false,
+                _ => {}
+            }
+            return;
+        }
+        match byte {
+            b'"' => self.in_string = true,
+            // Saturation cannot be undone, so a value nested past the width
+            // of a machine word simply never closes. That is the honest
+            // outcome: no boundary was proved, so no answer is admitted.
+            b'{' | b'[' => self.depth = self.depth.saturating_add(1),
+            b'}' | b']' => {
+                self.depth -= 1;
+                if self.depth == 0 {
+                    self.close_frame();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A top-level value just ended. Whether it is the launcher's answer is
+    /// now a question about its contents alone.
+    fn close_frame(&mut self) {
+        self.scan = Scan::Between;
+        if !self.oversized {
+            self.judge_frame();
+        }
+        self.frame = Vec::new();
+        self.oversized = false;
+    }
+
+    fn judge_frame(&mut self) {
+        match serde_json::from_slice::<LaunchEnvelope>(&self.frame) {
+            Ok(envelope) => {
+                self.readable += 1;
+                if envelope.names_a_launch() {
+                    match serde_json::from_slice::<LaunchReceipt>(&self.frame) {
+                        Ok(receipt) => self.receipt = Some(receipt),
+                        Err(error) => {
+                            self.breakage.get_or_insert_with(|| error.to_string());
+                        }
+                    }
+                }
+            }
+            // Balanced delimiters are not a promise of valid JSON. What the
+            // reader proved is where the value ended, and that is enough to
+            // carry on reading past it.
+            Err(error) => {
+                self.breakage.get_or_insert_with(|| error.to_string());
+            }
+        }
+    }
+
+    /// The launcher's answer, or why the stream does not contain one.
+    fn answer(&self) -> StdoutAnswer {
+        if let Some(receipt) = &self.receipt {
+            return Ok(receipt.clone());
+        }
+        if !self.spoke {
+            return Err("launcher printed no receipt".to_string());
+        }
+        let unread = self.breakage.clone().or_else(|| match self.scan {
+            Scan::Frame => {
+                Some("the launcher's output ended inside a value it never closed".to_string())
+            }
+            _ => None,
+        });
+        match unread {
+            // Nothing on stdout ever read as a value, so what the operator
+            // needs to see is the launcher's own breakage.
+            Some(why) if self.readable == 0 => {
+                Err(format!("launch receipt is not valid JSON: {why}"))
+            }
+            _ => Err("launcher printed diagnostics but no receipt".to_string()),
+        }
+    }
+}
+
+/// The launcher's answer as proved by the reader that saw every byte of its
+/// stdout, or the reason no answer could be proved from it.
+///
+/// Carried alongside the display text rather than derived from it: the text
+/// is a bounded projection with a hole in the middle, and a verdict read back
+/// out of a projection is a verdict about the projection.
+pub type StdoutAnswer = Result<LaunchReceipt, String>;
 
 /// One stream's retained bytes: a head, a tail, and an honest count of what
 /// fell between them.
@@ -502,10 +725,18 @@ struct BoundedCapture {
     head: Vec<u8>,
     tail: VecDeque<u8>,
     dropped: u64,
+    /// What the stream meant, kept apart from what will be shown of it.
+    /// Retaining bytes and reading structure are answers to different
+    /// questions, and only one of them can be answered later.
+    answer: ReceiptScanner,
 }
 
 impl BoundedCapture {
     fn push(&mut self, bytes: &[u8]) {
+        // Structure is read first, from the original stream. Everything
+        // below decides what an operator will be shown; this line decides
+        // what VOC knows, and it cannot be done after the fact.
+        self.answer.push(bytes);
         let mut rest = bytes;
         if self.head.len() < DIAGNOSTIC_HEAD_CAP {
             let take = (DIAGNOSTIC_HEAD_CAP - self.head.len()).min(rest.len());
@@ -528,6 +759,12 @@ impl BoundedCapture {
             self.tail.pop_front();
             self.dropped += 1;
         }
+    }
+
+    /// The launcher's answer, as read from the whole stream rather than from
+    /// the bounded text below.
+    fn answer(&self) -> StdoutAnswer {
+        self.answer.answer()
     }
 
     /// The retained bytes as one stream. Nothing is elided silently: the gap
@@ -602,6 +839,22 @@ fn snapshot(buffer: &Arc<Mutex<BoundedCapture>>) -> Vec<u8> {
         .unwrap_or_default()
 }
 
+/// The stdout capture's two projections, taken together: the bounded text an
+/// operator reads, and the answer the reader proved from the whole stream.
+///
+/// Both come from one lock so they describe the same moment. A reader lost to
+/// a panicking thread is a gap in VOC's sight, never a launcher that answered
+/// nothing.
+fn stdout_view(buffer: &Arc<Mutex<BoundedCapture>>) -> (Vec<u8>, StdoutAnswer) {
+    match buffer.lock() {
+        Ok(guard) => (guard.snapshot(), guard.answer()),
+        Err(_) => (
+            Vec::new(),
+            Err("VOC lost the reader holding the launcher's stdout".to_string()),
+        ),
+    }
+}
+
 /// Spawn `command` with both output streams drained concurrently and the
 /// private stdin payload written on its own thread, then wait at most
 /// `deadline` for it to exit.
@@ -656,21 +909,27 @@ pub(crate) fn run_bounded(
                 while finished.load(Ordering::SeqCst) < 2 && grace.elapsed() < READER_FLUSH_GRACE {
                     thread::sleep(CHILD_POLL_INTERVAL);
                 }
-                return Ok(LauncherRun::Completed(Output {
-                    status,
-                    stdout: snapshot(&stdout),
-                    stderr: snapshot(&stderr),
-                }));
+                let (text, answer) = stdout_view(&stdout);
+                return Ok(LauncherRun::Completed {
+                    output: Output {
+                        status,
+                        stdout: text,
+                        stderr: snapshot(&stderr),
+                    },
+                    answer,
+                });
             }
             Ok(None) => {}
             // The spawn already succeeded, so this is not a failure to
             // start: VOC has merely gone blind to a launcher that may
             // already have admitted a run.
             Err(error) => {
+                let (text, answer) = stdout_view(&stdout);
                 return Ok(LauncherRun::Unobservable {
                     error: format!("failed to wait for {what}: {error}"),
-                    stdout: snapshot(&stdout),
+                    stdout: text,
                     stderr: snapshot(&stderr),
+                    answer,
                 });
             }
         }
@@ -683,10 +942,12 @@ pub(crate) fn run_bounded(
             thread::spawn(move || {
                 let _ = child.wait();
             });
+            let (text, answer) = stdout_view(&stdout);
             return Ok(LauncherRun::Undecided {
                 waited,
-                stdout: snapshot(&stdout),
+                stdout: text,
                 stderr: snapshot(&stderr),
+                answer,
             });
         }
         thread::sleep(CHILD_POLL_INTERVAL);
@@ -862,138 +1123,23 @@ impl LaunchEnvelope {
     }
 }
 
-/// How far a JSON value reaches from the front of some text — the one
-/// question that settles what is nested inside what.
-enum Frame {
-    /// A complete value, ending at this offset. Everything before that
-    /// offset belongs to it; nothing after it ever did.
-    Complete(usize),
-    /// The text ends inside the value. Its members can read perfectly well
-    /// while its framing stays unknown, so nothing found inside it stands on
-    /// its own.
-    Truncated(String),
-    /// Not a value at all — text that merely begins like one.
-    Malformed(String),
-}
-
-/// Read one JSON value from the front of `text`, keeping none of it: only
-/// where it ends, or why it does not.
-fn read_frame(text: &str) -> Frame {
-    let mut values = serde_json::Deserializer::from_str(text).into_iter::<IgnoredAny>();
-    match values.next() {
-        Some(Ok(IgnoredAny)) => Frame::Complete(values.byte_offset()),
-        Some(Err(error)) if error.classify() == Category::Eof => {
-            Frame::Truncated(error.to_string())
-        }
-        Some(Err(error)) => Frame::Malformed(error.to_string()),
-        None => Frame::Truncated("the launcher's output ended before any value".to_string()),
-    }
-}
-
-/// Where the line after `from` begins. A raw newline never occurs inside a
-/// JSON string, so a line boundary always falls between tokens rather than
-/// through one.
-fn next_line(text: &str, from: usize) -> usize {
-    match text[from..].find('\n') {
-        Some(offset) => from + offset + 1,
-        None => text.len(),
-    }
-}
-
 impl LaunchReceipt {
-    /// Read the launcher's answer out of the stdout VOC retained.
+    /// Read the launcher's answer out of a finished stream of stdout.
     ///
-    /// The answer is the last *complete top-level* object that states a
-    /// verdict about a launch, and both halves of that carry weight.
+    /// This is the same reader the stream pump runs while a launcher is still
+    /// talking, handed every byte at once: `ReceiptScanner` decides what is
+    /// top-level by standing outside every value before it begins reading
+    /// one, so an object nested in a diagnostic is never a candidate and a
+    /// value that never closed never yields one.
     ///
-    /// Top-level membership is established, not guessed. The scan walks
-    /// forward from the start of the retained output and reads every value
-    /// it meets whole: a value is top-level because the scan stood outside
-    /// every other value when it began reading, and everything that value
-    /// contains is stepped over with it. So a diagnostic nested in the
-    /// receipt is never a candidate — not because of how it was indented or
-    /// what punctuation followed it, neither of which says anything about
-    /// depth, but because the scan never stands inside a value it has
-    /// already begun.
-    ///
-    /// Reading values whole is also what makes a cut-off stream safe. When
-    /// the retained output ends inside a value — a launcher killed
-    /// mid-print, a snapshot taken at the deadline — the scan stops at that
-    /// value instead of stepping into it. A finished object inside an
-    /// unfinished one is a fragment of an answer, and returning it would
-    /// state a verdict the launcher never finished giving.
-    ///
-    /// What lies between values is ordinary launcher chatter: it cannot
-    /// occur inside a JSON value, so the scan resumes at the next line and
-    /// keeps whatever it has already read. That is what lets an answer
-    /// survive both the noise printed before it and the noise printed after
-    /// it.
-    ///
-    /// Each byte is read once and the capture feeding this holds a fixed
-    /// number of them, so no volume of launcher output makes the answer
-    /// expensive to find.
+    /// Use it where the whole stream is in hand. Where it is not — a live
+    /// launcher whose output must also be bounded for display — read the
+    /// answer from the capture instead, which is holding this same reader
+    /// open across the gap it will later elide.
     pub fn parse(stdout: &[u8]) -> anyhow::Result<Self> {
-        let text = String::from_utf8_lossy(stdout);
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            anyhow::bail!("launcher printed no receipt");
-        }
-
-        let mut answer: Option<Self> = None;
-        let mut objects = 0usize;
-        let mut unreadable: Option<String> = None;
-        let mut cursor = 0usize;
-        while cursor < trimmed.len() {
-            let rest = &trimmed[cursor..];
-            let lead = rest.len() - rest.trim_start().len();
-            if lead > 0 {
-                cursor += lead;
-                continue;
-            }
-            if !rest.starts_with(['{', '[']) {
-                cursor = next_line(trimmed, cursor);
-                continue;
-            }
-            match read_frame(rest) {
-                Frame::Complete(end) => {
-                    objects += 1;
-                    if let Some(receipt) = Self::read_answer(&rest[..end]) {
-                        answer = Some(receipt);
-                    }
-                    cursor += end;
-                }
-                // Nothing follows an unfinished value, and nothing inside it
-                // was ever shown to stand alone.
-                Frame::Truncated(why) => {
-                    unreadable.get_or_insert(why);
-                    break;
-                }
-                Frame::Malformed(why) => {
-                    unreadable.get_or_insert(why);
-                    cursor = next_line(trimmed, cursor);
-                }
-            }
-        }
-
-        if let Some(receipt) = answer {
-            return Ok(receipt);
-        }
-        match unreadable {
-            // Not one value on stdout ever closed, so what the operator
-            // needs to read is the launcher's own breakage.
-            Some(why) if objects == 0 => anyhow::bail!("launch receipt is not valid JSON: {why}"),
-            _ => anyhow::bail!("launcher printed diagnostics but no receipt"),
-        }
-    }
-
-    /// The receipt carried by one complete top-level object, if that object
-    /// is the launcher's answer at all.
-    fn read_answer(frame: &str) -> Option<Self> {
-        let envelope: LaunchEnvelope = serde_json::from_str(frame).ok()?;
-        if !envelope.names_a_launch() {
-            return None;
-        }
-        serde_json::from_str(frame).ok()
+        let mut reader = ReceiptScanner::default();
+        reader.push(stdout);
+        reader.answer().map_err(|why| anyhow::anyhow!(why))
     }
 
     pub fn refusal_reason(&self) -> String {
@@ -1154,11 +1300,11 @@ impl LaunchOutcome {
         run: anyhow::Result<LauncherRun>,
     ) -> Self {
         match run {
-            Ok(LauncherRun::Completed(output)) => {
+            Ok(LauncherRun::Completed { output, answer }) => {
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                let (receipt, transport_error) = match LaunchReceipt::parse(&output.stdout) {
+                let (receipt, transport_error) = match answer {
                     Ok(receipt) => (Some(receipt), None),
-                    Err(error) => (None, Some(format!("{error:#}"))),
+                    Err(why) => (None, Some(why)),
                 };
                 Self {
                     preview,
@@ -1174,8 +1320,9 @@ impl LaunchOutcome {
             }
             Ok(LauncherRun::Undecided {
                 waited,
-                stdout,
+                stdout: _,
                 stderr,
+                answer,
             }) => Self {
                 preview,
                 expectation,
@@ -1185,7 +1332,7 @@ impl LaunchOutcome {
                 // is the absence of an answer, not a transport failure.
                 launcher_started: true,
                 termination_signal: None,
-                receipt: LaunchReceipt::parse(&stdout).ok(),
+                receipt: answer.ok(),
                 stderr: String::from_utf8_lossy(&stderr).into_owned(),
                 transport_error: None,
                 undecided_after: Some(waited),
@@ -1195,15 +1342,16 @@ impl LaunchOutcome {
             // gap in VOC's sight, not proof of an absent launcher.
             Ok(LauncherRun::Unobservable {
                 error,
-                stdout,
+                stdout: _,
                 stderr,
+                answer,
             }) => Self {
                 preview,
                 expectation,
                 exit_code: None,
                 launcher_started: true,
                 termination_signal: None,
-                receipt: LaunchReceipt::parse(&stdout).ok(),
+                receipt: answer.ok(),
                 stderr: String::from_utf8_lossy(&stderr).into_owned(),
                 transport_error: Some(error),
                 undecided_after: None,
@@ -1986,12 +2134,19 @@ mod tests {
         assert_eq!(Environment::FleetVmCloud.policy_id(), "cloud-soon");
     }
 
+    /// A finished launcher, presented the way the transport presents one:
+    /// the bytes it wrote, and the answer the reader proved from them.
     fn completed(stdout: &[u8], stderr: &[u8]) -> anyhow::Result<LauncherRun> {
-        Ok(LauncherRun::Completed(Output {
-            status: std::process::ExitStatus::default(),
-            stdout: stdout.to_vec(),
-            stderr: stderr.to_vec(),
-        }))
+        let mut capture = BoundedCapture::default();
+        capture.push(stdout);
+        Ok(LauncherRun::Completed {
+            output: Output {
+                status: std::process::ExitStatus::default(),
+                stdout: capture.snapshot(),
+                stderr: stderr.to_vec(),
+            },
+            answer: capture.answer(),
+        })
     }
 
     #[test]
@@ -2427,10 +2582,10 @@ mod tests {
 
     #[test]
     fn an_answer_at_the_end_of_an_elided_stream_is_still_read() {
-        // The capture keeps a head, a tail, and its own notice of the gap
-        // between them. That notice is VOC's prose, so the scan treats it as
-        // it treats any other chatter, and the answer the launcher printed
-        // last stays readable behind output that outran the head.
+        // A launcher that outruns the head budget still gets its answer
+        // read: the elision decides what an operator is shown, never what
+        // VOC knows. The two projections part company here, and the test
+        // holds both — the answer entire, the text honestly holed.
         let mut capture = BoundedCapture::default();
         for index in 0..20_000 {
             capture.push(format!("{{\"log\":\"noise\",\"i\":{index}}}\n").as_bytes());
@@ -2439,10 +2594,20 @@ mod tests {
         capture.push(b"\n");
         assert!(capture.dropped > 0, "the fixture must outrun the caps");
 
-        let kept = capture.snapshot();
-        let receipt = LaunchReceipt::parse(&kept).expect("the answer must survive the elision");
+        let receipt = capture
+            .answer()
+            .expect("the answer must survive the elision");
         assert!(receipt.accepted);
         assert_eq!(receipt.run_id, "work-elided");
+
+        // The display text is a bounded projection with a gap named in it.
+        // Reading structure back out of it is what this boundary stops
+        // doing, so the verdict above was never taken from here.
+        let shown = String::from_utf8_lossy(&capture.snapshot()).into_owned();
+        assert!(
+            shown.contains("elided") && shown.len() < 20_000 * 28,
+            "the operator's text stays bounded and says where the gap is"
+        );
     }
 
     #[test]
@@ -2499,7 +2664,9 @@ mod tests {
         let run = run_bounded(command, None, Duration::from_millis(200), "silent stub").unwrap();
         let waited = match run {
             LauncherRun::Undecided { waited, .. } => waited,
-            LauncherRun::Completed(_) => panic!("a sleeping launcher must not report completion"),
+            LauncherRun::Completed { .. } => {
+                panic!("a sleeping launcher must not report completion")
+            }
             LauncherRun::Unobservable { error, .. } => {
                 panic!("the wait on a healthy sleeping child must not be lost: {error}")
             }
@@ -2514,6 +2681,7 @@ mod tests {
                 waited,
                 stdout: Vec::new(),
                 stderr: Vec::new(),
+                answer: Err("launcher printed no receipt".to_string()),
             }),
         );
         assert_eq!(outcome.admission(), Admission::Unknown);
@@ -2523,5 +2691,187 @@ mod tests {
                 .trail_line()
                 .contains("a worker may already be running")
         );
+    }
+
+    /// One stamped launch answer, in the shape the canonical launcher prints.
+    fn stamped(run_id: &str, accepted: bool) -> String {
+        format!(
+            r#"{{"schema":"vibecrafted.launch_receipt.v1","accepted":{accepted},"run_id":"{run_id}","status":"launching"}}"#
+        )
+    }
+
+    /// Complete top-level diagnostic objects, enough of them to outrun the
+    /// head cap on their own. `separator` is what the launcher prints between
+    /// them, so the same noise can be used inside an array or at top level.
+    fn noise_larger_than_the_head(separator: &str) -> String {
+        let mut text = String::new();
+        let mut index = 0u32;
+        while text.len() < DIAGNOSTIC_HEAD_CAP + DIAGNOSTIC_TAIL_CAP * 2 {
+            text.push_str(&format!("{{\"log\":\"noise\",\"i\":{index}}}{separator}\n"));
+            index += 1;
+        }
+        text
+    }
+
+    #[test]
+    fn a_frame_opened_before_the_elision_never_makes_its_members_top_level() {
+        // The launcher opened an array and never closed it. Everything after
+        // that opener is inside it, including the stamped object printed
+        // last — and the reader knows this because it saw the opener, even
+        // though the display text no longer contains it.
+        for accepted in [true, false] {
+            let mut capture = BoundedCapture::default();
+            capture.push(b"{\"outer\":[\n");
+            capture.push(noise_larger_than_the_head(",").as_bytes());
+            capture.push(format!("{}\n", stamped("work-nested", accepted)).as_bytes());
+            assert!(capture.dropped > 0, "the fixture must outrun the caps");
+            assert!(
+                capture.answer().is_err(),
+                "a member of a frame that never closed is not an answer (accepted={accepted})"
+            );
+        }
+    }
+
+    #[test]
+    fn an_earlier_receipt_survives_a_frame_opened_after_it_and_never_closed() {
+        // Losing structural certainty must not retract what was already
+        // proved: the stamped receipt read whole, before the opener, stands.
+        let mut capture = BoundedCapture::default();
+        capture.push(format!("{}\n", stamped("work-early", true)).as_bytes());
+        capture.push(b"{\"outer\":[\n");
+        capture.push(noise_larger_than_the_head(",").as_bytes());
+        capture.push(format!("{}\n", stamped("work-nested", false)).as_bytes());
+        assert!(capture.dropped > 0, "the fixture must outrun the caps");
+
+        let receipt = capture
+            .answer()
+            .expect("the receipt proved before the opener must survive");
+        assert_eq!(receipt.run_id, "work-early");
+        assert!(receipt.accepted);
+    }
+
+    #[test]
+    fn a_receipt_after_complete_diagnostics_larger_than_the_head_is_still_the_answer() {
+        // The promise the boundary must not break: diagnostics that outrun
+        // the head are stepped over, and the answer printed after them is
+        // still read.
+        let mut capture = BoundedCapture::default();
+        capture.push(noise_larger_than_the_head("").as_bytes());
+        capture.push(format!("{}\n", stamped("work-late", true)).as_bytes());
+        assert!(capture.dropped > 0, "the fixture must outrun the caps");
+
+        let receipt = capture
+            .answer()
+            .expect("a receipt behind complete noise must still be read");
+        assert_eq!(receipt.run_id, "work-late");
+        assert!(receipt.accepted);
+    }
+
+    #[test]
+    fn an_elision_notice_printed_by_the_launcher_closes_nothing() {
+        // VOC's own gap notice is display prose. A launcher that prints the
+        // same words is printing text, and text never resets what the reader
+        // proved about structure.
+        let mut capture = BoundedCapture::default();
+        capture.push(b"{\"outer\":[\n");
+        capture.push(
+            format!(
+                "\n… [VOC kept the first {DIAGNOSTIC_HEAD_CAP} and last {DIAGNOSTIC_TAIL_CAP} bytes; 999999 elided] …\n"
+            )
+            .as_bytes(),
+        );
+        capture.push(format!("{}\n", stamped("work-spoofed", true)).as_bytes());
+        assert!(
+            capture.answer().is_err(),
+            "a notice printed by the child must not make its members top-level"
+        );
+    }
+
+    #[test]
+    fn a_frame_too_large_to_be_a_receipt_is_stepped_over_rather_than_held() {
+        // One value larger than anything VOC will hold, with no newline in
+        // it. Its boundary is still known, so the answer printed after it is
+        // read — and none of it was ever kept.
+        let mut capture = BoundedCapture::default();
+        capture.push(b"{\"blob\":\"");
+        capture.push("x".repeat(RECEIPT_FRAME_CAP * 2).as_bytes());
+        capture.push(b"\"}\n");
+        capture.push(format!("{}\n", stamped("work-after-blob", true)).as_bytes());
+
+        let receipt = capture
+            .answer()
+            .expect("an answer after an oversized frame must still be read");
+        assert_eq!(receipt.run_id, "work-after-blob");
+    }
+
+    #[test]
+    fn the_answer_does_not_depend_on_how_the_stream_was_chunked() {
+        // Openers, quotes and escapes land wherever the pipe splits them.
+        let stream = format!(
+            "{{\"note\":\"a brace {{ and a quote \\\" inside a string\"}}\n{}{}\n",
+            noise_larger_than_the_head(""),
+            stamped("work-chunked", true)
+        );
+        let mut whole = BoundedCapture::default();
+        whole.push(stream.as_bytes());
+        let mut split = BoundedCapture::default();
+        for chunk in stream.as_bytes().chunks(7) {
+            split.push(chunk);
+        }
+        assert_eq!(
+            whole.answer().expect("whole").run_id,
+            split.answer().expect("split").run_id
+        );
+        assert_eq!(whole.answer().expect("whole").run_id, "work-chunked");
+
+        // The same for a stream whose outer frame never closes: chunking
+        // must not manufacture a boundary either.
+        let unfinished = format!("{{\"outer\":[\n{}\n", stamped("work-nested", true));
+        let mut split = BoundedCapture::default();
+        for chunk in unfinished.as_bytes().chunks(3) {
+            split.push(chunk);
+        }
+        assert!(split.answer().is_err(), "chunking must not close a frame");
+    }
+
+    /// Run a real `/bin/sh` launcher stub through the capture boundary and
+    /// present it exactly as the console does.
+    fn launcher_stub(script: &str) -> LaunchOutcome {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", script]);
+        let run = run_bounded(command, None, Duration::from_secs(30), "launcher stub");
+        LaunchOutcome::from_run(
+            "preview".to_string(),
+            LaunchExpectation::new(&request(LaunchKind::Workflow), None),
+            run,
+        )
+    }
+
+    #[test]
+    fn a_real_launcher_whose_diagnostics_outrun_the_head_still_proves_its_admission() {
+        let outcome = launcher_stub(
+            r#"yes '{"log":"noise"}' | head -n 20000; printf '%s\n' '{"schema":"vibecrafted.launch_receipt.v1","accepted":true,"run_id":"work-e2e-late","status":"launching"}'"#,
+        );
+        assert_eq!(
+            outcome.admission(),
+            Admission::Admitted,
+            "{}",
+            outcome.trail_line()
+        );
+        assert_eq!(outcome.run_id(), Some("work-e2e-late"));
+    }
+
+    #[test]
+    fn a_real_launcher_that_never_closed_its_frame_leaves_the_admission_unknown() {
+        let outcome = launcher_stub(
+            r#"printf '%s\n' '{"outer":['; yes '{"log":"noise"},' | head -n 20000; printf '%s\n' '{"schema":"vibecrafted.launch_receipt.v1","accepted":true,"run_id":"work-e2e-nested","status":"launching"}'"#,
+        );
+        assert_eq!(
+            outcome.admission(),
+            Admission::Unknown,
+            "a member of an unfinished frame must not be read as an admission: {}",
+            outcome.trail_line()
+        );
+        assert_eq!(outcome.run_id(), None);
     }
 }

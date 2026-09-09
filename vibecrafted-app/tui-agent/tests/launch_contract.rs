@@ -18,8 +18,8 @@ use std::time::Duration;
 use tempfile::{TempDir, tempdir};
 use voc::catalog::{CatalogState, LauncherCatalog};
 use voc::launch::{
-    Admission, Confirmation, Environment, LaunchOutcome, LauncherRun, PermissionPolicy,
-    Presentation, SandboxChoice,
+    Admission, Confirmation, Environment, LaunchOutcome, LaunchReceipt, LauncherRun,
+    PermissionPolicy, Presentation, SandboxChoice,
 };
 
 mod support;
@@ -669,6 +669,7 @@ fn a_wait_lost_after_the_spawn_is_unknown_not_an_absent_launcher() {
             error: "failed to wait for launcher: No child processes (os error 10)".to_string(),
             stdout: Vec::new(),
             stderr: Vec::new(),
+            answer: Err("launcher printed no receipt".to_string()),
         }),
     );
 
@@ -701,6 +702,10 @@ fn a_wait_lost_after_the_spawn_is_unknown_not_an_absent_launcher() {
             error: "failed to wait for launcher: No child processes (os error 10)".to_string(),
             stdout: confirmed_receipt(&repo).into_bytes(),
             stderr: Vec::new(),
+            // What the launcher managed to say was read while it was
+            // saying it, which is why losing the wait does not lose it.
+            answer: LaunchReceipt::parse(confirmed_receipt(&repo).as_bytes())
+                .map_err(|why| why.to_string()),
         }),
     );
     assert_eq!(spoke_first.admission(), Admission::Admitted);
