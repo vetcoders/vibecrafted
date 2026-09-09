@@ -116,6 +116,14 @@ class WorktreeManager:
         allow_reuse: bool = False,
     ) -> WorktreeGeometry:
         """Resolve and materialize a cut root, refusing ambiguous reuse."""
+        # This boundary consumes a resolved commit, never a moving ref. The
+        # declaration resolver owns branch/tag/short-SHA interpretation.
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", baseline_sha):
+            raise WorktreeContractError("baseline must be a full pinned commit SHA")
+        if _git(self.main_repo, "cat-file", "-t", baseline_sha) != "commit":
+            raise WorktreeContractError(
+                "baseline commit is unavailable in selected repository"
+            )
         geometry = self.geometry(cut_id, baseline_sha, integrator=integrator)
         root = Path(geometry.worktree_path)
         if integrator:
@@ -142,10 +150,17 @@ class WorktreeManager:
             )
             command = ["git", "worktree", "add", "--quiet"]
             if branch_exists:
-                command.extend([str(root), geometry.branch])
-            else:
-                command.extend(["-b", geometry.branch, str(root), baseline_sha])
+                raise WorktreeContractError(
+                    f"refusing existing branch {geometry.branch}; resume requires its owning run receipt"
+                )
+            # Git's ref lock arbitrates concurrent attempts. Never attach an
+            # existing branch after losing that race, even at the same SHA.
+            command.extend(["-b", geometry.branch, str(root), baseline_sha])
             _run(self.main_repo, command, "create linked checkout")
+            if _git(root, "rev-parse", "HEAD") != baseline_sha:
+                raise WorktreeContractError(
+                    "new worker baseline differs from pinned commit"
+                )
             self._validate_reuse(geometry)
         self._validate_target(root)
         return geometry
@@ -159,16 +174,9 @@ class WorktreeManager:
             raise WorktreeContractError(
                 f"selected workspace is not a git repository root: {self.main_repo}"
             )
-        observed_head = _git(self.main_repo, "rev-parse", "HEAD")
-        if not observed_head or observed_head != baseline_sha:
-            raise WorktreeContractError(
-                "selected workspace HEAD changed before worktree creation; retry the launch"
-            )
-        dirty = _git(self.main_repo, "status", "--porcelain")
-        if dirty:
-            raise WorktreeContractError(
-                f"local worktrees require a clean selected workspace: {dirty}"
-            )
+        # The parent may move or contain staged, unstaged and untracked work.
+        # Materialize Git objects at the pinned SHA without reading its index
+        # or copying, stashing, committing or cleaning its working files.
         return self.prepare(f"{provider}-{launch_id}", baseline_sha)
 
     def validate(self, geometry: WorktreeGeometry) -> None:
@@ -278,6 +286,10 @@ class WorktreeManager:
             )
 
     def _validate_reuse(self, geometry: WorktreeGeometry) -> None:
+        # Authenticate common Git directory, registration, branch and baseline
+        # ancestry using the same owner as active recovery. A matching branch
+        # name in an unrelated checkout is not a resume receipt.
+        self.recover_active(geometry)
         root = Path(geometry.worktree_path)
         if not root.is_dir():
             raise WorktreeContractError(f"worker worktree is missing: {root}")

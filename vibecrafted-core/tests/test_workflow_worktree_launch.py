@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from vibecrafted_core import workflow
+from vibecrafted_core.dispatch.worktrees import WorktreeContractError, WorktreeManager
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -142,7 +145,7 @@ def test_launch_workflow_prepares_a_linked_checkout_and_records_it(
     assert Path(cwd_file.read_text(encoding="utf-8")).resolve() == worktree.resolve()
 
 
-def test_launch_workflow_refuses_worktree_on_dirty_or_non_root_paths(
+def test_launch_workflow_refuses_worktree_on_non_root_paths(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     home = tmp_path / ".vibecrafted"
@@ -168,22 +171,6 @@ def test_launch_workflow_refuses_worktree_on_dirty_or_non_root_paths(
     assert refused["reason"] == "worktree_rejected"
     assert "subdirectory" in refused["error"]
     assert not (home / "control_plane" / "runtime_runs").exists()
-
-    (repo / "dirty.txt").write_text("x\n", encoding="utf-8")
-    dirty_spec = workflow.normalize_launch_spec(
-        {
-            "skill": "workflow",
-            "agent": "claude",
-            "prompt": "x",
-            "root": str(repo),
-            "worktree": True,
-        },
-        tmp_path,
-    )
-    refused = workflow.launch_workflow(dirty_spec, tmp_path)
-    assert refused["accepted"] is False
-    assert "clean selected workspace" in refused["error"]
-    assert _git(repo, "worktree", "list", "--porcelain").count("worktree ") == 1
 
     plain = tmp_path / "plain"
     plain.mkdir()
@@ -215,3 +202,155 @@ def test_normalize_launch_spec_worktree_needs_a_root() -> None:
             },
             "",
         )
+
+
+@pytest.mark.parametrize("dirty", ["staged", "unstaged", "untracked", "combined"])
+def test_pinned_checkout_preserves_dirty_parent(tmp_path, dirty):
+    repo = tmp_path / "żółć repo"
+    baseline = _repo(repo)
+    if dirty in {"staged", "combined"}:
+        (repo / "README.md").write_bytes(b"staged\n")
+        _git(repo, "add", "README.md")
+    if dirty in {"unstaged", "combined"}:
+        (repo / "README.md").write_bytes(b"unstaged\n")
+    if dirty in {"untracked", "combined"}:
+        (repo / "private.txt").write_bytes(b"private parent data\n")
+    before = {p.name: p.read_bytes() for p in repo.iterdir() if p.is_file()}
+    index = (repo / ".git/index").read_bytes()
+    head = _git(repo, "rev-parse", "HEAD")
+    spec = workflow.normalize_launch_spec(
+        {
+            "skill": "workflow",
+            "agent": "codex",
+            "prompt": "go",
+            "root": str(repo),
+            "worktree": True,
+        },
+        tmp_path,
+    )
+    prepared, receipt = workflow._prepare_launch_worktree(spec, "dirty-parent")
+    worker = Path(prepared.root)
+    assert _git(worker, "rev-parse", "HEAD") == baseline == head
+    assert (worker / "README.md").read_bytes() == b"seed\n"
+    assert not (worker / "private.txt").exists()
+    assert _git(worker, "status", "--porcelain") == ""
+    assert receipt["worktree_baseline_sha"] == baseline
+    assert before == {p.name: p.read_bytes() for p in repo.iterdir() if p.is_file()}
+    assert (repo / ".git/index").read_bytes() == index
+    assert _git(repo, "rev-parse", "HEAD") == head
+
+
+def test_new_checkout_refuses_existing_branch_without_touching_it(tmp_path):
+    repo = tmp_path / "repo"
+    baseline = _repo(repo)
+    _git(repo, "branch", "cut/collision")
+    manager = WorktreeManager(repo)
+    with pytest.raises(WorktreeContractError, match="existing branch"):
+        manager.prepare("collision", baseline)
+    assert _git(repo, "rev-parse", "cut/collision") == baseline
+    assert not (manager.worktree_root / "collision").exists()
+
+
+def test_checkout_uses_pinned_commit_after_parent_moves(tmp_path):
+    repo = tmp_path / "repo"
+    baseline = _repo(repo)
+    (repo / "README.md").write_text("later\n")
+    _git(repo, "commit", "-qam", "later unpushed commit")
+    geometry = WorktreeManager(repo).prepare_agent_launch("codex", "pinned", baseline)
+    assert _git(Path(geometry.worktree_path), "rev-parse", "HEAD") == baseline
+    assert _git(repo, "rev-parse", "HEAD") != baseline
+
+
+def test_new_checkout_rejects_noncommit_and_unpinned_refs(tmp_path):
+    repo = tmp_path / "repo"
+    baseline = _repo(repo)
+    manager = WorktreeManager(repo)
+    for invalid in [
+        "HEAD",
+        "missing",
+        baseline[:8],
+        _git(repo, "rev-parse", "HEAD^{tree}"),
+    ]:
+        with pytest.raises(WorktreeContractError, match="baseline"):
+            manager.prepare("invalid", invalid)
+        assert not (manager.worktree_root / "invalid").exists()
+
+
+def test_reuse_checks_repository_and_baseline(tmp_path):
+    repo = tmp_path / "repo"
+    baseline = _repo(repo)
+    manager = WorktreeManager(repo)
+    geometry = manager.prepare("owned", baseline)
+    foreign = tmp_path / "foreign"
+    _repo(foreign)
+    _git(foreign, "branch", "-m", geometry.branch)
+    with pytest.raises(WorktreeContractError, match="owned|registered"):
+        manager.validate(replace(geometry, worktree_path=str(foreign)))
+    (repo / "later").write_text("later\n")
+    _git(repo, "add", "later")
+    _git(repo, "commit", "-qm", "later")
+    with pytest.raises(WorktreeContractError, match="baseline"):
+        manager.validate(
+            replace(geometry, baseline_sha=_git(repo, "rev-parse", "HEAD"))
+        )
+
+
+def test_concurrent_duplicate_checkout_has_one_winner(tmp_path):
+    repo = tmp_path / "repo"
+    baseline = _repo(repo)
+    manager = WorktreeManager(repo)
+
+    def prepare(_):
+        try:
+            return manager.prepare("same-cut", baseline)
+        except WorktreeContractError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(prepare, range(2)))
+    assert sum(result is not None for result in results) == 1
+    assert _git(repo, "worktree", "list", "--porcelain").count("worktree ") == 2
+
+
+def test_public_cli_launches_dirty_parent_in_committed_checkout(
+    monkeypatch, tmp_path, capsys
+):
+    import time
+
+    from vibecrafted_core.cli import main
+
+    repo = tmp_path / "public żółć repo"
+    baseline = _repo(repo)
+    (repo / "private.txt").write_bytes(b"must stay in parent\n")
+    cwd_file = tmp_path / "provider-cwd"
+    _stub_worker(monkeypatch, cwd_file)
+    monkeypatch.setenv("VIBECRAFTED_GUARD", "0")
+    assert (
+        main(
+            [
+                "workflow",
+                "claude",
+                "--repo",
+                str(repo),
+                "--worktree",
+                "true",
+                "--runtime",
+                "headless",
+                "--prompt",
+                "literal żółć\n'quoted' ",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["accepted"] is True
+    worker = Path(receipt["worktree_path"])
+    assert receipt["worktree_baseline_sha"] == baseline
+    deadline = time.monotonic() + 30
+    while not cwd_file.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert cwd_file.exists()
+    assert Path(cwd_file.read_text()).resolve() == worker.resolve()
+    assert not (worker / "private.txt").exists()
+    assert (repo / "private.txt").read_bytes() == b"must stay in parent\n"
