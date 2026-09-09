@@ -12,7 +12,17 @@
 # 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 set -euo pipefail
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# Root discovery cannot call PATH tools. Sanitization has not run yet, and a
+# hostile or empty inherited PATH is a supported startup case.
+_vc_terminal_entry="${BASH_SOURCE[0]}"
+_vc_terminal_scripts="${_vc_terminal_entry%/*}"
+if [[ -z "$_vc_terminal_scripts" ]]; then
+  _vc_terminal_scripts="/"
+elif [[ "$_vc_terminal_scripts" == "$_vc_terminal_entry" ]]; then
+  _vc_terminal_scripts="."
+fi
+root="$(cd "${_vc_terminal_scripts}/.." && pwd -P)"
+unset _vc_terminal_entry _vc_terminal_scripts
 host="$root/libexec/vc-terminal"
 config="$HOME/.config/vibecrafted/vc-terminal/vc-terminal.toml"
 
