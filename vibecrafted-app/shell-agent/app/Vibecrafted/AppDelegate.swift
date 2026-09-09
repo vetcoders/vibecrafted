@@ -1880,7 +1880,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     alert.informativeText =
       "Open Vibecrafted returns to the app. Workspaces and Runtime Server use the configured live server only when it is available. Advanced contains runtime controls and support files. Quitting Vibecrafted leaves the runtime service, terminals, agents, and sessions running."
     alert.addButton(withTitle: "OK")
-    alert.runModal()
+    alert.addButton(withTitle: "Open Diagnostics")
+    if alert.runModal() == .alertSecondButtonReturn {
+      showServerDiagnostics()
+    }
   }
 
   private func activeRunSummary() -> RuntimeActivityTruth {

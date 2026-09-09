@@ -1051,6 +1051,13 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
         assert title in tray
     assert "Command Deck:" not in tray
     assert "cappedMenuTitle" not in tray
+    help_dialog = delegate[
+        delegate.index("private func showStatusItemHelp") : delegate.index(
+            "private func activeRunSummary"
+        )
+    ]
+    assert 'alert.addButton(withTitle: "Open Diagnostics")' in help_dialog
+    assert "showServerDiagnostics()" in help_dialog
     assert 'withTitle: "About Vibecrafted"' in delegate
     assert 'withTitle: "Quit Vibecrafted"' in delegate
     assert "#selector(requestQuit)" in delegate
