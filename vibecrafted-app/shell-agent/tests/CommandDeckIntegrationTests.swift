@@ -410,7 +410,7 @@ struct CommandDeckIntegrationTests {
     let session = WebConsoleSession(
       websiteDataStore: .nonPersistent(), initialLoadTimeout: .milliseconds(200),
       downloadDestinationProvider: { _, _, _ in nil })
-    session.navigate(path: "/stall")
+    session.navigate(path: "/stall-retry")
     model.endpointDidChange = { session.apply(endpoint: $0) }
     session.events.stateDidChange = { model.receiveWebState($0) }
     model.refreshEndpoint(caretakerData: nil, runtimeReady: true)
@@ -427,12 +427,48 @@ struct CommandDeckIntegrationTests {
     try require(reason.contains("did not finish loading"), "First-load timeout was not actionable")
     try require(!model.presentation.exposesCanvas, "Timed-out first load exposed an unproven canvas")
 
+    // Retry the same endpoint through the AppModel endpoint/state callback
+    // chain. The fixture holds the first response open until this retry has
+    // committed, so success proves a new navigation can recover the first
+    // document without replacing the retained session.
+    let original = session.webView
+    session.retry()
+    try await waitFor {
+      if case .loaded(let url) = session.loadState {
+        return url.path == "/stall-retry" && url.port == endpoint.port
+      }
+      return false
+    }
+    try require(model.presentation.phase == .online && model.presentation.exposesCanvas,
+      "Same-endpoint retry did not restore the AppModel canvas")
+    try require(session.webView === original, "Same-endpoint retry recreated the web session")
+    try require(try await evaluateString("document.title", in: session.webView) == "retry fixture",
+      "Same-endpoint retry committed the wrong document")
+
+    let (_, releaseResponse) = try await URLSession.shared.data(
+      from: endpoint.appendingPathComponent("release-first-stall"))
+    try require((releaseResponse as? HTTPURLResponse)?.statusCode == 204,
+      "Fixture did not release the delayed first response")
+    try await tick()
+    try require(try await evaluateString("document.title", in: session.webView) == "retry fixture",
+      "Delayed first response replaced the retried document")
+    try require(session.webView.url?.path == "/stall-retry" && model.presentation.exposesCanvas,
+      "Delayed first response replaced the retried navigation state")
+
+    try await evaluate("document.getElementById('retry-next').click()", in: session.webView)
+    try await waitFor {
+      if case .loaded(let url) = session.loadState { return url.path == "/workspaces" }
+      return false
+    }
+    try require(session.webView === original && model.presentation.exposesCanvas,
+      "Post-retry link navigation lost the persistent session or canvas")
+
     // Withdrawing or replacing an endpoint invalidates the older watchdog.
     // Its eventual timeout must never overwrite the state of the later owner.
     let replacement = WebConsoleSession(
       websiteDataStore: .nonPersistent(), initialLoadTimeout: .milliseconds(200),
       downloadDestinationProvider: { _, _, _ in nil })
-    replacement.navigate(path: "/stall")
+    replacement.navigate(path: "/stall-always")
     replacement.apply(endpoint: endpoint)
     try await tick()
     replacement.apply(endpoint: nil)

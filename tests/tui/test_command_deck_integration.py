@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -181,18 +182,61 @@ def test_native_session_state_routes_and_reopen(tmp_path: Path) -> None:
     binary = _compile(tmp_path, "command-deck-contract", sources)
 
     class Fixture(http.server.BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            if self.path == "/stall":
-                # A healthy listener that never completes its first document.
-                # The native harness has its own short WebKit deadline and must
-                # surface a retryable failure before this response arrives.
-                import time
+        stall_lock = threading.Lock()
+        stall_requests = 0
+        first_stall_started = threading.Event()
+        release_first_stall = threading.Event()
+        first_stall_responded = threading.Event()
 
+        def do_GET(self) -> None:
+            if self.path == "/stall-retry":
+                # The first document stays alive past the native watchdog. A
+                # retry uses this exact URL and succeeds while that first
+                # response remains pending; `/release-first-stall` releases
+                # it only after the retry has committed.
+                with self.stall_lock:
+                    self.__class__.stall_requests += 1
+                    first_request = self.__class__.stall_requests == 1
+                if first_request:
+                    self.first_stall_started.set()
+                    if not self.release_first_stall.wait(timeout=10):
+                        self.send_error(504, "fixture did not release first stall")
+                        return
+                    body = b"<!doctype html><title>late fixture</title>"
+                else:
+                    body = b"""<!doctype html><title>retry fixture</title>
+<a id="retry-next" href="/workspaces">Continue</a>"""
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                try:
+                    self.wfile.write(body)
+                finally:
+                    if first_request:
+                        self.first_stall_responded.set()
+                return
+            if self.path == "/release-first-stall":
+                # The harness calls this only after the second `/stall` load
+                # has committed. Hold its acknowledgement until the delayed
+                # first response has been written, making the stale-callback
+                # assertion deterministic without borrowing another server.
+                self.release_first_stall.set()
+                if not self.first_stall_responded.wait(timeout=10):
+                    self.send_error(504, "fixture first stall did not respond")
+                    return
+                self.send_response(204)
+                self.end_headers()
+                return
+            if self.path == "/stall-always":
+                # The endpoint-withdrawal/replacement contract has its own
+                # permanently stalled document. Keep it independent from the
+                # first-request retry scenario above.
                 time.sleep(2)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.end_headers()
-                self.wfile.write(b"<!doctype html><title>late fixture</title>")
+                self.wfile.write(b"<!doctype html><title>always stalled fixture</title>")
                 return
             if self.path == "/download":
                 self.send_response(200)
@@ -260,6 +304,9 @@ def test_native_session_state_routes_and_reopen(tmp_path: Path) -> None:
             check=True,
         )
         assert "CommandDeckIntegrationTests passed" in result.stdout
+        assert Fixture.first_stall_started.is_set()
+        assert Fixture.first_stall_responded.is_set()
+        assert Fixture.stall_requests == 2
         print(result.stdout)
     finally:
         server.shutdown()
