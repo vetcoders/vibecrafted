@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -258,7 +259,8 @@ def test_launch_workflow_returns_pid_and_logs_spawn(
     assert ".vibecrafted/artifacts/local/src/" in payload["report"]
     assert "/reports/workflow/" in payload["report"]
     report_name = Path(payload["report"]).name
-    assert "_go_" in report_name
+    assert "_go_" not in report_name
+    assert "_workflow_" in report_name
     assert payload["run_id"].replace(".", "-") in report_name
     assert report_name.endswith("_report.md")
     assert ".vibecrafted/control_plane/runtime_runs/" in payload["transcript"]
@@ -1234,7 +1236,7 @@ def test_launch_workflow_never_runs_global_sync_after_spawn(
     assert payload["control_plane"]["sync"] == "deferred"
 
 
-def test_launch_workflow_records_skipped_model_override_for_unknown_flag(
+def test_launch_workflow_refuses_agy_without_private_transport(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
@@ -1250,28 +1252,10 @@ def test_launch_workflow_records_skipped_model_override_for_unknown_flag(
         model="gemini-pro",
     )
     monkeypatch.setattr(
-        workflow,
-        "_stdin_command",
-        lambda _agent: [
-            sys.executable,
-            "-c",
-            (
-                "from pathlib import Path; import os; "
-                "Path(os.environ['VIBECRAFTED_REPORT_PATH']).write_text('ok\\n')"
-            ),
-        ],
+        workflow, "_sweep_stale_runs", lambda: pytest.fail("mutation before refusal")
     )
-
-    payload = workflow.launch_workflow(spec, source)
-
-    assert payload["accepted"] is True
-    assert (
-        payload["model_requested"] == "gemini-pro"
-    )  # Google family label preserved for agy telemetry
-    assert payload["model_override_supported"] is False
-    assert payload["model_override_skipped"] is True
-    assert payload["model_override_skip_reason"] == "unsupported_agent_model_flag"
-    assert "gemini-pro" not in payload["worker_command"]
+    with pytest.raises(ValueError, match="private prompt transport"):
+        workflow.launch_workflow(spec, source)
 
 
 def test_launch_workflow_records_failure_event_when_spawn_errors(
@@ -1940,7 +1924,7 @@ def test_research_terminal_runtime_uses_vc_frame_research_layout(
         source,
     )
     digest = "9e0d59e1dc48bc42"
-    spec = workflow.WorkflowLaunchSpec(**{**spec.to_payload(), "claim_digest": digest})
+    spec = replace(spec, claim_digest=digest)
     monkeypatch.setattr(
         workflow.shutil,
         "which",
@@ -2011,7 +1995,8 @@ def test_research_terminal_runtime_uses_vc_frame_research_layout(
     assert "export VIBECRAFTED_PROMPT_PATH=" in lane_bodies
     assert f"export VIBECRAFTED_CLAIM_DIGEST={digest}" in lane_bodies
     assert "export VIBECRAFTED_CANONICAL_REPORT_DIR=" in lane_bodies
-    assert "export VIBECRAFTED_ARTIFACT_SLUG=map-it" in lane_bodies
+    assert "export VIBECRAFTED_ARTIFACT_SLUG=map-it" not in lane_bodies
+    assert "export VIBECRAFTED_ARTIFACT_SLUG=research" in lane_bodies
     assert (
         f"export VIBECRAFTED_WORKER_SESSION={shlex.quote(worker_host)}" in lane_bodies
     )

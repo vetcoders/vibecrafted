@@ -905,27 +905,40 @@ cmd_start_help() {
   printf '\n'
   printf '%b⚒%b  %bstart%b\n' "$_copper" "$_reset" "$_bold" "$_reset"
   printf '%b─────────────────────────────────────────%b\n' "$_steel" "$_reset"
-  printf '  Start the operator vc-frame session (default board: operator).\n'
+  printf '  Create a vc-frame workspace for a repository and enter it (operator layout).\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted start\n'
-  printf '  vibecrafted start operator\n'
-  printf '  vibecrafted start --repo <project-path> [operator|resume]\n'
-  printf '  vc-start\n'
-  printf '  vc-start operator\n'
-  printf '  vc-start --repo <project-path> [operator|resume]\n'
+  printf '  vibecrafted start [<workspace>] [--repo <project-path>]\n'
+  printf '  vibecrafted start --root <project-path>          (legacy spelling of --repo)\n'
+  printf '  vibecrafted start resume\n'
+  printf '  vc-start [<workspace>] [--repo <project-path>]    (same contract, same owner)\n'
   printf '  vc-start resume\n'
   printf '\n'
+  printf '%bContract:%b\n' "$_bold" "$_reset"
+  printf '  Root:   --repo wins; otherwise the Git top-level of the current directory\n'
+  printf '          (a subdirectory names the same workspace); outside Git, the directory itself.\n'
+  printf '  Name:   <workspace> if given, else the root directory name, used verbatim.\n'
+  printf '          Rules: 1-24 characters, no / or \\, no leading -, no control characters,\n'
+  printf '          no leading/trailing whitespace. Reserved words: operator, vibecrafted\n'
+  printf '          (= default start), resume (= deliberate re-entry). Nothing is normalized.\n'
+  printf '  Create: create-only. The live vc-frame inventory is read first; a session with\n'
+  printf '          the same name (attached, detached or EXITED) refuses the start with the\n'
+  printf '          attach/switch/rename commands. Nothing is attached, switched, killed,\n'
+  printf '          renamed or suffixed for you. Two concurrent starts yield one workspace\n'
+  printf '          and one refusal (vc-frame creates exclusively).\n'
+  printf '  Enter:  with a terminal outside Frame, enter the new workspace.\n'
+  printf '          Inside Frame, guest creation awaits the shared-host API. Outside Frame, the\n'
+  printf '          VC Terminal opens on the repository to enter it.\n'
+  printf '  Exit:   0 entered · 2 usage/name/root · 3 workspace exists · 4 inventory/engine\n'
+  printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted start\n'
+  printf '  vc-start                                   # workspace named after this repository\n'
+  printf '  vc-start review-b --repo ~/Projects/example\n'
   printf '  vibecrafted start --repo ~/Projects/example\n'
-  printf '  vc-start operator\n'
-  printf '  vc-start --repo ~/Projects/example resume\n'
   printf '  vc-start resume\n'
   printf '\n'
   printf '  Direct %bvc-<workflow> <agent>%b calls outside vc-frame auto-enter the\n' "$_cyan" "$_reset"
   printf '  operator session and run the workflow in a new tab.\n'
-  printf '  --repo (legacy spelling: --root) is consumed by the public launcher before vc-frame starts.\n'
   printf '\n'
 }
 
@@ -4927,45 +4940,22 @@ cmd_start() {
     cmd_start_help
     return 0
   fi
-  local status=0 owner_root
+  local owner_root
   # Product entrypoint choke: load full lifecycle helpers (shell modules,
   # frontier pin, frame launcher). Ordinary shells stay PATH-only.
-  # Note: live operator path is shell `vc-start` → same prepare function;
-  # deck start is secondary (vibecrafted start) and must share that choke.
+  # Shell `vc-start` and this deck verb share ONE parser and ONE owner
+  # (dashboard.sh _vetcoders_start_entry: root → name → live inventory →
+  # exclusive create → enter / VC Terminal). Never re-enter the public
+  # vc-start alias from here: Python→deck→helper→deck fork-bombs.
   owner_root="$(_script_owner_root)" || return $?
   _ensure_helpers_loaded "$owner_root" || return $?
-  if ! declare -F _vetcoders_product_entry_prepare >/dev/null 2>&1; then
-    printf 'vc-start: required product preparation helper missing\n' >&2
+  if ! declare -F _vetcoders_start_entry >/dev/null 2>&1 \
+    || ! declare -F _vetcoders_product_entry_prepare >/dev/null 2>&1; then
+    printf 'vc-start: required product start helper missing\n' >&2
     return 1
   fi
   _vetcoders_start_prepare_arguments "$@" || return $?
-  local start_project_root="${VIBECRAFTED_START_ROOT:-}"
-  [[ -n "$start_project_root" ]] || start_project_root="$(_vetcoders_effective_project_root)"
-  _vetcoders_start_open_terminal_if_needed \
-    "$start_project_root" "${_vetcoders_start_frame_argv[@]}" || return $?
-  [[ -z "${VIBECRAFTED_START_ESCALATED:-}" ]] || return 0
-  set -- "${_vetcoders_start_frame_argv[@]}"
-  _vetcoders_product_entry_prepare "${VIBECRAFTED_START_ROOT:-}" || return $?
-  if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" == "1" ]]; then
-    if ! declare -F _vetcoders_product_entry_probe_print >/dev/null 2>&1; then
-      printf 'vc-start: required product probe helper missing\n' >&2
-      return 1
-    fi
-    _vetcoders_product_entry_probe_print || status=$?
-  elif [[ "${1:-}" == "resume" ]]; then
-    # Call frame launcher directly — never re-enter via public vc-start alias
-    # (thin passthrough to `vibecrafted start` fork-bombs: Python→deck→helper).
-    shift || true
-    _vetcoders_resume_operator_session "$@"
-    status=$?
-  else
-    if [[ "${1:-}" == "operator" || "${1:-}" == "vibecrafted" ]]; then
-      shift || true
-    fi
-    _vetcoders_launch_dashboard operator "$@"
-    status=$?
-  fi
-  return "$status"
+  _vetcoders_start_entry "${_vetcoders_start_frame_argv[@]}"
 }
 
 cmd_loop() {
@@ -5035,15 +5025,40 @@ cmd_core_workflow_skill() {
   shift || true
   local core_dir core_skill
   core_skill="$skill"
-  [[ "$core_skill" != "justdo" ]] || core_skill="implement"
   core_dir="$(_dispatcher_core_dir 2>/dev/null || true)"
   [[ -n "$core_dir" ]] || {
     printf '%b✗%b Vibecrafted Core module not found.\n' "$_red" "$_reset" >&2
     printf '  Expected vibecrafted-core/vibecrafted_core/cli.py in the source or installed tools tree.\n' >&2
     return 1
   }
-  PYTHONPATH="$core_dir${PYTHONPATH:+:$PYTHONPATH}" \
-    "$(_vibecrafted_python)" -m vibecrafted_core.cli "$core_skill" "$@" --source-dir "$(_script_repo_root)"
+  # Inline text is one argument. Move it to a private pipe before spawning
+  # Python; core materializes the existing run-owned immutable prompt files.
+  local inline_prompt="" has_inline=0 item
+  local -a launch_args=()
+  while (($#)); do
+    item="$1"
+    shift
+    case "$item" in
+      -p|--prompt)
+        (($#)) || { printf 'Missing value for --prompt\n' >&2; return 2; }
+        ((has_inline == 0)) || { printf 'Duplicate --prompt\n' >&2; return 2; }
+        inline_prompt="$1"; has_inline=1; shift
+        ;;
+      --prompt=*)
+        ((has_inline == 0)) || { printf 'Duplicate --prompt\n' >&2; return 2; }
+        inline_prompt="${item#*=}"; has_inline=1
+        ;;
+      --) launch_args+=("$item" "$@"); break ;;
+      *) launch_args+=("$item") ;;
+    esac
+  done
+  if ((has_inline)); then
+    printf '%s' "$inline_prompt" | PYTHONPATH="$core_dir" \
+      "$(_vibecrafted_python)" -m vibecrafted_core.cli "$core_skill" "${launch_args[@]}" --prompt-stdin --source-dir "$(_script_repo_root)"
+  else
+    PYTHONPATH="$core_dir" \
+      "$(_vibecrafted_python)" -m vibecrafted_core.cli "$core_skill" "${launch_args[@]}" --source-dir "$(_script_repo_root)"
+  fi
 }
 
 cmd_init() {
@@ -6110,7 +6125,7 @@ cmd_fork() {
   }
   if [[ -z "$explicit_root" && -n "$source_root" && -d "$source_root" ]] \
     && [[ "$selector" != current && "$selector" != previous ]]; then
-    root_dir="$(cd "$source_root" 2>/dev/null && pwd -P)" || root_dir="$root_dir"
+    root_dir="$(cd "$source_root" 2>/dev/null && pwd -P)" || return 1
   fi
 
   # Provider fork argv. The source session id is only READ: codex `fork`
@@ -6467,7 +6482,7 @@ run_skill() {
 
   if [[ "$skill" == "marbles" && "$agent" == --* ]]; then
     printf '%b✗%b Missing marbles agent before flags.\n' "$_red" "$_reset" >&2
-    printf '  Try: vibecrafted marbles codex %s %s\n' "$agent" "$*" >&2
+    printf '  Try: vibecrafted marbles codex --file <plan>\n' >&2
     printf '\n' >&2
     cmd_skill_help "$skill" >&2
     return 1
@@ -6490,36 +6505,8 @@ run_skill() {
     return 1
   }
 
-  case "$skill" in
-    implement|justdo|workflow|review|marbles)
-      cmd_core_workflow_skill "$skill" "$agent" "$@"
-      return
-      ;;
-  esac
-
-  # `--worktree` asks for an isolated linked checkout. Only the core launcher
-  # (launch_workflow → WorktreeManager) can create one, and cli.py owns every
-  # LAUNCHERS skill, so a launch carrying the flag routes there instead of the
-  # shell helper, which would otherwise run in the shared checkout.
-  if _argv_requests_worktree "$@" || _argv_requests_execution_controls "$@"; then
-    cmd_core_workflow_skill "$skill" "$agent" "$@"
-    return
-  fi
-
-  local dispatch_skill="$skill"
-  [[ "$dispatch_skill" != "implement" ]] || dispatch_skill="justdo"
-  local helper_name="${agent}-skill-${skill}"
-  _ensure_helpers_loaded || return 1
-  if command -v "$helper_name" >/dev/null 2>&1; then
-    _run_helper "$helper_name" "$@"
-    return
-  fi
-  if command -v _vetcoders_skill_entry >/dev/null 2>&1; then
-    _vetcoders_skill_entry "$agent" "$dispatch_skill" "$@"
-    return
-  fi
-  printf '%b✗%b Missing helper %s and no generic skill entry is available.\n' "$_red" "$_reset" "$helper_name" >&2
-  return 1
+  # All execution skills use the same admission/parser/resolver owner.
+  cmd_core_workflow_skill "$skill" "$agent" "$@"
 }
 
 run_wrapper() {
@@ -6630,10 +6617,17 @@ main() {
 
   # Global flags — strip before dispatch
   export VIBECRAFTED_VERBOSE="${VIBECRAFTED_VERBOSE:-0}"
-  local filtered=()
+  local filtered=() keep_value=0 literal_tail=0
   for _arg in "$@"; do
+    if ((keep_value || literal_tail)); then
+      filtered+=("$_arg")
+      keep_value=0
+      continue
+    fi
     case "$_arg" in
       --verbose) VIBECRAFTED_VERBOSE=1 ;;
+      --) filtered+=("$_arg"); literal_tail=1 ;;
+      --prompt|-p|--file|-f|--model|--repo|--root|--base|--runtime|--execution-runtime|--session|--run-id) filtered+=("$_arg"); keep_value=1 ;;
       *) filtered+=("$_arg") ;;
     esac
   done
@@ -6684,7 +6678,7 @@ main() {
         printf '  Use: vibecrafted help %s\n' "$cmd" >&2
       else
         printf '  Use: vibecrafted %s %s' "$action" "$cmd" >&2
-        [[ "$#" -gt 1 ]] && printf ' %s' "${*:2}" >&2
+        [[ "$#" -gt 1 ]] && printf ' [arguments]' >&2
         printf '\n' >&2
       fi
       printf '  Agent names belong at the end of public commands.\n' >&2

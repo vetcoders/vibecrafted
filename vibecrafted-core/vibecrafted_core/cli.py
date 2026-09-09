@@ -212,7 +212,13 @@ def _add_launch_parser(sub: argparse._SubParsersAction, name: str) -> None:
         action="store_true",
         help="read the prompt from stdin and keep it out of argv/temp files",
     )
-    run.add_argument("--runtime", default="")
+    run.add_argument(
+        "--runtime", default="", help="presentation: headless, visible or terminal"
+    )
+    run.add_argument(
+        "--execution-runtime", choices=["living-tree", "local-worktrees"], default=""
+    )
+    run.add_argument("--base", default="")
     add_repo_arguments(run)
     run.add_argument(
         "--worktree",
@@ -246,7 +252,7 @@ def _add_launch_parser(sub: argparse._SubParsersAction, name: str) -> None:
     run.add_argument("--mode", default="")
     run.add_argument("--count", type=int)
     run.add_argument("--depth", type=int)
-    run.add_argument("--model", default="")
+    run.add_argument("--model", default=None)
     if name == "research":
         run.add_argument("--synthesizer", default="")
         run.add_argument("--synthesizer-model", default="")
@@ -455,7 +461,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     add_repo_arguments(resume)
     resume.add_argument("--source-dir", default="")
-    resume.add_argument("--model", default="")
+    resume.add_argument("--model", default=None)
     resume.add_argument("--json", action="store_true")
     fork_source = sub.add_parser(
         "fork-source",
@@ -619,6 +625,19 @@ def _print_launch_receipt(payload: dict[str, Any]) -> None:
     print(f"agent:      {agent}")
     print(f"skill:      {_field(payload, 'skill')}")
     print(f"root:       {_field(payload, 'root')}")
+    for key in (
+        "repo_requested",
+        "repo_kind",
+        "base_requested",
+        "resolved_ref",
+        "baseline_sha",
+        "runtime_class",
+        "presentation",
+        "model_requested",
+        "model_source",
+    ):
+        if payload.get(key):
+            print(f"{key}: {payload[key]}")
     if payload.get("worktree"):
         print(f"worktree:   {_field(payload, 'worktree_branch')}")
         print(f"parent:     {_field(payload, 'parent_root')}")
@@ -1006,11 +1025,15 @@ def _agent_resume(agent: str, argv: Sequence[str]) -> int:
     parser.add_argument("--session", default="")
     parser.add_argument("-p", "--prompt", default="")
     parser.add_argument("-f", "--file", dest="prompt_file", default="")
+    parser.add_argument("--prompt-stdin", action="store_true")
     add_repo_arguments(parser)
     parser.add_argument("--source-dir", default="")
-    parser.add_argument("--model", default="")
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--base", default="")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(list(argv))
+    if args.model == "":
+        parser.error("CLI --model must be non-empty")
 
     resume_root = ""
     if str(args.repo or "").strip() or str(args.root or "").strip():
@@ -1082,9 +1105,13 @@ def _agent_resume(agent: str, argv: Sequence[str]) -> int:
         return 2
 
     prompt = str(args.prompt or "")
+    if args.prompt_stdin:
+        if prompt or args.prompt_file:
+            parser.error("--prompt-stdin conflicts with --prompt/--file")
+        prompt = sys.stdin.read()
     if args.prompt_file:
         try:
-            prompt = Path(args.prompt_file).expanduser().read_text(encoding="utf-8")
+            prompt = Path(args.prompt_file).expanduser().read_bytes().decode("utf-8")
         except OSError as exc:
             print(f"error: cannot read --file: {exc}", file=sys.stderr)
             return 2
@@ -1096,6 +1123,8 @@ def _agent_resume(agent: str, argv: Sequence[str]) -> int:
         expected_agent=agent,
         root=resume_root,
         model=args.model,
+        plan_text=prompt if args.prompt_file else "",
+        base=args.base,
     )
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
@@ -1530,6 +1559,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     parser = _build_parser()
     args = parser.parse_args(raw_args)
+    if getattr(args, "model", None) == "":
+        parser.error("CLI --model must be non-empty")
     if not args.command:
         parser.print_help()
         return 0
@@ -1747,7 +1778,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.prompt_file:
             prompt_path = Path(args.prompt_file).expanduser()
             try:
-                prompt = prompt_path.read_text(encoding="utf-8")
+                prompt = prompt_path.read_bytes().decode("utf-8")
             except OSError as exc:
                 resume_result: dict[str, Any] = {
                     "schema": "vibecrafted.manual_explicit_resume.v1",
@@ -1843,13 +1874,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         worktree_requested = parse_worktree_flag(
             getattr(args, "worktree", ""), label=f"vibecrafted {args.command}"
         )
-        launch_root = select_repository(
-            args.repo,
-            args.root,
-            fallback=resolve_operator_launch_root,
-            require_git=worktree_requested,
-            label=f"vibecrafted {args.command}",
-        ).path
+        launch_root = args.repo or args.root or str(Path.cwd())
     except RepoSelectionError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -1866,8 +1891,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "prompt": prompt,
         "file": args.file,
         "runtime": _default_runtime(args.runtime, launch_root),
-        "root": launch_root,
+        "root": args.root,
+        "repo": args.repo,
+        "repo_selector": True,
         "worktree": worktree_requested,
+        "runtime_class": args.execution_runtime,
+        "base": args.base,
         "permissions": getattr(args, "permissions", ""),
         "sandbox": getattr(args, "sandbox", ""),
         "mode": args.mode or args.command,

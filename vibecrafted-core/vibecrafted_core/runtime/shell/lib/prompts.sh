@@ -34,6 +34,7 @@ _vetcoders_contract_reset() {
   _vetcoders_contract_depth=""
   _vetcoders_contract_runtime=""
   _vetcoders_contract_model=""
+  _vetcoders_contract_base=""
   _vetcoders_contract_policy_runtime=""
   _vetcoders_contract_permissions=""
   _vetcoders_contract_token_budget=""
@@ -82,6 +83,12 @@ _vetcoders_parse_contract() {
         shift
         [[ $# -gt 0 ]] || { echo "Missing value for --prompt" >&2; return 1; }
         _vetcoders_contract_prompt_explicit=1
+        if [[ -n "${_vetcoders_contract_single_prompt:-}" ]]; then
+          _vetcoders_contract_prompt="$1"
+          shift
+          continue
+        fi
+        # Legacy interactive commands retain greedy positional composition.
         # Greedy: everything after --prompt is the prompt text.
         # Flags must come BEFORE --prompt.
         _vetcoders_contract_prompt="$*"
@@ -141,13 +148,18 @@ _vetcoders_parse_contract() {
         [[ $# -gt 0 ]] || { echo "Missing value for --runtime" >&2; return 1; }
         _vetcoders_contract_runtime="$1"
         ;;
+      --base)
+        shift
+        [[ $# -gt 0 ]] || { echo "Missing value for --base" >&2; return 1; }
+        _vetcoders_contract_base="$1"
+        ;;
       --model)
         if [[ -z "${_vetcoders_contract_allow_model:-}" ]]; then
           printf 'Unknown flag: %s (flags go before --prompt; use -- for literal text)\n' "$1" >&2
           return 1
         fi
         shift
-        [[ $# -gt 0 ]] || { echo "Missing value for --model" >&2; return 1; }
+        [[ $# -gt 0 && -n "$1" ]] || { echo "Missing or empty value for --model" >&2; return 1; }
         _vetcoders_contract_model="$1"
         ;;
       --policy-runtime)
@@ -352,7 +364,7 @@ _vetcoders_rewrite_contract_root_argv() {
       # Value-taking flags: step over the VALUE too, so a value that happens to
       # spell a flag is never read as one.
       -f | --file | --task | --session | --run-id | --count | --depth | \
-        --runtime | --model | --policy-runtime | --permissions | \
+        --runtime | --model | --base | --policy-runtime | --permissions | \
         --token-budget | --operator | --continuity | --parent-session | \
         --continuity-parent)
         skip=1

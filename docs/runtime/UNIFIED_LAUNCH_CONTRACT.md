@@ -1,0 +1,184 @@
+# Unified launch contract: source continuation
+
+This document distinguishes implemented source behavior from integration and
+installed acceptance. The original full launch contract remains open. The flag
+syntax and catalog table below are implementation choices for review, not newly
+attributed Founder decisions.
+
+## Declaration and ownership
+
+Execution skills use `cli.py` -> `workflow.normalize_launch_spec` ->
+`launch_workflow`. Shell aliases enter the same core parser. `repo_selection.py`
+owns path/ref/catalog resolution. `repository_claims.canonical_repo_identity`
+owns repository identity, including validated managed-clone receipts;
+`dispatch.worktrees.WorktreeManager` owns linked checkout admission. Provider
+argument builders and `model_overrides.py` own exact model flags. `spawn.py` and
+`control_plane.py` retain process and durable run-state ownership.
+
+```sh
+vibecrafted workflow codex --repo /path/to/repo --base HEAD \
+  --execution-runtime local-worktrees --runtime headless --file plan.md
+vc-workflow codex --repo team/project --worktree --file plan.md
+```
+
+`--repo` is the public spelling; `--root` is a conflict-checked alias. An existing
+path wins over identity syntax. Explicit missing paths are errors. Public core
+launches without either flag resolve the caller's Git top-level, never the build
+root or ambient workspace. Subdirectories and symlinks resolve to that worktree.
+
+`--base` defaults to local `HEAD` for paths (including unpushed commits), and the
+source remote's current default branch for catalog identities. Branches and tags
+with the same spelling require `refs/heads/...` or `refs/tags/...`. Local refs
+stay local; remote refs require qualification. Resolution produces a commit SHA
+before materialization. Linked worktrees use that SHA even if the parent moves.
+Dirty parent files and index are preserved. A Living Tree request for another
+commit refuses; it never checks out, stashes, resets or commits the parent.
+
+The implementation separates `--execution-runtime living-tree|local-worktrees`
+from `--runtime headless|visible|terminal` (legacy presentation names). `--worktree`
+is the local-worktrees alias. VM/cloud and unknown runtime spellings refuse;
+there is no local fallback. Visible/terminal lifecycle parity still requires
+native acceptance and the reserved transport integration.
+
+## Catalog identities
+
+The existing `$XDG_CONFIG_HOME/vibecrafted/config.toml` (default
+`~/.config/vibecrafted/config.toml`) can contain explicit source URLs:
+
+```toml
+[repositories."team/project"]
+remote = "ssh://git@git.example.org/team/project.git"
+```
+
+There is no implicit GitHub host. Unknown entries refuse. Credential-bearing
+HTTP URLs, passwords, query strings, fragments and unsupported transports
+refuse before Git. Use the Git provider's existing authentication mechanism.
+Local paths/file remotes support hermetic testing.
+
+A managed clone lives under
+`$VIBECRAFTED_HOME/repositories/<remote-digest>/<org>/<repo>`. A receipt in its
+common Git directory binds identity and origin. Reuse checks both. Clone/fetch
+mutations are locked by remote; preparation subprocesses have bounded timeouts.
+Branches and tags refresh into separate remote namespaces with pruning; remote
+HEAD is queried for every selection. A requested SHA must be reachable from a
+refreshed source branch or tag; cache-only commit objects refuse. A partial clone or foreign cache without a
+valid receipt refuses and is preserved for inspection. Worker checkouts retain
+the standard `worktrees/<org>/<repo>/YYYY_MMDD/<cut>/` geometry.
+
+Remote-host execution and transporting a local-only commit are unsupported.
+The catalog is resolved on the execution host; this implementation only has a
+local host adapter. A managed clone's local HEAD is not silently moved when the
+remote default changes: use local-worktrees to launch from the refreshed SHA.
+
+## Model and prompt
+
+Launch selection is CLI model > plan-frontmatter model > provider default.
+Dispatch TOML `model` is an explicit override at the same precedence as CLI.
+Resume selection is CLI model > newly supplied plan model > previous effective
+model (then previous requested model if effective observation is unavailable).
+A plain continuation note and an old runtime prompt snapshot do not reselect a
+model. Parent metadata and source plan files are never rewritten by overrides.
+
+The existing frontmatter parser has a strict launch mode using the existing
+PyYAML dependency. A model must be one nonempty string. Null, collections,
+booleans, numbers, duplicate model/agent keys and provider conflicts refuse.
+BOM/CRLF are accepted for metadata extraction without modifying source bytes.
+Model identifiers pass unchanged to provider argument lists; no universal
+`effort` exists. Catalog/account availability remains a provider rejection,
+not proof from the local parser. A provider with no known model flag refuses
+an explicit pin rather than silently ignoring it.
+
+`--prompt TEXT` remains supported as one argument (including heredoc-equivalent
+shell substitutions), with `--file` and `--prompt-stdin` alternatives. The deck
+moves inline text to a private pipe before invoking Python. Core materializes
+`plan-source.md` and `prompt.md` through the existing writer with exclusive
+creation and mode 0600. Existing files and symlinks are not overwritten. The
+source digest detects edits between selection and launch. Report-safe spec
+serialization omits prompt text; receipts include source digest/reference and
+model source. Snapshots stay with the run for historical attribution; no new
+automatic cleanup deletes them or the input file.
+
+The initial shell argv exposure and OS ARG_MAX cannot be undone. Use file/stdin
+for inputs beyond ARG_MAX. This cut proves producer transport; it does not
+certify every downstream provider or HTTP log viewer. In particular the current
+Agy adapter expands stdin into `--print` argv: direct core Agy launches now
+refuse before launch mutation until that reserved adapter gains private transport.
+Supervised research lanes and native interactive prompt composition still need
+end-to-end privacy admission.
+
+## Public entry matrix
+
+| Entry                                                                                                                                   | Parser and route                                  | Repo/base/execution                                      | Model/prompt                                    | Evidence boundary                                                              |
+| --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- | -------------------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------ |
+| workflow, implement, review, research, marbles                                                                                          | public deck -> core CLI -> workflow               | shared core flags                                        | strict selection, private core input            | focused source tests; supervisor/provider integration separate                 |
+| audit, canary, decorate, delegate, dou, followup, guard, hydrate, intents, justdo, ownership, polarize, prune, release, scaffold, trust | same core execution route                         | shared core flags                                        | same selection                                  | alias/parser route; skill semantics unchanged                                  |
+| vc-* execution aliases                                                                                                                  | deck `run_wrapper` or Python wrappers -> core     | same as corresponding skill                              | same as corresponding skill                     | native alias installation not changed                                          |
+| resume --run-id                                                                                                                         | shell shared parser -> core operator_continue_run | original root/baseline; conflicting overrides refuse     | new CLI/plan/previous precedence                | CP provider attribution remains reserved                                       |
+| resume --session with explicit input                                                                                                    | shared parser -> resume-session                   | explicit native session; no unrecorded baseline override | whole plan or stdin, exact model                | native session exclusion/PTY acceptance remains open                           |
+| bare resume, fork, init, partner, operator                                                                                              | existing shell/native declaration owners          | partial: not all core repo/base/runtime fields adopted   | interactive/native paths need final unification | do not claim complete parity                                                   |
+| dispatch TOML                                                                                                                           | dispatch schema/supervisor -> workflow            | existing dispatch substrate and baseline policy          | TOML override / brief model                     | dependency baseline policy needs final audit; no fleet launched by this worker |
+| vc-start / vibecrafted start                                                                                                            | shared dashboard parser and create-only owner     | local path; default Git top-level name                   | no work/model flags added                       | fake-engine and real-PTY fixtures; guest integration pending                   |
+| VOC/App/MCP                                                                                                                             | their owned declarations -> core                  | capability additions required below                      | capability additions required below             | sibling integrations and installed acceptance pending                          |
+| observe/await/status and other read-only commands                                                                                       | existing observation owners                       | no meaningless work flags                                | no prompt launch contract                       | unchanged                                                                      |
+
+## Provider and presentation capability matrix
+
+| Provider      | Model argument                                         | Private prompt mechanism in current source | Status                                                   |
+| ------------- | ------------------------------------------------------ | ------------------------------------------ | -------------------------------------------------------- |
+| Codex         | `-m` after `exec`, including absolute executable paths | stdin                                      | source tested; real account execution not performed      |
+| Claude        | `--model`                                              | print-mode stdin                           | source tested; native session/account acceptance pending |
+| Grok          | `--model` (`-m` recognized)                            | `--prompt-file /dev/stdin`                 | adapter inspected; runtime acceptance pending            |
+| Cursor        | `--model`                                              | existing stream/stdin contract             | adapter admission retained; runtime acceptance pending   |
+| Junie         | no supported model override in current registry        | existing text input                        | explicit model pin refuses; native behavior unverified   |
+| Agy           | `--model` builder exists                               | current inner argv transport is unsafe     | direct workflow rejected pending spawn-owner correction  |
+| Gemini legacy | deprecated                                             | no supported launch                        | rejected; no substitution of requested model             |
+
+No active provider process, native UI, VM or cloud run was used as a fixture.
+
+## Workspace creation and Frame dependency
+
+The recovered START implementation uses one parser for the deck and shell.
+It chooses the explicit workspace name or repository basename, validates it,
+reads live/exited engine inventory, and refuses duplicates before preparation
+or terminal creation. No silent attach, replacement, suffix, kill or deletion.
+Inventory failures refuse rather than treating uncertainty as an empty list.
+Outside Frame, creation is exclusive; a no-TTY caller opens VC Terminal only
+after successful creation, carrying the exact root and created-session marker.
+
+The recovered implementation's inside-Frame `switch-session` was not a stable
+host with separate guest workspace identities. This generation therefore
+refuses new inside-Frame workspace creation before mutation. The Frame baton
+must supply an exclusive guest-create operation accepting host identity, guest
+identity, repository/cwd and layout; a guest inventory/collision query; and an
+activation operation that keeps the existing host/server and canvas alive.
+The precise API names must come from that implementation, not invented flags.
+
+## Reserved integration interfaces
+
+- **Terra / spawn + CP:** preserve launch identity fields through all phases and
+  settlement; event author (`guardian`) must not replace execution provider
+  (`claude`). `control_plane._event_runs` currently selects each payload's
+  `agent` over existing identity. Add a launch-Claude / settle-Guardian / resume-
+  Claude regression without rewriting historical events. Preserve `model_source`,
+  source digest/reference, repo kind/request, baseline/ref, runtime class and
+  presentation in durable projections. Native continuation metadata must retain
+  parent linkage. Prove readiness/publication failure semantics at process launch.
+- **Spawn:** replace Agy's `--print "$(cat)"` inner argv transport, or expose it
+  as unsupported. Verify supervised lanes, provider transcript echo and HTTP log
+  viewing cannot disclose raw prompt snapshots. Verify inherited runtime Python
+  state is scrubbed at every provider boundary; no host interpreter repair.
+- **VOC:** add base, execution-runtime, repo identity capability, model selector
+  and model-source/source-reference fields without reordering the provider
+  catalog or changing rendering. Display unsupported VM/cloud and Agy private
+  transport explicitly. Existing `workflow-capabilities` region is reserved.
+- **Frame:** admit the actual stable-host guest API above before enabling
+  inside-host start. Closing a viewer must not own the worker lifecycle.
+
+Outstanding independent unification includes native init/partner/operator/fork
+repo/base/model propagation, all direct API callers consuming the same repository
+admission, source-ref provenance, complete native-session mutual exclusion,
+full all-surface idempotency/crash/
+cleanup acceptance. These are not converted into passes by focused tests.
+
+Review and integrate the local commits before a clean signed build. The Operator
+owns installation, notarization, live UI/provider acceptance and release.

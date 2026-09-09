@@ -54,7 +54,13 @@ from .init_resume import init_resume_block
 from .model_overrides import _model_override_receipt, _with_model_override
 from .package_resources import deck_path as package_deck_path
 from .process_control import process_identity_receipt, validate_process_identity
-from .repo_selection import git_toplevel, parse_worktree_flag
+from .repo_selection import (
+    git_toplevel,
+    parse_worktree_flag,
+    resolve_repository_base,
+    resolve_repository_identity,
+    select_repository,
+)
 from .report_contract import CLAIM_DIGEST_ENV, reserve_launcher_report_template
 from .research_config import ResearchAgentSelection, resolve_research_runtime_config
 from .run_mutation import mutate_run_meta, run_mutation_locks
@@ -110,6 +116,14 @@ class WorkflowLaunchSpec:
     count: int | None = None
     depth: int | None = None
     model: str = ""
+    repo_requested: str = ""
+    repo_kind: str = "path"
+    base: str = "HEAD"
+    baseline_sha: str = ""
+    resolved_ref: str = ""
+    runtime_class: str = "living-tree"
+    source_digest: str = ""
+    model_source: str = "provider_default"
     research_agents: tuple[str, ...] = ()
     research_synthesizer: str = ""
     research_synthesizer_model: str = ""
@@ -139,7 +153,7 @@ class WorkflowLaunchSpec:
 
     def to_payload(self) -> dict[str, Any]:
         """Serialize the spec to a plain dict for launch logs and events."""
-        return asdict(self)
+        return {**asdict(self), "prompt": ""}
 
 
 def vibecrafted_launcher(source_dir: str | Path) -> Path:
@@ -1458,7 +1472,9 @@ def _qualify_stop_signal(
 
 def _normalized_runtime(raw: str) -> str:
     """Coerce a raw runtime string to a supported runtime, default "headless"."""
-    return raw if raw in SUPPORTED_RUNTIMES else "headless"
+    if raw not in SUPPORTED_RUNTIMES:
+        raise ValueError(f"Unsupported runtime: {raw}; no host adapter is available")
+    return raw
 
 
 def _coerce_positive_int(value: Any, default: int | None = None) -> int | None:
@@ -1485,6 +1501,30 @@ def _workflow_metadata(skill: str) -> dict[str, Any]:
         "tooling": list(definition.tooling),
         "lifecycle_order": definition.lifecycle_order,
     }
+
+
+def select_plan_model(
+    agent: str, text: str, *, model: str = "", previous: str = ""
+) -> tuple[str, str]:
+    """Select an exact provider identifier without altering the source document."""
+    fields = parse_frontmatter(text=text, strict=True)
+    if fields.get("agent") and fields["agent"] != agent:
+        raise ValueError("frontmatter agent conflicts with selected provider")
+    if model:
+        if (
+            not isinstance(model, str)
+            or not model.strip()
+            or model != model.strip()
+            or model.startswith("-")
+            or any(ord(c) < 32 for c in model)
+        ):
+            raise ValueError("CLI model must be a non-empty provider identifier")
+        return model, "cli"
+    if "model" in fields:
+        return fields["model"], "plan_frontmatter"
+    if previous:
+        return previous, "resume_previous"
+    return "", "provider_default"
 
 
 def normalize_launch_spec(
@@ -1526,7 +1566,7 @@ def normalize_launch_spec(
     if agent not in SUPPORTED_AGENTS:
         raise ValueError(f"Unsupported agent: {agent}")
 
-    prompt = str(payload.get("prompt") or "").strip()
+    prompt = str(payload.get("prompt") or "")
     file_path = str(payload.get("file") or "").strip()
     if not prompt and not file_path:
         prompt = workflow_registry.workflow_default_prompt(skill)
@@ -1539,11 +1579,18 @@ def normalize_launch_spec(
     depth = _coerce_positive_int(
         payload.get("depth"), 3 if definition.supports_depth else None
     )
-    model = str(payload.get("model") or payload.get("model_requested") or "").strip()
-    if not model and file_path:
-        # Brief frontmatter is the plan's voice: `model: <id>` pins the worker
-        # tier without an explicit --model flag. Flag always wins over brief.
-        model = parse_frontmatter(Path(file_path).expanduser()).get("model", "").strip()
+    if file_path and not Path(file_path).expanduser().is_file():
+        raise ValueError(f"Prompt file does not exist or is not a file: {file_path}")
+    plan_text = (
+        Path(file_path).expanduser().read_bytes().decode("utf-8")
+        if file_path
+        else prompt
+    )
+    model, model_source = select_plan_model(
+        agent,
+        plan_text,
+        model=payload.get("model") or payload.get("model_requested") or "",
+    )
     research_agents: tuple[str, ...] = ()
     research_synthesizer = ""
     research_synthesizer_model = str(
@@ -1571,9 +1618,6 @@ def normalize_launch_spec(
         raise ValueError("Launch requires either --prompt text or --file path.")
     if file_path and not Path(file_path).expanduser().is_file():
         raise ValueError(f"Prompt file does not exist or is not a file: {file_path}")
-    worktree = parse_worktree_flag(payload.get("worktree"))
-    if worktree and not root:
-        raise ValueError("--worktree requires a selected repository (--repo <path>).")
     permissions = parse_permissions_word(payload.get("permissions"))
     sandbox = parse_sandbox_word(payload.get("sandbox"))
     if permissions or sandbox is not None:
@@ -1586,6 +1630,108 @@ def normalize_launch_spec(
         # provider's exact supported alternative (never a silent downgrade).
         resolve_execution_controls(agent, permissions=permissions, sandbox=sandbox)
 
+    execution = str(payload.get("runtime_class") or "")
+    if execution and execution not in {"living-tree", "local-worktrees"}:
+        raise ValueError(f"Unsupported execution runtime: {execution}; no host adapter")
+    worktree = parse_worktree_flag(payload.get("worktree"))
+    if execution:
+        if worktree and execution != "local-worktrees":
+            raise ValueError("--worktree conflicts with execution runtime")
+        worktree = execution == "local-worktrees"
+    requested_repo = str(payload.get("repo") or payload.get("root") or "")
+    repo_kind = "path"
+    identity_default = ""
+    if payload.get("repo_selector"):
+        raw_repo, raw_root = (
+            str(payload.get("repo") or ""),
+            str(payload.get("root") or ""),
+        )
+        if (
+            raw_repo
+            and raw_root
+            and raw_repo != raw_root
+            and Path(raw_repo).expanduser().resolve()
+            != Path(raw_root).expanduser().resolve()
+        ):
+            raise ValueError("conflicting --repo and --root")
+        chosen = raw_repo or raw_root
+        if (
+            chosen
+            and not Path(chosen).expanduser().exists()
+            and re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*", chosen
+            )
+        ):
+            repo_kind = "identity"
+            root, identity_default = resolve_repository_identity(chosen)
+        else:
+            selected = select_repository(
+                raw_repo, raw_root, fallback=Path.cwd, require_git=True
+            )
+            root = selected.git_toplevel
+    top = git_toplevel(Path(root))
+    if top and root:
+        root = top
+    base = str(payload.get("base") or "HEAD")
+    effective_base = base
+    if repo_kind == "identity":
+        if base == "HEAD":
+            effective_base = identity_default
+        elif base.startswith("refs/heads/"):
+            effective_base = base.replace("refs/heads/", "refs/remotes/origin/", 1)
+        elif base.startswith("refs/tags/"):
+            effective_base = base.replace("refs/tags/", "refs/vibecrafted/tags/", 1)
+        elif not base.startswith("refs/"):
+            candidates = []
+            for candidate in (
+                f"refs/remotes/origin/{base}",
+                f"refs/vibecrafted/tags/{base}",
+            ):
+                try:
+                    resolve_repository_base(root, candidate)
+                    candidates.append(candidate)
+                except ValueError:
+                    pass
+            if len(candidates) > 1 or (
+                not candidates and not re.fullmatch(r"[0-9a-fA-F]{4,40}", base)
+            ):
+                raise ValueError(
+                    "remote --base missing or ambiguous; use refs/heads/ or refs/tags/"
+                )
+            effective_base = candidates[0] if candidates else base
+    resolved_ref, baseline_sha = (
+        resolve_repository_base(root, effective_base) if top else ("", "")
+    )
+    if repo_kind == "identity" and baseline_sha:
+        advertised = subprocess.run(
+            [
+                "git",
+                "-C",
+                root,
+                "for-each-ref",
+                f"--contains={baseline_sha}",
+                "--format=%(refname)",
+                "refs/remotes/origin/",
+                "refs/vibecrafted/tags/",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        if advertised.returncode or not advertised.stdout.strip():
+            raise ValueError(
+                "remote --base commit is not reachable from the refreshed source branches or tags; cached local objects are not a source baseline"
+            )
+    if payload.get("base") and not top:
+        raise ValueError("--base requires a Git repository")
+    if baseline_sha and not worktree and baseline_sha != _git_head(Path(root)):
+        raise ValueError(
+            "Living Tree --base differs from HEAD; select --execution-runtime local-worktrees"
+        )
+    if worktree and not root:
+        raise ValueError("--worktree requires a selected repository (--repo <path>).")
+
     return WorkflowLaunchSpec(
         agent=agent,
         mode=mode,
@@ -1597,6 +1743,14 @@ def normalize_launch_spec(
         count=count,
         depth=depth,
         model=model,
+        model_source=model_source,
+        source_digest=hashlib.sha256(plan_text.encode("utf-8")).hexdigest(),
+        repo_requested=requested_repo,
+        repo_kind=repo_kind,
+        base=base,
+        baseline_sha=baseline_sha,
+        resolved_ref=resolved_ref,
+        runtime_class="local-worktrees" if worktree else "living-tree",
         research_agents=research_agents,
         research_synthesizer=research_synthesizer,
         research_synthesizer_model=research_synthesizer_model,
@@ -1676,7 +1830,7 @@ def _prepare_launch_worktree(
             "--worktree requires the selected repository root, not a "
             f"subdirectory: pass --repo {toplevel}"
         )
-    baseline = _git_head(parent)
+    baseline = spec.baseline_sha or _git_head(parent)
     if not baseline:
         raise ValueError(f"--worktree needs at least one commit in {parent}")
     manager = WorktreeManager(parent)
@@ -1699,19 +1853,28 @@ def _prepare_launch_worktree(
 
 
 def _source_prompt(spec: WorkflowLaunchSpec) -> str:
-    """Resolve the operator's raw prompt text from ``spec.file`` or ``spec.prompt``."""
-    if spec.file:
-        return (
-            Path(spec.file).expanduser().read_text(encoding="utf-8", errors="replace")
-        )
-    return spec.prompt
+    """Read exact input, refusing a file changed since model admission."""
+    text = (
+        Path(spec.file).expanduser().read_bytes().decode("utf-8")
+        if spec.file
+        else spec.prompt
+    )
+    if (
+        spec.source_digest
+        and hashlib.sha256(text.encode("utf-8")).hexdigest() != spec.source_digest
+    ):
+        raise ValueError("plan source changed after admission; submit a new launch")
+    return text
 
 
-def _runtime_prompt(spec: WorkflowLaunchSpec) -> str:
+def _runtime_prompt(
+    spec: WorkflowLaunchSpec, *, source_prompt: str | None = None
+) -> str:
     """Wrap the source prompt in the runtime contract instructions given to the worker."""
     report_hint = "${VIBECRAFTED_REPORT_PATH}"
     transcript_hint = "${VIBECRAFTED_TRANSCRIPT_PATH}"
-    source_prompt = _source_prompt(spec)
+    if source_prompt is None:
+        source_prompt = _source_prompt(spec)
     # Resume is a payload of the init pass, not a verb someone has to remember.
     # The block is empty on a clean checkout, so it costs nothing when there is
     # no unfinished work; `init_resume_block` never raises.
@@ -1761,7 +1924,9 @@ Operator prompt:
 def _write_prompt_file(path: Path, body: str) -> Path:
     """Write the assembled prompt body to disk and return its path."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(body.encode("utf-8"))
     return path
 
 
@@ -1915,6 +2080,24 @@ def machine_launch_receipt(payload: dict[str, Any]) -> dict[str, Any]:
             receipt[key] = str(payload.get(key) or "")
     if isinstance(payload.get("execution_controls"), dict):
         receipt["execution_controls"] = dict(payload["execution_controls"])
+    for key in (
+        "model_requested",
+        "model_effective",
+        "model_source",
+        "repo_requested",
+        "repo_kind",
+        "base_requested",
+        "resolved_ref",
+        "baseline_sha",
+        "runtime_class",
+        "presentation",
+        "source_path",
+        "source_origin",
+        "source_snapshot",
+        "source_digest",
+    ):
+        if key in payload:
+            receipt[key] = payload[key]
     return receipt
 
 
@@ -2698,6 +2881,14 @@ def launch_workflow(
     lifecycle events. Never blocks on the spawned run reaching a terminal state
     — control-plane reconciliation is deliberately deferred to observe/await.
     """
+    _normalized_runtime(spec.runtime)
+    if spec.agent == "agy":
+        raise ValueError(
+            "agy private prompt transport is unavailable: its current adapter expands stdin into argv; no worker started"
+        )
+    if spec.runtime_class not in {"living-tree", "local-worktrees"}:
+        raise ValueError("unsupported execution runtime; no host adapter")
+    _source_prompt(spec)  # refuse source drift before any mutation
     # Opportunistic pre-flight: before adding a run to the machine, take the dead
     # ones' survivors off it. Every spawn is the natural sweep point — it needs no
     # daemon, and it is exactly when the residue starts costing the new run cores.
@@ -2801,11 +2992,11 @@ def launch_workflow(
     prompt_body = (
         source_prompt
         if runtime_kind in {"supervised_research", "supervised_marbles"}
-        else _runtime_prompt(spec)
+        else _runtime_prompt(spec, source_prompt=source_prompt)
     )
     canonical_report_dir = _canonical_report_dir(spec.root, spec.skill)
     artifact_ts = time.strftime("%Y-%m-%d")
-    artifact_slug = _artifact_slug(source_prompt, run_id)
+    artifact_slug = spec.skill  # filenames/receipts must not disclose prompt text
     report_path = _canonical_report_path(
         canonical_report_dir=canonical_report_dir,
         artifact_ts=artifact_ts,
@@ -2820,6 +3011,16 @@ def launch_workflow(
         skill=spec.skill,
         claim_digest=str(spec.claim_digest or "").strip(),
     )
+    source_snapshot = _write_prompt_file(
+        artifacts["prompt"].with_name("plan-source.md"), source_prompt
+    )
+    source_receipt = {
+        "source_path": str(Path(spec.file).expanduser().resolve()) if spec.file else "",
+        "source_origin": "file" if spec.file else "inline",
+        "source_snapshot": str(source_snapshot),
+        "source_digest": hashlib.sha256(source_prompt.encode("utf-8")).hexdigest(),
+        "model_source": spec.model_source,
+    }
     prompt_path = _write_prompt_file(artifacts["prompt"], prompt_body)
     claim_digest = str(spec.claim_digest or "").strip()
     try:
@@ -2848,10 +3049,22 @@ def launch_workflow(
     initial_meta: dict[str, Any] = dict(launch_meta or {})
     initial_meta["run_id"] = run_id
     initial_meta["runtime"] = spec.runtime
+    initial_meta.update(
+        {
+            "repo_requested": spec.repo_requested,
+            "repo_kind": spec.repo_kind,
+            "base_requested": spec.base,
+            "resolved_ref": spec.resolved_ref,
+            "baseline_sha": spec.baseline_sha,
+            "runtime_class": spec.runtime_class,
+            "presentation": "headless" if spec.runtime == "headless" else "visible",
+        }
+    )
     if worktree_receipt:
         initial_meta["root"] = spec.root
         initial_meta.update(worktree_receipt)
     initial_meta.update(controls_receipt)
+    initial_meta.update(source_receipt)
     if claim_digest:
         initial_meta["claim_digest"] = claim_digest
     if len(initial_meta) > 1:
@@ -2899,7 +3112,18 @@ def launch_workflow(
         model_receipt = {"model_requested": spec.model}
     # Execution controls ride the same receipt channel as the model pin: every
     # accepted/refused payload that spreads model_receipt carries them too.
-    model_receipt = {**model_receipt, **controls_receipt}
+    model_receipt = {
+        **model_receipt,
+        **controls_receipt,
+        **source_receipt,
+        "repo_requested": spec.repo_requested,
+        "repo_kind": spec.repo_kind,
+        "base_requested": spec.base,
+        "resolved_ref": spec.resolved_ref,
+        "baseline_sha": spec.baseline_sha,
+        "runtime_class": spec.runtime_class,
+        "presentation": "headless" if spec.runtime == "headless" else "visible",
+    }
     dispatch_command = _dispatcher_command(
         run_id=run_id,
         root=spec.root,
@@ -4537,6 +4761,8 @@ def manual_resume_session(
     prompt: str,
     root: str | Path = "",
     model: str = "",
+    model_source: str = "",
+    launch_meta: dict[str, Any] | None = None,
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Launch an explicit provider-session continuation as its own tracked run.
@@ -4570,6 +4796,17 @@ def manual_resume_session(
             reason="missing_prompt",
         )
     try:
+        model_requested, selected_source = select_plan_model(
+            normalized_agent, prompt_body, model=model
+        )
+    except ValueError as exc:
+        return _manual_explicit_resume_rejection(
+            agent=normalized_agent,
+            agent_session_id=native_id,
+            reason="launch_spec_invalid",
+            detail=str(exc),
+        )
+    try:
         command, _probe_state, _probe_version = _verified_native_resume_command(
             normalized_agent,
             native_id,
@@ -4582,7 +4819,6 @@ def manual_resume_session(
             detail=exc.detail,
             retryable=exc.retryable,
         )
-    model_requested = str(model or "").strip()
     command = _with_model_override(
         normalized_agent,
         command,
@@ -4597,6 +4833,7 @@ def manual_resume_session(
     child_env["VIBECRAFTED_SESSION_ID"] = child_runtime_session_id
     child_env["VIBECRAFTED_AGENT_SESSION_ID"] = native_id
     launch_meta = {
+        **(launch_meta or {}),
         "run_id": child_run_id,
         "agent": normalized_agent,
         "agent_session_id": native_id,
@@ -4614,6 +4851,13 @@ def manual_resume_session(
         runtime="headless",
         root=resolved_root,
         model=model_requested,
+        model_source=model_source or selected_source,
+        runtime_class=str(launch_meta.get("runtime_class") or "living-tree"),
+        baseline_sha=str(
+            launch_meta.get("baseline_sha")
+            or launch_meta.get("worktree_baseline_sha")
+            or ""
+        ),
         run_id=child_run_id,
     )
     try:
@@ -5053,7 +5297,7 @@ def _operator_continue_prompt(
     native_session: str,
 ) -> str:
     """Build the continuation prompt for a stopped/failed parent run."""
-    extra = str(extra_prompt or "").strip()
+    extra = str(extra_prompt or "")
     original = ""
     try:
         resolved = resolve_run(run_id)
@@ -5102,6 +5346,8 @@ def operator_continue_run(
     expected_agent: str = "",
     root: str | Path = "",
     model: str = "",
+    plan_text: str = "",
+    base: str = "",
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Continue a stopped/failed control-plane run as a new tracked job.
@@ -5211,7 +5457,68 @@ def operator_continue_run(
         root or parent.get("root") or "",
         resolved_source_dir,
     )
-    model_requested = str(model or parent.get("model_requested") or "").strip()
+    if (
+        root
+        and parent.get("root")
+        and Path(root).resolve() != Path(str(parent["root"])).resolve()
+    ):
+        return _operator_continue_rejection(
+            target,
+            "repository_conflict",
+            detail="resume preserves the original checkout; use fork",
+            run=parent,
+        )
+    if base:
+        try:
+            _ref, requested_sha = resolve_repository_base(resolved_root, base)
+        except ValueError as exc:
+            return _operator_continue_rejection(
+                target, "base_conflict", detail=str(exc), run=parent
+            )
+        recorded_sha = (
+            parent.get("baseline_sha")
+            or parent.get("worktree_baseline_sha")
+            or parent.get("dispatch_baseline_sha")
+        )
+        if not recorded_sha or requested_sha != recorded_sha:
+            return _operator_continue_rejection(
+                target,
+                "base_conflict",
+                detail="resume preserves recorded baseline; use a new run or fork",
+                run=parent,
+            )
+    try:
+        model_requested, model_source = select_plan_model(
+            agent,
+            plan_text,
+            model=model,
+            previous=str(
+                parent.get("agent_model")
+                or parent.get("model_effective")
+                or parent.get("model_requested")
+                or ""
+            ),
+        )
+    except ValueError as exc:
+        return _operator_continue_rejection(
+            target, "launch_spec_invalid", detail=str(exc), run=parent
+        )
+    continuation_meta = {
+        "parent_run_id": target,
+        "resume_of": target,
+        "model_source": model_source,
+        **{
+            key: parent[key]
+            for key in (
+                "runtime_class",
+                "baseline_sha",
+                "worktree_baseline_sha",
+                "worktree_branch",
+                "parent_root",
+            )
+            if key in parent
+        },
+    }
 
     if native_session:
         launched = manual_resume_session(
@@ -5221,6 +5528,8 @@ def operator_continue_run(
             prompt=prompt_body,
             root=resolved_root,
             model=model_requested,
+            model_source=model_source,
+            launch_meta=continuation_meta,
             env=env,
         )
         return {
@@ -5254,12 +5563,14 @@ def operator_continue_run(
             detail=str(exc),
             run=parent,
         )
+    spec = replace(spec, model_source=model_source)
     try:
         launched = launch_workflow(
             spec,
             resolved_source_dir,
             env=env,
             launch_meta={
+                **continuation_meta,
                 "resume_of": target,
                 "resume_root": target,
                 "resume_mode": "operator_continue",

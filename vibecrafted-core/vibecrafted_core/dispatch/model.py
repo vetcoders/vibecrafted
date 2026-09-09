@@ -148,6 +148,7 @@ class Cut:
     critical: bool = False
     mode: str = "write"
     model: str = ""
+    model_source: str = "provider_default"
     prompt: str = ""
     brief: str = ""
     extra: str = ""

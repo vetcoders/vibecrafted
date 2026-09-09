@@ -915,37 +915,17 @@ vc-start() {
     _vetcoders_vc_passthrough start --help
     return $?
   fi
-  _vetcoders_start_prepare_arguments "$@" || return $?
-  local _vc_start_project_root="${VIBECRAFTED_START_ROOT:-}"
-  [[ -n "$_vc_start_project_root" ]] || _vc_start_project_root="$(_vetcoders_effective_project_root)"
-  _vetcoders_start_open_terminal_if_needed \
-    "$_vc_start_project_root" "${_vetcoders_start_frame_argv[@]}" || return $?
-  [[ -z "${VIBECRAFTED_START_ESCALATED:-}" ]] || return 0
-  set -- "${_vetcoders_start_frame_argv[@]}"
-  # Required lifecycle helpers belong to the admitted facade.
-  if ! declare -F _vetcoders_product_entry_prepare >/dev/null 2>&1; then
-    printf 'vc-start: required product preparation helper missing\n' >&2
+  # Required lifecycle helpers belong to the admitted facade (dashboard.sh).
+  # `command -v`, not `declare -F`: under zsh `-F` means float, not function.
+  if ! command -v _vetcoders_start_entry >/dev/null 2>&1 \
+    || ! command -v _vetcoders_product_entry_prepare >/dev/null 2>&1; then
+    printf 'vc-start: required product start helper missing\n' >&2
     return 1
   fi
-  _vetcoders_product_entry_prepare "${VIBECRAFTED_START_ROOT:-}" || return $?
-  # Tests/doctor: print env effects without attach (no TUI, no session create).
-  if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" == "1" ]]; then
-    if ! declare -F _vetcoders_product_entry_probe_print >/dev/null 2>&1; then
-      printf 'vc-start: required product probe helper missing\n' >&2
-      return 1
-    fi
-    _vetcoders_product_entry_probe_print
-    return $?
-  fi
-  if [[ "${1:-}" == "resume" ]]; then
-    shift || true
-    _vetcoders_resume_operator_session "$@"
-    return
-  fi
-  if [[ "${1:-}" == "operator" || "${1:-}" == "vibecrafted" ]]; then
-    shift || true
-  fi
-  _vetcoders_launch_dashboard operator "$@"
+  # One parser, one owner: the create-only workspace contract in dashboard.sh
+  # (root → name → live inventory → exclusive create → enter / VC Terminal).
+  _vetcoders_start_prepare_arguments "$@" || return $?
+  _vetcoders_start_entry "${_vetcoders_start_frame_argv[@]}"
 }
 
 vc-dashboard() {

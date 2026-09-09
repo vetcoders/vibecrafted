@@ -214,6 +214,9 @@ def workflow_cell_launcher(
             runtime="headless",
             root=root,
             model=cut.model,
+            model_source=cut.model_source,
+            baseline_sha=cut.baseline_sha,
+            runtime_class="local-worktrees" if cut.runtime_branch else "living-tree",
         )
         runtime_env = {
             "VIBECRAFTED_DISPATCH_CUT_ID": cut.id,
@@ -1015,6 +1018,9 @@ class DispatchSupervisor:
             runtime="headless",
             root=root,
             model=cut.model,
+            model_source=cut.model_source,
+            baseline_sha=cut.baseline_sha,
+            runtime_class="local-worktrees" if cut.runtime_branch else "living-tree",
         )
         recovered = recover_launch_receipt(spec, env=env)
         if not recovered or not recovered.get("accepted"):

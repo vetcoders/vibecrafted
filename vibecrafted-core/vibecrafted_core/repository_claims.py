@@ -12,6 +12,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import uuid
@@ -466,6 +467,22 @@ def canonical_repo_identity(
     canonical_root = common_dir.parent if common_dir.name == ".git" else worktree_root
     remote = _git(worktree_root, "remote", "get-url", "origin")
     repo_identity = _remote_identity(remote) or f"local/{canonical_root.name}"
+    try:
+        managed = json.loads((common_dir / "vibecrafted-repository.json").read_text())
+    except (OSError, ValueError):
+        managed = {}
+    configured_identity = (
+        managed.get("identity", "") if isinstance(managed, dict) else ""
+    )
+    if (
+        isinstance(configured_identity, str)
+        and re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*",
+            configured_identity,
+        )
+        and managed.get("remote") == remote
+    ):
+        repo_identity = configured_identity
     repo_key = hashlib.sha256(str(canonical_root).encode("utf-8")).hexdigest()
     return {
         "repo_key": repo_key,

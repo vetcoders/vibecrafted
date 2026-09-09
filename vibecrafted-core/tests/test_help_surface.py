@@ -26,7 +26,9 @@ def test_worker_help_declares_headless_as_the_default_surface() -> None:
     output = render_workflow_help("implement")
 
     assert "--runtime <terminal|headless>" in output
-    assert "Worker surface (default: headless)" in output
+    assert "Presentation (default: headless)" in output
+    assert "--execution-runtime <living-tree|local-worktrees>" in output
+    assert "--base <ref|SHA|HEAD>" in output
 
 
 def test_partner_help_is_interactive_only() -> None:

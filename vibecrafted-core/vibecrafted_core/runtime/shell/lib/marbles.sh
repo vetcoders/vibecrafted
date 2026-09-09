@@ -237,7 +237,7 @@ _vetcoders_run_core_cli() {
   py="${python_spec%%$'\t'*}"
   import_root="${python_spec#*$'\t'}"
   if [[ -n "$import_root" ]]; then
-    PYTHONPATH="$import_root${PYTHONPATH:+:$PYTHONPATH}" \
+    PYTHONPATH="$import_root" \
       "$py" -m vibecrafted_core.cli "$@"
   else
     "$py" -m vibecrafted_core.cli "$@"
@@ -254,7 +254,7 @@ _vetcoders_cursor_permission_flags() {
   import_root="${python_spec#*$'\t'}"
   timeout="${VIBECRAFTED_CURSOR_PROBE_TIMEOUT_S:-10}"
   if [[ -n "$import_root" ]]; then
-    PYTHONPATH="$import_root${PYTHONPATH:+:$PYTHONPATH}" \
+    PYTHONPATH="$import_root" \
       "$py" - "$timeout" <<'PY'
 import sys
 from vibecrafted_core.cursor_admission import cursor_permission_flag_string
@@ -277,7 +277,7 @@ _vetcoders_core_source_dir() {
   py="${python_spec%%$'\t'*}"
   import_root="${python_spec#*$'\t'}"
   if [[ -n "$import_root" ]]; then
-    PYTHONPATH="$import_root${PYTHONPATH:+:$PYTHONPATH}" \
+    PYTHONPATH="$import_root" \
       "$py" -c 'from vibecrafted_core.package_resources import package_root; print(package_root())'
   else
     "$py" -c 'from vibecrafted_core.package_resources import package_root; print(package_root())'
@@ -468,7 +468,13 @@ _vetcoders_looks_like_run_id() {
 _vetcoders_resume_agent() {
   local tool="$1"
   shift
+  local _vetcoders_contract_allow_model=1
+  local _vetcoders_contract_single_prompt=1
   _vetcoders_parse_contract "$@" || return 1
+  case "${_vetcoders_contract_runtime:-}" in
+    ""|headless|terminal|visible) ;;
+    *) printf 'Unsupported resume runtime; no host adapter is available.\n' >&2; return 2 ;;
+  esac
   # Normalize an explicit --root ONCE, before anything changes cwd (shared
   # owner with the init family; see _vetcoders_normalize_declared_contract_root).
   _vetcoders_normalize_declared_contract_root resume || return 1
@@ -489,10 +495,16 @@ _vetcoders_resume_agent() {
     )
     [[ -n "${_vetcoders_contract_run_id:-}" ]] && core_args+=(--run-id "$_vetcoders_contract_run_id")
     [[ -n "${_vetcoders_contract_last:-}" ]] && core_args+=(--last)
-    [[ -n "${_vetcoders_contract_prompt:-}" ]] && core_args+=(--prompt "$_vetcoders_contract_prompt")
+    [[ -n "${_vetcoders_contract_prompt:-}" ]] && core_args+=(--prompt-stdin)
+    [[ -n "${_vetcoders_contract_model:-}" ]] && core_args+=(--model "$_vetcoders_contract_model")
+    [[ -n "${_vetcoders_contract_base:-}" ]] && core_args+=(--base "$_vetcoders_contract_base")
     [[ -n "${_vetcoders_contract_file:-}" ]] && core_args+=(--file "$_vetcoders_contract_file")
     [[ -n "${_vetcoders_contract_root:-}" ]] && core_args+=(--root "$_vetcoders_contract_root")
-    _vetcoders_run_core_cli "${core_args[@]}"
+    if [[ -n "${_vetcoders_contract_prompt:-}" ]]; then
+      printf '%s' "$_vetcoders_contract_prompt" | _vetcoders_run_core_cli "${core_args[@]}"
+    else
+      _vetcoders_run_core_cli "${core_args[@]}"
+    fi
     return $?
   fi
   if [[ -n "${_vetcoders_contract_session:-}" ]] && _vetcoders_looks_like_run_id "$_vetcoders_contract_session"; then
@@ -542,6 +554,25 @@ _vetcoders_resume_agent() {
       [[ -n "$_vetcoders_contract_file" ]]
   }; then
     resume_explicit_input=1
+  fi
+
+  if [[ -n "${_vetcoders_contract_base:-}" ]]; then
+    printf 'A provider session has no baseline receipt; use --run-id with --base.\n' >&2
+    return 2
+  fi
+  # Explicit native continuation is a tracked core job. Preserve the full
+  # plan (including model frontmatter); never compose a file-pointer prompt.
+  if [[ -n "$_vetcoders_contract_session" && -n "$resume_explicit_input" && -z "${_vetcoders_contract_fork_session:-}" ]]; then
+    local -a native_args=(resume-session "$tool" --agent-session-id "$_vetcoders_contract_session")
+    [[ -z "${_vetcoders_contract_root:-}" ]] || native_args+=(--repo "$_vetcoders_contract_root")
+    [[ -z "${_vetcoders_contract_model:-}" ]] || native_args+=(--model "$_vetcoders_contract_model")
+    if [[ -n "$_vetcoders_contract_file" ]]; then
+      [[ -z "$_vetcoders_contract_prompt" ]] || { printf 'Use one of --prompt or --file.\n' >&2; return 2; }
+      _vetcoders_run_core_cli "${native_args[@]}" --prompt-file "$_vetcoders_contract_file"
+    else
+      printf '%s' "$_vetcoders_contract_prompt" | _vetcoders_run_core_cli "${native_args[@]}" --prompt-stdin
+    fi
+    return $?
   fi
 
   # A bare resume is an operator TUI, so it needs a visible surface. When the
@@ -803,7 +834,8 @@ _vetcoders_resume_agent() {
   _vetcoders_launch_tracked_resume \
     "$tool" \
     "$_vetcoders_contract_session" \
-    "$resume_prompt"
+    "$resume_prompt" \
+    "${_vetcoders_contract_model:-}"
 }
 
 _vetcoders_resume_command() {
