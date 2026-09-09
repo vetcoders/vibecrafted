@@ -143,6 +143,28 @@ def _write_fake_python(bin_dir: Path, capture_file: Path) -> None:
     script.chmod(0o755)
 
 
+def _initialize_git_fixture(root: Path) -> None:
+    """Create the base receipt required by task-launch normalization."""
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "README.md"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "fixture base",
+        ],
+        check=True,
+    )
+
+
 def _seed_launcher_ulimits(script_path: Path) -> None:
     """Seed the helper owned by the copied launcher's physical root."""
     owner = script_path.parent.parent
@@ -1006,6 +1028,7 @@ def test_telemetry_wrapper_smokes_headless_marbles_runtime(tmp_path: Path) -> No
     spawn_script = isolated_root / "runtime" / "scripts" / "marbles_spawn.sh"
 
     home.mkdir()
+    _initialize_git_fixture(tmp_path)
     wrapper.symlink_to(LAUNCHER)
     (isolated_root / "runtime" / "scripts").mkdir(parents=True)
     (isolated_root / "scripts").mkdir(parents=True)
@@ -1060,6 +1083,7 @@ def test_telemetry_wrapper_clears_ambient_marbles_context(tmp_path: Path) -> Non
     spawn_script = isolated_root / "runtime" / "scripts" / "marbles_spawn.sh"
 
     home.mkdir()
+    _initialize_git_fixture(tmp_path)
     wrapper.symlink_to(LAUNCHER)
     (isolated_root / "runtime" / "scripts").mkdir(parents=True)
     (isolated_root / "scripts").mkdir(parents=True)
@@ -1999,6 +2023,7 @@ def test_autonomous_delivery_skills_route_to_core_async_launcher(
     fake_bin = tmp_path / "bin"
     capture_file = tmp_path / "python-args.txt"
     fake_bin.mkdir()
+    _initialize_git_fixture(tmp_path)
     _write_fake_python(fake_bin, capture_file)
 
     env = os.environ.copy()
@@ -2015,11 +2040,11 @@ def test_autonomous_delivery_skills_route_to_core_async_launcher(
     )
 
     args = capture_file.read_text(encoding="utf-8").splitlines()
-    assert args[:4] == ["-m", "vibecrafted_core.cli", "implement", "codex"]
+    assert args[:4] == ["-m", "vibecrafted_core.cli", skill, "codex"]
     assert "--source-dir" in args
     assert str(REPO_ROOT) in args
-    assert "--prompt" in args
-    assert "Ship the cut" in args
+    assert "--prompt-stdin" in args
+    assert "Ship the cut" not in args
 
 
 @pytest.mark.parametrize(
@@ -2059,6 +2084,7 @@ def test_research_preserves_optional_variadic_agents_for_core_parser(
     fake_bin = tmp_path / "bin"
     capture_file = tmp_path / "python-args.txt"
     fake_bin.mkdir()
+    _initialize_git_fixture(tmp_path)
     _write_fake_python(fake_bin, capture_file)
 
     env = os.environ.copy()
@@ -2080,7 +2106,11 @@ def test_research_preserves_optional_variadic_agents_for_core_parser(
     assert "Unknown agent" not in result.stderr
     args = capture_file.read_text(encoding="utf-8").splitlines()
     assert args[:2] == ["-m", "vibecrafted_core.cli"]
-    assert args[2 : 2 + len(expected_prefix)] == expected_prefix
+    expected = [
+        "--prompt-stdin" if item == "--prompt" else item for item in expected_prefix
+    ]
+    expected = [item for item in expected if item != "Check Codescribe"]
+    assert args[2 : 2 + len(expected)] == expected
     assert args[-2:] == ["--source-dir", str(REPO_ROOT)]
 
 
@@ -2198,6 +2228,7 @@ def test_generic_skill_fallback_routes_unwrapped_skills(
     )
 
     home.mkdir()
+    _initialize_git_fixture(tmp_path)
     wrapper.symlink_to(LAUNCHER)
     _write_generic_skill_helper(helper)
 
@@ -2248,6 +2279,7 @@ def test_generic_skill_fallback_routes_skill_wrappers(
     )
 
     home.mkdir()
+    _initialize_git_fixture(tmp_path)
     wrapper.symlink_to(LAUNCHER)
     _write_generic_skill_helper(helper)
 
@@ -2295,7 +2327,7 @@ def test_marbles_flags_without_agent_get_actionable_error() -> None:
 
     assert result.returncode != 0
     assert "Missing marbles agent before flags." in result.stderr
-    assert "Try: vibecrafted marbles codex --count 8 --depth 10" in result.stderr
+    assert "Try: vibecrafted marbles codex --file <plan>" in result.stderr
     assert "Unknown agent: --count" not in result.stderr
 
 
@@ -2562,7 +2594,7 @@ def test_agent_first_mode_is_rejected_with_action_first_migration() -> None:
 
     assert result.returncode == 2
     assert "Agent-first grammar was removed" in result.stderr
-    assert "Use: vibecrafted stop codex --help" in result.stderr
+    assert "Use: vibecrafted stop codex [arguments]" in result.stderr
 
 
 @pytest.mark.parametrize("verb", ["observe", "await", "stop"])
