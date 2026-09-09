@@ -211,6 +211,8 @@ export SWIFT_PREFIX_MAP
 . "$REPO_ROOT/scripts/lib/payload-hygiene.sh"
 # shellcheck source=/dev/null
 . "$REPO_ROOT/scripts/lib/macho-signing.sh"
+# shellcheck source=/dev/null
+. "$REPO_ROOT/scripts/lib/runtime-pack-selection.sh"
 
 cleanup() {
   # Host-wide resources first. The keychain session mutates state that outlives
@@ -515,13 +517,20 @@ produce_runtime_pack() {
   if [[ -n "$TEMP_KEYCHAIN_PATH" ]]; then
     packager_codesign_args+=(--codesign-keychain "$TEMP_KEYCHAIN_PATH")
   fi
+  # Read the donor identities ONCE, here, and hand the very same values to the
+  # packager and to the build-selection record. Re-reading a sibling HEAD after
+  # the pack is sealed would let a donor that moved mid-build describe bytes it
+  # did not produce.
+  local terminal_revision frame_revision
+  terminal_revision="$(git_sha "$TERMINAL_REPO")"
+  frame_revision="$(git_sha "$FRAME_REPO")"
   log "Producing the canonical standalone Runtime Pack"
   rm -f "$RUNTIME_PACK" "$RUNTIME_PACK_CHECKSUM" "$RUNTIME_PACK_SIGNATURE"
   "$REPO_ROOT/scripts/package-runtime-pack.sh" \
     --payload-root "$RUNTIME_PAYLOAD" --output "$RUNTIME_PACK" \
     --source-revision "$ROOT_SHA" \
-    --terminal-revision "$(git_sha "$TERMINAL_REPO")" \
-    --frame-revision "$(git_sha "$FRAME_REPO")" \
+    --terminal-revision "$terminal_revision" \
+    --frame-revision "$frame_revision" \
     --version "$RUNTIME_VERSION" \
     --platform "$RUNTIME_PACK_PLATFORM" \
     --architecture "$RUNTIME_PACK_ARCHITECTURE" \
@@ -530,6 +539,15 @@ produce_runtime_pack() {
     || die "standalone Runtime Pack contains an invalid or unsigned Mach-O"
   /usr/bin/openssl dgst -sha256 -sign "$SIGNING_KEY" \
     -out "$RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK"
+  # Completion boundary for the standalone carrier: packaged, its Mach-O payload
+  # verified, its detached signature written. Only now may `make install` treat
+  # this exact path as the artifact the Founder just built. The packager prints
+  # the path much earlier, before signing, which is too early to publish.
+  runtime_pack_selection_publish "$REPO_ROOT" "$RUNTIME_PACK_SELECTION_ATTEMPT" \
+    "$RUNTIME_PACK" "$RUNTIME_VERSION" "$RUNTIME_PACK_PLATFORM" \
+    "$RUNTIME_PACK_ARCHITECTURE" "$ROOT_SHA" "$terminal_revision" \
+    "$frame_revision" \
+    || die "could not record the standalone Runtime Pack build selection"
 }
 
 embed_runtime_pack() {
@@ -974,6 +992,15 @@ if [[ "$MODE" == "notarize" ]]; then
   emit_release_tuple
   exit 0
 fi
+
+# Claim the attempt before the first thing that can fail. Everything from the
+# donor snapshot onwards may die, and a build that dies must not leave the
+# previous success standing as the implicit answer to `make install` — not even
+# when the failed retry runs at the very same source SHA, which no name derived
+# from HEAD could tell apart.
+RUNTIME_PACK_SELECTION_ATTEMPT="$(runtime_pack_selection_attempt_id)"
+runtime_pack_selection_begin "$REPO_ROOT" "$RUNTIME_PACK_SELECTION_ATTEMPT" "$ROOT_SHA" \
+  || die "could not mark the Runtime Pack build attempt as pending"
 
 build_product
 [[ "$MODE" == "runtime-pack" ]] && exit 0
