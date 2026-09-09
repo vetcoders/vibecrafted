@@ -18,10 +18,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
-from scripts import vetcoders_install
 from vibecrafted_core import cli
 from vibecrafted_core.runtime_paths import version_is_stamped
+
+from scripts import vetcoders_install
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DECK = REPO_ROOT / "scripts" / "vibecrafted"
@@ -30,7 +30,7 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 # Founder launches use a heredoc-shaped --prompt. A newline-free paragraph
 # cannot prove argv/stdin preservation across the public spellings.
 LONG_PROMPT = (
-    "Preserve this exact argv payload: quotes \"inner\", dollars $HOME,\n"
+    'Preserve this exact argv payload: quotes "inner", dollars $HOME,\n'
     "and a heredoc paragraph\n\n" + ("word " * 40) + "\ntrailing line"
 )
 
@@ -61,6 +61,7 @@ def _run_named(
     env: dict[str, str] | None = None,
     cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     wrapper = tmp_path / wrapper_name
     if wrapper.exists() or wrapper.is_symlink():
         wrapper.unlink()
@@ -123,7 +124,7 @@ def _write_fork_launch_boundary_python(
 ) -> None:
     """Intercept fork-source / fork-session; exec the host interpreter otherwise."""
     path.write_text(
-        "#!/usr/bin/env python3\n"
+        f"#!{sys.executable}\n"
         "import json, os, sys\n"
         f"REAL = {sys.executable!r}\n"
         f"CAPTURE = {str(capture)!r}\n"
@@ -145,7 +146,7 @@ def _write_fork_launch_boundary_python(
         "        raise SystemExit(0)\n"
         "    if command == 'fork-session':\n"
         "        open(CAPTURE, 'w', encoding='utf-8').write(json.dumps({\n"
-        "            'argv': rest,\n"
+        "            'argv': [command, *rest],\n"
         "            'stdin': sys.stdin.read(),\n"
         "        }))\n"
         "        print(json.dumps({'accepted': True, 'run_id': 'fork-fixture-1'}))\n"
@@ -240,7 +241,12 @@ def test_fork_prompt_spellings_share_normalized_launch_boundary(tmp_path: Path) 
 
     results: list[dict[str, object]] = []
     for label, runner in (
-        ("wrapper", lambda: _run_named("vc-fork", payload, tmp_path / "wrapper", env=env, cwd=root)),
+        (
+            "wrapper",
+            lambda: _run_named(
+                "vc-fork", payload, tmp_path / "wrapper", env=env, cwd=root
+            ),
+        ),
         ("deck", lambda: _run_deck(["fork", *payload], env=env, cwd=root)),
     ):
         if capture.exists():
@@ -294,7 +300,9 @@ def test_python_entry_and_deck_verb_share_child_argv(
 
     monkeypatch.setattr("sys.argv", [wrapper, "codex", "--prompt", LONG_PROMPT])
     assert cli.main() == 0
-    monkeypatch.setattr("sys.argv", ["vibecrafted", verb, "codex", "--prompt", LONG_PROMPT])
+    monkeypatch.setattr(
+        "sys.argv", ["vibecrafted", verb, "codex", "--prompt", LONG_PROMPT]
+    )
     assert cli.main([verb, "codex", "--prompt", LONG_PROMPT]) == 0
 
     wrapper_argv, deck_argv = seen["calls"]
@@ -428,10 +436,12 @@ def _installed_generation(tmp_path: Path, home: Path, frame_source: Path) -> Pat
     # deck's installed-generation marker; a checkout never carries it.
     assert version_is_stamped(STAMPED_GENERATION_VERSION)
     assert not version_is_stamped("4.3.1+gtest")
-    (generation / "VERSION").write_text(f"{STAMPED_GENERATION_VERSION}\n", encoding="utf-8")
+    (generation / "VERSION").write_text(
+        f"{STAMPED_GENERATION_VERSION}\n", encoding="utf-8"
+    )
     (generation / "runtime-manifest.json").write_text("{}\n", encoding="utf-8")
     python = generation / "bin" / "python3"
-    python.write_text(f"#!/bin/sh\nexec {sys.executable!r} \"$@\"\n", encoding="utf-8")
+    python.write_text(f'#!/bin/sh\nexec {sys.executable!r} "$@"\n', encoding="utf-8")
     python.chmod(0o755)
     frame = generation / "bin" / "vc-frame"
     shutil.copy2(frame_source, frame)
@@ -493,7 +503,9 @@ def test_fork_spellings_share_normalized_child_admission(tmp_path: Path) -> None
     for label in ("deck", "wrapper"):
         capture = tmp_path / f"{label}-vc-frame-args.txt"
         _write_fake_vc_frame(fake_bin, capture, "operator-test")
-        generation = _installed_generation(tmp_path / label, home, fake_bin / "vc-frame")
+        generation = _installed_generation(
+            tmp_path / label, home, fake_bin / "vc-frame"
+        )
         if label == "wrapper":
             wrapper = tmp_path / "vc-fork"
             if wrapper.exists() or wrapper.is_symlink():
@@ -550,15 +562,25 @@ def test_fork_spellings_share_normalized_child_admission(tmp_path: Path) -> None
         admission = _admission_from_capture(payload)
         results.append((payload, admission, proc.stdout))
 
-    (deck_payload, deck_admission, deck_out), (wrap_payload, wrap_admission, wrap_out) = results
+    (
+        (deck_payload, deck_admission, deck_out),
+        (wrap_payload, wrap_admission, wrap_out),
+    ) = results
     assert deck_payload[:3] == wrap_payload[:3]
     assert "new-pane" in deck_payload and "new-pane" in wrap_payload
     assert "new-tab" not in deck_payload and "new-tab" not in wrap_payload
-    assert deck_admission["model_requested"] == wrap_admission["model_requested"] == "gpt-test"
+    assert (
+        deck_admission["model_requested"]
+        == wrap_admission["model_requested"]
+        == "gpt-test"
+    )
     assert deck_admission["root"] == wrap_admission["root"] == str(root)
     assert deck_admission["session_selection"] == wrap_admission["session_selection"]
     assert deck_admission["session_selection"]["session_selector"] == "current"
-    assert deck_admission["session_selection"]["agent_session_id"] == "current-codex-session"
+    assert (
+        deck_admission["session_selection"]["agent_session_id"]
+        == "current-codex-session"
+    )
     assert "source-session: current-codex-session" in deck_out
     assert "source-session: current-codex-session" in wrap_out
 
@@ -573,14 +595,17 @@ def test_alias_maps_stay_coordinated() -> None:
     assert "vc-canary" in shell_wrappers
     assert "vc-fork" not in vetcoders_install.PYTHON_ENTRYPOINT_LAUNCHERS
     expected_runtime = {
-        name: verb for name, verb in cli.SHELL_WRAPPER_VERBS.items() if name != "vc-start"
+        name: verb
+        for name, verb in cli.SHELL_WRAPPER_VERBS.items()
+        if name != "vc-start"
     }
     assert vetcoders_install._RUNTIME_WRAPPER_VERBS == expected_runtime
-    pyproject = (REPO_ROOT / "vibecrafted-core/pyproject.toml").read_text(encoding="utf-8")
+    pyproject = (REPO_ROOT / "vibecrafted-core/pyproject.toml").read_text(
+        encoding="utf-8"
+    )
     assert "vc-fork =" not in pyproject
     dispatch = (
-        REPO_ROOT
-        / "vibecrafted-core/vibecrafted_core/runtime/shell/lib/dispatch.sh"
+        REPO_ROOT / "vibecrafted-core/vibecrafted_core/runtime/shell/lib/dispatch.sh"
     ).read_text(encoding="utf-8")
     assert 'vc-fork() { _vetcoders_vc_passthrough fork "$@"; }' in dispatch
     assert 'vc-canary() { _vetcoders_vc_passthrough canary "$@"; }' in dispatch
