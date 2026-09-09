@@ -325,6 +325,151 @@ mod tests {
         );
     }
 
+    /// The console half of `main.css` — everything from the shell marker down.
+    /// The legacy marketing sections above it (hero, blog, pricing) have no
+    /// route in this product and deliberately keep their own scale, so a
+    /// whole-file assertion would be measuring dead bytes.
+    fn console_css() -> &'static str {
+        const MARK: &str = "/* W1-b_web-shell: vibecrafted server console shell */";
+        let at = STYLE_MAIN.find(MARK).expect("console section marker");
+        &STYLE_MAIN[at..]
+    }
+
+    /// Founder's binding reference: the native reconnect/recovery card. These
+    /// are `CommandDeckPalette.resolved(...)` transcribed to sRGB — if someone
+    /// repaints the console without repainting the native deck, this fails.
+    #[test]
+    fn console_tokens_transcribe_the_native_command_deck_palette() {
+        for (role, hex) in [
+            ("surface (dark)", "#21211f"),
+            ("surfaceRaised (dark)", "#2e2b29"),
+            ("ink (dark)", "#ede6d6"),
+            ("muted (dark)", "#b3ab9e"),
+            ("amber", "#e39e38"),
+            ("destructive (dark)", "#db5247"),
+            ("stroke (dark)", "#524d45"),
+            ("surface (light)", "#f5f0e3"),
+            ("surfaceRaised (light)", "#fcfaf2"),
+            ("ink (light)", "#2e2b26"),
+            ("amber (light, increased variant — see tokens.css)", "#945705"),
+            ("stroke (light)", "#c7bdad"),
+            ("surface (dark, increased)", "#12120f"),
+            ("ink (dark, increased)", "#faf5eb"),
+            ("amber (increased)", "#ffb82e"),
+        ] {
+            assert!(
+                STYLE_TOKENS.contains(hex),
+                "{role} must be the native value {hex}"
+            );
+        }
+
+        // CommandDeckMetrics: one radius, one stroke, one duration.
+        assert!(STYLE_TOKENS.contains("--radius-surface: 8px;"));
+        assert!(STYLE_TOKENS.contains("--stroke-width: 1px;"));
+        assert!(STYLE_TOKENS.contains("--stroke-width: 1.5px;"));
+        assert!(STYLE_TOKENS.contains("--motion-base: 220ms;"));
+    }
+
+    /// The two-colour editorial split had collapsed into one dead grey on both
+    /// names, which is how a focus ring became invisible. The native deck
+    /// carries exactly one accent; so does the console now.
+    #[test]
+    fn the_console_carries_one_live_accent_and_a_usable_focus_ring() {
+        assert!(
+            !STYLE_TOKENS.contains("#d4d4d8"),
+            "the dead grey accent must not survive anywhere in the token layer"
+        );
+        assert!(STYLE_TOKENS.contains("--amber: #e39e38;"));
+        assert!(
+            STYLE_TOKENS.contains("--teal: var(--amber);"),
+            "the second accent name must converge on the one accent, not hold a rival value"
+        );
+        assert!(
+            STYLE_TOKENS.contains("--focus-ring: var(--accent);"),
+            "focus must ride the live accent"
+        );
+        assert!(
+            STYLE_TOKENS.contains("--accent-narrative: var(--accent);")
+                && STYLE_TOKENS.contains("--accent-interaction: var(--accent);"),
+            "both legacy accent roles must converge instead of being overridden downstream"
+        );
+    }
+
+    /// The native card is one raised surface plus one 1px stroke: no shadow,
+    /// no glow, no blur. This is the assertion that keeps the main view
+    /// belonging to the same app as the reconnect card.
+    #[test]
+    fn console_surfaces_are_flat_stroked_and_share_one_radius() {
+        let css = console_css();
+        for (banned, why) in [
+            ("--radius-xl", "24px radii are not the deck's 8px"),
+            ("--radius-lg", "16px radii are not the deck's 8px"),
+            ("--radius-md", "12px radii are not the deck's 8px"),
+            ("--radius-sm", "one radius owner only: --radius-surface"),
+            ("--shadow-hover", "the native card has no resting shadow"),
+            ("radial-gradient", "no decorative glow on an operator desk"),
+            ("linear-gradient", "no decorative glow on an operator desk"),
+            ("backdrop-filter", "no gratuitous blur"),
+            ("rgba(255, 255, 255", "nested surfaces must be theme-aware, not white alpha"),
+        ] {
+            assert!(
+                !css.contains(banned),
+                "console css still contains {banned}: {why}"
+            );
+        }
+        assert!(css.contains("var(--radius-surface)"));
+        assert!(css.contains("var(--stroke-width) solid var(--border-subtle)"));
+    }
+
+    /// Focus had seven separate `outline: none` suppressions and signalled
+    /// itself with a border tint, which is not a focus indicator. One owner now.
+    #[test]
+    fn the_console_has_exactly_one_focus_owner() {
+        let css = console_css();
+        assert!(
+            !css.contains("outline: none"),
+            "no route may suppress the focus indicator"
+        );
+        assert_eq!(
+            css.matches(".server-app-shell :focus-visible").count(),
+            2,
+            "one focus rule plus its increased-contrast refinement"
+        );
+        assert!(css.contains("outline: 2px solid var(--focus-ring);"));
+    }
+
+    /// The deck honours reduced motion and thickens its stroke at increased
+    /// contrast. The console shipped neither before this pass.
+    #[test]
+    fn accessibility_preferences_reach_the_console() {
+        let css = console_css();
+        assert!(css.contains("@media (prefers-reduced-motion: reduce)"));
+        assert!(css.contains("@media (prefers-contrast: more)"));
+        assert!(
+            STYLE_TOKENS.contains("@media (prefers-contrast: more)"),
+            "the increased-contrast palette must exist at the token layer, \
+             so every route gets it without opting in"
+        );
+    }
+
+    /// Adoption, not decoration: both shells embed the same two stylesheets,
+    /// so a converged token reaches every route including the raw-HTML studio.
+    #[test]
+    fn every_route_receives_the_converged_tokens() {
+        let html = render_document(&ServerDocument {
+            title: "t",
+            active: ServerSection::Overview,
+            status: "ok",
+            head_html: "",
+            body_html: "",
+            tail_html: "",
+        });
+        assert!(html.contains("#21211f"), "the native surface reaches the document");
+        assert!(html.contains("--focus-ring: var(--accent);"));
+        assert_eq!(count(&html, STYLE_TOKENS), 1, "one token sheet, not a copy per route");
+        assert_eq!(count(&html, STYLE_MAIN), 1, "one main sheet, not a copy per route");
+    }
+
     /// One theme contract for every route: the raw-HTML document and the Leptos
     /// shell must ship the same pre-paint restore and the same control script.
     #[test]
