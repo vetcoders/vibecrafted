@@ -264,41 +264,160 @@ runtime_pack_selection_write() {
 # check and the publication that depends on it are one indivisible step against
 # a concurrent begin.
 #
-# `mkdir` is the atomic primitive available to every shell on every platform
-# that builds packs. A builder killed mid-publication would otherwise wedge
-# every later build, so the holder stamps its pid and a dead holder's lock is
-# broken rather than waited out.
-runtime_pack_selection_lock() {
-  local file="$1" lock="$1.lock" waited=0 holder
-  mkdir -p "${file%/*}" || return 1
-  while ! mkdir "$lock" 2>/dev/null; do
-    holder="$(cat "$lock/pid" 2>/dev/null || true)"
-    if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then
-      runtime_pack_selection_drop_lock "$lock"
-      continue
-    fi
-    waited=$((waited + 1))
-    if ((waited > 600)); then
-      printf 'runtime pack selection: timed out waiting for %s\n' "$lock" >&2
-      return 1
-    fi
-    sleep 0.1
-  done
-  printf '%s\n' "$$" > "$lock/pid"
+# The exclusion belongs to the KERNEL, not to this file.
+#
+# A lock this file had to reclaim by hand could not be reclaimed safely. The
+# shape here used to be an atomic `mkdir` stamped with the holder's pid, broken
+# when that pid was found dead -- and between observing the dead holder and
+# removing its directory a second builder could take that very lock, so the
+# removal deleted a LIVE owner's claim and two builders ran inside at once.
+# Reading the pid a second time, or checking it again just before removing,
+# only moves that window; and a pid is not an identity anyway, since the OS
+# reuses it and a subshell reports a different one.
+#
+# `flock(2)` has no window because there is nothing to reclaim. The lock lives
+# on the open file description, so the kernel drops it the moment the last
+# descriptor referring to it is closed -- including when the holder is killed.
+# Crash recovery is therefore not code in this file, and "a stale lock" is not
+# a state this file can be in.
+#
+# Two consequences carry the fix:
+#   * the lock FILE is created once and never removed. Unlinking it would put
+#     the old race back in a new spelling -- two builders flocking two inodes
+#     under one name, each correctly believing it holds the record;
+#   * releasing is closing this process's own descriptor, so a release cannot
+#     reach anyone else's lock. A departing owner destroying its successor's
+#     claim is not fixed below, it is unrepresentable.
+#
+# The descriptor is inherited by children, exactly as it is wherever flock(1)
+# is used this way. The critical sections below start only short-lived,
+# waited-for helpers (`date`, `mkdir`, `mv`), so a killed holder's lock is gone
+# as soon as those exit; nothing long-running may be started while it is held.
+RUNTIME_PACK_SELECTION_LOCK_FD=""
+# The bound this lock has always waited, in seconds.
+RUNTIME_PACK_SELECTION_LOCK_TIMEOUT="${RUNTIME_PACK_SELECTION_LOCK_TIMEOUT:-60}"
+
+# One primitive in the three spellings a build host can offer. Each places the
+# same kernel lock on the descriptor this shell already holds open, so which
+# one runs is invisible above: the helper exits, this process's descriptor
+# keeps the open file description alive, and the lock with it.
+#
+# macOS is why there is more than one. It ships no flock(1) -- that is the
+# stated reason scripts/lib/keychain-session.sh rolled its own mkdir lock -- so
+# perl and python3 are not fallbacks for exotic hosts; on a Mac one of them IS
+# the mechanism. Both are present on any host that can build and sign a pack,
+# so reaching them downloads no toolchain and replaces no host Python.
+#
+#   0 acquired · 1 the bounded wait expired · 2 this host offers no file lock
+runtime_pack_selection_flock() {
+  local fd="$1" timeout="$2"
+  if command -v flock >/dev/null ; then
+    flock -w "$timeout" "$fd"
+    return
+  fi
+  if command -v perl >/dev/null ; then
+    perl -e '
+      use Fcntl qw(:flock);
+      open(my $handle, ">&=", $ARGV[0]) or exit 3;
+      my $deadline = time + $ARGV[1];
+      while (1) {
+        exit 0 if flock($handle, LOCK_EX | LOCK_NB);
+        exit 1 if time >= $deadline;
+        select(undef, undef, undef, 0.1);
+      }
+    ' "$fd" "$timeout"
+    return
+  fi
+  if command -v python3 >/dev/null ; then
+    python3 -c '
+import fcntl
+import sys
+import time
+
+descriptor = int(sys.argv[1])
+deadline = time.monotonic() + float(sys.argv[2])
+while True:
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        if time.monotonic() >= deadline:
+            sys.exit(1)
+        time.sleep(0.1)
+    else:
+        sys.exit(0)
+' "$fd" "$timeout"
+    return
+  fi
+  return 2
 }
 
-# Release exactly one lock and nothing else. The one thing this file must never
-# be able to do is delete an artifact, so the release path removes the single
-# file it wrote and then rmdirs -- a directory that is not this lock, or holds
-# anything this file did not put there, survives.
-runtime_pack_selection_drop_lock() {
+# `>>` creates the lock file when it is absent and never truncates one another
+# builder is holding open. Nothing is ever written into it: the descriptor is
+# the claim, the bytes would only be a second, lying copy of it.
+runtime_pack_selection_open_lock_fd() {
   local lock="$1"
-  rm -f "$lock/pid"
-  rmdir "$lock" 2>/dev/null
+  RUNTIME_PACK_SELECTION_LOCK_FD=""
+  if [[ -d "$lock" ]]; then
+    # A directory here is the previous mkdir-based lock, left by a builder that
+    # died inside it. Removing it is the one move this file must never make, so
+    # it says what it found and stops.
+    printf 'runtime pack selection: %s is a directory left by an older lock; remove it\n' \
+      "$lock" >&2
+    return 1
+  fi
+  if ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 1))); then
+    exec {RUNTIME_PACK_SELECTION_LOCK_FD}>>"$lock" || return 1
+  else
+    # The /bin/bash macOS still ships is 3.2 and cannot allocate a descriptor
+    # into a variable. Nothing in this build path holds a descriptor this high.
+    RUNTIME_PACK_SELECTION_LOCK_FD=200
+    eval "exec ${RUNTIME_PACK_SELECTION_LOCK_FD}>>\"\$lock\"" || return 1
+  fi
+  [[ -n "$RUNTIME_PACK_SELECTION_LOCK_FD" ]] || return 1
 }
 
+runtime_pack_selection_close_lock_fd() {
+  [[ -n "$RUNTIME_PACK_SELECTION_LOCK_FD" ]] || return 0
+  eval "exec ${RUNTIME_PACK_SELECTION_LOCK_FD}>&-" 2>/dev/null || true
+  RUNTIME_PACK_SELECTION_LOCK_FD=""
+}
+
+runtime_pack_selection_lock() {
+  local file="$1" lock="$1.lock" status=0
+  if [[ -n "$RUNTIME_PACK_SELECTION_LOCK_FD" ]]; then
+    # Not a wait: one process cannot queue behind itself, and a second claim
+    # would overwrite the descriptor that IS the first one's lock.
+    printf 'runtime pack selection: this process already holds %s\n' "$lock" >&2
+    return 1
+  fi
+  mkdir -p "${file%/*}" || return 1
+  runtime_pack_selection_open_lock_fd "$lock" || return 1
+  runtime_pack_selection_flock \
+    "$RUNTIME_PACK_SELECTION_LOCK_FD" "$RUNTIME_PACK_SELECTION_LOCK_TIMEOUT" || status=$?
+  if ((status != 0)); then
+    runtime_pack_selection_close_lock_fd
+    case "$status" in
+      1)
+        printf 'runtime pack selection: timed out waiting for %s\n' "$lock" >&2
+        ;;
+      2)
+        printf 'runtime pack selection: this host offers no file lock (flock, perl or python3); refusing to write %s unserialised\n' \
+          "$file" >&2
+        ;;
+      *)
+        printf 'runtime pack selection: could not lock %s\n' "$lock" >&2
+        ;;
+    esac
+    return 1
+  fi
+  return 0
+}
+
+# Release exactly one lock and nothing else: this process's own descriptor.
+# There is deliberately no argument and no path -- an owner can only ever let
+# go of what it holds.
 runtime_pack_selection_unlock() {
-  runtime_pack_selection_drop_lock "$1.lock"
+  runtime_pack_selection_close_lock_fd
 }
 
 # Claim the attempt BEFORE anything that can fail. An interrupted or failed
@@ -316,7 +435,7 @@ runtime_pack_selection_begin() {
     attempt "$attempt" \
     source_revision "$source_revision" \
     started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" || status=1
-  runtime_pack_selection_unlock "$file"
+  runtime_pack_selection_unlock
   return $status
 }
 
@@ -357,7 +476,7 @@ runtime_pack_selection_commit() {
     current="$RUNTIME_PACK_SELECTION_REC_attempt"
   fi
   if [[ -n "$current" && "$current" != "$attempt" ]]; then
-    runtime_pack_selection_unlock "$file"
+    runtime_pack_selection_unlock
     printf 'runtime pack selection: a newer build attempt (%s) owns the record; not publishing %s\n' \
       "$current" "$attempt" >&2
     return 0
@@ -377,7 +496,7 @@ runtime_pack_selection_commit() {
     terminal_revision "$terminal_revision" \
     frame_revision "$frame_revision" \
     completed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" || status=1
-  runtime_pack_selection_unlock "$file"
+  runtime_pack_selection_unlock
   return $status
 }
 

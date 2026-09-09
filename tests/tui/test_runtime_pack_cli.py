@@ -1641,6 +1641,259 @@ def test_a_stale_builder_cannot_publish_over_a_newer_attempt(tmp_path: Path) -> 
     assert "did not complete" in reported["error"]
 
 
+# --- the record lock, driven rather than described --------------------------
+#
+# The lock is what makes the ownership check above indivisible, so it is
+# exercised with real contenders rather than asserted about. Every scenario
+# runs from a script file: a contender has to be a separate live process, and
+# nesting one inside a `bash -c` string only proves how quoting survived.
+
+CONTENDER = """\
+. "$1"
+RUNTIME_PACK_SELECTION_LOCK_TIMEOUT="${5:-30}"
+runtime_pack_selection_lock "$2" || exit 9
+touch "$3/entered"
+while [[ ! -e "$3/release" ]]; do sleep 0.02; done
+runtime_pack_selection_unlock
+"""
+
+# Inside the lock, look: exactly one name may be in the witness directory. A
+# contender that sees a second one writes the violation down, so "never two
+# entrants" is observed by the entrants themselves, not inferred from timing.
+WITNESS = """\
+. "$1"
+RUNTIME_PACK_SELECTION_LOCK_TIMEOUT=30
+runtime_pack_selection_lock "$2" || { echo "refused:$4" >> "$3/violations"; exit 9; }
+: > "$3/inside/$4"
+seen="$(ls "$3/inside" | wc -l | tr -d " ")"
+[[ "$seen" == "1" ]] || echo "overlap:$4:$seen" >> "$3/violations"
+sleep 0.05
+rm -f "$3/inside/$4"
+runtime_pack_selection_unlock
+echo "done:$4" >> "$3/completed"
+"""
+
+
+def _lock_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A record path, a scratch directory for the scenario, and a contender."""
+
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    contender = tmp_path / "contender.sh"
+    contender.write_text(CONTENDER, encoding="utf-8")
+    return tmp_path / "repo/build/runtime-pack-selection.json", fixture, contender
+
+
+def _selection_scenario(
+    tmp_path: Path, body: str, *arguments: str
+) -> subprocess.CompletedProcess[str]:
+    """Run a scenario against the real library, reporting statuses as data.
+
+    `set -e` is absent here for the same reason it is absent from
+    `_selection_shell`: every exit code under test is printed, so no assertion
+    can land on whatever command happened to run last.
+    """
+
+    script = tmp_path / "scenario.sh"
+    script.write_text(f'. "{SELECTION_LIBRARY}"\n{body}', encoding="utf-8")
+    return subprocess.run(
+        ["bash", str(script), str(SELECTION_LIBRARY), *arguments],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_a_departing_owner_cannot_release_its_successors_lock(tmp_path: Path) -> None:
+    """The release that used to reach a lock its caller no longer held.
+
+    A takes the lock and gives it up. B takes it and stays inside. A then
+    releases a second time -- what a trap, a retry or a late cleanup does. The
+    old release removed a pid file and rmdir'd a directory without asking whose
+    they were, so it deleted B's live claim and the next builder walked in.
+    Releasing is now closing this process's own descriptor, which cannot name
+    anyone else's lock.
+    """
+
+    record, fixture, contender = _lock_fixture(tmp_path)
+
+    result = _selection_scenario(
+        tmp_path,
+        'library="$1"; file="$2"; fixture="$3"; contender="$4"\n'
+        'runtime_pack_selection_lock "$file"; echo "a_lock=$?"\n'
+        'runtime_pack_selection_unlock; echo "a_release=$?"\n'
+        'bash "$contender" "$library" "$file" "$fixture" &\n'
+        "b=$!\n"
+        'for ((i=0;i<250;i++)); do [[ -e "$fixture/entered" ]] && break; sleep 0.02; done\n'
+        '[[ -e "$fixture/entered" ]] && echo "b_inside=1" || echo "b_inside=0"\n'
+        'runtime_pack_selection_unlock; echo "a_release_again=$?"\n'
+        'bash -c \'. "$1"; RUNTIME_PACK_SELECTION_LOCK_TIMEOUT=2; '
+        'runtime_pack_selection_lock "$2"\' _ "$library" "$file" 2>/dev/null\n'
+        'echo "c_lock=$?"\n'
+        'touch "$fixture/release"; wait "$b"; echo "b_exit=$?"\n',
+        str(record),
+        str(fixture),
+        str(contender),
+    )
+
+    reported = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    assert reported["a_lock"] == "0"
+    assert reported["a_release"] == "0"
+    assert reported["b_inside"] == "1", result.stderr
+    # C is refused because B still holds it -- the whole point of the scenario.
+    assert reported["c_lock"] == "1", result.stdout
+    assert reported["b_exit"] == "0"
+
+
+def test_a_killed_owner_leaves_no_lock_to_break(tmp_path: Path) -> None:
+    """Crash recovery is the kernel's, so there is nothing here to reclaim.
+
+    The holder is killed outright while inside the lock. No successor inspects
+    a pid, breaks a directory or waits out a timeout: the descriptor died with
+    the process, and with it the lock.
+    """
+
+    record, fixture, contender = _lock_fixture(tmp_path)
+
+    result = _selection_scenario(
+        tmp_path,
+        'library="$1"; file="$2"; fixture="$3"; contender="$4"\n'
+        'bash "$contender" "$library" "$file" "$fixture" &\n'
+        "holder=$!\n"
+        'for ((i=0;i<250;i++)); do [[ -e "$fixture/entered" ]] && break; sleep 0.02; done\n'
+        '[[ -e "$fixture/entered" ]] && echo "holder_inside=1" || echo "holder_inside=0"\n'
+        'kill -9 "$holder"; wait "$holder" 2>/dev/null\n'
+        "RUNTIME_PACK_SELECTION_LOCK_TIMEOUT=10\n"
+        'runtime_pack_selection_lock "$file"; echo "successor_lock=$?"\n'
+        "runtime_pack_selection_unlock\n"
+        '[[ -e "$file.lock" ]] && echo "lock_file_kept=1" || echo "lock_file_kept=0"\n',
+        str(record),
+        str(fixture),
+        str(contender),
+    )
+
+    reported = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    assert reported["holder_inside"] == "1", result.stderr
+    assert reported["successor_lock"] == "0", result.stderr
+    # The file stays. Unlinking it would let two builders lock two inodes under
+    # one name, each of them correctly.
+    assert reported["lock_file_kept"] == "1"
+
+
+def test_a_bounded_wait_refuses_instead_of_hanging(tmp_path: Path) -> None:
+    """A builder that cannot have the lock is told so, and told when."""
+
+    record, fixture, contender = _lock_fixture(tmp_path)
+
+    result = _selection_scenario(
+        tmp_path,
+        'library="$1"; file="$2"; fixture="$3"; contender="$4"\n'
+        'bash "$contender" "$library" "$file" "$fixture" &\n'
+        "b=$!\n"
+        'for ((i=0;i<250;i++)); do [[ -e "$fixture/entered" ]] && break; sleep 0.02; done\n'
+        '[[ -e "$fixture/entered" ]] && echo "b_inside=1" || echo "b_inside=0"\n'
+        "RUNTIME_PACK_SELECTION_LOCK_TIMEOUT=1\n"
+        "started=$(date -u +%s)\n"
+        'runtime_pack_selection_lock "$file"; echo "a_lock=$?"\n'
+        'echo "waited=$(( $(date -u +%s) - started ))"\n'
+        'touch "$fixture/release"; wait "$b"; echo "b_exit=$?"\n',
+        str(record),
+        str(fixture),
+        str(contender),
+    )
+
+    reported = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    assert reported["b_inside"] == "1", result.stderr
+    assert reported["a_lock"] == "1"
+    assert "timed out waiting" in result.stderr
+    # Honest failure means bounded, not merely eventual.
+    assert int(reported["waited"]) <= 10, result.stdout
+    assert reported["b_exit"] == "0"
+
+
+def test_no_two_builders_are_ever_inside_the_record_lock(tmp_path: Path) -> None:
+    """Eight contenders, one of them arriving over a killed owner's remains.
+
+    The takeover the old lock permitted needed a dead holder to break, so the
+    scenario supplies one before the field starts. Overlap is not inferred from
+    timing: every contender counts the names in the witness directory while it
+    is inside, and one that sees a second name writes it down.
+    """
+
+    record, fixture, contender = _lock_fixture(tmp_path)
+    (fixture / "inside").mkdir()
+    witness = tmp_path / "witness.sh"
+    witness.write_text(WITNESS, encoding="utf-8")
+
+    result = _selection_scenario(
+        tmp_path,
+        'library="$1"; file="$2"; fixture="$3"; contender="$4"; witness="$5"\n'
+        'bash "$contender" "$library" "$file" "$fixture" &\n'
+        "holder=$!\n"
+        'for ((i=0;i<250;i++)); do [[ -e "$fixture/entered" ]] && break; sleep 0.02; done\n'
+        '[[ -e "$fixture/entered" ]] && echo "holder_inside=1" || echo "holder_inside=0"\n'
+        'kill -9 "$holder"; wait "$holder" 2>/dev/null\n'
+        "for id in 1 2 3 4 5 6 7 8; do\n"
+        '  bash "$witness" "$library" "$file" "$fixture" "$id" &\n'
+        "done\n"
+        "wait\n"
+        'echo "violations=$(cat "$fixture/violations" 2>/dev/null | wc -l | tr -d " ")"\n'
+        'echo "completed=$(cat "$fixture/completed" 2>/dev/null | wc -l | tr -d " ")"\n',
+        str(record),
+        str(fixture),
+        str(contender),
+        str(witness),
+    )
+
+    reported = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    assert reported["holder_inside"] == "1", result.stderr
+    violations = fixture / "violations"
+    assert reported["violations"] == "0", (
+        violations.read_text("utf-8") if violations.exists() else result.stdout
+    )
+    # All eight got a turn: exclusion, not a queue that quietly dropped anyone.
+    assert reported["completed"] == "8", result.stdout
+
+
+def test_the_lock_refuses_an_older_mkdir_lock_rather_than_removing_it(
+    tmp_path: Path,
+) -> None:
+    """The one thing this file must never do, it still never does.
+
+    A directory at the lock's path is the previous mkdir-based lock, left by a
+    builder that died inside it. Deleting it is exactly the move whose race
+    this change removes, so the library says what it found and stops -- and the
+    directory is still there afterwards.
+    """
+
+    record, _fixture, _contender = _lock_fixture(tmp_path)
+    stale = Path(f"{record}.lock")
+    stale.mkdir(parents=True)
+    (stale / "pid").write_text("99999999\n", encoding="utf-8")
+
+    result = _selection_scenario(
+        tmp_path,
+        'file="$2"\nruntime_pack_selection_lock "$file"; echo "lock=$?"\n',
+        str(record),
+    )
+
+    reported = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    assert reported["lock"] == "1"
+    assert "directory left by an older lock" in result.stderr
+    assert stale.is_dir()
+    assert (stale / "pid").exists()
+
+
 @pytest.mark.parametrize(
     "mangle",
     (
