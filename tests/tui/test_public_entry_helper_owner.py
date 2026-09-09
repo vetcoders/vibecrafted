@@ -32,8 +32,10 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -70,11 +72,16 @@ def _installed_generation(base: Path, log: Path, capture: Path) -> Path:
     generation = base / "generation"
     shutil.copy2(DECK, _ensure_dir(generation / "bin") / "vibecrafted")
     (generation / "bin" / "vibecrafted").chmod(0o755)
-    shutil.copytree(RUNTIME_TREE, generation / CORE / "runtime")
+    # The physical deck now resolves the package through repo_selection before
+    # dispatch.  A generation therefore contains the whole core package, not
+    # merely its runtime helpers.
+    shutil.copytree(
+        REPO_ROOT / "vibecrafted-core" / "vibecrafted_core", generation / CORE
+    )
     _mark_facade(generation / CORE / "runtime", OWNER_MARK, log)
     # The installer's receipt, and no .git: the boundary the shell layer already
     # draws between an installed payload and a development checkout.
-    _write(generation / "VERSION", "4.3.0+fixture\n", executable=False)
+    _write(generation / "VERSION", "4.3.0+g1234567\n", executable=False)
     _write(
         generation / "runtime-manifest.json",
         json.dumps({"generation": "fixture"}) + "\n",
@@ -84,6 +91,10 @@ def _installed_generation(base: Path, log: Path, capture: Path) -> Path:
     # resolvers in vc_frame.sh to accept them.
     for engine in ("vc-terminal", "vc-frame"):
         _write(generation / "libexec" / engine, "#!/bin/bash\nexit 0\n")
+    _write(
+        generation / "bin" / "python3",
+        f'#!/bin/sh\nexec {sys.executable!r} "$@"\n',
+    )
     _write(generation / "bin" / "vc-frame", "#!/bin/bash\nexit 0\n")
     _write(generation / "bin" / "vc-start", "#!/bin/bash\nexit 0\n")
     # The product terminal entry records the launch instead of opening a window.
@@ -110,7 +121,9 @@ def _source_checkout(base: Path, log: Path) -> Path:
     checkout = base / "framework-source"
     shutil.copy2(DECK, _ensure_dir(checkout / "scripts") / "vibecrafted")
     (checkout / "scripts" / "vibecrafted").chmod(0o755)
-    shutil.copytree(RUNTIME_TREE, checkout / CORE / "runtime")
+    shutil.copytree(
+        REPO_ROOT / "vibecrafted-core" / "vibecrafted_core", checkout / CORE
+    )
     _mark_facade(checkout / CORE / "runtime", SOURCE_MARK, log)
     _write(checkout / "VERSION", "9.9.9-source\n", executable=False)
     _write(checkout / "skills" / "dou" / "SKILL.md", "placeholder\n", executable=False)
@@ -128,6 +141,19 @@ def world(tmp_path: Path) -> dict[str, Path]:
     log = tmp_path / "sourced.log"
     capture = tmp_path / "terminal-launch.json"
     home = _ensure_dir(tmp_path / "home")
+    project = _ensure_dir(tmp_path / "mlx batch's runner")
+    # This terminal/resume route feeds the public launch-spec resolver, which
+    # pins a Git base. Model that contract with a real repository; other
+    # selector coverage retains its explicit non-Git cases.
+    subprocess.run(["git", "init", "-q", str(project)], check=True)
+    _write(project / "README.md", "fixture\n", executable=False)
+    for args in (
+        ["git", "-C", str(project), "config", "user.email", "fixture@example.invalid"],
+        ["git", "-C", str(project), "config", "user.name", "Fixture"],
+        ["git", "-C", str(project), "add", "README.md"],
+        ["git", "-C", str(project), "commit", "-qm", "fixture base"],
+    ):
+        subprocess.run(args, check=True)
     _write(
         home / ".config" / "vibecrafted" / "vc-terminal" / "launch-primary-shell.zsh",
         PRIMARY_SHELL.read_text(encoding="utf-8"),
@@ -137,7 +163,7 @@ def world(tmp_path: Path) -> dict[str, Path]:
         "log": log,
         "capture": capture,
         "home": home,
-        "project": _ensure_dir(tmp_path / "mlx-batch-runner"),
+        "project": project,
         "generation": _installed_generation(tmp_path, log, capture),
         "checkout": _source_checkout(tmp_path, log),
     }
@@ -176,7 +202,7 @@ def _run(
     command = [str(entry), *argv]
     if shell is not None:
         # The caller's login shell must not change who owns the helpers.
-        quoted = " ".join(f"'{part}'" for part in command)
+        quoted = shlex.join(command)
         command = (
             ["zsh", "-f", "-c", quoted]
             if shell == "zsh"
@@ -224,6 +250,11 @@ def _working_directory(launch: dict) -> Path:
     return Path(argv[argv.index("--working-directory") + 1]).resolve()
 
 
+def _interactive_handoff_command(launch: dict) -> str:
+    argv = _hosted_argv(launch)
+    return argv[argv.index("--command") + 1]
+
+
 # --------------------------------------------------------------------------
 # The reported red
 # --------------------------------------------------------------------------
@@ -246,14 +277,25 @@ def test_installed_resume_inside_a_checkout_uses_its_own_generation(
     # Only the selected generation's helper tree was loaded.
     assert _sourced(world) == [OWNER_MARK], result.stderr
 
-    # Host argv names the selected generation's front door, never the checkout's.
+    # The public terminal handoff is a spawned core command. Its import root
+    # and child interpreter must still be owned by the selected generation,
+    # never by the checkout that happened to be the caller's cwd.
     hosted = _hosted_argv(launch)
     assert hosted[0].endswith("launch-primary-shell.zsh")
-    assert hosted[1] == str(world["generation"] / "bin" / "vibecrafted")
+    assert f"PYTHONPATH={world['generation'] / 'vibecrafted-core'}" in hosted
+    handoff_tokens = shlex.split(_interactive_handoff_command(launch))
+    assert handoff_tokens[:5] == [
+        str(world["generation"] / "bin" / "python3"),
+        "-m",
+        "vibecrafted_core.spawn",
+        "interactive-launch",
+        "codex",
+    ]
+    assert str(world["checkout"]) not in handoff_tokens
 
     # Project identity is independent, and --root survives exactly.
     assert _working_directory(launch) == project.resolve()
-    assert hosted[2:] == ["resume", "codex", "--root", str(project)]
+    assert handoff_tokens[handoff_tokens.index("--root") + 1] == str(project)
     assert launch["boundary"] == "1"
 
 
@@ -290,7 +332,9 @@ def test_ambient_roots_cannot_select_another_generation(
 
     assert launch is not None, result.stderr
     assert _sourced(world) == [OWNER_MARK]
-    assert _hosted_argv(launch)[1] == str(world["generation"] / "bin" / "vibecrafted")
+    assert str(world["generation"] / "bin" / "python3") in _interactive_handoff_command(
+        launch
+    )
 
 
 def test_normal_cwd_outside_any_checkout_still_uses_the_generation(
@@ -322,7 +366,9 @@ def test_caller_shell_does_not_change_the_owner(
 
     assert launch is not None, result.stderr
     assert _sourced(world) == [OWNER_MARK]
-    assert _hosted_argv(launch)[1] == str(world["generation"] / "bin" / "vibecrafted")
+    assert str(world["generation"] / "bin" / "python3") in _interactive_handoff_command(
+        launch
+    )
 
 
 def test_start_keeps_choosing_its_own_generation(world: dict[str, Path]) -> None:
@@ -378,7 +424,7 @@ def test_direct_source_execution_keeps_its_own_route(world: dict[str, Path]) -> 
     assert _sourced(world) == [SOURCE_MARK]
     assert OWNER_MARK not in _sourced(world)
     assert launch is None
-    assert "no installed vibecrafted front door" in result.stderr
+    assert "runtime-install --payload-root <Runtime-Pack>" in result.stderr
 
 
 @pytest.mark.parametrize("stale", [False, True])
@@ -433,7 +479,9 @@ def test_catalog_uses_physical_deck_generation(
 def test_catalog_missing_physical_core_refuses_foreign_fallback(
     world: dict[str, Path],
 ) -> None:
-    _write(world["checkout"] / CORE / "dispatcher.py", "", executable=False)
+    dispatcher = world["generation"] / CORE / "dispatcher.py"
+    dispatcher.unlink()
+    assert not dispatcher.exists()
     result = subprocess.run(
         [
             "bash",
@@ -449,3 +497,21 @@ def test_catalog_missing_physical_core_refuses_foreign_fallback(
     )
     assert result.returncode != 0
     assert not result.stdout.strip()
+
+
+def test_dispatch_missing_physical_core_refuses_foreign_fallback(
+    world: dict[str, Path],
+) -> None:
+    dispatcher = world["generation"] / CORE / "dispatcher.py"
+    dispatcher.unlink()
+    assert not dispatcher.exists()
+    result = subprocess.run(
+        ["bash", str(world["generation"] / "bin/vibecrafted"), "dispatch", "run"],
+        cwd=world["checkout"],
+        env={**os.environ, "VIBECRAFTED_ROOT": str(world["checkout"])},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "Async dispatcher module not found" in result.stderr
