@@ -25,7 +25,14 @@ from typing import Any
 
 from .agent_dispatch import extract_session_id, sandbox_supported
 from .clock import utc_now_iso
-from .control_plane import control_plane_home, ensure_session_id, normalize_run_root
+from .control_plane import (
+    ControlPlaneLockBusy,
+    ControlPlaneStorageError,
+    control_plane_home,
+    ensure_session_id,
+    normalize_run_root,
+    sync_state,
+)
 from .events import append_event
 from .execution_controls import PERMISSION_POLICIES, ExecutionControls
 from .report_contract import (
@@ -1567,6 +1574,7 @@ def launch_interactive_workspace(
             "continuity validation failed before provider spawn",
             {**failed, "meta": str(meta_path)},
         )
+        _publish_interactive_projection(run_id)
         raise
     if operator_policy.provider is not None:
         return _launch_supervised_interactive_workspace(
@@ -1709,7 +1717,14 @@ def launch_interactive_workspace(
             signal.signal(signum, _forward_owner_signal)
 
     # Publish the mandatory roles immediately after successful child creation.
-    # Stronger process fingerprints are a subsequent best-effort enrichment.
+    # The qualified process fingerprints travel with that first publication:
+    # the canonical snapshot folds the lifecycle event, never the runtime meta,
+    # and an idle provider proves it is alive only through its identity
+    # receipt. Capture stays best-effort — a deterministic fast-exit provider
+    # may already be terminal — and never delays the mandatory PID + role truth.
+    _attach_interactive_process_identity(
+        receipt, run_id=launch.run_id, worker_pid=child.pid
+    )
     _write_meta(launch.meta_path, receipt)
     append_event(
         "lifecycle:active",
@@ -1717,20 +1732,7 @@ def launch_interactive_workspace(
         "interactive Agent Workspace provider child is live",
         {**receipt, "meta": str(launch.meta_path), "identity_required": True},
     )
-    try:
-        from .process_control import process_identity_receipt
-
-        owner_identity = process_identity_receipt(os.getpid(), run_id=launch.run_id)
-        worker_identity = process_identity_receipt(child.pid, run_id=launch.run_id)
-        if owner_identity is not None:
-            receipt["owner_identity"] = owner_identity
-        if worker_identity is not None:
-            receipt["worker_identity"] = worker_identity
-        _write_meta(launch.meta_path, receipt)
-    except (OSError, RuntimeError, ValueError):
-        # PID + role truth remains mandatory; stronger identity is best-effort
-        # because a deterministic fast-exit provider may already be terminal.
-        pass
+    _publish_interactive_projection(launch.run_id)
     quota_exhausted = False
     provider_returncode: int
     try:
@@ -2134,6 +2136,49 @@ def _launch_supervised_interactive_workspace(
         worker_pid=operator_child.pid,
         supervision=active_relation,
     )
+    received_signal: list[int] = []
+    previous_handlers: dict[int, Any] = {}
+
+    def _forward_owner_signal(signum: int, _frame: Any) -> None:
+        if not received_signal:
+            received_signal.append(signum)
+        for owned_process in (child, operator_child):
+            if owned_process.poll() is None:
+                try:
+                    owned_process.send_signal(signum)
+                except ProcessLookupError:
+                    pass
+
+    # Own the pair's signals before publishing, exactly like the direct owner:
+    # both providers already exist, and a SIGINT/SIGTERM landing during the
+    # publication window used to hit the default handler — the owner died
+    # unsettled and left two orphaned providers behind.
+    if threading.current_thread() is threading.main_thread():
+        for signum in (
+            signal.SIGINT,
+            signal.SIGTERM,
+            getattr(signal, "SIGHUP", signal.SIGTERM),
+        ):
+            if signum in previous_handlers:
+                continue
+            previous_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, _forward_owner_signal)
+
+    # Same publication contract as the direct owner: identity receipts ride the
+    # first ACTIVE publication so the snapshot can prove an idle pair alive.
+    identity_table = _process_table_or_none()
+    _attach_interactive_process_identity(
+        child_receipt,
+        run_id=launch.run_id,
+        worker_pid=child.pid,
+        table=identity_table,
+    )
+    _attach_interactive_process_identity(
+        operator_receipt,
+        run_id=operator_run_id,
+        worker_pid=operator_child.pid,
+        table=identity_table,
+    )
     try:
         _write_meta(launch.meta_path, child_receipt)
         _write_meta(operator_meta_path, operator_receipt)
@@ -2157,7 +2202,11 @@ def _launch_supervised_interactive_workspace(
                 "identity_required": True,
             },
         )
+        _publish_interactive_projection(launch.run_id)
+        _publish_interactive_projection(operator_run_id)
     except Exception as exc:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
         child_code = _stop_owned_process(child)
         operator_code = _stop_owned_process(operator_child)
         operator_log.close()
@@ -2180,30 +2229,6 @@ def _launch_supervised_interactive_workspace(
             error=str(exc),
         )
         raise
-
-    received_signal: list[int] = []
-    previous_handlers: dict[int, Any] = {}
-
-    def _forward_owner_signal(signum: int, _frame: Any) -> None:
-        if not received_signal:
-            received_signal.append(signum)
-        for owned_process in (child, operator_child):
-            if owned_process.poll() is None:
-                try:
-                    owned_process.send_signal(signum)
-                except ProcessLookupError:
-                    pass
-
-    if threading.current_thread() is threading.main_thread():
-        for signum in (
-            signal.SIGINT,
-            signal.SIGTERM,
-            getattr(signal, "SIGHUP", signal.SIGTERM),
-        ):
-            if signum in previous_handlers:
-                continue
-            previous_handlers[signum] = signal.getsignal(signum)
-            signal.signal(signum, _forward_owner_signal)
 
     quota_exhausted = False
     supervision_lost = False
@@ -2350,10 +2375,17 @@ def _launch_supervised_interactive_workspace(
     )
     terminal_observation_confirmed = False
     settlement_error = ""
-    if not supervision_lost and not received_signal and operator_child.poll() is None:
+    if not supervision_lost and not received_signal:
         deadline = time.monotonic() + 1.0
         try:
-            while time.monotonic() < deadline:
+            while True:
+                # Sample the Operator Agent's exit BEFORE reading: the protocol
+                # file outlives its writer, so an Operator that appends its
+                # terminal observation and exits at once is still read on this
+                # pass. Gating the whole window on a live operator skipped a
+                # fast operator's final truth whenever the child's terminal
+                # publication took longer than the operator's last write.
+                operator_exited = operator_child.poll() is not None
                 events, protocol_offset = _poll_operator_protocol(
                     protocol_path, protocol_offset
                 )
@@ -2379,7 +2411,11 @@ def _launch_supervised_interactive_workspace(
                             },
                         }
                         _write_meta(operator_meta_path, operator_receipt)
-                if terminal_observation_confirmed or operator_child.poll() is not None:
+                if (
+                    terminal_observation_confirmed
+                    or operator_exited
+                    or time.monotonic() >= deadline
+                ):
                     break
                 time.sleep(0.05)
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
@@ -2556,7 +2592,89 @@ def _terminalize_related_receipt(
         f"Operator Agent terminal: {terminal_reason}",
         {**terminal, "meta": str(meta_path), "identity_required": True},
     )
+    _publish_interactive_projection(run_id)
     return terminal
+
+
+def _process_table_or_none() -> Sequence[Any] | None:
+    """One process-table capture shared by several identity receipts."""
+    try:
+        from .process_control import build_process_table
+
+        return build_process_table()
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _attach_interactive_process_identity(
+    receipt: dict[str, Any],
+    *,
+    run_id: str,
+    worker_pid: int,
+    owner_pid: int | None = None,
+    table: Sequence[Any] | None = None,
+) -> None:
+    """Stamp best-effort owner/worker identity receipts onto *receipt*.
+
+    Deliberately publishes no top-level ``worker_pgid``: an interactive
+    provider inherits the terminal pane's process group, and ``worker_pgid``
+    is the first stop-signal target (``killpg``). The receipts still carry the
+    captured group, which is all the liveness reconciler needs.
+    """
+    try:
+        from .process_control import process_identity_receipt
+
+        shared_table = table if table is not None else _process_table_or_none()
+        owner_identity = process_identity_receipt(
+            int(owner_pid or os.getpid()), run_id=run_id, table=shared_table
+        )
+        worker_identity = process_identity_receipt(
+            int(worker_pid), run_id=run_id, table=shared_table
+        )
+    except (OSError, RuntimeError, ValueError):
+        # PID + role truth remains mandatory; stronger identity is best-effort
+        # because a deterministic fast-exit provider may already be terminal.
+        return
+    if owner_identity is not None:
+        receipt["owner_identity"] = owner_identity
+    if worker_identity is not None:
+        receipt["worker_identity"] = worker_identity
+
+
+def _publish_interactive_projection(run_id: str) -> str:
+    """Project one interactive run into its canonical ``runs/<id>.json`` snapshot.
+
+    The public server projection (``/api/control/state`` → control-core
+    ``read_state_view``) trusts the retained snapshots the Python writer
+    produces; it folds neither ``runtime_runs/`` nor the event stream on its
+    own. Headless dispatch reaches that snapshot through the workflow board
+    sync, but an interactive Agent Workspace published only ``meta.json`` plus
+    a ``lifecycle:*`` event — a living provider stayed invisible in Live Runs
+    until some observer happened to call ``sync_state``. Publish the scoped
+    projection here, at the same moments the lifecycle event is appended.
+
+    Scoped to this run id: an unrelated stale, dead or test run is never
+    re-projected or promoted by an interactive launch. Best-effort by design:
+    meta and the event stream stay the durable truth and the next sync
+    re-projects from them, so a projection failure is logged instead of
+    killing a live provider child.
+    """
+    try:
+        sync_state(only_run_id=run_id)
+    except (
+        ControlPlaneLockBusy,
+        ControlPlaneStorageError,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ) as exc:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "interactive run %s snapshot projection deferred: %s", run_id, exc
+        )
+        return f"deferred:{exc}"
+    return "published"
 
 
 def _cleanup_unspawned_interactive_launch(launch: InteractiveWorkspaceLaunch) -> str:
@@ -2617,6 +2735,7 @@ def _terminalize_interactive_launch(
         f"interactive Agent Workspace terminal: {terminal_reason}",
         {**terminal, "meta": str(launch.meta_path), "identity_required": True},
     )
+    _publish_interactive_projection(launch.run_id)
     return terminal
 
 
