@@ -707,7 +707,11 @@ def test_event_author_cannot_replace_admitted_provider(tmp_path, monkeypatch):
                 {
                     "run_id": "work-provider",
                     "kind": "lifecycle:completed",
-                    "payload": {"agent": "guardian"},
+                    "payload": {
+                        "agent": "guardian",
+                        "model_effective": "guardian-model",
+                        "model_source": "cli",
+                    },
                 },
             ]
         )

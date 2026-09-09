@@ -2361,6 +2361,12 @@ def _merge_event_stream(
             "source_digest",
             "source_ref",
         ):
+            if (
+                key in {"model_requested", "model_effective", "model_source"}
+                and payload.get("agent")
+                and str(payload["agent"]) != agent
+            ):
+                continue
             if key in payload and payload.get(key) not in (None, ""):
                 extra[key] = payload[key]
 
