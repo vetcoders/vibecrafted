@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from vibecrafted_core.cli import LAUNCHERS
 from vibecrafted_core.help_surface import (
+    CORE_SURFACE_COMMANDS,
     WORKFLOW_HELP,
+    advertised_compact_verbs,
+    render_message_help,
     render_resume_session_help,
     render_root_help,
     render_workflow_help,
@@ -45,6 +48,11 @@ def test_research_help_exposes_swarm_alias() -> None:
     output = render_workflow_help("research")
 
     assert "vibecrafted swarm [agents...] [flags]" in output
+    assert "vibecrafted research [agents...] [flags]" in output
+    assert "vibecrafted research <uno|duo|trio> <agents...> [flags]" in output
+    assert "research.yaml lanes" in output
+    assert "Single-agent research" not in output
+    assert "claude + codex + junie" not in output
 
 
 def test_root_help_uses_the_registered_ship_cycle() -> None:
@@ -60,8 +68,25 @@ def test_root_help_uses_the_registered_ship_cycle() -> None:
     assert "resume-session" in output
     assert "fork <agent>" in output
     assert "--run-id" in output
+    assert "Codex queue receipts" in output
     assert "uninstall            Remove runtime" in output
     assert "vibecrafted uninstall --dry-run" in output
+    advertised = advertised_compact_verbs("test-version")
+    assert set(CORE_SURFACE_COMMANDS) <= set(advertised)
+    assert "init" in advertised
+    assert "<skill>" not in advertised
+
+
+def test_message_help_is_codex_queue_only() -> None:
+    output = render_message_help()
+    display = " ".join(output.split())
+
+    assert "Codex `queue --thread`" in display
+    assert "does not start a worker" in display
+    assert "does not invent Claude" in display
+    assert "Claude steering" not in display
+    assert "--run-id <id>" in output
+    assert "--inspect <message-id>" in output
 
 
 def test_resume_session_help_matches_the_tracked_headless_contract() -> None:

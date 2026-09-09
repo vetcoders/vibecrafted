@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 from vibecrafted_core import cli, lifecycle_delivery
+from vibecrafted_core.help_surface import CORE_SURFACE_COMMANDS
 
 
 def _accepted_launch_payload() -> dict[str, object]:
@@ -56,6 +57,14 @@ def test_root_cli_without_command_returns_product_help(capsys) -> None:
     assert "Vibecrafted core command surface" not in output
 
 
+def test_python_owned_commands_keep_surface_and_internal_verbs() -> None:
+    owned = cli.python_owned_commands()
+    assert set(CORE_SURFACE_COMMANDS) <= set(owned)
+    assert "fork-source" in owned
+    assert "capabilities" in owned
+    assert "acp" in owned
+
+
 @pytest.mark.parametrize("launcher", cli.LAUNCHERS)
 def test_every_workflow_help_uses_the_core_product_surface(
     launcher: str, capsys
@@ -91,6 +100,34 @@ def test_resume_session_help_topic_matches_direct_flag(capsys) -> None:
     assert topic_output == direct_output
     assert "--agent-session-id <id>" in topic_output
     assert "tracked, detached headless run" in topic_output
+
+
+def test_message_help_topic_matches_direct_flag(capsys) -> None:
+    assert cli.main(["help", "message"]) == 0
+    topic_output = capsys.readouterr().out
+
+    assert cli.main(["message", "--help"]) == 0
+    direct_output = capsys.readouterr().out
+
+    assert topic_output == direct_output
+    display = " ".join(topic_output.split())
+    assert "Codex `queue --thread`" in display
+    assert "does not invent Claude" in display
+
+
+def test_relocate_and_claims_help_reach_owned_parsers(capsys) -> None:
+    assert cli.main(["help", "relocate"]) == 0
+    relocate_help = capsys.readouterr().out
+    assert "snapshot" in relocate_help
+    assert "restore" in relocate_help
+    assert cli.main(["relocate", "--help"]) == 0
+    assert capsys.readouterr().out == relocate_help
+
+    assert cli.main(["help", "claims"]) == 0
+    claims_help = capsys.readouterr().out
+    assert "acquire" in claims_help
+    assert cli.main(["claims", "--help"]) == 0
+    assert capsys.readouterr().out == claims_help
 
 
 def test_bare_partner_delegates_to_deck_not_launch_workflow(
