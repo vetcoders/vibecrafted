@@ -1298,7 +1298,8 @@ def test_a_build_that_can_still_fail_has_already_invalidated_its_selection() -> 
     # packager -- comes after them.
     begin_at = builder.index("runtime_pack_selection_begin")
     acquire_at = builder.index("release_single_flight_acquire")
-    assert acquire_at < begin_at
+    output_at = builder.index("release_single_flight_acquire_output")
+    assert acquire_at < output_at < begin_at
     assert begin_at < builder.index('TERMINAL_DONOR="$(canonical_dir')
     assert begin_at < builder.index("\nbuild_product\n")
     assert "release_single_flight_release" in builder
@@ -1320,10 +1321,15 @@ def test_a_build_that_can_still_fail_has_already_invalidated_its_selection() -> 
     )[0]
     assert "runtime_pack_selection" not in notarize_arm
     assert 'release_single_flight_acquire "$REPO_ROOT"' in builder
+    assert 'release_single_flight_acquire_output "$REPO_ROOT" "$DIST_DIR"' in builder
     assert builder.index("release_single_flight_acquire") < builder.index(
         'if [[ "$MODE" == "notarize" ]]; then'
     )
     assert "--help|-h)" in builder
+    assert "VIBECRAFTED_RELEASE_FAKE_STAGES" not in builder
+    assert "VIBECRAFTED_RELEASE_FAKE_KEYCHAIN" not in builder
+    assert "release_run_fake_bounded_stages" not in builder
+    assert ".vibecrafted-release-owner" not in builder
 
 
 def test_standalone_selection_is_not_the_app_dmg_release_tuple() -> None:
@@ -1410,6 +1416,9 @@ def test_main_source_snapshot_pins_launch_sha_across_payload_app_and_selection()
     assert "donor_snapshot_reap || true" in builder
     assert "worktree add --detach" in library
     assert "[revision]" in library
+    assert "donor_snapshot_owner_stamp_file" in library
+    assert ".vibecrafted-release-owner" not in library
+    assert "%s.release-owner" in library
 
 
 def test_main_snapshot_does_not_own_selection_or_artifact_output() -> None:

@@ -36,13 +36,22 @@
 # Records of live snapshots, one "<donor>\t<path>" per entry.
 DONOR_SNAPSHOTS=()
 
-# Optional owner stamp written into each snapshot. A departing process that
+# Optional owner stamp for a snapshot LOCATION. A departing process that
 # still has the path in DONOR_SNAPSHOTS must not reap a successor that reused
 # the same location after the kernel dropped the release lock. Unset keeps
 # the historical reap-everything-we-recorded behaviour for callers that do
 # not share a path with another live release.
+#
+# The stamp is a sibling of the worktree (`<path>.release-owner`), never a
+# file inside it. Writing inside the snapshot makes SOURCE_ROOT dirty, and
+# build_product's require_clean_repo then fails on the release's own marker.
+# The sibling is outside the source payload and outside git status.
 DONOR_SNAPSHOT_OWNER="${DONOR_SNAPSHOT_OWNER:-}"
-DONOR_SNAPSHOT_OWNER_STAMP=".vibecrafted-release-owner"
+
+# donor_snapshot_owner_stamp_file <snapshot-path>
+donor_snapshot_owner_stamp_file() {
+  printf '%s.release-owner\n' "$1"
+}
 
 # _donor_snapshot_force_remove <donor> <path>
 #
@@ -102,6 +111,14 @@ donor_snapshot_create() {
     head="$(git -C "$donor" rev-parse HEAD)"
   fi
 
+  mkdir -p "$(dirname "$path")"
+  # Claim the location BEFORE removing a predecessor worktree. A sibling
+  # stamp survives `worktree remove`; writing the new owner first is what
+  # stops a late first-attempt reap from destroying the successor mid-add.
+  if [[ -n "$DONOR_SNAPSHOT_OWNER" ]]; then
+    printf '%s\n' "$DONOR_SNAPSHOT_OWNER" > "$(donor_snapshot_owner_stamp_file "$path")"
+  fi
+
   # Clear any residue from an earlier interrupted run before adding: a stale
   # registration for this exact path would make `worktree add` refuse.
   git -C "$donor" worktree prune >/dev/null 2>&1 || true
@@ -111,10 +128,9 @@ donor_snapshot_create() {
     git -C "$donor" worktree prune >/dev/null 2>&1 || true
   fi
 
-  mkdir -p "$(dirname "$path")"
   git -C "$donor" worktree add --detach --quiet "$path" "$head" >/dev/null
   if [[ -n "$DONOR_SNAPSHOT_OWNER" ]]; then
-    printf '%s\n' "$DONOR_SNAPSHOT_OWNER" > "$path/$DONOR_SNAPSHOT_OWNER_STAMP"
+    printf '%s\n' "$DONOR_SNAPSHOT_OWNER" > "$(donor_snapshot_owner_stamp_file "$path")"
   fi
 
   DONOR_SNAPSHOTS+=("$donor"$'\t'"$path")
@@ -124,7 +140,7 @@ donor_snapshot_create() {
 # donor_snapshot_reap — remove every snapshot this process created.
 # Safe to call more than once and safe to call when nothing was created.
 donor_snapshot_reap() {
-  local record donor path
+  local record donor path stamp
   (( ${#DONOR_SNAPSHOTS[@]} == 0 )) && return 0
   # The expansion MUST stay quoted. Each record holds "<donor>\t<path>", and an
   # unquoted "${DONOR_SNAPSHOTS[@]}" word-splits on the tab in IFS: `record`
@@ -134,11 +150,12 @@ donor_snapshot_reap() {
     [[ -n "$record" ]] || continue
     donor="${record%%$'\t'*}"
     path="${record#*$'\t'}"
-    # A successor that recreated this path stamps it with a different owner.
-    # Reaping it would be the 2026-09-09 incident: the stopped attempt's
-    # EXIT handler destroying the live frozen source.
-    if [[ -n "$DONOR_SNAPSHOT_OWNER" && -f "$path/$DONOR_SNAPSHOT_OWNER_STAMP" ]]; then
-      if [[ "$(cat "$path/$DONOR_SNAPSHOT_OWNER_STAMP" 2>/dev/null || true)" != "$DONOR_SNAPSHOT_OWNER" ]]; then
+    # A successor that recreated this path stamps the sibling with a
+    # different owner. Reaping it would be the 2026-09-09 incident: the
+    # stopped attempt's EXIT handler destroying the live frozen source.
+    stamp="$(donor_snapshot_owner_stamp_file "$path")"
+    if [[ -n "$DONOR_SNAPSHOT_OWNER" && -f "$stamp" ]]; then
+      if [[ "$(cat "$stamp" 2>/dev/null || true)" != "$DONOR_SNAPSHOT_OWNER" ]]; then
         continue
       fi
     fi
@@ -146,6 +163,7 @@ donor_snapshot_reap() {
       _donor_snapshot_force_remove "$donor" "$path"
     fi
     git -C "$donor" worktree prune >/dev/null 2>&1 || true
+    rm -f "$stamp"
   done
   DONOR_SNAPSHOTS=()
 }
