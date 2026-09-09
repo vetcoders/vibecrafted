@@ -31,6 +31,12 @@ use std::time::{Duration, Instant};
 /// different contract, not a confirmation of this one.
 pub const LAUNCH_RECEIPT_SCHEMA: &str = "vibecrafted.launch_receipt.v1";
 
+/// The family every launch receipt belongs to, whichever version the launcher
+/// stamps. Recognizing the envelope is the parser's job; judging which version
+/// arrived is the audit's, so the parser reads only the family and leaves the
+/// verdict on the version to the audit that reports it.
+const LAUNCH_RECEIPT_SCHEMA_FAMILY: &str = "vibecrafted.launch_receipt.";
+
 /// Schema of the receipt's execution-controls block
 /// (`ExecutionControls.receipt`).
 pub const EXECUTION_CONTROLS_SCHEMA: &str = "vibecrafted.execution_controls.v1";
@@ -589,6 +595,19 @@ fn opens_a_line(text: &str, offset: usize) -> bool {
         .is_some_and(|prefix| prefix.trim().is_empty())
 }
 
+/// Whether a complete object was a member of a larger one, judged by what
+/// follows it: the separator before a sibling, or the close of the array or
+/// object that held it. Indentation says nothing about this — a diagnostic
+/// block pretty-printed inside the receipt opens its line exactly as the
+/// receipt does — so this is what keeps a fragment of the answer from being
+/// returned as the answer.
+fn nests_inside_another_object(after: &str) -> bool {
+    matches!(
+        after.trim_start().as_bytes().first(),
+        Some(b',' | b']' | b'}')
+    )
+}
+
 /// The signal that ended a child, when one did. `ExitStatus::code()` is
 /// `None` for a signalled child, and that silence must never be mistaken for
 /// a launcher that never ran.
@@ -833,6 +852,43 @@ pub struct LaunchReceipt {
     pub meta: String,
 }
 
+/// The two facts that decide whether an object on the launcher's stdout is a
+/// launch receipt at all, read before the receipt itself: the verdict it
+/// states about a launch, and the contract it claims to speak.
+///
+/// `accepted` is `None` exactly when the object never mentions it, and that
+/// distinction is the whole point. The canonical launcher always stamps a
+/// verdict (`workflow.machine_launch_receipt`), so an object without one is
+/// something else it printed — a progress line, a drain notice, a diagnostic
+/// nested inside the receipt — and reading such an object as the receipt
+/// turns an admitted run into a refusal the launcher never gave.
+#[derive(Debug, Deserialize)]
+struct LaunchEnvelope {
+    #[serde(default)]
+    accepted: Option<bool>,
+    #[serde(default)]
+    schema: Option<String>,
+}
+
+impl LaunchEnvelope {
+    /// Whether this object states a verdict about a launch of this contract.
+    ///
+    /// Deliberately generous about *which* version: a receipt stamped with
+    /// another one is still a receipt, and refusing it is the audit's job.
+    /// Deliberately strict about the rest: the receipt's own nested blocks
+    /// carry a schema of another family and never a verdict, and unrelated
+    /// diagnostics carry neither.
+    fn names_a_launch(&self) -> bool {
+        if self.accepted.is_none() {
+            return false;
+        }
+        match self.schema.as_deref().map(str::trim) {
+            None | Some("") => true,
+            Some(schema) => schema.starts_with(LAUNCH_RECEIPT_SCHEMA_FAMILY),
+        }
+    }
+}
+
 impl LaunchReceipt {
     pub fn parse(stdout: &[u8]) -> anyhow::Result<Self> {
         let text = String::from_utf8_lossy(stdout);
@@ -840,11 +896,14 @@ impl LaunchReceipt {
         if trimmed.is_empty() {
             anyhow::bail!("launcher printed no receipt");
         }
-        // The receipt is the last JSON object on stdout. Scanning back from
-        // the end keeps it readable behind any volume of preceding output —
-        // including output VOC itself elided — so a launcher that admitted a
-        // run is never read as silent merely because it was also noisy. The
-        // window and the candidate count bound the work.
+        // The receipt is the last object on stdout that states a verdict
+        // about a launch. Scanning back from the end keeps it readable behind
+        // any volume of preceding output — including output VOC itself
+        // elided — so a launcher that admitted a run is never read as silent
+        // merely because it was also noisy. What it says *after* answering,
+        // and the blocks nested inside the answer, are not the answer: the
+        // envelope decides that, never the position on the line. The window
+        // and the candidate count bound the work.
         let floor = trimmed.len().saturating_sub(RECEIPT_SCAN_WINDOW);
         let window_start = (floor..=trimmed.len())
             .find(|index| trimmed.is_char_boundary(*index))
@@ -854,9 +913,14 @@ impl LaunchReceipt {
             if !opens_a_line(window, offset) {
                 continue;
             }
-            if let Ok(receipt) = Self::read_object(&window[offset..])
-                && receipt.names_a_launch()
-            {
+            let candidate = &window[offset..];
+            let Some((envelope, end)) = Self::read_envelope(candidate) else {
+                continue;
+            };
+            if !envelope.names_a_launch() || nests_inside_another_object(&candidate[end..]) {
+                continue;
+            }
+            if let Ok(receipt) = Self::read_object(candidate) {
                 return Ok(receipt);
             }
         }
@@ -864,7 +928,24 @@ impl LaunchReceipt {
         // the whole document, so a bare object still parses and the error the
         // operator reads is the one the launcher actually caused.
         let start = trimmed.find('{').unwrap_or(0);
-        serde_json::from_str(&trimmed[start..]).context("launch receipt is not valid JSON")
+        let whole = &trimmed[start..];
+        let receipt: Self =
+            serde_json::from_str(whole).context("launch receipt is not valid JSON")?;
+        // Even alone on stdout, an object that states no verdict is not an
+        // answer. Reporting it as one would read a launcher's own chatter
+        // back to the operator as a refusal it never issued.
+        if Self::read_envelope(whole).is_some_and(|(envelope, _)| envelope.names_a_launch()) {
+            return Ok(receipt);
+        }
+        anyhow::bail!("launcher printed diagnostics but no receipt")
+    }
+
+    /// Read the launch envelope from the front of `text`, with the offset one
+    /// byte past the object it read, so the caller can see what follows it.
+    fn read_envelope(text: &str) -> Option<(LaunchEnvelope, usize)> {
+        let mut stream = serde_json::Deserializer::from_str(text).into_iter::<LaunchEnvelope>();
+        let envelope = stream.next()?.ok()?;
+        Some((envelope, stream.byte_offset()))
     }
 
     /// Read one object from the front of `text`, ignoring whatever follows
@@ -873,17 +954,6 @@ impl LaunchReceipt {
     fn read_object(text: &str) -> Result<Self, serde_json::Error> {
         let mut deserializer = serde_json::Deserializer::from_str(text);
         Self::deserialize(&mut deserializer)
-    }
-
-    /// Whether this object speaks about a launch at all, rather than being
-    /// other JSON the launcher happened to print — including the receipt's
-    /// own nested blocks, which carry a schema but never a verdict.
-    ///
-    /// Deliberately generous about *which* launch: a receipt stamped with
-    /// another schema version is still a receipt, and refusing it is the
-    /// audit's job, not the parser's.
-    fn names_a_launch(&self) -> bool {
-        self.accepted || !self.run_id.trim().is_empty() || !self.status.trim().is_empty()
     }
 
     pub fn refusal_reason(&self) -> String {
@@ -2137,6 +2207,97 @@ mod tests {
         // The nested controls block carries a schema of its own and must
         // never be mistaken for the receipt around it.
         assert_eq!(receipt.schema, LAUNCH_RECEIPT_SCHEMA);
+    }
+
+    #[test]
+    fn a_receipt_survives_a_diagnostic_printed_after_it() {
+        // The launcher answers, then keeps talking. What it says afterwards
+        // is about the run, not a verdict on it.
+        let bytes = b"{\"schema\":\"vibecrafted.launch_receipt.v1\",\"accepted\":true,\"run_id\":\"work-real\",\"status\":\"launching\"}\n{\"status\":\"draining\"}\n";
+        let receipt = LaunchReceipt::parse(bytes).expect("the receipt must outlive the noise");
+        assert!(receipt.accepted);
+        assert_eq!(receipt.run_id, "work-real");
+    }
+
+    #[test]
+    fn a_diagnostic_nested_in_a_pretty_printed_receipt_is_never_the_receipt() {
+        // Pretty-printing puts a nested object at the start of its own line.
+        // Nesting is structure, not indentation.
+        let bytes = br#"{
+  "schema": "vibecrafted.launch_receipt.v1",
+  "accepted": true,
+  "run_id": "work-real",
+  "diagnostics": [
+    {"run_id": "diagnostic-only"}
+  ]
+}"#;
+        let receipt = LaunchReceipt::parse(bytes).expect("the enclosing receipt must be read");
+        assert!(receipt.accepted);
+        assert_eq!(receipt.run_id, "work-real");
+    }
+
+    #[test]
+    fn a_verdict_nested_inside_the_receipt_is_still_not_the_receipt() {
+        // Even an object that states a verdict of its own is not the answer
+        // when it is a member of the object that carries the real one.
+        let bytes = br#"{
+  "schema": "vibecrafted.launch_receipt.v1",
+  "accepted": true,
+  "run_id": "work-real",
+  "diagnostics": [
+    {"accepted": false, "run_id": "rejected-sibling"}
+  ]
+}"#;
+        let receipt = LaunchReceipt::parse(bytes).expect("the enclosing receipt must be read");
+        assert!(receipt.accepted);
+        assert_eq!(receipt.run_id, "work-real");
+    }
+
+    #[test]
+    fn diagnostics_without_a_verdict_are_unknown_and_never_a_refusal() {
+        // A launcher that printed only chatter refused nothing. Reading that
+        // as a refusal would invent an answer it never gave.
+        let req = request(LaunchKind::Workflow);
+        for chatter in [
+            &b"{\"status\":\"draining\"}"[..],
+            &b"{\"schema\":\"vibecrafted.execution_controls.v1\",\"provider\":\"claude\"}"[..],
+            &b"the launcher said nothing machine-readable"[..],
+        ] {
+            assert!(
+                LaunchReceipt::parse(chatter).is_err(),
+                "chatter must not parse as a receipt: {}",
+                String::from_utf8_lossy(chatter)
+            );
+            let outcome = LaunchOutcome::from_run(
+                "p".to_string(),
+                LaunchExpectation::new(&req, None),
+                completed(chatter, b""),
+            );
+            assert_eq!(
+                outcome.admission(),
+                Admission::Unknown,
+                "chatter is not a refusal: {}",
+                String::from_utf8_lossy(chatter)
+            );
+        }
+    }
+
+    #[test]
+    fn a_stated_refusal_is_still_a_refusal_behind_later_noise() {
+        let bytes = b"{\"schema\":\"vibecrafted.launch_receipt.v1\",\"accepted\":false,\"run_id\":\"\",\"status\":\"rejected\",\"message\":\"agy: --sandbox false cannot be enforced\"}\n{\"status\":\"draining\"}\n";
+        let req = request(LaunchKind::Workflow);
+        let outcome = LaunchOutcome::from_run(
+            "p".to_string(),
+            LaunchExpectation::new(&req, None),
+            completed(bytes, b""),
+        );
+        assert_eq!(outcome.admission(), Admission::Refused);
+        assert!(
+            outcome
+                .detail_lines()
+                .iter()
+                .any(|line| line.contains("--sandbox false cannot be enforced"))
+        );
     }
 
     #[test]
