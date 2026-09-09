@@ -1339,7 +1339,7 @@ def test_three_way_shell_correction_keeps_user_chrome_and_accepts_new_defaults(
     incoming = _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
     assert _PREVIOUS_SHELL in previous
     assert _INCOMING_SHELL in incoming
-    first = _install(
+    _install(
         seed_runtime_pack(
             tmp_path / "pack-a", version="9.9.9+a", terminal_policy=previous
         ),
