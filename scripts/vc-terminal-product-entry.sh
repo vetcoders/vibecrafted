@@ -51,7 +51,7 @@ _vc_terminal_is_owned_generation_bin() {
 }
 
 _vc_terminal_sanitize_inherited_path() {
-  local inherited="${PATH-}" remaining entry
+  local inherited="${PATH-}" remaining entry joined index
   local -a retained=()
   # A sentinel preserves an empty final component. Empty PATH entries name the
   # caller's working directory, so they are retained rather than normalized.
@@ -61,7 +61,17 @@ _vc_terminal_sanitize_inherited_path() {
     remaining="${remaining#*:}"
     _vc_terminal_is_owned_generation_bin "$entry" || retained+=("$entry")
   done
-  PATH="$(IFS=:; printf '%s' "${retained[*]}")"
+  # Explicit join keeps empty, spaced, and repeated components in order.
+  joined=""
+  index=0
+  while ((index < ${#retained[@]})); do
+    if ((index)); then
+      joined="${joined}:"
+    fi
+    joined="${joined}${retained[index]}"
+    index=$((index + 1))
+  done
+  PATH="$joined"
   export PATH
 }
 
