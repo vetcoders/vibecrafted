@@ -135,18 +135,38 @@ _vetcoders_vc_terminal_primary_shell() {
 }
 
 # True when this process is a public VC entry that owes the operator a visible
-# terminal. Deliberately NOT a test flag: the signals are the real controlling
-# terminal and one explicit re-entry boundary exported into the child.
+# terminal. The signals are the real controlling terminal, one explicit
+# re-entry boundary exported into the child, and -- for an inherited frame
+# marker or operator-session name -- the ENGINE's word that the named session
+# is a surface someone is attached to. The environment alone is never that
+# proof (2026-09-09, Founder repros for init/operator/resume/fork: every one
+# ran from an agent shell carrying VC_FRAME_SESSION_NAME=vibecrafted while the
+# only live sessions were other projects', and the direct path either panicked
+# on the missing host or parked the provider tab where nobody was looking).
 _vetcoders_needs_vc_terminal_entry() {
   # The child we spawn re-enters the same entry; the boundary stops the loop
   # even if the host somehow fails to hand us a PTY.
   [[ -z "${VIBECRAFTED_TERMINAL_ENTRY:-}" ]] || return 1
   # A real terminal means the direct path is already correct — never reroute it.
+  # (Deliberately no test flag here: a test that models the terminal child
+  # sets the re-entry boundary above, the way the real child receives it.)
   [[ ! -t 0 || ! -t 1 ]] || return 1
-  # Inside a frame the caller already owns a visible surface.
-  ! _vetcoders_in_vc_frame || return 1
-  # An explicitly named operator session is honoured on the direct path.
-  [[ -z "${VIBECRAFTED_OPERATOR_SESSION:-}" ]] || return 1
+  # Inside a frame the caller owns a visible surface only when the marker's
+  # session is live AND has an attached client (or the engine cannot be asked,
+  # which keeps a plain sourced checkout on the old path). A marker whose
+  # session is dead, missing or unattended is ambient context, not a surface.
+  if _vetcoders_in_vc_frame; then
+    ! _vetcoders_has_usable_vc_frame_surface || return 1
+  fi
+  # An explicitly named operator session is honoured on the direct path when
+  # it is a surface by the same test; a name the engine reports dead, missing
+  # or unattended is inherited env, and the direct path would only hang the
+  # provider tab on a host nobody sees (or create one nobody asked for).
+  if [[ -n "${VIBECRAFTED_OPERATOR_SESSION:-}" ]]; then
+    case "$(_vetcoders_vc_frame_surface_state "$VIBECRAFTED_OPERATOR_SESSION")" in
+      usable | unknown) return 1 ;;
+    esac
+  fi
   return 0
 }
 
@@ -272,6 +292,26 @@ writer_src = (
     "    pass\n"
 )
 
+# The window we open is, by construction, NOT inside the frame this process
+# inherited its markers from: an attached-context marker that reaches the
+# child would make it adopt a session that is dead, missing or unwatched (the
+# very reason a window is being opened), and a pending attach/switch spec is
+# this process's own state. The child resolves its own target from scratch.
+child_env = dict(os.environ)
+for key in (
+    "VC_FRAME",
+    "VC_FRAME_PANE_ID",
+    "VC_FRAME_SESSION_NAME",
+    "ZELLIJ",
+    "ZELLIJ_PANE_ID",
+    "ZELLIJ_SESSION_NAME",
+    "VIBECRAFTED_OPERATOR_SESSION",
+    "VIBECRAFTED_PENDING_VC_FRAME_ATTACH",
+    "VIBECRAFTED_PENDING_VC_FRAME_SWITCH",
+    "VIBECRAFTED_PREPARED_VC_FRAME_SESSION",
+):
+    child_env.pop(key, None)
+
 try:
     subprocess.Popen(
         [sys.executable, "-c", writer_src],
@@ -280,6 +320,7 @@ try:
         stderr=subprocess.DEVNULL,
         start_new_session=True,
         close_fds=True,
+        env=child_env,
     )
 except OSError as exc:
     # A real failure to fork/exec the detached writer -- e.g. a resource
@@ -352,6 +393,99 @@ _vetcoders_product_front_door() {
   printf '%s\n' "$candidate"
 }
 
+# Open the product terminal for a public declaration that has no visible
+# surface here, and re-enter it there through the `vibecrafted` front door.
+# One owner for resume/init/operator/partner (shell) and fork (deck): the
+# hosted argv is `<verb> <agent> [args…]`, exactly what the child re-parses on
+# the project root the window is opened on. 0 = the host admitted the launch
+# (the caller returns 0 and does nothing else here); 1 = it did not.
+_vetcoders_open_public_entry_in_vc_terminal() {
+  local project_root="$1"
+  shift
+  local verb="${1:-entry}"
+  local front_door=""
+  front_door="$(_vetcoders_product_front_door vibecrafted 2>/dev/null || true)"
+  if [[ -z "$front_door" ]]; then
+    # No front door means no supported way to obtain a PTY. Falling through
+    # would compose a continuity pack / provider command for a launch that
+    # cannot happen.
+    printf 'vc-%s: no TTY and no installed vibecrafted front door to open a terminal with.\n' "$verb" >&2
+    printf 'Run the %s from a terminal, or install the runtime so bin/vc-terminal and bin/vibecrafted exist.\n' "$verb" >&2
+    return 1
+  fi
+  _vetcoders_open_entry_in_vc_terminal "$front_door" "$project_root" "$@"
+}
+
+# The shared contract-parsed half of that escalation, for the shell entries
+# that went through _vetcoders_parse_contract (resume, init, operator, partner).
+# Placement is the caller's contract: BEFORE any continuity pack, prompt
+# composition or provider command, so the escalated child does each of them
+# exactly once. Returns 0 = escalated (caller returns 0), 1 = a terminal was
+# needed but could not be opened (caller returns 1), 2 = direct path here.
+_vetcoders_declaration_escalate_if_needed() {
+  local verb="$1" tool="$2"
+  shift 2
+  command -v _vetcoders_needs_vc_terminal_entry >/dev/null || return 2
+  _vetcoders_needs_vc_terminal_entry || return 2
+  local project_root=""
+  project_root="$(_vetcoders_effective_project_root)"
+  # The child re-parses this very vector, but from the terminal's working
+  # directory — which IS the normalized root. Forwarding a raw relative token
+  # would resolve it a second time, one level deeper; hand over the absolute
+  # value so the child, the session name, AICX and the provider read the same
+  # project.
+  _vetcoders_rewrite_contract_root_argv "${_vetcoders_contract_root:-}" "$@"
+  # shellcheck disable=SC2154  # the rewritten vector is the parser's global (prompts.sh)
+  _vetcoders_open_public_entry_in_vc_terminal "$project_root" "$verb" "$tool" \
+    "${_vetcoders_contract_argv[@]}" || return 1
+  return 0
+}
+
+# Normalize an explicit --root/--repo ONCE, before anything changes cwd:
+# `--root ../B` must mean ../B relative to where the operator typed it, not
+# relative to wherever a later step happens to stand. Every downstream reader
+# (terminal cwd, workspace/session naming, AICX, provider cwd) then sees one
+# absolute value. 1 when the declared path is not a directory.
+_vetcoders_normalize_declared_contract_root() {
+  local verb="${1:-resume}"
+  [[ -n "${_vetcoders_contract_root:-}" ]] || return 0
+  local normalized=""
+  normalized="$(_vetcoders_absolute_physical_path "$_vetcoders_contract_root")"
+  if [[ -z "$normalized" || ! -d "$normalized" ]]; then
+    printf '%s: --root is not an existing directory: %s\n' "$verb" "$_vetcoders_contract_root" >&2
+    return 1
+  fi
+  _vetcoders_contract_root="$normalized"
+}
+
+# One launch owner for the interactive declarations: the init / operator /
+# partner faces, and fork's declared path. Prepare the workspace session
+# WITHOUT handing the terminal over, hang the provider tab on it, print the
+# receipt, and only then -- last act -- enter it. Before this owner the init
+# family prepared in the FOREGROUND: with no live session the operator layout
+# blocked until the Founder detached, and the provider tab appeared only after
+# the window they were waiting in had been closed (the ordering defect resume
+# fixed with defer-attach on 2026-09-06). Same terminal-side arguments as
+# resume: the declared root routes through the declared-workspace owner.
+_vetcoders_launch_interactive_declaration() {
+  local verb="$1" runtime="$2" tab_name="$3" command_text="$4"
+  local declared_root="${5:-}" receipt="${6:-}"
+  _vetcoders_prepare_operator_runtime "$runtime" defer-attach "$declared_root" "$verb" || return 1
+  if [[ -z "${VIBECRAFTED_OPERATOR_SESSION:-}" ]]; then
+    printf '%s: no visible operator target could be prepared here; refusing to start %s in a session nobody can see.\n' \
+      "$verb" "$tab_name" >&2
+    printf '  run the %s from a terminal, or let the public entry open one.\n' "$verb" >&2
+    return 1
+  fi
+  _vetcoders_spawn_into_operator_session "$tab_name" "$command_text" || return 1
+  printf '%s launched in workspace session: %s\n' "$verb" "$VIBECRAFTED_OPERATOR_SESSION"
+  [[ -z "$declared_root" ]] || printf '  root:    %s\n' "$declared_root"
+  [[ -z "$receipt" ]] || printf '%s\n' "$receipt"
+  # The tab exists, so the terminal may now be handed over. This blocks until
+  # the Founder detaches, which is exactly what they asked for.
+  _vetcoders_attach_prepared_vc_frame_session
+}
+
 # vc-frame needs a real PTY to enable raw mode. When stdin/stdout are pipes
 # (curl|bash, ssh without -t, agent subprocess), vc-frame panics with an
 # unhelpful Rust traceback. Catch the missing-TTY case early and return a
@@ -382,6 +516,106 @@ _vetcoders_in_vc_frame() {
   # VC_FRAME_* is the trusted attached-context signal. Legacy ZELLIJ_* values
   # can leak from a parent shell and must not hijack visible launch targeting.
   [[ -n "${VC_FRAME_PANE_ID:-}" ]] && [[ -n "${VC_FRAME_SESSION_NAME:-}" ]]
+}
+
+# Attached-client evidence for a live session, from the engine itself. Prints:
+#   clients  -- at least one client is attached (the session is on a screen);
+#   none     -- the server is up but nobody is attached (a background session);
+#   unknown  -- the engine could not be asked, or answered in an unknown shape.
+# `action list-clients` prints a CLIENT_ID header and one row per attached
+# client (vc-frame 0.47.3, verified in an isolated sandbox: zero rows for a
+# session created with --create-background, one row once a pty client attaches,
+# zero again after it leaves). The query is addressed explicitly and runs with
+# THIS process's attachment context cleared, so the engine can never mistake it
+# for a nested client of the session it is asked about.
+_vetcoders_vc_frame_session_client_state() {
+  local session_name="${1:-}"
+  [[ -n "$session_name" ]] || {
+    printf 'unknown\n'
+    return 0
+  }
+  local vc_frame_bin=""
+  vc_frame_bin="$(_vetcoders_vc_frame_bin 2>/dev/null)" || {
+    printf 'unknown\n'
+    return 0
+  }
+  local listing="" query_status=0
+  listing="$(env -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME \
+    -u ZELLIJ -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME \
+    "$vc_frame_bin" --session "$session_name" action list-clients 2>/dev/null)" || query_status=$?
+  if ((query_status != 0)); then
+    printf 'unknown\n'
+    return 0
+  fi
+  local header_seen=0 rows=0 line=""
+  while IFS= read -r line; do
+    line="$(printf '%s' "$line" | _vetcoders_strip_ansi)"
+    [[ -n "${line// /}" ]] || continue
+    if ((header_seen == 0)); then
+      [[ "$line" == CLIENT_ID* ]] || continue
+      header_seen=1
+      continue
+    fi
+    rows=$((rows + 1))
+  done <<<"$listing"
+  if ((header_seen == 0)); then
+    printf 'unknown\n'
+  elif ((rows > 0)); then
+    printf 'clients\n'
+  else
+    printf 'none\n'
+  fi
+}
+
+# Whether a named session is a surface an operator can SEE right now. Prints:
+#   usable     -- live, with an attached client (or a live session on an
+#                 engine that cannot report clients);
+#   unattended -- live, but no client is attached;
+#   dead       -- an EXITED incarnation (recovery evidence, never a target);
+#   missing    -- no such session;
+#   unknown    -- no engine to ask (callers keep their pre-engine behaviour).
+_vetcoders_vc_frame_surface_state() {
+  local session_name="${1:-}"
+  [[ -n "$session_name" ]] || {
+    printf 'missing\n'
+    return 0
+  }
+  _vetcoders_vc_frame_bin >/dev/null 2>&1 || {
+    printf 'unknown\n'
+    return 0
+  }
+  local state=""
+  state="$(_vetcoders_vc_frame_session_state "$session_name")"
+  case "$state" in
+    live) ;;
+    dead | missing)
+      printf '%s\n' "$state"
+      return 0
+      ;;
+    *)
+      printf 'unknown\n'
+      return 0
+      ;;
+  esac
+  case "$(_vetcoders_vc_frame_session_client_state "$session_name")" in
+    none) printf 'unattended\n' ;;
+    *) printf 'usable\n' ;;
+  esac
+}
+
+# True when THIS process's attached-frame markers name a surface someone is
+# looking at. A bare `_vetcoders_in_vc_frame` is the environment's claim; this
+# is the engine's confirmation of it. `unknown` (no engine to ask) keeps the
+# claim, so a plain sourced checkout behaves as before.
+_vetcoders_has_usable_vc_frame_surface() {
+  _vetcoders_in_vc_frame || return 1
+  local session_name=""
+  session_name="$(_vetcoders_current_vc_frame_session_name)"
+  [[ -n "$session_name" ]] || return 1
+  case "$(_vetcoders_vc_frame_surface_state "$session_name")" in
+    usable | unknown) return 0 ;;
+  esac
+  return 1
 }
 
 # Live (non-EXITED) vc-frame session names. One name per line. Multi-word hosts
@@ -1094,31 +1328,38 @@ _vetcoders_ensure_vc_frame_session() {
 #   3. otherwise R's place session is the target: live -> reuse as is (never a
 #      duplicate); dead -> preserved, a recovery incarnation is created;
 #      missing -> created detached with the client context cleared;
-#   4. decide how the Founder ENTERS it, executed last by
-#      _vetcoders_attach_prepared_vc_frame_session once the provider tab
-#      exists: live attached client elsewhere -> switch that client; a
-#      controlling terminal -> foreground attach with a clean env; neither
-#      (stale marker, no TTY) -> say so and print the attach command.
+#   4. decide how the Founder ENTERS it -- settled BEFORE anything is created
+#      and executed last by _vetcoders_attach_prepared_vc_frame_session once
+#      the provider tab exists: an attached client on a live ambient session
+#      that someone is watching -> switch that client; a controlling terminal
+#      -> foreground attach with a clean env; neither -> refuse here. A caller
+#      with no surface never reaches this owner on the public path (the entry
+#      opens the product terminal first); one that does anyway (a broken host,
+#      a bypassed entry) gets an actionable failure instead of a session that
+#      exists where nobody can see it and a "launched" nobody can act on.
 # Other sessions are never killed, renamed or re-targeted. A failed create is
-# a failed resume: nothing is launched anywhere else instead.
+# a failed declaration: nothing is launched anywhere else instead.
 _vetcoders_prepare_declared_workspace_target() {
   local declared_root="${1:-}"
+  local verb="${2:-resume}"
   [[ -n "$declared_root" && -d "$declared_root" ]] || {
-    printf 'resume: declared workspace root is not a directory: %s\n' "$declared_root" >&2
+    printf '%s: declared workspace root is not a directory: %s\n' "$verb" "$declared_root" >&2
     return 1
   }
   command -v _vetcoders_ensure_canonical_workspace_identity >/dev/null || {
-    printf 'resume: the canonical workspace owner is unavailable; cannot bind %s\n' "$declared_root" >&2
+    printf '%s: the canonical workspace owner is unavailable; cannot bind %s\n' "$verb" "$declared_root" >&2
     return 1
   }
 
   # Captured BEFORE any targeting export below overwrites the marker: the
   # ambient session is the only handle that can later move the attached
-  # client, and its liveness decides whether that move is possible at all.
-  local ambient_session="" ambient_state="missing"
+  # client, and whether anyone is attached to it decides whether that move is
+  # possible at all. Liveness alone is not that proof (a background session
+  # has no client to move).
+  local ambient_session="" ambient_surface="missing"
   if _vetcoders_in_vc_frame; then
     ambient_session="$(_vetcoders_current_vc_frame_session_name)"
-    [[ -z "$ambient_session" ]] || ambient_state="$(_vetcoders_vc_frame_session_state "$ambient_session")"
+    [[ -z "$ambient_session" ]] || ambient_surface="$(_vetcoders_vc_frame_surface_state "$ambient_session")"
   fi
   local ambient_operator="${VIBECRAFTED_OPERATOR_SESSION:-}"
   unset VIBECRAFTED_PENDING_VC_FRAME_ATTACH VIBECRAFTED_PENDING_VC_FRAME_SWITCH
@@ -1129,12 +1370,12 @@ _vetcoders_prepare_declared_workspace_target() {
     place="$(_vetcoders_operator_session_name)"
   fi
   [[ -n "$place" ]] || {
-    printf 'resume: the workspace owner bound %s to no place session; refusing to guess one.\n' "$declared_root" >&2
+    printf '%s: the workspace owner bound %s to no place session; refusing to guess one.\n' "$verb" "$declared_root" >&2
     return 1
   }
   if [[ -n "$ambient_operator" && "$ambient_operator" != "$place" ]]; then
-    printf 'resume: VIBECRAFTED_OPERATOR_SESSION=%s is ambient context, not the declared workspace; using %s for %s\n' \
-      "$ambient_operator" "$place" "$declared_root" >&2
+    printf '%s: VIBECRAFTED_OPERATOR_SESSION=%s is ambient context, not the declared workspace; using %s for %s\n' \
+      "$verb" "$ambient_operator" "$place" "$declared_root" >&2
   fi
   export VIBECRAFTED_DECLARED_WORKSPACE_ROOT="$declared_root"
 
@@ -1149,8 +1390,26 @@ _vetcoders_prepare_declared_workspace_target() {
     return 0
   fi
   if [[ -n "$ambient_session" ]]; then
-    printf 'resume: attached vc-frame session %s (%s) is ambient context, not the declared workspace %s for %s\n' \
-      "$ambient_session" "$ambient_state" "$place" "$declared_root" >&2
+    printf '%s: attached vc-frame session %s (%s) is ambient context, not the declared workspace %s for %s\n' \
+      "$verb" "$ambient_session" "$ambient_surface" "$place" "$declared_root" >&2
+  fi
+
+  # The entry decision comes first. A workspace nobody can be shown must not
+  # be created on this caller's behalf.
+  local entry_mode=""
+  if [[ -n "$ambient_session" && "$ambient_surface" == usable ]]; then
+    entry_mode="switch"
+  elif [[ -t 0 && -t 1 ]] || [[ -n "${VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME:-}" ]]; then
+    # The same suite-only bypass the generic create branch honours below:
+    # the child of a terminal hand-off always has a TTY for real, and the
+    # tests drive that child without allocating one.
+    entry_mode="attach"
+  else
+    printf '%s: no attached vc-frame client and no controlling terminal here; the workspace %s for %s cannot be entered from this process.\n' \
+      "$verb" "$place" "$declared_root" >&2
+    printf '  run the %s from a terminal, or let the public entry open one (it does so by itself when no surface is available); nothing was created or launched.\n' \
+      "$verb" >&2
+    return 1
   fi
 
   local vc_frame_bin=""
@@ -1162,8 +1421,8 @@ _vetcoders_prepare_declared_workspace_target() {
     local layout_file=""
     layout_file="$(_vetcoders_operator_layout_file 2>/dev/null || true)"
     [[ -n "$layout_file" ]] || {
-      printf 'resume: no operator layout is available; cannot create the workspace session %s for %s.\n' \
-        "$place" "$declared_root" >&2
+      printf '%s: no operator layout is available; cannot create the workspace session %s for %s.\n' \
+        "$verb" "$place" "$declared_root" >&2
       return 1
     }
     if [[ "$state" == dead ]]; then
@@ -1175,8 +1434,8 @@ _vetcoders_prepare_declared_workspace_target() {
         "$dead_place" "$place" >&2
     fi
     if ! _vetcoders_create_vc_frame_session_detached "$vc_frame_bin" "$place" "$layout_file"; then
-      printf 'resume: could not create the workspace session %s for %s; nothing was launched elsewhere.\n' \
-        "$place" "$declared_root" >&2
+      printf '%s: could not create the workspace session %s for %s; nothing was launched elsewhere.\n' \
+        "$verb" "$place" "$declared_root" >&2
       return 1
     fi
     place="${VIBECRAFTED_PREPARED_VC_FRAME_SESSION:-$place}"
@@ -1185,13 +1444,10 @@ _vetcoders_prepare_declared_workspace_target() {
   export VIBECRAFTED_OPERATOR_SESSION="$place"
   export VC_FRAME_SESSION_NAME="$place"
   export ZELLIJ_SESSION_NAME="$place"
-  if [[ -n "$ambient_session" && "$ambient_state" == live ]]; then
+  if [[ "$entry_mode" == switch ]]; then
     export VIBECRAFTED_PENDING_VC_FRAME_SWITCH="${ambient_session}"$'\t'"${place}"
-  elif [[ -t 0 && -t 1 ]]; then
-    export VIBECRAFTED_PENDING_VC_FRAME_ATTACH="$place"
   else
-    printf 'resume: no live attached client and no controlling terminal here; enter the workspace with: vc-frame attach %s\n' \
-      "$place" >&2
+    export VIBECRAFTED_PENDING_VC_FRAME_ATTACH="$place"
   fi
   return 0
 }
@@ -1210,6 +1466,8 @@ _vetcoders_prepare_operator_runtime() {
   # public entry. Opt-in as well; only the declared-workspace owner above
   # treats the attached frame as ambient context.
   local declared_root="${3:-}"
+  # verb label for messages: resume (default), init, operator, partner, fork.
+  local verb="${4:-resume}"
   local session_name layout_file
   _vetcoders_normalize_ambient_context
   unset VIBECRAFTED_PENDING_VC_FRAME_ATTACH
@@ -1220,17 +1478,33 @@ _vetcoders_prepare_operator_runtime() {
   esac
 
   if [[ -n "$declared_root" ]]; then
-    _vetcoders_prepare_declared_workspace_target "$declared_root"
+    _vetcoders_prepare_declared_workspace_target "$declared_root" "$verb"
     return $?
   fi
 
-  # If we are already inside a vc-frame session, naturally attach to it.
+  # If we are already inside a vc-frame session, naturally attach to it --
+  # when the engine confirms that session as a surface (live, attached client)
+  # or cannot be asked. A marker whose session is dead, missing or unattended
+  # is inherited context from a pane that is gone or a window nobody watches:
+  # adopting it is how `init codex` from an agent shell hung its tab on a
+  # freshly created background `vibecrafted` host the Founder never saw. Say
+  # so, drop it for this launch only, and resolve the project's own target.
   if _vetcoders_in_vc_frame; then
-    VIBECRAFTED_OPERATOR_SESSION="$(_vetcoders_current_vc_frame_session_name)"
-    export VIBECRAFTED_OPERATOR_SESSION
-    export VC_FRAME_SESSION_NAME="$VIBECRAFTED_OPERATOR_SESSION"
-    export ZELLIJ_SESSION_NAME="$VIBECRAFTED_OPERATOR_SESSION"
-    return 0
+    if _vetcoders_has_usable_vc_frame_surface; then
+      VIBECRAFTED_OPERATOR_SESSION="$(_vetcoders_current_vc_frame_session_name)"
+      export VIBECRAFTED_OPERATOR_SESSION
+      export VC_FRAME_SESSION_NAME="$VIBECRAFTED_OPERATOR_SESSION"
+      export ZELLIJ_SESSION_NAME="$VIBECRAFTED_OPERATOR_SESSION"
+      return 0
+    fi
+    local stale_marker=""
+    stale_marker="$(_vetcoders_current_vc_frame_session_name)"
+    printf '%s: attached vc-frame marker %s (%s) is ambient context, not a visible surface; preparing this project'"'"'s own target.\n' \
+      "$verb" "$stale_marker" "$(_vetcoders_vc_frame_surface_state "$stale_marker")" >&2
+    unset VC_FRAME VC_FRAME_PANE_ID VC_FRAME_SESSION_NAME ZELLIJ ZELLIJ_PANE_ID ZELLIJ_SESSION_NAME
+    if [[ "${VIBECRAFTED_OPERATOR_SESSION:-}" == "$stale_marker" ]]; then
+      unset VIBECRAFTED_OPERATOR_SESSION
+    fi
   fi
 
   if [[ -n "${VIBECRAFTED_OPERATOR_SESSION:-}" ]]; then
@@ -1241,11 +1515,32 @@ _vetcoders_prepare_operator_runtime() {
       VIBECRAFTED_OPERATOR_SESSION="$(_vetcoders_operator_session_name)"
       export VIBECRAFTED_OPERATOR_SESSION
     fi
-    export VC_FRAME_SESSION_NAME="${VC_FRAME_SESSION_NAME:-$VIBECRAFTED_OPERATOR_SESSION}"
-    if [[ -n "$defer_attach" ]]; then
-      _vetcoders_mark_pending_vc_frame_attach "$VIBECRAFTED_OPERATOR_SESSION" 0
-    fi
-    return 0
+    # Honoured while the engine reports it live (or cannot be asked). A name
+    # the engine reports dead or missing is inherited env, not a choice: the
+    # spawn would resurrect a host under that name that nobody is attached to.
+    local explicit_surface=""
+    explicit_surface="$(_vetcoders_vc_frame_surface_state "$VIBECRAFTED_OPERATOR_SESSION")"
+    case "$explicit_surface" in
+      dead | missing)
+        printf '%s: VIBECRAFTED_OPERATOR_SESSION=%s is ambient context (%s), not a visible surface; preparing this project'"'"'s own target.\n' \
+          "$verb" "$VIBECRAFTED_OPERATOR_SESSION" "$explicit_surface" >&2
+        unset VIBECRAFTED_OPERATOR_SESSION
+        ;;
+      *)
+        export VC_FRAME_SESSION_NAME="${VC_FRAME_SESSION_NAME:-$VIBECRAFTED_OPERATOR_SESSION}"
+        if [[ -n "$defer_attach" ]]; then
+          # A live session nobody is attached to is entered from a terminal
+          # (same handover as a freshly created one); a watched one is not
+          # nested into.
+          if [[ "$explicit_surface" == unattended ]]; then
+            _vetcoders_mark_pending_vc_frame_attach "$VIBECRAFTED_OPERATOR_SESSION" 1
+          else
+            _vetcoders_mark_pending_vc_frame_attach "$VIBECRAFTED_OPERATOR_SESSION" 0
+          fi
+        fi
+        return 0
+        ;;
+    esac
   fi
 
   # One canonical workspace owner for start and resume. This runs in the
@@ -1417,8 +1712,12 @@ _vetcoders_vc_frame_session_action() {
   local err_file out_file action_status=0 err=""
   local tab_name=""
   tab_name="$(_vetcoders_vc_frame_action_name_arg "$@" 2>/dev/null || true)"
-  err_file="$(mktemp "${TMPDIR:-/tmp}/vc-frame-action.XXXXXX.err")"
-  out_file="$(mktemp "${TMPDIR:-/tmp}/vc-frame-action.XXXXXX.out")"
+  # The X's must END the template: BSD mktemp(1) treats `XXXXXX.err` as a
+  # literal name, so every action on the host shared ONE file, and two
+  # launches at the same instant (two shells, a worker beside the Founder)
+  # failed each other with "mkstemp failed … File exists".
+  err_file="$(mktemp "${TMPDIR:-/tmp}/vc-frame-action.err.XXXXXX")"
+  out_file="$(mktemp "${TMPDIR:-/tmp}/vc-frame-action.out.XXXXXX")"
 
   _vetcoders_vc_frame_action_invoke() {
     if [[ -n "$session_name" ]]; then

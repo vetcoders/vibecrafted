@@ -1139,7 +1139,9 @@ cmd_fork_help() {
   printf '  --session <id|current|previous>     provider session to branch from (never a work-* run id)\n'
   printf '  --run-id <work-...>                 control-plane run; its recorded provider session is the source\n'
   printf '  --repo <path>                       repository the fork runs in, from any directory (--root: legacy spelling)\n'
-  printf '  --runtime visible|terminal          pane in this vc-frame tab, or exec in a plain TTY (headless is refused)\n'
+  printf '  --runtime visible|terminal          pane in this vc-frame tab; outside a watched pane the repo'"'"'s own workspace\n'
+  printf '                                      session hosts the fork as a tab (a terminal is opened when there is none;\n'
+  printf '                                      --runtime terminal in a plain TTY execs the provider directly); headless is refused\n'
   printf '  --placement right|floating          pane shape (default: right)\n'
   printf '  --model <name>                      provider model override\n'
   printf '  --permissions bypass|auto|accept-edits|read-only  provider permission contract (codex: no accept-edits)\n'
@@ -6152,14 +6154,54 @@ cmd_fork() {
   local command_text
   command_text="$(_vetcoders_shell_quote_join "${provider_argv[@]}")" || return 1
 
-  if ! _vetcoders_in_vc_frame; then
+  # A same-tab pane needs a pane someone is looking at: the attached-frame
+  # markers, confirmed by the engine (live session, attached client). Markers
+  # inherited from a pane whose host is gone are ambient context, not a pane.
+  local fork_surface_usable=0
+  if command -v _vetcoders_has_usable_vc_frame_surface >/dev/null ; then
+    ! _vetcoders_has_usable_vc_frame_surface || fork_surface_usable=1
+  elif _vetcoders_in_vc_frame; then
+    fork_surface_usable=1
+  fi
+
+  if ((fork_surface_usable == 0)); then
     if [[ "$runtime" == terminal && -t 0 && -t 1 ]]; then
       cd "$root_dir" || return 1
       exec "${provider_argv[@]}"
     fi
-    echo "Same-tab fork needs an attached vc-frame pane (VC_FRAME_PANE_ID + VC_FRAME_SESSION_NAME)." >&2
-    echo "  Run it from Quick cmd/a shell pane in the target tab, or use --runtime terminal in a plain TTY." >&2
-    return 2
+    # `vibecrafted fork` is a workspace declaration (Founder, 2026-09-09):
+    # outside a usable pane it owes the fork its repository's own workspace
+    # and a real terminal, never a "needs an attached pane" refusal and never
+    # a headless downgrade. The source identity was resolved ABOVE (AICX
+    # `current`/`previous` read this process's own context), so it travels as
+    # the exact provider id; the escalated child re-enters with that id, the
+    # absolute repository and every execution option, and starts the provider
+    # exactly once.
+    if command -v _vetcoders_needs_vc_terminal_entry >/dev/null &&
+      _vetcoders_needs_vc_terminal_entry; then
+      local -a fork_entry_argv=(fork "$agent" --session "$session_id" --repo "$root_dir"
+        --runtime "$runtime" --placement "$placement")
+      [[ -z "$model" ]] || fork_entry_argv+=(--model "$model")
+      [[ -z "$permissions" ]] || fork_entry_argv+=(--permissions "$permissions")
+      [[ -z "$prompt" ]] || fork_entry_argv+=(--prompt "$prompt")
+      _vetcoders_open_public_entry_in_vc_terminal "$root_dir" "${fork_entry_argv[@]}" || return 1
+      return 0
+    fi
+    # A terminal here (or the child a terminal already opened): the
+    # repository's own workspace session hosts the fork as a tab, and the
+    # terminal is handed to it last. Shared owner with init/operator/resume.
+    local fork_receipt=""
+    fork_receipt="$(
+      printf '  agent:     %s\n' "$agent"
+      printf '  session:   %s\n' "$session_id"
+      [[ -z "$source_run_id" ]] || printf '  source:    %s\n' "$source_run_id"
+      printf '  repo:      %s\n' "$root_dir"
+      printf '  tab:       %s fork'"\n" "$agent"
+    )"
+    _vetcoders_contract_root="$root_dir"
+    _vetcoders_launch_interactive_declaration fork "$runtime" "${agent} fork" \
+      "$command_text" "$root_dir" "$fork_receipt"
+    return $?
   fi
 
   local vc_frame_bin session_name repo_label pane_title cmd_script
