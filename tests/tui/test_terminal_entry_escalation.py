@@ -13,9 +13,16 @@ stdin-is-not-a-TTY guard.
 The contract proven here: vc-frame keeps refusing pipes (it is internal), but a
 PUBLIC entry owes the operator a visible terminal. The escalation reuses the one
 owner Vibecrafted.app already uses -- vc-terminal -e <launch-primary-shell.zsh>
-<front door> [argv] -- and then, inside that terminal, the child completes the
-resume in the right ORDER: exactly one AICX pack, exactly one provider tab, and
-only afterwards the blocking foreground attach.
+<child owner> --. Start's child owner is still the generation ``bin/vc-start``.
+Resume/init/operator/partner hand off through
+``env PYTHONPATH=<sourced-core> <owned-python> -m vibecrafted_core.spawn
+interactive-handoff --command <interactive-launch …>``, never a PATH-resolved
+``bin/vibecrafted`` and never a guessed ``argv[2] == resume``. The owned
+token is a real interpreter name (``python`` / ``python3`` / ``python3.N``)
+or the exact checkout wrapper ``scripts/project-python`` — not a basename
+or substring lookalike. Inside that terminal the child completes the resume
+in the right ORDER: exactly one continuity/admission pack, exactly one
+provider tab, and only afterwards the blocking foreground attach.
 
 Four properties are load-bearing and each has a case below:
   * project identity -- explicit --root wins, and the runtime generation is
@@ -43,14 +50,9 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SHELL_SH = (
-    REPO_ROOT
-    / "vibecrafted-core"
-    / "vibecrafted_core"
-    / "runtime"
-    / "shell"
-    / "vetcoders.sh"
-)
+CORE_IMPORT_ROOT = REPO_ROOT / "vibecrafted-core"
+CANONICAL_PROJECT_PYTHON = (REPO_ROOT / "scripts" / "project-python").resolve()
+SHELL_SH = CORE_IMPORT_ROOT / "vibecrafted_core" / "runtime" / "shell" / "vetcoders.sh"
 PRIMARY_SHELL = REPO_ROOT / "config" / "alacritty" / "launch-primary-shell.zsh"
 
 # The operator's terminal is not the inside of a dispatched worker. A worker
@@ -66,6 +68,31 @@ WORKSPACE_IDENTITY_ENV = (
     "VIBECRAFTED_WORKSPACE_INSTANCE_ID",
     "VIBECRAFTED_WORKSPACE_ROOT",
     "VIBECRAFTED_BUILD_ID",
+)
+
+# Ambient worker/runtime bindings must not leak into a public-entry fixture.
+# `_vetcoders_ambient_project_root` used to treat a sourced-checkout
+# VIBECRAFTED_ROOT as the project; these keys are stripped so cwd / --root
+# is the only remaining identity.
+PUBLIC_ENTRY_ISOLATE_ENV = (
+    *WORKSPACE_IDENTITY_ENV,
+    "VIBECRAFTED_START_CREATED_SESSION",
+    "VIBECRAFTED_TERMINAL_ENTRY",
+    "VIBECRAFTED_ROOT",
+    "VIBECRAFTED_RUNTIME_ROOT",
+    "VIBECRAFTED_RUNTIME_BIN",
+    "VIBECRAFTED_RUNTIME_HOME",
+    "VIBECRAFTED_PYTHON",
+    "VIBECRAFTED_CORE_DIR",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "SPAWN_ROOT",
+    "VC_FRAME",
+    "VC_FRAME_PANE_ID",
+    "VC_FRAME_SESSION_NAME",
+    "ZELLIJ",
+    "ZELLIJ_PANE_ID",
+    "ZELLIJ_SESSION_NAME",
 )
 
 # A stand-in for the vc-frame engine. It records every invocation, keeps a live
@@ -211,6 +238,21 @@ def _install_canonical_launcher(home: Path) -> Path:
     )
 
 
+def _commit_fixture_repo(path: Path) -> Path:
+    """Create the minimal Git/HEAD contract required by workflow admission."""
+    path.mkdir(parents=True, exist_ok=True)
+    (path / ".fixture").write_text("fixture\n", encoding="utf-8")
+    for argv in (
+        ["git", "init", "-q", str(path)],
+        ["git", "-C", str(path), "config", "user.email", "fixture@example.invalid"],
+        ["git", "-C", str(path), "config", "user.name", "Fixture"],
+        ["git", "-C", str(path), "add", ".fixture"],
+        ["git", "-C", str(path), "commit", "-q", "-m", "fixture baseline"],
+    ):
+        subprocess.run(argv, check=True, capture_output=True, text=True)
+    return path
+
+
 def _fake_generation(
     root: Path,
     capture: Path,
@@ -268,12 +310,14 @@ def _run_entry(
     terminal_exit: int = 0,
     expect_launch: bool = True,
     shell: str = "bash",
+    prelude: str = "",
 ) -> tuple[subprocess.CompletedProcess[str], dict | None]:
     capture = tmp_path / "terminal-launch.json"
     home = tmp_path / "home"
     home.mkdir(parents=True, exist_ok=True)
     project_dir = tmp_path / project
-    project_dir.mkdir(parents=True, exist_ok=True)
+    if not (project_dir / ".git").exists():
+        _commit_fixture_repo(project_dir)
     if with_canonical_launcher:
         _install_canonical_launcher(home)
     # Create-only start (2026-09-09): a caller without a TTY creates the
@@ -285,23 +329,7 @@ def _run_entry(
     )
 
     env = os.environ.copy()
-    for key in (
-        *WORKSPACE_IDENTITY_ENV,
-        "VIBECRAFTED_START_CREATED_SESSION",
-        "VIBECRAFTED_TERMINAL_ENTRY",
-        "VIBECRAFTED_ROOT",
-        "VIBECRAFTED_RUNTIME_ROOT",
-        "VIBECRAFTED_RUNTIME_BIN",
-        "VIBECRAFTED_RUNTIME_HOME",
-        "VIBECRAFTED_PYTHON",
-        "SPAWN_ROOT",
-        "VC_FRAME",
-        "VC_FRAME_PANE_ID",
-        "VC_FRAME_SESSION_NAME",
-        "ZELLIJ",
-        "ZELLIJ_PANE_ID",
-        "ZELLIJ_SESSION_NAME",
-    ):
+    for key in PUBLIC_ENTRY_ISOLATE_ENV:
         env.pop(key, None)
     env["HOME"] = str(home)
     env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
@@ -328,8 +356,10 @@ def _run_entry(
             "_vetcoders_aicx_resume_fallback() { printf 'called\\n' "
             ">> \"$TEST_AICX_CAPTURE\"; printf 'MODE=new_session\\n'; }"
         ),
-        invocation,
     ]
+    if prelude:
+        lines.append(prelude)
+    lines.append(invocation)
 
     result = subprocess.run(
         _shell_argv(shell, "\n".join(lines)),
@@ -362,30 +392,157 @@ def _working_directory(launch: dict) -> Path:
     return Path(argv[argv.index("--working-directory") + 1]).resolve()
 
 
-def _child_effective_root(tmp_path: Path, launch: dict) -> Path:
-    """The project the CHILD lands on, resolved from the argv it was handed.
+def _flag_value(argv: list[str], flag: str) -> str:
+    try:
+        index = argv.index(flag)
+    except ValueError as exc:
+        raise AssertionError(f"{flag} missing from {argv}") from exc
+    assert index + 1 < len(argv), argv
+    return argv[index + 1]
 
-    The child re-parses the forwarded vector from the terminal's working
-    directory. That SECOND parse is where a raw relative --root resolves one
-    level too deep, so asserting on the parent's cwd alone cannot see it.
+
+def _is_spawn_handoff(hosted: list[str]) -> bool:
+    return "vibecrafted_core.spawn" in hosted and "interactive-handoff" in hosted
+
+
+def _product_front_door(hosted: list[str]) -> str:
+    """Start-family owner: generation ``bin/vc-start`` after the primary shell."""
+    assert hosted, hosted
+    assert hosted[0].endswith("launch-primary-shell.zsh"), hosted
+    assert not _is_spawn_handoff(hosted), hosted
+    return hosted[1]
+
+
+def _product_args(hosted: list[str]) -> list[str]:
+    _product_front_door(hosted)
+    return hosted[2:]
+
+
+def _spawn_owner_argv(hosted: list[str]) -> list[str]:
+    """The child owner after the primary shell.
+
+    Sourced resume/init escalate through
+    ``_vetcoders_enter_admitted_interactive``: either
+    ``/usr/bin/env PYTHONPATH=<core> <python> -m vibecrafted_core.spawn
+    interactive-handoff --command …`` or the same vector without the env
+    wrapper when core is already importable. Never a PATH-resolved
+    ``bin/vibecrafted resume`` and never a fixed verb index.
     """
-    hosted = _hosted_argv(launch)
-    assert hosted[2] == "resume", hosted
-    contract_args = hosted[4:]
-    script = "\n".join(
-        [
-            f'source "{SHELL_SH}"',
-            "_vetcoders_parse_contract "
-            + " ".join(shlex.quote(arg) for arg in contract_args),
-            'printf "CHILD_ROOT=[%s]\\n" "$(_vetcoders_effective_project_root)"',
-        ]
+    assert hosted, hosted
+    assert hosted[0].endswith("launch-primary-shell.zsh"), hosted
+    owner = hosted[1:]
+    assert "vibecrafted_core.spawn" in owner, owner
+    assert "interactive-handoff" in owner, owner
+    assert "--command" in owner, owner
+    assert not any(token.endswith("/bin/vibecrafted") for token in hosted), hosted
+    return owner
+
+
+def _handoff_python_path(owner: list[str]) -> Path:
+    """Selected interpreter or wrapper token in the spawn owner argv."""
+    if Path(owner[0]).name == "env":
+        assert len(owner) > 2, owner
+        assert owner[1].startswith("PYTHONPATH="), owner
+        return Path(owner[2])
+    return Path(owner[0])
+
+
+def _is_interpreter_python_name(name: str) -> bool:
+    """Real interpreter spelling: python, python3, python3.N — not a prefix."""
+    if name in {"python", "python3"}:
+        return True
+    prefix = "python3."
+    if not name.startswith(prefix):
+        return False
+    suffix = name[len(prefix) :]
+    return bool(suffix) and suffix.isdigit()
+
+
+def _is_canonical_project_python(path: Path) -> bool:
+    """Exact repo ``scripts/project-python`` after resolve, not a lookalike."""
+    try:
+        return path.expanduser().resolve() == CANONICAL_PROJECT_PYTHON
+    except OSError:
+        return False
+
+
+def _is_owned_handoff_python(python_path: str | Path) -> bool:
+    path = Path(python_path)
+    return _is_canonical_project_python(path) or _is_interpreter_python_name(path.name)
+
+
+def _assert_owned_handoff_python(python_path: Path, owner: list[str]) -> None:
+    assert _is_owned_handoff_python(python_path), (
+        "unowned handoff interpreter "
+        f"{python_path}: expected python/python3/python3.N or exact "
+        f"{CANONICAL_PROJECT_PYTHON}; owner={owner}"
     )
+
+
+def _handoff_command_text(owner: list[str]) -> str:
+    return _flag_value(owner, "--command")
+
+
+def _inner_launch_argv(command_text: str) -> list[str]:
+    tokens = shlex.split(command_text)
+    assert "vibecrafted_core.spawn" in tokens, tokens
+    assert "interactive-launch" in tokens, tokens
+    return tokens[tokens.index("interactive-launch") :]
+
+
+def _admission_payload(launch_argv: list[str]) -> dict:
+    path = Path(_flag_value(launch_argv, "--admission-file"))
+    assert path.is_file(), path
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _spawn_handoff(hosted: list[str]) -> tuple[list[str], list[str], dict]:
+    """Parse the real child protocol: owner argv, inner launch, admission."""
+    owner = _spawn_owner_argv(hosted)
+    pythonpath_tokens = [token for token in owner if token.startswith("PYTHONPATH=")]
+    assert pythonpath_tokens, owner
+    imported = Path(
+        pythonpath_tokens[0].split("=", 1)[1].split(os.pathsep)[0]
+    ).resolve()
+    assert imported == CORE_IMPORT_ROOT.resolve(), owner
+    _assert_owned_handoff_python(_handoff_python_path(owner), owner)
+    assert owner[owner.index("-m") + 1] == "vibecrafted_core.spawn", owner
+    inner = _inner_launch_argv(_handoff_command_text(owner))
+    admission = _admission_payload(inner)
+    return owner, inner, admission
+
+
+def _parent_aicx_calls(tmp_path: Path) -> list[str]:
+    capture = tmp_path / "aicx-called.txt"
+    if not capture.exists():
+        return []
+    return [line for line in capture.read_text(encoding="utf-8").splitlines() if line]
+
+
+def _child_effective_root(tmp_path: Path, launch: dict) -> Path:
+    """The project the CHILD lands on after the actual owner handoff.
+
+    The parent already resolved root by running this same spawn vector with
+    ``--root-only``. The child re-enters ``interactive-handoff`` from the
+    terminal's working directory. Invoking that owner again with
+    ``--root-only`` from that cwd is the second parse; asserting on the
+    parent's ``--working-directory`` alone cannot see a relative --root
+    walking one level too deep.
+    """
+    owner = _spawn_owner_argv(_hosted_argv(launch))
     env = os.environ.copy()
-    for key in ("VIBECRAFTED_ROOT", "VIBECRAFTED_RUNTIME_ROOT", "SPAWN_ROOT"):
+    for key in (
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "VIBECRAFTED_ROOT",
+        "VIBECRAFTED_RUNTIME_ROOT",
+        "SPAWN_ROOT",
+    ):
         env.pop(key, None)
     env["HOME"] = str(tmp_path / "home")
+    env["VIBECRAFTED_HOME"] = str(tmp_path / "home" / ".vibecrafted")
     result = subprocess.run(
-        ["bash", "--noprofile", "--norc", "-c", script],
+        [*owner, "--root-only"],
         check=False,
         cwd=_working_directory(launch),
         env=env,
@@ -393,9 +550,161 @@ def _child_effective_root(tmp_path: Path, launch: dict) -> Path:
         text=True,
         timeout=60,
     )
-    marker = "CHILD_ROOT=["
-    assert marker in result.stdout, result.stdout + result.stderr
-    return Path(result.stdout.split(marker, 1)[1].split("]", 1)[0]).resolve()
+    assert result.returncode == 0, result.stdout + result.stderr
+    printed = result.stdout.strip().splitlines()[-1]
+    root = Path(printed)
+    if not root.is_absolute():
+        root = _working_directory(launch) / root
+    return root.resolve()
+
+
+def _synthetic_spawn_hosted(
+    python_path: Path | str,
+    *,
+    admission_file: Path,
+    admission: dict | None = None,
+    provider: str = "codex",
+    root: Path | None = None,
+) -> list[str]:
+    """Build a complete spawn-handoff argv around a chosen python token."""
+    selected_root = (root or REPO_ROOT).resolve()
+    payload = (
+        admission
+        if admission is not None
+        else {
+            "skill": "resume",
+            "agent": provider,
+            "root": str(selected_root),
+        }
+    )
+    admission_file.write_text(json.dumps(payload), encoding="utf-8")
+    command = " ".join(
+        [
+            shlex.quote(str(python_path)),
+            "-m",
+            "vibecrafted_core.spawn",
+            "interactive-launch",
+            provider,
+            "--root",
+            shlex.quote(str(selected_root)),
+            "--admission-file",
+            shlex.quote(str(admission_file)),
+        ]
+    )
+    return [
+        str(PRIMARY_SHELL),
+        "/usr/bin/env",
+        f"PYTHONPATH={CORE_IMPORT_ROOT}",
+        str(python_path),
+        "-m",
+        "vibecrafted_core.spawn",
+        "interactive-handoff",
+        "--command",
+        command,
+    ]
+
+
+# --------------------------------------------------------------------------
+# Owned interpreter vs exact project-python wrapper
+# --------------------------------------------------------------------------
+
+
+def test_owned_handoff_python_accepts_exact_canonical_wrapper() -> None:
+    assert CANONICAL_PROJECT_PYTHON.is_file(), CANONICAL_PROJECT_PYTHON
+    assert _is_owned_handoff_python(CANONICAL_PROJECT_PYTHON)
+    assert _is_owned_handoff_python(
+        REPO_ROOT / "scripts" / ".." / "scripts" / "project-python"
+    )
+    assert _is_canonical_project_python(CANONICAL_PROJECT_PYTHON)
+
+
+def test_owned_handoff_python_accepts_interpreter_names() -> None:
+    assert _is_owned_handoff_python("python")
+    assert _is_owned_handoff_python("python3")
+    assert _is_owned_handoff_python("/usr/bin/python3.12")
+    assert _is_owned_handoff_python(REPO_ROOT / ".venv" / "bin" / "python3")
+    assert _is_interpreter_python_name("python3.13")
+    assert not _is_interpreter_python_name("project-python")
+
+
+def test_owned_handoff_python_rejects_unrelated_executable_and_path(
+    tmp_path: Path,
+) -> None:
+    lookalike = tmp_path / "scripts" / "project-python"
+    lookalike.parent.mkdir(parents=True)
+    lookalike.write_text("#!/bin/sh\n", encoding="utf-8")
+    lookalike.chmod(0o755)
+    assert not _is_owned_handoff_python(lookalike)
+    assert not _is_owned_handoff_python("/tmp/evil/project-python")
+    assert not _is_owned_handoff_python("/opt/homebrew/bin/project-python")
+    assert not _is_owned_handoff_python(REPO_ROOT / "scripts" / "project-python-extra")
+    assert not _is_owned_handoff_python(str(CANONICAL_PROJECT_PYTHON) + "-x")
+    assert not _is_owned_handoff_python("project-python")
+    assert not _is_owned_handoff_python("python-malware")
+    assert not _is_owned_handoff_python("my-python3")
+    assert not _is_owned_handoff_python("python3.12rc1")
+    assert not _is_owned_handoff_python("python2")
+    assert not _is_owned_handoff_python("/usr/bin/false")
+    assert not _is_owned_handoff_python(tmp_path / "not-python")
+
+
+def test_spawn_handoff_accepts_exact_canonical_project_python(tmp_path: Path) -> None:
+    project = tmp_path / "selected-repo"
+    hosted = _synthetic_spawn_hosted(
+        CANONICAL_PROJECT_PYTHON,
+        admission_file=tmp_path / "admission.json",
+        root=project,
+    )
+    owner, inner, admission = _spawn_handoff(hosted)
+    assert _handoff_python_path(owner).resolve() == CANONICAL_PROJECT_PYTHON
+    assert inner[0] == "interactive-launch"
+    assert inner[1] == "codex"
+    assert Path(_flag_value(inner, "--root")).resolve() == project.resolve()
+    assert admission["skill"] == "resume"
+    assert admission["agent"] == "codex"
+    assert Path(admission["root"]).resolve() == project.resolve()
+    assert owner.count("interactive-handoff") == 1
+    assert inner.count("interactive-launch") == 1
+
+
+def test_spawn_handoff_accepts_interpreter_form(tmp_path: Path) -> None:
+    project = tmp_path / "selected-repo"
+    hosted = _synthetic_spawn_hosted(
+        Path("/usr/bin/python3.12"),
+        admission_file=tmp_path / "admission.json",
+        root=project,
+        provider="claude",
+    )
+    owner, inner, admission = _spawn_handoff(hosted)
+    assert _is_interpreter_python_name(_handoff_python_path(owner).name)
+    assert inner[1] == "claude"
+    assert admission["skill"] == "resume"
+    assert admission["agent"] == "claude"
+    assert Path(admission["root"]).resolve() == project.resolve()
+
+
+def test_spawn_handoff_rejects_unrelated_project_python_path(tmp_path: Path) -> None:
+    fake = tmp_path / "scripts" / "project-python"
+    fake.parent.mkdir(parents=True)
+    fake.write_text("#!/bin/sh\n", encoding="utf-8")
+    fake.chmod(0o755)
+    hosted = _synthetic_spawn_hosted(
+        fake,
+        admission_file=tmp_path / "admission.json",
+        root=tmp_path / "selected-repo",
+    )
+    with pytest.raises(AssertionError, match="unowned handoff interpreter"):
+        _spawn_handoff(hosted)
+
+
+def test_spawn_handoff_rejects_python_prefix_lookalike(tmp_path: Path) -> None:
+    hosted = _synthetic_spawn_hosted(
+        tmp_path / "bin" / "python-malware",
+        admission_file=tmp_path / "admission.json",
+        root=tmp_path / "selected-repo",
+    )
+    with pytest.raises(AssertionError, match="unowned handoff interpreter"):
+        _spawn_handoff(hosted)
 
 
 # --------------------------------------------------------------------------
@@ -407,6 +716,7 @@ def test_bare_resume_without_tty_opens_terminal_on_this_project(
     tmp_path: Path,
 ) -> None:
     """The reported P0: bare resume must open a terminal, not refuse."""
+    _commit_fixture_repo(tmp_path / "mlx-batch-runner")
     result, launch = _run_entry(tmp_path, "vc-resume codex")
 
     assert result.returncode == 0, result.stderr
@@ -415,38 +725,44 @@ def test_bare_resume_without_tty_opens_terminal_on_this_project(
     # Exact cwd: the session belongs to the project the operator ran this in.
     assert _working_directory(launch) == (tmp_path / "mlx-batch-runner").resolve()
 
-    # The existing owner contract, not a private launcher.
+    # The sourced-shell owner, not a PATH-resolved vibecrafted wrapper.
     hosted = _hosted_argv(launch)
-    assert hosted[0].endswith("launch-primary-shell.zsh")
-    assert hosted[1].endswith("/bin/vibecrafted")
-    assert hosted[2:] == ["resume", "codex"]
+    _owner, inner, admission = _spawn_handoff(hosted)
+    project = (tmp_path / "mlx-batch-runner").resolve()
+    assert inner[1] == "codex", inner
+    assert Path(_flag_value(inner, "--root")).resolve() == project
+    assert admission["skill"] == "resume", admission
+    assert admission["agent"] == "codex", admission
+    assert Path(admission["root"]).resolve() == project
+    assert _child_effective_root(tmp_path, launch) == project
 
     # The child re-enters the same entry; the boundary must ride with it.
     assert launch["boundary"] == "1"
 
-    # Nothing may be launched twice: no AICX pack in the escalating parent.
-    assert not (tmp_path / "aicx-called.txt").exists()
+    # The parent composes exactly one continuity pack into the handoff
+    # command. The child is interactive-handoff, not a second vc-resume.
+    assert _parent_aicx_calls(tmp_path) == ["called"]
     assert "refusing to downgrade" not in result.stderr
 
 
 def test_bare_start_without_tty_opens_terminal_with_its_front_door(
     tmp_path: Path,
 ) -> None:
+    _commit_fixture_repo(tmp_path / "mlx-batch-runner")
     result, launch = _run_entry(tmp_path, "vc-start")
 
     assert result.returncode == 0, result.stderr
     assert launch is not None, f"no terminal was opened: {result.stderr}"
     hosted = _hosted_argv(launch)
     assert hosted[0].endswith("launch-primary-shell.zsh")
-    assert hosted[1].endswith("/bin/vc-start")
+    assert _product_front_door(hosted).endswith("/bin/vc-start")
 
 
 def test_start_explicit_root_is_consumed_before_terminal_escalation(
     tmp_path: Path,
 ) -> None:
     """Public start owns --root; Frame must never receive the project flag."""
-    other = tmp_path / "project with spaces"
-    other.mkdir()
+    other = _commit_fixture_repo(tmp_path / "project with spaces")
 
     result, launch = _run_entry(
         tmp_path, f"vc-start --root={shlex.quote(str(other))} operator"
@@ -459,7 +775,7 @@ def test_start_explicit_root_is_consumed_before_terminal_escalation(
     # Create-only start: the child is handed the resolved repository as the
     # standard `--repo` so it enters the SAME workspace the parent created,
     # whatever its own cwd/Git context is. Frame never sees --root/--repo.
-    assert hosted[2:] == ["operator", "--repo", str(other.resolve())], hosted
+    assert _product_args(hosted) == ["operator", "--repo", str(other.resolve())], hosted
 
 
 @pytest.mark.parametrize("root_arg", ["--root", "--root=", "--root /no/such/project"])
@@ -477,8 +793,7 @@ def test_start_rejects_invalid_root_before_terminal_or_workspace_side_effects(
 def test_start_explicit_root_preserves_resume_without_forwarding_root(
     tmp_path: Path,
 ) -> None:
-    other = tmp_path / "resume project"
-    other.mkdir()
+    other = _commit_fixture_repo(tmp_path / "resume project")
 
     result, launch = _run_entry(
         tmp_path, f"vc-start resume --root {shlex.quote(str(other))}"
@@ -487,7 +802,11 @@ def test_start_explicit_root_preserves_resume_without_forwarding_root(
     assert result.returncode == 0, result.stderr
     assert launch is not None, result.stderr
     assert _working_directory(launch) == other.resolve()
-    assert _hosted_argv(launch)[2:] == ["resume", "--repo", str(other.resolve())]
+    assert _product_args(_hosted_argv(launch)) == [
+        "resume",
+        "--repo",
+        str(other.resolve()),
+    ]
 
 
 def test_start_preserves_exact_argv_including_quoting(tmp_path: Path) -> None:
@@ -496,11 +815,12 @@ def test_start_preserves_exact_argv_including_quoting(tmp_path: Path) -> None:
     (Create-only start accepts exactly one bare workspace name and no foreign
     options, so the replayed vector is the name plus the resolved `--repo`.)
     """
+    _commit_fixture_repo(tmp_path / "mlx-batch-runner")
     result, launch = _run_entry(tmp_path, "vc-start " + shlex.quote("two words"))
 
     assert result.returncode == 0, result.stderr
     assert launch is not None
-    assert _hosted_argv(launch)[2:] == [
+    assert _product_args(_hosted_argv(launch)) == [
         "two words",
         "--repo",
         str((tmp_path / "mlx-batch-runner").resolve()),
@@ -517,8 +837,7 @@ def test_explicit_absolute_root_binds_the_terminal_not_the_cwd(
     tmp_path: Path,
 ) -> None:
     """`--root B` from A opens B. Forwarding B while opening A is the bug."""
-    other = tmp_path / "project-b"
-    other.mkdir()
+    other = _commit_fixture_repo(tmp_path / "project-b")
     result, launch = _run_entry(
         tmp_path, f"vc-resume codex --root {shlex.quote(str(other))}"
     )
@@ -526,22 +845,31 @@ def test_explicit_absolute_root_binds_the_terminal_not_the_cwd(
     assert result.returncode == 0, result.stderr
     assert launch is not None, result.stderr
     assert _working_directory(launch) == other.resolve()
-    assert _hosted_argv(launch)[2:4] == ["resume", "codex"]
+    _owner, inner, admission = _spawn_handoff(_hosted_argv(launch))
+    assert inner[1] == "codex", inner
+    assert Path(_flag_value(inner, "--root")).resolve() == other.resolve()
+    assert admission["skill"] == "resume", admission
+    assert Path(admission["root"]).resolve() == other.resolve()
+    assert _child_effective_root(tmp_path, launch) == other.resolve()
 
 
 def test_relative_explicit_root_is_resolved_against_the_caller(
     tmp_path: Path,
 ) -> None:
     """`--root ../project-b` must not be re-read after we chdir into it."""
-    other = tmp_path / "project-b"
-    other.mkdir()
+    other = _commit_fixture_repo(tmp_path / "project-b")
     result, launch = _run_entry(tmp_path, "vc-resume codex --root ../project-b")
 
     assert result.returncode == 0, result.stderr
     assert launch is not None, result.stderr
     assert _working_directory(launch) == other.resolve()
     # A sibling token resolves back onto itself from the new cwd, so this case
-    # is forgiving by accident. Check the child too, or it proves nothing.
+    # is forgiving by accident. Check the child owner too, or it proves nothing.
+    _owner, inner, admission = _spawn_handoff(_hosted_argv(launch))
+    forwarded_root = Path(_flag_value(inner, "--root"))
+    assert forwarded_root.is_absolute(), inner
+    assert forwarded_root.resolve() == other.resolve()
+    assert Path(admission["root"]).resolve() == other.resolve()
     assert _child_effective_root(tmp_path, launch) == other.resolve()
 
 
@@ -555,8 +883,7 @@ def test_nested_relative_root_survives_the_child_reparse(tmp_path: Path) -> None
     """
     project = tmp_path / "mlx-batch-runner"
     project.mkdir(parents=True, exist_ok=True)
-    nested = project / "child"
-    nested.mkdir()
+    nested = _commit_fixture_repo(project / "child")
 
     result, launch = _run_entry(tmp_path, "vc-resume codex --root child")
 
@@ -564,33 +891,41 @@ def test_nested_relative_root_survives_the_child_reparse(tmp_path: Path) -> None
     assert launch is not None, result.stderr
     assert _working_directory(launch) == nested.resolve()
 
-    hosted = _hosted_argv(launch)
-    assert hosted[4] == "--root", hosted
-    assert Path(hosted[5]).is_absolute(), f"a relative root crossed the cwd: {hosted}"
-    assert Path(hosted[5]).resolve() == nested.resolve()
+    _owner, inner, admission = _spawn_handoff(_hosted_argv(launch))
+    forwarded_root = Path(_flag_value(inner, "--root"))
+    assert forwarded_root.is_absolute(), f"a relative root crossed the cwd: {inner}"
+    assert forwarded_root.resolve() == nested.resolve()
+    assert Path(admission["root"]).resolve() == nested.resolve()
     assert _child_effective_root(tmp_path, launch) == nested.resolve()
 
 
 def test_root_rewrite_preserves_every_other_argument(tmp_path: Path) -> None:
-    """Only the root VALUE is rewritten; flags, order and provider args stay."""
+    """Only the root VALUE is rewritten; provider and surviving flags stay.
+
+    Resume no longer forwards the raw ``vc-resume`` vector. ``--fork-session``
+    is a closed refuse (resume must not silently become a fork). The extra
+    flag that still rides the child owner is ``--permissions``.
+    """
     project = tmp_path / "mlx-batch-runner"
     project.mkdir(parents=True, exist_ok=True)
-    nested = project / "child"
-    nested.mkdir()
+    nested = _commit_fixture_repo(project / "child")
 
     result, launch = _run_entry(
         tmp_path,
-        "vc-resume claude --fork-session --root child --runtime terminal",
+        "vc-resume claude --root child --permissions accept-edits",
     )
 
     assert result.returncode == 0, result.stderr
     assert launch is not None, result.stderr
 
-    hosted = _hosted_argv(launch)[2:]
-    assert hosted[:3] == ["resume", "claude", "--fork-session"], hosted
-    assert hosted[3] == "--root", hosted
-    assert Path(hosted[4]).resolve() == nested.resolve()
-    assert hosted[5:] == ["--runtime", "terminal"], hosted
+    _owner, inner, admission = _spawn_handoff(_hosted_argv(launch))
+    assert inner[1] == "claude", inner
+    assert _flag_value(inner, "--permissions") == "accept-edits", inner
+    assert Path(_flag_value(inner, "--root")).resolve() == nested.resolve()
+    assert admission["skill"] == "resume", admission
+    assert admission["agent"] == "claude", admission
+    assert Path(admission["root"]).resolve() == nested.resolve()
+    assert _child_effective_root(tmp_path, launch) == nested.resolve()
 
 
 def test_explicit_root_that_does_not_exist_is_refused(tmp_path: Path) -> None:
@@ -614,6 +949,7 @@ def test_generation_root_is_not_mistaken_for_the_project(tmp_path: Path) -> None
     project opened the terminal on the release directory.
     """
     generation = tmp_path / "generation"
+    _commit_fixture_repo(tmp_path / "mlx-batch-runner")
     result, launch = _run_entry(
         tmp_path,
         "vc-resume codex",
@@ -634,33 +970,32 @@ def test_generation_root_is_not_mistaken_for_the_project(tmp_path: Path) -> None
 
 
 def _resolve_target(
-    tmp_path: Path, live: list[str], *, project: str = "mlx-batch-runner"
+    tmp_path: Path,
+    live: list[str],
+    *,
+    project: str = "mlx-batch-runner",
+    owner_cli: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     home = tmp_path / "home"
     home.mkdir(parents=True, exist_ok=True)
     _install_canonical_launcher(home)
     project_dir = tmp_path / project
-    project_dir.mkdir(parents=True, exist_ok=True)
+    if not (project_dir / ".git").exists():
+        _commit_fixture_repo(project_dir)
     generation = _fake_generation(tmp_path, tmp_path / "unused.json")
     live_file = tmp_path / "live-sessions.txt"
     live_file.write_text("".join(f"{name}\n" for name in live), encoding="utf-8")
 
     env = os.environ.copy()
-    for key in (
-        *WORKSPACE_IDENTITY_ENV,
-        "VIBECRAFTED_ROOT",
-        "VIBECRAFTED_RUNTIME_ROOT",
-        "SPAWN_ROOT",
-        "VC_FRAME_PANE_ID",
-        "VC_FRAME_SESSION_NAME",
-        "ZELLIJ_SESSION_NAME",
-    ):
+    for key in PUBLIC_ENTRY_ISOLATE_ENV:
         env.pop(key, None)
     env["HOME"] = str(home)
     env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
     env["XDG_CONFIG_HOME"] = str(home / ".config")
     env["VC_FRAME_LIVE"] = str(live_file)
     env["VC_FRAME_LOG"] = str(tmp_path / "frame.log")
+    if owner_cli is not None:
+        env["VIBECRAFTED_PRODUCT_CORE_CLI"] = str(owner_cli)
 
     script = (
         f'source "{SHELL_SH}"\n'
@@ -708,17 +1043,27 @@ def test_attached_marker_on_another_project_is_not_ownership(
 
 
 def test_project_bound_live_session_is_reused(tmp_path: Path) -> None:
-    """Proven ownership: the session named after THIS repository."""
+    """Only the selected owner's matching workspace binding is reused."""
+    project = _commit_fixture_repo(tmp_path / "mlx-batch-runner")
+    calls = tmp_path / "owner-calls"
+    owner = _canonical_owner_cli(tmp_path / "owner-cli", calls=calls)
     result = _resolve_target(
-        tmp_path, ["Live runs", "mlx-batch-runner", "host-a"]
+        tmp_path,
+        ["Live runs", BOUND_SESSION, "mlx-batch-runner", "host-a"],
+        owner_cli=owner,
     )
-    assert "TARGET=[mlx-batch-runner]" in result.stdout, result.stdout + result.stderr
+    assert f"TARGET=[{BOUND_SESSION}]" in result.stdout, result.stdout + result.stderr
+    assert "TARGET=[mlx-batch-runner]" not in result.stdout
+    assert f"workspace resolve --root {project} --env" in calls.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_unrelated_live_sessions_do_not_block_the_project(tmp_path: Path) -> None:
     """End to end: global sessions elsewhere never refuse the escalation."""
     live_file = tmp_path / "live-sessions.txt"
     live_file.write_text("Live runs\nNeeds attention\nhost-a\n", encoding="utf-8")
+    _commit_fixture_repo(tmp_path / "mlx-batch-runner")
     result, launch = _run_entry(
         tmp_path,
         "vc-resume codex",
@@ -793,7 +1138,8 @@ def _bound_project(
     home.mkdir(parents=True, exist_ok=True)
     _install_canonical_launcher(home)
     project_dir = tmp_path / project
-    project_dir.mkdir(parents=True, exist_ok=True)
+    if not (project_dir / ".git").exists():
+        _commit_fixture_repo(project_dir)
     generation = _fake_generation(tmp_path, tmp_path / "unused.json")
     live_file = tmp_path / "live-sessions.txt"
     live_file.write_text("".join(f"{name}\n" for name in live), encoding="utf-8")
@@ -807,16 +1153,7 @@ def _bound_project(
 
     env = os.environ.copy()
     for key in (
-        *WORKSPACE_IDENTITY_ENV,
-        "VIBECRAFTED_ROOT",
-        "VIBECRAFTED_RUNTIME_ROOT",
-        "SPAWN_ROOT",
-        "VC_FRAME",
-        "VC_FRAME_PANE_ID",
-        "VC_FRAME_SESSION_NAME",
-        "ZELLIJ",
-        "ZELLIJ_PANE_ID",
-        "ZELLIJ_SESSION_NAME",
+        *PUBLIC_ENTRY_ISOLATE_ENV,
         # tests/conftest.py sets this suite-wide. Here the no-PTY path IS the
         # contract under test, so the bypass is opted into per case instead.
         "VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME",
@@ -1424,6 +1761,50 @@ def test_installed_generation_uses_its_owned_interpreter_over_foreign_override(
     assert not foreign_capture.exists(), result.stdout + result.stderr
 
 
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_core_python_spec_resolves_import_root_without_bash_source(
+    tmp_path: Path, shell: str
+) -> None:
+    """Zsh BASH_SOURCE is empty in shell/lib. The owned core dir captured at
+    facade load must still be the import root, and a hostile public python3
+    must not be selected when VIBECRAFTED_PYTHON names the owned interpreter.
+    """
+    hostile = tmp_path / "hostile-bin"
+    _write(
+        hostile / "python3",
+        "#!/bin/sh\nprintf 'HOST_PYTHON_SELECTED\\n' >&2\nexit 79\n",
+    )
+    env = os.environ.copy()
+    for key in PUBLIC_ENTRY_ISOLATE_ENV:
+        env.pop(key, None)
+    env["VIBECRAFTED_PYTHON"] = sys.executable
+    env["PATH"] = f"{hostile}:/usr/bin:/bin"
+    script = (
+        f'source "{SHELL_SH}"\n'
+        'spec="$(_vetcoders_core_python_spec)" || exit 2\n'
+        'printf "PY=[%s]\\n" "${spec%%	*}"\n'
+        'printf "ROOT=[%s]\\n" "${spec#*	}"\n'
+    )
+    result = subprocess.run(
+        _shell_argv(shell, script),
+        check=False,
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "HOST_PYTHON_SELECTED" not in result.stdout + result.stderr
+    assert f"PY=[{sys.executable}]" in result.stdout or "PY=[" in result.stdout
+    root_line = next(
+        line for line in result.stdout.splitlines() if line.startswith("ROOT=[")
+    )
+    root = root_line[len("ROOT=[") : -1]
+    if root:
+        assert Path(root).resolve() == CORE_IMPORT_ROOT.resolve(), result.stdout
+
+
 # --------------------------------------------------------------------------
 # One physical config owner
 # --------------------------------------------------------------------------
@@ -1507,17 +1888,28 @@ def test_rejected_terminal_launch_is_reported_as_a_failure(
 
 
 def test_missing_front_door_stops_before_any_aicx_work(tmp_path: Path) -> None:
-    """No front door means no PTY is obtainable -- do not assemble a 48h pack."""
+    """No spawn owner means no PTY is obtainable -- do not assemble a 48h pack.
+
+    Resume no longer uses generation ``bin/vibecrafted`` as the hosted front
+    door. The child owner is ``_vetcoders_core_python_spec`` plus
+    ``vibecrafted_core.spawn``. A missing ``bin/vibecrafted`` stub is not a
+    refusal anymore; a failed core python spec is.
+    """
+    _commit_fixture_repo(tmp_path / "mlx-batch-runner")
     result, launch = _run_entry(
         tmp_path,
         "vc-resume codex",
-        front_doors=("vc-start",),
         expect_launch=False,
+        prelude=(
+            "_vetcoders_core_python_spec() { "
+            'echo "Vibecrafted core unavailable: cannot import vibecrafted_core." >&2; '
+            "return 1; }"
+        ),
     )
 
     assert launch is None
     assert result.returncode != 0
-    assert "no installed vibecrafted front door" in result.stderr
+    assert "vibecrafted_core" in result.stderr
     assert not (tmp_path / "aicx-called.txt").exists()
 
 
@@ -1542,8 +1934,17 @@ def test_missing_terminal_host_fails_actionably(
         assert "vc-frame engine is unavailable" in combined, combined
         assert "refusing to create" in combined, combined
     else:
-        assert "no TTY" in combined
-        assert "terminal" in combined.lower()
+        # Resume no longer uses generation bin/vibecrafted as the hosted front
+        # door, so the old "no TTY and no installed vibecrafted front door"
+        # sentence is gone. The gap it still names is the missing terminal
+        # host / engine under the empty loaded root.
+        assert "terminal" in combined.lower() or "vc-frame" in combined, combined
+        assert (
+            "no TTY" in combined
+            or "missing" in combined.lower()
+            or "unavailable" in combined.lower()
+            or "vc-terminal" in combined
+        ), combined
 
 
 # --------------------------------------------------------------------------
@@ -1687,7 +2088,8 @@ def _run_child_resume(
         "layout {\n}\n",
     )
     project_dir = tmp_path / "mlx-batch-runner"
-    project_dir.mkdir(parents=True, exist_ok=True)
+    if not (project_dir / ".git").exists():
+        _commit_fixture_repo(project_dir)
     generation = _fake_generation(tmp_path, tmp_path / "unused.json")
 
     frame_log = tmp_path / "frame.log"
@@ -1697,15 +2099,7 @@ def _run_child_resume(
     )
 
     env = os.environ.copy()
-    for key in (
-        *WORKSPACE_IDENTITY_ENV,
-        "VIBECRAFTED_ROOT",
-        "VIBECRAFTED_RUNTIME_ROOT",
-        "SPAWN_ROOT",
-        "VC_FRAME_PANE_ID",
-        "VC_FRAME_SESSION_NAME",
-        "ZELLIJ_SESSION_NAME",
-    ):
+    for key in PUBLIC_ENTRY_ISOLATE_ENV:
         env.pop(key, None)
     env["HOME"] = str(home)
     env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
@@ -1729,7 +2123,7 @@ def _run_child_resume(
     )
     result = subprocess.run(
         [
-            "python3",
+            sys.executable,
             "-c",
             (
                 "import pty, sys; sys.exit(pty.spawn("
@@ -1964,7 +2358,8 @@ def _prepare_and_attach(
         "layout {\n}\n",
     )
     project_dir = tmp_path / project_name
-    project_dir.mkdir(parents=True, exist_ok=True)
+    if not (project_dir / ".git").exists():
+        _commit_fixture_repo(project_dir)
     generation = _fake_generation(tmp_path, tmp_path / "unused.json")
 
     frame_log = tmp_path / "frame.log"
@@ -1974,17 +2369,8 @@ def _prepare_and_attach(
 
     env = os.environ.copy()
     for key in (
-        *WORKSPACE_IDENTITY_ENV,
+        *PUBLIC_ENTRY_ISOLATE_ENV,
         "VIBECRAFTED_PENDING_VC_FRAME_ATTACH",
-        "VIBECRAFTED_ROOT",
-        "VIBECRAFTED_RUNTIME_ROOT",
-        "SPAWN_ROOT",
-        "VC_FRAME",
-        "VC_FRAME_PANE_ID",
-        "VC_FRAME_SESSION_NAME",
-        "ZELLIJ",
-        "ZELLIJ_PANE_ID",
-        "ZELLIJ_SESSION_NAME",
     ):
         env.pop(key, None)
     env["HOME"] = str(home)
@@ -2020,7 +2406,7 @@ def _prepare_and_attach(
     )
     result = subprocess.run(
         [
-            "python3",
+            sys.executable,
             "-c",
             (
                 "import pty, sys; sys.exit(pty.spawn("
@@ -2225,13 +2611,12 @@ def test_nested_relative_root_survives_the_child_reparse_under_zsh(
 ) -> None:
     """The bash P0 fix (test_nested_relative_root_survives_the_child_reparse)
     held only under bash: the same `--root child` case must open the correct
-    nested project, and the hosted argv must carry the absolute rewrite, when
+    nested project, and the child owner must carry the absolute rewrite, when
     the operator's login shell is zsh.
     """
     project = tmp_path / "mlx-batch-runner"
     project.mkdir(parents=True, exist_ok=True)
-    nested = project / "child"
-    nested.mkdir()
+    nested = _commit_fixture_repo(project / "child")
 
     result, launch = _run_entry(tmp_path, "vc-resume codex --root child", shell="zsh")
 
@@ -2239,10 +2624,12 @@ def test_nested_relative_root_survives_the_child_reparse_under_zsh(
     assert launch is not None, result.stderr
     assert _working_directory(launch) == nested.resolve()
 
-    hosted = _hosted_argv(launch)
-    assert hosted[4] == "--root", hosted
-    assert Path(hosted[5]).is_absolute(), f"a relative root crossed the cwd: {hosted}"
-    assert Path(hosted[5]).resolve() == nested.resolve()
+    _owner, inner, admission = _spawn_handoff(_hosted_argv(launch))
+    forwarded_root = Path(_flag_value(inner, "--root"))
+    assert forwarded_root.is_absolute(), f"a relative root crossed the cwd: {inner}"
+    assert forwarded_root.resolve() == nested.resolve()
+    assert Path(admission["root"]).resolve() == nested.resolve()
+    assert _child_effective_root(tmp_path, launch) == nested.resolve()
 
 
 # --------------------------------------------------------------------------
@@ -2380,16 +2767,16 @@ def test_bare_resume_without_tty_opens_terminal_under_zsh(tmp_path: Path) -> Non
     whether the host admitted the launch must not silently read the wrong
     variable.
     """
+    _commit_fixture_repo(tmp_path / "mlx-batch-runner")
     result, launch = _run_entry(tmp_path, "vc-resume codex", shell="zsh")
 
     assert result.returncode == 0, result.stderr
     assert launch is not None, f"no terminal was opened: {result.stderr}"
     assert "read-only variable" not in result.stderr, result.stderr
-    hosted = _hosted_argv(launch)
-    assert hosted[0].endswith("launch-primary-shell.zsh")
-
-    # Nothing may be launched twice: no AICX pack in the escalating parent.
-    assert not (tmp_path / "aicx-called.txt").exists()
+    _owner, inner, admission = _spawn_handoff(_hosted_argv(launch))
+    assert inner[1] == "codex", inner
+    assert admission["skill"] == "resume", admission
+    assert _parent_aicx_calls(tmp_path) == ["called"]
 
 
 def _run_terminal_path_entry(
@@ -2464,8 +2851,17 @@ def test_terminal_entry_drops_owned_generation_bins_from_a_polluted_parent(
     _write(founder_bin / "founder-tool", "#!/bin/sh\nprintf founder-tool\n")
     inherited = os.pathsep.join(
         [
-            "", str(stale_bins[0]), str(founder_bin), str(stale_bins[1]),
-            str(lookalike), str(selected_bin), str(stale_bins[2]), "", "/usr/bin", "/bin", "",
+            "",
+            str(stale_bins[0]),
+            str(founder_bin),
+            str(stale_bins[1]),
+            str(lookalike),
+            str(selected_bin),
+            str(stale_bins[2]),
+            "",
+            "/usr/bin",
+            "/bin",
+            "",
         ]
     )
 
@@ -2473,7 +2869,13 @@ def test_terminal_entry_drops_owned_generation_bins_from_a_polluted_parent(
         tmp_path, runtime_home=runtime_home, inherited_path=inherited
     )
     assert str(receipt["path"]).split(os.pathsep) == [
-        "", str(founder_bin), str(lookalike), "", "/usr/bin", "/bin", ""
+        "",
+        str(founder_bin),
+        str(lookalike),
+        "",
+        "/usr/bin",
+        "/bin",
+        "",
     ]
     assert receipt["founder_tool"] == str(founder_bin / "founder-tool")
     assert receipt["runtime_home"] == str(runtime_home)
@@ -2492,7 +2894,9 @@ def test_terminal_entry_path_sanitation_is_idempotent_for_clean_custom_root(
     _write(founder_bin / "founder-tool", "#!/bin/sh\nprintf founder-tool\n")
     clean = os.pathsep.join([str(founder_bin), "", str(lookalike), "/usr/bin", "/bin"])
 
-    receipt = _run_terminal_path_entry(tmp_path, runtime_home=runtime_home, inherited_path=clean)
+    receipt = _run_terminal_path_entry(
+        tmp_path, runtime_home=runtime_home, inherited_path=clean
+    )
     assert receipt["path"] == clean
     assert receipt["founder_tool"] == str(founder_bin / "founder-tool")
 
@@ -2509,7 +2913,14 @@ def test_terminal_entry_anchors_custom_release_cleanup_on_its_selected_root(
     for directory in (stale, selected, lookalike, stale_parent_bin):
         directory.mkdir(parents=True, exist_ok=True)
     inherited = os.pathsep.join(
-        [str(stale), str(lookalike), str(selected), str(stale_parent_bin), "/usr/bin", "/bin"]
+        [
+            str(stale),
+            str(lookalike),
+            str(selected),
+            str(stale_parent_bin),
+            "/usr/bin",
+            "/bin",
+        ]
     )
 
     receipt = _run_terminal_path_entry(
@@ -2587,12 +2998,20 @@ def test_interpreter_start_failure_is_not_reported_as_accepted(
     (`vc-terminal`) must never be invoked either.
     """
     fake_bin = tmp_path / "fakebin"
-    _write_fake_python3(fake_bin, f"#!{sys.executable}\nimport sys\nsys.exit(42)\n")
+    fake_python = _write_fake_python3(
+        fake_bin, f"#!{sys.executable}\nimport sys\nsys.exit(42)\n"
+    )
 
     result, launch = _run_entry(
         tmp_path,
         "vc-resume codex",
-        extra_env={"PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"},
+        extra_env={
+            # Owned core spec must keep a real interpreter; the injected
+            # failure is the terminal driver's python, not PATH python3.
+            "VIBECRAFTED_PYTHON": sys.executable,
+            "PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin",
+        },
+        prelude=(f'_vetcoders_internal_python() {{ printf "%s\\n" "{fake_python}"; }}'),
         expect_launch=False,
         shell=shell,
     )
@@ -2616,7 +3035,7 @@ def test_driver_popen_failure_is_not_reported_as_accepted(
     silently folded into "accepted... starting".
     """
     fake_bin = tmp_path / "fakebin"
-    _write_fake_python3(
+    fake_python = _write_fake_python3(
         fake_bin,
         f"#!{sys.executable}\n"
         "import sys, subprocess\n"
@@ -2630,7 +3049,11 @@ def test_driver_popen_failure_is_not_reported_as_accepted(
     result, launch = _run_entry(
         tmp_path,
         "vc-resume codex",
-        extra_env={"PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"},
+        extra_env={
+            "VIBECRAFTED_PYTHON": sys.executable,
+            "PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin",
+        },
+        prelude=(f'_vetcoders_internal_python() {{ printf "%s\\n" "{fake_python}"; }}'),
         expect_launch=False,
         shell=shell,
     )

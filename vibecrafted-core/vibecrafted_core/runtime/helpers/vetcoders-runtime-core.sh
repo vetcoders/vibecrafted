@@ -147,6 +147,14 @@ _vetcoders_ambient_project_root() {
     && "$root" == "${VIBECRAFTED_RUNTIME_ROOT}" ]]; then
     return 0
   fi
+  # Source-checkout owner (core.sh unsets RUNTIME_ROOT): the facade binds
+  # VIBECRAFTED_ROOT to the loaded shell, not to the operator's project.
+  # Treating that path as the project names sessions after the worktree
+  # instead of cwd / --root.
+  if [[ -n "$root" && -z "${VIBECRAFTED_RUNTIME_ROOT:-}" \
+    && -e "$root/.git" && ! -f "$root/runtime-manifest.json" ]]; then
+    return 0
+  fi
   printf '%s\n' "$root"
 }
 
@@ -438,9 +446,8 @@ _vetcoders_operator_place_session_name() {
     _vetcoders_session_base_name
     return 0
   fi
-  local root_dir=""
+  local root_dir="" resolved="" python_spec py import_root
   root_dir="$(_vetcoders_effective_project_root)"
-  local resolved=""
 
   # Physical owner first: the selected generation's CLI is the same catalogue
   # reader vc-start's workspace preparation uses, with the interpreter and
@@ -456,24 +463,36 @@ _vetcoders_operator_place_session_name() {
     fi
   fi
 
-  # Degraded path: this helper is also sourced without the product entry
-  # module. `python3` here is whatever the login PATH provides — under
-  # `zsh -lic` that is Homebrew's, ahead of the generation's bin, and it cannot
-  # import vibecrafted_core at all. The previous blanket `except Exception`
-  # printed the repository basename for that ImportError, making an unreachable
-  # catalogue indistinguishable from a genuine "this root has no workspace" and
-  # silently degrading a bound place to a bare name. Let the import failure be
-  # a failure; `resolve_operator_place_session` already answers the real
-  # catalogue misses itself.
-  if command -v python3 >/dev/null 2>&1; then
-    resolved="$(
-      SPAWN_ROOT="$root_dir" VIBECRAFTED_ROOT="$root_dir" python3 - <<'PY' 2>/dev/null
+  # Same owned interpreter/import-root as the public entries. A bare PATH
+  # `python3` is the login host, not the catalogue owner — under `zsh -lic`
+  # that is Homebrew, and it cannot import vibecrafted_core. Import failure
+  # stays a failure; do not degrade to the repository basename.
+  if command -v _vetcoders_core_python_spec >/dev/null 2>&1; then
+    python_spec="$(_vetcoders_core_python_spec 2>/dev/null)" || python_spec=""
+    py="${python_spec%%$'\t'*}"
+    import_root="${python_spec#*$'\t'}"
+    if [[ -n "$py" ]]; then
+      if [[ -n "$import_root" ]]; then
+        resolved="$(
+          SPAWN_ROOT="$root_dir" VIBECRAFTED_ROOT="$root_dir" \
+            PYTHONPATH="$import_root" "$py" - <<'PY' 2>/dev/null
 import os
 from vibecrafted_core.workspace_catalog import resolve_operator_place_session
 root = os.environ.get("SPAWN_ROOT") or os.environ.get("VIBECRAFTED_ROOT") or os.getcwd()
 print(resolve_operator_place_session(root=root, env=os.environ), end="")
 PY
-    )" || resolved=""
+        )" || resolved=""
+      else
+        resolved="$(
+          SPAWN_ROOT="$root_dir" VIBECRAFTED_ROOT="$root_dir" "$py" - <<'PY' 2>/dev/null
+import os
+from vibecrafted_core.workspace_catalog import resolve_operator_place_session
+root = os.environ.get("SPAWN_ROOT") or os.environ.get("VIBECRAFTED_ROOT") or os.getcwd()
+print(resolve_operator_place_session(root=root, env=os.environ), end="")
+PY
+        )" || resolved=""
+      fi
+    fi
   fi
   if [[ -n "$resolved" ]]; then
     printf '%s\n' "$resolved"

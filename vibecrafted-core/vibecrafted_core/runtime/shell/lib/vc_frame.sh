@@ -903,11 +903,15 @@ _vetcoders_effective_worker_session() {
   root_dir="$(_vetcoders_effective_project_root)"
 
   local resolved=""
-  local python_bin=""
-  python_bin="$(_vetcoders_internal_python)"
-  if command -v "$python_bin" >/dev/null 2>&1; then
-    resolved="$(
-      SPAWN_ROOT="$root_dir" VIBECRAFTED_ROOT="$root_dir" "$python_bin" - <<'PY' 2>/dev/null
+  local python_spec py import_root
+  python_spec="$(_vetcoders_core_python_spec 2>/dev/null)" || python_spec=""
+  py="${python_spec%%$'\t'*}"
+  import_root="${python_spec#*$'\t'}"
+  if [[ -n "$py" ]]; then
+    if [[ -n "$import_root" ]]; then
+      resolved="$(
+        SPAWN_ROOT="$root_dir" VIBECRAFTED_ROOT="$root_dir" \
+          PYTHONPATH="$import_root" "$py" - <<'PY' 2>/dev/null
 import os
 from pathlib import Path
 root = os.environ.get("SPAWN_ROOT") or os.environ.get("VIBECRAFTED_ROOT") or os.getcwd()
@@ -917,7 +921,21 @@ try:
 except Exception:
     print(f"{Path(root).name or 'vibecrafted'}-w", end="")
 PY
-    )" || resolved=""
+      )" || resolved=""
+    else
+      resolved="$(
+        SPAWN_ROOT="$root_dir" VIBECRAFTED_ROOT="$root_dir" "$py" - <<'PY' 2>/dev/null
+import os
+from pathlib import Path
+root = os.environ.get("SPAWN_ROOT") or os.environ.get("VIBECRAFTED_ROOT") or os.getcwd()
+try:
+    from vibecrafted_core.workspace_catalog import resolve_worker_host_session
+    print(resolve_worker_host_session(root=root, env=os.environ), end="")
+except Exception:
+    print(f"{Path(root).name or 'vibecrafted'}-w", end="")
+PY
+      )" || resolved=""
+    fi
   fi
   if [[ -n "$resolved" ]]; then
     printf '%s\n' "$resolved"
