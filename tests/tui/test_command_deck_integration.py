@@ -176,6 +176,7 @@ def test_native_session_state_routes_and_reopen(tmp_path: Path) -> None:
     sources = sorted((APP / "CommandDeck").glob("*.swift"))
     sources += [
         APP / "ServerMenuPolicy.swift",
+        APP / "LifecycleLog.swift",
         APP / "Views/MainWindowController.swift",
         SHELL / "tests/CommandDeckIntegrationTests.swift",
     ]
@@ -239,6 +240,16 @@ def test_native_session_state_routes_and_reopen(tmp_path: Path) -> None:
                 self.wfile.write(
                     b"<!doctype html><title>always stalled fixture</title>"
                 )
+                return
+            if self.path == "/inline-script":
+                body = b"""<!doctype html><title>inline script fixture</title>
+<main id="canvas">ready</main>
+<script>document.documentElement.dataset.inlineFixture = "ready";</script>"""
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
                 return
             if self.path == "/download":
                 self.send_response(200)
