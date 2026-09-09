@@ -20,6 +20,30 @@ from vibecrafted_core.runtime_pack_contract import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = REPO_ROOT / "scripts/install-runtime-pack.sh"
 PACKAGER = REPO_ROOT / "scripts/package-runtime-pack.sh"
+SELECTION_LIBRARY = REPO_ROOT / "scripts/lib/runtime-pack-selection.sh"
+SELECTION_SCHEMA = "vibecrafted.runtime-pack-selection.v1"
+# The eighteen canonical archives the Founder's dist actually held on
+# 2026-09-09, when `make runtime-pack && make install` refused as ambiguous.
+HISTORICAL_PACKS = (
+    "Vibecrafted_RuntimePack_4.3.0-20260906-6a0cf10a-darwin-arm64.tar.gz",
+    "Vibecrafted_RuntimePack_4.3.0-20260906-ae650a83-darwin-arm64.tar.gz",
+    "Vibecrafted_RuntimePack_4.3.0-20260906-cb026674-darwin-arm64.tar.gz",
+    "Vibecrafted_RuntimePack_4.3.0-20260906-f861d136-darwin-arm64.tar.gz",
+    "Vibecrafted_RuntimePack_4.3.0-20260907-043864af-darwin-arm64.tar.gz",
+    "Vibecrafted_RuntimePack_4.3.0-20260907-09c947e0-darwin-arm64.tar.gz",
+    "Vibecrafted_RuntimePack_4.3.0-20260907-ae7c5ed8-darwin-arm64.tar.gz",
+    "Vibecrafted_RuntimePack_4.3.1-20260908-32659c8a-darwin-arm64.tar.gz",
+    "Vibecrafted_RuntimePack_4.3.1-20260908-381c6b8b-darwin-arm64.tar.gz",
+    "Vibecrafted_RuntimePack_4.3.1-20260908-48dc4050-darwin-arm64.tar.gz",
+    "Vibecrafted_RuntimePack_4.3.1-20260908-653649f4-darwin-arm64.tar.gz",
+    "Vibecrafted_RuntimePack_4.3.1-20260908-68065b95-darwin-arm64.tar.gz",
+    "Vibecrafted_RuntimePack_4.3.1-20260908-83c26f12-darwin-arm64.tar.gz",
+    "Vibecrafted_RuntimePack_4.3.1-20260908-aa12980d-darwin-arm64.tar.gz",
+    "Vibecrafted_RuntimePack_4.3.1-20260908-ec951bbd-darwin-arm64.tar.gz",
+    "Vibecrafted_RuntimePack_4.3.1-20260908-f53e79a0-darwin-arm64.tar.gz",
+    "Vibecrafted_RuntimePack_4.3.1-20260909-0e5f10ee-darwin-arm64.tar.gz",
+    "Vibecrafted_RuntimePack_4.3.1-20260909-8177a33d-darwin-arm64.tar.gz",
+)
 SOURCE_SHA = "1" * 40
 TERMINAL_SHA = "2" * 40
 FRAME_SHA = "3" * 40
@@ -47,7 +71,7 @@ def _foundation_manifest(root: Path) -> None:
     )
 
 
-def _fake_runtime_payload(root: Path, capture: Path) -> None:
+def _fake_runtime_payload(root: Path, capture: Path, marker: str | None = None) -> None:
     (root / "bin").mkdir(parents=True)
     (root / "scripts").mkdir(parents=True)
     contract_dir = root / "vibecrafted-core/vibecrafted_core"
@@ -73,10 +97,19 @@ def _fake_runtime_payload(root: Path, capture: Path) -> None:
         '  printf mutation > "$INSTALLER_CHILD_MUTATION"\n'
         "  exit 0\n"
         "fi\n"
+        # Identify WHICH archive's payload is running, so a selection test can
+        # prove the installed bytes are the recorded ones rather than merely
+        # some archive that happened to verify.
+        'if [[ -n "${PACK_MARKER_OUT:-}" ]]; then\n'
+        '  marker="$(dirname "$0")/../PACK-MARKER"\n'
+        '  [[ -f "$marker" ]] && cat "$marker" > "$PACK_MARKER_OUT"\n'
+        "fi\n"
         'printf "%s\\n" "$@" > "$CAPTURE"\n',
         encoding="utf-8",
     )
     python.chmod(0o755)
+    if marker is not None:
+        (root / "PACK-MARKER").write_text(marker, encoding="utf-8")
     vc_start = root / "bin/vc-start"
     vc_start.write_text("#!/bin/sh\n", encoding="utf-8")
     vc_start.chmod(0o755)
@@ -140,6 +173,7 @@ def _sealed_archive(
     *,
     name: str = "Vibecrafted_RuntimePack_fixture.tar.gz",
     source_revision: str = SOURCE_SHA,
+    keys: tuple[Path, Path] | None = None,
 ) -> tuple[Path, Path]:
     archive = tmp_path / name
     _source_provenance(payload, source_revision)
@@ -159,26 +193,32 @@ def _sealed_archive(
     archive.with_suffix(archive.suffix + ".sha256").write_text(
         f"{checksum}  {archive.name}\n", encoding="utf-8"
     )
-    private_key = tmp_path / "signing.key"
-    public_key = tmp_path / "signing.pub"
-    subprocess.run(
-        ["openssl", "genpkey", "-algorithm", "RSA", "-out", str(private_key)],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        [
-            "openssl",
-            "pkey",
-            "-in",
-            str(private_key),
-            "-pubout",
-            "-out",
-            str(public_key),
-        ],
-        check=True,
-        capture_output=True,
-    )
+    # Two archives sealed by the SAME key make a selection test honest: picking
+    # the wrong one then fails on selection, not on an unrelated signature.
+    if keys is not None:
+        private_key, public_key = keys
+    else:
+        private_key = tmp_path / "signing.key"
+        public_key = tmp_path / "signing.pub"
+    if not private_key.exists():
+        subprocess.run(
+            ["openssl", "genpkey", "-algorithm", "RSA", "-out", str(private_key)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "openssl",
+                "pkey",
+                "-in",
+                str(private_key),
+                "-pubout",
+                "-out",
+                str(public_key),
+            ],
+            check=True,
+            capture_output=True,
+        )
     subprocess.run(
         [
             "openssl",
@@ -229,9 +269,13 @@ def _isolated_repo_install(
 ) -> subprocess.CompletedProcess[str]:
     repo = root / "repo"
     scripts = repo / "scripts"
-    scripts.mkdir(parents=True)
+    (scripts / "lib").mkdir(parents=True, exist_ok=True)
     shutil.copy2(REPO_ROOT / "Makefile", repo / "Makefile")
     shutil.copy2(INSTALLER, scripts / INSTALLER.name)
+    # The installer reads the build -> install handoff through its owner. A repo
+    # without that library keeps the pre-handoff single-archive behaviour, which
+    # is exactly what the App-embedded copy relies on.
+    shutil.copy2(SELECTION_LIBRARY, scripts / "lib" / SELECTION_LIBRARY.name)
     fake_bin = root / "fake-bin"
     fake_bin.mkdir()
     uname = fake_bin / "uname"
@@ -324,6 +368,329 @@ def test_make_install_rejects_ambiguous_canonical_runtime_packs(
 
     assert result.returncode != 0
     assert "multiple Runtime Packs in dist" in result.stderr
+
+
+def _historical_dist(dist: Path) -> None:
+    """Reproduce the Founder's dist: many legitimate, non-installable archives."""
+    for name in HISTORICAL_PACKS:
+        (dist / name).write_bytes(b"historical archive")
+
+
+def _selection_record(repo: Path, fields: dict[str, str]) -> Path:
+    record = repo / "build/runtime-pack-selection.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    body = ",\n".join(f'  "{key}": "{value}"' for key, value in fields.items())
+    record.write_text("{\n" + body + "\n}\n", encoding="utf-8")
+    return record
+
+
+def _ready_fields(pack: Path, **overrides: str) -> dict[str, str]:
+    fields = {
+        "schema": SELECTION_SCHEMA,
+        "status": "ready",
+        "attempt": "fixture-attempt",
+        "pack": str(pack),
+        "carrier_basename": pack.name,
+        "sha256": hashlib.sha256(pack.read_bytes()).hexdigest(),
+        "size": str(pack.stat().st_size),
+        "version": VERSION,
+        "platform": "darwin-arm64",
+        "architecture": "arm64",
+        "source_revision": SOURCE_SHA,
+        "terminal_revision": TERMINAL_SHA,
+        "frame_revision": FRAME_SHA,
+        "completed_at": "2026-09-09T11:01:06Z",
+    }
+    fields.update(overrides)
+    return fields
+
+
+def _git_repo(repo: Path) -> str:
+    repo.mkdir(parents=True, exist_ok=True)
+    run = lambda *args: subprocess.run(
+        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+    )
+    run("init", "-q")
+    run("config", "user.email", "agents@vetcoders.io")
+    run("config", "user.name", "fixture")
+    run("commit", "-q", "--allow-empty", "-m", "fixture")
+    return run("rev-parse", "HEAD").stdout.strip()
+
+
+def test_recorded_build_wins_over_eighteen_historical_archives(
+    tmp_path: Path,
+) -> None:
+    """The reported defect: a completed build is not what `make install` picks.
+
+    With the Founder's eighteen historical archives on disk the installer saw
+    many canonical candidates and refused. The producer knew the exact path all
+    along, so it now records it and this resolves to those bytes -- never by
+    mtime, never by glob order, and without removing a single historical pack.
+    """
+
+    repo = tmp_path / "repo"
+    dist = repo / "dist"
+    dist.mkdir(parents=True)
+    _historical_dist(dist)
+    built = tmp_path / "built/VibecraftedRuntime"
+    _fake_runtime_payload(built, tmp_path / "argv", marker="just-built")
+    archive, public_key = _sealed_archive(
+        dist,
+        built,
+        name="Vibecrafted_RuntimePack_4.3.0-20260909-d7d83dc5-darwin-arm64.tar.gz",
+        keys=(tmp_path / "signing.key", tmp_path / "signing.pub"),
+    )
+    _selection_record(repo, _ready_fields(archive))
+    marker_out = tmp_path / "installed-marker"
+
+    result = _isolated_repo_install(
+        tmp_path,
+        env={
+            "CAPTURE": str(tmp_path / "argv"),
+            "PACK_MARKER_OUT": str(marker_out),
+            "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY": str(public_key),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert marker_out.read_text(encoding="utf-8") == "just-built"
+    assert len(list(dist.glob("Vibecrafted_RuntimePack_*"))) >= len(HISTORICAL_PACKS)
+
+
+def test_explicit_pack_outranks_the_build_selection_record(tmp_path: Path) -> None:
+    """Installing another signed generation on purpose stays supported."""
+
+    repo = tmp_path / "repo"
+    dist = repo / "dist"
+    dist.mkdir(parents=True)
+    keys = (tmp_path / "signing.key", tmp_path / "signing.pub")
+    recorded_payload = tmp_path / "recorded/VibecraftedRuntime"
+    _fake_runtime_payload(recorded_payload, tmp_path / "argv", marker="recorded")
+    recorded, public_key = _sealed_archive(
+        dist,
+        recorded_payload,
+        name="Vibecrafted_RuntimePack_4.3.0-20260909-d7d83dc5-darwin-arm64.tar.gz",
+        keys=keys,
+    )
+    requested_payload = tmp_path / "requested/VibecraftedRuntime"
+    _fake_runtime_payload(requested_payload, tmp_path / "argv", marker="requested")
+    requested, _ = _sealed_archive(
+        dist,
+        requested_payload,
+        name="Vibecrafted_RuntimePack_4.3.0-20260908-aa12980d-darwin-arm64.tar.gz",
+        keys=keys,
+    )
+    _selection_record(repo, _ready_fields(recorded))
+    marker_out = tmp_path / "installed-marker"
+
+    result = _isolated_repo_install(
+        tmp_path,
+        env={
+            "CAPTURE": str(tmp_path / "argv"),
+            "PACK_MARKER_OUT": str(marker_out),
+            "RUNTIME_PACK": str(requested),
+            "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY": str(public_key),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert marker_out.read_text(encoding="utf-8") == "requested"
+
+
+def test_interrupted_build_cannot_publish_the_previous_success(
+    tmp_path: Path,
+) -> None:
+    """A failed retry must not let the last good archive pose as today's build.
+
+    dist holds exactly ONE installable archive here, so the pre-handoff path
+    would happily install it. The pending record is the whole difference: the
+    attempt was claimed before the build could fail, so nothing is ready.
+    """
+
+    repo = tmp_path / "repo"
+    dist = repo / "dist"
+    dist.mkdir(parents=True)
+    previous = tmp_path / "previous/VibecraftedRuntime"
+    _fake_runtime_payload(previous, tmp_path / "argv", marker="previous-success")
+    _, public_key = _sealed_archive(
+        dist,
+        previous,
+        name="Vibecrafted_RuntimePack_4.3.0-20260908-aa12980d-darwin-arm64.tar.gz",
+        keys=(tmp_path / "signing.key", tmp_path / "signing.pub"),
+    )
+    _selection_record(
+        repo,
+        {
+            "schema": SELECTION_SCHEMA,
+            "status": "pending",
+            "attempt": "interrupted-attempt",
+            "source_revision": SOURCE_SHA,
+            "started_at": "2026-09-09T11:01:06Z",
+        },
+    )
+    marker_out = tmp_path / "installed-marker"
+
+    result = _isolated_repo_install(
+        tmp_path,
+        env={
+            "CAPTURE": str(tmp_path / "argv"),
+            "PACK_MARKER_OUT": str(marker_out),
+            "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY": str(public_key),
+        },
+    )
+
+    assert result.returncode != 0
+    assert "did not complete" in result.stderr
+    assert not marker_out.exists()
+
+
+def test_recorded_pack_swapped_under_its_digest_is_refused(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    dist = repo / "dist"
+    dist.mkdir(parents=True)
+    payload = tmp_path / "built/VibecraftedRuntime"
+    _fake_runtime_payload(payload, tmp_path / "argv", marker="just-built")
+    archive, public_key = _sealed_archive(
+        dist,
+        payload,
+        name="Vibecrafted_RuntimePack_4.3.0-20260909-d7d83dc5-darwin-arm64.tar.gz",
+        keys=(tmp_path / "signing.key", tmp_path / "signing.pub"),
+    )
+    fields = _ready_fields(archive)
+    _selection_record(repo, fields)
+    # Same path, same signed-looking name, different bytes.
+    archive.write_bytes(b"swapped bytes")
+
+    result = _isolated_repo_install(
+        tmp_path,
+        env={
+            "CAPTURE": str(tmp_path / "argv"),
+            "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY": str(public_key),
+        },
+    )
+
+    assert result.returncode != 0
+    assert "recorded digest" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"platform": "linux-arm64"}, "targets linux-arm64"),
+        ({"architecture": "x64"}, "targets x64"),
+        ({"status": "half-written"}, "no usable status"),
+        ({"schema": "vibecrafted.some-other-record.v1"}, "unknown schema"),
+        ({"sha256": "not-a-digest"}, "no usable digest"),
+        ({"source_revision": "abcdef"}, "no full source revision"),
+        ({"carrier_basename": "Vibecrafted_RuntimePack_other.tar.gz"}, "disagrees"),
+    ],
+)
+def test_unusable_selection_record_never_falls_back_to_another_archive(
+    tmp_path: Path, overrides: dict[str, str], expected: str
+) -> None:
+    """Every refusal here has ONE installable archive sitting in dist.
+
+    That archive is what the legacy path would install. A record that cannot be
+    honoured must fail visibly instead of quietly resolving to it.
+    """
+
+    repo = tmp_path / "repo"
+    dist = repo / "dist"
+    dist.mkdir(parents=True)
+    payload = tmp_path / "built/VibecraftedRuntime"
+    _fake_runtime_payload(payload, tmp_path / "argv", marker="just-built")
+    archive, public_key = _sealed_archive(
+        dist,
+        payload,
+        name="Vibecrafted_RuntimePack_4.3.0-20260909-d7d83dc5-darwin-arm64.tar.gz",
+        keys=(tmp_path / "signing.key", tmp_path / "signing.pub"),
+    )
+    _selection_record(repo, _ready_fields(archive, **overrides))
+    marker_out = tmp_path / "installed-marker"
+
+    result = _isolated_repo_install(
+        tmp_path,
+        env={
+            "CAPTURE": str(tmp_path / "argv"),
+            "PACK_MARKER_OUT": str(marker_out),
+            "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY": str(public_key),
+        },
+    )
+
+    assert result.returncode != 0
+    assert expected in result.stderr
+    assert not marker_out.exists()
+
+
+def test_record_from_a_foreign_source_generation_is_refused(tmp_path: Path) -> None:
+    """ "The pack you just built HERE" is a claim about this checkout."""
+
+    repo = tmp_path / "repo"
+    _git_repo(repo)
+    dist = repo / "dist"
+    dist.mkdir(parents=True)
+    payload = tmp_path / "built/VibecraftedRuntime"
+    _fake_runtime_payload(payload, tmp_path / "argv", marker="foreign")
+    archive, public_key = _sealed_archive(
+        dist,
+        payload,
+        name="Vibecrafted_RuntimePack_4.3.0-20260909-d7d83dc5-darwin-arm64.tar.gz",
+        keys=(tmp_path / "signing.key", tmp_path / "signing.pub"),
+    )
+    _selection_record(repo, _ready_fields(archive))
+    marker_out = tmp_path / "installed-marker"
+
+    result = _isolated_repo_install(
+        tmp_path,
+        env={
+            "CAPTURE": str(tmp_path / "argv"),
+            "PACK_MARKER_OUT": str(marker_out),
+            "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY": str(public_key),
+        },
+    )
+
+    assert result.returncode != 0
+    assert "this source is at" in result.stderr
+    assert not marker_out.exists()
+
+
+def test_record_bound_to_this_checkout_installs_from_a_custom_release_dir(
+    tmp_path: Path,
+) -> None:
+    """The counterpart: right source, and a release directory outside dist.
+
+    VIBECRAFTED_RELEASE_DIR is why a reconstructed `dist/<name>` was never safe.
+    The recorded path is absolute, so a directory with a space in it is ordinary.
+    """
+
+    repo = tmp_path / "repo"
+    head = _git_repo(repo)
+    release_dir = tmp_path / "release output"
+    release_dir.mkdir()
+    payload = tmp_path / "built/VibecraftedRuntime"
+    _fake_runtime_payload(payload, tmp_path / "argv", marker="custom-dir-build")
+    archive, public_key = _sealed_archive(
+        release_dir,
+        payload,
+        name="Vibecrafted_RuntimePack_4.3.0-20260909-d7d83dc5-darwin-arm64.tar.gz",
+        source_revision=head,
+        keys=(tmp_path / "signing.key", tmp_path / "signing.pub"),
+    )
+    _selection_record(repo, _ready_fields(archive, source_revision=head))
+    marker_out = tmp_path / "installed-marker"
+
+    result = _isolated_repo_install(
+        tmp_path,
+        env={
+            "CAPTURE": str(tmp_path / "argv"),
+            "PACK_MARKER_OUT": str(marker_out),
+            "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY": str(public_key),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert marker_out.read_text(encoding="utf-8") == "custom-dir-build"
+    assert not (repo / "dist").exists()
 
 
 def test_runtime_pack_rejects_directory_carrier(tmp_path: Path) -> None:

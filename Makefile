@@ -81,6 +81,10 @@ RELEASE_SCRIPT := scripts/build-vibecrafted-release.sh
 PORTABLE_SCRIPT := scripts/build-portable-release.sh
 RUNTIME_PACK_INSTALLER := scripts/install-runtime-pack.sh
 RUNTIME_PACK_PACKAGER := scripts/package-runtime-pack.sh
+# Owner of the build -> install handoff record. The builder writes which pack it
+# actually completed; this Makefile and the installer read it instead of each
+# re-deriving a filename from the current HEAD, date and a hard-coded dist.
+RUNTIME_PACK_SELECTION_LIB := scripts/lib/runtime-pack-selection.sh
 RUNTIME_PACK ?=
 KEYS ?= $(HOME)/.keys
 # Extra builder flags, e.g. RELEASE_FLAGS=--snapshot-donors to build from
@@ -112,16 +116,19 @@ release:
 
 # Build the standalone macOS Runtime Pack directly from source and native donor
 # inputs. Vibecrafted.app consumes this carrier; it is not the carrier's source.
+#
+# The path printed here is the one the builder recorded on completion, not a
+# name rebuilt from `git rev-parse` and `date` after the fact. That
+# reconstruction drifted whenever HEAD moved during the build, the build crossed
+# midnight, or VIBECRAFTED_RELEASE_DIR pointed somewhere other than dist -- and
+# then `make install` had nothing but a glob over eighteen legitimate historical
+# packs, which it correctly refused as ambiguous.
 runtime-pack:
 	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --runtime-pack-only $${=VC_RELEASE_FLAGS}'
-	@version="$$(tr -d '[:space:]' < VERSION)"; \
-	revision="$$(git rev-parse --short=8 HEAD)"; \
-	date="$${VIBECRAFTED_RELEASE_DATE:-$$(date -u +%Y%m%d)}"; \
-	arch="$$(uname -m | sed 's/^arm64$$/arm64/; s/^aarch64$$/arm64/; s/^x86_64$$/x64/')"; \
-	output="dist/Vibecrafted_RuntimePack_$${version}-$${date}-$${revision}-darwin-$${arch}.tar.gz"; \
-	test -s "$$output" \
-		|| { echo 'release builder produced no standalone Runtime Pack' >&2; exit 1; }; \
-	printf '%s\n' "$$output"
+	@bash -c '. "$(CURDIR)/$(RUNTIME_PACK_SELECTION_LIB)"; \
+	runtime_pack_selection_read "$(CURDIR)" "" "" \
+		|| { printf "%s\n" "$${RUNTIME_PACK_SELECTION_ERROR:-release builder produced no standalone Runtime Pack}" >&2; exit 1; }; \
+	printf "%s\n" "$$RUNTIME_PACK_SELECTION_PACK"'
 
 # The portable channel needs no signing identity and no notary account: it is a
 # provenance-bound source distribution, so it builds anywhere git and python3 do.
@@ -298,6 +305,11 @@ endif
 # `curl ... | bash` path ran `make install-auto` as a silent no-op.
 install-auto: install
 
+# RUNTIME_PACK stays authoritative when given, including to install a different
+# signed generation on purpose. Left empty, the installer asks the build
+# selection record which pack the last `make runtime-pack` actually completed;
+# an incomplete or foreign build fails visibly there rather than resolving into
+# some older archive that merely looks plausible.
 install:
 	@VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)" bash "$(RUNTIME_PACK_INSTALLER)"
 	@$(MAKE) --no-print-directory reconcile-server-service
