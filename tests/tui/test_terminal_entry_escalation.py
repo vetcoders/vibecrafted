@@ -211,6 +211,21 @@ def _install_canonical_launcher(home: Path) -> Path:
     )
 
 
+def _commit_fixture_repo(path: Path) -> Path:
+    """Create the minimal Git/HEAD contract required by workflow admission."""
+    path.mkdir(parents=True, exist_ok=True)
+    (path / ".fixture").write_text("fixture\n", encoding="utf-8")
+    for argv in (
+        ["git", "init", "-q", str(path)],
+        ["git", "-C", str(path), "config", "user.email", "fixture@example.invalid"],
+        ["git", "-C", str(path), "config", "user.name", "Fixture"],
+        ["git", "-C", str(path), "add", ".fixture"],
+        ["git", "-C", str(path), "commit", "-q", "-m", "fixture baseline"],
+    ):
+        subprocess.run(argv, check=True, capture_output=True, text=True)
+    return path
+
+
 def _fake_generation(
     root: Path,
     capture: Path,
@@ -407,6 +422,7 @@ def test_bare_resume_without_tty_opens_terminal_on_this_project(
     tmp_path: Path,
 ) -> None:
     """The reported P0: bare resume must open a terminal, not refuse."""
+    _commit_fixture_repo(tmp_path / "mlx-batch-runner")
     result, launch = _run_entry(tmp_path, "vc-resume codex")
 
     assert result.returncode == 0, result.stderr
@@ -432,6 +448,7 @@ def test_bare_resume_without_tty_opens_terminal_on_this_project(
 def test_bare_start_without_tty_opens_terminal_with_its_front_door(
     tmp_path: Path,
 ) -> None:
+    _commit_fixture_repo(tmp_path / "mlx-batch-runner")
     result, launch = _run_entry(tmp_path, "vc-start")
 
     assert result.returncode == 0, result.stderr
@@ -445,8 +462,7 @@ def test_start_explicit_root_is_consumed_before_terminal_escalation(
     tmp_path: Path,
 ) -> None:
     """Public start owns --root; Frame must never receive the project flag."""
-    other = tmp_path / "project with spaces"
-    other.mkdir()
+    other = _commit_fixture_repo(tmp_path / "project with spaces")
 
     result, launch = _run_entry(
         tmp_path, f"vc-start --root={shlex.quote(str(other))} operator"
@@ -477,8 +493,7 @@ def test_start_rejects_invalid_root_before_terminal_or_workspace_side_effects(
 def test_start_explicit_root_preserves_resume_without_forwarding_root(
     tmp_path: Path,
 ) -> None:
-    other = tmp_path / "resume project"
-    other.mkdir()
+    other = _commit_fixture_repo(tmp_path / "resume project")
 
     result, launch = _run_entry(
         tmp_path, f"vc-start resume --root {shlex.quote(str(other))}"
@@ -496,6 +511,7 @@ def test_start_preserves_exact_argv_including_quoting(tmp_path: Path) -> None:
     (Create-only start accepts exactly one bare workspace name and no foreign
     options, so the replayed vector is the name plus the resolved `--repo`.)
     """
+    _commit_fixture_repo(tmp_path / "mlx-batch-runner")
     result, launch = _run_entry(tmp_path, "vc-start " + shlex.quote("two words"))
 
     assert result.returncode == 0, result.stderr
@@ -517,8 +533,7 @@ def test_explicit_absolute_root_binds_the_terminal_not_the_cwd(
     tmp_path: Path,
 ) -> None:
     """`--root B` from A opens B. Forwarding B while opening A is the bug."""
-    other = tmp_path / "project-b"
-    other.mkdir()
+    other = _commit_fixture_repo(tmp_path / "project-b")
     result, launch = _run_entry(
         tmp_path, f"vc-resume codex --root {shlex.quote(str(other))}"
     )
@@ -533,8 +548,7 @@ def test_relative_explicit_root_is_resolved_against_the_caller(
     tmp_path: Path,
 ) -> None:
     """`--root ../project-b` must not be re-read after we chdir into it."""
-    other = tmp_path / "project-b"
-    other.mkdir()
+    other = _commit_fixture_repo(tmp_path / "project-b")
     result, launch = _run_entry(tmp_path, "vc-resume codex --root ../project-b")
 
     assert result.returncode == 0, result.stderr
@@ -555,8 +569,7 @@ def test_nested_relative_root_survives_the_child_reparse(tmp_path: Path) -> None
     """
     project = tmp_path / "mlx-batch-runner"
     project.mkdir(parents=True, exist_ok=True)
-    nested = project / "child"
-    nested.mkdir()
+    nested = _commit_fixture_repo(project / "child")
 
     result, launch = _run_entry(tmp_path, "vc-resume codex --root child")
 
@@ -575,8 +588,7 @@ def test_root_rewrite_preserves_every_other_argument(tmp_path: Path) -> None:
     """Only the root VALUE is rewritten; flags, order and provider args stay."""
     project = tmp_path / "mlx-batch-runner"
     project.mkdir(parents=True, exist_ok=True)
-    nested = project / "child"
-    nested.mkdir()
+    nested = _commit_fixture_repo(project / "child")
 
     result, launch = _run_entry(
         tmp_path,
@@ -614,6 +626,7 @@ def test_generation_root_is_not_mistaken_for_the_project(tmp_path: Path) -> None
     project opened the terminal on the release directory.
     """
     generation = tmp_path / "generation"
+    _commit_fixture_repo(tmp_path / "mlx-batch-runner")
     result, launch = _run_entry(
         tmp_path,
         "vc-resume codex",
@@ -634,7 +647,11 @@ def test_generation_root_is_not_mistaken_for_the_project(tmp_path: Path) -> None
 
 
 def _resolve_target(
-    tmp_path: Path, live: list[str], *, project: str = "mlx-batch-runner"
+    tmp_path: Path,
+    live: list[str],
+    *,
+    project: str = "mlx-batch-runner",
+    owner_cli: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     home = tmp_path / "home"
     home.mkdir(parents=True, exist_ok=True)
@@ -661,6 +678,8 @@ def _resolve_target(
     env["XDG_CONFIG_HOME"] = str(home / ".config")
     env["VC_FRAME_LIVE"] = str(live_file)
     env["VC_FRAME_LOG"] = str(tmp_path / "frame.log")
+    if owner_cli is not None:
+        env["VIBECRAFTED_PRODUCT_CORE_CLI"] = str(owner_cli)
 
     script = (
         f'source "{SHELL_SH}"\n'
@@ -708,17 +727,25 @@ def test_attached_marker_on_another_project_is_not_ownership(
 
 
 def test_project_bound_live_session_is_reused(tmp_path: Path) -> None:
-    """Proven ownership: the session named after THIS repository."""
+    """Only the selected owner's matching workspace binding is reused."""
+    project = _commit_fixture_repo(tmp_path / "mlx-batch-runner")
+    calls = tmp_path / "owner-calls"
+    owner = _canonical_owner_cli(tmp_path / "owner-cli", calls=calls)
     result = _resolve_target(
-        tmp_path, ["Live runs", "mlx-batch-runner", "host-a"]
+        tmp_path,
+        ["Live runs", BOUND_SESSION, "mlx-batch-runner", "host-a"],
+        owner_cli=owner,
     )
-    assert "TARGET=[mlx-batch-runner]" in result.stdout, result.stdout + result.stderr
+    assert f"TARGET=[{BOUND_SESSION}]" in result.stdout, result.stdout + result.stderr
+    assert "TARGET=[mlx-batch-runner]" not in result.stdout
+    assert f"workspace resolve --root {project} --env" in calls.read_text(encoding="utf-8")
 
 
 def test_unrelated_live_sessions_do_not_block_the_project(tmp_path: Path) -> None:
     """End to end: global sessions elsewhere never refuse the escalation."""
     live_file = tmp_path / "live-sessions.txt"
     live_file.write_text("Live runs\nNeeds attention\nhost-a\n", encoding="utf-8")
+    _commit_fixture_repo(tmp_path / "mlx-batch-runner")
     result, launch = _run_entry(
         tmp_path,
         "vc-resume codex",
