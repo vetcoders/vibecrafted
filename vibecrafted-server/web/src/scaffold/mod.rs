@@ -473,9 +473,6 @@ pub mod api {
     }
 
     fn render_editor(workspace: &ScaffoldWorkspace) -> String {
-        // Keep the native-host reference-tab boundary on each machine endpoint.
-        // The rendered editor test below verifies the complete attributes.
-        let external_link_attributes = format!(r#"target="_blank" rel="{}""#, "noopener noreferrer");
         let first_id = workspace
             .artifacts
             .first()
@@ -552,8 +549,8 @@ pub mod api {
     </div>
     <div class="inspector-block">
       <h3>Endpoints</h3>
-      <a class="api-link" href="/api/scaffold/artifacts?org={}&repo={}&day={}&plan_id={}" {external_link_attributes}>artifact endpoint ↗</a>
-      <a class="api-link" href="/api/scaffold/changes?org={}&repo={}&day={}&plan_id={}" {external_link_attributes}>change endpoint ↗</a>
+      <a class="api-link" href="/api/scaffold/artifacts?org={}&repo={}&day={}&plan_id={}" target="_blank" rel="noopener noreferrer">artifact endpoint ↗</a>
+      <a class="api-link" href="/api/scaffold/changes?org={}&repo={}&day={}&plan_id={}" target="_blank" rel="noopener noreferrer">change endpoint ↗</a>
     </div>
   </aside>
 </div>"#,
@@ -576,7 +573,6 @@ pub mod api {
             url_component(&workspace.repo),
             url_component(&workspace.day),
             url_component(&workspace.plan_id),
-            external_link_attributes = external_link_attributes,
         );
         let scripts = format!(
             "{}\n{}\n{}",
