@@ -1692,8 +1692,9 @@ def test_toml_flatten_keeps_shell_record_and_bindings_path():
     assert flat["keyboard.bindings"] == [{"key": "B", "action": "Copy"}]
     assert "keyboard" not in flat
     assert flat["window.opacity"] == 0.8
-    assert flat["window.padding"] == {"x": 8, "y": 24}
-    assert "window.padding.x" not in flat
+    assert flat["window.padding.x"] == 8
+    assert flat["window.padding.y"] == 24
+    assert "window.padding" not in flat
     empty_bindings = installer._toml_flatten(tomllib.loads("[[keyboard.bindings]]\n"))
     assert empty_bindings == {"keyboard.bindings": [{}]}
     explicit_empty = installer._toml_flatten(tomllib.loads("[keyboard]\nbindings = []\n"))
@@ -1737,6 +1738,86 @@ def test_toml_keep_current_nested_shell_replaces_inline_without_duplicate():
     assert parsed["terminal"]["shell"]["program"] == "/usr/bin/fish"
     assert "shell" in parsed["terminal"]
     assert kept.count("[terminal.shell]") + kept.count("shell =") == 1
+
+
+def test_toml_merge_same_table_disjoint_scalars_do_not_conflict():
+    """Root probe: sibling scalars keep independent identity."""
+    previous = '[window]\nopacity = 0.8\ndecorations = "Full"\n'
+    current = '[window]\nopacity = 0.9\ndecorations = "Full"\n'
+    incoming = '[window]\nopacity = 0.8\ndecorations = "None"\n'
+    assert installer._toml_flatten(tomllib.loads(previous)) == {
+        "window.opacity": 0.8,
+        "window.decorations": "Full",
+    }
+    merged = installer._merge_toml_runtime_preferences(previous, current, incoming)
+    _assert_toml_tree(
+        merged, {"window": {"opacity": 0.9, "decorations": "None"}}
+    )
+    assert "settings conflict" not in merged
+
+
+def test_toml_merge_sibling_add_or_remove_does_not_rebind_identity():
+    previous = '[window]\nopacity = 0.8\ndecorations = "Full"\n'
+    current = (
+        '[window]\nopacity = 0.8\ndecorations = "Full"\nstartup_mode = "Maximized"\n'
+    )
+    incoming = '[window]\nopacity = 0.9\ndecorations = "None"\n'
+    merged = installer._merge_toml_runtime_preferences(previous, current, incoming)
+    _assert_toml_tree(
+        merged,
+        {
+            "window": {
+                "opacity": 0.9,
+                "decorations": "None",
+                "startup_mode": "Maximized",
+            }
+        },
+    )
+    removed = installer._merge_toml_runtime_preferences(current, previous, incoming)
+    _assert_toml_tree(
+        removed, {"window": {"opacity": 0.9, "decorations": "None"}}
+    )
+
+
+def test_toml_merge_inline_and_nested_window_are_the_same_settings():
+    previous = '[window]\nopacity = 0.8\ndecorations = "Full"\n'
+    current = '[window]\nopacity = 0.9\ndecorations = "Full"\n'
+    incoming = 'window = { opacity = 0.8, decorations = "None" }\n'
+    merged = installer._merge_toml_runtime_preferences(previous, current, incoming)
+    _assert_toml_tree(
+        merged, {"window": {"opacity": 0.9, "decorations": "None"}}
+    )
+    nested_in = '[window]\nopacity = 0.8\ndecorations = "None"\n'
+    inline_cur = 'window = { opacity = 0.9, decorations = "Full" }\n'
+    crossed = installer._merge_toml_runtime_preferences(
+        previous, inline_cur, nested_in
+    )
+    _assert_toml_tree(
+        crossed, {"window": {"opacity": 0.9, "decorations": "None"}}
+    )
+
+
+def test_toml_merge_disjoint_padding_leaves_keep_inline_form():
+    previous = "[window]\npadding = { x = 0, y = 0 }\nopacity = 0.8\n"
+    current = "[window]\npadding = { x = 4, y = 0 }\nopacity = 0.8\n"
+    incoming = "[window]\npadding = { x = 0, y = 24 }\nopacity = 0.9\n"
+    merged = installer._merge_toml_runtime_preferences(previous, current, incoming)
+    _assert_toml_tree(
+        merged, {"window": {"padding": {"x": 4, "y": 24}, "opacity": 0.9}}
+    )
+    assert "padding = { x = 4, y = 24 }" in merged
+    assert "[window.padding]" not in merged
+
+
+def test_toml_merge_comment_on_sibling_survives_disjoint_edit():
+    previous = '[window]\nopacity = 0.8\ndecorations = "Full"  # keep-chrome\n'
+    current = '[window]\nopacity = 0.9\ndecorations = "Full"  # keep-chrome\n'
+    incoming = '[window]\nopacity = 0.8\ndecorations = "None"  # keep-chrome\n'
+    merged = installer._merge_toml_runtime_preferences(previous, current, incoming)
+    _assert_toml_tree(
+        merged, {"window": {"opacity": 0.9, "decorations": "None"}}
+    )
+    assert "# keep-chrome" in merged
 
 
 def test_published_previous_receipt_rejects_config_conflicts():

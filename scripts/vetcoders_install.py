@@ -15811,40 +15811,34 @@ def _preference_shell_accepts_incoming(previous: Any, current: Any, incoming: An
     return bool(_preference_shell_launcher_name(incoming))
 
 
-def _toml_is_record_table(value: Any) -> bool:
-    """True for inline-table-shaped records, not grouping tables.
+_TOML_MISSING = object()
 
-    `shell = { program, args }` and `padding = { x, y }` are one setting.
-    A parent whose child is array-of-tables (list of dicts) must flatten so
-    the list stays at its real path (`keyboard.bindings`, never `keyboard`).
-    A lone list child, including `bindings = []`, is that list setting, not a
-    record wrapper. Nested grouping tables flatten one level and stop at the
-    record (`window.padding` beside `window.opacity`).
-    """
-    if not isinstance(value, dict) or not value:
-        return False
-    if any(isinstance(inner, dict) for inner in value.values()):
-        return False
-    if any(
-        isinstance(inner, list) and any(isinstance(item, dict) for item in inner)
-        for inner in value.values()
-    ):
-        return False
-    if len(value) == 1 and isinstance(next(iter(value.values())), list):
-        return False
-    return True
+# Documented product/Alacritty schema path: one semantic setting for the
+# exact previous-minus-operator shell migration. Inline `shell = {…}` and
+# nested `[terminal.shell]` are the same identity. Generic tables — including
+# `[window]`, `padding`, `font.normal`, and `cursor.style` — flatten to leaf
+# paths. Do not infer atomicity from "all values are scalars"; sibling count
+# and representation must not change setting identity.
+_TOML_ATOMIC_RECORD_PATHS = frozenset({"terminal.shell"})
+
+
+def _toml_is_atomic_record_path(dotted: str) -> bool:
+    return dotted in _TOML_ATOMIC_RECORD_PATHS
 
 
 def _toml_flatten(value: Any, prefix: str = "") -> dict[str, Any]:
-    """Flatten grouping tables. Record tables and lists stay one setting.
+    """Flatten generic tables to leaf paths. Lists stay one setting.
 
-    Flattening every dict makes `terminal.shell` unreachable as a mapping, so
-    exact shell correction never runs and overlay writes `[terminal.shell]`
-    beside a leftover inline `shell =`. Collapsing any dict that contains a
-    list made `keyboard` atomic and parked bindings under the wrong header.
+    ``terminal.shell`` is the only documented atomic record. A shape
+    heuristic that collapsed any all-scalar table made disjoint
+    ``window.opacity`` / ``window.decorations`` edits look like one
+    conflict. Flattening every dict made exact shell correction unreachable
+    and overlay emit ``[terminal.shell]`` beside leftover inline ``shell =``.
     """
     if not isinstance(value, dict):
         return {prefix: value} if prefix else {}
+    if prefix and _toml_is_atomic_record_path(prefix):
+        return {prefix: value}
     flat: dict[str, Any] = {}
     for key, inner in value.items():
         name = str(key)
@@ -15853,7 +15847,7 @@ def _toml_flatten(value: Any, prefix: str = "") -> dict[str, Any]:
                 "quoted or dotted TOML keys cannot be merged by setting identity"
             )
         path = f"{prefix}.{name}" if prefix else name
-        if isinstance(inner, dict) and not _toml_is_record_table(inner):
+        if isinstance(inner, dict) and not _toml_is_atomic_record_path(path):
             flat.update(_toml_flatten(inner, path))
         else:
             flat[path] = inner
@@ -16110,34 +16104,204 @@ def _toml_remove_nested_table(text: str, dotted: str) -> str:
     return "".join(lines)
 
 
-def _toml_replace_or_insert(text: str, dotted: str, literal: str) -> str:
-    """Replace one assignment on the incoming canvas, preserving other text."""
-    lines = text.splitlines(keepends=True)
-    table, _, leaf = dotted.rpartition(".")
-    if not leaf:
-        table, leaf = "", dotted
-    if _toml_array_table_spans(lines, dotted):
-        return _toml_replace_array_tables(lines, dotted, literal)
+@dataclass(frozen=True)
+class _TomlSettingLocation:
+    """How one flattened setting is spelled in source."""
+
+    kind: str
+    index: int = -1
+    start: int = -1
+    end: int = -1
+    key: str = ""
+    table: str = ""
+    inner_parts: tuple[str, ...] = ()
+    present: bool = False
+    spans: tuple[tuple[int, int], ...] = ()
+
+
+def _toml_assignment_value_text(line: str) -> str:
+    body = _toml_line_without_comment(line)
+    if "=" not in body:
+        raise ValueError("unsupported TOML preference value")
+    return body.split("=", 1)[1].strip()
+
+
+def _toml_loads_value(text: str) -> Any:
+    import tomllib
+
+    try:
+        return tomllib.loads(f"_ = {text}")["_"]
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError("unsupported TOML preference value") from exc
+
+
+def _toml_hash_comment(line: str) -> str:
+    stripped = _toml_line_without_comment(line)
+    tail = line[len(stripped) :]
+    if "#" not in tail:
+        return ""
+    return tail.split("\n", 1)[0]
+
+
+def _toml_dict_has_path(tree: Any, parts: Sequence[str]) -> bool:
+    node = tree
+    for part in parts:
+        if not isinstance(node, dict) or part not in node:
+            return False
+        node = node[part]
+    return True
+
+
+def _toml_set_nested(
+    tree: dict[str, Any], parts: Sequence[str], value: Any
+) -> dict[str, Any]:
+    if not parts:
+        raise ValueError("TOML merge could not represent the resolved preference tree")
+    updated = dict(tree)
+    head, *rest = parts
+    if not rest:
+        updated[head] = value
+        return updated
+    child = updated.get(head)
+    if child is None:
+        child = {}
+    elif not isinstance(child, dict):
+        raise ValueError("TOML merge could not represent the resolved preference tree")
+    updated[head] = _toml_set_nested(child, rest, value)
+    return updated
+
+
+def _toml_delete_nested(tree: dict[str, Any], parts: Sequence[str]) -> dict[str, Any]:
+    if not parts:
+        raise ValueError("TOML merge could not represent the resolved preference tree")
+    updated = dict(tree)
+    head, *rest = parts
+    if head not in updated:
+        return updated
+    if not rest:
+        del updated[head]
+        return updated
+    child = updated[head]
+    if not isinstance(child, dict):
+        raise ValueError("TOML merge could not represent the resolved preference tree")
+    nested = _toml_delete_nested(child, rest)
+    if not nested:
+        del updated[head]
+    else:
+        updated[head] = nested
+    return updated
+
+
+def _toml_rewrite_assignment_line(line: str, literal: str) -> str:
+    indent = line[: len(line) - len(line.lstrip())]
+    key = _toml_assignment_key(line)
+    if key is None:
+        raise ValueError("unsupported TOML preference value")
+    comment = _toml_hash_comment(line)
+    newline = "\n" if line.endswith("\n") else ""
+    suffix = f" {comment}" if comment else ""
+    return f"{indent}{key} = {literal}{suffix}{newline}"
+
+
+def _toml_update_inline_field(
+    line: str, inner_parts: Sequence[str], value: Any
+) -> str | None:
+    """Rewrite one leaf inside an inline table. None means delete the assignment."""
+    tree = _toml_loads_value(_toml_assignment_value_text(line))
+    if not isinstance(tree, dict):
+        raise ValueError("TOML merge could not represent the resolved preference tree")
+    if value is _TOML_MISSING:
+        tree = _toml_delete_nested(tree, inner_parts)
+    else:
+        tree = _toml_set_nested(tree, inner_parts, value)
+    if not tree:
+        return None
+    return _toml_rewrite_assignment_line(line, _toml_literal(tree))
+
+
+def _toml_locate_setting(
+    lines: list[str], dotted: str
+) -> _TomlSettingLocation | None:
+    """Find the source form of a flattened path, or None if absent."""
+    parts = [part for part in dotted.split(".") if part]
+    if not parts:
+        return None
+    spans = _toml_array_table_spans(lines, dotted)
+    if spans:
+        return _TomlSettingLocation(kind="array_table", spans=tuple(spans))
+    if _toml_is_atomic_record_path(dotted):
+        nest = _toml_nested_table_span(lines, dotted)
+        if nest is not None:
+            return _TomlSettingLocation(kind="nested_table", start=nest[0], end=nest[1])
     current_table = ""
     for index, line in enumerate(lines):
         header = _toml_header_name(line)
         if header is not None and not line.lstrip().startswith("[["):
             current_table = header
             continue
-        if current_table != table:
+        key = _toml_assignment_key(line)
+        if key is None:
             continue
-        if _toml_assignment_key(line) != leaf:
+        table_parts = [part for part in current_table.split(".") if part]
+        try:
+            key_parts = _toml_split_dotted_keys(key)
+        except ValueError:
             continue
-        if not _toml_assignment_is_complete(line):
-            raise ValueError(
-                "multiline TOML assignment cannot be merged by setting identity"
+        assigned = table_parts + key_parts
+        if assigned == parts:
+            if not _toml_assignment_is_complete(line):
+                raise ValueError(
+                    "multiline TOML assignment cannot be merged by setting identity"
+                )
+            return _TomlSettingLocation(
+                kind="assignment", index=index, key=key, table=current_table
             )
-        indent = line[: len(line) - len(line.lstrip())]
-        newline = "\n" if line.endswith("\n") else ""
-        lines[index] = f"{indent}{leaf} = {literal}{newline}"
-        return "".join(lines)
-    text = _toml_remove_nested_table("".join(lines), dotted)
+        if len(assigned) < len(parts) and assigned == parts[: len(assigned)]:
+            if not _toml_assignment_is_complete(line):
+                raise ValueError(
+                    "multiline TOML assignment cannot be merged by setting identity"
+                )
+            value = _toml_loads_value(_toml_assignment_value_text(line))
+            if not isinstance(value, dict):
+                raise ValueError(
+                    "TOML merge could not represent the resolved preference tree"
+                )
+            rest = tuple(parts[len(assigned) :])
+            return _TomlSettingLocation(
+                kind="inline_field",
+                index=index,
+                key=key,
+                table=current_table,
+                inner_parts=rest,
+                present=_toml_dict_has_path(value, rest),
+            )
+    return None
+
+
+def _toml_delete_line_and_empty_table(lines: list[str], index: int) -> None:
+    header_index = -1
+    table = ""
+    for cursor in range(index, -1, -1):
+        header = _toml_header_name(lines[cursor])
+        if header is not None and not lines[cursor].lstrip().startswith("[["):
+            header_index = cursor
+            table = header
+            break
+    del lines[index]
+    if (
+        table
+        and header_index >= 0
+        and not _toml_table_has_assignments(lines, header_index)
+    ):
+        del lines[header_index]
+
+
+def _toml_insert_assignment(text: str, dotted: str, literal: str) -> str:
+    """Create a nested-table or parent-table assignment for a missing path."""
     lines = text.splitlines(keepends=True)
+    table, _, leaf = dotted.rpartition(".")
+    if not leaf:
+        table, leaf = "", dotted
     assignment = f"{leaf} = {literal}\n"
     if table:
         header = f"[{table}]"
@@ -16156,67 +16320,71 @@ def _toml_replace_or_insert(text: str, dotted: str, literal: str) -> str:
     return "".join(lines)
 
 
+def _toml_replace_or_insert(text: str, dotted: str, literal: str) -> str:
+    """Replace one assignment on the incoming canvas, preserving other text."""
+    lines = text.splitlines(keepends=True)
+    loc = _toml_locate_setting(lines, dotted)
+    if loc is not None and loc.kind == "array_table":
+        return _toml_replace_array_tables(lines, dotted, literal)
+    if loc is not None and loc.kind == "nested_table":
+        text = _toml_remove_nested_table("".join(lines), dotted)
+        return _toml_insert_assignment(text, dotted, literal)
+    if loc is not None and loc.kind == "assignment":
+        lines[loc.index] = _toml_rewrite_assignment_line(lines[loc.index], literal)
+        return "".join(lines)
+    if loc is not None and loc.kind == "inline_field":
+        rewritten = _toml_update_inline_field(
+            lines[loc.index], loc.inner_parts, _toml_loads_value(literal)
+        )
+        if rewritten is None:
+            _toml_delete_line_and_empty_table(lines, loc.index)
+        else:
+            lines[loc.index] = rewritten
+        return "".join(lines)
+    text = _toml_remove_nested_table("".join(lines), dotted)
+    return _toml_insert_assignment(text, dotted, literal)
+
+
 def _toml_raw_assignment(text: str, dotted: str) -> str | None:
     """Copy the user's exact assignment text when it is the resolved value."""
     lines = text.splitlines(keepends=True)
-    spans = _toml_array_table_spans(lines, dotted)
-    if spans:
-        return "".join("".join(lines[start:end]) for start, end in spans)
-    table, _, leaf = dotted.rpartition(".")
-    if not leaf:
-        table, leaf = "", dotted
-    current_table = ""
-    for line in lines:
-        header = _toml_header_name(line)
-        if header is not None and not line.lstrip().startswith("[["):
-            current_table = header
-            continue
-        if current_table != table:
-            continue
-        if _toml_assignment_key(line) != leaf:
-            continue
-        if not _toml_assignment_is_complete(line):
-            raise ValueError(
-                "multiline TOML assignment cannot be merged by setting identity"
-            )
-        return line
-    span = _toml_nested_table_span(lines, dotted)
-    if span is not None:
-        return "".join(lines[span[0] : span[1]])
+    loc = _toml_locate_setting(lines, dotted)
+    if loc is None:
+        return None
+    if loc.kind == "array_table":
+        return "".join("".join(lines[start:end]) for start, end in loc.spans)
+    if loc.kind == "nested_table":
+        return "".join(lines[loc.start : loc.end])
+    if loc.kind == "assignment":
+        return lines[loc.index]
     return None
 
 
 def _toml_delete_assignment(text: str, dotted: str) -> str:
     """Remove one resolved-absent setting from the incoming canvas."""
     lines = text.splitlines(keepends=True)
-    if _toml_array_table_spans(lines, dotted):
+    loc = _toml_locate_setting(lines, dotted)
+    if loc is None:
+        return _toml_remove_nested_table(text, dotted)
+    if loc.kind == "array_table":
         return _toml_replace_array_tables(lines, dotted, "")
-    table, _, leaf = dotted.rpartition(".")
-    if not leaf:
-        table, leaf = "", dotted
-    current_table = ""
-    header_index = -1
-    for index, line in enumerate(lines):
-        header = _toml_header_name(line)
-        if header is not None and not line.lstrip().startswith("[["):
-            current_table = header
-            header_index = index
-            continue
-        if current_table != table or _toml_assignment_key(line) != leaf:
-            continue
-        if not _toml_assignment_is_complete(line):
-            raise ValueError(
-                "multiline TOML assignment cannot be merged by setting identity"
-            )
-        del lines[index]
-        if (
-            table
-            and header_index >= 0
-            and not _toml_table_has_assignments(lines, header_index)
-        ):
-            del lines[header_index]
+    if loc.kind == "nested_table":
+        return _toml_remove_nested_table(text, dotted)
+    if loc.kind == "assignment":
+        _toml_delete_line_and_empty_table(lines, loc.index)
         return "".join(lines)
-    return _toml_remove_nested_table("".join(lines), dotted)
+    if loc.kind == "inline_field":
+        if not loc.present:
+            return text
+        rewritten = _toml_update_inline_field(
+            lines[loc.index], loc.inner_parts, _TOML_MISSING
+        )
+        if rewritten is None:
+            _toml_delete_line_and_empty_table(lines, loc.index)
+        else:
+            lines[loc.index] = rewritten
+        return "".join(lines)
+    return text
 
 
 def _merge_toml_runtime_preferences(
@@ -16247,7 +16415,7 @@ def _merge_toml_runtime_preferences(
             if curr is not _TOML_MISSING:
                 resolved[key] = curr
             continue
-        if key == "terminal.shell" or key.endswith(".shell"):
+        if key == "terminal.shell":
             if (
                 prev is not _TOML_MISSING
                 and curr is not _TOML_MISSING
@@ -16279,7 +16447,12 @@ def _merge_toml_runtime_preferences(
             if current_values.get(key, _TOML_MISSING) == value
             else None
         )
-        if raw is not None:
+        incoming_form = _toml_locate_setting(merged.splitlines(keepends=True), key)
+        if raw is not None and (
+            _toml_is_atomic_record_path(key)
+            or incoming_form is None
+            or incoming_form.kind != "inline_field"
+        ):
             merged = _overlay_toml_assignment(merged, key, raw)
         else:
             merged = _toml_replace_or_insert(merged, key, _toml_literal(value))
@@ -16336,9 +16509,6 @@ def _overlay_toml_assignment(text: str, dotted: str, raw_assignment: str) -> str
     if text and not text.endswith("\n"):
         text += "\n"
     return text + (raw_assignment if raw_assignment.endswith("\n") else raw_assignment + "\n")
-
-
-_TOML_MISSING = object()
 
 
 def _merge_runtime_preferences(
