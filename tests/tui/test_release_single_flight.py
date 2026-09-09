@@ -146,6 +146,90 @@ def _wait_for(path: Path, timeout: float = 8) -> None:
     raise AssertionError(f"timed out waiting for {path}")
 
 
+def _drain(proc: subprocess.Popen[str], timeout: float = 2) -> tuple[str, str]:
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate(timeout=timeout)
+    return stdout or "", stderr or ""
+
+
+def _reap_own_child(proc: subprocess.Popen[str] | None) -> None:
+    """Signal only this test's child. Never another process."""
+    if proc is None or proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate(timeout=2)
+
+
+def _wait_for_or_report(proc: subprocess.Popen[str], path: Path, timeout: float = 8) -> None:
+    try:
+        _wait_for(path, timeout=timeout)
+    except AssertionError as exc:
+        rc = proc.poll()
+        stderr = ""
+        if rc is not None:
+            _stdout, stderr = _drain(proc, timeout=1)
+        raise AssertionError(f"{exc}; driver rc={rc} stderr={stderr!r}") from exc
+
+
+def _write_fake_security(path: Path) -> Path:
+    """A substitute ``security`` that lives outside the tracked fixture root.
+
+    create-keychain is ``-p <password> <path>``; $2 is the flag, not the file.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "#!/bin/sh\n"
+        "state=\"${FAKE_SECURITY_STATE:?}\"\n"
+        "mkdir -p \"$state\"\n"
+        "printf '%s\\n' \"$*\" >> \"$state/argv.log\"\n"
+        "cmd=\"$1\"\n"
+        "shift\n"
+        "case \"$cmd\" in\n"
+        "  list-keychains) : ;;\n"
+        "  default-keychain) : ;;\n"
+        "  create-keychain)\n"
+        "    path=\"\"\n"
+        "    while [ $# -gt 0 ]; do\n"
+        "      case \"$1\" in\n"
+        "        -p) [ $# -ge 2 ] || exit 64; shift 2 ;;\n"
+        "        *) path=\"$1\"; shift ;;\n"
+        "      esac\n"
+        "    done\n"
+        "    [ -n \"$path\" ] || exit 64\n"
+        "    mkdir -p \"$(dirname \"$path\")\"\n"
+        "    printf 'fake-keychain\\n' > \"$path\"\n"
+        "    ;;\n"
+        "  set-keychain-settings) : ;;\n"
+        "  unlock-keychain)\n"
+        "    path=\"\"\n"
+        "    while [ $# -gt 0 ]; do\n"
+        "      case \"$1\" in\n"
+        "        -p) [ $# -ge 2 ] || exit 64; shift 2 ;;\n"
+        "        *) path=\"$1\"; shift ;;\n"
+        "      esac\n"
+        "    done\n"
+        "    [ -e \"$path\" ] || exit 1\n"
+        "    ;;\n"
+        "  delete-keychain)\n"
+        "    path=\"$1\"\n"
+        "    [ -n \"$path\" ] || exit 64\n"
+        "    rm -f \"$path\"\n"
+        "    ;;\n"
+        "  *) ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
+
+
 def _finish(proc: subprocess.Popen[str], timeout: float = 8) -> subprocess.CompletedProcess[str]:
     stdout, stderr = proc.communicate(timeout=timeout)
     return subprocess.CompletedProcess(
@@ -310,50 +394,47 @@ def test_keychain_trap_still_chains_in_front_of_reap_and_unlock(
     tmp_path: Path,
 ) -> None:
     repo, _head = _stage_repo(tmp_path)
-    fake_bin = repo / "fake-bin"
-    security = fake_bin / "security"
-    security.write_text(
-        "#!/bin/sh\n"
-        "state=\"${FAKE_SECURITY_STATE:?}\"\n"
-        "mkdir -p \"$state\"\n"
-        "printf '%s\\n' \"$*\" >> \"$state/argv.log\"\n"
-        "case \"$1\" in\n"
-        "  list-keychains) : ;;\n"
-        "  default-keychain) : ;;\n"
-        "  create-keychain) : > \"$2\" ;;\n"
-        "  set-keychain-settings) : ;;\n"
-        "  unlock-keychain) : ;;\n"
-        "  delete-keychain) rm -f \"$2\" ;;\n"
-        "  *) ;;\n"
-        "esac\n",
-        encoding="utf-8",
-    )
-    security.chmod(0o755)
+    # Outside the committed fixture so require_clean_repo still sees a clean tree.
+    security = _write_fake_security(tmp_path / "untracked-security" / "security")
     state = tmp_path / "security-state"
     state.mkdir()
     stage = tmp_path / "stage-keychain"
-    first = _start_driver(
-        repo,
-        stage,
-        "--runtime-pack-only",
-        extra_env={
-            "RELEASE_SINGLE_FLIGHT_KEYCHAIN": "1",
-            "KEYCHAIN_SESSION_SECURITY_BIN": str(security),
-            "KEYCHAIN_SESSION_STATE_DIR": str(tmp_path / "keychain-state"),
-            "FAKE_SECURITY_STATE": str(state),
-            "HOME": str(tmp_path / "home"),
-        },
-    )
-    _wait_for(stage / "trap-exit")
-    trap_text = (stage / "trap-exit").read_text(encoding="utf-8")
-    assert "_ks_trap_cleanup" in trap_text
-    assert "cleanup" in trap_text
-    first.send_signal(signal.SIGTERM)
-    done = _finish(first)
-    assert done.returncode == 143, done.stderr
-    assert not (stage / "continued-after-wait").exists()
-    argv = (state / "argv.log").read_text(encoding="utf-8")
-    assert "delete-keychain" in argv or "create-keychain" in argv
+    first: subprocess.Popen[str] | None = None
+    try:
+        first = _start_driver(
+            repo,
+            stage,
+            "--runtime-pack-only",
+            extra_env={
+                "RELEASE_SINGLE_FLIGHT_KEYCHAIN": "1",
+                "KEYCHAIN_SESSION_SECURITY_BIN": str(security),
+                "KEYCHAIN_SESSION_STATE_DIR": str(tmp_path / "keychain-state"),
+                "FAKE_SECURITY_STATE": str(state),
+                "HOME": str(tmp_path / "home"),
+            },
+        )
+        _wait_for_or_report(first, stage / "trap-exit")
+        trap_text = (stage / "trap-exit").read_text(encoding="utf-8")
+        assert "_ks_trap_cleanup" in trap_text
+        assert "cleanup" in trap_text
+        first.send_signal(signal.SIGTERM)
+        done = _finish(first)
+        assert done.returncode == 143, done.stderr
+        assert not (stage / "continued-after-wait").exists()
+        argv = (state / "argv.log").read_text(encoding="utf-8")
+        assert "create-keychain" in argv
+        assert "delete-keychain" in argv
+        created = [
+            line
+            for line in argv.splitlines()
+            if line.startswith("create-keychain")
+        ]
+        assert created, argv
+        assert " -p " in f" {created[0]} "
+        assert not created[0].endswith(" -p")
+        assert not (repo / "-p").exists()
+    finally:
+        _reap_own_child(first)
 
 
 def test_shared_output_dir_refuses_a_second_checkout(
@@ -388,6 +469,54 @@ def test_shared_output_dir_refuses_a_second_checkout(
     assert done.returncode == 0, done.stderr
 
 
+def test_in_root_symlink_and_dotdot_share_one_physical_output_lock(
+    tmp_path: Path,
+) -> None:
+    """Two roots, one physical dist: lexical in-repo prefix must not skip the lock."""
+
+    first_repo, _head = _stage_repo(tmp_path, "checkout-a")
+    second_repo, _second_head = _stage_repo(tmp_path, "checkout-b")
+    shared = tmp_path / "shared-dist"
+    # First root reaches the shared dir through .. ; second through an in-root symlink.
+    first_dist = first_repo / ".." / shared.name
+    (second_repo / "dist").symlink_to(shared)
+    first_stage = tmp_path / "stage-phys-a"
+    first = _start_driver(
+        first_repo,
+        first_stage,
+        "--runtime-pack-only",
+        extra_env={"VIBECRAFTED_RELEASE_DIR": str(first_dist)},
+    )
+    try:
+        _wait_for_or_report(first, first_stage / "locked")
+        second_stage = tmp_path / "stage-phys-b"
+        second = subprocess.run(
+            ["bash", str(DRIVER), "--runtime-pack-only"],
+            cwd=second_repo,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=8,
+            env=_driver_env(second_repo, second_stage),
+        )
+        assert second.returncode != 0, second.stderr
+        assert "already owns this output directory" in second.stderr
+        assert not (second_stage / "locked").exists()
+        assert not (second_repo / "build/runtime-pack-selection.json").exists()
+        assert (shared.parent / f"{shared.name}.release.lock").is_file()
+        assert first_dist.resolve() == shared.resolve()
+        assert (second_repo / "dist").resolve() == shared.resolve()
+    finally:
+        (first_stage / "continue").write_text("1\n", encoding="utf-8")
+        if first.poll() is None:
+            done = _finish(first)
+        else:
+            done = None
+        _reap_own_child(first)
+    if done is not None:
+        assert done.returncode == 0, done.stderr
+
+
 def test_production_entrypoint_has_no_fake_stage_escape() -> None:
     builder = RELEASE_BUILDER.read_text(encoding="utf-8")
     assert "VIBECRAFTED_RELEASE_FAKE_STAGES" not in builder
@@ -397,3 +526,5 @@ def test_production_entrypoint_has_no_fake_stage_escape() -> None:
     flight = FLIGHT_LIBRARY.read_text(encoding="utf-8")
     assert "never unlink" in flight
     assert "release_single_flight_acquire_output" in flight
+    assert "release_single_flight_physical_identity" in flight
+    assert 'case "$dist_abs" in' not in flight

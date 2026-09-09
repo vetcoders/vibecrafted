@@ -9,10 +9,11 @@
 # This lock is the long-lived one: taken before any of those mutations and
 # held until after cleanup, including descendants that inherit the descriptor.
 #
-# When VIBECRAFTED_RELEASE_DIR resolves to a directory outside this checkout,
-# a second kernel lock on that physical path stops two checkouts from quietly
-# sharing one output tree. A dist that stays under the checkout is already
-# covered by build/release.lock.
+# When VIBECRAFTED_RELEASE_DIR resolves physically outside this checkout,
+# a second kernel lock on that path stops two checkouts from quietly
+# sharing one output tree (in-root symlink or .. must not skip the lock).
+# A dist that physically stays under the checkout is already covered by
+# build/release.lock. Lexical in-repo prefix is not identity.
 #
 # The exclusion belongs to the KERNEL, not to a pid file. The flock primitive
 # is the one in runtime-pack-selection.sh: never unlink the lock inode, never
@@ -127,28 +128,85 @@ release_single_flight_acquire() {
   return 0
 }
 
-# Second lock when the resolved output directory is not inside this checkout.
-# Physical identity (pwd -P) so two worktrees cannot share one dist via a
-# symlink and miss each other. Dist under the checkout is already covered.
-release_single_flight_acquire_output() {
-  local repo_root="$1" dist_dir="$2" repo_abs dist_abs repo_phys dist_phys lock status=0
-  [[ -n "$dist_dir" ]] || return 1
-  repo_abs="$(cd "$repo_root" && pwd)" || return 1
-  case "$dist_dir" in
-    /*) dist_abs="$dist_dir" ;;
-    *) dist_abs="$PWD/$dist_dir" ;;
+# Physical directory identity without creating anything.
+# Follows leaf symlinks (including a dangling target), collapses .. and .,
+# and walks missing components through the nearest existing ancestor via
+# pwd -P. mkdir would dirty an in-checkout dist before require_clean_repo.
+release_single_flight_physical_identity() {
+  local input="$1" abs hops=0 target parent base parent_phys
+  [[ -n "$input" ]] || return 1
+  case "$input" in
+    /*) abs="$input" ;;
+    *) abs="$PWD/$input" ;;
   esac
-  # Do not mkdir an in-checkout dist here: that would dirty SOURCE/REPO
-  # before require_clean_repo. /dist is gitignored on the living tree, but
-  # a custom in-repo VIBECRAFTED_RELEASE_DIR is not this lock's job.
-  case "$dist_abs" in
-    "$repo_abs"|"$repo_abs"/*)
-      return 0
+
+  while [[ -L "$abs" ]]; do
+    hops=$((hops + 1))
+    if ((hops > 32)); then
+      return 1
+    fi
+    target="$(readlink "$abs")" || return 1
+    [[ -n "$target" ]] || return 1
+    case "$target" in
+      /*) abs="$target" ;;
+      *) abs="$(dirname "$abs")/$target" ;;
+    esac
+  done
+
+  if [[ -d "$abs" ]]; then
+    (cd -P "$abs" && pwd -P) || return 1
+    return 0
+  fi
+  if [[ -e "$abs" ]]; then
+    parent="$(dirname "$abs")"
+    base="$(basename "$abs")"
+    parent_phys="$(release_single_flight_physical_identity "$parent")" || return 1
+    if [[ "$parent_phys" == / ]]; then
+      printf '/%s\n' "$base"
+    else
+      printf '%s/%s\n' "$parent_phys" "$base"
+    fi
+    return 0
+  fi
+
+  if [[ "$abs" == / ]]; then
+    printf '/\n'
+    return 0
+  fi
+  parent="$(dirname "$abs")"
+  base="$(basename "$abs")"
+  parent_phys="$(release_single_flight_physical_identity "$parent")" || return 1
+  case "$base" in
+    .)
+      printf '%s\n' "$parent_phys"
+      ;;
+    ..)
+      if [[ "$parent_phys" == / ]]; then
+        printf '/\n'
+      else
+        dirname "$parent_phys"
+      fi
+      ;;
+    *)
+      if [[ "$parent_phys" == / ]]; then
+        printf '/%s\n' "$base"
+      else
+        printf '%s/%s\n' "$parent_phys" "$base"
+      fi
       ;;
   esac
-  mkdir -p "$dist_abs" || return 1
-  repo_phys="$(cd "$repo_abs" && pwd -P)" || return 1
-  dist_phys="$(cd "$dist_abs" && pwd -P)" || return 1
+}
+
+# Second lock when the resolved output directory is not inside this checkout.
+# Identity is physical: an in-root symlink or a .. path that shares one
+# directory with another root must take the same sibling lock. Dist that
+# physically stays under the checkout is already covered by build/release.lock.
+# Do not mkdir until that decision is made.
+release_single_flight_acquire_output() {
+  local repo_root="$1" dist_dir="$2" repo_phys dist_phys lock status=0
+  [[ -n "$dist_dir" ]] || return 1
+  repo_phys="$(release_single_flight_physical_identity "$repo_root")" || return 1
+  dist_phys="$(release_single_flight_physical_identity "$dist_dir")" || return 1
   case "$dist_phys" in
     "$repo_phys"|"$repo_phys"/*)
       return 0
@@ -158,6 +216,13 @@ release_single_flight_acquire_output() {
     printf 'release: this process already holds the output lock\n' >&2
     return 1
   fi
+  mkdir -p "$dist_phys" || return 1
+  dist_phys="$(release_single_flight_physical_identity "$dist_phys")" || return 1
+  case "$dist_phys" in
+    "$repo_phys"|"$repo_phys"/*)
+      return 0
+      ;;
+  esac
   lock="$(release_single_flight_output_lock_file "$dist_phys")"
   release_single_flight_open_output_lock_fd "$lock" || return 1
   runtime_pack_selection_flock \

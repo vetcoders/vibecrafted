@@ -651,12 +651,18 @@ def test_release_bundle_binds_the_vibecrafted_app_icon() -> None:
     )
     icon = REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted/Vibecrafted.icns"
 
+    version = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    assert version
     assert "INFOPLIST_FILE: Vibecrafted/Info.plist" in project
-    assert 'MARKETING_VERSION: "4.3.0"' in project
-    assert '- "Vibecrafted.icns"' in project
+    assert f'MARKETING_VERSION: "{version}"' in project
+    assert "- \"Vibecrafted.icns\"" in project
     assert "<key>CFBundleIconFile</key>" in info_plist
     assert "<string>Vibecrafted.icns</string>" in info_plist
+    assert "<key>CFBundleShortVersionString</key>" in info_plist
+    assert "<string>$(MARKETING_VERSION)</string>" in info_plist
     assert 'plist["CFBundleIconFile"] = contract.PRODUCT_ICON_FILE' in manifest
+    assert 'plist["CFBundleShortVersionString"] = args.version' in manifest
+    assert '--version "$VERSION"' in builder
     assert icon.is_file()
     assert icon.stat().st_size > 100_000
     assert "$TERMINAL_REPO/assets/icon/vc-terminal-icon.png" in builder
@@ -696,15 +702,16 @@ def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
     assert "CTFontManagerRegisterFontsForURL" in app_delegate
     assert "kCTFontFamilyNameAttribute as String" in app_delegate
     assert 'CTFontDescriptorCreateWithNameAndSize("Spot Mono"' not in app_delegate
+    assert "_RUNTIME_PREFERENCE_SOURCES" in installer
     assert (
-        'terminal_policy_source = generation / "config/vc-terminal/vibecrafted.toml"'
-        in installer
+        '("terminal-policy.toml", "config/vc-terminal/vibecrafted.toml")' in installer
     )
-    assert 'terminal_policy = product_config / "terminal-policy.toml"' in installer
-    assert 'terminal_policy_source.read_text(encoding="utf-8")' in installer
+    assert 'product_config / "terminal-policy.toml"' in installer
+    assert 'policy = product / "terminal-policy.toml"' in installer
+    assert "(terminal / \"vc-terminal.toml\").write_text" in installer
     assert 'product_config / "vc-terminal" / "vc-terminal.toml"' in installer
     assert 'product_config / "terminal-entry.toml"' not in installer
-    assert "_reclaim_product_terminal_debris" in installer
+    assert "_PRODUCT_TERMINAL_DEBRIS" in installer
     assert "vc-terminal/alacritty.toml" in installer
     assert "launch-alt-screen" not in installer
     assert 'product_config / "terminal-theme.toml"' in installer
