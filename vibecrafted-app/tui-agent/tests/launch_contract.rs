@@ -819,3 +819,148 @@ fn a_home_directory_repository_is_refused_as_a_work_context() {
 fn dirs_home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").expect("HOME must be set for this test"))
 }
+
+/// Opt-in exact-source cross-language gate; no fixture substitutes for core output.
+#[test]
+#[ignore = "requires VC_TEST_REAL_DECK and a prepared source Python"]
+fn real_selected_generation_catalog_reaches_voc() {
+    let deck = std::path::PathBuf::from(std::env::var_os("VC_TEST_REAL_DECK").unwrap());
+    let catalog = LauncherCatalog::load(&deck, &std::collections::BTreeMap::new()).unwrap();
+    assert_eq!(
+        catalog.agents,
+        vec!["agy", "claude", "codex", "cursor", "grok", "junie"]
+    );
+    let codex = catalog.provider("codex").unwrap();
+    assert!(codex.model_override.supported);
+    assert!(codex.control_cell(None, None).unwrap().supported);
+    assert!(
+        !codex
+            .control_cell(Some("accept-edits"), None)
+            .unwrap()
+            .supported
+    );
+    assert!(catalog.environment_availability("local-native").is_ok());
+    assert!(catalog.environment_availability("cloud-soon").is_err());
+}
+
+/// Only the provider is a fixture. Catalog, declaration, shell, core, durable
+/// receipt and VOC's admission audit all execute their real implementations.
+#[test]
+#[ignore = "requires VC_TEST_REAL_DECK and a prepared source Python"]
+fn real_deck_receipt_confirms_voc_declaration() {
+    let deck = PathBuf::from(std::env::var_os("VC_TEST_REAL_DECK").unwrap());
+    let dir = tempdir().unwrap();
+    let repo = dir.path().join("private repo with spaces");
+    fs::create_dir(&repo).unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "baseline",
+        ],
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let baseline = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    let bin = dir.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let provider = bin.join("codex");
+    fs::write(&provider, r#"#!/usr/bin/env python3
+import json, sys, uuid
+if '--help' in sys.argv:
+    print('exec stdin'); sys.exit()
+if '--version' in sys.argv:
+    print('codex fixture'); sys.exit()
+sys.stdin.buffer.read()
+print(json.dumps({'type':'thread.started','thread_id':str(uuid.uuid4())}), flush=True)
+print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'output_tokens':1}}), flush=True)
+"#).unwrap();
+    fs::set_permissions(&provider, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut env = std::collections::BTreeMap::new();
+    env.insert(
+        "PATH".to_string(),
+        format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()).into(),
+    );
+    let home = dir.path().join("vc");
+    env.insert(
+        "VIBECRAFTED_HOME".to_string(),
+        home.clone().into_os_string(),
+    );
+    let catalog = LauncherCatalog::load(&deck, &env).unwrap();
+    let codex_index = catalog.agents.iter().position(|a| a == "codex").unwrap();
+    let mut app = fixture_app(&repo, &deck, &dir.path().join("roots"));
+    app.catalog = CatalogState::Ready(catalog);
+    app.launch_agent = codex_index;
+    app.launch_environment = Environment::FleetWorktrees;
+    app.launch_permissions = PermissionPolicy::ReadOnly;
+    app.launch_sandbox = SandboxChoice::On;
+    app.launch_model = "fixture-model".to_string();
+    app.launch_prompt = "Private Żółć 🔒\r\nsecond line\r\n\r\n".repeat(2000);
+    let mut command = app.launch_plan().unwrap();
+    command.env.extend(env);
+    assert!(!command.preview().contains("Private Żółć"));
+    let result = command.run_capturing(Duration::from_secs(90)).unwrap();
+    let raw = match &result {
+        LauncherRun::Completed { output, .. } => {
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+        }
+        other => panic!("real launcher did not settle: {other:?}"),
+    };
+    let outcome = LaunchOutcome::from_run(command.preview(), app.launch_expectation(), Ok(result));
+    assert_eq!(outcome.admission(), Admission::Admitted);
+    assert_eq!(
+        outcome.audit().confirmation(),
+        Confirmation::Confirmed,
+        "{:?}",
+        outcome.audit()
+    );
+    assert_eq!(
+        fs::read(raw["source_snapshot"].as_str().unwrap()).unwrap(),
+        app.launch_prompt.as_bytes()
+    );
+    assert_eq!(raw["parent_root"].as_str().unwrap(), repo.to_str().unwrap());
+    assert_eq!(
+        raw["worktree_baseline_sha"].as_str().unwrap(),
+        String::from_utf8(baseline.stdout).unwrap().trim()
+    );
+    assert!(Path::new(raw["root"].as_str().unwrap()).starts_with(home.join("worktrees")));
+    let meta_path = Path::new(raw["meta"].as_str().unwrap());
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    loop {
+        let meta: serde_json::Value =
+            serde_json::from_slice(&fs::read(meta_path).unwrap()).unwrap();
+        if !meta["exit_code"].is_null() {
+            assert_eq!(meta["exit_code"], 0);
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fixture worker did not settle: {meta}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}

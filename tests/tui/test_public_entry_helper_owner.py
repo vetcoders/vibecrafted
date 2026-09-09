@@ -379,3 +379,73 @@ def test_direct_source_execution_keeps_its_own_route(world: dict[str, Path]) -> 
     assert OWNER_MARK not in _sourced(world)
     assert launch is None
     assert "no installed vibecrafted front door" in result.stderr
+
+
+@pytest.mark.parametrize("stale", [False, True])
+@pytest.mark.parametrize("installed", [False, True])
+def test_catalog_uses_physical_deck_generation(
+    world: dict[str, Path], stale: bool, installed: bool
+) -> None:
+    """Two valid cores/interpreters disagree; neither cwd nor ambient roots select."""
+    import sys
+
+    for key in ("generation", "checkout"):
+        owner = world[key]
+        _write(owner / CORE / "__init__.py", "", executable=False)
+        _write(owner / CORE / "dispatcher.py", "", executable=False)
+        _write(
+            owner / CORE / "cli.py",
+            f'import json\nprint(json.dumps({{"owner": {key!r}}}))\n',
+            executable=False,
+        )
+    generation_python = _write(
+        world["generation"] / "bin/python3", f'#!/bin/sh\nexec {sys.executable} "$@"\n'
+    )
+    owner = world["generation" if installed else "checkout"]
+    deck = owner / ("bin/vibecrafted" if installed else "scripts/vibecrafted")
+    env = {
+        **os.environ,
+        "HOME": str(world["home"]),
+        "VIBECRAFTED_PYTHON": sys.executable,
+    }
+    if stale:
+        env.update(
+            VIBECRAFTED_ROOT=str(
+                world["checkout"] if installed else world["generation"]
+            ),
+            VIBECRAFTED_RUNTIME_ROOT=str(world["generation"]),
+            VIBECRAFTED_PYTHON=str(generation_python),
+        )
+    result = subprocess.run(
+        ["bash", str(deck), "capabilities", "--json"],
+        cwd=world["checkout"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "owner": "generation" if installed else "checkout"
+    }
+
+
+def test_catalog_missing_physical_core_refuses_foreign_fallback(
+    world: dict[str, Path],
+) -> None:
+    _write(world["checkout"] / CORE / "dispatcher.py", "", executable=False)
+    result = subprocess.run(
+        [
+            "bash",
+            str(world["generation"] / "bin/vibecrafted"),
+            "capabilities",
+            "--json",
+        ],
+        cwd=world["checkout"],
+        env={**os.environ, "VIBECRAFTED_ROOT": str(world["checkout"])},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert not result.stdout.strip()

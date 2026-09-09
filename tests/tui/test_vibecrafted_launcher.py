@@ -1642,7 +1642,19 @@ def test_installed_launcher_tui_uses_shared_state_and_voc_binary(
     assert "--tick-ms 500" in tui_args
 
 
-def test_tui_prefers_declared_runtime_voc_over_host_and_source(
+def _write_physical_generation_deck(runtime: Path) -> Path:
+    launcher = runtime / "bin/vibecrafted"
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    launcher.write_bytes(LAUNCHER.read_bytes())
+    launcher.chmod(0o755)
+    limits = Path("vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh")
+    (runtime / limits).parent.mkdir(parents=True, exist_ok=True)
+    (runtime / limits).write_bytes((REPO_ROOT / limits).read_bytes())
+    (runtime / "runtime-manifest.json").write_text("{}\n")
+    return launcher
+
+
+def test_tui_prefers_physical_runtime_voc_over_host_and_source(
     tmp_path: Path,
 ) -> None:
     """An installed generation owns VOC; stale host/source candidates cannot mask it."""
@@ -1659,6 +1671,7 @@ def test_tui_prefers_declared_runtime_voc_over_host_and_source(
     _write_capture_script(runtime / "bin" / "voc", runtime_capture)
     _write_capture_script(hostile_bin / "voc", hostile_capture)
     _write_capture_script(runtime / "bin" / "vc-server", tmp_path / "server-args.txt")
+    launcher = _write_physical_generation_deck(runtime)
 
     env = os.environ.copy()
     env["HOME"] = str(home)
@@ -1668,7 +1681,7 @@ def test_tui_prefers_declared_runtime_voc_over_host_and_source(
     env.pop("PYTHONPATH", None)
 
     subprocess.run(
-        ["bash", str(LAUNCHER), "tui", "--runtime", "headless"],
+        ["bash", str(launcher), "tui", "--runtime", "headless"],
         check=True,
         cwd=tmp_path,
         env=env,
@@ -1678,7 +1691,7 @@ def test_tui_prefers_declared_runtime_voc_over_host_and_source(
     assert not hostile_capture.exists()
 
 
-def test_tui_declared_runtime_missing_voc_fails_without_host_fallback(
+def test_tui_physical_runtime_missing_voc_fails_without_host_fallback(
     tmp_path: Path,
 ) -> None:
     """A partial Runtime Pack gets product repair guidance, never cargo/PATH rescue."""
@@ -1693,6 +1706,7 @@ def test_tui_declared_runtime_missing_voc_fails_without_host_fallback(
     (runtime / "server" / "site").mkdir(parents=True)
     _write_capture_script(hostile_bin / "voc", hostile_capture)
     _write_capture_script(runtime / "bin" / "vc-server", tmp_path / "server-args.txt")
+    launcher = _write_physical_generation_deck(runtime)
 
     env = os.environ.copy()
     env["HOME"] = str(home)
@@ -1702,7 +1716,7 @@ def test_tui_declared_runtime_missing_voc_fails_without_host_fallback(
     env.pop("PYTHONPATH", None)
 
     result = subprocess.run(
-        ["bash", str(LAUNCHER), "tui", "--runtime", "headless"],
+        ["bash", str(launcher), "tui", "--runtime", "headless"],
         check=False,
         cwd=tmp_path,
         env=env,
@@ -2305,7 +2319,8 @@ def test_marbles_delete_control_subcommand_routes_to_helper(tmp_path: Path) -> N
     )
 
     home.mkdir()
-    wrapper.symlink_to(LAUNCHER)
+    generation = home / ".local/share/vibecrafted/tools/vibecrafted-current"
+    wrapper.symlink_to(_write_physical_generation_deck(generation))
     helper.parent.mkdir(parents=True, exist_ok=True)
     helper.write_text(
         "\n".join(
