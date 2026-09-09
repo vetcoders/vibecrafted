@@ -228,9 +228,10 @@ Bare interactive fork admission proves a provider process was started, not that
 its pane displays a new native session. The receipt leaves `agent_session_id`
 and `provider_session_id` empty with `native_identity_status: pending`.
 `provider_session_requested`, when present, is only the UUID supplied to a
-provider's `--session-id` option; Codex fork has no such option. Until an
-attributable provider acknowledgement is available, an exit-zero interactive
-fork settles as `native_fork_identity_unconfirmed`. No newest-file or inherited
+provider's `--session-id` option; Codex fork has no such option. Without an
+attributable provider acknowledgement, an exit-zero interactive fork settles as
+`native_fork_identity_unconfirmed`. Codex now implements the correlated
+acknowledgement described below. No newest-file or inherited
 parent-ID heuristic promotes it to success. Remote app-server/pane child identity
 and continued source usability remain required native acceptance.
 
@@ -253,3 +254,44 @@ slow-display backpressure, supervised partial-echo/log-view privacy, and install
 Frame/VOC lifecycle acceptance retain their separate proof obligations. Output
 capture follows terminal geometry during quiet periods; this is not full keyboard
 or every-terminal SIGWINCH acceptance.
+
+## Exact deck generation selection
+
+Invoking a physical checkout `scripts/vibecrafted` (or its packaged deck copy)
+selects that checkout's core and shell helpers, independently of cwd and inherited
+`VIBECRAFTED_ROOT` / `VIBECRAFTED_RUNTIME_ROOT`. Those variables are context, not
+development selectors. Select another checkout by invoking its deck explicitly.
+`VIBECRAFTED_PYTHON` remains the explicit development interpreter override;
+an override pointing into a receipted installed generation is rejected for source
+selection. Otherwise the checkout's core `.venv` or host Python is used. Select
+a receipted installed generation by invoking its physical deck: its adjacent
+core and `bin/python3` are mandatory, with no foreign-generation/host fallback.
+`--repo` / `--root` select the work repository and never the code generation.
+VOC consumes the real selected deck catalog; absent provider/environment cells
+remain unavailable, without a locally invented capability list.
+
+## Correlated interactive Codex fork
+
+The interactive spawn owner uses the selected Codex executable's app-server
+`thread/fork`, correlating the response ID to the run. It requires a distinct
+native child ID, exact `forkedFromId`, and admitted cwd, then independently calls
+`thread/read` for that exact child and checks all three fields again. Only then
+are the child IDs and `native_identity_evidence` published through the existing
+control plane. The selected CLI opens that acknowledged child with `resume`;
+the source is never the resume target. Permission/model selection is retained.
+The public bare fork opens the child idle. Its synthetic shell skill marker is
+not a user task and is not submitted to the provider; explicit task-bearing
+forks continue through the private-input headless path.
+
+Local native RPC uses that exact executable's `app-server --stdio` and its existing
+Codex home. Explicit `CODEX_REMOTE=unix:///absolute/socket` uses that same remote
+endpoint for the native fork and interactive CLI. Other remote transports refuse
+before provider spawn; no fallback changes the selected endpoint or executable.
+The acknowledgement deadline is bounded. Missing/mismatched replies leave the
+receipt failed and identity unconfirmed, with no automatic retry of a possibly
+completed native mutation. Process/window admission remains separate from native
+identity and from terminal exit. Other providers retain their existing pending
+identity semantics until a correlated acknowledgement adapter is implemented.
+The Unix WebSocket adapter uses the maintained BSD-licensed `websockets` client
+for framing, bounded reads and connection cleanup; it does not implement a
+second session resolver or persist identities outside the control plane.

@@ -114,12 +114,15 @@ _vc_source_launcher_ulimits || exit $?
 unset -f _vc_source_launcher_ulimits
 
 _runtime_payload_root() {
-  local candidate="${VIBECRAFTED_RUNTIME_ROOT:-}"
-  if [[ -n "$candidate" && -x "$candidate/bin/vc-server" && -d "$candidate/server/site" ]]; then
+  local candidate
+  candidate="$(_script_owner_root)" || return 1
+  if _is_installed_generation_root "$candidate"; then
     printf '%s\n' "$candidate"
     return 0
   fi
-  candidate="$(_script_owner_root)"
+  # An exact checkout invocation selects source, even inside an older runtime.
+  # Runtime roots describe inherited context; they are not a deck selector.
+  _is_framework_source_root "$candidate" && return 1
   if [[ -x "$candidate/bin/vc-server" && -d "$candidate/server/site" ]]; then
     printf '%s\n' "$candidate"
     return 0
@@ -383,6 +386,8 @@ _ensure_helpers_loaded() {
     physical_owner="$(_script_owner_root 2>/dev/null || true)"
     if _is_installed_generation_root "$physical_owner"; then
       owner_root="$physical_owner"
+    elif _is_framework_source_root "$physical_owner"; then
+      owner_root="$physical_owner"
     fi
   fi
   if [[ -n "$owner_root" ]]; then
@@ -512,7 +517,17 @@ _core_module_dir() {
 }
 
 _dispatcher_core_dir() {
-  local repo_source candidate
+  local repo_source candidate owner_root
+  owner_root="$(_script_owner_root)" || return 1
+  if _is_installed_generation_root "$owner_root" || _is_framework_source_root "$owner_root"; then
+    candidate="$owner_root/vibecrafted-core"
+    if [[ ! -f "$candidate/vibecrafted_core/dispatcher.py" ]]; then
+      printf 'vibecrafted: selected launcher core missing: %s\n' "$candidate" >&2
+      return 1
+    fi
+    printf '%s\n' "$candidate"
+    return 0
+  fi
   repo_source="$(_repo_source_root 2>/dev/null || true)"
   for candidate in \
     "${repo_source:+$repo_source/vibecrafted-core}" \
@@ -532,6 +547,12 @@ _dispatcher_core_dir() {
 # checkout decks keep the explicit development override.
 _vibecrafted_python_owned_by_current() {
   local candidate="$1" candidate_real current_real deck_real
+  local physical_owner candidate_owner
+  physical_owner="$(_script_owner_root)" || return 1
+  candidate_owner="$(cd -P "$(dirname "$candidate")/.." 2>/dev/null && pwd -P)" || return 1
+  if _is_framework_source_root "$physical_owner" && _is_installed_generation_root "$candidate_owner"; then
+    return 1
+  fi
   [[ -d "$crafted_tools" ]] || return 0
   current_real="$(cd "$crafted_tools" 2>/dev/null && pwd -P)" || return 1
   deck_real="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null)" || return 0
@@ -548,13 +569,23 @@ _vibecrafted_python_owned_by_current() {
 _vibecrafted_owned_python() {
   local resolved shebang py runtime_root
   runtime_root="$(_runtime_payload_root 2>/dev/null || true)"
-  if [[ -n "$runtime_root" && -x "$runtime_root/bin/python3" ]]; then
-    printf '%s\n' "$runtime_root/bin/python3"
-    return 0
+  if [[ -n "$runtime_root" ]]; then
+    if [[ -x "$runtime_root/bin/python3" ]]; then
+      printf '%s\n' "$runtime_root/bin/python3"
+      return 0
+    fi
+    printf 'vibecrafted: selected runtime Python missing: %s/bin/python3\n' "$runtime_root" >&2
+    return 1
   fi
   if [[ -n "${VIBECRAFTED_PYTHON:-}" && -x "$VIBECRAFTED_PYTHON" ]] \
     && _vibecrafted_python_owned_by_current "$VIBECRAFTED_PYTHON"; then
     printf '%s\n' "$VIBECRAFTED_PYTHON"
+    return 0
+  fi
+  if _is_framework_source_root "$(_script_owner_root)"; then
+    py="$(_script_owner_root)/vibecrafted-core/.venv/bin/python"
+    [[ -x "$py" ]] || return 1
+    printf '%s\n' "$py"
     return 0
   fi
   for resolved in \
@@ -588,6 +619,8 @@ _vibecrafted_owned_python() {
 # control never takes that fallback: see _server_helper_python.
 _vibecrafted_python() {
   _vibecrafted_owned_python && return 0
+  # A partial physical runtime must never borrow the host interpreter.
+  _is_installed_generation_root "$(_script_owner_root)" && return 1
   command -v python3 2>/dev/null || command -v python 2>/dev/null || printf 'python3\n'
 }
 

@@ -1926,6 +1926,59 @@ def launch_interactive_workspace(
             "VIBECRAFTED_CONTINUITY_LINEAGE_ID": continuity_policy.lineage_id,
         }
     )
+    if native_fork and provider == "codex":
+        from .continuity.native_fork import confirm_codex_native_fork
+
+        # Persist pending before the native mutation: a lost acknowledgement
+        # never becomes an invented child or an automatic retry of thread/fork.
+        _write_meta(launch.meta_path, launch.receipt)
+        try:
+            identity = confirm_codex_native_fork(
+                executable=resolved[0],
+                env=child_env,
+                root=launch.effective_root,
+                parent=continuity_policy.parent_provider_session_id,
+                run_id=launch.run_id,
+                model=str(admission.get("model_requested") or ""),
+                permissions=permissions,
+            )
+        except (ValueError, OSError) as exc:
+            _terminalize_interactive_launch(
+                launch,
+                launch.receipt,
+                status="failed",
+                exit_code=1,
+                terminal_reason="native_fork_identity_unconfirmed",
+                error=str(exc),
+            )
+            return 1
+        launch.receipt.update(identity)
+        # This is an exact acknowledged native fork, not resume of the source.
+        # Keep the selected executable, permission/model flags and transport.
+        child_id = identity["provider_session_id"]
+        resume_command = interactive_policy_command(
+            provider, command[-1], runtime, permissions
+        )
+        if admission.get("skill") == "fork":
+            # The public bare fork has no task input. Open the native child
+            # idle; do not send the shell's synthetic /vc-fork skill marker.
+            resume_command.pop()
+        resume_command[1:1] = ["resume", child_id]
+        resume_command = _with_model_override(
+            provider, resume_command, str(admission.get("model_requested") or "")
+        )
+        resolved = [resolved[0], *resume_command[1:]]
+        resolved.extend(["--cd", launch.effective_root])
+        if child_env.get("CODEX_REMOTE"):
+            resolved.extend(["--remote", child_env["CODEX_REMOTE"]])
+        _write_meta(launch.meta_path, launch.receipt)
+        print(
+            f"Native fork confirmed: run_id={launch.run_id} "
+            f"source_session_id={continuity_policy.parent_provider_session_id} "
+            f"agent_session_id={child_id}",
+            file=sys.stderr,
+            flush=True,
+        )
     source_secret = prompt
     if admission.get("source_snapshot"):
         source_secret = Path(admission["source_snapshot"]).read_bytes().decode("utf-8")
@@ -2093,7 +2146,11 @@ def launch_interactive_workspace(
         terminal_reason = (
             f"provider_signal:{signal.Signals(abs(provider_returncode)).name}"
         )
-    elif provider_returncode == 0 and native_fork:
+    elif (
+        provider_returncode == 0
+        and native_fork
+        and receipt.get("native_identity_status") != "confirmed"
+    ):
         # No terminal success without a child identity from the provider.
         status = "failed"
         terminal_reason = "native_fork_identity_unconfirmed"

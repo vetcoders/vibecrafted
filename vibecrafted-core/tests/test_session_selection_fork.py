@@ -391,7 +391,10 @@ def test_public_resume_help_has_one_session_selector():
     assert "--fork-session" not in result.stdout
 
 
-def test_bare_interactive_fork_never_publishes_requested_uuid(tmp_path, monkeypatch):
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_bare_interactive_fork_never_publishes_requested_uuid(
+    tmp_path, monkeypatch, confirmed
+):
     import os
 
     from vibecrafted_core.spawn import launch_interactive_workspace
@@ -431,6 +434,24 @@ exit 0
     monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(fake_bin))
     monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("SMOKE_CAPTURE", str(capture))
+    child_id = "20000000-0000-4000-8000-000000000002"
+    if confirmed:
+        from vibecrafted_core.continuity import native_fork
+
+        monkeypatch.setattr(
+            native_fork,
+            "confirm_codex_native_fork",
+            lambda **kwargs: {
+                "agent_session_id": child_id,
+                "provider_session_id": child_id,
+                "native_identity_status": "confirmed",
+                "native_identity_evidence": {
+                    "child_id": child_id,
+                    "forked_from_id": "source-native",
+                    "request_id": kwargs["run_id"] + ":fork",
+                },
+            },
+        )
     result = launch_interactive_workspace(
         "codex",
         "/vc-fork",
@@ -440,27 +461,47 @@ exit 0
         "unmetered",
         continuity="bare-fork",
         parent_session_id="source-native",
+        admission={"model_requested": "fixture-model", "skill": "fork"},
     )
     receipt = json.loads(
         next(
             (tmp_path / "vc/control_plane/runtime_runs").glob("*/meta.json")
         ).read_text()
     )
-    assert receipt["agent_session_id"] == ""
-    assert receipt["provider_session_id"] == ""
-    assert workflow._provider_session_for_continue(receipt) == ""
+    assert receipt["agent_session_id"] == (child_id if confirmed else "")
+    assert receipt["provider_session_id"] == (child_id if confirmed else "")
+    assert workflow._provider_session_for_continue(receipt) == (
+        child_id if confirmed else ""
+    )
     assert receipt["provider_session_requested"] == ""
     assert receipt["fork_source_session_id"] == "source-native"
-    assert receipt["native_identity_status"] == "pending"
-    assert receipt["terminal_reason"] == "native_fork_identity_unconfirmed"
-    assert result == 1
+    assert receipt["native_identity_status"] == (
+        "confirmed" if confirmed else "pending"
+    )
+    assert receipt["terminal_reason"] == (
+        "provider_exit_zero" if confirmed else "native_fork_identity_unconfirmed"
+    )
+    assert result == (0 if confirmed else 1)
     projected = json.loads(
         (tmp_path / "vc/control_plane/runs" / (receipt["run_id"] + ".json")).read_text()
     )
-    assert projected["native_identity_status"] == "pending"
+    assert projected["native_identity_status"] == (
+        "confirmed" if confirmed else "pending"
+    )
     assert projected["fork_source_session_id"] == "source-native"
-    assert workflow._provider_session_for_continue(projected) == ""
-    assert capture.read_text().splitlines()[0] == "fork"
+    assert workflow._provider_session_for_continue(projected) == (
+        child_id if confirmed else ""
+    )
+    argv = capture.read_text().splitlines()
+    assert ("resume" if confirmed else "app-server") in argv
+    if confirmed:
+        assert argv[argv.index("resume") + 1] == child_id
+        assert argv[argv.index("-m") + 1] == "fixture-model"
+        assert "source-native" not in argv
+        assert "/vc-fork" not in argv
+        assert (
+            projected["native_identity_evidence"] == receipt["native_identity_evidence"]
+        )
 
 
 @pytest.mark.parametrize("selector", ["source-native", "current", "last"])
