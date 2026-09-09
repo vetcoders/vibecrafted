@@ -1429,6 +1429,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     case .blocked(let reason), .recovering(let reason): detail = runtimeResolutionFailure ?? reason
     default: detail = runtimeAdvisory ?? state.detail
     }
+    let statusLine: String
+    switch presentation.phase {
+    case .bootstrapping: statusLine = "Status: Starting…"
+    case .connecting: statusLine = "Status: Connecting…"
+    case .online: statusLine = "Status: Ready"
+    case .recovering: statusLine = "Status: Recovering…"
+    case .blocked: statusLine = "Status: Unavailable"
+    }
     var utilities: Set<StatusItemAction> = []
     if canonicalInstall != nil {
       utilities.formUnion([.revealRuntime, .revealControlPlane, .copyRuntimeIdentity])
@@ -1444,7 +1452,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     }
     tray?.update(StatusItemPresentation(
       health: health,
-      statusLine: "Command Deck: \(presentation.phase.rawValue)", detailLine: detail,
+      statusLine: statusLine, detailLine: detail,
       availability: StatusItemAvailability(canShowCommandDeck: true,
         canOpenTerminal: actions.contains(.openTerminal),
         canRetryConnection: actions.contains(.retryConnection),
@@ -1868,11 +1876,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   @objc private func showStatusItemHelp() {
     let alert = NSAlert()
     alert.alertStyle = .informational
-    alert.messageText = "Vibecrafted Help"
+    alert.messageText = "Help & Diagnostics"
     alert.informativeText =
-      "The tray reports the combined native connection and web canvas state. Open VC Server and Open Workspaces use the configured live server only when its caretaker says it is available. Console and Workspaces stay in the Command Deck web session. Reveal Control Plane Files opens the on-disk runtime state."
+      "Open Vibecrafted returns to the app. Workspaces and Runtime Server use the configured live server only when it is available. Advanced contains runtime controls and support files. Quitting Vibecrafted leaves the runtime service, terminals, agents, and sessions running."
     alert.addButton(withTitle: "OK")
-    alert.runModal()
+    alert.addButton(withTitle: "Open Diagnostics")
+    if alert.runModal() == .alertSecondButtonReturn {
+      showServerDiagnostics()
+    }
   }
 
   private func activeRunSummary() -> RuntimeActivityTruth {

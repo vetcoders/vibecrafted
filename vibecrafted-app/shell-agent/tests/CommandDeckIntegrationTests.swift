@@ -70,6 +70,51 @@ struct CommandDeckIntegrationTests {
     try require(model.endpoint == nil && !model.presentation.exposesCanvas, "Missing runtime stayed online")
   }
 
+  static func trayMenuContract() throws {
+    let primary = StatusItemController.primaryCommands
+    try require(primary.map(\.title) == [
+      "Open Vibecrafted", "Open Terminal", "Workspaces", "Help & Diagnostics…"
+    ], "Tray primary actions are not human-facing")
+    try require(primary.map(\.action) == [
+      .showCommandDeck, .openTerminal, .showWorkspaces, .help
+    ], "Tray primary actions changed dispatch")
+    try require(primary[0].keyEquivalent == "o" && primary[1].keyEquivalent == "t",
+      "Tray shortcuts changed")
+
+    let advanced = StatusItemController.advancedCommands
+    for action in [
+      StatusItemAction.startServer, .restartServer, .stopRuntime, .showLogs,
+      .revealRuntime, .revealControlPlane, .copyRuntimeIdentity
+    ] {
+      try require(advanced.contains { $0.action == action },
+        "Advanced menu omitted \(action.rawValue)")
+    }
+
+    let unavailable = StatusItemAvailability(
+      canShowCommandDeck: true, canOpenTerminal: false, canRetryConnection: false,
+      canRepairRuntime: false, canStopRuntime: false, canShowDiagnostics: true,
+      canQuitApp: true)
+    try require(StatusItemController.isEnabled(.showCommandDeck, availability: unavailable),
+      "Open Vibecrafted should remain available")
+    try require(StatusItemController.isEnabled(.showWorkspaces, availability: unavailable),
+      "Workspaces should remain available")
+    try require(StatusItemController.isEnabled(.help, availability: unavailable),
+      "Help should remain available")
+    try require(!StatusItemController.isEnabled(.openTerminal, availability: unavailable)
+      && !StatusItemController.isEnabled(.stopRuntime, availability: unavailable)
+      && !StatusItemController.isEnabled(.startServer, availability: unavailable),
+      "Unavailable runtime actions became enabled")
+
+    let running = StatusItemAvailability(
+      canShowCommandDeck: true, canOpenTerminal: true, canRetryConnection: true,
+      canRepairRuntime: true, canStopRuntime: true, canShowDiagnostics: true,
+      canQuitApp: true, runtimeActions: [.startServer, .restartServer, .showLogs,
+        .revealRuntime, .revealControlPlane, .copyRuntimeIdentity])
+    try require(StatusItemController.isEnabled(.startServer, availability: running)
+      && StatusItemController.isEnabled(.copyRuntimeIdentity, availability: running),
+      "Available runtime actions became disabled")
+  }
+
   static func policyContract(_ endpoint: URL) throws {
     let origin = WebRuntimeOrigin(url: endpoint)!
     for path in ["/", "/workspaces", "/run/example"] {
@@ -997,6 +1042,7 @@ struct CommandDeckIntegrationTests {
     try require(reconnectEndpoint.scheme == "http" && reconnectEndpoint.host == "127.0.0.1" && reconnectEndpoint.port != nil,
       "Only a loopback reconnect endpoint is permitted")
     try stateContract(endpoint)
+    try trayMenuContract()
     try policyContract(endpoint)
     try authenticationAndDownloadContract(endpoint)
     try tabPolicyContract(endpoint)

@@ -1039,12 +1039,25 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
         / "vibecrafted-app/shell-agent/app/Vibecrafted/CommandDeck/StatusItemController.swift"
     ).read_text()
     for title in [
-        "Show Command Deck",
+        "Open Vibecrafted",
         "Open Terminal",
-        "Stop Runtime…",
+        "Workspaces",
+        "Help & Diagnostics…",
+        "Advanced",
+        "Stop Runtime Service…",
         "Repair Runtime…",
+        "Quit Vibecrafted",
     ]:
-        assert f'withTitle: "{title}"' in tray
+        assert title in tray
+    assert "Command Deck:" not in tray
+    assert "cappedMenuTitle" not in tray
+    help_dialog = delegate[
+        delegate.index("private func showStatusItemHelp") : delegate.index(
+            "private func activeRunSummary"
+        )
+    ]
+    assert 'alert.addButton(withTitle: "Open Diagnostics")' in help_dialog
+    assert "showServerDiagnostics()" in help_dialog
     assert 'withTitle: "About Vibecrafted"' in delegate
     assert 'withTitle: "Quit Vibecrafted"' in delegate
     assert "#selector(requestQuit)" in delegate
@@ -1223,8 +1236,8 @@ def test_tray_menu_supervises_runtime_pack_carrier_drift() -> None:
     # supervision actions (reveal home, reveal control files, copy identity).
     tray = (app_dir / "CommandDeck/StatusItemController.swift").read_text()
     for title in [
-        "Reveal Runtime Home",
-        "Reveal Control Plane Files",
+        "Open Runtime Folder",
+        "Open Control Plane Folder",
         "Copy Runtime Identity",
     ]:
         assert title in tray

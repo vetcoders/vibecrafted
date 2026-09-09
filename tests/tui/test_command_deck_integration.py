@@ -18,6 +18,13 @@ SHELL = ROOT / "vibecrafted-app/shell-agent"
 APP = SHELL / "app/Vibecrafted"
 
 
+def _production_scaffold_editor_source(scaffold: str) -> str:
+    """Exclude cfg(test) fixtures and assertions from the rendered-editor contract."""
+    start = scaffold.index("    fn render_editor(")
+    end = scaffold.index("\n    #[cfg(test)]", start)
+    return scaffold[start:end]
+
+
 def test_single_native_host_source_contract() -> None:
     delegate = (APP / "AppDelegate.swift").read_text()
     main = (APP / "main.swift").read_text()
@@ -85,12 +92,17 @@ def test_single_native_host_source_contract() -> None:
     app_rs = (ROOT / "vibecrafted-server/web/src/app.rs").read_text()
     assert "'file://'" not in app_rs and "href='file://" not in app_rs
     assert "item.reference" in app_rs
-    # Scaffold endpoint links open outside the studio document.
-    assert scaffold.count('class="api-link" href="/api/scaffold/') == 2
-    assert (
-        scaffold.count('target="_blank" rel="noopener noreferrer">artifact endpoint')
-        == 1
-    )
+    # Scaffold endpoint links open outside the studio document. Inspect the
+    # production renderer only: test fixtures must not satisfy this contract.
+    editor = _production_scaffold_editor_source(scaffold)
+    assert editor.count('class="api-link" href="/api/scaffold/') == 2
+    assert editor.count('target="_blank" rel="noopener noreferrer"') == 2
+    for endpoint in ["artifacts", "changes"]:
+        assert (
+            f'href="/api/scaffold/{endpoint}?org={{}}&repo={{}}&day={{}}&plan_id={{}}" '
+            'target="_blank" rel="noopener noreferrer"'
+        ) in editor
+    assert 'id="api-blank"' not in editor
     assert host.count("WKWebView(frame:") == 1
     assert "websiteDataStore: WKWebsiteDataStore = .default()" in host
     assert "configuration.websiteDataStore = websiteDataStore" in host

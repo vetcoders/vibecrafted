@@ -1,4 +1,4 @@
-// Vibecrafted — Command Deck status item
+// Vibecrafted — status item
 // Created by Vetcoders
 //
 // Sole tray owner for the shell App. Lifecycle precision stays in
@@ -60,14 +60,14 @@ struct StatusItemPresentation: Equatable, Sendable {
 
   static let bootstrapping = StatusItemPresentation(
     health: .checking,
-    statusLine: "Command Deck: Preparing…",
+    statusLine: "Status: Starting…",
     detailLine: "Waiting for the runtime owner",
     availability: .default,
     toolTip: "Vibecrafted — preparing"
   )
 }
 
-/// AppKit menu-bar owner for Command Deck. Construct once, call `install()`,
+/// AppKit menu-bar owner for Vibecrafted. Construct once, call `install()`,
 /// push presentation updates; remove with `uninstall()`. Does not create a
 /// second status item in mux-agent or tray-agent.
 @MainActor
@@ -79,15 +79,29 @@ final class StatusItemController: NSObject, NSMenuDelegate {
   private var presentation: StatusItemPresentation
 
   private weak var statusLineItem: NSMenuItem?
-  private weak var detailLineItem: NSMenuItem?
-  private weak var showCommandDeckItem: NSMenuItem?
-  private weak var openTerminalItem: NSMenuItem?
-  private weak var retryItem: NSMenuItem?
-  private weak var repairItem: NSMenuItem?
-  private weak var stopRuntimeItem: NSMenuItem?
-  private weak var diagnosticsItem: NSMenuItem?
-  private var utilityItems: [StatusItemAction: NSMenuItem] = [:]
-  private weak var quitAppItem: NSMenuItem?
+  private var actionItems: [StatusItemAction: NSMenuItem] = [:]
+
+  /// Keep user-facing labels and their typed actions in one inspectable shape.
+  /// AppDelegate remains the dispatch owner; this menu only emits these actions.
+  static let primaryCommands: [StatusItemMenuCommand] = [
+    .init(action: .showCommandDeck, title: "Open Vibecrafted", keyEquivalent: "o"),
+    .init(action: .openTerminal, title: "Open Terminal", keyEquivalent: "t"),
+    .init(action: .showWorkspaces, title: "Workspaces"),
+    .init(action: .help, title: "Help & Diagnostics…")
+  ]
+
+  static let advancedCommands: [StatusItemMenuCommand] = [
+    .init(action: .retryConnection, title: "Reconnect"),
+    .init(action: .repairRuntime, title: "Repair Runtime…"),
+    .init(action: .showServer, title: "Open Runtime Server"),
+    .init(action: .startServer, title: "Start Runtime Service"),
+    .init(action: .restartServer, title: "Restart Runtime Service"),
+    .init(action: .stopRuntime, title: "Stop Runtime Service…"),
+    .init(action: .showLogs, title: "Open Runtime Logs"),
+    .init(action: .revealRuntime, title: "Open Runtime Folder"),
+    .init(action: .revealControlPlane, title: "Open Control Plane Folder"),
+    .init(action: .copyRuntimeIdentity, title: "Copy Runtime Identity")
+  ]
 
   init(
     presentation: StatusItemPresentation = .bootstrapping,
@@ -119,90 +133,28 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     status.isEnabled = false
     statusLineItem = status
 
-    let detail = menu.addItem(withTitle: presentation.detailLine, action: nil, keyEquivalent: "")
-    detail.isEnabled = false
-    detailLineItem = detail
-
+    menu.addItem(.separator())
+    Self.primaryCommands.forEach { add($0, to: menu) }
     menu.addItem(.separator())
 
-    let showDeck = menu.addItem(
-      withTitle: "Show Command Deck",
-      action: #selector(emitShowCommandDeck(_:)),
-      keyEquivalent: "o"
-    )
-    showDeck.keyEquivalentModifierMask = [.command, .option]
-    showDeck.target = self
-    showCommandDeckItem = showDeck
-
-    let terminal = menu.addItem(
-      withTitle: "Open Terminal",
-      action: #selector(emitOpenTerminal(_:)),
-      keyEquivalent: "t"
-    )
-    terminal.keyEquivalentModifierMask = [.command, .option]
-    terminal.target = self
-    openTerminalItem = terminal
-
-    menu.addItem(.separator())
-
-    let retry = menu.addItem(
-      withTitle: "Retry Connection",
-      action: #selector(emitRetryConnection(_:)),
-      keyEquivalent: ""
-    )
-    retry.target = self
-    retryItem = retry
-
-    let repair = menu.addItem(
-      withTitle: "Repair Runtime…",
-      action: #selector(emitRepairRuntime(_:)),
-      keyEquivalent: ""
-    )
-    repair.target = self
-    repairItem = repair
-
-    // Explicit Stop Runtime — never aliased to Quit App.
-    let stop = menu.addItem(
-      withTitle: "Stop Runtime…",
-      action: #selector(emitStopRuntime(_:)),
-      keyEquivalent: ""
-    )
-    stop.target = self
-    stopRuntimeItem = stop
-
-    let diagnostics = menu.addItem(
-      withTitle: "Diagnostics…",
-      action: #selector(emitShowDiagnostics(_:)),
-      keyEquivalent: ""
-    )
-    diagnostics.target = self
-    diagnosticsItem = diagnostics
-
-    menu.addItem(.separator())
-
-    for (action, title) in [
-      (StatusItemAction.showServer, "Server"), (.showWorkspaces, "Workspaces"),
-      (.startServer, "Start Server"), (.restartServer, "Restart Server"),
-      (.showLogs, "Open Server Logs"), (.revealRuntime, "Reveal Runtime Home"),
-      (.revealControlPlane, "Reveal Control Plane Files"),
-      (.copyRuntimeIdentity, "Copy Runtime Identity"), (.help, "Command Deck Help")
-    ] {
-      let utility = menu.addItem(withTitle: title, action: #selector(emitUtility(_:)), keyEquivalent: "")
-      utility.target = self
-      utility.representedObject = action.rawValue
-      utilityItems[action] = utility
+    let advanced = NSMenu(title: "Advanced")
+    Self.advancedCommands.enumerated().forEach { index, command in
+      if index == 2 || index == 6 || index == 7 { advanced.addItem(.separator()) }
+      add(command, to: advanced)
     }
+    let advancedItem = menu.addItem(withTitle: "Advanced", action: nil, keyEquivalent: "")
+    advancedItem.submenu = advanced
     menu.addItem(.separator())
 
     // Quit App leaves server / PTYs / agents / sessions alive by contract.
     // AppDelegate routes this callback to App termination only — never Stop Runtime.
     let quit = menu.addItem(
-      withTitle: "Quit App",
+      withTitle: "Quit Vibecrafted",
       action: #selector(emitQuitApp(_:)),
       keyEquivalent: "q"
     )
     quit.target = self
-    quitAppItem = quit
+    actionItems[.quitApp] = quit
 
     item.menu = menu
     statusItem = item
@@ -215,15 +167,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     NSStatusBar.system.removeStatusItem(item)
     statusItem = nil
     statusLineItem = nil
-    detailLineItem = nil
-    showCommandDeckItem = nil
-    openTerminalItem = nil
-    retryItem = nil
-    repairItem = nil
-    stopRuntimeItem = nil
-    diagnosticsItem = nil
-    quitAppItem = nil
-    utilityItems.removeAll()
+    actionItems.removeAll()
   }
 
   func update(_ presentation: StatusItemPresentation) {
@@ -244,28 +188,36 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     statusItem?.button?.toolTip = presentation.toolTip
     statusItem?.button?.setAccessibilityLabel(glyph.accessibilityDescription)
 
-    statusLineItem?.title = cappedMenuTitle(presentation.statusLine)
-    detailLineItem?.title = cappedMenuTitle(presentation.detailLine)
-    detailLineItem?.isHidden = presentation.detailLine.isEmpty
+    statusLineItem?.title = presentation.statusLine
 
     let availability = presentation.availability
-    showCommandDeckItem?.isEnabled = availability.canShowCommandDeck
-    openTerminalItem?.isEnabled = availability.canOpenTerminal
-    retryItem?.isEnabled = availability.canRetryConnection
-    repairItem?.isEnabled = availability.canRepairRuntime
-    stopRuntimeItem?.isEnabled = availability.canStopRuntime
-    diagnosticsItem?.isEnabled = availability.canShowDiagnostics
-    quitAppItem?.isEnabled = availability.canQuitApp
-    for (action, item) in utilityItems {
-      item.isEnabled = [.showServer, .showWorkspaces, .help].contains(action)
-        || availability.runtimeActions.contains(action)
+    for (action, item) in actionItems {
+      item.isEnabled = Self.isEnabled(action, availability: availability)
     }
   }
 
-  /// Menu-bar labels stay scannable (swiftui-patterns menu-bar guidance).
-  private func cappedMenuTitle(_ title: String) -> String {
-    if title.count <= 30 { return title }
-    return String(title.prefix(27)) + "..."
+  private func add(_ command: StatusItemMenuCommand, to menu: NSMenu) {
+    let item = menu.addItem(
+      withTitle: command.title, action: #selector(emitMenuAction(_:)), keyEquivalent: command.keyEquivalent)
+    if !command.keyEquivalent.isEmpty { item.keyEquivalentModifierMask = [.command, .option] }
+    item.target = self
+    item.representedObject = command.action.rawValue
+    actionItems[command.action] = item
+  }
+
+  static func isEnabled(_ action: StatusItemAction, availability: StatusItemAvailability) -> Bool {
+    switch action {
+    case .showCommandDeck: availability.canShowCommandDeck
+    case .openTerminal: availability.canOpenTerminal
+    case .retryConnection: availability.canRetryConnection
+    case .repairRuntime: availability.canRepairRuntime
+    case .stopRuntime: availability.canStopRuntime
+    case .showDiagnostics: availability.canShowDiagnostics
+    case .quitApp: availability.canQuitApp
+    case .showServer, .showWorkspaces, .help: true
+    case .startServer, .restartServer, .showLogs, .revealRuntime, .revealControlPlane, .copyRuntimeIdentity:
+      availability.runtimeActions.contains(action)
+    }
   }
 
   // MARK: - Actions
@@ -274,37 +226,25 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     handler(action)
   }
 
-  @objc private func emitUtility(_ item: NSMenuItem) {
+  @objc private func emitMenuAction(_ item: NSMenuItem) {
     guard let raw = item.representedObject as? String,
       let action = StatusItemAction(rawValue: raw) else { return }
     emit(action)
   }
 
-  @objc private func emitShowCommandDeck(_ sender: Any?) {
-    emit(.showCommandDeck)
-  }
-
-  @objc private func emitOpenTerminal(_ sender: Any?) {
-    emit(.openTerminal)
-  }
-
-  @objc private func emitRetryConnection(_ sender: Any?) {
-    emit(.retryConnection)
-  }
-
-  @objc private func emitRepairRuntime(_ sender: Any?) {
-    emit(.repairRuntime)
-  }
-
-  @objc private func emitStopRuntime(_ sender: Any?) {
-    emit(.stopRuntime)
-  }
-
-  @objc private func emitShowDiagnostics(_ sender: Any?) {
-    emit(.showDiagnostics)
-  }
-
   @objc private func emitQuitApp(_ sender: Any?) {
     emit(.quitApp)
+  }
+}
+
+struct StatusItemMenuCommand: Equatable {
+  let action: StatusItemAction
+  let title: String
+  let keyEquivalent: String
+
+  init(action: StatusItemAction, title: String, keyEquivalent: String = "") {
+    self.action = action
+    self.title = title
+    self.keyEquivalent = keyEquivalent
   }
 }
