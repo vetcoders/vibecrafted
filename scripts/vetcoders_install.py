@@ -16779,8 +16779,16 @@ def _foundation_service_dependent_plists() -> list[tuple[Path, dict[str, Any]]]:
         if not isinstance(payload, dict):
             continue
         label = str(payload.get("Label") or "")
-        if label.startswith(("io.vetcoders.", "com.vibecrafted.")):
-            # Our own services are reconciled by their own lanes.
+        legacy_foundation_labels = {
+            "io.vetcoders.loctree.mcp",
+            "io.vetcoders.aicx.mcp",
+        }
+        if (
+            label.startswith(("io.vetcoders.", "com.vibecrafted."))
+            and label not in legacy_foundation_labels
+        ):
+            # Product-owned services have their own lanes; historical upstream
+            # foundation labels still participate in pointer reconciliation.
             continue
         program = _foreign_launch_agent_program(payload)
         program_name = Path(program).name
@@ -16802,6 +16810,7 @@ def _repoint_foundation_service_dependents(
     *,
     launcher_home: Path,
     runtime_home: Path,
+    receipt: dict[str, Any] | None = None,
 ) -> list[str]:
     """Repoint foundation LaunchAgents off retired or Vibecrafted-owned paths.
 
@@ -16812,23 +16821,41 @@ def _repoint_foundation_service_dependents(
     if sys.platform != "darwin":
         return []
     retired_set = {str(path) for path in retired}
+    pending = (receipt or {}).get("foundation_service_pending", {})
+    if receipt is not None:
+        receipt["foundation_service_pending"] = pending
     actions: list[str] = []
     for plist_path, payload in _foundation_service_dependent_plists():
-        arguments = [str(value) for value in (payload.get("ProgramArguments") or [])]
-        if not arguments:
+        raw_arguments = payload.get("ProgramArguments")
+        if raw_arguments is not None and (
+            not isinstance(raw_arguments, list)
+            or not all(isinstance(value, str) for value in raw_arguments)
+        ):
             continue
-        program = arguments[0]
+        arguments = list(raw_arguments or [])
+        program = _foreign_launch_agent_program(payload)
+        if not program:
+            continue
         tool = Path(program).name.removeprefix("vibecrafted-")
-        owned_by_us = (
-            program in retired_set
-            or _path_is_under(Path(program), runtime_home)
-            or (
-                Path(program).parent == launcher_home
-                and tool.startswith("vibecrafted-")
-            )
+        owned_by_us = program in retired_set or _path_is_under(
+            Path(program), runtime_home
         )
+        pending_reload = pending.get(str(plist_path), {})
+        retry_reload = (
+            pending_reload.get("label") == payload.get("Label")
+            and pending_reload.get("program") == program
+            and pending_reload.get("sha256")
+            == hashlib.sha256(plist_path.read_bytes()).hexdigest()
+        )
+        if pending_reload and not retry_reload and not owned_by_us:
+            action = (
+                f"{plist_path.name}: pending reload not replayed; configuration changed"
+            )
+            actions.append(action)
+            print(f"[runtime-install] {action}", file=sys.stderr)
+            continue
         dangling = not Path(program).exists()
-        if not owned_by_us:
+        if not owned_by_us and not retry_reload:
             if dangling:
                 print(
                     f"[runtime-install] {plist_path.name}: {program} is dangling; "
@@ -16836,8 +16863,11 @@ def _repoint_foundation_service_dependents(
                     file=sys.stderr,
                 )
             continue
-        replacement = shutil.which(tool)
-        if replacement and _path_is_under(Path(replacement), runtime_home):
+        replacement = program if retry_reload else shutil.which(tool)
+        if replacement and (
+            _path_is_under(Path(replacement), runtime_home)
+            or _path_is_under(Path(replacement).resolve(), runtime_home.resolve())
+        ):
             replacement = None
         if replacement is None:
             print(
@@ -16847,29 +16877,63 @@ def _repoint_foundation_service_dependents(
                 file=sys.stderr,
             )
             continue
-        if Path(replacement) == Path(program):
+        if Path(replacement) == Path(program) and not retry_reload:
             continue
-        arguments[0] = replacement
-        payload["ProgramArguments"] = arguments
-        if payload.get("Program"):
-            payload["Program"] = replacement
-        temporary = plist_path.with_name(f".{plist_path.name}.new-{os.getpid()}")
-        with temporary.open("wb") as handle:
-            plistlib.dump(payload, handle, fmt=plistlib.FMT_XML)
-        temporary.chmod(0o644)
-        os.replace(temporary, plist_path)
         label = str(payload.get("Label") or plist_path.stem)
         domain = f"gui/{os.getuid()}"
         probe = _launchctl_quiet("print", f"{domain}/{label}")
         loaded = probe is not None and probe.returncode == 0
-        if loaded:
-            _launchctl_quiet("bootout", f"{domain}/{label}")
-            _launchctl_quiet("bootstrap", domain, str(plist_path))
-        actions.append(f"{label}: {program} -> {replacement}")
-        print(
-            f"[runtime-install] repointed {plist_path.name}: {program} -> {replacement}",
-            file=sys.stderr,
-        )
+        if payload.get("Program"):
+            # Program is executable truth; ProgramArguments may use a custom
+            # argv[0], or be absent entirely. Preserve its contents verbatim.
+            payload["Program"] = replacement
+        else:
+            arguments[0] = replacement
+            payload["ProgramArguments"] = arguments
+        publication = plistlib.dumps(payload, fmt=plistlib.FMT_XML)
+        if loaded or retry_reload:
+            pending[str(plist_path)] = {
+                "label": label,
+                "program": replacement,
+                "sha256": hashlib.sha256(publication).hexdigest(),
+            }
+            if receipt is not None:
+                _checkpoint_runtime_install_receipt(runtime_home, receipt)
+        original_mode = stat.S_IMODE(plist_path.stat().st_mode)
+        temporary = plist_path.with_name(f".{plist_path.name}.new-{os.getpid()}")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(publication)
+                os.fchmod(handle.fileno(), original_mode)
+            os.replace(temporary, plist_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        service_state = "not loaded; configuration updated"
+        if loaded or retry_reload:
+            stopped = (
+                _launchctl_quiet("bootout", f"{domain}/{label}") if loaded else None
+            )
+            if loaded and (stopped is None or stopped.returncode != 0):
+                service_state = "reload failed at bootout; configuration updated"
+            else:
+                started = _launchctl_quiet("bootstrap", domain, str(plist_path))
+                verified = _launchctl_quiet("print", f"{domain}/{label}")
+                if (
+                    started is None
+                    or started.returncode != 0
+                    or verified is None
+                    or verified.returncode != 0
+                ):
+                    service_state = "reload failed at bootstrap; configuration updated"
+                else:
+                    service_state = "reloaded; service health unverified"
+                    pending.pop(str(plist_path), None)
+                    if receipt is not None:
+                        _checkpoint_runtime_install_receipt(runtime_home, receipt)
+        action = f"{label}: {program} -> {replacement}; {service_state}"
+        actions.append(action)
+        print(f"[runtime-install] repointed {action}", file=sys.stderr)
     return actions
 
 
@@ -17985,6 +18049,9 @@ def _install_runtime_pack(args: argparse.Namespace) -> int:
         ),
         "config_defaults": dict(previous.get("config_defaults", {})),
         "config_pending": dict(previous.get("config_pending", {})),
+        "foundation_service_pending": json.loads(
+            json.dumps(previous.get("foundation_service_pending", {}))
+        ),
     }
 
     releases = runtime_home / "releases"
@@ -18241,12 +18308,14 @@ def _install_runtime_pack(args: argparse.Namespace) -> int:
         receipt=receipt,
         previous=previous,
     )
-    _repoint_foundation_service_dependents(
+    foundation_service_actions = _repoint_foundation_service_dependents(
         retired_launchers,
         launcher_home=paths["launcher_home"],
         runtime_home=runtime_home,
+        receipt=receipt,
     )
 
+    receipt["foundation_service_actions"] = foundation_service_actions
     receipt.pop("install_pending", None)
     receipt.pop("install_phase", None)
     _checkpoint_runtime_install_receipt(runtime_home, receipt)
@@ -18255,6 +18324,7 @@ def _install_runtime_pack(args: argparse.Namespace) -> int:
         app_root=app_root,
         paths=paths,
     )
+    result["foundation_service_actions"] = foundation_service_actions
     result["tools_current"] = str(current_link)
     result["skills"] = str(len(skill_names))
     result["runtime_views"] = ",".join(runtime_views)
