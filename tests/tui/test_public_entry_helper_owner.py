@@ -141,7 +141,7 @@ def world(tmp_path: Path) -> dict[str, Path]:
     log = tmp_path / "sourced.log"
     capture = tmp_path / "terminal-launch.json"
     home = _ensure_dir(tmp_path / "home")
-    project = _ensure_dir(tmp_path / "mlx-batch-runner")
+    project = _ensure_dir(tmp_path / "mlx batch's runner")
     # This terminal/resume route feeds the public launch-spec resolver, which
     # pins a Git base. Model that contract with a real repository; other
     # selector coverage retains its explicit non-Git cases.
@@ -202,7 +202,7 @@ def _run(
     command = [str(entry), *argv]
     if shell is not None:
         # The caller's login shell must not change who owns the helpers.
-        quoted = " ".join(f"'{part}'" for part in command)
+        quoted = shlex.join(command)
         command = (
             ["zsh", "-f", "-c", quoted]
             if shell == "zsh"
@@ -479,7 +479,9 @@ def test_catalog_uses_physical_deck_generation(
 def test_catalog_missing_physical_core_refuses_foreign_fallback(
     world: dict[str, Path],
 ) -> None:
-    _write(world["checkout"] / CORE / "dispatcher.py", "", executable=False)
+    dispatcher = world["generation"] / CORE / "dispatcher.py"
+    dispatcher.unlink()
+    assert not dispatcher.exists()
     result = subprocess.run(
         [
             "bash",
@@ -495,3 +497,21 @@ def test_catalog_missing_physical_core_refuses_foreign_fallback(
     )
     assert result.returncode != 0
     assert not result.stdout.strip()
+
+
+def test_dispatch_missing_physical_core_refuses_foreign_fallback(
+    world: dict[str, Path],
+) -> None:
+    dispatcher = world["generation"] / CORE / "dispatcher.py"
+    dispatcher.unlink()
+    assert not dispatcher.exists()
+    result = subprocess.run(
+        ["bash", str(world["generation"] / "bin/vibecrafted"), "dispatch", "run"],
+        cwd=world["checkout"],
+        env={**os.environ, "VIBECRAFTED_ROOT": str(world["checkout"])},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "Async dispatcher module not found" in result.stderr
