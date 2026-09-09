@@ -28,6 +28,7 @@ from vibecrafted_core.workflow import (
     LAUNCH_IDEMPOTENCY_KEY_ENV,
     WorkflowLaunchSpec,
     launch_workflow,
+    normalize_launch_spec,
     recover_launch_receipt,
     recover_legacy_dispatch_identity,
     reserve_run_id,
@@ -205,17 +206,28 @@ def workflow_cell_launcher(
         """Launch one cell via ``launch_workflow`` and adapt its result into a ``CellRun``."""
         root = cut.runtime_root or dispatch.meta.repo
         base_dir = Path(root)
-        spec = WorkflowLaunchSpec(
-            agent=cut.agent,
-            mode=cut.resolved_workflow,
-            skill=cut.resolved_workflow,
+        # Model and exact brief bytes were admitted together by parse_dispatch.
+        source = cut.source_text if cut.source_text is not None else cut.prompt
+        spec = normalize_launch_spec(
+            {
+                "agent": cut.agent,
+                "skill": cut.resolved_workflow,
+                "prompt": source,
+                "root": root,
+                "base": cut.baseline_sha,
+                "runtime": "headless",
+                "model": cut.model,
+            },
+            base_dir,
+        )
+        spec = replace(
+            spec,
             prompt=prompt,
-            file="",
-            runtime="headless",
-            root=root,
-            model=cut.model,
+            plan_source=source,
+            source_path=cut.brief,
+            source_digest=cut.source_digest
+            or hashlib.sha256(source.encode("utf-8")).hexdigest(),
             model_source=cut.model_source,
-            baseline_sha=cut.baseline_sha,
             runtime_class="local-worktrees" if cut.runtime_branch else "living-tree",
         )
         runtime_env = {

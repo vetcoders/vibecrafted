@@ -7,6 +7,7 @@ import datetime as dt
 import hashlib
 import inspect
 import json
+import logging
 import os
 import re
 import shlex
@@ -25,9 +26,17 @@ from typing import Any
 
 from .agent_dispatch import extract_session_id, sandbox_supported
 from .clock import utc_now_iso
-from .control_plane import control_plane_home, ensure_session_id, normalize_run_root
+from .control_plane import (
+    ControlPlaneLockBusy,
+    ControlPlaneStorageError,
+    control_plane_home,
+    ensure_session_id,
+    normalize_run_root,
+    sync_state,
+)
 from .events import append_event
 from .execution_controls import PERMISSION_POLICIES, ExecutionControls
+from .model_overrides import _with_model_override
 from .report_contract import (
     CLAIM_DIGEST_ENV,
     materialize_launcher_report_template,
@@ -40,7 +49,10 @@ from .runtime_paths import (
     selected_runtime_environment,
     version_is_stamped,
 )
-from .runtime_transcript import write_runtime_transcript_manifest
+from .runtime_transcript import (
+    InteractiveTranscriptCapture,
+    write_runtime_transcript_manifest,
+)
 from .settlement import BareMarkdownError, require_bound_markdown
 from .telemetry import estimate_cost_usd
 
@@ -948,6 +960,14 @@ def interactive_policy_command(
             ]
         return ["claude", "--verbose", *flags, *session_flags, prompt]
     if provider == "codex":
+        if continuity.mode == "bare-fork":
+            return [
+                "codex",
+                "fork",
+                *flags,
+                continuity.parent_provider_session_id,
+                prompt,
+            ]
         return ["codex", *flags, prompt]
     if provider == "agy":
         return ["agy", *flags, "--add-dir", ".", "--prompt-interactive", prompt]
@@ -1066,6 +1086,17 @@ def interactive_workspace_command(
     continuity: str = "fresh",
     parent_session_id: str = "",
     parent_lineage_id: str = "",
+    *,
+    model: str = "",
+    source_file: str = "",
+    base: str = "",
+    worktree: str | bool | None = None,
+    execution_runtime: str = "",
+    skill: str = "init",
+    native_session: str = "",
+    parent_run_id: str = "",
+    resume_run_id: str = "",
+    resume_last: bool = False,
 ) -> list[str]:
     """Build the portable wrapper argv used by the exact ``init`` route.
 
@@ -1092,6 +1123,166 @@ def interactive_workspace_command(
         parent_session_id=parent_session_id,
         parent_lineage_id=parent_lineage_id,
     )
+    from .workflow import (
+        _prepare_launch_worktree,
+        _source_prompt,
+        _write_prompt_file,
+        normalize_launch_spec,
+        reserve_run_id,
+    )
+
+    if skill not in {"init", "partner", "operator", "resume", "fork"}:
+        raise ValueError("unsupported interactive launcher")
+    parent = {}
+    selected_model_source = ""
+    if resume_last:
+        from .cli import _run_for_agent
+
+        if resume_run_id or native_session:
+            raise ValueError("choose one resume identity")
+        previous = _run_for_agent(provider, "", last=True)
+        if not previous:
+            raise ValueError("no previous run for this provider; pass --run-id")
+        resume_run_id = str(previous["run_id"])
+    if resume_run_id:
+        from .repo_selection import resolve_repository_base
+        from .workflow import (
+            _merge_run_and_meta,
+            _native_resume_meta,
+            _provider_session_for_continue,
+            _worker_process_alive,
+            lookup_run,
+            select_plan_model,
+        )
+
+        record = lookup_run(resume_run_id)
+        if not record:
+            raise ValueError("resume run not found")
+        parent = _merge_run_and_meta(record, _native_resume_meta(resume_run_id, record))
+        if parent.get("agent") != provider:
+            raise ValueError("resume provider conflicts with recorded agent")
+        if _worker_process_alive(parent):
+            raise ValueError("resume session already has an active executor")
+        recorded_runtime = str(parent.get("runtime_class") or "living-tree")
+        if execution_runtime and execution_runtime != recorded_runtime:
+            raise ValueError("resume preserves execution runtime; use fork")
+        if worktree not in (None, ""):
+            from .workflow import parse_worktree_flag
+
+            if parse_worktree_flag(worktree) != (recorded_runtime == "local-worktrees"):
+                raise ValueError(
+                    "resume worktree selector conflicts with recorded runtime"
+                )
+        # An existing run owns its checkout. Matching selectors validate that
+        # ownership; they must never create a second checkout during resume.
+        execution_runtime, runtime, worktree = "living-tree", "local-native", None
+        parent_root = str(parent.get("root") or "")
+        if root and Path(root).resolve() != Path(parent_root).resolve():
+            raise ValueError("resume preserves repository; use fork")
+        root = parent_root
+        if base and resolve_repository_base(root, base)[1] != parent.get(
+            "baseline_sha"
+        ):
+            raise ValueError("resume preserves baseline; use fork")
+        native_session = _provider_session_for_continue(parent)
+        if not native_session:
+            raise ValueError("resume run has no verified native session identity")
+        text = Path(source_file).read_bytes().decode("utf-8") if source_file else ""
+        model, selected_model_source = select_plan_model(
+            provider,
+            text,
+            model=model,
+            previous=str(
+                parent.get("model_effective")
+                or parent.get("agent_model")
+                or parent.get("model_requested")
+                or ""
+            ),
+        )
+        parent_run_id = resume_run_id
+        base = ""  # validate current checkout without changing historical baseline
+    execution = execution_runtime or (
+        "living-tree" if runtime == "local-native" else runtime
+    )
+    spec = normalize_launch_spec(
+        {
+            "agent": provider,
+            "skill": "workflow",
+            "prompt": prompt or f"/vc-{skill}",
+            "file": source_file,
+            "repo": str(root),
+            "repo_selector": True,
+            "base": base,
+            "runtime_class": execution,
+            "worktree": worktree,
+            "model": model,
+            "runtime": "terminal",
+        },
+        Path(__file__).parent,
+    )
+    source = _source_prompt(spec)
+    if native_session:
+        native_session = _validated_continuity_id(
+            native_session, label="native session"
+        )
+        if provider not in {"codex", "claude"}:
+            raise ValueError(f"interactive native resume unsupported for {provider}")
+        from .workflow import _worker_process_alive, find_run_for_identity_token
+
+        existing = find_run_for_identity_token(native_session)
+        if existing and _worker_process_alive(existing):
+            raise ValueError("native session already has an active executor")
+    run_id = reserve_run_id("rsme" if skill == "resume" else "init")
+    run_dir = control_plane_home() / "runtime_runs" / run_id
+    source_path = _write_prompt_file(run_dir / "plan-source.md", source)
+    worktree_receipt = {}
+    if spec.worktree:
+        spec, worktree_receipt = _prepare_launch_worktree(spec, run_id)
+    admission = {
+        "run_id": run_id,
+        "agent": provider,
+        "skill": skill,
+        "status": "prepared",
+        "root": spec.root,
+        "parent_root": spec.parent_root or spec.root,
+        "effective_worker_root": spec.root,
+        "repo_requested": spec.repo_requested,
+        "repo_kind": spec.repo_kind,
+        "base_requested": spec.base,
+        "baseline_sha": spec.baseline_sha,
+        "resolved_ref": spec.resolved_ref,
+        "runtime_class": spec.runtime_class,
+        "presentation": "visible",
+        "requires_pty": True,
+        "model_requested": spec.model,
+        "model_effective": spec.model,
+        "model_source": selected_model_source or spec.model_source,
+        "source_snapshot": str(source_path),
+        "source_digest": spec.source_digest,
+        "source_path": source_file,
+        "source_origin": "file" if source_file else "inline",
+        "parent_run_id": parent_run_id or os.environ.get("VIBECRAFTED_RUN_ID", ""),
+        "agent_session_id": native_session,
+        **worktree_receipt,
+    }
+    if parent:
+        admission["baseline_sha"] = parent.get("baseline_sha", "")
+        admission["runtime_class"] = parent.get("runtime_class", "living-tree")
+    admission_path = _write_prompt_file(
+        run_dir / "admission.json", json.dumps(admission)
+    )
+    _write_meta(run_dir / "meta.json", admission)
+    append_event(
+        "lifecycle:prepared",
+        run_id,
+        "interactive declaration admitted",
+        {**admission, "meta": str(run_dir / "meta.json")},
+    )
+    _project_interactive_snapshot(run_id)
+    print(
+        f"run_id: {run_id}  model: {spec.model or 'provider_default'}  model_source: {spec.model_source}",
+        file=sys.stderr,
+    )
     interpreter, bootstraps = interactive_launch_interpreter()
     command = [
         interpreter,
@@ -1100,7 +1291,7 @@ def interactive_workspace_command(
         "interactive-launch",
         provider,
         "--runtime",
-        runtime,
+        "local-native",
         "--permissions",
         permissions,
         "--token-budget",
@@ -1110,9 +1301,9 @@ def interactive_workspace_command(
         "--continuity",
         continuity_policy.mode,
         "--root",
-        str(Path(root).expanduser().resolve()),
-        "--prompt",
-        prompt,
+        spec.root,
+        "--admission-file",
+        str(admission_path),
     ]
     if continuity_policy.parent_provider_session_id:
         command[command.index("--root") : command.index("--root")] = [
@@ -1247,7 +1438,9 @@ def prepare_interactive_workspace_launch(
         run_dir = control_plane_home() / "runtime_runs" / effective_run_id
         prompt_path = run_dir / "prompt.md"
         prompt_path.parent.mkdir(parents=True, exist_ok=True)
-        prompt_path.write_text(prompt, encoding="utf-8")
+        from .workflow import _write_prompt_file
+
+        _write_prompt_file(prompt_path, prompt)
         meta_path = run_dir / "meta.json"
         owner_pid = int(worker_pid or os.getpid())
         receipt: dict[str, Any] = {
@@ -1513,6 +1706,8 @@ def launch_interactive_workspace(
     continuity: str = "fresh",
     parent_session_id: str = "",
     parent_lineage_id: str = "",
+    *,
+    admission: dict[str, Any] | None = None,
 ) -> int:
     """Own one provider child while preserving the inherited interactive TTY."""
     operator_policy = resolve_operator_agent_policy(operator, runtime=runtime)
@@ -1520,7 +1715,8 @@ def launch_interactive_workspace(
         raise ValueError(operator_policy.reason)
     from .workflow import reserve_run_id
 
-    run_id = reserve_run_id("init")
+    admission = dict(admission or {})
+    run_id = str(admission.get("run_id") or reserve_run_id("init"))
     try:
         continuity_policy = resolve_continuity_policy(
             continuity,
@@ -1567,6 +1763,7 @@ def launch_interactive_workspace(
             "continuity validation failed before provider spawn",
             {**failed, "meta": str(meta_path)},
         )
+        _flush_terminal_projection(run_id, failed, meta_path=meta_path)
         raise
     if operator_policy.provider is not None:
         return _launch_supervised_interactive_workspace(
@@ -1579,17 +1776,33 @@ def launch_interactive_workspace(
             operator_policy=operator_policy,
             run_id=run_id,
             continuity_material=continuity_material,
+            admission=admission,
         )
     quota = resolve_quota_policy(token_budget, runtime=runtime)
     child_env = _fresh_child_environment(os.environ.copy(), continuity_policy)
     provider_session_id = str(uuid.uuid4())
     command = interactive_policy_command(
         provider,
-        continuity_material.prompt,
+        f"Read and follow the private task file: {control_plane_home() / 'runtime_runs' / run_id / 'prompt.md'}",
         runtime,
         permissions,
         provider_session_id=provider_session_id,
         continuity_policy=continuity_policy,
+    )
+    native_session = str(admission.get("agent_session_id") or "")
+    if native_session:
+        if provider == "claude":
+            if "--session-id" in command:
+                index = command.index("--session-id")
+                del command[index : index + 2]
+            command[1:1] = ["--resume", native_session]
+        elif provider == "codex":
+            command[1:1] = ["resume", native_session]
+        else:
+            raise ValueError(f"interactive native resume unsupported for {provider}")
+        provider_session_id = native_session
+    command = _with_model_override(
+        provider, command, str(admission.get("model_requested") or "")
     )
     resolved = _resolve_agent_command(provider, command, child_env)
     capability = resolve_provider_usage_capability(provider, executable=resolved[0])
@@ -1614,6 +1827,10 @@ def launch_interactive_workspace(
         provider_session_id=provider_session_id,
         continuity_material=continuity_material,
     )
+    launch.receipt.update(admission)
+    launch.receipt["provider_session_id"] = provider_session_id
+    launch.receipt["agent_session_id"] = provider_session_id
+    launch.receipt["status"] = "prepared"
     if capability.supported and provider == "claude":
         try:
             usage_reader: Any = _ClaudeTranscriptUsage(
@@ -1639,21 +1856,29 @@ def launch_interactive_workspace(
             "VIBECRAFTED_PARENT_ROOT": launch.parent_root,
             "VIBECRAFTED_EFFECTIVE_ROOT": launch.effective_root,
             "VIBECRAFTED_AGENT_ROLE": "agent",
-            "VIBECRAFTED_PROMPT_ROLE": prompt.splitlines()[0] if prompt else "",
+            "VIBECRAFTED_PROMPT_ROLE": str(admission.get("skill") or "init"),
             "VIBECRAFTED_CONTINUITY_MODE": continuity_policy.mode,
             "VIBECRAFTED_CONTINUITY_LINEAGE_ID": continuity_policy.lineage_id,
         }
     )
+    source_secret = prompt
+    if admission.get("source_snapshot"):
+        source_secret = Path(admission["source_snapshot"]).read_bytes().decode("utf-8")
+    transcript = launch.meta_path.with_name("transcript.log")
+    capture = InteractiveTranscriptCapture(transcript, source_secret)
+    launch.receipt["transcript"] = str(transcript)
+    launch.receipt["latest_transcript"] = str(transcript)
     try:
-        # Omitting stdin/stdout/stderr is the contract: the provider inherits the
-        # wrapper's exact descriptors and controlling terminal. No PTY broker,
-        # pipe, or terminal-text parser sits between the User and provider.
         child = subprocess.Popen(
             resolved,
             cwd=launch.effective_root,
             env=child_env,
+            stdout=capture.slave,
+            stderr=capture.slave,
         )
+        capture.start()
     except (OSError, ValueError) as exc:
+        capture.close()
         cleanup = _cleanup_unspawned_interactive_launch(launch)
         _terminalize_interactive_launch(
             launch,
@@ -1677,7 +1902,7 @@ def launch_interactive_workspace(
         "launcher_pid": os.getpid(),
         "worker_pid": child.pid,
         "role": "agent",
-        "prompt_role": prompt.splitlines()[0] if prompt else "",
+        "prompt_role": str(admission.get("skill") or "init"),
         "operator_policy": operator_policy.as_dict(),
         "supervision": {
             "mode": "user_observed",
@@ -1709,7 +1934,14 @@ def launch_interactive_workspace(
             signal.signal(signum, _forward_owner_signal)
 
     # Publish the mandatory roles immediately after successful child creation.
-    # Stronger process fingerprints are a subsequent best-effort enrichment.
+    # The qualified process fingerprints travel with that first publication:
+    # the canonical snapshot folds the lifecycle event, never the runtime meta,
+    # and an idle provider proves it is alive only through its identity
+    # receipt. Capture stays best-effort — a deterministic fast-exit provider
+    # may already be terminal — and never delays the mandatory PID + role truth.
+    _attach_interactive_process_identity(
+        receipt, run_id=launch.run_id, worker_pid=child.pid
+    )
     _write_meta(launch.meta_path, receipt)
     append_event(
         "lifecycle:active",
@@ -1717,20 +1949,10 @@ def launch_interactive_workspace(
         "interactive Agent Workspace provider child is live",
         {**receipt, "meta": str(launch.meta_path), "identity_required": True},
     )
-    try:
-        from .process_control import process_identity_receipt
-
-        owner_identity = process_identity_receipt(os.getpid(), run_id=launch.run_id)
-        worker_identity = process_identity_receipt(child.pid, run_id=launch.run_id)
-        if owner_identity is not None:
-            receipt["owner_identity"] = owner_identity
-        if worker_identity is not None:
-            receipt["worker_identity"] = worker_identity
-        _write_meta(launch.meta_path, receipt)
-    except (OSError, RuntimeError, ValueError):
-        # PID + role truth remains mandatory; stronger identity is best-effort
-        # because a deterministic fast-exit provider may already be terminal.
-        pass
+    projection = _InteractiveProjection(
+        run_id=launch.run_id, meta_path=launch.meta_path, receipt=receipt
+    )
+    projection.publish()
     quota_exhausted = False
     provider_returncode: int
     try:
@@ -1741,6 +1963,9 @@ def launch_interactive_workspace(
                 receipt["measured_usage"] = measured_usage
                 receipt["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
                 _write_meta(launch.meta_path, receipt)
+            # Owned recovery of a deferred ACTIVE publication: same owner,
+            # same poll loop, no observer required while the provider idles.
+            projection.pump()
             if (
                 current_returncode is None
                 and not received_signal
@@ -1777,6 +2002,9 @@ def launch_interactive_workspace(
         )
         raise
     finally:
+        capture.close()
+        if capture.error:
+            receipt["transcript_error"] = capture.error
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
 
@@ -1828,20 +2056,25 @@ def _launch_supervised_interactive_workspace(
     operator_policy: OperatorAgentPolicy,
     run_id: str,
     continuity_material: ContinuityMaterial,
+    admission: dict[str, Any] | None = None,
 ) -> int:
     """Own one child and one distinct supervisor on the existing lifecycle throne."""
     assert operator_policy.provider is not None
+    admission = admission or {}
     quota = resolve_quota_policy(token_budget, runtime=runtime)
     continuity_policy = continuity_material.policy
     base_env = _fresh_child_environment(os.environ.copy(), continuity_policy)
     child_session_id = str(uuid.uuid4())
     child_command = interactive_policy_command(
         provider,
-        prompt,
+        f"Read and follow the private task file: {control_plane_home() / 'runtime_runs' / run_id / 'prompt.md'}",
         runtime,
         permissions,
         provider_session_id=child_session_id,
         continuity_policy=continuity_policy,
+    )
+    child_command = _with_model_override(
+        provider, child_command, str(admission.get("model_effective") or "")
     )
     child_resolved = _resolve_agent_command(provider, child_command, base_env)
     child_capability = resolve_provider_usage_capability(
@@ -1896,7 +2129,9 @@ def _launch_supervised_interactive_workspace(
             relation_id=relation_id,
             protocol_path=protocol_path,
         )
-        operator_prompt_path.write_text(operator_prompt, encoding="utf-8")
+        from .workflow import _write_prompt_file
+
+        _write_prompt_file(operator_prompt_path, operator_prompt)
     except Exception:
         _cleanup_unspawned_interactive_launch(launch)
         raise
@@ -1911,11 +2146,12 @@ def _launch_supervised_interactive_workspace(
     }
     child_receipt = {
         **launch.receipt,
+        **admission,
         "updated_at": now_iso,
         "status": "reserved",
         "liveness": "reserved",
         "role": "agent",
-        "prompt_role": prompt.splitlines()[0] if prompt else "",
+        "prompt_role": str(admission.get("skill") or "init"),
         "operator_policy": operator_policy.as_dict(),
         "supervision": dict(relation),
     }
@@ -1947,7 +2183,7 @@ def _launch_supervised_interactive_workspace(
     }
     operator_command = interactive_policy_command(
         operator_policy.provider,
-        operator_prompt,
+        f"Read and follow the private task file: {operator_prompt_path}",
         runtime,
         operator_policy.permissions or "accept-edits",
         provider_session_id=operator_session_id,
@@ -2053,7 +2289,7 @@ def _launch_supervised_interactive_workspace(
         "VIBECRAFTED_PARENT_ROOT": launch.parent_root,
         "VIBECRAFTED_EFFECTIVE_ROOT": launch.effective_root,
         "VIBECRAFTED_AGENT_ROLE": "agent",
-        "VIBECRAFTED_PROMPT_ROLE": prompt.splitlines()[0] if prompt else "",
+        "VIBECRAFTED_PROMPT_ROLE": str(admission.get("skill") or "init"),
         "VIBECRAFTED_SUPERVISION_RELATION_ID": relation_id,
         "VIBECRAFTED_SUPERVISION_PEER_RUN_ID": operator_run_id,
         "VIBECRAFTED_CONTINUITY_MODE": continuity_policy.mode,
@@ -2134,6 +2370,55 @@ def _launch_supervised_interactive_workspace(
         worker_pid=operator_child.pid,
         supervision=active_relation,
     )
+    received_signal: list[int] = []
+    previous_handlers: dict[int, Any] = {}
+
+    def _forward_owner_signal(signum: int, _frame: Any) -> None:
+        if not received_signal:
+            received_signal.append(signum)
+        for owned_process in (child, operator_child):
+            if owned_process.poll() is None:
+                try:
+                    owned_process.send_signal(signum)
+                except ProcessLookupError:
+                    pass
+
+    # Own the pair's signals before publishing, exactly like the direct owner:
+    # both providers already exist, and a SIGINT/SIGTERM landing during the
+    # publication window used to hit the default handler — the owner died
+    # unsettled and left two orphaned providers behind.
+    if threading.current_thread() is threading.main_thread():
+        for signum in (
+            signal.SIGINT,
+            signal.SIGTERM,
+            getattr(signal, "SIGHUP", signal.SIGTERM),
+        ):
+            if signum in previous_handlers:
+                continue
+            previous_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, _forward_owner_signal)
+
+    # Same publication contract as the direct owner: identity receipts ride the
+    # first ACTIVE publication so the snapshot can prove an idle pair alive.
+    identity_table = _process_table_or_none()
+    _attach_interactive_process_identity(
+        child_receipt,
+        run_id=launch.run_id,
+        worker_pid=child.pid,
+        table=identity_table,
+    )
+    _attach_interactive_process_identity(
+        operator_receipt,
+        run_id=operator_run_id,
+        worker_pid=operator_child.pid,
+        table=identity_table,
+    )
+    child_projection = _InteractiveProjection(
+        run_id=launch.run_id, meta_path=launch.meta_path, receipt=child_receipt
+    )
+    operator_projection = _InteractiveProjection(
+        run_id=operator_run_id, meta_path=operator_meta_path, receipt=operator_receipt
+    )
     try:
         _write_meta(launch.meta_path, child_receipt)
         _write_meta(operator_meta_path, operator_receipt)
@@ -2157,7 +2442,11 @@ def _launch_supervised_interactive_workspace(
                 "identity_required": True,
             },
         )
+        child_projection.publish()
+        operator_projection.publish()
     except Exception as exc:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
         child_code = _stop_owned_process(child)
         operator_code = _stop_owned_process(operator_child)
         operator_log.close()
@@ -2181,30 +2470,6 @@ def _launch_supervised_interactive_workspace(
         )
         raise
 
-    received_signal: list[int] = []
-    previous_handlers: dict[int, Any] = {}
-
-    def _forward_owner_signal(signum: int, _frame: Any) -> None:
-        if not received_signal:
-            received_signal.append(signum)
-        for owned_process in (child, operator_child):
-            if owned_process.poll() is None:
-                try:
-                    owned_process.send_signal(signum)
-                except ProcessLookupError:
-                    pass
-
-    if threading.current_thread() is threading.main_thread():
-        for signum in (
-            signal.SIGINT,
-            signal.SIGTERM,
-            getattr(signal, "SIGHUP", signal.SIGTERM),
-        ):
-            if signum in previous_handlers:
-                continue
-            previous_handlers[signum] = signal.getsignal(signum)
-            signal.signal(signum, _forward_owner_signal)
-
     quota_exhausted = False
     supervision_lost = False
     stop_actor_run_id = ""
@@ -2220,6 +2485,8 @@ def _launch_supervised_interactive_workspace(
                     dt.timezone.utc
                 ).isoformat()
                 _write_meta(launch.meta_path, child_receipt)
+            child_projection.pump()
+            operator_projection.pump()
             events, protocol_offset = _poll_operator_protocol(
                 protocol_path, protocol_offset
             )
@@ -2350,10 +2617,17 @@ def _launch_supervised_interactive_workspace(
     )
     terminal_observation_confirmed = False
     settlement_error = ""
-    if not supervision_lost and not received_signal and operator_child.poll() is None:
+    if not supervision_lost and not received_signal:
         deadline = time.monotonic() + 1.0
         try:
-            while time.monotonic() < deadline:
+            while True:
+                # Sample the Operator Agent's exit BEFORE reading: the protocol
+                # file outlives its writer, so an Operator that appends its
+                # terminal observation and exits at once is still read on this
+                # pass. Gating the whole window on a live operator skipped a
+                # fast operator's final truth whenever the child's terminal
+                # publication took longer than the operator's last write.
+                operator_exited = operator_child.poll() is not None
                 events, protocol_offset = _poll_operator_protocol(
                     protocol_path, protocol_offset
                 )
@@ -2379,7 +2653,11 @@ def _launch_supervised_interactive_workspace(
                             },
                         }
                         _write_meta(operator_meta_path, operator_receipt)
-                if terminal_observation_confirmed or operator_child.poll() is not None:
+                if (
+                    terminal_observation_confirmed
+                    or operator_exited
+                    or time.monotonic() >= deadline
+                ):
                     break
                 time.sleep(0.05)
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
@@ -2556,7 +2834,333 @@ def _terminalize_related_receipt(
         f"Operator Agent terminal: {terminal_reason}",
         {**terminal, "meta": str(meta_path), "identity_required": True},
     )
+    _flush_terminal_projection(run_id, terminal, meta_path=meta_path)
     return terminal
+
+
+def _process_table_or_none() -> Sequence[Any] | None:
+    """One process-table capture shared by several identity receipts."""
+    try:
+        from .process_control import build_process_table
+
+        return build_process_table()
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _attach_interactive_process_identity(
+    receipt: dict[str, Any],
+    *,
+    run_id: str,
+    worker_pid: int,
+    owner_pid: int | None = None,
+    table: Sequence[Any] | None = None,
+) -> None:
+    """Stamp best-effort owner/worker identity receipts onto *receipt*.
+
+    Deliberately publishes no top-level ``worker_pgid``: an interactive
+    provider inherits the terminal pane's process group, and ``worker_pgid``
+    is the first stop-signal target (``killpg``). The receipts still carry the
+    captured group, which is all the liveness reconciler needs.
+    """
+    try:
+        from .process_control import process_identity_receipt
+
+        shared_table = table if table is not None else _process_table_or_none()
+        owner_identity = process_identity_receipt(
+            int(owner_pid or os.getpid()), run_id=run_id, table=shared_table
+        )
+        worker_identity = process_identity_receipt(
+            int(worker_pid), run_id=run_id, table=shared_table
+        )
+    except (OSError, RuntimeError, ValueError):
+        # PID + role truth remains mandatory; stronger identity is best-effort
+        # because a deterministic fast-exit provider may already be terminal.
+        return
+    if owner_identity is not None:
+        receipt["owner_identity"] = owner_identity
+    if worker_identity is not None:
+        receipt["worker_identity"] = worker_identity
+
+
+# --- Canonical snapshot publication: owned, bounded recovery -----------------
+#
+# Lifecycle ownership. The interactive owner process (the pane launcher that
+# holds the provider child) owns its run's ``runs/<id>.json`` publication for
+# exactly as long as it lives. Recovery after a transient failure therefore
+# runs on the owner's own poll loop (no thread, no helper process, nothing to
+# reap or leak at exit) and, at terminalization, as one synchronous bounded
+# flush before the owner returns. The snapshot authority stays single and the
+# scope stays exact: every attempt is the same ``sync_state(only_run_id=...)``.
+# Persistent terminal failure is abandoned loudly — stderr, a durable
+# ``projection:abandoned`` event and the meta receipt — while meta.json plus the
+# lifecycle event remain the durable truth a later full board sync re-projects.
+#
+# Retry bound. ACTIVE phase retries for the lifetime of its still-live owner,
+# with exponential backoff 0.5s·2^(n-1) capped at 30s. The cap constrains
+# frequency rather than declaring a healthy owner permanently invisible after
+# an arbitrary number of transient storage failures.
+# TERMINAL phase (owner exit): a bounded retry-scheduling/sleep budget of
+# _PROJECTION_TERMINAL_BUDGET_SECONDS and _PROJECTION_TERMINAL_ATTEMPT_LIMIT
+# attempts, interrupt-safe. A blocking filesystem syscall remains outside that
+# budget.
+_PROJECTION_RETRY_INITIAL_SECONDS = 0.5
+_PROJECTION_RETRY_MAX_SECONDS = 30.0
+# The first power that reaches the 30-second ceiling: 0.5 * 2**6 == 32.
+# Clamp the exponent before calculating the power so an arbitrarily long
+# storage outage cannot make retry scheduling itself overflow.
+_PROJECTION_RETRY_MAX_EXPONENT = 6
+_PROJECTION_TERMINAL_BUDGET_SECONDS = 5.0
+_PROJECTION_TERMINAL_ATTEMPT_LIMIT = 6
+# ControlPlaneLockBusy is kept for completeness: the scoped projection takes no
+# global sync lock, so the live failure classes here are storage/OS errors and
+# a refused run-meta mutation (ValueError), not the board-sync lock.
+_PROJECTION_ERRORS: tuple[type[BaseException], ...] = (
+    ControlPlaneLockBusy,
+    ControlPlaneStorageError,
+    OSError,
+    RuntimeError,
+    ValueError,
+)
+_projection_log = logging.getLogger(__name__)
+
+
+def _project_interactive_snapshot(run_id: str) -> str:
+    """One scoped canonical projection attempt: '' on success, else the error."""
+    try:
+        sync_state(only_run_id=run_id)
+    except _PROJECTION_ERRORS as exc:
+        return f"{type(exc).__name__}: {exc}"
+    return ""
+
+
+def _projection_backoff_seconds(failures: int) -> float:
+    exponent = min(max(int(failures) - 1, 0), _PROJECTION_RETRY_MAX_EXPONENT)
+    return min(
+        _PROJECTION_RETRY_MAX_SECONDS,
+        _PROJECTION_RETRY_INITIAL_SECONDS * (2.0**exponent),
+    )
+
+
+def _record_projection_abandoned(
+    run_id: str,
+    *,
+    phase: str,
+    attempts: int,
+    last_error: str,
+    receipt: Mapping[str, Any],
+) -> None:
+    """Make a persistent projection failure observable without inventing truth."""
+    _projection_log.error(
+        "interactive run %s canonical snapshot projection abandoned after %d %s "
+        "attempt(s); meta.json and the lifecycle event remain the durable truth "
+        "(run `vibecrafted control-plane sync` once the cause is fixed): %s",
+        run_id,
+        attempts,
+        phase,
+        last_error,
+    )
+    try:
+        append_event(
+            "projection:abandoned",
+            run_id,
+            f"canonical snapshot projection abandoned ({phase})",
+            {
+                "run_id": run_id,
+                "phase": phase,
+                "attempts": int(attempts),
+                "last_error": last_error,
+                "state": str(receipt.get("status") or ""),
+                "liveness": str(receipt.get("liveness") or ""),
+            },
+        )
+    except _PROJECTION_ERRORS as exc:
+        _projection_log.error(
+            "interactive run %s projection abandonment event not durable: %s",
+            run_id,
+            exc,
+        )
+
+
+@dataclass
+class _InteractiveProjection:
+    """Owner-side ACTIVE publication of one run's canonical snapshot.
+
+    ``publish`` is the first attempt right after the ``lifecycle:active``
+    event; ``pump`` is called from the owner's existing provider poll loop and
+    retries a pending publication when its backoff is due. No thread, no
+    timer: the retry lives and dies with the owner, and a terminalization
+    supersedes any pending ACTIVE publication with its own bounded flush.
+    """
+
+    run_id: str
+    meta_path: Path
+    receipt: dict[str, Any]
+    clock: Callable[[], float] = time.monotonic
+    attempts: int = 0
+    failures: int = 0
+    next_attempt_at: float = 0.0
+    status: str = "unpublished"
+    last_error: str = ""
+    first_failed_at: str = ""
+
+    def publish(self) -> str:
+        return self._attempt()
+
+    def pump(self) -> str:
+        if self.status != "pending" or self.clock() < self.next_attempt_at:
+            return self.status
+        return self._attempt()
+
+    def _attempt(self) -> str:
+        self.attempts += 1
+        error = _project_interactive_snapshot(self.run_id)
+        if not error:
+            if self.failures:
+                _projection_log.warning(
+                    "interactive run %s snapshot projection recovered on attempt %d",
+                    self.run_id,
+                    self.attempts,
+                )
+            self.status = "published"
+            self.last_error = ""
+            self._stamp(published_at=utc_now_iso())
+            return self.status
+        self.failures += 1
+        self.last_error = error
+        if not self.first_failed_at:
+            self.first_failed_at = utc_now_iso()
+        delay = _projection_backoff_seconds(self.failures)
+        self.next_attempt_at = self.clock() + delay
+        self.status = "pending"
+        # A live owner may legitimately outlast an outage. Log the first
+        # defer only, so recovery does not become an unbounded log stream.
+        if self.attempts == 1:
+            _projection_log.warning(
+                "interactive run %s snapshot projection deferred; owner retries "
+                "with capped %.1fs backoff: %s",
+                self.run_id,
+                _PROJECTION_RETRY_MAX_SECONDS,
+                error,
+            )
+        self._stamp()
+        return self.status
+
+    def _stamp(self, **extra: Any) -> None:
+        """Mirror the publication state into the owner's meta receipt (best-effort)."""
+        self.receipt["projection"] = {
+            "status": self.status,
+            "attempts": self.attempts,
+            "last_error": self.last_error,
+            "first_failed_at": self.first_failed_at,
+            **extra,
+        }
+        try:
+            _write_meta(self.meta_path, self.receipt)
+        except OSError:
+            # The same storage fault that blocks the snapshot may block meta;
+            # the log line above already carries the truth.
+            pass
+
+
+def _flush_terminal_projection(
+    run_id: str,
+    receipt: dict[str, Any],
+    *,
+    meta_path: Path | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> str:
+    """Bounded synchronous recovery of the terminal snapshot before owner exit.
+
+    Runs after the terminal meta and lifecycle event are durable, so the
+    retained terminal truth is never at stake — only its visibility. The retry
+    budget limits scheduling and sleep; it cannot bound a blocking filesystem
+    syscall inside the canonical writer. It never spawns anything, and a
+    Ctrl-C during the flush abandons it instead of unwinding the owner's exit
+    path.
+    """
+    deadline = clock() + _PROJECTION_TERMINAL_BUDGET_SECONDS
+    attempts = 0
+    last_error = ""
+    while True:
+        attempts += 1
+        try:
+            last_error = _project_interactive_snapshot(run_id)
+        except KeyboardInterrupt:
+            last_error = "KeyboardInterrupt: terminal projection interrupted"
+            break
+        if not last_error:
+            if attempts > 1:
+                _projection_log.warning(
+                    "interactive run %s terminal snapshot projection recovered "
+                    "on attempt %d",
+                    run_id,
+                    attempts,
+                )
+            _stamp_terminal_projection(
+                receipt, meta_path, status="published", attempts=attempts
+            )
+            return "published"
+        remaining = deadline - clock()
+        if attempts >= _PROJECTION_TERMINAL_ATTEMPT_LIMIT or remaining <= 0:
+            break
+        delay = min(_projection_backoff_seconds(attempts), remaining)
+        _projection_log.warning(
+            "interactive run %s terminal snapshot projection deferred (attempt "
+            "%d/%d, owner retries in %.1fs within a %.0fs exit budget): %s",
+            run_id,
+            attempts,
+            _PROJECTION_TERMINAL_ATTEMPT_LIMIT,
+            delay,
+            _PROJECTION_TERMINAL_BUDGET_SECONDS,
+            last_error,
+        )
+        try:
+            sleep(delay)
+        except KeyboardInterrupt:
+            last_error = "KeyboardInterrupt: terminal projection interrupted"
+            break
+    _record_projection_abandoned(
+        run_id,
+        phase="terminal",
+        attempts=attempts,
+        last_error=last_error,
+        receipt=receipt,
+    )
+    _stamp_terminal_projection(
+        receipt,
+        meta_path,
+        status="abandoned",
+        attempts=attempts,
+        last_error=last_error,
+    )
+    return "abandoned"
+
+
+def _stamp_terminal_projection(
+    receipt: dict[str, Any],
+    meta_path: Path | None,
+    *,
+    status: str,
+    attempts: int,
+    last_error: str = "",
+) -> None:
+    """Retain terminal publication outcome without creating another writer."""
+    receipt["projection"] = {
+        "phase": "terminal",
+        "status": status,
+        "attempts": attempts,
+        "last_error": last_error,
+        "published_at": utc_now_iso() if status == "published" else "",
+    }
+    if meta_path is None:
+        return
+    try:
+        _write_meta(meta_path, receipt)
+    except OSError:
+        # The terminal lifecycle receipt remains durable from before this flush.
+        pass
 
 
 def _cleanup_unspawned_interactive_launch(launch: InteractiveWorkspaceLaunch) -> str:
@@ -2617,6 +3221,7 @@ def _terminalize_interactive_launch(
         f"interactive Agent Workspace terminal: {terminal_reason}",
         {**terminal, "meta": str(launch.meta_path), "identity_required": True},
     )
+    _flush_terminal_projection(launch.run_id, terminal, meta_path=launch.meta_path)
     return terminal
 
 
@@ -4276,6 +4881,16 @@ def _build_parser() -> argparse.ArgumentParser:
     interactive_command.add_argument("--parent-session", default="")
     interactive_command.add_argument("--continuity-parent", default="")
     interactive_command.add_argument("--root", required=True)
+    interactive_command.add_argument("--file", default="")
+    interactive_command.add_argument("--model", default="")
+    interactive_command.add_argument("--base", default="")
+    interactive_command.add_argument("--execution-runtime", default="")
+    interactive_command.add_argument("--worktree", default="")
+    interactive_command.add_argument("--skill", default="init")
+    interactive_command.add_argument("--session", default="")
+    interactive_command.add_argument("--parent-run-id", default="")
+    interactive_command.add_argument("--resume-run-id", default="")
+    interactive_command.add_argument("--resume-last", action="store_true")
     interactive_launch = sub.add_parser(
         "interactive-launch", help="Prepare and exec an interactive Agent Workspace."
     )
@@ -4287,7 +4902,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--permissions", choices=PERMISSION_POLICIES, default="bypass"
     )
     interactive_launch.add_argument("--root", required=True)
-    interactive_launch.add_argument("--prompt", required=True)
+    interactive_launch.add_argument("--prompt", default="")
+    interactive_launch.add_argument("--admission-file", default="")
     interactive_launch.add_argument("--token-budget", default="safe")
     interactive_launch.add_argument(
         "--operator", choices=OPERATOR_POLICIES, default="none"
@@ -4297,6 +4913,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     interactive_launch.add_argument("--parent-session", default="")
     interactive_launch.add_argument("--continuity-parent", default="")
+    handoff = sub.add_parser(
+        "interactive-handoff", help="Enter an admitted interactive execution"
+    )
+    handoff.add_argument("--command", dest="launch_command", required=True)
+    handoff.add_argument("--root-only", action="store_true")
     sub.add_parser(
         "policy-matrix", help="Print the complete provider policy matrix as JSON."
     )
@@ -4306,6 +4927,22 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point dispatching to the launcher helper subcommands."""
     args = _build_parser().parse_args(argv)
+    if args.command == "interactive-handoff":
+        command = shlex.split(args.launch_command)
+        if (
+            "vibecrafted_core.spawn" not in command
+            or "interactive-launch" not in command
+            or "--admission-file" not in command
+        ):
+            raise ValueError("expected a canonical admitted interactive command")
+        launch_args = command[command.index("interactive-launch") :]
+        selected = _build_parser().parse_args(launch_args)
+        if args.root_only:
+            print(selected.root)
+            return 0
+        # Re-enter the canonical owner in this interpreter. The command's
+        # executable/environment prefix is descriptive, never executable input.
+        return main(launch_args)
     if args.command == "write-meta":
         write_meta(
             args.meta,
@@ -4355,7 +4992,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(shlex.join(command))
         return 0
     if args.command == "interactive-command":
-        prompt = sys.stdin.read()
+        from .workflow import read_prompt_stream
+
+        prompt = read_prompt_stream(sys.stdin)
         try:
             command = interactive_workspace_command(
                 args.provider,
@@ -4368,6 +5007,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.continuity,
                 args.parent_session,
                 args.continuity_parent,
+                model=args.model,
+                source_file=args.file,
+                base=args.base,
+                execution_runtime=args.execution_runtime,
+                worktree=args.worktree,
+                skill=args.skill,
+                native_session=args.session,
+                parent_run_id=args.parent_run_id,
+                resume_run_id=args.resume_run_id,
+                resume_last=args.resume_last,
             )
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
@@ -4375,7 +5024,62 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(shlex.join(command))
         return 0
     if args.command == "interactive-launch":
+        admission = {}
+        claimed = False
+        native_lease = None
         try:
+            if args.admission_file:
+                path = Path(args.admission_file)
+                if path.is_symlink() or path.stat().st_mode & 0o077:
+                    raise ValueError("unsafe interactive admission file")
+                admission = json.loads(path.read_bytes())
+                expected = (
+                    control_plane_home() / "runtime_runs" / str(admission["run_id"])
+                )
+                if path.resolve() != (expected / "admission.json").resolve():
+                    raise ValueError(
+                        "interactive admission does not belong to this run"
+                    )
+                source_path = Path(admission["source_snapshot"])
+                if (
+                    source_path.is_symlink()
+                    or source_path.resolve() != (expected / "plan-source.md").resolve()
+                    or source_path.stat().st_mode & 0o077
+                ):
+                    raise ValueError("unsafe interactive source snapshot")
+                source = source_path.read_bytes()
+                if hashlib.sha256(source).hexdigest() != admission["source_digest"]:
+                    raise ValueError("interactive source digest mismatch")
+                if (
+                    args.provider != admission["agent"]
+                    or args.root != admission["root"]
+                ):
+                    raise ValueError("interactive admission target mismatch")
+                args.prompt = f"/vc-{admission['skill']}\n\n" + source.decode("utf-8")
+                # Exclusive execution claim: reopening a view cannot run the provider twice.
+                claim_fd = os.open(
+                    expected / "execution.claim",
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                    0o600,
+                )
+                os.close(claim_fd)
+                claimed = True
+                native_id = str(admission.get("agent_session_id") or "")
+                if native_id:
+                    import fcntl
+
+                    leases = control_plane_home() / "native_session_leases"
+                    leases.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    key = hashlib.sha256(
+                        f"{args.provider}:{native_id}".encode()
+                    ).hexdigest()
+                    native_lease = os.open(leases / key, os.O_CREAT | os.O_RDWR, 0o600)
+                    try:
+                        fcntl.flock(native_lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError as exc:
+                        raise ValueError(
+                            "native session already has an active executor"
+                        ) from exc
             return launch_interactive_workspace(
                 args.provider,
                 args.prompt,
@@ -4387,10 +5091,38 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.continuity,
                 args.parent_session,
                 args.continuity_parent,
+                admission=admission,
             )
         except (OSError, RuntimeError, ValueError) as exc:
+            if claimed:
+                failed = {
+                    **admission,
+                    "status": "failed",
+                    "state": "failed",
+                    "liveness": "terminal",
+                    "terminal_reason": "interactive_start_failed",
+                    "error": str(exc),
+                    "completed_at": utc_now_iso(),
+                }
+                meta_path = (
+                    control_plane_home()
+                    / "runtime_runs"
+                    / admission["run_id"]
+                    / "meta.json"
+                )
+                _write_meta(meta_path, failed)
+                append_event(
+                    "lifecycle:failed",
+                    admission["run_id"],
+                    "interactive start failed",
+                    {**failed, "meta": str(meta_path)},
+                )
+                _project_interactive_snapshot(admission["run_id"])
             print(str(exc), file=sys.stderr)
             return 2
+        finally:
+            if native_lease is not None:
+                os.close(native_lease)
     if args.command == "policy-matrix":
         print(
             json.dumps(

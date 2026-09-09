@@ -50,6 +50,7 @@ from .workflow import (
     manual_resume_session,
     normalize_launch_spec,
     operator_continue_run,
+    read_prompt_stream,
     recover_launch_receipt,
     resolve_fork_source,
 )
@@ -205,7 +206,7 @@ def _add_launch_parser(sub: argparse._SubParsersAction, name: str) -> None:
         run.add_argument("--dry-run", action="store_true")
         run.add_argument("--json", action="store_true")
         return
-    run.add_argument("-p", "--prompt", default="")
+    run.add_argument("-p", "--prompt", default=None)
     run.add_argument("-f", "--file", default="")
     run.add_argument(
         "--prompt-stdin",
@@ -1108,7 +1109,7 @@ def _agent_resume(agent: str, argv: Sequence[str]) -> int:
     if args.prompt_stdin:
         if prompt or args.prompt_file:
             parser.error("--prompt-stdin conflicts with --prompt/--file")
-        prompt = sys.stdin.read()
+        prompt = read_prompt_stream(sys.stdin)
     if args.prompt_file:
         try:
             prompt = Path(args.prompt_file).expanduser().read_bytes().decode("utf-8")
@@ -1124,6 +1125,9 @@ def _agent_resume(agent: str, argv: Sequence[str]) -> int:
         root=resume_root,
         model=args.model,
         plan_text=prompt if args.prompt_file else "",
+        source_path=str(Path(args.prompt_file).expanduser().resolve())
+        if args.prompt_file
+        else "",
         base=args.base,
     )
     if args.json:
@@ -1774,7 +1778,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "resume-session":
         prompt = str(args.prompt or "")
         if args.prompt_stdin:
-            prompt = sys.stdin.read()
+            prompt = read_prompt_stream(sys.stdin)
         elif args.prompt_file:
             prompt_path = Path(args.prompt_file).expanduser()
             try:
@@ -1820,6 +1824,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             prompt=prompt,
             root=resume_root,
             model=args.model,
+            source_text=prompt,
+            source_path=str(Path(args.prompt_file).expanduser().resolve())
+            if args.prompt_file
+            else "",
         )
         if args.json:
             print(json.dumps(resume_result, ensure_ascii=False, indent=2))
@@ -1865,13 +1873,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.prompt_stdin:
         if prompt or args.file:
             parser.error("--prompt-stdin cannot be combined with --prompt or --file")
-        prompt = sys.stdin.read()
+        prompt = read_prompt_stream(sys.stdin)
     agent_arg = args.agent
     research_agents = ()
     if args.command == "research" and isinstance(agent_arg, list):
         research_agents = tuple(agent_arg) if len(agent_arg) > 1 else ()
     try:
-        worktree_requested = parse_worktree_flag(
+        parse_worktree_flag(
             getattr(args, "worktree", ""), label=f"vibecrafted {args.command}"
         )
         launch_root = args.repo or args.root or str(Path.cwd())
@@ -1889,12 +1897,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         "skill": LAUNCH_ALIASES.get(args.command, args.command),
         "agent": args.agent,
         "prompt": prompt,
+        "input_explicit": args.prompt is not None
+        or bool(args.file)
+        or args.prompt_stdin,
         "file": args.file,
         "runtime": _default_runtime(args.runtime, launch_root),
         "root": args.root,
         "repo": args.repo,
         "repo_selector": True,
-        "worktree": worktree_requested,
+        "worktree": args.worktree,
         "runtime_class": args.execution_runtime,
         "base": args.base,
         "permissions": getattr(args, "permissions", ""),

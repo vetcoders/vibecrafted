@@ -108,18 +108,18 @@ end-to-end privacy admission.
 
 ## Public entry matrix
 
-| Entry                                                                                                                                   | Parser and route                                  | Repo/base/execution                                      | Model/prompt                                    | Evidence boundary                                                              |
-| --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- | -------------------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------ |
-| workflow, implement, review, research, marbles                                                                                          | public deck -> core CLI -> workflow               | shared core flags                                        | strict selection, private core input            | focused source tests; supervisor/provider integration separate                 |
-| audit, canary, decorate, delegate, dou, followup, guard, hydrate, intents, justdo, ownership, polarize, prune, release, scaffold, trust | same core execution route                         | shared core flags                                        | same selection                                  | alias/parser route; skill semantics unchanged                                  |
-| vc-* execution aliases                                                                                                                  | deck `run_wrapper` or Python wrappers -> core     | same as corresponding skill                              | same as corresponding skill                     | native alias installation not changed                                          |
-| resume --run-id                                                                                                                         | shell shared parser -> core operator_continue_run | original root/baseline; conflicting overrides refuse     | new CLI/plan/previous precedence                | CP provider attribution remains reserved                                       |
-| resume --session with explicit input                                                                                                    | shared parser -> resume-session                   | explicit native session; no unrecorded baseline override | whole plan or stdin, exact model                | native session exclusion/PTY acceptance remains open                           |
-| bare resume, fork, init, partner, operator                                                                                              | existing shell/native declaration owners          | partial: not all core repo/base/runtime fields adopted   | interactive/native paths need final unification | do not claim complete parity                                                   |
-| dispatch TOML                                                                                                                           | dispatch schema/supervisor -> workflow            | existing dispatch substrate and baseline policy          | TOML override / brief model                     | dependency baseline policy needs final audit; no fleet launched by this worker |
-| vc-start / vibecrafted start                                                                                                            | shared dashboard parser and create-only owner     | local path; default Git top-level name                   | no work/model flags added                       | fake-engine and real-PTY fixtures; guest integration pending                   |
-| VOC/App/MCP                                                                                                                             | their owned declarations -> core                  | capability additions required below                      | capability additions required below             | sibling integrations and installed acceptance pending                          |
-| observe/await/status and other read-only commands                                                                                       | existing observation owners                       | no meaningless work flags                                | no prompt launch contract                       | unchanged                                                                      |
+| Entry                                                                                                                                   | Parser and route                                                                  | Repo/base/execution                                               | Model/prompt                                                              | Evidence boundary                                                                                        |
+| --------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| workflow, implement, review, research, marbles                                                                                          | public deck -> core CLI -> workflow                                               | shared core flags                                                 | strict selection, private core input                                      | focused source tests; supervisor/provider integration separate                                           |
+| audit, canary, decorate, delegate, dou, followup, guard, hydrate, intents, justdo, ownership, polarize, prune, release, scaffold, trust | same core execution route                                                         | shared core flags                                                 | same selection                                                            | alias/parser route; skill semantics unchanged                                                            |
+| vc-* execution aliases                                                                                                                  | deck `run_wrapper` or Python wrappers -> core                                     | same as corresponding skill                                       | same as corresponding skill                                               | native alias installation not changed                                                                    |
+| resume --run-id                                                                                                                         | shell shared parser -> core operator_continue_run                                 | original root/baseline; conflicting overrides refuse              | new CLI/plan/previous precedence                                          | canonical metadata provider wins over settlement author                                                  |
+| resume --session with explicit input                                                                                                    | shared parser -> resume-session                                                   | explicit native session; no unrecorded baseline override          | whole plan or stdin, exact model                                          | native session exclusion/PTY acceptance remains open                                                     |
+| bare resume, fork, init, partner, operator                                                                                              | shell -> spawn interactive-command -> normalize_launch_spec -> interactive-launch | canonical repo/base/execution; resume preserves recorded checkout | immutable private admission/source, exact model; fresh child run identity | eight real PTY fixture cases pass for init/partner/operator/resume; native Frame/fork acceptance pending |
+| dispatch TOML                                                                                                                           | dispatch schema/supervisor -> workflow                                            | existing dispatch substrate and baseline policy                   | TOML override / brief model; source and model frozen together             | dependency baseline policy needs final audit; no fleet launched by this worker                           |
+| vc-start / vibecrafted start                                                                                                            | shared dashboard parser and create-only owner                                     | local path; default Git top-level name                            | no work/model flags added                                                 | fake-engine and real-PTY fixtures; guest integration pending                                             |
+| VOC/App/MCP                                                                                                                             | their owned declarations -> core                                                  | capability additions required below                               | capability additions required below                                       | sibling integrations and installed acceptance pending                                                    |
+| observe/await/status and other read-only commands                                                                                       | existing observation owners                                                       | no meaningless work flags                                         | no prompt launch contract                                                 | unchanged                                                                                                |
 
 ## Provider and presentation capability matrix
 
@@ -155,7 +155,7 @@ The precise API names must come from that implementation, not invented flags.
 
 ## Reserved integration interfaces
 
-- **Terra / spawn + CP:** preserve launch identity fields through all phases and
+- **Admitted Live Runs (`071c24b8`):** exact scoped owner patches are reconciled. Preserve launch identity fields through all phases and
   settlement; event author (`guardian`) must not replace execution provider
   (`claude`). `control_plane._event_runs` currently selects each payload's
   `agent` over existing identity. Add a launch-Claude / settle-Guardian / resume-
@@ -174,11 +174,26 @@ The precise API names must come from that implementation, not invented flags.
 - **Frame:** admit the actual stable-host guest API above before enabling
   inside-host start. Closing a viewer must not own the worker lifecycle.
 
-Outstanding independent unification includes native init/partner/operator/fork
-repo/base/model propagation, all direct API callers consuming the same repository
-admission, source-ref provenance, complete native-session mutual exclusion,
-full all-surface idempotency/crash/
-cleanup acceptance. These are not converted into passes by focused tests.
+Interactive admission now reserves a fresh run identity before a provider starts,
+materializes the original source and admission at mode 0600, passes only private
+references through command composition, and uses the existing control-plane owner
+for prepared, active and terminal projections. The output capture keeps provider
+TTY descriptors while recording a private, prompt-filtered transcript. Admission
+replay refuses a second executor. Interactive native-session leases exclude another
+interactive launch for the same native identity.
+
+Init/partner/operator stay interactive even with explicit input. Bare resume stays
+interactive; explicit prompt/file/stdin resume takes the tracked noninteractive
+path. Shell command substitution may already have removed trailing newlines before
+admission; the launcher preserves the bytes it actually receives, including CRLF.
+Dispatch stores the admitted original source independently of its assembled runtime
+instructions. Research model pins belong to the selected provider role, not swarm.
+
+Remaining acceptance includes native Frame viewer detachment and cold-start host
+handoff, supervised transcript echo filtering, native fork fixtures, complete native-
+session mutual exclusion across interactive and noninteractive paths, and all-surface
+idempotency/crash/cleanup. Explicit provider-session resume without a recorded run
+still cannot accept an unrecorded baseline override. These are not passes.
 
 Review and integrate the local commits before a clean signed build. The Operator
 owns installation, notarization, live UI/provider acceptance and release.

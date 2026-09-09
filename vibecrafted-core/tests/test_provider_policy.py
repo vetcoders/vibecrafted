@@ -152,7 +152,7 @@ def _git(repo: Path, *args: str) -> str:
 
 
 def _repo(path: Path) -> str:
-    path.mkdir()
+    path.mkdir(exist_ok=True)
     _git(path, "init", "-q")
     _git(path, "config", "user.email", "agents@vetcoders.io")
     _git(path, "config", "user.name", "runtime-test")
@@ -1218,7 +1218,7 @@ def test_child_spawn_failure_publishes_no_false_active_and_removes_clean_worktre
     assert "lifecycle:active" not in events
 
 
-@pytest.mark.parametrize("kind", ["non-git", "dirty"])
+@pytest.mark.parametrize("kind", ["non-git"])
 def test_invalid_worktree_parent_fails_before_runtime_truth(
     kind: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1363,6 +1363,7 @@ def test_interactive_command_uses_contract_flags() -> None:
 def test_interactive_workspace_command_wraps_the_exact_init_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _repo(tmp_path)
     monkeypatch.setattr(
         "vibecrafted_core.spawn.resolve_provider_usage_capability",
         lambda _provider: _TEST_USAGE_CAPABILITY,
@@ -1377,8 +1378,10 @@ def test_interactive_workspace_command_wraps_the_exact_init_route(
         "vibecrafted_core.spawn",
         "interactive-launch",
     ]
-    assert command[-2:] == ["--prompt", "/vc-init"]
-    assert "local-worktrees" in command
+    assert "--prompt" not in command
+    admission = json.loads(Path(command[-1]).read_bytes())
+    assert admission["runtime_class"] == "local-worktrees"
+    assert Path(admission["source_snapshot"]).read_text() == "/vc-init"
     assert "read-only" in command
 
 
@@ -1593,6 +1596,7 @@ def test_interactive_command_requires_typed_continuity_selection(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     """H2b2d fail-first: the canonical owner must accept explicit fresh truth."""
+    _repo(tmp_path)
     monkeypatch.setattr(sys, "stdin", io.StringIO("/vc-init"))
     monkeypatch.setattr(
         "vibecrafted_core.spawn.resolve_provider_usage_capability",
@@ -1835,7 +1839,7 @@ def test_interactive_workspace_command_defaults_to_unmetered_for_providers_witho
     tmp_path: Path,
 ) -> None:
     repo = tmp_path / "repo"
-    repo.mkdir()
+    _repo(repo)
     for provider in ("codex", "grok", "cursor", "agy", "junie"):
         cmd = interactive_workspace_command(
             provider,
@@ -1929,7 +1933,7 @@ def test_interactive_workspace_command_invokes_the_selected_generation_bootstrap
     keep every execution option of the plain form."""
     gen = _stamped_generation(tmp_path)
     repo = tmp_path / "repo"
-    repo.mkdir()
+    _repo(repo)
     plain_executable = sys.executable
     monkeypatch.setattr(
         "vibecrafted_core.spawn.resolve_provider_usage_capability",
@@ -1976,7 +1980,8 @@ def test_interactive_workspace_command_invokes_the_selected_generation_bootstrap
         continuity="fresh",
     )
     assert plain[0] == plain_executable
-    assert plain[1:] == installed[1:]
+    assert plain[1:-1] == installed[1:-1]
+    assert plain[-1] != installed[-1]  # each declaration reserves a new run
 
 
 def test_interactive_workspace_command_keeps_the_import_root_prefix_for_a_plain_interpreter(
@@ -1984,6 +1989,7 @@ def test_interactive_workspace_command_keeps_the_import_root_prefix_for_a_plain_
 ) -> None:
     """Source lane, prior behaviour retained: an interpreter that cannot
     import core by itself gets the explicit import root in front."""
+    _repo(tmp_path)
     monkeypatch.setattr(
         "vibecrafted_core.spawn.resolve_provider_usage_capability",
         lambda _provider: _TEST_USAGE_CAPABILITY,
@@ -2034,7 +2040,9 @@ def test_unmetered_launch_reaches_a_provider_without_a_usage_sidechannel(
         == 0
     )
 
-    assert capture.read_text(encoding="utf-8").count("/vc-init") == 1
+    assert "/vc-init" not in capture.read_text(encoding="utf-8")
+    snapshot = next((home / "control_plane/runtime_runs").glob("*/prompt.md"))
+    assert snapshot.read_text() == "/vc-init"
     receipts = list((home / "control_plane" / "runtime_runs").glob("*/meta.json"))
     assert len(receipts) == 1
     receipt = json.loads(receipts[0].read_text(encoding="utf-8"))

@@ -330,6 +330,7 @@ _vetcoders_start_validate_workspace_name() {
 
 _vetcoders_start_prepare_arguments() {
   local raw_root="" raw_repo="" normalized_root="" arg
+  local _vetcoders_contract_base="" _vetcoders_contract_execution_runtime="" _vetcoders_contract_worktree=""
   _vetcoders_start_frame_argv=()
   _vetcoders_start_workspace_name=""
   _vetcoders_start_mode="start"
@@ -342,6 +343,19 @@ _vetcoders_start_prepare_arguments() {
       esac
     fi
     case "$arg" in
+      --base)
+        shift; [[ $# -gt 0 && -n "$1" ]] || return 2
+        _vetcoders_contract_base="$1"
+        ;;
+      --execution-runtime)
+        shift; [[ $# -gt 0 && -n "$1" ]] || return 2
+        _vetcoders_contract_execution_runtime="$1"
+        ;;
+      --worktree)
+        _vetcoders_contract_worktree=true
+        if [[ $# -gt 1 ]] && _vetcoders_is_worktree_word "$2"; then shift; _vetcoders_contract_worktree="$1"; fi
+        ;;
+      --worktree=*) _vetcoders_contract_worktree="${1#--worktree=}" ;;
       --root)
         shift
         if (($# == 0)) || [[ -z "$1" ]]; then
@@ -413,7 +427,6 @@ _vetcoders_start_prepare_arguments() {
   done
 
   unset VIBECRAFTED_START_ROOT
-  [[ -n "$raw_root" || -n "$raw_repo" ]] || return 0
   # Same selector as every other public verb: `--repo` standard, `--root`
   # legacy, conflicting pair refused, path must already exist.
   normalized_root="$(_vetcoders_select_repo "vc-start" "$raw_repo" "$raw_root")" || return $?

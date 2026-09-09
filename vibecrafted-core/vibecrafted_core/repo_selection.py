@@ -386,3 +386,50 @@ __all__ = [
     "select_repository",
     "selected_root",
 ]
+
+
+def main() -> int:
+    """Shell adapters use the canonical launch resolver; no shell path twin."""
+    import json
+    import sys
+
+    from .workflow import normalize_launch_spec
+
+    parser = argparse.ArgumentParser(
+        description="Resolve a launch repository and pinned base"
+    )
+    add_repo_arguments(parser)
+    parser.add_argument("--base", default="")
+    parser.add_argument("--execution-runtime", default="")
+    parser.add_argument("--worktree", default="")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--prepare-worktree", action="store_true")
+    args = parser.parse_args()
+    try:
+        spec = normalize_launch_spec(
+            {
+                "agent": "codex",
+                "skill": "workflow",
+                "prompt": "repository selection",
+                "repo": args.repo,
+                "root": args.root,
+                "repo_selector": True,
+                "base": args.base,
+                "runtime_class": args.execution_runtime,
+                "worktree": args.worktree,
+            },
+            Path.cwd(),
+        )
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    if args.prepare_worktree and spec.worktree:
+        from .workflow import _prepare_launch_worktree, reserve_run_id
+
+        spec, _receipt = _prepare_launch_worktree(spec, reserve_run_id("init"))
+    print(json.dumps(spec.to_payload()) if args.json else spec.root)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

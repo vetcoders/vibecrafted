@@ -2791,6 +2791,23 @@ def _native_resume_claim_env(
 def test_manual_explicit_resume_launches_own_tracked_headless_run(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "baseline",
+        ],
+        check=True,
+    )
     monkeypatch.setattr(workflow, "reserve_run_id", lambda _skill: "rsme-manual-1")
     monkeypatch.setattr(
         workflow, "ensure_session_id", lambda _value=None: "runtime-manual-1"

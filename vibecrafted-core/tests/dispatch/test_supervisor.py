@@ -161,7 +161,11 @@ prompt = "canonical dispatch report prompt"
         def kill(self) -> None:
             pass
 
+    real_popen = workflow.subprocess.Popen
+
     def fake_popen(command: list[str], **kwargs: object) -> FakeProc:
+        if command[0] == "git":
+            return real_popen(command, **kwargs)
         if "env" in kwargs:
             # The tracked launcher owns the child env. Identity capture may
             # subsequently invoke `ps` through the same monkeypatched

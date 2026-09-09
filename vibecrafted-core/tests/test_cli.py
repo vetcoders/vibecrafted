@@ -154,6 +154,23 @@ def test_workflow_prompt_stdin_stays_out_of_argv_and_temp_files(
     tmp_path: Path,
     capsys,
 ) -> None:
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "baseline",
+        ],
+        check=True,
+    )
     seen: dict[str, object] = {}
 
     def fake_launch(spec, source_dir):
@@ -196,7 +213,7 @@ def test_workflow_prompt_stdin_stays_out_of_argv_and_temp_files(
     assert body["status"] == "launching"
 
 
-def test_review_from_home_uses_selected_workspace(
+def test_review_from_home_does_not_adopt_ambient_workspace(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -228,8 +245,8 @@ def test_review_from_home_uses_selected_workspace(
         ]
     )
 
-    assert rc == 0
-    assert Path(str(seen["root"])) == workspace.resolve()
+    assert rc == 2
+    assert not seen
 
 
 def test_review_from_home_without_workspace_is_refused(
@@ -1447,6 +1464,25 @@ def test_startup_watch_survives_a_null_accepted_field(tmp_path, capsys, monkeypa
 def test_json_launch_prints_one_parseable_receipt_even_with_unserializable_extras(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
 ) -> None:
+    import subprocess
+
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ],
+        check=True,
+    )
     launches = []
 
     def fake_launch(spec, _source_dir):
@@ -1492,6 +1528,26 @@ def test_json_launch_prints_one_parseable_receipt_even_with_unserializable_extra
 def test_json_launch_exception_after_run_created_emits_recovered_receipt(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
 ) -> None:
+    import subprocess
+
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ],
+        check=True,
+    )
+
     def fake_launch(_spec, _source_dir):
         raise RuntimeError("viewer exploded after spawn")
 
@@ -1534,6 +1590,25 @@ def test_json_launch_exception_after_run_created_emits_recovered_receipt(
 def test_json_launch_never_returns_empty_success_without_run_id(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
 ) -> None:
+    import subprocess
+
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ],
+        check=True,
+    )
     monkeypatch.setattr(
         cli,
         "launch_workflow",

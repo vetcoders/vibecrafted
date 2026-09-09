@@ -371,3 +371,331 @@ def test_public_resume_model_and_private_input_reach_core(tmp_path, identity):
     assert body not in argv
     assert transported == body
     assert body not in result.stdout + result.stderr
+
+
+def test_explicit_false_execution_conflict(tmp_path):
+    with pytest.raises(ValueError, match="conflict"):
+        spec(tmp_path, prompt="task", worktree=False, runtime_class="local-worktrees")
+
+
+def test_core_stdin_preserves_crlf(monkeypatch, tmp_path):
+    import io
+    import sys
+
+    from vibecrafted_core import cli
+
+    body = "\ufeff---\r\nagent: codex\r\nmodel: exact\r\n---\r\nZażółć\r\n\r\n"
+    selected = {}
+    monkeypatch.setattr(
+        sys, "stdin", io.TextIOWrapper(io.BytesIO(body.encode()), encoding="utf-8")
+    )
+    monkeypatch.setattr(
+        cli,
+        "normalize_launch_spec",
+        lambda payload, _: selected.update(payload) or object(),
+    )
+    monkeypatch.setattr(cli, "launch_workflow", lambda *_: {"accepted": True})
+    cli.main(["workflow", "codex", "--repo", str(tmp_path), "--prompt-stdin", "--json"])
+    assert selected["prompt"].encode() == body.encode()
+    assert selected["worktree"] in (None, "")
+
+
+def test_dispatch_freezes_source_with_model(tmp_path):
+    import json
+
+    from vibecrafted_core.dispatch.schema import parse_dispatch, render_cell_prompt
+
+    path = tmp_path / "brief.md"
+    original = "---\r\nagent: codex\r\nmodel: original\r\n---\r\n  Żółć\r\n\r\n"
+    path.write_bytes(original.encode())
+    source = (
+        Path(__file__).parent / "dispatch/fixtures/minimal.dispatch.toml"
+    ).read_text()
+    source = source.replace(
+        'prompt = "Implement parser cut {id} in {repo}."',
+        "brief = " + json.dumps(str(path)),
+    )
+    dispatch = parse_dispatch(source)
+    path.write_text("---\nmodel: changed\n---\nchanged task")
+    rendered = render_cell_prompt(dispatch, dispatch.cuts[0])
+    assert original in rendered
+    assert "changed task" not in rendered
+    assert dispatch.cuts[0].model == "original"
+
+
+@pytest.mark.parametrize("providers", [["codex", "claude"], "codex"])
+def test_research_model_has_provider_role(tmp_path, providers):
+    selected = spec(
+        tmp_path,
+        skill="research",
+        agent=providers,
+        prompt="---\nagent: codex\nmodel: exact-codex\n---\ntask",
+    )
+    assert selected.agent == "swarm"
+    assert selected.research_model_agent == "codex"
+    assert selected.model == "exact-codex"
+
+
+@pytest.mark.parametrize("skill", ["init", "partner", "operator", "resume"])
+@pytest.mark.parametrize("input_kind", ["prompt", "file"])
+def test_interactive_admission_snapshot_and_private_command(
+    tmp_path, monkeypatch, skill, input_kind
+):
+    import hashlib
+    import json
+    import subprocess
+
+    from vibecrafted_core import spawn
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for args in [
+        ("init", "-b", "trunk"),
+        (
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "base",
+        ),
+    ]:
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+    monkeypatch.setattr(
+        spawn,
+        "resolve_provider_usage_capability",
+        lambda *_: spawn.ProviderUsageCapability("codex", False),
+    )
+    monkeypatch.setenv("VIBECRAFTED_RUN_ID", "work-parent")
+    body = '\ufeff---\r\nagent: codex\r\nmodel: exact-codex\r\n---\r\n  Żółć "quoted"\r\n\r\n'
+    plan = tmp_path / "plan.md"
+    plan.write_bytes(body.encode())
+    cmd = spawn.interactive_workspace_command(
+        "codex",
+        body if input_kind == "prompt" else "",
+        "local-native",
+        "bypass",
+        repo,
+        token_budget="unmetered",
+        skill=skill,
+        source_file=str(plan) if input_kind == "file" else "",
+    )
+    assert body not in " ".join(cmd)
+    assert "--prompt" not in cmd
+    admission_path = Path(cmd[cmd.index("--admission-file") + 1])
+    admission = json.loads(admission_path.read_bytes())
+    assert admission["run_id"] != "work-parent"
+    assert admission["parent_run_id"] == "work-parent"
+    assert admission["skill"] == skill
+    assert admission["model_requested"] == "exact-codex"
+    assert admission["model_source"] == "plan_frontmatter"
+    snapshot = Path(admission["source_snapshot"])
+    assert snapshot.parent.name == admission["run_id"]
+    assert snapshot.read_bytes() == body.encode()
+    assert admission["source_digest"] == hashlib.sha256(body.encode()).hexdigest()
+    assert stat.S_IMODE(snapshot.stat().st_mode) == 0o600
+    assert stat.S_IMODE(admission_path.stat().st_mode) == 0o600
+    assert body not in admission_path.read_text()
+
+
+@pytest.mark.parametrize("skill", ["init", "partner", "operator", "resume"])
+@pytest.mark.parametrize("attached", [False, True])
+def test_public_interactive_shell_pty_admission(tmp_path, monkeypatch, skill, attached):
+    import json
+    import os
+    import pty
+    import shlex
+    import subprocess
+    import sys
+
+    from vibecrafted_core import control_plane
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ],
+        check=True,
+    )
+    core = Path(__file__).resolve().parents[1]
+    lib = core / "vibecrafted_core/runtime/shell/lib"
+    capture = tmp_path / "provider.json"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    provider = bin_dir / "codex"
+    provider.write_text(
+        f"#!{sys.executable}\n"
+        + """import json,os,sys
+from pathlib import Path
+Path(os.environ['PROVIDER_CAPTURE']).write_text(json.dumps({'argv': sys.argv, 'run_id': os.environ['VIBECRAFTED_RUN_ID'], 'tty': [os.isatty(i) for i in (0,1,2)]}))
+print('fixture-provider-completed', flush=True)
+"""
+    )
+    provider.chmod(0o700)
+    body = '\ufeff---\r\nagent: codex\r\nmodel: exact-codex\r\n---\r\n Żółć "quoted"\r\n\r\n'
+    plan = tmp_path / "plan.md"
+    plan.write_bytes(body.encode())
+    script = "\n".join(
+        "source " + shlex.quote(str(path))
+        for path in [
+            lib.parent.parent / "helpers/vetcoders-runtime-core.sh",
+            lib / "prompts.sh",
+            lib / "vc_frame.sh",
+            lib / "operator.sh",
+            lib / "operator_entrypoints.sh",
+            lib / "marbles.sh",
+        ]
+    )
+    script += '\n_vetcoders_core_python_spec() { printf "%s\\t%s\\n" "$FIXTURE_PYTHON" "$FIXTURE_CORE"; }\n'
+    script += """
+_vetcoders_needs_vc_terminal_entry() { return 1; }
+_vetcoders_vc_frame_bin() { printf /fixture-frame; }
+_vetcoders_require_vc_frame() { return 0; }
+_vetcoders_operator_face_tab() { printf fixture; }
+_vetcoders_launch_interactive_declaration() { _vetcoders_exec_admitted_interactive "$4"; }
+_vetcoders_ensure_canonical_workspace_identity() { return 0; }
+_vetcoders_prepare_operator_runtime() { export VIBECRAFTED_OPERATOR_SESSION=fixture; }
+_vetcoders_spawn_into_operator_session() { _vetcoders_exec_admitted_interactive "$2"; }
+_vetcoders_attach_prepared_vc_frame_session() { return 0; }
+"""
+    if skill == "resume":
+        script += '_vetcoders_resume_agent codex --session 11111111-2222-4333-8444-555555555555 --repo "$FIXTURE_REPO" --model exact-codex --token-budget unmetered\n'
+    else:
+        script += f'_vetcoders_skill_{skill} codex --repo "$FIXTURE_REPO" --file "$FIXTURE_PLAN" --token-budget unmetered\n'
+    env = {
+        **os.environ,
+        "FIXTURE_PYTHON": sys.executable,
+        "FIXTURE_CORE": str(core),
+        "FIXTURE_REPO": str(repo),
+        "FIXTURE_PLAN": str(plan),
+        "PROVIDER_CAPTURE": str(capture),
+        "VIBECRAFTED_RUN_ID": "work-parent",
+        "VIBECRAFTED_RUNTIME_BIN": str(bin_dir),
+        "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+    }
+    env.pop("PYTHONPATH", None)
+    if attached:
+        env.update(VC_FRAME="1", VC_FRAME_SESSION_NAME="fixture", VC_FRAME_PANE_ID="7")
+    master, slave = pty.openpty()
+    try:
+        proc = subprocess.Popen(
+            ["bash", "-c", script], env=env, stdin=slave, stdout=slave, stderr=slave
+        )
+        os.close(slave)
+        slave = -1
+        # Drain the real PTY so no child can block behind its output buffer.
+        import select
+
+        output = bytearray()
+        import time
+
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if select.select([master], [], [], 0.05)[0]:
+                try:
+                    data = os.read(master, 65536)
+                except OSError:
+                    break
+                if not data:
+                    break
+                output.extend(data)
+            if proc.poll() is not None:
+                break
+        assert proc.wait(timeout=2) == 0, output.decode(errors="replace")
+        result = json.loads(capture.read_text())
+        assert result["tty"] == [True, True, True]
+        assert result["run_id"] != "work-parent"
+        assert body not in " ".join(result["argv"])
+        assert result["argv"][result["argv"].index("-m") + 1] == "exact-codex"
+        run_dir = control_plane.control_plane_home() / "runtime_runs" / result["run_id"]
+        meta = json.loads((run_dir / "meta.json").read_text())
+        assert meta["skill"] == skill
+        assert meta["status"] == "completed"
+        assert "fixture-provider-completed" in Path(meta["transcript"]).read_text()
+        assert body not in Path(meta["transcript"]).read_text()
+        projection = json.loads(
+            (
+                control_plane.control_plane_home()
+                / "runs"
+                / (result["run_id"] + ".json")
+            ).read_text()
+        )
+        assert projection["agent"] == "codex"
+        assert projection["state"] == "completed"
+        if skill == "resume":
+            assert "resume" in result["argv"]
+            assert "11111111-2222-4333-8444-555555555555" in result["argv"]
+    finally:
+        if "proc" in locals() and proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=3)
+        if slave >= 0:
+            os.close(slave)
+        os.close(master)
+
+
+def test_prompt_redaction_across_every_boundary():
+    from vibecrafted_core.runtime_transcript import PrivatePromptFilter
+
+    secret = "Zażółć\r\nsecret".encode()
+    for split in range(len(secret) + 1):
+        redactor = PrivatePromptFilter(secret)
+        result = (
+            redactor.feed(b"before " + secret[:split])
+            + redactor.feed(secret[split:] + b" after")
+            + redactor.finish()
+        )
+        assert result == b"before [private launch input redacted] after"
+
+
+def test_event_author_cannot_replace_admitted_provider(tmp_path, monkeypatch):
+    import json
+
+    from vibecrafted_core import control_plane as cp
+
+    events = tmp_path / "events.jsonl"
+    monkeypatch.setattr(cp, "event_stream_path", lambda: events)
+    events.write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in [
+                {
+                    "run_id": "work-provider",
+                    "kind": "launch",
+                    "payload": {
+                        "agent": "claude",
+                        "root": str(tmp_path),
+                        "model_requested": "claude-exact",
+                        "model_effective": "claude-exact",
+                        "model_source": "plan_frontmatter",
+                        "baseline_sha": "a" * 40,
+                        "presentation": "visible",
+                    },
+                },
+                {
+                    "run_id": "work-provider",
+                    "kind": "lifecycle:completed",
+                    "payload": {"agent": "guardian"},
+                },
+            ]
+        )
+    )
+    result = cp._merge_event_stream({})["work-provider"]
+    assert result.agent == "claude"
+    assert result.extra["model_effective"] == "claude-exact"
+    assert result.extra["model_source"] == "plan_frontmatter"
+    assert result.extra["baseline_sha"] == "a" * 40

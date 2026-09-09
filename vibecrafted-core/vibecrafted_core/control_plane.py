@@ -1114,6 +1114,14 @@ def _reconcile_dead_launcher(run: dict[str, Any]) -> dict[str, Any]:
         return result
     owner_pid = _coerce_int(result.get("owner_pid"))
     if owner_pid is not None:
+        if liveness == "terminal":
+            # The interactive owner terminalizes its receipt atomically
+            # (status + liveness + exit_code + completed_at) before the pair
+            # is torn down. `cancelled` is not a FINAL_STATES member, so
+            # without this guard an owner-signalled (Ctrl-C / SIGTERM) or
+            # provider-signalled exit was relabelled failed/pid_gone with a
+            # recovery demand — closed history resurrected as an alert.
+            return result
         owner_alive = _pid_is_alive(owner_pid)
         provider_alive = any(
             _pid_is_alive(pid)
@@ -1498,6 +1506,14 @@ def _worker_process_truth(run: dict[str, Any]) -> tuple[bool, str]:
     worker_pid = _coerce_int(run.get("worker_pid"))
     worker_pgid = _coerce_int(run.get("worker_pgid"))
     receipt = run.get("worker_identity")
+    if worker_pgid is None and isinstance(receipt, dict):
+        # An interactive Agent Workspace never publishes ``worker_pgid``: its
+        # provider inherits the terminal pane's process group, and that key is
+        # also the first stop-signal target (``killpg``). The qualified identity
+        # receipt still names the group the provider was captured in, which is
+        # enough to prove the same process is alive here — observation only,
+        # the pane group never becomes a signal target through this path.
+        worker_pgid = _coerce_int(receipt.get("pgid"))
     if not run_id or worker_pid is None or worker_pgid is None:
         return False, "qualified_identity_unavailable"
     valid, reason, _identity = validate_process_identity(
@@ -2216,7 +2232,14 @@ def _merge_event_stream(
             if identity_required
             else str(raw_root or "")
         )
-        agent = str(payload.get("agent") or (existing.agent if existing else "unknown"))
+        # A lifecycle event's author is not a provider reassignment. Once a
+        # launch/meta record establishes identity, later Guardian notifications
+        # cannot change the executor of that run.
+        agent = str(
+            existing.agent
+            if existing and existing.agent not in {"", "unknown", "guardian"}
+            else payload.get("agent") or "unknown"
+        )
         skill = str(payload.get("skill") or (existing.skill if existing else "unknown"))
         mode = str(payload.get("mode") or (existing.mode if existing else "unknown"))
         report = str(
@@ -2315,6 +2338,28 @@ def _merge_event_stream(
             "workspace_display_label",
             "worker_host_session",
             "worker_host_display",
+            "model_requested",
+            "model_effective",
+            "model_source",
+            "repo_requested",
+            "repo_kind",
+            "repo_identity",
+            "repo_remote",
+            "base_requested",
+            "base_ref",
+            "baseline_sha",
+            "runtime_class",
+            "presentation",
+            "requires_pty",
+            "execution_host",
+            "parent_root",
+            "effective_worker_root",
+            "parent_run_id",
+            "source_path",
+            "source_snapshot",
+            "source_origin",
+            "source_digest",
+            "source_ref",
         ):
             if key in payload and payload.get(key) not in (None, ""):
                 extra[key] = payload[key]

@@ -36,6 +36,7 @@ _vetcoders_contract_reset() {
   _vetcoders_contract_model=""
   _vetcoders_contract_base=""
   _vetcoders_contract_policy_runtime=""
+  _vetcoders_contract_execution_runtime=""
   _vetcoders_contract_permissions=""
   _vetcoders_contract_token_budget=""
   _vetcoders_contract_operator=""
@@ -79,6 +80,11 @@ _vetcoders_parse_contract() {
   _vetcoders_contract_reset
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --prompt-stdin)
+        [[ -z "${_vetcoders_contract_prompt_explicit:-}${_vetcoders_contract_file_explicit:-}" ]] || { echo "--prompt-stdin conflicts with --prompt/--file" >&2; return 1; }
+        _vetcoders_contract_prompt_explicit=1
+        IFS= read -r -d '' _vetcoders_contract_prompt || true
+        ;;
       -p|--prompt)
         shift
         [[ $# -gt 0 ]] || { echo "Missing value for --prompt" >&2; return 1; }
@@ -161,6 +167,11 @@ _vetcoders_parse_contract() {
         shift
         [[ $# -gt 0 && -n "$1" ]] || { echo "Missing or empty value for --model" >&2; return 1; }
         _vetcoders_contract_model="$1"
+        ;;
+      --execution-runtime)
+        shift
+        [[ $# -gt 0 ]] || { echo "Missing value for --execution-runtime" >&2; return 1; }
+        _vetcoders_contract_execution_runtime="$1"
         ;;
       --policy-runtime)
         shift
@@ -270,6 +281,14 @@ _vetcoders_parse_contract() {
     _vetcoders_contract_prompt="$_vetcoders_contract_tail"
   fi
 
+  if [[ -n "$_vetcoders_contract_prompt_explicit" && -z "${_vetcoders_contract_prompt//[[:space:]]/}" ]]; then
+    echo "--prompt requires non-empty input; bare resume is the interactive form." >&2
+    return 2
+  fi
+  if [[ -n "$_vetcoders_contract_file_explicit" && -z "$_vetcoders_contract_file" ]]; then
+    echo "--file requires a path." >&2
+    return 2
+  fi
   # Repository selection is decided ONCE, here, for every verb that parses the
   # shared contract (init / partner / operator / resume / every shell skill):
   # `--repo` and the legacy `--root` go through the same selector, a conflicting
@@ -364,7 +383,7 @@ _vetcoders_rewrite_contract_root_argv() {
       # Value-taking flags: step over the VALUE too, so a value that happens to
       # spell a flag is never read as one.
       -f | --file | --task | --session | --run-id | --count | --depth | \
-        --runtime | --model | --base | --policy-runtime | --permissions | \
+        --runtime | --model | --base | --execution-runtime | --policy-runtime | --permissions | \
         --token-budget | --operator | --continuity | --parent-session | \
         --continuity-parent)
         skip=1

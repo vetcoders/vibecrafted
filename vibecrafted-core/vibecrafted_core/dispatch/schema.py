@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shlex
@@ -198,7 +199,11 @@ def render_cell_prompt(
         delivery_contract,
         active_baton.to_json(),
     ]
-    rendered = [_format_known(part, variables).strip() for part in parts if part]
+    rendered = [
+        part if part is body and cut.brief else _format_known(part, variables).strip()
+        for part in parts
+        if part
+    ]
     return "\n\n".join(part for part in rendered if part).rstrip() + "\n"
 
 
@@ -228,6 +233,8 @@ def render_cut_verifies(dispatch: Dispatch, cut: Cut) -> Cut:
 
 def _brief_or_prompt(cut: Cut) -> str:
     """Read the cut's brief file if resolvable, else fall back to its inline prompt."""
+    if cut.source_text is not None:
+        return cut.source_text
     if cut.brief:
         path = Path(cut.brief).expanduser()
         if path.is_file():
@@ -425,6 +432,7 @@ def _parse_cuts(
         if brief:
             _validate_brief_path(brief, base_dir, index, errors)
 
+        plan_text = ""
         model, model_source = "", "provider_default"
         raw_model = item.get("model", "")
         if "model" in item and (
@@ -466,6 +474,8 @@ def _parse_cuts(
                 mode=mode,
                 model=model,
                 model_source=model_source,
+                source_text=plan_text,
+                source_digest=hashlib.sha256(plan_text.encode("utf-8")).hexdigest(),
                 prompt=prompt,
                 brief=_resolve_brief(brief, base_dir),
                 extra=_string(item.get("extra")),

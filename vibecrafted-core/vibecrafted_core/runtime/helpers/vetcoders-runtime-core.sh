@@ -98,35 +98,20 @@ _vetcoders_absolute_physical_path() {
 # that truly need a work tree check for one themselves.
 _vetcoders_select_repo() {
   local label="${1:-vibecrafted}" repo_raw="${2:-}" root_raw="${3:-}"
-  local repo_norm="" root_norm="" chosen="" flag="" normalized=""
-  if [[ -n "$repo_raw" && -n "$root_raw" ]]; then
-    repo_norm="$(_vetcoders_absolute_physical_path "$repo_raw")"
-    root_norm="$(_vetcoders_absolute_physical_path "$root_raw")"
-    if [[ "$repo_norm" != "$root_norm" ]]; then
-      printf '%s: conflicting --repo %s and --root %s; pass one repository (--repo is the standard spelling)\n' \
-        "$label" "$repo_raw" "$root_raw" >&2
-      return 2
-    fi
-  fi
-  if [[ -n "$repo_raw" ]]; then
-    chosen="$repo_raw"
-    flag="--repo"
-  elif [[ -n "$root_raw" ]]; then
-    chosen="$root_raw"
-    flag="--root"
+  local python_spec py import_root
+  python_spec="$(_vetcoders_core_python_spec)" || return 1
+  py="${python_spec%%$'\t'*}"
+  import_root="${python_spec#*$'\t'}"
+  local -a argv=("$py" -m vibecrafted_core.repo_selection --repo "$repo_raw" --root "$root_raw")
+  [[ "$label" != vc-start ]] || argv+=(--prepare-worktree)
+  [[ -z "${_vetcoders_contract_base:-}" ]] || argv+=(--base "$_vetcoders_contract_base")
+  [[ -z "${_vetcoders_contract_execution_runtime:-}" ]] || argv+=(--execution-runtime "$_vetcoders_contract_execution_runtime")
+  [[ -z "${_vetcoders_contract_worktree:-}" ]] || argv+=(--worktree "$_vetcoders_contract_worktree")
+  if [[ -n "$import_root" ]]; then
+    PYTHONPATH="$import_root${PYTHONPATH:+:$PYTHONPATH}" "${argv[@]}"
   else
-    return 0
+    "${argv[@]}"
   fi
-  normalized="$(_vetcoders_absolute_physical_path "$chosen")"
-  if [[ -z "$normalized" || ! -e "$normalized" ]]; then
-    printf '%s: %s is not an existing directory: %s\n' "$label" "$flag" "$chosen" >&2
-    return 2
-  fi
-  if [[ ! -d "$normalized" ]]; then
-    printf '%s: %s is not a directory: %s\n' "$label" "$flag" "$chosen" >&2
-    return 2
-  fi
-  printf '%s\n' "$normalized"
 }
 
 # `--worktree` takes an optional boolean word. These two helpers keep the

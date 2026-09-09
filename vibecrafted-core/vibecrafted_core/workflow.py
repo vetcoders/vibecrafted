@@ -123,6 +123,9 @@ class WorkflowLaunchSpec:
     resolved_ref: str = ""
     runtime_class: str = "living-tree"
     source_digest: str = ""
+    plan_source: str | None = None
+    source_path: str = ""
+    research_model_agent: str = ""
     model_source: str = "provider_default"
     research_agents: tuple[str, ...] = ()
     research_synthesizer: str = ""
@@ -153,7 +156,7 @@ class WorkflowLaunchSpec:
 
     def to_payload(self) -> dict[str, Any]:
         """Serialize the spec to a plain dict for launch logs and events."""
-        return {**asdict(self), "prompt": ""}
+        return {**asdict(self), "prompt": "", "plan_source": None}
 
 
 def vibecrafted_launcher(source_dir: str | Path) -> Path:
@@ -1503,6 +1506,16 @@ def _workflow_metadata(skill: str) -> dict[str, Any]:
     }
 
 
+def read_prompt_stream(stream: Any) -> str:
+    """Read UTF-8 bytes without universal-newline translation (16 MiB maximum)."""
+    source = getattr(stream, "buffer", stream)
+    data = source.read(16 * 1024 * 1024 + 1)
+    raw = data.encode("utf-8") if isinstance(data, str) else data
+    if len(raw) > 16 * 1024 * 1024:
+        raise ValueError("prompt exceeds the 16 MiB input limit")
+    return raw.decode("utf-8")
+
+
 def select_plan_model(
     agent: str, text: str, *, model: str = "", previous: str = ""
 ) -> tuple[str, str]:
@@ -1552,7 +1565,10 @@ def normalize_launch_spec(
     else:
         positional_agents = ()
         agent = str(raw_agent or definition.default_agent).strip()
+    model_agent = agent
     if definition.runtime_kind == "supervised_research":
+        if isinstance(raw_agent, str) and raw_agent and raw_agent != "swarm":
+            positional_agents = (raw_agent,)
         if not positional_agents and raw_research_agents:
             positional_agents = tuple(
                 str(item).strip() for item in raw_research_agents if str(item).strip()
@@ -1562,13 +1578,14 @@ def normalize_launch_spec(
         ]
         if unsupported:
             raise ValueError(f"Unsupported research agent: {unsupported[0]}")
+        model_agent = positional_agents[0] if positional_agents else ""
         agent = "swarm"
     if agent not in SUPPORTED_AGENTS:
         raise ValueError(f"Unsupported agent: {agent}")
 
     prompt = str(payload.get("prompt") or "")
     file_path = str(payload.get("file") or "").strip()
-    if not prompt and not file_path:
+    if not prompt and not file_path and not payload.get("input_explicit"):
         prompt = workflow_registry.workflow_default_prompt(skill)
     root = normalize_run_root(payload.get("root"), source_dir)
     runtime = _normalized_runtime(str(payload.get("runtime") or "headless").strip())
@@ -1586,11 +1603,15 @@ def normalize_launch_spec(
         if file_path
         else prompt
     )
+    if (file_path or payload.get("input_explicit")) and not plan_text.strip():
+        raise ValueError("explicit prompt input must not be empty")
     model, model_source = select_plan_model(
-        agent,
+        model_agent,
         plan_text,
         model=payload.get("model") or payload.get("model_requested") or "",
     )
+    if model and definition.runtime_kind == "supervised_research" and not model_agent:
+        raise ValueError("research --model requires an explicit provider role")
     research_agents: tuple[str, ...] = ()
     research_synthesizer = ""
     research_synthesizer_model = str(
@@ -1635,7 +1656,9 @@ def normalize_launch_spec(
         raise ValueError(f"Unsupported execution runtime: {execution}; no host adapter")
     worktree = parse_worktree_flag(payload.get("worktree"))
     if execution:
-        if worktree and execution != "local-worktrees":
+        if payload.get("worktree") not in (None, "") and worktree != (
+            execution == "local-worktrees"
+        ):
             raise ValueError("--worktree conflicts with execution runtime")
         worktree = execution == "local-worktrees"
     requested_repo = str(payload.get("repo") or payload.get("root") or "")
@@ -1751,6 +1774,9 @@ def normalize_launch_spec(
         baseline_sha=baseline_sha,
         resolved_ref=resolved_ref,
         runtime_class="local-worktrees" if worktree else "living-tree",
+        research_model_agent=model_agent
+        if definition.runtime_kind == "supervised_research"
+        else "",
         research_agents=research_agents,
         research_synthesizer=research_synthesizer,
         research_synthesizer_model=research_synthesizer_model,
@@ -1855,9 +1881,13 @@ def _prepare_launch_worktree(
 def _source_prompt(spec: WorkflowLaunchSpec) -> str:
     """Read exact input, refusing a file changed since model admission."""
     text = (
-        Path(spec.file).expanduser().read_bytes().decode("utf-8")
-        if spec.file
-        else spec.prompt
+        spec.plan_source
+        if spec.plan_source is not None
+        else (
+            Path(spec.file).expanduser().read_bytes().decode("utf-8")
+            if spec.file
+            else spec.prompt
+        )
     )
     if (
         spec.source_digest
@@ -2096,8 +2126,26 @@ def machine_launch_receipt(payload: dict[str, Any]) -> dict[str, Any]:
         "source_snapshot",
         "source_digest",
     ):
+        receipt[key] = payload.get(key, "")
+    for key in (
+        "report",
+        "transcript",
+        "meta",
+        "parent_root",
+        "effective_worker_root",
+        "parent_run_id",
+        "agent_session_id",
+        "requires_pty",
+        "execution_host",
+        "repository_identity",
+        "remote",
+        "source_ref",
+        "reason",
+        "error",
+        "launch_phase",
+    ):
         if key in payload:
-            receipt[key] = payload[key]
+            receipt[key] = _json_plain(payload[key])
     return receipt
 
 
@@ -2988,11 +3036,16 @@ def launch_workflow(
         if runtime_kind == "supervised_research"
         else None
     )
+    if research_selection is not None:
+        research_selection = replace(
+            research_selection, model_agent=spec.research_model_agent
+        )
     source_prompt = _source_prompt(spec)
+    runtime_source = spec.prompt if spec.plan_source is not None else source_prompt
     prompt_body = (
-        source_prompt
+        runtime_source
         if runtime_kind in {"supervised_research", "supervised_marbles"}
-        else _runtime_prompt(spec, source_prompt=source_prompt)
+        else _runtime_prompt(spec, source_prompt=runtime_source)
     )
     canonical_report_dir = _canonical_report_dir(spec.root, spec.skill)
     artifact_ts = time.strftime("%Y-%m-%d")
@@ -3015,8 +3068,9 @@ def launch_workflow(
         artifacts["prompt"].with_name("plan-source.md"), source_prompt
     )
     source_receipt = {
-        "source_path": str(Path(spec.file).expanduser().resolve()) if spec.file else "",
-        "source_origin": "file" if spec.file else "inline",
+        "source_path": spec.source_path
+        or (str(Path(spec.file).expanduser().resolve()) if spec.file else ""),
+        "source_origin": "file" if spec.file or spec.source_path else "inline",
         "source_snapshot": str(source_snapshot),
         "source_digest": hashlib.sha256(source_prompt.encode("utf-8")).hexdigest(),
         "model_source": spec.model_source,
@@ -3116,6 +3170,8 @@ def launch_workflow(
         **model_receipt,
         **controls_receipt,
         **source_receipt,
+        "model_requested": spec.model,
+        "model_effective": spec.model,
         "repo_requested": spec.repo_requested,
         "repo_kind": spec.repo_kind,
         "base_requested": spec.base,
@@ -3160,6 +3216,7 @@ def launch_workflow(
     if spec.model:
         merged_env["VIBECRAFTED_MODEL_REQUESTED"] = spec.model
     if research_selection is not None:
+        merged_env["VIBECRAFTED_RESEARCH_MODEL_AGENT"] = spec.research_model_agent
         if spec.research_agents:
             merged_env["VIBECRAFTED_RESEARCH_AGENTS"] = ",".join(
                 research_selection.agents
@@ -4762,6 +4819,8 @@ def manual_resume_session(
     root: str | Path = "",
     model: str = "",
     model_source: str = "",
+    source_text: str | None = None,
+    source_path: str = "",
     launch_meta: dict[str, Any] | None = None,
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -4842,23 +4901,43 @@ def manual_resume_session(
         "resume_mode": "manual_explicit",
         "manual_explicit": True,
     }
-    spec = WorkflowLaunchSpec(
-        agent=normalized_agent,
+    try:
+        admitted = normalize_launch_spec(
+            {
+                "agent": normalized_agent,
+                "skill": "workflow",
+                "prompt": source_text if source_text is not None else prompt_body,
+                "root": resolved_root,
+                "repo_selector": True,
+                "runtime": "headless",
+                "model": model_requested,
+            },
+            resolved_source_dir,
+        )
+    except ValueError as exc:
+        return _manual_explicit_resume_rejection(
+            agent=normalized_agent,
+            agent_session_id=native_id,
+            reason="launch_spec_invalid",
+            detail=str(exc),
+        )
+    spec = replace(
+        admitted,
         mode="manual_explicit",
-        skill="workflow",
         prompt=prompt_body,
-        file="",
-        runtime="headless",
-        root=resolved_root,
-        model=model_requested,
         model_source=model_source or selected_source,
-        runtime_class=str(launch_meta.get("runtime_class") or "living-tree"),
+        runtime_class=str(launch_meta.get("runtime_class") or admitted.runtime_class),
         baseline_sha=str(
             launch_meta.get("baseline_sha")
             or launch_meta.get("worktree_baseline_sha")
-            or ""
+            or admitted.baseline_sha
         ),
         run_id=child_run_id,
+        plan_source=source_text,
+        source_path=source_path,
+        source_digest=hashlib.sha256(
+            (source_text if source_text is not None else prompt_body).encode("utf-8")
+        ).hexdigest(),
     )
     try:
         launched = launch_workflow(
@@ -5243,6 +5322,11 @@ def _merge_run_and_meta(run: dict[str, Any], meta: dict[str, Any]) -> dict[str, 
     for key, value in run.items():
         if value not in (None, ""):
             merged[key] = value
+    if (
+        str(meta.get("agent") or "") in SUPPORTED_AGENTS
+        and str(run.get("agent") or "") not in SUPPORTED_AGENTS
+    ):
+        merged["agent"] = meta["agent"]
     return merged
 
 
@@ -5347,6 +5431,7 @@ def operator_continue_run(
     root: str | Path = "",
     model: str = "",
     plan_text: str = "",
+    source_path: str = "",
     base: str = "",
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -5493,8 +5578,8 @@ def operator_continue_run(
             plan_text,
             model=model,
             previous=str(
-                parent.get("agent_model")
-                or parent.get("model_effective")
+                parent.get("model_effective")
+                or parent.get("agent_model")
                 or parent.get("model_requested")
                 or ""
             ),
@@ -5529,6 +5614,8 @@ def operator_continue_run(
             root=resolved_root,
             model=model_requested,
             model_source=model_source,
+            source_text=plan_text or prompt or None,
+            source_path=source_path,
             launch_meta=continuation_meta,
             env=env,
         )
@@ -5563,7 +5650,15 @@ def operator_continue_run(
             detail=str(exc),
             run=parent,
         )
-    spec = replace(spec, model_source=model_source)
+    spec = replace(
+        spec,
+        model_source=model_source,
+        plan_source=plan_text or prompt or None,
+        source_path=source_path,
+        source_digest=hashlib.sha256(
+            (plan_text or prompt or prompt_body).encode("utf-8")
+        ).hexdigest(),
+    )
     try:
         launched = launch_workflow(
             spec,

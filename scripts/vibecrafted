@@ -1151,7 +1151,7 @@ cmd_fork_help() {
   printf '\n%bOptions:%b\n' "$_bold" "$_reset"
   printf '  --session <id|current|previous>     provider session to branch from (never a work-* run id)\n'
   printf '  --run-id <work-...>                 control-plane run; its recorded provider session is the source\n'
-  printf '  --repo <path>                       repository the fork runs in, from any directory (--root: legacy spelling)\n'
+  printf '  --repo <path|org/name>              canonical repository (--root: equivalent legacy alias)\n'
   printf '  --runtime visible|terminal          pane in this vc-frame tab; outside a watched pane the repo'"'"'s own workspace\n'
   printf '                                      session hosts the fork as a tab (a terminal is opened when there is none;\n'
   printf '                                      --runtime terminal in a plain TTY execs the provider directly); headless is refused\n'
@@ -1159,6 +1159,9 @@ cmd_fork_help() {
   printf '  --model <name>                      provider model override\n'
   printf '  --permissions bypass|auto|accept-edits|read-only  provider permission contract (codex: no accept-edits)\n'
   printf '  -p, --prompt <text>                 optional first prompt in the fork\n'
+  printf '  --file <plan> | --prompt-stdin      private source snapshot; model may come from YAML frontmatter\n'
+  printf '  --base <ref>                        pinned branch, tag, commit or HEAD\n'
+  printf '  --execution-runtime living-tree|local-worktrees; --worktree [true|false]\n'
   printf '\n%bExamples:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted fork codex --session current --runtime visible\n'
   printf '  vibecrafted fork claude --run-id work-260908-194325-30219 --repo ~/Projects/app\n'
@@ -1177,11 +1180,14 @@ cmd_init_help() {
   printf '  vc-init [claude|codex|agy|junie|grok|cursor]\n'
   printf '\n'
   printf '%bRuntime:%b\n' "$_bold" "$_reset"
-  printf '  terminal  (default) open a tab in the vc-frame cockpit; falls back to plain when vc-frame is absent\n'
+  printf '  terminal  (default) open a tab in the vc-frame cockpit; missing host support refuses\n'
   printf '  plain     start the agent in this terminal, no cockpit needed\n'
   printf '  Policy runtime defaults to local-native; unavailable runtimes fail closed.\n'
   printf '  Permission support is provider-specific; unsupported cells are rejected.\n'
-  printf '  Token budget defaults to safe (250000 measured tokens); N sets a bounded budget.\n'
+  printf '  --repo <path|org/name> (--root alias), --base <ref>, --execution-runtime living-tree|local-worktrees\n'
+  printf '  --worktree [true|false], --model <exact-id>, --file <plan>, --prompt-stdin\n'
+  printf '  Model selection: --model > plan frontmatter > provider default; input remains interactive.\n'
+  printf '  Token budget defaults to unmetered; safe or N explicitly require measured usage support.\n'
   printf '  unlimited is restricted to directly observed local-native sessions and still measures usage.\n'
   printf '  Measured quota currently requires a verified Claude transcript capability; unsupported providers fail closed.\n'
   printf '  Continuity defaults to fresh in the shell. full-lineage requires materialized AICX + active LOOP + parent lineage.\n'
@@ -1202,7 +1208,7 @@ cmd_partner_help() {
   printf '%b─────────────────────────────────────────%b\n' "$_steel" "$_reset"
   printf '  Start an interactive partner session with an agent (shared steering).\n'
   printf '  Same family as init: TTY/frame face with /vc-partner. Never a headless worker.\n'
-  printf '  --prompt/--file append extra seed context. vc-partner without a TTY refuses.\n'
+  printf '  --prompt/--file remain interactive; without a TTY the canonical VC Terminal handoff is used.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted partner [claude|codex|agy|junie|grok|cursor] [--runtime terminal|visible|plain]\n'
@@ -6020,6 +6026,7 @@ cmd_fork() {
 
   local selector="" run_id="" runtime="visible" placement="right"
   local model="" permissions="" repo_dir="" root_dir="" prompt=""
+  local plan_file="" base="" execution="" worktree=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --session) shift; [[ $# -gt 0 ]] || { echo "Missing value for --session" >&2; return 2; }; selector="$1" ;;
@@ -6030,9 +6037,12 @@ cmd_fork() {
       --repo=*) repo_dir="${1#--repo=}" ;;
       --root) shift; [[ $# -gt 0 ]] || { echo "Missing value for --root" >&2; return 2; }; root_dir="$1" ;;
       --root=*) root_dir="${1#--root=}" ;;
-      --worktree|--worktree=*)
-        echo "fork has no --worktree: a fork reuses the source session's checkout. Run a launcher with --worktree true for an isolated cut." >&2
-        return 2 ;;
+      --file) shift; [[ $# -gt 0 ]] || return 2; plan_file="$1" ;;
+      --prompt-stdin) IFS= read -r -d '' prompt || true; [[ -n "$prompt" ]] || { echo "Empty --prompt-stdin" >&2; return 2; } ;;
+      --base) shift; [[ $# -gt 0 ]] || return 2; base="$1" ;;
+      --execution-runtime) shift; [[ $# -gt 0 ]] || return 2; execution="$1" ;;
+      --worktree) worktree=true; if [[ $# -gt 1 && "$2" =~ ^(true|false)$ ]]; then shift; worktree="$1"; fi ;;
+      --worktree=*) worktree="${1#--worktree=}" ;;
       --runtime) shift; [[ $# -gt 0 ]] || { echo "Missing value for --runtime" >&2; return 2; }; runtime="$1" ;;
       --placement) shift; [[ $# -gt 0 ]] || { echo "Missing value for --placement" >&2; return 2; }; placement="$1" ;;
       --floating) placement="floating" ;;
@@ -6096,7 +6106,9 @@ cmd_fork() {
   # explicit session id or a --run-id fall back to the repository the source
   # run recorded, and only then to the caller's checkout.
   local explicit_root=""
-  explicit_root="$(_vetcoders_select_repo "fork" "$repo_dir" "$root_dir")" || return $?
+  if [[ -n "$repo_dir$root_dir" ]]; then
+    explicit_root="$(_vetcoders_select_repo "fork" "$repo_dir" "$root_dir")" || return $?
+  fi
   root_dir="${explicit_root:-$(_repo_root)}"
   root_dir="$(cd "$root_dir" 2>/dev/null && pwd -P)" || {
     printf 'Fork root is not a directory: %s\n' "$root_dir" >&2
@@ -6128,94 +6140,25 @@ cmd_fork() {
     root_dir="$(cd "$source_root" 2>/dev/null && pwd -P)" || return 1
   fi
 
-  # Provider fork argv. The source session id is only READ: codex `fork`
-  # creates a new conversation, claude/grok `--resume … --fork-session` mint a
-  # new session id. grok never gets --restore-code or --worktree (capability
-  # table forbidden flags: both mutate or leave the shared checkout).
-  local -a provider_argv=()
-  case "$agent" in
-    codex)
-      provider_argv=(codex fork --cd "$root_dir")
-      [[ -z "$model" ]] || provider_argv+=(--model "$model")
-      case "$permissions" in
-        bypass) provider_argv+=(--dangerously-bypass-approvals-and-sandbox) ;;
-        auto) provider_argv+=(--ask-for-approval on-request --sandbox workspace-write) ;;
-        read-only) provider_argv+=(--ask-for-approval never --sandbox read-only) ;;
-      esac
-      provider_argv+=("$session_id")
-      ;;
-    claude)
-      provider_argv=(claude --resume "$session_id" --fork-session)
-      [[ -z "$model" ]] || provider_argv+=(--model "$model")
-      case "$permissions" in
-        bypass) provider_argv+=(--permission-mode bypassPermissions) ;;
-        auto) provider_argv+=(--permission-mode auto) ;;
-        accept-edits) provider_argv+=(--permission-mode acceptEdits) ;;
-        read-only) provider_argv+=(--permission-mode plan) ;;
-      esac
-      ;;
-    grok)
-      provider_argv=(grok --resume "$session_id" --fork-session --cwd "$root_dir" --no-alt-screen)
-      [[ -z "$model" ]] || provider_argv+=(--model "$model")
-      case "$permissions" in
-        bypass) provider_argv+=(--permission-mode bypassPermissions) ;;
-        auto) provider_argv+=(--permission-mode auto) ;;
-        accept-edits) provider_argv+=(--permission-mode acceptEdits) ;;
-        read-only) provider_argv+=(--permission-mode plan) ;;
-      esac
-      ;;
-  esac
-  [[ -z "$prompt" ]] || provider_argv+=("$prompt")
-  local command_text
-  command_text="$(_vetcoders_shell_quote_join "${provider_argv[@]}")" || return 1
-
-  # A same-tab pane needs a pane someone is looking at: the attached-frame
-  # markers, confirmed by the engine (live session, attached client). Markers
-  # inherited from a pane whose host is gone are ambient context, not a pane.
-  local fork_surface_usable=0
-  if command -v _vetcoders_has_usable_vc_frame_surface >/dev/null ; then
-    ! _vetcoders_has_usable_vc_frame_surface || fork_surface_usable=1
-  elif _vetcoders_in_vc_frame; then
-    fork_surface_usable=1
-  fi
-
-  if ((fork_surface_usable == 0)); then
-    if [[ "$runtime" == terminal && -t 0 && -t 1 ]]; then
-      cd "$root_dir" || return 1
-      exec "${provider_argv[@]}"
+  # The existing interactive owner admits the fork, snapshots its source and
+  # owns the provider lifetime. Pane/window transport sees only that reference.
+  local _vetcoders_interactive_skill=fork
+  local _vetcoders_contract_model="$model" _vetcoders_contract_file="$plan_file"
+  local _vetcoders_contract_base="$base" _vetcoders_contract_execution_runtime="$execution"
+  local _vetcoders_contract_worktree="$worktree" _vetcoders_contract_root="$root_dir"
+  local _vetcoders_contract_repo="$repo_dir" _vetcoders_contract_run_id=""
+  local _vetcoders_contract_parent_run_id="$source_run_id" _vetcoders_contract_session=""
+  local command_text admission_status=0
+  command_text="$(_vetcoders_init_command_text "$agent" "$prompt" local-native "${permissions:-bypass}" unmetered none bare-fork "$session_id")" || return 1
+  _vetcoders_enter_admitted_interactive fork "$command_text" || admission_status=$?
+  case "$admission_status" in 0) return 0 ;; 1) return 1 ;; esac
+  root_dir="$_vetcoders_contract_root"
+  if ! _vetcoders_in_vc_frame; then
+    if [[ "$runtime" == terminal ]]; then
+      _vetcoders_init_in_current_terminal "$agent" "$command_text" plain fork
+    else
+      _vetcoders_launch_interactive_declaration fork "$runtime" "${agent} fork" "$command_text" "$root_dir"
     fi
-    # `vibecrafted fork` is a workspace declaration (Founder, 2026-09-09):
-    # outside a usable pane it owes the fork its repository's own workspace
-    # and a real terminal, never a "needs an attached pane" refusal and never
-    # a headless downgrade. The source identity was resolved ABOVE (AICX
-    # `current`/`previous` read this process's own context), so it travels as
-    # the exact provider id; the escalated child re-enters with that id, the
-    # absolute repository and every execution option, and starts the provider
-    # exactly once.
-    if command -v _vetcoders_needs_vc_terminal_entry >/dev/null &&
-      _vetcoders_needs_vc_terminal_entry; then
-      local -a fork_entry_argv=(fork "$agent" --session "$session_id" --repo "$root_dir"
-        --runtime "$runtime" --placement "$placement")
-      [[ -z "$model" ]] || fork_entry_argv+=(--model "$model")
-      [[ -z "$permissions" ]] || fork_entry_argv+=(--permissions "$permissions")
-      [[ -z "$prompt" ]] || fork_entry_argv+=(--prompt "$prompt")
-      _vetcoders_open_public_entry_in_vc_terminal "$root_dir" "${fork_entry_argv[@]}" || return 1
-      return 0
-    fi
-    # A terminal here (or the child a terminal already opened): the
-    # repository's own workspace session hosts the fork as a tab, and the
-    # terminal is handed to it last. Shared owner with init/operator/resume.
-    local fork_receipt=""
-    fork_receipt="$(
-      printf '  agent:     %s\n' "$agent"
-      printf '  session:   %s\n' "$session_id"
-      [[ -z "$source_run_id" ]] || printf '  source:    %s\n' "$source_run_id"
-      printf '  repo:      %s\n' "$root_dir"
-      printf '  tab:       %s fork'"\n" "$agent"
-    )"
-    _vetcoders_contract_root="$root_dir"
-    _vetcoders_launch_interactive_declaration fork "$runtime" "${agent} fork" \
-      "$command_text" "$root_dir" "$fork_receipt"
     return $?
   fi
 
