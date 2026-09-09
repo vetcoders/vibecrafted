@@ -128,3 +128,165 @@ def test_message_inspection_refuses_path_escape(monkeypatch, tmp_path: Path) -> 
     monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
     with pytest.raises(message_control.MessageControlError, match="invalid_message_id"):
         message_control.inspect_message("../../outside")
+
+
+def test_same_key_body_different_run_fails_before_runner_including_retry(
+    monkeypatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    _run(home, "run-1", session="thread-a")
+    _run(home, "run-2", session="thread-b")
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setattr(
+        message_control, "_resolve_agent_command", lambda _agent, argv, _env: argv
+    )
+    seen: list[list[str]] = []
+
+    def runner(argv, **_kwargs):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+    first = message_control.send_message(
+        run_id="run-1", text="one", idempotency_key="shared", runner=runner
+    )
+    assert first["run_id"] == "run-1"
+    assert first["delivery_state"] == "provider_accepted"
+    assert len(seen) == 1
+
+    with pytest.raises(
+        message_control.MessageControlError, match="idempotency_key_run_mismatch"
+    ):
+        message_control.send_message(
+            run_id="run-2", text="one", idempotency_key="shared", runner=runner
+        )
+    with pytest.raises(
+        message_control.MessageControlError, match="idempotency_key_run_mismatch"
+    ):
+        message_control.send_message(
+            run_id="run-2",
+            text="one",
+            idempotency_key="shared",
+            retry=True,
+            runner=runner,
+        )
+
+    assert len(seen) == 1
+    assert seen[0][3] == "thread-a"
+    replay = message_control.send_message(
+        run_id="run-1", text="one", idempotency_key="shared", runner=runner
+    )
+    assert replay["idempotent_replay"] is True
+    assert replay["message_id"] == first["message_id"]
+    assert len(seen) == 1
+
+
+def test_retry_does_not_resubmit_provider_accepted(monkeypatch, tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    _run(home, "run-1")
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setattr(
+        message_control, "_resolve_agent_command", lambda _agent, argv, _env: argv
+    )
+    calls = 0
+
+    def runner(argv, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+    first = message_control.send_message(
+        run_id="run-1", text="one", idempotency_key="accepted", runner=runner
+    )
+    retried = message_control.send_message(
+        run_id="run-1",
+        text="one",
+        idempotency_key="accepted",
+        retry=True,
+        runner=runner,
+    )
+    assert calls == 1
+    assert first["delivery_state"] == "provider_accepted"
+    assert retried["delivery_state"] == "provider_accepted"
+    assert retried["idempotent_replay"] is True
+    assert retried["message_id"] == first["message_id"]
+
+
+def test_retry_resubmits_unresolved_timeout_on_same_run_only(
+    monkeypatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    _run(home, "run-1", session="thread-a")
+    _run(home, "run-2", session="thread-b")
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setattr(
+        message_control, "_resolve_agent_command", lambda _agent, argv, _env: argv
+    )
+    calls = 0
+
+    def runner(argv, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=30)
+        return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+    timed_out = message_control.send_message(
+        run_id="run-1", text="one", idempotency_key="timeout", runner=runner
+    )
+    assert timed_out["delivery_state"] == "retryable_failure"
+    assert timed_out["failure"]["reason"] == "provider_queue_timeout"
+
+    recovered = message_control.send_message(
+        run_id="run-1",
+        text="one",
+        idempotency_key="timeout",
+        retry=True,
+        runner=runner,
+    )
+    assert calls == 2
+    assert recovered["delivery_state"] == "provider_accepted"
+    assert recovered["message_id"] == timed_out["message_id"]
+
+    with pytest.raises(
+        message_control.MessageControlError, match="idempotency_key_run_mismatch"
+    ):
+        message_control.send_message(
+            run_id="run-2",
+            text="one",
+            idempotency_key="timeout",
+            retry=True,
+            runner=runner,
+        )
+    assert calls == 2
+
+
+def test_timeout_reason_is_typed_and_omits_private_text(
+    monkeypatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    _run(home, "run-1")
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setattr(
+        message_control, "_resolve_agent_command", lambda _agent, argv, _env: argv
+    )
+    secret = "SECRET_MARKER_DO_NOT_PERSIST"
+
+    def runner(argv, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=30, output=secret)
+
+    result = message_control.send_message(
+        run_id="run-1", text=secret, runner=runner
+    )
+    diagnostics = json.dumps(
+        {
+            "failure": result.get("failure"),
+            "attempts": result.get("attempts"),
+            "delivery_state": result.get("delivery_state"),
+        },
+        default=str,
+    )
+    assert result["delivery_state"] == "retryable_failure"
+    assert result["failure"]["reason"] == "provider_queue_timeout"
+    assert "TimeoutExpired" not in diagnostics
+    assert secret not in diagnostics
+    assert secret not in json.dumps(result["attempts"], default=str)

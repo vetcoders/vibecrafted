@@ -29,6 +29,9 @@ from .spawn import _resolve_agent_command
 MESSAGE_SCHEMA = "vibecrafted.provider-message.v1"
 MAX_MESSAGE_BYTES = 64 * 1024
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_UNRESOLVED_OR_FAILED = frozenset(
+    {"recorded", "retryable_failure", "permanent_failure"}
+)
 
 
 class MessageControlError(ValueError):
@@ -114,6 +117,22 @@ def _record_failure(
     return updated
 
 
+def _queue_attempt_failure(
+    record: dict[str, Any],
+    attempt: dict[str, Any],
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    """Persist a typed queue failure without exception or argv payload."""
+
+    updated = dict(record)
+    updated["attempts"] = [
+        *list(record.get("attempts") or []),
+        {**attempt, "finished_at": _now(), "outcome": reason},
+    ]
+    return _record_failure(updated, state="retryable_failure", reason=reason)
+
+
 def inspect_message(message_id: str) -> dict[str, Any] | None:
     """Return one durable message receipt without inferring semantic ACK."""
 
@@ -135,9 +154,11 @@ def send_message(
 ) -> dict[str, Any]:
     """Persist intent, then submit one native provider queue operation.
 
-    A crash after ``recorded`` deliberately leaves the state unresolved. A
-    repeated key returns that record unless an operator explicitly asks for a
-    retry, because provider queue APIs do not give us an exactly-once receipt.
+    A crash after ``recorded`` deliberately leaves the state unresolved.
+    Reuse of a key is keyed by body digest; a different target run is a
+    conflict, not a replay. ``retry`` resubmits only unresolved or failed
+    receipts. ``provider_accepted`` is never submitted again. Timeouts are
+    ambiguous: the typed reason does not claim exactly-once delivery.
     """
 
     target = str(run_id or "").strip()
@@ -161,7 +182,14 @@ def send_message(
                 raise MessageControlError("idempotency_receipt_missing")
             if str(prior.get("text_digest") or "") != _digest(body):
                 raise MessageControlError("idempotency_key_payload_mismatch")
-            if not retry:
+            if str(prior.get("run_id") or "") != target:
+                raise MessageControlError("idempotency_key_run_mismatch")
+            state = str(prior.get("delivery_state") or "")
+            if (
+                not retry
+                or state == "provider_accepted"
+                or state not in _UNRESOLVED_OR_FAILED
+            ):
                 return {**prior, "idempotent_replay": True}
             record = prior
         else:
@@ -219,13 +247,14 @@ def send_message(
                 timeout=30,
                 check=False,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            updated = dict(record)
-            updated["attempts"] = [*list(record.get("attempts") or []), attempt]
-            return _record_failure(
-                updated,
-                state="retryable_failure",
-                reason=f"{type(exc).__name__}:{exc}",
+        except subprocess.TimeoutExpired:
+            # TimeoutExpired stringifies the full argv, including --message.
+            return _queue_attempt_failure(
+                record, attempt, reason="provider_queue_timeout"
+            )
+        except OSError:
+            return _queue_attempt_failure(
+                record, attempt, reason="provider_queue_unavailable"
             )
 
         stdout = str(completed.stdout or "")

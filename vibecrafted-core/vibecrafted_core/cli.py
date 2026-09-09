@@ -509,7 +509,10 @@ def _build_parser() -> argparse.ArgumentParser:
     message.add_argument(
         "--retry",
         action="store_true",
-        help="explicitly retry an unresolved or failed receipt",
+        help=(
+            "retry only an unresolved or failed receipt; "
+            "provider_accepted is never resubmitted"
+        ),
     )
     message.add_argument(
         "--inspect",
@@ -1482,6 +1485,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "control-plane-revalidate",
         "dispatch",
         "doctor",
+        "message",
         "fork-source",
         "session-source",
         "fork-session",
@@ -1839,12 +1843,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.run_id and args.file:
             try:
-                text = Path(args.file).expanduser().read_text(encoding="utf-8")
+                raw = Path(args.file).expanduser().read_bytes()
             except OSError as exc:
                 print(
                     f"error: message_file_unreadable:{type(exc).__name__}",
                     file=sys.stderr,
                 )
+                return 2
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                print("error: message_file_not_utf8", file=sys.stderr)
                 return 2
             try:
                 result = send_message(

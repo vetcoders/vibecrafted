@@ -1667,3 +1667,21 @@ def test_message_command_reads_file_and_projects_truthful_receipt(
     payload = json.loads(capsys.readouterr().out)
     assert payload["delivery_state"] == "provider_accepted"
     assert payload["agent_ack_state"] == "unobserved"
+
+
+def test_message_command_malformed_utf8_is_bounded_failure(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    message_file = tmp_path / "message.txt"
+    message_file.write_bytes(b"\xff\xfeSECRET_MARKER_DO_NOT_PERSIST")
+
+    assert (
+        cli.main(["message", "--run-id", "run-1", "--file", str(message_file)]) == 2
+    )
+    captured = capsys.readouterr()
+    assert "error: message_file_not_utf8" in captured.err
+    assert "Traceback" not in captured.err
+    assert "Traceback" not in captured.out
+    assert "UnicodeDecodeError" not in captured.err
+    assert "SECRET_MARKER_DO_NOT_PERSIST" not in captured.err
