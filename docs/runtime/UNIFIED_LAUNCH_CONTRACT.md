@@ -224,6 +224,22 @@ the runtime instruction envelope through stdin. Child metadata records
 is never seeded as the child's identity. A successful process without a distinct
 native child ID is a failed fork.
 
+Bare interactive fork admission proves a provider process was started, not that
+its pane displays a new native session. The receipt leaves `agent_session_id`
+and `provider_session_id` empty with `native_identity_status: pending`.
+`provider_session_requested`, when present, is only the UUID supplied to a
+provider's `--session-id` option; Codex fork has no such option. Until an
+attributable provider acknowledgement is available, an exit-zero interactive
+fork settles as `native_fork_identity_unconfirmed`. No newest-file or inherited
+parent-ID heuristic promotes it to success. Remote app-server/pane child identity
+and continued source usability remain required native acceptance.
+
+`session_selection` retains the original selector, resolved native source,
+selection root and resolution provenance through admission and control-plane
+projection. A handed-off `last` selection is pinned: admission revalidates its
+exact target rather than selecting again after newer runs appear. Source selection
+and child identity are separate evidence.
+
 The installed help advertises no verified native fork mechanism for Agy, Junie
 or Cursor. Their refusal describes this adapter limit; it is not exhaustive proof
 that their product can never fork. Interactive exact-session resume uses Agy's

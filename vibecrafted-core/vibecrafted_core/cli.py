@@ -476,6 +476,7 @@ def _build_parser() -> argparse.ArgumentParser:
     fork_source.add_argument("--run-id", default="")
     fork_source.add_argument("--session", default="")
     fork_source.add_argument("--json", action="store_true")
+    fork_source.add_argument("--root", default="")
     session_source = sub.add_parser(
         "session-source", help="resolve shared provider session selector"
     )
@@ -486,6 +487,7 @@ def _build_parser() -> argparse.ArgumentParser:
     task_fork = sub.add_parser("fork-session", help="tracked native task fork")
     task_fork.add_argument("agent", choices=sorted(AGENTS - {"swarm"}))
     task_fork.add_argument("--session", required=True)
+    task_fork.add_argument("--session-selection", type=json.loads, default=None)
     task_fork.add_argument("--parent-run-id", default="")
     task_fork.add_argument("--root", required=True)
     task_fork.add_argument("--model", default=None)
@@ -1043,7 +1045,7 @@ def _agent_resume(agent: str, argv: Sequence[str]) -> int:
     """``vibecrafted resume <agent>``: continue a stopped control-plane run."""
     parser = argparse.ArgumentParser(prog=f"vibecrafted resume {agent}")
     parser.add_argument("--run-id", default="")
-    parser.add_argument("--last", action="store_true")
+    parser.add_argument("--last", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--session", default="")
     parser.add_argument("-p", "--prompt", default="")
     parser.add_argument("-f", "--file", dest="prompt_file", default="")
@@ -1072,9 +1074,7 @@ def _agent_resume(agent: str, argv: Sequence[str]) -> int:
     session = str(args.session or "").strip()
     run_id = str(args.run_id or "").strip()
     if sum((bool(session), bool(run_id), bool(args.last))) > 1:
-        parser.error(
-            "choose one identity: --session or --run-id (--last is deprecated)"
-        )
+        parser.error("choose one identity: --session or --run-id")
     if args.last:
         parser.error("--last is retired for resume; use --session last")
     if session and not run_id:
@@ -1119,7 +1119,7 @@ def _agent_resume(agent: str, argv: Sequence[str]) -> int:
         run_id = str(run.get("run_id") or "")
     else:
         print(
-            "Resume a stopped run with --run-id <work-...> or --last.",
+            "Resume a stopped run with --run-id <work-...>; use --session last for scoped native history.",
             file=sys.stderr,
         )
         print(
@@ -1846,14 +1846,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
+        from .workflow import resolve_session_selection
+
+        try:
+            selection = resolve_session_selection(
+                args.agent, args.agent_session_id, resume_root
+            )
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         resume_result = manual_resume_session(
             args.agent,
-            args.agent_session_id,
+            selection["agent_session_id"],
             args.source_dir or package_root(),
             prompt=prompt,
             root=resume_root,
             model=args.model,
             source_text=prompt,
+            launch_meta={"session_selection": selection},
             source_path=str(Path(args.prompt_file).expanduser().resolve())
             if args.prompt_file
             else "",
@@ -1885,6 +1895,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 source_path=args.file,
                 parent_run_id=args.parent_run_id,
                 permissions=args.permissions,
+                session_selection=args.session_selection,
             )
         except (ValueError, OSError) as exc:
             print(f"error: {exc}", file=sys.stderr)
@@ -1902,9 +1913,45 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(result["agent_session_id"] if args.id_only else json.dumps(result))
         return 0
     if args.command == "fork-source":
+        from .workflow import resolve_session_selection
+
         fork_result = resolve_fork_source(
             args.agent, run_id=args.run_id, session=args.session
         )
+        if args.root and not (args.session and args.run_id):
+            try:
+                if args.session in {"current", "last", "previous"}:
+                    fork_result = resolve_session_selection(
+                        args.agent, args.session, args.root
+                    )
+                elif fork_result.get("accepted"):
+                    selected_root = args.root
+                    if selected_root == "auto":
+                        selected_root = fork_result.get("source_root") or str(
+                            Path.cwd()
+                        )
+                    original = fork_result
+                    fork_result = resolve_session_selection(
+                        args.agent, original["agent_session_id"], selected_root
+                    )
+                    if args.run_id:
+                        fork_result.update(
+                            session_selector="run-id",
+                            identity_source="run_meta",
+                            source_run_id=args.run_id,
+                        )
+                if fork_result.get("accepted"):
+                    capability = resolve_fork_source(
+                        args.agent, session=fork_result["agent_session_id"]
+                    )
+                    if not capability.get("accepted"):
+                        fork_result = capability
+            except ValueError as exc:
+                fork_result = {
+                    "accepted": False,
+                    "reason": "session_selection_failed",
+                    "detail": str(exc),
+                }
         if args.json:
             print(json.dumps(fork_result, ensure_ascii=False, indent=2))
         elif fork_result.get("accepted"):

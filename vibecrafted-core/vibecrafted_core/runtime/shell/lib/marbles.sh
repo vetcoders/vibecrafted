@@ -501,9 +501,6 @@ _vetcoders_resume_agent() {
     echo "  vibecrafted resume ${tool} --session current|last" >&2
     return 0
   fi
-  if [[ -n "${_vetcoders_contract_session:-}" ]]; then
-    _vetcoders_contract_session="$(_vetcoders_run_core_cli session-source "$tool" --session "$_vetcoders_contract_session" --root "${_vetcoders_contract_root:-$(_vetcoders_repo_root)}" --id-only)" || return 2
-  fi
   if [[ -n "${_vetcoders_contract_execution_runtime:-}${_vetcoders_contract_worktree:-}" && -n "${_vetcoders_contract_prompt_explicit:-}${_vetcoders_contract_file_explicit:-}" ]]; then
     printf 'Noninteractive resume preserves its checkout; execution/worktree overrides require fork.\n' >&2
     return 2

@@ -623,6 +623,17 @@ def _fresh_child_environment(
     env: dict[str, str], policy: ContinuityPolicy
 ) -> dict[str, str]:
     child = dict(env)
+    if policy.mode == "bare-fork":
+        # The source is already pinned in native argv. Inherited parent IDs
+        # cannot describe the new child, including calls to --session current.
+        for name in (
+            "CODEX_THREAD_ID",
+            "CODEX_SESSION_ID",
+            "CLAUDE_CODE_SESSION_ID",
+            "GROK_SESSION_ID",
+            "VIBECRAFTED_AGENT_SESSION_ID",
+        ):
+            child.pop(name, None)
     if policy.mode == "fresh":
         for name in _INHERITED_CONTINUITY_ENV:
             child.pop(name, None)
@@ -1086,6 +1097,7 @@ def interactive_workspace_command(
     parent_run_id: str = "",
     resume_run_id: str = "",
     resume_last: bool = False,
+    session_selection: dict[str, Any] | None = None,
 ) -> list[str]:
     """Build the portable wrapper argv used by the exact ``init`` route.
 
@@ -1128,12 +1140,17 @@ def interactive_workspace_command(
         )
     if native_session and (resume_run_id or resume_last):
         raise ValueError("choose one identity: --session or --run-id")
-    if native_session:
+    if native_session or session_selection is not None:
         from .workflow import resolve_session_selection
 
-        native_session = resolve_session_selection(provider, native_session, root)[
-            "agent_session_id"
-        ]
+        session_selection = resolve_session_selection(
+            provider,
+            native_session or parent_session_id,
+            root,
+            selection=session_selection,
+        )
+        if native_session:
+            native_session = session_selection["agent_session_id"]
     parent = {}
     selected_model_source = ""
     if resume_last:
@@ -1201,6 +1218,14 @@ def interactive_workspace_command(
             ),
         )
         parent_run_id = resume_run_id
+        session_selection = {
+            "agent": provider,
+            "agent_session_id": native_session,
+            "session_selector": "run-id",
+            "identity_source": "run_meta",
+            "source_run_id": resume_run_id,
+            "selection_root": str(Path(root).resolve()),
+        }
         base = ""  # validate current checkout without changing historical baseline
     execution = execution_runtime or (
         "living-tree" if runtime == "local-native" else runtime
@@ -1264,6 +1289,7 @@ def interactive_workspace_command(
         "source_origin": "file" if source_file else "inline",
         "parent_run_id": parent_run_id or os.environ.get("VIBECRAFTED_RUN_ID", ""),
         "agent_session_id": native_session,
+        "session_selection": session_selection or {},
         **worktree_receipt,
     }
     if parent:
@@ -1838,8 +1864,20 @@ def launch_interactive_workspace(
         continuity_material=continuity_material,
     )
     launch.receipt.update(admission)
-    launch.receipt["provider_session_id"] = provider_session_id
-    launch.receipt["agent_session_id"] = provider_session_id
+    # A requested ID is not a provider acknowledgement. Codex fork does not
+    # even accept our generated ID; process admission must not invent one.
+    native_fork = continuity_policy.mode == "bare-fork"
+    launch.receipt["provider_session_id"] = "" if native_fork else provider_session_id
+    launch.receipt["agent_session_id"] = "" if native_fork else provider_session_id
+    if native_fork:
+        launch.receipt.update(
+            native_fork=True,
+            fork_source_session_id=continuity_policy.parent_provider_session_id,
+            native_identity_status="pending",
+            provider_session_requested=(
+                provider_session_id if "--session-id" in command else ""
+            ),
+        )
     launch.receipt["status"] = "prepared"
     if capability.supported and provider == "claude":
         try:
@@ -2038,6 +2076,11 @@ def launch_interactive_workspace(
         terminal_reason = (
             f"provider_signal:{signal.Signals(abs(provider_returncode)).name}"
         )
+    elif provider_returncode == 0 and native_fork:
+        # No terminal success without a child identity from the provider.
+        status = "failed"
+        terminal_reason = "native_fork_identity_unconfirmed"
+        shell_status = 1
     elif provider_returncode == 0:
         status = "completed"
         terminal_reason = "provider_exit_zero"
@@ -4898,6 +4941,9 @@ def _build_parser() -> argparse.ArgumentParser:
     interactive_command.add_argument("--worktree", default="")
     interactive_command.add_argument("--skill", default="init")
     interactive_command.add_argument("--session", default="")
+    interactive_command.add_argument(
+        "--session-selection", type=json.loads, default=None
+    )
     interactive_command.add_argument("--parent-run-id", default="")
     interactive_command.add_argument("--resume-run-id", default="")
     interactive_command.add_argument("--resume-last", action="store_true")
@@ -5027,6 +5073,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 parent_run_id=args.parent_run_id,
                 resume_run_id=args.resume_run_id,
                 resume_last=args.resume_last,
+                session_selection=args.session_selection,
             )
         except ValueError as exc:
             print(str(exc), file=sys.stderr)

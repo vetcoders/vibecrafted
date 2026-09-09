@@ -73,6 +73,7 @@ _vetcoders_init_command_text() {
   [[ -z "${_vetcoders_contract_base:-}" ]] || continuity_args+=(--base "$_vetcoders_contract_base")
   [[ -z "${_vetcoders_contract_execution_runtime:-}" ]] || continuity_args+=(--execution-runtime "$_vetcoders_contract_execution_runtime")
   [[ -z "${_vetcoders_contract_worktree:-}" ]] || continuity_args+=(--worktree "$_vetcoders_contract_worktree")
+  [[ -z "${_vetcoders_contract_session_selection:-}" ]] || continuity_args+=(--session-selection "$_vetcoders_contract_session_selection")
   [[ -z "${_vetcoders_contract_session:-}" ]] || continuity_args+=(--session "$_vetcoders_contract_session")
   [[ -z "${_vetcoders_contract_run_id:-}" ]] || continuity_args+=(--resume-run-id "$_vetcoders_contract_run_id")
   [[ -z "${_vetcoders_contract_last:-}" ]] || continuity_args+=(--resume-last)

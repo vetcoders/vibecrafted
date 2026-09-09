@@ -152,7 +152,11 @@ def test_core_rejects_both_identities_before_lookup():
     assert exc.value.code == 2
 
 
-def test_public_task_forks_are_independent_tracked_native_commands(tmp_path):
+@pytest.mark.parametrize("recorded_source", [False, True])
+@pytest.mark.parametrize("selector", ["source-native", "current", "last"])
+def test_public_task_forks_are_independent_tracked_native_commands(
+    tmp_path, recorded_source, selector
+):
     import os
     import time
 
@@ -204,7 +208,19 @@ print(json.dumps({"type":"turn.completed", "usage":{"input_tokens":1,"output_tok
         VIBECRAFTED_HOME=str(tmp_path / "vc"),
         VIBECRAFTED_ROOT=str(root),
         VIBECRAFTED_PYTHON=runner,
+        CODEX_THREAD_ID="source-native",
     )
+    repo_args = ["--repo", str(repo)]
+    if recorded_source or selector == "last":
+        record(
+            tmp_path / "vc" / "control_plane",
+            "work-source",
+            "source-native",
+            repo,
+            stamp="2099-01-01T00:00:00Z",
+        )
+        if recorded_source and selector == "source-native":
+            repo_args = []
     receipts = []
     for i in range(2):
         plan = tmp_path / f"task-{i}.md"
@@ -217,13 +233,13 @@ print(json.dumps({"type":"turn.completed", "usage":{"input_tokens":1,"output_tok
                 "fork",
                 "codex",
                 "--session",
-                "source-native",
-                "--repo",
-                str(repo),
+                selector,
+                *repo_args,
                 "--file",
                 str(plan),
             ],
             env=env,
+            cwd=repo if selector in {"current", "last"} else root,
             capture_output=True,
             text=True,
             timeout=30,
@@ -247,6 +263,19 @@ print(json.dumps({"type":"turn.completed", "usage":{"input_tokens":1,"output_tok
         for m in metas
     ), metas
     assert all(m["fork_source_session_id"] == "source-native" for m in metas)
+    for meta in metas:
+        selection = meta["session_selection"]
+        assert selection["session_selector"] == selector
+        assert selection["selection_root"] == str(repo.resolve())
+        assert selection["agent_session_id"] == "source-native"
+        assert (
+            selection["identity_source"]
+            == {
+                "current": "explicit_parent_context",
+                "last": "repository_provider_latest_started",
+                "source-native": "explicit_session",
+            }[selector]
+        )
 
 
 def test_junie_advertised_model_flag_is_preserved():
@@ -345,3 +374,176 @@ def test_native_fork_refuses_missing_or_reused_child_identity(
     )
     assert handle.process.returncode == 0
     assert handle.exit_code == 1
+
+
+def test_public_resume_help_has_one_session_selector():
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        ["bash", str(root / "scripts/vibecrafted"), "resume", "--help"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=True,
+    )
+    assert "--session <id|current|last>" in result.stdout
+    assert "--last" not in result.stdout
+    assert "--fork-session" not in result.stdout
+
+
+def test_bare_interactive_fork_never_publishes_requested_uuid(tmp_path, monkeypatch):
+    import os
+
+    from vibecrafted_core.spawn import launch_interactive_workspace
+
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "baseline",
+        ],
+        check=True,
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    capture = tmp_path / "argv"
+    provider = fake_bin / "codex"
+    provider.write_text("""#!/bin/sh
+case "$*" in
+  *--help*) echo 'exec resume fork'; exit 0;;
+  *--version*) echo 'codex-cli fixture'; exit 0;;
+esac
+printf '%s\\n' "$@" > "$SMOKE_CAPTURE"
+exit 0
+""")
+    provider.chmod(0o755)
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "vc"))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(fake_bin))
+    monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("SMOKE_CAPTURE", str(capture))
+    result = launch_interactive_workspace(
+        "codex",
+        "/vc-fork",
+        "local-native",
+        "bypass",
+        repo,
+        "unmetered",
+        continuity="bare-fork",
+        parent_session_id="source-native",
+    )
+    receipt = json.loads(
+        next(
+            (tmp_path / "vc/control_plane/runtime_runs").glob("*/meta.json")
+        ).read_text()
+    )
+    assert receipt["agent_session_id"] == ""
+    assert receipt["provider_session_id"] == ""
+    assert workflow._provider_session_for_continue(receipt) == ""
+    assert receipt["provider_session_requested"] == ""
+    assert receipt["fork_source_session_id"] == "source-native"
+    assert receipt["native_identity_status"] == "pending"
+    assert receipt["terminal_reason"] == "native_fork_identity_unconfirmed"
+    assert result == 1
+    projected = json.loads(
+        (tmp_path / "vc/control_plane/runs" / (receipt["run_id"] + ".json")).read_text()
+    )
+    assert projected["native_identity_status"] == "pending"
+    assert projected["fork_source_session_id"] == "source-native"
+    assert workflow._provider_session_for_continue(projected) == ""
+    assert capture.read_text().splitlines()[0] == "fork"
+
+
+@pytest.mark.parametrize("selector", ["source-native", "current", "last"])
+def test_bare_resume_admission_retains_original_selection(
+    tmp_path, monkeypatch, selector
+):
+    from vibecrafted_core.spawn import interactive_workspace_command
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "baseline",
+        ],
+        check=True,
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CODEX_THREAD_ID", "source-native")
+    record(workflow.control_plane_home(), "work-source", "source-native", tmp_path)
+    command = interactive_workspace_command(
+        "codex",
+        "",
+        "local-native",
+        "bypass",
+        tmp_path,
+        "unmetered",
+        skill="resume",
+        native_session=selector,
+    )
+    admission = json.loads(
+        Path(command[command.index("--admission-file") + 1]).read_text()
+    )
+    assert admission["agent_session_id"] == "source-native"
+    assert admission["session_selection"]["session_selector"] == selector
+    assert admission["session_selection"]["selection_root"] == str(tmp_path)
+
+
+def test_selection_handoff_does_not_reselect_last(tmp_path, monkeypatch):
+    monkeypatch.setattr(workflow, "control_plane_home", lambda: tmp_path)
+    monkeypatch.setattr(workflow, "lookup_run", lambda _: None)
+    record(tmp_path, "one", "source", tmp_path)
+    selection = workflow.resolve_session_selection("codex", "last", tmp_path)
+    record(tmp_path, "two", "newer", tmp_path, stamp="2027-01-01T00:00:00Z")
+    retained = workflow.resolve_session_selection(
+        "codex", "source", tmp_path, selection=selection
+    )
+    assert retained == selection
+    with pytest.raises(ValueError, match="does not match"):
+        workflow.resolve_session_selection(
+            "codex", "newer", tmp_path, selection=selection
+        )
+
+
+def test_bare_fork_environment_keeps_transport_but_drops_parent_identity():
+    from vibecrafted_core.spawn import ContinuityPolicy, _fresh_child_environment
+
+    source = {
+        name: "source-native"
+        for name in (
+            "CODEX_THREAD_ID",
+            "CODEX_SESSION_ID",
+            "CLAUDE_CODE_SESSION_ID",
+            "GROK_SESSION_ID",
+            "VIBECRAFTED_AGENT_SESSION_ID",
+        )
+    }
+    source["CODEX_REMOTE"] = "unix:///isolated/app-server.sock"
+    child = _fresh_child_environment(
+        source,
+        ContinuityPolicy(
+            mode="bare-fork",
+            lineage_id="source-native",
+            parent_provider_session_id="source-native",
+        ),
+    )
+    assert child == {"CODEX_REMOTE": source["CODEX_REMOTE"]}
+    assert source["CODEX_THREAD_ID"] == "source-native"

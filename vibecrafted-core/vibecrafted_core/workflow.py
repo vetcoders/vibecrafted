@@ -2058,6 +2058,7 @@ def _launch_tracking_payload(
             "native_resume",
             "native_fork",
             "fork_source_session_id",
+            "session_selection",
             "parent_run_id",
             "resume_idempotency_key",
             "dispatch_run_id",
@@ -4987,9 +4988,13 @@ def manual_fork_session(
     source_path: str = "",
     parent_run_id: str = "",
     permissions: str = "",
+    session_selection: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Admit a native task fork using the existing private tracked launcher."""
-    source = resolve_fork_source(agent, session=session)
+    source = resolve_session_selection(
+        agent, session, root, selection=session_selection
+    )
+    session = source["agent_session_id"]
     if not source.get("accepted"):
         return source
     try:
@@ -5056,6 +5061,7 @@ def manual_fork_session(
             worker_command_override=command,
             launch_meta={
                 "native_fork": True,
+                "session_selection": source,
                 "fork_source_session_id": session,
                 "parent_run_id": parent_run_id or source.get("source_run_id", ""),
                 "runtime_session_id": runtime_session,
@@ -5232,6 +5238,7 @@ def resolve_session_selection(
     root: str | Path,
     *,
     environment: dict[str, str] | None = None,
+    selection: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve public current/last without global recency or implicit cloning.
 
@@ -5242,6 +5249,20 @@ def resolve_session_selection(
     provider = agent.strip().lower()
     selected_root = str(Path(root).expanduser().resolve())
     token = selector.strip()
+    if selection is not None:
+        # Transport the original resolution, never reinterpret current/last
+        # after handoff. Revalidate the exact target against current ownership.
+        if (
+            not isinstance(selection, dict)
+            or selection.get("agent") != provider
+            or selection.get("agent_session_id") != token
+            or selection.get("selection_root") != selected_root
+            or not selection.get("session_selector")
+            or not selection.get("identity_source")
+        ):
+            raise ValueError("session selection receipt does not match admission")
+        resolve_session_selection(provider, token, selected_root)
+        return dict(selection)
     if token == "previous":
         raise ValueError(
             "--session previous is retired; use current, last or an exact ID"
@@ -5574,6 +5595,8 @@ def _worker_process_alive(run: dict[str, Any]) -> bool:
 
 def _provider_session_for_continue(run: dict[str, Any]) -> str:
     """Return a provider session id that is not just the Vibecrafted runtime id."""
+    if run.get("native_identity_status") == "pending":
+        return ""
     agent_session = _explicit_native_identity(
         run.get("agent_session_id") or run.get("session_id") or ""
     )

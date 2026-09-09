@@ -3054,7 +3054,11 @@ def test_fork_codex_opens_named_pane_in_current_vc_frame_tab(
     assert admission["root"] == str(root)
     assert "interactive-launch" in tokens
     assert expected_session in command_body
-    assert f"session:   {expected_session}" in result.stdout
+    assert f"source-session: {expected_session}" in result.stdout
+    assert "native child identity pending" in result.stdout
+    assert admission["session_selection"]["session_selector"] == selector
+    assert admission["session_selection"]["agent_session_id"] == expected_session
+    assert admission["session_selection"]["selection_root"] == str(root)
 
 
 def test_fork_codex_supports_floating_same_tab_placement(tmp_path: Path) -> None:
