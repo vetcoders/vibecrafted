@@ -53,7 +53,17 @@ compinit -i -d "${HISTFILE:h}/zcompdump"
 if (( $+functions[compdef] )); then
   # Ask each installed command for its advertised options on completion, not
   # on shell startup. This follows upgrades without executing a workspace.
-  compdef _gnu_generic vibecrafted vc-start vc-frame vc-workflow vc-dashboard
+  compdef _gnu_generic vibecrafted vc-frame vc-workflow vc-dashboard
+  # vc-start's human-readable help embeds options in usage/examples rather
+  # than a GNU option table, so _gnu_generic cannot discover its flags.
+  _vc_terminal_start_completion() {
+    _arguments \
+      '--repo[Repository directory]:repository:_files -/' \
+      '--root[Legacy spelling of --repo]:repository:_files -/' \
+      '--help[Show workspace help]' \
+      '1:workspace:(resume)'
+  }
+  compdef _vc_terminal_start_completion vc-start
 else
   _VC_TERMINAL_WARNINGS+=('shell completion unavailable')
 fi

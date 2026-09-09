@@ -1,7 +1,12 @@
 """A product command failure must not destroy the terminal's login shell."""
 
+import os
+import pty
+import select
 import shutil
+import signal
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -133,3 +138,65 @@ def test_product_profile_survives_broken_completion_and_repeated_source(
     assert dangling.is_symlink()
     assert not (tmp_path / ".zsh_history").exists()
     assert not (tmp_path / ".local/share/atuin").exists()
+
+
+def test_tab_completes_workspace_option_without_launching_workspace(
+    tmp_path: Path,
+) -> None:
+    product = tmp_path / ".config/vibecrafted/vc-terminal"
+    product.mkdir(parents=True)
+    shutil.copy2(
+        ENTRY.parents[2] / "config/vc-terminal/interactive.zsh",
+        product / "interactive.zsh",
+    )
+    (product / ".zshrc").write_text(f'source "{ENTRY}"\nPROMPT="VC_PROMPT> "\n')
+    commands = tmp_path / ".local/bin"
+    commands.mkdir(parents=True)
+    command = commands / "vc-start"
+    command.write_text('#!/bin/sh\ntouch "$HOME/WORKSPACE_STARTED"\nexit 99\n')
+    command.chmod(0o700)
+    captured = tmp_path / "completed-buffer"
+    pid, descriptor = pty.fork()
+    if pid == 0:
+        os.chdir(tmp_path)
+        os.execve(
+            "/bin/bash",
+            ["/bin/bash", str(ENTRY)],
+            {"HOME": str(tmp_path), "PATH": "/usr/bin:/bin", "TERM": "xterm"},
+        )
+
+    def wait_for_prompt() -> None:
+        output = bytearray()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if select.select([descriptor], [], [], 0.1)[0]:
+                output.extend(os.read(descriptor, 65536))
+                if b"VC_PROMPT> " in output:
+                    return
+        pytest.fail("interactive shell did not reach its prompt")
+
+    try:
+        wait_for_prompt()
+        os.write(
+            descriptor,
+            (
+                b'function capture_buffer() { print -r -- "$BUFFER" > "$HOME/completed-buffer"; '
+                b"BUFFER=''; zle reset-prompt; }; zle -N capture_buffer; "
+                b"bindkey '^X^V' capture_buffer\n"
+            ),
+        )
+        wait_for_prompt()
+        os.write(descriptor, b"vc-start --re\t\x18\x16")
+        deadline = time.monotonic() + 15
+        while not captured.exists() and time.monotonic() < deadline:
+            if select.select([descriptor], [], [], 0.1)[0]:
+                os.read(descriptor, 65536)
+        assert captured.exists(), "completion widget did not return a buffer"
+        assert captured.read_text().strip() == "vc-start --repo"
+        assert not (tmp_path / "WORKSPACE_STARTED").exists()
+    finally:
+        # Interactive zsh ignores SIGTERM. Reap only this forked test child,
+        # including on an assertion failure, so the acceptance test is bounded.
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        os.close(descriptor)
