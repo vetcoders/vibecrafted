@@ -77,6 +77,11 @@ def test_compact_help_uses_release_engine_contract(tmp_path: Path) -> None:
     # Bounded deck: operator consoles and plumbing live in help --all only.
     assert "dashboard" not in output
     assert "telemetry" not in output
+    assert "resume-session" in output
+    assert "relocate" in output
+    assert "Codex queue receipts" in output
+    assert "claims" in output
+    assert "settlements" in output
 
 
 def test_full_help_examples_keep_decorate_between_dou_and_hydrate(
@@ -88,6 +93,16 @@ def test_full_help_examples_keep_decorate_between_dou_and_hydrate(
     assert "vibecrafted decorate codex" in output
     assert "vibecrafted hydrate codex" in output
     assert "justdo = Just Do posture (not implement)" in output
+    assert "Single-agent research" not in output
+    assert "Launch Claude + codex + junie swarm" not in output
+    assert "Triple-agent research (claude + codex + junie)" not in output
+    assert "Alias for vibecrafted dashboard" not in output
+    assert "Create a vc-frame workspace (create-only)" in output
+    assert "uno|duo|trio" in output
+    assert "resume-session" in output
+    assert "Codex queue only" in output
+    assert "relocate" in output
+    assert "claims" in output
 
 
 def test_implement_help_is_ship_write_and_distinct_from_justdo(tmp_path: Path) -> None:

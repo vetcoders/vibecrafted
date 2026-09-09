@@ -371,9 +371,39 @@ WORKFLOW_HELP: dict[str, WorkflowHelp] = {
 }
 
 
+# Compact-help verbs owned by ``vibecrafted_core.cli`` (not workflow skills).
+# The shell deck must route these to Python. Do not invent ``vc-*`` twins:
+# they are absent from the installer owned-alias inventory on purpose.
+CORE_SURFACE_COMMANDS = (
+    "claims",
+    "message",
+    "relocate",
+    "resume-session",
+    "settlements",
+)
+
+
 def has_workflow_help(topic: str) -> bool:
     """Return True when ``topic`` (with an optional ``vc-`` prefix) has help content."""
     return topic.removeprefix("vc-") in WORKFLOW_HELP
+
+
+def advertised_compact_verbs(version: str = "test") -> tuple[str, ...]:
+    """Return command tokens listed under the compact ``Commands:`` block.
+
+    ``<skill>`` is a placeholder, not a verb. The rendered compact help is
+    the owner; this parser exists so tests do not grow a second manual list.
+    """
+    section = (
+        render_root_help(version).split("Commands:", 1)[1].split("Ship cycle:", 1)[0]
+    )
+    verbs: list[str] = []
+    for line in section.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("<"):
+            continue
+        verbs.append(stripped.split()[0])
+    return tuple(verbs)
 
 
 def _skill_version(topic: str) -> str:
@@ -413,7 +443,7 @@ Commands:
   status               Today's agent activity
   doctor               Installation health — pass/fail
   receipt              Delivery/runtime receipt (source ↔ installed)
-  message              Persist/inspect run-addressed provider steering receipts
+  message              Persist/inspect run-addressed Codex queue receipts
   capabilities         Launcher catalog: agents, models, controls, environments (--json)
   claims               Atomic Living Tree path claims (acquire|heartbeat|status|list|release)
   settlements          Read-only f/x/n ledger query (summary|list|inspect)
@@ -443,6 +473,41 @@ Words:
   run        one dispatched agent job; its report + transcript live under ~/.vibecrafted
   stage      one step of the ship cycle above (scaffold, implement, review, …)
   workspace  the repository root a run works in, tracked by the control plane
+""".lstrip("\n")
+
+
+def render_message_help() -> str:
+    """Render the fixed help text for ``vibecrafted message``.
+
+    Codex ``queue --thread`` is the only supported provider steering
+    primitive. Do not advertise Claude or other-provider steering.
+    """
+    return """
+⚒  message
+─────────────────────────────────────────
+  Persist and inspect run-addressed Codex queue receipts.
+
+Usage:
+  vibecrafted message --run-id <id> --file <path> \\
+    [--idempotency-key <key>] [--retry] [--json]
+  vibecrafted message --inspect <message-id>
+
+Options:
+  --run-id <id>            Tracked run that already has a Codex thread
+  --file <path>            UTF-8 message body (kept out of argv)
+  --idempotency-key <key>  Replay key; same body+run is a receipt replay
+  --retry                  Resubmit only unresolved or failed receipts
+  --inspect <message-id>   Read one durable receipt (JSON)
+  --json                   Machine-readable send receipt
+
+Contract:
+  Codex `queue --thread` is the only supported steering primitive.
+  This command does not start a worker, does not exec-resume, and does
+  not invent Claude (or any other provider) steering. A missing provider
+  session is a bounded refusal. provider_accepted is never an agent ACK.
+
+Example:
+  vibecrafted message --run-id work-... --file ./note.txt --json
 """.lstrip("\n")
 
 

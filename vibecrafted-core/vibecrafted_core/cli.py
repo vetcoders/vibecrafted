@@ -22,6 +22,7 @@ from .control_plane import (
     resolve_run,
     sync_state,
 )
+from .help_surface import CORE_SURFACE_COMMANDS
 from .package_resources import deck_path, package_root
 from .repo_selection import (
     RepoSelectionError,
@@ -123,6 +124,76 @@ TERMINAL_STATES = {
 _INSTALLER_LEASE_FD_ENV = "VIBECRAFTED_INSTALL_LEASE_FD"
 _INSTALLER_LOCK_NAME = ".vibecrafted-install.lock"
 _EX_TEMPFAIL = 75
+
+
+def python_owned_commands() -> frozenset[str]:
+    """Commands ``cli.main`` keeps instead of delegating to the shell deck.
+
+    ``CORE_SURFACE_COMMANDS`` is the compact-help subset the deck must also
+    route. Internal verbs (fork-source, acp, …) stay here and unpublished.
+    """
+    return frozenset(
+        {
+            "acp",
+            "capabilities",
+            "config",
+            "control-plane-revalidate",
+            "dispatch",
+            "doctor",
+            "fork-source",
+            "fork-session",
+            "paste",
+            "procs",
+            "reap",
+            "receipt",
+            "session-source",
+            "settle",
+            "ship",
+            "stop",
+        }
+        | set(LAUNCHERS)
+        | set(CORE_SURFACE_COMMANDS)
+    )
+
+
+def _invoke_owned_main(main_fn: Any, argv: Sequence[str]) -> int:
+    """Run an owned argparse/main that may raise ``SystemExit`` on ``--help``."""
+    try:
+        result = main_fn(list(argv))
+    except SystemExit as exc:
+        code = exc.code
+        if code is None:
+            return 0
+        if isinstance(code, int):
+            return code
+        return 1
+    return int(result or 0)
+
+
+def _render_core_surface_help(topic: str) -> int:
+    """Render ``help <core-surface-verb>`` from the verb's owner."""
+    from .help_surface import render_message_help, render_resume_session_help
+
+    if topic == "resume-session":
+        print(render_resume_session_help(), end="")
+        return 0
+    if topic == "message":
+        print(render_message_help(), end="")
+        return 0
+    if topic == "relocate":
+        from .relocate import main as relocate_main
+
+        return _invoke_owned_main(relocate_main, ["--help"])
+    if topic == "claims":
+        from .repository_claims import claims_cli_main
+
+        return _invoke_owned_main(claims_cli_main, ["--help"])
+    if topic == "settlements":
+        parser = _build_parser()
+        return _invoke_owned_main(
+            lambda argv: parser.parse_args(argv) or 0, ["settlements", "--help"]
+        )
+    raise ValueError(f"unsupported core surface help topic: {topic}")
 
 
 def _normalize_research_arity_args(args: Sequence[str]) -> list[str]:
@@ -1439,6 +1510,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     help_version = os.environ.get("VIBECRAFTED_HELP_VERSION", "").strip() or __version__
     from .help_surface import (
         has_workflow_help,
+        render_message_help,
         render_resume_session_help,
         render_root_help,
         render_workflow_help,
@@ -1452,9 +1524,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(render_root_help(help_version), end="")
             return 0
         topic = raw_args[1].removeprefix("vc-")
-        if topic == "resume-session":
-            print(render_resume_session_help(), end="")
-            return 0
+        if topic in CORE_SURFACE_COMMANDS:
+            return _render_core_surface_help(topic)
         if topic not in {"--all", "--full"} and has_workflow_help(topic):
             print(render_workflow_help(topic), end="")
             return 0
@@ -1462,6 +1533,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         arg in {"-h", "--help"} for arg in raw_args[1:]
     ):
         print(render_resume_session_help(), end="")
+        return 0
+    if raw_args[0] == "message" and any(
+        arg in {"-h", "--help"} for arg in raw_args[1:]
+    ):
+        print(render_message_help(), end="")
         return 0
     if raw_args[0] in LAUNCHERS:
         workflow_args = raw_args[1:]
@@ -1480,29 +1556,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"vibecrafted research: {exc}", file=sys.stderr)
         return 2
 
-    python_commands = {
-        "acp",
-        "capabilities",
-        "claims",
-        "config",
-        "control-plane-revalidate",
-        "dispatch",
-        "doctor",
-        "message",
-        "fork-source",
-        "session-source",
-        "fork-session",
-        "paste",
-        "procs",
-        "reap",
-        "receipt",
-        "relocate",
-        "resume-session",
-        "settle",
-        "settlements",
-        "ship",
-        "stop",
-    } | set(LAUNCHERS)
+    python_commands = python_owned_commands()
     agent_python_verbs = {"observe", "await", "stop", "resume"}
     is_lifecycle = shell_wrapper_verb is not None
     if raw_args and shell_wrapper_verb is None:
@@ -1575,7 +1629,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if raw_args and raw_args[0] == "claims":
         from .repository_claims import claims_cli_main
 
-        return claims_cli_main(raw_args[1:])
+        return _invoke_owned_main(claims_cli_main, raw_args[1:])
     if raw_args and raw_args[0] == "control-plane-revalidate":
         parser = _build_parser()
         args = parser.parse_args(raw_args)
@@ -1600,7 +1654,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if raw_args and raw_args[0] == "relocate":
         from .relocate import main as relocate_main
 
-        return relocate_main(raw_args[1:])
+        return _invoke_owned_main(relocate_main, raw_args[1:])
     if raw_args and raw_args[0] == "stop":
         from .wrappers import stop_main
 

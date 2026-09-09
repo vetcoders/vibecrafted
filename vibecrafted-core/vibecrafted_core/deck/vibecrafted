@@ -738,7 +738,7 @@ _skill_summary() {
     polarize) printf 'Post-marbles concept and product truth polarization skill.\n' ;;
     prune) printf 'Runtime and publish-cone cleanup with hard cuts and proof.\n' ;;
     release) printf 'Release mechanics, deployment reality, and ship-readiness work.\n' ;;
-    research) printf 'Triple-agent research pass for ground truth before implementation.\n' ;;
+    research) printf 'Multi-agent research pass for ground truth before implementation.\n' ;;
     review) printf 'Bounded PR, branch, commit-range, or artifact-pack review with findings-first output.\n' ;;
     scaffold) printf 'Founder-first architecture planning from a vague idea.\n' ;;
     trust) printf 'READ-only post-hoc falsification of commit claims on the Living Tree.\n' ;;
@@ -4754,6 +4754,11 @@ cmd_help() {
       cmd_fork_help
       return
       ;;
+    claims|message|relocate|resume-session|settlements)
+      if _run_core_help "$topic"; then
+        return 0
+      fi
+      ;;
     observe|await|stop)
       cmd_lifecycle_help "$topic"
       return
@@ -4801,7 +4806,12 @@ cmd_help() {
   printf '  %bstatus%b               Today'"'"'s agent activity\n' "$_cyan" "$_reset"
   printf '  %bdoctor%b               Installation health — pass/fail\n' "$_cyan" "$_reset"
   printf '  %breceipt%b              Delivery/runtime receipt (source ↔ installed)\n' "$_cyan" "$_reset"
+  printf '  %bresume-session%b       Continue an exact provider session as a tracked run\n' "$_cyan" "$_reset"
+  printf '  %brelocate%b             Snapshot open sessions + worktrees (snapshot|restore)\n' "$_cyan" "$_reset"
+  printf '  %bmessage%b              Persist/inspect run-addressed Codex queue receipts\n' "$_cyan" "$_reset"
   printf '  %bcapabilities%b         Launcher catalog: agents, models, controls, environments (--json)\n' "$_cyan" "$_reset"
+  printf '  %bclaims%b               Atomic Living Tree path claims (acquire|heartbeat|status|list|release)\n' "$_cyan" "$_reset"
+  printf '  %bsettlements%b          Read-only f/x/n ledger query (summary|list|inspect)\n' "$_cyan" "$_reset"
   printf '  %bupdate%b               Update to the latest release\n' "$_cyan" "$_reset"
   printf '  %buninstall%b            Remove runtime; preserve Founder data and unknowns\n' "$_cyan" "$_reset"
   printf '  %bhelp%b [topic|--all]   This deck · full reference\n' "$_cyan" "$_reset"
@@ -4860,7 +4870,7 @@ cmd_help_full() {
   printf '%b=== WORKFLOWS + LIFECYCLE (action first) ===%b\n' "$_bold" "$_reset"
   printf '\n'
   printf '  %bvibecrafted implement <agent>%b <plan.md>   Execute a plan file\n' "$_cyan" "$_reset"
-  printf '  %bvibecrafted research <agent>%b  <plan.md>   Single-agent research mode\n' "$_cyan" "$_reset"
+  printf '  %bvibecrafted research%b [agents...] [flags]  YAML lanes when uno|duo|trio is omitted\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted review <agent>%b    <plan.md>   Review bounded code artifacts\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted observe <agent>%b   --last      Check last agent report/transcript\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted await <agent>%b     --last      Join the shared vc-server monitor\n' "$_cyan" "$_reset"
@@ -4871,7 +4881,9 @@ cmd_help_full() {
   printf '\n'
   printf '%b=== RESEARCH (launcher) ===%b\n' "$_bold" "$_reset"
   printf '\n'
-  printf '  %bvibecrafted research%b [--prompt "text" | --file plan.md]   Launch Claude + codex + junie swarm\n' "$_cyan" "$_reset"
+  printf '  %bvibecrafted research%b [agents...] [flags]                 YAML research.yaml lanes (any N)\n' "$_cyan" "$_reset"
+  printf '  %bvibecrafted research <uno|duo|trio>%b <agents...> [flags]  Exact positional lane count\n' "$_cyan" "$_reset"
+  printf '  %bvibecrafted swarm%b [agents...] [flags]                   Alias for research\n' "$_cyan" "$_reset"
   printf '  %bEvery skill also installs a vc-<skill> shortcut.%b\n' "$_dim" "$_reset"
   printf '\n'
   printf '%b=== TELEMETRY ===%b\n' "$_bold" "$_reset"
@@ -4890,7 +4902,7 @@ cmd_help_full() {
   printf '  %bvibecrafted dashboard ls%b              List active vc-frame sessions\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted dashboard gc%b [flags]      Prune dead/stale vc-frame sessions\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted dashboard switch%b <name>   Switch to session (vc-frame-native)\n' "$_cyan" "$_reset"
-  printf '  %bvibecrafted start%b [layout]            Alias for %bvibecrafted dashboard%b\n' "$_cyan" "$_reset" "$_cyan" "$_reset"
+  printf '  %bvibecrafted start%b [<workspace>] [--repo <path>]  Create a vc-frame workspace (create-only)\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted gui%b                       Public/local-web launch + observe surface\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted tui%b                       Rust operator console over shared state\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted server%b <action>           Manage local control-plane viewer server\n' "$_cyan" "$_reset"
@@ -4905,7 +4917,7 @@ cmd_help_full() {
   printf '  %bpartner%b    Shared steering and executive reasoning with the user\n' "$_copper" "$_reset"
   printf '  %bownership%b  Full-spectrum operational ownership and delivery\n' "$_copper" "$_reset"
   printf '  %bdelegate%b   In-session native subagent delegation\n' "$_copper" "$_reset"
-  printf '  %bresearch%b   Triple-agent research (claude + codex + junie)\n' "$_copper" "$_reset"
+  printf '  %bresearch%b   Multi-agent research; uno|duo|trio pin arity, else YAML lanes\n' "$_copper" "$_reset"
   printf '  %breview%b     (vc-review v2.0.0) Bounded PR, branch, commit-range, or artifact-pack review\n' "$_copper" "$_reset"
   printf '  %bprune%b      Runtime/publish cone extraction\n' "$_copper" "$_reset"
   printf '  %btrust%b      Post-hoc commit-claim falsification with f/x/n settlement projection\n' "$_copper" "$_reset"
@@ -4922,6 +4934,11 @@ cmd_help_full() {
   printf '  %bvibecrafted dispatch%b run ...          Async lifecycle supervisor for one worker\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted telemetry smoke%b [flags]  Smoke the marbles telemetry path\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted resume%b <agent> [flags]    Resume an existing agent session\n' "$_cyan" "$_reset"
+  printf '  %bvibecrafted resume-session%b <agent> --agent-session-id <id>  Tracked headless continue\n' "$_cyan" "$_reset"
+  printf '  %bvibecrafted message%b --run-id <id> --file <path>            Codex queue only; no worker spawn\n' "$_cyan" "$_reset"
+  printf '  %bvibecrafted relocate%b snapshot|restore                      Machine-move session snapshot\n' "$_cyan" "$_reset"
+  printf '  %bvibecrafted claims%b acquire|heartbeat|status|list|release   Living Tree path claims\n' "$_cyan" "$_reset"
+  printf '  %bvibecrafted settlements%b summary|list|inspect               Read-only f/x/n ledger\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted status%b                    Today'"'"'s agent activity\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted update%b                     Pull latest + reinstall\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted doctor%b                    Installation health check\n' "$_cyan" "$_reset"
@@ -5438,15 +5455,20 @@ cmd_receipt() {
     "$@"
 }
 
-cmd_settlements() {
-  local core_dir
+cmd_core_cli() {
+  local verb="$1" core_dir
+  shift || true
   core_dir="$(_core_module_dir 2>/dev/null || true)"
   [[ -n "$core_dir" ]] || {
     printf '%b✗%b Vibecrafted Core module not found.\n' "$_red" "$_reset" >&2
     return 1
   }
   PYTHONPATH="$core_dir${PYTHONPATH:+:$PYTHONPATH}" \
-    "$(_vibecrafted_python)" -m vibecrafted_core.cli settlements "$@"
+    "$(_vibecrafted_python)" -m vibecrafted_core.cli "$verb" "$@"
+}
+
+cmd_settlements() {
+  cmd_core_cli settlements "$@"
 }
 
 cmd_control_plane_revalidate() {
@@ -6622,6 +6644,7 @@ main() {
     telemetry) cmd_telemetry "$@" ;;
     stats|status) cmd_stats "$@" ;;
     settlements) cmd_settlements "$@" ;;
+    claims|message|relocate|resume-session) cmd_core_cli "$cmd" "$@" ;;
     update|upgrade) cmd_update "$@" ;;
     uninstall|remove) cmd_uninstall "$@" ;;
     version|--version|-v) printf 'vibecrafted %s\n' "$(_version)" ;;
