@@ -7,7 +7,9 @@ Subcommands:
     list            Show available 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. skills and the runtime substrate beneath them
     uninstall       Remove 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. skills, views, launchers, and helpers
     restore         Restore pre-install state from backup
-    runtime-install Install a signed/offline Runtime Pack for the native app or CLI
+    runtime-install Install a signed/offline Runtime Pack for the native app or CLI.
+                    Explicit rescue: --rescue --plan (read-only) or --rescue --apply
+                    --plan-digest HEX. Normal install/uninstall/rollback stay strict.
     runtime-resolve Read installed Runtime Pack identity without mutation
     runtime-repair  Reconcile product configuration with the selected generation
     runtime-uninstall
@@ -20,6 +22,8 @@ Usage:
     python3 scripts/vetcoders_install.py uninstall [--dry-run]
     python3 scripts/vetcoders_install.py restore [--dry-run]
     python3 scripts/vetcoders_install.py runtime-install --payload-root PATH [--app-root PATH]
+    python3 -B scripts/vetcoders_install.py runtime-install --payload-root PATH --rescue --plan
+    python3 scripts/vetcoders_install.py runtime-install --payload-root PATH --rescue --apply --plan-digest HEX
     python3 -B scripts/vetcoders_install.py runtime-resolve --runtime-home ABSOLUTE_PATH --json
     python3 -B scripts/vetcoders_install.py runtime-repair --runtime-home ABSOLUTE_PATH --plan --json
     python3 scripts/vetcoders_install.py runtime-uninstall [--dry-run]
@@ -67,6 +71,10 @@ from xml.parsers.expat import ExpatError
 # Read-only inspection must not populate bytecode in an installed generation.
 if sys.argv[1:2] == ["runtime-resolve"] or (
     sys.argv[1:2] == ["runtime-repair"] and "--plan" in sys.argv[2:]
+) or (
+    sys.argv[1:2] == ["runtime-install"]
+    and "--rescue" in sys.argv[2:]
+    and "--plan" in sys.argv[2:]
 ):
     sys.dont_write_bytecode = True
 
@@ -11863,13 +11871,21 @@ def _doctor_runtime_receipt_findings() -> list[DoctorFinding]:
             "config_pending",
             "config_conflicts",
             "uninstall_pending",
+            "rescue_pending",
         )
     ):
+        pending_rescue = bool(receipt.get("rescue_pending"))
         return [
             DoctorFinding(
                 "fail",
                 "runtime-receipt",
-                "Runtime Pack publication or recovery is pending; rerun make install",
+                (
+                    "interrupted Runtime Pack rescue; rerun the same "
+                    f"{_runtime_rescue_command()} and then --rescue --apply "
+                    "--plan-digest <hex>"
+                    if pending_rescue
+                    else "Runtime Pack publication or recovery is pending; rerun make install"
+                ),
             )
         ]
     findings: list[DoctorFinding] = []
@@ -11880,6 +11896,33 @@ def _doctor_runtime_receipt_findings() -> list[DoctorFinding]:
                 "runtime-receipt",
                 "pending upgrade preference choice; the previously verified "
                 "runtime remains selected",
+            )
+        )
+    backup_classes = [
+        _classify_runtime_backup_entry(Path(destination), Path(backup), paths)
+        for destination, backup in _runtime_backup_entries(receipt)
+    ]
+    missing_historical = [
+        entry for entry in backup_classes if entry["class"] == "missing_historical"
+    ]
+    unsafe_backups = [entry for entry in backup_classes if entry["class"] == "unsafe"]
+    if unsafe_backups:
+        findings.append(
+            DoctorFinding(
+                "fail",
+                "runtime-receipt",
+                "receipt backup/ownership paths are unsafe or escaping; "
+                "rescue apply refuses them. Do not edit the receipt.",
+            )
+        )
+    elif missing_historical:
+        findings.append(
+            DoctorFinding(
+                "fail",
+                "runtime-receipt",
+                f"{len(missing_historical)} historical rollback preimages are "
+                "missing; historical rollback is unavailable. Single supported "
+                f"path: {_runtime_rescue_command()}",
             )
         )
     preferences = _runtime_preference_paths(paths["product_config"])
@@ -11901,15 +11944,26 @@ def _doctor_runtime_receipt_findings() -> list[DoctorFinding]:
             detail.append(f"{len(drifted)} drifted ({', '.join(drifted[:3])})")
         if missing:
             detail.append(f"{len(missing)} missing ({', '.join(missing[:3])})")
-        findings.append(
-            DoctorFinding(
-                "warn",
-                "runtime-receipt",
-                "receipt/disk drift: "
-                + "; ".join(detail)
-                + " — repair with `make install`",
+        if missing:
+            findings.append(
+                DoctorFinding(
+                    "fail",
+                    "runtime-receipt",
+                    "receipt/disk live damage: "
+                    + "; ".join(detail)
+                    + f" — single supported path: {_runtime_rescue_command()}",
+                )
             )
-        )
+        else:
+            findings.append(
+                DoctorFinding(
+                    "warn",
+                    "runtime-receipt",
+                    "receipt/disk drift: "
+                    + "; ".join(detail)
+                    + " — repair with `make install`",
+                )
+            )
     elif not receipt.get("candidate_conflicts"):
         findings.append(
             DoctorFinding(
@@ -15429,6 +15483,10 @@ def cmd_restore(args: argparse.Namespace) -> int:
 
 RUNTIME_INSTALL_RECEIPT = "install-receipt.json"
 RUNTIME_INSTALL_SCHEMA = "vibecrafted.runtime-install.v1"
+RUNTIME_RESCUE_PLAN_SCHEMA = "vibecrafted.runtime-rescue-plan.v1"
+RUNTIME_RESCUE_RESULT_SCHEMA = "vibecrafted.runtime-rescue-result.v1"
+RUNTIME_RESCUE_EVIDENCE_SCHEMA = "vibecrafted.runtime-rescue-evidence.v1"
+RUNTIME_RESCUE_PENDING_SCHEMA = "vibecrafted.runtime-rescue-pending.v1"
 _RUNTIME_WRAPPER_VERBS = {
     "telemetry": "telemetry",
     "vc-dashboard": "dashboard",
@@ -17305,6 +17363,1009 @@ def _validate_runtime_backup_receipts(
         backup.lstat()  # A missing receipted snapshot is never successful recovery.
 
 
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _canonical_digest(payload: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    )
+    return _sha256_bytes(encoded.encode("utf-8"))
+
+
+def _runtime_installer_supports_rescue(installer_path: Path) -> bool:
+    """True when an installer source defines the explicit rescue plan schema."""
+    try:
+        text = installer_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return (
+        "RUNTIME_RESCUE_PLAN_SCHEMA" in text
+        and "--rescue" in text
+        and RUNTIME_RESCUE_PLAN_SCHEMA in text
+    )
+
+
+def _runtime_rescue_command() -> str:
+    return (
+        "python3 <checkout>/scripts/vetcoders_install.py runtime-install "
+        "--payload-root <Runtime-Pack> --rescue --plan"
+    )
+
+
+def _runtime_owned_path_is_managed(path: Path, paths: Mapping[str, Path]) -> bool:
+    return _receipt_path_is_allowed(
+        path, paths
+    ) or _receipt_projection_path_is_allowed(path)
+
+
+def _classify_runtime_backup_entry(
+    destination: Path, backup: Path, paths: Mapping[str, Path]
+) -> dict[str, str]:
+    """Classify one receipted backup without fabricating missing preimages."""
+    record = {
+        "destination": str(destination),
+        "backup": str(backup),
+        "class": "present",
+        "reason": "",
+    }
+    if not destination.is_absolute() or not backup.is_absolute():
+        record.update({"class": "unsafe", "reason": "receipt backup entry is not absolute"})
+        return record
+    if destination.name in {"", ".", ".."} or backup.name in {"", ".", ".."}:
+        record.update({"class": "unsafe", "reason": "receipt backup entry is malformed"})
+        return record
+    if not _runtime_owned_path_is_managed(destination, paths):
+        record.update(
+            {"class": "unsafe", "reason": "receipt restore path escapes managed roots"}
+        )
+        return record
+    try:
+        _assert_runtime_physical_path(destination, leaf_symlink=True)
+        _assert_runtime_physical_path(backup, leaf_symlink=True)
+    except RuntimeError as exc:
+        record.update({"class": "unsafe", "reason": str(exc)})
+        return record
+    backup_root = paths["runtime_home"] / ".installer-backups"
+    if not _receipt_backup_path_is_allowed(backup, backup_root):
+        record.update(
+            {"class": "unsafe", "reason": "receipt backup path escapes backup root"}
+        )
+        return record
+    try:
+        backup.lstat()
+    except FileNotFoundError:
+        record.update(
+            {
+                "class": "missing_historical",
+                "reason": (
+                    "historical rollback bytes are absent; historical rollback is unavailable"
+                ),
+            }
+        )
+        return record
+    except OSError as exc:
+        record.update({"class": "unsafe", "reason": f"backup unreadable: {exc}"})
+        return record
+    return record
+
+
+def _classify_runtime_owned_file(
+    path: Path, expected_digest: str, paths: Mapping[str, Path]
+) -> dict[str, str]:
+    record = {
+        "path": str(path),
+        "kind": "file",
+        "class": "present",
+        "reason": "",
+        "receipt_sha256": expected_digest,
+        "current_sha256": "",
+        "current_target": "",
+    }
+    if not _runtime_owned_path_is_managed(path, paths):
+        record.update(
+            {"class": "unsafe", "reason": "owned file path escapes managed roots"}
+        )
+        return record
+    try:
+        _assert_runtime_physical_path(path, leaf_symlink=True)
+    except RuntimeError as exc:
+        record.update({"class": "unsafe", "reason": str(exc)})
+        return record
+    if not _path_present(path):
+        record.update({"class": "live_damage", "reason": "owned file is missing"})
+        return record
+    if path.is_symlink() or not path.is_file():
+        record.update(
+            {"class": "live_damage", "reason": "owned file is not a regular file"}
+        )
+        return record
+    actual = _sha256_path(path)
+    record["current_sha256"] = actual
+    if actual != expected_digest:
+        record.update({"class": "live_damage", "reason": "owned file digest differs"})
+    return record
+
+
+def _classify_runtime_owned_symlink(
+    path: Path, expected_target: str, paths: Mapping[str, Path]
+) -> dict[str, str]:
+    record = {
+        "path": str(path),
+        "kind": "symlink",
+        "class": "present",
+        "reason": "",
+        "receipt_sha256": "",
+        "current_sha256": "",
+        "current_target": "",
+        "receipt_target": expected_target,
+    }
+    if not _runtime_owned_path_is_managed(path, paths):
+        record.update(
+            {"class": "unsafe", "reason": "owned symlink path escapes managed roots"}
+        )
+        return record
+    try:
+        _assert_runtime_physical_path(path, leaf_symlink=True)
+    except RuntimeError as exc:
+        record.update({"class": "unsafe", "reason": str(exc)})
+        return record
+    if not _path_present(path):
+        record.update({"class": "live_damage", "reason": "owned symlink is missing"})
+        return record
+    if not path.is_symlink():
+        record.update({"class": "live_damage", "reason": "owned path is not a symlink"})
+        return record
+    record["current_target"] = os.readlink(path)
+    try:
+        resolved = str(path.resolve(strict=True))
+    except OSError:
+        record.update(
+            {
+                "class": "live_damage",
+                "reason": "owned symlink is dangling; a dangling link is not ownership proof",
+            }
+        )
+        return record
+    record["current_target"] = resolved
+    if resolved != expected_target:
+        record.update({"class": "live_damage", "reason": "owned symlink target differs"})
+    return record
+
+
+def _runtime_rescue_ownership_inventory(
+    receipt: Mapping[str, Any], paths: Mapping[str, Path]
+) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    for raw, digest in receipt.get("owned_files", {}).items():
+        items.append(_classify_runtime_owned_file(Path(raw), str(digest), paths))
+    for raw, target in receipt.get("owned_symlinks", {}).items():
+        items.append(
+            _classify_runtime_owned_symlink(Path(raw), str(target), paths)
+        )
+    return items
+
+
+def _runtime_rescue_foreign_collisions(
+    receipt: Mapping[str, Any],
+    paths: Mapping[str, Path],
+    payload_root: Path,
+) -> list[dict[str, str]]:
+    """Refuse names we would publish that exist without receipt+digest proof."""
+    collisions: list[dict[str, str]] = []
+    owned_files = receipt.get("owned_files", {})
+    owned_symlinks = receipt.get("owned_symlinks", {})
+    launcher_home = paths["launcher_home"]
+    intended: set[str] = set(_RUNTIME_WRAPPER_VERBS)
+    intended.update({"vc-terminal", SECURE_WALKAROUND_LAUNCHER})
+    bin_dir = payload_root / "bin"
+    if bin_dir.is_dir():
+        intended.update(_runtime_published_launcher_names(bin_dir))
+    for name in sorted(intended):
+        destination = launcher_home / name
+        key = str(destination)
+        if not _path_present(destination):
+            continue
+        if key in owned_files or key in owned_symlinks:
+            continue
+        collisions.append(
+            {
+                "path": key,
+                "class": "unknown_ownership",
+                "reason": (
+                    "foreign command occupies a published name without "
+                    "receipt+path+digest proof"
+                ),
+            }
+        )
+    current = paths["runtime_home"] / "tools/vibecrafted-current"
+    if _path_present(current) and str(current) not in owned_symlinks:
+        collisions.append(
+            {
+                "path": str(current),
+                "class": "unknown_ownership",
+                "reason": "runtime selector exists without receipted symlink ownership",
+            }
+        )
+    return collisions
+
+
+def _runtime_rescue_target_identity(payload_root: Path) -> dict[str, Any]:
+    identity: dict[str, Any] = {
+        "payload_root": str(payload_root),
+        "version": "",
+        "payload_sha256": "",
+        "installer_supports_rescue": False,
+        "usable": False,
+        "reason": "",
+    }
+    try:
+        payload_root = payload_root.expanduser().resolve()
+        identity["payload_root"] = str(payload_root)
+        _assert_runtime_tree_has_no_symlinks(payload_root)
+        version_path = payload_root / "VERSION"
+        version = version_path.read_text(encoding="utf-8").strip()
+        if not version or not re.fullmatch(r"[A-Za-z0-9.+_-]+", version):
+            raise RuntimeError(f"invalid Runtime Pack VERSION: {version!r}")
+        identity["version"] = version
+        material = version_path.read_bytes()
+        provenance = payload_root / "source-provenance.json"
+        if provenance.is_file():
+            material += provenance.read_bytes()
+        identity["payload_sha256"] = _sha256_bytes(material)
+        installer = payload_root / "scripts/vetcoders_install.py"
+        identity["installer_supports_rescue"] = _runtime_installer_supports_rescue(
+            installer
+        )
+        if not installer.is_file():
+            raise RuntimeError("Runtime Pack installer is missing")
+        identity["usable"] = True
+    except (OSError, RuntimeError, ValueError) as exc:
+        identity["reason"] = str(exc)[:1200]
+        identity["usable"] = False
+    return identity
+
+
+def _runtime_receipt_without_missing_historical(
+    receipt: Mapping[str, Any], missing_backups: set[str]
+) -> dict[str, Any]:
+    cleaned = json.loads(json.dumps(receipt))
+    for key in ("backups", "drift_backups"):
+        cleaned[key] = {
+            destination: backup
+            for destination, backup in cleaned.get(key, {}).items()
+            if backup not in missing_backups
+        }
+    history: dict[str, list[str]] = {}
+    for destination, backups in cleaned.get("drift_backup_history", {}).items():
+        kept = [backup for backup in backups if backup not in missing_backups]
+        if kept:
+            history[destination] = kept
+    cleaned["drift_backup_history"] = history
+    return cleaned
+
+
+def _runtime_rescue_evidence_root(runtime_home: Path, token: str) -> Path:
+    return runtime_home / ".installer-backups" / "rescue" / token
+
+
+def _runtime_rescue_journal_path(runtime_home: Path) -> Path:
+    return runtime_home / ".installer-backups" / "rescue" / "current-journal.json"
+
+
+def _runtime_rescue_snapshot_pre_rescue(
+    paths: Mapping[str, Path],
+    receipt: Mapping[str, Any],
+    evidence_root: Path,
+) -> dict[str, Any]:
+    """Copy currently recoverable owned surfaces. This is damaged state, not a restorepoint."""
+    snapshot_root = evidence_root / "pre-rescue"
+    snapshot_root.mkdir(parents=True, exist_ok=True)
+    captured: list[dict[str, str]] = []
+    candidates: list[Path] = [
+        _runtime_receipt_path(paths["runtime_home"]),
+        paths["runtime_home"] / "active.json",
+        paths["runtime_home"] / "tools/vibecrafted-current",
+    ]
+    candidates.extend(Path(raw) for raw in receipt.get("owned_files", {}))
+    candidates.extend(Path(raw) for raw in receipt.get("owned_symlinks", {}))
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not _runtime_owned_path_is_managed(path, paths):
+            continue
+        try:
+            _assert_runtime_physical_path(path, leaf_symlink=True)
+        except RuntimeError:
+            continue
+        token = hashlib.sha256(key.encode("utf-8")).hexdigest()[:20]
+        entry = {
+            "path": key,
+            "rel": token,
+            "kind": "absent",
+            "sha256": "",
+            "target": "",
+        }
+        if not _path_present(path):
+            captured.append(entry)
+            continue
+        destination = snapshot_root / token
+        _copy_path_to_backup(path, destination)
+        if path.is_symlink():
+            entry.update(kind="symlink", target=os.readlink(path))
+        elif path.is_file():
+            entry.update(kind="file", sha256=_sha256_path(path))
+        elif path.is_dir():
+            entry["kind"] = "directory"
+        captured.append(entry)
+    label = {
+        "schema": RUNTIME_RESCUE_EVIDENCE_SCHEMA,
+        "label": "damaged-pre-rescue",
+        "healthy_restorepoint": False,
+        "paths": captured,
+    }
+    _atomic_json_file(snapshot_root / "label.json", label)
+    return label
+
+
+def _runtime_rescue_restore_pre_rescue(
+    paths: Mapping[str, Path], label: Mapping[str, Any], snapshot_root: Path
+) -> list[dict[str, str]]:
+    residuals: list[dict[str, str]] = []
+    for entry in label.get("paths", []):
+        destination = Path(entry["path"])
+        if not _runtime_owned_path_is_managed(destination, paths):
+            residuals.append(
+                {
+                    "path": str(destination),
+                    "reason": "refusing to restore an unmanaged pre-rescue path",
+                }
+            )
+            continue
+        source = snapshot_root / str(entry.get("rel", ""))
+        try:
+            _assert_runtime_physical_path(destination, leaf_symlink=True)
+            if entry.get("kind") == "absent":
+                if _path_present(destination):
+                    _remove_path(destination)
+                continue
+            if not _path_present(source):
+                raise RuntimeError("pre-rescue snapshot entry is missing")
+            if _path_present(destination):
+                _remove_path(destination)
+            _restore_path_from_backup(source, destination)
+        except (OSError, RuntimeError) as exc:
+            residuals.append({"path": str(destination), "reason": str(exc)[:400]})
+    return residuals
+
+
+def _runtime_rescue_rollback_captured_state(
+    paths: Mapping[str, Path],
+    journal: Mapping[str, Any],
+    receipt_path: Path,
+    original_bytes: bytes | None,
+) -> list[dict[str, str]]:
+    """Restore the damaged pre-rescue snapshot and original receipt bytes."""
+    residuals: list[dict[str, str]] = []
+    snapshot_path = Path(
+        str((journal.get("pre_rescue_snapshot") or {}).get("path") or "")
+    )
+    if snapshot_path.is_dir() and (snapshot_path / "label.json").is_file():
+        try:
+            label = json.loads((snapshot_path / "label.json").read_text(encoding="utf-8"))
+            residuals.extend(
+                _runtime_rescue_restore_pre_rescue(paths, label, snapshot_path)
+            )
+        except (OSError, json.JSONDecodeError, RuntimeError):
+            residuals.append(
+                {
+                    "path": str(snapshot_path),
+                    "reason": "could not restore damaged pre-rescue snapshot",
+                }
+            )
+    archive_path = Path(str((journal.get("archived_receipt") or {}).get("path") or ""))
+    evidence = original_bytes
+    if evidence is None and archive_path.is_file():
+        try:
+            evidence = archive_path.read_bytes()
+        except OSError as exc:
+            residuals.append({"path": str(archive_path), "reason": str(exc)[:400]})
+    if evidence is not None:
+        try:
+            receipt_path.write_bytes(evidence)
+        except OSError as exc:
+            residuals.append({"path": str(receipt_path), "reason": str(exc)[:400]})
+    return residuals
+
+
+def _runtime_rescue_verify_destination(
+    paths: Mapping[str, Path],
+) -> tuple[bool, str]:
+    """Destination verification only. Success is not a historical restore claim."""
+    try:
+        runtime_home = paths["runtime_home"]
+        receipt = _load_runtime_install_receipt(_runtime_receipt_path(runtime_home))
+        if not receipt:
+            return False, "destination receipt is absent"
+        if receipt.get("schema") != RUNTIME_INSTALL_SCHEMA:
+            return False, "destination receipt schema is unsupported"
+        if any(
+            receipt.get(key)
+            for key in (
+                "install_pending",
+                "config_pending",
+                "config_transaction",
+                "rescue_pending",
+                "uninstall_pending",
+            )
+        ):
+            return False, "destination publication is still pending"
+        _validate_runtime_backup_receipts(receipt, paths)
+        current = runtime_home / "tools/vibecrafted-current"
+        _assert_runtime_physical_path(current, leaf_symlink=True)
+        if not current.is_symlink():
+            return False, "destination selector is not a symlink"
+        generation = current.resolve(strict=True)
+        errors = _runtime_generation_payload_errors(generation)
+        if errors:
+            return False, "destination generation is unusable: " + "; ".join(errors[:4])
+        for name in ("vibecrafted", "vc-terminal", "vc-frame"):
+            launcher = paths["launcher_home"] / name
+            if not launcher.is_file() or not os.access(launcher, os.X_OK):
+                return False, f"destination launcher is unusable: {name}"
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError) as exc:
+        return False, str(exc)[:1200]
+    return True, ""
+
+
+def _build_runtime_rescue_plan(
+    *,
+    paths: Mapping[str, Path],
+    payload_root: Path,
+    receipt_bytes: bytes | None,
+    receipt: Mapping[str, Any] | None,
+    receipt_error: str,
+) -> dict[str, Any]:
+    target = _runtime_rescue_target_identity(payload_root)
+    backups = [
+        _classify_runtime_backup_entry(Path(destination), Path(backup), paths)
+        for destination, backup in _runtime_backup_entries(receipt or {})
+    ]
+    ownership = _runtime_rescue_ownership_inventory(receipt or {}, paths)
+    collisions = (
+        _runtime_rescue_foreign_collisions(receipt or {}, paths, payload_root)
+        if receipt and target["usable"]
+        else []
+    )
+    current = paths["runtime_home"] / "tools/vibecrafted-current"
+    generation = ""
+    try:
+        if current.is_symlink():
+            generation = current.resolve().name
+    except OSError:
+        generation = ""
+    active_version = ""
+    active_path = paths["runtime_home"] / "active.json"
+    if active_path.is_file():
+        try:
+            active = json.loads(active_path.read_text(encoding="utf-8"))
+            if isinstance(active, dict):
+                active_version = str(active.get("version") or "")
+        except (OSError, json.JSONDecodeError):
+            active_version = ""
+    missing = [entry for entry in backups if entry["class"] == "missing_historical"]
+    unsafe = [
+        entry
+        for entry in (*backups, *ownership, *collisions)
+        if entry["class"] in {"unsafe", "unknown_ownership"}
+    ]
+    live_damage = [entry for entry in ownership if entry["class"] == "live_damage"]
+    historical_rollback = "unavailable" if missing else "available"
+    if receipt_error:
+        status, reason = "unusable", receipt_error
+    elif not target["usable"]:
+        status, reason = "unusable", target["reason"] or "target Runtime Pack is unusable"
+    elif unsafe:
+        status, reason = (
+            "refused",
+            "unsafe or unknown-ownership paths refuse rescue; "
+            "normal install validation is unchanged",
+        )
+    elif missing or live_damage:
+        status, reason = (
+            "rescueable",
+            "historical rollback is unavailable; explicit rescue can republish "
+            "the verified target without fabricating missing preimages",
+        )
+    else:
+        status, reason = (
+            "healthy",
+            "no missing historical backups or live owned damage",
+        )
+    repair_actions: list[dict[str, str]] = []
+    if missing:
+        repair_actions.append(
+            {
+                "action": "drop_missing_historical_backups",
+                "reason": (
+                    "omit absent historical backup map entries after archiving "
+                    "the original receipt; never invent preimages"
+                ),
+            }
+        )
+    if live_damage:
+        repair_actions.append(
+            {
+                "action": "republish_owned_surfaces",
+                "reason": (
+                    "converge receipted runtime/selectors/launchers/skills/config "
+                    "from the verified target pack"
+                ),
+            }
+        )
+    if status == "healthy":
+        repair_actions.append(
+            {
+                "action": "verify_destination",
+                "reason": "repeat apply is idempotent once the destination verifies",
+            }
+        )
+    plan: dict[str, Any] = {
+        "schema": RUNTIME_RESCUE_PLAN_SCHEMA,
+        "status": status,
+        "mode": "plan",
+        "reason": reason,
+        "historical_rollback": historical_rollback,
+        "receipt": {
+            "path": str(_runtime_receipt_path(paths["runtime_home"])),
+            "sha256": _sha256_bytes(receipt_bytes) if receipt_bytes is not None else "",
+            "byte_length": len(receipt_bytes or b""),
+            "version": str((receipt or {}).get("version") or ""),
+            "archived": False,
+        },
+        "generation": {
+            "selector": str(current),
+            "current": generation,
+            "active_version": active_version,
+        },
+        "target": target,
+        "ownership": ownership,
+        "backups": backups,
+        "missing_backups": missing,
+        "live_damage": live_damage,
+        "unsafe": [entry for entry in (*backups, *ownership) if entry["class"] == "unsafe"],
+        "collisions": collisions,
+        "repair_actions": repair_actions,
+        "bootstrap": {
+            "required": not bool(target.get("installer_supports_rescue")),
+            "command": _runtime_rescue_command(),
+            "reason": (
+                "this source installer can apply rescue against a verifier-accepted "
+                "payload-root; a target pack whose embedded installer lacks --rescue "
+                "must not be rewritten. Compatibility: tests/tui/test_runtime_pack_rescue.py"
+                if not target.get("installer_supports_rescue")
+                else "target pack installer already includes --rescue"
+            ),
+        },
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    input_digest = _canonical_digest(
+        {
+            "receipt_sha256": plan["receipt"]["sha256"],
+            "ownership": ownership,
+            "backups": backups,
+            "generation": plan["generation"],
+            "target": {
+                "version": target.get("version"),
+                "payload_sha256": target.get("payload_sha256"),
+                "payload_root": target.get("payload_root"),
+            },
+            "collisions": collisions,
+        }
+    )
+    plan["input_digest"] = input_digest
+    plan["plan_digest"] = _canonical_digest(
+        {key: value for key, value in plan.items() if key not in {"at", "plan_digest"}}
+    )
+    return plan
+
+
+def _load_runtime_rescue_receipt(
+    receipt_path: Path,
+) -> tuple[bytes | None, dict[str, Any] | None, str]:
+    if not receipt_path.is_file():
+        return None, None, "no runtime install receipt is present"
+    try:
+        receipt_bytes = receipt_path.read_bytes()
+        receipt = json.loads(receipt_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return None, None, f"cannot read runtime install receipt: {exc}"
+    if not isinstance(receipt, dict) or receipt.get("schema") != RUNTIME_INSTALL_SCHEMA:
+        return receipt_bytes, None, "unsupported or tampered runtime install receipt"
+    return receipt_bytes, receipt, ""
+
+
+def _cmd_runtime_rescue_plan(args: argparse.Namespace) -> int:
+    envelope: dict[str, Any] = {
+        "schema": RUNTIME_RESCUE_PLAN_SCHEMA,
+        "status": "unusable",
+        "reason": "",
+    }
+    descriptor: int | None = None
+    try:
+        paths = _runtime_install_paths(getattr(args, "runtime_home", None))
+        for path in paths.values():
+            _assert_runtime_physical_path(path)
+        current = paths["runtime_home"] / "tools/vibecrafted-current"
+        _assert_runtime_physical_path(current, leaf_symlink=True)
+        lock_path = _tools_install_lease_path(current)
+        _assert_runtime_physical_path(lock_path)
+        try:
+            descriptor = os.open(lock_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except FileNotFoundError:
+            pass
+        else:
+            _validate_tools_lease_descriptor(descriptor, lock_path)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError("runtime publication is in progress") from exc
+        receipt_bytes, receipt, receipt_error = _load_runtime_rescue_receipt(
+            _runtime_receipt_path(paths["runtime_home"])
+        )
+        envelope = _build_runtime_rescue_plan(
+            paths=paths,
+            payload_root=Path(args.payload_root),
+            receipt_bytes=receipt_bytes,
+            receipt=receipt,
+            receipt_error=receipt_error,
+        )
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        envelope = {
+            "schema": RUNTIME_RESCUE_PLAN_SCHEMA,
+            "status": "unusable",
+            "reason": str(exc)[:1200] or "runtime rescue plan failed",
+        }
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    print(json.dumps(envelope, sort_keys=True))
+    return 0 if envelope.get("status") in {"rescueable", "healthy"} else 2
+
+
+def cmd_runtime_rescue(args: argparse.Namespace) -> int:
+    """Explicit Runtime Pack rescue: plan is read-only; apply binds and republishes."""
+    plan_only = bool(getattr(args, "plan", False))
+    apply_requested = bool(getattr(args, "apply", False))
+    if plan_only and apply_requested:
+        print(
+            json.dumps(
+                {
+                    "schema": RUNTIME_RESCUE_PLAN_SCHEMA,
+                    "status": "unusable",
+                    "reason": "--rescue requires exactly one of --plan or --apply",
+                },
+                sort_keys=True,
+            )
+        )
+        return 2
+    if not plan_only and not apply_requested:
+        print(
+            json.dumps(
+                {
+                    "schema": RUNTIME_RESCUE_PLAN_SCHEMA,
+                    "status": "unusable",
+                    "reason": "explicit rescue requires --plan or --apply",
+                },
+                sort_keys=True,
+            )
+        )
+        return 2
+    if plan_only:
+        return _cmd_runtime_rescue_plan(args)
+    paths = _runtime_install_paths(getattr(args, "runtime_home", None))
+    for path in paths.values():
+        _assert_runtime_physical_path(path)
+    current = paths["runtime_home"] / "tools/vibecrafted-current"
+    _assert_runtime_physical_path(current, leaf_symlink=True)
+    with (
+        _tools_install_lease(current, operation="runtime-rescue") as descriptor,
+        _inherited_tools_install_lease(descriptor),
+    ):
+        return _runtime_rescue_apply(args, paths)
+
+
+def _runtime_rescue_apply(
+    args: argparse.Namespace, paths: Mapping[str, Path]
+) -> int:
+    envelope: dict[str, Any] = {
+        "schema": RUNTIME_RESCUE_RESULT_SCHEMA,
+        "status": "unusable",
+        "mode": "apply",
+        "reason": "",
+        "plan_digest": "",
+        "input_digest": "",
+        "archived_receipt": {},
+        "pre_rescue_snapshot": {},
+        "missing_history": [],
+        "repair_actions": [],
+        "healthy_restorepoint": False,
+        "residuals": [],
+        "runtime": None,
+    }
+    expected_digest = str(getattr(args, "plan_digest", "") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+        envelope["reason"] = "--rescue --apply requires --plan-digest <sha256>"
+        print(json.dumps(envelope, sort_keys=True))
+        return 2
+    receipt_path = _runtime_receipt_path(paths["runtime_home"])
+    journal_path = _runtime_rescue_journal_path(paths["runtime_home"])
+    original_bytes: bytes | None = None
+    try:
+        journal: dict[str, Any] = {}
+        if journal_path.is_file():
+            loaded = json.loads(journal_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                journal = loaded
+        live = _load_runtime_install_receipt(receipt_path) if receipt_path.is_file() else {}
+        pending = bool(
+            live
+            and (
+                live.get("install_pending")
+                or live.get("config_transaction")
+                or live.get("rescue_pending")
+            )
+        )
+        journal_matches = (
+            pending
+            and journal.get("plan_digest") == expected_digest
+            and journal.get("schema") == RUNTIME_RESCUE_PENDING_SCHEMA
+        )
+        if pending and not journal_matches:
+            envelope["plan_digest"] = expected_digest
+            if live.get("rescue_pending"):
+                envelope.update(
+                    status="refused",
+                    reason=(
+                        "interrupted rescue journal does not match --plan-digest; "
+                        "re-run --rescue --plan against current disk state"
+                    ),
+                )
+            else:
+                envelope.update(
+                    status="refused",
+                    reason=(
+                        "Runtime Pack publication is already pending; finish or "
+                        "recover that transaction before explicit rescue"
+                    ),
+                )
+            print(json.dumps(envelope, sort_keys=True))
+            return 2
+        if journal_matches:
+            envelope.update(
+                plan_digest=expected_digest,
+                input_digest=str(journal.get("input_digest") or ""),
+                archived_receipt=dict(journal.get("archived_receipt") or {}),
+                pre_rescue_snapshot=dict(journal.get("pre_rescue_snapshot") or {}),
+                missing_history=list(journal.get("missing_history") or []),
+                repair_actions=list(journal.get("repair_actions") or []),
+            )
+            code = _install_runtime_pack(args, emit_result=False)
+            return _runtime_rescue_finish(
+                envelope, paths, receipt_path, journal, code
+            )
+        receipt_bytes, receipt, receipt_error = _load_runtime_rescue_receipt(
+            receipt_path
+        )
+        plan = _build_runtime_rescue_plan(
+            paths=paths,
+            payload_root=Path(args.payload_root),
+            receipt_bytes=receipt_bytes,
+            receipt=receipt,
+            receipt_error=receipt_error,
+        )
+        envelope["plan_digest"] = str(plan.get("plan_digest") or "")
+        envelope["input_digest"] = str(plan.get("input_digest") or "")
+        if plan["plan_digest"] != expected_digest:
+            envelope.update(
+                status="refused",
+                reason=(
+                    "input drift: live receipt/ownership/target no longer match "
+                    f"plan digest {expected_digest}"
+                ),
+            )
+            print(json.dumps(envelope, sort_keys=True))
+            return 2
+        if plan["status"] == "refused":
+            envelope.update(status="refused", reason=plan["reason"], runtime=None)
+            envelope["missing_history"] = plan["missing_backups"]
+            envelope["repair_actions"] = plan["repair_actions"]
+            print(json.dumps(envelope, sort_keys=True))
+            return 2
+        if plan["status"] == "unusable":
+            envelope.update(status="unusable", reason=plan["reason"])
+            print(json.dumps(envelope, sort_keys=True))
+            return 2
+        if plan["status"] == "healthy":
+            verified, verify_reason = _runtime_rescue_verify_destination(paths)
+            envelope.update(
+                status="rescued" if verified else "residual",
+                reason=(
+                    "repeat apply converged; destination already verifies"
+                    if verified
+                    else verify_reason
+                ),
+                healthy_restorepoint=verified,
+                missing_history=[],
+                repair_actions=plan["repair_actions"],
+            )
+            print(json.dumps(envelope, sort_keys=True))
+            return 0 if verified else 2
+        if receipt is None or receipt_bytes is None:
+            envelope["reason"] = receipt_error or "receipt evidence is missing"
+            print(json.dumps(envelope, sort_keys=True))
+            return 2
+        original_bytes = receipt_bytes
+        token = (
+            datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            + "-"
+            + plan["receipt"]["sha256"][:12]
+        )
+        evidence_root = _runtime_rescue_evidence_root(paths["runtime_home"], token)
+        evidence_root.mkdir(parents=True, exist_ok=True)
+        archive = evidence_root / "original-receipt.json"
+        archive.write_bytes(original_bytes)
+        (evidence_root / "original-receipt.sha256").write_text(
+            plan["receipt"]["sha256"] + "\n", encoding="utf-8"
+        )
+        snapshot = _runtime_rescue_snapshot_pre_rescue(paths, receipt, evidence_root)
+        missing_backups = {
+            entry["backup"] for entry in plan["missing_backups"] if entry.get("backup")
+        }
+        sanitized = _runtime_receipt_without_missing_historical(receipt, missing_backups)
+        rescue_record = {
+            "schema": RUNTIME_RESCUE_PENDING_SCHEMA,
+            "archived_receipt": str(archive),
+            "archived_receipt_sha256": plan["receipt"]["sha256"],
+            "pre_rescue_snapshot": str(evidence_root / "pre-rescue"),
+            "pre_rescue_label": "damaged-pre-rescue",
+            "healthy_restorepoint": False,
+            "plan_digest": plan["plan_digest"],
+            "input_digest": plan["input_digest"],
+            "missing_history": plan["missing_backups"],
+            "repair_actions": plan["repair_actions"],
+        }
+        journal = {
+            "schema": RUNTIME_RESCUE_PENDING_SCHEMA,
+            "token": token,
+            "plan_digest": plan["plan_digest"],
+            "input_digest": plan["input_digest"],
+            "archived_receipt": {
+                "path": str(archive),
+                "sha256": plan["receipt"]["sha256"],
+            },
+            "pre_rescue_snapshot": {
+                "path": str(evidence_root / "pre-rescue"),
+                "label": "damaged-pre-rescue",
+                "healthy_restorepoint": False,
+            },
+            "missing_history": plan["missing_backups"],
+            "repair_actions": plan["repair_actions"],
+            "label_paths": snapshot.get("paths", []),
+        }
+        _atomic_json_file(journal_path, journal)
+        envelope.update(
+            archived_receipt=journal["archived_receipt"],
+            pre_rescue_snapshot=journal["pre_rescue_snapshot"],
+            missing_history=plan["missing_backups"],
+            repair_actions=plan["repair_actions"],
+        )
+        code = _install_runtime_pack(
+            args,
+            previous=sanitized,
+            rescue_record=rescue_record,
+            emit_result=False,
+        )
+        return _runtime_rescue_finish(
+            envelope, paths, receipt_path, journal, code
+        )
+    except PreferenceConflict:
+        raise
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        journal = {}
+        if journal_path.is_file():
+            try:
+                loaded = json.loads(journal_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    journal = loaded
+            except (OSError, json.JSONDecodeError):
+                journal = {}
+        residuals = _runtime_rescue_rollback_captured_state(
+            paths, journal, receipt_path, original_bytes
+        )
+        envelope.update(
+            status="residual" if residuals else "unusable",
+            reason=str(exc)[:1200] or "runtime rescue apply failed",
+            residuals=residuals,
+            healthy_restorepoint=False,
+            archived_receipt=dict(journal.get("archived_receipt") or envelope.get("archived_receipt") or {}),
+            pre_rescue_snapshot=dict(
+                journal.get("pre_rescue_snapshot") or envelope.get("pre_rescue_snapshot") or {}
+            ),
+        )
+        print(json.dumps(envelope, sort_keys=True))
+        return 2
+
+
+def _runtime_rescue_finish(
+    envelope: dict[str, Any],
+    paths: Mapping[str, Path],
+    receipt_path: Path,
+    journal: Mapping[str, Any],
+    code: int,
+) -> int:
+    if code != 0:
+        residuals = _runtime_rescue_rollback_captured_state(
+            paths, journal, receipt_path, None
+        )
+        envelope.update(
+            status="residual" if residuals else "unusable",
+            reason="runtime publication returned a non-zero status",
+            residuals=residuals,
+            healthy_restorepoint=False,
+        )
+        print(json.dumps(envelope, sort_keys=True))
+        return 2
+    verified, verify_reason = _runtime_rescue_verify_destination(paths)
+    receipt = _load_runtime_install_receipt(receipt_path)
+    rescue = dict(receipt.get("rescue") or journal)
+    rescue.update(
+        {
+            "schema": "vibecrafted.runtime-rescue.v1",
+            "archived_receipt": str((journal.get("archived_receipt") or {}).get("path") or ""),
+            "archived_receipt_sha256": str(
+                (journal.get("archived_receipt") or {}).get("sha256") or ""
+            ),
+            "missing_history": list(journal.get("missing_history") or []),
+            "repair_actions": list(journal.get("repair_actions") or []),
+            "pre_rescue_snapshot": str(
+                (journal.get("pre_rescue_snapshot") or {}).get("path") or ""
+            ),
+            "pre_rescue_label": "damaged-pre-rescue",
+            "healthy_restorepoint": verified,
+            "verified": verified,
+        }
+    )
+    receipt.pop("rescue_pending", None)
+    receipt["rescue"] = rescue
+    _checkpoint_runtime_install_receipt(paths["runtime_home"], receipt)
+    result = None
+    if verified:
+        generation = (
+            paths["runtime_home"] / "tools/vibecrafted-current"
+        ).resolve(strict=True)
+        result = _runtime_install_result(
+            generation=generation,
+            app_root=_receipt_app_root(receipt),
+            paths=paths,
+        )
+    envelope.update(
+        status="rescued" if verified else "residual",
+        reason="" if verified else verify_reason,
+        healthy_restorepoint=verified,
+        runtime=result,
+        residuals=[]
+        if verified
+        else [{"path": str(receipt_path), "reason": verify_reason}],
+    )
+    print(json.dumps(envelope, sort_keys=True))
+    return 0 if verified else 2
+
+
 def _stage_runtime_product_config(
     generation: Path,
     paths: Mapping[str, Path],
@@ -19064,7 +20125,21 @@ def _runtime_repair_status(entries: Sequence[Mapping[str, str]]) -> str:
 
 
 def cmd_runtime_install(args: argparse.Namespace) -> int:
-    paths = _runtime_install_paths()
+    if getattr(args, "rescue", False):
+        return cmd_runtime_rescue(args)
+    if getattr(args, "plan", False) or getattr(args, "apply", False):
+        print(
+            json.dumps(
+                {
+                    "schema": RUNTIME_RESCUE_PLAN_SCHEMA,
+                    "status": "unusable",
+                    "reason": "--plan and --apply are only valid with --rescue",
+                },
+                sort_keys=True,
+            )
+        )
+        return 2
+    paths = _runtime_install_paths(getattr(args, "runtime_home", None))
     for path in paths.values():
         _assert_runtime_physical_path(path)
     current = paths["runtime_home"] / "tools/vibecrafted-current"
@@ -19076,7 +20151,13 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         return _install_runtime_pack(args)
 
 
-def _install_runtime_pack(args: argparse.Namespace) -> int:
+def _install_runtime_pack(
+    args: argparse.Namespace,
+    *,
+    previous: dict[str, Any] | None = None,
+    rescue_record: Mapping[str, Any] | None = None,
+    emit_result: bool = True,
+) -> int:
     """Install one immutable Runtime Pack and publish a closed ownership receipt."""
     payload_root = Path(args.payload_root).expanduser().resolve()
     app_root = Path(args.app_root).expanduser().resolve() if args.app_root else None
@@ -19087,10 +20168,11 @@ def _install_runtime_pack(args: argparse.Namespace) -> int:
         raise RuntimeError(f"invalid Runtime Pack VERSION: {version!r}")
     _assert_runtime_tree_has_no_symlinks(payload_root)
 
-    paths = _runtime_install_paths()
+    paths = _runtime_install_paths(getattr(args, "runtime_home", None))
     runtime_home = paths["runtime_home"]
     receipt_path = _runtime_receipt_path(runtime_home)
-    previous = _load_runtime_install_receipt(receipt_path)
+    if previous is None:
+        previous = _load_runtime_install_receipt(receipt_path)
     previous_roots = {
         name: Path(value) for name, value in previous.get("roots", {}).items()
     }
@@ -19148,6 +20230,9 @@ def _install_runtime_pack(args: argparse.Namespace) -> int:
             json.dumps(previous.get("foundation_service_pending", {}))
         ),
     }
+    if rescue_record:
+        receipt["rescue_pending"] = json.loads(json.dumps(dict(rescue_record)))
+        receipt["rescue"] = json.loads(json.dumps(dict(rescue_record)))
 
     releases = runtime_home / "releases"
     generation = releases / version
@@ -19427,7 +20512,8 @@ def _install_runtime_pack(args: argparse.Namespace) -> int:
     result["tools_current"] = str(current_link)
     result["skills"] = str(len(skill_names))
     result["runtime_views"] = ",".join(runtime_views)
-    print(json.dumps(result, sort_keys=True))
+    if emit_result:
+        print(json.dumps(result, sort_keys=True))
     return 0
 
 
@@ -20048,11 +21134,42 @@ def main(argv: Sequence[str] | None = None) -> int:
     # runtime pack — the same installer entrypoint is embedded in the DMG and
     # remains usable by non-GUI channels.
     p_runtime_install = sub.add_parser(
-        "runtime-install", help="Install a signed/offline Vibecrafted Runtime Pack"
+        "runtime-install",
+        help=(
+            "Install a signed/offline Vibecrafted Runtime Pack. "
+            "Explicit rescue: --rescue --plan or --rescue --apply --plan-digest"
+        ),
     )
     p_runtime_install.add_argument("--payload-root", required=True)
     p_runtime_install.add_argument("--app-root")
     p_runtime_install.add_argument("--terminal-host")
+    p_runtime_install.add_argument(
+        "--runtime-home",
+        metavar="ABSOLUTE_PATH",
+        help="Absolute runtime home (tests and isolated rescue)",
+    )
+    p_runtime_install.add_argument(
+        "--rescue",
+        action="store_true",
+        help=(
+            "Explicit rescue/migration when historical rollback bytes are missing. "
+            "Requires --plan or --apply. Normal install stays strict."
+        ),
+    )
+    p_runtime_install.add_argument(
+        "--plan",
+        action="store_true",
+        help="With --rescue: inventory hashes, ownership, and missing backups without writing",
+    )
+    p_runtime_install.add_argument(
+        "--apply",
+        action="store_true",
+        help="With --rescue: apply a bound rescue plan through the existing publication transaction",
+    )
+    p_runtime_install.add_argument(
+        "--plan-digest",
+        help="SHA-256 of the rescue plan this apply is bound to",
+    )
     p_runtime_install.add_argument(
         "--allow-older-runtime",
         action="store_true",

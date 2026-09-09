@@ -189,3 +189,31 @@ _𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)20
   generation's and refuses an older pack, naming every component revision that
   would regress (`vc-frame: f7755692 -> 915ca04e` is the 2026-08-27 case that
   orphaned 12 live sessions). `--allow-older-runtime` makes a downgrade explicit.
+
+## 6. Explicit rescue when historical rollback bytes are missing
+
+Normal `runtime-install` / uninstall / rollback stay strict: every receipted
+backup path is `lstat`ed before publication. Missing historical rollback
+preimages therefore block a regular upgrade. That is not a license to edit
+the receipt.
+
+The single supported path is the same owner:
+
+```text
+python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack> --rescue --plan
+python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack> --rescue --apply --plan-digest <sha256>
+```
+
+`--plan` is read-only. It inventories receipt digest, generation, ownership
+hashes/targets, and backup classes (`present`, `missing_historical`,
+`live_damage`, `unsafe`). Historical rollback is reported unavailable when
+preimages are gone. Original receipt bytes are preserved as evidence.
+
+`--apply` binds to that plan digest, takes the existing install lease,
+snapshots the live tree as `damaged-pre-rescue` (never a healthy
+restorepoint), archives the original receipt, drops only missing-historical
+backup map entries, and reuses the existing publication transaction. Unsafe
+or unknown-ownership paths refuse. User config and foreign commands stay.
+A target pack whose embedded installer lacks `--rescue` is not rewritten;
+bootstrap with this source installer against the verified payload-root.
+Compatibility: `tests/tui/test_runtime_pack_rescue.py`.

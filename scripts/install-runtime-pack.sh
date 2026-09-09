@@ -27,6 +27,10 @@ resolve_preference=""
 preference_current_sha256=""
 preference_incoming_sha256=""
 preference_path=""
+rescue="0"
+rescue_plan="0"
+rescue_apply="0"
+plan_digest=""
 
 cleanup() {
   local status=$?
@@ -113,12 +117,30 @@ while (($#)); do
       esac
       shift 2
       ;;
+    --rescue)
+      rescue="1"
+      shift
+      ;;
+    --plan)
+      rescue_plan="1"
+      shift
+      ;;
+    --apply)
+      rescue_apply="1"
+      shift
+      ;;
+    --plan-digest)
+      (($# >= 2)) || die "--plan-digest requires a hex digest"
+      plan_digest="$2"
+      shift 2
+      ;;
     --dry-run|-n)
       dry_run="1"
       shift
       ;;
     --help|-h)
-      printf 'usage: %s [--pack <RuntimePack.tar.gz>] [--verify-only] [--expected-*-revision <sha>] [--app-root <Vibecrafted.app> --terminal-host <path> --frame-helper <path>] [--resolve-preference keep-current|use-incoming --preference-current-sha256 <hex> --preference-incoming-sha256 <hex>] [--uninstall [--dry-run]]\n' "$0"
+      printf 'usage: %s [--pack <RuntimePack.tar.gz>] [--verify-only] [--expected-*-revision <sha>] [--app-root <Vibecrafted.app> --terminal-host <path> --frame-helper <path>] [--resolve-preference keep-current|use-incoming --preference-current-sha256 <hex> --preference-incoming-sha256 <hex>] [--rescue --plan|--apply [--plan-digest <hex>]] [--uninstall [--dry-run]]\n' "$0"
+      printf 'Rescue: explicit plan/apply when historical rollback bytes are missing. If this pack installer lacks --rescue, bootstrap with a source installer that includes it against the verified --payload-root. Do not rewrite the signed payload.\n'
       exit 0
       ;;
     *) die "unknown argument: $1" ;;
@@ -151,6 +173,21 @@ if [[ -z "$expected_architecture" ]]; then
 fi
 if [[ "$operation" == "uninstall" && "$verify_only" == "1" ]]; then
   die "--verify-only cannot be combined with --uninstall"
+fi
+if [[ "$rescue" != "1" && ( "$rescue_plan" == "1" || "$rescue_apply" == "1" || -n "$plan_digest" ) ]]; then
+  die "--plan, --apply, and --plan-digest are only valid with --rescue"
+fi
+if [[ "$rescue" == "1" && "$operation" == "uninstall" ]]; then
+  die "--rescue cannot be combined with --uninstall"
+fi
+if [[ "$rescue" == "1" && "$rescue_plan" == "1" && "$rescue_apply" == "1" ]]; then
+  die "--rescue requires exactly one of --plan or --apply"
+fi
+if [[ "$rescue" == "1" && "$rescue_plan" != "1" && "$rescue_apply" != "1" ]]; then
+  die "explicit rescue requires --plan or --apply"
+fi
+if [[ "$rescue_apply" == "1" && -z "$plan_digest" ]]; then
+  die "--rescue --apply requires --plan-digest"
 fi
 helper_argument_count=0
 [[ -n "$app_root" ]] && ((helper_argument_count += 1))
@@ -368,11 +405,33 @@ if [[ "$verify_only" == "1" ]]; then
   exit 0
 fi
 
+installer_entry="$pack_installer"
+if [[ "$rescue" == "1" ]]; then
+  if ! grep -Fq 'RUNTIME_RESCUE_PLAN_SCHEMA' "$pack_installer" \
+    || ! grep -Fq -- '--rescue' "$pack_installer"; then
+    source_installer="$SCRIPT_DIR/vetcoders_install.py"
+    if [[ -f "$source_installer" ]] \
+      && grep -Fq 'RUNTIME_RESCUE_PLAN_SCHEMA' "$source_installer" \
+      && grep -Fq -- '--rescue' "$source_installer"; then
+      installer_entry="$source_installer"
+      printf 'Runtime Pack installer lacks --rescue; bootstrapping with source installer %s against the verified payload-root. Do not rewrite the signed payload.\n' \
+        "$source_installer" >&2
+    else
+      die "This Runtime Pack installer does not support --rescue. Bootstrap with a source/version whose installer includes runtime-install --rescue (compatibility: tests/tui/test_runtime_pack_rescue.py) targeting this verified pack via --payload-root. Do not rewrite the signed payload."
+    fi
+  fi
+fi
 if [[ "$operation" == "uninstall" ]]; then
   arguments=(runtime-uninstall)
   [[ "$dry_run" == "1" ]] && arguments+=(--dry-run)
 else
   arguments=(runtime-install --payload-root "$payload_root")
+fi
+if [[ "$rescue" == "1" ]]; then
+  arguments+=(--rescue)
+  [[ "$rescue_plan" == "1" ]] && arguments+=(--plan)
+  [[ "$rescue_apply" == "1" ]] && arguments+=(--apply)
+  [[ -n "$plan_digest" ]] && arguments+=(--plan-digest "$plan_digest")
 fi
 if [[ "$operation" == "install" && -n "$app_root" ]]; then
   app_root="$(cd "$app_root" && pwd -P)" \
@@ -421,11 +480,11 @@ if [[ "$operation" == "install" && -n "$resolve_preference" ]]; then
 fi
 
 if [[ -n "$temporary" ]]; then
-  "$pack_python" "$pack_installer" "${arguments[@]}" &
+  "$pack_python" "$installer_entry" "${arguments[@]}" &
   installer_child_pid="$!"
   wait "$installer_child_pid"
   installer_status=$?
   installer_child_pid=""
   exit "$installer_status"
 fi
-exec "$pack_python" "$pack_installer" "${arguments[@]}"
+exec "$pack_python" "$installer_entry" "${arguments[@]}"
