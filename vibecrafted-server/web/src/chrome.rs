@@ -255,6 +255,27 @@ mod tests {
         haystack.matches(needle).count()
     }
 
+    /// `render_document` embeds three complete stylesheets, so counting a class
+    /// name over the whole document counts CSS selectors as if they were
+    /// markup: `main.css` alone declares `.server-theme-toggle` six times.
+    /// Contracts about the live DOM and its scripts are measured here, on the
+    /// document with the embedded sheets stripped; contracts about the sheets
+    /// are measured against `STYLE_TOKENS` / `STYLE_MAIN` directly.
+    fn live_layer(html: &str) -> String {
+        let mut out = String::with_capacity(html.len());
+        let mut rest = html;
+        while let Some(open) = rest.find("<style>") {
+            out.push_str(&rest[..open]);
+            let after = &rest[open + "<style>".len()..];
+            rest = match after.find("</style>") {
+                Some(close) => &after[close + "</style>".len()..],
+                None => "",
+            };
+        }
+        out.push_str(rest);
+        out
+    }
+
     #[test]
     fn document_wraps_raw_canvas_in_one_server_frame() {
         let html = render_document(&ServerDocument {
@@ -303,9 +324,13 @@ mod tests {
 
         // Dark is the pre-paint default, so the offer is light.
         assert!(html.contains("aria-label=\"Switch to light theme\""));
-        let button_start = html.find("server-theme-toggle").expect("toggle");
-        let button_end = html[button_start..].find("</button>").expect("close") + button_start;
-        let button = &html[button_start..button_end];
+        // The first `server-theme-toggle` in the raw document is a CSS
+        // selector, not the control — slice the live layer or this reads the
+        // stylesheet and passes for the wrong reason.
+        let live = live_layer(&html);
+        let button_start = live.find("server-theme-toggle").expect("toggle");
+        let button_end = live[button_start..].find("</button>").expect("close") + button_start;
+        let button = &live[button_start..button_end];
         assert!(button.contains("light"), "dark active must offer light");
         assert!(!button.contains(">dark<"), "the button must not name the active theme");
 
@@ -483,8 +508,9 @@ mod tests {
             tail_html: "",
         });
 
-        assert_eq!(count(&html, "server-theme-toggle"), 2, "one toggle, one script hook");
-        assert_eq!(count(&html, "loct-theme"), 2, "one storage key, read once and written once");
+        let live = live_layer(&html);
+        assert_eq!(count(&live, "server-theme-toggle"), 2, "one toggle, one script hook");
+        assert_eq!(count(&live, "loct-theme"), 2, "one storage key, read once and written once");
         assert!(theme_head_script().contains("localStorage.getItem('loct-theme')"));
         assert!(theme_control_script().contains("localStorage.setItem('loct-theme', next)"));
     }

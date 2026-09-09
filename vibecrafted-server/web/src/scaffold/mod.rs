@@ -1893,7 +1893,7 @@ pub mod api {
 .result-count{margin:32px 0 14px;color:var(--muted);font:11px var(--font-mono);text-transform:uppercase;letter-spacing:.1em}
 .plan-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:12px}
 .plan-card{min-height:290px;display:flex;flex-direction:column;justify-content:space-between;gap:28px;padding:22px;border:var(--stroke-width) solid var(--line);border-radius:var(--radius-surface);background:var(--panel);text-decoration:none;transition:transform var(--motion-base) var(--ease-ui),border-color var(--motion-base) var(--ease-ui),background var(--motion-base) var(--ease-ui)}
-.plan-card:hover,.plan-card:focus-visible{transform:translateY(-3px);border-color:var(--teal);background:var(--panel-lift);outline:none}
+.plan-card:hover,.plan-card:focus-visible{transform:translateY(-3px);border-color:var(--teal);background:var(--panel-lift)}
 .plan-card-blocked{border-color:color-mix(in srgb,var(--status-danger) 35%,transparent);background:var(--panel)}.plan-card-blocked .plan-access{border-color:color-mix(in srgb,var(--status-danger) 45%,transparent);color:var(--bad)}
 .plan-card[hidden]{display:none}.plan-card-top,.plan-card-meta,.plan-open{display:flex;align-items:center;justify-content:space-between;gap:16px}
 .plan-number{color:var(--muted);font:12px var(--font-mono)}.plan-access{border:1px solid var(--line);border-radius:99px;padding:4px 8px;color:var(--muted);font:9px var(--font-mono);text-transform:uppercase;letter-spacing:.1em}
@@ -1912,11 +1912,11 @@ pub mod api {
 /* Plan-level navigation stays inside the studio canvas; global routes live in the frame sidebar. */
 .review-sidebar-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .review-library-link{display:inline-flex;align-items:center;min-height:26px;border:1px solid var(--line);border-radius:999px;padding:0 10px;color:var(--muted);font:550 11px/1 var(--font-body);text-decoration:none;white-space:nowrap}
-.review-library-link:hover,.review-library-link:focus-visible{border-color:var(--line-strong);background:var(--panel-lift);color:var(--text);outline:none}
+.review-library-link:hover,.review-library-link:focus-visible{border-color:var(--line-strong);background:var(--panel-lift);color:var(--text)}
 .summary{display:grid;gap:3px;color:var(--muted);flex:0 0 auto}.summary strong{color:var(--text);font-size:16px}
 .tabs{display:flex;flex-direction:column;gap:6px;overflow:auto;padding-right:4px;min-height:0;flex:1 1 auto}
 .tab{display:grid;gap:2px;text-decoration:none;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px 10px;background:var(--panel-lift)}
-.tab:hover,.tab:focus{border-color:var(--accent);outline:none}
+.tab:hover,.tab:focus{border-color:var(--accent)}
 .tab.is-active{border-color:var(--teal);background:var(--panel-lift);box-shadow:inset 2px 0 0 var(--accent)}
 .tab small{color:var(--muted);font:11px var(--font-mono)}.tab-done{border-color:color-mix(in srgb,var(--status-success) 55%,transparent)}
 .tab-done.is-active{border-color:var(--accent)}
@@ -1955,7 +1955,7 @@ pub mod api {
   background:var(--panel-lift);color:var(--muted);white-space:nowrap
 }
 button.render-mode-btn{cursor:pointer;font-weight:500;color:var(--text);background:var(--panel-lift)}
-button.render-mode-btn:hover,button.render-mode-btn:focus-visible{border-color:var(--teal);color:var(--text);outline:none;background:var(--panel-lift)}
+button.render-mode-btn:hover,button.render-mode-btn:focus-visible{border-color:var(--teal);color:var(--text);background:var(--panel-lift)}
 button.render-mode-btn[data-next="rich"]{border-color:color-mix(in srgb,var(--accent) 45%,transparent);color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,transparent)}
 .checkpoint-state{color:var(--warn)}.checkpoint-state:empty{display:none}
 .inspector-pill{color:var(--warn)}.inspector-pill.is-done{color:var(--status-success);border-color:color-mix(in srgb,var(--status-success) 55%,transparent)}
@@ -2706,9 +2706,17 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
         /// previous brand (teal glows, lime code, two hand-mixed greens) beside
         /// the shared tokens. Colour here must now come from the same semantic
         /// layer the native deck feeds.
+        ///
+        /// Scope: this asserts the stylesheet the studio *owns*. The rendered
+        /// document also embeds `chrome::STYLE_MAIN`, whose first ~1400 lines
+        /// are the marketing site (hero, blog, pricing) and carry one
+        /// `linear-gradient` on `.blog-post-header` — a selector no console
+        /// route ever matches. Asserting over the whole document measured that
+        /// dead sheet instead of this one; the shared layer has its own owner
+        /// in `chrome::tests`.
         #[test]
         fn studio_styling_converges_on_the_shared_deck_tokens() {
-            let html = render_editor(&fixture());
+            let css = editor_css();
 
             for fossil in [
                 "#5e7f47", "#22321f", // hand-mixed checkpoint green
@@ -2719,22 +2727,76 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
                 "#1b1914", "#1b1617", // slab card fills
             ] {
                 assert!(
-                    !html.contains(fossil),
+                    !css.contains(fossil),
                     "studio css still carries the fossil literal {fossil}"
                 );
             }
 
             assert!(
-                !html.contains("radial-gradient") && !html.contains("linear-gradient"),
+                !css.contains("radial-gradient") && !css.contains("linear-gradient"),
                 "the plan library is an index, not a landing page"
             );
             assert!(
-                html.contains("--accent:var(--amber)"),
+                css.contains("--accent:var(--amber)"),
                 "the studio bridge must point at the live accent, not plain text"
             );
             assert!(
-                html.contains("box-shadow:inset 0 0 0 2px var(--focus-ring)"),
+                css.contains("box-shadow:inset 0 0 0 2px var(--focus-ring)"),
                 "the raw editor focus ring must use the corrected global token"
+            );
+            assert!(
+                render_editor(&fixture()).contains(css),
+                "the studio must actually ship the stylesheet this test measures"
+            );
+        }
+
+        /// The shared sheet installs one focus owner —
+        /// `.server-app-shell :focus-visible` (`main.css`) — and the studio
+        /// canvas renders inside that shell, so the ring should reach every
+        /// control here for free. It did not: `editor_css()` is embedded in
+        /// `head_html`, i.e. *after* the shared sheet, and these four rules
+        /// carried `outline:none` at exactly equal specificity (0,2,0), so the
+        /// later declaration won and the ring was suppressed in both themes.
+        /// A border tint is not a focus indicator; `main.css` says so itself.
+        ///
+        /// The two suppressions that remain in the studio are deliberate and
+        /// keep their own replacement: the raw textarea swaps the outline for
+        /// an inset ring, and the tracker chip re-declares a real one.
+        #[test]
+        fn studio_controls_never_suppress_the_shared_focus_ring() {
+            let css = editor_css();
+
+            for control in [
+                ".plan-card:hover,.plan-card:focus-visible{",
+                ".review-library-link:hover,.review-library-link:focus-visible{",
+                ".tab:hover,.tab:focus{",
+                "button.render-mode-btn:hover,button.render-mode-btn:focus-visible{",
+            ] {
+                let mut seen = 0;
+                for (at, _) in css.match_indices(control) {
+                    let rest = &css[at..];
+                    let end = rest.find('}').expect("every studio rule is closed");
+                    assert!(
+                        !rest[..end].contains("outline"),
+                        "{control} suppresses the one focus ring the shell installs"
+                    );
+                    seen += 1;
+                }
+                assert!(seen > 0, "{control} vanished — re-point this contract");
+            }
+
+            // Deliberate, and each still shows focus.
+            assert!(
+                css.contains(
+                    ".editor-form textarea.raw-pane:focus{outline:none;box-shadow:inset 0 0 0 2px var(--focus-ring)}"
+                ),
+                "the raw editor must keep its inset focus affordance"
+            );
+            assert!(
+                css.contains(
+                    "button.md-status:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}"
+                ),
+                "the tracker chip must re-declare the ring it suppressed"
             );
         }
 
@@ -2744,21 +2806,40 @@ button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
         /// shape the status chips already use — one owner, not a second dialect.
         #[test]
         fn checkpoint_and_save_actions_read_from_the_semantic_palette() {
-            let html = render_editor(&fixture());
+            let css = editor_css();
+            const SUCCESS_EDGE: &str = "color-mix(in srgb,var(--status-success) 55%,transparent)";
 
+            // Named owners, not a pinned total. Three surfaces mark "done" —
+            // the sidebar tab, the inspector pill and the tracker chip — and
+            // two commit actions carry the stroke: checkpoint and save. The
+            // tracker chip joined in 00f03ce6, so a hard-coded "4" described a
+            // studio that no longer existed. Splitting the count by the shape
+            // each owner uses keeps this honest: a new dialect still fails.
+            let done_edge = format!("border-color:{SUCCESS_EDGE}");
+            let action_stroke = format!("border:var(--stroke-width) solid {SUCCESS_EDGE}");
             assert_eq!(
-                html.matches("color-mix(in srgb,var(--status-success) 55%,transparent)").count(),
-                4,
-                "checkpoint, save and both done-markers share one success expression"
+                css.matches(done_edge.as_str()).count(),
+                3,
+                "tab, inspector pill and tracker chip mark done with one edge"
             );
             assert_eq!(
-                html.matches("background:color-mix(in srgb,var(--status-success) 14%,transparent)")
+                css.matches(action_stroke.as_str()).count(),
+                2,
+                "checkpoint and save carry the same success stroke"
+            );
+            assert_eq!(
+                css.matches(SUCCESS_EDGE).count(),
+                5,
+                "five owners total — nothing else may mint a sixth success dialect"
+            );
+            assert_eq!(
+                css.matches("background:color-mix(in srgb,var(--status-success) 14%,transparent)")
                     .count(),
                 2,
                 "checkpoint and save carry the same fill weight"
             );
             assert!(
-                html.contains("border-radius:var(--radius-surface);padding:8px 12px;font-weight:700"),
+                css.contains("border-radius:var(--radius-surface);padding:8px 12px;font-weight:700"),
                 "the commit action takes the deck's 8px radius"
             );
         }
