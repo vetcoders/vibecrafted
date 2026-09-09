@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -142,10 +143,46 @@ def _write_fake_python(bin_dir: Path, capture_file: Path) -> None:
     script.chmod(0o755)
 
 
+def _seed_launcher_ulimits(script_path: Path) -> None:
+    """Seed the helper owned by the copied launcher's physical root."""
+    owner = script_path.parent.parent
+    if script_path.parent.name == "deck":
+        owner = script_path.parent.parents[2]
+    limits = (
+        owner
+        / "vibecrafted-core"
+        / "vibecrafted_core"
+        / "runtime"
+        / "scripts"
+        / "lib"
+        / "ulimits.sh"
+    )
+    limits.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(
+        REPO_ROOT
+        / "vibecrafted-core"
+        / "vibecrafted_core"
+        / "runtime"
+        / "scripts"
+        / "lib"
+        / "ulimits.sh",
+        limits,
+    )
+
+
+def _write_owned_launcher(script_path: Path) -> None:
+    script_path.write_text(LAUNCHER.read_text(encoding="utf-8"), encoding="utf-8")
+    script_path.chmod(0o755)
+    _seed_launcher_ulimits(script_path)
+
+
 def _write_trimmed_launcher(script_path: Path) -> None:
     source = LAUNCHER.read_text(encoding="utf-8").splitlines()
     script_path.write_text("\n".join(source[:-1]) + "\n", encoding="utf-8")
     script_path.chmod(0o755)
+    # Resolver fixtures model a valid generation; incomplete generations are
+    # covered explicitly elsewhere.
+    _seed_launcher_ulimits(script_path)
 
 
 def test_python_resolver_skips_bash_product_launchers(tmp_path: Path) -> None:
@@ -614,6 +651,7 @@ def test_bare_shell_face_opens_interactive_tab_without_print_mode(
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session()
     env["VIBECRAFTED_RUNTIME_BIN"] = str(fake_bin)
+    env["VIBECRAFTED_PREFER_REPO_VC_FRAME"] = "1"
     # Sanitize real vc_frame env to prevent leaks from the host session.
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
@@ -686,6 +724,7 @@ def test_init_codex_fails_closed_without_measured_usage_capability(
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session()
     env["VIBECRAFTED_RUNTIME_BIN"] = str(fake_bin)
+    env["VIBECRAFTED_PREFER_REPO_VC_FRAME"] = "1"
     # Sanitize real vc_frame env to prevent leaks from the host session.
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
@@ -736,6 +775,7 @@ def test_init_fleet_agents_fail_closed_without_measured_usage_capability(
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session()
     env["VIBECRAFTED_RUNTIME_BIN"] = str(fake_bin)
+    env["VIBECRAFTED_PREFER_REPO_VC_FRAME"] = "1"
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
@@ -779,6 +819,7 @@ def test_init_grok_rejects_quota_before_any_single_shot_or_tab(tmp_path: Path) -
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session()
     env["VIBECRAFTED_RUNTIME_BIN"] = str(fake_bin)
+    env["VIBECRAFTED_PREFER_REPO_VC_FRAME"] = "1"
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
@@ -1119,8 +1160,7 @@ def test_installed_launcher_prefers_current_control_plane_helper_over_home_store
 
     home.mkdir(parents=True)
     launcher.parent.mkdir(parents=True, exist_ok=True)
-    launcher.write_text(LAUNCHER.read_text(encoding="utf-8"), encoding="utf-8")
-    launcher.chmod(0o755)
+    _write_owned_launcher(launcher)
     _write_fake_marbles_spawn(stale_spawn)
     _write_fake_marbles_spawn(fresh_spawn)
     _write_fake_helper(stale_helper, stale_spawn)
@@ -1204,8 +1244,7 @@ def test_deck_dispatches_control_plane_revalidate_to_core(tmp_path: Path) -> Non
     home.mkdir(parents=True)
     fake_bin.mkdir()
     launcher.parent.mkdir(parents=True, exist_ok=True)
-    launcher.write_text(LAUNCHER.read_text(encoding="utf-8"), encoding="utf-8")
-    launcher.chmod(0o755)
+    _write_owned_launcher(launcher)
     current_root.mkdir(parents=True)
     (current_root / "VERSION").write_text("0.0.0-test\n", encoding="utf-8")
     _write_fake_core_package(current_root)
@@ -1412,8 +1451,7 @@ def test_installed_launcher_gui_uses_python_control_plane_surface(
     home.mkdir(parents=True)
     fake_bin.mkdir()
     launcher.parent.mkdir(parents=True, exist_ok=True)
-    launcher.write_text(LAUNCHER.read_text(encoding="utf-8"), encoding="utf-8")
-    launcher.chmod(0o755)
+    _write_owned_launcher(launcher)
     (current_root / "scripts").mkdir(parents=True, exist_ok=True)
     (current_root / "VERSION").write_text("0.0.0-test\n", encoding="utf-8")
     (current_root / "scripts" / "installer_gui.py").write_text(
@@ -1460,8 +1498,7 @@ def test_installed_launcher_doctor_forwards_fix_flags(tmp_path: Path) -> None:
     home.mkdir(parents=True)
     fake_bin.mkdir()
     launcher.parent.mkdir(parents=True, exist_ok=True)
-    launcher.write_text(LAUNCHER.read_text(encoding="utf-8"), encoding="utf-8")
-    launcher.chmod(0o755)
+    _write_owned_launcher(launcher)
     (current_root / "scripts").mkdir(parents=True, exist_ok=True)
     (current_root / "vibecrafted-core").mkdir(parents=True, exist_ok=True)
     (current_root / "VERSION").write_text("0.0.0-test\n", encoding="utf-8")
@@ -1513,8 +1550,7 @@ def test_installed_launcher_doctor_reconciles_server_service_then_rechecks(
     home.mkdir(parents=True)
     fake_bin.mkdir()
     launcher.parent.mkdir(parents=True, exist_ok=True)
-    launcher.write_text(LAUNCHER.read_text(encoding="utf-8"), encoding="utf-8")
-    launcher.chmod(0o755)
+    _write_owned_launcher(launcher)
     (current_root / "scripts").mkdir(parents=True, exist_ok=True)
     core_package = current_root / "vibecrafted-core" / "vibecrafted_core"
     core_package.mkdir(parents=True, exist_ok=True)
@@ -1597,8 +1633,7 @@ def test_installed_launcher_tui_uses_shared_state_and_voc_binary(
     home.mkdir(parents=True)
     fake_bin.mkdir()
     launcher.parent.mkdir(parents=True, exist_ok=True)
-    launcher.write_text(LAUNCHER.read_text(encoding="utf-8"), encoding="utf-8")
-    launcher.chmod(0o755)
+    _write_owned_launcher(launcher)
     (current_root / "scripts").mkdir(parents=True, exist_ok=True)
     app_root = current_root / "vibecrafted-app"
     (app_root / "tui-agent").mkdir(parents=True, exist_ok=True)
@@ -1747,8 +1782,7 @@ def test_tui_uses_voc_from_path_when_local_build_missing(
     home.mkdir(parents=True)
     fake_bin.mkdir()
     launcher.parent.mkdir(parents=True, exist_ok=True)
-    launcher.write_text(LAUNCHER.read_text(encoding="utf-8"), encoding="utf-8")
-    launcher.chmod(0o755)
+    _write_owned_launcher(launcher)
     (current_root / "scripts").mkdir(parents=True, exist_ok=True)
     (current_root / "VERSION").write_text("0.0.0-test\n", encoding="utf-8")
     _write_fake_core_package(current_root)
@@ -1794,8 +1828,7 @@ def test_tui_uses_home_local_voc_when_login_path_omits_it(
     home.mkdir(parents=True)
     fake_bin.mkdir()
     launcher.parent.mkdir(parents=True, exist_ok=True)
-    launcher.write_text(LAUNCHER.read_text(encoding="utf-8"), encoding="utf-8")
-    launcher.chmod(0o755)
+    _write_owned_launcher(launcher)
     (current_root / "scripts").mkdir(parents=True, exist_ok=True)
     (current_root / "VERSION").write_text("0.0.0-test\n", encoding="utf-8")
     _write_fake_core_package(current_root)
@@ -3678,8 +3711,7 @@ def test_server_service_preserves_high_installer_lease_fd_through_launcher(
 
     home.mkdir()
     current_bin.mkdir()
-    current_launcher.write_text(LAUNCHER.read_text(encoding="utf-8"), encoding="utf-8")
-    current_launcher.chmod(0o755)
+    _write_owned_launcher(current_launcher)
     current_supervisor.write_text(
         "\n".join(
             [
