@@ -16,7 +16,8 @@ opacity = 0.9
 title = "𝓥𝓲𝓫𝓮𝓬𝓻𝓪𝓯𝓽𝓮𝓭."
 decorations = "Transparent"
 startup_mode = "Maximized"
-padding = { x = 0, y = 0 }
+# Transparent title controls must not cover terminal or alternate-screen text.
+padding = { x = 8, y = 24 }
 dynamic_padding = true
 option_as_alt = "Both"
 
