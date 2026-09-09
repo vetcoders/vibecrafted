@@ -36,6 +36,14 @@
 # Records of live snapshots, one "<donor>\t<path>" per entry.
 DONOR_SNAPSHOTS=()
 
+# Optional owner stamp written into each snapshot. A departing process that
+# still has the path in DONOR_SNAPSHOTS must not reap a successor that reused
+# the same location after the kernel dropped the release lock. Unset keeps
+# the historical reap-everything-we-recorded behaviour for callers that do
+# not share a path with another live release.
+DONOR_SNAPSHOT_OWNER="${DONOR_SNAPSHOT_OWNER:-}"
+DONOR_SNAPSHOT_OWNER_STAMP=".vibecrafted-release-owner"
+
 # _donor_snapshot_force_remove <donor> <path>
 #
 # The one place in this file allowed to run `rm -rf`. It existed only in the
@@ -105,6 +113,9 @@ donor_snapshot_create() {
 
   mkdir -p "$(dirname "$path")"
   git -C "$donor" worktree add --detach --quiet "$path" "$head" >/dev/null
+  if [[ -n "$DONOR_SNAPSHOT_OWNER" ]]; then
+    printf '%s\n' "$DONOR_SNAPSHOT_OWNER" > "$path/$DONOR_SNAPSHOT_OWNER_STAMP"
+  fi
 
   DONOR_SNAPSHOTS+=("$donor"$'\t'"$path")
   DONOR_SNAPSHOT_HEAD="$head"
@@ -123,6 +134,14 @@ donor_snapshot_reap() {
     [[ -n "$record" ]] || continue
     donor="${record%%$'\t'*}"
     path="${record#*$'\t'}"
+    # A successor that recreated this path stamps it with a different owner.
+    # Reaping it would be the 2026-09-09 incident: the stopped attempt's
+    # EXIT handler destroying the live frozen source.
+    if [[ -n "$DONOR_SNAPSHOT_OWNER" && -f "$path/$DONOR_SNAPSHOT_OWNER_STAMP" ]]; then
+      if [[ "$(cat "$path/$DONOR_SNAPSHOT_OWNER_STAMP" 2>/dev/null || true)" != "$DONOR_SNAPSHOT_OWNER" ]]; then
+        continue
+      fi
+    fi
     if ! git -C "$donor" worktree remove --force "$path" >/dev/null 2>&1; then
       _donor_snapshot_force_remove "$donor" "$path"
     fi

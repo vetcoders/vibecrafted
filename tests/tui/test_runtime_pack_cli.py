@@ -1428,6 +1428,10 @@ def _preflight_builder_repo(tmp_path: Path) -> tuple[Path, str, Path]:
     (repo / "dist").mkdir()
     shutil.copy2(RELEASE_BUILDER, repo / "scripts" / RELEASE_BUILDER.name)
     shutil.copy2(SELECTION_LIBRARY, repo / "scripts/lib" / SELECTION_LIBRARY.name)
+    shutil.copy2(
+        REPO_ROOT / "scripts/lib/release-single-flight.sh",
+        repo / "scripts/lib/release-single-flight.sh",
+    )
     (repo / "VERSION").write_text(f"{VERSION}\n", encoding="utf-8")
     # The builder prefers a rustup cargo before it parses a single argument.
     # HOME is a fresh directory here, so a real rustup would find no toolchain

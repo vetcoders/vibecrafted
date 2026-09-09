@@ -216,6 +216,29 @@ def test_the_record_is_made_in_the_callers_shell_not_a_subshell(
     assert not snapshot.exists()
 
 
+def test_reaper_skips_a_snapshot_stamped_by_a_successor(tmp_path: Path) -> None:
+    """A late EXIT must not destroy a successor that reused the same path."""
+
+    donor = _make_donor(tmp_path / "donor")
+    snapshot = tmp_path / "work/donor-snapshots/vibecrafted"
+    result = _run_driver(
+        "DONOR_SNAPSHOT_OWNER=first-attempt\n"
+        f'donor_snapshot_create "{donor}" "{snapshot}" >/dev/null\n'
+        "printf 'first-attempt' > /dev/null\n"
+        "DONOR_SNAPSHOT_OWNER=successor-attempt\n"
+        f'printf "%s\\n" "successor-attempt" > "{snapshot}/.vibecrafted-release-owner"\n'
+        "DONOR_SNAPSHOT_OWNER=first-attempt\n"
+        "donor_snapshot_reap\n"
+        f'test -d "{snapshot}"\n',
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert snapshot.is_dir()
+    assert (snapshot / ".vibecrafted-release-owner").read_text(
+        encoding="utf-8"
+    ).strip() == "successor-attempt"
+
+
 def test_builder_never_captures_the_snapshot_through_command_substitution() -> None:
     builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
         encoding="utf-8"

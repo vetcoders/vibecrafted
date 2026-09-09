@@ -821,7 +821,10 @@ def test_dirty_donors_are_a_release_flag_with_a_reaper_not_a_manual_ritual() -> 
     # The reaper runs from the same trap that ends the keychain session, so it
     # fires on success, on error, and on Ctrl-C during a notarization wait.
     assert "donor_snapshot_reap || true" in builder
-    assert "trap cleanup EXIT INT TERM HUP" in builder
+    assert "trap cleanup EXIT" in builder
+    assert "trap 'cleanup; exit 130' INT" in builder
+    assert "trap 'cleanup; exit 143' TERM" in builder
+    assert "trap 'cleanup; exit 129' HUP" in builder
     assert "materialize_donor_snapshots" in builder
     assert "VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT" in builder
 
@@ -1294,8 +1297,14 @@ def test_a_build_that_can_still_fail_has_already_invalidated_its_selection() -> 
     # contract cares about -- date, toolchain, signing inputs, cargo, the
     # packager -- comes after them.
     begin_at = builder.index("runtime_pack_selection_begin")
+    acquire_at = builder.index("release_single_flight_acquire")
+    assert acquire_at < begin_at
     assert begin_at < builder.index('TERMINAL_DONOR="$(canonical_dir')
     assert begin_at < builder.index("\nbuild_product\n")
+    assert "release_single_flight_release" in builder
+    assert builder.index("donor_snapshot_reap") < builder.index(
+        "release_single_flight_release"
+    )
     build_product = builder.split("build_product() {", 1)[1].split("\n}\n", 1)[0]
     assert "runtime_pack_selection_begin" not in build_product
     assert (
@@ -1310,6 +1319,11 @@ def test_a_build_that_can_still_fail_has_already_invalidated_its_selection() -> 
         "\nfi\n", 1
     )[0]
     assert "runtime_pack_selection" not in notarize_arm
+    assert 'release_single_flight_acquire "$REPO_ROOT"' in builder
+    assert builder.index("release_single_flight_acquire") < builder.index(
+        'if [[ "$MODE" == "notarize" ]]; then'
+    )
+    assert "--help|-h)" in builder
 
 
 def test_standalone_selection_is_not_the_app_dmg_release_tuple() -> None:

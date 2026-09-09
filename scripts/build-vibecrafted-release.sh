@@ -59,6 +59,10 @@ for argument in "$@"; do
     --no-notarize) MODE="dmg" ;;
     --notarize-only) MODE="notarize" ;;
     --snapshot-donors) SNAPSHOT_DONORS=1 ;;
+    --help|-h)
+      echo "usage: $0 [--app-only|--runtime-pack-only|--no-notarize|--notarize-only] [--snapshot-donors]" >&2
+      exit 0
+      ;;
     *)
       echo "usage: $0 [--app-only|--runtime-pack-only|--no-notarize|--notarize-only] [--snapshot-donors]" >&2
       exit 2
@@ -72,8 +76,50 @@ done
 # release date and the Xcode preflight all die above that point.
 # shellcheck source=/dev/null
 . "$REPO_ROOT/scripts/lib/runtime-pack-selection.sh"
+# shellcheck source=/dev/null
+. "$REPO_ROOT/scripts/lib/release-single-flight.sh"
 
 ROOT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+
+# Exclusive ownership of the shared selection, snapshot and App/output paths
+# BEFORE any of those mutate. --help/-h and unknown argv have already exited
+# above, so usage never takes the lock or creates build/. --notarize-only
+# shares APP, DIST and BUILD_DIR with a full release, so it takes the same
+# lock and still leaves the selection record untouched.
+release_single_flight_acquire "$REPO_ROOT" \
+  || die "another release already owns this checkout's shared build state"
+
+cleanup() {
+  # Host-wide resources first. The keychain session mutates state that outlives
+  # this process and affects every application on the machine; the donor
+  # snapshots are directories under this repo's own build/ and a stale one is
+  # merely untidy. Reaping first meant a hung `git worktree remove` — an index
+  # lock on a busy donor is enough — would strand the keychain instead.
+  #
+  # In practice keychain_session_begin also arms its own EXIT handler which
+  # chains ahead of this one, so the keychain is usually already released by the
+  # time we arrive. That path does not exist when no signing certificate was
+  # present, which is exactly when this ordering is the only ordering.
+  #
+  # The release lock stays held through reap: unlocking first would let a
+  # successor recreate donor-snapshots/vibecrafted, after which this EXIT
+  # handler would destroy the successor's frozen source. Closing our own
+  # descriptor is last, and never unlinks the lock inode.
+  if declare -F keychain_session_end >/dev/null 2>&1; then
+    keychain_session_end "$SIGNING_KEYCHAIN_LABEL" || true
+  fi
+  if declare -F donor_snapshot_reap >/dev/null 2>&1; then
+    donor_snapshot_reap || true
+  fi
+  release_single_flight_release
+}
+# INT/TERM/HUP must exit after cleanup. A bare shared trap returns into the
+# interrupted command and would keep mutating after the lock was released.
+# keychain_session_begin reads these handlers back and chains in front.
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+trap 'cleanup; exit 129' HUP
 
 # Claim the attempt before the first thing that can fail.
 #
@@ -92,6 +138,8 @@ if [[ "$MODE" != "notarize" ]]; then
   runtime_pack_selection_begin "$REPO_ROOT" "$RUNTIME_PACK_SELECTION_ATTEMPT" \
     "$ROOT_SHA" \
     || die "could not mark the Runtime Pack build attempt as pending"
+  DONOR_SNAPSHOT_OWNER="$RUNTIME_PACK_SELECTION_ATTEMPT"
+  export DONOR_SNAPSHOT_OWNER
 fi
 
 # The donor is where the source lives; the repo is what we compile. They differ
@@ -170,19 +218,24 @@ CODESIGN_KEYCHAIN_ARGS=()
 # 2026-08-28 on dragon with xcode-select pointing at ~/Downloads/Xcode-beta.app;
 # the same tree under /Applications/Xcode.app (26.6) builds clean. A beta
 # Xcode is therefore refused unless the operator opts in explicitly.
-XCODE_DEVELOPER_DIR="${DEVELOPER_DIR:-$(xcode-select -p 2>/dev/null || true)}"
-if [[ -z "$XCODE_DEVELOPER_DIR" || ! -d "$XCODE_DEVELOPER_DIR" ]]; then
-  echo "FATAL: no usable Xcode developer dir (xcode-select -p / DEVELOPER_DIR)" >&2
-  exit 1
+#
+# Fake bounded stages (VIBECRAFTED_RELEASE_FAKE_STAGES) never compile or sign,
+# so they skip the toolchain probe. Production paths still fail closed here.
+if [[ -z "${VIBECRAFTED_RELEASE_FAKE_STAGES:-}" ]]; then
+  XCODE_DEVELOPER_DIR="${DEVELOPER_DIR:-$(xcode-select -p 2>/dev/null || true)}"
+  if [[ -z "$XCODE_DEVELOPER_DIR" || ! -d "$XCODE_DEVELOPER_DIR" ]]; then
+    echo "FATAL: no usable Xcode developer dir (xcode-select -p / DEVELOPER_DIR)" >&2
+    exit 1
+  fi
+  if [[ "$XCODE_DEVELOPER_DIR" == *[Bb]eta* && -z "${VIBECRAFTED_ALLOW_BETA_XCODE:-}" ]]; then
+    echo "FATAL: release refuses a beta Xcode toolchain: $XCODE_DEVELOPER_DIR" >&2
+    echo "       repair: DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer make release" >&2
+    echo "       (or sudo xcode-select -s /Applications/Xcode.app; VIBECRAFTED_ALLOW_BETA_XCODE=1 overrides)" >&2
+    exit 1
+  fi
+  export DEVELOPER_DIR="$XCODE_DEVELOPER_DIR"
+  echo "==> Xcode developer dir: $DEVELOPER_DIR ($(xcrun --find strip 2>/dev/null || echo 'strip: unresolved'))"
 fi
-if [[ "$XCODE_DEVELOPER_DIR" == *[Bb]eta* && -z "${VIBECRAFTED_ALLOW_BETA_XCODE:-}" ]]; then
-  echo "FATAL: release refuses a beta Xcode toolchain: $XCODE_DEVELOPER_DIR" >&2
-  echo "       repair: DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer make release" >&2
-  echo "       (or sudo xcode-select -s /Applications/Xcode.app; VIBECRAFTED_ALLOW_BETA_XCODE=1 overrides)" >&2
-  exit 1
-fi
-export DEVELOPER_DIR="$XCODE_DEVELOPER_DIR"
-echo "==> Xcode developer dir: $DEVELOPER_DIR ($(xcrun --find strip 2>/dev/null || echo 'strip: unresolved'))"
 export MACOSX_DEPLOYMENT_TARGET=14.0
 # Release payloads must not remember the operator account, Cargo registry, or
 # living checkout locations through compiler metadata.
@@ -307,22 +360,9 @@ require_bound_revision() {
 if [[ "$MODE" != "notarize" ]]; then
   require_clean_repo "$REPO_ROOT" vibecrafted
 fi
-
-cleanup() {
-  # Host-wide resources first. The keychain session mutates state that outlives
-  # this process and affects every application on the machine; the donor
-  # snapshots are directories under this repo's own build/ and a stale one is
-  # merely untidy. Reaping first meant a hung `git worktree remove` — an index
-  # lock on a busy donor is enough — would strand the keychain instead.
-  #
-  # In practice keychain_session_begin also arms its own EXIT handler which
-  # chains ahead of this one, so the keychain is usually already released by the
-  # time we arrive. That path does not exist when no signing certificate was
-  # present, which is exactly when this ordering is the only ordering.
-  keychain_session_end "$SIGNING_KEYCHAIN_LABEL" || true
-  donor_snapshot_reap || true
-}
-trap cleanup EXIT INT TERM HUP
+# cleanup + signal traps are armed immediately after the release lock so a
+# die() above still reaps nothing it did not create and still closes our
+# descriptor. keychain_session_begin chains onto those handlers.
 
 read_trimmed_file() {
   sed -e 's/[[:space:]]*$//' -e '/^$/d' "$1" | head -n1
@@ -582,6 +622,49 @@ materialize_donor_snapshots() {
   # cargo/DerivedData stay in the living BUILD_DIR so correct caches reuse.
   [[ -z "${VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT:-}" ]] \
     || die "VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT is set; failing on purpose so the reaper is exercised"
+}
+
+# Deterministic entrypoint stages for concurrency tests. Never compiles or
+# signs. The directory is the handshake: this process writes sentinels, then
+# waits for `continue` or `publish` (a pack path). --notarize-only takes the
+# lock and writes `locked` without touching selection or snapshots.
+release_run_fake_bounded_stages() {
+  local dir="$1" pack waited=0
+  [[ -n "$dir" ]] || die "VIBECRAFTED_RELEASE_FAKE_STAGES is empty"
+  mkdir -p "$dir"
+  printf '%s\n' "$$" > "$dir/locked"
+  printf '%s\n' "${RELEASE_SINGLE_FLIGHT_LOCK_FD:-}" > "$dir/lock-fd"
+  if [[ "$MODE" != "notarize" ]]; then
+    [[ -f "$(runtime_pack_selection_file "$REPO_ROOT")" ]] \
+      || die "fake stages: selection record is missing after the claim"
+    cp "$(runtime_pack_selection_file "$REPO_ROOT")" "$dir/selection"
+    materialize_donor_snapshots
+    printf '%s\n' "$DONOR_SNAPSHOT_HEAD" > "$dir/snapshot"
+    printf '%s\n' "$SOURCE_ROOT" > "$dir/snapshot-path"
+    [[ -d "$SOURCE_ROOT" ]] || die "fake stages: main snapshot is missing"
+  else
+    : > "$dir/notarize-locked"
+  fi
+  if [[ -n "${VIBECRAFTED_RELEASE_FAKE_KEYCHAIN:-}" ]]; then
+    keychain_session_begin "$SIGNING_KEYCHAIN_LABEL"
+    printf '%s\n' "${KEYCHAIN_SESSION_PATH:-}" > "$dir/keychain-path"
+    trap -p EXIT > "$dir/trap-exit" || true
+  fi
+  while [[ ! -e "$dir/continue" && ! -e "$dir/publish" ]]; do
+    sleep 0.05
+    waited=$((waited + 1))
+    (( waited < 600 )) || die "fake stages: timed out waiting for continue/publish"
+  done
+  if [[ -e "$dir/publish" ]]; then
+    pack="$(read_trimmed_file "$dir/publish")"
+    [[ -n "$pack" && -f "$pack" ]] || die "fake stages: publish path is missing"
+    runtime_pack_selection_publish "$REPO_ROOT" "$RUNTIME_PACK_SELECTION_ATTEMPT" \
+      "$pack" "$RUNTIME_VERSION" "$RUNTIME_PACK_PLATFORM" \
+      "$RUNTIME_PACK_ARCHITECTURE" "$ROOT_SHA" \
+      "$(git_sha "$TERMINAL_REPO")" "$(git_sha "$FRAME_REPO")" \
+      || die "fake stages: could not publish the exact pack"
+    : > "$dir/published"
+  fi
 }
 
 produce_runtime_pack() {
@@ -1058,6 +1141,11 @@ verify_runtime_pack_projection() {
   cmp "$EMBEDDED_RUNTIME_PACK_CHECKSUM" "$RUNTIME_PACK_CHECKSUM"
   cmp "$EMBEDDED_RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK_SIGNATURE"
 }
+
+if [[ -n "${VIBECRAFTED_RELEASE_FAKE_STAGES:-}" ]]; then
+  release_run_fake_bounded_stages "$VIBECRAFTED_RELEASE_FAKE_STAGES"
+  exit 0
+fi
 
 if [[ "$MODE" == "notarize" ]]; then
   [[ -d "$APP" ]] || die "missing $APP; run make dmg-signed first"
