@@ -17394,6 +17394,472 @@ def _runtime_rescue_command() -> str:
     )
 
 
+def _runtime_rescue_payload_digest(payload_root: Path) -> str:
+    """Content digest of the live pack tree via the existing payload hasher."""
+    payload_root = payload_root.expanduser().resolve()
+    _validate_runtime_payload_tree(payload_root)
+    descriptor = _runtime_payload_open_absolute_directory(payload_root, create=False)
+    try:
+        kind = _runtime_payload_kind(os.fstat(descriptor), label=str(payload_root))
+        return _runtime_payload_digest_fd(descriptor, kind)
+    finally:
+        os.close(descriptor)
+
+
+def _runtime_rescue_payload_inventory(payload_root: Path) -> list[dict[str, str]]:
+    """Exact live file inventory using the receipt file digest owner."""
+    records: list[dict[str, str]] = []
+    payload_root = payload_root.expanduser().resolve()
+    for dirpath, dirnames, filenames in os.walk(payload_root, followlinks=False):
+        dirnames.sort()
+        filenames.sort()
+        for name in filenames:
+            path = Path(dirpath) / name
+            if path.name == ".DS_Store":
+                continue
+            if path.is_symlink():
+                raise RuntimeError(
+                    f"Runtime Pack inventory contains a symlink: {path}"
+                )
+            if not path.is_file():
+                raise RuntimeError(
+                    f"Runtime Pack inventory contains a nonregular file: {path}"
+                )
+            records.append(
+                {
+                    "path": path.relative_to(payload_root).as_posix(),
+                    "sha256": _sha256_path(path),
+                    "size": str(path.stat().st_size),
+                    "mode": f"{stat.S_IMODE(path.stat().st_mode):04o}",
+                }
+            )
+    if not records:
+        raise RuntimeError("Runtime Pack payload inventory is empty")
+    return records
+
+
+def _runtime_rescue_verify_pack_provenance(
+    payload_root: Path, inventory: Sequence[Mapping[str, str]]
+) -> tuple[bool, str]:
+    """Re-check a closed provenance inventory when the pack carries one.
+
+    Absence is not verification. Present inventory must match live
+    ``_sha256_path`` bytes. This does not invent a second verifier.
+    """
+    path = payload_root / RUNTIME_PACK_PROVENANCE_NAME
+    if not path.is_file():
+        return False, ""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Runtime Pack provenance is unreadable: {exc}") from exc
+    files = (
+        ((payload.get("payload") or {}) if isinstance(payload, dict) else {}).get(
+            "files"
+        )
+    )
+    if not isinstance(files, list) or not files:
+        raise RuntimeError("Runtime Pack provenance inventory is empty or malformed")
+    observed = {item["path"]: item["sha256"] for item in inventory}
+    for record in files:
+        if not isinstance(record, dict):
+            raise RuntimeError("Runtime Pack provenance inventory is malformed")
+        relative = str(record.get("path") or "")
+        digest = str(record.get("sha256") or "")
+        if not relative or relative not in observed:
+            raise RuntimeError(f"Runtime Pack provenance path is missing: {relative}")
+        if observed[relative] != digest:
+            raise RuntimeError(
+                "Runtime Pack provenance digest does not match live bytes: "
+                + relative
+            )
+    return True, _sha256_path(path)
+
+
+def _runtime_owned_occupant_state(path: Path) -> dict[str, str]:
+    """Record the current occupant of a receipted path, including nonregular types."""
+    state = {
+        "current_type": "absent",
+        "current_sha256": "",
+        "current_target": "",
+        "current_listing": "",
+        "occupant_proof": "none",
+    }
+    if not _path_present(path):
+        return state
+    try:
+        mode = path.lstat().st_mode
+    except OSError:
+        state["current_type"] = "unreadable"
+        return state
+    if stat.S_ISLNK(mode):
+        state["current_type"] = "symlink"
+        try:
+            state["current_target"] = os.readlink(path)
+        except OSError as exc:
+            state["current_target"] = f"<unreadable:{exc}>"
+        return state
+    if stat.S_ISDIR(mode):
+        state["current_type"] = "directory"
+        try:
+            state["current_listing"] = "\n".join(sorted(os.listdir(path)))
+        except OSError as exc:
+            state["current_listing"] = f"<unreadable:{exc}>"
+        return state
+    if stat.S_ISREG(mode):
+        state["current_type"] = "file"
+        try:
+            state["current_sha256"] = _sha256_path(path)
+        except OSError:
+            state["current_type"] = "unreadable"
+        return state
+    state["current_type"] = "other"
+    return state
+
+
+def _runtime_rescue_occupant_disposition(
+    path: Path,
+    expected_kind: str,
+    occupant: Mapping[str, str],
+    paths: Mapping[str, Path],
+) -> str:
+    """Decide whether a current occupant may be replaced.
+
+    A receipted path is not proof that the current occupant is ours.
+    Dangling or runtime-owned targets may be republished; foreign
+    replacements are preserved.
+    """
+    current = occupant.get("current_type") or "absent"
+    if current == "absent":
+        return "republish"
+    if current in {"unreadable", "other"}:
+        return "preserve"
+    if current == expected_kind:
+        return "republish"
+    if current == "symlink":
+        try:
+            resolved = path.resolve()
+        except OSError:
+            return "republish"
+        if _runtime_owned_path_is_managed(resolved, paths):
+            return "republish"
+        if resolved.exists() and not _runtime_owned_path_is_managed(resolved, paths):
+            return "preserve"
+        return "republish"
+    if current == "directory":
+        return "preserve" if (occupant.get("current_listing") or "").strip() else "republish"
+    if current == "file" and expected_kind != "file":
+        return "preserve"
+    return "preserve"
+
+
+def _runtime_rescue_shell_path_allowed(path: Path) -> bool:
+    return path.parent == Path.home() and path.name in _SHELL_STARTUP_FILES
+
+
+def _runtime_rescue_expected_publication_paths(
+    paths: Mapping[str, Path],
+    payload_root: Path,
+    receipt: Mapping[str, Any],
+) -> list[Path]:
+    """Every path apply can create, replace, or remove."""
+    expected: list[Path] = [
+        _runtime_receipt_path(paths["runtime_home"]),
+        paths["runtime_home"] / "active.json",
+        paths["runtime_home"] / "tools/vibecrafted-current",
+        paths["product_config"],
+        paths["product_config"] / "vc-frame",
+        paths["product_config"] / "vc-terminal",
+        paths["product_config"] / "shell",
+        paths["product_config"] / "vc-terminal" / "vc-terminal.toml",
+        paths["product_config"] / "vc-terminal" / _PRODUCT_PRIMARY_SHELL_NAME,
+        paths["crafted_home"] / STATE_FILE,
+    ]
+    expected.extend(Path(raw) for raw in receipt.get("owned_files", {}))
+    expected.extend(Path(raw) for raw in receipt.get("owned_symlinks", {}))
+    expected.extend(Path(raw) for raw in receipt.get("owned_dirs", []))
+    bin_dir = payload_root / "bin"
+    names = set(_RUNTIME_WRAPPER_VERBS)
+    names.update({"vc-terminal", SECURE_WALKAROUND_LAUNCHER})
+    if bin_dir.is_dir():
+        names.update(_runtime_published_launcher_names(bin_dir))
+    expected.extend(paths["launcher_home"] / name for name in sorted(names))
+    try:
+        skills = discover_skills(payload_root)
+        skills_root = source_skills_root(payload_root)
+    except (OSError, RuntimeError):
+        skills = []
+        skills_root = payload_root / "vibecrafted-core/vibecrafted_core/skills"
+    for runtime in STANDARD_VIEW_RUNTIMES:
+        view = runtime_skills_dir(runtime)
+        expected.append(view)
+        for skill in skills:
+            expected.append(view / skill.name)
+        try:
+            for _source, relative in iter_skill_root_rule_files(skills_root):
+                expected.append(view / relative)
+        except OSError:
+            continue
+    for rcname in _SHELL_STARTUP_FILES:
+        rcfile = Path.home() / rcname
+        if rcfile.exists():
+            expected.append(rcfile)
+    seen: set[str] = set()
+    ordered: list[Path] = []
+    for path in expected:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(path)
+    return ordered
+
+
+def _runtime_rescue_directory_evidence(root: Path) -> str:
+    """Content identity of a snapshot directory that may legally contain leaf symlinks."""
+    entries: list[dict[str, str]] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames.sort()
+        filenames.sort()
+        for name in [*dirnames, *filenames]:
+            path = Path(dirpath) / name
+            relative = path.relative_to(root).as_posix()
+            if path.is_symlink():
+                entries.append(
+                    {"path": relative, "kind": "symlink", "target": os.readlink(path)}
+                )
+            elif path.is_dir():
+                entries.append({"path": relative, "kind": "directory"})
+            elif path.is_file():
+                entries.append(
+                    {"path": relative, "kind": "file", "sha256": _sha256_path(path)}
+                )
+            else:
+                entries.append({"path": relative, "kind": "other"})
+    return _canonical_digest({"entries": entries})
+
+
+def _runtime_rescue_snapshot_evidence_digest(
+    label: Mapping[str, Any], snapshot_root: Path
+) -> str:
+    records: list[dict[str, str]] = []
+    for entry in label.get("paths", []):
+        record = {
+            "path": str(entry.get("path") or ""),
+            "rel": str(entry.get("rel") or ""),
+            "kind": str(entry.get("kind") or ""),
+            "sha256": str(entry.get("sha256") or ""),
+            "target": str(entry.get("target") or ""),
+            "listing": str(entry.get("listing") or ""),
+        }
+        source = snapshot_root / record["rel"]
+        if record["kind"] == "file" and source.is_file() and not source.is_symlink():
+            record["evidence_sha256"] = _sha256_path(source)
+        elif record["kind"] == "symlink" and source.is_symlink():
+            record["evidence_target"] = os.readlink(source)
+        elif record["kind"] == "directory" and source.is_dir() and not source.is_symlink():
+            record["evidence_sha256"] = _runtime_rescue_directory_evidence(source)
+        records.append(record)
+    return _canonical_digest({"paths": records})
+
+
+def _runtime_rescue_validate_snapshot_evidence(
+    snapshot_root: Path, label: Mapping[str, Any]
+) -> None:
+    expected = str(label.get("evidence_sha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise RuntimeError("pre-rescue snapshot evidence digest is missing")
+    if _runtime_rescue_snapshot_evidence_digest(label, snapshot_root) != expected:
+        raise RuntimeError("pre-rescue snapshot evidence digest drifted")
+    for entry in label.get("paths", []):
+        source = snapshot_root / str(entry.get("rel") or "")
+        kind = str(entry.get("kind") or "")
+        if kind == "absent":
+            if _path_present(source):
+                raise RuntimeError("absent snapshot entry is unexpectedly present")
+            continue
+        if kind == "file":
+            if not source.is_file() or source.is_symlink():
+                raise RuntimeError(f"snapshot file evidence is missing: {entry.get('path')}")
+            if _sha256_path(source) != str(entry.get("sha256") or ""):
+                raise RuntimeError(f"snapshot file evidence drifted: {entry.get('path')}")
+            continue
+        if kind == "symlink":
+            if not source.is_symlink() or os.readlink(source) != str(entry.get("target") or ""):
+                raise RuntimeError(f"snapshot symlink evidence drifted: {entry.get('path')}")
+            continue
+        if kind == "directory":
+            if not source.is_dir() or source.is_symlink():
+                raise RuntimeError(
+                    f"snapshot directory evidence is missing: {entry.get('path')}"
+                )
+
+
+def _runtime_rescue_interactive_shell_check() -> dict[str, str]:
+    """Isolated interactive zsh smoke. ``which`` exit 0 is not shell health."""
+    zsh = shutil.which("zsh")
+    record = {"ok": "false", "reason": "", "returncode": "", "stderr": ""}
+    if zsh is None:
+        record["reason"] = "isolated interactive zsh is unavailable"
+        return record
+    env = {
+        "HOME": str(Path.home()),
+        "USER": os.environ.get("USER", "rescue"),
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "TERM": "dumb",
+        "ZDOTDIR": str(Path.home()),
+    }
+    zshrc = Path.home() / ".zshrc"
+    script = (
+        f"source {shlex.quote(str(zshrc))} && printf 'shell-ok\\n'"
+        if zshrc.is_file()
+        else "printf 'shell-ok\\n'"
+    )
+    try:
+        completed = subprocess.run(
+            [zsh, "-f", "-c", script],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        record["reason"] = f"isolated interactive zsh failed: {exc}"
+        return record
+    stderr = completed.stderr or ""
+    record["returncode"] = str(completed.returncode)
+    record["stderr"] = stderr[:400]
+    unhealthy = (
+        "helper not found",
+        "vetcoders.sh",
+        "vetcoders.zsh",
+        "runtime/shell/vetcoders",
+    )
+    if completed.returncode != 0 or "shell-ok" not in (completed.stdout or ""):
+        record["reason"] = "isolated interactive zsh did not complete cleanly"
+        return record
+    if any(marker in stderr for marker in unhealthy):
+        record["reason"] = (
+            "interactive shell still sources an absent legacy helper; "
+            "which(1) exit 0 is not shell health"
+        )
+        return record
+    record["ok"] = "true"
+    return record
+
+
+def _runtime_rescue_shell_plan() -> dict[str, Any]:
+    """Plan doctor --fix-rc stanza edits without rewriting user content."""
+    stanzas: list[dict[str, str]] = []
+    refused: list[dict[str, str]] = []
+    ensure_path = _find_launcher_wrapper("vibecrafted") is not None
+    for rcname in _SHELL_STARTUP_FILES:
+        rcfile = Path.home() / rcname
+        if not rcfile.exists():
+            continue
+        try:
+            content = rcfile.read_text(encoding="utf-8")
+        except OSError as exc:
+            refused.append(
+                {
+                    "path": str(rcfile),
+                    "class": "unsafe",
+                    "reason": f"shell rc is unreadable: {exc}",
+                }
+            )
+            continue
+        if _rc_has_unclosed_vibecrafted_block(content):
+            refused.append(
+                {
+                    "path": str(rcfile),
+                    "class": "unsafe",
+                    "reason": (
+                        "unclosed Vibecrafted block; attribution is ambiguous "
+                        "and doctor --fix-rc must not rewrite the file"
+                    ),
+                }
+            )
+            continue
+        proposed = _doctor_repair_rc_content(
+            content, ensure_helper=False, ensure_path=ensure_path
+        )
+        stanzas.append(
+            {
+                "path": str(rcfile),
+                "owner": "doctor --fix-rc",
+                "current_sha256": _sha256_bytes(content.encode("utf-8")),
+                "proposed_sha256": _sha256_bytes(proposed.encode("utf-8")),
+                "action": "unchanged" if proposed == content else "doctor_fix_rc",
+            }
+        )
+    return {
+        "stanzas": stanzas,
+        "refused": refused,
+        "interactive_shell": _runtime_rescue_interactive_shell_check(),
+    }
+
+
+def _runtime_rescue_apply_shell_stanzas(
+    stanzas: Sequence[Mapping[str, str]],
+) -> list[dict[str, str]]:
+    residuals: list[dict[str, str]] = []
+    ensure_path = _find_launcher_wrapper("vibecrafted") is not None
+    for stanza in stanzas:
+        if stanza.get("action") != "doctor_fix_rc":
+            continue
+        rcfile = Path(str(stanza.get("path") or ""))
+        if not _runtime_rescue_shell_path_allowed(rcfile):
+            residuals.append(
+                {
+                    "path": str(rcfile),
+                    "reason": "shell stanza path is not an owned startup file",
+                }
+            )
+            continue
+        try:
+            content = rcfile.read_text(encoding="utf-8")
+        except OSError as exc:
+            residuals.append({"path": str(rcfile), "reason": str(exc)[:400]})
+            continue
+        if _sha256_bytes(content.encode("utf-8")) != stanza.get("current_sha256"):
+            residuals.append(
+                {
+                    "path": str(rcfile),
+                    "reason": "shell rc changed after plan; doctor --fix-rc was not applied",
+                }
+            )
+            continue
+        if _rc_has_unclosed_vibecrafted_block(content):
+            residuals.append(
+                {
+                    "path": str(rcfile),
+                    "reason": "unclosed Vibecrafted block; attribution is ambiguous",
+                }
+            )
+            continue
+        proposed = _doctor_repair_rc_content(
+            content, ensure_helper=False, ensure_path=ensure_path
+        )
+        if _sha256_bytes(proposed.encode("utf-8")) != stanza.get("proposed_sha256"):
+            residuals.append(
+                {
+                    "path": str(rcfile),
+                    "reason": "doctor --fix-rc proposed edit drifted from the plan",
+                }
+            )
+            continue
+        backup = rcfile.with_name(rcfile.name + ".vibecrafted-rc-bak")
+        try:
+            if not backup.exists():
+                shutil.copy2(rcfile, backup)
+            mode = stat.S_IMODE(rcfile.stat().st_mode)
+            _atomic_bytes_file(rcfile, proposed.encode("utf-8"), mode=mode)
+        except OSError as exc:
+            residuals.append({"path": str(rcfile), "reason": str(exc)[:400]})
+    return residuals
+
+
 def _runtime_owned_path_is_managed(path: Path, paths: Mapping[str, Path]) -> bool:
     return _receipt_path_is_allowed(
         path, paths
@@ -17454,14 +17920,15 @@ def _classify_runtime_backup_entry(
 def _classify_runtime_owned_file(
     path: Path, expected_digest: str, paths: Mapping[str, Path]
 ) -> dict[str, str]:
+    occupant = _runtime_owned_occupant_state(path)
     record = {
         "path": str(path),
         "kind": "file",
         "class": "present",
         "reason": "",
         "receipt_sha256": expected_digest,
-        "current_sha256": "",
-        "current_target": "",
+        "disposition": "",
+        **occupant,
     }
     if not _runtime_owned_path_is_managed(path, paths):
         record.update(
@@ -17473,17 +17940,46 @@ def _classify_runtime_owned_file(
     except RuntimeError as exc:
         record.update({"class": "unsafe", "reason": str(exc)})
         return record
-    if not _path_present(path):
-        record.update({"class": "live_damage", "reason": "owned file is missing"})
-        return record
-    if path.is_symlink() or not path.is_file():
+    if occupant["current_type"] == "absent":
         record.update(
-            {"class": "live_damage", "reason": "owned file is not a regular file"}
+            {
+                "class": "live_damage",
+                "reason": "owned file is missing",
+                "disposition": "republish",
+            }
         )
         return record
-    actual = _sha256_path(path)
-    record["current_sha256"] = actual
-    if actual != expected_digest:
+    if occupant["current_type"] != "file":
+        disposition = _runtime_rescue_occupant_disposition(
+            path, "file", occupant, paths
+        )
+        record["disposition"] = disposition
+        if disposition == "preserve":
+            record.update(
+                {
+                    "class": "unknown_ownership",
+                    "reason": (
+                        "receipted file has an unproven nonregular replacement; "
+                        "current occupant is not ownership proof"
+                    ),
+                }
+            )
+            return record
+        record.update(
+            {
+                "class": "live_damage",
+                "reason": (
+                    "owned file is not a regular file; planned disposition is "
+                    f"republish over {occupant['current_type']}"
+                ),
+            }
+        )
+        return record
+    record["occupant_proof"] = (
+        "receipt_digest" if occupant["current_sha256"] == expected_digest else "none"
+    )
+    record["disposition"] = "republish"
+    if occupant["current_sha256"] != expected_digest:
         record.update({"class": "live_damage", "reason": "owned file digest differs"})
     return record
 
@@ -17491,15 +17987,16 @@ def _classify_runtime_owned_file(
 def _classify_runtime_owned_symlink(
     path: Path, expected_target: str, paths: Mapping[str, Path]
 ) -> dict[str, str]:
+    occupant = _runtime_owned_occupant_state(path)
     record = {
         "path": str(path),
         "kind": "symlink",
         "class": "present",
         "reason": "",
         "receipt_sha256": "",
-        "current_sha256": "",
-        "current_target": "",
         "receipt_target": expected_target,
+        "disposition": "",
+        **occupant,
     }
     if not _runtime_owned_path_is_managed(path, paths):
         record.update(
@@ -17511,13 +18008,40 @@ def _classify_runtime_owned_symlink(
     except RuntimeError as exc:
         record.update({"class": "unsafe", "reason": str(exc)})
         return record
-    if not _path_present(path):
-        record.update({"class": "live_damage", "reason": "owned symlink is missing"})
+    if occupant["current_type"] == "absent":
+        record.update(
+            {
+                "class": "live_damage",
+                "reason": "owned symlink is missing",
+                "disposition": "republish",
+            }
+        )
         return record
-    if not path.is_symlink():
-        record.update({"class": "live_damage", "reason": "owned path is not a symlink"})
+    if occupant["current_type"] != "symlink":
+        disposition = _runtime_rescue_occupant_disposition(
+            path, "symlink", occupant, paths
+        )
+        record["disposition"] = disposition
+        if disposition == "preserve":
+            record.update(
+                {
+                    "class": "unknown_ownership",
+                    "reason": (
+                        "receipted symlink has an unproven replacement; "
+                        "current occupant is not ownership proof"
+                    ),
+                }
+            )
+            return record
+        record.update(
+            {
+                "class": "live_damage",
+                "reason": "owned path is not a symlink",
+                "disposition": disposition,
+            }
+        )
         return record
-    record["current_target"] = os.readlink(path)
+    record["disposition"] = "republish"
     try:
         resolved = str(path.resolve(strict=True))
     except OSError:
@@ -17529,8 +18053,68 @@ def _classify_runtime_owned_symlink(
         )
         return record
     record["current_target"] = resolved
+    record["occupant_proof"] = "receipt_target" if resolved == expected_target else "none"
     if resolved != expected_target:
         record.update({"class": "live_damage", "reason": "owned symlink target differs"})
+    return record
+
+
+def _classify_runtime_owned_dir(
+    path: Path, paths: Mapping[str, Path]
+) -> dict[str, str]:
+    occupant = _runtime_owned_occupant_state(path)
+    record = {
+        "path": str(path),
+        "kind": "directory",
+        "class": "present",
+        "reason": "",
+        "receipt_sha256": "",
+        "disposition": "",
+        **occupant,
+    }
+    if not _runtime_owned_path_is_managed(path, paths):
+        record.update(
+            {"class": "unsafe", "reason": "owned directory path escapes managed roots"}
+        )
+        return record
+    try:
+        _assert_runtime_physical_path(path, leaf_symlink=True)
+    except RuntimeError as exc:
+        record.update({"class": "unsafe", "reason": str(exc)})
+        return record
+    if occupant["current_type"] == "absent":
+        record.update(
+            {
+                "class": "live_damage",
+                "reason": "owned directory is missing",
+                "disposition": "republish",
+            }
+        )
+        return record
+    if occupant["current_type"] != "directory":
+        disposition = _runtime_rescue_occupant_disposition(
+            path, "directory", occupant, paths
+        )
+        record["disposition"] = disposition
+        if disposition == "preserve":
+            record.update(
+                {
+                    "class": "unknown_ownership",
+                    "reason": (
+                        "receipted directory has an unproven replacement; "
+                        "current occupant is not ownership proof"
+                    ),
+                }
+            )
+            return record
+        record.update(
+            {
+                "class": "live_damage",
+                "reason": "owned path is not a directory",
+            }
+        )
+        return record
+    record["occupant_proof"] = "receipt_path"
     return record
 
 
@@ -17544,6 +18128,8 @@ def _runtime_rescue_ownership_inventory(
         items.append(
             _classify_runtime_owned_symlink(Path(raw), str(target), paths)
         )
+    for raw in receipt.get("owned_dirs", []):
+        items.append(_classify_runtime_owned_dir(Path(raw), paths))
     return items
 
 
@@ -17595,7 +18181,13 @@ def _runtime_rescue_target_identity(payload_root: Path) -> dict[str, Any]:
     identity: dict[str, Any] = {
         "payload_root": str(payload_root),
         "version": "",
+        "version_identity_sha256": "",
         "payload_sha256": "",
+        "inventory_sha256": "",
+        "inventory": [],
+        "inventory_count": 0,
+        "inventory_verified": False,
+        "provenance_verified": False,
         "installer_supports_rescue": False,
         "usable": False,
         "reason": "",
@@ -17613,17 +18205,28 @@ def _runtime_rescue_target_identity(payload_root: Path) -> dict[str, Any]:
         provenance = payload_root / "source-provenance.json"
         if provenance.is_file():
             material += provenance.read_bytes()
-        identity["payload_sha256"] = _sha256_bytes(material)
+        identity["version_identity_sha256"] = _sha256_bytes(material)
         installer = payload_root / "scripts/vetcoders_install.py"
         identity["installer_supports_rescue"] = _runtime_installer_supports_rescue(
             installer
         )
         if not installer.is_file():
             raise RuntimeError("Runtime Pack installer is missing")
+        inventory = _runtime_rescue_payload_inventory(payload_root)
+        identity["inventory"] = inventory
+        identity["inventory_count"] = len(inventory)
+        identity["inventory_sha256"] = _canonical_digest({"files": inventory})
+        identity["payload_sha256"] = _runtime_rescue_payload_digest(payload_root)
+        provenance_verified, _provenance_digest = _runtime_rescue_verify_pack_provenance(
+            payload_root, inventory
+        )
+        identity["provenance_verified"] = provenance_verified
+        identity["inventory_verified"] = True
         identity["usable"] = True
     except (OSError, RuntimeError, ValueError) as exc:
         identity["reason"] = str(exc)[:1200]
         identity["usable"] = False
+        identity["inventory_verified"] = False
     return identity
 
 
@@ -17658,49 +18261,44 @@ def _runtime_rescue_snapshot_pre_rescue(
     paths: Mapping[str, Path],
     receipt: Mapping[str, Any],
     evidence_root: Path,
+    payload_root: Path,
 ) -> dict[str, Any]:
     """Copy currently recoverable owned surfaces. This is damaged state, not a restorepoint."""
     snapshot_root = evidence_root / "pre-rescue"
     snapshot_root.mkdir(parents=True, exist_ok=True)
     captured: list[dict[str, str]] = []
-    candidates: list[Path] = [
-        _runtime_receipt_path(paths["runtime_home"]),
-        paths["runtime_home"] / "active.json",
-        paths["runtime_home"] / "tools/vibecrafted-current",
-    ]
-    candidates.extend(Path(raw) for raw in receipt.get("owned_files", {}))
-    candidates.extend(Path(raw) for raw in receipt.get("owned_symlinks", {}))
     seen: set[str] = set()
-    for path in candidates:
+    for path in _runtime_rescue_expected_publication_paths(
+        paths, payload_root, receipt
+    ):
         key = str(path)
         if key in seen:
             continue
         seen.add(key)
-        if not _runtime_owned_path_is_managed(path, paths):
+        if not (
+            _runtime_owned_path_is_managed(path, paths)
+            or _runtime_rescue_shell_path_allowed(path)
+        ):
             continue
         try:
             _assert_runtime_physical_path(path, leaf_symlink=True)
         except RuntimeError:
             continue
         token = hashlib.sha256(key.encode("utf-8")).hexdigest()[:20]
+        occupant = _runtime_owned_occupant_state(path)
         entry = {
             "path": key,
             "rel": token,
-            "kind": "absent",
-            "sha256": "",
-            "target": "",
+            "kind": occupant["current_type"],
+            "sha256": occupant["current_sha256"],
+            "target": occupant["current_target"],
+            "listing": occupant["current_listing"],
         }
-        if not _path_present(path):
+        if occupant["current_type"] == "absent":
             captured.append(entry)
             continue
         destination = snapshot_root / token
         _copy_path_to_backup(path, destination)
-        if path.is_symlink():
-            entry.update(kind="symlink", target=os.readlink(path))
-        elif path.is_file():
-            entry.update(kind="file", sha256=_sha256_path(path))
-        elif path.is_dir():
-            entry["kind"] = "directory"
         captured.append(entry)
     label = {
         "schema": RUNTIME_RESCUE_EVIDENCE_SCHEMA,
@@ -17708,6 +18306,9 @@ def _runtime_rescue_snapshot_pre_rescue(
         "healthy_restorepoint": False,
         "paths": captured,
     }
+    label["evidence_sha256"] = _runtime_rescue_snapshot_evidence_digest(
+        label, snapshot_root
+    )
     _atomic_json_file(snapshot_root / "label.json", label)
     return label
 
@@ -17716,9 +18317,28 @@ def _runtime_rescue_restore_pre_rescue(
     paths: Mapping[str, Path], label: Mapping[str, Any], snapshot_root: Path
 ) -> list[dict[str, str]]:
     residuals: list[dict[str, str]] = []
+    try:
+        _runtime_rescue_validate_snapshot_evidence(snapshot_root, label)
+    except (OSError, RuntimeError) as exc:
+        return [
+            {
+                "path": str(snapshot_root),
+                "reason": f"refusing to restore unvalidated pre-rescue evidence: {exc}",
+            }
+        ]
+    if label.get("healthy_restorepoint"):
+        return [
+            {
+                "path": str(snapshot_root),
+                "reason": "refusing to treat damaged-pre-rescue evidence as a healthy restorepoint",
+            }
+        ]
     for entry in label.get("paths", []):
         destination = Path(entry["path"])
-        if not _runtime_owned_path_is_managed(destination, paths):
+        if not (
+            _runtime_owned_path_is_managed(destination, paths)
+            or _runtime_rescue_shell_path_allowed(destination)
+        ):
             residuals.append(
                 {
                     "path": str(destination),
@@ -17768,15 +18388,43 @@ def _runtime_rescue_rollback_captured_state(
                 }
             )
     archive_path = Path(str((journal.get("archived_receipt") or {}).get("path") or ""))
+    expected_receipt = str(
+        (journal.get("archived_receipt") or {}).get("sha256") or ""
+    )
     evidence = original_bytes
-    if evidence is None and archive_path.is_file():
+    if archive_path.is_file():
         try:
-            evidence = archive_path.read_bytes()
+            archived = archive_path.read_bytes()
+            archived_digest = _sha256_bytes(archived)
+            if expected_receipt and archived_digest != expected_receipt:
+                residuals.append(
+                    {
+                        "path": str(archive_path),
+                        "reason": "archived original receipt digest drifted; bytes were not restored from it",
+                    }
+                )
+            elif evidence is None:
+                evidence = archived
+            elif _sha256_bytes(evidence) != archived_digest:
+                residuals.append(
+                    {
+                        "path": str(archive_path),
+                        "reason": "in-memory receipt evidence disagrees with the archived original",
+                    }
+                )
         except OSError as exc:
             residuals.append({"path": str(archive_path), "reason": str(exc)[:400]})
     if evidence is not None:
         try:
-            receipt_path.write_bytes(evidence)
+            if expected_receipt and _sha256_bytes(evidence) != expected_receipt:
+                residuals.append(
+                    {
+                        "path": str(receipt_path),
+                        "reason": "original receipt evidence digest does not match the archived digest",
+                    }
+                )
+            else:
+                receipt_path.write_bytes(evidence)
         except OSError as exc:
             residuals.append({"path": str(receipt_path), "reason": str(exc)[:400]})
     return residuals
@@ -17785,7 +18433,8 @@ def _runtime_rescue_rollback_captured_state(
 def _runtime_rescue_verify_destination(
     paths: Mapping[str, Path],
 ) -> tuple[bool, str]:
-    """Destination verification only. Success is not a historical restore claim."""
+    """Complete destination verification. A receipt is not a healthy shell."""
+    errors: list[str] = []
     try:
         runtime_home = paths["runtime_home"]
         receipt = _load_runtime_install_receipt(_runtime_receipt_path(runtime_home))
@@ -17810,15 +18459,113 @@ def _runtime_rescue_verify_destination(
         if not current.is_symlink():
             return False, "destination selector is not a symlink"
         generation = current.resolve(strict=True)
-        errors = _runtime_generation_payload_errors(generation)
-        if errors:
-            return False, "destination generation is unusable: " + "; ".join(errors[:4])
-        for name in ("vibecrafted", "vc-terminal", "vc-frame"):
+        payload_errors = _runtime_generation_payload_errors(generation)
+        if payload_errors:
+            errors.append(
+                "destination generation is unusable: " + "; ".join(payload_errors[:4])
+            )
+        active_path = runtime_home / "active.json"
+        if not active_path.is_file() or active_path.is_symlink():
+            errors.append("destination active identity is not a regular file")
+        else:
+            active = json.loads(active_path.read_text(encoding="utf-8"))
+            if not isinstance(active, dict):
+                errors.append("destination active identity is malformed")
+            else:
+                if str(active.get("version") or "") != generation.name:
+                    errors.append("active version disagrees with selector identity")
+                if Path(str(active.get("runtime_root") or "")) != generation:
+                    errors.append("active runtime_root disagrees with selector identity")
+                if str(receipt.get("version") or "") != generation.name:
+                    errors.append("receipt version disagrees with selector identity")
+        for raw, digest in receipt.get("owned_files", {}).items():
+            path = Path(raw)
+            occupant = _runtime_owned_occupant_state(path)
+            if (
+                occupant["current_type"] != "file"
+                or occupant["current_sha256"] != digest
+            ):
+                errors.append(
+                    "owned file is not the receipted regular file: "
+                    f"{path.name} ({occupant['current_type'] or 'absent'})"
+                )
+        for raw, target in receipt.get("owned_symlinks", {}).items():
+            path = Path(raw)
+            if not path.is_symlink():
+                errors.append(f"owned symlink is missing or not a symlink: {path.name}")
+                continue
+            try:
+                if str(path.resolve(strict=True)) != target:
+                    errors.append(f"owned symlink target drifted: {path.name}")
+            except OSError:
+                errors.append(f"owned symlink is dangling: {path.name}")
+        for raw in receipt.get("owned_dirs", []):
+            path = Path(raw)
+            if not path.is_dir() or path.is_symlink():
+                errors.append(f"owned directory is missing or not a directory: {path}")
+        expected_names = set(_RUNTIME_WRAPPER_VERBS)
+        expected_names.update({"vc-terminal", SECURE_WALKAROUND_LAUNCHER})
+        bin_dir = generation / "bin"
+        if bin_dir.is_dir():
+            expected_names.update(_runtime_published_launcher_names(bin_dir))
+        for name in sorted(expected_names):
             launcher = paths["launcher_home"] / name
-            if not launcher.is_file() or not os.access(launcher, os.X_OK):
-                return False, f"destination launcher is unusable: {name}"
+            if (
+                launcher.is_symlink()
+                or not launcher.is_file()
+                or not os.access(launcher, os.X_OK)
+            ):
+                errors.append(f"destination launcher is unusable: {name}")
+        skills = discover_skills(generation)
+        if not skills:
+            errors.append("destination skills are missing")
+        for runtime in STANDARD_VIEW_RUNTIMES:
+            view = runtime_skills_dir(runtime)
+            for skill in skills:
+                link = view / skill.name
+                if not link.is_symlink():
+                    errors.append(f"skill projection missing: {runtime}/{skill.name}")
+                    continue
+                try:
+                    if link.resolve(strict=True) != skill.resolve():
+                        errors.append(f"skill projection drifted: {runtime}/{skill.name}")
+                except OSError:
+                    errors.append(f"skill projection dangling: {runtime}/{skill.name}")
+        product = paths["product_config"]
+        required_config = (
+            product / "vc-frame" / "config.kdl",
+            product / "vc-terminal" / "vc-terminal.toml",
+            product / "vc-terminal" / _PRODUCT_PRIMARY_SHELL_NAME,
+        )
+        for required in required_config:
+            if not required.is_file() or required.is_symlink():
+                errors.append(f"destination product config is missing: {required.name}")
+        for required_dir in (
+            product / "vc-frame" / "layouts",
+            product / "vc-frame" / "themes",
+        ):
+            if not required_dir.is_dir() or required_dir.is_symlink():
+                errors.append(
+                    f"destination product config directory is missing: {required_dir.name}"
+                )
+        generation_shell = (
+            generation / "vibecrafted-core/vibecrafted_core/runtime/shell"
+        )
+        for helper_name in ("vetcoders.sh", "vetcoders.zsh"):
+            if (generation_shell / helper_name).is_file() and not (
+                product / "shell" / helper_name
+            ).is_file():
+                errors.append(f"destination shell helper is missing: {helper_name}")
+        for finding in _host_shell_contract_findings():
+            if finding.level == "fail":
+                errors.append(finding.message)
+        shell = _runtime_rescue_interactive_shell_check()
+        if shell.get("ok") != "true":
+            errors.append(shell.get("reason") or "isolated interactive shell is unhealthy")
     except (OSError, RuntimeError, ValueError, TypeError, KeyError) as exc:
         return False, str(exc)[:1200]
+    if errors:
+        return False, "; ".join(errors[:16])
     return True, ""
 
 
@@ -17841,6 +18588,7 @@ def _build_runtime_rescue_plan(
         if receipt and target["usable"]
         else []
     )
+    shell = _runtime_rescue_shell_plan()
     current = paths["runtime_home"] / "tools/vibecrafted-current"
     generation = ""
     try:
@@ -17860,10 +18608,13 @@ def _build_runtime_rescue_plan(
     missing = [entry for entry in backups if entry["class"] == "missing_historical"]
     unsafe = [
         entry
-        for entry in (*backups, *ownership, *collisions)
+        for entry in (*backups, *ownership, *collisions, *shell["refused"])
         if entry["class"] in {"unsafe", "unknown_ownership"}
     ]
     live_damage = [entry for entry in ownership if entry["class"] == "live_damage"]
+    shell_needs_repair = any(
+        stanza.get("action") == "doctor_fix_rc" for stanza in shell["stanzas"]
+    )
     historical_rollback = "unavailable" if missing else "available"
     if receipt_error:
         status, reason = "unusable", receipt_error
@@ -17875,7 +18626,7 @@ def _build_runtime_rescue_plan(
             "unsafe or unknown-ownership paths refuse rescue; "
             "normal install validation is unchanged",
         )
-    elif missing or live_damage:
+    elif missing or live_damage or shell_needs_repair or shell["interactive_shell"].get("ok") != "true":
         status, reason = (
             "rescueable",
             "historical rollback is unavailable; explicit rescue can republish "
@@ -17904,6 +18655,31 @@ def _build_runtime_rescue_plan(
                 "reason": (
                     "converge receipted runtime/selectors/launchers/skills/config "
                     "from the verified target pack"
+                ),
+            }
+        )
+    for entry in live_damage:
+        if entry.get("current_type") and entry.get("current_type") != entry.get("kind"):
+            repair_actions.append(
+                {
+                    "action": "replace_nonregular_owned_path",
+                    "path": entry["path"],
+                    "current_type": entry.get("current_type", ""),
+                    "current_target": entry.get("current_target", ""),
+                    "disposition": entry.get("disposition") or "republish",
+                    "reason": (
+                        "explicit planned replacement of a nonregular occupant; "
+                        "the current occupant is not ownership proof"
+                    ),
+                }
+            )
+    if shell_needs_repair:
+        repair_actions.append(
+            {
+                "action": "doctor_fix_rc",
+                "reason": (
+                    "apply planned doctor --fix-rc stanza edits only; "
+                    "user rc content outside the owned stanza is preserved"
                 ),
             }
         )
@@ -17939,6 +18715,15 @@ def _build_runtime_rescue_plan(
         "live_damage": live_damage,
         "unsafe": [entry for entry in (*backups, *ownership) if entry["class"] == "unsafe"],
         "collisions": collisions,
+        "shell": {
+            "stanzas": shell["stanzas"],
+            "refused": shell["refused"],
+            "interactive_shell": {
+                key: value
+                for key, value in shell["interactive_shell"].items()
+                if key != "stderr"
+            },
+        },
         "repair_actions": repair_actions,
         "bootstrap": {
             "required": not bool(target.get("installer_supports_rescue")),
@@ -17961,10 +18746,13 @@ def _build_runtime_rescue_plan(
             "generation": plan["generation"],
             "target": {
                 "version": target.get("version"),
+                "version_identity_sha256": target.get("version_identity_sha256"),
                 "payload_sha256": target.get("payload_sha256"),
+                "inventory_sha256": target.get("inventory_sha256"),
                 "payload_root": target.get("payload_root"),
             },
             "collisions": collisions,
+            "shell": plan["shell"],
         }
     )
     plan["input_digest"] = input_digest
@@ -18222,7 +19010,9 @@ def _runtime_rescue_apply(
         (evidence_root / "original-receipt.sha256").write_text(
             plan["receipt"]["sha256"] + "\n", encoding="utf-8"
         )
-        snapshot = _runtime_rescue_snapshot_pre_rescue(paths, receipt, evidence_root)
+        snapshot = _runtime_rescue_snapshot_pre_rescue(
+            paths, receipt, evidence_root, Path(args.payload_root)
+        )
         missing_backups = {
             entry["backup"] for entry in plan["missing_backups"] if entry.get("backup")
         }
@@ -18255,6 +19045,8 @@ def _runtime_rescue_apply(
             },
             "missing_history": plan["missing_backups"],
             "repair_actions": plan["repair_actions"],
+            "shell": plan.get("shell") or {},
+            "evidence_sha256": snapshot.get("evidence_sha256"),
             "label_paths": snapshot.get("paths", []),
         }
         _atomic_json_file(journal_path, journal)
@@ -18320,7 +19112,16 @@ def _runtime_rescue_finish(
         )
         print(json.dumps(envelope, sort_keys=True))
         return 2
+    shell_residuals = _runtime_rescue_apply_shell_stanzas(
+        list(((journal.get("shell") or {}).get("stanzas") or []))
+    )
     verified, verify_reason = _runtime_rescue_verify_destination(paths)
+    residuals = list(shell_residuals)
+    if not verified:
+        residuals.append({"path": str(receipt_path), "reason": verify_reason})
+    if residuals:
+        verified = False
+        verify_reason = verify_reason or residuals[0]["reason"]
     receipt = _load_runtime_install_receipt(receipt_path)
     rescue = dict(receipt.get("rescue") or journal)
     rescue.update(
@@ -18358,9 +19159,7 @@ def _runtime_rescue_finish(
         reason="" if verified else verify_reason,
         healthy_restorepoint=verified,
         runtime=result,
-        residuals=[]
-        if verified
-        else [{"path": str(receipt_path), "reason": verify_reason}],
+        residuals=residuals,
     )
     print(json.dumps(envelope, sort_keys=True))
     return 0 if verified else 2

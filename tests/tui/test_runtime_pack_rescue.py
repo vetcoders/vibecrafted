@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from argparse import Namespace
 from pathlib import Path
 
@@ -369,3 +370,171 @@ def test_wrapper_help_and_source_support_marker():
     assert installer.RUNTIME_RESCUE_PLAN_SCHEMA in Path(installer.__file__).read_text(
         encoding="utf-8"
     )
+
+
+def test_target_identity_binds_payload_bytes_not_version_hash(tmp_path, installed, capsys):
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    _, first = _plan(payload, capsys)
+    version_identity = first["target"]["version_identity_sha256"]
+    payload_digest = first["target"]["payload_sha256"]
+    inventory_digest = first["target"]["inventory_sha256"]
+    assert first["target"]["inventory_verified"] is True
+    assert first["target"]["inventory_count"] >= 1
+    assert payload_digest != version_identity
+    assert inventory_digest != version_identity
+    launcher = payload / "bin/vibecrafted"
+    launcher.write_text(launcher.read_text() + "# payload-bind probe\n")
+    _, second = _plan(payload, capsys)
+    assert second["target"]["version_identity_sha256"] == version_identity
+    assert second["target"]["payload_sha256"] != payload_digest
+    assert second["target"]["inventory_sha256"] != inventory_digest
+    assert second["plan_digest"] != first["plan_digest"]
+
+
+def test_verify_destination_refuses_wrapper_skill_config_and_shell_drift(
+    tmp_path, installed, capsys
+):
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    _, plan = _plan(payload, capsys)
+    code, result = _apply(payload, capsys, plan["plan_digest"])
+    assert code == 0
+    assert result["healthy_restorepoint"] is True
+    wrapper = paths["launcher_home"] / "vc-status"
+    wrapper.unlink()
+    wrapper.symlink_to(paths["runtime_home"] / "tools/vibecrafted-current/.venv/bin/vc-status")
+    skill = Path.home() / ".agents/skills/vc-audit"
+    if skill.exists() or skill.is_symlink():
+        skill.unlink()
+    config = paths["product_config"] / "vc-terminal" / "vc-terminal.toml"
+    config.unlink()
+    zshrc = Path.home() / ".zshrc"
+    zshrc.write_text(
+        f"{installer._shell_source_line()}\n"
+        "source ~/.local/share/vibecrafted/tools/vibecrafted-current/runtime/shell/vetcoders.sh\n",
+        encoding="utf-8",
+    )
+    verified, reason = installer._runtime_rescue_verify_destination(paths)
+    assert verified is False
+    assert "vc-status" in reason
+    assert "vc-audit" in reason or "skill" in reason
+    assert "vc-terminal.toml" in reason or "product config" in reason
+    assert _receipt(paths).is_file()
+
+
+def test_classify_records_symlink_target_and_directory_listing_for_binding(
+    installed, capsys
+):
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    owned = paths["launcher_home"] / "vibecrafted"
+    owned.unlink()
+    owned.symlink_to("/tmp/rescue-missing-venv/vibecrafted")
+    occupied = paths["launcher_home"] / "vc-help"
+    occupied.unlink()
+    occupied.mkdir()
+    (occupied / "keep.txt").write_text("foreign dir\n")
+    _, plan = _plan(payload, capsys)
+    drifted = next(
+        entry
+        for entry in plan["ownership"]
+        if entry["path"] == str(owned)
+    )
+    assert drifted["current_type"] == "symlink"
+    assert drifted["current_target"] == "/tmp/rescue-missing-venv/vibecrafted"
+    assert drifted["class"] == "live_damage"
+    assert drifted["disposition"] == "republish"
+    foreign_dir = next(
+        entry
+        for entry in plan["ownership"]
+        if entry["path"] == str(occupied)
+    )
+    assert foreign_dir["current_type"] == "directory"
+    assert "keep.txt" in foreign_dir["current_listing"]
+    assert foreign_dir["class"] == "unknown_ownership"
+    assert plan["status"] == "refused"
+    owned.unlink()
+    owned.symlink_to("/tmp/rescue-missing-venv/other")
+    code, result = _apply(payload, capsys, plan["plan_digest"])
+    assert code == 2
+    assert result["status"] == "refused"
+    assert "input drift" in result["reason"]
+    assert (occupied / "keep.txt").read_text() == "foreign dir\n"
+
+
+def test_snapshot_covers_new_publication_and_validates_evidence(
+    tmp_path, installed, capsys, monkeypatch
+):
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    new_skill = payload / "vibecrafted-core/vibecrafted_core/skills/vc-rescue-probe/SKILL.md"
+    new_skill.parent.mkdir(parents=True, exist_ok=True)
+    new_skill.write_text("# vc-rescue-probe\n")
+    projected = Path.home() / ".agents/skills/vc-rescue-probe"
+    assert not projected.exists()
+    _, plan = _plan(payload, capsys)
+    original = installer._publish_runtime_config_transaction
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("injected interrupt")
+
+    monkeypatch.setattr(installer, "_publish_runtime_config_transaction", boom)
+    code, first = _apply(payload, capsys, plan["plan_digest"])
+    assert code == 2
+    snapshot = Path(first["pre_rescue_snapshot"]["path"])
+    label = json.loads((snapshot / "label.json").read_text(encoding="utf-8"))
+    assert label["healthy_restorepoint"] is False
+    assert re.fullmatch(r"[0-9a-f]{64}", label["evidence_sha256"])
+    assert any(
+        entry["path"] == str(projected) and entry["kind"] == "absent"
+        for entry in label["paths"]
+    )
+    captured = next(entry for entry in label["paths"] if entry["kind"] == "file")
+    tampered = snapshot / captured["rel"]
+    tampered.write_bytes(tampered.read_bytes() + b"tamper")
+    residuals = installer._runtime_rescue_restore_pre_rescue(paths, label, snapshot)
+    assert residuals
+    assert "evidence" in residuals[0]["reason"]
+    archive = Path(first["archived_receipt"]["path"])
+    assert installer._sha256_bytes(archive.read_bytes()) == first["archived_receipt"]["sha256"]
+
+
+def test_fix_rc_is_explicit_planned_stanza_preserving_user_content(
+    installed, capsys
+):
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    zshrc = Path.home() / ".zshrc"
+    user = "# keep my aliases\nalias keep-me=true\n"
+    zshrc.write_text(
+        user + installer._shell_source_line() + "\n",
+        encoding="utf-8",
+    )
+    code, plan = _plan(payload, capsys)
+    assert code == 0
+    stanza = next(
+        item
+        for item in plan["shell"]["stanzas"]
+        if item["path"] == str(zshrc)
+    )
+    assert stanza["owner"] == "doctor --fix-rc"
+    assert stanza["action"] == "doctor_fix_rc"
+    apply_code, result = _apply(payload, capsys, plan["plan_digest"])
+    assert apply_code == 0
+    assert result["healthy_restorepoint"] is True
+    repaired = zshrc.read_text(encoding="utf-8")
+    assert "alias keep-me=true" in repaired
+    assert installer._shell_source_line() not in repaired
+    assert installer._launcher_path_line() in repaired
+    unclosed = Path.home() / ".zprofile"
+    unclosed.write_text(
+        "# user login\n# >>> vibecrafted >>>\n"
+        + installer._shell_source_line()
+        + "\nexport KEEP_ME=1\n",
+        encoding="utf-8",
+    )
+    refuse_code, refused = _plan(payload, capsys)
+    assert refuse_code == 2
+    assert refused["status"] == "refused"
+    assert unclosed.read_text(encoding="utf-8").endswith("export KEEP_ME=1\n")

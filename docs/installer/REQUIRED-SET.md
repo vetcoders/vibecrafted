@@ -205,15 +205,23 @@ python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <
 ```
 
 `--plan` is read-only. It inventories receipt digest, generation, ownership
-hashes/targets, and backup classes (`present`, `missing_historical`,
+hashes/targets (including nonregular current type, symlink target, and
+directory listing), the verified target payload inventory/content digest
+(not a VERSION hash labeled as a payload hash), host-shell `--fix-rc`
+stanzas, and backup classes (`present`, `missing_historical`,
 `live_damage`, `unsafe`). Historical rollback is reported unavailable when
 preimages are gone. Original receipt bytes are preserved as evidence.
 
-`--apply` binds to that plan digest, takes the existing install lease,
-snapshots the live tree as `damaged-pre-rescue` (never a healthy
-restorepoint), archives the original receipt, drops only missing-historical
-backup map entries, and reuses the existing publication transaction. Unsafe
-or unknown-ownership paths refuse. User config and foreign commands stay.
+`--apply` binds to that plan digest, revalidates the live payload inventory
+under the existing install lease, snapshots every path publication can
+mutate as `damaged-pre-rescue` (never a healthy restorepoint; evidence is
+hashed before restore), archives the original receipt, drops only
+missing-historical backup map entries, and reuses the existing publication
+transaction. Destination verification covers selectors, active identity,
+every receipted file/symlink/dir, every expected launcher/skill/config
+projection, and an isolated interactive shell. A healthy receipt is not a
+healthy shell. Unsafe or unknown-ownership paths refuse. User config,
+foreign commands, and unplanned rc content stay.
 A target pack whose embedded installer lacks `--rescue` is not rewritten;
 bootstrap with this source installer against the verified payload-root.
 Compatibility: `tests/tui/test_runtime_pack_rescue.py`.
