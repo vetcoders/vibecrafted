@@ -2665,7 +2665,7 @@ def _attach_interactive_process_identity(
 # reap or leak at exit) and, at terminalization, as one synchronous bounded
 # flush before the owner returns. The snapshot authority stays single and the
 # scope stays exact: every attempt is the same ``sync_state(only_run_id=...)``.
-# Persistent failure is abandoned loudly — stderr, a durable
+# Persistent terminal failure is abandoned loudly — stderr, a durable
 # ``projection:abandoned`` event and the meta receipt — while meta.json plus the
 # lifecycle event remain the durable truth a later full board sync re-projects.
 #
@@ -2673,10 +2673,16 @@ def _attach_interactive_process_identity(
 # with exponential backoff 0.5s·2^(n-1) capped at 30s. The cap constrains
 # frequency rather than declaring a healthy owner permanently invisible after
 # an arbitrary number of transient storage failures.
-# TERMINAL phase (owner exit): at most _PROJECTION_TERMINAL_BUDGET_SECONDS of
-# wall clock and _PROJECTION_TERMINAL_ATTEMPT_LIMIT attempts, interrupt-safe.
+# TERMINAL phase (owner exit): a bounded retry-scheduling/sleep budget of
+# _PROJECTION_TERMINAL_BUDGET_SECONDS and _PROJECTION_TERMINAL_ATTEMPT_LIMIT
+# attempts, interrupt-safe. A blocking filesystem syscall remains outside that
+# budget.
 _PROJECTION_RETRY_INITIAL_SECONDS = 0.5
 _PROJECTION_RETRY_MAX_SECONDS = 30.0
+# The first power that reaches the 30-second ceiling: 0.5 * 2**6 == 32.
+# Clamp the exponent before calculating the power so an arbitrarily long
+# storage outage cannot make retry scheduling itself overflow.
+_PROJECTION_RETRY_MAX_EXPONENT = 6
 _PROJECTION_TERMINAL_BUDGET_SECONDS = 5.0
 _PROJECTION_TERMINAL_ATTEMPT_LIMIT = 6
 # ControlPlaneLockBusy is kept for completeness: the scoped projection takes no
@@ -2702,7 +2708,7 @@ def _project_interactive_snapshot(run_id: str) -> str:
 
 
 def _projection_backoff_seconds(failures: int) -> float:
-    exponent = max(int(failures) - 1, 0)
+    exponent = min(max(int(failures) - 1, 0), _PROJECTION_RETRY_MAX_EXPONENT)
     return min(
         _PROJECTION_RETRY_MAX_SECONDS,
         _PROJECTION_RETRY_INITIAL_SECONDS * (2.0**exponent),

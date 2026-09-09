@@ -667,6 +667,8 @@ def test_active_projection_recovers_same_owner_after_former_attempt_limit(
     projection = spawn._InteractiveProjection(
         run_id=run_id, meta_path=meta_path, receipt=receipt, clock=lambda: now[0]
     )
+    assert spawn._projection_backoff_seconds(1025) == 30.0
+    assert spawn._projection_backoff_seconds(10**100) == 30.0
     assert projection.publish() == "pending"
     assert projection.attempts == 1
     assert projection.pump() == "pending"  # not due yet: no busy retry
@@ -689,6 +691,14 @@ def test_active_projection_recovers_same_owner_after_former_attempt_limit(
         e for e in _events_for(home, run_id) if e["kind"] == "projection:abandoned"
     ]
 
+    # A same-owner retry remains schedulable beyond the former float-overflow
+    # boundary, so recovery does not need a new projection object or observer.
+    projection.attempts = projection.failures = 1024
+    now[0] = projection.next_attempt_at
+    assert projection.pump() == "pending"
+    assert projection.attempts == projection.failures == 1025
+    assert projection.next_attempt_at - now[0] == 30.0
+
     # Storage heals while the same owner remains live: no fresh projection
     # object, observe call, or manual sync is needed for recovery.
     monkeypatch.setattr(spawn, "sync_state", lambda only_run_id=None: {})
@@ -696,7 +706,7 @@ def test_active_projection_recovers_same_owner_after_former_attempt_limit(
     assert projection.pump() == "published"
     now[0] += 3600
     assert projection.pump() == "published"
-    assert projection.attempts == 22
+    assert projection.attempts == 1026
     assert json.loads(meta_path.read_text(encoding="utf-8"))["projection"][
         "published_at"
     ]
