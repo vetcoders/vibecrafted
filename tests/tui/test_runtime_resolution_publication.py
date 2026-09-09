@@ -446,10 +446,19 @@ def test_same_setting_kdl_conflict_refuses_publication_and_preserves_evidence(
             "mouse_mode true", "mouse_mode true\ncopy_on_select false"
         ),
     )
-    with pytest.raises(
-        RuntimeError, match="KDL settings conflict with changed shipped defaults"
-    ):
+    with pytest.raises(installer.PreferenceConflict) as caught:
         _install(payload_b, capsys)
+    conflict = caught.value
+    assert conflict.envelope["schema"] == installer.PREFERENCE_CONFLICT_SCHEMA
+    assert conflict.envelope["status"] == "conflict"
+    settings = [
+        setting
+        for item in conflict.envelope.get("files", [])
+        for setting in item.get("settings", [])
+    ]
+    assert "copy_on_select" in settings
+    assert "keep-current" in conflict.envelope["choices"]
+    assert "use-incoming" in conflict.envelope["choices"]
     capsys.readouterr()
     assert _snapshot(product) == before
     assert (paths["runtime_home"] / "active.json").read_bytes() == active
@@ -1658,6 +1667,76 @@ def test_preference_shell_correction_is_exact_not_first_flag():
         previous_toml, extra_toml, incoming_toml, choice="keep-current"
     )
     _assert_toml_tree(kept, tomllib.loads(extra_toml))
+    assert "[terminal.shell]" not in kept
+    assert 'program = "/usr/bin/fish"' not in kept
+    assert 'echo extra' in kept
+
+
+def test_toml_flatten_keeps_shell_record_and_bindings_path():
+    parsed = tomllib.loads(
+        "[terminal]\n"
+        'shell = { program = "/bin/zsh", args = ["-lc"] }\n'
+        "\n"
+        "[[keyboard.bindings]]\n"
+        'key = "B"\n'
+        'action = "Copy"\n'
+        "\n"
+        "[window]\n"
+        "opacity = 0.8\n"
+        "padding = { x = 8, y = 24 }\n"
+    )
+    flat = installer._toml_flatten(parsed)
+    assert flat["terminal.shell"] == {"program": "/bin/zsh", "args": ["-lc"]}
+    assert "terminal.shell.program" not in flat
+    assert "terminal.shell.args" not in flat
+    assert flat["keyboard.bindings"] == [{"key": "B", "action": "Copy"}]
+    assert "keyboard" not in flat
+    assert flat["window.opacity"] == 0.8
+    assert flat["window.padding"] == {"x": 8, "y": 24}
+    assert "window.padding.x" not in flat
+    empty_bindings = installer._toml_flatten(tomllib.loads("[[keyboard.bindings]]\n"))
+    assert empty_bindings == {"keyboard.bindings": [{}]}
+    explicit_empty = installer._toml_flatten(tomllib.loads("[keyboard]\nbindings = []\n"))
+    assert explicit_empty == {"keyboard.bindings": []}
+    assert "keyboard" not in explicit_empty
+
+
+def test_toml_keep_current_nested_shell_replaces_inline_without_duplicate():
+    previous = (
+        "[terminal]\n"
+        "[terminal.shell]\n"
+        'program = "/bin/zsh"\n'
+        'args = ["-lc", "exec \\"launch-primary-shell.zsh\\" operator"]\n'
+    )
+    current = (
+        "[terminal]\n"
+        "[terminal.shell]\n"
+        'program = "/usr/bin/fish"\n'
+        'args = ["-l"]\n'
+    )
+    incoming = (
+        "[terminal]\n"
+        'shell = { program = "/bin/sh", args = ["-c", "exec \\"launch-primary-shell.zsh\\""] }\n'
+        "other = 1\n"
+    )
+    with pytest.raises(ValueError, match="settings conflict"):
+        installer._merge_toml_runtime_preferences(previous, current, incoming)
+    kept = installer._merge_toml_runtime_preferences(
+        previous, current, incoming, choice="keep-current"
+    )
+    _assert_toml_tree(
+        kept,
+        {
+            "terminal": {
+                "shell": {"program": "/usr/bin/fish", "args": ["-l"]},
+                "other": 1,
+            }
+        },
+    )
+    parsed = tomllib.loads(kept)
+    assert parsed["terminal"]["shell"]["program"] == "/usr/bin/fish"
+    assert "shell" in parsed["terminal"]
+    assert kept.count("[terminal.shell]") + kept.count("shell =") == 1
 
 
 def test_published_previous_receipt_rejects_config_conflicts():

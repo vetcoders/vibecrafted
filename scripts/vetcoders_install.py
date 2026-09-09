@@ -15811,12 +15811,37 @@ def _preference_shell_accepts_incoming(previous: Any, current: Any, incoming: An
     return bool(_preference_shell_launcher_name(incoming))
 
 
-def _toml_flatten(value: Any, prefix: str = "") -> dict[str, Any]:
-    """Flatten tables. Lists (including array-of-tables) stay one setting.
+def _toml_is_record_table(value: Any) -> bool:
+    """True for inline-table-shaped records, not grouping tables.
 
-    A table that happens to contain a list is still a table. Collapsing it
-    into one atomic dictionary loses the child path and later assignments
-    land under the wrong header.
+    `shell = { program, args }` and `padding = { x, y }` are one setting.
+    A parent whose child is array-of-tables (list of dicts) must flatten so
+    the list stays at its real path (`keyboard.bindings`, never `keyboard`).
+    A lone list child, including `bindings = []`, is that list setting, not a
+    record wrapper. Nested grouping tables flatten one level and stop at the
+    record (`window.padding` beside `window.opacity`).
+    """
+    if not isinstance(value, dict) or not value:
+        return False
+    if any(isinstance(inner, dict) for inner in value.values()):
+        return False
+    if any(
+        isinstance(inner, list) and any(isinstance(item, dict) for item in inner)
+        for inner in value.values()
+    ):
+        return False
+    if len(value) == 1 and isinstance(next(iter(value.values())), list):
+        return False
+    return True
+
+
+def _toml_flatten(value: Any, prefix: str = "") -> dict[str, Any]:
+    """Flatten grouping tables. Record tables and lists stay one setting.
+
+    Flattening every dict makes `terminal.shell` unreachable as a mapping, so
+    exact shell correction never runs and overlay writes `[terminal.shell]`
+    beside a leftover inline `shell =`. Collapsing any dict that contains a
+    list made `keyboard` atomic and parked bindings under the wrong header.
     """
     if not isinstance(value, dict):
         return {prefix: value} if prefix else {}
@@ -15828,7 +15853,7 @@ def _toml_flatten(value: Any, prefix: str = "") -> dict[str, Any]:
                 "quoted or dotted TOML keys cannot be merged by setting identity"
             )
         path = f"{prefix}.{name}" if prefix else name
-        if isinstance(inner, dict):
+        if isinstance(inner, dict) and not _toml_is_record_table(inner):
             flat.update(_toml_flatten(inner, path))
         else:
             flat[path] = inner
@@ -16064,6 +16089,27 @@ def _toml_table_has_assignments(lines: list[str], header_index: int) -> bool:
     return False
 
 
+def _toml_nested_table_span(lines: list[str], name: str) -> tuple[int, int] | None:
+    """The `[name]` header through the next header, if that form is present."""
+    for index, line in enumerate(lines):
+        header = _toml_header_name(line)
+        if header == name and not line.lstrip().startswith("[["):
+            end = index + 1
+            while end < len(lines) and _toml_header_name(lines[end]) is None:
+                end += 1
+            return (index, end)
+    return None
+
+
+def _toml_remove_nested_table(text: str, dotted: str) -> str:
+    lines = text.splitlines(keepends=True)
+    span = _toml_nested_table_span(lines, dotted)
+    if span is None:
+        return text
+    del lines[span[0] : span[1]]
+    return "".join(lines)
+
+
 def _toml_replace_or_insert(text: str, dotted: str, literal: str) -> str:
     """Replace one assignment on the incoming canvas, preserving other text."""
     lines = text.splitlines(keepends=True)
@@ -16090,6 +16136,8 @@ def _toml_replace_or_insert(text: str, dotted: str, literal: str) -> str:
         newline = "\n" if line.endswith("\n") else ""
         lines[index] = f"{indent}{leaf} = {literal}{newline}"
         return "".join(lines)
+    text = _toml_remove_nested_table("".join(lines), dotted)
+    lines = text.splitlines(keepends=True)
     assignment = f"{leaf} = {literal}\n"
     if table:
         header = f"[{table}]"
@@ -16132,6 +16180,9 @@ def _toml_raw_assignment(text: str, dotted: str) -> str | None:
                 "multiline TOML assignment cannot be merged by setting identity"
             )
         return line
+    span = _toml_nested_table_span(lines, dotted)
+    if span is not None:
+        return "".join(lines[span[0] : span[1]])
     return None
 
 
@@ -16165,7 +16216,7 @@ def _toml_delete_assignment(text: str, dotted: str) -> str:
         ):
             del lines[header_index]
         return "".join(lines)
-    return "".join(lines)
+    return _toml_remove_nested_table("".join(lines), dotted)
 
 
 def _merge_toml_runtime_preferences(
@@ -16249,6 +16300,16 @@ def _overlay_toml_assignment(text: str, dotted: str, raw_assignment: str) -> str
         return _toml_replace_array_tables(lines, dotted, raw_assignment)
     if _toml_array_table_spans(lines, dotted):
         return _toml_replace_array_tables(lines, dotted, raw_assignment)
+    stripped = raw_assignment.lstrip()
+    if stripped.startswith("[") and not stripped.startswith("[["):
+        # A nested header must not replace an inline assignment in-place:
+        # that would steal later keys from the parent table.
+        text = _toml_delete_assignment(text, dotted)
+        if text and not text.endswith("\n"):
+            text += "\n"
+        return text + (
+            raw_assignment if raw_assignment.endswith("\n") else raw_assignment + "\n"
+        )
     table, _, leaf = dotted.rpartition(".")
     if not leaf:
         table, leaf = "", dotted
@@ -16267,6 +16328,7 @@ def _overlay_toml_assignment(text: str, dotted: str, raw_assignment: str) -> str
             assignment = raw_assignment if raw_assignment.endswith("\n") else raw_assignment + newline
             lines[index] = assignment
             return "".join(lines)
+    text = _toml_remove_nested_table("".join(lines), dotted)
     if "=" in raw_assignment and not raw_assignment.lstrip().startswith("["):
         return _toml_replace_or_insert(
             text, dotted, raw_assignment.split("=", 1)[1].strip()

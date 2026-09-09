@@ -1624,12 +1624,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     alert.addButton(withTitle: "Use Incoming")
     alert.addButton(withTitle: "Show Diagnostics")
     let response = alert.runModal()
+    // AppKit names only the first three buttons; the fourth is
+    // NSAlertThirdButtonReturn + 1 (raw 1003). `.alertFourthButtonReturn` is
+    // not an NSApplication.ModalResponse case.
+    let fourthButtonReturn = NSApplication.ModalResponse(
+      rawValue: NSApplication.ModalResponse.alertThirdButtonReturn.rawValue + 1)
     switch response {
     case .alertSecondButtonReturn:
       retryPreferenceConflict(envelope, action: "keep-current")
     case .alertThirdButtonReturn:
       retryPreferenceConflict(envelope, action: "use-incoming")
-    case .alertFourthButtonReturn:
+    case fourthButtonReturn:
       showServerDiagnostics()
       presentPreferenceConflict(envelope, afterOnboardingFailure: afterOnboardingFailure)
     default:
