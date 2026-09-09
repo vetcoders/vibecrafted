@@ -12,7 +12,17 @@
 # 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 set -euo pipefail
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# Root discovery cannot call PATH tools. Sanitization has not run yet, and a
+# hostile or empty inherited PATH is a supported startup case.
+_vc_terminal_entry="${BASH_SOURCE[0]}"
+_vc_terminal_scripts="${_vc_terminal_entry%/*}"
+if [[ -z "$_vc_terminal_scripts" ]]; then
+  _vc_terminal_scripts="/"
+elif [[ "$_vc_terminal_scripts" == "$_vc_terminal_entry" ]]; then
+  _vc_terminal_scripts="."
+fi
+root="$(cd "${_vc_terminal_scripts}/.." && pwd -P)"
+unset _vc_terminal_entry _vc_terminal_scripts
 host="$root/libexec/vc-terminal"
 config="$HOME/.config/vibecrafted/vc-terminal/vc-terminal.toml"
 
@@ -51,7 +61,7 @@ _vc_terminal_is_owned_generation_bin() {
 }
 
 _vc_terminal_sanitize_inherited_path() {
-  local inherited="${PATH-}" remaining entry
+  local inherited="${PATH-}" remaining entry joined index
   local -a retained=()
   # A sentinel preserves an empty final component. Empty PATH entries name the
   # caller's working directory, so they are retained rather than normalized.
@@ -61,7 +71,17 @@ _vc_terminal_sanitize_inherited_path() {
     remaining="${remaining#*:}"
     _vc_terminal_is_owned_generation_bin "$entry" || retained+=("$entry")
   done
-  PATH="$(IFS=:; printf '%s' "${retained[*]}")"
+  # Explicit join keeps empty, spaced, and repeated components in order.
+  joined=""
+  index=0
+  while ((index < ${#retained[@]})); do
+    if ((index)); then
+      joined="${joined}:"
+    fi
+    joined="${joined}${retained[index]}"
+    index=$((index + 1))
+  done
+  PATH="$joined"
   export PATH
 }
 

@@ -2883,6 +2883,45 @@ def test_terminal_entry_drops_owned_generation_bins_from_a_polluted_parent(
     assert receipt["runtime_bin"] == str(selected_bin)
 
 
+def test_terminal_entry_path_join_keeps_empty_components_without_ifs(
+    tmp_path: Path,
+) -> None:
+    """Join retained PATH by index. Empty, spaced, and ordered entries stay."""
+    source = (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "IFS=" not in source
+    assert 'PATH="$(IFS=:' not in source
+
+    runtime_home = tmp_path / "runtime home"
+    owned = runtime_home / "releases" / "4.3.1+gSELECTED" / "bin"
+    stale = runtime_home / "releases" / "4.3.0+gSTALE" / "bin"
+    user_bin = tmp_path / "user tools"
+    for directory in (owned, stale, user_bin):
+        directory.mkdir(parents=True, exist_ok=True)
+    inherited = os.pathsep.join(
+        ["", "", str(owned), str(user_bin), "", str(stale), "/usr/bin", ""]
+    )
+
+    receipt = _run_terminal_path_entry(
+        tmp_path, runtime_home=runtime_home, inherited_path=inherited
+    )
+    assert receipt["path"] == os.pathsep.join(
+        ["", "", str(user_bin), "", "/usr/bin", ""]
+    )
+
+    only_owned = os.pathsep.join([str(owned), str(stale)])
+    emptied = _run_terminal_path_entry(
+        tmp_path, runtime_home=runtime_home, inherited_path=only_owned
+    )
+    assert emptied["path"] == ""
+
+    doubled = _run_terminal_path_entry(
+        tmp_path, runtime_home=runtime_home, inherited_path=":"
+    )
+    assert doubled["path"] == ":"
+
+
 def test_terminal_entry_path_sanitation_is_idempotent_for_clean_custom_root(
     tmp_path: Path,
 ) -> None:
