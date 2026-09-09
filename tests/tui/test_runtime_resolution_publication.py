@@ -8,6 +8,7 @@ import os
 import stat
 import subprocess
 import sys
+import tomllib
 from argparse import Namespace
 from pathlib import Path
 
@@ -1535,3 +1536,210 @@ def test_cli_preference_conflict_is_json_without_traceback(tmp_path, roots, caps
     assert "Traceback" not in captured.err
     assert "^^^^" not in captured.err
     _resolve(roots, capsys, status="ready")
+
+
+def _assert_toml_tree(text: str, intended: dict) -> None:
+    """Parsed merge output must equal the intended resolved tree."""
+    assert installer._toml_trees_equal(tomllib.loads(text), intended)
+
+
+def test_toml_merge_respects_user_deletion_of_unchanged_default():
+    """Current removed opacity; incoming still ships previous 0.8 and new history."""
+    previous = "[window]\nopacity = 0.8\n\n[scrolling]\nhistory = 100\n"
+    current = "[scrolling]\nhistory = 100\n"
+    incoming = "[window]\nopacity = 0.8\n\n[scrolling]\nhistory = 200\n"
+    merged = installer._merge_toml_runtime_preferences(previous, current, incoming)
+    _assert_toml_tree(merged, {"scrolling": {"history": 200}})
+    assert "opacity" not in tomllib.loads(merged).get("window", {})
+
+
+def test_toml_merge_keep_current_preserves_deletion_against_changed_incoming():
+    previous = "[window]\nopacity = 0.8\n"
+    current = "# kept empty\n"
+    incoming = "[window]\nopacity = 0.9\n"
+    with pytest.raises(ValueError, match="settings conflict"):
+        installer._merge_toml_runtime_preferences(previous, current, incoming)
+    kept = installer._merge_toml_runtime_preferences(
+        previous, current, incoming, choice="keep-current"
+    )
+    _assert_toml_tree(kept, {})
+    assert "opacity" not in tomllib.loads(kept)
+    incoming_choice = installer._merge_toml_runtime_preferences(
+        previous, current, incoming, choice="use-incoming"
+    )
+    _assert_toml_tree(incoming_choice, {"window": {"opacity": 0.9}})
+
+
+def test_toml_merge_array_table_stays_under_keyboard_not_window():
+    previous = (
+        '[[keyboard.bindings]]\nkey = "A"\naction = "Copy"\n\n[window]\nopacity = 0.8\n'
+    )
+    current = (
+        '[[keyboard.bindings]]\nkey = "B"\naction = "Copy"\n\n[window]\nopacity = 0.8\n'
+    )
+    incoming = (
+        '[[keyboard.bindings]]\nkey = "A"\naction = "Copy"\n\n[window]\nopacity = 0.9\n'
+    )
+    merged = installer._merge_toml_runtime_preferences(previous, current, incoming)
+    parsed = tomllib.loads(merged)
+    _assert_toml_tree(
+        merged,
+        {
+            "keyboard": {"bindings": [{"key": "B", "action": "Copy"}]},
+            "window": {"opacity": 0.9},
+        },
+    )
+    assert "keyboard" not in parsed.get("window", {})
+
+
+def test_toml_raw_assignment_joins_array_table_span_strings():
+    text = (
+        '[[keyboard.bindings]]\nkey = "B"\n\n[window]\nopacity = 0.8\n\n'
+        '[[keyboard.bindings]]\nkey = "C"\n'
+    )
+    raw = installer._toml_raw_assignment(text, "keyboard.bindings")
+    assert isinstance(raw, str)
+    assert 'key = "B"' in raw
+    assert 'key = "C"' in raw
+
+
+def test_toml_merge_fail_closed_on_dotted_quoted_key():
+    previous = '"foo.bar" = 1\n'
+    current = '"foo.bar" = 2\n'
+    incoming = '"foo.bar" = 1\n'
+    with pytest.raises(ValueError, match="quoted or dotted"):
+        installer._merge_toml_runtime_preferences(previous, current, incoming)
+
+
+def test_preference_shell_correction_is_exact_not_first_flag():
+    previous = {
+        "program": "/bin/zsh",
+        "args": [
+            "-lc",
+            'exec "launch-primary-shell.zsh" "$VIBECRAFTED_RUNTIME_ROOT/bin/vc-start" operator',
+        ],
+    }
+    allowed = {
+        "program": "/bin/zsh",
+        "args": ["-lc", 'exec "launch-primary-shell.zsh"'],
+    }
+    extra = {
+        "program": "/bin/zsh",
+        "args": ["-lc", 'exec "launch-primary-shell.zsh"; echo extra; curl evil'],
+    }
+    incoming = {
+        "program": "/bin/sh",
+        "args": ["-c", 'exec "launch-primary-shell.zsh"'],
+    }
+    assert installer._preference_shell_is_previous_minus_operator(previous, allowed)
+    assert not installer._preference_shell_is_previous_minus_operator(previous, extra)
+    assert installer._preference_shell_accepts_incoming(previous, allowed, incoming)
+    assert not installer._preference_shell_accepts_incoming(previous, extra, incoming)
+    previous_toml = (
+        "[terminal]\n"
+        'shell = { program = "/bin/zsh", args = ["-lc", '
+        '"exec \\"launch-primary-shell.zsh\\" \\"$VIBECRAFTED_RUNTIME_ROOT/bin/vc-start\\" operator"] }\n'
+    )
+    extra_toml = (
+        "[terminal]\n"
+        'shell = { program = "/bin/zsh", args = ["-lc", '
+        '"exec \\"launch-primary-shell.zsh\\"; echo extra"] }\n'
+    )
+    incoming_toml = (
+        "[terminal]\n"
+        'shell = { program = "/bin/sh", args = ["-c", '
+        '"exec \\"launch-primary-shell.zsh\\""] }\n'
+    )
+    with pytest.raises(ValueError, match="settings conflict"):
+        installer._merge_toml_runtime_preferences(
+            previous_toml, extra_toml, incoming_toml
+        )
+    kept = installer._merge_toml_runtime_preferences(
+        previous_toml, extra_toml, incoming_toml, choice="keep-current"
+    )
+    _assert_toml_tree(kept, tomllib.loads(extra_toml))
+
+
+def test_published_previous_receipt_rejects_config_conflicts():
+    healthy = {
+        "schema": installer.RUNTIME_INSTALL_SCHEMA,
+        "version": "9.9.9+a",
+    }
+    poisoned = {
+        **healthy,
+        "config_conflicts": [{"path": "terminal-policy.toml"}],
+    }
+    assert (
+        installer._published_previous_receipt(
+            {"preparing_previous_receipt": healthy}
+        )
+        is not None
+    )
+    assert (
+        installer._published_previous_receipt(
+            {"preparing_previous_receipt": poisoned}
+        )
+        is None
+    )
+
+
+def test_abandon_unpublished_requires_physical_previous_generation(tmp_path):
+    runtime_home = tmp_path / "runtime"
+    runtime_home.mkdir()
+    saved = {
+        "schema": installer.RUNTIME_INSTALL_SCHEMA,
+        "version": "9.9.9+ghost",
+        "owned_symlinks": {},
+    }
+    receipt = {
+        "schema": installer.RUNTIME_INSTALL_SCHEMA,
+        "install_pending": True,
+        "install_phase": "preparing",
+        "preparing_previous_receipt": saved,
+        "roots": {},
+    }
+    available = installer._abandon_unpublished_preference_conflicts(
+        runtime_home=runtime_home,
+        receipt=receipt,
+        conflicts=[{"path": "terminal-policy.toml", "reason": "overlap"}],
+    )
+    assert available is False
+    assert receipt["candidate_conflicts"]
+    assert "config_conflicts" not in receipt
+
+    version = "9.9.9+real"
+    generation = runtime_home / "releases" / version
+    generation.mkdir(parents=True)
+    current = runtime_home / "tools/vibecrafted-current"
+    current.parent.mkdir(parents=True)
+    current.symlink_to(generation)
+    (runtime_home / "active.json").write_text(
+        json.dumps(
+            {
+                "schema": "vibecrafted.active-runtime.v1",
+                "runtime_root": str(generation),
+                "version": version,
+            }
+        ),
+        encoding="utf-8",
+    )
+    physical = {
+        "schema": installer.RUNTIME_INSTALL_SCHEMA,
+        "version": version,
+        "owned_symlinks": {str(current): str(generation)},
+    }
+    live = {
+        "schema": installer.RUNTIME_INSTALL_SCHEMA,
+        "install_pending": True,
+        "install_phase": "preparing",
+        "preparing_previous_receipt": physical,
+        "roots": {},
+    }
+    assert (
+        installer._abandon_unpublished_preference_conflicts(
+            runtime_home=runtime_home,
+            receipt=live,
+            conflicts=[{"path": "terminal-policy.toml", "reason": "overlap"}],
+        )
+        is True
+    )

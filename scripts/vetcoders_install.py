@@ -11872,15 +11872,16 @@ def _doctor_runtime_receipt_findings() -> list[DoctorFinding]:
                 "Runtime Pack publication or recovery is pending; rerun make install",
             )
         ]
+    findings: list[DoctorFinding] = []
     if receipt.get("candidate_conflicts"):
-        return [
+        findings.append(
             DoctorFinding(
                 "warn",
                 "runtime-receipt",
                 "pending upgrade preference choice; the previously verified "
                 "runtime remains selected",
             )
-        ]
+        )
     preferences = _runtime_preference_paths(paths["product_config"])
     missing: list[str] = []
     drifted: list[str] = []
@@ -11894,7 +11895,6 @@ def _doctor_runtime_receipt_findings() -> list[DoctorFinding]:
             or (path not in preferences and _sha256_path(path) != digest)
         ):
             drifted.append(key)
-    findings: list[DoctorFinding] = []
     if missing or drifted:
         detail: list[str] = []
         if drifted:
@@ -11910,7 +11910,7 @@ def _doctor_runtime_receipt_findings() -> list[DoctorFinding]:
                 + " — repair with `make install`",
             )
         )
-    else:
+    elif not receipt.get("candidate_conflicts"):
         findings.append(
             DoctorFinding(
                 "ok",
@@ -15723,12 +15723,60 @@ def _preference_shell_launcher_name(value: Any) -> str:
     return "launch-primary-shell.zsh" if "launch-primary-shell.zsh" in _preference_shell_blob(value) else ""
 
 
-def _preference_shell_vehicle(value: Any) -> tuple[str, str]:
+_OPERATOR_ARGV_SUFFIX = re.compile(
+    r"""
+    \s+
+    (?:
+        "(?:[^"\\]|\\.)*vc-start(?:[^"\\]|\\.)*"
+        | '(?:[^'\\]|\\.)*vc-start(?:[^'\\]|\\.)*'
+        | [^\s"']*vc-start
+    )
+    \s+
+    operator
+    \s*$
+    """,
+    re.VERBOSE,
+)
+
+
+def _preference_shell_args(value: Any) -> list[str]:
     if isinstance(value, Mapping):
         args = value.get("args") or []
-        flag = str(args[0]) if args else ""
-        return str(value.get("program", "")), flag
-    return "", ""
+        if isinstance(args, str):
+            return [args]
+        return [str(item) for item in args]
+    return [str(value)] if value not in (None, "") else []
+
+
+def _preference_shell_strip_operator_suffix(text: str) -> str:
+    return _OPERATOR_ARGV_SUFFIX.sub("", text)
+
+
+def _preference_shell_without_operator(value: Any) -> Any:
+    """Previous shell with only the trailing vc-start operator payload removed."""
+    if isinstance(value, Mapping):
+        args = list(_preference_shell_args(value))
+        if (
+            len(args) >= 2
+            and args[-1] == "operator"
+            and "vc-start" in args[-2]
+        ):
+            args = args[:-2]
+        else:
+            args = [_preference_shell_strip_operator_suffix(item) for item in args]
+        stripped = dict(value)
+        stripped["args"] = args
+        return stripped
+    return _preference_shell_strip_operator_suffix(str(value))
+
+
+def _preference_shell_equivalent(left: Any, right: Any) -> bool:
+    """Exact program + argv identity. Prefix or first-flag match is not enough."""
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        return str(left.get("program", "")) == str(right.get("program", "")) and (
+            _preference_shell_args(left) == _preference_shell_args(right)
+        )
+    return _preference_shell_blob(left) == _preference_shell_blob(right)
 
 
 def _preference_shell_is_previous_minus_operator(previous: Any, current: Any) -> bool:
@@ -15741,7 +15789,9 @@ def _preference_shell_is_previous_minus_operator(previous: Any, current: Any) ->
         return False
     if not _preference_shell_launcher_name(current):
         return False
-    return _preference_shell_vehicle(previous) == _preference_shell_vehicle(current)
+    return _preference_shell_equivalent(
+        _preference_shell_without_operator(previous), current
+    )
 
 
 def _preference_shell_accepts_incoming(previous: Any, current: Any, incoming: Any) -> bool:
@@ -15761,28 +15811,68 @@ def _preference_shell_accepts_incoming(previous: Any, current: Any, incoming: An
     return bool(_preference_shell_launcher_name(incoming))
 
 
-def _toml_value_is_atomic(value: Any) -> bool:
-    if isinstance(value, list):
-        return True
-    if isinstance(value, dict) and any(
-        isinstance(inner, (list, dict)) for inner in value.values()
-    ):
-        return True
-    return False
-
-
 def _toml_flatten(value: Any, prefix: str = "") -> dict[str, Any]:
-    """Flatten tables; keep inline tables that contain lists/dicts atomic."""
+    """Flatten tables. Lists (including array-of-tables) stay one setting.
+
+    A table that happens to contain a list is still a table. Collapsing it
+    into one atomic dictionary loses the child path and later assignments
+    land under the wrong header.
+    """
     if not isinstance(value, dict):
         return {prefix: value} if prefix else {}
     flat: dict[str, Any] = {}
     for key, inner in value.items():
-        path = f"{prefix}.{key}" if prefix else str(key)
-        if isinstance(inner, dict) and not _toml_value_is_atomic(inner):
+        name = str(key)
+        if "." in name or name == "" or "\n" in name:
+            raise ValueError(
+                "quoted or dotted TOML keys cannot be merged by setting identity"
+            )
+        path = f"{prefix}.{name}" if prefix else name
+        if isinstance(inner, dict):
             flat.update(_toml_flatten(inner, path))
         else:
             flat[path] = inner
     return flat
+
+
+def _toml_unflatten(values: Mapping[str, Any]) -> dict[str, Any]:
+    tree: dict[str, Any] = {}
+    for dotted, value in values.items():
+        parts = str(dotted).split(".")
+        node: dict[str, Any] = tree
+        for part in parts[:-1]:
+            current = node.setdefault(part, {})
+            if not isinstance(current, dict):
+                raise ValueError(
+                    "settings conflict with changed shipped defaults: " + dotted
+                )
+            node = current
+        leaf = parts[-1]
+        if leaf in node and isinstance(node[leaf], dict) and not isinstance(value, dict):
+            raise ValueError(
+                "settings conflict with changed shipped defaults: " + dotted
+            )
+        node[leaf] = value
+    return tree
+
+
+def _toml_drop_empty_tables(value: Any) -> Any:
+    if isinstance(value, dict):
+        cleaned = {
+            key: _toml_drop_empty_tables(inner) for key, inner in value.items()
+        }
+        return {
+            key: inner
+            for key, inner in cleaned.items()
+            if not (isinstance(inner, dict) and not inner)
+        }
+    if isinstance(value, list):
+        return [_toml_drop_empty_tables(item) for item in value]
+    return value
+
+
+def _toml_trees_equal(left: Any, right: Any) -> bool:
+    return _toml_drop_empty_tables(left) == _toml_drop_empty_tables(right)
 
 
 def _toml_literal(value: Any) -> str:
@@ -15802,13 +15892,127 @@ def _toml_literal(value: Any) -> str:
     raise ValueError("unsupported TOML preference value")
 
 
+def _toml_line_without_comment(line: str) -> str:
+    """Strip a `#` comment, honouring quoted strings."""
+    quoted: str | None = None
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if quoted:
+            if char == "\\":
+                escaped = True
+            elif char == quoted:
+                quoted = None
+            continue
+        if char in {'"', "'"}:
+            quoted = char
+        elif char == "#":
+            return line[:index]
+    return line
+
+
+def _toml_unquote_key(raw: str) -> str:
+    text = raw.strip()
+    if len(text) >= 2 and text[0] == text[-1] == '"':
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError("quoted TOML key is invalid") from exc
+    if len(text) >= 2 and text[0] == text[-1] == "'":
+        return text[1:-1]
+    return text
+
+
+def _toml_split_dotted_keys(raw: str) -> list[str]:
+    parts: list[str] = []
+    current: list[str] = []
+    quoted: str | None = None
+    escaped = False
+    for char in raw:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if quoted:
+            current.append(char)
+            if char == "\\":
+                escaped = True
+            elif char == quoted:
+                quoted = None
+            continue
+        if char in {'"', "'"}:
+            quoted = char
+            current.append(char)
+            continue
+        if char == ".":
+            parts.append(_toml_unquote_key("".join(current)))
+            current = []
+            continue
+        current.append(char)
+    if quoted:
+        raise ValueError("quoted TOML key is unterminated")
+    parts.append(_toml_unquote_key("".join(current)))
+    if any(part == "" or "." in part or "\n" in part for part in parts):
+        raise ValueError(
+            "quoted or dotted TOML keys cannot be merged by setting identity"
+        )
+    return parts
+
+
 def _toml_header_name(line: str) -> str | None:
-    body = line.split("#", 1)[0].strip()
+    body = _toml_line_without_comment(line).strip()
     if body.startswith("[[") and body.endswith("]]"):
-        return body[2:-2].strip()
-    if body.startswith("[") and body.endswith("]"):
-        return body[1:-1].strip()
-    return None
+        inner = body[2:-2].strip()
+    elif body.startswith("[") and body.endswith("]"):
+        inner = body[1:-1].strip()
+    else:
+        return None
+    return ".".join(_toml_split_dotted_keys(inner))
+
+
+def _toml_assignment_key(line: str) -> str | None:
+    body = _toml_line_without_comment(line)
+    if "=" not in body or body.lstrip().startswith("["):
+        return None
+    return _toml_unquote_key(body.split("=", 1)[0])
+
+
+def _toml_assignment_is_complete(line: str) -> bool:
+    body = _toml_line_without_comment(line)
+    if "=" not in body:
+        return True
+    value = body.split("=", 1)[1].strip()
+    if value.startswith(('"""', "'''")):
+        closer = value[:3]
+        return value.count(closer) >= 2
+    opens = value.count("[") + value.count("{")
+    closes = value.count("]") + value.count("}")
+    if opens != closes:
+        return False
+    quoted: str | None = None
+    escaped = False
+    for char in value:
+        if escaped:
+            escaped = False
+            continue
+        if quoted:
+            if char == "\\":
+                escaped = True
+            elif char == quoted:
+                quoted = None
+            continue
+        if char in {'"', "'"}:
+            quoted = char
+    return quoted is None
+
+
+def _toml_root_insert_index(lines: list[str]) -> int:
+    for index, line in enumerate(lines):
+        if _toml_header_name(line) is not None:
+            return index
+    return len(lines)
 
 
 def _toml_array_table_spans(lines: list[str], name: str) -> list[tuple[int, int]]:
@@ -15849,6 +16053,17 @@ def _toml_replace_array_tables(lines: list[str], name: str, raw: str) -> str:
     return "".join(lines)
 
 
+def _toml_table_has_assignments(lines: list[str], header_index: int) -> bool:
+    index = header_index + 1
+    while index < len(lines):
+        if _toml_header_name(lines[index]) is not None:
+            break
+        if _toml_assignment_key(lines[index]) is not None:
+            return True
+        index += 1
+    return False
+
+
 def _toml_replace_or_insert(text: str, dotted: str, literal: str) -> str:
     """Replace one assignment on the incoming canvas, preserving other text."""
     lines = text.splitlines(keepends=True)
@@ -15865,11 +16080,16 @@ def _toml_replace_or_insert(text: str, dotted: str, literal: str) -> str:
             continue
         if current_table != table:
             continue
-        match = re.match(rf"^(\s*)({re.escape(leaf)})(\s*=\s*)", line)
-        if match:
-            newline = "\n" if line.endswith("\n") else ""
-            lines[index] = f"{match.group(1)}{match.group(2)}{match.group(3)}{literal}{newline}"
-            return "".join(lines)
+        if _toml_assignment_key(line) != leaf:
+            continue
+        if not _toml_assignment_is_complete(line):
+            raise ValueError(
+                "multiline TOML assignment cannot be merged by setting identity"
+            )
+        indent = line[: len(line) - len(line.lstrip())]
+        newline = "\n" if line.endswith("\n") else ""
+        lines[index] = f"{indent}{leaf} = {literal}{newline}"
+        return "".join(lines)
     assignment = f"{leaf} = {literal}\n"
     if table:
         header = f"[{table}]"
@@ -15883,9 +16103,9 @@ def _toml_replace_or_insert(text: str, dotted: str, literal: str) -> str:
         if text and not text.endswith("\n"):
             text += "\n"
         return text + f"{header}\n{assignment}"
-    if text and not text.endswith("\n"):
-        text += "\n"
-    return text + assignment
+    insert_at = _toml_root_insert_index(lines)
+    lines.insert(insert_at, assignment)
+    return "".join(lines)
 
 
 def _toml_raw_assignment(text: str, dotted: str) -> str | None:
@@ -15893,7 +16113,7 @@ def _toml_raw_assignment(text: str, dotted: str) -> str | None:
     lines = text.splitlines(keepends=True)
     spans = _toml_array_table_spans(lines, dotted)
     if spans:
-        return "".join(lines[start:end] for start, end in spans)
+        return "".join("".join(lines[start:end]) for start, end in spans)
     table, _, leaf = dotted.rpartition(".")
     if not leaf:
         table, leaf = "", dotted
@@ -15905,9 +16125,47 @@ def _toml_raw_assignment(text: str, dotted: str) -> str | None:
             continue
         if current_table != table:
             continue
-        if re.match(rf"^\s*{re.escape(leaf)}\s*=", line):
-            return line
+        if _toml_assignment_key(line) != leaf:
+            continue
+        if not _toml_assignment_is_complete(line):
+            raise ValueError(
+                "multiline TOML assignment cannot be merged by setting identity"
+            )
+        return line
     return None
+
+
+def _toml_delete_assignment(text: str, dotted: str) -> str:
+    """Remove one resolved-absent setting from the incoming canvas."""
+    lines = text.splitlines(keepends=True)
+    if _toml_array_table_spans(lines, dotted):
+        return _toml_replace_array_tables(lines, dotted, "")
+    table, _, leaf = dotted.rpartition(".")
+    if not leaf:
+        table, leaf = "", dotted
+    current_table = ""
+    header_index = -1
+    for index, line in enumerate(lines):
+        header = _toml_header_name(line)
+        if header is not None and not line.lstrip().startswith("[["):
+            current_table = header
+            header_index = index
+            continue
+        if current_table != table or _toml_assignment_key(line) != leaf:
+            continue
+        if not _toml_assignment_is_complete(line):
+            raise ValueError(
+                "multiline TOML assignment cannot be merged by setting identity"
+            )
+        del lines[index]
+        if (
+            table
+            and header_index >= 0
+            and not _toml_table_has_assignments(lines, header_index)
+        ):
+            del lines[header_index]
+        return "".join(lines)
+    return "".join(lines)
 
 
 def _merge_toml_runtime_preferences(
@@ -15956,7 +16214,11 @@ def _merge_toml_runtime_preferences(
         raise ValueError(
             "settings conflict with changed shipped defaults: " + ", ".join(conflicts)
         )
+    intended = _toml_unflatten(resolved)
     merged = incoming
+    for key in incoming_values:
+        if key not in resolved:
+            merged = _toml_delete_assignment(merged, key)
     for key, value in resolved.items():
         incoming_value = incoming_values.get(key, _TOML_MISSING)
         if incoming_value == value:
@@ -15970,13 +16232,21 @@ def _merge_toml_runtime_preferences(
             merged = _overlay_toml_assignment(merged, key, raw)
         else:
             merged = _toml_replace_or_insert(merged, key, _toml_literal(value))
-    tomllib.loads(merged)
+    if not merged.strip():
+        merged = "#\n"
+    parsed = tomllib.loads(merged)
+    if not _toml_trees_equal(parsed, intended):
+        raise ValueError(
+            "TOML merge could not represent the resolved preference tree"
+        )
     return merged
 
 
 def _overlay_toml_assignment(text: str, dotted: str, raw_assignment: str) -> str:
     """Put the user's exact assignment onto the incoming canvas."""
     lines = text.splitlines(keepends=True)
+    if raw_assignment.lstrip().startswith("[["):
+        return _toml_replace_array_tables(lines, dotted, raw_assignment)
     if _toml_array_table_spans(lines, dotted):
         return _toml_replace_array_tables(lines, dotted, raw_assignment)
     table, _, leaf = dotted.rpartition(".")
@@ -15988,14 +16258,22 @@ def _overlay_toml_assignment(text: str, dotted: str, raw_assignment: str) -> str
         if header is not None and not line.lstrip().startswith("[["):
             current_table = header
             continue
-        if current_table == table and re.match(rf"^\s*{re.escape(leaf)}\s*=", line):
+        if current_table == table and _toml_assignment_key(line) == leaf:
+            if not _toml_assignment_is_complete(line):
+                raise ValueError(
+                    "multiline TOML assignment cannot be merged by setting identity"
+                )
             newline = "\n" if raw_assignment.endswith("\n") or line.endswith("\n") else ""
             assignment = raw_assignment if raw_assignment.endswith("\n") else raw_assignment + newline
             lines[index] = assignment
             return "".join(lines)
-    return _toml_replace_or_insert(
-        text, dotted, raw_assignment.split("=", 1)[1].strip() if "=" in raw_assignment else raw_assignment
-    )
+    if "=" in raw_assignment and not raw_assignment.lstrip().startswith("["):
+        return _toml_replace_or_insert(
+            text, dotted, raw_assignment.split("=", 1)[1].strip()
+        )
+    if text and not text.endswith("\n"):
+        text += "\n"
+    return text + (raw_assignment if raw_assignment.endswith("\n") else raw_assignment + "\n")
 
 
 _TOML_MISSING = object()
@@ -16472,7 +16750,10 @@ def _published_previous_receipt(receipt: Mapping[str, Any]) -> dict[str, Any] | 
         return None
     if saved.get("install_pending") or "config_transaction" in saved:
         return None
-    if any(saved.get(key) for key in ("config_pending", "uninstall_pending")):
+    if any(
+        saved.get(key)
+        for key in ("config_pending", "uninstall_pending", "config_conflicts")
+    ):
         return None
     if not saved.get("version"):
         return None
@@ -16585,7 +16866,7 @@ def _abandon_unpublished_preference_conflicts(
         for name, value in (receipt.get("roots") or {}).items():
             paths[name] = Path(value)
         _restore_runtime_publication_receipt(paths, receipt, saved)
-        previous_available = True
+        previous_available = _previous_runtime_is_available(runtime_home, saved)
     else:
         previous_available = False
     receipt.pop("config_conflicts", None)
