@@ -55,8 +55,14 @@ _donor_snapshot_force_remove() {
 # reader is the script that sources this file, not this file itself.
 export DONOR_SNAPSHOT_HEAD=""
 
-# donor_snapshot_create <donor-repo> <snapshot-path>
-# Sets DONOR_SNAPSHOT_HEAD to the donor HEAD the snapshot was taken at.
+# donor_snapshot_create <donor-repo> <snapshot-path> [revision]
+# Sets DONOR_SNAPSHOT_HEAD to the commit the snapshot was taken at.
+#
+# The optional revision pins a SHA captured earlier (main-source launch HEAD).
+# Without it the snapshot is the donor's current HEAD, which is the sibling
+# donor contract: freeze whatever that checkout claims right now. A Living
+# Tree may move after launch; passing the captured SHA is what keeps the
+# receipt bound to one generation instead of whoever is HEAD at snapshot time.
 #
 # It deliberately does NOT print the SHA for `head="$(donor_snapshot_create ...)"`
 # to capture. MEASURED 2026-08-18 during this cut's own walk-around: with the
@@ -68,12 +74,25 @@ export DONOR_SNAPSHOT_HEAD=""
 # see what it must reap is exactly how the 2026-08-11 ghost was born, so the
 # recording side effect must happen in the caller's own shell. Read the result
 # out of DONOR_SNAPSHOT_HEAD.
+#
+# Lifetime and cleanup ownership: every successful create appends one
+# "<donor>\t<path>" record to DONOR_SNAPSHOTS. The caller must reap through
+# `donor_snapshot_reap` from a trap armed for EXIT INT TERM HUP. The reaper
+# owns only those worktrees. It must never be aimed at DIST_DIR, BUILD_DIR
+# cargo caches, the App, or `build/runtime-pack-selection.json` — those live
+# on the living checkout so a reap cannot unpublish a finished carrier or
+# delete a reusable target.
 donor_snapshot_create() {
-  local donor="$1" path="$2" head
+  local donor="$1" path="$2" requested="${3:-}" head
 
   git -C "$donor" rev-parse --git-dir >/dev/null 2>&1 \
     || { printf 'FATAL: %s is not a git repository\n' "$donor" >&2; return 1; }
-  head="$(git -C "$donor" rev-parse HEAD)"
+  if [[ -n "$requested" ]]; then
+    head="$(git -C "$donor" rev-parse --verify "${requested}^{commit}")" \
+      || { printf 'FATAL: %s has no commit %s\n' "$donor" "$requested" >&2; return 1; }
+  else
+    head="$(git -C "$donor" rev-parse HEAD)"
+  fi
 
   # Clear any residue from an earlier interrupted run before adding: a stale
   # registration for this exact path would make `worktree add` refuse.

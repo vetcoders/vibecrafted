@@ -149,6 +149,7 @@ def test_the_literal_set_covers_home_checkout_donors_and_snapshots() -> None:
 
     for variable in (
         "${HOME:-}",
+        "${SOURCE_ROOT:-}",
         "${TERMINAL_DONOR:-}",
         "${FRAME_DONOR:-}",
         "${TERMINAL_REPO:-}",

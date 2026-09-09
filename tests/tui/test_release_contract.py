@@ -84,6 +84,7 @@ def _run_native_voc_build(
             "FAKE_CARGO_OUTPUTS": " ".join(outputs),
             "PATH": f"{fake_bin}:{env['PATH']}",
             "REPO_ROOT": str(REPO_ROOT),
+            "SOURCE_ROOT": str(REPO_ROOT),
         }
     )
     result = subprocess.run(
@@ -446,7 +447,7 @@ def test_builder_emits_the_canonical_versioned_dmg_and_checksum() -> None:
         'printf \'%s\\n\' "$RUNTIME_VERSION" > "$RUNTIME_PACK_RESOURCE_DIR/VERSION"'
         in builder
     )
-    assert '"$REPO_ROOT/scripts/package-runtime-pack.sh"' in builder
+    assert '"$SOURCE_ROOT/scripts/package-runtime-pack.sh"' in builder
     assert '-out "$RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK"' in builder
     assert 'install -m 0644 "$RUNTIME_PACK" "$EMBEDDED_RUNTIME_PACK"' in builder
     assert 'cmp "$EMBEDDED_RUNTIME_PACK" "$RUNTIME_PACK"' in builder
@@ -459,13 +460,13 @@ def test_builder_emits_the_canonical_versioned_dmg_and_checksum() -> None:
     assert "build-server-release" in builder
     assert 'install -m 0755 "$server_source" "$runtime/bin/vc-server"' in builder
     assert '"$runtime/server/site/"' in builder
-    mcp_copy = '/bin/cp -R "$REPO_ROOT/vibecrafted-mcp/vibecrafted_mcp" \\\n    "$runtime/vibecrafted-mcp/"'
+    mcp_copy = '/bin/cp -R "$SOURCE_ROOT/vibecrafted-mcp/vibecrafted_mcp" \\\n    "$runtime/vibecrafted-mcp/"'
     mcp_generation_version = 'printf \'%s\\n\' "$RUNTIME_VERSION" \\\n    > "$runtime/vibecrafted-mcp/vibecrafted_mcp/VERSION"'
     assert mcp_copy in builder
     assert mcp_generation_version in builder
     assert builder.index(mcp_copy) < builder.index(mcp_generation_version)
-    assert '"$REPO_ROOT/scripts/render-python-entrypoint-launchers.py"' in builder
-    assert '"$REPO_ROOT/vibecrafted-core/pyproject.toml"' in builder
+    assert '"$SOURCE_ROOT/scripts/render-python-entrypoint-launchers.py"' in builder
+    assert '"$SOURCE_ROOT/vibecrafted-core/pyproject.toml"' in builder
     assert '"$runtime/runtime"' not in builder
 
 
@@ -909,6 +910,7 @@ def test_remaps_run_broadest_prefix_first() -> None:
     order = [
         '"$HOME=/usr/src/operator-home"',
         '"$REPO_ROOT=/usr/src/vibecrafted"',
+        '"$SOURCE_ROOT=/usr/src/vibecrafted"',
         '"$TERMINAL_DONOR=/usr/src/vc-terminal"',
         '"$FRAME_DONOR=/usr/src/vc-frame"',
         '"$TERMINAL_REPO=/usr/src/vc-terminal"',
@@ -1338,3 +1340,77 @@ def test_standalone_selection_is_not_the_app_dmg_release_tuple() -> None:
     assert builder.index("runtime_pack_selection_publish") < tuple_at
     # Build state under the ignored build/, not user configuration.
     assert "build/$RUNTIME_PACK_SELECTION_BASENAME" in library
+
+
+def test_main_source_snapshot_pins_launch_sha_across_payload_app_and_selection() -> None:
+    """Living Tree movement after launch must not mint a mixed generation.
+
+    ROOT_SHA is captured once. Payload copies, the App manifest, pack names
+    and the selection record all bind that SHA. Compile inputs come from
+    SOURCE_ROOT, the detached snapshot at that SHA. DIST_DIR, BUILD_DIR and
+    the selection file stay on the living REPO_ROOT so a reap cannot
+    unpublish a carrier or delete a reusable cache.
+    """
+
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    library = (REPO_ROOT / "scripts/lib/donor-snapshot.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'SOURCE_ROOT="$DONOR_SNAPSHOT_ROOT/vibecrafted"' in builder
+    assert 'donor_snapshot_create "$REPO_ROOT" "$SOURCE_ROOT" "$ROOT_SHA"' in builder
+    assert 'require_bound_revision() {' in builder
+    assert 'require_bound_revision "$SOURCE_ROOT" vibecrafted "$ROOT_SHA"' in builder
+    assert '--vibecrafted-sha "$ROOT_SHA"' in builder
+    assert 'git_sha "$REPO_ROOT"' not in builder
+    assert 'show "$ROOT_SHA:VERSION"' in builder
+    assert 'RUNTIME_VERSION="${VERSION}+g${ROOT_SHA:0:8}"' in builder
+    assert '--source-revision "$ROOT_SHA"' in builder
+    assert 'carrier --source "$SOURCE_ROOT"' in builder
+    assert 'DIST_DIR="${VIBECRAFTED_RELEASE_DIR:-$REPO_ROOT/dist}"' in builder
+    assert 'BUILD_DIR="$REPO_ROOT/build/unified-release"' in builder
+    assert 'runtime_pack_selection_begin "$REPO_ROOT"' in builder
+    assert 'runtime_pack_selection_publish "$REPO_ROOT"' in builder
+    assert 'CARGO_TARGET_DIR="$NATIVE_VOC_BUILD_ROOT"' in builder
+    assert 'CARGO_BUILD_ROOT="$server_build_root"' in builder
+
+    # After the pin, dirt/identity checks the snapshot, not the living tree.
+    product = builder.split("build_product() {", 1)[1].split("\n}\n", 1)[0]
+    assert 'require_clean_repo "$SOURCE_ROOT" vibecrafted' in product
+    assert 'require_clean_repo "$REPO_ROOT" vibecrafted' not in product
+    assert product.count('require_bound_revision "$SOURCE_ROOT" vibecrafted "$ROOT_SHA"') == 2
+
+    # A failed snapshot build has already claimed the selection and still reaps.
+    begin_at = builder.index("runtime_pack_selection_begin")
+    snapshot_at = builder.index(
+        'donor_snapshot_create "$REPO_ROOT" "$SOURCE_ROOT" "$ROOT_SHA"'
+    )
+    fail_at = builder.index("VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT")
+    publish_at = builder.index("runtime_pack_selection_publish")
+    assert begin_at < snapshot_at < fail_at < publish_at
+    assert "donor_snapshot_reap || true" in builder
+    assert "worktree add --detach" in library
+    assert "[revision]" in library
+
+
+def test_main_snapshot_does_not_own_selection_or_artifact_output() -> None:
+    """Selection and carriers must not point at a path the reaper deletes."""
+
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    selection = (REPO_ROOT / "scripts/lib/runtime-pack-selection.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'SOURCE_ROOT="$DONOR_SNAPSHOT_ROOT/vibecrafted"' in builder
+    assert "runtime_pack_selection_begin \"$SOURCE_ROOT\"" not in builder
+    assert "runtime_pack_selection_publish \"$SOURCE_ROOT\"" not in builder
+    assert 'DIST_DIR="${VIBECRAFTED_RELEASE_DIR:-$SOURCE_ROOT/dist}"' not in builder
+    assert 'BUILD_DIR="$SOURCE_ROOT/build/unified-release"' not in builder
+    assert "build/$RUNTIME_PACK_SELECTION_BASENAME" in selection
+    assert "$1/build/$RUNTIME_PACK_SELECTION_BASENAME" in selection or (
+        'printf \'%s\\n\' "$1/build/$RUNTIME_PACK_SELECTION_BASENAME"' in selection
+    )
