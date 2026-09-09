@@ -341,8 +341,8 @@ func deriveServerMenuState(
 
   guard let envelope = decodeCaretakerEnvelope(data: caretakerData) else {
     return ServerMenuState(
-      header: "VC Server: CARETAKER UNAVAILABLE",
-      detail: "The canonical caretaker did not answer — the runtime may be missing or broken",
+      header: "VC Server: NOT ANSWERING",
+      detail: "The installed runtime did not answer — it may be missing or broken",
       health: .failed,
       canStart: false,
       canStop: false,

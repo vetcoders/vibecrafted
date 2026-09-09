@@ -348,8 +348,8 @@ def test_server_menu_is_honest_when_the_caretaker_is_absent(
 ) -> None:
     lines = _run_policy(policy_binary, "absent")
     assert lines[:4] == [
-        "VC Server: CARETAKER UNAVAILABLE",
-        "The canonical caretaker did not answer — the runtime may be missing or broken",
+        "VC Server: NOT ANSWERING",
+        "The installed runtime did not answer — it may be missing or broken",
         "failed",
         "false,false,false",
     ]
@@ -362,8 +362,8 @@ def test_server_menu_is_honest_when_the_envelope_is_garbage(
     """A corrupt envelope is a reported condition, never a crashed status item."""
     lines = _run_policy(policy_binary, "garbage")
     assert lines[:4] == [
-        "VC Server: CARETAKER UNAVAILABLE",
-        "The canonical caretaker did not answer — the runtime may be missing or broken",
+        "VC Server: NOT ANSWERING",
+        "The installed runtime did not answer — it may be missing or broken",
         "failed",
         "false,false,false",
     ]
