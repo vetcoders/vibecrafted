@@ -1224,12 +1224,22 @@ def test_public_resume_success_path_one_aicx_one_provider_canonical_ids(
         'printf "SESSION_ID=[%s]\\n" "${VIBECRAFTED_SESSION_ID:-}"\n'
         'printf "TARGET=[%s]\\n" "${VIBECRAFTED_OPERATOR_SESSION:-}"\n'
     )
+    # The re-entry child runs in the terminal the public entry opened, so it
+    # has a controlling TTY for real; a workspace nobody can be shown is
+    # refused before anything is created (see test_resume_declared_workspace).
+    # sys.executable, not `python3`: the fixture PATH resolves the latter to
+    # the host's Xcode Python 3.9, whose pty.spawn hangs on macOS once the
+    # child exits.
     result = subprocess.run(
-        _shell_argv("bash", script),
+        [
+            sys.executable,
+            "-c",
+            "import pty, sys; sys.exit(pty.spawn(sys.argv[1:]))",
+            *_shell_argv("bash", script),
+        ],
         check=False,
         cwd=project_dir,
         env=env,
-        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         timeout=60,
@@ -1532,15 +1542,46 @@ def test_reentry_boundary_stops_a_terminal_launch_loop(
 def test_explicit_operator_session_keeps_the_direct_path(
     tmp_path: Path, invocation: str
 ) -> None:
-    """An explicitly named target is honoured; do not hijack it into a window."""
+    """An explicitly named LIVE target is honoured; do not hijack it into a
+    window. (The engine confirms the name: see the sibling below for a name
+    the engine does not know.)"""
+    live = tmp_path / "live-sessions.txt"
+    live.write_text("mlx-batch-runner\n", encoding="utf-8")
     _result, launch = _run_entry(
         tmp_path,
         invocation,
-        extra_env={"VIBECRAFTED_OPERATOR_SESSION": "mlx-batch-runner"},
+        extra_env={
+            "VIBECRAFTED_OPERATOR_SESSION": "mlx-batch-runner",
+            "VC_FRAME_LIVE": str(live),
+        },
         expect_launch=False,
     )
 
     assert launch is None, "explicit operator target was overridden by a terminal"
+
+
+@pytest.mark.parametrize("invocation", ["vc-resume codex", "vc-start"])
+def test_explicit_operator_session_the_engine_does_not_know_is_not_trusted(
+    tmp_path: Path, invocation: str
+) -> None:
+    """VIBECRAFTED_OPERATOR_SESSION naming a session the engine reports missing
+    is inherited env, not a surface (2026-09-09: an agent shell inside a pane
+    whose host had died carried exactly such a name). The direct path would
+    resurrect a background host under that name and park the tab there; the
+    public entry opens a terminal instead."""
+    live = tmp_path / "live-sessions.txt"
+    live.write_text("host-a\n", encoding="utf-8")
+    result, launch = _run_entry(
+        tmp_path,
+        invocation,
+        extra_env={
+            "VIBECRAFTED_OPERATOR_SESSION": "mlx-batch-runner",
+            "VC_FRAME_LIVE": str(live),
+        },
+    )
+
+    assert launch is not None, f"no terminal was opened: {result.stderr}"
+    assert result.returncode == 0, result.stderr
 
 
 def test_real_tty_is_not_rerouted(tmp_path: Path) -> None:
@@ -1930,6 +1971,10 @@ def _prepare_and_attach(
         env["VC_FRAME"] = "1"
         env["VC_FRAME_PANE_ID"] = "0"
         env["VC_FRAME_SESSION_NAME"] = project_name
+        # ... and the engine confirms it: a nested caller's host is a live
+        # session. A marker naming a session the engine does not list is
+        # ambient context (a stale inheritance), not a nested caller.
+        live_file.write_text(f"{project_name}\n", encoding="utf-8")
 
     script = "\n".join(
         [

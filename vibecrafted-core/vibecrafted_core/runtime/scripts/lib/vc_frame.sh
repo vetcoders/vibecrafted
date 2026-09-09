@@ -531,7 +531,15 @@ spawn_vc_frame_create_host_session() {
   local session_name="${2:-}"
   [[ -n "$vc_frame_bin" && -n "$session_name" ]] || return 1
   local out="" status=0
-  out="$("$vc_frame_bin" attach --create-background "$session_name" 2>&1)" || status=$?
+  # Bounded create with ONLY the current client's attachment context cleared
+  # (2026-09-09). A dispatcher's targeting export or a stale pane marker can
+  # name exactly the host being resurrected; Frame mirrors VC_FRAME_SESSION_NAME
+  # into ZELLIJ_SESSION_NAME at startup and src/commands.rs:844 then panics
+  # ("trying to attach to the current session") instead of creating it. Twin
+  # of _vetcoders_vc_frame_create_host_session (shell/lib/vc_frame.sh).
+  out="$(env -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME \
+    -u ZELLIJ -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME \
+    "$vc_frame_bin" attach --create-background "$session_name" 2>&1)" || status=$?
   if [[ -n "$out" ]]; then
     printf '%s\n' "$out" >&2
   fi

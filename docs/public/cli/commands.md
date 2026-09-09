@@ -136,6 +136,20 @@ The same payload is attached to the init step of **every** pipeline launch
 in view. Full inventory on demand:
 `vibecrafted settlements list --bucket n --revalidatable`.
 
+**A declaration opens its workspace.** `init`, `operator` and `partner` owe
+you the oriented agent on a surface you can see. The repository's own
+vc-frame session (bound through the workspace catalog, `--repo <path>` to
+declare another one) is created detached when absent and reused when live;
+the agent tab is hung on it first, and only then is your terminal attached.
+When the command runs with no controlling terminal — an agent tool with pipes
+for stdio — and no attached frame that the engine confirms as watched, it
+opens the Vibecrafted terminal on that repository and re-enters there with the
+same arguments (budget, prompt, file), exactly once. Inherited
+`VC_FRAME_SESSION_NAME` / `VIBECRAFTED_OPERATOR_SESSION` values are checked
+against the engine: a session that is dead, missing or has no attached client
+is ambient context, never a target. A terminal launch the host rejects is
+reported as a failure, never as "launched".
+
 ## status
 
 ```bash
@@ -231,6 +245,25 @@ native-attaches the last same-agent candidate. `--repo` (legacy `--root`)
 selects the repository from any directory and narrows AICX; it is not a
 session picker. The catalog in the pack is evidence, not a swipe list.
 
+`--repo <path>` (or `--root <path>`) on an interactive resume is a
+**workspace declaration**: the agent is resumed inside that repository's own
+vc-frame session, bound through the workspace catalog. The session is
+created when absent and reused when live — never duplicated, and never
+replaced by whatever session the calling shell happens to be attached to
+(a stale or foreign `VC_FRAME_SESSION_NAME` is ambient context, not a
+target). Entering it follows the caller: an attached client on a watched
+session is switched onto the workspace, a plain terminal attaches to it,
+and a caller with neither — no TTY, a stale or unwatched marker — has the
+Vibecrafted terminal opened on the declared repository, where the resume
+re-enters with the same native id and absolute root and attaches. It is never
+downgraded to a headless run and never left with an attach command to type.
+Other sessions are left untouched.
+
+```bash
+# From any shell, including one attached to another project's frame:
+vibecrafted resume codex --session <provider-uuid> --repo ~/Projects/other-repo
+```
+
 ```bash
 printf '%s' "continue safely" | vibecrafted resume-session codex \
   --agent-session-id <provider-session-id> --prompt-stdin
@@ -279,9 +312,17 @@ Provider coverage (verified on the installed CLIs):
 | agy      | none (`--conversation <id>` only)                                           | refused, same hint                                                                                |
 | junie    | none (`--session-id … --resume` only)                                       | refused, same hint                                                                                |
 
-Inside vc-frame, `--runtime visible|terminal` opens a pane in the current tab
-(break-right by default, `--placement floating` otherwise); in a plain TTY,
-`--runtime terminal` execs the provider directly. `--runtime headless` is
+Inside a watched vc-frame pane, `--runtime visible|terminal` opens a pane in
+the current tab (break-right by default, `--placement floating` otherwise);
+in a plain TTY, `--runtime terminal` execs the provider directly. Anywhere
+else, `fork` is a **workspace declaration**: the source session is resolved
+first (`current` / `previous` read the calling process's own context), then
+the repository's own vc-frame session hosts the fork as a tab and the
+terminal is attached to it — and when there is no terminal at all (an agent
+tool with pipes for stdio, a marker whose host is gone) the Vibecrafted
+terminal is opened on that repository and the fork re-enters there with the
+exact provider id, absolute `--repo`, runtime, placement, model, permissions
+and prompt. The prompt stays interactive. `--runtime headless` is
 refused for every provider: `codex fork` is an interactive TUI, and a headless
 tracked fork for claude/grok is not wired in this release (`resume-session`
 continues the original headlessly, which is a resume, not a fork).

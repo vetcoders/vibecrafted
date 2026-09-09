@@ -469,20 +469,9 @@ _vetcoders_resume_agent() {
   local tool="$1"
   shift
   _vetcoders_parse_contract "$@" || return 1
-  # Normalize an explicit --root ONCE, before anything changes cwd. `--root ../B`
-  # must mean ../B relative to where the operator typed it, not relative to
-  # wherever a later step happens to stand. Everything downstream — terminal
-  # cwd, workspace/session naming, AICX, provider cwd — then reads this one
-  # absolute value instead of re-deriving its own.
-  if [[ -n "${_vetcoders_contract_root:-}" ]]; then
-    local _resume_root_normalized=""
-    _resume_root_normalized="$(_vetcoders_absolute_physical_path "$_vetcoders_contract_root")"
-    if [[ -z "$_resume_root_normalized" || ! -d "$_resume_root_normalized" ]]; then
-      printf 'resume: --root is not an existing directory: %s\n' "$_vetcoders_contract_root" >&2
-      return 1
-    fi
-    _vetcoders_contract_root="$_resume_root_normalized"
-  fi
+  # Normalize an explicit --root ONCE, before anything changes cwd (shared
+  # owner with the init family; see _vetcoders_normalize_declared_contract_root).
+  _vetcoders_normalize_declared_contract_root resume || return 1
   if [[ -n "${_vetcoders_contract_help:-}" ]]; then
     echo "Resume a provider session or a stopped control-plane run." >&2
     echo "  vibecrafted resume ${tool} --session <provider-uuid>" >&2
@@ -556,36 +545,22 @@ _vetcoders_resume_agent() {
   fi
 
   # A bare resume is an operator TUI, so it needs a visible surface. When the
-  # caller has no controlling terminal we open the product terminal host on
-  # THIS project and re-run the same entry there, rather than refusing.
+  # caller has none -- no controlling terminal, and no attached frame or
+  # explicit operator session the engine confirms as watched -- we open the
+  # product terminal host on THIS project and re-run the same entry there,
+  # rather than refusing. Shared owner with init/operator/partner and fork.
   #
   # Placement is the contract: this sits BEFORE the AICX continuity pack and
   # before any provider command is composed, so the escalated child assembles
   # the pack exactly once. Escalating later would launch AICX twice.
   if [[ -z "$resume_explicit_input" ]] &&
-    [[ -z "${_vetcoders_contract_runtime:-}" || "${_vetcoders_contract_runtime:-}" =~ ^(terminal|visible)$ ]] &&
-    command -v _vetcoders_needs_vc_terminal_entry >/dev/null 2>&1 &&
-    _vetcoders_needs_vc_terminal_entry; then
-    local _resume_front_door="" _resume_project_root=""
-    _resume_front_door="$(_vetcoders_product_front_door vibecrafted 2>/dev/null || true)"
-    if [[ -z "$_resume_front_door" ]]; then
-      # No front door means no supported way to obtain a PTY. Falling through
-      # would assemble a 48h AICX pack for a launch that cannot happen.
-      printf 'vc-resume: no TTY and no installed vibecrafted front door to open a terminal with.\n' >&2
-      printf 'Run the resume from a terminal, or install the runtime so bin/vc-terminal exists.\n' >&2
-      return 1
-    fi
-    _resume_project_root="$(_vetcoders_effective_project_root)"
-    # The child re-parses this very vector, but from the terminal's working
-    # directory — which IS the normalized root. Forwarding the raw token would
-    # resolve a relative `--root` a second time, one level deeper. Hand over
-    # the absolute value this function already settled on, so the child, the
-    # session name, AICX and the provider all read the same project.
-    _vetcoders_rewrite_contract_root_argv "${_vetcoders_contract_root:-}" "$@"
-    _vetcoders_open_entry_in_vc_terminal \
-      "$_resume_front_door" "$_resume_project_root" resume "$tool" \
-      "${_vetcoders_contract_argv[@]}" || return 1
-    return 0
+    [[ -z "${_vetcoders_contract_runtime:-}" || "${_vetcoders_contract_runtime:-}" =~ ^(terminal|visible)$ ]]; then
+    local _resume_escalation=0
+    _vetcoders_declaration_escalate_if_needed resume "$tool" "$@" || _resume_escalation=$?
+    case "$_resume_escalation" in
+      0) return 0 ;;
+      1) return 1 ;;
+    esac
   fi
 
   # ONE canonical workspace owner, at the REAL public resume boundary. This is
@@ -602,7 +577,30 @@ _vetcoders_resume_agent() {
   # _vetcoders_prepare_operator_runtime itself already gives them (an explicit
   # override must never even consult the catalogue, let alone be overridden by
   # it).
-  if [[ -z "$resume_explicit_input" ]] &&
+  #
+  # DECLARED workspace (2026-09-09): an explicit `--root/--repo R` is the
+  # target, full stop. Neither an attached frame nor an ambient
+  # VIBECRAFTED_OPERATOR_SESSION may skip this gate for it -- that skip is how
+  # `resume codex --session <id> --root <repo>` run from a stale/foreign frame
+  # marker was silently re-homed onto the marker's session (and panicked on the
+  # missing host). Binding R here keeps the identity exported for
+  # _vetcoders_prepare_declared_workspace_target below, which verifies liveness,
+  # creates R's own session when absent and decides how it is entered.
+  local resume_declared_root="${_vetcoders_contract_root:-}"
+  local resume_ambient_operator="${VIBECRAFTED_OPERATOR_SESSION:-}"
+  if [[ -z "$resume_explicit_input" && -n "$resume_declared_root" ]] &&
+    command -v _vetcoders_ensure_canonical_workspace_identity >/dev/null 2>&1; then
+    _vetcoders_ensure_canonical_workspace_identity "$resume_declared_root" || {
+      local _resume_identity_status=$?
+      printf 'resume: could not resolve the canonical workspace owner for the declared root %s.\n' "$resume_declared_root" >&2
+      printf 'resume: refusing to assemble continuity or open a provider session without an owned target; inspect '"'"'vibecrafted workspace list'"'"'.\n' >&2
+      return "$_resume_identity_status"
+    }
+    if [[ -n "$resume_ambient_operator" && "$resume_ambient_operator" != "${VIBECRAFTED_OPERATOR_SESSION:-}" ]]; then
+      printf 'resume: VIBECRAFTED_OPERATOR_SESSION=%s is ambient context, not the declared workspace; using %s for %s\n' \
+        "$resume_ambient_operator" "${VIBECRAFTED_OPERATOR_SESSION:-}" "$resume_declared_root" >&2
+    fi
+  elif [[ -z "$resume_explicit_input" ]] &&
     [[ -z "${VIBECRAFTED_OPERATOR_SESSION:-}" ]] &&
     command -v _vetcoders_ensure_canonical_workspace_identity >/dev/null 2>&1 &&
     { ! command -v _vetcoders_in_vc_frame >/dev/null 2>&1 || ! _vetcoders_in_vc_frame; }; then
@@ -753,11 +751,15 @@ _vetcoders_resume_agent() {
     # not hand the terminal to a foreground client yet — that client blocks
     # until detach, so the provider tab below would only be created after the
     # operator closed the window they were waiting for.
-    _vetcoders_prepare_operator_runtime "$runtime" defer-attach || return 1
+    # A declared root hands preparation to the declared-workspace owner; a
+    # bare resume keeps the generic detection (explicit env | in-frame |
+    # canonical bound live | create).
+    _vetcoders_prepare_operator_runtime "$runtime" defer-attach "$resume_declared_root" resume || return 1
     if [[ -n "${VIBECRAFTED_OPERATOR_SESSION:-}" ]]; then
       _vetcoders_spawn_into_operator_session "$(_vetcoders_operator_face_tab "$tool")" "$resume_cmd" || return 1
       printf 'Resume launched in operator session: %s\n' "$VIBECRAFTED_OPERATOR_SESSION"
       printf '  agent:   %s\n' "$tool"
+      [[ -z "$resume_declared_root" ]] || printf '  root:    %s\n' "$resume_declared_root"
       if [[ -n "$_vetcoders_contract_session" ]]; then
         printf '  session: %s\n' "$_vetcoders_contract_session"
       else
