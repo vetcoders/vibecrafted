@@ -116,6 +116,21 @@ struct DashboardEvent {
     message: String,
 }
 
+fn unique_runtime_labels<I, S>(labels: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    labels
+        .into_iter()
+        .map(|label| label.as_ref().trim().to_string())
+        .filter(|label| !label.is_empty())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[cfg(feature = "ssr")]
 fn load_dashboard_data() -> DashboardData {
     use chrono::Utc;
@@ -260,12 +275,12 @@ fn load_dashboard_data_from(
                     .sessions
                     .into_iter()
                     .map(|session| {
-                        let runtime = session
-                            .attachments
-                            .iter()
-                            .map(|attachment| attachment.runtime.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ");
+                        let runtime = unique_runtime_labels(
+                            session
+                                .attachments
+                                .iter()
+                                .map(|attachment| attachment.runtime.as_str()),
+                        );
                         let runs = runs_by_logical_session
                             .remove(&session.session_id)
                             .unwrap_or_default();
@@ -1398,7 +1413,7 @@ mod tests {
         DashboardSessionRun, LifecyclePage, RunsPage, SessionsPage, StructurePage, WorkspacesPage,
         console_dashboard, decode_dashboard_embed, encode_dashboard_embed,
         load_dashboard_data_from, operator_active_runs, run_cards, session_cards,
-        workspaces_dashboard,
+        unique_runtime_labels, workspaces_dashboard,
     };
     use crate::control::api::{control_routes, state_payload};
     use crate::theme::provide_theme_context;
@@ -1703,6 +1718,14 @@ mod tests {
         });
         assert!(html.contains("href=\"/run/run-logical-01\""));
         assert!(!html.contains("provider-session-01"));
+    }
+
+    #[test]
+    fn session_runtime_labels_dedup_repeated_attachments() {
+        assert_eq!(
+            unique_runtime_labels(["vc-frame", "vc-frame", "vc-terminal", ""]),
+            "vc-frame, vc-terminal"
+        );
     }
 
     #[test]

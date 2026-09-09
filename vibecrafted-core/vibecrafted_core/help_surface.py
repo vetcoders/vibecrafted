@@ -413,6 +413,7 @@ Commands:
   status               Today's agent activity
   doctor               Installation health — pass/fail
   receipt              Delivery/runtime receipt (source ↔ installed)
+  message              Persist/inspect run-addressed provider steering receipts
   capabilities         Launcher catalog: agents, models, controls, environments (--json)
   claims               Atomic Living Tree path claims (acquire|heartbeat|status|list|release)
   settlements          Read-only f/x/n ledger query (summary|list|inspect)
