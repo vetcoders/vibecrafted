@@ -502,7 +502,10 @@ def test_interactive_admission_snapshot_and_private_command(
 
 @pytest.mark.parametrize("skill", ["init", "partner", "operator", "resume"])
 @pytest.mark.parametrize("attached", [False, True])
-def test_public_interactive_shell_pty_admission(tmp_path, monkeypatch, skill, attached):
+@pytest.mark.parametrize("provider_exit", [0, 7])
+def test_public_interactive_shell_pty_admission(
+    tmp_path, monkeypatch, skill, attached, provider_exit
+):
     import json
     import os
     import pty
@@ -543,6 +546,7 @@ def test_public_interactive_shell_pty_admission(tmp_path, monkeypatch, skill, at
 from pathlib import Path
 Path(os.environ['PROVIDER_CAPTURE']).write_text(json.dumps({'argv': sys.argv, 'run_id': os.environ['VIBECRAFTED_RUN_ID'], 'tty': [os.isatty(i) for i in (0,1,2)]}))
 print('fixture-provider-completed', flush=True)
+raise SystemExit(int(os.environ['PROVIDER_EXIT']))
 """
     )
     provider.chmod(0o700)
@@ -583,6 +587,7 @@ _vetcoders_attach_prepared_vc_frame_session() { return 0; }
         "FIXTURE_REPO": str(repo),
         "FIXTURE_PLAN": str(plan),
         "PROVIDER_CAPTURE": str(capture),
+        "PROVIDER_EXIT": str(provider_exit),
         "VIBECRAFTED_RUN_ID": "work-parent",
         "VIBECRAFTED_RUNTIME_BIN": str(bin_dir),
         "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
@@ -590,6 +595,14 @@ _vetcoders_attach_prepared_vc_frame_session() { return 0; }
     env.pop("PYTHONPATH", None)
     if attached:
         env.update(VC_FRAME="1", VC_FRAME_SESSION_NAME="fixture", VC_FRAME_PANE_ID="7")
+    parent_paths = [
+        control_plane.control_plane_home() / "runtime_runs/work-parent/meta.json",
+        control_plane.control_plane_home() / "runs/work-parent.json",
+    ]
+    parent_bytes = b'{"run_id":"work-parent","agent":"claude","state":"active","sentinel":"parent-owned"}'
+    for parent_path in parent_paths:
+        parent_path.parent.mkdir(parents=True, exist_ok=True)
+        parent_path.write_bytes(parent_bytes)
     master, slave = pty.openpty()
     try:
         proc = subprocess.Popen(
@@ -615,7 +628,12 @@ _vetcoders_attach_prepared_vc_frame_session() { return 0; }
                 output.extend(data)
             if proc.poll() is not None:
                 break
-        assert proc.wait(timeout=2) == 0, output.decode(errors="replace")
+        assert (proc.wait(timeout=2) == 0) == (provider_exit == 0), output.decode(
+            errors="replace"
+        )
+        assert all(
+            parent_path.read_bytes() == parent_bytes for parent_path in parent_paths
+        )
         result = json.loads(capture.read_text())
         assert result["tty"] == [True, True, True]
         assert result["run_id"] != "work-parent"
@@ -624,7 +642,7 @@ _vetcoders_attach_prepared_vc_frame_session() { return 0; }
         run_dir = control_plane.control_plane_home() / "runtime_runs" / result["run_id"]
         meta = json.loads((run_dir / "meta.json").read_text())
         assert meta["skill"] == skill
-        assert meta["status"] == "completed"
+        assert meta["status"] == ("completed" if provider_exit == 0 else "failed")
         assert "fixture-provider-completed" in Path(meta["transcript"]).read_text()
         assert body not in Path(meta["transcript"]).read_text()
         projection = json.loads(
@@ -635,7 +653,7 @@ _vetcoders_attach_prepared_vc_frame_session() { return 0; }
             ).read_text()
         )
         assert projection["agent"] == "codex"
-        assert projection["state"] == "completed"
+        assert projection["state"] == ("completed" if provider_exit == 0 else "failed")
         if skill == "resume":
             assert "resume" in result["argv"]
             assert "11111111-2222-4333-8444-555555555555" in result["argv"]
