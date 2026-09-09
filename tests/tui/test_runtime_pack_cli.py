@@ -1402,3 +1402,482 @@ def test_signed_carrier_rejects_selected_architecture_mismatch_before_installer(
     assert result.returncode != 0
     assert "internal provenance verification failed" in result.stderr
     assert not capture.exists()
+
+
+# --- the build -> install handoff, exercised rather than read -------------
+#
+# The assertions below drive the REAL producer entry point and the REAL record
+# owner. Every one of them reports the subject's exit status explicitly instead
+# of letting a shell's last command decide it: a refusal has to be the refusal
+# under test, never an unrelated failure that happens to be non-zero too.
+
+RELEASE_BUILDER = REPO_ROOT / "scripts/build-vibecrafted-release.sh"
+
+
+def _preflight_builder_repo(tmp_path: Path) -> tuple[Path, str, Path]:
+    """A repo where the real release builder runs as far as its preflight.
+
+    Only the builder and the record's owner are copied. That is not a shortcut:
+    every failure exercised here happens before the remaining libraries are even
+    sourced, which is precisely the property under test -- the attempt must be
+    claimed before them.
+    """
+
+    repo = tmp_path / "repo"
+    (repo / "scripts/lib").mkdir(parents=True)
+    (repo / "dist").mkdir()
+    shutil.copy2(RELEASE_BUILDER, repo / "scripts" / RELEASE_BUILDER.name)
+    shutil.copy2(SELECTION_LIBRARY, repo / "scripts/lib" / SELECTION_LIBRARY.name)
+    (repo / "VERSION").write_text(f"{VERSION}\n", encoding="utf-8")
+    # The builder prefers a rustup cargo before it parses a single argument.
+    # HOME is a fresh directory here, so a real rustup would find no toolchain
+    # under it and spend the test installing one over the network -- silently,
+    # because that probe is `|| true`. Stub it: which cargo wins is irrelevant
+    # to a preflight that dies long before anything compiles.
+    fake_bin = repo / "fake-bin"
+    fake_bin.mkdir()
+    rustup = fake_bin / "rustup"
+    rustup.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    rustup.chmod(0o755)
+    head = _git_repo(repo)
+    previous = repo / "dist/Vibecrafted_RuntimePack_previous-darwin-arm64.tar.gz"
+    previous.write_bytes(b"the pack that succeeded yesterday")
+    _selection_record(
+        repo, _ready_fields(previous, attempt="previous-success", source_revision=head)
+    )
+    return repo, head, previous
+
+
+def _run_builder(
+    repo: Path, *arguments: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", str(repo / "scripts" / RELEASE_BUILDER.name), *arguments],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            **os.environ,
+            "PATH": f"{repo / 'fake-bin'}:{os.environ['PATH']}",
+            "VIBECRAFTED_TERMINAL_REPO": str(repo),
+            "VIBECRAFTED_FRAME_REPO": str(repo),
+            **(env or {}),
+        },
+    )
+
+
+def _record(repo: Path) -> dict[str, str]:
+    # json.loads is the point: the record has to be real JSON, not merely a
+    # shape the shell reader happens to accept.
+    return json.loads((repo / "build/runtime-pack-selection.json").read_text("utf-8"))
+
+
+@pytest.mark.parametrize(
+    ("environment", "expected"),
+    (
+        pytest.param(
+            {"VIBECRAFTED_TERMINAL_REPO": "/nonexistent/vc-terminal"},
+            "missing donor directory",
+            id="missing-donor",
+        ),
+        pytest.param(
+            {"VIBECRAFTED_RELEASE_DATE": "not-a-date"},
+            "VIBECRAFTED_RELEASE_DATE must be YYYYMMDD",
+            id="invalid-release-date",
+        ),
+        pytest.param(
+            {"DEVELOPER_DIR": "/nonexistent/Xcode.app/Contents/Developer"},
+            "no usable Xcode developer dir",
+            id="unusable-xcode",
+        ),
+    ),
+)
+def test_a_failed_preflight_invalidates_the_previous_ready_selection(
+    tmp_path: Path, environment: dict[str, str], expected: str
+) -> None:
+    """A build that dies before it starts still has to void yesterday's answer.
+
+    These three die in the builder's executable top level, above everything that
+    looks like "the build": donor roots, the release date, the Xcode toolchain.
+    Claiming the attempt just before `build_product` left all of them outside
+    the protection, so a failed retry -- at the very same source SHA, where no
+    name derived from HEAD can tell the runs apart -- left the previous success
+    selected and `make install` installed it as if it were today's build.
+    """
+
+    repo, head, previous = _preflight_builder_repo(tmp_path)
+    assert _record(repo)["status"] == "ready"
+
+    result = _run_builder(repo, "--runtime-pack-only", env=environment)
+
+    # Name the failure. A non-zero exit alone would also be satisfied by the
+    # sandbox lacking something unrelated.
+    assert result.returncode != 0
+    assert expected in result.stderr, result.stderr
+    record = _record(repo)
+    assert record["status"] == "pending"
+    assert record["source_revision"] == head
+    assert "pack" not in record
+    # The archive itself is untouched; only the claim that it is current is gone.
+    assert previous.is_file()
+
+
+@pytest.mark.parametrize(
+    ("arguments", "environment", "expected"),
+    (
+        pytest.param(
+            ("--not-a-flag",),
+            {},
+            "usage:",
+            id="usage-error",
+        ),
+        pytest.param(
+            ("--notarize-only",),
+            {"VIBECRAFTED_TERMINAL_REPO": "/nonexistent/vc-terminal"},
+            "missing donor directory",
+            id="notarize-only",
+        ),
+    ),
+)
+def test_a_run_that_builds_no_carrier_leaves_the_selection_untouched(
+    tmp_path: Path,
+    arguments: tuple[str, ...],
+    environment: dict[str, str],
+    expected: str,
+) -> None:
+    """Invalidation belongs to builds, not to every invocation.
+
+    Misuse is rejected before the claim, and --notarize-only re-runs
+    notarization for an App that already exists: it produces no new carrier, so
+    voiding the record would refuse an install of a pack that is still perfectly
+    current.
+    """
+
+    repo, _head, _previous = _preflight_builder_repo(tmp_path)
+    before = (repo / "build/runtime-pack-selection.json").read_bytes()
+
+    result = _run_builder(repo, *arguments, env=environment)
+
+    assert result.returncode != 0
+    assert expected in result.stderr, result.stderr
+    assert (repo / "build/runtime-pack-selection.json").read_bytes() == before
+
+
+def _selection_shell(script: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+    """Drive the record's owner directly, reporting its status as data.
+
+    `set -e` is deliberately absent and every exit code is printed rather than
+    returned: a test that asserted on the process status would be asserting on
+    whatever ran last.
+    """
+
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'. "{SELECTION_LIBRARY}"\n{script}',
+            "runtime-pack-selection",
+            *arguments,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_a_stale_builder_cannot_publish_over_a_newer_attempt(tmp_path: Path) -> None:
+    """The interleaving that hashing-then-renaming could not survive.
+
+    Reading the current attempt, then digesting a several-hundred-megabyte
+    archive, then renaming over the record is check-then-act, and the window is
+    exactly as long as the digest. Schedule: A claims, A digests, B claims while
+    A is still digesting, A finishes and tries to publish. The rename is atomic
+    but it is not compare-and-swap, so A's ready record used to bury B -- and
+    when B then failed, the failed build's install resolved to A's bytes.
+
+    Nothing here sleeps or races: measuring and committing are separate steps,
+    so the schedule is written down rather than hoped for.
+    """
+
+    repo = tmp_path / "repo"
+    (repo / "dist").mkdir(parents=True)
+    pack = repo / "dist/Vibecrafted_RuntimePack_A-darwin-arm64.tar.gz"
+    pack.write_bytes(b"A's carrier")
+
+    result = _selection_shell(
+        'repo="$1"; pack="$2"; sha="$3"\n'
+        'a="$(runtime_pack_selection_attempt_id)"\n'
+        'b="$a-newer"\n'
+        'runtime_pack_selection_begin "$repo" "$a" "$sha"; echo "begin_a=$?"\n'
+        'runtime_pack_selection_measure "$pack"; echo "measure_a=$?"\n'
+        'runtime_pack_selection_begin "$repo" "$b" "$sha"; echo "begin_b=$?"\n'
+        'runtime_pack_selection_commit "$repo" "$a" "4.3.1" darwin-arm64 arm64 '
+        '"$sha" "$sha" "$sha"; echo "commit_a=$?"\n'
+        'runtime_pack_selection_read "$repo" darwin-arm64 arm64; echo "read=$?"\n'
+        'echo "error=$RUNTIME_PACK_SELECTION_ERROR"\n',
+        str(repo),
+        str(pack),
+        SOURCE_SHA,
+    )
+
+    reported = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    assert reported["begin_a"] == "0"
+    assert reported["measure_a"] == "0"
+    assert reported["begin_b"] == "0"
+    # A's build genuinely succeeded; it simply is no longer the answer. That is
+    # a step aside, not a build failure, so it does not fail the builder.
+    assert reported["commit_a"] == "0"
+    assert "owns the record" in result.stderr
+
+    record = _record(repo)
+    assert record["status"] == "pending"
+    assert record["attempt"].endswith("-newer")
+    # The consumer's verdict is the one that matters: B never completed, so
+    # nothing is installable -- least of all the stale winner's bytes.
+    assert reported["read"] == "2"
+    assert "did not complete" in reported["error"]
+
+
+@pytest.mark.parametrize(
+    "mangle",
+    (
+        pytest.param(
+            lambda text: text.rstrip("\n")[:-1] + "\n",
+            id="truncated-closing-brace",
+        ),
+        pytest.param(
+            lambda text: text.replace(
+                '  "status": "ready",', '  "status": "ready",\n  "status": "pending",'
+            ),
+            id="duplicate-status",
+        ),
+        pytest.param(
+            lambda text: text.replace(
+                '  "sha256"', '  "pack": "/tmp/other.tar.gz",\n  "sha256"'
+            ),
+            id="duplicate-pack",
+        ),
+        pytest.param(
+            lambda text: (
+                "\n".join(line for line in text.splitlines() if '"size"' not in line)
+                + "\n"
+            ),
+            id="missing-size",
+        ),
+        pytest.param(
+            lambda text: (
+                "\n".join(
+                    line
+                    for line in text.splitlines()
+                    if '"terminal_revision"' not in line
+                )
+                + "\n"
+            ),
+            id="missing-donor-revision",
+        ),
+        pytest.param(
+            lambda text: (
+                "\n".join(line for line in text.splitlines() if '"version"' not in line)
+                + "\n"
+            ),
+            id="missing-version",
+        ),
+        pytest.param(
+            lambda text: text.replace('"status": "ready"', '"status": "pending"'),
+            id="mixed-generation",
+        ),
+        pytest.param(
+            lambda text: text + '  "pack": "/tmp/appended.tar.gz"\n',
+            id="trailing-field-after-close",
+        ),
+    ),
+)
+def test_only_one_whole_record_is_ever_honoured(tmp_path: Path, mangle) -> None:
+    """Matching lines are not a record; the whole document is.
+
+    The reader used to pull each field out with an anchored `sed`, so a record
+    with its closing brace removed read exactly like a complete one, a second
+    `status` or `pack` silently won by being first, and version, size and the
+    donor revisions could simply be absent. None of those describe a build that
+    finished, and a selection record that cannot describe a finished build must
+    refuse rather than hand the installer a candidate.
+    """
+
+    repo = tmp_path / "repo"
+    (repo / "dist").mkdir(parents=True)
+    pack = repo / "dist/Vibecrafted_RuntimePack_4.3.0-darwin-arm64.tar.gz"
+    pack.write_bytes(b"a carrier whose record is broken")
+    record = _selection_record(repo, _ready_fields(pack))
+    intact = record.read_text(encoding="utf-8")
+
+    # The intact record is honoured -- otherwise this proves nothing.
+    healthy = _selection_shell(
+        'runtime_pack_selection_read "$1" darwin-arm64 arm64; echo "read=$?"\n',
+        str(repo),
+    )
+    assert "read=0" in healthy.stdout, healthy.stdout
+
+    record.write_text(mangle(intact), encoding="utf-8")
+    result = _selection_shell(
+        'runtime_pack_selection_read "$1" darwin-arm64 arm64; echo "read=$?"\n'
+        'echo "pack=$RUNTIME_PACK_SELECTION_PACK"\n',
+        str(repo),
+    )
+
+    # Exit 2 is the contract: a record exists and cannot be honoured, so the
+    # caller must fail visibly instead of resolving some other archive.
+    assert "read=2" in result.stdout, result.stdout
+    assert "pack=\n" in result.stdout + "\n", result.stdout
+
+
+def test_a_relative_release_dir_is_recorded_as_the_directory_it_means(
+    tmp_path: Path,
+) -> None:
+    """VIBECRAFTED_RELEASE_DIR may be relative; the record may not be.
+
+    The reader accepts absolute carriers only -- a relative path means a
+    different file from every directory -- so the producer resolves what it is
+    about to record. Spaces are ordinary in a release directory and survive.
+    """
+
+    repo = tmp_path / "repo"
+    (repo / "out dir").mkdir(parents=True)
+    pack = repo / "out dir/Vibecrafted_RuntimePack_4.3.0-darwin-arm64.tar.gz"
+    pack.write_bytes(b"a carrier outside dist")
+
+    result = _selection_shell(
+        'cd "$1"\n'
+        'attempt="$(runtime_pack_selection_attempt_id)"\n'
+        'runtime_pack_selection_begin "$1" "$attempt" "$2"; echo "begin=$?"\n'
+        'runtime_pack_selection_publish "$1" "$attempt" "./out dir/$3" "4.3.0" '
+        'darwin-arm64 arm64 "$2" "$2" "$2"; echo "publish=$?"\n'
+        'runtime_pack_selection_read "$1" darwin-arm64 arm64; echo "read=$?"\n'
+        'echo "pack=$RUNTIME_PACK_SELECTION_PACK"\n',
+        str(repo),
+        SOURCE_SHA,
+        pack.name,
+    )
+
+    assert "begin=0" in result.stdout, result.stdout
+    assert "publish=0" in result.stdout, result.stdout
+    assert "read=0" in result.stdout, result.stdout
+    assert f"pack={pack}" in result.stdout, result.stdout
+    assert _record(repo)["pack"] == str(pack)
+    assert not (repo / "dist").exists()
+
+
+def test_the_producers_own_record_carries_its_build_into_the_installer(
+    tmp_path: Path,
+) -> None:
+    """The handoff end to end, with nothing about the record fabricated.
+
+    Every other selection test writes the record by hand, which proves the
+    consumer reads a shape but not that the producer writes it. Here the real
+    owner publishes -- after the archive is sealed and signed, as the builder
+    does -- and `make install` resolves it past eighteen legitimate historical
+    archives, then puts the recorded bytes through the checksum, the detached
+    signature and the internal provenance gates unchanged.
+    """
+
+    repo = tmp_path / "repo"
+    dist = repo / "dist"
+    dist.mkdir(parents=True)
+    _historical_dist(dist)
+    head = _git_repo(repo)
+    built = tmp_path / "built/VibecraftedRuntime"
+    _fake_runtime_payload(built, tmp_path / "argv", marker="just-built")
+    archive, public_key = _sealed_archive(
+        dist,
+        built,
+        name="Vibecrafted_RuntimePack_4.3.0-20260909-d7d83dc5-darwin-arm64.tar.gz",
+        source_revision=head,
+        keys=(tmp_path / "signing.key", tmp_path / "signing.pub"),
+    )
+
+    published = _selection_shell(
+        'repo="$1"; pack="$2"; head="$3"; terminal="$4"; frame="$5"; version="$6"\n'
+        'attempt="$(runtime_pack_selection_attempt_id)"\n'
+        'runtime_pack_selection_begin "$repo" "$attempt" "$head"; echo "begin=$?"\n'
+        'runtime_pack_selection_publish "$repo" "$attempt" "$pack" "$version" '
+        'darwin-arm64 arm64 "$head" "$terminal" "$frame"; echo "publish=$?"\n',
+        str(repo),
+        str(archive),
+        head,
+        TERMINAL_SHA,
+        FRAME_SHA,
+        VERSION,
+    )
+    assert "begin=0" in published.stdout, published.stdout + published.stderr
+    assert "publish=0" in published.stdout, published.stdout + published.stderr
+
+    marker_out = tmp_path / "installed-marker"
+    result = _isolated_repo_install(
+        tmp_path,
+        env={
+            "CAPTURE": str(tmp_path / "argv"),
+            "PACK_MARKER_OUT": str(marker_out),
+            "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY": str(public_key),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert marker_out.read_text(encoding="utf-8") == "just-built"
+    # Selection resolved bytes, and it did so without touching a single one of
+    # the archives it did not choose.
+    carriers = sorted(
+        path.name for path in dist.glob("Vibecrafted_RuntimePack_*.tar.gz")
+    )
+    assert carriers == sorted((*HISTORICAL_PACKS, archive.name))
+
+
+def test_a_carrier_swapped_after_publication_fails_the_producers_own_record(
+    tmp_path: Path,
+) -> None:
+    """The record names bytes. Replacing them is caught before the installer.
+
+    This is the same publication as above, so the refusal cannot be blamed on a
+    hand-written record: only the archive changed underneath it.
+    """
+
+    repo = tmp_path / "repo"
+    dist = repo / "dist"
+    dist.mkdir(parents=True)
+    head = _git_repo(repo)
+    built = tmp_path / "built/VibecraftedRuntime"
+    _fake_runtime_payload(built, tmp_path / "argv", marker="just-built")
+    archive, public_key = _sealed_archive(
+        dist,
+        built,
+        name="Vibecrafted_RuntimePack_4.3.0-20260909-d7d83dc5-darwin-arm64.tar.gz",
+        source_revision=head,
+        keys=(tmp_path / "signing.key", tmp_path / "signing.pub"),
+    )
+    published = _selection_shell(
+        'attempt="$(runtime_pack_selection_attempt_id)"\n'
+        'runtime_pack_selection_begin "$1" "$attempt" "$3"; echo "begin=$?"\n'
+        'runtime_pack_selection_publish "$1" "$attempt" "$2" "$6" darwin-arm64 '
+        'arm64 "$3" "$4" "$5"; echo "publish=$?"\n',
+        str(repo),
+        str(archive),
+        head,
+        TERMINAL_SHA,
+        FRAME_SHA,
+        VERSION,
+    )
+    assert "publish=0" in published.stdout, published.stdout + published.stderr
+
+    archive.write_bytes(archive.read_bytes() + b"appended")
+
+    result = _isolated_repo_install(
+        tmp_path,
+        env={
+            "CAPTURE": str(tmp_path / "argv"),
+            "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY": str(public_key),
+        },
+    )
+
+    assert result.returncode != 0
+    assert "recorded digest" in result.stderr, result.stderr
