@@ -50,6 +50,10 @@ def _strip(text: str) -> str:
     return ANSI.sub("", text).replace("\r\n", "\n")
 
 
+def _display_text(text: str) -> str:
+    return " ".join(_strip(text).split())
+
+
 def _isolated_env(home: Path, extra_bin: Path | None = None) -> dict[str, str]:
     env = {
         key: value
@@ -148,7 +152,7 @@ def test_source_deck_advertised_help_reaches_parser(tmp_path: Path, verb: str) -
     home = tmp_path / "home"
     home.mkdir()
     result = _run(_help_argv(verb), home=home)
-    combined = _strip(result.stdout + result.stderr)
+    combined = _display_text(result.stdout + result.stderr)
     assert UNKNOWN not in combined
     assert result.returncode == 0, combined
     for marker in CORE_HELP_MARKERS.get(verb, ()):
@@ -163,7 +167,7 @@ def test_packaged_deck_core_surface_help_reaches_parser(
     home = tmp_path / "run-home"
     home.mkdir()
     result = _run([verb, "--help"], home=home, deck=deck, cwd=tmp_path)
-    combined = _strip(result.stdout + result.stderr)
+    combined = _display_text(result.stdout + result.stderr)
     assert UNKNOWN not in combined
     assert result.returncode == 0, combined
     for marker in CORE_HELP_MARKERS[verb]:
@@ -237,10 +241,19 @@ def test_claims_list_json_schema_is_stable(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     assert payload["schema"] == RESULT_SCHEMA
-    assert set(payload) == {"schema", "ok", "action", "claims"}
+    assert set(payload) == {
+        "schema",
+        "ok",
+        "action",
+        "claims",
+        "conflicts",
+        "stale_claims",
+    }
     assert payload["ok"] is True
     assert payload["action"] == "list"
     assert payload["claims"] == []
+    assert payload["conflicts"] == []
+    assert payload["stale_claims"] == []
 
 
 def test_owned_alias_inventory_keeps_vc_fork_and_refuses_invented_twins() -> None:

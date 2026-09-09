@@ -79,11 +79,12 @@ def test_root_help_uses_the_registered_ship_cycle() -> None:
 
 def test_message_help_is_codex_queue_only() -> None:
     output = render_message_help()
+    display = " ".join(output.split())
 
-    assert "Codex `queue --thread`" in output
-    assert "does not start a worker" in output
-    assert "does not invent Claude" in output
-    assert "Claude steering" not in output
+    assert "Codex `queue --thread`" in display
+    assert "does not start a worker" in display
+    assert "does not invent Claude" in display
+    assert "Claude steering" not in display
     assert "--run-id <id>" in output
     assert "--inspect <message-id>" in output
 

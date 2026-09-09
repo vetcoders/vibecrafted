@@ -57,7 +57,6 @@ def test_root_cli_without_command_returns_product_help(capsys) -> None:
     assert "Vibecrafted core command surface" not in output
 
 
-@pytest.mark.parametrize("launcher", cli.LAUNCHERS)
 def test_python_owned_commands_keep_surface_and_internal_verbs() -> None:
     owned = cli.python_owned_commands()
     assert set(CORE_SURFACE_COMMANDS) <= set(owned)
@@ -66,6 +65,7 @@ def test_python_owned_commands_keep_surface_and_internal_verbs() -> None:
     assert "acp" in owned
 
 
+@pytest.mark.parametrize("launcher", cli.LAUNCHERS)
 def test_every_workflow_help_uses_the_core_product_surface(
     launcher: str, capsys
 ) -> None:
@@ -110,8 +110,9 @@ def test_message_help_topic_matches_direct_flag(capsys) -> None:
     direct_output = capsys.readouterr().out
 
     assert topic_output == direct_output
-    assert "Codex `queue --thread`" in topic_output
-    assert "does not invent Claude" in topic_output
+    display = " ".join(topic_output.split())
+    assert "Codex `queue --thread`" in display
+    assert "does not invent Claude" in display
 
 
 def test_relocate_and_claims_help_reach_owned_parsers(capsys) -> None:
