@@ -407,9 +407,15 @@ def _ready_fields(pack: Path, **overrides: str) -> dict[str, str]:
 
 def _git_repo(repo: Path) -> str:
     repo.mkdir(parents=True, exist_ok=True)
-    run = lambda *args: subprocess.run(
-        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
-    )
+
+    def run(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
     run("init", "-q")
     run("config", "user.email", "agents@vetcoders.io")
     run("config", "user.name", "fixture")
