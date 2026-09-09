@@ -15,12 +15,14 @@ PUBLIC entry owes the operator a visible terminal. The escalation reuses the one
 owner Vibecrafted.app already uses -- vc-terminal -e <launch-primary-shell.zsh>
 <child owner> --. Start's child owner is still the generation ``bin/vc-start``.
 Resume/init/operator/partner hand off through
-``env PYTHONPATH=<sourced-core> <python> -m vibecrafted_core.spawn
+``env PYTHONPATH=<sourced-core> <owned-python> -m vibecrafted_core.spawn
 interactive-handoff --command <interactive-launch …>``, never a PATH-resolved
-``bin/vibecrafted`` and never a guessed ``argv[2] == resume``. Inside that
-terminal the child completes the resume in the right ORDER: exactly one
-continuity/admission pack, exactly one provider tab, and only afterwards the
-blocking foreground attach.
+``bin/vibecrafted`` and never a guessed ``argv[2] == resume``. The owned
+token is a real interpreter name (``python`` / ``python3`` / ``python3.N``)
+or the exact checkout wrapper ``scripts/project-python`` — not a basename
+or substring lookalike. Inside that terminal the child completes the resume
+in the right ORDER: exactly one continuity/admission pack, exactly one
+provider tab, and only afterwards the blocking foreground attach.
 
 Four properties are load-bearing and each has a case below:
   * project identity -- explicit --root wins, and the runtime generation is
@@ -49,6 +51,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CORE_IMPORT_ROOT = REPO_ROOT / "vibecrafted-core"
+CANONICAL_PROJECT_PYTHON = (REPO_ROOT / "scripts" / "project-python").resolve()
 SHELL_SH = (
     CORE_IMPORT_ROOT
     / "vibecrafted_core"
@@ -441,6 +444,49 @@ def _spawn_owner_argv(hosted: list[str]) -> list[str]:
     return owner
 
 
+def _handoff_python_path(owner: list[str]) -> Path:
+    """Selected interpreter or wrapper token in the spawn owner argv."""
+    if Path(owner[0]).name == "env":
+        assert len(owner) > 2, owner
+        assert owner[1].startswith("PYTHONPATH="), owner
+        return Path(owner[2])
+    return Path(owner[0])
+
+
+def _is_interpreter_python_name(name: str) -> bool:
+    """Real interpreter spelling: python, python3, python3.N — not a prefix."""
+    if name in {"python", "python3"}:
+        return True
+    prefix = "python3."
+    if not name.startswith(prefix):
+        return False
+    suffix = name[len(prefix) :]
+    return bool(suffix) and suffix.isdigit()
+
+
+def _is_canonical_project_python(path: Path) -> bool:
+    """Exact repo ``scripts/project-python`` after resolve, not a lookalike."""
+    try:
+        return path.expanduser().resolve() == CANONICAL_PROJECT_PYTHON
+    except OSError:
+        return False
+
+
+def _is_owned_handoff_python(python_path: str | Path) -> bool:
+    path = Path(python_path)
+    return _is_canonical_project_python(path) or _is_interpreter_python_name(
+        path.name
+    )
+
+
+def _assert_owned_handoff_python(python_path: Path, owner: list[str]) -> None:
+    assert _is_owned_handoff_python(python_path), (
+        "unowned handoff interpreter "
+        f"{python_path}: expected python/python3/python3.N or exact "
+        f"{CANONICAL_PROJECT_PYTHON}; owner={owner}"
+    )
+
+
 def _handoff_command_text(owner: list[str]) -> str:
     return _flag_value(owner, "--command")
 
@@ -465,12 +511,7 @@ def _spawn_handoff(hosted: list[str]) -> tuple[list[str], list[str], dict]:
     assert pythonpath_tokens, owner
     imported = Path(pythonpath_tokens[0].split("=", 1)[1].split(os.pathsep)[0]).resolve()
     assert imported == CORE_IMPORT_ROOT.resolve(), owner
-    if Path(owner[0]).name == "env":
-        assert owner[1].startswith("PYTHONPATH="), owner
-        python_bin = Path(owner[2]).name
-    else:
-        python_bin = Path(owner[0]).name
-    assert python_bin.startswith("python"), owner
+    _assert_owned_handoff_python(_handoff_python_path(owner), owner)
     assert owner[owner.index("-m") + 1] == "vibecrafted_core.spawn", owner
     inner = _inner_launch_argv(_handoff_command_text(owner))
     admission = _admission_payload(inner)
@@ -521,6 +562,151 @@ def _child_effective_root(tmp_path: Path, launch: dict) -> Path:
     if not root.is_absolute():
         root = _working_directory(launch) / root
     return root.resolve()
+
+
+def _synthetic_spawn_hosted(
+    python_path: Path | str,
+    *,
+    admission_file: Path,
+    admission: dict | None = None,
+    provider: str = "codex",
+    root: Path | None = None,
+) -> list[str]:
+    """Build a complete spawn-handoff argv around a chosen python token."""
+    selected_root = (root or REPO_ROOT).resolve()
+    payload = admission if admission is not None else {
+        "skill": "resume",
+        "agent": provider,
+        "root": str(selected_root),
+    }
+    admission_file.write_text(json.dumps(payload), encoding="utf-8")
+    command = " ".join(
+        [
+            shlex.quote(str(python_path)),
+            "-m",
+            "vibecrafted_core.spawn",
+            "interactive-launch",
+            provider,
+            "--root",
+            shlex.quote(str(selected_root)),
+            "--admission-file",
+            shlex.quote(str(admission_file)),
+        ]
+    )
+    return [
+        str(PRIMARY_SHELL),
+        "/usr/bin/env",
+        f"PYTHONPATH={CORE_IMPORT_ROOT}",
+        str(python_path),
+        "-m",
+        "vibecrafted_core.spawn",
+        "interactive-handoff",
+        "--command",
+        command,
+    ]
+
+
+# --------------------------------------------------------------------------
+# Owned interpreter vs exact project-python wrapper
+# --------------------------------------------------------------------------
+
+
+def test_owned_handoff_python_accepts_exact_canonical_wrapper() -> None:
+    assert CANONICAL_PROJECT_PYTHON.is_file(), CANONICAL_PROJECT_PYTHON
+    assert _is_owned_handoff_python(CANONICAL_PROJECT_PYTHON)
+    assert _is_owned_handoff_python(
+        REPO_ROOT / "scripts" / ".." / "scripts" / "project-python"
+    )
+    assert _is_canonical_project_python(CANONICAL_PROJECT_PYTHON)
+
+
+def test_owned_handoff_python_accepts_interpreter_names() -> None:
+    assert _is_owned_handoff_python("python")
+    assert _is_owned_handoff_python("python3")
+    assert _is_owned_handoff_python("/usr/bin/python3.12")
+    assert _is_owned_handoff_python(REPO_ROOT / ".venv" / "bin" / "python3")
+    assert _is_interpreter_python_name("python3.13")
+    assert not _is_interpreter_python_name("project-python")
+
+
+def test_owned_handoff_python_rejects_unrelated_executable_and_path(
+    tmp_path: Path,
+) -> None:
+    lookalike = tmp_path / "scripts" / "project-python"
+    lookalike.parent.mkdir(parents=True)
+    lookalike.write_text("#!/bin/sh\n", encoding="utf-8")
+    lookalike.chmod(0o755)
+    assert not _is_owned_handoff_python(lookalike)
+    assert not _is_owned_handoff_python("/tmp/evil/project-python")
+    assert not _is_owned_handoff_python("/opt/homebrew/bin/project-python")
+    assert not _is_owned_handoff_python(REPO_ROOT / "scripts" / "project-python-extra")
+    assert not _is_owned_handoff_python(str(CANONICAL_PROJECT_PYTHON) + "-x")
+    assert not _is_owned_handoff_python("project-python")
+    assert not _is_owned_handoff_python("python-malware")
+    assert not _is_owned_handoff_python("my-python3")
+    assert not _is_owned_handoff_python("python3.12rc1")
+    assert not _is_owned_handoff_python("python2")
+    assert not _is_owned_handoff_python("/usr/bin/false")
+    assert not _is_owned_handoff_python(tmp_path / "not-python")
+
+
+def test_spawn_handoff_accepts_exact_canonical_project_python(tmp_path: Path) -> None:
+    project = tmp_path / "selected-repo"
+    hosted = _synthetic_spawn_hosted(
+        CANONICAL_PROJECT_PYTHON,
+        admission_file=tmp_path / "admission.json",
+        root=project,
+    )
+    owner, inner, admission = _spawn_handoff(hosted)
+    assert _handoff_python_path(owner).resolve() == CANONICAL_PROJECT_PYTHON
+    assert inner[0] == "interactive-launch"
+    assert inner[1] == "codex"
+    assert Path(_flag_value(inner, "--root")).resolve() == project.resolve()
+    assert admission["skill"] == "resume"
+    assert admission["agent"] == "codex"
+    assert Path(admission["root"]).resolve() == project.resolve()
+    assert owner.count("interactive-handoff") == 1
+    assert inner.count("interactive-launch") == 1
+
+
+def test_spawn_handoff_accepts_interpreter_form(tmp_path: Path) -> None:
+    project = tmp_path / "selected-repo"
+    hosted = _synthetic_spawn_hosted(
+        Path("/usr/bin/python3.12"),
+        admission_file=tmp_path / "admission.json",
+        root=project,
+        provider="claude",
+    )
+    owner, inner, admission = _spawn_handoff(hosted)
+    assert _is_interpreter_python_name(_handoff_python_path(owner).name)
+    assert inner[1] == "claude"
+    assert admission["skill"] == "resume"
+    assert admission["agent"] == "claude"
+    assert Path(admission["root"]).resolve() == project.resolve()
+
+
+def test_spawn_handoff_rejects_unrelated_project_python_path(tmp_path: Path) -> None:
+    fake = tmp_path / "scripts" / "project-python"
+    fake.parent.mkdir(parents=True)
+    fake.write_text("#!/bin/sh\n", encoding="utf-8")
+    fake.chmod(0o755)
+    hosted = _synthetic_spawn_hosted(
+        fake,
+        admission_file=tmp_path / "admission.json",
+        root=tmp_path / "selected-repo",
+    )
+    with pytest.raises(AssertionError, match="unowned handoff interpreter"):
+        _spawn_handoff(hosted)
+
+
+def test_spawn_handoff_rejects_python_prefix_lookalike(tmp_path: Path) -> None:
+    hosted = _synthetic_spawn_hosted(
+        tmp_path / "bin" / "python-malware",
+        admission_file=tmp_path / "admission.json",
+        root=tmp_path / "selected-repo",
+    )
+    with pytest.raises(AssertionError, match="unowned handoff interpreter"):
+        _spawn_handoff(hosted)
 
 
 # --------------------------------------------------------------------------
