@@ -53,6 +53,8 @@ def _outbox_root() -> Path:
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     # mkdir's mode is affected by umask and an existing directory can predate
     # this feature. Message payloads are private control-plane data.
+    # Private directory: owner needs traversal; group and others get no access.
+    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
     os.chmod(root, 0o700)
     return root
 
@@ -66,6 +68,8 @@ def _message_path(message_id: str) -> Path:
 def _idempotency_path(key: str) -> Path:
     directory = _outbox_root() / "idempotency"
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Private directory: owner needs traversal; group and others get no access.
+    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
     os.chmod(directory, 0o700)
     return directory / f"{_digest(key)}.json"
 
