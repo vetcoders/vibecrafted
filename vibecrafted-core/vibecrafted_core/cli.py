@@ -50,6 +50,7 @@ from .workflow import (
     manual_resume_session,
     normalize_launch_spec,
     operator_continue_run,
+    read_prompt_stream,
     recover_launch_receipt,
     resolve_fork_source,
 )
@@ -205,14 +206,20 @@ def _add_launch_parser(sub: argparse._SubParsersAction, name: str) -> None:
         run.add_argument("--dry-run", action="store_true")
         run.add_argument("--json", action="store_true")
         return
-    run.add_argument("-p", "--prompt", default="")
+    run.add_argument("-p", "--prompt", default=None)
     run.add_argument("-f", "--file", default="")
     run.add_argument(
         "--prompt-stdin",
         action="store_true",
         help="read the prompt from stdin and keep it out of argv/temp files",
     )
-    run.add_argument("--runtime", default="")
+    run.add_argument(
+        "--runtime", default="", help="presentation: headless, visible or terminal"
+    )
+    run.add_argument(
+        "--execution-runtime", choices=["living-tree", "local-worktrees"], default=""
+    )
+    run.add_argument("--base", default="")
     add_repo_arguments(run)
     run.add_argument(
         "--worktree",
@@ -246,7 +253,7 @@ def _add_launch_parser(sub: argparse._SubParsersAction, name: str) -> None:
     run.add_argument("--mode", default="")
     run.add_argument("--count", type=int)
     run.add_argument("--depth", type=int)
-    run.add_argument("--model", default="")
+    run.add_argument("--model", default=None)
     if name == "research":
         run.add_argument("--synthesizer", default="")
         run.add_argument("--synthesizer-model", default="")
@@ -455,7 +462,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     add_repo_arguments(resume)
     resume.add_argument("--source-dir", default="")
-    resume.add_argument("--model", default="")
+    resume.add_argument("--model", default=None)
     resume.add_argument("--json", action="store_true")
     fork_source = sub.add_parser(
         "fork-source",
@@ -469,6 +476,29 @@ def _build_parser() -> argparse.ArgumentParser:
     fork_source.add_argument("--run-id", default="")
     fork_source.add_argument("--session", default="")
     fork_source.add_argument("--json", action="store_true")
+    fork_source.add_argument("--root", default="")
+    session_source = sub.add_parser(
+        "session-source", help="resolve shared provider session selector"
+    )
+    session_source.add_argument("agent", choices=sorted(AGENTS - {"swarm"}))
+    session_source.add_argument("--session", required=True)
+    session_source.add_argument("--root", required=True)
+    session_source.add_argument("--id-only", action="store_true")
+    task_fork = sub.add_parser("fork-session", help="tracked native task fork")
+    task_fork.add_argument("agent", choices=sorted(AGENTS - {"swarm"}))
+    task_fork.add_argument("--session", required=True)
+    task_fork.add_argument("--session-selection", type=json.loads, default=None)
+    task_fork.add_argument("--parent-run-id", default="")
+    task_fork.add_argument("--root", required=True)
+    task_fork.add_argument("--model", default=None)
+    task_fork.add_argument("--base", default="")
+    task_fork.add_argument("--permissions", default="")
+    task_fork.add_argument("--worktree", default=None)
+    task_fork.add_argument("--execution-runtime", default="")
+    task_fork.add_argument("--source-dir", default="")
+    inputs = task_fork.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--file", default="")
+    inputs.add_argument("--prompt-stdin", action="store_true")
     for name in LAUNCHERS:
         _add_launch_parser(sub, name)
     return parser
@@ -619,6 +649,19 @@ def _print_launch_receipt(payload: dict[str, Any]) -> None:
     print(f"agent:      {agent}")
     print(f"skill:      {_field(payload, 'skill')}")
     print(f"root:       {_field(payload, 'root')}")
+    for key in (
+        "repo_requested",
+        "repo_kind",
+        "base_requested",
+        "resolved_ref",
+        "baseline_sha",
+        "runtime_class",
+        "presentation",
+        "model_requested",
+        "model_source",
+    ):
+        if payload.get(key):
+            print(f"{key}: {payload[key]}")
     if payload.get("worktree"):
         print(f"worktree:   {_field(payload, 'worktree_branch')}")
         print(f"parent:     {_field(payload, 'parent_root')}")
@@ -1002,15 +1045,19 @@ def _agent_resume(agent: str, argv: Sequence[str]) -> int:
     """``vibecrafted resume <agent>``: continue a stopped control-plane run."""
     parser = argparse.ArgumentParser(prog=f"vibecrafted resume {agent}")
     parser.add_argument("--run-id", default="")
-    parser.add_argument("--last", action="store_true")
+    parser.add_argument("--last", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--session", default="")
     parser.add_argument("-p", "--prompt", default="")
     parser.add_argument("-f", "--file", dest="prompt_file", default="")
+    parser.add_argument("--prompt-stdin", action="store_true")
     add_repo_arguments(parser)
     parser.add_argument("--source-dir", default="")
-    parser.add_argument("--model", default="")
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--base", default="")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(list(argv))
+    if args.model == "":
+        parser.error("CLI --model must be non-empty")
 
     resume_root = ""
     if str(args.repo or "").strip() or str(args.root or "").strip():
@@ -1026,6 +1073,10 @@ def _agent_resume(agent: str, argv: Sequence[str]) -> int:
 
     session = str(args.session or "").strip()
     run_id = str(args.run_id or "").strip()
+    if sum((bool(session), bool(run_id), bool(args.last))) > 1:
+        parser.error("choose one identity: --session or --run-id")
+    if args.last:
+        parser.error("--last is retired for resume; use --session last")
     if session and not run_id:
         kind = classify_resume_identity(session)
         if kind in {"run_id", "vibecrafted_session"} or looks_like_control_plane_run_id(
@@ -1068,7 +1119,7 @@ def _agent_resume(agent: str, argv: Sequence[str]) -> int:
         run_id = str(run.get("run_id") or "")
     else:
         print(
-            "Resume a stopped run with --run-id <work-...> or --last.",
+            "Resume a stopped run with --run-id <work-...>; use --session last for scoped native history.",
             file=sys.stderr,
         )
         print(
@@ -1082,9 +1133,13 @@ def _agent_resume(agent: str, argv: Sequence[str]) -> int:
         return 2
 
     prompt = str(args.prompt or "")
+    if args.prompt_stdin:
+        if prompt or args.prompt_file:
+            parser.error("--prompt-stdin conflicts with --prompt/--file")
+        prompt = read_prompt_stream(sys.stdin)
     if args.prompt_file:
         try:
-            prompt = Path(args.prompt_file).expanduser().read_text(encoding="utf-8")
+            prompt = Path(args.prompt_file).expanduser().read_bytes().decode("utf-8")
         except OSError as exc:
             print(f"error: cannot read --file: {exc}", file=sys.stderr)
             return 2
@@ -1096,6 +1151,11 @@ def _agent_resume(agent: str, argv: Sequence[str]) -> int:
         expected_agent=agent,
         root=resume_root,
         model=args.model,
+        plan_text=prompt if args.prompt_file else "",
+        source_path=str(Path(args.prompt_file).expanduser().resolve())
+        if args.prompt_file
+        else "",
+        base=args.base,
     )
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
@@ -1404,6 +1464,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "dispatch",
         "doctor",
         "fork-source",
+        "session-source",
+        "fork-session",
         "paste",
         "procs",
         "reap",
@@ -1530,6 +1592,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     parser = _build_parser()
     args = parser.parse_args(raw_args)
+    if getattr(args, "model", None) == "":
+        parser.error("CLI --model must be non-empty")
     if not args.command:
         parser.print_help()
         return 0
@@ -1743,11 +1807,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "resume-session":
         prompt = str(args.prompt or "")
         if args.prompt_stdin:
-            prompt = sys.stdin.read()
+            prompt = read_prompt_stream(sys.stdin)
         elif args.prompt_file:
             prompt_path = Path(args.prompt_file).expanduser()
             try:
-                prompt = prompt_path.read_text(encoding="utf-8")
+                prompt = prompt_path.read_bytes().decode("utf-8")
             except OSError as exc:
                 resume_result: dict[str, Any] = {
                     "schema": "vibecrafted.manual_explicit_resume.v1",
@@ -1782,23 +1846,112 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
+        from .workflow import resolve_session_selection
+
+        try:
+            selection = resolve_session_selection(
+                args.agent, args.agent_session_id, resume_root
+            )
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         resume_result = manual_resume_session(
             args.agent,
-            args.agent_session_id,
+            selection["agent_session_id"],
             args.source_dir or package_root(),
             prompt=prompt,
             root=resume_root,
             model=args.model,
+            source_text=prompt,
+            launch_meta={"session_selection": selection},
+            source_path=str(Path(args.prompt_file).expanduser().resolve())
+            if args.prompt_file
+            else "",
         )
         if args.json:
             print(json.dumps(resume_result, ensure_ascii=False, indent=2))
         else:
             _print_resume_session_receipt(resume_result)
         return 0 if resume_result.get("accepted") else 1
+    if args.command == "fork-session":
+        from .workflow import manual_fork_session
+
+        try:
+            prompt = (
+                Path(args.file).expanduser().read_bytes().decode("utf-8")
+                if args.file
+                else read_prompt_stream(sys.stdin)
+            )
+            result = manual_fork_session(
+                args.agent,
+                args.session,
+                args.source_dir or package_root(),
+                prompt=prompt,
+                root=args.root,
+                model=args.model,
+                base=args.base,
+                worktree=args.worktree,
+                execution_runtime=args.execution_runtime,
+                source_path=args.file,
+                parent_run_id=args.parent_run_id,
+                permissions=args.permissions,
+                session_selection=args.session_selection,
+            )
+        except (ValueError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(result, ensure_ascii=False, default=str))
+        return 0 if result.get("accepted") else 2
+    if args.command == "session-source":
+        from .workflow import resolve_session_selection
+
+        try:
+            result = resolve_session_selection(args.agent, args.session, args.root)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(result["agent_session_id"] if args.id_only else json.dumps(result))
+        return 0
     if args.command == "fork-source":
+        from .workflow import resolve_session_selection
+
         fork_result = resolve_fork_source(
             args.agent, run_id=args.run_id, session=args.session
         )
+        if args.root and not (args.session and args.run_id):
+            try:
+                if args.session in {"current", "last", "previous"}:
+                    fork_result = resolve_session_selection(
+                        args.agent, args.session, args.root
+                    )
+                elif fork_result.get("accepted"):
+                    selected_root = args.root
+                    if selected_root == "auto":
+                        selected_root = fork_result.get("source_root") or str(
+                            Path.cwd()
+                        )
+                    original = fork_result
+                    fork_result = resolve_session_selection(
+                        args.agent, original["agent_session_id"], selected_root
+                    )
+                    if args.run_id:
+                        fork_result.update(
+                            session_selector="run-id",
+                            identity_source="run_meta",
+                            source_run_id=args.run_id,
+                        )
+                if fork_result.get("accepted"):
+                    capability = resolve_fork_source(
+                        args.agent, session=fork_result["agent_session_id"]
+                    )
+                    if not capability.get("accepted"):
+                        fork_result = capability
+            except ValueError as exc:
+                fork_result = {
+                    "accepted": False,
+                    "reason": "session_selection_failed",
+                    "detail": str(exc),
+                }
         if args.json:
             print(json.dumps(fork_result, ensure_ascii=False, indent=2))
         elif fork_result.get("accepted"):
@@ -1834,22 +1987,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.prompt_stdin:
         if prompt or args.file:
             parser.error("--prompt-stdin cannot be combined with --prompt or --file")
-        prompt = sys.stdin.read()
+        prompt = read_prompt_stream(sys.stdin)
     agent_arg = args.agent
     research_agents = ()
     if args.command == "research" and isinstance(agent_arg, list):
         research_agents = tuple(agent_arg) if len(agent_arg) > 1 else ()
     try:
-        worktree_requested = parse_worktree_flag(
+        parse_worktree_flag(
             getattr(args, "worktree", ""), label=f"vibecrafted {args.command}"
         )
-        launch_root = select_repository(
-            args.repo,
-            args.root,
-            fallback=resolve_operator_launch_root,
-            require_git=worktree_requested,
-            label=f"vibecrafted {args.command}",
-        ).path
+        launch_root = args.repo or args.root or str(Path.cwd())
     except RepoSelectionError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -1864,10 +2011,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         "skill": LAUNCH_ALIASES.get(args.command, args.command),
         "agent": args.agent,
         "prompt": prompt,
+        "input_explicit": args.prompt is not None
+        or bool(args.file)
+        or args.prompt_stdin,
         "file": args.file,
         "runtime": _default_runtime(args.runtime, launch_root),
-        "root": launch_root,
-        "worktree": worktree_requested,
+        "root": args.root,
+        "repo": args.repo,
+        "repo_selector": True,
+        "worktree": args.worktree,
+        "runtime_class": args.execution_runtime,
+        "base": args.base,
         "permissions": getattr(args, "permissions", ""),
         "sandbox": getattr(args, "sandbox", ""),
         "mode": args.mode or args.command,

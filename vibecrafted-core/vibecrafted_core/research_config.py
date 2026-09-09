@@ -30,16 +30,21 @@ class ResearchAgentSelection:
     synthesizer: str = ""
     synthesizer_model: str = ""
     synthesizer_source: str = ""
+    model_agent: str = ""
 
     def lane_model(self, agent: str, global_model: str = "") -> str:
         """Model for one lane: ``global_model`` wins, else the lane's own model."""
-        if global_model:
+        if global_model and (not self.model_agent or agent == self.model_agent):
             return global_model
         return str((self.lane_models or {}).get(agent, "")).strip()
 
     def synthesis_model(self, global_model: str = "") -> str:
         """Model for the synthesis step: ``global_model`` wins, else configured."""
-        return global_model or self.synthesizer_model
+        if global_model and (
+            not self.model_agent or self.synthesizer == self.model_agent
+        ):
+            return self.synthesizer_model or global_model
+        return self.synthesizer_model
 
 
 def research_yaml_path() -> Path:
@@ -357,4 +362,5 @@ def resolve_research_runtime_config(
         synthesizer=synth_agent,
         synthesizer_model=synth_model,
         synthesizer_source=synth_source,
+        model_agent=os.environ.get("VIBECRAFTED_RESEARCH_MODEL_AGENT", ""),
     )

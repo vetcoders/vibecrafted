@@ -145,7 +145,7 @@ def test_launch_workflow_prepares_a_linked_checkout_and_records_it(
     assert Path(cwd_file.read_text(encoding="utf-8")).resolve() == worktree.resolve()
 
 
-def test_launch_workflow_refuses_worktree_on_non_root_paths(
+def test_launch_workflow_normalizes_subdirectory_and_refuses_non_git(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     home = tmp_path / ".vibecrafted"
@@ -166,11 +166,9 @@ def test_launch_workflow_refuses_worktree_on_non_root_paths(
         },
         tmp_path,
     )
-    refused = workflow.launch_workflow(sub_spec, tmp_path)
-    assert refused["accepted"] is False
-    assert refused["reason"] == "worktree_rejected"
-    assert "subdirectory" in refused["error"]
-    assert not (home / "control_plane" / "runtime_runs").exists()
+    assert sub_spec.root == str(repo.resolve())
+    prepared, _receipt = workflow._prepare_launch_worktree(sub_spec, "work-subdir-test")
+    assert Path(prepared.root, "README.md").read_text() == "seed\n"
 
     plain = tmp_path / "plain"
     plain.mkdir()

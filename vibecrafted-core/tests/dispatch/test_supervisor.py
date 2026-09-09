@@ -161,7 +161,11 @@ prompt = "canonical dispatch report prompt"
         def kill(self) -> None:
             pass
 
+    real_popen = workflow.subprocess.Popen
+
     def fake_popen(command: list[str], **kwargs: object) -> FakeProc:
+        if command[0] == "git":
+            return real_popen(command, **kwargs)
         if "env" in kwargs:
             # The tracked launcher owns the child env. Identity capture may
             # subsequently invoke `ps` through the same monkeypatched
@@ -199,7 +203,8 @@ prompt = "canonical dispatch report prompt"
     assert command[command.index("--report") + 1] == run.report_path
     assert "/artifacts/local/repo/" in run.report_path
     assert "/reports/implement/" in run.report_path
-    assert "canonical-dispatch-report" in Path(run.report_path).name
+    assert "canonical-dispatch-report" not in Path(run.report_path).name
+    assert "_codex_implement_" in Path(run.report_path).name
     assert "/control_plane/runtime_runs/" not in run.report_path
     assert "/control_plane/runtime_runs/" in env["VIBECRAFTED_TRANSCRIPT_PATH"]
     assert "/control_plane/runtime_runs/" in env["VIBECRAFTED_META_PATH"]

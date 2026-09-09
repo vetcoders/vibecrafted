@@ -50,6 +50,7 @@ def _write_fake_core_python(path: Path) -> None:
                 "fi",
                 'if [[ "${1:-}" == "-m" && "${2:-}" == "vibecrafted_core.cli" ]]; then',
                 "  shift 2",
+                '  if [[ "${1:-}" == session-source ]]; then printf "%s\\n" "$FAKE_CORE_SESSION_ID"; exit 0; fi',
                 '  printf "%s\\0" "$@" > "$FAKE_CORE_ARGV_FILE"',
                 '  cat > "$FAKE_CORE_PROMPT_FILE"',
                 "  printf '%s\\n' \\",
@@ -118,17 +119,9 @@ def _assert_tracked_resume(
     assert "MANUAL EXPLICIT RESUME RECEIPT" in result.stdout
     assert f"agent_session_id:   {session_id}" in result.stdout
     payload = _read_nul_argv(core_argv)
-    assert payload[:6] == [
-        "resume-session",
-        "codex",
-        "--agent-session-id",
-        session_id,
-        "--prompt-stdin",
-        "--root",
-    ]
-    assert payload[6] == str(REPO_ROOT)
-    assert payload[7] == "--source-dir"
-    assert Path(payload[8]).name == "core-source"
+    assert payload[:4] == ["resume-session", "codex", "--agent-session-id", session_id]
+    assert "--prompt-stdin" in payload
+    assert prompt not in payload
     assert core_prompt.read_text(encoding="utf-8") == prompt
     assert not provider_called.exists()
 
@@ -2739,61 +2732,44 @@ def test_resume_subcommand_forwards_session_and_prompt_to_agent(
     )
 
 
-def test_resume_subcommand_wraps_headless_codex_in_vc_frame_worker_session(
+def test_task_resume_stays_headless_with_inherited_frame_context(
     tmp_path: Path,
 ) -> None:
-    home = tmp_path / "home"
-    fake_bin = tmp_path / "bin"
-    capture_file = tmp_path / "vc_frame-args.txt"
-
-    home.mkdir()
-    fake_bin.mkdir()
-    _write_fake_vc_frame_with_live_session(fake_bin, capture_file, "operator-test")
-
-    env = os.environ.copy()
-    env["HOME"] = str(home)
-    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
-    env["VIBECRAFTED_RUNTIME_BIN"] = str(fake_bin)
-    env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
-    env["VETCODERS_SPAWN_RUNTIME"] = "terminal"
-    env["VIBECRAFTED_OPERATOR_SESSION"] = "operator-test"
-    env["VIBECRAFTED_WORKER_SESSION"] = "worker-test"
-    env["CAPTURE_FILE"] = str(capture_file)
-    env.pop("VC_FRAME", None)
-    env.pop("VC_FRAME_PANE_ID", None)
-    env.pop("VC_FRAME_SESSION_NAME", None)
-    env.pop("VIBECRAFTED_RUN_ID", None)
-    env.pop("VIBECRAFTED_RUN_LOCK", None)
-    env.pop("VIBECRAFTED_SKILL_CODE", None)
-    env.pop("VIBECRAFTED_SKILL_NAME", None)
-
-    subprocess.run(
+    session_id = "resume-session-789"
+    prompt = "Continue inside vc_frame"
+    env, provider_called, core_argv, core_prompt = _tracked_resume_fixture(
+        tmp_path, session_id=session_id
+    )
+    env.update(
+        VETCODERS_SPAWN_RUNTIME="terminal",
+        VIBECRAFTED_OPERATOR_SESSION="operator-test",
+        VIBECRAFTED_WORKER_SESSION="worker-test",
+    )
+    result = subprocess.run(
         [
             "bash",
             str(LAUNCHER),
             "resume",
             "codex",
             "--session",
-            "resume-session-789",
+            session_id,
             "--prompt",
-            "Continue inside vc_frame",
+            prompt,
         ],
         check=True,
         cwd=REPO_ROOT,
         env=env,
+        capture_output=True,
+        text=True,
     )
-
-    payload = capture_file.read_text(encoding="utf-8").splitlines()
-    assert "--session" in payload
-    assert "worker-test" in payload
-    assert "operator-test" not in payload
-    assert "action" in payload
-    assert "new-tab" in payload
-    assert "--name" in payload
-    assert "codex" in payload
-    assert "resume-codex" not in payload
-    assert "--cwd" in payload
-    assert str(REPO_ROOT) in payload
+    _assert_tracked_resume(
+        result,
+        provider_called=provider_called,
+        core_argv=core_argv,
+        core_prompt=core_prompt,
+        session_id=session_id,
+        prompt=prompt,
+    )
 
 
 def test_resume_wrapper_symlink_forwards_session_and_prompt_to_agent(
@@ -2878,10 +2854,34 @@ def test_resume_wrapper_accepts_bare_positional_session_id(tmp_path: Path) -> No
     capture_file = tmp_path / "vc-frame-args.txt"
     wrapper = tmp_path / "vc-resume"
 
+    root = tmp_path / "operator-test"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
     home.mkdir()
     fake_bin.mkdir()
     wrapper.symlink_to(LAUNCHER)
     _write_fake_vc_frame_with_live_session(fake_bin, capture_file, "operator-test")
+
+    frame = fake_bin / "vc-frame"
+    frame.write_text(
+        frame.read_text().replace('} > "$CAPTURE_FILE"', '} >> "$CAPTURE_FILE"')
+    )
 
     env = os.environ.copy()
     env["HOME"] = str(home)
@@ -2890,24 +2890,36 @@ def test_resume_wrapper_accepts_bare_positional_session_id(tmp_path: Path) -> No
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env["VETCODERS_SPAWN_RUNTIME"] = "terminal"
     env["VIBECRAFTED_OPERATOR_SESSION"] = "operator-test"
+    env["VIBECRAFTED_PREFER_REPO_VC_FRAME"] = "1"
+    env["VIBECRAFTED_VC_FRAME_BIN"] = str(fake_bin / "vc-frame")
+    env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
     env["CAPTURE_FILE"] = str(capture_file)
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
 
     subprocess.run(
-        ["bash", str(wrapper), "codex", "resume-session-789"],
+        ["bash", str(wrapper), "codex", "resume-session-789", "--repo", str(root)],
         check=True,
         cwd=REPO_ROOT,
         env=env,
     )
 
     payload = capture_file.read_text(encoding="utf-8").splitlines()
+    payload = payload[payload.index("--name") - 4 :]
     assert payload[:4] == ["--session", "operator-test", "action", "new-tab"]
     separator = payload.index("--")
     command_script = Path(payload[separator + 1])
     command_body = command_script.read_text(encoding="utf-8")
-    assert "codex resume resume-session-789" in command_body
+    assert "interactive-launch" in command_body
+    import shlex
+
+    tokens = shlex.split(shlex.split(command_body, comments=True)[-1])
+    admission = json.loads(
+        Path(tokens[tokens.index("--admission-file") + 1]).read_text()
+    )
+    assert admission["agent_session_id"] == "resume-session-789"
+    assert admission["root"] == str(root)
     assert "codex exec" not in command_body
 
 
@@ -2939,7 +2951,7 @@ def _write_fake_aicx_sessions(bin_dir: Path, current_id: str, previous_id: str) 
 
 @pytest.mark.parametrize(
     ("selector", "expected_session"),
-    [("current", "current-codex-session"), ("previous", "previous-codex-session")],
+    [("current", "current-codex-session"), ("last", "last-codex-session")],
 )
 def test_fork_codex_opens_named_pane_in_current_vc_frame_tab(
     tmp_path: Path, selector: str, expected_session: str
@@ -2952,8 +2964,35 @@ def test_fork_codex_opens_named_pane_in_current_vc_frame_tab(
     fake_bin.mkdir()
     root.mkdir(parents=True)
     _write_fake_vc_frame_with_live_session(fake_bin, capture_file, "operator-test")
-    _write_fake_aicx_sessions(
-        fake_bin, "current-codex-session", "previous-codex-session"
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    record = home / ".vibecrafted/control_plane/runtime_runs/source/meta.json"
+    record.parent.mkdir(parents=True)
+    record.write_text(
+        json.dumps(
+            {
+                "run_id": "source",
+                "agent": "codex",
+                "agent_session_id": expected_session,
+                "root": str(root),
+                "started_at": "2026-09-09T00:00:00Z",
+            }
+        )
     )
 
     env = os.environ.copy()
@@ -2969,6 +3008,7 @@ def test_fork_codex_opens_named_pane_in_current_vc_frame_tab(
     env["VC_FRAME_PANE_ID"] = "7"
     env["VC_FRAME_SESSION_NAME"] = "operator-test"
     env["CAPTURE_FILE"] = str(capture_file)
+    env["CODEX_THREAD_ID"] = "current-codex-session"
 
     result = subprocess.run(
         [
@@ -2988,7 +3028,7 @@ def test_fork_codex_opens_named_pane_in_current_vc_frame_tab(
             "auto",
         ],
         check=True,
-        cwd=REPO_ROOT,
+        cwd=root,
         env=env,
         capture_output=True,
         text=True,
@@ -3004,12 +3044,21 @@ def test_fork_codex_opens_named_pane_in_current_vc_frame_tab(
     )
     separator = payload.index("--")
     command_body = Path(payload[separator + 1]).read_text(encoding="utf-8")
-    assert "codex fork" in command_body
-    assert "--model gpt-test" in command_body
-    assert "--ask-for-approval on-request --sandbox workspace-write" in command_body
-    assert f"--cd {root}" in command_body
+    import shlex
+
+    tokens = shlex.split(shlex.split(command_body, comments=True)[-1])
+    admission = json.loads(
+        Path(tokens[tokens.index("--admission-file") + 1]).read_text()
+    )
+    assert admission["model_requested"] == "gpt-test"
+    assert admission["root"] == str(root)
+    assert "interactive-launch" in tokens
     assert expected_session in command_body
-    assert f"session:   {expected_session}" in result.stdout
+    assert f"source-session: {expected_session}" in result.stdout
+    assert "native child identity pending" in result.stdout
+    assert admission["session_selection"]["session_selector"] == selector
+    assert admission["session_selection"]["agent_session_id"] == expected_session
+    assert admission["session_selection"]["selection_root"] == str(root)
 
 
 def test_fork_codex_supports_floating_same_tab_placement(tmp_path: Path) -> None:
@@ -3077,7 +3126,7 @@ def test_fork_codex_rejects_headless_runtime() -> None:
     )
 
     assert result.returncode == 2
-    assert "codex fork is an interactive TUI" in result.stderr
+    assert "Bare fork requires visible or terminal runtime" in result.stderr
 
 
 def test_vc_dashboard_wrapper_dispatches_to_dashboard(tmp_path: Path) -> None:

@@ -237,7 +237,7 @@ _vetcoders_run_core_cli() {
   py="${python_spec%%$'\t'*}"
   import_root="${python_spec#*$'\t'}"
   if [[ -n "$import_root" ]]; then
-    PYTHONPATH="$import_root${PYTHONPATH:+:$PYTHONPATH}" \
+    PYTHONPATH="$import_root" \
       "$py" -m vibecrafted_core.cli "$@"
   else
     "$py" -m vibecrafted_core.cli "$@"
@@ -254,7 +254,7 @@ _vetcoders_cursor_permission_flags() {
   import_root="${python_spec#*$'\t'}"
   timeout="${VIBECRAFTED_CURSOR_PROBE_TIMEOUT_S:-10}"
   if [[ -n "$import_root" ]]; then
-    PYTHONPATH="$import_root${PYTHONPATH:+:$PYTHONPATH}" \
+    PYTHONPATH="$import_root" \
       "$py" - "$timeout" <<'PY'
 import sys
 from vibecrafted_core.cursor_admission import cursor_permission_flag_string
@@ -277,7 +277,7 @@ _vetcoders_core_source_dir() {
   py="${python_spec%%$'\t'*}"
   import_root="${python_spec#*$'\t'}"
   if [[ -n "$import_root" ]]; then
-    PYTHONPATH="$import_root${PYTHONPATH:+:$PYTHONPATH}" \
+    PYTHONPATH="$import_root" \
       "$py" -c 'from vibecrafted_core.package_resources import package_root; print(package_root())'
   else
     "$py" -c 'from vibecrafted_core.package_resources import package_root; print(package_root())'
@@ -468,7 +468,29 @@ _vetcoders_looks_like_run_id() {
 _vetcoders_resume_agent() {
   local tool="$1"
   shift
+  local _vetcoders_contract_allow_model=1
+  local _vetcoders_contract_single_prompt=1
   _vetcoders_parse_contract "$@" || return 1
+  case "${_vetcoders_contract_runtime:-}" in
+    ""|headless|terminal|visible) ;;
+    *) printf 'Unsupported resume runtime; no host adapter is available.\n' >&2; return 2 ;;
+  esac
+  case "${_vetcoders_contract_execution_runtime:-}" in
+    ""|living-tree|local-worktrees) ;;
+    *) printf 'Unsupported execution runtime: no host adapter.\n' >&2; return 2 ;;
+  esac
+  if [[ -n "${_vetcoders_contract_last:-}" ]]; then
+    printf 'Use --session last; resume --last is retired.\n' >&2
+    return 2
+  fi
+  if [[ -n "${_vetcoders_contract_session:-}" && -n "${_vetcoders_contract_run_id:-}" ]]; then
+    printf 'Choose one identity: --session or --run-id.\n' >&2
+    return 2
+  fi
+  if [[ -n "${_vetcoders_contract_prompt_explicit:-}${_vetcoders_contract_file_explicit:-}" && -n "${_vetcoders_contract_runtime:-}" && "$_vetcoders_contract_runtime" != headless ]]; then
+    printf 'Task resume is noninteractive; use --runtime headless.\n' >&2
+    return 2
+  fi
   # Normalize an explicit --root ONCE, before anything changes cwd (shared
   # owner with the init family; see _vetcoders_normalize_declared_contract_root).
   _vetcoders_normalize_declared_contract_root resume || return 1
@@ -476,10 +498,14 @@ _vetcoders_resume_agent() {
     echo "Resume a provider session or a stopped control-plane run." >&2
     echo "  vibecrafted resume ${tool} --session <provider-uuid>" >&2
     echo "  vibecrafted resume ${tool} --run-id <work-...>" >&2
-    echo "  vibecrafted resume ${tool} --run-id <work-...> | --last" >&2
+    echo "  vibecrafted resume ${tool} --session current|last" >&2
     return 0
   fi
-  if [[ -n "${_vetcoders_contract_run_id:-}" || -n "${_vetcoders_contract_last:-}" ]]; then
+  if [[ -n "${_vetcoders_contract_execution_runtime:-}${_vetcoders_contract_worktree:-}" && -n "${_vetcoders_contract_prompt_explicit:-}${_vetcoders_contract_file_explicit:-}" ]]; then
+    printf 'Noninteractive resume preserves its checkout; execution/worktree overrides require fork.\n' >&2
+    return 2
+  fi
+  if [[ -n "${_vetcoders_contract_run_id:-}" || -n "${_vetcoders_contract_last:-}" ]] && [[ -n "${_vetcoders_contract_prompt_explicit:-}${_vetcoders_contract_file_explicit:-}" ]]; then
     if [[ -n "${_vetcoders_contract_session:-}" ]]; then
       echo "--session and --run-id/--last cannot be combined. Use one identity." >&2
       return 1
@@ -489,10 +515,16 @@ _vetcoders_resume_agent() {
     )
     [[ -n "${_vetcoders_contract_run_id:-}" ]] && core_args+=(--run-id "$_vetcoders_contract_run_id")
     [[ -n "${_vetcoders_contract_last:-}" ]] && core_args+=(--last)
-    [[ -n "${_vetcoders_contract_prompt:-}" ]] && core_args+=(--prompt "$_vetcoders_contract_prompt")
+    [[ -n "${_vetcoders_contract_prompt:-}" ]] && core_args+=(--prompt-stdin)
+    [[ -n "${_vetcoders_contract_model:-}" ]] && core_args+=(--model "$_vetcoders_contract_model")
+    [[ -n "${_vetcoders_contract_base:-}" ]] && core_args+=(--base "$_vetcoders_contract_base")
     [[ -n "${_vetcoders_contract_file:-}" ]] && core_args+=(--file "$_vetcoders_contract_file")
     [[ -n "${_vetcoders_contract_root:-}" ]] && core_args+=(--root "$_vetcoders_contract_root")
-    _vetcoders_run_core_cli "${core_args[@]}"
+    if [[ -n "${_vetcoders_contract_prompt:-}" ]]; then
+      printf '%s' "$_vetcoders_contract_prompt" | _vetcoders_run_core_cli "${core_args[@]}"
+    else
+      _vetcoders_run_core_cli "${core_args[@]}"
+    fi
     return $?
   fi
   if [[ -n "${_vetcoders_contract_session:-}" ]] && _vetcoders_looks_like_run_id "$_vetcoders_contract_session"; then
@@ -544,86 +576,49 @@ _vetcoders_resume_agent() {
     resume_explicit_input=1
   fi
 
-  # A bare resume is an operator TUI, so it needs a visible surface. When the
-  # caller has none -- no controlling terminal, and no attached frame or
-  # explicit operator session the engine confirms as watched -- we open the
-  # product terminal host on THIS project and re-run the same entry there,
-  # rather than refusing. Shared owner with init/operator/partner and fork.
-  #
-  # Placement is the contract: this sits BEFORE the AICX continuity pack and
-  # before any provider command is composed, so the escalated child assembles
-  # the pack exactly once. Escalating later would launch AICX twice.
-  if [[ -z "$resume_explicit_input" ]] &&
-    [[ -z "${_vetcoders_contract_runtime:-}" || "${_vetcoders_contract_runtime:-}" =~ ^(terminal|visible)$ ]]; then
-    local _resume_escalation=0
-    _vetcoders_declaration_escalate_if_needed resume "$tool" "$@" || _resume_escalation=$?
-    case "$_resume_escalation" in
-      0) return 0 ;;
-      1) return 1 ;;
-    esac
+  if [[ -n "${_vetcoders_contract_base:-}" && -z "${_vetcoders_contract_run_id:-}" ]]; then
+    printf 'A provider session has no baseline receipt; use --run-id with --base.\n' >&2
+    return 2
+  fi
+  # Explicit native continuation is a tracked core job. Preserve the full
+  # plan (including model frontmatter); never compose a file-pointer prompt.
+  if [[ -n "$_vetcoders_contract_session" && -n "$resume_explicit_input" && -z "${_vetcoders_contract_fork_session:-}" ]]; then
+    local -a native_args=(resume-session "$tool" --agent-session-id "$_vetcoders_contract_session")
+    [[ -z "${_vetcoders_contract_root:-}" ]] || native_args+=(--repo "$_vetcoders_contract_root")
+    [[ -z "${_vetcoders_contract_model:-}" ]] || native_args+=(--model "$_vetcoders_contract_model")
+    if [[ -n "$_vetcoders_contract_file" ]]; then
+      [[ -z "$_vetcoders_contract_prompt" ]] || { printf 'Use one of --prompt or --file.\n' >&2; return 2; }
+      _vetcoders_run_core_cli "${native_args[@]}" --prompt-file "$_vetcoders_contract_file"
+    else
+      printf '%s' "$_vetcoders_contract_prompt" | _vetcoders_run_core_cli "${native_args[@]}" --prompt-stdin
+    fi
+    return $?
   fi
 
-  # ONE canonical workspace owner, at the REAL public resume boundary. This is
-  # the actual `vibecrafted resume <tool> --root A` entry (not dashboard.sh's
-  # `vc-start resume`): the AICX continuity pack is assembled a few lines below
-  # and `_vetcoders_prepare_operator_runtime` runs further down still, so the
-  # gate must sit HERE — after the no-TTY terminal escalation above has already
-  # returned (a re-parsed child will hit this same gate itself), but strictly
-  # before any AICX or provider side effect. Skipped for a headless dispatch
-  # with explicit --prompt/--file: that path never opens a vc-frame session and
-  # is unrelated to workspace/session binding. Also skipped when an explicit
-  # VIBECRAFTED_OPERATOR_SESSION or a genuine attached caller already answers
-  # the "which session" question -- exactly the precedence
-  # _vetcoders_prepare_operator_runtime itself already gives them (an explicit
-  # override must never even consult the catalogue, let alone be overridden by
-  # it).
-  #
-  # DECLARED workspace (2026-09-09): an explicit `--root/--repo R` is the
-  # target, full stop. Neither an attached frame nor an ambient
-  # VIBECRAFTED_OPERATOR_SESSION may skip this gate for it -- that skip is how
-  # `resume codex --session <id> --root <repo>` run from a stale/foreign frame
-  # marker was silently re-homed onto the marker's session (and panicked on the
-  # missing host). Binding R here keeps the identity exported for
-  # _vetcoders_prepare_declared_workspace_target below, which verifies liveness,
-  # creates R's own session when absent and decides how it is entered.
-  local resume_declared_root="${_vetcoders_contract_root:-}"
-  local resume_ambient_operator="${VIBECRAFTED_OPERATOR_SESSION:-}"
-  if [[ -z "$resume_explicit_input" && -n "$resume_declared_root" ]] &&
-    command -v _vetcoders_ensure_canonical_workspace_identity >/dev/null 2>&1; then
-    _vetcoders_ensure_canonical_workspace_identity "$resume_declared_root" || {
-      local _resume_identity_status=$?
-      printf 'resume: could not resolve the canonical workspace owner for the declared root %s.\n' "$resume_declared_root" >&2
-      printf 'resume: refusing to assemble continuity or open a provider session without an owned target; inspect '"'"'vibecrafted workspace list'"'"'.\n' >&2
-      return "$_resume_identity_status"
-    }
-    if [[ -n "$resume_ambient_operator" && "$resume_ambient_operator" != "${VIBECRAFTED_OPERATOR_SESSION:-}" ]]; then
-      printf 'resume: VIBECRAFTED_OPERATOR_SESSION=%s is ambient context, not the declared workspace; using %s for %s\n' \
-        "$resume_ambient_operator" "${VIBECRAFTED_OPERATOR_SESSION:-}" "$resume_declared_root" >&2
-    fi
-  elif [[ -z "$resume_explicit_input" ]] &&
-    [[ -z "${VIBECRAFTED_OPERATOR_SESSION:-}" ]] &&
-    command -v _vetcoders_ensure_canonical_workspace_identity >/dev/null 2>&1 &&
-    { ! command -v _vetcoders_in_vc_frame >/dev/null 2>&1 || ! _vetcoders_in_vc_frame; }; then
-    _vetcoders_ensure_canonical_workspace_identity "${_vetcoders_contract_root:-}" || {
-      local _resume_identity_status=$?
-      printf 'resume: could not resolve the canonical workspace owner for this project.\n' >&2
-      printf 'resume: refusing to assemble continuity or open a provider session without an owned target; re-run from the intended root or inspect '"'"'vibecrafted workspace list'"'"'.\n' >&2
-      return "$_resume_identity_status"
-    }
-    # This gate's own job is WORKSPACE/SESSION/INSTANCE identity and the
-    # resolved root (for AICX and for reporting the canonical target below),
-    # never the visible ATTACH target. Which live session to reuse, or
-    # whether one must be created, stays _vetcoders_prepare_operator_runtime's
-    # decision further down -- its own explicit-override check
-    # (VIBECRAFTED_OPERATOR_SESSION nonempty) must still see it unset here, or
-    # a name this gate resolved (but never confirmed live) would be trusted
-    # blindly, skipping both live-detection and session creation.
-    unset VIBECRAFTED_OPERATOR_SESSION
+  if [[ -n "${_vetcoders_contract_fork_session:-}" ]]; then
+    printf 'Use vibecrafted fork with the native session identity; resume never silently becomes a fork.\n' >&2
+    return 2
   fi
+  if [[ -n "$resume_explicit_input" ]]; then
+    local -a fresh_args=(workflow "$tool" --runtime headless)
+    [[ -z "${_vetcoders_contract_root:-}" ]] || fresh_args+=(--repo "$_vetcoders_contract_root")
+    [[ -z "${_vetcoders_contract_model:-}" ]] || fresh_args+=(--model "$_vetcoders_contract_model")
+    [[ -z "${_vetcoders_contract_base:-}" ]] || fresh_args+=(--base "$_vetcoders_contract_base")
+    [[ -z "${_vetcoders_contract_execution_runtime:-}" ]] || fresh_args+=(--execution-runtime "$_vetcoders_contract_execution_runtime")
+    [[ -z "${_vetcoders_contract_worktree:-}" ]] || fresh_args+=(--worktree "$_vetcoders_contract_worktree")
+    if [[ -n "$_vetcoders_contract_file" ]]; then
+      _vetcoders_run_core_cli "${fresh_args[@]}" --file "$_vetcoders_contract_file"
+    else
+      printf '%s' "$_vetcoders_contract_prompt" | _vetcoders_run_core_cli "${fresh_args[@]}" --prompt-stdin
+    fi
+    return $?
+  fi
+  # Admission resolves the checkout before the Frame target owner is consulted.
+  local resume_declared_root="${_vetcoders_contract_root:-}"
 
   local aicx_fallback_mode=""
   local aicx_context_file=""
-  if [[ -z "$_vetcoders_contract_session" && -z "$resume_explicit_input" ]]; then
+  if [[ -z "$_vetcoders_contract_session" && -z "${_vetcoders_contract_run_id:-}${_vetcoders_contract_last:-}" && -z "$resume_explicit_input" ]]; then
     # No session id: compose multi-agent continuity from AICX (48h default).
     local root_dir fallback_lines
     root_dir="${_vetcoders_contract_root:-$(_vetcoders_repo_root)}"
@@ -668,85 +663,20 @@ _vetcoders_resume_agent() {
     return 1
   }
 
-  local resume_prompt
-  local runtime
-  local resume_cmd
-  local resume_mode
-  resume_prompt="$(_vetcoders_compose_input_context "$_vetcoders_contract_prompt" "$_vetcoders_contract_file")" || return 1
-  # An explicit --prompt/--file means "continue the job", not "open me a TUI":
-  # the resume must run the agent's NON-INTERACTIVE invocation even when a
-  # visible operator tab hosts it, so it finishes, exits, and can be triaged.
-  # Only a bare resume (no operator input) parks an interactive session in the
-  # tab. An internal AICX file is continuity transport and does not count as
-  # operator input for any provider.
-  resume_mode="interactive"
-  [[ -z "$resume_explicit_input" ]] || resume_mode="headless"
-  if [[ "$resume_mode" == interactive && -z "$_vetcoders_contract_runtime" ]]; then
-    # Worker dispatch defaults to headless, but a bare resume is deliberately
-    # an operator TUI. Keep that path terminal-backed unless explicitly set.
-    runtime="terminal"
-  else
-    runtime="$(_vetcoders_effective_runtime)"
-  fi
-
-  if [[ -n "$_vetcoders_contract_session" ]]; then
-    resume_cmd="$(_vetcoders_resume_command "$tool" "$_vetcoders_contract_session" "$resume_prompt" "$resume_mode" "${_vetcoders_contract_fork_session:-}")" || return 1
-  else
-    # A fork needs a base session to branch from; a silent fresh session would
-    # betray the operator's "keep the original untouched" intent.
-    if [[ -n "${_vetcoders_contract_fork_session:-}" ]]; then
-      echo "--fork-session needs a base session (--session <id>); AICX will not pick one." >&2
-      return 1
-    fi
-    # NEW session: continuity pack only (explicitly not a native resume).
-    resume_cmd="$(_vetcoders_fresh_session_command "$tool" "$resume_prompt" "$resume_mode")" || return 1
-    aicx_fallback_mode="${aicx_fallback_mode:-new_session}"
-  fi
-
-  # CONTRACT (G7): non-interactive resume ALWAYS lands in the worker host
-  # (right column), never the human operator seat. Interactive bare resume
-  # stays on the operator surface. AgentStreamParser renders streaming-json
-  # for grok so the worker pane is human-readable; raw stream is teed aside.
-  local stream_raw=""
-
-  if [[ "$resume_mode" == headless ]] && [[ "$runtime" =~ ^(terminal|visible)$ ]] && {
-    _vetcoders_in_vc_frame ||
-      [[ -n "${VIBECRAFTED_OPERATOR_SESSION:-}" ]] ||
-      [[ -n "${VIBECRAFTED_WORKER_SESSION:-}" ]] ||
-      [[ -t 0 && -t 1 ]]
-  }; then
-    local worker_host
-    worker_host="$(_vetcoders_effective_worker_session 2>/dev/null || true)"
-    if [[ -n "$worker_host" ]]; then
-      stream_raw="$(_vetcoders_resume_raw_transcript_path "$tool")"
-      resume_cmd="$(
-        _vetcoders_wrap_with_agent_stream "$tool" "$resume_cmd" "$stream_raw"
-      )" || return 1
-      export VIBECRAFTED_WORKER_SESSION="${VIBECRAFTED_WORKER_SESSION:-$worker_host}"
-      _vetcoders_spawn_into_operator_session "$(_vetcoders_operator_face_tab "$tool")" "$resume_cmd" || return 1
-      printf 'Resume launched in worker session: %s\n' "$VIBECRAFTED_WORKER_SESSION"
-      printf '  agent:   %s\n' "$tool"
-      printf '  mode:    headless (G7 workers column)\n'
-      if [[ -n "$_vetcoders_contract_session" ]]; then
-        printf '  session: %s\n' "$_vetcoders_contract_session"
-      elif [[ -n "$resume_explicit_input" ]]; then
-        printf '  session: (new — explicit non-interactive run)\n'
-      else
-        printf '  session: (new — aicx 48h multi-agent continuity)\n'
-      fi
-      [[ -n "$aicx_fallback_mode" ]] && printf '  aicx:    %s\n' "$aicx_fallback_mode"
-      [[ -n "$aicx_context_file" ]] && printf '  pack:    %s\n' "$aicx_context_file"
-      [[ -n "$stream_raw" && "$tool" == grok ]] && printf '  raw:     %s\n' "$stream_raw"
-      return 0
-    fi
-  fi
+  local runtime="${_vetcoders_contract_runtime:-terminal}" resume_cmd
+  local _vetcoders_interactive_skill=resume
+  resume_cmd="$(_vetcoders_init_command_text "$tool" "${_vetcoders_contract_prompt:-}" "${_vetcoders_contract_policy_runtime:-local-native}" "${_vetcoders_contract_permissions:-bypass}" "${_vetcoders_contract_token_budget:-unmetered}")" || return 1
+  local _resume_admission=0
+  _vetcoders_enter_admitted_interactive resume "$resume_cmd" || _resume_admission=$?
+  case "$_resume_admission" in 0) return 0 ;; 1) return 1 ;; esac
+  resume_declared_root="$_vetcoders_contract_root"
 
   # Interactive resume — provider-neutral policy (adapters only change argv):
   #   bare resume → interactive → explicit or detected operator target
   #   prompt/file → tracked headless worker (handled above)
   # Prepare resolves: explicit env | in-frame | attached/current | repo-bound
   # live | single live. Multi-candidate ambiguity fails closed with a list.
-  if [[ "$resume_mode" == interactive ]] && [[ "$runtime" =~ ^(terminal|visible)$ ]]; then
+  if [[ "$runtime" =~ ^(terminal|visible)$ ]]; then
     # defer-attach: preparation may CREATE this project's session, but it must
     # not hand the terminal to a foreground client yet — that client blocks
     # until detach, so the provider tab below would only be created after the
@@ -774,36 +704,9 @@ _vetcoders_resume_agent() {
     fi
   fi
 
-  if [[ "$resume_mode" == interactive ]]; then
-    printf 'Interactive %s resume requires an explicit or detected operator target; refusing to downgrade to a headless run.\n' "$tool" >&2
-    printf '  export VIBECRAFTED_OPERATOR_SESSION=<session>  # jawny target\n' >&2
-    printf '  # or run from an attached vc-frame tab / leave exactly one live session\n' >&2
-    local live_hint=""
-    live_hint="$(_vetcoders_list_live_vc_frame_sessions 2>/dev/null | head -20 || true)"
-    if [[ -n "$live_hint" ]]; then
-      printf '  live vc-frame sessions:\n' >&2
-      while IFS= read -r live_name; do
-        [[ -n "$live_name" ]] || continue
-        printf '    - %s\n' "$live_name" >&2
-      done <<< "$live_hint"
-    fi
-    return 1
-  fi
+  printf 'Interactive %s resume requires an admitted Frame target; no provider was downgraded to headless.\n' "$tool" >&2
+  return 1
 
-  # No vc-frame surface: core owns the detached lifetime, control-plane record,
-  # transcript, and Guardian-visible process identity. There is deliberately no
-  # raw nohup/setsid fallback when core cannot prove the launch contract.
-  if [[ -n "${_vetcoders_contract_fork_session:-}" ]]; then
-    # The tracked core path (resume-session / workflow launcher) has no fork
-    # contract yet; dropping the flag here would silently mutate the original
-    # session the operator asked to preserve.
-    echo "--fork-session is not supported on the tracked core resume path yet; run inside vc-frame or use a bare (interactive) resume." >&2
-    return 1
-  fi
-  _vetcoders_launch_tracked_resume \
-    "$tool" \
-    "$_vetcoders_contract_session" \
-    "$resume_prompt"
 }
 
 _vetcoders_resume_command() {

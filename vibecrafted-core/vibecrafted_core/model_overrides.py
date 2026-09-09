@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import shlex
 from collections.abc import Sequence
+from pathlib import Path
 
 MODEL_OVERRIDE_FLAGS = {
     "agy": "--model",
     "claude": "--model",
     "codex": "-m",
     "cursor": "--model",
+    "junie": "--model",
     # grok 1.0.21 documents both `-m` and `--model`; inject the long form to
     # match grok_spawn.sh, and treat `-m` as an existing pin.
     "grok": "--model",
@@ -166,7 +168,7 @@ def _with_direct_model_override(
             return command_list
         raise ValueError("model_override_conflicts_with_existing_model")
     if (
-        command_list[0] == "codex"
+        Path(command_list[0]).name == "codex"
         and len(command_list) > 1
         and command_list[1] == "exec"
     ):
@@ -179,8 +181,8 @@ def _with_model_override(
 ) -> list[str]:
     """Splice the agent's model flag + value into ``command`` when supported.
 
-    Returns ``command`` unchanged (as a list) when no model was requested, the
-    agent has no known flag, or the command is empty. ``codex exec`` gets the
+    Returns ``command`` unchanged (as a list) when no model was requested or
+    the command is empty. An explicit pin without a known model flag refuses. ``codex exec`` gets the
     flag inserted after the ``exec`` subcommand rather than at the head. Agy's
     special shell wrapper is rewritten inside ``bash -c``; unsupported wrapper
     shapes fail closed so its receipt cannot claim a pin that never reached Agy.
@@ -188,7 +190,9 @@ def _with_model_override(
     requested = "" if model_requested is None else str(model_requested)
     command_list = list(command)
     flag = MODEL_OVERRIDE_FLAGS.get(agent)
-    if not requested.strip() or not flag or not command_list:
+    if requested.strip() and not flag:
+        raise ValueError("requested model is unsupported by this provider adapter")
+    if not requested.strip() or not command_list:
         return command_list
     aliases = MODEL_OVERRIDE_FLAG_ALIASES.get(agent, (flag,))
     if agent == "agy":

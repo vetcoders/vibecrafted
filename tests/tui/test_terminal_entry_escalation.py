@@ -231,7 +231,8 @@ def _fake_generation(
         "import json, os, sys\n"
         f"open({str(capture)!r}, 'w').write(json.dumps("
         "{'argv': sys.argv[1:], 'cwd': os.getcwd(),"
-        " 'boundary': os.environ.get('VIBECRAFTED_TERMINAL_ENTRY', '')}))\n"
+        " 'boundary': os.environ.get('VIBECRAFTED_TERMINAL_ENTRY', ''),"
+        " 'created': os.environ.get('VIBECRAFTED_START_CREATED_SESSION', '')}))\n"
         f"sys.exit({terminal_exit})\n",
     )
     for verb in front_doors:
@@ -275,10 +276,18 @@ def _run_entry(
     project_dir.mkdir(parents=True, exist_ok=True)
     if with_canonical_launcher:
         _install_canonical_launcher(home)
+    # Create-only start (2026-09-09): a caller without a TTY creates the
+    # workspace session BEFORE opening the terminal, so the pinned product
+    # config must carry the operator layout the create needs.
+    _write(
+        home / ".config" / "vibecrafted" / "vc-frame" / "layouts" / "operator.kdl",
+        "layout {\n}\n",
+    )
 
     env = os.environ.copy()
     for key in (
         *WORKSPACE_IDENTITY_ENV,
+        "VIBECRAFTED_START_CREATED_SESSION",
         "VIBECRAFTED_TERMINAL_ENTRY",
         "VIBECRAFTED_ROOT",
         "VIBECRAFTED_RUNTIME_ROOT",
@@ -299,6 +308,7 @@ def _run_entry(
     env["XDG_CONFIG_HOME"] = str(home / ".config")
     env["XDG_DATA_HOME"] = str(home / ".local" / "share")
     env["TEST_AICX_CAPTURE"] = str(tmp_path / "aicx-called.txt")
+    env["VC_FRAME_LIVE"] = str(tmp_path / "frame-live.txt")
     env.update(extra_env or {})
 
     lines = [f'source "{SHELL_SH}"']
@@ -446,7 +456,10 @@ def test_start_explicit_root_is_consumed_before_terminal_escalation(
     assert launch is not None, result.stderr
     assert _working_directory(launch) == other.resolve()
     hosted = _hosted_argv(launch)
-    assert hosted[2:] == ["operator"], hosted
+    # Create-only start: the child is handed the resolved repository as the
+    # standard `--repo` so it enters the SAME workspace the parent created,
+    # whatever its own cwd/Git context is. Frame never sees --root/--repo.
+    assert hosted[2:] == ["operator", "--repo", str(other.resolve())], hosted
 
 
 @pytest.mark.parametrize("root_arg", ["--root", "--root=", "--root /no/such/project"])
@@ -474,18 +487,25 @@ def test_start_explicit_root_preserves_resume_without_forwarding_root(
     assert result.returncode == 0, result.stderr
     assert launch is not None, result.stderr
     assert _working_directory(launch) == other.resolve()
-    assert _hosted_argv(launch)[2:] == ["resume"]
+    assert _hosted_argv(launch)[2:] == ["resume", "--repo", str(other.resolve())]
 
 
 def test_start_preserves_exact_argv_including_quoting(tmp_path: Path) -> None:
-    """argv is preserved verbatim -- a spaced argument stays one argument."""
-    result, launch = _run_entry(
-        tmp_path, "vc-start " + shlex.quote("two words") + " --flag=a b"
-    )
+    """argv is preserved verbatim -- a spaced workspace name stays one argument.
+
+    (Create-only start accepts exactly one bare workspace name and no foreign
+    options, so the replayed vector is the name plus the resolved `--repo`.)
+    """
+    result, launch = _run_entry(tmp_path, "vc-start " + shlex.quote("two words"))
 
     assert result.returncode == 0, result.stderr
     assert launch is not None
-    assert _hosted_argv(launch)[2:] == ["two words", "--flag=a", "b"]
+    assert _hosted_argv(launch)[2:] == [
+        "two words",
+        "--repo",
+        str((tmp_path / "mlx-batch-runner").resolve()),
+    ]
+    assert launch["created"] == "two words", launch
 
 
 # --------------------------------------------------------------------------
@@ -1513,8 +1533,17 @@ def test_missing_terminal_host_fails_actionably(
     assert launch is None
     assert result.returncode != 0
     combined = result.stderr
-    assert "no TTY" in combined
-    assert "terminal" in combined.lower()
+    if invocation == "vc-start":
+        # Create-only start reads the engine inventory before any window; with
+        # no installed generation there is no engine either, and that is the
+        # gap it names (exit 4), instead of opening a terminal for a child
+        # that could not create anything.
+        assert result.returncode == 4, combined
+        assert "vc-frame engine is unavailable" in combined, combined
+        assert "refusing to create" in combined, combined
+    else:
+        assert "no TTY" in combined
+        assert "terminal" in combined.lower()
 
 
 # --------------------------------------------------------------------------

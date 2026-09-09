@@ -18,6 +18,7 @@ _vetcoders_skill_init() {
   shift
   local runtime init_prompt command_text permissions escalation
 
+  local _vetcoders_contract_allow_model=1 _vetcoders_contract_single_prompt=1
   _vetcoders_parse_contract "$@" || return 1
   [[ -z "$_vetcoders_contract_count" ]] || {
     echo "--count is not supported by vibecrafted init." >&2
@@ -48,25 +49,24 @@ _vetcoders_skill_init() {
   # 2 killed the whole `vibecrafted init` before `case` ever ran (2026-09-09
   # parent repro: exit 2, nothing composed, no engine call). Capture the
   # status the way resume does, so errexit never sees the expected 2.
-  escalation=0
-  _vetcoders_declaration_escalate_if_needed init "$tool" "$@" || escalation=$?
-  case "$escalation" in
-    0) return 0 ;;
-    1) return 1 ;;
-  esac
-  init_prompt="$(_vetcoders_compose_init_prompt "$_vetcoders_contract_prompt" "$_vetcoders_contract_file")" || return 1
+  local _vetcoders_interactive_skill=init
+  init_prompt="${_vetcoders_contract_prompt:-}"
   permissions="${_vetcoders_contract_permissions:-}"
   [[ -n "$permissions" ]] || { [[ "$tool" == "junie" ]] && permissions="auto" || permissions="bypass"; }
-  command_text="$(_vetcoders_init_command_text "$tool" "$init_prompt" "${_vetcoders_contract_policy_runtime:-local-native}" "$permissions" "${_vetcoders_contract_token_budget:-safe}" "${_vetcoders_contract_operator:-none}" "${_vetcoders_contract_continuity:-fresh}" "${_vetcoders_contract_parent_session:-}" "${_vetcoders_contract_continuity_parent:-}")" || return 1
+  command_text="$(_vetcoders_init_command_text "$tool" "$init_prompt" "${_vetcoders_contract_policy_runtime:-local-native}" "$permissions" "${_vetcoders_contract_token_budget:-unmetered}" "${_vetcoders_contract_operator:-none}" "${_vetcoders_contract_continuity:-fresh}" "${_vetcoders_contract_parent_session:-}" "${_vetcoders_contract_continuity_parent:-}")" || return 1
+  escalation=0
+  _vetcoders_enter_admitted_interactive init "$command_text" || escalation=$?
+  case "$escalation" in 0) return 0 ;; 1) return 1 ;; esac
 
   # No cockpit, or an explicit `--runtime plain`: the orientation session is
   # the agent itself, so run it right here in the caller's terminal. A fresh
   # install without vc-frame must not dead-end on "run vc-start first" when
   # vc-start needs the very same binary.
-  if [[ "$runtime" == "plain" ]] || ! _vetcoders_vc_frame_bin >/dev/null ; then
+  if [[ "$runtime" == "plain" ]]; then
     _vetcoders_init_in_current_terminal "$tool" "$command_text" "$runtime" "init"
     return
   fi
+  _vetcoders_require_vc_frame || return 1
 
   # Prepare (create detached when absent) -> provider tab -> enter last. An
   # explicit --repo/--root is the declared workspace, exactly as for resume.
@@ -93,7 +93,7 @@ _vetcoders_init_in_current_terminal() {
     fi
     return 1
   fi
-  ( cd "$root_dir" && eval "$command_text" )
+  ( cd "$root_dir" && _vetcoders_exec_admitted_interactive "$command_text" )
 }
 
 # vc-operator launcher — interactive operator session entry point.
@@ -104,6 +104,7 @@ _vetcoders_skill_operator() {
   local tool="$1"
   shift
   local runtime operator_prompt command_text permissions escalation
+  local _vetcoders_contract_allow_model=1 _vetcoders_contract_single_prompt=1
 
   _vetcoders_parse_contract "$@" || return 1
   [[ -z "$_vetcoders_contract_count" ]] || {
@@ -127,16 +128,14 @@ _vetcoders_skill_operator() {
   # Same declaration contract as init: a caller with no visible surface is
   # handed a real terminal on this project before any prompt is composed.
   # Tri-state captured, never bare: the deck's errexit would end on the 2.
-  escalation=0
-  _vetcoders_declaration_escalate_if_needed operator "$tool" "$@" || escalation=$?
-  case "$escalation" in
-    0) return 0 ;;
-    1) return 1 ;;
-  esac
-  operator_prompt="$(_vetcoders_compose_operator_prompt "$_vetcoders_contract_prompt" "$_vetcoders_contract_file")" || return 1
+  local _vetcoders_interactive_skill=operator
+  operator_prompt="${_vetcoders_contract_prompt:-}"
   permissions="${_vetcoders_contract_permissions:-}"
   [[ -n "$permissions" ]] || { [[ "$tool" == "junie" ]] && permissions="auto" || permissions="bypass"; }
-  command_text="$(_vetcoders_operator_command_text "$tool" "$operator_prompt" "${_vetcoders_contract_policy_runtime:-local-native}" "$permissions" "${_vetcoders_contract_token_budget:-safe}" "${_vetcoders_contract_operator:-none}" "${_vetcoders_contract_continuity:-fresh}" "${_vetcoders_contract_parent_session:-}" "${_vetcoders_contract_continuity_parent:-}")" || return 1
+  command_text="$(_vetcoders_operator_command_text "$tool" "$operator_prompt" "${_vetcoders_contract_policy_runtime:-local-native}" "$permissions" "${_vetcoders_contract_token_budget:-unmetered}" "${_vetcoders_contract_operator:-none}" "${_vetcoders_contract_continuity:-fresh}" "${_vetcoders_contract_parent_session:-}" "${_vetcoders_contract_continuity_parent:-}")" || return 1
+  escalation=0
+  _vetcoders_enter_admitted_interactive operator "$command_text" || escalation=$?
+  case "$escalation" in 0) return 0 ;; 1) return 1 ;; esac
 
   _vetcoders_launch_interactive_declaration operator "$runtime" \
     "$(_vetcoders_operator_face_tab "$tool")" "$command_text" "${_vetcoders_contract_root:-}"
@@ -148,6 +147,7 @@ _vetcoders_skill_partner() {
   local tool="$1"
   shift
   local runtime partner_prompt command_text permissions escalation
+  local _vetcoders_contract_allow_model=1 _vetcoders_contract_single_prompt=1
 
   _vetcoders_parse_contract "$@" || return 1
   [[ -z "$_vetcoders_contract_count" ]] || {
@@ -168,21 +168,20 @@ _vetcoders_skill_partner() {
   runtime="$(_vetcoders_partner_runtime "${_vetcoders_contract_runtime:-terminal}")" || return 1
   # Same declaration contract as init (partner is the init family).
   # Tri-state captured, never bare: the deck's errexit would end on the 2.
-  escalation=0
-  _vetcoders_declaration_escalate_if_needed partner "$tool" "$@" || escalation=$?
-  case "$escalation" in
-    0) return 0 ;;
-    1) return 1 ;;
-  esac
-  partner_prompt="$(_vetcoders_compose_partner_prompt "$_vetcoders_contract_prompt" "$_vetcoders_contract_file")" || return 1
+  local _vetcoders_interactive_skill=partner
+  partner_prompt="${_vetcoders_contract_prompt:-}"
   permissions="${_vetcoders_contract_permissions:-}"
   [[ -n "$permissions" ]] || { [[ "$tool" == "junie" ]] && permissions="auto" || permissions="bypass"; }
-  command_text="$(_vetcoders_partner_command_text "$tool" "$partner_prompt" "${_vetcoders_contract_policy_runtime:-local-native}" "$permissions" "${_vetcoders_contract_token_budget:-safe}" "${_vetcoders_contract_operator:-none}" "${_vetcoders_contract_continuity:-fresh}" "${_vetcoders_contract_parent_session:-}" "${_vetcoders_contract_continuity_parent:-}")" || return 1
+  command_text="$(_vetcoders_partner_command_text "$tool" "$partner_prompt" "${_vetcoders_contract_policy_runtime:-local-native}" "$permissions" "${_vetcoders_contract_token_budget:-unmetered}" "${_vetcoders_contract_operator:-none}" "${_vetcoders_contract_continuity:-fresh}" "${_vetcoders_contract_parent_session:-}" "${_vetcoders_contract_continuity_parent:-}")" || return 1
+  escalation=0
+  _vetcoders_enter_admitted_interactive partner "$command_text" || escalation=$?
+  case "$escalation" in 0) return 0 ;; 1) return 1 ;; esac
 
-  if [[ "$runtime" == "plain" ]] || ! _vetcoders_vc_frame_bin >/dev/null ; then
+  if [[ "$runtime" == "plain" ]]; then
     _vetcoders_init_in_current_terminal "$tool" "$command_text" "$runtime" "partner"
     return
   fi
+  _vetcoders_require_vc_frame || return 1
 
   _vetcoders_launch_interactive_declaration partner "$runtime" \
     "$(_vetcoders_operator_face_tab "$tool")" "$command_text" "${_vetcoders_contract_root:-}"

@@ -36,6 +36,7 @@ from .control_plane import (
 )
 from .events import append_event
 from .execution_controls import PERMISSION_POLICIES, ExecutionControls
+from .model_overrides import _with_model_override
 from .report_contract import (
     CLAIM_DIGEST_ENV,
     materialize_launcher_report_template,
@@ -48,7 +49,10 @@ from .runtime_paths import (
     selected_runtime_environment,
     version_is_stamped,
 )
-from .runtime_transcript import write_runtime_transcript_manifest
+from .runtime_transcript import (
+    InteractiveTranscriptCapture,
+    write_runtime_transcript_manifest,
+)
 from .settlement import BareMarkdownError, require_bound_markdown
 from .telemetry import estimate_cost_usd
 
@@ -448,17 +452,6 @@ def resolve_continuity_policy(
     )
     if parent_lineage_id:
         raise ValueError("bare-fork accepts only an explicit provider-session parent")
-    current_ids = {
-        str(ambient.get(name) or "").strip()
-        for name in (
-            "CODEX_SESSION_ID",
-            "CLAUDE_CODE_SESSION_ID",
-            "VIBECRAFTED_OPERATOR_SESSION_ID",
-            "VIBECRAFTED_PROVIDER_SESSION_ID",
-        )
-    }
-    if parent in current_ids:
-        raise ValueError("bare-fork parent is the current provider session")
     from .continuity.capabilities import (
         PROBE_CONFIRMED,
         SUPPORTED,
@@ -630,6 +623,17 @@ def _fresh_child_environment(
     env: dict[str, str], policy: ContinuityPolicy
 ) -> dict[str, str]:
     child = dict(env)
+    if policy.mode == "bare-fork":
+        # The source is already pinned in native argv. Inherited parent IDs
+        # cannot describe the new child, including calls to --session current.
+        for name in (
+            "CODEX_THREAD_ID",
+            "CODEX_SESSION_ID",
+            "CLAUDE_CODE_SESSION_ID",
+            "GROK_SESSION_ID",
+            "VIBECRAFTED_AGENT_SESSION_ID",
+        ):
+            child.pop(name, None)
     if policy.mode == "fresh":
         for name in _INHERITED_CONTINUITY_ENV:
             child.pop(name, None)
@@ -973,6 +977,14 @@ def interactive_policy_command(
             ]
         return ["claude", "--verbose", *flags, *session_flags, prompt]
     if provider == "codex":
+        if continuity.mode == "bare-fork":
+            return [
+                "codex",
+                "fork",
+                *flags,
+                continuity.parent_provider_session_id,
+                prompt,
+            ]
         return ["codex", *flags, prompt]
     if provider == "agy":
         return ["agy", *flags, "--add-dir", ".", "--prompt-interactive", prompt]
@@ -1091,6 +1103,18 @@ def interactive_workspace_command(
     continuity: str = "fresh",
     parent_session_id: str = "",
     parent_lineage_id: str = "",
+    *,
+    model: str = "",
+    source_file: str = "",
+    base: str = "",
+    worktree: str | bool | None = None,
+    execution_runtime: str = "",
+    skill: str = "init",
+    native_session: str = "",
+    parent_run_id: str = "",
+    resume_run_id: str = "",
+    resume_last: bool = False,
+    session_selection: dict[str, Any] | None = None,
 ) -> list[str]:
     """Build the portable wrapper argv used by the exact ``init`` route.
 
@@ -1117,6 +1141,192 @@ def interactive_workspace_command(
         parent_session_id=parent_session_id,
         parent_lineage_id=parent_lineage_id,
     )
+    from .workflow import (
+        _prepare_launch_worktree,
+        _source_prompt,
+        _write_prompt_file,
+        normalize_launch_spec,
+        reserve_run_id,
+    )
+
+    if skill not in {"init", "partner", "operator", "resume", "fork"}:
+        raise ValueError("unsupported interactive launcher")
+    if skill != "resume" and (native_session or resume_run_id or resume_last):
+        raise ValueError(
+            "session/run selectors apply to resume; fork uses its source identity"
+        )
+    if native_session and (resume_run_id or resume_last):
+        raise ValueError("choose one identity: --session or --run-id")
+    if native_session or session_selection is not None:
+        from .workflow import resolve_session_selection
+
+        session_selection = resolve_session_selection(
+            provider,
+            native_session or parent_session_id,
+            root,
+            selection=session_selection,
+        )
+        if native_session:
+            native_session = session_selection["agent_session_id"]
+    parent = {}
+    selected_model_source = ""
+    if resume_last:
+        from .cli import _run_for_agent
+
+        if resume_run_id or native_session:
+            raise ValueError("choose one resume identity")
+        previous = _run_for_agent(provider, "", last=True)
+        if not previous:
+            raise ValueError("no previous run for this provider; pass --run-id")
+        resume_run_id = str(previous["run_id"])
+    if resume_run_id:
+        from .repo_selection import resolve_repository_base
+        from .workflow import (
+            _merge_run_and_meta,
+            _native_resume_meta,
+            _provider_session_for_continue,
+            _worker_process_alive,
+            lookup_run,
+            select_plan_model,
+        )
+
+        record = lookup_run(resume_run_id)
+        if not record:
+            raise ValueError("resume run not found")
+        parent = _merge_run_and_meta(record, _native_resume_meta(resume_run_id, record))
+        if parent.get("agent") != provider:
+            raise ValueError("resume provider conflicts with recorded agent")
+        if _worker_process_alive(parent):
+            raise ValueError("resume session already has an active executor")
+        recorded_runtime = str(parent.get("runtime_class") or "living-tree")
+        if execution_runtime and execution_runtime != recorded_runtime:
+            raise ValueError("resume preserves execution runtime; use fork")
+        if worktree not in (None, ""):
+            from .workflow import parse_worktree_flag
+
+            if parse_worktree_flag(worktree) != (recorded_runtime == "local-worktrees"):
+                raise ValueError(
+                    "resume worktree selector conflicts with recorded runtime"
+                )
+        # An existing run owns its checkout. Matching selectors validate that
+        # ownership; they must never create a second checkout during resume.
+        execution_runtime, runtime, worktree = "living-tree", "local-native", None
+        parent_root = str(parent.get("root") or "")
+        if root and Path(root).resolve() != Path(parent_root).resolve():
+            raise ValueError("resume preserves repository; use fork")
+        root = parent_root
+        if base and resolve_repository_base(root, base)[1] != parent.get(
+            "baseline_sha"
+        ):
+            raise ValueError("resume preserves baseline; use fork")
+        native_session = _provider_session_for_continue(parent)
+        if not native_session:
+            raise ValueError("resume run has no verified native session identity")
+        text = Path(source_file).read_bytes().decode("utf-8") if source_file else ""
+        model, selected_model_source = select_plan_model(
+            provider,
+            text,
+            model=model,
+            previous=str(
+                parent.get("model_effective")
+                or parent.get("agent_model")
+                or parent.get("model_requested")
+                or ""
+            ),
+        )
+        parent_run_id = resume_run_id
+        session_selection = {
+            "agent": provider,
+            "agent_session_id": native_session,
+            "session_selector": "run-id",
+            "identity_source": "run_meta",
+            "source_run_id": resume_run_id,
+            "selection_root": str(Path(root).resolve()),
+        }
+        base = ""  # validate current checkout without changing historical baseline
+    execution = execution_runtime or (
+        "living-tree" if runtime == "local-native" else runtime
+    )
+    spec = normalize_launch_spec(
+        {
+            "agent": provider,
+            "skill": "workflow",
+            "prompt": prompt or f"/vc-{skill}",
+            "file": source_file,
+            "repo": str(root),
+            "repo_selector": True,
+            "base": base,
+            "runtime_class": execution,
+            "worktree": worktree,
+            "model": model,
+            "runtime": "terminal",
+        },
+        Path(__file__).parent,
+    )
+    source = _source_prompt(spec)
+    if native_session:
+        native_session = _validated_continuity_id(
+            native_session, label="native session"
+        )
+        if provider not in {"codex", "claude", "grok", "agy", "junie", "cursor"}:
+            raise ValueError(f"interactive native resume unsupported for {provider}")
+        from .workflow import _worker_process_alive, find_run_for_identity_token
+
+        existing = find_run_for_identity_token(native_session)
+        if existing and _worker_process_alive(existing):
+            raise ValueError("native session already has an active executor")
+    run_id = reserve_run_id("rsme" if skill == "resume" else "init")
+    run_dir = control_plane_home() / "runtime_runs" / run_id
+    source_path = _write_prompt_file(run_dir / "plan-source.md", source)
+    worktree_receipt = {}
+    if spec.worktree:
+        spec, worktree_receipt = _prepare_launch_worktree(spec, run_id)
+    admission = {
+        "run_id": run_id,
+        "agent": provider,
+        "skill": skill,
+        "status": "prepared",
+        "root": spec.root,
+        "parent_root": spec.parent_root or spec.root,
+        "effective_worker_root": spec.root,
+        "repo_requested": spec.repo_requested,
+        "repo_kind": spec.repo_kind,
+        "base_requested": spec.base,
+        "baseline_sha": spec.baseline_sha,
+        "resolved_ref": spec.resolved_ref,
+        "runtime_class": spec.runtime_class,
+        "presentation": "visible",
+        "requires_pty": True,
+        "model_requested": spec.model,
+        "model_effective": spec.model,
+        "model_source": selected_model_source or spec.model_source,
+        "source_snapshot": str(source_path),
+        "source_digest": spec.source_digest,
+        "source_path": source_file,
+        "source_origin": "file" if source_file else "inline",
+        "parent_run_id": parent_run_id or os.environ.get("VIBECRAFTED_RUN_ID", ""),
+        "agent_session_id": native_session,
+        "session_selection": session_selection or {},
+        **worktree_receipt,
+    }
+    if parent:
+        admission["baseline_sha"] = parent.get("baseline_sha", "")
+        admission["runtime_class"] = parent.get("runtime_class", "living-tree")
+    admission_path = _write_prompt_file(
+        run_dir / "admission.json", json.dumps(admission)
+    )
+    _write_meta(run_dir / "meta.json", admission)
+    append_event(
+        "lifecycle:prepared",
+        run_id,
+        "interactive declaration admitted",
+        {**admission, "meta": str(run_dir / "meta.json")},
+    )
+    _project_interactive_snapshot(run_id)
+    print(
+        f"run_id: {run_id}  model: {spec.model or 'provider_default'}  model_source: {spec.model_source}",
+        file=sys.stderr,
+    )
     interpreter, bootstraps = interactive_launch_interpreter()
     command = [
         interpreter,
@@ -1125,7 +1335,7 @@ def interactive_workspace_command(
         "interactive-launch",
         provider,
         "--runtime",
-        runtime,
+        "local-native",
         "--permissions",
         permissions,
         "--token-budget",
@@ -1135,9 +1345,9 @@ def interactive_workspace_command(
         "--continuity",
         continuity_policy.mode,
         "--root",
-        str(Path(root).expanduser().resolve()),
-        "--prompt",
-        prompt,
+        spec.root,
+        "--admission-file",
+        str(admission_path),
     ]
     if continuity_policy.parent_provider_session_id:
         command[command.index("--root") : command.index("--root")] = [
@@ -1272,7 +1482,9 @@ def prepare_interactive_workspace_launch(
         run_dir = control_plane_home() / "runtime_runs" / effective_run_id
         prompt_path = run_dir / "prompt.md"
         prompt_path.parent.mkdir(parents=True, exist_ok=True)
-        prompt_path.write_text(prompt, encoding="utf-8")
+        from .workflow import _write_prompt_file
+
+        _write_prompt_file(prompt_path, prompt)
         meta_path = run_dir / "meta.json"
         owner_pid = int(worker_pid or os.getpid())
         receipt: dict[str, Any] = {
@@ -1538,6 +1750,8 @@ def launch_interactive_workspace(
     continuity: str = "fresh",
     parent_session_id: str = "",
     parent_lineage_id: str = "",
+    *,
+    admission: dict[str, Any] | None = None,
 ) -> int:
     """Own one provider child while preserving the inherited interactive TTY."""
     operator_policy = resolve_operator_agent_policy(operator, runtime=runtime)
@@ -1545,7 +1759,8 @@ def launch_interactive_workspace(
         raise ValueError(operator_policy.reason)
     from .workflow import reserve_run_id
 
-    run_id = reserve_run_id("init")
+    admission = dict(admission or {})
+    run_id = str(admission.get("run_id") or reserve_run_id("init"))
     try:
         continuity_policy = resolve_continuity_policy(
             continuity,
@@ -1605,17 +1820,42 @@ def launch_interactive_workspace(
             operator_policy=operator_policy,
             run_id=run_id,
             continuity_material=continuity_material,
+            admission=admission,
         )
     quota = resolve_quota_policy(token_budget, runtime=runtime)
     child_env = _fresh_child_environment(os.environ.copy(), continuity_policy)
-    provider_session_id = str(uuid.uuid4())
+    native_session = str(admission.get("agent_session_id") or "")
+    provider_session_id = native_session or str(uuid.uuid4())
     command = interactive_policy_command(
         provider,
-        continuity_material.prompt,
+        f"Read and follow the private task file: {control_plane_home() / 'runtime_runs' / run_id / 'prompt.md'}",
         runtime,
         permissions,
         provider_session_id=provider_session_id,
         continuity_policy=continuity_policy,
+    )
+    native_session = str(admission.get("agent_session_id") or "")
+    if native_session:
+        if provider == "claude":
+            if "--session-id" in command:
+                index = command.index("--session-id")
+                del command[index : index + 2]
+            command[1:1] = ["--resume", native_session]
+        elif provider == "codex":
+            command[1:1] = ["resume", native_session]
+        elif provider == "grok":
+            command[1:1] = ["--resume", native_session]
+        elif provider == "agy":
+            command[1:1] = ["--conversation", native_session]
+        elif provider == "junie":
+            command[1:1] = ["--resume", "--session-id", native_session]
+        elif provider == "cursor":
+            pass  # interactive_policy_command already supplied the exact chat ID
+        else:
+            raise ValueError(f"interactive native resume unsupported for {provider}")
+        provider_session_id = native_session
+    command = _with_model_override(
+        provider, command, str(admission.get("model_requested") or "")
     )
     resolved = _resolve_agent_command(provider, command, child_env)
     capability = resolve_provider_usage_capability(provider, executable=resolved[0])
@@ -1640,6 +1880,22 @@ def launch_interactive_workspace(
         provider_session_id=provider_session_id,
         continuity_material=continuity_material,
     )
+    launch.receipt.update(admission)
+    # A requested ID is not a provider acknowledgement. Codex fork does not
+    # even accept our generated ID; process admission must not invent one.
+    native_fork = continuity_policy.mode == "bare-fork"
+    launch.receipt["provider_session_id"] = "" if native_fork else provider_session_id
+    launch.receipt["agent_session_id"] = "" if native_fork else provider_session_id
+    if native_fork:
+        launch.receipt.update(
+            native_fork=True,
+            fork_source_session_id=continuity_policy.parent_provider_session_id,
+            native_identity_status="pending",
+            provider_session_requested=(
+                provider_session_id if "--session-id" in command else ""
+            ),
+        )
+    launch.receipt["status"] = "prepared"
     if capability.supported and provider == "claude":
         try:
             usage_reader: Any = _ClaudeTranscriptUsage(
@@ -1665,21 +1921,29 @@ def launch_interactive_workspace(
             "VIBECRAFTED_PARENT_ROOT": launch.parent_root,
             "VIBECRAFTED_EFFECTIVE_ROOT": launch.effective_root,
             "VIBECRAFTED_AGENT_ROLE": "agent",
-            "VIBECRAFTED_PROMPT_ROLE": prompt.splitlines()[0] if prompt else "",
+            "VIBECRAFTED_PROMPT_ROLE": str(admission.get("skill") or "init"),
             "VIBECRAFTED_CONTINUITY_MODE": continuity_policy.mode,
             "VIBECRAFTED_CONTINUITY_LINEAGE_ID": continuity_policy.lineage_id,
         }
     )
+    source_secret = prompt
+    if admission.get("source_snapshot"):
+        source_secret = Path(admission["source_snapshot"]).read_bytes().decode("utf-8")
+    transcript = launch.meta_path.with_name("transcript.log")
+    capture = InteractiveTranscriptCapture(transcript, source_secret)
+    launch.receipt["transcript"] = str(transcript)
+    launch.receipt["latest_transcript"] = str(transcript)
     try:
-        # Omitting stdin/stdout/stderr is the contract: the provider inherits the
-        # wrapper's exact descriptors and controlling terminal. No PTY broker,
-        # pipe, or terminal-text parser sits between the User and provider.
         child = subprocess.Popen(
             resolved,
             cwd=launch.effective_root,
             env=child_env,
+            stdout=capture.slave,
+            stderr=capture.slave,
         )
+        capture.start()
     except (OSError, ValueError) as exc:
+        capture.close()
         cleanup = _cleanup_unspawned_interactive_launch(launch)
         _terminalize_interactive_launch(
             launch,
@@ -1703,7 +1967,7 @@ def launch_interactive_workspace(
         "launcher_pid": os.getpid(),
         "worker_pid": child.pid,
         "role": "agent",
-        "prompt_role": prompt.splitlines()[0] if prompt else "",
+        "prompt_role": str(admission.get("skill") or "init"),
         "operator_policy": operator_policy.as_dict(),
         "supervision": {
             "mode": "user_observed",
@@ -1803,6 +2067,9 @@ def launch_interactive_workspace(
         )
         raise
     finally:
+        capture.close()
+        if capture.error:
+            receipt["transcript_error"] = capture.error
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
 
@@ -1826,6 +2093,11 @@ def launch_interactive_workspace(
         terminal_reason = (
             f"provider_signal:{signal.Signals(abs(provider_returncode)).name}"
         )
+    elif provider_returncode == 0 and native_fork:
+        # No terminal success without a child identity from the provider.
+        status = "failed"
+        terminal_reason = "native_fork_identity_unconfirmed"
+        shell_status = 1
     elif provider_returncode == 0:
         status = "completed"
         terminal_reason = "provider_exit_zero"
@@ -1854,20 +2126,25 @@ def _launch_supervised_interactive_workspace(
     operator_policy: OperatorAgentPolicy,
     run_id: str,
     continuity_material: ContinuityMaterial,
+    admission: dict[str, Any] | None = None,
 ) -> int:
     """Own one child and one distinct supervisor on the existing lifecycle throne."""
     assert operator_policy.provider is not None
+    admission = admission or {}
     quota = resolve_quota_policy(token_budget, runtime=runtime)
     continuity_policy = continuity_material.policy
     base_env = _fresh_child_environment(os.environ.copy(), continuity_policy)
     child_session_id = str(uuid.uuid4())
     child_command = interactive_policy_command(
         provider,
-        prompt,
+        f"Read and follow the private task file: {control_plane_home() / 'runtime_runs' / run_id / 'prompt.md'}",
         runtime,
         permissions,
         provider_session_id=child_session_id,
         continuity_policy=continuity_policy,
+    )
+    child_command = _with_model_override(
+        provider, child_command, str(admission.get("model_effective") or "")
     )
     child_resolved = _resolve_agent_command(provider, child_command, base_env)
     child_capability = resolve_provider_usage_capability(
@@ -1922,7 +2199,9 @@ def _launch_supervised_interactive_workspace(
             relation_id=relation_id,
             protocol_path=protocol_path,
         )
-        operator_prompt_path.write_text(operator_prompt, encoding="utf-8")
+        from .workflow import _write_prompt_file
+
+        _write_prompt_file(operator_prompt_path, operator_prompt)
     except Exception:
         _cleanup_unspawned_interactive_launch(launch)
         raise
@@ -1937,11 +2216,12 @@ def _launch_supervised_interactive_workspace(
     }
     child_receipt = {
         **launch.receipt,
+        **admission,
         "updated_at": now_iso,
         "status": "reserved",
         "liveness": "reserved",
         "role": "agent",
-        "prompt_role": prompt.splitlines()[0] if prompt else "",
+        "prompt_role": str(admission.get("skill") or "init"),
         "operator_policy": operator_policy.as_dict(),
         "supervision": dict(relation),
     }
@@ -1973,7 +2253,7 @@ def _launch_supervised_interactive_workspace(
     }
     operator_command = interactive_policy_command(
         operator_policy.provider,
-        operator_prompt,
+        f"Read and follow the private task file: {operator_prompt_path}",
         runtime,
         operator_policy.permissions or "accept-edits",
         provider_session_id=operator_session_id,
@@ -2079,7 +2359,7 @@ def _launch_supervised_interactive_workspace(
         "VIBECRAFTED_PARENT_ROOT": launch.parent_root,
         "VIBECRAFTED_EFFECTIVE_ROOT": launch.effective_root,
         "VIBECRAFTED_AGENT_ROLE": "agent",
-        "VIBECRAFTED_PROMPT_ROLE": prompt.splitlines()[0] if prompt else "",
+        "VIBECRAFTED_PROMPT_ROLE": str(admission.get("skill") or "init"),
         "VIBECRAFTED_SUPERVISION_RELATION_ID": relation_id,
         "VIBECRAFTED_SUPERVISION_PEER_RUN_ID": operator_run_id,
         "VIBECRAFTED_CONTINUITY_MODE": continuity_policy.mode,
@@ -4671,6 +4951,19 @@ def _build_parser() -> argparse.ArgumentParser:
     interactive_command.add_argument("--parent-session", default="")
     interactive_command.add_argument("--continuity-parent", default="")
     interactive_command.add_argument("--root", required=True)
+    interactive_command.add_argument("--file", default="")
+    interactive_command.add_argument("--model", default="")
+    interactive_command.add_argument("--base", default="")
+    interactive_command.add_argument("--execution-runtime", default="")
+    interactive_command.add_argument("--worktree", default="")
+    interactive_command.add_argument("--skill", default="init")
+    interactive_command.add_argument("--session", default="")
+    interactive_command.add_argument(
+        "--session-selection", type=json.loads, default=None
+    )
+    interactive_command.add_argument("--parent-run-id", default="")
+    interactive_command.add_argument("--resume-run-id", default="")
+    interactive_command.add_argument("--resume-last", action="store_true")
     interactive_launch = sub.add_parser(
         "interactive-launch", help="Prepare and exec an interactive Agent Workspace."
     )
@@ -4682,7 +4975,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--permissions", choices=PERMISSION_POLICIES, default="bypass"
     )
     interactive_launch.add_argument("--root", required=True)
-    interactive_launch.add_argument("--prompt", required=True)
+    interactive_launch.add_argument("--prompt", default="")
+    interactive_launch.add_argument("--admission-file", default="")
     interactive_launch.add_argument("--token-budget", default="safe")
     interactive_launch.add_argument(
         "--operator", choices=OPERATOR_POLICIES, default="none"
@@ -4692,6 +4986,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     interactive_launch.add_argument("--parent-session", default="")
     interactive_launch.add_argument("--continuity-parent", default="")
+    handoff = sub.add_parser(
+        "interactive-handoff", help="Enter an admitted interactive execution"
+    )
+    handoff.add_argument("--command", dest="launch_command", required=True)
+    handoff.add_argument("--root-only", action="store_true")
     sub.add_parser(
         "policy-matrix", help="Print the complete provider policy matrix as JSON."
     )
@@ -4701,6 +5000,22 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point dispatching to the launcher helper subcommands."""
     args = _build_parser().parse_args(argv)
+    if args.command == "interactive-handoff":
+        command = shlex.split(args.launch_command)
+        if (
+            "vibecrafted_core.spawn" not in command
+            or "interactive-launch" not in command
+            or "--admission-file" not in command
+        ):
+            raise ValueError("expected a canonical admitted interactive command")
+        launch_args = command[command.index("interactive-launch") :]
+        selected = _build_parser().parse_args(launch_args)
+        if args.root_only:
+            print(selected.root)
+            return 0
+        # Re-enter the canonical owner in this interpreter. The command's
+        # executable/environment prefix is descriptive, never executable input.
+        return main(launch_args)
     if args.command == "write-meta":
         write_meta(
             args.meta,
@@ -4750,7 +5065,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(shlex.join(command))
         return 0
     if args.command == "interactive-command":
-        prompt = sys.stdin.read()
+        from .workflow import read_prompt_stream
+
+        prompt = read_prompt_stream(sys.stdin)
         try:
             command = interactive_workspace_command(
                 args.provider,
@@ -4763,6 +5080,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.continuity,
                 args.parent_session,
                 args.continuity_parent,
+                model=args.model,
+                source_file=args.file,
+                base=args.base,
+                execution_runtime=args.execution_runtime,
+                worktree=args.worktree,
+                skill=args.skill,
+                native_session=args.session,
+                parent_run_id=args.parent_run_id,
+                resume_run_id=args.resume_run_id,
+                resume_last=args.resume_last,
+                session_selection=args.session_selection,
             )
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
@@ -4770,7 +5098,62 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(shlex.join(command))
         return 0
     if args.command == "interactive-launch":
+        admission = {}
+        claimed = False
+        native_lease = None
         try:
+            if args.admission_file:
+                path = Path(args.admission_file)
+                if path.is_symlink() or path.stat().st_mode & 0o077:
+                    raise ValueError("unsafe interactive admission file")
+                admission = json.loads(path.read_bytes())
+                expected = (
+                    control_plane_home() / "runtime_runs" / str(admission["run_id"])
+                )
+                if path.resolve() != (expected / "admission.json").resolve():
+                    raise ValueError(
+                        "interactive admission does not belong to this run"
+                    )
+                source_path = Path(admission["source_snapshot"])
+                if (
+                    source_path.is_symlink()
+                    or source_path.resolve() != (expected / "plan-source.md").resolve()
+                    or source_path.stat().st_mode & 0o077
+                ):
+                    raise ValueError("unsafe interactive source snapshot")
+                source = source_path.read_bytes()
+                if hashlib.sha256(source).hexdigest() != admission["source_digest"]:
+                    raise ValueError("interactive source digest mismatch")
+                if (
+                    args.provider != admission["agent"]
+                    or args.root != admission["root"]
+                ):
+                    raise ValueError("interactive admission target mismatch")
+                args.prompt = f"/vc-{admission['skill']}\n\n" + source.decode("utf-8")
+                # Exclusive execution claim: reopening a view cannot run the provider twice.
+                claim_fd = os.open(
+                    expected / "execution.claim",
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                    0o600,
+                )
+                os.close(claim_fd)
+                claimed = True
+                native_id = str(admission.get("agent_session_id") or "")
+                if native_id:
+                    import fcntl
+
+                    leases = control_plane_home() / "native_session_leases"
+                    leases.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    key = hashlib.sha256(
+                        f"{args.provider}:{native_id}".encode()
+                    ).hexdigest()
+                    native_lease = os.open(leases / key, os.O_CREAT | os.O_RDWR, 0o600)
+                    try:
+                        fcntl.flock(native_lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError as exc:
+                        raise ValueError(
+                            "native session already has an active executor"
+                        ) from exc
             return launch_interactive_workspace(
                 args.provider,
                 args.prompt,
@@ -4782,10 +5165,38 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.continuity,
                 args.parent_session,
                 args.continuity_parent,
+                admission=admission,
             )
         except (OSError, RuntimeError, ValueError) as exc:
+            if claimed:
+                failed = {
+                    **admission,
+                    "status": "failed",
+                    "state": "failed",
+                    "liveness": "terminal",
+                    "terminal_reason": "interactive_start_failed",
+                    "error": str(exc),
+                    "completed_at": utc_now_iso(),
+                }
+                meta_path = (
+                    control_plane_home()
+                    / "runtime_runs"
+                    / admission["run_id"]
+                    / "meta.json"
+                )
+                _write_meta(meta_path, failed)
+                append_event(
+                    "lifecycle:failed",
+                    admission["run_id"],
+                    "interactive start failed",
+                    {**failed, "meta": str(meta_path)},
+                )
+                _project_interactive_snapshot(admission["run_id"])
             print(str(exc), file=sys.stderr)
             return 2
+        finally:
+            if native_lease is not None:
+                os.close(native_lease)
     if args.command == "policy-matrix":
         print(
             json.dumps(

@@ -44,8 +44,7 @@ from ..runtime_paths import agent_tool_search_path
 SUPPORTED = "supported"
 UNSUPPORTED = "unsupported"
 UNVERIFIED = "unverified"
-# Native-fork adds one restricted middle state (codex: fork exists but only
-# in a visible terminal runtime; ``codex exec`` has no fork command).
+# Retained capability value for providers restricted to terminal execution.
 TERMINAL_ONLY = "terminal_only"
 
 # Execution classes. ``evidence_only`` providers contribute historical session
@@ -158,10 +157,9 @@ CAPABILITIES: Mapping[str, ProviderCapability] = {
         ),
         interactive_resume=SUPPORTED,
         noninteractive_resume=SUPPORTED,
-        native_fork=TERMINAL_ONLY,
+        native_fork=SUPPORTED,
         fork_runtime_restrictions=(
-            "top-level `fork` subcommand needs a visible terminal runtime; "
-            "`codex exec` has no fork command — headless fork fails closed"
+            "interactive `fork`; noninteractive `exec fork <id> -`; exec help is checked at admission"
         ),
         prompt_transport="stdin",
         session_identity_event=(
@@ -174,7 +172,7 @@ CAPABILITIES: Mapping[str, ProviderCapability] = {
             cli="codex",
             required_markers=("exec", "resume"),
         ),
-        notes="codex-cli 0.144.5 verified on host 2026-07-18",
+        notes="Installed help 2026-09-09 advertises exec fork; live-source concurrency requires separate acceptance",
     ),
     "gemini": ProviderCapability(
         agent="gemini",
@@ -205,7 +203,7 @@ CAPABILITIES: Mapping[str, ProviderCapability] = {
         interactive_resume=SUPPORTED,
         noninteractive_resume=UNVERIFIED,
         native_fork=UNSUPPORTED,
-        fork_runtime_restrictions="no fork surface in agy 1.1.x",
+        fork_runtime_restrictions="no verified native fork adapter; top-level help is not exhaustive",
         prompt_transport="flag_value",
         session_identity_event=(
             "none structured; runner-captured transcript `session:` line"
@@ -234,7 +232,7 @@ CAPABILITIES: Mapping[str, ProviderCapability] = {
         interactive_resume=SUPPORTED,
         noninteractive_resume=UNVERIFIED,
         native_fork=UNSUPPORTED,
-        fork_runtime_restrictions="no fork surface in junie 26.x",
+        fork_runtime_restrictions="no verified native fork adapter; top-level help is not exhaustive",
         prompt_transport="stdin",
         session_identity_event=(
             "`--output-format json-stream` telemetry receipt (session id)"
@@ -302,7 +300,7 @@ CAPABILITIES: Mapping[str, ProviderCapability] = {
         interactive_resume=SUPPORTED,
         noninteractive_resume=UNVERIFIED,
         native_fork=UNSUPPORTED,
-        fork_runtime_restrictions="no fork surface in cursor-agent 2026.08.x",
+        fork_runtime_restrictions="no verified native fork adapter; top-level help is not exhaustive",
         prompt_transport="stdin",
         session_identity_event=(
             "stream-json `system`/`init` event carrying `session_id`"

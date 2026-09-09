@@ -105,7 +105,7 @@ _vetcoders_product_core_cli() {
   [[ -f "$core_dir/vibecrafted_core/cli.py" ]] || return 1
   PATH="${python_dir:+$python_dir:}${PATH:-}" \
     XDG_CONFIG_HOME="$config_home" \
-    PYTHONPATH="$core_dir${PYTHONPATH:+:$PYTHONPATH}" \
+    PYTHONPATH="$core_dir" \
     "$python_bin" -m vibecrafted_core.cli "$@"
 }
 
@@ -263,18 +263,99 @@ except (OSError, ValueError, subprocess.TimeoutExpired) as error:
 PY_RUNTIME_ADMIT
 }
 
-# Project-start owns exactly one project flag before any terminal, workspace, or
-# Frame work begins. This is deliberately a projection, not a second Frame
-# parser: every non-project argument remains byte-for-byte Frame input. Keeping
-# that boundary here prevents `--root` from reaching vc-frame (which rightly
-# rejects it as an unknown Frame argument), while preserving existing Frame
-# layouts and options.
+# ---------------------------------------------------------------------------
+# vc-start argument contract (2026-09-09, Founder P0 "one create-only workspace
+# contract from every entrypoint"). Shell `vc-start` and deck `cmd_start` both
+# parse through here and then enter _vetcoders_start_entry; there is no second
+# parser and nothing is forwarded to vc-frame as opaque input any more.
+#
+#   vc-start [<workspace>] [--repo <path>|--root <path>]   create-only start
+#   vc-start resume [...]                                  deliberate re-entry
+#
+# Outputs (globals, read by _vetcoders_start_entry):
+#   VIBECRAFTED_START_ROOT          normalized explicit repository (or unset)
+#   _vetcoders_start_frame_argv     the user's non-project argv, verbatim, in
+#                                   order (reserved words, the explicit name,
+#                                   resume's own arguments) -- what the
+#                                   terminal child is handed back
+#   _vetcoders_start_workspace_name the explicit name ("" = derive from root)
+#   _vetcoders_start_mode           start | resume
+#
+# Reserved words: `operator` and `vibecrafted` are the historical layout
+# aliases and mean the default start; `resume` is the deliberate re-entry and
+# takes the rest of the argv as its own. Any other bare word is the workspace
+# name, validated ONCE here (exit 2), before any terminal, workspace or Frame
+# side effect. vc-start owns the session name and the operator layout, so the
+# Frame spellings of those (-s/--session, -n/--new-session-with-layout,
+# -l/--layout, --layout-string) and every other option are refused instead of
+# being smuggled to the engine, where they used to fail inside a window the
+# operator had already been handed.
+_vetcoders_start_reserved_word() {
+  case "${1:-}" in
+    operator | vibecrafted | resume) return 0 ;;
+  esac
+  return 1
+}
+
+# Validate a workspace (vc-frame session) name once. Frame itself refuses only
+# the empty name, `.`/`..`, path separators and a Windows drive prefix
+# (zellij-utils/src/sessions.rs validate_session_name); the rest are this
+# product's rules so a name is never silently truncated or normalized later:
+# the rail's single max length (_vetcoders_vc_frame_session_max_length), no
+# leading dash (it would parse as an option), no control characters, no
+# leading/trailing whitespace. Spaces inside are legal (Frame hosts such names).
+# Prints the reason on stderr and returns 2.
+_vetcoders_start_validate_workspace_name() {
+  local name="${1-}" label="${2:-workspace name}" reason="" max_len=""
+  max_len="$(_vetcoders_vc_frame_session_max_length 2>/dev/null || printf '24\n')"
+  if [[ -z "$name" || -z "${name//[[:space:]]/}" ]]; then
+    reason="it is empty"
+  elif [[ "$name" == "." || "$name" == ".." ]]; then
+    reason="'.' and '..' are not names"
+  elif [[ "$name" == */* || "$name" == *\\* ]]; then
+    reason="path separators are not allowed"
+  elif [[ "$name" == -* ]]; then
+    reason="it starts with '-' (would be read as an option)"
+  elif [[ "$name" == *[[:cntrl:]]* ]]; then
+    reason="control characters are not allowed"
+  elif [[ "$name" == [[:space:]]* || "$name" == *[[:space:]] ]]; then
+    reason="leading or trailing whitespace is not allowed"
+  elif ((${#name} > max_len)); then
+    reason="it is ${#name} characters long; the limit is ${max_len}"
+  fi
+  [[ -n "$reason" ]] || return 0
+  printf 'vc-start: %s %s cannot be used: %s.\n' "$label" "$(_vetcoders_shell_quote "$name")" "$reason" >&2
+  return 2
+}
+
 _vetcoders_start_prepare_arguments() {
   local raw_root="" raw_repo="" normalized_root="" arg
+  local _vetcoders_contract_base="" _vetcoders_contract_execution_runtime="" _vetcoders_contract_worktree=""
   _vetcoders_start_frame_argv=()
+  _vetcoders_start_workspace_name=""
+  _vetcoders_start_mode="start"
   while (($#)); do
     arg="$1"
+    if [[ "$_vetcoders_start_mode" == resume ]]; then
+      case "$arg" in
+        --repo | --repo=* | --root | --root=*) ;;
+        *) _vetcoders_start_frame_argv+=("$arg"); shift; continue ;;
+      esac
+    fi
     case "$arg" in
+      --base)
+        shift; [[ $# -gt 0 && -n "$1" ]] || return 2
+        _vetcoders_contract_base="$1"
+        ;;
+      --execution-runtime)
+        shift; [[ $# -gt 0 && -n "$1" ]] || return 2
+        _vetcoders_contract_execution_runtime="$1"
+        ;;
+      --worktree)
+        _vetcoders_contract_worktree=true
+        if [[ $# -gt 1 ]] && _vetcoders_is_worktree_word "$2"; then shift; _vetcoders_contract_worktree="$1"; fi
+        ;;
+      --worktree=*) _vetcoders_contract_worktree="${1#--worktree=}" ;;
       --root)
         shift
         if (($# == 0)) || [[ -z "$1" ]]; then
@@ -305,13 +386,40 @@ _vetcoders_start_prepare_arguments() {
           return 2
         fi
         ;;
-      --)
+      resume)
+        # Repository selection remains owned here, on either side of resume.
+        _vetcoders_start_mode="resume"
         _vetcoders_start_frame_argv+=("$arg")
-        shift
-        _vetcoders_start_frame_argv+=("$@")
-        break
+        ;;
+      operator | vibecrafted)
+        # Historical layout aliases: the default start, kept in the argv the
+        # terminal child is handed so an escalated call replays exactly.
+        _vetcoders_start_frame_argv+=("$arg")
+        ;;
+      -s | --session | -s=* | --session=* | -n | --new-session-with-layout | -n=* | --new-session-with-layout=* | -l | --layout | -l=* | --layout=* | --layout-string | --layout-string=*)
+        printf 'vc-start: %s is not accepted; vc-start owns the session name and the operator layout.\n' "${arg%%=*}" >&2
+        printf 'Name the workspace as a bare argument: vc-start <workspace> [--repo <path>]\n' >&2
+        return 2
+        ;;
+      --)
+        printf 'vc-start: -- is not accepted; vc-start forwards nothing to vc-frame.\n' >&2
+        printf 'Usage: vc-start [<workspace>] [--repo <path>] | vc-start resume\n' >&2
+        return 2
+        ;;
+      -*)
+        printf 'vc-start: unknown option %s.\n' "$(_vetcoders_shell_quote "$arg")" >&2
+        printf 'Usage: vc-start [<workspace>] [--repo <path>] | vc-start resume   (--root is the legacy spelling of --repo)\n' >&2
+        return 2
         ;;
       *)
+        if [[ -n "$_vetcoders_start_workspace_name" ]]; then
+          printf 'vc-start: one workspace name only; got %s and %s.\n' \
+            "$(_vetcoders_shell_quote "$_vetcoders_start_workspace_name")" "$(_vetcoders_shell_quote "$arg")" >&2
+          printf 'Usage: vc-start [<workspace>] [--repo <path>]\n' >&2
+          return 2
+        fi
+        _vetcoders_start_validate_workspace_name "$arg" "workspace name" || return $?
+        _vetcoders_start_workspace_name="$arg"
         _vetcoders_start_frame_argv+=("$arg")
         ;;
     esac
@@ -319,7 +427,6 @@ _vetcoders_start_prepare_arguments() {
   done
 
   unset VIBECRAFTED_START_ROOT
-  [[ -n "$raw_root" || -n "$raw_repo" ]] || return 0
   # Same selector as every other public verb: `--repo` standard, `--root`
   # legacy, conflicting pair refused, path must already exist.
   normalized_root="$(_vetcoders_select_repo "vc-start" "$raw_repo" "$raw_root")" || return $?
@@ -327,15 +434,39 @@ _vetcoders_start_prepare_arguments() {
   export VIBECRAFTED_START_ROOT="$normalized_root"
 }
 
+# Open the product terminal for a start that has no visible surface here.
+# $1 = the decision mode:
+#   strict  -- plain start: the ONLY signals are the re-entry boundary and
+#              this process's own controlling terminal. An inherited
+#              VC_FRAME_*/ZELLIJ_* marker or an operator-session name proves
+#              nothing about THIS process's stdin (Founder repro 2026-09-09:
+#              vc-start from an agent tool inside an attached pane reached the
+#              engine and died on "stdin is not a terminal" after the whole
+#              preparation had run).
+#   declared -- `vc-start resume`: the declaration family's shared decision
+#              (_vetcoders_needs_vc_terminal_entry), unchanged by this cut.
+# $2 = project root (the terminal's working directory); the rest is the argv
+# the child replays.
 _vetcoders_start_open_terminal_if_needed() {
-  local project_root="$1"
-  shift
+  local mode="${1:-strict}" project_root="${2:-}"
+  shift 2 || shift $#
   unset VIBECRAFTED_START_ESCALATED
-  if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" == "1" ]] ||
-    ! command -v _vetcoders_needs_vc_terminal_entry >/dev/null 2>&1 ||
-    ! _vetcoders_needs_vc_terminal_entry; then
-    return 0
-  fi
+  [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" != "1" ]] || return 0
+  case "$mode" in
+    declared)
+      if ! command -v _vetcoders_needs_vc_terminal_entry >/dev/null 2>&1 ||
+        ! _vetcoders_needs_vc_terminal_entry; then
+        return 0
+      fi
+      ;;
+    *)
+      # The child we open re-enters this very entry; the boundary stops the
+      # loop even if the host somehow fails to hand it a PTY.
+      [[ -z "${VIBECRAFTED_TERMINAL_ENTRY:-}" ]] || return 0
+      # A real controlling terminal is the direct path -- and the only proof.
+      [[ ! -t 0 || ! -t 1 ]] || return 0
+      ;;
+  esac
   local front_door=""
   front_door="$(_vetcoders_product_front_door vc-start 2>/dev/null || true)"
   if [[ -z "$front_door" ]]; then
@@ -654,4 +785,425 @@ _vetcoders_resume_operator_session() {
     return 0
   fi
   return 1
+}
+
+# ---------------------------------------------------------------------------
+# vc-start: one create-only workspace contract (2026-09-09, Founder P0)
+# ---------------------------------------------------------------------------
+# The same owner from every entrypoint (shell `vc-start`, deck `vibecrafted
+# start`, the bundled Rust front door, the terminal child):
+#   1. root  -- explicit --repo/--root, else the Git top-level of the caller's
+#               directory, else that directory. Never the runtime generation
+#               or an ambient wrapper root: those name sessions after releases.
+#   2. name  -- the explicit bare argument, else the root's basename VERBATIM,
+#               validated once. A repository whose name is not a legal session
+#               name is refused with the explicit-name form, never normalized.
+#   3. check -- the selected engine's own `list-sessions` in the product socket
+#               namespace, markers cleared. A live session (attached or not) or
+#               an EXITED resurrection record under the name refuses the start
+#               (exit 3) BEFORE any window, workspace record or provider; an
+#               unreadable inventory refuses too (exit 4): doubt is not
+#               permission to duplicate. Frame's `attach --create-background`
+#               RESURRECTS a dead record instead of creating (src/commands.rs,
+#               the ClientInfo::Resurrect arm), which is why the record has to
+#               be ruled out here first.
+#   4. create -- Frame's server-side exclusive `attach --create-background`
+#               (zellij-client/src/lib.rs start_server_detached): the loser of
+#               a race gets exit 1 + "Session already exists", told apart from
+#               every other refusal. Nothing is killed, deleted, renamed,
+#               switched or attached on conflict; no unique-name fallback.
+#   5. enter  -- a caller with a controlling terminal attaches (outside a
+#               frame) or moves its own client with switch-session (inside one:
+#               the shared canvas, never a nested multiplexer). A caller WITHOUT
+#               one has already created the session (step 4 needs no PTY) and
+#               opens the VC Terminal host on the root with the same name/repo
+#               argv plus VIBECRAFTED_START_CREATED_SESSION, so the child enters
+#               the very session this start created instead of finding the
+#               name taken. The parent's exit status therefore already says
+#               whether the workspace exists.
+# `vc-start resume` is the deliberate re-entry and keeps its own owner.
+
+# One project identity for start: explicit root, else the Git top-level that
+# contains the caller's directory (a subdirectory names the SAME workspace as
+# the root does), else the directory itself. Documented default; no ambient
+# SPAWN_ROOT/VIBECRAFTED_ROOT, no wrapper cwd, no generation.
+_vetcoders_start_resolve_root() {
+  local root="${VIBECRAFTED_START_ROOT:-}" top=""
+  if [[ -z "$root" ]]; then
+    top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+    if [[ -n "$top" && -d "$top" ]]; then
+      root="$top"
+    else
+      root="$(pwd -P)" || return 1
+    fi
+  fi
+  _vetcoders_absolute_physical_path "$root"
+}
+
+# The default workspace name is the root's basename, verbatim, under the same
+# validator as an explicit name. Refusal says exactly what to type instead.
+_vetcoders_start_default_workspace_name() {
+  local root="${1:-}" base=""
+  base="$(basename -- "$root")"
+  if ! _vetcoders_start_validate_workspace_name "$base" "the repository name"; then
+    printf 'Pass a workspace name explicitly: vc-start <workspace> --repo %s\n' \
+      "$(_vetcoders_shell_quote "$root")" >&2
+    return 2
+  fi
+  printf '%s\n' "$base"
+}
+
+# Run the selected engine the way the product entry does: attachment markers
+# of THIS process cleared (a marker equal to the target trips Frame's nested-
+# reattach panic, src/commands.rs:844, and `(current)` tags the listing), and
+# the product socket namespace pinned when the caller has none.
+_vetcoders_start_frame_env() {
+  local socket_dir=""
+  socket_dir="$(_vetcoders_vc_frame_socket_dir 2>/dev/null || true)"
+  if [[ -n "$socket_dir" ]]; then
+    VC_FRAME_SOCKET_DIR="$socket_dir" ZELLIJ_SOCKET_DIR="$socket_dir" \
+      env -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME \
+      -u ZELLIJ -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME "$@"
+  else
+    env -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME \
+      -u ZELLIJ -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME "$@"
+  fi
+}
+
+# Authoritative inventory state for ONE name. Prints exactly one of:
+#   live     -- a running server owns the name (attached or detached alike)
+#   dead     -- an EXITED resurrection record owns the name (not running)
+#   missing  -- the name is free
+#   error    -- the inventory could not be read or parsed; the reason is left
+#               in _vetcoders_start_inventory_error
+# `list-sessions --no-formatting` prints `NAME [Created … ago] SUFFIX`, where
+# SUFFIX is `(EXITED - attach to resurrect)` for a record (zellij-utils/src/
+# sessions.rs print_sessions), and exits 1 with "No active vc-frame sessions
+# found." when both lists are empty -- that one non-zero exit IS an answer.
+# Unlike _vetcoders_vc_frame_session_state, nothing here is swallowed into
+# "missing": every other failure is `error`.
+_vetcoders_start_session_inventory_state() {
+  local session_name="${1:-}" vc_frame_bin="" listing="" rc=0 line="" name="" found="missing"
+  _vetcoders_start_inventory_error=""
+  vc_frame_bin="$(_vetcoders_vc_frame_bin 2>/dev/null)" || {
+    _vetcoders_start_inventory_error="the selected vc-frame engine is unavailable"
+    printf 'vc-start: %s\n' "$_vetcoders_start_inventory_error" >&2
+    printf 'error\n'
+    return 0
+  }
+  listing="$(_vetcoders_start_frame_env "$vc_frame_bin" list-sessions --no-formatting 2>&1)" || rc=$?
+  if ((rc != 0)); then
+    if [[ "$listing" == *"No active vc-frame sessions found."* ]]; then
+      printf 'missing\n'
+      return 0
+    fi
+    _vetcoders_start_inventory_error="list-sessions exited ${rc}${listing:+: ${listing%%$'\n'*}}"
+    printf 'vc-start: %s\n' "$_vetcoders_start_inventory_error" >&2
+    printf 'error\n'
+    return 0
+  fi
+  while IFS= read -r line; do
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -n "$line" ]] || continue
+    case "$line" in
+      *" [Created "*) ;;
+      *)
+        _vetcoders_start_inventory_error="unrecognized inventory line: ${line}"
+        printf 'vc-start: %s\n' "$_vetcoders_start_inventory_error" >&2
+    printf 'error\n'
+        return 0
+        ;;
+    esac
+    name="${line%% \[Created *}"
+    [[ "$name" == "$session_name" ]] || continue
+    if [[ "$line" == *"(EXITED"* ]]; then
+      found="dead"
+    else
+      found="live"
+      break
+    fi
+  done <<<"$listing"
+  printf '%s\n' "$found"
+}
+
+# Refuse a start whose name is taken. Every command printed is a real one:
+# `vc-dashboard attach|switch` (dashboard.sh), `vc-frame attach`,
+# `vc-frame kill-session`, `vc-frame delete-session` (vc-frame 0.47.3 --help).
+# Deletion is offered only when nobody is attached; a watched session gets
+# attach/switch and the rename form only. Exit 3.
+_vetcoders_start_refuse_existing_workspace() {
+  local name="${1:-}" state="${2:-live}" root="${3:-}" clients="unknown" q_name="" q_root=""
+  q_name="$(_vetcoders_shell_quote "$name")"
+  q_root="$(_vetcoders_shell_quote "$root")"
+  case "$state" in
+    dead)
+      printf 'vc-start: workspace %s already exists in vc-frame as an EXITED session (a resurrection record, not running).\n' "$q_name" >&2
+      ;;
+    *)
+      clients="$(_vetcoders_vc_frame_session_client_state "$name")"
+      case "$clients" in
+        clients) printf 'vc-start: workspace %s already exists in vc-frame (live, a client is attached).\n' "$q_name" >&2 ;;
+        none) printf 'vc-start: workspace %s already exists in vc-frame (live, detached: nobody is attached).\n' "$q_name" >&2 ;;
+        *) printf 'vc-start: workspace %s already exists in vc-frame (live).\n' "$q_name" >&2 ;;
+      esac
+      ;;
+  esac
+  printf '  Nothing was created, attached, switched or deleted (repository: %s). Choose one:\n' "$q_root" >&2
+  if [[ "$state" == dead ]]; then
+    printf '    resurrect it from a terminal:       vc-frame attach %s\n' "$q_name" >&2
+  else
+    if _vetcoders_in_vc_frame; then
+      printf '    switch this Frame client to it:     vc-dashboard switch %s\n' "$q_name" >&2
+    fi
+    printf '    attach from a terminal:             vc-dashboard attach %s\n' "$q_name" >&2
+  fi
+  printf '    start a different workspace here:   vc-start <new-name> --repo %s\n' "$q_root" >&2
+  if [[ "$state" == dead ]]; then
+    printf '    delete the exited record:           vc-frame delete-session %s\n' "$q_name" >&2
+  elif [[ "$clients" == none ]]; then
+    printf '    stop it (nobody is attached):       vc-frame kill-session %s\n' "$q_name" >&2
+  fi
+  return 3
+}
+
+# Refuse when the inventory cannot answer. Exit 4.
+_vetcoders_start_refuse_inventory() {
+  local name="${1:-}"
+  printf 'vc-start: could not read the live vc-frame session inventory (%s); refusing to create %s because a duplicate cannot be ruled out.\n' \
+    "${_vetcoders_start_inventory_error:-unknown reason}" "$(_vetcoders_shell_quote "$name")" >&2
+  printf '  Inspect the engine yourself: vc-frame list-sessions --no-formatting   -- then re-run vc-start.\n' >&2
+  return 4
+}
+
+# The one create primitive. Returns 0 (created and live), 3 (the exact name
+# was taken meanwhile -- the caller re-reads the inventory and refuses), or 4
+# (any other engine refusal / the session never came up). Never waits a real
+# refusal out, never treats "already exists" as success.
+_vetcoders_start_create_workspace_session() {
+  local vc_frame_bin="${1:-}" session_name="${2:-}" layout_file="${3:-}" out="" rc=0
+  [[ -n "$vc_frame_bin" && -n "$session_name" ]] || return 4
+  if [[ -z "$layout_file" || ! -f "$layout_file" ]]; then
+    printf 'vc-start: operator layout missing under: %s\n' "$(_vetcoders_vc_frame_config_dir 2>/dev/null || printf '?')" >&2
+    printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
+    return 4
+  fi
+  _vetcoders_record_vc_frame_attachment missing "$session_name" || return $?
+  out="$(_vetcoders_start_frame_env "$vc_frame_bin" \
+    --new-session-with-layout "$layout_file" \
+    attach --create-background "$session_name" 2>&1)" || rc=$?
+  if ((rc != 0)); then
+    if _vetcoders_vc_frame_stderr_is_session_already_exists "$out"; then
+      return 3
+    fi
+    printf 'vc-start: vc-frame refused to create workspace %s (exit %s).\n' \
+      "$(_vetcoders_shell_quote "$session_name")" "$rc" >&2
+    [[ -z "$out" ]] || printf '%s\n' "$out" >&2
+    return 4
+  fi
+  if ! _vetcoders_wait_for_vc_frame_session "$session_name" 40; then
+    printf 'vc-start: workspace %s did not come up in vc-frame after the create call.\n' \
+      "$(_vetcoders_shell_quote "$session_name")" >&2
+    [[ -z "$out" ]] || printf '%s\n' "$out" >&2
+    return 4
+  fi
+  _vetcoders_record_vc_frame_attachment live "$session_name" || return $?
+  export VIBECRAFTED_PREPARED_VC_FRAME_SESSION="$session_name"
+  return 0
+}
+
+# Enter the created workspace from a caller that has a surface: inside a
+# frame someone is looking at, move THIS client (shared canvas); otherwise a
+# foreground attach with the attachment context cleared. Blocks until detach.
+_vetcoders_start_enter_workspace_session() {
+  local vc_frame_bin="${1:-}" session_name="${2:-}" ambient="" rc=0
+  if _vetcoders_in_vc_frame; then
+    ambient="$(_vetcoders_current_vc_frame_session_name)"
+    if [[ -n "$ambient" && "$ambient" != "$session_name" ]] && _vetcoders_has_usable_vc_frame_surface; then
+      VC_FRAME_SESSION_NAME="$ambient" ZELLIJ_SESSION_NAME="$ambient" \
+        "$vc_frame_bin" --session "$ambient" action switch-session "$session_name" || rc=$?
+      if ((rc != 0)); then
+        printf 'vc-start: could not switch this Frame client from %s to %s (exit %s); the workspace exists: vc-dashboard attach %s\n' \
+          "$(_vetcoders_shell_quote "$ambient")" "$(_vetcoders_shell_quote "$session_name")" "$rc" \
+          "$(_vetcoders_shell_quote "$session_name")" >&2
+      fi
+      return "$rc"
+    fi
+  fi
+  _vetcoders_start_frame_env "$vc_frame_bin" attach "$session_name"
+}
+
+# Create-only start from a caller WITHOUT a controlling terminal: the create
+# itself needs no PTY, so it happens here, before any window -- the caller's
+# exit status reflects the workspace, not the terminal host. Config pin and
+# engine admission only; the full product preparation (workspace record,
+# server eye) runs in the terminal child, which has the surface.
+_vetcoders_start_create_before_terminal() {
+  local session_name="${1:-}" root="${2:-}" vc_frame_bin="" layout_file="" rc=0 state=""
+  local PATH="${PATH:-}"
+  PATH="$(_vetcoders_path_with_bundled_bin_priority "$PATH")"
+  export PATH
+  _vetcoders_require_vc_frame || return 1
+  _vetcoders_pin_vc_frame_config_dir || return $?
+  vc_frame_bin="$(_vetcoders_vc_frame_bin)" || return 1
+  layout_file="$(_vetcoders_operator_layout_file 2>/dev/null || true)"
+  _vetcoders_start_create_workspace_session "$vc_frame_bin" "$session_name" "$layout_file" || rc=$?
+  if ((rc == 3)); then
+    state="$(_vetcoders_start_session_inventory_state "$session_name")"
+    [[ "$state" == dead ]] || state="live"
+    _vetcoders_start_refuse_existing_workspace "$session_name" "$state" "$root"
+    return $?
+  fi
+  return "$rc"
+}
+
+# The surfaced half: product preparation has run (identities exported, cwd is
+# the root). Re-read the inventory (cheap; the create below is exclusive
+# anyway), create unless this very start already did, then enter.
+_vetcoders_start_launch_workspace() {
+  local session_name="${1:-}" root="${2:-}" vc_frame_bin="" layout_file="" state="" rc=0
+  if [[ -n "${VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS:-}" ]]; then
+    printf 'vc-start: product preparation failed; the workspace was not created.\n' >&2
+    return "$VIBECRAFTED_PRODUCT_ENTRY_ERROR_STATUS"
+  fi
+  local PATH="${PATH:-}"
+  PATH="$(_vetcoders_path_with_bundled_bin_priority "$PATH")"
+  export PATH
+  vc_raise_launcher_limits
+  vc_frame_bin="$(_vetcoders_vc_frame_bin)" || {
+    echo "vc-frame is not installed — the visual workspace needs it." >&2
+    echo "Everything else works without it. Run agents headless:" >&2
+    echo "    vibecrafted workflow <agent> -p \"your task\"" >&2
+    echo "    vibecrafted observe <agent> --run-id <id>" >&2
+    echo "Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>" >&2
+    return 1
+  }
+  _vetcoders_load_frontier_sidecars
+  layout_file="$(_vetcoders_operator_layout_file 2>/dev/null || true)"
+
+  state="$(_vetcoders_start_session_inventory_state "$session_name")"
+  case "$state" in
+    error)
+      _vetcoders_start_refuse_inventory "$session_name"
+      return $?
+      ;;
+    dead)
+      _vetcoders_start_refuse_existing_workspace "$session_name" dead "$root"
+      return $?
+      ;;
+    live)
+      if [[ "${VIBECRAFTED_START_CREATED_SESSION:-}" != "$session_name" ]]; then
+        _vetcoders_start_refuse_existing_workspace "$session_name" live "$root"
+        return $?
+      fi
+      # Created by the start that opened this terminal; bind it now that the
+      # workspace identities exist, then enter.
+      _vetcoders_record_vc_frame_attachment live "$session_name" || return $?
+      ;;
+    *)
+      _vetcoders_start_create_workspace_session "$vc_frame_bin" "$session_name" "$layout_file" || rc=$?
+      if ((rc == 3)); then
+        state="$(_vetcoders_start_session_inventory_state "$session_name")"
+        [[ "$state" == dead ]] || state="live"
+        _vetcoders_start_refuse_existing_workspace "$session_name" "$state" "$root"
+        return $?
+      fi
+      ((rc == 0)) || return "$rc"
+      printf 'vc-start: created workspace %s for %s\n' \
+        "$(_vetcoders_shell_quote "$session_name")" "$(_vetcoders_shell_quote "$root")"
+      ;;
+  esac
+  unset VIBECRAFTED_START_CREATED_SESSION
+  export VIBECRAFTED_OPERATOR_SESSION="$session_name"
+  _vetcoders_start_enter_workspace_session "$vc_frame_bin" "$session_name"
+}
+
+# Shared entry for shell `vc-start` and deck `cmd_start`, after
+# _vetcoders_start_prepare_arguments. $@ = _vetcoders_start_frame_argv.
+_vetcoders_start_entry() {
+  local root="" session_name="" state="" rc=0
+  root="$(_vetcoders_start_resolve_root)" || {
+    printf 'vc-start: could not resolve the project root.\n' >&2
+    return 1
+  }
+
+  if [[ "${_vetcoders_start_mode:-start}" == "resume" ]]; then
+    # Deliberate re-entry: the declaration family's own escalation and owner.
+    _vetcoders_start_open_terminal_if_needed declared "$root" "$@" --repo "$root" || return $?
+    [[ -z "${VIBECRAFTED_START_ESCALATED:-}" ]] || return 0
+    _vetcoders_product_entry_prepare "$root" || return $?
+    if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" == "1" ]]; then
+      _vetcoders_product_entry_probe_print
+      return $?
+    fi
+    while (($#)) && _vetcoders_start_reserved_word "$1"; do
+      [[ "$1" != "resume" ]] || {
+        shift
+        break
+      }
+      shift
+    done
+    _vetcoders_resume_operator_session "$@"
+    return $?
+  fi
+
+  session_name="${_vetcoders_start_workspace_name:-}"
+  if [[ -z "$session_name" ]]; then
+    session_name="$(_vetcoders_start_default_workspace_name "$root")" || return $?
+  fi
+
+  # Tests/doctor: preparation effects only; no inventory, no create, no attach.
+  if [[ "${VIBECRAFTED_PRODUCT_ENTRY_PROBE:-0}" == "1" ]]; then
+    _vetcoders_product_entry_prepare "$root" || return $?
+    _vetcoders_product_entry_probe_print
+    return $?
+  fi
+
+  # 3. The authoritative inventory, before any window, record or provider.
+  state="$(_vetcoders_start_session_inventory_state "$session_name")"
+  case "$state" in
+    error)
+      _vetcoders_start_refuse_inventory "$session_name"
+      return $?
+      ;;
+    dead)
+      _vetcoders_start_refuse_existing_workspace "$session_name" dead "$root"
+      return $?
+      ;;
+    live)
+      if [[ "${VIBECRAFTED_START_CREATED_SESSION:-}" != "$session_name" ]]; then
+        _vetcoders_start_refuse_existing_workspace "$session_name" live "$root"
+        return $?
+      fi
+      ;;
+  esac
+
+  # A distinct guest on a stable host requires the Frame guest API. A
+  # switch-session to another server is not that contract. Refuse before
+  # mutation while the independently owned Frame API is awaiting admission.
+  if _vetcoders_in_vc_frame && [[ -z "${VIBECRAFTED_START_CREATED_SESSION:-}" ]]; then
+    printf 'vc-start: shared-host guest workspace creation is unavailable in this generation; the Frame guest API must be admitted before creating a workspace inside this host.\n' >&2
+    return 4
+  fi
+
+  # 4+5 without a surface: create here, then open the terminal that enters.
+  if [[ -z "${VIBECRAFTED_TERMINAL_ENTRY:-}" ]] && [[ ! -t 0 || ! -t 1 ]]; then
+    if [[ "$state" != "live" ]]; then
+      _vetcoders_start_create_before_terminal "$session_name" "$root" || return $?
+      printf 'vc-start: created workspace %s for %s\n' \
+        "$(_vetcoders_shell_quote "$session_name")" "$(_vetcoders_shell_quote "$root")"
+    fi
+    export VIBECRAFTED_START_CREATED_SESSION="$session_name"
+    _vetcoders_start_open_terminal_if_needed strict "$root" "$@" --repo "$root" || rc=$?
+    unset VIBECRAFTED_START_CREATED_SESSION
+    if ((rc != 0)); then
+      printf 'vc-start: workspace %s exists (detached) but no terminal could be opened for it; attach with: vc-dashboard attach %s\n' \
+        "$(_vetcoders_shell_quote "$session_name")" "$(_vetcoders_shell_quote "$session_name")" >&2
+      return "$rc"
+    fi
+    return 0
+  fi
+
+  # 4+5 with a surface (a real terminal, or the child the terminal opened).
+  _vetcoders_product_entry_prepare "$root" || return $?
+  _vetcoders_start_launch_workspace "$session_name" "$root"
 }

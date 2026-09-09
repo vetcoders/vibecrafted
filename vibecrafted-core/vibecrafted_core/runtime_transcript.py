@@ -266,3 +266,141 @@ def validate_runtime_transcript(
     if evidence != (declared_bytes, declared_sha256):
         return None
     return canonical
+
+
+class PrivatePromptFilter:
+    """Streaming exact-byte redaction, including matches across read boundaries."""
+
+    def __init__(self, secret: bytes) -> None:
+        self.secret = secret
+        self.prefix = [0] * len(secret)
+        matched = 0
+        for index in range(1, len(secret)):
+            while matched and secret[index] != secret[matched]:
+                matched = self.prefix[matched - 1]
+            if secret[index] == secret[matched]:
+                matched += 1
+            self.prefix[index] = matched
+        self.matched = 0
+        self.pending = bytearray()
+
+    def feed(self, chunk: bytes) -> bytes:
+        if not self.secret:
+            return chunk
+        output = bytearray()
+        for value in chunk:
+            self.pending.append(value)
+            while self.matched and value != self.secret[self.matched]:
+                self.matched = self.prefix[self.matched - 1]
+            if value == self.secret[self.matched]:
+                self.matched += 1
+            if self.matched == len(self.secret):
+                output.extend(self.pending[: -self.matched])
+                output.extend(b"[private launch input redacted]")
+                self.pending.clear()
+                self.matched = 0
+            else:
+                count = len(self.pending) - self.matched
+                output.extend(self.pending[:count])
+                del self.pending[:count]
+        return bytes(output)
+
+    def finish(self) -> bytes:
+        tail = bytes(self.pending)
+        self.pending.clear()
+        self.matched = 0
+        return tail
+
+
+class InteractiveTranscriptCapture:
+    """Capture output through a tty while leaving the caller's input tty intact.
+
+    The capture is an output adapter, not a process supervisor. Losing the
+    display sink never signals the child; the existing spawn owner keeps its
+    identity, lifecycle, and publication loop.
+    """
+
+    def __init__(self, path: Path, secret: str, *, display_fd: int = 1) -> None:
+        import fcntl
+        import pty
+        import termios
+        import threading
+
+        self.master, self.slave = pty.openpty()
+        self.path = path
+        self.display_fd = display_fd
+        self.error = ""
+        self.filter = PrivatePromptFilter(secret.encode("utf-8"))
+        self.normalized_filter = PrivatePromptFilter(
+            secret.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8")
+        )
+        try:
+            size = fcntl.ioctl(display_fd, termios.TIOCGWINSZ, b"\0" * 8)
+            fcntl.ioctl(self.slave, termios.TIOCSWINSZ, size)
+        except OSError:
+            pass
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        self.log = os.fdopen(fd, "wb", buffering=0)
+        self.thread = threading.Thread(target=self._drain, daemon=True)
+
+    def start(self) -> None:
+        os.close(self.slave)
+        self.slave = -1
+        self.thread.start()
+
+    def _emit(self, raw: bytes) -> None:
+        if not raw:
+            return
+        self.log.write(raw)
+        if self.display_fd >= 0:
+            try:
+                view = memoryview(raw)
+                while view:
+                    count = os.write(self.display_fd, view)
+                    view = view[count:]
+            except OSError:
+                self.display_fd = -1
+
+    def _drain(self) -> None:
+        import errno
+        import fcntl
+        import select
+        import termios
+
+        try:
+            while True:
+                # The provider sees this output PTY, so keep its geometry in
+                # step with the original terminal even during quiet periods.
+                try:
+                    size = fcntl.ioctl(self.display_fd, termios.TIOCGWINSZ, b"\0" * 8)
+                    fcntl.ioctl(self.master, termios.TIOCSWINSZ, size)
+                except (OSError, ValueError):
+                    pass
+                ready, _, _ = select.select([self.master], [], [], 0.1)
+                if not ready:
+                    continue
+                try:
+                    chunk = os.read(self.master, 65536)
+                except OSError as exc:
+                    if exc.errno in (errno.EIO, errno.EBADF):
+                        break
+                    raise
+                if not chunk:
+                    break
+                self._emit(self.normalized_filter.feed(self.filter.feed(chunk)))
+            self._emit(self.normalized_filter.feed(self.filter.finish()))
+            self._emit(self.normalized_filter.finish())
+        except OSError as exc:
+            self.error = f"transcript capture failed: {type(exc).__name__}"
+        finally:
+            self.log.close()
+
+    def close(self) -> None:
+        if self.slave >= 0:
+            os.close(self.slave)
+            self.slave = -1
+        if self.thread.ident is not None:
+            self.thread.join(timeout=1)
+        else:
+            self.log.close()
+        os.close(self.master)

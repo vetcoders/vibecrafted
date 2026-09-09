@@ -59,11 +59,14 @@ def test_dispatch_defines_passthrough_helper() -> None:
     assert not re.search(
         r"vc-dashboard\(\)\s*\{\s*_vetcoders_vc_passthrough dashboard", text
     )
-    start_body = text.split("vc-start()")[1].split("vc-frontier-paths")[0]
-    # Only --help may call into the deck; bare start must launch dashboard.
-    # The help touch goes through the guarded passthrough so DECK_BIN/test-mode
-    # resolution holds even here — never a bare `command vibecrafted`.
-    assert "_vetcoders_launch_dashboard operator" in start_body
+    start_body = text.split("vc-start()")[1].split("vc-dashboard()")[0]
+    # Only --help may call into the deck; bare start must enter the one
+    # create-only workspace owner (dashboard.sh), never the dashboard
+    # reuse-or-create launcher. The help touch goes through the guarded
+    # passthrough so DECK_BIN/test-mode resolution holds even here — never a
+    # bare `command vibecrafted`.
+    assert "_vetcoders_start_entry" in start_body
+    assert "_vetcoders_launch_dashboard" not in start_body
     assert "_vetcoders_vc_passthrough start --help" in start_body
     assert re.search(r"command vibecrafted start\s+\"\$@\"", start_body) is None
     assert re.search(r"_vetcoders_vc_passthrough start\s+\"\$@\"", start_body) is None

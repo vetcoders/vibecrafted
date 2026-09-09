@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shlex
@@ -14,7 +15,7 @@ import tomllib
 from vibecrafted_core.autonomy_surface import destructive_remote_push
 from vibecrafted_core.delivery.model import ContractError, ExecutionEnvelope
 from vibecrafted_core.runtime_paths import vibecrafted_home
-from vibecrafted_core.workflow import SUPPORTED_WORKFLOWS
+from vibecrafted_core.workflow import SUPPORTED_WORKFLOWS, select_plan_model
 
 from .model import (
     CRITICAL_FAIL_POLICIES,
@@ -198,7 +199,11 @@ def render_cell_prompt(
         delivery_contract,
         active_baton.to_json(),
     ]
-    rendered = [_format_known(part, variables).strip() for part in parts if part]
+    rendered = [
+        part if part is body and cut.brief else _format_known(part, variables).strip()
+        for part in parts
+        if part
+    ]
     return "\n\n".join(part for part in rendered if part).rstrip() + "\n"
 
 
@@ -228,10 +233,12 @@ def render_cut_verifies(dispatch: Dispatch, cut: Cut) -> Cut:
 
 def _brief_or_prompt(cut: Cut) -> str:
     """Read the cut's brief file if resolvable, else fall back to its inline prompt."""
+    if cut.source_text is not None:
+        return cut.source_text
     if cut.brief:
         path = Path(cut.brief).expanduser()
         if path.is_file():
-            return path.read_text(encoding="utf-8")
+            return path.read_bytes().decode("utf-8")
     return cut.prompt
 
 
@@ -418,12 +425,32 @@ def _parse_cuts(
         if resolved_workflow not in SUPPORTED_WORKFLOWS:
             errors.append(f"cuts[{index}].workflow: unsupported workflow {workflow!r}")
 
-        prompt = _string(item.get("prompt"))
+        prompt = item.get("prompt") if isinstance(item.get("prompt"), str) else ""
         brief = _string(item.get("brief"))
         if not prompt and not brief:
             errors.append(f"cuts[{index}]: prompt or brief is required")
         if brief:
             _validate_brief_path(brief, base_dir, index, errors)
+
+        plan_text = ""
+        model, model_source = "", "provider_default"
+        raw_model = item.get("model", "")
+        if "model" in item and (
+            not isinstance(raw_model, str) or not raw_model.strip()
+        ):
+            errors.append(f"cuts[{index}].model: expected a non-empty string")
+        else:
+            try:
+                plan_text = (
+                    Path(_resolve_brief(brief, base_dir)).read_bytes().decode("utf-8")
+                    if brief
+                    else prompt
+                )
+                model, model_source = select_plan_model(
+                    _string(item.get("agent")), plan_text, model=raw_model
+                )
+            except (OSError, ValueError) as exc:
+                errors.append(f"cuts[{index}].model: {exc}")
 
         mode = _string(item.get("mode")) or "write"
         mutation = _string(item.get("mutation"))
@@ -445,7 +472,10 @@ def _parse_cuts(
                 resolved_workflow=resolved_workflow,
                 critical=bool(item.get("critical")),
                 mode=mode,
-                model=_string(item.get("model")),
+                model=model,
+                model_source=model_source,
+                source_text=plan_text,
+                source_digest=hashlib.sha256(plan_text.encode("utf-8")).hexdigest(),
                 prompt=prompt,
                 brief=_resolve_brief(brief, base_dir),
                 extra=_string(item.get("extra")),

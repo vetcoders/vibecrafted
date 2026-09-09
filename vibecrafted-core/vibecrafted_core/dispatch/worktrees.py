@@ -48,16 +48,14 @@ def _same_filesystem_location(left: str | Path, right: str | Path) -> bool:
 def repo_identity(repo: str | Path) -> tuple[str, str]:
     """Resolve a stable ``(org, repo)`` from origin, with local fallbacks."""
     root = Path(repo).expanduser().resolve()
-    remote = _git(root, "remote", "get-url", "origin")
-    tail = remote.strip().removesuffix(".git")
-    if ":" in tail and "://" not in tail:
-        tail = tail.split(":", 1)[1]
-    elif "://" in tail:
-        tail = tail.split("://", 1)[1]
-        tail = tail.split("/", 1)[1] if "/" in tail else ""
-    parts = [part for part in tail.strip("/").split("/") if part]
-    org = parts[-2] if len(parts) >= 2 else "local"
-    name = parts[-1] if parts else root.name
+    from ..repository_claims import ClaimContractError, canonical_repo_identity
+
+    try:
+        identity = canonical_repo_identity(root)["repo_identity"]
+    except ClaimContractError:
+        # Artifact paths may be requested before a repository is initialized.
+        identity = f"local/{root.name}"
+    org, name = identity.rsplit("/", 1)
     return _safe_component(org, "local"), _safe_component(name, "repo")
 
 

@@ -2036,6 +2036,11 @@ def _normalize_agent_meta(path: Path) -> RunStatus | None:
         "role",
         "prompt_role",
         "provider_session_id",
+        "provider_session_requested",
+        "native_identity_status",
+        "native_fork",
+        "fork_source_session_id",
+        "session_selection",
         "operator_policy",
         "supervision",
         "stop_actor_run_id",
@@ -2232,7 +2237,14 @@ def _merge_event_stream(
             if identity_required
             else str(raw_root or "")
         )
-        agent = str(payload.get("agent") or (existing.agent if existing else "unknown"))
+        # A lifecycle event's author is not a provider reassignment. Once a
+        # launch/meta record establishes identity, later Guardian notifications
+        # cannot change the executor of that run.
+        agent = str(
+            existing.agent
+            if existing and existing.agent not in {"", "unknown", "guardian"}
+            else payload.get("agent") or "unknown"
+        )
         skill = str(payload.get("skill") or (existing.skill if existing else "unknown"))
         mode = str(payload.get("mode") or (existing.mode if existing else "unknown"))
         report = str(
@@ -2283,6 +2295,12 @@ def _merge_event_stream(
             "resume_root",
             "attempt",
             "native_resume",
+            "native_fork",
+            "fork_source_session_id",
+            "session_selection",
+            "provider_session_id",
+            "provider_session_requested",
+            "native_identity_status",
             "resume_idempotency_key",
             "dispatch_run_id",
             "dispatch_cut_id",
@@ -2331,7 +2349,35 @@ def _merge_event_stream(
             "workspace_display_label",
             "worker_host_session",
             "worker_host_display",
+            "model_requested",
+            "model_effective",
+            "model_source",
+            "repo_requested",
+            "repo_kind",
+            "repo_identity",
+            "repo_remote",
+            "base_requested",
+            "base_ref",
+            "baseline_sha",
+            "runtime_class",
+            "presentation",
+            "requires_pty",
+            "execution_host",
+            "parent_root",
+            "effective_worker_root",
+            "parent_run_id",
+            "source_path",
+            "source_snapshot",
+            "source_origin",
+            "source_digest",
+            "source_ref",
         ):
+            if (
+                key in {"model_requested", "model_effective", "model_source"}
+                and payload.get("agent")
+                and str(payload["agent"]) != agent
+            ):
+                continue
             if key in payload and payload.get(key) not in (None, ""):
                 extra[key] = payload[key]
 

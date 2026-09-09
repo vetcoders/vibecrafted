@@ -524,13 +524,15 @@ def _option_lines(topic: str) -> list[str]:
     lines = [
         "  -p, --prompt <text>            Inline prompt",
         "  -f, --file <path.md>           Input file as prompt context",
-        "  --prompt-stdin                 Read prompt from stdin; no argv/temp copy",
-        "  --runtime <terminal|headless>  Worker surface (default: headless)",
-        "  --repo <path>                  Repository, from any directory (--root: legacy spelling)",
-        "  --worktree [true|false]        Run in a fresh linked checkout of --repo (clean Git root required)",
+        "  --prompt-stdin                 Read prompt from stdin into a private snapshot",
+        "  --runtime <terminal|headless>  Presentation (default: headless)",
+        "  --repo <path|org/name>         Repository (--root: identical legacy alias)",
+        "  --base <ref|SHA|HEAD>          Pinned commit; local HEAD or identity remote HEAD by default",
+        "  --execution-runtime <living-tree|local-worktrees>  Execution location",
+        "  --worktree [true|false]        Alias for local-worktrees; dirty parent preserved",
         "  --permissions <policy>         bypass|auto|accept-edits|read-only, enforced by the agent CLI (default: bypass)",
         "  --sandbox [true|false]         Agent CLI sandbox on/off; refused before launch when it cannot be enforced",
-        "  --model <name>                 Agent model override",
+        "  --model <name>                 Exact model; CLI > plan frontmatter > provider default",
     ]
     definition = workflow_definition(topic)
     if definition and definition.supports_count:

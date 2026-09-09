@@ -64,7 +64,12 @@ _vetcoders_source_runtime_helpers() {
     # The sourced helper resolves later runtime scripts through VIBECRAFTED_ROOT.
     # Bind it to this helper's physical owner only after the source succeeds.
     export VIBECRAFTED_ROOT="$owner_root"
-    export VIBECRAFTED_RUNTIME_ROOT="$owner_root"
+    if [[ -e "$owner_root/.git" && ! -f "$owner_root/runtime-manifest.json" ]]; then
+      # Source checkout ownership is not an immutable Runtime Pack generation.
+      unset VIBECRAFTED_RUNTIME_ROOT
+    else
+      export VIBECRAFTED_RUNTIME_ROOT="$owner_root"
+    fi
     return 0
   else
     source_status=$?
