@@ -36,7 +36,7 @@ struct TerminalLauncher {
       self.terminalHost = terminalHost
       self.generationRoot = generationRoot
       executable = terminal
-      arguments = ["-e", primaryShell.path, start.path, "operator"]
+      arguments = ["-e", primaryShell.path]
       self.workingDirectory = workingDirectory
       self.environment = environment
     }

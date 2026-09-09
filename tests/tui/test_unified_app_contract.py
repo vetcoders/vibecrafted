@@ -1104,10 +1104,7 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
         REPO_ROOT
         / "vibecrafted-app/shell-agent/app/Vibecrafted/CommandDeck/TerminalLauncher.swift"
     ).read_text()
-    assert (
-        'arguments = ["-e", primaryShell.path, start.path, "operator"]'
-        in terminal_owner
-    )
+    assert 'arguments = ["-e", primaryShell.path]' in terminal_owner
     assert (
         "process.currentDirectoryURL = specification.workingDirectory" in terminal_owner
     )
@@ -3767,12 +3764,14 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     assert 'chars = "\\u001b[46;10u"' in terminal
     assert 'key = "N"' in terminal
     assert 'chars = "\\u001b[110;9u"' in terminal
-    assert "launch-primary-shell.zsh" in terminal
     assert (
         "$VIBECRAFTED_RUNTIME_ROOT/config/alacritty/launch-primary-shell.zsh"
         not in terminal
     )
-    assert "$VIBECRAFTED_RUNTIME_ROOT/bin/vc-start" in terminal
+    assert terminal_policy["terminal"]["shell"] == {
+        "program": "/bin/zsh",
+        "args": ["-l"],
+    }
     assert "${1##*/}" in primary_shell
     assert '"$0" "$@"' in primary_shell
     terminal_launch = delegate[
@@ -3787,16 +3786,12 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
         REPO_ROOT
         / "vibecrafted-app/shell-agent/app/Vibecrafted/CommandDeck/TerminalLauncher.swift"
     ).read_text()
-    assert (
-        'arguments = ["-e", primaryShell.path, start.path, "operator"]'
-        in terminal_owner
-    )
+    assert 'arguments = ["-e", primaryShell.path]' in terminal_owner
     assert 'product_config / "vc-terminal" / "vc-terminal.toml"' in installer
     assert 'product_config / "terminal-entry.toml"' not in installer
     assert 'for debris in terminal.glob("launch-*.zsh"):' in installer
     assert "if debris.name != _PRODUCT_PRIMARY_SHELL_NAME:" in installer
     assert "_remove_path(debris)" in installer
-    assert "vc-terminal/launch-primary-shell.zsh" in terminal
     assert 'product_config / "terminal-policy.toml"' in installer
     assert 'theme = staged / "terminal-theme.toml"' in installer
     assert 'generation / "config/vc-terminal/themes/dark.toml"' in installer

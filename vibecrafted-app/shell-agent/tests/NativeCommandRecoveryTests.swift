@@ -50,7 +50,7 @@ struct NativeCommandRecoveryTests {
       start: start, workingDirectory: cwd, environment: environment)
     try require(specification.generationRoot == root, "Generation changed")
     try require(specification.executable == terminal, "Wrapper was substituted")
-    try require(specification.arguments == ["-e", shell.path, start.path, "operator"], "argv changed")
+    try require(specification.arguments == ["-e", shell.path], "argv changed")
     try require(specification.workingDirectory == cwd, "cwd changed")
     try require(specification.environment == environment, "Environment merged or rewritten")
     var mismatched = environment

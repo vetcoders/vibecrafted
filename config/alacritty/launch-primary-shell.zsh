@@ -30,13 +30,9 @@ leave_alt_screen() {
 # Ensure we start on the primary buffer (scrollback + ~Alt wheel bindings).
 leave_alt_screen
 
-# Product entries hosted by this terminal. `vc-start operator` is the window
-# Vibecrafted.app opens; the other verbs arrive when a public VC entry had no
-# controlling terminal and asked the product terminal host for a real PTY
-# (_vetcoders_open_entry_in_vc_terminal). All of them need the SAME treatment:
-# a login+interactive zsh so the runtime shell functions exist, then a clean
-# alternate-buffer handoff. Matching only vc-start silently dropped the argv of
-# every other verb into a bare login shell.
+# With no command, open a normal login shell. Explicit product entries retain
+# their argv and run in a login+interactive shell; their failure must leave the
+# terminal usable with the error visible in scrollback.
 product_entry=""
 case "${1##*/}" in
   vc-*|vibecrafted|vibecrafted-*) product_entry="$1" ;;
@@ -49,10 +45,7 @@ if [[ -n "$product_entry" ]]; then
   # vc-frame owns its own alternate-buffer lifecycle; clean sticky smcup.
   leave_alt_screen
   if (( product_entry_status != 0 )); then
-    # A failed vc-frame launch no longer owns a usable PTY. Do not drop the
-    # user into a login shell on that broken frontend; let vc-terminal close
-    # cleanly so Vibecrafted.app can open a fresh window.
-    exit "$product_entry_status"
+    printf '\nVibecrafted could not start the requested workspace (exit %s).\nYour terminal is still available; correct the command and try again.\n\n' "$product_entry_status" >&2
   fi
 fi
 
