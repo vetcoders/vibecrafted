@@ -21,7 +21,9 @@ config="$HOME/.config/vibecrafted/vc-terminal/vc-terminal.toml"
 # anchored ownership grammar: only direct children of this runtime home's
 # releases directory are owned; user lookalikes stay untouched.
 _vc_terminal_runtime_home() {
-  local selected="${VIBECRAFTED_RUNTIME_ROOT:-$root}" generation
+  # The physical wrapper selects the generation. A parent can carry a stale
+  # runtime-root from an earlier launch, which must not choose this boundary.
+  local selected="$root" generation
   if [[ -n "${VIBECRAFTED_RUNTIME_HOME:-}" ]]; then
     printf '%s\n' "${VIBECRAFTED_RUNTIME_HOME%/}"
   elif [[ "$selected" == */releases/* ]]; then

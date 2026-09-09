@@ -2398,6 +2398,7 @@ def _run_terminal_path_entry(
     runtime_home: Path,
     inherited_path: str,
     declare_runtime_home: bool = True,
+    inherited_runtime_root: Path | None = None,
 ) -> dict[str, object]:
     """Run the physical terminal entry against a host that records its child env."""
     home = tmp_path / "home"
@@ -2421,11 +2422,24 @@ def _run_terminal_path_entry(
         "  'runtime_home': os.environ.get('VIBECRAFTED_RUNTIME_HOME'),\n"
         "  'runtime_root': os.environ.get('VIBECRAFTED_RUNTIME_ROOT'),\n"
         "  'runtime_bin': os.environ.get('VIBECRAFTED_RUNTIME_BIN'),\n"
-        "}}))\n",
+        "}))\n",
     )
-    env = {**os.environ, "HOME": str(home), "PATH": inherited_path}
+    env = os.environ.copy()
+    for name in (
+        "VIBECRAFTED_RUNTIME_HOME",
+        "VIBECRAFTED_RUNTIME_ROOT",
+        "VIBECRAFTED_ROOT",
+        "VIBECRAFTED_RUNTIME_BIN",
+        "VIBECRAFTED_PYTHON",
+        "VIBECRAFTED_VC_FRAME_BIN",
+        "VIBECRAFTED_TERMINAL_HOST",
+    ):
+        env.pop(name, None)
+    env.update({"HOME": str(home), "PATH": inherited_path})
     if declare_runtime_home:
         env["VIBECRAFTED_RUNTIME_HOME"] = str(runtime_home)
+    if inherited_runtime_root is not None:
+        env["VIBECRAFTED_RUNTIME_ROOT"] = str(inherited_runtime_root)
     result = subprocess.run(
         [str(entry)], capture_output=True, text=True, env=env, check=False
     )
@@ -2490,17 +2504,25 @@ def test_terminal_entry_anchors_custom_release_cleanup_on_its_selected_root(
     stale = runtime_home / "releases/4.3.0+gSTALE/bin"
     selected = runtime_home / "releases/4.3.1+gSELECTED/bin"
     lookalike = tmp_path / "unowned/releases/4.3.0+gSTALE/bin"
-    for directory in (stale, selected, lookalike):
+    stale_parent_root = tmp_path / "stale parent runtime/releases/4.2.0+gPARENT"
+    stale_parent_bin = stale_parent_root / "bin"
+    for directory in (stale, selected, lookalike, stale_parent_bin):
         directory.mkdir(parents=True, exist_ok=True)
-    inherited = os.pathsep.join([str(stale), str(lookalike), str(selected), "/usr/bin", "/bin"])
+    inherited = os.pathsep.join(
+        [str(stale), str(lookalike), str(selected), str(stale_parent_bin), "/usr/bin", "/bin"]
+    )
 
     receipt = _run_terminal_path_entry(
         tmp_path,
         runtime_home=runtime_home,
         inherited_path=inherited,
         declare_runtime_home=False,
+        inherited_runtime_root=stale_parent_root,
     )
-    assert receipt["path"] == os.pathsep.join([str(lookalike), "/usr/bin", "/bin"])
+    # The wrapper's physical root wins over a hostile root left by its parent.
+    assert receipt["path"] == os.pathsep.join(
+        [str(lookalike), str(stale_parent_bin), "/usr/bin", "/bin"]
+    )
     assert receipt["runtime_home"] is None
     assert receipt["runtime_root"] == str(runtime_home / "releases/4.3.1+gSELECTED")
 
