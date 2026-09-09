@@ -1,67 +1,57 @@
-# Compile embargo — fazowo-świadomy kontrakt recovery
+# Compile embargo — odpowiedzialność integratora W2
 
-Compile embargo chroni kształtowanie architektury przed przeprojektowaniem sterowanym przez kompilator
-i testy. Przy autoryzacji Foundera checkpoint commity mogą użyć `--no-verify` lub równoważnego,
-selektywnego obejścia dla odroczonych bramek compile, lint, type-check i testów w dowolnym języku
-projektu. Zachowuj spójną pracę w commitach; tymczasowo psujący się build nie jest powodem, by
-zostawiać jedyny punkt recovery w brudnym drzewie.
+Embargo oddziela budowę architektury od wykonywalnej weryfikacji. Wynika z fazy
+pracy, nie z osobistej zgody ani decyzji konkretnej osoby.
 
-## Bramka dopuszczenia
+## Workerzy W1/W2
 
-Scaffold może zadeklarować compile embargo tylko wtedy, gdy jawne są wszystkie poniższe elementy:
+Worker mapuje zależności, implementuje kontrakt cuta, przez inspekcję sprawdza
+interfejsy i połączenia oraz zapisuje spójne lokalne checkpointy. Nie uruchamia
+kompilacji, buildów, formatterów, lintów, type-checków, testów ani wybiórczych
+bramek. Może pisać i czytać testy bez ich wykonywania. Raportuje niewiadome,
+ryzyka, brakujące połączenia i potrzebne później sprawdzenia.
 
-- decyzja Foundera autoryzująca eksperyment;
-- objęte fazy i dokładne bramki compile/lint/test odroczone w każdej fazie;
-- asercje albo dowody strukturalne, które tymczasowo zastępują te bramki;
-- atestacja kończąca embargo (np. `W2_STRUCTURALLY_CLOSED`), wymagany autor, lokalizacja journala
-  i SHA commita;
-- procedura checkpointu: które hooki i bramki są odroczone lub ominięte oraz lokalizacja raportu,
-  który zapisuje, co faktycznie uruchomiono, a co pominięto.
+Checkpoint może użyć `git commit --no-verify`, gdy hooki uruchamiałyby bramki.
+Nie wymaga wcześniejszego uruchomienia wybranych kontroli ani zbudowania polityki
+hooków. Obejście pomija całe wejście hooków Gita: trzeba zapisać wszystkie
+faktycznie pominięte kontrole, również bezpieczeństwa. Atrybucja i zakres własnych
+zmian pozostają obowiązkowe. Checkpoint zachowuje pracę, nie potwierdza jakości ani
+bezpieczeństwa i nie uprawnia do pushu, publikacji ani wydania.
 
-Przy lokalnym checkpoincie workera pod zadeklarowanym embargiem `--no-verify` jest w pełni
-autoryzowany. Obejmuje całe wejście bundlowanych hooków Gita; nie jest mechanizmem selektywnego
-wykonania i nie nakłada na workera prerequisite'u security hooka. Autoryzacja dotyczy wyłącznie
-zadeklarowanego zakresu checkpointu, nie claimu, że pominięte bramki przeszły. Zachowaj poprawną
-atrybucję commita i autoryzowany zakres refa/operacji. Zapisz odroczone bramki z commitem oraz
-zgłoś bramki, które faktycznie uruchomiono lub pominięto.
+## Integrator W2
 
-Użyj selektywnej, policy-aware repo-owned polityki hooków, jeśli jest dostępna. Jej brak nie
-blokuje lokalnego checkpointu workera ani nie wymaga najpierw budowania nowego systemu polityk:
-autoryzacja fazy wystarcza dla każdego checkpointu w tej fazie. Nie osłabiaj asercji produktu,
-żeby uzyskać green.
+Integrator weryfikuje dokładne commity i zakresy, składa cuty, sprawdza zależności
+oraz kontrakty i usuwa luki strukturalne. Integracja strukturalna może poprzedzać
+bramki wykonywalne; pozostaje jawnie niezweryfikowana.
 
-## Kanał recovery pod embargiem
+Dopiero integrator zapisuje `W2_STRUCTURALLY_CLOSED` dla dokładnego złożonego SHA.
+To znaczy „system złożony i gotowy do sprawdzenia”, nie „system działa”. Następnie
+przywraca i uruchamia pełne właściwe bramki, w tym kontrolę bezpieczeństwa i sekretów
+pominiętą przez checkpointy, oraz rozdziela konkretne naprawy na podstawie wyników.
+Worker sam nie dobiera bramek i nie zdejmuje embarga.
 
-Embargo ma trzy odrębne stany:
+Nieudana bramka po closure wymaga naprawy implementacji, nie osłabienia asercji
+ani automatycznego wznowienia embarga. Kolejna faza strukturalna wymaga jawnego
+zapisu integratora: zakresu oraz warunku jej zamknięcia.
 
-| Stan                               | Właściciel i dozwolona akcja                                                                                                                                                                                               | Dowód i znaczenie                                                                                                                                                                   |
-| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Lokalny checkpoint workera         | Worker zapisuje commit w swoim Fleet Worktree i na tym kończy pracę. Bez pushu workera, publikacji ani zdalnego refa `embargo/<plan-id>`; push z `--no-verify` jest wyłącznym przyciskiem Foundera.                        | Dokładny SHA, zakres i raport uruchomionych/pominiętych bramek. Wejście bundlowanych hooków może być pominięte; to nie jest security-clean ani verified delivery.                   |
-| Structural admission pod embargiem | Wyznaczony integrator weryfikuje dokładny commit i zakres workera, uruchamia Semgrep oraz przegląd sekretów/bezpieczeństwa i może lokalnie zintegrować baton, aby kolejne fale workerów budowały na spójnej architekturze. | Wyłącznie strukturalnie dopuszczone. Compile, lint, type-check i testy pozostają odroczone do nazwanej closure; integrator nigdy nie nazywa pominiętej bramki bezpieczeństwa clean. |
-| Verified delivery                  | Wyznaczony integrator po nazwanej closure.                                                                                                                                                                                 | Pełne, odpowiednie dla języka bramki odroczone i normalne przechodzą i są zapisane dla dokładnego dopuszczonego SHA.                                                                |
+## Dowody i adaptery repozytoriów
 
-Plan, tracker, journal i artefakt `.dispatch.toml` pozostają źródłami prawdy wykonania.
-Structural admission jest lokalnym joinem architektonicznym, nie claimem dostarczenia ani drugim control plane.
+Plan i handoff wskazują fazę, integratora W2, granice cutów, dowody strukturalne,
+odroczoną weryfikację i warunek closure. Checkpoint ma SHA, zakres, ryzyka i wykaz
+uruchomionych/pominiętych kontroli. Integrator zapisuje złożony SHA, atestację,
+wyniki bramek oraz pozostałe scenariusze odbioru. Używamy istniejącego planu,
+trackera, dispatchu i journala; w Vibecrafted jest to `.vibecrafted/THE_JOURNAL.md`.
 
-## Zdjęcie embarga
+Polityka obejmuje wszystkie języki; repo podaje dokładne komendy. Cztery bramki
+historycznego profilu Codescribe nie ograniczają jej zakresu. Marker TOML i hooki
+Codescribe są adapterem tego repo, nie potwierdzonym mechanizmem Vibecrafted.
+Błędny marker nie rozszerza uprawnień. Po closure i poza strukturalnym W1/W2
+obowiązują normalne bramki. Sam zachowany receipt closure nie przedłuża embarga.
 
-Nazwana atestacja kończy embargo. Przed zweryfikowanym dostarczeniem:
+## Dostarczenie
 
-1. uruchom wszystkie odroczone bramki oraz normalny pełny zestaw bramek;
-2. zapisz wyniki i atestację dla dokładnego SHA commita;
-3. zleć wyznaczonemu integratorowi zapis verified delivery dla dokładnego dopuszczonego SHA;
-4. zachowaj receipty lokalnego checkpointu i structural admission jako dowód recovery, dopóki
-   polityka integracji nie pozwoli ich posprzątać.
-
-### Macierz odroczonych bramek dla mieszanego repo
-
-Do nazwanej closure structural admission nie autoryzuje uruchamiania compile, lint, type-check ani
-testów tylko po to, by zazielenić embargo. Przy closure uruchom kategorie właściwe dla dopuszczonego
-zakresu: Swift — build/type-check i testy; Rust — `cargo check`/Clippy i testy; Python — lint/type-check
-i testy; Shell — syntax, formatter/linter i testy skryptów. Dokładne komendy należą do normalnego
-kontraktu bramek repo i są zapisane z dopuszczonym SHA.
-
-Nieudana odroczona bramka wymaga naprawy implementacji. Odnowione embargo strukturalne i jego
-obejście checkpointu wymagają zapisanej decyzji fazowej; ani nieudany test, ani stary receipt
-obejścia nie są dowodem zweryfikowanego dostarczenia.
-Merge, tag, release, publikacja i promocja stable pozostają przyciskami `vc-release`.
+Przed wydaniem integrator rozlicza wszystkie wymagane bramki i rzeczywiste
+scenariusze produktu dla dokładnej dostarczanej generacji. Podpis, notaryzacja,
+instalacja, zachowanie sesji i interakcje użytkownika wymagają właściwych dowodów.
+Checkpoint, integracja strukturalna, atestacja ani zielony unit test osobno nie
+potwierdzają dostarczenia. Embargo nie rozszerza uprawnień publikacji i release.
