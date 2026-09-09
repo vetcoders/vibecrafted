@@ -70,6 +70,13 @@ final class ToolTabWindowController: NSWindowController, NSWindowDelegate, Comma
   let model: ToolTabModel
   private let openExternally: @MainActor (URL) -> Void
   var onClose: (@MainActor () -> Void)?
+  /// Set by the coordinator for a tab whose own canvas cannot show the
+  /// product overview: a read-only reference view runs no page script, so a
+  /// dashboard loaded into it would be a script-less half-console. Home then
+  /// asks the coordinator for the overview in an interactive tab instead of
+  /// reloading the machine document here. Returns `false` when nothing could
+  /// be shown (no runtime), and Home falls back to the session's own route.
+  var presentProductOverview: (@MainActor () -> Bool)?
 
   init(
     key: String, title: String, destination: ToolDestination?, session: WebConsoleSession,
@@ -99,7 +106,9 @@ final class ToolTabWindowController: NSWindowController, NSWindowDelegate, Comma
 
   func navigate(_ action: CommandDeckNavigationAction) {
     switch action {
-    case .home: session.goHome()
+    case .home:
+      if let presentProductOverview, presentProductOverview() { return }
+      session.goHome()
     case .back: session.goBack()
     case .forward: session.goForward()
     case .openInBrowser:
@@ -204,8 +213,9 @@ final class NativeTabCoordinator {
       if let endpoint {
         tab.model.unavailableReason = nil
         if case .runtimeRoute(let path)? = tab.destination?.target {
-          tab.session.apply(endpoint: endpoint, homePath: path)
+          tab.session.apply(endpoint: endpoint, route: path, home: .route(path))
         } else {
+          // A link-opened tab keeps its own route and home inside the session.
           tab.session.apply(endpoint: endpoint)
         }
       } else {
@@ -239,8 +249,10 @@ final class NativeTabCoordinator {
           followsRuntimeEndpoint: scope.followsRuntimeEndpoint)
         switch scope {
         case .runtime:
+          // A destination owns its overview: the Loctree report returns to
+          // the report, not to the product root.
           if case .runtimeRoute(let path) = destination.target, let endpoint = runtimeEndpoint {
-            session.apply(endpoint: endpoint, homePath: path)
+            session.apply(endpoint: endpoint, route: path, home: .route(path))
           }
         case .localDocument(let document):
           session.present(localDocument: document)
@@ -265,10 +277,57 @@ final class NativeTabCoordinator {
       if let fragment = components.percentEncodedFragment { path += "#" + fragment }
       let session = WebConsoleSession(role: role, websiteDataStore: websiteDataStore)
       let title = role == .reference ? "Reference · \(components.path)" : components.path
-      makeTab(key: key, title: title, destination: nil, session: session, followsRuntimeEndpoint: true)
-      session.apply(endpoint: endpoint, homePath: path)
+      let tab = makeTab(key: key, title: title, destination: nil, session: session, followsRuntimeEndpoint: true)
+      // The URL that opened the tab is where it starts, not where Home goes.
+      // A tool tab (a `target=_blank` page, raw JSON, an error) returns to
+      // the runtime's product overview inside itself. A reference view runs
+      // no script, so it cannot render that overview: its session keeps the
+      // document as its route (so a reconnect re-presents it), and Home is
+      // answered by the coordinator with the overview in an interactive tab.
+      let home: WebTabHome = role == .reference ? .route(path) : .runtimeOverview
+      session.apply(endpoint: endpoint, route: path, home: home)
+      if role == .reference {
+        tab.presentProductOverview = { [weak self] in
+          guard let self else { return false }
+          if case .unavailable = self.openProductOverview() { return false }
+          return true
+        }
+      }
       return .opened(key)
     }
+  }
+
+  /// Shows the connected runtime's product overview in an interactive tool
+  /// tab: the overview tab already open is focused and brought back to `/`,
+  /// otherwise one opens on `/`. This is how Home leaves a view that cannot
+  /// render the overview itself (a read-only reference view reached from an
+  /// ordinary API link). It reuses the same route, key and origin check as
+  /// any link-opened tool tab, moves no other tab and changes no script
+  /// setting anywhere.
+  @discardableResult
+  func openProductOverview() -> Outcome {
+    guard let endpoint = runtimeEndpoint, let overview = Self.productOverviewURL(for: endpoint) else {
+      return .unavailable(reason: "The product overview needs a connected runtime.")
+    }
+    let outcome = open(.url(overview, .tool))
+    // Focusing the existing tab is not Home: since it opened the user may have
+    // navigated it to `/runs` or into an error. Its own Home is `/` on the
+    // current endpoint and a real load, so Back still reaches the page it
+    // left. A tab that just opened is already loading `/`.
+    if case .focused(let key) = outcome, let tab = tabs[key] {
+      tab.session.goHome()
+    }
+    return outcome
+  }
+
+  /// `/` on the endpoint the caretaker resolved, query and fragment dropped.
+  /// The App never names a host or port of its own.
+  static func productOverviewURL(for endpoint: URL) -> URL? {
+    guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else { return nil }
+    components.path = "/"
+    components.query = nil
+    components.fragment = nil
+    return components.url
   }
 
   static func key(for url: URL, role: WebTabRole) -> String {

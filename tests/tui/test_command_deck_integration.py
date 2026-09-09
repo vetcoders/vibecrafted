@@ -206,6 +206,7 @@ def test_native_session_state_routes_and_reopen(tmp_path: Path) -> None:
                 self.wfile.write(b"""<!doctype html><title>Scaffold fixture</title>
 <main><textarea id="draft">plan</textarea>
 <a id="api" href="/api/scaffold/artifacts?org=o&repo=r&day=d&plan_id=p">artifact endpoint</a>
+<a id="api-blank" href="/api/scaffold/artifacts?org=o&repo=r&day=d&plan_id=p" target="_blank" rel="noopener noreferrer">artifact endpoint (new tab)</a>
 <a id="blank" href="/workspaces" target="_blank" rel="noopener noreferrer">Workspaces</a></main>""")
                 return
             self.send_response(503 if self.path.startswith("/failure") else 200)

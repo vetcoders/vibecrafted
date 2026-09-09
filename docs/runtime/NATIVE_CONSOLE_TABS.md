@@ -37,6 +37,24 @@ It never hardcodes a host or port and never restarts or reinstalls anything.
 It stays valid while the page shows an error or a machine document; without a
 runtime it records the wish and the next applied endpoint lands on Home.
 
+Where Home returns is owned by whoever opens the tab (`WebTabHome`), never by
+the URL that happened to open it. The console and every tool tab opened from a
+link inside the product (`target=_blank`, including a raw API endpoint) return
+to `/`; a destination returns to its own route (the Loctree report to
+`/structure/report`), a configured service to its configured path, and a local
+document tab re-presents its one file. Home is a real load on the tab's
+origin, so Back still reaches the page it left.
+
+A read-only reference view (JSON or text diverted from an ordinary link) runs
+no script, so it cannot render the product overview itself. Home from it is
+answered by the coordinator (`NativeTabCoordinator.openProductOverview()`):
+the interactive overview tool tab on `/` of the current runtime is focused if
+it is open and opened otherwise, through the same route, dedupe key and
+origin check as any link-opened tool tab. The reference view keeps its
+document, role, no-script setting and history; the console and every sibling
+tab stay where they were. Without a runtime there is no overview to show, so
+Home opens nothing and the next reconnect re-presents the document.
+
 ## Tabs
 
 Every tab is an `NSWindow` in one tab group (`tabbingIdentifier`
@@ -156,6 +174,19 @@ open nothing; a local document tab shows only its file; the report tab uses an
 ephemeral store; a configured service tab opens without a runtime, stays on
 its origin, hands foreign links to the system browser and ignores runtime
 loss; runtime loss is shown on runtime tabs; the bridged toolbar exists with a
-stable item set at 800 px and 1200 px. `vibecrafted-server/web/tests/tools_http.rs`
+stable item set at 800 px and 1200 px; Home ownership: a `target=_blank` raw
+endpoint tab returns from JSON and from an HTTP error to the runtime overview
+on the same origin (and on a replacement endpoint) with Back/Forward intact
+and the console untouched, a foreign origin gets no tab, the report
+destination returns to the report; an ordinary API link diverted into a
+reference view → Home opens the interactive overview tab on `/` of the same
+origin (rendered, online, selected in the tab group), a second Home focuses
+that one tab instead of a twin, an overview tab navigated to `/runs` or into
+an HTTP error is brought back to `/` in place with its Back history kept, the
+reference view keeps its document,
+no-script setting and empty history, the console keeps its edit state, and
+without a runtime Home opens nothing while the reconnect re-presents the
+document.
+`vibecrafted-server/web/tests/tools_http.rs`
 proves the server boundaries (sandbox headers, asset confinement, peer gate,
 argv, projection, timeout, reference authorisation).
