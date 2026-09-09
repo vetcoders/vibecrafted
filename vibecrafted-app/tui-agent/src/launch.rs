@@ -74,6 +74,13 @@ pub const DIAGNOSTIC_TAIL_CAP: usize = 64 * 1024;
 /// memory in proportion to its size.
 pub const RECEIPT_FRAME_CAP: usize = 128 * 1024;
 
+/// How deeply VOC will follow a value's structure while still being able to
+/// prove where it ends. The reader remembers which opener each closer has to
+/// match, and that memory is bounded: a launcher must not be able to choose
+/// how much of it to spend. The bound is `serde_json`'s own recursion limit,
+/// so nothing is refused here that could have been read as a receipt anyway.
+pub const RECEIPT_DEPTH_CAP: usize = 128;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchKind {
     Workflow,
@@ -507,9 +514,10 @@ pub enum LauncherRun {
 
 /// Where the reader stands in the launcher's stdout, byte by byte.
 ///
-/// The three states are exhaustive over a stream: either nothing is open,
-/// or a line of chatter is being passed over, or a top-level value is being
-/// read. Nothing else can be true of a position in the output.
+/// The states are exhaustive over a stream: either nothing is open, or a
+/// line of chatter is being passed over, or a top-level value is being read
+/// — or the reader no longer knows which of those is true, which is a
+/// position in the output like any other and the only honest name for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Scan {
     /// Outside every value. The next byte that is not blank either opens one
@@ -519,8 +527,14 @@ enum Scan {
     /// Inside a line that did not begin a value. Every byte up to the next
     /// newline is text, whatever it looks like.
     Chatter,
-    /// Inside a top-level value, at a depth this reader has counted itself.
+    /// Inside a top-level value, with every opener still waiting for the
+    /// closer that matches it.
     Frame,
+    /// The stream stopped proving where its values end, and the reader has
+    /// no place in it any more. Not an error state: a stream that says
+    /// something VOC cannot follow is still a stream, and what it printed
+    /// before it stopped making sense is still what it printed.
+    Lost,
 }
 
 /// Reads the launcher's answer out of stdout *as it arrives*, while the
@@ -546,13 +560,17 @@ enum Scan {
 /// here, so a launcher echoing that notice is a launcher printing text.
 ///
 /// Cost is fixed and the work is linear: each byte is examined once, chatter
-/// and oversized values are counted rather than kept, and at most
-/// `RECEIPT_FRAME_CAP` bytes of one candidate value are ever held.
+/// and oversized values are counted rather than kept, at most
+/// `RECEIPT_FRAME_CAP` bytes of one candidate value are ever held, and the
+/// openers still waiting to be matched are capped at `RECEIPT_DEPTH_CAP`.
+/// None of those bounds is a number the launcher gets to choose.
 #[derive(Default)]
 struct ReceiptScanner {
     scan: Scan,
-    /// Structural depth inside the value being read. Only zero can end it.
-    depth: usize,
+    /// The closer each open value is still waiting for, innermost last.
+    /// A count would say `{]` ended something; only the openers themselves
+    /// know that it did not. Bounded by `RECEIPT_DEPTH_CAP`.
+    open: Vec<u8>,
     in_string: bool,
     escaped: bool,
     /// The value being read, while it is still small enough to be a receipt.
@@ -570,6 +588,15 @@ struct ReceiptScanner {
     breakage: Option<String>,
     /// Whether the launcher wrote anything but whitespace.
     spoke: bool,
+    /// Why the reader stopped being able to prove where values end. Set
+    /// exactly when `scan` is `Scan::Lost`, and never cleared: the stream
+    /// does not resume at a boundary VOC chose for it.
+    loss: Option<String>,
+}
+
+/// The closer that ends a value opened by `opener`.
+fn closing_delimiter(opener: u8) -> u8 {
+    if opener == b'{' { b'}' } else { b']' }
 }
 
 impl ReceiptScanner {
@@ -583,7 +610,8 @@ impl ReceiptScanner {
                     self.spoke = true;
                     if byte == b'{' || byte == b'[' {
                         self.scan = Scan::Frame;
-                        self.depth = 1;
+                        self.open.clear();
+                        self.open.push(closing_delimiter(byte));
                         self.in_string = false;
                         self.escaped = false;
                         self.oversized = false;
@@ -600,6 +628,9 @@ impl ReceiptScanner {
                     }
                 }
                 Scan::Frame => self.step_through_frame(byte),
+                // Past this point every byte is at a depth nobody knows.
+                // Reading them would only produce a verdict about bytes.
+                Scan::Lost => return,
             }
         }
     }
@@ -632,18 +663,49 @@ impl ReceiptScanner {
         }
         match byte {
             b'"' => self.in_string = true,
-            // Saturation cannot be undone, so a value nested past the width
-            // of a machine word simply never closes. That is the honest
-            // outcome: no boundary was proved, so no answer is admitted.
-            b'{' | b'[' => self.depth = self.depth.saturating_add(1),
-            b'}' | b']' => {
-                self.depth -= 1;
-                if self.depth == 0 {
-                    self.close_frame();
+            b'{' | b'[' => {
+                // Following this opener would mean remembering it, and how
+                // many there are is the launcher's choice, not VOC's. The
+                // bound is where the reader stops following rather than
+                // where it starts guessing.
+                if self.open.len() >= RECEIPT_DEPTH_CAP {
+                    self.lose_the_thread("a value nested deeper than VOC follows");
+                    return;
                 }
+                self.open.push(closing_delimiter(byte));
             }
+            b'}' | b']' => match self.open.pop() {
+                Some(expected) if expected == byte => {
+                    if self.open.is_empty() {
+                        self.close_frame();
+                    }
+                }
+                // The delimiters disagree, so this byte ended nothing. What
+                // it takes with it is the reader's place in the stream: from
+                // here, no object can be shown to be top-level, and one that
+                // merely looks it is the whole defect this guards against.
+                _ => self.lose_the_thread("a value closed by a delimiter that never opened it"),
+            },
             _ => {}
         }
+    }
+
+    /// Structure stopped proving where values end.
+    ///
+    /// The reader admits nothing further: an object printed after this is at
+    /// a depth no one knows, and being the last thing printed does not make
+    /// it top-level. An answer already proved stands — losing sight of the
+    /// stream is not the launcher retracting what it said. There is no
+    /// resynchronisation, because a newline is legal inside a value and
+    /// anything else VOC picked would be a boundary it invented.
+    fn lose_the_thread(&mut self, why: &str) {
+        self.scan = Scan::Lost;
+        self.frame = Vec::new();
+        self.open = Vec::new();
+        self.oversized = false;
+        self.in_string = false;
+        self.escaped = false;
+        self.loss = Some(why.to_string());
     }
 
     /// A top-level value just ended. Whether it is the launcher's answer is
@@ -686,6 +748,14 @@ impl ReceiptScanner {
         }
         if !self.spoke {
             return Err("launcher printed no receipt".to_string());
+        }
+        // Nothing printed after the loss can be shown to be an answer, so
+        // the operator gets the reason the reading stopped instead of a
+        // verdict assembled out of bytes at an unknown depth.
+        if let Some(why) = &self.loss {
+            return Err(format!(
+                "launch receipt cannot be read from this stream: {why}"
+            ));
         }
         let unread = self.breakage.clone().or_else(|| match self.scan {
             Scan::Frame => {
@@ -2834,6 +2904,168 @@ mod tests {
         assert!(split.answer().is_err(), "chunking must not close a frame");
     }
 
+    #[test]
+    fn a_frame_closed_by_the_wrong_delimiter_never_hands_the_stream_back() {
+        // `{` opened a value and `]` did not close it. That pair proves
+        // nothing about where the launcher's value ended, so the stamped
+        // object printed after it is a stamped object at an unknown depth —
+        // not an answer. Reading it as one would supply, by assumption, the
+        // very boundary the stream failed to give.
+        let req = request(LaunchKind::Workflow);
+        for accepted in [true, false] {
+            let mut capture = BoundedCapture::default();
+            capture.push(b"{]\n");
+            capture.push(stamped("nested-only", accepted).as_bytes());
+            assert!(
+                capture.answer().is_err(),
+                "a mismatched pair must not make the next object top-level (accepted={accepted})"
+            );
+
+            let stream = format!("{{]\n{}\n", stamped("nested-only", accepted));
+            let outcome = LaunchOutcome::from_run(
+                "p".to_string(),
+                LaunchExpectation::new(&req, None),
+                completed(stream.as_bytes(), b""),
+            );
+            assert_eq!(
+                outcome.admission(),
+                Admission::Unknown,
+                "broken framing decides nothing, in either direction: {}",
+                outcome.trail_line()
+            );
+            assert_eq!(outcome.run_id(), None);
+        }
+    }
+
+    #[test]
+    fn an_earlier_answer_outlives_the_frame_that_broke_the_reading() {
+        // The launcher answered, and then printed something whose structure
+        // the reader cannot follow. Losing the thread after an answer takes
+        // nothing away from the answer: uncertainty is not a retraction, and
+        // the object that arrives during it is not a correction.
+        let mut capture = BoundedCapture::default();
+        capture.push(format!("{}\n", stamped("work-first", true)).as_bytes());
+        capture.push(b"{]\n");
+        capture.push(format!("{}\n", stamped("work-second", false)).as_bytes());
+
+        let receipt = capture
+            .answer()
+            .expect("an answer already proved must survive later uncertainty");
+        assert!(receipt.accepted);
+        assert_eq!(receipt.run_id, "work-first");
+
+        let stream = format!(
+            "{}\n{{]\n{}\n",
+            stamped("work-first", true),
+            stamped("work-second", false)
+        );
+        let outcome = LaunchOutcome::from_run(
+            "p".to_string(),
+            LaunchExpectation::new(&request(LaunchKind::Workflow), None),
+            completed(stream.as_bytes(), b""),
+        );
+        assert_eq!(outcome.admission(), Admission::Admitted);
+        assert_eq!(outcome.run_id(), Some("work-first"));
+    }
+
+    #[test]
+    fn values_of_mixed_kinds_still_close_the_openers_they_match() {
+        // Objects and arrays nest through each other freely, and matching is
+        // exactly what proves those boundaries. A reader strict enough to
+        // reject `{]` must stay permissive enough to read the launcher's
+        // ordinary diagnostics, or it buys the fix with everything else.
+        let mut capture = BoundedCapture::default();
+        capture.push(br#"{"a":[{"b":[[],{}]},[]],"c":{"d":[{"e":{}}]}}"#);
+        capture.push(b"\n[[{},[{}]],{},[[[]]]]\n");
+        capture.push(format!("{}\n", stamped("work-mixed", true)).as_bytes());
+
+        let receipt = capture
+            .answer()
+            .expect("matched nesting of either kind must still close");
+        assert!(receipt.accepted);
+        assert_eq!(receipt.run_id, "work-mixed");
+    }
+
+    #[test]
+    fn delimiters_inside_strings_are_never_matched_against_anything() {
+        // The delimiters that frame a value are the ones outside its strings.
+        // A launcher quoting `]` or `}` in a message is quoting a character,
+        // and a matcher that weighed it would lose the stream on prose.
+        let mut capture = BoundedCapture::default();
+        capture.push(br#"{"note":"] } ] [ { \" }] still text","tail":"\\"}"#);
+        capture.push(b"\n");
+        capture.push(
+            br#"{"schema":"vibecrafted.launch_receipt.v1","accepted":true,"run_id":"work-quoted","status":"launching","message":"closed with }] and [ {"}"#,
+        );
+        capture.push(b"\n");
+
+        let receipt = capture
+            .answer()
+            .expect("quoted delimiters are text, not structure");
+        assert!(receipt.accepted);
+        assert_eq!(receipt.run_id, "work-quoted");
+        assert!(
+            receipt.message.contains("closed with }]"),
+            "{}",
+            receipt.message
+        );
+    }
+
+    #[test]
+    fn a_broken_pair_is_broken_however_the_pipe_split_it() {
+        // The opener and the closer that fails to match it can arrive in
+        // different reads. What the stream meant cannot depend on where the
+        // pipe happened to cut it.
+        let stream = format!("{{]\n{}\n", stamped("nested-only", true));
+        for size in [1usize, 2, 3, 7, 64] {
+            let mut split = BoundedCapture::default();
+            for chunk in stream.as_bytes().chunks(size) {
+                split.push(chunk);
+            }
+            assert!(
+                split.answer().is_err(),
+                "chunk size {size} must not repair a mismatched pair"
+            );
+        }
+    }
+
+    #[test]
+    fn a_value_nested_past_what_voc_can_follow_admits_nothing_after_it() {
+        // Under the bound the reader still proves boundaries the ordinary
+        // way, and the answer printed after a deep diagnostic is read.
+        let mut within = BoundedCapture::default();
+        within.push("[".repeat(RECEIPT_DEPTH_CAP - 1).as_bytes());
+        within.push("]".repeat(RECEIPT_DEPTH_CAP - 1).as_bytes());
+        within.push(format!("\n{}\n", stamped("work-deep-ok", true)).as_bytes());
+        let receipt = within
+            .answer()
+            .expect("nesting within the bound still closes");
+        assert_eq!(receipt.run_id, "work-deep-ok");
+
+        // Past it, following the structure would mean keeping a stack whose
+        // size the launcher chooses. VOC declines, and says so by admitting
+        // nothing further rather than by guessing.
+        let mut past = BoundedCapture::default();
+        past.push("[".repeat(RECEIPT_DEPTH_CAP + 8).as_bytes());
+        past.push("]".repeat(RECEIPT_DEPTH_CAP + 8).as_bytes());
+        past.push(format!("\n{}\n", stamped("work-too-deep", true)).as_bytes());
+        assert!(
+            past.answer().is_err(),
+            "a value nested past the bound must not hand the stream back"
+        );
+
+        // And an answer proved before the deep value still stands.
+        let mut after = BoundedCapture::default();
+        after.push(format!("{}\n", stamped("work-before-deep", true)).as_bytes());
+        after.push("[".repeat(RECEIPT_DEPTH_CAP + 8).as_bytes());
+        after.push(format!("\n{}\n", stamped("work-after-deep", false)).as_bytes());
+        let kept = after
+            .answer()
+            .expect("the earlier answer outlives the unfollowable value");
+        assert!(kept.accepted);
+        assert_eq!(kept.run_id, "work-before-deep");
+    }
+
     /// Run a real `/bin/sh` launcher stub through the capture boundary and
     /// present it exactly as the console does.
     fn launcher_stub(script: &str) -> LaunchOutcome {
@@ -2870,6 +3102,23 @@ mod tests {
             outcome.admission(),
             Admission::Unknown,
             "a member of an unfinished frame must not be read as an admission: {}",
+            outcome.trail_line()
+        );
+        assert_eq!(outcome.run_id(), None);
+    }
+
+    #[test]
+    fn a_real_launcher_whose_delimiters_never_matched_leaves_the_admission_unknown() {
+        // The same defect at the far end of a real pipe: a shell writes a
+        // pair that never matched, then writes a stamped acceptance. The
+        // acceptance is real text and still not a proved answer.
+        let outcome = launcher_stub(
+            r#"printf '%s\n' '{]'; printf '%s\n' '{"schema":"vibecrafted.launch_receipt.v1","accepted":true,"run_id":"work-e2e-mismatch","status":"launching"}'"#,
+        );
+        assert_eq!(
+            outcome.admission(),
+            Admission::Unknown,
+            "an object printed after broken framing must not admit a run: {}",
             outcome.trail_line()
         );
         assert_eq!(outcome.run_id(), None);
