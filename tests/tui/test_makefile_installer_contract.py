@@ -1661,3 +1661,152 @@ def test_runtime_pack_is_built_without_app_or_dmg_dependency() -> None:
     assert "--runtime-pack-only" in target
     assert "runtime-pack: app" not in makefile
     assert "$(RELEASE_SCRIPT)" in target
+
+
+def test_runtime_pack_target_prints_what_the_builder_recorded() -> None:
+    """The Make recipe must not rebuild the artifact's name after the fact.
+
+    It used to reconstruct `dist/Vibecrafted_RuntimePack_<version>-<date>-<short
+    sha>-darwin-<arch>.tar.gz` from the CURRENT HEAD and date. That name drifts
+    when HEAD moves during a build, when the build crosses midnight in UTC, and
+    it is simply wrong whenever VIBECRAFTED_RELEASE_DIR moved the output. The
+    producer captured the real path; the recipe reports it.
+    """
+
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    target = makefile.split("\nruntime-pack:\n", 1)[1].split("\n\n", 1)[0]
+
+    assert "--runtime-pack-only" in target
+    assert "runtime_pack_selection_read" in target
+    assert "$(RUNTIME_PACK_SELECTION_LIB)" in target
+    for reconstruction in ("git rev-parse", "date -u +%Y%m%d", "dist/Vibecrafted_"):
+        assert reconstruction not in target, reconstruction
+
+
+def test_install_leaves_pack_selection_to_its_single_owner() -> None:
+    """`make install` passes RUNTIME_PACK through and adds no second selector."""
+
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    target = makefile.split("\ninstall:\n", 1)[1].split("\n\n", 1)[0]
+
+    assert 'VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)"' in target
+    assert "$(RUNTIME_PACK_INSTALLER)" in target
+    assert "runtime_pack_selection_read" not in target
+    assert "dist/Vibecrafted_" not in target
+
+
+def test_selection_record_never_ranks_candidates_by_time_or_glob_order() -> None:
+    """Historical packs are legitimate; ranking them is what was forbidden."""
+
+    source = (REPO_ROOT / "scripts/lib/runtime-pack-selection.sh").read_text(
+        encoding="utf-8"
+    )
+    # The prose explains which heuristics are banned; the code must not use them.
+    library = "\n".join(
+        line for line in source.splitlines() if not line.lstrip().startswith("#")
+    )
+
+    for heuristic in ("-newer", "ls -t", "mtime", "sort -r", "find "):
+        assert heuristic not in library, heuristic
+    # Selection resolves a recorded absolute path, so it never enumerates dist.
+    assert "dist/" not in library
+    assert "rm -rf" not in library
+    # A record only ever names bytes it can still prove.
+    assert "runtime_pack_selection_sha256" in source
+
+
+def _mock_pack_repo(tmp_path: Path, *, body: str) -> Path:
+    """A repo whose `make runtime-pack` runs a disposable builder.
+
+    Only the packaging boundary is mocked; the Make target, the `zsh -ic` hop
+    and the selection library are the real ones the Founder's command uses.
+    """
+
+    repo = tmp_path / "repo"
+    (repo / "scripts/lib").mkdir(parents=True)
+    (repo / "out dir").mkdir(parents=True)
+    shutil.copy2(REPO_ROOT / "Makefile", repo / "Makefile")
+    shutil.copy2(
+        REPO_ROOT / "scripts/lib/runtime-pack-selection.sh",
+        repo / "scripts/lib/runtime-pack-selection.sh",
+    )
+    builder = repo / "mock-builder.sh"
+    builder.write_text(
+        "set -euo pipefail\n"
+        'REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+        '. "$REPO_ROOT/scripts/lib/runtime-pack-selection.sh"\n'
+        # A release directory outside dist, with a space, is ordinary: this is
+        # what VIBECRAFTED_RELEASE_DIR does and what no reconstructed
+        # `dist/<name>` could ever have produced.
+        'PACK="$REPO_ROOT/out dir/'
+        'Vibecrafted_RuntimePack_4.3.1-20260909-d7d83dc5-darwin-arm64.tar.gz"\n'
+        'ATTEMPT="$(runtime_pack_selection_attempt_id)"\n'
+        "SHA=$(printf 'd%.0s' {1..40})\n"
+        'runtime_pack_selection_begin "$REPO_ROOT" "$ATTEMPT" "$SHA"\n' + body,
+        encoding="utf-8",
+    )
+    return repo
+
+
+def _make_runtime_pack(repo: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "make",
+            "--no-print-directory",
+            "runtime-pack",
+            "RELEASE_SCRIPT=mock-builder.sh",
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_make_runtime_pack_reports_the_path_the_builder_recorded(
+    tmp_path: Path,
+) -> None:
+    """Run the real target; the printed path is the recorded one, verbatim."""
+
+    repo = _mock_pack_repo(
+        tmp_path,
+        body=(
+            "printf 'sealed carrier\\n' > \"$PACK\"\n"
+            'runtime_pack_selection_publish "$REPO_ROOT" "$ATTEMPT" "$PACK" '
+            '"4.3.1+gd7d83dc5" darwin-arm64 arm64 "$SHA" "$SHA" "$SHA"\n'
+        ),
+    )
+
+    result = _make_runtime_pack(repo)
+
+    assert result.returncode == 0, result.stderr
+    printed = result.stdout.strip().splitlines()[-1]
+    assert printed == str(
+        repo
+        / "out dir"
+        / ("Vibecrafted_RuntimePack_4.3.1-20260909-d7d83dc5-darwin-arm64.tar.gz")
+    )
+    assert Path(printed).is_file()
+    assert not (repo / "dist").exists()
+
+
+def test_make_runtime_pack_reports_a_build_that_never_completed(
+    tmp_path: Path,
+) -> None:
+    """A builder that dies after claiming the attempt prints no artifact path."""
+
+    repo = _mock_pack_repo(
+        tmp_path,
+        body='echo "[mock] dying before the carrier is sealed" >&2\nexit 1\n',
+    )
+
+    result = _make_runtime_pack(repo)
+
+    assert result.returncode != 0
+    assert "Vibecrafted_RuntimePack_" not in result.stdout
+    # The recipe stops at the failed builder, so the refusal message belongs to
+    # the next `make install` -- which is exactly what the pending record left
+    # behind here is for. That refusal is proven in
+    # test_interrupted_build_cannot_publish_the_previous_success.
+    record = repo / "build/runtime-pack-selection.json"
+    assert '"status": "pending"' in record.read_text(encoding="utf-8")

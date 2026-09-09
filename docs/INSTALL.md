@@ -257,6 +257,36 @@ non-interactively — this is what CI uses. `make install-all` additionally buil
 the Rust binaries (`voc`, `vc-admin`, `vc-server`) as real files into
 `~/.local/bin`.
 
+### Building a Runtime Pack and installing that exact one
+
+```bash
+make runtime-pack && make install
+```
+
+The builder records which carrier it completed, and `make install` installs
+those bytes. `make runtime-pack` prints the same path it recorded.
+
+The record lives in `build/runtime-pack-selection.json`. It is build state, not
+configuration: it names one absolute path with its digest and the source,
+terminal and frame revisions the carrier is required to claim. Historical packs
+in `dist/` stay where they are — selection never ranks them by modification time
+or glob order, and never deletes one to make an answer unambiguous.
+
+The attempt is marked pending before the build starts and published only after
+the archive is packaged, verified and signed. So:
+
+- an interrupted or failed build — including a retry at the same commit —
+  refuses to install, instead of quietly reinstalling the last success;
+- a record from a different checkout, a different platform, or one whose
+  carrier no longer matches its digest fails visibly rather than falling back
+  to some other archive;
+- `RUNTIME_PACK=/path/to/pack.tar.gz` still wins outright, which is how you
+  deliberately install another signed generation.
+
+Selection chooses an artifact; it never authenticates one. The checksum,
+detached signature, archive topology and internal provenance checks are
+unchanged, and the recorded identities are fed into them.
+
 For a browser-guided install surface instead of the terminal one:
 
 ```bash

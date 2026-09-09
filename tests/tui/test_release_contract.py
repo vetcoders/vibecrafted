@@ -1236,3 +1236,105 @@ def test_deck_server_service_translates_short_host_port_flags(tmp_path):
     assert "--host" in argv and argv[argv.index("--host") + 1] == "9.9.9.9"
     assert "--port" in argv and argv[argv.index("--port") + 1] == "3025"
     assert "-h" not in argv
+
+
+def test_standalone_pack_publishes_its_selection_only_after_it_is_signed() -> None:
+    """The producer owns the handoff, and publishes at the completion boundary.
+
+    package-runtime-pack.sh prints the archive path as soon as the tar exists,
+    which is BEFORE the Mach-O payload is verified and before the detached
+    signature is written. Publishing there would advertise an artifact that is
+    not yet installable, so the record is written at the end of
+    produce_runtime_pack instead.
+    """
+
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert '. "$REPO_ROOT/scripts/lib/runtime-pack-selection.sh"' in builder
+    produce = builder.split("produce_runtime_pack() {", 1)[1].split("\n}\n", 1)[0]
+    assert "runtime_pack_selection_publish" in produce
+    signature_at = produce.index('$RUNTIME_PACK_SIGNATURE" "$RUNTIME_PACK"')
+    assert produce.index("runtime_pack_selection_publish") > signature_at
+    assert produce.index("verify_runtime_pack_macho_signatures") < signature_at
+
+    # The donor SHAs recorded are the ones handed to the packager, read once.
+    # Re-reading a sibling HEAD after sealing lets a donor that moved mid-build
+    # describe bytes it did not produce.
+    assert 'terminal_revision="$(git_sha "$TERMINAL_REPO")"' in produce
+    assert produce.count('git_sha "$TERMINAL_REPO"') == 1
+    assert produce.count('git_sha "$FRAME_REPO"') == 1
+
+
+def test_a_build_that_can_still_fail_has_already_invalidated_its_selection() -> None:
+    """Claim the attempt BEFORE the first thing that can fail.
+
+    Otherwise a failed or interrupted retry leaves the previous success standing
+    as the implicit answer to `make install` -- and when the retry runs at the
+    same source SHA, no name derived from HEAD can tell the two apart.
+
+    Where the claim sits in the file is what this test can see, and position
+    alone is a weak proof: claiming immediately before `build_product` reads as
+    "first thing that can fail" and is not, because the donor roots, the release
+    date and the Xcode preflight all die above it. The behaviour is proven by
+    running the builder in
+    tests/tui/test_runtime_pack_cli.py::test_a_failed_preflight_invalidates_the_previous_ready_selection;
+    what remains here is the structural guard that keeps it there.
+    """
+
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+
+    # The claim precedes the executable top level in its entirety: the donor
+    # roots are the first statement that can die, and everything the release
+    # contract cares about -- date, toolchain, signing inputs, cargo, the
+    # packager -- comes after them.
+    begin_at = builder.index("runtime_pack_selection_begin")
+    assert begin_at < builder.index('TERMINAL_DONOR="$(canonical_dir')
+    assert begin_at < builder.index("\nbuild_product\n")
+    build_product = builder.split("build_product() {", 1)[1].split("\n}\n", 1)[0]
+    assert "runtime_pack_selection_begin" not in build_product
+    assert (
+        'RUNTIME_PACK_SELECTION_ATTEMPT="$(runtime_pack_selection_attempt_id)"'
+        in builder
+    )
+    # Notarize-only re-runs an existing App: it produces no new carrier, so it
+    # is excluded by an explicit mode guard rather than by happening to sit
+    # above the claim, which is no longer where it sits.
+    assert 'if [[ "$MODE" != "notarize" ]]; then' in builder
+    notarize_arm = builder.split('if [[ "$MODE" == "notarize" ]]; then', 1)[1].split(
+        "\nfi\n", 1
+    )[0]
+    assert "runtime_pack_selection" not in notarize_arm
+
+
+def test_standalone_selection_is_not_the_app_dmg_release_tuple() -> None:
+    """Two records, two meanings; an old release-output is not fresh proof.
+
+    dist/release-output.json requires app modules, embedded byte equality and
+    notarization evidence, and the standalone lane exits long before it exists.
+    """
+
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    library = (REPO_ROOT / "scripts/lib/runtime-pack-selection.sh").read_text(
+        encoding="utf-8"
+    )
+    installer = (REPO_ROOT / "scripts/install-runtime-pack.sh").read_text(
+        encoding="utf-8"
+    )
+    # Both files EXPLAIN the separation in prose; neither may reach for it.
+    code = "\n".join(
+        line
+        for line in (library + "\n" + installer).splitlines()
+        if not line.lstrip().startswith("#")
+    )
+
+    assert "release-output.json" not in code
+    tuple_at = builder.index('--output "$DIST_DIR/release-output.json"')
+    assert builder.index("runtime_pack_selection_publish") < tuple_at
+    # Build state under the ignored build/, not user configuration.
+    assert "build/$RUNTIME_PACK_SELECTION_BASENAME" in library

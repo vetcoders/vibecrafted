@@ -181,10 +181,65 @@ if [[ "$operation" == "uninstall" ]]; then
 fi
 
 if [[ -z "$pack" ]]; then
+  # An explicit --pack / VIBECRAFTED_RUNTIME_PACK stays authoritative and never
+  # reaches this branch: deliberately installing another signed generation is a
+  # supported act. Only the implicit case asks the producer what it built.
+  #
+  # The record's owner is scripts/lib/runtime-pack-selection.sh. It is absent
+  # from the copy of this script that ships inside Vibecrafted.app, which always
+  # passes --pack; no owner means no record, and the legacy path below stands.
+  selection_library="$SCRIPT_DIR/lib/runtime-pack-selection.sh"
+  if [[ -f "$selection_library" ]]; then
+    # shellcheck source=/dev/null
+    . "$selection_library"
+    selection_status=0
+    runtime_pack_selection_read "$REPO_ROOT" \
+      "$expected_platform" "$expected_architecture" || selection_status=$?
+    case "$selection_status" in
+      0)
+        pack="$RUNTIME_PACK_SELECTION_PACK"
+        # Feed the producer's captured identity into the checks that already
+        # exist. This does not add trust: the checksum, detached signature and
+        # internal provenance gates below are unchanged, and now simply know
+        # which revisions the selected bytes are required to claim.
+        if [[ -z "$expected_version" ]]; then
+          expected_version="$RUNTIME_PACK_SELECTION_VERSION"
+        fi
+        if [[ -z "$expected_source_revision" ]]; then
+          expected_source_revision="$RUNTIME_PACK_SELECTION_SOURCE_REVISION"
+        fi
+        if [[ -z "$expected_terminal_revision" ]]; then
+          expected_terminal_revision="$RUNTIME_PACK_SELECTION_TERMINAL_REVISION"
+        fi
+        if [[ -z "$expected_frame_revision" ]]; then
+          expected_frame_revision="$RUNTIME_PACK_SELECTION_FRAME_REVISION"
+        fi
+        # A record produced from some other checkout, or from this one before it
+        # moved, no longer describes "the pack you just built here". Say so;
+        # never resolve the disagreement by picking a different archive.
+        if command -v git >/dev/null 2>&1 \
+          && current_source_revision="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null)" \
+          && [[ -n "$current_source_revision" ]] \
+          && [[ "$current_source_revision" != "$RUNTIME_PACK_SELECTION_SOURCE_REVISION" ]]; then
+          die "the recorded Runtime Pack was built from ${RUNTIME_PACK_SELECTION_SOURCE_REVISION:0:8}, but this source is at ${current_source_revision:0:8}; rebuild it or pass an explicit pack"
+        fi
+        ;;
+      1) ;;
+      *) die "${RUNTIME_PACK_SELECTION_ERROR:-the Runtime Pack build selection record is unusable}" ;;
+    esac
+  fi
+fi
+
+if [[ -z "$pack" ]]; then
   shopt -s nullglob
-  # The canonical platform is already a complete <os>-<architecture> slug.
-  # Architecture remains an independent provenance check below; it is not a
-  # second filename component.
+  # No build-selection record: the pre-handoff behaviour, retained for a repo
+  # holding exactly one prebuilt release asset. The canonical platform is
+  # already a complete <os>-<architecture> slug. Architecture remains an
+  # independent provenance check below; it is not a second filename component.
+  #
+  # Ambiguity is still a refusal. Historical packs are legitimate artifacts, and
+  # the answer to many of them is a producer that says which one it made — never
+  # newest mtime, glob order, or deleting the others.
   candidates=("$REPO_ROOT"/dist/Vibecrafted_RuntimePack_*-"$expected_platform".tar.gz)
   shopt -u nullglob
   if ((${#candidates[@]} == 1)); then
