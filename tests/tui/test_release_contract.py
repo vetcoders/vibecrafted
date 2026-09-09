@@ -1273,16 +1273,26 @@ def test_a_build_that_can_still_fail_has_already_invalidated_its_selection() -> 
     Otherwise a failed or interrupted retry leaves the previous success standing
     as the implicit answer to `make install` -- and when the retry runs at the
     same source SHA, no name derived from HEAD can tell the two apart.
+
+    Where the claim sits in the file is what this test can see, and position
+    alone is a weak proof: claiming immediately before `build_product` reads as
+    "first thing that can fail" and is not, because the donor roots, the release
+    date and the Xcode preflight all die above it. The behaviour is proven by
+    running the builder in
+    tests/tui/test_runtime_pack_cli.py::test_a_failed_preflight_invalidates_the_previous_ready_selection;
+    what remains here is the structural guard that keeps it there.
     """
 
     builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
         encoding="utf-8"
     )
 
-    # build_product is what eventually calls produce_runtime_pack, so claiming
-    # the attempt before that top-level call covers every failure in between --
-    # donor snapshots, cargo, codesign, the packager itself.
+    # The claim precedes the executable top level in its entirety: the donor
+    # roots are the first statement that can die, and everything the release
+    # contract cares about -- date, toolchain, signing inputs, cargo, the
+    # packager -- comes after them.
     begin_at = builder.index("runtime_pack_selection_begin")
+    assert begin_at < builder.index('TERMINAL_DONOR="$(canonical_dir')
     assert begin_at < builder.index("\nbuild_product\n")
     build_product = builder.split("build_product() {", 1)[1].split("\n}\n", 1)[0]
     assert "runtime_pack_selection_begin" not in build_product
@@ -1290,8 +1300,10 @@ def test_a_build_that_can_still_fail_has_already_invalidated_its_selection() -> 
         'RUNTIME_PACK_SELECTION_ATTEMPT="$(runtime_pack_selection_attempt_id)"'
         in builder
     )
-    # Notarize-only re-runs an existing App; they produce no new carrier and
-    # must leave the record alone.
+    # Notarize-only re-runs an existing App: it produces no new carrier, so it
+    # is excluded by an explicit mode guard rather than by happening to sit
+    # above the claim, which is no longer where it sits.
+    assert 'if [[ "$MODE" != "notarize" ]]; then' in builder
     notarize_arm = builder.split('if [[ "$MODE" == "notarize" ]]; then', 1)[1].split(
         "\nfi\n", 1
     )[0]

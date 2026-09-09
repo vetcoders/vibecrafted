@@ -66,6 +66,34 @@ for argument in "$@"; do
   esac
 done
 
+# The build -> install handoff record is owned by this library, and it is loaded
+# HERE rather than beside the other libraries further down: the claim it makes
+# has to happen before the first thing that can fail, and the donor roots, the
+# release date and the Xcode preflight all die above that point.
+# shellcheck source=/dev/null
+. "$REPO_ROOT/scripts/lib/runtime-pack-selection.sh"
+
+ROOT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+
+# Claim the attempt before the first thing that can fail.
+#
+# An unusable argument has already exited above, so `--help`-shaped misuse never
+# touches the record. --notarize-only re-runs notarization for an App that
+# already exists and produces no new carrier, so it must leave the record
+# exactly as it found it. Every other mode reaches produce_runtime_pack, and
+# from here on ANYTHING may die: a missing donor directory, a malformed
+# VIBECRAFTED_RELEASE_DATE, a beta Xcode, cargo, codesign, the packager. A build
+# that dies must not leave the previous success standing as the implicit answer
+# to `make install` -- not even when the failed retry runs at the very same
+# source SHA, which no name derived from HEAD could tell apart.
+RUNTIME_PACK_SELECTION_ATTEMPT=""
+if [[ "$MODE" != "notarize" ]]; then
+  RUNTIME_PACK_SELECTION_ATTEMPT="$(runtime_pack_selection_attempt_id)"
+  runtime_pack_selection_begin "$REPO_ROOT" "$RUNTIME_PACK_SELECTION_ATTEMPT" \
+    "$ROOT_SHA" \
+    || die "could not mark the Runtime Pack build attempt as pending"
+fi
+
 # The donor is where the source lives; the repo is what we compile. They differ
 # only under --snapshot-donors, where the repo becomes a detached worktree at the
 # donor HEAD so a dirty Living Tree donor can still produce an honest receipt.
@@ -82,11 +110,18 @@ fi
 ICON_SOURCE="${VIBECRAFTED_ICON_SOURCE:-$REPO_ROOT/docs/presence/logo-master.png}"
 ICON_REFERENCE="${VIBECRAFTED_ICON_REFERENCE:-}"
 DIST_DIR="${VIBECRAFTED_RELEASE_DIR:-$REPO_ROOT/dist}"
+# A relative release dir is a supported way to move the output, and it means
+# "relative to where this build was started". Resolve it once, now, so every
+# path derived below -- App, DMG, carrier, and the recorded selection -- names
+# one directory instead of drifting with whatever cwd a later step holds.
+case "$DIST_DIR" in
+  /*) ;;
+  *) DIST_DIR="$PWD/$DIST_DIR" ;;
+esac
 BUILD_DIR="$REPO_ROOT/build/unified-release"
 APP="$DIST_DIR/Vibecrafted.app"
 VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/VERSION")"
 RELEASE_DATE="${VIBECRAFTED_RELEASE_DATE:-$(date -u +%Y%m%d)}"
-ROOT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 RUNTIME_VERSION="${VERSION}+g${ROOT_SHA:0:8}"
 [[ "$RELEASE_DATE" =~ ^[0-9]{8}$ ]] || {
   printf 'FATAL: VIBECRAFTED_RELEASE_DATE must be YYYYMMDD\n' >&2
@@ -211,8 +246,6 @@ export SWIFT_PREFIX_MAP
 . "$REPO_ROOT/scripts/lib/payload-hygiene.sh"
 # shellcheck source=/dev/null
 . "$REPO_ROOT/scripts/lib/macho-signing.sh"
-# shellcheck source=/dev/null
-. "$REPO_ROOT/scripts/lib/runtime-pack-selection.sh"
 
 cleanup() {
   # Host-wide resources first. The keychain session mutates state that outlives
@@ -992,15 +1025,6 @@ if [[ "$MODE" == "notarize" ]]; then
   emit_release_tuple
   exit 0
 fi
-
-# Claim the attempt before the first thing that can fail. Everything from the
-# donor snapshot onwards may die, and a build that dies must not leave the
-# previous success standing as the implicit answer to `make install` — not even
-# when the failed retry runs at the very same source SHA, which no name derived
-# from HEAD could tell apart.
-RUNTIME_PACK_SELECTION_ATTEMPT="$(runtime_pack_selection_attempt_id)"
-runtime_pack_selection_begin "$REPO_ROOT" "$RUNTIME_PACK_SELECTION_ATTEMPT" "$ROOT_SHA" \
-  || die "could not mark the Runtime Pack build attempt as pending"
 
 build_product
 [[ "$MODE" == "runtime-pack" ]] && exit 0
