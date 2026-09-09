@@ -1633,3 +1633,37 @@ def test_json_launch_never_returns_empty_success_without_run_id(
     assert body["accepted"] is True
     assert body["run_id"] == ""
     assert "missing run_id" in captured.err
+
+
+def test_message_command_reads_file_and_projects_truthful_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    message_file = tmp_path / "message.txt"
+    message_file.write_text("private steering", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    def fake_send(**kwargs: object) -> dict[str, object]:
+        seen.update(kwargs)
+        return {
+            "message_id": "msg-1",
+            "run_id": "run-1",
+            "provider": "codex",
+            "delivery_state": "provider_accepted",
+            "agent_ack_state": "unobserved",
+        }
+
+    from vibecrafted_core import message_control
+
+    monkeypatch.setattr(message_control, "send_message", fake_send)
+    assert (
+        cli.main(
+            ["message", "--run-id", "run-1", "--file", str(message_file), "--json"]
+        )
+        == 0
+    )
+    assert seen["text"] == "private steering"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["delivery_state"] == "provider_accepted"
+    assert payload["agent_ack_state"] == "unobserved"

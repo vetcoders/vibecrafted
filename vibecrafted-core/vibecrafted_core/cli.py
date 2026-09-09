@@ -499,6 +499,25 @@ def _build_parser() -> argparse.ArgumentParser:
     inputs = task_fork.add_mutually_exclusive_group(required=True)
     inputs.add_argument("--file", default="")
     inputs.add_argument("--prompt-stdin", action="store_true")
+    message = sub.add_parser(
+        "message",
+        help="persist and inspect run-addressed provider steering receipts",
+    )
+    message.add_argument("--run-id", default="")
+    message.add_argument("--file", default="", help="UTF-8 message body file")
+    message.add_argument("--idempotency-key", default="")
+    message.add_argument(
+        "--retry",
+        action="store_true",
+        help="explicitly retry an unresolved or failed receipt",
+    )
+    message.add_argument(
+        "--inspect",
+        metavar="MESSAGE_ID",
+        default="",
+        help="read one durable provider-message receipt",
+    )
+    message.add_argument("--json", action="store_true")
     for name in LAUNCHERS:
         _add_launch_parser(sub, name)
     return parser
@@ -1804,6 +1823,55 @@ def main(argv: Sequence[str] | None = None) -> int:
             for line in render_capabilities_lines(capabilities_payload):
                 print(line)
         return 0
+    if args.command == "message":
+        from .message_control import MessageControlError, inspect_message, send_message
+
+        if args.inspect:
+            try:
+                result = inspect_message(args.inspect)
+            except MessageControlError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            if result is None:
+                print(f"message not found: {args.inspect}", file=sys.stderr)
+                return 1
+            print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+        if args.run_id and args.file:
+            try:
+                text = Path(args.file).expanduser().read_text(encoding="utf-8")
+            except OSError as exc:
+                print(
+                    f"error: message_file_unreadable:{type(exc).__name__}",
+                    file=sys.stderr,
+                )
+                return 2
+            try:
+                result = send_message(
+                    run_id=args.run_id,
+                    text=text,
+                    idempotency_key=args.idempotency_key,
+                    retry=bool(args.retry),
+                )
+            except MessageControlError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            if args.json:
+                print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+            else:
+                print(
+                    f"message_id: {result['message_id']}\n"
+                    f"run_id: {result['run_id']}\n"
+                    f"provider: {result['provider']}\n"
+                    f"delivery_state: {result['delivery_state']}\n"
+                    f"agent_ack_state: {result.get('agent_ack_state', 'unobserved')}"
+                )
+            return 0 if result["delivery_state"] == "provider_accepted" else 1
+        print(
+            "usage: vibecrafted message --run-id ID --file FILE | --inspect MESSAGE_ID",
+            file=sys.stderr,
+        )
+        return 2
     if args.command == "resume-session":
         prompt = str(args.prompt or "")
         if args.prompt_stdin:
