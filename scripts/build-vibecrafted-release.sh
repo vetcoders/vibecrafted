@@ -59,6 +59,10 @@ for argument in "$@"; do
     --no-notarize) MODE="dmg" ;;
     --notarize-only) MODE="notarize" ;;
     --snapshot-donors) SNAPSHOT_DONORS=1 ;;
+    --help|-h)
+      echo "usage: $0 [--app-only|--runtime-pack-only|--no-notarize|--notarize-only] [--snapshot-donors]" >&2
+      exit 0
+      ;;
     *)
       echo "usage: $0 [--app-only|--runtime-pack-only|--no-notarize|--notarize-only] [--snapshot-donors]" >&2
       exit 2
@@ -72,8 +76,63 @@ done
 # release date and the Xcode preflight all die above that point.
 # shellcheck source=/dev/null
 . "$REPO_ROOT/scripts/lib/runtime-pack-selection.sh"
+# shellcheck source=/dev/null
+. "$REPO_ROOT/scripts/lib/release-single-flight.sh"
 
 ROOT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+
+# Exclusive ownership of the shared selection, snapshot and App/output paths
+# BEFORE any of those mutate. --help/-h and unknown argv have already exited
+# above, so usage never takes the lock or creates build/. --notarize-only
+# shares APP, DIST and BUILD_DIR with a full release, so it takes the same
+# lock and still leaves the selection record untouched.
+release_single_flight_acquire "$REPO_ROOT" \
+  || die "another release already owns this checkout's shared build state"
+
+cleanup() {
+  # Host-wide resources first. The keychain session mutates state that outlives
+  # this process and affects every application on the machine; the donor
+  # snapshots are directories under this repo's own build/ and a stale one is
+  # merely untidy. Reaping first meant a hung `git worktree remove` — an index
+  # lock on a busy donor is enough — would strand the keychain instead.
+  #
+  # In practice keychain_session_begin also arms its own EXIT handler which
+  # chains ahead of this one, so the keychain is usually already released by the
+  # time we arrive. That path does not exist when no signing certificate was
+  # present, which is exactly when this ordering is the only ordering.
+  #
+  # Both release descriptors stay held through reap: unlocking first would
+  # let a successor recreate donor-snapshots/vibecrafted or take a shared
+  # output dir, after which this EXIT handler would destroy the successor's
+  # frozen source. Closing our own descriptors is last, and never unlinks
+  # the lock inodes. This function returns; INT/TERM/HUP then exit so no
+  # release work continues after unlock.
+  if declare -F keychain_session_end >/dev/null 2>&1; then
+    keychain_session_end "$SIGNING_KEYCHAIN_LABEL" || true
+  fi
+  if declare -F donor_snapshot_reap >/dev/null 2>&1; then
+    donor_snapshot_reap || true
+  fi
+  release_single_flight_release
+}
+# INT/TERM/HUP must exit after cleanup. A bare shared trap returns into the
+# interrupted command and would keep mutating after the lock was released.
+# keychain_session_begin reads these handlers back and chains in front.
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+trap 'cleanup; exit 129' HUP
+
+# Output may be redirected off this checkout. Take that lock before the
+# selection claim so two roots cannot mark pending and then contend for one
+# dist. A dist that stays under REPO_ROOT is already covered.
+DIST_DIR="${VIBECRAFTED_RELEASE_DIR:-$REPO_ROOT/dist}"
+case "$DIST_DIR" in
+  /*) ;;
+  *) DIST_DIR="$PWD/$DIST_DIR" ;;
+esac
+release_single_flight_acquire_output "$REPO_ROOT" "$DIST_DIR" \
+  || die "another release already owns this output directory"
 
 # Claim the attempt before the first thing that can fail.
 #
@@ -92,6 +151,8 @@ if [[ "$MODE" != "notarize" ]]; then
   runtime_pack_selection_begin "$REPO_ROOT" "$RUNTIME_PACK_SELECTION_ATTEMPT" \
     "$ROOT_SHA" \
     || die "could not mark the Runtime Pack build attempt as pending"
+  DONOR_SNAPSHOT_OWNER="$RUNTIME_PACK_SELECTION_ATTEMPT"
+  export DONOR_SNAPSHOT_OWNER
 fi
 
 # The donor is where the source lives; the repo is what we compile. They differ
@@ -114,15 +175,7 @@ else
 fi
 ICON_SOURCE="${VIBECRAFTED_ICON_SOURCE:-$SOURCE_ROOT/docs/presence/logo-master.png}"
 ICON_REFERENCE="${VIBECRAFTED_ICON_REFERENCE:-}"
-DIST_DIR="${VIBECRAFTED_RELEASE_DIR:-$REPO_ROOT/dist}"
-# A relative release dir is a supported way to move the output, and it means
-# "relative to where this build was started". Resolve it once, now, so every
-# path derived below -- App, DMG, carrier, and the recorded selection -- names
-# one directory instead of drifting with whatever cwd a later step holds.
-case "$DIST_DIR" in
-  /*) ;;
-  *) DIST_DIR="$PWD/$DIST_DIR" ;;
-esac
+# DIST_DIR was resolved and locked immediately after the checkout lock.
 BUILD_DIR="$REPO_ROOT/build/unified-release"
 APP="$DIST_DIR/Vibecrafted.app"
 VERSION="$(git -C "$REPO_ROOT" show "$ROOT_SHA:VERSION" | tr -d '[:space:]')"
@@ -170,6 +223,7 @@ CODESIGN_KEYCHAIN_ARGS=()
 # 2026-08-28 on dragon with xcode-select pointing at ~/Downloads/Xcode-beta.app;
 # the same tree under /Applications/Xcode.app (26.6) builds clean. A beta
 # Xcode is therefore refused unless the operator opts in explicitly.
+#
 XCODE_DEVELOPER_DIR="${DEVELOPER_DIR:-$(xcode-select -p 2>/dev/null || true)}"
 if [[ -z "$XCODE_DEVELOPER_DIR" || ! -d "$XCODE_DEVELOPER_DIR" ]]; then
   echo "FATAL: no usable Xcode developer dir (xcode-select -p / DEVELOPER_DIR)" >&2
@@ -307,22 +361,9 @@ require_bound_revision() {
 if [[ "$MODE" != "notarize" ]]; then
   require_clean_repo "$REPO_ROOT" vibecrafted
 fi
-
-cleanup() {
-  # Host-wide resources first. The keychain session mutates state that outlives
-  # this process and affects every application on the machine; the donor
-  # snapshots are directories under this repo's own build/ and a stale one is
-  # merely untidy. Reaping first meant a hung `git worktree remove` — an index
-  # lock on a busy donor is enough — would strand the keychain instead.
-  #
-  # In practice keychain_session_begin also arms its own EXIT handler which
-  # chains ahead of this one, so the keychain is usually already released by the
-  # time we arrive. That path does not exist when no signing certificate was
-  # present, which is exactly when this ordering is the only ordering.
-  keychain_session_end "$SIGNING_KEYCHAIN_LABEL" || true
-  donor_snapshot_reap || true
-}
-trap cleanup EXIT INT TERM HUP
+# cleanup + signal traps are armed immediately after the release lock so a
+# die() above still reaps nothing it did not create and still closes our
+# descriptor. keychain_session_begin chains onto those handlers.
 
 read_trimmed_file() {
   sed -e 's/[[:space:]]*$//' -e '/^$/d' "$1" | head -n1

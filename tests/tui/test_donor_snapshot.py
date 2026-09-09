@@ -216,6 +216,56 @@ def test_the_record_is_made_in_the_callers_shell_not_a_subshell(
     assert not snapshot.exists()
 
 
+def test_reaper_skips_a_snapshot_stamped_by_a_successor(tmp_path: Path) -> None:
+    """A late EXIT must not destroy a successor that reused the same path."""
+
+    donor = _make_donor(tmp_path / "donor")
+    snapshot = tmp_path / "work/donor-snapshots/vibecrafted"
+    stamp = Path(f"{snapshot}.release-owner")
+    result = _run_driver(
+        "DONOR_SNAPSHOT_OWNER=first-attempt\n"
+        f'donor_snapshot_create "{donor}" "{snapshot}" >/dev/null\n'
+        "DONOR_SNAPSHOT_OWNER=successor-attempt\n"
+        f'donor_snapshot_create "{donor}" "{snapshot}" >/dev/null\n'
+        "DONOR_SNAPSHOT_OWNER=first-attempt\n"
+        "donor_snapshot_reap\n"
+        f'test -d "{snapshot}"\n',
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert snapshot.is_dir()
+    assert stamp.is_file()
+    assert stamp.read_text(encoding="utf-8").strip() == "successor-attempt"
+    assert not (snapshot / ".vibecrafted-release-owner").exists()
+    assert _git("status", "--porcelain", "--untracked-files=normal", cwd=snapshot) == ""
+
+
+def test_materialize_then_require_clean_repo_accepts_owner_stamp_outside_tree(
+    tmp_path: Path,
+) -> None:
+    """The exact production path: create snapshot, then require_clean_repo."""
+
+    donor = _make_donor(tmp_path / "donor")
+    snapshot = tmp_path / "work/donor-snapshots/vibecrafted"
+    builder = REPO_ROOT / "scripts/build-vibecrafted-release.sh"
+    result = _run_driver(
+        f'die() {{ printf "FATAL: %s\\n" "$*" >&2; exit 1; }}\n'
+        f'eval "$(awk \'/^require_clean_repo\\(\\)/,/^}}/\' "{builder}")"\n'
+        "DONOR_SNAPSHOT_OWNER=attempt-under-test\n"
+        f'donor_snapshot_create "{donor}" "{snapshot}"\n'
+        f'require_clean_repo "{snapshot}" vibecrafted\n'
+        f'test ! -e "{snapshot}/.vibecrafted-release-owner"\n'
+        f'test -f "{snapshot}.release-owner"\n'
+        f'test "$(cat "{snapshot}.release-owner")" = "attempt-under-test"\n',
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert snapshot.is_dir()
+    assert not (snapshot / ".vibecrafted-release-owner").exists()
+    assert (tmp_path / "work/donor-snapshots/vibecrafted.release-owner").is_file()
+    assert _git("status", "--porcelain", "--untracked-files=normal", cwd=snapshot) == ""
+
+
 def test_builder_never_captures_the_snapshot_through_command_substitution() -> None:
     builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
         encoding="utf-8"

@@ -651,12 +651,18 @@ def test_release_bundle_binds_the_vibecrafted_app_icon() -> None:
     )
     icon = REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted/Vibecrafted.icns"
 
+    version = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    assert version
     assert "INFOPLIST_FILE: Vibecrafted/Info.plist" in project
-    assert 'MARKETING_VERSION: "4.3.0"' in project
+    assert f'MARKETING_VERSION: "{version}"' in project
     assert '- "Vibecrafted.icns"' in project
     assert "<key>CFBundleIconFile</key>" in info_plist
     assert "<string>Vibecrafted.icns</string>" in info_plist
+    assert "<key>CFBundleShortVersionString</key>" in info_plist
+    assert "<string>$(MARKETING_VERSION)</string>" in info_plist
     assert 'plist["CFBundleIconFile"] = contract.PRODUCT_ICON_FILE' in manifest
+    assert 'plist["CFBundleShortVersionString"] = args.version' in manifest
+    assert '--version "$VERSION"' in builder
     assert icon.is_file()
     assert icon.stat().st_size > 100_000
     assert "$TERMINAL_REPO/assets/icon/vc-terminal-icon.png" in builder
@@ -696,15 +702,16 @@ def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
     assert "CTFontManagerRegisterFontsForURL" in app_delegate
     assert "kCTFontFamilyNameAttribute as String" in app_delegate
     assert 'CTFontDescriptorCreateWithNameAndSize("Spot Mono"' not in app_delegate
+    assert "_RUNTIME_PREFERENCE_SOURCES" in installer
     assert (
-        'terminal_policy_source = generation / "config/vc-terminal/vibecrafted.toml"'
-        in installer
+        '("terminal-policy.toml", "config/vc-terminal/vibecrafted.toml")' in installer
     )
-    assert 'terminal_policy = product_config / "terminal-policy.toml"' in installer
-    assert 'terminal_policy_source.read_text(encoding="utf-8")' in installer
+    assert 'product_config / "terminal-policy.toml"' in installer
+    assert 'policy = product / "terminal-policy.toml"' in installer
+    assert '(terminal / "vc-terminal.toml").write_text' in installer
     assert 'product_config / "vc-terminal" / "vc-terminal.toml"' in installer
     assert 'product_config / "terminal-entry.toml"' not in installer
-    assert "_reclaim_product_terminal_debris" in installer
+    assert "_PRODUCT_TERMINAL_DEBRIS" in installer
     assert "vc-terminal/alacritty.toml" in installer
     assert "launch-alt-screen" not in installer
     assert 'product_config / "terminal-theme.toml"' in installer
@@ -821,7 +828,10 @@ def test_dirty_donors_are_a_release_flag_with_a_reaper_not_a_manual_ritual() -> 
     # The reaper runs from the same trap that ends the keychain session, so it
     # fires on success, on error, and on Ctrl-C during a notarization wait.
     assert "donor_snapshot_reap || true" in builder
-    assert "trap cleanup EXIT INT TERM HUP" in builder
+    assert "trap cleanup EXIT" in builder
+    assert "trap 'cleanup; exit 130' INT" in builder
+    assert "trap 'cleanup; exit 143' TERM" in builder
+    assert "trap 'cleanup; exit 129' HUP" in builder
     assert "materialize_donor_snapshots" in builder
     assert "VIBECRAFTED_RELEASE_FAIL_AFTER_SNAPSHOT" in builder
 
@@ -1294,8 +1304,15 @@ def test_a_build_that_can_still_fail_has_already_invalidated_its_selection() -> 
     # contract cares about -- date, toolchain, signing inputs, cargo, the
     # packager -- comes after them.
     begin_at = builder.index("runtime_pack_selection_begin")
+    acquire_at = builder.index("release_single_flight_acquire")
+    output_at = builder.index("release_single_flight_acquire_output")
+    assert acquire_at < output_at < begin_at
     assert begin_at < builder.index('TERMINAL_DONOR="$(canonical_dir')
     assert begin_at < builder.index("\nbuild_product\n")
+    assert "release_single_flight_release" in builder
+    assert builder.index("donor_snapshot_reap") < builder.index(
+        "release_single_flight_release"
+    )
     build_product = builder.split("build_product() {", 1)[1].split("\n}\n", 1)[0]
     assert "runtime_pack_selection_begin" not in build_product
     assert (
@@ -1310,6 +1327,16 @@ def test_a_build_that_can_still_fail_has_already_invalidated_its_selection() -> 
         "\nfi\n", 1
     )[0]
     assert "runtime_pack_selection" not in notarize_arm
+    assert 'release_single_flight_acquire "$REPO_ROOT"' in builder
+    assert 'release_single_flight_acquire_output "$REPO_ROOT" "$DIST_DIR"' in builder
+    assert builder.index("release_single_flight_acquire") < builder.index(
+        'if [[ "$MODE" == "notarize" ]]; then'
+    )
+    assert "--help|-h)" in builder
+    assert "VIBECRAFTED_RELEASE_FAKE_STAGES" not in builder
+    assert "VIBECRAFTED_RELEASE_FAKE_KEYCHAIN" not in builder
+    assert "release_run_fake_bounded_stages" not in builder
+    assert ".vibecrafted-release-owner" not in builder
 
 
 def test_standalone_selection_is_not_the_app_dmg_release_tuple() -> None:
@@ -1396,6 +1423,9 @@ def test_main_source_snapshot_pins_launch_sha_across_payload_app_and_selection()
     assert "donor_snapshot_reap || true" in builder
     assert "worktree add --detach" in library
     assert "[revision]" in library
+    assert "donor_snapshot_owner_stamp_file" in library
+    assert ".vibecrafted-release-owner" not in library
+    assert "%s.release-owner" in library
 
 
 def test_main_snapshot_does_not_own_selection_or_artifact_output() -> None:
