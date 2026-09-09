@@ -83,8 +83,21 @@ let traceback = """
 Traceback (most recent call last):
   File "/Users/o/.local/share/vibecrafted/releases/4.3.1/scripts/vetcoders_install.py", line 15677, in _assert
     raise ValueError("KDL edit changes nested or structural content")
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 ValueError: KDL edit changes nested or structural content
 """.data(using: .utf8)!
+
+let preferenceConflict = envelope(#"""
+{"schema": "vibecrafted.preference-conflict.v1", "status": "conflict",
+ "message": "Your terminal-policy.toml overlaps the new defaults on terminal.shell. The previously verified runtime is still selected.",
+ "previous_runtime_available": true, "previous_runtime_version": "9.9.9+a",
+ "choices": ["keep-current", "use-incoming"],
+ "files": [{"path": "/Users/o/.config/vibecrafted/terminal-policy.toml",
+            "reason": "settings conflict with changed shipped defaults: terminal.shell",
+            "settings": ["terminal.shell"], "choices": ["keep-current", "use-incoming"],
+            "current_sha256": "aa", "incoming_sha256": "bb", "backup": "/backups/policy",
+            "mergeable": true}]}
+"""#)
 
 func label(_ outcome: ConfigRepairOutcome) -> String {
   switch outcome {
@@ -159,6 +172,16 @@ case "arguments":
     .joined(separator: " "))
   emit(runtimeRepairArguments(installer: installer, runtimeHome: home, plan: false)
     .joined(separator: " "))
+case "caret":
+  let excerpt = boundedResolverDiagnostic(stdout: Data(), stderr: traceback, limit: 240)
+  emit(excerpt)
+  emit(isTracebackCaret("          ^^^^^") ? "caret" : "kept")
+case "preference-conflict":
+  let decoded = decodePreferenceConflict(from: preferenceConflict)!
+  emit(preferenceConflictSummary(decoded))
+  emit(preferenceResolutionChoice(from: decoded, action: "keep-current")?.action ?? "none")
+  emit(preferenceResolutionChoice(from: decoded, action: "use-incoming")?.action ?? "none")
+  emit(decoded.previousRuntimeAvailable == true ? "previous-ready" : "no-prior")
 default:
   emit("unknown scenario")
 }
@@ -280,3 +303,24 @@ def test_the_plan_invocation_is_read_only_by_construction(policy_binary: Path) -
         "-B /gen/scripts/vetcoders_install.py runtime-repair "
         "--runtime-home /Users/o/.local/share/vibecrafted --json"
     )
+
+
+def test_caret_tails_never_reach_the_dialog(policy_binary: Path) -> None:
+    excerpt, marker = _run(policy_binary, "caret")
+    assert "Traceback" not in excerpt
+    assert "^^^^" not in excerpt
+    assert "KDL edit changes nested or structural content" in excerpt
+    assert marker == "caret"
+
+
+def test_preference_conflict_names_settings_and_keeps_a_bound_choice(
+    policy_binary: Path,
+) -> None:
+    summary, keep, incoming, availability = _run(policy_binary, "preference-conflict")
+    assert "terminal.shell" in summary
+    assert "still selected" in summary
+    assert "^^^^" not in summary
+    assert "/usr/bin/fish" not in summary
+    assert keep == "keep-current"
+    assert incoming == "use-incoming"
+    assert availability == "previous-ready"

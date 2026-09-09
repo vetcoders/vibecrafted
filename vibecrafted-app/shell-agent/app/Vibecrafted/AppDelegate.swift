@@ -169,6 +169,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   private var runtimeAdvisory: String?
   /// The owner's last word on configuration, for the diagnostics surface.
   private var lastConfigRepair: ConfigRepairEnvelope?
+  /// Last hash-bound upgrade conflict, so Diagnostics can show it without the dialog.
+  private var lastPreferenceConflict: PreferenceConflictEnvelope?
   private var configRepairProcess: Process?
   private var terminalLaunch: TerminalLauncher.Launch?
   private var terminalRegistration: TerminalRegistrationObservation?
@@ -347,6 +349,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
             self.finishConnectingCommandDeck(with: .ready(install))
           case .failure(let error):
             self.applyResolution(resolution)
+            if let conflict = error as? PreferenceConflictError {
+              self.presentPreferenceConflict(conflict.envelope, afterOnboardingFailure: true)
+              return
+            }
             let reason = "Runtime onboarding failed: \(error.localizedDescription)"
             self.runtimeResolutionFailure = reason
             self.model.block(reason: reason)
@@ -1121,13 +1127,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   }
 
   private func installCanonicalRuntime() throws -> CanonicalRuntimeInstall {
-    try decodeCanonicalRuntimeInstall(from: runRuntimePackInstaller(arguments: runtimePackInstallArguments()))
+    try decodeCanonicalRuntimeInstall(from: runRuntimePackInstaller(arguments: try runtimePackInstallArguments()))
   }
 
   /// The UI form never waits on the main actor. All callers join the one
   /// carrier publication, which preserves the installer's lease/transaction
   /// boundary instead of introducing a second installer owner in the App.
   private func installCanonicalRuntime(
+    preferenceChoice: PreferenceResolutionChoice? = nil,
     completion: @escaping (Result<CanonicalRuntimeInstall, Error>) -> Void
   ) {
     if runtimeInstallProcess != nil {
@@ -1135,7 +1142,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       return
     }
     do {
-      try runRuntimePackInstaller(arguments: runtimePackInstallArguments()) { [weak self] result in
+      try runRuntimePackInstaller(arguments: runtimePackInstallArguments(preferenceChoice: preferenceChoice)) { [weak self] result in
         guard let self else { return }
         let outcome: Result<CanonicalRuntimeInstall, Error>
         switch result {
@@ -1154,7 +1161,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     }
   }
 
-  private func runtimePackInstallArguments() throws -> [String] {
+  private func runtimePackInstallArguments(
+    preferenceChoice: PreferenceResolutionChoice? = nil
+  ) throws -> [String] {
     let appRoot = Bundle.main.bundleURL
     let resources = appRoot.appendingPathComponent("Contents/Resources", isDirectory: true)
     let carrierDirectory = resources.appendingPathComponent("runtime-pack", isDirectory: true)
@@ -1172,7 +1181,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     let terminalHost = appRoot.appendingPathComponent(
       "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty")
     let frameHelper = appRoot.appendingPathComponent("Contents/Helpers/vc-frame")
-    return [
+    var arguments = [
       "--pack", carriers[0].path,
       "--app-root", appRoot.path,
       "--terminal-host", terminalHost.path,
@@ -1181,6 +1190,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       "--expected-terminal-revision", terminalRevision,
       "--expected-frame-revision", frameRevision,
     ]
+    if let choice = preferenceChoice {
+      arguments += [
+        "--resolve-preference", choice.action,
+        "--preference-current-sha256", choice.currentSha256,
+        "--preference-incoming-sha256", choice.incomingSha256,
+        "--preference-path", choice.path,
+      ]
+    }
+    return arguments
   }
 
   private func decodeCanonicalRuntimeInstall(from output: Data) throws -> CanonicalRuntimeInstall {
@@ -1278,6 +1296,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     stdout: Data, stderr: Data, terminationStatus: Int32, clean: Bool,
     timedOut: Bool = false
   ) throws -> Data {
+    if let envelope = decodePreferenceConflict(from: stdout) {
+      throw PreferenceConflictError(envelope: envelope)
+    }
     guard clean, terminationStatus == 0 else {
       // The installer is a Python program and prints a traceback when it
       // refuses. Reducing it to the owner's actual message is what keeps a
@@ -1587,6 +1608,78 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     alert.runModal()
   }
 
+  /// Human upgrade-conflict dialog: conflicting settings, keep/use, diagnostics.
+  private func presentPreferenceConflict(
+    _ envelope: PreferenceConflictEnvelope,
+    afterOnboardingFailure: Bool = false
+  ) {
+    lastPreferenceConflict = envelope
+    runtimeAdvisory = envelope.message
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "Update needs a settings choice"
+    alert.informativeText = preferenceConflictSummary(envelope)
+    alert.addButton(withTitle: "Cancel")
+    alert.addButton(withTitle: "Keep Current")
+    alert.addButton(withTitle: "Use Incoming")
+    alert.addButton(withTitle: "Show Diagnostics")
+    let response = alert.runModal()
+    switch response {
+    case .alertSecondButtonReturn:
+      retryPreferenceConflict(envelope, action: "keep-current")
+    case .alertThirdButtonReturn:
+      retryPreferenceConflict(envelope, action: "use-incoming")
+    case .alertFourthButtonReturn:
+      showServerDiagnostics()
+      presentPreferenceConflict(envelope, afterOnboardingFailure: afterOnboardingFailure)
+    default:
+      if afterOnboardingFailure, envelope.previousRuntimeAvailable != true {
+        let reason = preferenceConflictSummary(envelope)
+        runtimeResolutionFailure = reason
+        model.block(reason: reason)
+      } else {
+        refreshServerStatus()
+      }
+    }
+  }
+
+  private func retryPreferenceConflict(_ envelope: PreferenceConflictEnvelope, action: String) {
+    guard let choice = preferenceResolutionChoice(from: envelope, action: action) else {
+      showNativeMessage(
+        "Cannot retry the update",
+        "The conflict is no longer bound to current and incoming hashes.")
+      return
+    }
+    guard !repairInFlight, runtimeActionPreflight == nil, serverActionInFlight == nil else { return }
+    repairInFlight = true
+    updateDeckPresentation()
+    installCanonicalRuntime(preferenceChoice: choice) { [weak self] result in
+      guard let self else { return }
+      self.repairInFlight = false
+      defer { self.updateDeckPresentation() }
+      switch result {
+      case .failure(let error):
+        if let conflict = error as? PreferenceConflictError {
+          self.presentPreferenceConflict(conflict.envelope)
+          return
+        }
+        self.showNativeMessage("Vibecrafted could not apply the settings choice", error.localizedDescription)
+        self.refreshServerStatus()
+      case .success(let install):
+        self.lastPreferenceConflict = nil
+        self.cachedResolution = nil
+        guard let repaired = self.applyResolution(.ready(install)),
+          let environment = self.canonicalRuntimeEnvironment
+        else { return }
+        self.workspaceLaunchFailureReported = false
+        self.reconcileControlPlaneEye(install: repaired, environment: environment)
+        self.applyRuntimePackMenuState()
+        self.refreshServerStatus()
+        self.webSession.retry()
+      }
+    }
+  }
+
   /// Publish this App's signed carrier over the current installation.
   ///
   /// Normal opening never reaches here — it resolves whatever is installed —
@@ -1618,6 +1711,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       switch result {
       case .failure(let error):
         lifecycleLog("runtime repair failed: \(error.localizedDescription)")
+        if let conflict = error as? PreferenceConflictError {
+          self.presentPreferenceConflict(conflict.envelope)
+          return
+        }
         let failure = NSAlert()
         failure.alertStyle = .critical
         failure.messageText = "Vibecrafted could not reinstall its runtime"
@@ -1864,6 +1961,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       lines.append("")
       lines.append("Configuration")
       lines.append(configRepairSummary(configuration))
+    }
+    if let conflict = lastPreferenceConflict {
+      lines.append("")
+      lines.append("Upgrade conflict")
+      lines.append(preferenceConflictDiagnostics(conflict))
     }
     alert.informativeText = lines.joined(separator: "\n")
     alert.addButton(withTitle: "OK")

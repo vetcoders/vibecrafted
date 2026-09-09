@@ -11872,6 +11872,15 @@ def _doctor_runtime_receipt_findings() -> list[DoctorFinding]:
                 "Runtime Pack publication or recovery is pending; rerun make install",
             )
         ]
+    if receipt.get("candidate_conflicts"):
+        return [
+            DoctorFinding(
+                "warn",
+                "runtime-receipt",
+                "pending upgrade preference choice; the previously verified "
+                "runtime remains selected",
+            )
+        ]
     preferences = _runtime_preference_paths(paths["product_config"])
     missing: list[str] = []
     drifted: list[str] = []
@@ -15678,18 +15687,344 @@ def _write_runtime_owned_file(
     _checkpoint_runtime_install_receipt(runtime_home, receipt)
 
 
+PREFERENCE_CONFLICT_SCHEMA = "vibecrafted.preference-conflict.v1"
+PREFERENCE_CHOICES = ("keep-current", "use-incoming")
+_PREFERENCE_SETTINGS_CONFLICT = re.compile(
+    r"(?:settings|KDL settings) conflict with changed shipped defaults(?:: (.+))?$"
+)
+
+
+class PreferenceConflict(RuntimeError):
+    """A preference file needs an explicit supported choice; nothing was published."""
+
+    def __init__(self, message: str, envelope: Mapping[str, Any]):
+        super().__init__(message)
+        self.envelope = dict(envelope)
+
+
+def _preference_shell_blob(value: Any) -> str:
+    """Flatten a TOML shell assignment for semantic comparison, not display."""
+    if isinstance(value, Mapping):
+        program = str(value.get("program", ""))
+        args = value.get("args") or []
+        args_text = args if isinstance(args, str) else " ".join(str(item) for item in args)
+        return f"{program} {args_text}"
+    return str(value)
+
+
+def _preference_shell_has_operator_payload(value: Any) -> bool:
+    """True when a shipped or user shell still launches `vc-start operator`."""
+    blob = _preference_shell_blob(value)
+    return "vc-start" in blob and re.search(r"(^|[\s\"'])operator($|[\s\"'])", blob) is not None
+
+
+def _preference_shell_launcher_name(value: Any) -> str:
+    """Product launcher identity, independent of home/XDG spelling."""
+    return "launch-primary-shell.zsh" if "launch-primary-shell.zsh" in _preference_shell_blob(value) else ""
+
+
+def _preference_shell_vehicle(value: Any) -> tuple[str, str]:
+    if isinstance(value, Mapping):
+        args = value.get("args") or []
+        flag = str(args[0]) if args else ""
+        return str(value.get("program", "")), flag
+    return "", ""
+
+
+def _preference_shell_is_previous_minus_operator(previous: Any, current: Any) -> bool:
+    """User kept the previous vehicle and only removed the operator payload."""
+    if not _preference_shell_has_operator_payload(previous):
+        return False
+    if _preference_shell_has_operator_payload(current):
+        return False
+    if _preference_shell_launcher_name(previous) != _preference_shell_launcher_name(current):
+        return False
+    if not _preference_shell_launcher_name(current):
+        return False
+    return _preference_shell_vehicle(previous) == _preference_shell_vehicle(current)
+
+
+def _preference_shell_accepts_incoming(previous: Any, current: Any, incoming: Any) -> bool:
+    """Resolve the known operator-strip vs Frame-first vehicle evolution.
+
+    The user correction is "do not auto-start operator". Incoming already ships
+    that policy (Frame remains the product default). The leftover previous
+    vehicle is not an explicit shell preference. A different program or a
+    shell that is not the product launcher stays an explicit choice.
+    """
+    if incoming == current:
+        return True
+    if not _preference_shell_is_previous_minus_operator(previous, current):
+        return False
+    if _preference_shell_has_operator_payload(incoming):
+        return False
+    return bool(_preference_shell_launcher_name(incoming))
+
+
+def _toml_value_is_atomic(value: Any) -> bool:
+    if isinstance(value, list):
+        return True
+    if isinstance(value, dict) and any(
+        isinstance(inner, (list, dict)) for inner in value.values()
+    ):
+        return True
+    return False
+
+
+def _toml_flatten(value: Any, prefix: str = "") -> dict[str, Any]:
+    """Flatten tables; keep inline tables that contain lists/dicts atomic."""
+    if not isinstance(value, dict):
+        return {prefix: value} if prefix else {}
+    flat: dict[str, Any] = {}
+    for key, inner in value.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(inner, dict) and not _toml_value_is_atomic(inner):
+            flat.update(_toml_flatten(inner, path))
+        else:
+            flat[path] = inner
+    return flat
+
+
+def _toml_literal(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float):
+        return repr(value)
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_literal(item) for item in value) + "]"
+    if isinstance(value, dict):
+        inner = ", ".join(f"{key} = {_toml_literal(item)}" for key, item in value.items())
+        return "{ " + inner + " }"
+    raise ValueError("unsupported TOML preference value")
+
+
+def _toml_header_name(line: str) -> str | None:
+    body = line.split("#", 1)[0].strip()
+    if body.startswith("[[") and body.endswith("]]"):
+        return body[2:-2].strip()
+    if body.startswith("[") and body.endswith("]"):
+        return body[1:-1].strip()
+    return None
+
+
+def _toml_array_table_spans(lines: list[str], name: str) -> list[tuple[int, int]]:
+    """Every contiguous [[name]] group, including groups split by other tables."""
+    spans: list[tuple[int, int]] = []
+    index = 0
+    while index < len(lines):
+        header = _toml_header_name(lines[index])
+        if header == name and lines[index].lstrip().startswith("[["):
+            start = index
+            index += 1
+            while index < len(lines):
+                header = _toml_header_name(lines[index])
+                if header is None or (
+                    header == name and lines[index].lstrip().startswith("[[")
+                ):
+                    index += 1
+                    continue
+                break
+            spans.append((start, index))
+        else:
+            index += 1
+    return spans
+
+
+def _toml_replace_array_tables(lines: list[str], name: str, raw: str) -> str:
+    spans = _toml_array_table_spans(lines, name)
+    if not spans:
+        if raw and not raw.endswith("\n"):
+            raw += "\n"
+        return "".join(lines) + raw
+    for start, end in reversed(spans):
+        del lines[start:end]
+    insert_at = spans[0][0]
+    if raw and not raw.endswith("\n"):
+        raw += "\n"
+    lines.insert(insert_at, raw)
+    return "".join(lines)
+
+
+def _toml_replace_or_insert(text: str, dotted: str, literal: str) -> str:
+    """Replace one assignment on the incoming canvas, preserving other text."""
+    lines = text.splitlines(keepends=True)
+    table, _, leaf = dotted.rpartition(".")
+    if not leaf:
+        table, leaf = "", dotted
+    if _toml_array_table_spans(lines, dotted):
+        return _toml_replace_array_tables(lines, dotted, literal)
+    current_table = ""
+    for index, line in enumerate(lines):
+        header = _toml_header_name(line)
+        if header is not None and not line.lstrip().startswith("[["):
+            current_table = header
+            continue
+        if current_table != table:
+            continue
+        match = re.match(rf"^(\s*)({re.escape(leaf)})(\s*=\s*)", line)
+        if match:
+            newline = "\n" if line.endswith("\n") else ""
+            lines[index] = f"{match.group(1)}{match.group(2)}{match.group(3)}{literal}{newline}"
+            return "".join(lines)
+    assignment = f"{leaf} = {literal}\n"
+    if table:
+        header = f"[{table}]"
+        for index, line in enumerate(lines):
+            if _toml_header_name(line) == table and not line.lstrip().startswith("[["):
+                insert_at = index + 1
+                while insert_at < len(lines) and lines[insert_at].lstrip().startswith("#"):
+                    insert_at += 1
+                lines.insert(insert_at, assignment)
+                return "".join(lines)
+        if text and not text.endswith("\n"):
+            text += "\n"
+        return text + f"{header}\n{assignment}"
+    if text and not text.endswith("\n"):
+        text += "\n"
+    return text + assignment
+
+
+def _toml_raw_assignment(text: str, dotted: str) -> str | None:
+    """Copy the user's exact assignment text when it is the resolved value."""
+    lines = text.splitlines(keepends=True)
+    spans = _toml_array_table_spans(lines, dotted)
+    if spans:
+        return "".join(lines[start:end] for start, end in spans)
+    table, _, leaf = dotted.rpartition(".")
+    if not leaf:
+        table, leaf = "", dotted
+    current_table = ""
+    for line in lines:
+        header = _toml_header_name(line)
+        if header is not None and not line.lstrip().startswith("[["):
+            current_table = header
+            continue
+        if current_table != table:
+            continue
+        if re.match(rf"^\s*{re.escape(leaf)}\s*=", line):
+            return line
+    return None
+
+
+def _merge_toml_runtime_preferences(
+    previous: str, current: str, incoming: str, *, choice: str | None = None
+) -> str:
+    """Three-way TOML merge by setting identity, then text overlay on incoming."""
+    import tomllib
+
+    previous_values = _toml_flatten(tomllib.loads(previous))
+    current_values = _toml_flatten(tomllib.loads(current))
+    incoming_values = _toml_flatten(tomllib.loads(incoming))
+    keys = set(previous_values) | set(current_values) | set(incoming_values)
+    resolved: dict[str, Any] = {}
+    conflicts: list[str] = []
+    for key in sorted(keys):
+        prev = previous_values.get(key, _TOML_MISSING)
+        curr = current_values.get(key, _TOML_MISSING)
+        inc = incoming_values.get(key, _TOML_MISSING)
+        if curr == inc:
+            if curr is not _TOML_MISSING:
+                resolved[key] = curr
+            continue
+        if curr == prev:
+            if inc is not _TOML_MISSING:
+                resolved[key] = inc
+            continue
+        if inc == prev:
+            if curr is not _TOML_MISSING:
+                resolved[key] = curr
+            continue
+        if key == "terminal.shell" or key.endswith(".shell"):
+            if (
+                prev is not _TOML_MISSING
+                and curr is not _TOML_MISSING
+                and inc is not _TOML_MISSING
+                and _preference_shell_accepts_incoming(prev, curr, inc)
+            ):
+                resolved[key] = inc
+                continue
+        conflicts.append(key)
+        if choice == "keep-current" and curr is not _TOML_MISSING:
+            resolved[key] = curr
+        elif choice == "use-incoming" and inc is not _TOML_MISSING:
+            resolved[key] = inc
+    if conflicts and choice not in PREFERENCE_CHOICES:
+        raise ValueError(
+            "settings conflict with changed shipped defaults: " + ", ".join(conflicts)
+        )
+    merged = incoming
+    for key, value in resolved.items():
+        incoming_value = incoming_values.get(key, _TOML_MISSING)
+        if incoming_value == value:
+            continue
+        raw = (
+            _toml_raw_assignment(current, key)
+            if current_values.get(key, _TOML_MISSING) == value
+            else None
+        )
+        if raw is not None:
+            merged = _overlay_toml_assignment(merged, key, raw)
+        else:
+            merged = _toml_replace_or_insert(merged, key, _toml_literal(value))
+    tomllib.loads(merged)
+    return merged
+
+
+def _overlay_toml_assignment(text: str, dotted: str, raw_assignment: str) -> str:
+    """Put the user's exact assignment onto the incoming canvas."""
+    lines = text.splitlines(keepends=True)
+    if _toml_array_table_spans(lines, dotted):
+        return _toml_replace_array_tables(lines, dotted, raw_assignment)
+    table, _, leaf = dotted.rpartition(".")
+    if not leaf:
+        table, leaf = "", dotted
+    current_table = ""
+    for index, line in enumerate(lines):
+        header = _toml_header_name(line)
+        if header is not None and not line.lstrip().startswith("[["):
+            current_table = header
+            continue
+        if current_table == table and re.match(rf"^\s*{re.escape(leaf)}\s*=", line):
+            newline = "\n" if raw_assignment.endswith("\n") or line.endswith("\n") else ""
+            assignment = raw_assignment if raw_assignment.endswith("\n") else raw_assignment + newline
+            lines[index] = assignment
+            return "".join(lines)
+    return _toml_replace_or_insert(
+        text, dotted, raw_assignment.split("=", 1)[1].strip() if "=" in raw_assignment else raw_assignment
+    )
+
+
+_TOML_MISSING = object()
+
+
 def _merge_runtime_preferences(
-    previous: str | None, current: str, incoming: str, *, kdl: bool = False
+    previous: str | None,
+    current: str,
+    incoming: str,
+    *,
+    kdl: bool = False,
+    toml: bool = False,
+    choice: str | None = None,
 ) -> str:
     """Carry independent user edits onto new defaults; refuse ambiguous overlap.
 
     This is a conservative text merge, not a KDL/TOML rewrite. Comments and
     user formatting survive. Missing history and touching edits require an
     explicit resolution instead of guessing which preference should win.
+    TOML additionally merges by setting identity so unchanged keys accept new
+    defaults and true overlapping settings stay explicit.
     """
     if current == incoming:
         return current
     if previous is None:
+        if choice == "use-incoming":
+            return incoming
+        if choice == "keep-current":
+            return current
         raise ValueError("previous shipped defaults are unavailable")
     if current == previous:
         return incoming
@@ -15698,6 +16033,12 @@ def _merge_runtime_preferences(
     # merely because this is a KDL preference file.
     if incoming == previous:
         return current
+    if toml:
+        return _merge_toml_runtime_preferences(
+            previous, current, incoming, choice=choice
+        )
+    if choice in PREFERENCE_CHOICES:
+        return current if choice == "keep-current" else incoming
     base = previous.splitlines(keepends=True)
 
     def edits(text: str) -> list[tuple[int, int, list[str]]]:
@@ -15946,6 +16287,9 @@ def _reconcile_runtime_preference(
     *,
     runtime_home: Path,
     previous: Mapping[str, Any],
+    choice: str | None = None,
+    expected_current_sha256: str | None = None,
+    expected_incoming_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Decide one preference file's postimage without writing anything.
 
@@ -15975,10 +16319,13 @@ def _reconcile_runtime_preference(
         "incoming_defaults": incoming_source,
         "baseline_source": None,
         "current_sha256": None,
+        "incoming_sha256": hashlib.sha256(incoming.encode("utf-8")).hexdigest(),
         "present": False,
         "body": None,
         "defaults": None,
         "error": None,
+        "settings": [],
+        "mergeable": True,
     }
     try:
         aliases = [
@@ -16036,14 +16383,48 @@ def _reconcile_runtime_preference(
             if bound_digest and digest != bound_digest:
                 raise ValueError("previous shipped defaults differ from their manifest")
             baseline = raw.decode("utf-8")
+        if choice:
+            if choice not in PREFERENCE_CHOICES:
+                raise ValueError("unsupported preference choice")
+            if not expected_current_sha256 or not expected_incoming_sha256:
+                raise ValueError(
+                    "preference choice requires bound current and incoming hashes"
+                )
         current = current_raw.decode("utf-8") if current_raw is not None else None
-        body = (
-            incoming
-            if current is None
-            else _merge_runtime_preferences(
-                baseline, current, incoming, kdl=destination.suffix == ".kdl"
+
+        def merge(selected: str | None) -> str:
+            return incoming if current is None else _merge_runtime_preferences(
+                baseline,
+                current,
+                incoming,
+                kdl=destination.suffix == ".kdl",
+                toml=destination.suffix == ".toml",
+                choice=selected,
             )
-        )
+
+        try:
+            # A later retry of an already-applied choice must not fail merely
+            # because the bound current hash is the pre-merge snapshot.
+            body = merge(None)
+        except ValueError:
+            if not choice:
+                raise
+            current_matches = (
+                not outcome["current_sha256"]
+                or outcome["current_sha256"] == expected_current_sha256
+            )
+            incoming_matches = outcome["incoming_sha256"] == expected_incoming_sha256
+            if current_matches and not incoming_matches:
+                raise ValueError(
+                    "incoming defaults changed during retry; concurrent edit refused"
+                ) from None
+            if incoming_matches and outcome["current_sha256"] and not current_matches:
+                raise ValueError(
+                    "preference changed during retry; concurrent edit refused"
+                ) from None
+            if not (current_matches and incoming_matches):
+                raise
+            body = merge(choice)
         if not body.strip() or "\0" in body:
             raise ValueError("merged preference file is empty or invalid")
         if destination.suffix == ".toml":
@@ -16051,7 +16432,15 @@ def _reconcile_runtime_preference(
 
             tomllib.loads(body)
     except (OSError, UnicodeError, ValueError) as exc:
-        outcome["error"] = str(exc)
+        message = str(exc)
+        outcome["error"] = message
+        matched = _PREFERENCE_SETTINGS_CONFLICT.search(message)
+        if matched and matched.group(1):
+            outcome["settings"] = [
+                item.strip() for item in matched.group(1).split(",") if item.strip()
+            ]
+        else:
+            outcome["mergeable"] = False
         return outcome
     outcome["body"] = body
     outcome["defaults"] = {
@@ -16061,6 +16450,150 @@ def _reconcile_runtime_preference(
     return outcome
 
 
+def _preference_choice_for_path(
+    destination: Path,
+    *,
+    choice: str | None,
+    choice_path: str | None,
+) -> str | None:
+    if not choice:
+        return None
+    if not choice_path:
+        return choice
+    selected = Path(choice_path)
+    if destination == selected or destination.name == selected.name:
+        return choice
+    return None
+
+
+def _published_previous_receipt(receipt: Mapping[str, Any]) -> dict[str, Any] | None:
+    saved = receipt.get("preparing_previous_receipt")
+    if not isinstance(saved, dict) or saved.get("schema") != RUNTIME_INSTALL_SCHEMA:
+        return None
+    if saved.get("install_pending") or "config_transaction" in saved:
+        return None
+    if any(saved.get(key) for key in ("config_pending", "uninstall_pending")):
+        return None
+    if not saved.get("version"):
+        return None
+    return json.loads(json.dumps(saved))
+
+
+def _previous_runtime_is_available(runtime_home: Path, previous: Mapping[str, Any]) -> bool:
+    """True when the last published generation is still selectable on disk."""
+    version = previous.get("version")
+    if not isinstance(version, str) or not version:
+        return False
+    generation = runtime_home / "releases" / version
+    current = runtime_home / "tools/vibecrafted-current"
+    active = runtime_home / "active.json"
+    try:
+        if not generation.is_dir() or not current.is_symlink():
+            return False
+        if current.resolve(strict=True) != generation:
+            return False
+        if previous.get("owned_symlinks", {}).get(str(current)) != str(generation):
+            return False
+        document = json.loads(active.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, RuntimeError):
+        return False
+    return (
+        document.get("schema") == "vibecrafted.active-runtime.v1"
+        and document.get("runtime_root") == str(generation)
+        and document.get("version") == version
+    )
+
+
+def _redacted_preference_conflict(
+    outcome: Mapping[str, Any], *, backup: str
+) -> dict[str, Any]:
+    """Receipt/dialog payload: setting names and hashes, never preference values."""
+    settings = list(outcome.get("settings") or [])
+    reason = str(outcome.get("error") or "product preference conflict")
+    if settings:
+        reason = "settings conflict with changed shipped defaults: " + ", ".join(settings)
+    return {
+        "path": str(outcome["path"]),
+        "reason": reason,
+        "settings": settings,
+        "choices": list(PREFERENCE_CHOICES),
+        "mergeable": bool(outcome.get("mergeable", True)),
+        "current_sha256": outcome.get("current_sha256") or "",
+        "incoming_sha256": outcome.get("incoming_sha256") or "",
+        "backup": backup,
+        "previous_defaults": str(outcome.get("baseline_source") or ""),
+        "incoming_defaults": str(outcome.get("incoming_defaults") or ""),
+    }
+
+
+def _preference_conflict_envelope(
+    conflicts: Sequence[Mapping[str, Any]],
+    *,
+    previous_available: bool,
+    previous_version: str = "",
+) -> dict[str, Any]:
+    settings = [
+        setting
+        for item in conflicts
+        for setting in item.get("settings", [])
+        if setting
+    ]
+    names = ", ".join(settings) if settings else "overlapping settings"
+    files = [Path(item["path"]).name for item in conflicts]
+    file_label = ", ".join(files) if files else "product configuration"
+    if previous_available:
+        message = (
+            f"Your {file_label} overlaps the new defaults on {names}. "
+            "The previously verified runtime is still selected. "
+            "Keep your current settings or use the incoming defaults, then retry."
+        )
+    else:
+        message = (
+            f"Your {file_label} overlaps the new defaults on {names}. "
+            "No previously verified runtime is available. "
+            "Use the incoming defaults or repair the file, then retry."
+        )
+    return {
+        "schema": PREFERENCE_CONFLICT_SCHEMA,
+        "status": "conflict",
+        "message": message,
+        "files": [dict(item) for item in conflicts],
+        "previous_runtime_available": previous_available,
+        "previous_runtime_version": previous_version,
+        "choices": list(PREFERENCE_CHOICES),
+    }
+
+
+def _abandon_unpublished_preference_conflicts(
+    *,
+    runtime_home: Path,
+    receipt: dict[str, Any],
+    conflicts: list[dict[str, Any]],
+) -> bool:
+    """Restore a published receipt so a candidate conflict cannot poison it.
+
+    `config_conflicts` remains the poison key `runtime-resolve` already
+    understands. A refused unpublished upgrade records `candidate_conflicts`
+    instead, which older resolvers ignore.
+    """
+    unpublished = bool(receipt.get("install_pending")) or receipt.get(
+        "install_phase"
+    ) in {"preparing", "ancillary"}
+    saved = _published_previous_receipt(receipt) if unpublished else None
+    if saved is not None:
+        paths = {"runtime_home": runtime_home}
+        for name, value in (receipt.get("roots") or {}).items():
+            paths[name] = Path(value)
+        _restore_runtime_publication_receipt(paths, receipt, saved)
+        previous_available = True
+    else:
+        previous_available = False
+    receipt.pop("config_conflicts", None)
+    receipt["candidate_conflicts"] = conflicts
+    _checkpoint_runtime_install_receipt(runtime_home, receipt)
+    return previous_available
+
+
 def _prepare_runtime_preferences(
     generation: Path,
     product_config: Path,
@@ -16068,6 +16601,10 @@ def _prepare_runtime_preferences(
     runtime_home: Path,
     receipt: dict[str, Any],
     previous: dict[str, Any],
+    choice: str | None = None,
+    expected_current_sha256: str | None = None,
+    expected_incoming_sha256: str | None = None,
+    choice_path: str | None = None,
 ) -> dict[Path, dict[str, Any]]:
     """Preflight every preference before changing config or runtime selectors.
 
@@ -16080,14 +16617,20 @@ def _prepare_runtime_preferences(
     the refusal to publish.
     """
     prepared: dict[Path, dict[str, Any]] = {}
-    conflicts: list[dict[str, str]] = []
+    conflicts: list[dict[str, Any]] = []
     for destination, relative in _runtime_preference_sources(product_config).items():
+        file_choice = _preference_choice_for_path(
+            destination, choice=choice, choice_path=choice_path
+        )
         outcome = _reconcile_runtime_preference(
             destination,
             relative,
             generation,
             runtime_home=runtime_home,
             previous=previous,
+            choice=file_choice,
+            expected_current_sha256=expected_current_sha256 if file_choice else None,
+            expected_incoming_sha256=expected_incoming_sha256 if file_choice else None,
         )
         if outcome["error"] is not None:
             # Reuse the installer's backup and receipt, without installing a
@@ -16103,15 +16646,7 @@ def _prepare_runtime_preferences(
                         reason="product configuration conflict",
                     )
                 )
-            conflicts.append(
-                {
-                    "path": str(destination),
-                    "reason": outcome["error"],
-                    "backup": backup,
-                    "previous_defaults": str(outcome["baseline_source"] or ""),
-                    "incoming_defaults": str(outcome["incoming_defaults"]),
-                }
-            )
+            conflicts.append(_redacted_preference_conflict(outcome, backup=backup))
             continue
         prepared[destination] = {
             "body": outcome["body"],
@@ -16119,16 +16654,25 @@ def _prepare_runtime_preferences(
             "defaults": outcome["defaults"],
         }
     if conflicts:
-        receipt["config_conflicts"] = conflicts
-        _checkpoint_runtime_install_receipt(runtime_home, receipt)
-        raise RuntimeError(
-            "product configuration conflict; config and runtime selectors "
-            "were not published. Resolve the preserved user configuration "
-            "against previous/incoming defaults "
-            "listed in install-receipt.json and retry runtime-install: "
-            + "; ".join(f"{item['path']}: {item['reason']}" for item in conflicts)
+        previous_available = _abandon_unpublished_preference_conflicts(
+            runtime_home=runtime_home,
+            receipt=receipt,
+            conflicts=conflicts,
+        )
+        if not previous_available:
+            previous_available = _previous_runtime_is_available(runtime_home, previous)
+        envelope = _preference_conflict_envelope(
+            conflicts,
+            previous_available=previous_available,
+            previous_version=str(previous.get("version") or ""),
+        )
+        detail = "; ".join(item["reason"] for item in conflicts if item.get("reason"))
+        raise PreferenceConflict(
+            f"{envelope['message']}" + (f" ({detail})" if detail else ""),
+            envelope,
         )
     receipt.pop("config_conflicts", None)
+    receipt.pop("candidate_conflicts", None)
     _checkpoint_runtime_install_receipt(runtime_home, receipt)
     return prepared
 
@@ -17950,6 +18494,13 @@ def cmd_runtime_repair(args: argparse.Namespace) -> int:
                         repaired=len(actionable),
                         conflicts=0,
                     )
+    except PreferenceConflict as exc:
+        envelope.update(
+            status="conflict",
+            reason=str(exc.envelope.get("message") or exc)[:1200],
+            files=list(exc.envelope.get("files") or []),
+            conflicts=len(exc.envelope.get("files") or []),
+        )
     except (
         OSError,
         RuntimeError,
@@ -18170,6 +18721,10 @@ def _install_runtime_pack(args: argparse.Namespace) -> int:
         runtime_home=runtime_home,
         receipt=receipt,
         previous=previous,
+        choice=getattr(args, "resolve_preference", None),
+        expected_current_sha256=getattr(args, "preference_current_sha256", None),
+        expected_incoming_sha256=getattr(args, "preference_incoming_sha256", None),
+        choice_path=getattr(args, "preference_path", None),
     )
     product_before = _runtime_config_digest(product_config)
     backup_root = runtime_home / ".installer-backups"
@@ -18971,6 +19526,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Install a Runtime Pack older than the active generation (explicit downgrade)",
     )
+    p_runtime_install.add_argument(
+        "--resolve-preference",
+        choices=PREFERENCE_CHOICES,
+        help="Apply one explicit preference choice on a bound retry",
+    )
+    p_runtime_install.add_argument(
+        "--preference-current-sha256",
+        help="SHA-256 of the current preference file the choice is bound to",
+    )
+    p_runtime_install.add_argument(
+        "--preference-incoming-sha256",
+        help="SHA-256 of the incoming shipped defaults the choice is bound to",
+    )
+    p_runtime_install.add_argument(
+        "--preference-path",
+        help="Preference file the bound choice applies to",
+    )
 
     p_runtime_resolve = sub.add_parser(
         "runtime-resolve", help="Read installed Runtime Pack identity without repair"
@@ -19015,7 +19587,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.command == "restore":
         return cmd_restore(args)
     elif args.command == "runtime-install":
-        return cmd_runtime_install(args)
+        try:
+            return cmd_runtime_install(args)
+        except PreferenceConflict as exc:
+            print(json.dumps(exc.envelope, sort_keys=True))
+            return 2
     elif args.command == "runtime-resolve":
         return cmd_runtime_resolve(args)
     elif args.command == "runtime-repair":

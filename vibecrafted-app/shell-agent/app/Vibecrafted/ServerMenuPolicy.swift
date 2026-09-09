@@ -509,11 +509,17 @@ func decodeRuntimeResolution<Runtime: Decodable>(
 
 /// True of the banner and frames of a Python traceback, false of anything an
 /// operator can act on.
+func isTracebackCaret(_ line: String) -> Bool {
+  let trimmed = line.trimmingCharacters(in: .whitespaces)
+  return !trimmed.isEmpty && trimmed.allSatisfy { $0 == "^" || $0 == "~" }
+}
+
 func isTracebackScaffolding(_ line: String) -> Bool {
   if line == "Traceback (most recent call last):" { return true }
   if line.hasPrefix("File \"") && line.contains(", line ") { return true }
   if line.hasPrefix("During handling of the above exception") { return true }
   if line.hasPrefix("The above exception was the direct cause") { return true }
+  if isTracebackCaret(line) { return true }
   return false
 }
 
@@ -539,8 +545,10 @@ func meaningfulOwnerLines(_ text: String) -> [String] {
     }
     if skipSource {
       skipSource = false
+      if isTracebackCaret(line) { continue }
       continue
     }
+    if isTracebackCaret(line) { continue }
     kept.append(line)
   }
   return kept.isEmpty ? Array(lines.suffix(1)) : kept
@@ -940,4 +948,148 @@ func configRepairAdvisory(_ envelope: ConfigRepairEnvelope) -> String? {
   default:
     return nil
   }
+}
+
+// MARK: - Upgrade preference conflict
+
+let preferenceConflictSchema = "vibecrafted.preference-conflict.v1"
+
+/// One preference file the installer could not merge without a human choice.
+///
+/// Setting names and hashes only — preference values stay out of the dialog.
+struct PreferenceConflictFile: Decodable {
+  let path: String
+  let reason: String?
+  let settings: [String]?
+  let choices: [String]?
+  let currentSha256: String?
+  let incomingSha256: String?
+  let backup: String?
+  let mergeable: Bool?
+
+  enum CodingKeys: String, CodingKey {
+    case path, reason, settings, choices, backup, mergeable
+    case currentSha256 = "current_sha256"
+    case incomingSha256 = "incoming_sha256"
+  }
+}
+
+/// `vibecrafted.preference-conflict.v1` printed by runtime-install on exit 2.
+struct PreferenceConflictEnvelope: Decodable {
+  let schema: String?
+  let status: String?
+  let message: String?
+  let files: [PreferenceConflictFile]?
+  let previousRuntimeAvailable: Bool?
+  let previousRuntimeVersion: String?
+  let choices: [String]?
+
+  enum CodingKeys: String, CodingKey {
+    case schema, status, message, files, choices
+    case previousRuntimeAvailable = "previous_runtime_available"
+    case previousRuntimeVersion = "previous_runtime_version"
+  }
+}
+
+/// The owner's typed upgrade-conflict refusal.
+struct PreferenceConflictError: Error {
+  let envelope: PreferenceConflictEnvelope
+}
+
+extension PreferenceConflictError: LocalizedError {
+  var errorDescription: String? { preferenceConflictSummary(envelope) }
+}
+
+/// Bound Keep current / Use incoming retry for one conflicting file.
+struct PreferenceResolutionChoice {
+  let action: String
+  let currentSha256: String
+  let incomingSha256: String
+  let path: String
+}
+
+func decodePreferenceConflict(from stdout: Data) -> PreferenceConflictEnvelope? {
+  let candidates = preferenceConflictJSONCandidates(stdout)
+  for data in candidates {
+    guard
+      let envelope = try? JSONDecoder().decode(PreferenceConflictEnvelope.self, from: data),
+      envelope.schema == preferenceConflictSchema,
+      envelope.status == "conflict"
+    else { continue }
+    return envelope
+  }
+  return nil
+}
+
+func preferenceConflictJSONCandidates(_ stdout: Data) -> [Data] {
+  guard let text = String(data: stdout, encoding: .utf8) else { return [] }
+  var candidates: [Data] = []
+  let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+  if let whole = trimmed.data(using: .utf8) { candidates.append(whole) }
+  for line in text.split(whereSeparator: { $0.isNewline }).reversed() {
+    let item = line.trimmingCharacters(in: .whitespaces)
+    if item.hasPrefix("{"), let data = item.data(using: .utf8) {
+      candidates.append(data)
+    }
+  }
+  return candidates
+}
+
+func preferenceConflictSummary(_ envelope: PreferenceConflictEnvelope, limit: Int = 6) -> String {
+  var lines: [String] = []
+  if let message = envelope.message, !message.isEmpty {
+    lines.append(message)
+  } else {
+    lines.append("Product settings overlap the incoming defaults and need a choice.")
+  }
+  if envelope.previousRuntimeAvailable == true {
+    let version = envelope.previousRuntimeVersion.flatMap { $0.isEmpty ? nil : $0 } ?? "the previous generation"
+    lines.append("The previously verified runtime (\(version)) is still selected.")
+  } else {
+    lines.append("No previously verified runtime is available; the app is not connected.")
+  }
+  for file in (envelope.files ?? []).prefix(limit) {
+    let name = (file.path as NSString).lastPathComponent
+    let settings = (file.settings ?? []).joined(separator: ", ")
+    var line = "• \(name)"
+    if !settings.isEmpty { line += " — \(settings)" }
+    else if let reason = file.reason, !reason.isEmpty { line += " — \(reason)" }
+    if let backup = file.backup, !backup.isEmpty {
+      line += " (backup \(backup))"
+    }
+    lines.append(line)
+  }
+  if (envelope.files ?? []).count > limit {
+    lines.append("…and \((envelope.files ?? []).count - limit) more.")
+  }
+  return lines.joined(separator: "\n")
+}
+
+func preferenceConflictDiagnostics(_ envelope: PreferenceConflictEnvelope) -> String {
+  var lines = [preferenceConflictSummary(envelope)]
+  for file in envelope.files ?? [] {
+    if let current = file.currentSha256, !current.isEmpty {
+      lines.append("current \( (file.path as NSString).lastPathComponent ) \(current)")
+    }
+    if let incoming = file.incomingSha256, !incoming.isEmpty {
+      lines.append("incoming \( (file.path as NSString).lastPathComponent ) \(incoming)")
+    }
+  }
+  return lines.joined(separator: "\n")
+}
+
+private let preferenceChoiceActions = ["keep-current", "use-incoming"]
+
+func preferenceResolutionChoice(
+  from envelope: PreferenceConflictEnvelope, action: String
+) -> PreferenceResolutionChoice? {
+  guard preferenceChoiceActions.contains(action),
+    let file = envelope.files?.first(where: {
+      !($0.currentSha256 ?? "").isEmpty && !($0.incomingSha256 ?? "").isEmpty
+    }) ?? envelope.files?.first,
+    let current = file.currentSha256, !current.isEmpty,
+    let incoming = file.incomingSha256, !incoming.isEmpty
+  else { return nil }
+  return PreferenceResolutionChoice(
+    action: action, currentSha256: current, incomingSha256: incoming, path: file.path)
 }

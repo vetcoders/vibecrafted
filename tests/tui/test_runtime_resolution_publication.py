@@ -60,7 +60,7 @@ def roots(tmp_path: Path, monkeypatch):
     return installer._runtime_install_paths()
 
 
-def _install(payload: Path, capsys) -> dict:
+def _install(payload: Path, capsys, **choice) -> dict:
     assert (
         installer.cmd_runtime_install(
             Namespace(
@@ -68,11 +68,33 @@ def _install(payload: Path, capsys) -> dict:
                 app_root=None,
                 terminal_host=None,
                 frame_helper=None,
+                resolve_preference=choice.get("resolve_preference"),
+                preference_current_sha256=choice.get("preference_current_sha256"),
+                preference_incoming_sha256=choice.get("preference_incoming_sha256"),
+                preference_path=choice.get("preference_path"),
             )
         )
         == 0
     )
     return json.loads(capsys.readouterr().out.splitlines()[-1])
+
+
+def _install_conflict(payload: Path, capsys, **choice):
+    with pytest.raises(installer.PreferenceConflict) as caught:
+        installer.cmd_runtime_install(
+            Namespace(
+                payload_root=str(payload),
+                app_root=None,
+                terminal_host=None,
+                frame_helper=None,
+                resolve_preference=choice.get("resolve_preference"),
+                preference_current_sha256=choice.get("preference_current_sha256"),
+                preference_incoming_sha256=choice.get("preference_incoming_sha256"),
+                preference_path=choice.get("preference_path"),
+            )
+        )
+    capsys.readouterr()
+    return caught.value
 
 
 def _resolve(paths: dict, capsys, *, status: str) -> dict:
@@ -433,11 +455,12 @@ def test_same_setting_kdl_conflict_refuses_publication_and_preserves_evidence(
     receipt = json.loads(
         (paths["runtime_home"] / installer.RUNTIME_INSTALL_RECEIPT).read_text()
     )
-    conflict = receipt["config_conflicts"][0]
+    assert "config_conflicts" not in receipt
+    conflict = receipt["candidate_conflicts"][0]
     assert Path(conflict["backup"]).read_bytes() == config.read_bytes()
     assert Path(conflict["previous_defaults"]).is_file()
     assert Path(conflict["incoming_defaults"]).is_file()
-    _resolve(paths, capsys, status="unusable")
+    _resolve(paths, capsys, status="ready")
 
 
 def test_nested_kdl_edit_refuses_publication_and_preserves_evidence(
@@ -467,7 +490,7 @@ def test_nested_kdl_edit_refuses_publication_and_preserves_evidence(
     capsys.readouterr()
     assert _snapshot(product) == before
     assert (paths["runtime_home"] / "active.json").read_bytes() == active
-    _resolve(paths, capsys, status="unusable")
+    _resolve(paths, capsys, status="ready")
 
 
 def test_unsupported_changed_kdl_scalar_syntax_refuses_publication(
@@ -501,7 +524,7 @@ def test_unsupported_changed_kdl_scalar_syntax_refuses_publication(
     capsys.readouterr()
     assert _snapshot(product) == before
     assert (paths["runtime_home"] / "active.json").read_bytes() == active
-    _resolve(paths, capsys, status="unusable")
+    _resolve(paths, capsys, status="ready")
 
 
 def _crash_install(payload: Path, paths: dict, cut: str) -> None:
@@ -1260,3 +1283,255 @@ def test_config_repair_records_one_redacted_receipt(installed, capsys):
     blob = json.dumps(receipt)
     assert secret.strip() not in blob
     assert "Traceback" not in blob
+
+
+_REPO_TERMINAL_POLICY = (
+    Path(__file__).resolve().parents[2] / "config/vc-terminal/vibecrafted.toml"
+)
+_INCOMING_SHELL = (
+    'shell = { program = "/bin/sh", args = ["-c", "exec \\"$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh\\""] }'
+)
+_PREVIOUS_SHELL = (
+    'shell = { program = "/bin/zsh", args = ["-lc", "exec \\"${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-terminal/launch-primary-shell.zsh\\" \\"$VIBECRAFTED_RUNTIME_ROOT/bin/vc-start\\" operator"] }'
+)
+_USER_STRIPPED_SHELL = (
+    'shell = { program = "/bin/zsh", args = ["-lc", "exec \\"${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-terminal/launch-primary-shell.zsh\\""] }'
+)
+_EXPLICIT_FISH_SHELL = (
+    'shell = { program = "/usr/bin/fish", args = ["-l"] }'
+)
+
+
+def _previous_terminal_policy() -> str:
+    return (
+        _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
+        .replace(_INCOMING_SHELL, _PREVIOUS_SHELL)
+        .replace("padding = { x = 8, y = 24 }", "padding = { x = 0, y = 0 }")
+    )
+
+
+def _user_terminal_policy(*, shell: str = _USER_STRIPPED_SHELL) -> str:
+    return (
+        _previous_terminal_policy()
+        .replace(_PREVIOUS_SHELL, shell)
+        .replace('family = "Spot Mono"', 'family = "User Mono"', 1)
+        .replace('background = "#0b0b12"', 'background = "#111111"')
+        # Trailing [[keyboard.bindings]] group, split from the first by other tables.
+        .replace('key = "Enter"\nmods = "Shift"', 'key = "Enter"\nmods = "Control"')
+    )
+
+
+def test_three_way_shell_correction_keeps_user_chrome_and_accepts_new_defaults(
+    tmp_path, roots, capsys
+):
+    """Exact prior/current/incoming shell: user stripped operator args only."""
+    previous = _previous_terminal_policy()
+    incoming = _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
+    assert _PREVIOUS_SHELL in previous
+    assert _INCOMING_SHELL in incoming
+    first = _install(
+        seed_runtime_pack(
+            tmp_path / "pack-a", version="9.9.9+a", terminal_policy=previous
+        ),
+        capsys,
+    )
+    policy = roots["product_config"] / "terminal-policy.toml"
+    user = _user_terminal_policy()
+    policy.write_text(user, encoding="utf-8")
+    selector = (roots["runtime_home"] / "tools/vibecrafted-current").readlink()
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-b", version="9.9.10+b", terminal_policy=incoming
+        ),
+        capsys,
+    )
+    text = policy.read_text(encoding="utf-8")
+    assert _INCOMING_SHELL in text
+    assert "padding = { x = 8, y = 24 }" in text
+    assert 'family = "User Mono"' in text
+    assert 'background = "#111111"' in text
+    assert 'mods = "Control"' in text
+    assert "vc-start" not in text or "operator" not in text.split("shell =", 1)[1].split("\n", 1)[0]
+    assert (roots["runtime_home"] / "tools/vibecrafted-current").readlink() != selector
+    _resolve(roots, capsys, status="ready")
+
+
+def test_disjoint_toml_edits_still_merge(installed, tmp_path, capsys):
+    paths, _, _ = installed
+    policy = paths["product_config"] / "terminal-policy.toml"
+    policy.write_text(policy.read_text().replace("opacity = 0.9", "opacity = 0.75"))
+    original = installed[1] / "config/vc-terminal/vibecrafted.toml"
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-b",
+            version="9.9.10+b",
+            terminal_policy=original.read_text().replace(
+                "history = 50000", "history = 60000"
+            ),
+        ),
+        capsys,
+    )
+    merged = policy.read_text()
+    assert "opacity = 0.75" in merged
+    assert "history = 60000" in merged
+    _resolve(paths, capsys, status="ready")
+
+
+def test_explicit_shell_preference_stays_a_bound_choice(tmp_path, roots, capsys):
+    previous = _previous_terminal_policy()
+    incoming = _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-a", version="9.9.9+a", terminal_policy=previous
+        ),
+        capsys,
+    )
+    policy = roots["product_config"] / "terminal-policy.toml"
+    user = _user_terminal_policy(shell=_EXPLICIT_FISH_SHELL)
+    policy.write_text(user, encoding="utf-8")
+    current_sha = installer._sha256_path(policy)
+    incoming_source = tmp_path / "pack-b/config/vc-terminal/vibecrafted.toml"
+    payload = seed_runtime_pack(
+        tmp_path / "pack-b", version="9.9.10+b", terminal_policy=incoming
+    )
+    incoming_sha = installer._sha256_path(incoming_source)
+    selector = (roots["runtime_home"] / "tools/vibecrafted-current").readlink()
+    active = (roots["runtime_home"] / "active.json").read_bytes()
+    conflict = _install_conflict(payload, capsys)
+    assert conflict.envelope["schema"] == installer.PREFERENCE_CONFLICT_SCHEMA
+    assert conflict.envelope["previous_runtime_available"] is True
+    assert "terminal.shell" in json.dumps(conflict.envelope)
+    assert "/usr/bin/fish" not in json.dumps(conflict.envelope)
+    assert "Traceback" not in json.dumps(conflict.envelope)
+    assert "^^^^" not in json.dumps(conflict.envelope)
+    receipt = json.loads(
+        (roots["runtime_home"] / installer.RUNTIME_INSTALL_RECEIPT).read_text()
+    )
+    assert "config_conflicts" not in receipt
+    assert receipt["candidate_conflicts"]
+    assert (roots["runtime_home"] / "tools/vibecrafted-current").readlink() == selector
+    assert (roots["runtime_home"] / "active.json").read_bytes() == active
+    _resolve(roots, capsys, status="ready")
+
+    drifted = policy.read_text(encoding="utf-8").replace("opacity = 0.9", "opacity = 0.5")
+    policy.write_text(drifted, encoding="utf-8")
+    concurrent = _install_conflict(
+        payload,
+        capsys,
+        resolve_preference="keep-current",
+        preference_current_sha256=current_sha,
+        preference_incoming_sha256=incoming_sha,
+        preference_path=str(policy),
+    )
+    assert "concurrent" in str(concurrent).lower() or "changed during retry" in str(
+        concurrent
+    )
+    policy.write_text(user, encoding="utf-8")
+    for _ in range(2):
+        _install(
+            payload,
+            capsys,
+            resolve_preference="keep-current",
+            preference_current_sha256=current_sha,
+            preference_incoming_sha256=incoming_sha,
+            preference_path=str(policy),
+        )
+        assert _EXPLICIT_FISH_SHELL in policy.read_text(encoding="utf-8")
+        assert "padding = { x = 8, y = 24 }" in policy.read_text(encoding="utf-8")
+        _resolve(roots, capsys, status="ready")
+
+
+def test_use_incoming_shell_choice_is_bound_and_preserves_chrome(tmp_path, roots, capsys):
+    previous = _previous_terminal_policy()
+    incoming = _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-a", version="9.9.9+a", terminal_policy=previous
+        ),
+        capsys,
+    )
+    policy = roots["product_config"] / "terminal-policy.toml"
+    user = _user_terminal_policy(shell=_EXPLICIT_FISH_SHELL)
+    policy.write_text(user, encoding="utf-8")
+    current_sha = installer._sha256_path(policy)
+    incoming_source = tmp_path / "pack-b/config/vc-terminal/vibecrafted.toml"
+    payload = seed_runtime_pack(
+        tmp_path / "pack-b", version="9.9.10+b", terminal_policy=incoming
+    )
+    incoming_sha = installer._sha256_path(incoming_source)
+    _install_conflict(payload, capsys)
+    _resolve(roots, capsys, status="ready")
+    _install(
+        payload,
+        capsys,
+        resolve_preference="use-incoming",
+        preference_current_sha256=current_sha,
+        preference_incoming_sha256=incoming_sha,
+        preference_path=str(policy),
+    )
+    text = policy.read_text(encoding="utf-8")
+    assert _INCOMING_SHELL in text
+    assert _EXPLICIT_FISH_SHELL not in text
+    assert 'family = "User Mono"' in text
+    assert 'background = "#111111"' in text
+    assert 'mods = "Control"' in text
+    _resolve(roots, capsys, status="ready")
+    _install(
+        payload,
+        capsys,
+        resolve_preference="use-incoming",
+        preference_current_sha256=current_sha,
+        preference_incoming_sha256=incoming_sha,
+        preference_path=str(policy),
+    )
+    assert _INCOMING_SHELL in policy.read_text(encoding="utf-8")
+    _resolve(roots, capsys, status="ready")
+
+
+def test_failed_upgrade_without_prior_runtime_is_not_ready(roots, tmp_path, capsys):
+    incoming = _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
+    policy = roots["product_config"] / "terminal-policy.toml"
+    policy.parent.mkdir(parents=True)
+    policy.write_text(_user_terminal_policy(shell=_EXPLICIT_FISH_SHELL), encoding="utf-8")
+    conflict = _install_conflict(
+        seed_runtime_pack(
+            tmp_path / "pack-a", version="9.9.9+a", terminal_policy=incoming
+        ),
+        capsys,
+    )
+    assert conflict.envelope["previous_runtime_available"] is False
+    assert "not connected" in conflict.envelope["message"].lower() or (
+        "no previously verified runtime" in conflict.envelope["message"].lower()
+    )
+    envelope = _resolve(roots, capsys, status="unusable")
+    assert envelope["runtime"] is None
+    assert envelope["status"] == "unusable"
+
+
+def test_cli_preference_conflict_is_json_without_traceback(tmp_path, roots, capsys):
+    previous = _previous_terminal_policy()
+    incoming = _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-a", version="9.9.9+a", terminal_policy=previous
+        ),
+        capsys,
+    )
+    policy = roots["product_config"] / "terminal-policy.toml"
+    policy.write_text(_user_terminal_policy(shell=_EXPLICIT_FISH_SHELL), encoding="utf-8")
+    payload = seed_runtime_pack(
+        tmp_path / "pack-b", version="9.9.10+b", terminal_policy=incoming
+    )
+    code = installer.main(
+        ["runtime-install", "--payload-root", str(payload)]
+    )
+    captured = capsys.readouterr()
+    assert code == 2
+    envelope = json.loads(captured.out.splitlines()[-1])
+    assert envelope["schema"] == installer.PREFERENCE_CONFLICT_SCHEMA
+    assert "terminal.shell" in json.dumps(envelope)
+    assert "/usr/bin/fish" not in captured.out
+    assert "/usr/bin/fish" not in captured.err
+    assert "Traceback" not in captured.err
+    assert "^^^^" not in captured.err
+    _resolve(roots, capsys, status="ready")
