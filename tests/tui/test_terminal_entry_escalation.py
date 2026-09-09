@@ -52,13 +52,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CORE_IMPORT_ROOT = REPO_ROOT / "vibecrafted-core"
 CANONICAL_PROJECT_PYTHON = (REPO_ROOT / "scripts" / "project-python").resolve()
-SHELL_SH = (
-    CORE_IMPORT_ROOT
-    / "vibecrafted_core"
-    / "runtime"
-    / "shell"
-    / "vetcoders.sh"
-)
+SHELL_SH = CORE_IMPORT_ROOT / "vibecrafted_core" / "runtime" / "shell" / "vetcoders.sh"
 PRIMARY_SHELL = REPO_ROOT / "config" / "alacritty" / "launch-primary-shell.zsh"
 
 # The operator's terminal is not the inside of a dispatched worker. A worker
@@ -474,9 +468,7 @@ def _is_canonical_project_python(path: Path) -> bool:
 
 def _is_owned_handoff_python(python_path: str | Path) -> bool:
     path = Path(python_path)
-    return _is_canonical_project_python(path) or _is_interpreter_python_name(
-        path.name
-    )
+    return _is_canonical_project_python(path) or _is_interpreter_python_name(path.name)
 
 
 def _assert_owned_handoff_python(python_path: Path, owner: list[str]) -> None:
@@ -509,7 +501,9 @@ def _spawn_handoff(hosted: list[str]) -> tuple[list[str], list[str], dict]:
     owner = _spawn_owner_argv(hosted)
     pythonpath_tokens = [token for token in owner if token.startswith("PYTHONPATH=")]
     assert pythonpath_tokens, owner
-    imported = Path(pythonpath_tokens[0].split("=", 1)[1].split(os.pathsep)[0]).resolve()
+    imported = Path(
+        pythonpath_tokens[0].split("=", 1)[1].split(os.pathsep)[0]
+    ).resolve()
     assert imported == CORE_IMPORT_ROOT.resolve(), owner
     _assert_owned_handoff_python(_handoff_python_path(owner), owner)
     assert owner[owner.index("-m") + 1] == "vibecrafted_core.spawn", owner
@@ -574,11 +568,15 @@ def _synthetic_spawn_hosted(
 ) -> list[str]:
     """Build a complete spawn-handoff argv around a chosen python token."""
     selected_root = (root or REPO_ROOT).resolve()
-    payload = admission if admission is not None else {
-        "skill": "resume",
-        "agent": provider,
-        "root": str(selected_root),
-    }
+    payload = (
+        admission
+        if admission is not None
+        else {
+            "skill": "resume",
+            "agent": provider,
+            "root": str(selected_root),
+        }
+    )
     admission_file.write_text(json.dumps(payload), encoding="utf-8")
     command = " ".join(
         [
@@ -1056,7 +1054,9 @@ def test_project_bound_live_session_is_reused(tmp_path: Path) -> None:
     )
     assert f"TARGET=[{BOUND_SESSION}]" in result.stdout, result.stdout + result.stderr
     assert "TARGET=[mlx-batch-runner]" not in result.stdout
-    assert f"workspace resolve --root {project} --env" in calls.read_text(encoding="utf-8")
+    assert f"workspace resolve --root {project} --env" in calls.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_unrelated_live_sessions_do_not_block_the_project(tmp_path: Path) -> None:
@@ -2609,7 +2609,7 @@ def test_rewrite_contract_root_argv_preserves_prompt_and_dashdash_payload(
 def test_nested_relative_root_survives_the_child_reparse_under_zsh(
     tmp_path: Path,
 ) -> None:
-    """    The bash P0 fix (test_nested_relative_root_survives_the_child_reparse)
+    """The bash P0 fix (test_nested_relative_root_survives_the_child_reparse)
     held only under bash: the same `--root child` case must open the correct
     nested project, and the child owner must carry the absolute rewrite, when
     the operator's login shell is zsh.
@@ -2851,8 +2851,17 @@ def test_terminal_entry_drops_owned_generation_bins_from_a_polluted_parent(
     _write(founder_bin / "founder-tool", "#!/bin/sh\nprintf founder-tool\n")
     inherited = os.pathsep.join(
         [
-            "", str(stale_bins[0]), str(founder_bin), str(stale_bins[1]),
-            str(lookalike), str(selected_bin), str(stale_bins[2]), "", "/usr/bin", "/bin", "",
+            "",
+            str(stale_bins[0]),
+            str(founder_bin),
+            str(stale_bins[1]),
+            str(lookalike),
+            str(selected_bin),
+            str(stale_bins[2]),
+            "",
+            "/usr/bin",
+            "/bin",
+            "",
         ]
     )
 
@@ -2860,7 +2869,13 @@ def test_terminal_entry_drops_owned_generation_bins_from_a_polluted_parent(
         tmp_path, runtime_home=runtime_home, inherited_path=inherited
     )
     assert str(receipt["path"]).split(os.pathsep) == [
-        "", str(founder_bin), str(lookalike), "", "/usr/bin", "/bin", ""
+        "",
+        str(founder_bin),
+        str(lookalike),
+        "",
+        "/usr/bin",
+        "/bin",
+        "",
     ]
     assert receipt["founder_tool"] == str(founder_bin / "founder-tool")
     assert receipt["runtime_home"] == str(runtime_home)
@@ -2879,7 +2894,9 @@ def test_terminal_entry_path_sanitation_is_idempotent_for_clean_custom_root(
     _write(founder_bin / "founder-tool", "#!/bin/sh\nprintf founder-tool\n")
     clean = os.pathsep.join([str(founder_bin), "", str(lookalike), "/usr/bin", "/bin"])
 
-    receipt = _run_terminal_path_entry(tmp_path, runtime_home=runtime_home, inherited_path=clean)
+    receipt = _run_terminal_path_entry(
+        tmp_path, runtime_home=runtime_home, inherited_path=clean
+    )
     assert receipt["path"] == clean
     assert receipt["founder_tool"] == str(founder_bin / "founder-tool")
 
@@ -2896,7 +2913,14 @@ def test_terminal_entry_anchors_custom_release_cleanup_on_its_selected_root(
     for directory in (stale, selected, lookalike, stale_parent_bin):
         directory.mkdir(parents=True, exist_ok=True)
     inherited = os.pathsep.join(
-        [str(stale), str(lookalike), str(selected), str(stale_parent_bin), "/usr/bin", "/bin"]
+        [
+            str(stale),
+            str(lookalike),
+            str(selected),
+            str(stale_parent_bin),
+            "/usr/bin",
+            "/bin",
+        ]
     )
 
     receipt = _run_terminal_path_entry(
@@ -2987,11 +3011,7 @@ def test_interpreter_start_failure_is_not_reported_as_accepted(
             "VIBECRAFTED_PYTHON": sys.executable,
             "PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin",
         },
-        prelude=(
-            "_vetcoders_internal_python() { "
-            f'printf "%s\\n" "{fake_python}"; '
-            "}"
-        ),
+        prelude=(f'_vetcoders_internal_python() {{ printf "%s\\n" "{fake_python}"; }}'),
         expect_launch=False,
         shell=shell,
     )
@@ -3033,11 +3053,7 @@ def test_driver_popen_failure_is_not_reported_as_accepted(
             "VIBECRAFTED_PYTHON": sys.executable,
             "PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin",
         },
-        prelude=(
-            "_vetcoders_internal_python() { "
-            f'printf "%s\\n" "{fake_python}"; '
-            "}"
-        ),
+        prelude=(f'_vetcoders_internal_python() {{ printf "%s\\n" "{fake_python}"; }}'),
         expect_launch=False,
         shell=shell,
     )
