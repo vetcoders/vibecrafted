@@ -678,6 +678,11 @@ acquire_lock() {
     "$$" "$(escape_json "$(process_lstart "$$")")" "$(escape_json "$TRANSACTION")")"
 }
 
+# Called by the EXIT trap installed before acquire_lock. ShellCheck 0.11.0
+# models this script's final `exit 0` as an edge that skips EXIT handlers,
+# so a trap-only function reads as uncalled (SC2329). The trap is the call;
+# the descriptor must stay open until the transaction ends.
+# shellcheck disable=SC2329
 release_lock() {
   # Close only this process's descriptor. Never unlink held or the lock dir:
   # removing the inode would let two recoverers flock two names.

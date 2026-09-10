@@ -377,6 +377,12 @@ if [[ "${VIBECRAFTED_RUNTIME_PACK_HARNESS:-}" == "1" ]]; then
   pack_harness=1
 fi
 
+# Called by the EXIT trap installed below. ShellCheck 0.11.0 models a
+# script-final `exit` as an edge that leaves the graph without running EXIT
+# handlers, so a trap-only function reads as uncalled (SC2329). The e37
+# installer ended in `exec` and never reached that edge; this one must
+# capture the installer status, so the trap is the call site.
+# shellcheck disable=SC2329
 cleanup() {
   local status=$?
   local _attempt
@@ -404,6 +410,9 @@ cleanup() {
   fi
   return "$status"
 }
+# Called by the TERM/INT/HUP traps installed below; see the SC2329 note on
+# cleanup for why ShellCheck cannot see a trap-only call site here.
+# shellcheck disable=SC2329
 terminate_installer_child() {
   local signal="$1"
   local _attempt
