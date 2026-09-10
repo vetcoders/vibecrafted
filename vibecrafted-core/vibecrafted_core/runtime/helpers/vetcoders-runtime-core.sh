@@ -214,6 +214,7 @@ _vetcoders_ambient_project_root() {
 # an ambient project root, then the caller's repository. Session naming, the
 # terminal cwd, AICX and the provider cwd all read THIS, so they cannot drift
 # apart mid-flight.
+# shellcheck disable=SC2120 # Optional explicit root; most callers use ambient ownership.
 _vetcoders_effective_project_root() {
   local root="${1:-${_vetcoders_contract_root:-}}"
   [[ -n "$root" ]] || root="$(_vetcoders_ambient_project_root)"
@@ -499,6 +500,7 @@ _vetcoders_operator_place_session_name() {
     return 0
   fi
   local root_dir="" resolved="" python_spec py import_root
+  # shellcheck disable=SC2119 # Intentionally request the ambient-owner fallback.
   root_dir="$(_vetcoders_effective_project_root)"
 
   # Physical owner first: the selected generation's CLI is the same catalogue

@@ -520,6 +520,7 @@ _vetcoders_launch_interactive_declaration() {
   [[ -z "$receipt" ]] || printf '%s\n' "$receipt"
   # The tab exists, so the terminal may now be handed over. This blocks until
   # the Founder detaches, which is exactly what they asked for.
+  # shellcheck disable=SC2119 # No override: attach the prepared ambient target.
   _vetcoders_attach_prepared_vc_frame_session
 }
 
@@ -1189,6 +1190,7 @@ _vetcoders_mark_pending_vc_frame_attach() {
 # create path above already uses (env -u ... attach --create-background) —
 # so the parent shell's targeting state and the explicit session argument are
 # untouched, only the child's inherited attachment context is.
+# shellcheck disable=SC2120 # Optional prepared target override for direct callers.
 _vetcoders_attach_prepared_vc_frame_session() {
   # Declared-workspace entry from a LIVE attached client elsewhere: move that
   # client onto the prepared session (Frame's own switch-session, the same
