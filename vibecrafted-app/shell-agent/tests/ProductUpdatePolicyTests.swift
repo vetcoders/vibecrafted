@@ -341,10 +341,15 @@ struct ProductUpdatePolicyTests {
     signature: Data = Data(repeating: 3, count: 256),
     proof: ProductUpdateProof = validProof(),
     verifySignature: Result<Void, Error> = .success(()),
-    installPack: @escaping (ProductUpdateCandidate, URL, (Result<ProductUpdateIdentity, Error>) -> Void) -> Void = { _, _, _ in
+    installPack: @escaping (
+      ProductUpdateCandidate, URL, @escaping (Result<ProductUpdateIdentity, Error>) -> Void
+    ) -> () -> Void = { _, _, _ in
       fatalError("pack must not publish")
     },
-    replaceApp: @escaping (ProductUpdateReplacementRequest, (Result<ProductUpdateReplacementAdmission, Error>) -> Void) -> Void = { _, _ in
+    replaceApp: @escaping (
+      ProductUpdateReplacementRequest,
+      @escaping (Result<ProductUpdateReplacementAdmission, Error>) -> Void
+    ) -> () -> Void = { _, _ in
       fatalError("app must not replace")
     },
     closeUI: @escaping () -> Void = {},
@@ -399,14 +404,8 @@ struct ProductUpdatePolicyTests {
           completion(.success(proof))
           return {}
         },
-        installPack: { candidate, url, completion in
-          installPack(candidate, url, completion)
-          return {}
-        },
-        replaceApp: { request, completion in
-          replaceApp(request, completion)
-          return {}
-        },
+        installPack: installPack,
+        replaceApp: replaceApp,
         extractApp: { _, destination, completion in
           try? FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
           completion(.success(destination))
@@ -423,7 +422,10 @@ struct ProductUpdatePolicyTests {
         resolveProductUpdateChannel(
           feedURLString: nil, publicKeyURL: writeTemp("k.pub", Data("k".utf8)), helperURL: nil)
       },
-      installPack: { _, _, _ in packs += 1 })
+      installPack: { _, _, _ in
+        packs += 1
+        return {}
+      })
     coordinator.checkForUpdates()
     try wait { coordinator.progress.phase == .unavailable }
     try require(packs == 0, "missing feed reached the installer")
@@ -436,8 +438,14 @@ struct ProductUpdatePolicyTests {
     var replaces = 0
     let coordinator = makeCoordinator(
       verifySignature: .failure(ProductUpdateTrustError.signatureInvalid),
-      installPack: { _, _, _ in packs += 1 },
-      replaceApp: { _, _ in replaces += 1 })
+      installPack: { _, _, _ in
+        packs += 1
+        return {}
+      },
+      replaceApp: { _, _ in
+        replaces += 1
+        return {}
+      })
     coordinator.checkForUpdates()
     try wait { coordinator.progress.phase == .refused }
     try require(packs == 0 && replaces == 0, "forged signature reached mutation")
@@ -460,12 +468,13 @@ struct ProductUpdatePolicyTests {
     var packs = 0
     var replaces = 0
     var closed = 0
-    var current = previousInstalled()
+    let current = previousInstalled()
     let coordinator = makeCoordinator(
       installed: { current },
       installPack: { _, _, completion in
         packs += 1
         completion(.success(matchingInstalled()))
+        return {}
       },
       replaceApp: { request, completion in
         replaces += 1
@@ -478,6 +487,7 @@ struct ProductUpdatePolicyTests {
               transactionURL: request.transactionURL,
               transactionID: request.transactionID ?? "test-txn",
               ready: true)))
+        return {}
       },
       closeUI: { closed += 1 })
     coordinator.checkForUpdates()
@@ -503,8 +513,12 @@ struct ProductUpdatePolicyTests {
             ProductUpdateIdentity(
               appGeneration: admitted.generation, packGeneration: admitted.generation,
               sourceRevision: admitted.sourceRevision)))
+        return {}
       },
-      replaceApp: { _, _ in replaces += 1 })
+      replaceApp: { _, _ in
+        replaces += 1
+        return {}
+      })
     coordinator.checkForUpdates()
     try wait { coordinator.progress.canInstall }
     coordinator.installUpdate()
@@ -517,9 +531,13 @@ struct ProductUpdatePolicyTests {
   static func testCoordinatorHelperUnableToReplaceIsRetained() throws {
     var packs = 0
     let coordinator = makeCoordinator(
-      installPack: { _, _, _ in packs += 1 },
+      installPack: { _, _, _ in
+        packs += 1
+        return {}
+      },
       replaceApp: { _, completion in
         completion(.failure(ProductUpdateReplacementError.replaceFailed("destination locked")))
+        return {}
       })
     coordinator.checkForUpdates()
     try wait { coordinator.progress.canInstall }
@@ -1443,6 +1461,7 @@ struct ProductUpdatePolicyTests {
               transactionURL: request.transactionURL,
               transactionID: request.transactionID ?? "test-txn",
               ready: true)))
+        return {}
       },
       closeUI: { closed += 1 },
       homeURL: blocked)
@@ -1470,6 +1489,7 @@ struct ProductUpdatePolicyTests {
               receiptURL: request.receiptURL,
               transactionURL: request.transactionURL,
               ready: false)))
+        return {}
       },
       closeUI: { closed += 1 })
     coordinator.checkForUpdates()
