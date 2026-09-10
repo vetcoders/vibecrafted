@@ -109,9 +109,10 @@ def test_doctor_runtime_receipt_findings_flag_drift_and_missing(
 
     findings = installer._doctor_runtime_receipt_findings()
 
-    assert [finding.level for finding in findings] == ["warn"]
+    assert [finding.level for finding in findings] == ["fail"]
     assert "drifted" in findings[0].message
     assert "missing" in findings[0].message
+    assert "--rescue --plan" in findings[0].message
 
     receipt_path.write_text(
         json.dumps({"schema": installer.RUNTIME_INSTALL_SCHEMA, "owned_files": {}}),

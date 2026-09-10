@@ -399,6 +399,7 @@ _ensure_helpers_loaded() {
     if [[ ! -r "$helper" ]]; then
       printf 'vibecrafted: selected runtime shell missing: %s\n' "$helper" >&2
       printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
+      printf 'If historical rollback bytes are missing: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack> --rescue --plan\n' >&2
       return 1
     fi
     export VIBECRAFTED_ROOT="$owner_root"
