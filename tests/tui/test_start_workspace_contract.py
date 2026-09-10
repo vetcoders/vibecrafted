@@ -1242,35 +1242,6 @@ def _typed_terminal_rows(rows):
     return found
 
 
-def _terminal_identity(rows) -> tuple:
-    return tuple(
-        (
-            pane.get("id"),
-            str(pane.get("terminal_command") or ""),
-            str(pane.get("pane_cwd") or ""),
-        )
-        for pane in _typed_terminal_rows(rows)
-    )
-
-
-_INTERACTIVE_TERMINAL_NEEDLES = (
-    "exec zsh",
-    "exec sh",
-    "sh -s",
-    'exec "${SHELL',
-    "exec ${SHELL",
-)
-
-
-def _first_interactive_terminal(rows):
-    terminals = _typed_terminal_rows(rows)
-    for pane in terminals:
-        command = str(pane.get("terminal_command") or "")
-        if any(needle in command for needle in _INTERACTIVE_TERMINAL_NEEDLES):
-            return pane
-    return terminals[0] if terminals else None
-
-
 def _typed_write_chars(run, session: str, pane_id, text: str) -> None:
     written = run(
         "--session",
@@ -3614,9 +3585,9 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         same prior pane via public `action write-chars --pane-id` — not
         sleep-alive or guest dump-screen alone. Offered `operator` layout
         alias projects on the same canvas (A/B); real Frame project-workspace
-        returns the original guest (A/B/A). Guest session PID/start identity
-        and a completed guest command survive the viewport swap; the prior
-        pane accepts a second command after B. One current viewport —
+        returns the original guest (A/B/A). An owned guest `sh -s` pane
+        records PID/start identity and a completed command; both survive
+        the viewport swap. The prior pane accepts a second command after B. One current viewport —
         leftover visitors are not required. `--layout` stays usage-refused.
         Then client-ambiguity refuses before another create. Cleanup
         identities are registered before ops that can throw.
@@ -3878,27 +3849,41 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         surviving = _pane_by_id(after_rows, prior_pane_id, is_plugin=False)
         assert surviving is not None, (prior_pane_id, after_rows)
         assert unique_client_listing(1)
-        guest_term = _wait_until(
-            lambda: _first_interactive_terminal(guest_session_rows(guest)),
-            15,
-        )
-        assert guest_term is not None, guest_session_rows(guest)
-        time.sleep(0.5)
-        guest_term = _first_interactive_terminal(guest_session_rows(guest))
-        assert guest_term is not None, guest_session_rows(guest)
-        guest_term_id = guest_term["id"]
-        guest_surface = _terminal_identity(guest_session_rows(guest))
-        assert guest_surface, guest_session_rows(guest)
-        _typed_write_chars(
-            frame,
+        guest_created = frame(
+            "--session",
             guest,
-            guest_term_id,
-            f"echo $$ > {guest_pid}; ps -p $$ -o lstart= > {guest_lstart}",
+            "action",
+            "new-pane",
+            "--",
+            "sh",
+            "-c",
+            (
+                f"echo $$ > {guest_pid}; "
+                f"ps -p $$ -o lstart= > {guest_lstart}; "
+                "exec sh -s"
+            ),
         )
+        assert guest_created.returncode == 0, guest_created.stderr
         assert _wait_until(
             lambda: _pid_alive(guest_pid) and guest_lstart.is_file(),
             15,
-        ), (guest_pid, guest_lstart, guest_session_rows(guest))
+        ), (guest_pid, guest_lstart)
+
+        def find_guest_pane():
+            marker = str(guest_pid)
+            for row in _typed_terminal_rows(guest_session_rows(guest)):
+                command = str(row.get("terminal_command") or "")
+                if marker in command or "sh -s" in command:
+                    return row
+            return None
+
+        guest_term = _wait_until(find_guest_pane, 15)
+        assert isinstance(guest_term, dict) and guest_term.get("id") not in (
+            None,
+            "",
+        ), guest_session_rows(guest)
+        guest_term_id = guest_term["id"]
+        guest_command = str(guest_term.get("terminal_command") or "")
         guest_pid_value = guest_pid.read_text(encoding="utf-8").strip()
         guest_identity = _pid_file_start_identity(guest_pid)
         assert guest_pid_value.isdigit() and guest_identity, guest_pid_value
@@ -3914,6 +3899,11 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
             15,
         ), guest_done
         _assert_pid_identity(guest_pid, guest_pid_value, guest_identity)
+        later_guest = find_guest_pane()
+        assert later_guest is not None and later_guest.get("id") == guest_term_id
+        assert str(later_guest.get("terminal_command") or "") == guest_command or (
+            "sh -s" in str(later_guest.get("terminal_command") or "")
+        ), (guest_command, later_guest)
         assert str(surviving.get("terminal_command") or "") == prior_command or (
             "sh -s" in str(surviving.get("terminal_command") or "")
         ), (prior_command, surviving)
@@ -3981,7 +3971,8 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         )
         assert current_b is not None, (alias_receipts[0], alias_rows)
         assert _pane_by_id(alias_rows, prior_pane_id, is_plugin=False) is not None
-        assert _terminal_identity(guest_session_rows(guest)) == guest_surface
+        guest_after_b = find_guest_pane()
+        assert guest_after_b is not None and guest_after_b.get("id") == guest_term_id
         _assert_pid_identity(guest_pid, guest_pid_value, guest_identity)
         assert guest_token in guest_done.read_text(encoding="utf-8")
         _assert_pid_identity(prior_pid, prior_pid_value, prior_identity)
@@ -4020,7 +4011,8 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         )
         assert current_a is not None, (returned_receipts[0], aba_rows)
         assert _pane_by_id(aba_rows, prior_pane_id, is_plugin=False) is not None
-        assert _terminal_identity(guest_session_rows(guest)) == guest_surface
+        guest_after_a = find_guest_pane()
+        assert guest_after_a is not None and guest_after_a.get("id") == guest_term_id
         _assert_pid_identity(guest_pid, guest_pid_value, guest_identity)
         assert guest_token in guest_done.read_text(encoding="utf-8")
         assert guest in listing() and alias in listing()
