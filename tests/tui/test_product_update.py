@@ -849,6 +849,7 @@ def _isolated_product_env(
         "VIBECRAFTED_PYTHON",
         "VIBECRAFTED_REPO",
         "VIBECRAFTED_CONTROL_PLANE",
+        *_FRAME_IDENTITY_ENV,
     ):
         env.pop(key, None)
     env.update(
@@ -862,6 +863,7 @@ def _isolated_product_env(
             "XDG_CACHE_HOME": str(xdg_cache),
             "XDG_STATE_HOME": str(xdg_state),
             "VC_FRAME_SOCKET_DIR": str(sockets),
+            "ZELLIJ_SOCKET_DIR": str(sockets),
             "TMPDIR": str(scratch),
             "VIBECRAFTED_UPDATE_HELPER_HARNESS": "1",
         }
@@ -916,6 +918,37 @@ def _assert_receipt_names_live_app(receipt: dict[str, object], dest: Path) -> No
         resolved = str(Path(str(value)).resolve())
         assert ".vc-update-capture-" not in resolved, f"receipt root {name} names the capture"
         assert not resolved.endswith("/prior.app"), f"receipt root {name} still names prior.app"
+
+
+def _assert_shared_recovered_tuple(
+    *,
+    env: dict[str, str],
+    dest: Path,
+    tmp_path: Path,
+    prior_pub: dict[str, object],
+    settings: Path,
+    session: _IsolatedFrameSession,
+) -> None:
+    """App + runtime + config + wrappers share the isolated recover, same PTY."""
+    restored = _read_installer_publication(Path(env["VIBECRAFTED_RUNTIME_HOME"]))
+    assert restored["version"] == prior_pub["version"]
+    _assert_isolated_receipt_roots(restored["receipt"], tmp_path)  # type: ignore[arg-type]
+    _assert_receipt_names_live_app(restored["receipt"], dest)  # type: ignore[arg-type]
+    roots = restored["receipt"].get("roots")  # type: ignore[union-attr]
+    assert isinstance(roots, dict)
+    for key in ("runtime_home", "product_config", "crafted_home", "launcher_home"):
+        assert key in roots, f"recovered receipt missing shared {key}"
+        path = Path(str(roots[key]))
+        assert path.exists(), f"recovered {key} is missing: {path}"
+    launcher_home = Path(str(roots["launcher_home"]))
+    wrappers = [
+        entry.name
+        for entry in launcher_home.iterdir()
+        if entry.name == "vibecrafted" or entry.name.startswith("vc-")
+    ]
+    assert wrappers, f"recovered launcher_home has no product wrappers: {launcher_home}"
+    assert settings.read_text(encoding="utf-8").count("tuple-recovery-260910") == 1
+    session.assert_survived()
 
 
 def _app_helpers(dest: Path) -> tuple[Path, Path]:
@@ -1944,12 +1977,16 @@ class _IsolatedFrameSession:
         raise AssertionError("Frame PTY worker did not publish its process identity")
 
     def _record_server(self) -> None:
+        # eww includes the environment: the socket dir is often env-only,
+        # not argv. Require that isolated path so a Founder frame cannot match.
         listed = subprocess.check_output(
-            ["/bin/ps", "-ax", "-o", "pid=,command="], text=True
+            ["/bin/ps", "eww", "-ax", "-o", "pid=,command="], text=True
         )
         socket = str(self.socket_dir)
         for line in listed.splitlines():
-            if "vc-frame" not in line or socket not in line:
+            if socket not in line:
+                continue
+            if "vc-frame" not in line and "zellij" not in line:
                 continue
             pid = int(line.strip().split(None, 1)[0])
             start = subprocess.check_output(
@@ -2142,13 +2179,15 @@ def test_product_update_cross_generation_publish_then_restore_previous_tuple(
             assert payload["installer_status"] == "0"
             assert payload["pack_generation"] == prior_pub["version"]
             assert _identity_token(dest) == apps.prior_identity
-            restored = _read_installer_publication(runtime_home)
-            assert restored["version"] == prior_pub["version"]
-            assert "79001c3d" in str(restored["version"]).lower()
-            _assert_isolated_receipt_roots(restored["receipt"], tmp_path)  # type: ignore[arg-type]
-            _assert_receipt_names_live_app(restored["receipt"], dest)  # type: ignore[arg-type]
-            assert settings.read_text(encoding="utf-8").count("tuple-recovery-260910") == 1
-            session.assert_survived()
+            assert "79001c3d" in str(prior_pub["version"]).lower()
+            _assert_shared_recovered_tuple(
+                env=env,
+                dest=dest,
+                tmp_path=tmp_path,
+                prior_pub=prior_pub,
+                settings=settings,
+                session=session,
+            )
             evidence_path = tmp_path / "pack-evidence.json"
             assert not evidence_path.exists(), "caller-written pack enum is not installer proof"
             _assert_founder_identity_untouched(founder_before)
@@ -2407,16 +2446,19 @@ def test_product_update_whole_tuple_recovery_interrupted_then_resumed(
                     first.wait(timeout=5)
 
             assert _identity_token(dest) == apps.prior_identity
-            restored = _read_installer_publication(runtime_home)
-            assert restored["version"] == prior_pub["version"]
-            _assert_receipt_names_live_app(restored["receipt"], dest)  # type: ignore[arg-type]
             resume_payload = json.loads(
                 (tmp_path / "recover-resume.json").read_text(encoding="utf-8")
             )
             assert resume_payload["recovered"] is True
             assert resume_payload["pack_generation"] == prior_pub["version"]
-            assert settings.read_text(encoding="utf-8").count("tuple-recovery-260910") == 1
-            session.assert_survived()
+            _assert_shared_recovered_tuple(
+                env=env,
+                dest=dest,
+                tmp_path=tmp_path,
+                prior_pub=prior_pub,
+                settings=settings,
+                session=session,
+            )
             _assert_founder_identity_untouched(founder_before)
     finally:
         session.close()

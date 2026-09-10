@@ -298,12 +298,12 @@ verify_signed_app() {
     echo "refusing symlink app: $app" >&2
     return 1
   fi
-  if ! /usr/bin/codesign --verify --strict --verbose=4 "$app" >/dev/null 2>&1; then
+  if ! without_update_lock_fd /usr/bin/codesign --verify --strict --verbose=4 "$app" >/dev/null 2>&1; then
     echo "codesign --verify --strict failed: $app" >&2
     return 1
   fi
   local display
-  display="$(/usr/bin/codesign --display --verbose=4 "$app" 2>&1 || true)"
+  display="$(without_update_lock_fd /usr/bin/codesign --display --verbose=4 "$app" 2>&1 || true)"
   echo "$display" | /usr/bin/grep -q "^Identifier=${EXPECTED_IDENTIFIER}$" || {
     echo "codesign identifier is not ${EXPECTED_IDENTIFIER}" >&2
     return 1
@@ -392,7 +392,7 @@ journal_get() {
   if [[ ! -f "$JOURNAL" ]]; then
     return 1
   fi
-  /usr/bin/python3 - "$JOURNAL" "$key" <<'PY'
+  without_update_lock_fd /usr/bin/python3 - "$JOURNAL" "$key" <<'PY'
 import json, sys
 path, key = sys.argv[1], sys.argv[2]
 try:
@@ -513,7 +513,7 @@ relaunch_destination() {
     return 0
   fi
   write_journal "relaunching" "receipt already persisted"
-  if ! "$OPEN_BIN" -n "$DESTINATION"; then
+  if ! without_update_lock_fd "$OPEN_BIN" -n "$DESTINATION"; then
     echo "relaunch of $DESTINATION failed after the replacement receipt was written" >&2
     atomic_write "${RECEIPT}.relaunch.json" "$(printf '{"schema":"io.vetcoders.vibecrafted.app-replacement-relaunch.v1","destination":"%s","relaunched":false,"transaction":"%s"}' \
       "$(escape_json "$DESTINATION")" "$(escape_json "$TRANSACTION")")"
@@ -720,7 +720,7 @@ observe_published_generation() {
   runtime_home="${VIBECRAFTED_RUNTIME_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted}"
   pointer="$runtime_home/active.json"
   receipt="$runtime_home/install-receipt.json"
-  /usr/bin/python3 - "$pointer" "$receipt" <<'PY'
+  without_update_lock_fd /usr/bin/python3 - "$pointer" "$receipt" <<'PY'
 import json, sys
 pointer, receipt = sys.argv[1], sys.argv[2]
 try:
@@ -809,7 +809,7 @@ capture_owned_historical_pack() {
   shopt -u nullglob
   for f in "${files[@]}"; do
     if [[ -f "$f" && ! -L "$f" ]]; then
-      /bin/cp -p "$f" "$dest/$(basename "$f")" || return 1
+      without_update_lock_fd /bin/cp -p "$f" "$dest/$(basename "$f")" || return 1
     fi
   done
   if found="$(pack_payload_in_dir "$dest")"; then
@@ -847,11 +847,11 @@ locate_prior_pack() {
 prior_pack_generation() {
   local pack="$1"
   local member
-  member="$(/usr/bin/tar -tzf "$pack" | /usr/bin/grep -E '(^|/)VERSION$' | /usr/bin/head -n 1)" || true
+  member="$(without_update_lock_fd /usr/bin/tar -tzf "$pack" | /usr/bin/grep -E '(^|/)VERSION$' | /usr/bin/head -n 1)" || true
   if [[ -z "$member" ]]; then
     return 1
   fi
-  /usr/bin/tar -xOf "$pack" "$member" | tr -d '[:space:]'
+  without_update_lock_fd /usr/bin/tar -xOf "$pack" "$member" | tr -d '[:space:]'
 }
 
 installer_admits_allow_older() {
@@ -1447,7 +1447,7 @@ restore_previous_tuple() {
   if owned_prepared "$PREPARED" && [[ -e "$PREPARED" ]]; then
     remove_owned_prepared "$PREPARED" || true
   fi
-  if ! /usr/bin/ditto "$SOURCE" "$PREPARED"; then
+  if ! without_update_lock_fd /usr/bin/ditto "$SOURCE" "$PREPARED"; then
     echo "prepare of the previous app failed" >&2
     write_journal "failed" "restore prepare failed"
     exit 8
@@ -1596,7 +1596,7 @@ require_exact_identity "$SOURCE" "$SOURCE_IDENTITY" "candidate source"
 
 if [[ -e "$DESTINATION" ]]; then
   write_journal "capturing" "unique owned capture"
-  if ! /usr/bin/ditto "$DESTINATION" "$PRIOR"; then
+  if ! without_update_lock_fd /usr/bin/ditto "$DESTINATION" "$PRIOR"; then
     echo "unique capture of the previous app failed" >&2
     write_journal "failed" "capture failed"
     exit 7
@@ -1621,7 +1621,7 @@ if [[ -e "$DESTINATION" ]]; then
   hold_if "captured" || exit 18
 
   write_journal "preparing" "candidate copy"
-  if ! /usr/bin/ditto "$SOURCE" "$PREPARED"; then
+  if ! without_update_lock_fd /usr/bin/ditto "$SOURCE" "$PREPARED"; then
     echo "prepare of the candidate app failed" >&2
     write_journal "failed" "prepare failed"
     if [[ -e "$PREPARED" ]]; then
@@ -1682,7 +1682,7 @@ if [[ -e "$DESTINATION" ]]; then
   fail_after_if "adopted"
 else
   write_journal "preparing" "candidate copy"
-  if ! /usr/bin/ditto "$SOURCE" "$PREPARED"; then
+  if ! without_update_lock_fd /usr/bin/ditto "$SOURCE" "$PREPARED"; then
     echo "prepare of the candidate app failed" >&2
     write_journal "failed" "prepare failed"
     if [[ -e "$PREPARED" ]]; then
