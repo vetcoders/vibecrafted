@@ -252,9 +252,18 @@ def test_product_update_source_contract() -> None:
     assert "without_update_lock_fd" in helper
     assert "without_update_lock_fd /bin/mv" in helper
     assert "if ! /bin/mv" not in helper
-    assert "historical-runtime-pack" in helper
-    assert "owned_historical_pack" in helper
-    assert "capture_owned_historical_pack" in helper
+    # One rollback authority: the pack sealed inside the verified prior.app.
+    # An owned copy beside the capture, and a journalled path read back as input,
+    # were both second sources of truth and are gone.
+    assert "historical-runtime-pack" not in helper
+    assert "owned_historical_pack" not in helper
+    assert "capture_owned_historical_pack" not in helper
+    assert "journal_get prior_pack" not in helper
+    assert "journal_get prior_generation" not in helper
+    assert 'locate_prior_pack() {' in helper
+    assert "resolve_prior_runtime" in helper
+    assert "published_is_prior_generation" in helper
+    assert '"${app}/Contents/Resources/runtime-pack"' in helper
     assert "owned_displaced" in helper
     assert "journal_require operation" in helper
     assert "productUpdateObserveRuntimeEvidence" in transaction
@@ -283,7 +292,28 @@ def test_product_update_source_contract() -> None:
     assert "_installed_frame_engine" in authored
     assert "os.ttyname" in authored
     assert "os.isatty" in authored
-    assert "O_NOCTTY" in authored
+    # Commands reach the pane through the engine's addressed input, which the
+    # server delivers to the process stdin because the server owns the PTY
+    # master. A write to the tty slave lands in terminal OUTPUT, not input, so
+    # that direction must not come back.
+    assert "write-chars" in authored
+    assert "--pane-id" in authored
+    assert "dump-screen" in authored
+    assert "list-panes" in authored
+    assert "VCREPLY" in authored
+    # AST, not a text search: a literal ban would match its own assertion.
+    session_class = next(
+        node
+        for node in ast.walk(ast.parse(authored))
+        if isinstance(node, ast.ClassDef) and node.name == "_IsolatedFrameSession"
+    )
+    assert not any(
+        isinstance(child, ast.Call) and _call_func_name(child) == "open"
+        for child in ast.walk(session_class)
+    ), "the Frame proof must not open the tty slave or any command file"
+    worker_source = _FRAME_PTY_WORKER
+    assert "open(" not in worker_source, "the pane worker must not use a file channel"
+    assert "socket" not in worker_source, "the pane worker must not fake a socket"
     assert "installed vc-frame engine is required" in authored
     assert "--create-background" in authored
     assert "delete-session" in authored
@@ -1818,26 +1848,22 @@ def _plant_custom_settings(env: dict[str, str]) -> Path:
     return settings
 
 
+# The pane worker speaks only through the PTY the Frame server gave it: it reads
+# commands from stdin and answers on stdout. No mailbox file, no socket — the
+# server holds the master, so an addressed pane write is the only real input.
 _FRAME_PTY_WORKER = """\
 import os
 import sys
 import time
-from pathlib import Path
 
-root = Path(os.environ["VC_UPDATE_FRAME_PROBE"])
-ident = root / "ident"
-reply = root / "reply"
-
-def atomic_write(path, body):
-    tmp = path.with_name(path.name + ".tmp." + str(os.getpid()))
-    tmp.write_text(body, encoding="utf-8")
-    os.replace(tmp, path)
+def emit(text):
+    sys.stdout.write(text + "\\n")
+    sys.stdout.flush()
 
 if not os.isatty(0):
     sys.stderr.write("probe pane stdin is not a PTY\\n")
     raise SystemExit(2)
-tty = os.ttyname(0)
-atomic_write(ident, str(os.getpid()) + " " + tty + "\\n")
+emit("VCIDENT " + str(os.getpid()) + " " + os.ttyname(0))
 while True:
     line = sys.stdin.readline()
     if not line:
@@ -1850,9 +1876,9 @@ while True:
     if len(nonce) != 16 or any(char not in "0123456789abcdef" for char in nonce):
         continue
     if command == "ping":
-        atomic_write(reply, nonce + " pong " + str(os.getpid()) + "\\n")
+        emit("VCREPLY " + nonce + " pong " + str(os.getpid()))
     elif command == "identify":
-        atomic_write(reply, nonce + " " + str(os.getpid()) + "\\n")
+        emit("VCREPLY " + nonce + " " + str(os.getpid()))
 """
 
 
@@ -1862,6 +1888,14 @@ class _IsolatedFrameSession:
     Create path matches tests/tui/test_start_workspace_contract.py section 8:
     `--new-session-with-layout` plus `attach --create-background`. A layout pane
     hosts the PTY worker used for pid/lstart identity and command roundtrip.
+
+    Commands travel the engine's own addressed pane input
+    (`action write-chars --pane-id` plus a CR through `action write`), which the
+    server delivers to the pane process stdin because the server owns the PTY
+    master. Replies are read back from that process's stdout through
+    `action dump-screen --pane-id`. Writing to the tty slave would land in the
+    terminal's output queue instead, which is not process input at all.
+
     Teardown is kill-session + delete-session --force + this exclusively
     created /tmp directory only.
     """
@@ -1877,6 +1911,7 @@ class _IsolatedFrameSession:
         self.probe = self.root / "p"
         self.session = self.tag
         self.frame = _installed_frame_engine()
+        self.pane_id = ""
         self.worker_pid = 0
         self.worker_start = ""
         self.worker_tty = ""
@@ -1902,6 +1937,7 @@ class _IsolatedFrameSession:
             assert created.returncode == 0, created.stderr or created.stdout
             listing = self._frame("list-sessions", "--no-formatting")
             assert self.session in listing.stdout, listing.stdout or listing.stderr
+            self._resolve_pane()
             self._wait_worker()
             self._record_server()
             assert self.roundtrip("identify") == str(self.worker_pid)
@@ -1944,7 +1980,6 @@ class _IsolatedFrameSession:
                 "VC_FRAME_CONFIG_FILE": str(self.config_dir / "config.kdl"),
                 "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
                 "VIBECRAFTED_VC_FRAME_BIN": str(self.frame),
-                "VC_UPDATE_FRAME_PROBE": str(self.probe),
             }
         )
         return env
@@ -1961,47 +1996,92 @@ class _IsolatedFrameSession:
             timeout=timeout,
         )
 
-    def _wait_worker(self) -> None:
-        ident = self.probe / "ident"
+    def _action(self, *args: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+        # Address this session explicitly: a Founder frame must never be reachable.
+        return self._frame("--session", self.session, "action", *args, timeout=timeout)
+
+    def _resolve_pane(self) -> None:
+        """Identify the pane by real ownership: the command it is running."""
         deadline = time.time() + 20
+        last = ""
         while time.time() < deadline:
-            if ident.is_file():
+            listed = self._action("list-panes", "--json", "--all")
+            last = listed.stderr or listed.stdout
+            if listed.returncode == 0:
                 try:
-                    raw = ident.read_text(encoding="utf-8")
-                except OSError:
-                    time.sleep(0.05)
-                    continue
-                if not raw.endswith("\n"):
-                    time.sleep(0.05)
-                    continue
-                parts = raw.strip().split()
-                if (
-                    len(parts) == 2
-                    and parts[0].isdigit()
-                    and parts[1].startswith("/dev/")
-                ):
-                    self.worker_pid = int(parts[0])
-                    self.worker_tty = parts[1]
-                    self.worker_start = subprocess.check_output(
-                        ["/bin/ps", "-p", str(self.worker_pid), "-o", "lstart="],
-                        text=True,
-                    ).strip()
-                    if self.worker_start and os.path.exists(self.worker_tty):
+                    panes = json.loads(listed.stdout)
+                except json.JSONDecodeError:
+                    panes = []
+                for pane in panes:
+                    if pane.get("is_plugin"):
+                        continue
+                    command = str(pane.get("terminal_command") or "")
+                    if str(self.worker) in command and not pane.get("exited"):
+                        self.pane_id = f"terminal_{pane['id']}"
+                        self._assert_pane_fits_protocol(pane)
                         return
-            time.sleep(0.05)
-        raise AssertionError("Frame PTY worker did not publish its process identity")
+            time.sleep(0.1)
+        raise AssertionError(f"isolated Frame pane running the probe was not found: {last}")
+
+    @staticmethod
+    def _assert_pane_fits_protocol(pane: dict[str, object]) -> None:
+        """A wrapped reply is an unreadable reply.
+
+        dump-screen returns rendered rows, so the widest protocol line
+        (`VCREPLY <16 hex> pong <pid>`) has to fit one row. If an engine default
+        ever shrinks the background pane, fail here with the reason instead of
+        timing out on a line that was only ever split in half.
+        """
+        width = pane.get("pane_content_columns") or pane.get("pane_columns")
+        if not isinstance(width, int):
+            return
+        needed = len("VCREPLY ") + 16 + len(" pong ") + 7
+        assert width >= needed, (
+            f"Frame pane is {width} columns; the reply protocol needs {needed} "
+            "before dump-screen wraps it"
+        )
+
+    def _dump(self) -> str:
+        dumped = self._action("dump-screen", "--pane-id", self.pane_id, "--full")
+        if dumped.returncode != 0:
+            return ""
+        return dumped.stdout
+
+    def _await_pane_line(self, prefix: str, timeout: float) -> str:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for line in self._dump().splitlines():
+                stripped = line.strip()
+                if stripped.startswith(prefix):
+                    return stripped[len(prefix) :]
+            time.sleep(0.1)
+        return ""
+
+    def _wait_worker(self) -> None:
+        # The worker announces itself on its own stdout, read back from the pane.
+        announced = self._await_pane_line("VCIDENT ", 20)
+        parts = announced.split()
+        if len(parts) != 2 or not parts[0].isdigit() or not parts[1].startswith("/dev/"):
+            raise AssertionError("Frame PTY worker did not publish its process identity")
+        self.worker_pid = int(parts[0])
+        self.worker_tty = parts[1]
+        self.worker_start = subprocess.check_output(
+            ["/bin/ps", "-p", str(self.worker_pid), "-o", "lstart="], text=True
+        ).strip()
+        assert self.worker_start, "Frame PTY worker has no start time"
+        assert os.path.exists(self.worker_tty), self.worker_tty
 
     def _record_server(self) -> None:
-        # eww includes the environment: the socket dir is often env-only,
-        # not argv. Require that isolated path so a Founder frame cannot match.
+        # eww includes the environment: the socket dir is often env-only, not
+        # argv. Require the isolated socket AND this engine running --server so a
+        # Founder frame (or any passer-by naming the path) cannot match.
         listed = subprocess.check_output(
             ["/bin/ps", "eww", "-ax", "-o", "pid=,command="], text=True
         )
         socket = str(self.socket_dir)
+        engine = str(self.frame)
         for line in listed.splitlines():
-            if socket not in line:
-                continue
-            if "vc-frame" not in line and "zellij" not in line:
+            if socket not in line or "--server" not in line or engine not in line:
                 continue
             pid = int(line.strip().split(None, 1)[0])
             start = subprocess.check_output(
@@ -2014,36 +2094,20 @@ class _IsolatedFrameSession:
         raise AssertionError("isolated Frame server process was not found")
 
     def roundtrip(self, command: str) -> str:
-        reply = self.probe / "reply"
+        """Send nonce+command to the pane's real input; read the process answer."""
+        assert self.pane_id, "Frame pane was not identified"
         nonce = secrets.token_hex(8)
-        if reply.exists():
-            try:
-                reply.unlink()
-            except FileNotFoundError:
-                pass
-        assert self.worker_tty, "Frame PTY worker did not publish a tty"
-        fd = os.open(self.worker_tty, os.O_WRONLY | os.O_NOCTTY)
-        try:
-            os.write(fd, f"{nonce} {command}\n".encode("utf-8"))
-        finally:
-            os.close(fd)
-        deadline = time.time() + 8
-        while time.time() < deadline:
-            if reply.is_file():
-                try:
-                    raw = reply.read_text(encoding="utf-8")
-                except OSError:
-                    time.sleep(0.05)
-                    continue
-                if not raw.endswith("\n"):
-                    time.sleep(0.05)
-                    continue
-                text = raw.strip()
-                prefix = nonce + " "
-                if text.startswith(prefix):
-                    return text[len(prefix) :]
-            time.sleep(0.05)
-        raise AssertionError(f"Frame PTY did not answer {command!r}")
+        typed = self._action("write-chars", "--pane-id", self.pane_id, f"{nonce} {command}")
+        assert typed.returncode == 0, typed.stderr or typed.stdout
+        # 13 is the CR a human Enter produces; the line discipline turns it into
+        # the newline readline() is waiting for.
+        entered = self._action("write", "--pane-id", self.pane_id, "13")
+        assert entered.returncode == 0, entered.stderr or entered.stdout
+        # Only worker output carries VCREPLY; the tty echo of the typed line does not.
+        answer = self._await_pane_line(f"VCREPLY {nonce} ", 12)
+        if not answer:
+            raise AssertionError(f"Frame pane did not answer {command!r}")
+        return answer
 
     def assert_survived(self) -> None:
         listing = self._frame("list-sessions", "--no-formatting")
@@ -2059,20 +2123,22 @@ class _IsolatedFrameSession:
         ).strip()
         assert tty_now and tty_now != "??"
         assert self.worker_tty.endswith(tty_now) or Path(self.worker_tty).name == tty_now
-        tty_fd = os.open(self.worker_tty, os.O_WRONLY | os.O_NOCTTY)
-        try:
-            assert os.isatty(tty_fd)
-        finally:
-            os.close(tty_fd)
         server_now = subprocess.check_output(
             ["/bin/ps", "-p", str(self.server_pid), "-o", "lstart="], text=True
         ).strip()
         assert server_now == self.server_start
+        # Same addressed pane, still running the same owned command.
+        pane_before = self.pane_id
+        self._resolve_pane()
+        assert self.pane_id == pane_before
+        # A NEW answer: liveness, not a replay of the startup roundtrip.
         assert self.roundtrip("ping") == f"pong {self.worker_pid}"
         assert self.roundtrip("identify") == str(self.worker_pid)
 
     def close(self) -> None:
         if self.frame is not None and self._prepared:
+            # kill-session already removes the session; delete-session may then
+            # report it as unknown, which is not a failure of teardown.
             self._frame("kill-session", self.session)
             self._frame("delete-session", self.session, "--force")
         if self.root.exists():
@@ -2225,70 +2291,6 @@ def test_product_update_cross_generation_publish_then_restore_previous_tuple(
         session.close()
 
 
-def test_product_update_whole_tuple_recovery_fails_without_historical_rollback_data(
-    tmp_path: Path,
-) -> None:
-    founder_before = _founder_identity_stamps()
-    env = _isolated_product_env(tmp_path)
-    runtime_home = Path(env["VIBECRAFTED_RUNTIME_HOME"])
-    with _SignedApps(tmp_path) as apps:
-        dest = apps.copy_prior(tmp_path / "Installed.app")
-        source = apps.copy_e37(tmp_path / "Candidate.app")
-        prior_pack = _install_signed_pack(apps.prior["pack"], dest, env)
-        assert prior_pack.returncode == 0, prior_pack.stderr or prior_pack.stdout
-        prior_pub = _read_installer_publication(runtime_home)
-        receipt = tmp_path / "receipt.json"
-        journal = _replace_prior_with_candidate(
-            dest=dest, source=source, receipt=receipt, apps=apps
-        )
-        apps.release(source)
-        published = _install_signed_pack(
-            apps.e37["pack"], dest, env, fail_after="published"
-        )
-        assert published.returncode == 42, published.stderr or published.stdout
-        e37_pub = _read_installer_publication(runtime_home)
-        capture = Path(journal["capture"])
-        prior_app = capture / "prior.app"
-        assert _identity_token(prior_app) == apps.prior_identity
-        sidecar = capture / "historical-runtime-pack"
-        assert sidecar.is_dir(), "replace must capture historical pack outside the signed app"
-        for child in sidecar.iterdir():
-            if child.is_file() and not child.is_symlink():
-                child.unlink()
-        recover_receipt = tmp_path / "recover-missing.json"
-        failed = _run_helper(
-            [
-                "--source",
-                str(prior_app),
-                "--destination",
-                str(dest),
-                "--receipt",
-                str(recover_receipt),
-                "--journal",
-                str(receipt) + ".journal.json",
-                "--transaction",
-                str(journal["transaction"]),
-                "--mode",
-                "recover",
-            ],
-            env={**_helper_env(), **env},
-            timeout=120,
-        )
-        err = (failed.stderr or "").lower()
-        assert failed.returncode == 19, failed.stderr or failed.stdout
-        assert "historical" in err
-        assert "codesign --verify --strict failed" not in err
-        assert not recover_receipt.is_file() or "recovered" not in recover_receipt.read_text(
-            encoding="utf-8"
-        )
-        assert _identity_token(dest) == apps.e37_identity
-        assert _identity_token(prior_app) == apps.prior_identity
-        still = _read_installer_publication(runtime_home)
-        assert still["version"] == e37_pub["version"]
-        assert still["version"] != prior_pub["version"]
-        _assert_founder_identity_untouched(founder_before)
-
-
 def test_product_update_whole_tuple_recovery_fails_on_damaged_signed_historical_app(
     tmp_path: Path,
 ) -> None:
@@ -2314,8 +2316,14 @@ def test_product_update_whole_tuple_recovery_fails_on_damaged_signed_historical_
         capture = Path(journal["capture"])
         prior_app = capture / "prior.app"
         pack_dir = prior_app / "Contents/Resources/runtime-pack"
-        if pack_dir.is_dir():
-            shutil.rmtree(pack_dir)
+        assert pack_dir.is_dir(), (
+            "the signed prior.app is the only rollback authority and must embed "
+            f"its Runtime Pack: {pack_dir}"
+        )
+        assert not (capture / "historical-runtime-pack").exists(), (
+            "replace must not mint a second rollback authority beside the capture"
+        )
+        shutil.rmtree(pack_dir)
         recover_receipt = tmp_path / "recover-damaged-signed.json"
         failed = _run_helper(
             [
@@ -2338,6 +2346,9 @@ def test_product_update_whole_tuple_recovery_fails_on_damaged_signed_historical_
         err = failed.stderr or ""
         assert failed.returncode == 15, err or failed.stdout
         assert "codesign --verify --strict failed" in err
+        assert "missing historical rollback data" not in err, (
+            "a broken seal must refuse at codesign, never reach the pack lookup"
+        )
         assert not recover_receipt.is_file() or "recovered" not in recover_receipt.read_text(
             encoding="utf-8"
         )
