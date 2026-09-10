@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 import pytest
-from _runtime_pack_fixture import seed_runtime_pack
+from _runtime_pack_fixture import _write_test_source_provenance, seed_runtime_pack
 
 from scripts import vetcoders_install as installer
 from tests.tui.test_runtime_pack_rescue import (
@@ -271,6 +271,117 @@ def _kill_fixture_pid(pid: int) -> None:
         time.sleep(0.02)
 
 
+_INSTALLER_MAIN_GUARD = 'if __name__ == "__main__":\n    sys.exit(main())\n'
+_PUBLICATION_HOLD_REQUEST = "publication-hold.request"
+_PUBLICATION_HOLD_READY = "publication-hold.ready"
+_PUBLICATION_HOLD_INSTALLER_SUFFIX = """
+_VC_TEST_ORIG_CHECKPOINT_RUNTIME_INSTALL_RECEIPT = _checkpoint_runtime_install_receipt
+
+
+def _checkpoint_runtime_install_receipt(runtime_home, receipt):
+    _VC_TEST_ORIG_CHECKPOINT_RUNTIME_INSTALL_RECEIPT(runtime_home, receipt)
+    if not isinstance(receipt, dict) or not receipt.get("config_transaction"):
+        return
+    cache = Path(os.environ.get("XDG_CACHE_HOME", "")).expanduser()
+    request = cache / "vibecrafted" / "publication-hold.request"
+    if not request.is_file():
+        return
+    ready = cache / "vibecrafted" / "publication-hold.ready"
+    ready.parent.mkdir(parents=True, exist_ok=True)
+    ready.write_text(
+        json.dumps({"pid": os.getpid(), "ppid": os.getppid()}, sort_keys=True)
+        + "\\n",
+        encoding="utf-8",
+    )
+    while request.is_file():
+        time.sleep(0.05)
+
+
+"""
+
+
+def _publication_hold_paths() -> tuple[Path, Path]:
+    cache = Path(os.environ["XDG_CACHE_HOME"]) / "vibecrafted"
+    return cache / _PUBLICATION_HOLD_REQUEST, cache / _PUBLICATION_HOLD_READY
+
+
+def _instrument_pack_installer_publication_hold(payload: Path) -> None:
+    """Pause the fixture pack installer after the real publication lease.
+
+    This is test-private source inside the signed tiny pack, not a production
+    flag or API. The first ``config_transaction`` receipt checkpoint is the
+    mid-publication phase documented for SIGKILL recovery.
+    """
+    installer_path = payload / "scripts/vetcoders_install.py"
+    text = installer_path.read_text(encoding="utf-8")
+    if "_VC_TEST_ORIG_CHECKPOINT_RUNTIME_INSTALL_RECEIPT" in text:
+        return
+    if _INSTALLER_MAIN_GUARD not in text:
+        raise AssertionError("fixture installer is missing the main guard")
+    installer_path.write_text(
+        text.replace(
+            _INSTALLER_MAIN_GUARD,
+            _PUBLICATION_HOLD_INSTALLER_SUFFIX + _INSTALLER_MAIN_GUARD,
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _start_public_wrapper(
+    *arguments: str, env: dict[str, str], logs: Path
+) -> tuple[subprocess.Popen[str], Path, Path]:
+    logs.mkdir(parents=True, exist_ok=True)
+    stdout_path = logs / "stdout.log"
+    stderr_path = logs / "stderr.log"
+    stdout_file = stdout_path.open("w", encoding="utf-8")
+    stderr_file = stderr_path.open("w", encoding="utf-8")
+    try:
+        proc = subprocess.Popen(
+            ["bash", str(WRAPPER), *arguments],
+            cwd=str(REPO_ROOT),
+            stdout=stdout_file,
+            stderr=stderr_file,
+            text=True,
+            env=env,
+        )
+    except Exception:
+        stdout_file.close()
+        stderr_file.close()
+        raise
+    setattr(proc, "_vc_log_handles", (stdout_file, stderr_file))
+    return proc, stdout_path, stderr_path
+
+
+def _close_wrapper_logs(proc: subprocess.Popen[str]) -> None:
+    handles = getattr(proc, "_vc_log_handles", (proc.stdout, proc.stderr))
+    for handle in handles:
+        if handle is not None and not handle.closed:
+            handle.close()
+
+
+def _read_hold_identity(ready: Path) -> tuple[int, int]:
+    payload = json.loads(ready.read_text(encoding="utf-8"))
+    return int(payload["pid"]), int(payload["ppid"])
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _reap_owned_pids(*pids: int | None) -> None:
+    seen: set[int] = set()
+    for pid in pids:
+        if pid is None or pid in seen or pid <= 1:
+            continue
+        seen.add(pid)
+        _kill_fixture_pid(pid)
+
+
 def test_public_wrapper_plan_then_apply_same_verified_pack(
     tmp_path: Path, installed, capsys
 ) -> None:
@@ -464,6 +575,142 @@ def test_public_wrapper_interrupted_resume_same_verified_pack(
     finalized = _load_receipt(paths)
     assert finalized["rescue"]["verified"] is True
     assert not finalized.get("rescue_pending")
+
+
+def test_public_wrapper_sigkill_mid_publication_resumes_same_verified_pack(
+    tmp_path: Path, roots, capsys
+) -> None:
+    """Public plan/apply + SIGKILL at the real publication lease, then resume.
+
+    The sibling in-process test injects ``RuntimeError`` and writes pending by
+    hand. This one must keep the journal/receipt the real wrapper+installer
+    emitted, or fail on those records.
+    """
+    paths = roots
+    payload = seed_runtime_pack(tmp_path / "pack-hold", version="9.9.9+hold")
+    _instrument_pack_installer_publication_hold(payload)
+    _write_test_source_provenance(payload)
+    _seal_runtime_pack_for_admission(payload)
+    _install(payload, capsys)
+    planted = _plant_missing_historical(paths)
+    archive, public_key = _sign_payload_archive(tmp_path / "signed-hold", payload)
+    env = _wrapper_env(public_key)
+    flags = _wrapper_flags("9.9.9+hold")
+    expected = _expected_payload_root(_cache_home(), archive).resolve()
+    hold_request, hold_ready = _publication_hold_paths()
+    hold_request.parent.mkdir(parents=True, exist_ok=True)
+    if hold_ready.exists():
+        hold_ready.unlink()
+
+    planned = _run_wrapper(
+        "--pack", str(archive), "--rescue", "--plan", *flags, env=env
+    )
+    assert planned.returncode == 0, planned.stderr
+    plan = _json_out(planned)
+    assert plan["schema"] == installer.RUNTIME_RESCUE_PLAN_SCHEMA
+    assert plan["status"] == "rescueable"
+    assert plan["target"]["payload_root"] == str(expected)
+    assert plan["target"]["inventory_verified"] is True
+    assert plan["target"]["provenance_verified"] is True
+    assert Path(plan["target"]["payload_root"]) == expected
+
+    hold_request.write_text("hold\n", encoding="utf-8")
+    apply_args = (
+        "--pack",
+        str(archive),
+        "--rescue",
+        "--apply",
+        "--plan-digest",
+        plan["plan_digest"],
+        *flags,
+    )
+    wrapper: subprocess.Popen[str] | None = None
+    installer_pid: int | None = None
+    stdout_path: Path | None = None
+    stderr_path: Path | None = None
+    try:
+        wrapper, stdout_path, stderr_path = _start_public_wrapper(
+            *apply_args, env=env, logs=tmp_path / "apply-hold"
+        )
+        wrapper_pid = wrapper.pid
+        try:
+            _wait_exists(hold_ready, timeout=60)
+        except AssertionError:
+            stdout = stdout_path.read_text(encoding="utf-8")
+            stderr = stderr_path.read_text(encoding="utf-8")
+            raise AssertionError(
+                "public apply never reached mid-publication "
+                f"rc={wrapper.poll()} stdout={stdout!r} stderr={stderr!r}"
+            ) from None
+        installer_pid, parent_pid = _read_hold_identity(hold_ready)
+        assert parent_pid == wrapper_pid
+        assert installer_pid != wrapper_pid
+        assert _pid_alive(installer_pid)
+        assert os.getpgid(installer_pid) == os.getpgid(wrapper_pid)
+
+        os.kill(wrapper_pid, signal.SIGKILL)
+        assert wrapper.wait(timeout=5) == -signal.SIGKILL
+        assert not _pid_alive(wrapper_pid)
+
+        journal_path = installer._runtime_rescue_journal_path(paths["runtime_home"])
+        assert journal_path.is_file(), "SIGKILL left no rescue journal"
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        assert journal["plan_digest"] == plan["plan_digest"]
+        assert journal["binding"]["payload_root"] == str(expected)
+        assert journal["binding"]["payload_sha256"]
+        interrupted = _load_receipt(paths)
+        assert interrupted.get("install_pending") is True
+        assert interrupted.get("config_transaction"), (
+            "SIGKILL did not leave the real publication lease; "
+            f"receipt keys={sorted(interrupted)}"
+        )
+        pending = interrupted.get("rescue_pending")
+        assert isinstance(pending, dict), (
+            "SIGKILL did not leave real rescue_pending; "
+            f"receipt keys={sorted(interrupted)}"
+        )
+        assert pending.get("plan_digest") == plan["plan_digest"]
+        assert pending.get("binding", {}).get("payload_root") == str(expected)
+        assert pending.get("binding", {}).get("payload_sha256")
+
+        if _pid_alive(installer_pid):
+            concurrent = _run_wrapper(*apply_args, env=env)
+            assert concurrent.returncode != 0, (
+                concurrent.stdout,
+                concurrent.stderr,
+            )
+            assert "concurrent" in concurrent.stderr
+            assert _pid_alive(installer_pid)
+            _kill_fixture_pid(installer_pid)
+            installer_pid = None
+        hold_request.unlink(missing_ok=True)
+
+        applied = _run_wrapper(*apply_args, env=env)
+        assert applied.returncode == 0, (applied.stdout, applied.stderr)
+        result = _json_out(applied)
+        assert result["schema"] == installer.RUNTIME_RESCUE_RESULT_SCHEMA
+        assert result["status"] == "rescued"
+        assert result["healthy_restorepoint"] is True
+        assert result["plan_digest"] == plan["plan_digest"]
+        finalized = _load_receipt(paths)
+        assert finalized["rescue"]["verified"] is True
+        assert finalized["rescue"]["healthy_restorepoint"] is True
+        assert not finalized.get("rescue_pending")
+        assert not finalized.get("install_pending")
+        assert not finalized.get("config_transaction")
+        for backup in planted:
+            assert not Path(backup).exists()
+        assert not expected.exists()
+    finally:
+        hold_request.unlink(missing_ok=True)
+        if wrapper is not None:
+            _reap_owned_pids(installer_pid, wrapper.pid)
+            if wrapper.poll() is None:
+                wrapper.kill()
+                wrapper.wait(timeout=5)
+            _close_wrapper_logs(wrapper)
+        else:
+            _reap_owned_pids(installer_pid)
 
 
 def test_public_wrapper_interrupted_resume_refuses_altered_pending_identity(
