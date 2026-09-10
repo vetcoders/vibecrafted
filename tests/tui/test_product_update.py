@@ -284,10 +284,26 @@ def test_product_update_source_contract() -> None:
     assert "os.ttyname" in authored
     assert "os.isatty" in authored
     assert "O_NOCTTY" in authored
+    assert "installed vc-frame engine is required" in authored
     assert "--create-background" in authored
     assert "delete-session" in authored
     assert "list-sessions" in authored
     tree = ast.parse(authored)
+    session_start = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "_IsolatedFrameSession":
+            for item in node.body:
+                if isinstance(item, ast.FunctionDef) and item.name == "start":
+                    session_start = item
+    assert session_start is not None, "_IsolatedFrameSession.start is missing"
+    assert not any(
+        isinstance(child, ast.Call) and _call_func_name(child) == "skip"
+        for child in ast.walk(session_start)
+    ), "whole-tuple Frame proof must not skip when the engine is missing"
+    assert any(
+        isinstance(child, ast.Call) and _call_func_name(child) == "fail"
+        for child in ast.walk(session_start)
+    ), "missing vc-frame engine must fail the recover proof"
     assigns_start_blank = False
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
@@ -583,6 +599,8 @@ def _unsigned_app(path: Path, marker: str) -> Path:
 
 def _helper_env(**extra: str) -> dict[str, str]:
     env = os.environ.copy()
+    for key in _FRAME_IDENTITY_ENV:
+        env.pop(key, None)
     env["VIBECRAFTED_UPDATE_HELPER_HARNESS"] = "1"
     env.update(extra)
     return env
@@ -595,7 +613,7 @@ def _run_helper(args: list[str], env: dict[str, str] | None = None, timeout: flo
         capture_output=True,
         text=True,
         timeout=timeout,
-        env=env or os.environ.copy(),
+        env=env if env is not None else _helper_env(),
     )
 
 
@@ -1868,7 +1886,9 @@ class _IsolatedFrameSession:
 
     def start(self) -> None:
         if self.frame is None:
-            pytest.skip("no installed vc-frame engine")
+            pytest.fail(
+                "installed vc-frame engine is required for whole-tuple recover proof"
+            )
         try:
             self._prepare()
             created = self._frame(
@@ -1940,11 +1960,6 @@ class _IsolatedFrameSession:
             text=True,
             timeout=timeout,
         )
-
-    def _atomic_write(self, path: Path, body: str) -> None:
-        tmp = path.with_name(f"{path.name}.{secrets.token_hex(8)}.tmp")
-        tmp.write_text(body, encoding="utf-8")
-        os.replace(tmp, path)
 
     def _wait_worker(self) -> None:
         ident = self.probe / "ident"
