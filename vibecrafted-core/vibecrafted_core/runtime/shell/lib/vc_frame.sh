@@ -134,8 +134,25 @@ _vetcoders_vc_terminal_primary_shell() {
   printf '%s\n' "$candidate"
 }
 
+# True only for the child a product-owned terminal launch created. A bare
+# `VIBECRAFTED_TERMINAL_ENTRY=1` can be inherited through arbitrary agent
+# generations, so it is not a re-entry boundary by itself.
+_vetcoders_has_owned_vc_terminal_entry() {
+  # Once accepted, retain the boundary only in this shell. Do not export it to
+  # a provider or another agent generation: descendants have their own cwd and
+  # surface contract and must be admitted independently.
+  [[ "${_VETCODERS_OWNED_TERMINAL_ENTRY:-}" == "1" ]] && return 0
+  [[ "${VIBECRAFTED_TERMINAL_ENTRY:-}" == "1" ]] || return 1
+  local front_door=""
+  front_door="$(_vetcoders_product_front_door vibecrafted 2>/dev/null || true)"
+  [[ -n "$front_door" && "${VIBECRAFTED_TERMINAL_ENTRY_OWNER:-}" == "$front_door" ]] || return 1
+  _VETCODERS_OWNED_TERMINAL_ENTRY=1
+  unset VIBECRAFTED_TERMINAL_ENTRY VIBECRAFTED_TERMINAL_ENTRY_OWNER
+  return 0
+}
+
 # True when this process is a public VC entry that owes the operator a visible
-# terminal. The signals are the real controlling terminal, one explicit
+# terminal. The signals are the real controlling terminal, one product-owned
 # re-entry boundary exported into the child, and -- for an inherited frame
 # marker or operator-session name -- the ENGINE's word that the named session
 # is a surface someone is attached to. The environment alone is never that
@@ -145,8 +162,9 @@ _vetcoders_vc_terminal_primary_shell() {
 # on the missing host or parked the provider tab where nobody was looking).
 _vetcoders_needs_vc_terminal_entry() {
   # The child we spawn re-enters the same entry; the boundary stops the loop
-  # even if the host somehow fails to hand us a PTY.
-  [[ -z "${VIBECRAFTED_TERMINAL_ENTRY:-}" ]] || return 1
+  # even if the host somehow fails to hand us a PTY. An unqualified marker is
+  # ambient process ancestry, not proof that this process owns that child.
+  _vetcoders_has_owned_vc_terminal_entry && return 1
   # A real terminal means the direct path is already correct — never reroute it.
   # (Deliberately no test flag here: a test that models the terminal child
   # sets the re-entry boundary above, the way the real child receives it.)
@@ -181,7 +199,7 @@ _vetcoders_open_entry_in_vc_terminal() {
   local front_door="$1"
   local project_root="$2"
   shift 2
-  local terminal_bin primary_shell
+  local terminal_bin primary_shell terminal_entry_owner
   terminal_bin="$(_vetcoders_vc_terminal_bin)" || {
     _vetcoders_vc_terminal_missing_message
     return 1
@@ -195,6 +213,10 @@ _vetcoders_open_entry_in_vc_terminal() {
   }
   [[ -n "$front_door" && -x "$front_door" ]] || {
     printf 'vc-terminal: product front door is not executable: %s\n' "$front_door" >&2
+    return 1
+  }
+  terminal_entry_owner="$(_vetcoders_product_front_door vibecrafted)" || {
+    printf 'vc-terminal: canonical Vibecrafted re-entry owner is unavailable.\n' >&2
     return 1
   }
   [[ -n "$project_root" && -d "$project_root" ]] || {
@@ -265,7 +287,8 @@ _vetcoders_open_entry_in_vc_terminal() {
   # first, before the poll below ever starts.
   local driver_rc=0
   VC_TERMINAL_ARGV_FILE="$argv_file" VC_TERMINAL_RECEIPT="$receipt" \
-    VIBECRAFTED_TERMINAL_ENTRY=1 "$python_bin" - <<'PY'
+    VIBECRAFTED_TERMINAL_ENTRY=1 VIBECRAFTED_TERMINAL_ENTRY_OWNER="$terminal_entry_owner" \
+    "$python_bin" - <<'PY'
 import os
 import subprocess
 import sys
@@ -426,9 +449,23 @@ _vetcoders_declaration_escalate_if_needed() {
   local verb="$1" tool="$2"
   shift 2
   command -v _vetcoders_needs_vc_terminal_entry >/dev/null || return 2
-  _vetcoders_needs_vc_terminal_entry || return 2
   local project_root=""
   project_root="$(_vetcoders_effective_project_root)"
+  local needs_terminal=0
+  if _vetcoders_has_owned_vc_terminal_entry; then
+    # The terminal child consumes this boundary during facade load and keeps
+    # the guard only in its own shell, so it cannot recur but descendants do
+    # not inherit the exception.
+    needs_terminal=0
+  elif [[ ! -t 0 || ! -t 1 ]]; then
+    # A public declaration from a pipe has no proof that it controls an
+    # inherited Frame client, even when its session name happens to be this
+    # root's canonical workspace and another client is watching it.
+    needs_terminal=1
+  elif _vetcoders_needs_vc_terminal_entry; then
+    needs_terminal=1
+  fi
+  ((needs_terminal)) || return 2
   # The child re-parses this very vector, but from the terminal's working
   # directory — which IS the normalized root. Forwarding a raw relative token
   # would resolve it a second time, one level deeper; hand over the absolute

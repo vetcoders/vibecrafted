@@ -96,5 +96,10 @@ _vetcoders_source_shell_module skill_shortcuts || return $?
 _vetcoders_source_shell_module marbles || return $?
 _vetcoders_source_shell_module dispatch || return $?
 
+# Consume a qualified terminal handoff before any public parser can reject or
+# reparse it. The shell-local guard still prevents a loop in this immediate
+# child; descendants receive neither exported boundary variable.
+_vetcoders_has_owned_vc_terminal_entry >/dev/null 2>&1 || true
+
 unset -f _vetcoders_shell_facade_dir _vetcoders_resolve_shell_lib_dir _vetcoders_source_shell_module _vetcoders_source_workflow_module
 unset _vetcoders_shell_lib_dir
