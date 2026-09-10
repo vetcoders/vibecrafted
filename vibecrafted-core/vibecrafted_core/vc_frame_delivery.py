@@ -48,18 +48,12 @@ def tools_current_path(tools_home: Path | None = None) -> Path:
 
 _ZSHRC_TEMPLATE = """\
 # Vibecrafted launcher path. Product helpers are loaded only by vc-start.
-case ":$PATH:" in
-  *":$HOME/.local/bin:"*) ;;
-  *) export PATH="$HOME/.local/bin:$PATH" ;;
-esac
+case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
 """
 
 _FENCED_BLOCK = f"""\
 {_FENCE_BEGIN}
-case ":$PATH:" in
-  *":$HOME/.local/bin:"*) ;;
-  *) export PATH="$HOME/.local/bin:$PATH" ;;
-esac
+case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
 {_FENCE_END}
 """
 

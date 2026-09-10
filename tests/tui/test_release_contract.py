@@ -706,6 +706,10 @@ def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
     assert (
         '("terminal-policy.toml", "config/vc-terminal/vibecrafted.toml")' in installer
     )
+    assert '("starship.toml", "config/starship.toml")' in installer
+    assert 'for relative in ("atuin/config.toml",):' in installer
+    assert 'name="zsh-autosuggestions"' in installer
+    assert 'name="zsh-syntax-highlighting"' in installer
     assert 'product_config / "terminal-policy.toml"' in installer
     assert 'policy = product / "terminal-policy.toml"' in installer
     assert '(terminal / "vc-terminal.toml").write_text' in installer

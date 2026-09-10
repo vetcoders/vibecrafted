@@ -1,20 +1,89 @@
 # Loaded only by the product terminal's private ZDOTDIR.
 [[ -o interactive ]] || return 0
+
+# Remember the file that defined this profile so reload can re-read it after
+# an on-disk update. ${(%):-%x} is this sourced path; keep a fallback.
+typeset -g _VC_TERMINAL_PROFILE_FILE="${${(%):-%x}:-$HOME/.config/vibecrafted/vc-terminal/interactive.zsh}"
+
+_vc_terminal_owned_alias_names=(ll la l .. ... .... gs ga gc gp gl gd)
+_vc_terminal_product_shell="$HOME/.config/vibecrafted/shell"
+
+_vc_terminal_pin_product_env() {
+  # Product tool paths must exist before zoxide/atuin/starship `init`.
+  # Those commands read STARSHIP_CONFIG / ATUIN_* / _ZO_DATA_DIR at init time.
+  export VIBECRAFTED_TERMINAL_ENTRY=1
+  export VC_FRAME_CONFIG_DIR="$HOME/.config/vibecrafted/vc-frame"
+  export STARSHIP_CONFIG="$HOME/.config/vibecrafted/starship.toml"
+  export ATUIN_CONFIG_DIR="$HOME/.config/vibecrafted/atuin"
+  export ATUIN_DATA_DIR="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/atuin"
+  export ATUIN_DB_PATH="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/history.db"
+  export _ZO_DATA_DIR="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/zoxide"
+  export STARSHIP_CACHE="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/starship"
+  mkdir -p \
+    "${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/atuin" \
+    "$_ZO_DATA_DIR" \
+    "$STARSHIP_CACHE"
+}
+
+_vc_terminal_apply_fallback_prompt() {
+  # Two-line offline prompt: path, then a simple ❯. Used only when Starship
+  # did not install a precmd hook. Do not reset a live Starship prompt.
+  if (( $+functions[starship_precmd] || $+functions[prompt_starship_precmd] )); then
+    return 0
+  fi
+  PROMPT=$'%~
+❯ '
+  RPROMPT=''
+}
+
+_vc_terminal_load_owned_layer() {
+  local vc_alias_dir vc_alias_file vc_alias_name
+  _vc_terminal_pin_product_env
+  for vc_alias_name in "${_vc_terminal_owned_alias_names[@]}"; do
+    unalias "$vc_alias_name" 2>/dev/null || true
+  done
+  # Installed product tree first; generation checkout is a source-only fallback.
+  for vc_alias_dir in \
+    "$_vc_terminal_product_shell/aliases" \
+    "${VIBECRAFTED_ROOT:-}/vibecrafted-core/vibecrafted_core/runtime/shell/aliases"
+  do
+    [[ -d "$vc_alias_dir" ]] || continue
+    for vc_alias_file in "$vc_alias_dir"/*.zsh(N); do
+      source "$vc_alias_file"
+    done
+    break
+  done
+  unset vc_alias_dir vc_alias_file vc_alias_name
+  aliases() {
+    print -r -- 'navigation'
+    print -r -- '  ll  la  l  ..  ...  ....  cdr'
+    print -r -- 'git'
+    print -r -- '  gs  ga  gc  gp  gl  gd'
+    print -r -- 'frame'
+    print -r -- '  vcf-lp  vcf-ls  vcf-da'
+  }
+  _vc_terminal_apply_fallback_prompt
+}
+
+reload() {
+  # Re-read the installed profile so a changed interactive.zsh becomes the
+  # live definition. The load-once guard below skips tool/ZLE/banner work.
+  # Then apply the (possibly new) owned layer. cwd and HISTFILE stay put.
+  local vc_profile="${_VC_TERMINAL_PROFILE_FILE:-$HOME/.config/vibecrafted/vc-terminal/interactive.zsh}"
+  if [[ -r "$vc_profile" ]]; then
+    source "$vc_profile"
+  fi
+  _vc_terminal_load_owned_layer
+}
+
 [[ -z ${_VC_TERMINAL_PROFILE_LOADED:-} ]] || return 0
 typeset -g _VC_TERMINAL_PROFILE_LOADED=1
 
-export VIBECRAFTED_TERMINAL_ENTRY=1
-export VC_FRAME_CONFIG_DIR="$HOME/.config/vibecrafted/vc-frame"
-export STARSHIP_CONFIG="$HOME/.config/vibecrafted/starship.toml"
-export ATUIN_CONFIG_DIR="$HOME/.config/vibecrafted/atuin"
-export ATUIN_DATA_DIR="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/atuin"
-export ATUIN_DB_PATH="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/history.db"
-export _ZO_DATA_DIR="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/zoxide"
-export STARSHIP_CACHE="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/starship"
 HISTFILE="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/zsh_history"
 HISTSIZE=20000
 SAVEHIST=20000
-mkdir -p "${HISTFILE:h}" "$_ZO_DATA_DIR" "$STARSHIP_CACHE"
+mkdir -p "${HISTFILE:h}"
+_vc_terminal_pin_product_env
 setopt appendhistory histignorespace
 path=("$HOME/.local/bin" $path)
 typeset -U path
@@ -67,6 +136,7 @@ if (( $+functions[compdef] )); then
 else
   _VC_TERMINAL_WARNINGS+=('shell completion unavailable')
 fi
+# STARSHIP_CONFIG / ATUIN_* / _ZO_DATA_DIR were pinned above. Init reads them.
 for vc_tool in zoxide atuin starship; do
   if (( ! $+commands[$vc_tool] )); then
     _VC_TERMINAL_WARNINGS+=("$vc_tool is not installed; install it with its upstream installer")
@@ -81,9 +151,18 @@ for vc_tool in zoxide atuin starship; do
   fi
 done
 unset vc_tool vc_tool_args vc_tool_init
+if [[ -n ${VC_TERMINAL_PLUGIN_PREFIXES:-} ]]; then
+  vc_plugin_prefixes=(${=VC_TERMINAL_PLUGIN_PREFIXES})
+else
+  vc_plugin_prefixes=(/opt/homebrew /usr/local "$_vc_terminal_product_shell/plugins")
+fi
 for vc_plugin in zsh-autosuggestions zsh-syntax-highlighting; do
-  for vc_plugin_prefix in /opt/homebrew /usr/local; do
+  vc_plugin_file=""
+  for vc_plugin_prefix in "${vc_plugin_prefixes[@]}"; do
     vc_plugin_file="$vc_plugin_prefix/share/$vc_plugin/$vc_plugin.zsh"
+    if [[ "$vc_plugin_prefix" == */plugins ]]; then
+      vc_plugin_file="$vc_plugin_prefix/$vc_plugin/$vc_plugin.zsh"
+    fi
     if [[ -r "$vc_plugin_file" ]]; then
       source "$vc_plugin_file"
       break
@@ -91,7 +170,9 @@ for vc_plugin in zsh-autosuggestions zsh-syntax-highlighting; do
   done
   [[ -r "$vc_plugin_file" ]] || _VC_TERMINAL_WARNINGS+=("$vc_plugin is not installed")
 done
-unset vc_plugin_prefix vc_plugin vc_plugin_file
+unset vc_plugin_prefix vc_plugin vc_plugin_file vc_plugin_prefixes
+
+_vc_terminal_load_owned_layer
 
 (
   umask 077
@@ -110,6 +191,8 @@ if [[ -t 1 ]]; then
   print '  vc-frame list-sessions   Find an existing workspace'
   print '  vc-frame attach <name>   Return to a workspace'
   print '  vibecrafted --help      Explore commands'
+  print '  aliases                 List product shortcuts'
+  print '  reload                  Re-read the installed product profile'
   (( ! $+commands[atuin] )) || print '  Ctrl+R history'
   (( ! $+commands[zoxide] )) || print '  z <directory> jump'
   print '  Tab completion'
