@@ -2514,6 +2514,28 @@ def _pid_alive(path: Path) -> bool:
     return True
 
 
+def _process_start_identity(pid: int) -> str | None:
+    """Kernel start time plus command for one PID. A recycled PID differs."""
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "pid=,lstart=,command="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    value = " ".join(result.stdout.split())
+    return value or None
+
+
+def _pid_file_start_identity(path: Path) -> str | None:
+    try:
+        pid = int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    return _process_start_identity(pid)
+
+
 def _wait_until(probe, timeout: float = 20.0):
     deadline = time.monotonic() + timeout
     last = None
@@ -2661,12 +2683,16 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
     """W2 acceptance: public vc-start inside a PTY-backed admitted host.
 
     Creates an isolated exclusive sandbox, a vibecrafted-host session, one
-    attached PTY client, and a prior pane. Invokes public `vc-start --repo`
-    with attached-host markers. Success requires a compact Handled receipt
-    whose pane_id exists on the host, exact chrome titles, the same prior
-    pane id and process start identity, and a usable dump-screen of the
-    projected pane — not a guest-name substring. Then client-ambiguity
-    refuses before a second create. Cleanup kills only named test sessions.
+    attached PTY client, and a prior pane whose process records PID plus
+    start identity and then reads commands (`exec sh -s`). Invokes public
+    `vc-start --repo` with attached-host markers. Success requires a compact
+    Handled receipt whose pane_id exists on the host, exact chrome titles,
+    the same prior pane id / PID / start identity, and a harmless command
+    completed in that same prior pane via public `action write-chars
+    --pane-id` — not sleep-alive or guest dump-screen alone. Offered
+    `operator` layout alias must also project on the same canvas; `--layout`
+    stays usage-refused. Then client-ambiguity refuses before another
+    create. Cleanup kills only named test sessions.
     """
     assert _ADMITTED_FRAME is not None
     bin_path = _ADMITTED_FRAME
@@ -2679,12 +2705,18 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
     (home / "data").mkdir()
     host = _short_token("h")
     guest = _short_token("g")
+    alias = _short_token("a")
     other = _short_token("o")
     guest_repo = sandbox / guest
+    alias_repo = sandbox / alias
     other_repo = sandbox / other
     guest_repo.mkdir()
+    alias_repo.mkdir()
     other_repo.mkdir()
     prior_pid = home / "prior.pid"
+    prior_lstart = home / "prior.lstart"
+    prior_done = home / "prior.done"
+    prior_token = "prior-ok-" + uuid.uuid4().hex[:12]
     owner = _write(sandbox / "owner-cli", OWNER_CLI)
     env = os.environ.copy()
     for key in IDENTITY_ENV:
@@ -2799,43 +2831,28 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         assert _wait_until(lambda: host in listing() and "(EXITED" not in listing(), 20), listing()
 
         attach("host")
-        clients = _wait_until(
-            lambda: (
-                text
-                if _count_list_clients(
-                    (
-                        text := frame(
-                            "--session", host, "action", "list-clients"
-                        ).stdout
-                    )
-                )
-                == 1
-                else ""
-            ),
-            20,
-        )
+
+        def unique_client_listing(expected: int):
+            text = frame("--session", host, "action", "list-clients").stdout
+            return text if _count_list_clients(text) == expected else ""
+
+        clients = _wait_until(lambda: unique_client_listing(1), 20)
         assert clients and _count_list_clients(clients) == 1, (
             frame("--session", host, "action", "list-clients").stdout
         )
 
-        chrome = _wait_until(
-            lambda: (
-                rows
-                if (
-                    (
-                        titles := {
-                            pane.get("title")
-                            for pane in (rows := pane_rows())
-                            if isinstance(pane, dict)
-                        }
-                    )
-                    and "session-manager" in titles
-                    and "VC Guest" in titles
-                )
-                else []
-            ),
-            25,
-        )
+        def host_chrome_rows():
+            rows = pane_rows()
+            titles = {
+                pane.get("title")
+                for pane in rows
+                if isinstance(pane, dict)
+            }
+            if "session-manager" in titles and "VC Guest" in titles:
+                return rows
+            return []
+
+        chrome = _wait_until(host_chrome_rows, 25)
         assert chrome, panes()
         chrome_titles = {
             pane.get("title") for pane in chrome if isinstance(pane, dict)
@@ -2850,28 +2867,45 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
             "--",
             "sh",
             "-c",
-            f"echo $$ > {prior_pid}; exec sleep 10000",
+            (
+                f"echo $$ > {prior_pid}; "
+                f"ps -p $$ -o lstart= > {prior_lstart}; "
+                "exec sh -s"
+            ),
         )
         assert pane.returncode == 0, pane.stderr
-        assert _wait_until(lambda: _pid_alive(prior_pid), 15), prior_pid
-        prior_pid_value = prior_pid.read_text(encoding="utf-8").strip()
-        prior_pane = _wait_until(
-            lambda: next(
-                (
-                    row
-                    for row in pane_rows()
-                    if isinstance(row, dict)
-                    and "sleep 10000" in str(row.get("terminal_command") or "")
-                ),
-                None,
-            ),
+        assert _wait_until(
+            lambda: _pid_alive(prior_pid) and prior_lstart.is_file(),
             15,
+        ), (prior_pid, prior_lstart)
+        prior_pid_value = prior_pid.read_text(encoding="utf-8").strip()
+        prior_lstart_value = " ".join(
+            prior_lstart.read_text(encoding="utf-8").split()
         )
+        prior_identity = _pid_file_start_identity(prior_pid)
+        assert prior_pid_value.isdigit() and prior_identity, prior_pid_value
+        assert prior_lstart_value and prior_lstart_value in prior_identity, (
+            prior_lstart_value,
+            prior_identity,
+        )
+
+        def find_prior_pane():
+            marker = str(prior_pid)
+            for row in pane_rows():
+                if not isinstance(row, dict):
+                    continue
+                command = str(row.get("terminal_command") or "")
+                if marker in command or "sh -s" in command:
+                    return row
+            return None
+
+        prior_pane = _wait_until(find_prior_pane, 15)
         assert isinstance(prior_pane, dict) and prior_pane.get("id") not in (
             None,
             "",
         ), panes()
         prior_pane_id = prior_pane["id"]
+        prior_command = str(prior_pane.get("terminal_command") or "")
 
         refused_layout = public_start(
             guest_repo,
@@ -2912,8 +2946,53 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         assert guest_pane is not None, (receipt, after_rows)
         surviving = _pane_by_id(after_rows, prior_pane_id)
         assert surviving is not None, (prior_pane_id, after_rows)
+        assert str(surviving.get("terminal_command") or "") == prior_command or (
+            "sh -s" in str(surviving.get("terminal_command") or "")
+        ), (prior_command, surviving)
         assert prior_pid.read_text(encoding="utf-8").strip() == prior_pid_value
         assert _pid_alive(prior_pid), prior_pid_value
+        after_identity = _pid_file_start_identity(prior_pid)
+        assert after_identity == prior_identity, (prior_identity, after_identity)
+
+        written = frame(
+            "--session",
+            host,
+            "action",
+            "write-chars",
+            "--pane-id",
+            f"terminal_{prior_pane_id}",
+            f"echo {prior_token} > {prior_done}",
+        )
+        submitted = frame(
+            "--session",
+            host,
+            "action",
+            "send-keys",
+            "--pane-id",
+            f"terminal_{prior_pane_id}",
+            "Enter",
+        )
+        assert written.returncode == 0, written.stdout + written.stderr
+        assert submitted.returncode == 0, submitted.stdout + submitted.stderr
+        assert _wait_until(
+            lambda: (
+                prior_done.is_file()
+                and prior_token in prior_done.read_text(encoding="utf-8")
+            ),
+            15,
+        ), (prior_done, written.stdout + written.stderr + submitted.stdout + submitted.stderr)
+        assert prior_pid.read_text(encoding="utf-8").strip() == prior_pid_value
+        assert _pid_file_start_identity(prior_pid) == prior_identity
+        prior_dump = frame(
+            "--session",
+            host,
+            "action",
+            "dump-screen",
+            "--pane-id",
+            f"terminal_{prior_pane_id}",
+        )
+        assert prior_dump.returncode == 0, prior_dump.stdout + prior_dump.stderr
+        assert "not found" not in (prior_dump.stdout + prior_dump.stderr).lower()
         dumped = frame(
             "--session",
             host,
@@ -2926,22 +3005,39 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         assert dumped.returncode == 0, dump
         assert "not found" not in dump.lower(), dump
 
-        attach("host-second")
-        two = _wait_until(
-            lambda: (
-                text
-                if _count_list_clients(
-                    (
-                        text := frame(
-                            "--session", host, "action", "list-clients"
-                        ).stdout
-                    )
-                )
-                == 2
-                else ""
-            ),
-            20,
+        alias_started = public_start(
+            alias_repo,
+            f"vc-start operator --repo {shlex.quote(str(alias_repo))}",
         )
+        owned.append(alias)
+        alias_combined = alias_started.stdout + alias_started.stderr
+        assert "RC=[0]" in alias_started.stdout, alias_combined
+        assert f"created workspace {alias}" in alias_combined, alias_combined
+        assert f"projected workspace {alias}" in alias_combined, alias_combined
+        assert "switch-session" not in alias_combined
+        assert host in listing() and "(EXITED" not in listing()
+        assert alias in listing()
+        alias_receipts = _workspace_projection_receipts(alias_started.stdout)
+        assert len(alias_receipts) == 1, alias_started.stdout
+        assert alias_receipts[0].get("status") == "Handled", alias_receipts[0]
+        assert alias_receipts[0].get("guest") == alias, alias_receipts[0]
+        assert alias_receipts[0].get("pane_id") not in (None, ""), alias_receipts[0]
+        alias_rows = pane_rows()
+        alias_titles = {
+            row.get("title") for row in alias_rows if isinstance(row, dict)
+        }
+        assert "session-manager" in alias_titles and "VC Guest" in alias_titles, (
+            alias_rows
+        )
+        assert _pane_by_id(alias_rows, receipt["pane_id"]) is not None
+        assert _pane_by_id(alias_rows, alias_receipts[0]["pane_id"]) is not None
+        assert _pane_by_id(alias_rows, prior_pane_id) is not None
+        assert prior_pid.read_text(encoding="utf-8").strip() == prior_pid_value
+        assert _pid_file_start_identity(prior_pid) == prior_identity
+        assert prior_token in prior_done.read_text(encoding="utf-8")
+
+        attach("host-second")
+        two = _wait_until(lambda: unique_client_listing(2), 20)
         assert two and _count_list_clients(two) == 2, (
             frame("--session", host, "action", "list-clients").stdout
         )
@@ -2954,6 +3050,8 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         assert other not in listing(), listing()
         assert prior_pid.read_text(encoding="utf-8").strip() == prior_pid_value
         assert _pid_alive(prior_pid)
+        assert _pid_file_start_identity(prior_pid) == prior_identity
+        assert prior_token in prior_done.read_text(encoding="utf-8")
         final_titles = {
             row.get("title") for row in pane_rows() if isinstance(row, dict)
         }
