@@ -172,13 +172,21 @@ Inventory failures refuse rather than treating uncertainty as an empty list.
 Outside Frame, creation is exclusive; a no-TTY caller opens VC Terminal only
 after successful creation, carrying the exact root and created-session marker.
 
-The recovered implementation's inside-Frame `switch-session` was not a stable
-host with separate guest workspace identities. This generation therefore
-refuses new inside-Frame workspace creation before mutation. The Frame baton
-must supply an exclusive guest-create operation accepting host identity, guest
-identity, repository/cwd and layout; a guest inventory/collision query; and an
-activation operation that keeps the existing host/server and canvas alive.
-The precise API names must come from that implementation, not invented flags.
+Inside a live Frame host, `vc-start` creates a distinct guest session with
+`--guest-workspace` (chrome stripped by Frame) and projects it through the
+admitted public API:
+
+```text
+vc-frame --session <host> project-workspace <guest> [--tab <one-based>]
+```
+
+Host identity is the attached owner (`VC_FRAME_SESSION_NAME`) verified live
+with exactly one interactive client — never the repository basename and never
+a silent `switch-session`. Success requires one correlated
+`WorkspaceProjectionReceipt` with `status=Handled` and a `pane_id`. A missing
+or older Frame binary, an unresolvable host, or an ambiguous client refuses
+before create (exit 4). Failed projection leaves the previous canvas and
+reports created-but-not-projected. Name collisions remain exit 3.
 
 ## Reserved integration interfaces
 
@@ -198,8 +206,8 @@ The precise API names must come from that implementation, not invented flags.
   and model-source/source-reference fields without reordering the provider
   catalog or changing rendering. Display unsupported VM/cloud and Agy private
   transport explicitly. Existing `workflow-capabilities` region is reserved.
-- **Frame:** admit the actual stable-host guest API above before enabling
-  inside-host start. Closing a viewer must not own the worker lifecycle.
+- **Frame:** inside-host start uses `project-workspace` on the attached host.
+  Closing a viewer must not own the worker lifecycle.
 
 Interactive admission now reserves a fresh run identity before a provider starts,
 materializes the original source and admission at mode 0600, passes only private

@@ -960,8 +960,10 @@ cmd_start_help() {
   printf '          renamed or suffixed for you. Two concurrent starts yield one workspace\n'
   printf '          and one refusal (vc-frame creates exclusively).\n'
   printf '  Enter:  with a terminal outside Frame, enter the new workspace.\n'
-  printf '          Inside Frame, guest creation awaits the shared-host API. Outside Frame, the\n'
-  printf '          VC Terminal opens on the repository to enter it.\n'
+  printf '          Inside a live Frame host, create a guest workspace and project it into the\n'
+  printf '          same host canvas (one chrome). Older Frame without project-workspace refuses\n'
+  printf '          before mutation (exit 4). Outside Frame, the VC Terminal opens on the\n'
+  printf '          repository to enter it.\n'
   printf '  Exit:   0 entered · 2 usage/name/root · 3 workspace exists · 4 inventory/engine\n'
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
