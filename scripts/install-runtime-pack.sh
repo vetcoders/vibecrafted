@@ -370,7 +370,19 @@ rescue="0"
 rescue_plan="0"
 rescue_apply="0"
 plan_digest=""
+allow_older_runtime="0"
+fail_after=""
+pack_harness=0
+if [[ "${VIBECRAFTED_RUNTIME_PACK_HARNESS:-}" == "1" ]]; then
+  pack_harness=1
+fi
 
+# Called by the EXIT trap installed below. ShellCheck 0.11.0 models a
+# script-final `exit` as an edge that leaves the graph without running EXIT
+# handlers, so a trap-only function reads as uncalled (SC2329). The e37
+# installer ended in `exec` and never reached that edge; this one must
+# capture the installer status, so the trap is the call site.
+# shellcheck disable=SC2329
 cleanup() {
   local status=$?
   local _attempt
@@ -398,6 +410,9 @@ cleanup() {
   fi
   return "$status"
 }
+# Called by the TERM/INT/HUP traps installed below; see the SC2329 note on
+# cleanup for why ShellCheck cannot see a trap-only call site here.
+# shellcheck disable=SC2329
 terminate_installer_child() {
   local signal="$1"
   local _attempt
@@ -462,6 +477,18 @@ while (($#)); do
       esac
       shift 2
       ;;
+    --allow-older-runtime)
+      allow_older_runtime="1"
+      shift
+      ;;
+    --fail-after)
+      (($# >= 2)) || die "--fail-after requires a phase"
+      if [[ "$pack_harness" -ne 1 ]]; then
+        die "refusing --fail-after without VIBECRAFTED_RUNTIME_PACK_HARNESS=1"
+      fi
+      fail_after="$2"
+      shift 2
+      ;;
     --rescue)
       rescue="1"
       shift
@@ -484,8 +511,9 @@ while (($#)); do
       shift
       ;;
     --help|-h)
-      printf 'usage: %s [--pack <RuntimePack.tar.gz>] [--verify-only] [--expected-*-revision <sha>] [--app-root <Vibecrafted.app> --terminal-host <path> --frame-helper <path>] [--resolve-preference keep-current|use-incoming --preference-current-sha256 <hex> --preference-incoming-sha256 <hex>] [--rescue --plan|--apply [--plan-digest <hex>]] [--uninstall [--dry-run]]\n' "$0"
+      printf 'usage: %s [--pack <RuntimePack.tar.gz>] [--verify-only] [--expected-*-revision <sha>] [--app-root <Vibecrafted.app> --terminal-host <path> --frame-helper <path>] [--allow-older-runtime] [--resolve-preference keep-current|use-incoming --preference-current-sha256 <hex> --preference-incoming-sha256 <hex>] [--rescue --plan|--apply [--plan-digest <hex>]] [--uninstall [--dry-run]]\n' "$0"
       printf 'Rescue: explicit plan/apply when historical rollback bytes are missing. Plan and apply reuse a private extract bound to the signed archive digest so the same verified pack keeps the same payload-root. If this pack installer lacks --rescue, bootstrap with a source installer that includes it against the verified --payload-root. Do not rewrite the signed payload.\n'
+      printf 'Older-runtime recovery: --allow-older-runtime is the explicit downgrade admission. If this pack installer lacks that flag, bootstrap with a source installer that includes it against the verified --payload-root. Do not rewrite the signed payload or invent publication evidence.\n'
       exit 0
       ;;
     *) die "unknown argument: $1" ;;
@@ -533,6 +561,12 @@ if [[ "$rescue" == "1" && "$rescue_plan" != "1" && "$rescue_apply" != "1" ]]; th
 fi
 if [[ "$rescue_apply" == "1" && -z "$plan_digest" ]]; then
   die "--rescue --apply requires --plan-digest"
+fi
+if [[ "$allow_older_runtime" == "1" && "$operation" == "uninstall" ]]; then
+  die "--allow-older-runtime cannot be combined with --uninstall"
+fi
+if [[ -n "$fail_after" && "$fail_after" != "published" ]]; then
+  die "unsupported --fail-after phase: $fail_after"
 fi
 helper_argument_count=0
 [[ -n "$app_root" ]] && ((helper_argument_count += 1))
@@ -794,6 +828,36 @@ if [[ "$rescue" == "1" ]]; then
   [[ "$rescue_apply" == "1" ]] && arguments+=(--apply)
   [[ -n "$plan_digest" ]] && arguments+=(--plan-digest "$plan_digest")
 fi
+if [[ "$allow_older_runtime" == "1" ]]; then
+  arguments+=(--allow-older-runtime)
+  if ! grep -Fq -- '--allow-older-runtime' "$installer_entry"; then
+    source_installer=""
+    for candidate in \
+      "${VIBECRAFTED_SOURCE_INSTALLER:-}" \
+      "$SCRIPT_DIR/vetcoders_install.py"
+    do
+      [[ -n "$candidate" ]] || continue
+      if [[ -f "$candidate" ]] && grep -Fq -- '--allow-older-runtime' "$candidate"; then
+        source_installer="$candidate"
+        break
+      fi
+    done
+    if [[ -z "$source_installer" && -n "$app_root" ]]; then
+      bundled_installer="$app_root/Contents/Resources/runtime/scripts/vetcoders_install.py"
+      if [[ -f "$bundled_installer" ]] \
+        && grep -Fq -- '--allow-older-runtime' "$bundled_installer"; then
+        source_installer="$bundled_installer"
+      fi
+    fi
+    if [[ -n "$source_installer" ]]; then
+      installer_entry="$source_installer"
+      printf 'Runtime Pack installer lacks --allow-older-runtime; bootstrapping with source installer %s against the verified payload-root. Do not rewrite the signed payload.\n' \
+        "$source_installer" >&2
+    else
+      die "This Runtime Pack installer does not support --allow-older-runtime. Bootstrap with a source/version whose installer includes runtime-install --allow-older-runtime targeting this verified pack via --payload-root. Do not rewrite the signed payload."
+    fi
+  fi
+fi
 if [[ "$operation" == "install" && -n "$app_root" ]]; then
   app_root="$(cd "$app_root" && pwd -P)" \
     || die "cannot resolve Vibecrafted.app root: $app_root"
@@ -849,6 +913,16 @@ if [[ -n "$temporary" || -n "$rescue_staging" ]]; then
   if [[ "$rescue_apply" == "1" && "$installer_status" -eq 0 ]]; then
     _release_rescue_extract
   fi
+  if [[ "$installer_status" -eq 0 && "$fail_after" == "published" ]]; then
+    printf 'harness injected failure after published\n' >&2
+    exit 42
+  fi
   exit "$installer_status"
 fi
-exec "$pack_python" "$installer_entry" "${arguments[@]}"
+"$pack_python" "$installer_entry" "${arguments[@]}"
+installer_status=$?
+if [[ "$installer_status" -eq 0 && "$fail_after" == "published" ]]; then
+  printf 'harness injected failure after published\n' >&2
+  exit 42
+fi
+exit "$installer_status"

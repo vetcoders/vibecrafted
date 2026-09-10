@@ -998,6 +998,7 @@ build_product() {
     "$terminal_app/Contents/Info.plist")" == "alacritty.icns" ]] \
     || die "vc-terminal helper bundle icon contract is invalid"
   install -m 0755 "$frame_source" "$APP/Contents/Helpers/vc-frame"
+  install -m 0755 "$SOURCE_ROOT/scripts/vc-app-update.sh" "$APP/Contents/Helpers/vc-app-update"
 
   install -m 0644 "$SOURCE_ROOT/config/vc-terminal/vibecrafted.toml" \
     "$resources/terminal/vibecrafted.toml"

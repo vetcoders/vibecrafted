@@ -17,7 +17,32 @@ Implementation: `cmd_runtime_install`, `cmd_runtime_uninstall`,
 `_build_uninstall_inventory`, and `_managed_tools_entry` in
 `scripts/vetcoders_install.py`. The exact same installer is embedded under
 `Vibecrafted.app/Contents/Resources/runtime/scripts/`; AppDelegate delegates to
-it and does not write the installation itself. Regression coverage:
+it and does not write the installation itself. In-app Check for Updates
+(`docs/installer/IN_APP_UPDATE.md`) reuses that same installer for same-App
+pack repair. A newer App is replaced by the script helper installed at
+`Contents/Helpers/vc-app-update` (`scripts/vc-app-update.sh`; no compiled twin).
+The helper writes a READY admission after preflight, a phase journal before
+any destination mutation, and the terminal replacement receipt before
+`/usr/bin/open -n`. Resume reconciles every write-ahead phase and requires
+the original candidate/prior identities. Destination locking is flock on
+`.vc-update.lock/held`, never mkdir+rm. Pack failure recovers the prior Runtime Pack/config/launchers through
+the existing `install-runtime-pack.sh --allow-older-runtime` owner, then
+restores `prior.app` through the same transaction owner (`--mode recover`)
+and must not overwrite that capture.
+Whole-tuple recovery observes the installer's `active.json` and
+`install-receipt.json` with the same pending-publication refusal as the
+installer owner; a caller-written pack enum is not that proof.
+App-only restore is not whole-tuple success: unresolved, pending, or
+still-published newer pack state keeps recovery open. Missing historical
+rollback data fails closed without inventing restored evidence. Recover
+resolves a bundled helper-sibling or app wrapper that actually admits
+`--allow-older-runtime` (never a source-checkout hop) and binds the
+live destination as `app_root`. Empty `config_pending` objects are not
+pending publication. A failed handoff persist keeps the
+current UI and does not abandon the helper. Then the new App publishes the
+matching pack. The running process does not publish a newer pack under the
+old App.
+Regression coverage:
 `tests/tui/test_installer_uninstall.py`, `tests/tui/test_installer_restore.py`.
 
 ## 1. The required set

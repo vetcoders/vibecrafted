@@ -1041,6 +1041,7 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     for title in [
         "Open Vibecrafted",
         "Open Terminal",
+        "Check for Updates…",
         "Workspaces",
         "Help & Diagnostics…",
         "Advanced",
@@ -1059,6 +1060,7 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert 'alert.addButton(withTitle: "Open Diagnostics")' in help_dialog
     assert "showServerDiagnostics()" in help_dialog
     assert 'withTitle: "About Vibecrafted"' in delegate
+    assert 'withTitle: "Check for Updates…"' in delegate
     assert 'withTitle: "Quit Vibecrafted"' in delegate
     assert "#selector(requestQuit)" in delegate
     assert 'process.arguments = ["status", "--activity", "--json"]' in delegate

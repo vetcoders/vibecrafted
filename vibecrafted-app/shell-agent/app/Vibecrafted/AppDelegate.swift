@@ -2,6 +2,7 @@ import AppKit
 import CoreText
 import Darwin
 import os.log
+import SwiftUI
 
 // The durable lifecycle trail (installLog, lifecycleLog, signal handlers)
 // lives in LifecycleLog.swift — supervision evidence extracted from this
@@ -175,6 +176,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   private var terminalLaunch: TerminalLauncher.Launch?
   private var terminalRegistration: TerminalRegistrationObservation?
   private var terminalRegistrationTimer: Timer?
+  private var productUpdate: ProductUpdateCoordinator?
+  private var productUpdatePanel: NSWindow?
+  private var productUpdateStartupAdoption: ProductUpdateHandoffAdoption = .none
   let eventObserver = EventObserver()
 
   func showMainWindowIfNeeded() {
@@ -235,7 +239,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     }
 
     showMainWindowIfNeeded()
-    connectCommandDeck()
+    productUpdateStartupAdoption = adoptPendingProductUpdateIfNeeded()
+    switch productUpdateStartupAdoption {
+    case .waiting, .publishing, .restoring:
+      break
+    case .none, .retained:
+      connectCommandDeck()
+    }
   }
 
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
@@ -249,7 +259,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
 
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
     // Quit closes UI only; the service, terminals and agent lanes keep running.
-    .terminateNow
+    // An admitted helper must have a durable handoff before this process dies.
+    if productUpdate?.hasAdmittedHelperHandoff == true {
+      do {
+        try productUpdate?.persistAdmittedHandoff()
+      } catch {
+        showNativeMessage(
+          "Update handoff was not saved",
+          "The window stays open so the update helper is not abandoned. \(error.localizedDescription)")
+        return .terminateCancel
+      }
+    }
+    return .terminateNow
   }
 
   func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
@@ -267,6 +288,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   }
 
   func applicationWillTerminate(_ notification: Notification) {
+    if productUpdate?.hasAdmittedHelperHandoff == true {
+      productUpdate?.noteUIShutdownPreservingHandoff()
+    } else {
+      cancelRuntimePackInstaller()
+      productUpdate?.interrupt()
+    }
     // The workspace terminal is now started through the generation wrapper, so
     // it is a child of this process rather than an independent application.
     // That changes nothing about its lifetime: quitting the App is a view
@@ -335,6 +362,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   }
 
   private func connectCommandDeck() {
+    switch productUpdateStartupAdoption {
+    case .waiting, .publishing, .restoring:
+      return
+    case .none, .retained:
+      break
+    }
     _ = try? loadSignedCarrierRevisions()
     model.beginConnecting()
     resolveInstalledRuntime { [weak self] resolution in
@@ -552,6 +585,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     case .revealRuntime: revealRuntimeHomeFromStatusItem()
     case .revealControlPlane: openControlPlaneFromStatusItem()
     case .copyRuntimeIdentity: copyRuntimeIdentityFromStatusItem()
+    case .checkForUpdates: checkForUpdatesFromMenu()
     case .help: showStatusItemHelp()
     case .quitApp: requestQuit()
     }
@@ -1178,11 +1212,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
         userInfo: [NSLocalizedDescriptionKey: "signed App must contain one Runtime Pack carrier"])
     }
     let (sourceRevision, terminalRevision, frameRevision) = try loadSignedCarrierRevisions()
+    return try runtimePackInstallArguments(
+      pack: carriers[0], appRoot: appRoot, sourceRevision: sourceRevision,
+      terminalRevision: terminalRevision, frameRevision: frameRevision,
+      preferenceChoice: preferenceChoice)
+  }
+
+  /// Same installer owner as onboarding/repair. A candidate pack still goes
+  /// through expected-revision identity and the receipt transaction.
+  private func runtimePackInstallArguments(
+    pack: URL,
+    appRoot: URL,
+    sourceRevision: String,
+    terminalRevision: String,
+    frameRevision: String,
+    preferenceChoice: PreferenceResolutionChoice? = nil
+  ) throws -> [String] {
     let terminalHost = appRoot.appendingPathComponent(
       "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty")
     let frameHelper = appRoot.appendingPathComponent("Contents/Helpers/vc-frame")
     var arguments = [
-      "--pack", carriers[0].path,
+      "--pack", pack.path,
       "--app-root", appRoot.path,
       "--terminal-host", terminalHost.path,
       "--frame-helper", frameHelper.path,
@@ -1476,6 +1526,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       statusLine: statusLine, detailLine: detail,
       availability: StatusItemAvailability(canShowCommandDeck: true,
         canOpenTerminal: actions.contains(.openTerminal),
+        canCheckForUpdates: productUpdate?.isBusy != true,
         canRetryConnection: actions.contains(.retryConnection),
         canRepairRuntime: actions.contains(.repairRuntime),
         canStopRuntime: actions.contains(.requestStopRuntime),
@@ -1985,7 +2036,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     alert.alertStyle = .informational
     alert.messageText = "Help & Diagnostics"
     alert.informativeText =
-      "Open Vibecrafted returns to the app. Workspaces and Runtime Server use the configured live server only when it is available. Advanced contains runtime controls and support files. Quitting Vibecrafted leaves the runtime service, terminals, agents, and sessions running."
+      "Open Vibecrafted returns to the app. Check for Updates looks for a signed App and matching Runtime Pack; missing feed or helper is a finished unavailable state, not a spinner. Workspaces and Runtime Server use the configured live server only when it is available. Advanced contains runtime controls and support files. Quitting Vibecrafted leaves the runtime service, terminals, agents, and sessions running."
     alert.addButton(withTitle: "OK")
     alert.addButton(withTitle: "Open Diagnostics")
     if alert.runModal() == .alertSecondButtonReturn {
@@ -2037,6 +2088,683 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     NSApp.terminate(nil)
   }
 
+  @objc private func checkForUpdatesFromMenu() {
+    let coordinator = productUpdateCoordinator()
+    showProductUpdatePanel()
+    if !coordinator.isBusy {
+      coordinator.checkForUpdates()
+    }
+  }
+
+  private func productUpdateCoordinator() -> ProductUpdateCoordinator {
+    if let productUpdate { return productUpdate }
+    let coordinator = ProductUpdateCoordinator(
+      dependencies: ProductUpdateCoordinator.Dependencies(
+        channel: { [weak self] in
+          self?.resolveLiveUpdateChannel() ?? resolveProductUpdateChannel(
+            feedURLString: nil, publicKeyURL: nil, helperURL: nil)
+        },
+        installed: { [weak self] in
+          self?.currentProductUpdateIdentity()
+            ?? ProductUpdateIdentity(appGeneration: "unknown")
+        },
+        stagingRoot: {
+          FileManager.default.temporaryDirectory.appendingPathComponent(
+            "vibecrafted-product-update", isDirectory: true)
+        },
+        home: { [weak self] in
+          self?.craftedHomeURL()
+            ?? URL(fileURLWithPath: NSHomeDirectory() + "/.vibecrafted", isDirectory: true)
+        },
+        fetchBytes: { url, completion in
+          productUpdateFetchBytes(url, completion: completion)
+        },
+        downloadFile: { url, destination, completion in
+          productUpdateDownloadFile(url, to: destination, completion: completion)
+        },
+        verifyFeedSignature: { payload, signature, publicKey, completion in
+          let cancelled = ProductUpdateCancelFlag()
+          DispatchQueue.global(qos: .userInitiated).async {
+            let result = verifyDetachedReleaseSignature(
+              payload: payload, signature: signature, publicKeyPath: publicKey.path)
+            Task { @MainActor in
+              if !cancelled.marked {
+                completion(result.mapError { $0 as Error })
+              }
+            }
+          }
+          return { cancelled.mark() }
+        },
+        verifyCandidate: { [weak self] candidate, staging, payload, completion in
+          self?.verifyProductUpdateCandidate(
+            candidate, staging: staging, payload: payload, completion: completion)
+            ?? {}
+        },
+        installPack: { [weak self] candidate, pack, completion in
+          self?.installProductUpdate(candidate, pack: pack, completion: completion) ?? {}
+        },
+        replaceApp: { [weak self] request, completion in
+          self?.replaceProductUpdateAppBundle(request, completion: completion) ?? {}
+        },
+        extractApp: { dmg, destination, completion in
+          productUpdateExtractApp(from: dmg, to: destination, completion: completion)
+        },
+        closeUIAfterHelperArmed: { [weak self] in self?.requestQuit() },
+        checkTimeout: 180))
+    coordinator.onProgress = { [weak self] _ in
+      self?.renderProductUpdatePanel()
+      self?.updateDeckPresentation()
+    }
+    productUpdate = coordinator
+    return coordinator
+  }
+
+  private func resolveLiveUpdateChannel() -> ProductUpdateChannel {
+    let feed = Bundle.main.object(forInfoDictionaryKey: "VCUpdateFeedURL") as? String
+    let resources = Bundle.main.bundleURL.appendingPathComponent(
+      "Contents/Resources/runtime-pack", isDirectory: true)
+    let publicKey = resources.appendingPathComponent("vibecrafted-signing-v1.pub")
+    let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/vc-app-update")
+    return resolveProductUpdateChannel(
+      feedURLString: feed,
+      publicKeyURL: publicKey,
+      helperURL: FileManager.default.isExecutableFile(atPath: helper.path) ? helper : nil,
+      environment: ProcessInfo.processInfo.environment)
+  }
+
+  private func currentProductUpdateIdentity() -> ProductUpdateIdentity {
+    let version =
+      Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
+    let source = signedCarrierRevisions?.source
+    let appGeneration =
+      source.map { productUpdateGenerationLabel(version: version, sourceRevision: $0) } ?? version
+    return ProductUpdateIdentity(
+      appGeneration: appGeneration,
+      packGeneration: canonicalInstall?.root.lastPathComponent,
+      sourceRevision: source,
+      terminalRevision: signedCarrierRevisions?.terminal,
+      frameRevision: signedCarrierRevisions?.frame)
+  }
+
+  /// Same-generation pack repair, still through the existing installer identity
+  /// flags. A newer App is replaced first; this process will not publish that
+  /// pack. Receipts are not deleted, and conflict checks stay inside the installer.
+  private func installProductUpdate(
+    _ candidate: ProductUpdateCandidate,
+    pack: URL,
+    completion: @escaping (Result<ProductUpdateIdentity, Error>) -> Void
+  ) -> () -> Void {
+    let installed = currentProductUpdateIdentity()
+    guard productUpdateRunningAppMatchesCandidate(installed: installed, candidate: candidate) else {
+      completion(
+        .failure(
+          NSError(
+            domain: "io.vetcoders.vibecrafted.update", code: 2,
+            userInfo: [
+              NSLocalizedDescriptionKey:
+                "Refusing to publish a Runtime Pack that does not match this running App. The previous generation remains."
+            ])))
+      return {}
+    }
+    if runtimeInstallProcess != nil {
+      completion(
+        .failure(
+          NSError(
+            domain: "io.vetcoders.vibecrafted.update", code: 1,
+            userInfo: [
+              NSLocalizedDescriptionKey: "the Runtime Pack installer is already in flight"
+            ])))
+      return {}
+    }
+    do {
+      try runRuntimePackInstaller(
+        arguments: runtimePackInstallArguments(
+          pack: pack,
+          appRoot: Bundle.main.bundleURL,
+          sourceRevision: candidate.sourceRevision,
+          terminalRevision: candidate.terminalRevision,
+          frameRevision: candidate.frameRevision)
+      ) { [weak self] result in
+        guard let self else { return }
+        switch result {
+        case .failure(let error): completion(.failure(error))
+        case .success(let output):
+          do {
+            let install = try self.decodeCanonicalRuntimeInstall(from: output)
+            self.cachedResolution = nil
+            _ = self.applyResolution(.ready(install))
+            completion(.success(self.currentProductUpdateIdentity()))
+          } catch { completion(.failure(error)) }
+        }
+      }
+    } catch {
+      completion(.failure(error))
+    }
+    return { [weak self] in self?.cancelRuntimePackInstaller() }
+  }
+
+  private func cancelRuntimePackInstaller() {
+    guard let process = runtimeInstallProcess else { return }
+    if process.isRunning {
+      process.terminate()
+    }
+  }
+
+  private func verifyProductUpdateCandidate(
+    _ candidate: ProductUpdateCandidate,
+    staging: URL,
+    payload: Data,
+    completion: @escaping (Result<ProductUpdateProof, Error>) -> Void
+  ) -> () -> Void {
+    let cancelled = ProductUpdateCancelFlag()
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      let result = self?.observeVerifiedProductUpdateProof(
+        candidate, staging: staging, payload: payload) ?? .failure(ProductUpdateTrustError.pythonMissing)
+      DispatchQueue.main.async {
+        if !cancelled.marked { completion(result) }
+      }
+    }
+    return { cancelled.mark() }
+  }
+
+  private func observeVerifiedProductUpdateProof(
+    _ candidate: ProductUpdateCandidate,
+    staging: URL,
+    payload: Data
+  ) -> Result<ProductUpdateProof, Error> {
+    guard let packRelative = productUpdateStagedRelativePath(candidate.packRelativePath),
+      let appRelative = productUpdateStagedRelativePath(candidate.appRelativePath)
+    else {
+      return .failure(ProductUpdateTrustError.verifierFailed("signed artifact path is not relative"))
+    }
+    let pack = staging.appendingPathComponent(packRelative)
+    let dmg = staging.appendingPathComponent(appRelative)
+    if case .failure(let error) = verifyProductUpdatePayloadDigest(
+      fileURL: pack, expectedSHA256: candidate.packSHA256, expectedSize: candidate.packSize)
+    {
+      return .failure(error)
+    }
+    if FileManager.default.fileExists(atPath: dmg.path),
+      case .failure(let error) = verifyProductUpdatePayloadDigest(
+        fileURL: dmg, expectedSHA256: candidate.appSHA256, expectedSize: candidate.appSize)
+    {
+      return .failure(error)
+    }
+    let releaseOutput = staging.appendingPathComponent("release-output.json")
+    let signature = staging.appendingPathComponent("release-output.json.sig")
+    guard let python = resolveProductContractPython() else {
+      return .failure(ProductUpdateTrustError.pythonMissing)
+    }
+    switch invokeReleaseOutputVerifier(
+      releaseOutput: releaseOutput, signature: signature, python: python)
+    {
+    case .failure(let error):
+      return .failure(error)
+    case .success:
+      break
+    }
+    let observed = observeProductUpdateRevisions(from: payload)
+    let app = staging.appendingPathComponent("Vibecrafted.app")
+    guard FileManager.default.fileExists(atPath: app.path),
+      let identity = observeProductUpdateCodesignIdentity(appURL: app)
+    else {
+      return .failure(ProductUpdateTrustError.codesignFailed)
+    }
+    guard identity.identifier == productUpdateExpectedBundleIdentifier,
+      identity.teamID == productUpdateExpectedTeamID
+    else {
+      return .failure(ProductUpdateTrustError.codesignFailed)
+    }
+    guard observeProductUpdateStapledNotarization(appURL: app) else {
+      return .failure(ProductUpdateTrustError.notarizationFailed)
+    }
+    let packMatches =
+      runtimePackMatchesCarrier(
+        generation: candidate.generation, signedSourceRevision: observed.source ?? "")
+      && (observed.source?.lowercased() == candidate.sourceRevision.lowercased())
+    return .success(
+      ProductUpdateProof(
+        signatureVerifiedOverExactBytes: true,
+        verifierOwner: productUpdateExpectedVerifierOwner,
+        payloadHashesMatch: true,
+        codesignIdentifier: identity.identifier,
+        codesignTeamID: identity.teamID,
+        notarizedAndStapled: true,
+        packIdentityMatches: packMatches,
+        observedSourceRevision: observed.source,
+        observedTerminalRevision: observed.terminal,
+        observedFrameRevision: observed.frame))
+  }
+
+  private func resolveProductContractPython() -> URL? {
+    resolveProductContractPython(installRoot: canonicalInstall?.root)
+  }
+
+  private func replaceProductUpdateAppBundle(
+    _ request: ProductUpdateReplacementRequest,
+    completion: @escaping (Result<ProductUpdateReplacementAdmission, Error>) -> Void
+  ) -> () -> Void {
+    var live = request
+    if live.helperURL == nil {
+      live.helperURL = resolveLiveUpdateChannel().helperURL
+    }
+    if live.waitStart == nil, let pid = live.waitPID {
+      live.waitStart = captureProductUpdateProcessIdentity(pid: pid)?.startTime
+    }
+    if live.transactionID == nil {
+      live.transactionID = UUID().uuidString.lowercased()
+    }
+    let cancelled = ProductUpdateCancelFlag()
+    let processLock = NSLock()
+    var spawned: Process?
+    var helperAdmitted = false
+    DispatchQueue.global(qos: .userInitiated).async {
+      do {
+        let process = try spawnProductUpdateHelper(live)
+        processLock.lock()
+        spawned = process
+        processLock.unlock()
+        if cancelled.marked {
+          processLock.lock()
+          let admitted = helperAdmitted
+          processLock.unlock()
+          if !admitted {
+            terminateProductUpdateHelper(process)
+            DispatchQueue.main.async {
+              completion(.failure(ProductUpdateReplacementError.helperFailed("update cancelled")))
+            }
+          }
+          return
+        }
+        let outcome = waitForProductUpdateHelperAdmission(process: process, request: live)
+        if case .success = outcome {
+          processLock.lock()
+          helperAdmitted = true
+          processLock.unlock()
+        }
+        DispatchQueue.main.async {
+          switch outcome {
+          case .success(let admission):
+            completion(.success(admission))
+          case .failure(let error):
+            if cancelled.marked { return }
+            completion(.failure(error))
+          }
+        }
+      } catch {
+        DispatchQueue.main.async {
+          if !cancelled.marked {
+            completion(.failure(error))
+          }
+        }
+      }
+    }
+    return {
+      cancelled.mark()
+      processLock.lock()
+      let process = spawned
+      let admitted = helperAdmitted
+      processLock.unlock()
+      if admitted { return }
+      if let process {
+        terminateProductUpdateHelper(process)
+      }
+    }
+  }
+
+  @discardableResult
+  private func adoptPendingProductUpdateIfNeeded() -> ProductUpdateHandoffAdoption {
+    let pendingURL = productUpdatePendingHandoffURL(home: craftedHomeURL())
+    guard FileManager.default.isReadableFile(atPath: pendingURL.path) else { return .none }
+    guard let handoff = try? readProductUpdateHandoff(from: pendingURL) else {
+      showNativeMessage(
+        "Update did not finish",
+        "A previous update left an unreadable recovery record. The current version was not treated as finished.")
+      return .retained
+    }
+    return consumePendingProductUpdate(handoff, pendingURL: pendingURL, alreadyWaited: false)
+  }
+
+  private func consumePendingProductUpdate(
+    _ handoff: ProductUpdateHandoffRecord,
+    pendingURL: URL,
+    alreadyWaited: Bool
+  ) -> ProductUpdateHandoffAdoption {
+    let receiptURL = URL(fileURLWithPath: handoff.receiptURL)
+    let replacement = productUpdateObservedReplacementReceipt(at: receiptURL)
+    let helperLive = productUpdateHelperIdentityLive(
+      pid: handoff.helperPID, start: handoff.helperStart)
+    let evidence = productUpdateObserveRuntimeEvidence(
+      handoff: handoff,
+      runningApp: Bundle.main.bundleURL,
+      home: craftedHomeURL(),
+      runtimeHome: currentRuntimeHome())
+    let decision = decideProductUpdateHandoff(
+      handoff: handoff,
+      replacement: replacement,
+      helperLive: helperLive,
+      runningDestination: Bundle.main.bundleURL.path,
+      evidence: evidence)
+    switch decision {
+    case .awaitReceipt:
+      if alreadyWaited {
+        retainProductUpdateEvidence(handoff, reason: "the replacement receipt is still missing")
+        return .retained
+      }
+      showProductUpdatePanel()
+      productUpdateCoordinator().presentFinishing(candidate: nil)
+      DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        let found = self?.awaitProductUpdateReceipt(handoff) ?? false
+        DispatchQueue.main.async {
+          guard let self else { return }
+          if found {
+            let next = self.consumePendingProductUpdate(
+              handoff, pendingURL: pendingURL, alreadyWaited: true)
+            self.productUpdateStartupAdoption = next
+            if next == .none || next == .retained {
+              self.connectCommandDeck()
+            }
+          } else {
+            self.retainProductUpdateEvidence(
+              handoff,
+              reason: "the update helper is still working or stopped without a receipt")
+            self.productUpdateStartupAdoption = .retained
+            self.connectCommandDeck()
+          }
+        }
+      }
+      return .waiting
+    case .publishPack(let receipt):
+      return publishAdoptedProductUpdate(
+        handoff, replacement: receipt, pendingURL: pendingURL)
+    case .restorePrevious(let prior):
+      return beginProductUpdateRecover(handoff: handoff, prior: prior)
+    case .rolledBack(let reason):
+      do {
+        try writeProductUpdateRecovery(
+          handoff: handoff, reason: reason,
+          to: productUpdateRecoveryURL(home: craftedHomeURL()))
+      } catch {
+        retainProductUpdateEvidence(
+          handoff,
+          reason:
+            "\(reason) Recovery record was not saved. \(error.localizedDescription)")
+        return .retained
+      }
+      try? FileManager.default.removeItem(at: pendingURL)
+      showNativeMessage("Previous version restored", reason)
+      return .retained
+    case .retain(let reason):
+      retainProductUpdateEvidence(handoff, reason: reason)
+      return .retained
+    case .stale(let reason):
+      retainProductUpdateEvidence(handoff, reason: reason)
+      return .retained
+    }
+  }
+
+  private func awaitProductUpdateReceipt(_ handoff: ProductUpdateHandoffRecord) -> Bool {
+    let receiptURL = URL(fileURLWithPath: handoff.receiptURL)
+    let deadline = Date().addingTimeInterval(20)
+    while Date() < deadline {
+      if let replacement = productUpdateObservedReplacementReceipt(at: receiptURL),
+        replacement.replaced
+      {
+        return true
+      }
+      if !productUpdateHelperIdentityLive(pid: handoff.helperPID, start: handoff.helperStart) {
+        return productUpdateObservedReplacementReceipt(at: receiptURL)?.replaced == true
+      }
+      Thread.sleep(forTimeInterval: 0.05)
+    }
+    return productUpdateObservedReplacementReceipt(at: receiptURL)?.replaced == true
+  }
+
+  private func retainProductUpdateEvidence(
+    _ handoff: ProductUpdateHandoffRecord, reason: String
+  ) {
+    var message = reason
+    do {
+      try writeProductUpdateRecovery(
+        handoff: handoff, reason: reason,
+        to: productUpdateRecoveryURL(home: craftedHomeURL()))
+    } catch {
+      message =
+        "\(reason) Recovery record was not saved. \(error.localizedDescription)"
+    }
+    showNativeMessage("Update did not finish", message)
+  }
+
+  private func publishAdoptedProductUpdate(
+    _ handoff: ProductUpdateHandoffRecord,
+    replacement: ProductUpdateReplacementReceipt,
+    pendingURL: URL
+  ) -> ProductUpdateHandoffAdoption {
+    var bound = handoff
+    bound.capturePath = replacement.capture ?? handoff.capturePath
+    bound.phase = "app_replaced"
+    do {
+      try writeProductUpdateHandoff(bound, to: pendingURL)
+    } catch {
+      retainProductUpdateEvidence(
+        bound,
+        reason:
+          "Could not save the replaced-app handoff. The Runtime Pack was not published. \(error.localizedDescription)")
+      return .retained
+    }
+    guard let packPath = bound.packURL, FileManager.default.isReadableFile(atPath: packPath) else {
+      retainProductUpdateEvidence(
+        bound, reason: "the app was replaced, but the matching Runtime Pack was not found")
+      return .retained
+    }
+    let pack = URL(fileURLWithPath: packPath)
+    let candidate = ProductUpdateCandidate(
+      generation: bound.candidateGeneration,
+      sourceRevision: bound.sourceRevision,
+      terminalRevision: bound.terminalRevision,
+      frameRevision: bound.frameRevision,
+      keyID: productUpdateExpectedKeyID,
+      algorithm: productUpdateExpectedAlgorithm,
+      spkiSHA256: productUpdateExpectedSPKI,
+      packRelativePath: pack.lastPathComponent,
+      appRelativePath: "Vibecrafted.app",
+      packSHA256: String(repeating: "00", count: 32),
+      appSHA256: String(repeating: "00", count: 32),
+      packSize: 1,
+      appSize: 1)
+    let coordinator = productUpdateCoordinator()
+    coordinator.presentFinishing(candidate: candidate)
+    showProductUpdatePanel()
+    _ = installProductUpdate(candidate, pack: pack) { [weak self] outcome in
+      guard let self else { return }
+      switch outcome {
+      case .success:
+        self.reconcileAdoptedPack(handoff: bound, pendingURL: pendingURL, installerFailed: false)
+      case .failure:
+        self.reconcileAdoptedPack(handoff: bound, pendingURL: pendingURL, installerFailed: true)
+      }
+    }
+    return .publishing
+  }
+
+  /// Reconcile the App replace against the installer's own identity documents.
+  /// A caller-written enum is not publication proof. App-only restore is not
+  /// whole-tuple success.
+  private func reconcileAdoptedPack(
+    handoff: ProductUpdateHandoffRecord,
+    pendingURL: URL,
+    installerFailed: Bool
+  ) {
+    let observed = productUpdateObserveInstallerPublication(runtimeHome: currentRuntimeHome())
+    let derived = productUpdateDerivePackPublication(
+      observed,
+      priorGeneration: handoff.installedGeneration,
+      candidateGeneration: handoff.candidateGeneration)
+    do {
+      try writeProductUpdatePackEvidence(
+        transaction: handoff.transactionID,
+        observation: observed,
+        derived: derived,
+        priorGeneration: handoff.installedGeneration,
+        candidateGeneration: handoff.candidateGeneration,
+        to: productUpdatePackEvidenceURL(home: craftedHomeURL()))
+    } catch {
+      retainProductUpdateEvidence(
+        handoff,
+        reason:
+          "Could not persist Runtime Pack observation. \(error.localizedDescription). \(observed.detail)")
+      productUpdateStartupAdoption = .retained
+      connectCommandDeck()
+      return
+    }
+    switch derived {
+    case .published:
+      if installerFailed {
+        if let prior = productUpdateOwnedPriorApp(at: handoff.capturePath) {
+          _ = beginProductUpdateRecover(handoff: handoff, prior: prior)
+        } else {
+          retainProductUpdateEvidence(
+            handoff,
+            reason:
+              "the installer published \(observed.generation) and then failed; historical rollback data is missing. \(observed.detail)")
+          productUpdateStartupAdoption = .retained
+          connectCommandDeck()
+        }
+        return
+      }
+      try? FileManager.default.removeItem(at: pendingURL)
+      productUpdateStartupAdoption = .none
+      connectCommandDeck()
+    case .unpublished, .rolledBack:
+      if let prior = productUpdateOwnedPriorApp(at: handoff.capturePath) {
+        _ = beginProductUpdateRecover(handoff: handoff, prior: prior)
+      } else {
+        retainProductUpdateEvidence(
+          handoff,
+          reason:
+            "the Runtime Pack did not stay published, and the previous app capture is missing. \(observed.detail)")
+        productUpdateStartupAdoption = .retained
+        connectCommandDeck()
+      }
+    case .unresolved:
+      retainProductUpdateEvidence(
+        handoff,
+        reason:
+          "the Runtime Pack installer did not leave a coherent generation. \(observed.detail)")
+      productUpdateStartupAdoption = .retained
+      connectCommandDeck()
+    }
+  }
+
+  @discardableResult
+  private func beginProductUpdateRestore(
+    handoff: ProductUpdateHandoffRecord, prior: URL
+  ) -> ProductUpdateHandoffAdoption {
+    beginProductUpdateRecover(handoff: handoff, prior: prior)
+  }
+
+  /// Restore prior runtime/config/launchers through the installer owner, then
+  /// the matching prior app. App-only restore is not treated as success.
+  @discardableResult
+  private func beginProductUpdateRecover(
+    handoff: ProductUpdateHandoffRecord, prior: URL
+  ) -> ProductUpdateHandoffAdoption {
+    guard productUpdateOwnedPriorApp(at: prior.deletingLastPathComponent().path) != nil else {
+      retainProductUpdateEvidence(
+        handoff, reason: "the previous app capture is not an owned recovery path")
+      return .retained
+    }
+    let identity = captureProductUpdateProcessIdentity(
+      pid: ProcessInfo.processInfo.processIdentifier)
+    let receiptURL = URL(fileURLWithPath: handoff.receiptURL)
+      .deletingLastPathComponent()
+      .appendingPathComponent("recover-receipt.json")
+    let request = productUpdateRecoverRequest(
+      handoff: handoff,
+      priorApp: prior,
+      waitPID: identity?.pid ?? ProcessInfo.processInfo.processIdentifier,
+      waitStart: identity?.startTime,
+      helperURL: resolveLiveUpdateChannel().helperURL,
+      receiptURL: receiptURL)
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      let outcome = admitProductUpdateHelper(request)
+      DispatchQueue.main.async {
+        guard let self else { return }
+        switch outcome {
+        case .success(let admission) where admission.ready:
+          var restoring = handoff
+          restoring.phase = "restoring"
+          restoring.receiptURL = receiptURL.path
+          restoring.admissionURL = admission.admissionURL.path
+          restoring.journalURL = admission.journalURL?.path ?? handoff.journalURL
+          restoring.helperPID = admission.helperPID
+          restoring.helperStart =
+            captureProductUpdateProcessIdentity(pid: admission.helperPID)?.startTime ?? ""
+          restoring.mode = ProductUpdateHelperMode.recover.rawValue
+          if !admission.candidateIdentity.isEmpty {
+            restoring.priorIdentity = admission.candidateIdentity
+          }
+          do {
+            try writeProductUpdateHandoff(
+              restoring, to: productUpdatePendingHandoffURL(home: self.craftedHomeURL()))
+          } catch {
+            self.retainProductUpdateEvidence(
+              restoring,
+              reason:
+                "Could not save the recover handoff. The window stays open so the helper is not abandoned. \(error.localizedDescription)")
+            self.productUpdateStartupAdoption = .retained
+            self.connectCommandDeck()
+            return
+          }
+          self.productUpdate?.noteUIShutdownPreservingHandoff()
+          self.requestQuit()
+        case .success:
+          self.retainProductUpdateEvidence(
+            handoff, reason: "the recover helper started but did not admit the previous version")
+          self.productUpdateStartupAdoption = .retained
+          self.connectCommandDeck()
+        case .failure(let error):
+          self.retainProductUpdateEvidence(
+            handoff,
+            reason: "the previous app and Runtime Pack could not be restored. \(error.localizedDescription)")
+          self.productUpdateStartupAdoption = .retained
+          self.connectCommandDeck()
+        }
+      }
+    }
+    return .restoring
+  }
+
+  private func showProductUpdatePanel() {
+    if productUpdatePanel == nil {
+      let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 480, height: 360),
+        styleMask: [.titled, .closable],
+        backing: .buffered, defer: false)
+      window.title = "Check for Updates"
+      window.isReleasedWhenClosed = false
+      window.isRestorable = false
+      window.restorationClass = nil
+      window.center()
+      productUpdatePanel = window
+    }
+    renderProductUpdatePanel()
+    productUpdatePanel?.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+  }
+
+  private func renderProductUpdatePanel() {
+    guard let window = productUpdatePanel, let coordinator = productUpdate else { return }
+    let root = ProductUpdateView(
+      progress: coordinator.progress,
+      onRetry: { [weak self] in self?.productUpdate?.checkForUpdates() },
+      onInstall: { [weak self] in self?.productUpdate?.installUpdate() },
+      onClose: { [weak self] in self?.productUpdatePanel?.orderOut(nil) }
+    )
+    let hosting = NSHostingView(rootView: root)
+    window.contentView = hosting
+  }
+
   private func buildMainMenu() {
     let mainMenu = NSMenu()
 
@@ -2045,6 +2773,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     appMenu.addItem(
       withTitle: "About Vibecrafted",
       action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+    let checkUpdates = appMenu.addItem(
+      withTitle: "Check for Updates…", action: #selector(checkForUpdatesFromMenu), keyEquivalent: "")
+    checkUpdates.target = self
+    checkUpdates.toolTip = "Sprawdź aktualizacje"
     appMenu.addItem(.separator())
     appMenu.addItem(
       withTitle: "Hide Vibecrafted", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")

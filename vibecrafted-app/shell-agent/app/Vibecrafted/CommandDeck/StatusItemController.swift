@@ -11,6 +11,7 @@ import AppKit
 enum StatusItemAction: String, Sendable, CaseIterable {
   case showCommandDeck
   case openTerminal
+  case checkForUpdates
   case retryConnection
   case repairRuntime
   case stopRuntime
@@ -32,6 +33,7 @@ enum StatusItemAction: String, Sendable, CaseIterable {
 struct StatusItemAvailability: Equatable, Sendable {
   var canShowCommandDeck: Bool
   var canOpenTerminal: Bool
+  var canCheckForUpdates: Bool = true
   var canRetryConnection: Bool
   var canRepairRuntime: Bool
   var canStopRuntime: Bool
@@ -42,6 +44,7 @@ struct StatusItemAvailability: Equatable, Sendable {
   static let `default` = StatusItemAvailability(
     canShowCommandDeck: true,
     canOpenTerminal: false,
+    canCheckForUpdates: true,
     canRetryConnection: true,
     canRepairRuntime: true,
     canStopRuntime: false,
@@ -86,6 +89,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
   static let primaryCommands: [StatusItemMenuCommand] = [
     .init(action: .showCommandDeck, title: "Open Vibecrafted", keyEquivalent: "o"),
     .init(action: .openTerminal, title: "Open Terminal", keyEquivalent: "t"),
+    .init(action: .checkForUpdates, title: "Check for Updates…"),
     .init(action: .showWorkspaces, title: "Workspaces"),
     .init(action: .help, title: "Help & Diagnostics…")
   ]
@@ -202,6 +206,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     if !command.keyEquivalent.isEmpty { item.keyEquivalentModifierMask = [.command, .option] }
     item.target = self
     item.representedObject = command.action.rawValue
+    if command.action == .checkForUpdates {
+      item.toolTip = "Sprawdź aktualizacje"
+    }
     actionItems[command.action] = item
   }
 
@@ -209,6 +216,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     switch action {
     case .showCommandDeck: availability.canShowCommandDeck
     case .openTerminal: availability.canOpenTerminal
+    case .checkForUpdates: availability.canCheckForUpdates
     case .retryConnection: availability.canRetryConnection
     case .repairRuntime: availability.canRepairRuntime
     case .stopRuntime: availability.canStopRuntime

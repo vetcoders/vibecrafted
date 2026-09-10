@@ -70,5 +70,8 @@ targets:
     postBuildScripts:
       - script: |
           bash $SRCROOT/../scripts/fix-dylib-install-names.sh "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH"
+          mkdir -p "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers"
+          install -m 0755 "$SRCROOT/../../../scripts/vc-app-update.sh" \
+            "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers/vc-app-update"
         name: Normalize notification FFI install names
         shell: /bin/bash

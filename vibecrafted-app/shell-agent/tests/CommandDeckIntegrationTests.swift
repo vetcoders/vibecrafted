@@ -73,10 +73,10 @@ struct CommandDeckIntegrationTests {
   static func trayMenuContract() throws {
     let primary = StatusItemController.primaryCommands
     try require(primary.map(\.title) == [
-      "Open Vibecrafted", "Open Terminal", "Workspaces", "Help & Diagnostics…"
+      "Open Vibecrafted", "Open Terminal", "Check for Updates…", "Workspaces", "Help & Diagnostics…"
     ], "Tray primary actions are not human-facing")
     try require(primary.map(\.action) == [
-      .showCommandDeck, .openTerminal, .showWorkspaces, .help
+      .showCommandDeck, .openTerminal, .checkForUpdates, .showWorkspaces, .help
     ], "Tray primary actions changed dispatch")
     try require(primary[0].keyEquivalent == "o" && primary[1].keyEquivalent == "t",
       "Tray shortcuts changed")
@@ -100,6 +100,8 @@ struct CommandDeckIntegrationTests {
       "Workspaces should remain available")
     try require(StatusItemController.isEnabled(.help, availability: unavailable),
       "Help should remain available")
+    try require(StatusItemController.isEnabled(.checkForUpdates, availability: unavailable),
+      "Check for Updates should remain available")
     try require(!StatusItemController.isEnabled(.openTerminal, availability: unavailable)
       && !StatusItemController.isEnabled(.stopRuntime, availability: unavailable)
       && !StatusItemController.isEnabled(.startServer, availability: unavailable),
