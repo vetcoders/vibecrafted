@@ -734,7 +734,11 @@ class Scene:
     def owner_calls(self) -> list[str]:
         if not self.owner_log.exists():
             return []
-        return [l for l in self.owner_log.read_text(encoding="utf-8").splitlines() if l]
+        return [
+            line
+            for line in self.owner_log.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
 
     def live(self) -> list[str]:
         return sorted(p.name for p in (self.table / "live").iterdir())
@@ -844,6 +848,7 @@ def _run_create_lock(
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         _shell_argv(shell, _create_lock_script(*body)),
+        check=False,
         env=env,
         stdin=subprocess.DEVNULL,
         capture_output=True,
@@ -919,9 +924,7 @@ def _spawn_owned_create_lock_holder(
     except ProcessLookupError:
         detail = err_path.read_text(encoding="utf-8") if err_path.exists() else ""
         raise AssertionError(detail or "create-lock holder died before pgid probe")
-    assert pgid == holder.pid, (
-        "create-lock holder was not its own session/group leader"
-    )
+    assert pgid == holder.pid, "create-lock holder was not its own session/group leader"
     assert pgid not in (0, 1, os.getpgrp()), (
         "refusing to own a shared/system process group"
     )
@@ -2376,13 +2379,19 @@ def test_inside_host_guest_uses_shipped_operator_layout_content(
         for c in scene.calls()
         if c.get("created") == "mlx-batch-runner" and c.get("guest_workspace") is True
     ]
-    selected = Path(guest_creates[0]["argv"][guest_creates[0]["argv"].index("--new-session-with-layout") + 1])
+    selected = Path(
+        guest_creates[0]["argv"][
+            guest_creates[0]["argv"].index("--new-session-with-layout") + 1
+        ]
+    )
     assert selected.resolve() == SHIPPED_OPERATOR_LAYOUT.resolve()
     text = selected.read_text(encoding="utf-8")
     assert "session_layer" in text
     assert "session-manager" in text
     assert "VC Guest" in text or "pane_title" in text
-    assert (scene.table / "live" / "mlx-batch-runner").read_text(encoding="utf-8") == text
+    assert (scene.table / "live" / "mlx-batch-runner").read_text(
+        encoding="utf-8"
+    ) == text
     assert "--guest-workspace" in guest_creates[0]["argv"]
     assert projected
 
@@ -2452,7 +2461,7 @@ def test_create_lock_dies_with_holder_and_retry_succeeds(
         _wait_owned_create_lock_ready(holder, ready, err_path)
         busy = _run_create_lock(
             "_vetcoders_start_acquire_create_lock race",
-            'lock_rc=$?',
+            "lock_rc=$?",
             'printf "RC=[%s]\\n" "$lock_rc"',
             'exit "$lock_rc"',
             env=env,
@@ -2465,7 +2474,7 @@ def test_create_lock_dies_with_holder_and_retry_succeeds(
         _teardown_owned_create_lock_holder(holder)
     retry = _run_create_lock(
         "_vetcoders_start_acquire_create_lock race",
-        'lock_rc=$?',
+        "lock_rc=$?",
         'if ((lock_rc != 0)); then printf "RC=[%s]\\n" "$lock_rc"; exit "$lock_rc"; fi',
         "_vetcoders_start_release_create_lock",
         "printf RETRY_OK\\n",
@@ -2504,7 +2513,7 @@ def test_create_locks_are_independent_per_socket_namespace(
         _wait_owned_create_lock_ready(holder, ready, err_path)
         other = _run_create_lock(
             "_vetcoders_start_acquire_create_lock shared-name",
-            'lock_rc=$?',
+            "lock_rc=$?",
             'if ((lock_rc != 0)); then printf "RC=[%s]\\n" "$lock_rc"; exit "$lock_rc"; fi',
             "_vetcoders_start_release_create_lock",
             "printf NS_OK\\n",
@@ -2532,7 +2541,7 @@ def test_create_lock_refuses_leftover_mkdir_directory_without_deleting(
     env = _create_lock_env(tmp_path, sock=sock)
     result = _run_create_lock(
         "_vetcoders_start_acquire_create_lock stale",
-        'lock_rc=$?',
+        "lock_rc=$?",
         'printf "RC=[%s]\\n" "$lock_rc"',
         'exit "$lock_rc"',
         env=env,
@@ -2583,7 +2592,7 @@ def test_create_lock_is_not_held_by_live_frame_env_child(
         os.kill(child_pid, 0)
         retry = _run_create_lock(
             "_vetcoders_start_acquire_create_lock inherit",
-            'lock_rc=$?',
+            "lock_rc=$?",
             'if ((lock_rc != 0)); then printf "RC=[%s]\\n" "$lock_rc"; exit "$lock_rc"; fi',
             "_vetcoders_start_release_create_lock",
             "printf INHERIT_OK\\n",
@@ -2686,9 +2695,9 @@ def test_start_entry_owns_inside_host_projection_not_switch_session() -> None:
     assert "_vetcoders_start_classify_projection" in text
     assert "_vetcoders_start_reconcile_host_projection" in text
     assert "project-workspace" in text
-    enter = text.split("_vetcoders_start_enter_workspace_session()")[1].split(
-        "\n}\n"
-    )[0]
+    enter = text.split("_vetcoders_start_enter_workspace_session()")[1].split("\n}\n")[
+        0
+    ]
     assert "action switch-session" not in enter
 
 
@@ -2776,7 +2785,10 @@ def test_start_projection_receipt_ok_rejects_refused_and_malformed() -> None:
                 ]
             )
         )
-        assert "FN_RC=[0]" not in result.stdout, (payload, result.stdout + result.stderr)
+        assert "FN_RC=[0]" not in result.stdout, (
+            payload,
+            result.stdout + result.stderr,
+        )
         assert "FN_RC=[1]" in result.stdout, result.stdout + result.stderr
 
 
@@ -2791,7 +2803,10 @@ def test_start_classify_projection_accepts_real_receipt_representations() -> Non
         (pretty, "handled"),
         (prefixed, "handled"),
         (
-            json.dumps({**_HANDLED_RECEIPT, "status": "Refused", "pane_id": None}, separators=(",", ":")),
+            json.dumps(
+                {**_HANDLED_RECEIPT, "status": "Refused", "pane_id": None},
+                separators=(",", ":"),
+            ),
             "refused",
         ),
         (
@@ -2803,7 +2818,10 @@ def test_start_classify_projection_accepts_real_receipt_representations() -> Non
             "indeterminate",
         ),
         (
-            json.dumps({**_HANDLED_RECEIPT, "status": "Unavailable", "pane_id": None}, separators=(",", ":")),
+            json.dumps(
+                {**_HANDLED_RECEIPT, "status": "Unavailable", "pane_id": None},
+                separators=(",", ":"),
+            ),
             "indeterminate",
         ),
         ("{this is not a WorkspaceProjectionReceipt", "indeterminate"),
@@ -2811,11 +2829,15 @@ def test_start_classify_projection_accepts_real_receipt_representations() -> Non
         (
             compact
             + "\n"
-            + json.dumps({**_HANDLED_RECEIPT, "request_id": "pipe-2"}, separators=(",", ":")),
+            + json.dumps(
+                {**_HANDLED_RECEIPT, "request_id": "pipe-2"}, separators=(",", ":")
+            ),
             "indeterminate",
         ),
         (
-            json.dumps({**_HANDLED_RECEIPT, "guest": "someone-else"}, separators=(",", ":")),
+            json.dumps(
+                {**_HANDLED_RECEIPT, "guest": "someone-else"}, separators=(",", ":")
+            ),
             "indeterminate",
         ),
         (
@@ -2909,9 +2931,7 @@ def test_start_parsers_keep_private_json_off_python_argv(tmp_path: Path) -> None
     spy.chmod(0o755)
     receipt = dict(_HANDLED_RECEIPT)
     receipt["detail"] = secret
-    panes = json.dumps(
-        [{"id": 3, "title": "host", "terminal_command": secret}]
-    )
+    panes = json.dumps([{"id": 3, "title": "host", "terminal_command": secret}])
     fake = tmp_path / "vc-frame"
     fake.write_text(
         "#!/usr/bin/env python3\n"
@@ -3629,9 +3649,7 @@ def test_admitted_frame_project_workspace_is_a_real_verb_not_a_stub() -> None:
     try:
         missing_session = frame("project-workspace", guest)
         assert missing_session.returncode != 0
-        assert "requires --session" in (
-            missing_session.stdout + missing_session.stderr
-        )
+        assert "requires --session" in (missing_session.stdout + missing_session.stderr)
 
         missing_guest = frame("--session", host, "project-workspace", guest)
         assert missing_guest.returncode != 0
@@ -3672,25 +3690,25 @@ def test_admitted_frame_project_workspace_is_a_real_verb_not_a_stub() -> None:
 def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -> None:
     """W2 acceptance: public vc-start inside a PTY-backed admitted host.
 
-        Creates an isolated exclusive short sandbox, a vibecrafted-host session,
-        one attached PTY client, and a prior pane whose process records PID plus
-        start identity and then reads commands (`exec sh -s`). Invokes public
-        `vc-start --repo` with attached-host markers. Guest/alias/other dirs are
-        committed repositories. Success requires a compact Handled receipt whose
-        typed terminal pane_id exists on the host, persistent session-layer
-        chrome (not the replaceable VC Guest placeholder), the same prior pane
-        id / PID / start identity, and a harmless command completed in that
-        same prior pane via public `action write-chars --pane-id` — not
-        sleep-alive or guest dump-screen alone. Offered `operator` layout
-        alias projects on the same canvas (A/B); real Frame project-workspace
-        returns the original guest (A/B/A). An owned guest `sh -s` pane
-        records PID/start identity and a completed command; both survive
-        the viewport swap, and that same process answers a fresh correlated
-        command after B and again after A. The prior pane accepts a second
-        command after B. One current viewport —
-        leftover visitors are not required. `--layout` stays usage-refused.
-        Then client-ambiguity refuses before another create. Cleanup
-        identities are registered before ops that can throw.
+    Creates an isolated exclusive short sandbox, a vibecrafted-host session,
+    one attached PTY client, and a prior pane whose process records PID plus
+    start identity and then reads commands (`exec sh -s`). Invokes public
+    `vc-start --repo` with attached-host markers. Guest/alias/other dirs are
+    committed repositories. Success requires a compact Handled receipt whose
+    typed terminal pane_id exists on the host, persistent session-layer
+    chrome (not the replaceable VC Guest placeholder), the same prior pane
+    id / PID / start identity, and a harmless command completed in that
+    same prior pane via public `action write-chars --pane-id` — not
+    sleep-alive or guest dump-screen alone. Offered `operator` layout
+    alias projects on the same canvas (A/B); real Frame project-workspace
+    returns the original guest (A/B/A). An owned guest `sh -s` pane
+    records PID/start identity and a completed command; both survive
+    the viewport swap, and that same process answers a fresh correlated
+    command after B and again after A. The prior pane accepts a second
+    command after B. One current viewport —
+    leftover visitors are not required. `--layout` stays usage-refused.
+    Then client-ambiguity refuses before another create. Cleanup
+    identities are registered before ops that can throw.
     """
     assert _ADMITTED_FRAME is not None
     bin_path = _ADMITTED_FRAME
@@ -3797,10 +3815,14 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
                 text=True,
             )
             ptys.append((proc, release))
-            assert _wait_until(lambda: attached.is_file() and proc.poll() is None, 30), attached
+            assert _wait_until(
+                lambda: attached.is_file() and proc.poll() is None, 30
+            ), attached
             return proc
 
-        def public_start(repo: Path, invocation: str) -> subprocess.CompletedProcess[str]:
+        def public_start(
+            repo: Path, invocation: str
+        ) -> subprocess.CompletedProcess[str]:
             start_env = env.copy()
             start_env.update(
                 {
@@ -3837,7 +3859,9 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
             host,
         )
         assert created.returncode == 0, created.stderr
-        assert _wait_until(lambda: host in listing() and "(EXITED" not in listing(), 20), listing()
+        assert _wait_until(
+            lambda: host in listing() and "(EXITED" not in listing(), 20
+        ), listing()
 
         attach("host")
 
@@ -3846,9 +3870,9 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
             return text if _count_list_clients(text) == expected else ""
 
         clients = _wait_until(lambda: unique_client_listing(1), 20)
-        assert clients and _count_list_clients(clients) == 1, (
-            frame("--session", host, "action", "list-clients").stdout
-        )
+        assert clients and _count_list_clients(clients) == 1, frame(
+            "--session", host, "action", "list-clients"
+        ).stdout
 
         def host_chrome_rows():
             return _host_chrome_ready(pane_rows())
@@ -3878,9 +3902,7 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
             15,
         ), (prior_pid, prior_lstart)
         prior_pid_value = prior_pid.read_text(encoding="utf-8").strip()
-        prior_lstart_value = " ".join(
-            prior_lstart.read_text(encoding="utf-8").split()
-        )
+        prior_lstart_value = " ".join(prior_lstart.read_text(encoding="utf-8").split())
         prior_identity = _pid_file_start_identity(prior_pid)
         assert prior_pid_value.isdigit() and prior_identity, prior_pid_value
         assert prior_lstart_value and prior_lstart_value in prior_identity, (
@@ -3998,8 +4020,10 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
             f"echo {guest_token} > {guest_done}",
         )
         assert _wait_until(
-            lambda: guest_done.is_file()
-            and guest_token in guest_done.read_text(encoding="utf-8"),
+            lambda: (
+                guest_done.is_file()
+                and guest_token in guest_done.read_text(encoding="utf-8")
+            ),
             15,
         ), guest_done
         _assert_pid_identity(guest_pid, guest_pid_value, guest_identity)
@@ -4088,8 +4112,10 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
             f"echo {guest_token_b} > {guest_done_b}",
         )
         assert _wait_until(
-            lambda: guest_done_b.is_file()
-            and guest_token_b in guest_done_b.read_text(encoding="utf-8"),
+            lambda: (
+                guest_done_b.is_file()
+                and guest_token_b in guest_done_b.read_text(encoding="utf-8")
+            ),
             15,
         ), guest_done_b
         _assert_pid_identity(guest_pid, guest_pid_value, guest_identity)
@@ -4144,8 +4170,10 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
             f"echo {guest_token_a} > {guest_done_a}",
         )
         assert _wait_until(
-            lambda: guest_done_a.is_file()
-            and guest_token_a in guest_done_a.read_text(encoding="utf-8"),
+            lambda: (
+                guest_done_a.is_file()
+                and guest_token_a in guest_done_a.read_text(encoding="utf-8")
+            ),
             15,
         ), guest_done_a
         _assert_pid_identity(guest_pid, guest_pid_value, guest_identity)
@@ -4156,9 +4184,9 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
 
         attach("host-second")
         two = _wait_until(lambda: unique_client_listing(2), 20)
-        assert two and _count_list_clients(two) == 2, (
-            frame("--session", host, "action", "list-clients").stdout
-        )
+        assert two and _count_list_clients(two) == 2, frame(
+            "--session", host, "action", "list-clients"
+        ).stdout
         owned.append(other)
         ambiguous = public_start(
             other_repo,
@@ -4191,7 +4219,10 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
                 proc.wait(timeout=5)
         leftover = ""
         if cli_env is not None:
-            def _cleanup_frame(*args: str, timeout: int = 40) -> subprocess.CompletedProcess[str]:
+
+            def _cleanup_frame(
+                *args: str, timeout: int = 40
+            ) -> subprocess.CompletedProcess[str]:
                 return subprocess.run(
                     [str(bin_path), *args],
                     check=False,
