@@ -934,6 +934,195 @@ def _wait_owned_create_lock_ready(
     raise AssertionError(detail or "create-lock holder died before ready")
 
 
+def _read_owned_optional_pid(path: Path) -> int | None:
+    if not path.exists():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not text:
+        return None
+    try:
+        pid = int(text)
+    except ValueError:
+        return None
+    if pid <= 1:
+        return None
+    return pid
+
+
+def _reap_owned_pid(pid: int | None, *, timeout: float = 5.0) -> None:
+    """SIGKILL one owned pid and wait until it is gone. No group sweep."""
+    if pid is None or pid <= 1:
+        return
+    if pid in (os.getpid(), os.getppid()):
+        return
+    try:
+        if os.getpgid(pid) == os.getpgrp():
+            return
+    except ProcessLookupError:
+        return
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            waited, _ = os.waitpid(pid, os.WNOHANG)
+            if waited == pid:
+                return
+        except ChildProcessError:
+            pass
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.05)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+
+
+def _teardown_owned_frame_env_lock_inherit(
+    owner: subprocess.Popen[str] | None,
+    child_pid: int | None,
+    child_pid_path: Path,
+) -> None:
+    """Reap the inherit owner, then the setsid sleeper, even after timeout."""
+    if owner is not None:
+        _teardown_owned_create_lock_holder(owner)
+    resolved = child_pid
+    if resolved is None:
+        deadline = time.monotonic() + 1.0
+        while resolved is None and time.monotonic() < deadline:
+            resolved = _read_owned_optional_pid(child_pid_path)
+            if resolved is None:
+                time.sleep(0.05)
+    if resolved is None:
+        resolved = _read_owned_optional_pid(child_pid_path)
+    _reap_owned_pid(resolved)
+
+
+def _spawn_owned_frame_env_lock_inherit_owner(
+    *,
+    tmp_path: Path,
+    env: dict[str, str],
+    shell: str,
+    ready: Path,
+    child_pid_path: Path,
+) -> subprocess.Popen[str]:
+    """Acquire, start a frame-env child with detached stdio, release, exit.
+
+    Owner stdout/stderr are files, not PIPEs. The child is launched through
+    `_vetcoders_start_frame_env` with 0/1/2 redirected away from the owner
+    so a 180s sleeper cannot hold `communicate` open after the owner exits.
+    """
+    out_path = tmp_path / "inherit-owner.out"
+    err_path = tmp_path / "inherit-owner.err"
+    child_out = tmp_path / "inherit-child.out"
+    child_err = tmp_path / "inherit-child.err"
+    sleeper = (
+        "import os, signal, time\n"
+        "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "os.setsid()\n"
+        f"open({str(child_pid_path)!r}, 'w').write(str(os.getpid()))\n"
+        "devnull = os.open(os.devnull, os.O_RDWR)\n"
+        "os.dup2(devnull, 0)\n"
+        "os.dup2(devnull, 1)\n"
+        "os.dup2(devnull, 2)\n"
+        "if devnull > 2:\n"
+        "    os.close(devnull)\n"
+        "time.sleep(180)\n"
+    )
+    child_cmd = (
+        f"_vetcoders_start_frame_env {shlex.quote(sys.executable)} "
+        f"-c {shlex.quote(sleeper)} "
+        f"< /dev/null > {shlex.quote(str(child_out))} "
+        f"2> {shlex.quote(str(child_err))} &"
+    )
+    with out_path.open("w", encoding="utf-8") as out_fh, err_path.open(
+        "w", encoding="utf-8"
+    ) as err_fh:
+        owner = subprocess.Popen(
+            _shell_argv(
+                shell,
+                _create_lock_script(
+                    "_vetcoders_start_acquire_create_lock inherit || exit 9",
+                    child_cmd,
+                    (
+                        "polls=0; while [[ ! -f "
+                        + shlex.quote(str(child_pid_path))
+                        + " ]]; do "
+                        "if ((polls >= 80)); then exit 8; fi; "
+                        "sleep 0.05; polls=$((polls + 1)); done"
+                    ),
+                    "_vetcoders_start_release_create_lock",
+                    f"printf held > {shlex.quote(str(ready))}",
+                ),
+            ),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=out_fh,
+            stderr=err_fh,
+            text=True,
+            start_new_session=True,
+        )
+    assert owner.pid is not None
+    try:
+        pgid = os.getpgid(owner.pid)
+    except ProcessLookupError:
+        detail = err_path.read_text(encoding="utf-8") if err_path.exists() else ""
+        raise AssertionError(detail or "inherit-lock owner died before pgid probe")
+    try:
+        assert pgid == owner.pid, (
+            "inherit-lock owner was not its own session/group leader"
+        )
+        assert pgid not in (0, 1, os.getpgrp()), (
+            "refusing to own a shared/system process group"
+        )
+    except AssertionError:
+        _teardown_owned_create_lock_holder(owner)
+        _reap_owned_pid(_read_owned_optional_pid(child_pid_path))
+        raise
+    return owner
+
+
+def _wait_owned_frame_env_lock_inherit_ready(
+    owner: subprocess.Popen[str],
+    ready: Path,
+    err_path: Path,
+    *,
+    timeout: float = 15.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and not ready.exists():
+        if owner.poll() is not None:
+            break
+        time.sleep(0.05)
+    if not ready.exists():
+        if owner.poll() is None:
+            raise AssertionError(
+                "inherit-lock owner stayed live without publishing ready"
+            )
+        detail = err_path.read_text(encoding="utf-8") if err_path.exists() else ""
+        out_path = err_path.with_name("inherit-owner.out")
+        extra = out_path.read_text(encoding="utf-8") if out_path.exists() else ""
+        raise AssertionError(
+            detail or extra or "inherit-lock owner died before ready"
+        )
+    remaining = deadline - time.monotonic()
+    try:
+        owner.wait(timeout=max(0.1, remaining))
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError(
+            "inherit-lock owner published ready but did not exit"
+        ) from exc
+
+
 def _run(
     scene: Scene,
     invocation: str,
@@ -2332,42 +2521,45 @@ def test_create_lock_is_not_held_by_live_frame_env_child(
     An exec'd descendant must not keep the kernel lock after the owner
     closes or exits. Closing the parent descriptor alone is not enough
     if the child inherited it. The child is spawned the same way create
-    starts the engine; teardown kills only that owned sleeper.
+    starts the engine.
+
+    Cleanup boundary: owner Popen and the setsid sleeper are created
+    inside try/finally. Owner stdio is files (wait, not communicate).
+    Child 0/1/2 are redirected and then dup2'd to /dev/null; other
+    fds stay so this still proves the production lock-fd drop.
+    Start/timeout errors still reap owner then the pid-file child.
+
+    Proof boundary: the same live child survives a real second
+    `_vetcoders_start_acquire_create_lock`. Teardown SIGKILLs only
+    that owned sleeper.
     """
     sock = tmp_path / "sock"
     sock.mkdir()
     env = _create_lock_env(tmp_path, sock=sock)
     ready = tmp_path / "inherit-released"
     child_pid_path = tmp_path / "inherit-child.pid"
-    sleeper = (
-        "import os, signal, time\n"
-        "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
-        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-        "os.setsid()\n"
-        f"open({str(child_pid_path)!r}, 'w').write(str(os.getpid()))\n"
-        "time.sleep(180)\n"
-    )
+    owner: subprocess.Popen[str] | None = None
     child_pid: int | None = None
-    owner = _run_create_lock(
-        "_vetcoders_start_acquire_create_lock inherit || exit 9",
-        f"_vetcoders_start_frame_env {shlex.quote(sys.executable)} -c {shlex.quote(sleeper)} &",
-        (
-            "polls=0; while [[ ! -f "
-            + shlex.quote(str(child_pid_path))
-            + " ]]; do "
-            "if ((polls >= 80)); then exit 8; fi; "
-            "sleep 0.05; polls=$((polls + 1)); done"
-        ),
-        "_vetcoders_start_release_create_lock",
-        f"printf held > {shlex.quote(str(ready))}",
-        env=env,
-        shell=shell,
-        timeout=15,
-    )
     try:
-        assert owner.returncode == 0, owner.stdout + owner.stderr
-        assert ready.exists(), owner.stdout + owner.stderr
-        child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+        owner = _spawn_owned_frame_env_lock_inherit_owner(
+            tmp_path=tmp_path,
+            env=env,
+            shell=shell,
+            ready=ready,
+            child_pid_path=child_pid_path,
+        )
+        _wait_owned_frame_env_lock_inherit_ready(
+            owner,
+            ready,
+            tmp_path / "inherit-owner.err",
+        )
+        assert owner.returncode == 0, (
+            (tmp_path / "inherit-owner.out").read_text(encoding="utf-8")
+            + (tmp_path / "inherit-owner.err").read_text(encoding="utf-8")
+        )
+        assert ready.exists()
+        child_pid = _read_owned_optional_pid(child_pid_path)
+        assert child_pid is not None, "inherit-lock child did not publish pid"
         os.kill(child_pid, 0)
         retry = _run_create_lock(
             "_vetcoders_start_acquire_create_lock inherit",
@@ -2378,20 +2570,13 @@ def test_create_lock_is_not_held_by_live_frame_env_child(
             env=env,
             shell=shell,
         )
+        os.kill(child_pid, 0)
         assert retry.returncode == 0, retry.stdout + retry.stderr
         assert "INHERIT_OK" in retry.stdout
         assert "could not obtain exclusive create lock" not in retry.stderr
+        os.kill(child_pid, 0)
     finally:
-        if child_pid is None and child_pid_path.exists():
-            try:
-                child_pid = int(child_pid_path.read_text(encoding="utf-8"))
-            except ValueError:
-                child_pid = None
-        if child_pid is not None:
-            try:
-                os.kill(child_pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        _teardown_owned_frame_env_lock_inherit(owner, child_pid, child_pid_path)
 
 
 # --------------------------------------------------------------------------
