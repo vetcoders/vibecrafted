@@ -16,9 +16,11 @@
 #   5. Journal every mutation phase before changing the destination. Resume
 #      reconciles every write-ahead phase against the observed
 #      source/dest/prepared/displaced tuple and never falls through to recapture.
-#   6. Write the validated terminal receipt BEFORE relaunch. Restore emits
-#      restored, never replaced. Recover restores the prior Runtime Pack
-#      through install-runtime-pack.sh first, then the matching prior app.
+#   6. Write the validated terminal receipt BEFORE relaunch. terminal_detail()
+#      is the sole authority for that detail; no terminal spells its own.
+#      Replace emits replaced, restore emits restored, recover emits recovered
+#      -- on every path, including resume. Recover restores the prior Runtime
+#      Pack through install-runtime-pack.sh first, then the matching prior app.
 #   7. Destination exclusion is flock(2) on a durable inode, inlined from
 #      scripts/install-runtime-pack.sh. The lock file is never unlinked.
 #      Release closes this process's descriptor only. Installer, sleep, and
@@ -955,7 +957,8 @@ finish_restore_adopt() {
 }
 
 # Mode-aware reconciliation for every write-ahead phase and the observed
-# source/dest/prepared/displaced/failed-new tuple. Restore never emits replaced.
+# source/dest/prepared/displaced/failed-new tuple. Every terminal here defers to
+# terminal_detail(), so a resumed run can never contradict the mode it resumed.
 # Recover finishes runtime first; app-only resume is not whole-tuple success.
 reconcile_resume() {
   local phase="$1"
@@ -977,7 +980,7 @@ reconcile_resume() {
           if [[ "$DEST_PRESENT" -eq 1 ]]; then
             require_recovered_tuple "recovered destination"
             if [[ ! -f "$RECEIPT" ]]; then
-              write_terminal_receipt "recovered" "true"
+              write_terminal_receipt "$(terminal_detail)" "true"
             fi
             relaunch_destination || true
             exit 0
@@ -1025,7 +1028,7 @@ reconcile_resume() {
           if [[ "$DEST_PRESENT" -eq 1 ]]; then
             require_exact_identity "$DESTINATION" "$PRIOR_IDENTITY" "restored destination"
             if [[ ! -f "$RECEIPT" ]]; then
-              write_terminal_receipt "restored" "true"
+              write_terminal_receipt "$(terminal_detail)" "true"
             fi
             relaunch_destination || true
             exit 0
@@ -1073,7 +1076,7 @@ reconcile_resume() {
           if [[ "$DEST_PRESENT" -eq 1 ]]; then
             require_exact_identity "$DESTINATION" "$SOURCE_IDENTITY" "replaced destination"
             if [[ ! -f "$RECEIPT" ]]; then
-              write_terminal_receipt "replaced" "true"
+              write_terminal_receipt "$(terminal_detail)" "true"
             fi
             relaunch_destination || true
             exit 0
@@ -1352,6 +1355,11 @@ recover_whole_tuple() {
 # is the owned capture; the failed new bundle is quarantined beside it.
 # PRIOR_IDENTITY is the original preserved capture identity from the replace
 # journal, never a live hash of whatever is currently at source.
+#
+# recover_whole_tuple() finishes here as well, once the prior Runtime Pack is
+# published. That makes this the shared epilogue of two modes, so both terminals
+# below read terminal_detail() instead of naming a detail: the same code answers
+# restored under --mode restore and recovered under --mode recover.
 restore_previous_tuple() {
   if [[ ! -d "$SOURCE" ]]; then
     echo "restore source missing: $SOURCE" >&2
@@ -1393,7 +1401,7 @@ restore_previous_tuple() {
     local dest_abs
     dest_abs="$(physical_existing_dir "$DESTINATION")"
     if [[ "$dest_abs" == "$source_abs" ]]; then
-      write_terminal_receipt "restored" "true"
+      write_terminal_receipt "$(terminal_detail)" "true"
       relaunch_destination || true
       exit 0
     fi
@@ -1447,7 +1455,7 @@ restore_previous_tuple() {
   require_exact_identity "$SOURCE" "$PRIOR_IDENTITY" "owned prior.app"
   write_journal "adopted" "previous app restored; capture retained"
   fail_after_if "adopted"
-  write_terminal_receipt "restored" "true"
+  write_terminal_receipt "$(terminal_detail)" "true"
   fail_after_if "receipt"
   relaunch_destination || true
   exit 0

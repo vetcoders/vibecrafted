@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Self
 
 import pytest
 
@@ -356,8 +357,12 @@ def test_product_update_source_contract() -> None:
     recovery_names = [
         name
         for name in functions
-        if name.startswith("test_product_update_cross_generation")
-        or name.startswith("test_product_update_whole_tuple_recovery")
+        if name.startswith(
+            (
+                "test_product_update_cross_generation",
+                "test_product_update_whole_tuple_recovery",
+            )
+        )
     ]
     assert recovery_names, "cross-generation / whole-tuple recovery tests are missing"
     for name in recovery_names:
@@ -471,6 +476,7 @@ def test_product_update_helper_refuses_unsigned_source(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
         timeout=15,
+        check=False,
     )
     assert result.returncode != 0
     assert (dest / "Contents.txt").read_text(encoding="utf-8") == "previous"
@@ -508,6 +514,7 @@ def test_product_update_helper_times_out_live_parent(tmp_path: Path) -> None:
             capture_output=True,
             text=True,
             timeout=15,
+            check=False,
         )
         assert result.returncode != 0
         assert (dest / "marker.txt").read_text(encoding="utf-8") == "keep"
@@ -551,6 +558,7 @@ def test_product_update_helper_keeps_previous_capture(tmp_path: Path) -> None:
             capture_output=True,
             text=True,
             timeout=15,
+            check=False,
         )
         assert (old / "keep.txt").read_text(encoding="utf-8") == "old"
         assert (dest / "marker.txt").read_text(encoding="utf-8") == "keep"
@@ -576,6 +584,7 @@ def test_product_update_helper_unable_to_replace(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
         timeout=15,
+        check=False,
     )
     assert result.returncode != 0
     assert not dest.exists()
@@ -615,6 +624,7 @@ def test_product_update_helper_does_not_synthesize_receipt(tmp_path: Path) -> No
         capture_output=True,
         text=True,
         timeout=5,
+        check=False,
     )
     assert result.returncode == 0
     assert not receipt.exists()
@@ -644,6 +654,7 @@ def _run_helper(args: list[str], env: dict[str, str] | None = None, timeout: flo
         text=True,
         timeout=timeout,
         env=env if env is not None else _helper_env(),
+        check=False,
     )
 
 
@@ -769,6 +780,7 @@ def _require_e37_artifacts() -> dict[str, Path]:
         timeout=180,
         cwd=str(REPO_ROOT),
         env=verify_env,
+        check=False,
     )
     if verified.returncode != 0:
         pytest.fail(
@@ -809,6 +821,7 @@ def _verify_signed_generation(app: Path, *, source_token: str, label: str) -> No
         capture_output=True,
         text=True,
         timeout=30,
+        check=False,
     )
     if verified.returncode != 0:
         pytest.fail(
@@ -820,6 +833,7 @@ def _verify_signed_generation(app: Path, *, source_token: str, label: str) -> No
         capture_output=True,
         text=True,
         timeout=15,
+        check=False,
     )
     text = display.stdout + display.stderr
     if "Identifier=io.vetcoders.vibecrafted" not in text:
@@ -831,6 +845,7 @@ def _verify_signed_generation(app: Path, *, source_token: str, label: str) -> No
         capture_output=True,
         text=True,
         timeout=30,
+        check=False,
     )
     if stapled.returncode != 0:
         pytest.fail(
@@ -1043,6 +1058,7 @@ def _install_signed_pack(
             text=True,
             timeout=300,
             env=run_env,
+            check=False,
         )
     extract = Path(env["TMPDIR"]) / f"pack-extract-{os.getpid()}-{pack.stem}"
     extract.mkdir(parents=True, exist_ok=True)
@@ -1051,6 +1067,7 @@ def _install_signed_pack(
         capture_output=True,
         text=True,
         timeout=120,
+        check=False,
     )
     if unpacked.returncode != 0:
         return unpacked
@@ -1081,6 +1098,7 @@ def _install_signed_pack(
         text=True,
         timeout=120,
         env=verify_env,
+        check=False,
     )
     if verified.returncode != 0:
         return verified
@@ -1104,6 +1122,7 @@ def _install_signed_pack(
             text=True,
             timeout=60,
             env=agree_env,
+            check=False,
         )
         if agreed.returncode != 0:
             return agreed
@@ -1124,6 +1143,7 @@ def _install_signed_pack(
         text=True,
         timeout=300,
         env=env,
+        check=False,
     )
 
 
@@ -1142,6 +1162,7 @@ def _attach_signed_app(dmg: Path, mount: Path) -> Path:
         capture_output=True,
         text=True,
         timeout=60,
+        check=False,
     )
     if attached.returncode != 0:
         pytest.fail(
@@ -1164,6 +1185,7 @@ def _copy_signed_app(src: Path, dest: Path) -> Path:
             capture_output=True,
             text=True,
             timeout=60,
+            check=False,
         )
         if cloned.returncode != 0 or not dest.exists():
             if dest.exists():
@@ -1173,6 +1195,7 @@ def _copy_signed_app(src: Path, dest: Path) -> Path:
                 capture_output=True,
                 text=True,
                 timeout=60,
+                check=False,
             )
             if copied.returncode != 0 or not dest.exists():
                 raise RuntimeError(
@@ -1191,6 +1214,7 @@ def _identity_token(app: Path) -> str:
         capture_output=True,
         text=True,
         timeout=15,
+        check=False,
     )
     text = display.stdout + display.stderr
     for line in text.splitlines():
@@ -1208,7 +1232,7 @@ class _SignedApps:
         self.mounts: list[Path] = []
         self.copies: list[Path] = []
 
-    def __enter__(self) -> "_SignedApps":
+    def __enter__(self) -> Self:
         try:
             e37_mount = self.tmp / "mnt-e37"
             prior_mount = self.tmp / "mnt-79001"
@@ -1268,6 +1292,7 @@ class _SignedApps:
                 ["/usr/bin/hdiutil", "detach", str(mount), "-quiet"],
                 capture_output=True,
                 timeout=30,
+                check=False,
             )
 
     def release_copies(self) -> None:
@@ -1826,6 +1851,41 @@ def test_product_update_result_before_new_ui_and_restore(tmp_path: Path) -> None
             )
             assert resume_displacing.returncode == 0, resume_displacing.stderr
             assert json.loads(restore2.read_text(encoding="utf-8"))["detail"] == "restored"
+            assert _identity_token(dest) == apps.prior_identity
+            assert _identity_token(prior2) == apps.prior_identity
+            # Both restores above were interrupted, so both finished through
+            # finish_restore_adopt. Only an uninterrupted restore reaches the
+            # terminal at the end of restore_previous_tuple -- the very terminal
+            # a whole-tuple recover also finishes on. Running it here pins that
+            # shared epilogue to the mode that entered it: restore says restored
+            # and never claims recovery it did not perform.
+            restore3 = tmp_path / "restore-uninterrupted.json"
+            shutil.copy2(journal2_path, Path(str(restore3) + ".journal.json"))
+            uninterrupted = _run_helper(
+                [
+                    "--source",
+                    str(prior2),
+                    "--destination",
+                    str(dest),
+                    "--receipt",
+                    str(restore3),
+                    "--journal",
+                    str(restore3) + ".journal.json",
+                    "--transaction",
+                    journal2["transaction"],
+                    "--mode",
+                    "restore",
+                ],
+                env=_helper_env(),
+                timeout=90,
+            )
+            assert uninterrupted.returncode == 0, uninterrupted.stderr
+            uninterrupted_payload = json.loads(restore3.read_text(encoding="utf-8"))
+            assert uninterrupted_payload["detail"] == "restored"
+            assert uninterrupted_payload["mode"] == "restore"
+            assert uninterrupted_payload["operation"] == "restore"
+            assert uninterrupted_payload["recovered"] is False
+            assert uninterrupted_payload["replaced"] is True
             assert _identity_token(dest) == apps.prior_identity
             assert _identity_token(prior2) == apps.prior_identity
         finally:
@@ -2548,6 +2608,12 @@ def test_product_update_whole_tuple_recovery_interrupted_then_resumed(
                 (tmp_path / "recover-resume.json").read_text(encoding="utf-8")
             )
             assert resume_payload["recovered"] is True
+            # The resumed recover returns through restore_previous_tuple, the
+            # epilogue restore shares. The receipt must answer for the mode that
+            # was resumed, not for the function that carried it home.
+            assert resume_payload["detail"] == "recovered"
+            assert resume_payload["mode"] == "recover"
+            assert resume_payload["operation"] == "recover"
             assert resume_payload["pack_generation"] == prior_pub["version"]
             _assert_shared_recovered_tuple(
                 env=env,
