@@ -1003,6 +1003,16 @@ def _stage_shell_generation(tmp_path: Path, *, under_releases: bool) -> Path:
 
     The copied facade decides the owner root, so sourcing it drives the
     installed (non-developer) branch of the entry choke.
+
+    That branch performs a real read-only admission: the copied
+    ``scripts/vetcoders_install.py`` executes
+    ``vibecrafted_core/runtime_paths.py`` from its own file, because the
+    installer runs on the host interpreter and must never import the
+    package.  The generation therefore carries that module as well.  Without
+    it the resolver dies before it can answer at all, and the refusal under
+    test degrades from "this generation has no runtime identity" into "the
+    resolver is unavailable" -- a different verdict, produced by a gap in
+    this staging rather than by the product.
     """
     runtime_home = (tmp_path / "runtime-home").resolve()
     root = (
@@ -1015,7 +1025,8 @@ def _stage_shell_generation(tmp_path: Path, *, under_releases: bool) -> Path:
     shutil.copytree(
         REPO / "vibecrafted-core/vibecrafted_core/runtime", core / "runtime"
     )
-    shutil.copy2(REPO / "vibecrafted-core/vibecrafted_core/cli.py", core / "cli.py")
+    for name in ("cli.py", "runtime_paths.py"):
+        shutil.copy2(REPO / "vibecrafted-core/vibecrafted_core" / name, core / name)
     (root / "scripts").mkdir(parents=True)
     for name in (
         "vetcoders_install.py",
@@ -1083,6 +1094,9 @@ def test_vc_start_refuses_an_installed_generation_without_runtime_identity(
     assert proc.returncode == 2, proc.stdout + proc.stderr
     assert "VC_START_STATUS=2" in proc.stdout
     assert "vc-start: installed runtime" in proc.stderr
+    # The refusal must be the identity verdict itself -- the resolver ran and
+    # reported "absent" -- not a resolver that never got to answer.
+    assert "runtime identity files are absent" in proc.stderr
     assert "explicit install/repair required" in proc.stderr
 
 
