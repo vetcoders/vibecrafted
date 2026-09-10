@@ -2,6 +2,7 @@ import AppKit
 import CoreText
 import Darwin
 import os.log
+import SwiftUI
 
 // The durable lifecycle trail (installLog, lifecycleLog, signal handlers)
 // lives in LifecycleLog.swift — supervision evidence extracted from this
@@ -175,6 +176,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   private var terminalLaunch: TerminalLauncher.Launch?
   private var terminalRegistration: TerminalRegistrationObservation?
   private var terminalRegistrationTimer: Timer?
+  private var productUpdate: ProductUpdateCoordinator?
+  private var productUpdatePanel: NSWindow?
   let eventObserver = EventObserver()
 
   func showMainWindowIfNeeded() {
@@ -267,6 +270,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   }
 
   func applicationWillTerminate(_ notification: Notification) {
+    productUpdate?.interrupt()
     // The workspace terminal is now started through the generation wrapper, so
     // it is a child of this process rather than an independent application.
     // That changes nothing about its lifetime: quitting the App is a view
@@ -552,6 +556,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     case .revealRuntime: revealRuntimeHomeFromStatusItem()
     case .revealControlPlane: openControlPlaneFromStatusItem()
     case .copyRuntimeIdentity: copyRuntimeIdentityFromStatusItem()
+    case .checkForUpdates: checkForUpdatesFromMenu()
     case .help: showStatusItemHelp()
     case .quitApp: requestQuit()
     }
@@ -1178,11 +1183,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
         userInfo: [NSLocalizedDescriptionKey: "signed App must contain one Runtime Pack carrier"])
     }
     let (sourceRevision, terminalRevision, frameRevision) = try loadSignedCarrierRevisions()
+    return try runtimePackInstallArguments(
+      pack: carriers[0], appRoot: appRoot, sourceRevision: sourceRevision,
+      terminalRevision: terminalRevision, frameRevision: frameRevision,
+      preferenceChoice: preferenceChoice)
+  }
+
+  /// Same installer owner as onboarding/repair. A candidate pack still goes
+  /// through expected-revision identity and the receipt transaction.
+  private func runtimePackInstallArguments(
+    pack: URL,
+    appRoot: URL,
+    sourceRevision: String,
+    terminalRevision: String,
+    frameRevision: String,
+    preferenceChoice: PreferenceResolutionChoice? = nil
+  ) throws -> [String] {
     let terminalHost = appRoot.appendingPathComponent(
       "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty")
     let frameHelper = appRoot.appendingPathComponent("Contents/Helpers/vc-frame")
     var arguments = [
-      "--pack", carriers[0].path,
+      "--pack", pack.path,
       "--app-root", appRoot.path,
       "--terminal-host", terminalHost.path,
       "--frame-helper", frameHelper.path,
@@ -1476,6 +1497,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       statusLine: statusLine, detailLine: detail,
       availability: StatusItemAvailability(canShowCommandDeck: true,
         canOpenTerminal: actions.contains(.openTerminal),
+        canCheckForUpdates: productUpdate?.isBusy != true,
         canRetryConnection: actions.contains(.retryConnection),
         canRepairRuntime: actions.contains(.repairRuntime),
         canStopRuntime: actions.contains(.requestStopRuntime),
@@ -1985,7 +2007,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     alert.alertStyle = .informational
     alert.messageText = "Help & Diagnostics"
     alert.informativeText =
-      "Open Vibecrafted returns to the app. Workspaces and Runtime Server use the configured live server only when it is available. Advanced contains runtime controls and support files. Quitting Vibecrafted leaves the runtime service, terminals, agents, and sessions running."
+      "Open Vibecrafted returns to the app. Check for Updates looks for a signed App and matching Runtime Pack; missing feed or helper is a finished unavailable state, not a spinner. Workspaces and Runtime Server use the configured live server only when it is available. Advanced contains runtime controls and support files. Quitting Vibecrafted leaves the runtime service, terminals, agents, and sessions running."
     alert.addButton(withTitle: "OK")
     alert.addButton(withTitle: "Open Diagnostics")
     if alert.runModal() == .alertSecondButtonReturn {
@@ -2037,6 +2059,173 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     NSApp.terminate(nil)
   }
 
+  @objc private func checkForUpdatesFromMenu() {
+    let coordinator = productUpdateCoordinator()
+    showProductUpdatePanel()
+    if !coordinator.isBusy {
+      coordinator.checkForUpdates()
+    }
+  }
+
+  private func productUpdateCoordinator() -> ProductUpdateCoordinator {
+    if let productUpdate { return productUpdate }
+    let coordinator = ProductUpdateCoordinator(
+      dependencies: ProductUpdateCoordinator.Dependencies(
+        channel: { [weak self] in
+          self?.resolveLiveUpdateChannel() ?? resolveProductUpdateChannel(
+            feedURLString: nil, publicKeyPresent: false, appReplacementHelperPresent: false)
+        },
+        installed: { [weak self] in
+          self?.currentProductUpdateIdentity()
+            ?? ProductUpdateIdentity(appGeneration: "unknown")
+        },
+        fileExists: { FileManager.default.fileExists(atPath: $0) },
+        fetchFeed: { url, completion in
+          var request = URLRequest(url: url, timeoutInterval: 15)
+          request.cachePolicy = .reloadIgnoringLocalCacheData
+          URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error {
+              DispatchQueue.main.async { completion(.failure(error)) }
+              return
+            }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard let data, (200...299).contains(status) else {
+              DispatchQueue.main.async {
+                completion(
+                  .failure(
+                    NSError(
+                      domain: "io.vetcoders.vibecrafted.update", code: status,
+                      userInfo: [
+                        NSLocalizedDescriptionKey: "update feed returned HTTP \(status)"
+                      ])))
+              }
+              return
+            }
+            DispatchQueue.main.async { completion(.success(data)) }
+          }.resume()
+        },
+        installCandidate: { [weak self] candidate, completion in
+          self?.installProductUpdate(candidate, completion: completion)
+        },
+        requestUIOnlyQuit: { [weak self] in self?.requestQuit() },
+        checkTimeout: 15))
+    coordinator.onProgress = { [weak self] _ in
+      self?.renderProductUpdatePanel()
+      self?.updateDeckPresentation()
+    }
+    productUpdate = coordinator
+    return coordinator
+  }
+
+  private func resolveLiveUpdateChannel() -> ProductUpdateChannel {
+    let feed = Bundle.main.object(forInfoDictionaryKey: "VCUpdateFeedURL") as? String
+    let resources = Bundle.main.bundleURL.appendingPathComponent(
+      "Contents/Resources/runtime-pack", isDirectory: true)
+    let publicKey = resources.appendingPathComponent("vibecrafted-signing-v1.pub")
+    let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/vc-app-update")
+    return resolveProductUpdateChannel(
+      feedURLString: feed,
+      publicKeyPresent: FileManager.default.fileExists(atPath: publicKey.path),
+      appReplacementHelperPresent: FileManager.default.isExecutableFile(atPath: helper.path))
+  }
+
+  private func currentProductUpdateIdentity() -> ProductUpdateIdentity {
+    let version =
+      Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
+    let source = signedCarrierRevisions?.source
+    let appGeneration =
+      source.map { productUpdateGenerationLabel(version: version, sourceRevision: $0) } ?? version
+    return ProductUpdateIdentity(
+      appGeneration: appGeneration,
+      packGeneration: canonicalInstall?.root.lastPathComponent,
+      sourceRevision: source,
+      terminalRevision: signedCarrierRevisions?.terminal,
+      frameRevision: signedCarrierRevisions?.frame)
+  }
+
+  /// Same-generation pack repair only. A newer App+pack is not published from
+  /// this running process — that would mix generations. Receipts are not
+  /// deleted here, and conflict checks stay inside the installer.
+  private func installProductUpdate(
+    _ candidate: ProductUpdateCandidate,
+    completion: @escaping (Result<ProductUpdateIdentity, Error>) -> Void
+  ) {
+    let installed = currentProductUpdateIdentity()
+    guard productUpdateRunningAppMatchesCandidate(installed: installed, candidate: candidate) else {
+      completion(
+        .failure(
+          NSError(
+            domain: "io.vetcoders.vibecrafted.update", code: 2,
+            userInfo: [
+              NSLocalizedDescriptionKey:
+                "Refusing to publish a Runtime Pack that does not match this running App. The previous generation remains."
+            ])))
+      return
+    }
+    if runtimeInstallProcess != nil {
+      completion(
+        .failure(
+          NSError(
+            domain: "io.vetcoders.vibecrafted.update", code: 1,
+            userInfo: [
+              NSLocalizedDescriptionKey: "the Runtime Pack installer is already in flight"
+            ])))
+      return
+    }
+    do {
+      try runRuntimePackInstaller(
+        arguments: runtimePackInstallArguments(
+          pack: URL(fileURLWithPath: candidate.packPath),
+          appRoot: Bundle.main.bundleURL,
+          sourceRevision: candidate.sourceRevision,
+          terminalRevision: candidate.terminalRevision,
+          frameRevision: candidate.frameRevision)
+      ) { [weak self] result in
+        guard let self else { return }
+        switch result {
+        case .failure(let error): completion(.failure(error))
+        case .success(let output):
+          do {
+            let install = try self.decodeCanonicalRuntimeInstall(from: output)
+            self.cachedResolution = nil
+            _ = self.applyResolution(.ready(install))
+            completion(.success(self.currentProductUpdateIdentity()))
+          } catch { completion(.failure(error)) }
+        }
+      }
+    } catch { completion(.failure(error)) }
+  }
+
+  private func showProductUpdatePanel() {
+    if productUpdatePanel == nil {
+      let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 480, height: 360),
+        styleMask: [.titled, .closable],
+        backing: .buffered, defer: false)
+      window.title = "Check for Updates"
+      window.isReleasedWhenClosed = false
+      window.isRestorable = false
+      window.restorationClass = nil
+      window.center()
+      productUpdatePanel = window
+    }
+    renderProductUpdatePanel()
+    productUpdatePanel?.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+  }
+
+  private func renderProductUpdatePanel() {
+    guard let window = productUpdatePanel, let coordinator = productUpdate else { return }
+    let root = ProductUpdateView(
+      progress: coordinator.progress,
+      onRetry: { [weak self] in self?.productUpdate?.checkForUpdates() },
+      onQuitUI: { [weak self] in self?.productUpdate?.quitUIOnly() },
+      onClose: { [weak self] in self?.productUpdatePanel?.orderOut(nil) }
+    )
+    let hosting = NSHostingView(rootView: root)
+    window.contentView = hosting
+  }
+
   private func buildMainMenu() {
     let mainMenu = NSMenu()
 
@@ -2045,6 +2234,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     appMenu.addItem(
       withTitle: "About Vibecrafted",
       action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+    let checkUpdates = appMenu.addItem(
+      withTitle: "Check for Updates…", action: #selector(checkForUpdatesFromMenu), keyEquivalent: "")
+    checkUpdates.target = self
+    checkUpdates.toolTip = "Sprawdź aktualizacje"
     appMenu.addItem(.separator())
     appMenu.addItem(
       withTitle: "Hide Vibecrafted", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")

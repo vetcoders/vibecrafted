@@ -97,8 +97,22 @@ def test_app_quit_is_ui_only_and_stop_has_native_confirmation() -> None:
     assert 'alert.addButton(withTitle: "Stop Runtime Service")' in confirmation
     request_quit = delegate[
         delegate.index("@objc private func requestQuit()") : delegate.index(
-            "private func buildMainMenu()"
+            "@objc private func checkForUpdatesFromMenu()"
         )
     ]
     assert "NSApp.terminate(nil)" in request_quit
     assert "activeRunSummary" not in request_quit
+    assert "productUpdate?.interrupt()" in delegate
+    assert "requestUIOnlyQuit: { [weak self] in self?.requestQuit() }" in delegate
+    assert "case .checkForUpdates: checkForUpdatesFromMenu()" in delegate
+    assert "Stop Runtime" not in request_quit
+    install_update = delegate[
+        delegate.index("private func installProductUpdate(") : delegate.index(
+            "private func showProductUpdatePanel()"
+        )
+    ]
+    assert "Receipts are not deleted here" in delegate
+    assert "Refusing to publish a Runtime Pack that does not match" in install_update
+    assert "Bundle.main.bundleURL" in install_update
+    assert 'arguments: ["--uninstall"]' not in install_update
+    assert "performServerAction" not in install_update

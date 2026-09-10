@@ -17,7 +17,10 @@ Implementation: `cmd_runtime_install`, `cmd_runtime_uninstall`,
 `_build_uninstall_inventory`, and `_managed_tools_entry` in
 `scripts/vetcoders_install.py`. The exact same installer is embedded under
 `Vibecrafted.app/Contents/Resources/runtime/scripts/`; AppDelegate delegates to
-it and does not write the installation itself. Regression coverage:
+it and does not write the installation itself. In-app Check for Updates
+(`docs/installer/IN_APP_UPDATE.md`) reuses that same installer for same-App
+pack repair only; a newer App+pack is not published from the running process.
+Regression coverage:
 `tests/tui/test_installer_uninstall.py`, `tests/tui/test_installer_restore.py`.
 
 ## 1. The required set
