@@ -17581,8 +17581,21 @@ def _runtime_rescue_occupant_disposition(
     return "preserve"
 
 
+_RUNTIME_RESCUE_RC_BACKUP_SUFFIX = ".vibecrafted-rc-bak"
+
+
+def _runtime_rescue_rc_backup_path(rcfile: Path) -> Path:
+    """Sidecar written by planned ``doctor --fix-rc`` before the rc is edited."""
+    return rcfile.with_name(rcfile.name + _RUNTIME_RESCUE_RC_BACKUP_SUFFIX)
+
+
 def _runtime_rescue_shell_path_allowed(path: Path) -> bool:
-    return path.parent == Path.home() and path.name in _SHELL_STARTUP_FILES
+    if path.parent != Path.home():
+        return False
+    if path.name in _SHELL_STARTUP_FILES:
+        return True
+    suffix = _RUNTIME_RESCUE_RC_BACKUP_SUFFIX
+    return path.name.endswith(suffix) and path.name[: -len(suffix)] in _SHELL_STARTUP_FILES
 
 
 def _runtime_rescue_expected_publication_paths(
@@ -17630,8 +17643,8 @@ def _runtime_rescue_expected_publication_paths(
             continue
     for rcname in _SHELL_STARTUP_FILES:
         rcfile = Path.home() / rcname
-        if rcfile.exists():
-            expected.append(rcfile)
+        expected.append(rcfile)
+        expected.append(_runtime_rescue_rc_backup_path(rcfile))
     seen: set[str] = set()
     ordered: list[Path] = []
     for path in expected:
@@ -17694,6 +17707,14 @@ def _runtime_rescue_snapshot_evidence_digest(
 def _runtime_rescue_validate_snapshot_evidence(
     snapshot_root: Path, label: Mapping[str, Any]
 ) -> None:
+    if label.get("schema") != RUNTIME_RESCUE_EVIDENCE_SCHEMA:
+        raise RuntimeError("pre-rescue snapshot schema is corrupted")
+    if label.get("label") != "damaged-pre-rescue":
+        raise RuntimeError("pre-rescue snapshot label is corrupted")
+    if label.get("healthy_restorepoint"):
+        raise RuntimeError(
+            "refusing to treat damaged-pre-rescue evidence as a healthy restorepoint"
+        )
     expected = str(label.get("evidence_sha256") or "")
     if not re.fullmatch(r"[0-9a-f]{64}", expected):
         raise RuntimeError("pre-rescue snapshot evidence digest is missing")
@@ -17892,7 +17913,7 @@ def _runtime_rescue_apply_shell_stanzas(
                 }
             )
             continue
-        backup = rcfile.with_name(rcfile.name + ".vibecrafted-rc-bak")
+        backup = _runtime_rescue_rc_backup_path(rcfile)
         try:
             if not backup.exists():
                 shutil.copy2(rcfile, backup)
@@ -18346,13 +18367,137 @@ def _runtime_rescue_journal_path(runtime_home: Path) -> Path:
     return runtime_home / ".installer-backups" / "rescue" / "current-journal.json"
 
 
+def _runtime_rescue_input_binding(
+    payload_root: Path, *, allow_older_runtime: bool
+) -> dict[str, Any]:
+    """Identity of the caller-supplied pack. Not the live installed tree."""
+    resolved = payload_root.expanduser().resolve()
+    identity = _runtime_rescue_target_identity(resolved)
+    return {
+        "payload_root": str(resolved),
+        "payload_sha256": str(identity.get("payload_sha256") or ""),
+        "inventory_sha256": str(identity.get("inventory_sha256") or ""),
+        "inventory": list(identity.get("inventory") or []),
+        "version": str(identity.get("version") or ""),
+        "version_identity_sha256": str(identity.get("version_identity_sha256") or ""),
+        "mode": "apply",
+        "allow_older_runtime": bool(allow_older_runtime),
+    }
+
+
+def _runtime_rescue_resume_binding_error(
+    journal: Mapping[str, Any], args: argparse.Namespace
+) -> str:
+    """Reverify original pack/mode/path. Do not hash live installed drift."""
+    stored = journal.get("binding")
+    if not isinstance(stored, dict) or not stored:
+        return "interrupted rescue journal is missing original payload binding"
+    live = _runtime_rescue_input_binding(
+        Path(getattr(args, "payload_root", "")),
+        allow_older_runtime=bool(getattr(args, "allow_older_runtime", False)),
+    )
+    pack_changed = any(
+        stored.get(key) != live.get(key)
+        for key in (
+            "payload_sha256",
+            "inventory_sha256",
+            "version_identity_sha256",
+            "inventory",
+        )
+    )
+    if pack_changed:
+        return (
+            "input drift: interrupted rescue pack no longer matches "
+            "the journal binding"
+        )
+    if stored.get("payload_root") != live.get("payload_root"):
+        return (
+            "input drift: interrupted rescue path no longer matches "
+            "the journal binding"
+        )
+    if stored.get("mode") != live.get("mode") or stored.get(
+        "allow_older_runtime"
+    ) != live.get("allow_older_runtime"):
+        return (
+            "input drift: interrupted rescue mode no longer matches "
+            "the journal binding"
+        )
+    return ""
+
+
+def _runtime_rescue_pending_record_from_journal(
+    journal: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema": RUNTIME_RESCUE_PENDING_SCHEMA,
+        "archived_receipt": str(
+            (journal.get("archived_receipt") or {}).get("path") or ""
+        ),
+        "archived_receipt_sha256": str(
+            (journal.get("archived_receipt") or {}).get("sha256") or ""
+        ),
+        "pre_rescue_snapshot": str(
+            (journal.get("pre_rescue_snapshot") or {}).get("path") or ""
+        ),
+        "pre_rescue_label": "damaged-pre-rescue",
+        "healthy_restorepoint": False,
+        "plan_digest": str(journal.get("plan_digest") or ""),
+        "input_digest": str(journal.get("input_digest") or ""),
+        "missing_history": list(journal.get("missing_history") or []),
+        "repair_actions": list(journal.get("repair_actions") or []),
+        "binding": dict(journal.get("binding") or {}),
+    }
+
+
+def _runtime_rescue_keep_pending_truthful(
+    paths: Mapping[str, Path],
+    journal: Mapping[str, Any],
+    receipt_path: Path,
+) -> None:
+    """Keep interrupted rescue recoverable after a later failure, including conflicts."""
+    if not journal:
+        return
+    receipt = _load_runtime_install_receipt(receipt_path) if receipt_path.is_file() else {}
+    if not receipt:
+        return
+    pending = _runtime_rescue_pending_record_from_journal(journal)
+    receipt["rescue_pending"] = pending
+    receipt["rescue"] = dict(pending)
+    receipt["install_pending"] = True
+    _checkpoint_runtime_install_receipt(paths["runtime_home"], receipt)
+
+
+def _runtime_rescue_ordered_restore_entries(
+    entries: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Restore parent trees before leaves; delete absent children before parents."""
+    present = [entry for entry in entries if entry.get("kind") != "absent"]
+    absent = [entry for entry in entries if entry.get("kind") == "absent"]
+    present.sort(
+        key=lambda entry: (
+            str(entry.get("path") or "").count(os.sep),
+            str(entry.get("path") or ""),
+        )
+    )
+    absent.sort(
+        key=lambda entry: (
+            -str(entry.get("path") or "").count(os.sep),
+            str(entry.get("path") or ""),
+        )
+    )
+    return [*present, *absent]
+
+
 def _runtime_rescue_snapshot_pre_rescue(
     paths: Mapping[str, Path],
     receipt: Mapping[str, Any],
     evidence_root: Path,
     payload_root: Path,
 ) -> dict[str, Any]:
-    """Copy currently recoverable owned surfaces. This is damaged state, not a restorepoint."""
+    """Copy currently recoverable owned surfaces. This is damaged state, not a restorepoint.
+
+    If a path publication will touch cannot be captured, refuse before mutation.
+    """
     snapshot_root = evidence_root / "pre-rescue"
     snapshot_root.mkdir(parents=True, exist_ok=True)
     captured: list[dict[str, str]] = []
@@ -18371,10 +18516,18 @@ def _runtime_rescue_snapshot_pre_rescue(
             continue
         try:
             _assert_runtime_physical_path(path, leaf_symlink=True)
-        except RuntimeError:
-            continue
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "refusing rescue mutation; cannot capture publication path "
+                f"{path}: {exc}"
+            ) from exc
         token = hashlib.sha256(key.encode("utf-8")).hexdigest()[:20]
         occupant = _runtime_owned_occupant_state(path)
+        if occupant["current_type"] in {"unreadable", "other"}:
+            raise RuntimeError(
+                "refusing rescue mutation; publication path is unreadable: "
+                f"{path}"
+            )
         entry = {
             "path": key,
             "rel": token,
@@ -18422,7 +18575,7 @@ def _runtime_rescue_restore_pre_rescue(
                 "reason": "refusing to treat damaged-pre-rescue evidence as a healthy restorepoint",
             }
         ]
-    for entry in label.get("paths", []):
+    for entry in _runtime_rescue_ordered_restore_entries(list(label.get("paths") or [])):
         destination = Path(entry["path"])
         if not (
             _runtime_owned_path_is_managed(destination, paths)
@@ -18458,30 +18611,106 @@ def _runtime_rescue_rollback_captured_state(
     receipt_path: Path,
     original_bytes: bytes | None,
 ) -> list[dict[str, str]]:
-    """Restore the damaged pre-rescue snapshot and original receipt bytes."""
+    """Restore only after exact snapshot and receipt evidence validate.
+
+    Missing, unreadable, malformed, or mismatched evidence is a residual.
+    Destinations and the live receipt are not deleted or rewritten until
+    that evidence is exact. Failed rollback is never an empty residual list.
+    """
     residuals: list[dict[str, str]] = []
-    snapshot_path = Path(
-        str((journal.get("pre_rescue_snapshot") or {}).get("path") or "")
+    snapshot_ref = journal.get("pre_rescue_snapshot") or {}
+    archive_ref = journal.get("archived_receipt") or {}
+    snapshot_raw = str(snapshot_ref.get("path") or "")
+    archive_raw = str(archive_ref.get("path") or "")
+    snapshot_path = Path(snapshot_raw) if snapshot_raw else None
+    archive_path = Path(archive_raw) if archive_raw else None
+    expected_receipt = str(archive_ref.get("sha256") or "")
+    expected_evidence = str(
+        journal.get("evidence_sha256")
+        or snapshot_ref.get("evidence_sha256")
+        or ""
     )
-    if snapshot_path.is_dir() and (snapshot_path / "label.json").is_file():
+
+    snapshot_ok = False
+    label: dict[str, Any] | None = None
+    if snapshot_path is None:
+        residuals.append(
+            {
+                "path": "<journal-pre-rescue-snapshot>",
+                "reason": (
+                    "journal does not name pre-rescue snapshot evidence; "
+                    "destinations were not deleted or restored"
+                ),
+            }
+        )
+    elif not snapshot_path.is_dir():
+        residuals.append(
+            {
+                "path": str(snapshot_path),
+                "reason": (
+                    "pre-rescue snapshot is missing; destinations were not "
+                    "deleted or restored"
+                ),
+            }
+        )
+    elif not (snapshot_path / "label.json").is_file():
+        residuals.append(
+            {
+                "path": str(snapshot_path / "label.json"),
+                "reason": (
+                    "pre-rescue snapshot label is missing; destinations were "
+                    "not deleted or restored"
+                ),
+            }
+        )
+    else:
         try:
-            label = json.loads((snapshot_path / "label.json").read_text(encoding="utf-8"))
-            residuals.extend(
-                _runtime_rescue_restore_pre_rescue(paths, label, snapshot_path)
+            loaded = json.loads(
+                (snapshot_path / "label.json").read_text(encoding="utf-8")
             )
-        except (OSError, json.JSONDecodeError, RuntimeError):
+            if not isinstance(loaded, dict):
+                raise RuntimeError("pre-rescue snapshot label is malformed")
+            _runtime_rescue_validate_snapshot_evidence(snapshot_path, loaded)
+            if expected_evidence and loaded.get("evidence_sha256") != expected_evidence:
+                raise RuntimeError(
+                    "pre-rescue snapshot evidence digest does not match the journal"
+                )
+            snapshot_ok = True
+            label = loaded
+        except (OSError, UnicodeError, json.JSONDecodeError, RuntimeError) as exc:
             residuals.append(
                 {
                     "path": str(snapshot_path),
-                    "reason": "could not restore damaged pre-rescue snapshot",
+                    "reason": (
+                        "pre-rescue snapshot evidence is unreadable, malformed, "
+                        f"or mismatched; destinations were not deleted or restored: {exc}"
+                    )[:400],
                 }
             )
-    archive_path = Path(str((journal.get("archived_receipt") or {}).get("path") or ""))
-    expected_receipt = str(
-        (journal.get("archived_receipt") or {}).get("sha256") or ""
-    )
+
     evidence = original_bytes
-    if archive_path.is_file():
+    receipt_ok = False
+    if archive_path is None:
+        residuals.append(
+            {
+                "path": "<journal-archived-receipt>",
+                "reason": (
+                    "journal does not name archived original receipt evidence; "
+                    "the live receipt was not rewritten"
+                ),
+            }
+        )
+    elif not archive_path.is_file():
+        residuals.append(
+            {
+                "path": str(archive_path),
+                "reason": (
+                    "archived original receipt is missing; restore-point "
+                    "evidence was not retained and the live receipt was not rewritten"
+                ),
+            }
+        )
+    else:
         try:
             archived = archive_path.read_bytes()
             archived_digest = _sha256_bytes(archived)
@@ -18489,31 +18718,48 @@ def _runtime_rescue_rollback_captured_state(
                 residuals.append(
                     {
                         "path": str(archive_path),
-                        "reason": "archived original receipt digest drifted; bytes were not restored from it",
+                        "reason": (
+                            "archived original receipt digest drifted; "
+                            "bytes were not restored from it"
+                        ),
                     }
                 )
-            elif evidence is None:
-                evidence = archived
-            elif _sha256_bytes(evidence) != archived_digest:
+            elif evidence is not None and _sha256_bytes(evidence) != archived_digest:
                 residuals.append(
                     {
                         "path": str(archive_path),
-                        "reason": "in-memory receipt evidence disagrees with the archived original",
-                    }
-                )
-        except OSError as exc:
-            residuals.append({"path": str(archive_path), "reason": str(exc)[:400]})
-    if evidence is not None:
-        try:
-            if expected_receipt and _sha256_bytes(evidence) != expected_receipt:
-                residuals.append(
-                    {
-                        "path": str(receipt_path),
-                        "reason": "original receipt evidence digest does not match the archived digest",
+                        "reason": (
+                            "in-memory receipt evidence disagrees with the "
+                            "archived original; the live receipt was not rewritten"
+                        ),
                     }
                 )
             else:
-                receipt_path.write_bytes(evidence)
+                if evidence is None:
+                    evidence = archived
+                if expected_receipt and _sha256_bytes(evidence) != expected_receipt:
+                    residuals.append(
+                        {
+                            "path": str(receipt_path),
+                            "reason": (
+                                "original receipt evidence digest does not "
+                                "match the archived digest"
+                            ),
+                        }
+                    )
+                else:
+                    receipt_ok = True
+        except OSError as exc:
+            residuals.append({"path": str(archive_path), "reason": str(exc)[:400]})
+
+    if snapshot_ok and label is not None and snapshot_path is not None:
+        residuals.extend(
+            _runtime_rescue_restore_pre_rescue(paths, label, snapshot_path)
+        )
+    if receipt_ok and evidence is not None:
+        try:
+            receipt_path.parent.mkdir(parents=True, exist_ok=True)
+            receipt_path.write_bytes(evidence)
         except OSError as exc:
             residuals.append({"path": str(receipt_path), "reason": str(exc)[:400]})
     return residuals
@@ -18993,14 +19239,22 @@ def _runtime_rescue_apply(
                 or live.get("rescue_pending")
             )
         )
-        journal_matches = (
+        digest_schema_match = (
             pending
             and journal.get("plan_digest") == expected_digest
             and journal.get("schema") == RUNTIME_RESCUE_PENDING_SCHEMA
         )
+        binding_error = (
+            _runtime_rescue_resume_binding_error(journal, args)
+            if digest_schema_match
+            else ""
+        )
+        journal_matches = digest_schema_match and not binding_error
         if pending and not journal_matches:
             envelope["plan_digest"] = expected_digest
-            if live.get("rescue_pending"):
+            if digest_schema_match and binding_error:
+                envelope.update(status="refused", reason=binding_error)
+            elif live.get("rescue_pending"):
                 envelope.update(
                     status="refused",
                     reason=(
@@ -19027,7 +19281,11 @@ def _runtime_rescue_apply(
                 missing_history=list(journal.get("missing_history") or []),
                 repair_actions=list(journal.get("repair_actions") or []),
             )
-            code = _install_runtime_pack(args, emit_result=False)
+            code = _install_runtime_pack(
+                args,
+                rescue_record=_runtime_rescue_pending_record_from_journal(journal),
+                emit_result=False,
+            )
             return _runtime_rescue_finish(
                 envelope, paths, receipt_path, journal, code
             )
@@ -19083,6 +19341,10 @@ def _runtime_rescue_apply(
             print(json.dumps(envelope, sort_keys=True))
             return 2
         original_bytes = receipt_bytes
+        binding = _runtime_rescue_input_binding(
+            Path(args.payload_root),
+            allow_older_runtime=bool(getattr(args, "allow_older_runtime", False)),
+        )
         token = (
             datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             + "-"
@@ -19113,12 +19375,14 @@ def _runtime_rescue_apply(
             "input_digest": plan["input_digest"],
             "missing_history": plan["missing_backups"],
             "repair_actions": plan["repair_actions"],
+            "binding": binding,
         }
         journal = {
             "schema": RUNTIME_RESCUE_PENDING_SCHEMA,
             "token": token,
             "plan_digest": plan["plan_digest"],
             "input_digest": plan["input_digest"],
+            "binding": binding,
             "archived_receipt": {
                 "path": str(archive),
                 "sha256": plan["receipt"]["sha256"],
@@ -19127,6 +19391,7 @@ def _runtime_rescue_apply(
                 "path": str(evidence_root / "pre-rescue"),
                 "label": "damaged-pre-rescue",
                 "healthy_restorepoint": False,
+                "evidence_sha256": snapshot.get("evidence_sha256"),
             },
             "missing_history": plan["missing_backups"],
             "repair_actions": plan["repair_actions"],
@@ -19151,6 +19416,7 @@ def _runtime_rescue_apply(
             envelope, paths, receipt_path, journal, code
         )
     except PreferenceConflict:
+        _runtime_rescue_keep_pending_truthful(paths, journal, receipt_path)
         raise
     except (OSError, RuntimeError, ValueError, TypeError, KeyError, AttributeError) as exc:
         journal = {}

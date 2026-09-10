@@ -220,11 +220,19 @@ under the existing install lease, snapshots every path publication can
 mutate as `damaged-pre-rescue` (never a healthy restorepoint; evidence is
 hashed before restore), archives the original receipt, drops only
 missing-historical backup map entries, and reuses the existing publication
-transaction. Destination verification covers selectors, active identity,
-every receipted file/symlink/dir, every expected launcher/skill/config
-projection, and an isolated interactive `zsh -i` smoke in a real
-temporary HOME/ZDOTDIR. A healthy receipt is not a
-healthy shell. Unsafe or unknown-ownership paths refuse. Same-type
+transaction. The journal stores the original target/inventory/payload/source
+binding. Interrupted resume revalidates that input identity before every
+mutation and refuses a changed pack, mode, or path. Live installed
+partial-state from this rescue is not treated as input drift. A path
+publication will touch that cannot be captured refuses before mutation.
+Missing, unreadable, malformed, or mismatched snapshot/receipt evidence
+is a residual; destinations are not deleted or restored from it, and a
+failed rollback is never reported as complete. Preference conflicts keep
+pending journal state recoverable. Destination verification covers
+selectors, active identity, every receipted file/symlink/dir, every
+expected launcher/skill/config projection, and an isolated interactive
+`zsh -i` smoke in a real temporary HOME/ZDOTDIR. A healthy receipt is not
+a healthy shell. Unsafe or unknown-ownership paths refuse. Same-type
 receipted files with a different hash, and symlinks with a foreign live
 target, are not republished from receipt path alone: preference drift
 uses the existing preserving merge; foreign command/skill replacements

@@ -741,3 +741,430 @@ def test_same_type_foreign_symlink_target_refuses(tmp_path, installed, capsys):
     assert result["status"] == "refused"
     assert selector.is_symlink()
     assert selector.readlink() == foreign
+
+
+def _leave_interrupted_pending(paths: dict, plan_digest: str) -> None:
+    receipt = _load_receipt(paths)
+    receipt["install_pending"] = True
+    receipt["rescue_pending"] = {
+        "schema": installer.RUNTIME_RESCUE_PENDING_SCHEMA,
+        "plan_digest": plan_digest,
+    }
+    _write_receipt(paths, receipt)
+
+
+def test_interrupted_resume_changed_pack_refuses(
+    tmp_path, installed, capsys, monkeypatch
+):
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    _, plan = _plan(payload, capsys)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("injected interrupt")
+
+    monkeypatch.setattr(installer, "_publish_runtime_config_transaction", boom)
+    code, first = _apply(payload, capsys, plan["plan_digest"])
+    assert code == 2
+    assert first["healthy_restorepoint"] is False
+    _leave_interrupted_pending(paths, plan["plan_digest"])
+    other = seed_runtime_pack(tmp_path / "other-pack", version="9.9.9+other")
+    _seal_runtime_pack_for_admission(other)
+    captured: dict[str, str] = {}
+
+    def spy(args, **kwargs):
+        captured["payload_root"] = str(Path(args.payload_root).resolve())
+        return 0
+
+    monkeypatch.setattr(installer, "_install_runtime_pack", spy)
+    code, result = _apply(other, capsys, plan["plan_digest"])
+    assert code == 2
+    assert result["status"] == "refused"
+    assert "input drift" in result["reason"]
+    assert "pack" in result["reason"]
+    assert "payload_root" not in captured
+
+
+def test_interrupted_resume_changed_path_refuses(
+    tmp_path, installed, capsys, monkeypatch
+):
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    _, plan = _plan(payload, capsys)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("injected interrupt")
+
+    monkeypatch.setattr(installer, "_publish_runtime_config_transaction", boom)
+    assert _apply(payload, capsys, plan["plan_digest"])[0] == 2
+    _leave_interrupted_pending(paths, plan["plan_digest"])
+    relocated = tmp_path / "relocated-pack"
+    shutil.copytree(payload, relocated)
+    captured: dict[str, str] = {}
+
+    def spy(args, **kwargs):
+        captured["payload_root"] = str(Path(args.payload_root).resolve())
+        return 0
+
+    monkeypatch.setattr(installer, "_install_runtime_pack", spy)
+    code, result = _apply(relocated, capsys, plan["plan_digest"])
+    assert code == 2
+    assert result["status"] == "refused"
+    assert "input drift" in result["reason"]
+    assert "path" in result["reason"]
+    assert "payload_root" not in captured
+
+
+def test_interrupted_resume_changed_mode_refuses(
+    installed, capsys, monkeypatch
+):
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    _, plan = _plan(payload, capsys)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("injected interrupt")
+
+    monkeypatch.setattr(installer, "_publish_runtime_config_transaction", boom)
+    assert _apply(payload, capsys, plan["plan_digest"])[0] == 2
+    _leave_interrupted_pending(paths, plan["plan_digest"])
+    captured: dict[str, bool] = {}
+
+    def spy(args, **kwargs):
+        captured["called"] = True
+        return 0
+
+    monkeypatch.setattr(installer, "_install_runtime_pack", spy)
+    code, result = _apply(
+        payload, capsys, plan["plan_digest"], allow_older_runtime=True
+    )
+    assert code == 2
+    assert result["status"] == "refused"
+    assert "input drift" in result["reason"]
+    assert "mode" in result["reason"]
+    assert "called" not in captured
+
+
+def test_interrupted_resume_valid_same_binding_resumes(
+    installed, capsys, monkeypatch
+):
+    paths, payload, _ = installed
+    planted = _plant_missing_historical(paths)
+    _, plan = _plan(payload, capsys)
+    original = installer._publish_runtime_config_transaction
+    calls = {"n": 0}
+
+    def boom(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("injected interrupt")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(installer, "_publish_runtime_config_transaction", boom)
+    code, first = _apply(payload, capsys, plan["plan_digest"])
+    assert code == 2
+    journal = json.loads(
+        installer._runtime_rescue_journal_path(paths["runtime_home"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert journal["binding"]["payload_root"] == str(payload.resolve())
+    assert journal["binding"]["payload_sha256"]
+    assert journal["binding"]["inventory_sha256"]
+    _leave_interrupted_pending(paths, plan["plan_digest"])
+    sanitized = installer._runtime_receipt_without_missing_historical(
+        _load_receipt(paths), set(planted)
+    )
+    sanitized["install_pending"] = True
+    sanitized["rescue_pending"] = {
+        "schema": installer.RUNTIME_RESCUE_PENDING_SCHEMA,
+        "plan_digest": plan["plan_digest"],
+    }
+    _write_receipt(paths, sanitized)
+    code, second = _apply(payload, capsys, plan["plan_digest"])
+    assert code == 0
+    assert second["status"] == "rescued"
+    assert second["healthy_restorepoint"] is True
+    assert first["archived_receipt"]["path"]
+    assert Path(first["archived_receipt"]["path"]).is_file()
+
+
+def test_rollback_both_missing_reports_residual(tmp_path, roots):
+    journal = {
+        "pre_rescue_snapshot": {
+            "path": str(tmp_path / "missing-snap"),
+            "evidence_sha256": "b" * 64,
+        },
+        "archived_receipt": {
+            "path": str(tmp_path / "missing-receipt.json"),
+            "sha256": "a" * 64,
+        },
+        "evidence_sha256": "b" * 64,
+    }
+    receipt_path = installer._runtime_receipt_path(roots["runtime_home"])
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text("{}\n", encoding="utf-8")
+    roots["launcher_home"].mkdir(parents=True, exist_ok=True)
+    marker = roots["launcher_home"] / "keep-me"
+    marker.write_text("stay\n", encoding="utf-8")
+    residuals = installer._runtime_rescue_rollback_captured_state(
+        roots, journal, receipt_path, None
+    )
+    assert residuals
+    assert any("snapshot" in item["reason"] for item in residuals)
+    assert any(
+        "receipt" in item["reason"] or "archived" in item["reason"]
+        for item in residuals
+    )
+    assert marker.read_text(encoding="utf-8") == "stay\n"
+    assert receipt_path.read_text(encoding="utf-8") == "{}\n"
+
+
+def test_rollback_snapshot_missing_reports_residual(tmp_path, roots):
+    archive = tmp_path / "original-receipt.json"
+    original = b'{"schema":"probe"}\n'
+    archive.write_bytes(original)
+    journal = {
+        "pre_rescue_snapshot": {"path": str(tmp_path / "missing-snap")},
+        "archived_receipt": {
+            "path": str(archive),
+            "sha256": installer._sha256_bytes(original),
+        },
+        "evidence_sha256": "b" * 64,
+    }
+    receipt_path = installer._runtime_receipt_path(roots["runtime_home"])
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text("live\n", encoding="utf-8")
+    marker = tmp_path / "destination.txt"
+    marker.write_text("live dest\n", encoding="utf-8")
+    residuals = installer._runtime_rescue_rollback_captured_state(
+        roots, journal, receipt_path, None
+    )
+    assert any("snapshot" in item["reason"] for item in residuals)
+    assert marker.read_text(encoding="utf-8") == "live dest\n"
+
+
+def test_rollback_receipt_missing_reports_residual(tmp_path, roots):
+    snapshot = tmp_path / "pre-rescue"
+    snapshot.mkdir()
+    label = {
+        "schema": installer.RUNTIME_RESCUE_EVIDENCE_SCHEMA,
+        "label": "damaged-pre-rescue",
+        "healthy_restorepoint": False,
+        "paths": [],
+    }
+    label["evidence_sha256"] = installer._runtime_rescue_snapshot_evidence_digest(
+        label, snapshot
+    )
+    (snapshot / "label.json").write_text(json.dumps(label), encoding="utf-8")
+    journal = {
+        "pre_rescue_snapshot": {
+            "path": str(snapshot),
+            "evidence_sha256": label["evidence_sha256"],
+        },
+        "archived_receipt": {
+            "path": str(tmp_path / "missing-receipt.json"),
+            "sha256": "a" * 64,
+        },
+        "evidence_sha256": label["evidence_sha256"],
+    }
+    receipt_path = installer._runtime_receipt_path(roots["runtime_home"])
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text("live\n", encoding="utf-8")
+    residuals = installer._runtime_rescue_rollback_captured_state(
+        roots, journal, receipt_path, None
+    )
+    assert any("receipt" in item["reason"] or "archived" in item["reason"] for item in residuals)
+    assert receipt_path.read_text(encoding="utf-8") == "live\n"
+
+
+def test_rollback_corrupted_label_reports_residual(tmp_path, roots):
+    snapshot = tmp_path / "pre-rescue"
+    snapshot.mkdir()
+    (snapshot / "label.json").write_text("{not-json", encoding="utf-8")
+    archive = tmp_path / "original-receipt.json"
+    archive.write_bytes(b"{}\n")
+    journal = {
+        "pre_rescue_snapshot": {
+            "path": str(snapshot),
+            "evidence_sha256": "b" * 64,
+        },
+        "archived_receipt": {
+            "path": str(archive),
+            "sha256": installer._sha256_bytes(b"{}\n"),
+        },
+        "evidence_sha256": "b" * 64,
+    }
+    receipt_path = installer._runtime_receipt_path(roots["runtime_home"])
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text("live\n", encoding="utf-8")
+    marker = roots["launcher_home"] / "keep-me"
+    roots["launcher_home"].mkdir(parents=True, exist_ok=True)
+    marker.write_text("stay\n", encoding="utf-8")
+    residuals = installer._runtime_rescue_rollback_captured_state(
+        roots, journal, receipt_path, None
+    )
+    assert any("malformed" in item["reason"] or "mismatched" in item["reason"] for item in residuals)
+    assert marker.read_text(encoding="utf-8") == "stay\n"
+
+
+def test_rollback_corrupt_copied_bytes_reports_residual(installed, tmp_path):
+    paths, payload, _ = installed
+    receipt = _load_receipt(paths)
+    original = _receipt(paths).read_bytes()
+    evidence_root = tmp_path / "rescue-ev"
+    evidence_root.mkdir()
+    archive = evidence_root / "original-receipt.json"
+    archive.write_bytes(original)
+    label = installer._runtime_rescue_snapshot_pre_rescue(
+        paths, receipt, evidence_root, payload
+    )
+    snapshot = evidence_root / "pre-rescue"
+    captured = next(entry for entry in label["paths"] if entry["kind"] == "file")
+    tampered = snapshot / captured["rel"]
+    tampered.write_bytes(tampered.read_bytes() + b"tamper")
+    journal = {
+        "pre_rescue_snapshot": {
+            "path": str(snapshot),
+            "evidence_sha256": label["evidence_sha256"],
+        },
+        "archived_receipt": {
+            "path": str(archive),
+            "sha256": installer._sha256_bytes(original),
+        },
+        "evidence_sha256": label["evidence_sha256"],
+    }
+    live = paths["launcher_home"] / "vibecrafted"
+    before = live.read_bytes()
+    residuals = installer._runtime_rescue_rollback_captured_state(
+        paths, journal, _receipt(paths), None
+    )
+    assert residuals
+    assert any("mismatched" in item["reason"] or "evidence" in item["reason"] for item in residuals)
+    assert live.read_bytes() == before
+    assert archive.read_bytes() == original
+
+
+def test_rollback_valid_restores_and_keeps_evidence(installed, tmp_path):
+    paths, payload, _ = installed
+    receipt = _load_receipt(paths)
+    original = _receipt(paths).read_bytes()
+    evidence_root = tmp_path / "rescue-ev"
+    evidence_root.mkdir()
+    archive = evidence_root / "original-receipt.json"
+    archive.write_bytes(original)
+    label = installer._runtime_rescue_snapshot_pre_rescue(
+        paths, receipt, evidence_root, payload
+    )
+    snapshot = evidence_root / "pre-rescue"
+    launcher = paths["launcher_home"] / "vibecrafted"
+    before = launcher.read_bytes()
+    launcher.write_text("mutated\n", encoding="utf-8")
+    journal = {
+        "pre_rescue_snapshot": {
+            "path": str(snapshot),
+            "label": "damaged-pre-rescue",
+            "evidence_sha256": label["evidence_sha256"],
+        },
+        "archived_receipt": {
+            "path": str(archive),
+            "sha256": installer._sha256_bytes(original),
+        },
+        "evidence_sha256": label["evidence_sha256"],
+    }
+    residuals = installer._runtime_rescue_rollback_captured_state(
+        paths, journal, _receipt(paths), None
+    )
+    assert residuals == []
+    assert _receipt(paths).read_bytes() == original
+    assert archive.is_file()
+    assert (snapshot / "label.json").is_file()
+    assert launcher.read_bytes() == before
+
+
+def test_snapshot_refuses_uncapturable_physical_path(
+    installed, tmp_path, monkeypatch
+):
+    paths, payload, _ = installed
+    receipt = _load_receipt(paths)
+    original = installer._assert_runtime_physical_path
+    probe = paths["launcher_home"] / "vibecrafted"
+
+    def boom(path, *, leaf_symlink=False):
+        if path == probe:
+            raise RuntimeError("aliased for probe")
+        return original(path, leaf_symlink=leaf_symlink)
+
+    monkeypatch.setattr(installer, "_assert_runtime_physical_path", boom)
+    with pytest.raises(RuntimeError, match="cannot capture"):
+        installer._runtime_rescue_snapshot_pre_rescue(
+            paths, receipt, tmp_path / "ev", payload
+        )
+
+
+def test_snapshot_covers_rc_backup_paths(installed, capsys, monkeypatch):
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    zshrc = Path.home() / ".zshrc"
+    zshrc.write_text("# user rc\n", encoding="utf-8")
+    bak = installer._runtime_rescue_rc_backup_path(zshrc)
+    _, plan = _plan(payload, capsys)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("injected interrupt")
+
+    monkeypatch.setattr(installer, "_publish_runtime_config_transaction", boom)
+    code, first = _apply(payload, capsys, plan["plan_digest"])
+    assert code == 2
+    snapshot = Path(first["pre_rescue_snapshot"]["path"])
+    label = json.loads((snapshot / "label.json").read_text(encoding="utf-8"))
+    assert any(entry["path"] == str(zshrc) for entry in label["paths"])
+    assert any(entry["path"] == str(bak) for entry in label["paths"])
+
+
+def test_snapshot_parent_child_overlap_restore(installed, tmp_path):
+    paths, payload, _ = installed
+    receipt = _load_receipt(paths)
+    parent = paths["product_config"] / "vc-frame"
+    child = parent / "config.kdl"
+    if not child.is_file():
+        child = next(path for path in parent.rglob("*") if path.is_file())
+    original_child = child.read_bytes()
+    label = installer._runtime_rescue_snapshot_pre_rescue(
+        paths, receipt, tmp_path / "ev", payload
+    )
+    snapshot = tmp_path / "ev" / "pre-rescue"
+    (parent / "injected.txt").write_text("new\n", encoding="utf-8")
+    child.write_text("changed\n", encoding="utf-8")
+    residuals = installer._runtime_rescue_restore_pre_rescue(paths, label, snapshot)
+    assert residuals == []
+    assert not (parent / "injected.txt").exists()
+    assert child.read_bytes() == original_child
+
+
+def test_preference_conflict_keeps_pending_recoverable(
+    installed, capsys, monkeypatch
+):
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    _, plan = _plan(payload, capsys)
+
+    def boom(*args, **kwargs):
+        raise installer.PreferenceConflict(
+            "preference conflict",
+            {"message": "preference conflict", "files": []},
+        )
+
+    monkeypatch.setattr(installer, "_prepare_runtime_preferences", boom)
+    with pytest.raises(installer.PreferenceConflict):
+        installer.cmd_runtime_install(
+            _ns(payload, rescue=True, apply=True, plan_digest=plan["plan_digest"])
+        )
+    journal_path = installer._runtime_rescue_journal_path(paths["runtime_home"])
+    assert journal_path.is_file()
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert journal["binding"]["payload_root"] == str(payload.resolve())
+    receipt = _load_receipt(paths)
+    assert receipt.get("rescue_pending")
+    assert receipt.get("install_pending") is True
+    assert receipt["rescue_pending"].get("binding", {}).get("payload_sha256")
