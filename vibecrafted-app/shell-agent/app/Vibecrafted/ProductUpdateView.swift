@@ -97,7 +97,7 @@ struct ProductUpdateView: View {
 
   private var showsBusyIndicator: Bool {
     switch progress.phase {
-    case .checking, .downloading, .verifying, .installing, .restarting: true
+    case .checking, .downloading, .verifying, .installing, .restarting, .finishing: true
     case .idle, .ready, .success, .unavailable, .refused, .retained, .error: false
     }
   }
@@ -105,7 +105,7 @@ struct ProductUpdateView: View {
   private var symbolName: String {
     switch progress.phase {
     case .idle, .checking, .downloading: "arrow.triangle.2.circlepath"
-    case .verifying, .installing, .restarting: "checkmark.seal"
+    case .verifying, .installing, .restarting, .finishing: "checkmark.seal"
     case .ready: "arrow.down.app"
     case .success: "checkmark.circle.fill"
     case .unavailable, .error: "exclamationmark.triangle.fill"
@@ -117,7 +117,7 @@ struct ProductUpdateView: View {
     switch progress.phase {
     case .success, .ready: theme.palette.ink
     case .refused, .retained: theme.palette.destructive
-    case .unavailable, .error, .checking, .downloading, .verifying, .installing, .restarting, .idle:
+    case .unavailable, .error, .checking, .downloading, .verifying, .installing, .restarting, .finishing, .idle:
       theme.palette.amber
     }
   }

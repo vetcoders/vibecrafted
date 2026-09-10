@@ -20,8 +20,11 @@ Implementation: `cmd_runtime_install`, `cmd_runtime_uninstall`,
 it and does not write the installation itself. In-app Check for Updates
 (`docs/installer/IN_APP_UPDATE.md`) reuses that same installer for same-App
 pack repair. A newer App is replaced by the script helper installed at
-`Contents/Helpers/vc-app-update` (`scripts/vc-app-update.sh`; no compiled twin),
-then
+`Contents/Helpers/vc-app-update` (`scripts/vc-app-update.sh`; no compiled twin).
+The helper writes a READY admission after preflight, a phase journal before
+any destination mutation, and the terminal replacement receipt before
+`/usr/bin/open -n`. Pack failure restores `prior.app` through the same
+transaction owner and must not overwrite that capture. Then
 the new App publishes the matching pack. The running process does not publish a
 newer pack under the old App.
 Regression coverage:

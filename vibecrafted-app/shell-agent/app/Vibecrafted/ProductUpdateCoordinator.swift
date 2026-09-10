@@ -162,6 +162,11 @@ final class ProductUpdateCoordinator {
     }
   }
 
+  func presentFinishing(candidate: ProductUpdateCandidate?) {
+    let installed = dependencies.installed()
+    publish(deriveProductUpdateProgress(phase: .finishing, installed: installed, candidate: candidate))
+  }
+
   /// Normal UI shutdown after the helper was admitted. Does not terminate the helper.
   func noteUIShutdownPreservingHandoff() {
     cancelInFlight = nil
@@ -485,6 +490,7 @@ final class ProductUpdateCoordinator {
       let identity = captureProductUpdateProcessIdentity(
         pid: ProcessInfo.processInfo.processIdentifier)
       let receiptURL = staged.staging.appendingPathComponent("replacement-receipt.json")
+      let transactionID = UUID().uuidString.lowercased()
       let request = ProductUpdateReplacementRequest(
         waitPID: identity?.pid ?? ProcessInfo.processInfo.processIdentifier,
         waitStart: identity?.startTime,
@@ -493,7 +499,11 @@ final class ProductUpdateCoordinator {
         relaunch: true,
         receiptURL: receiptURL,
         helperURL: self.dependencies.channel().helperURL,
-        transactionURL: productUpdatePendingHandoffURL(home: self.dependencies.home()))
+        transactionURL: productUpdatePendingHandoffURL(home: self.dependencies.home()),
+        admissionURL: URL(fileURLWithPath: receiptURL.path + ".admission.json"),
+        journalURL: URL(fileURLWithPath: receiptURL.path + ".journal.json"),
+        transactionID: transactionID,
+        mode: .replace)
       var admitted = false
       let cancel = self.dependencies.replaceApp(request) { [weak self] outcome in
         Task { @MainActor in
@@ -511,19 +521,39 @@ final class ProductUpdateCoordinator {
                   "The app could not be replaced. Your current version stays installed. \(error.localizedDescription)"),
               token: token, terminal: .retained)
           case .success(let admission):
+            guard admission.ready else {
+              self.receipt.appReplaced = false
+              self.receipt.helperArmed = false
+              self.receipt.helperAdmitted = false
+              self.finish(
+                deriveProductUpdateProgress(
+                  phase: .retained, installed: self.dependencies.installed(),
+                  candidate: staged.candidate,
+                  detail:
+                    "The update helper started but did not admit the replacement. Your current version stays installed."),
+                token: token, terminal: .retained)
+              return
+            }
             admitted = true
             self.cancelInFlight = nil
             self.receipt.helperArmed = true
             self.receipt.helperAdmitted = true
-            self.receipt.boundary = .helperAdmitted
+            self.receipt.boundary = .helperReady
             self.receipt.helperPID = admission.helperPID
             self.receipt.receiptPath = admission.receiptURL.path
+            self.receipt.transactionID = admission.transactionID
+            self.receipt.journalPath = admission.journalURL?.path
+            let helperStart =
+              captureProductUpdateProcessIdentity(pid: admission.helperPID)?.startTime ?? ""
             let handoff = ProductUpdateHandoffRecord(
               schema: ProductUpdateHandoffRecord.schemaID,
               helperPID: admission.helperPID,
+              helperStart: helperStart,
               waitPID: request.waitPID ?? ProcessInfo.processInfo.processIdentifier,
               waitStart: request.waitStart ?? "",
               receiptURL: admission.receiptURL.path,
+              admissionURL: admission.admissionURL.path,
+              journalURL: admission.journalURL?.path ?? productUpdateJournalURL(for: request).path,
               destination: request.destinationApp.path,
               candidateGeneration: staged.candidate.generation,
               installedGeneration: installed.packGeneration ?? installed.appGeneration,
@@ -531,7 +561,10 @@ final class ProductUpdateCoordinator {
               packURL: staged.pack.path,
               sourceRevision: staged.candidate.sourceRevision,
               terminalRevision: staged.candidate.terminalRevision,
-              frameRevision: staged.candidate.frameRevision)
+              frameRevision: staged.candidate.frameRevision,
+              transactionID: admission.transactionID,
+              mode: request.mode.rawValue,
+              phase: "helper_ready")
             self.admittedHandoff = handoff
             try? writeProductUpdateHandoff(
               handoff, to: productUpdatePendingHandoffURL(home: self.dependencies.home()))

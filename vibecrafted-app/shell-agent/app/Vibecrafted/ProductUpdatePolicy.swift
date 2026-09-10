@@ -20,6 +20,7 @@ enum ProductUpdatePhase: String, Equatable, Sendable {
   case ready
   case installing
   case restarting
+  case finishing
   case success
   case unavailable
   case refused
@@ -418,6 +419,18 @@ func deriveProductUpdateProgress(
       canInstall: false,
       claimsHealthy: false,
       willCloseUIForReplacement: true)
+  case .finishing:
+    return ProductUpdateProgress(
+      phase: phase,
+      title: "Finishing the update",
+      summary: detail
+        ?? "The new version opened. The matching Runtime Pack is being applied. Frame, terminals, agents and sessions stay running.",
+      installedGeneration: installedLabel,
+      candidateGeneration: candidateLabel,
+      canRetry: false,
+      canInstall: false,
+      claimsHealthy: false,
+      willCloseUIForReplacement: false)
   case .success:
     return ProductUpdateProgress(
       phase: phase,

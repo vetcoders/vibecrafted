@@ -469,7 +469,9 @@ struct ProductUpdatePolicyTests {
               helperPID: 4242,
               waitIdentity: ProductUpdateProcessIdentity(pid: 1, startTime: "test"),
               receiptURL: request.receiptURL,
-              transactionURL: request.transactionURL)))
+              transactionURL: request.transactionURL,
+              transactionID: request.transactionID ?? "test-txn",
+              ready: true)))
       },
       closeUI: { closed += 1 })
     coordinator.checkForUpdates()
@@ -636,7 +638,9 @@ struct ProductUpdatePolicyTests {
               helperPID: 4242,
               waitIdentity: ProductUpdateProcessIdentity(pid: 1, startTime: "test"),
               receiptURL: request.receiptURL,
-              transactionURL: request.transactionURL)))
+              transactionURL: request.transactionURL,
+              transactionID: request.transactionID ?? "test-txn",
+              ready: true)))
         return { cancelled += 1 }
       })
     coordinator.checkForUpdates()
@@ -746,10 +750,12 @@ struct ProductUpdatePolicyTests {
       receiptURL: receipt,
       helperURL: try helperScript())
     switch replaceProductUpdateApp(request) {
-    case .failure(.destinationBusy):
+    case .failure(.destinationBusy), .failure(.helperFailed), .failure(.admissionRejected):
       break
     default:
-      throw Failure(message: "a live parent was not a destinationBusy failure")
+      throw Failure(
+        message:
+          "a live unsigned parent must fail before mutation (preflight 9 or identity timeout 5)")
     }
     try require(
       (try String(contentsOf: dest.appendingPathComponent("marker.txt"), encoding: .utf8)) == "keep",
@@ -822,6 +828,209 @@ struct ProductUpdatePolicyTests {
     try require(!FileManager.default.fileExists(atPath: receipt.path), "missing receipt was invented")
   }
 
+  static func sampleHandoff(
+    destination: String = "/Applications/Vibecrafted.app",
+    transaction: String = "txn-1",
+    helperPID: Int32 = 9,
+    helperStart: String = "start",
+    mode: String = ProductUpdateHelperMode.replace.rawValue,
+    receiptURL: String = "/tmp/replacement-receipt.json"
+  ) -> ProductUpdateHandoffRecord {
+    ProductUpdateHandoffRecord(
+      schema: ProductUpdateHandoffRecord.schemaID,
+      helperPID: helperPID,
+      helperStart: helperStart,
+      waitPID: 1,
+      waitStart: "parent",
+      receiptURL: receiptURL,
+      admissionURL: receiptURL + ".admission.json",
+      journalURL: receiptURL + ".journal.json",
+      destination: destination,
+      candidateGeneration: generation,
+      installedGeneration: previous,
+      capturePath: "/tmp/.vc-update-capture-txn-1",
+      packURL: "/tmp/pack.tar.gz",
+      sourceRevision: source,
+      terminalRevision: terminal,
+      frameRevision: frame,
+      transactionID: transaction,
+      mode: mode,
+      phase: "helper_ready")
+  }
+
+  static func testHandoffMissingReceiptWithLiveHelperWaits() throws {
+    switch decideProductUpdateHandoff(
+      handoff: sampleHandoff(), replacement: nil, helperLive: true,
+      runningDestination: "/Applications/Vibecrafted.app")
+    {
+    case .awaitReceipt:
+      break
+    default:
+      throw Failure(message: "live helper without a receipt must wait, not delete")
+    }
+  }
+
+  static func testHandoffMissingReceiptWithDeadHelperRetains() throws {
+    switch decideProductUpdateHandoff(
+      handoff: sampleHandoff(), replacement: nil, helperLive: false,
+      runningDestination: "/Applications/Vibecrafted.app")
+    {
+    case .retain(let reason):
+      try require(reason.contains("receipt"), reason)
+    default:
+      throw Failure(message: "dead helper without a receipt must retain evidence")
+    }
+  }
+
+  static func testHandoffCorruptOrStaleReceiptIsNotAdopted() throws {
+    let foreign = ProductUpdateReplacementReceipt(
+      replaced: true, relaunched: false, destination: "/Applications/Vibecrafted.app",
+      detail: "replaced", capture: "/tmp/.vc-update-capture-other", transaction: "other-txn")
+    switch decideProductUpdateHandoff(
+      handoff: sampleHandoff(), replacement: foreign, helperLive: false,
+      runningDestination: "/Applications/Vibecrafted.app")
+    {
+    case .stale:
+      break
+    default:
+      throw Failure(message: "a receipt from another transaction was adopted")
+    }
+    let wrongDest = ProductUpdateReplacementReceipt(
+      replaced: true, relaunched: false, destination: "/tmp/Other.app",
+      detail: "replaced", capture: nil, transaction: "txn-1")
+    switch decideProductUpdateHandoff(
+      handoff: sampleHandoff(), replacement: wrongDest, helperLive: false,
+      runningDestination: "/Applications/Vibecrafted.app")
+    {
+    case .stale:
+      break
+    default:
+      throw Failure(message: "a receipt for another destination was adopted")
+    }
+    switch decideProductUpdateHandoff(
+      handoff: sampleHandoff(), replacement: nil, helperLive: false,
+      runningDestination: "/tmp/Other.app")
+    {
+    case .stale:
+      break
+    default:
+      throw Failure(message: "a handoff for another running app was adopted")
+    }
+  }
+
+  static func testHandoffVerifiedReceiptPublishesPack() throws {
+    let receipt = ProductUpdateReplacementReceipt(
+      replaced: true, relaunched: false, destination: "/Applications/Vibecrafted.app",
+      detail: "replaced", capture: "/tmp/.vc-update-capture-txn-1", transaction: "txn-1")
+    switch decideProductUpdateHandoff(
+      handoff: sampleHandoff(), replacement: receipt, helperLive: false,
+      runningDestination: "/Applications/Vibecrafted.app")
+    {
+    case .publishPack(let observed):
+      try require(observed.replaced, "verified receipt was not publishable")
+    default:
+      throw Failure(message: "a bound replaced receipt did not continue to pack publish")
+    }
+  }
+
+  static func testHandoffRestoreReceiptDoesNotPublishPack() throws {
+    let receipt = ProductUpdateReplacementReceipt(
+      replaced: true, relaunched: true, destination: "/Applications/Vibecrafted.app",
+      detail: "restored", capture: "/tmp/.vc-update-capture-txn-1", transaction: "txn-1",
+      journal: "/tmp/restore-receipt.json.journal.json", mode: ProductUpdateHelperMode.restore.rawValue)
+    switch decideProductUpdateHandoff(
+      handoff: sampleHandoff(
+        mode: ProductUpdateHelperMode.restore.rawValue,
+        receiptURL: "/tmp/restore-receipt.json"),
+      replacement: receipt, helperLive: false,
+      runningDestination: "/Applications/Vibecrafted.app")
+    {
+    case .rolledBack(let reason):
+      try require(reason.contains("previous"), reason)
+    default:
+      throw Failure(message: "a restore receipt must not republish the failed pack")
+    }
+  }
+
+  static func testRestoreRequestBindsSameTransactionAndWaitsForUI() throws {
+    let prior = URL(fileURLWithPath: "/tmp/.vc-update-capture-txn-1/prior.app")
+    let request = productUpdateRestoreRequest(
+      handoff: sampleHandoff(),
+      priorApp: prior,
+      waitPID: 77,
+      waitStart: "now",
+      helperURL: URL(fileURLWithPath: "/tmp/helper"),
+      receiptURL: URL(fileURLWithPath: "/tmp/restore-receipt.json"))
+    try require(request.mode == .restore, "restore used replace mode")
+    try require(request.relaunch, "restore did not relaunch the previous app")
+    try require(request.waitPID == 77, "restore overwrote a running app without waiting")
+    try require(request.transactionID == "txn-1", "restore started a new transaction")
+    try require(request.sourceApp == prior, "restore source was not the owned prior.app")
+  }
+
+  static func testOwnedCaptureRejectsForeignPaths() throws {
+    try require(
+      productUpdateOwnedPriorApp(at: "/tmp/arbitrary/prior.app") == nil,
+      "a foreign path was treated as an owned capture")
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "vc-owned-\(UUID().uuidString)", isDirectory: true)
+    let capture = root.appendingPathComponent(".vc-update-capture-abc", isDirectory: true)
+    let prior = capture.appendingPathComponent("prior.app", isDirectory: true)
+    try FileManager.default.createDirectory(at: prior, withIntermediateDirectories: true)
+    try require(
+      productUpdateOwnedPriorApp(at: capture.path) == prior,
+      "an owned capture was not recognized")
+  }
+
+  static func testAdmissionRecordRequiresBinding() throws {
+    let request = ProductUpdateReplacementRequest(
+      waitPID: 5,
+      waitStart: "birth",
+      sourceApp: URL(fileURLWithPath: "/tmp/src.app"),
+      destinationApp: URL(fileURLWithPath: "/tmp/dst.app"),
+      relaunch: true,
+      receiptURL: URL(fileURLWithPath: "/tmp/receipt.json"),
+      transactionID: "txn-bind")
+    let ready = """
+      {"schema":"io.vetcoders.vibecrafted.app-replacement-admission.v1","status":"ready","transaction":"txn-bind","destination":"/tmp/dst.app","identifier":"\(productUpdateExpectedBundleIdentifier)","team_id":"\(productUpdateExpectedTeamID)","parent_pid":"5","parent_start":"birth","journal":"/tmp/j","capture":"/tmp/c","receipt":"/tmp/receipt.json","detail":"ok","source_identity":"x","mode":"replace"}
+      """.data(using: .utf8)!
+    guard let record = decodeProductUpdateHelperAdmission(ready) else {
+      throw Failure(message: "valid READY admission did not decode")
+    }
+    try require(productUpdateAdmissionMatches(record, request: request), "bound READY was rejected")
+    let stale = """
+      {"schema":"io.vetcoders.vibecrafted.app-replacement-admission.v1","status":"ready","transaction":"other","destination":"/tmp/dst.app","identifier":"\(productUpdateExpectedBundleIdentifier)","team_id":"\(productUpdateExpectedTeamID)","parent_pid":"5","parent_start":"birth","journal":"/tmp/j","capture":"/tmp/c","receipt":"/tmp/receipt.json","detail":"ok","source_identity":"x","mode":"replace"}
+      """.data(using: .utf8)!
+    guard let staleRecord = decodeProductUpdateHelperAdmission(stale) else {
+      throw Failure(message: "stale READY did not decode")
+    }
+    try require(
+      !productUpdateAdmissionMatches(staleRecord, request: request),
+      "a stale transaction was admitted")
+  }
+
+  static func testCoordinatorDoesNotCloseUIWithoutReadyAdmission() throws {
+    var closed = 0
+    let coordinator = makeCoordinator(
+      replaceApp: { request, completion in
+        completion(
+          .success(
+            ProductUpdateReplacementAdmission(
+              helperPID: 7,
+              waitIdentity: nil,
+              receiptURL: request.receiptURL,
+              transactionURL: request.transactionURL,
+              ready: false)))
+      },
+      closeUI: { closed += 1 })
+    coordinator.checkForUpdates()
+    try wait { coordinator.progress.canInstall }
+    coordinator.installUpdate()
+    try wait { coordinator.progress.phase == .retained }
+    try require(closed == 0, "UI closed before helper-owned READY")
+    try require(!coordinator.hasAdmittedHelperHandoff, "Process.isRunning was treated as admission")
+  }
+
   static func testProgressCopyHasNoArchitectureJargon() throws {
     let progress = deriveProductUpdateProgress(
       phase: .ready, installed: previousInstalled(), candidate: candidate())
@@ -859,6 +1068,14 @@ struct ProductUpdatePolicyTests {
     try testReplacementOwnerTimesOutLiveParent()
     try testReplacementOwnerKeepsPreviousCapture()
     try testReplacementOwnerDoesNotSynthesizeReceipt()
+    try testHandoffMissingReceiptWithLiveHelperWaits()
+    try testHandoffMissingReceiptWithDeadHelperRetains()
+    try testHandoffCorruptOrStaleReceiptIsNotAdopted()
+    try testHandoffVerifiedReceiptPublishesPack()
+    try testRestoreRequestBindsSameTransactionAndWaitsForUI()
+    try testOwnedCaptureRejectsForeignPaths()
+    try testAdmissionRecordRequiresBinding()
+    try testCoordinatorDoesNotCloseUIWithoutReadyAdmission()
     try testProgressCopyHasNoArchitectureJargon()
     print("ProductUpdatePolicyTests passed")
   }

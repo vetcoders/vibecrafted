@@ -178,6 +178,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   private var terminalRegistrationTimer: Timer?
   private var productUpdate: ProductUpdateCoordinator?
   private var productUpdatePanel: NSWindow?
+  private var productUpdateStartupAdoption: ProductUpdateHandoffAdoption = .none
   let eventObserver = EventObserver()
 
   func showMainWindowIfNeeded() {
@@ -238,8 +239,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     }
 
     showMainWindowIfNeeded()
-    connectCommandDeck()
-    adoptPendingProductUpdateIfNeeded()
+    productUpdateStartupAdoption = adoptPendingProductUpdateIfNeeded()
+    switch productUpdateStartupAdoption {
+    case .waiting, .publishing, .restoring:
+      break
+    case .none, .retained:
+      connectCommandDeck()
+    }
   }
 
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
@@ -345,6 +351,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   }
 
   private func connectCommandDeck() {
+    switch productUpdateStartupAdoption {
+    case .waiting, .publishing, .restoring:
+      return
+    case .none, .retained:
+      break
+    }
     _ = try? loadSignedCarrierRevisions()
     model.beginConnecting()
     resolveInstalledRuntime { [weak self] resolution in
@@ -2328,52 +2340,190 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     if live.waitStart == nil, let pid = live.waitPID {
       live.waitStart = captureProductUpdateProcessIdentity(pid: pid)?.startTime
     }
-    do {
-      let process = try spawnProductUpdateHelper(live)
-      guard process.isRunning else {
-        completion(.failure(ProductUpdateReplacementError.helperFailed("helper exited before admission")))
-        return {}
+    if live.transactionID == nil {
+      live.transactionID = UUID().uuidString.lowercased()
+    }
+    let cancelled = ProductUpdateCancelFlag()
+    let processLock = NSLock()
+    var spawned: Process?
+    var helperAdmitted = false
+    DispatchQueue.global(qos: .userInitiated).async {
+      do {
+        let process = try spawnProductUpdateHelper(live)
+        processLock.lock()
+        spawned = process
+        processLock.unlock()
+        if cancelled.marked {
+          processLock.lock()
+          let admitted = helperAdmitted
+          processLock.unlock()
+          if !admitted {
+            terminateProductUpdateHelper(process)
+            DispatchQueue.main.async {
+              completion(.failure(ProductUpdateReplacementError.helperFailed("update cancelled")))
+            }
+          }
+          return
+        }
+        let outcome = waitForProductUpdateHelperAdmission(process: process, request: live)
+        if case .success = outcome {
+          processLock.lock()
+          helperAdmitted = true
+          processLock.unlock()
+        }
+        DispatchQueue.main.async {
+          switch outcome {
+          case .success(let admission):
+            completion(.success(admission))
+          case .failure(let error):
+            if cancelled.marked { return }
+            completion(.failure(error))
+          }
+        }
+      } catch {
+        DispatchQueue.main.async {
+          if !cancelled.marked {
+            completion(.failure(error))
+          }
+        }
       }
-      completion(
-        .success(
-          ProductUpdateReplacementAdmission(
-            helperPID: process.processIdentifier,
-            waitIdentity: live.waitPID.map {
-              ProductUpdateProcessIdentity(pid: $0, startTime: live.waitStart ?? "")
-            },
-            receiptURL: live.receiptURL,
-            transactionURL: live.transactionURL)))
-      return {}
-    } catch {
-      completion(.failure(error))
-      return {}
+    }
+    return {
+      cancelled.mark()
+      processLock.lock()
+      let process = spawned
+      let admitted = helperAdmitted
+      processLock.unlock()
+      if admitted { return }
+      if let process {
+        terminateProductUpdateHelper(process)
+      }
     }
   }
 
-  private func adoptPendingProductUpdateIfNeeded() {
+  @discardableResult
+  private func adoptPendingProductUpdateIfNeeded() -> ProductUpdateHandoffAdoption {
     let pendingURL = productUpdatePendingHandoffURL(home: craftedHomeURL())
-    guard FileManager.default.isReadableFile(atPath: pendingURL.path),
-      let handoff = try? readProductUpdateHandoff(from: pendingURL)
-    else { return }
-    let receiptURL = URL(fileURLWithPath: handoff.receiptURL)
-    guard let replacement = productUpdateObservedReplacementReceipt(at: receiptURL),
-      replacement.replaced
-    else {
+    guard FileManager.default.isReadableFile(atPath: pendingURL.path) else { return .none }
+    guard let handoff = try? readProductUpdateHandoff(from: pendingURL) else {
       showNativeMessage(
         "Update did not finish",
-        "The update helper did not leave a replacement receipt. The previous version should still be installed.")
-      try? FileManager.default.removeItem(at: pendingURL)
-      return
+        "A previous update left an unreadable recovery record. The current version was not treated as finished.")
+      return .retained
     }
-    let capture = replacement.capture ?? handoff.capturePath
-    guard let packPath = handoff.packURL, FileManager.default.isReadableFile(atPath: packPath)
-    else { return }
+    return consumePendingProductUpdate(handoff, pendingURL: pendingURL, alreadyWaited: false)
+  }
+
+  private func consumePendingProductUpdate(
+    _ handoff: ProductUpdateHandoffRecord,
+    pendingURL: URL,
+    alreadyWaited: Bool
+  ) -> ProductUpdateHandoffAdoption {
+    let receiptURL = URL(fileURLWithPath: handoff.receiptURL)
+    let replacement = productUpdateObservedReplacementReceipt(at: receiptURL)
+    let helperLive = productUpdateHelperIdentityLive(
+      pid: handoff.helperPID, start: handoff.helperStart)
+    let decision = decideProductUpdateHandoff(
+      handoff: handoff,
+      replacement: replacement,
+      helperLive: helperLive,
+      runningDestination: Bundle.main.bundleURL.path)
+    switch decision {
+    case .awaitReceipt:
+      if alreadyWaited {
+        retainProductUpdateEvidence(handoff, reason: "the replacement receipt is still missing")
+        return .retained
+      }
+      showProductUpdatePanel()
+      productUpdateCoordinator().presentFinishing(candidate: nil)
+      DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        let found = self?.awaitProductUpdateReceipt(handoff) ?? false
+        DispatchQueue.main.async {
+          guard let self else { return }
+          if found {
+            let next = self.consumePendingProductUpdate(
+              handoff, pendingURL: pendingURL, alreadyWaited: true)
+            self.productUpdateStartupAdoption = next
+            if next == .none || next == .retained {
+              self.connectCommandDeck()
+            }
+          } else {
+            self.retainProductUpdateEvidence(
+              handoff,
+              reason: "the update helper is still working or stopped without a receipt")
+            self.productUpdateStartupAdoption = .retained
+            self.connectCommandDeck()
+          }
+        }
+      }
+      return .waiting
+    case .publishPack(let receipt):
+      return publishAdoptedProductUpdate(
+        handoff, replacement: receipt, pendingURL: pendingURL)
+    case .restorePrevious(let prior):
+      return beginProductUpdateRestore(handoff: handoff, prior: prior)
+    case .rolledBack(let reason):
+      try? writeProductUpdateRecovery(
+        handoff: handoff, reason: reason,
+        to: productUpdateRecoveryURL(home: craftedHomeURL()))
+      try? FileManager.default.removeItem(at: pendingURL)
+      showNativeMessage("Previous version restored", reason)
+      return .retained
+    case .retain(let reason):
+      retainProductUpdateEvidence(handoff, reason: reason)
+      return .retained
+    case .stale(let reason):
+      retainProductUpdateEvidence(handoff, reason: reason)
+      return .retained
+    }
+  }
+
+  private func awaitProductUpdateReceipt(_ handoff: ProductUpdateHandoffRecord) -> Bool {
+    let receiptURL = URL(fileURLWithPath: handoff.receiptURL)
+    let deadline = Date().addingTimeInterval(20)
+    while Date() < deadline {
+      if let replacement = productUpdateObservedReplacementReceipt(at: receiptURL),
+        replacement.replaced
+      {
+        return true
+      }
+      if !productUpdateHelperIdentityLive(pid: handoff.helperPID, start: handoff.helperStart) {
+        return productUpdateObservedReplacementReceipt(at: receiptURL)?.replaced == true
+      }
+      Thread.sleep(forTimeInterval: 0.05)
+    }
+    return productUpdateObservedReplacementReceipt(at: receiptURL)?.replaced == true
+  }
+
+  private func retainProductUpdateEvidence(
+    _ handoff: ProductUpdateHandoffRecord, reason: String
+  ) {
+    try? writeProductUpdateRecovery(
+      handoff: handoff, reason: reason,
+      to: productUpdateRecoveryURL(home: craftedHomeURL()))
+    showNativeMessage("Update did not finish", reason)
+  }
+
+  private func publishAdoptedProductUpdate(
+    _ handoff: ProductUpdateHandoffRecord,
+    replacement: ProductUpdateReplacementReceipt,
+    pendingURL: URL
+  ) -> ProductUpdateHandoffAdoption {
+    var bound = handoff
+    bound.capturePath = replacement.capture ?? handoff.capturePath
+    bound.phase = "app_replaced"
+    try? writeProductUpdateHandoff(bound, to: pendingURL)
+    guard let packPath = bound.packURL, FileManager.default.isReadableFile(atPath: packPath) else {
+      retainProductUpdateEvidence(
+        bound, reason: "the app was replaced, but the matching Runtime Pack was not found")
+      return .retained
+    }
     let pack = URL(fileURLWithPath: packPath)
     let candidate = ProductUpdateCandidate(
-      generation: handoff.candidateGeneration,
-      sourceRevision: handoff.sourceRevision,
-      terminalRevision: handoff.terminalRevision,
-      frameRevision: handoff.frameRevision,
+      generation: bound.candidateGeneration,
+      sourceRevision: bound.sourceRevision,
+      terminalRevision: bound.terminalRevision,
+      frameRevision: bound.frameRevision,
       keyID: productUpdateExpectedKeyID,
       algorithm: productUpdateExpectedAlgorithm,
       spkiSHA256: productUpdateExpectedSPKI,
@@ -2383,27 +2533,85 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       appSHA256: String(repeating: "00", count: 32),
       packSize: 1,
       appSize: 1)
+    let coordinator = productUpdateCoordinator()
+    coordinator.presentFinishing(candidate: candidate)
+    showProductUpdatePanel()
     _ = installProductUpdate(candidate, pack: pack) { [weak self] outcome in
       guard let self else { return }
       switch outcome {
       case .success:
         try? FileManager.default.removeItem(at: pendingURL)
+        self.productUpdateStartupAdoption = .none
+        self.connectCommandDeck()
       case .failure:
-        if let capture, !capture.isEmpty {
-          let prior = URL(fileURLWithPath: capture).appendingPathComponent("prior.app")
-          if FileManager.default.fileExists(atPath: prior.path) {
-            _ = replaceProductUpdateApp(
-              ProductUpdateReplacementRequest(
-                sourceApp: prior,
-                destinationApp: URL(fileURLWithPath: handoff.destination),
-                relaunch: false,
-                receiptURL: receiptURL.deletingLastPathComponent()
-                  .appendingPathComponent("restore-receipt.json"),
-                helperURL: self.resolveLiveUpdateChannel().helperURL))
-          }
+        if let prior = productUpdateOwnedPriorApp(at: bound.capturePath) {
+          _ = self.beginProductUpdateRestore(handoff: bound, prior: prior)
+        } else {
+          self.retainProductUpdateEvidence(
+            bound, reason: "the Runtime Pack did not publish, and the previous app capture is missing")
+          self.productUpdateStartupAdoption = .retained
+          self.connectCommandDeck()
         }
       }
     }
+    return .publishing
+  }
+
+  @discardableResult
+  private func beginProductUpdateRestore(
+    handoff: ProductUpdateHandoffRecord, prior: URL
+  ) -> ProductUpdateHandoffAdoption {
+    guard productUpdateOwnedPriorApp(at: prior.deletingLastPathComponent().path) != nil else {
+      retainProductUpdateEvidence(
+        handoff, reason: "the previous app capture is not an owned recovery path")
+      return .retained
+    }
+    let identity = captureProductUpdateProcessIdentity(
+      pid: ProcessInfo.processInfo.processIdentifier)
+    let receiptURL = URL(fileURLWithPath: handoff.receiptURL)
+      .deletingLastPathComponent()
+      .appendingPathComponent("restore-receipt.json")
+    let request = productUpdateRestoreRequest(
+      handoff: handoff,
+      priorApp: prior,
+      waitPID: identity?.pid ?? ProcessInfo.processInfo.processIdentifier,
+      waitStart: identity?.startTime,
+      helperURL: resolveLiveUpdateChannel().helperURL,
+      receiptURL: receiptURL)
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      let outcome = admitProductUpdateHelper(request)
+      DispatchQueue.main.async {
+        guard let self else { return }
+        switch outcome {
+        case .success(let admission) where admission.ready:
+          var restoring = handoff
+          restoring.phase = "restoring"
+          restoring.receiptURL = receiptURL.path
+          restoring.admissionURL = admission.admissionURL.path
+          restoring.journalURL = admission.journalURL?.path ?? handoff.journalURL
+          restoring.helperPID = admission.helperPID
+          restoring.helperStart =
+            captureProductUpdateProcessIdentity(pid: admission.helperPID)?.startTime ?? ""
+          restoring.mode = ProductUpdateHelperMode.restore.rawValue
+          try? writeProductUpdateHandoff(
+            restoring, to: productUpdatePendingHandoffURL(home: self.craftedHomeURL()))
+          self.productUpdate?.noteUIShutdownPreservingHandoff()
+          self.requestQuit()
+        case .success:
+          self.retainProductUpdateEvidence(
+            handoff, reason: "the restore helper started but did not admit the previous version")
+          self.productUpdateStartupAdoption = .retained
+          self.connectCommandDeck()
+        case .failure(let error):
+          self.retainProductUpdateEvidence(
+            handoff,
+            reason: "the previous version could not be restored. \(error.localizedDescription)")
+          self.productUpdateStartupAdoption = .retained
+          self.connectCommandDeck()
+        }
+      }
+    }
+    return .restoring
   }
 
   private func showProductUpdatePanel() {

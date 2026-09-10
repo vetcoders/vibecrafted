@@ -22,7 +22,8 @@ Sparkle cannot consume this product's signed artifact
 detached signature + `vibecrafted-signing-v1.pub`). It has no hook into
 `install-runtime-pack.sh` receipts. Adding it would require a second feed, a
 second public key, and still a coordinated pack transaction. Necessity is
-therefore not established. Sparkle is not pinned, not linked, and was not
+therefore not established. This is an observed-contract decision, not a
+Founder ban on Sparkle. Sparkle is not pinned, not linked, and was not
 installed (COMPILE_EMBARGO).
 
 ## One owner
@@ -56,25 +57,54 @@ installed (COMPILE_EMBARGO).
 
 ## Helper transaction
 
-The script is the only mutation implementation. It:
+The script is the only mutation implementation. There is no compiled Swift
+mutation twin. Two `mv` calls are **not** atomic: every phase is journaled
+before the destination changes, and resume/rollback never delete a foreign
+path. A destination lock (`.vc-update.lock` + live owner pid/start) refuses
+overlapping retries (exit 13).
+
+The script:
 
 - survives parent UI death (`trap '' HUP`; the App also `setpgid`s the helper)
-- waits for PID + `ps -o lstart=` identity, then **fails before mutation**
-  (exit 5) if that identity is still live
+- preflights source, destination, capture ownership, and signed identity
+  **before** the parent may quit
+- persists a helper-owned **READY** admission bound to transaction id,
+  candidate identity, destination, and parent PID/`lstart`.
+  `Process.isRunning` is not admission. Rejection or admission timeout leaves
+  the current UI alive
+- waits for that bound parent identity, then **fails before mutation**
+  (exit 5) if it is still live
 - refuses symlink source or destination
-- captures the previous destination under a unique
-  `.vc-update-capture-<uuid>/prior.app` (sibling captures are left alone)
-- prepares `.vc-update-prepared-<uuid>.app`, verifies codesign identity, then
-  `mv`s the prepared bundle into place
+- writes a durable phase journal (`app-update-journal.v1`) with a unique
+  owned capture/hash **before** any destination mutation
+- captures the previous destination under
+  `.vc-update-capture-<transaction>/prior.app` (sibling captures are left alone)
+- prepares `.vc-update-prepared-<transaction>.app`, verifies codesign
+  identity, journals the displace, then `mv`s the prepared bundle into place
 - revalidates identifier + Team ID on source, prepared, and destination
-- writes `replaced: true` only after the destination verifies
-- keeps the capture so a later pack failure can restore `prior.app`
+- writes the validated terminal replacement receipt (`replaced: true`)
+  **before** `/usr/bin/open -n`. Relaunch is a sidecar
+  (`receipt.relaunch.json`); a missing receipt is never success
+- keeps the capture so pack failure can restore `prior.app`
 
-The parent records **admission**, not replacement. `applicationWillTerminate`
-calls `noteUIShutdownPreservingHandoff` when a helper is admitted and does
-**not** terminate that helper. Missing replacement receipts are not success.
-The next launch reads `~/.vibecrafted/product-update/pending-handoff.json` and
-only continues pack publish after an observed `replaced: true` receipt.
+Restore is a separate owner path (`--mode restore` →
+`restore_previous_tuple`). It never dittos the failed new app onto
+`prior.app`. The failed destination is quarantined as `failed-new.app`.
+Capture validity is checked before any destructive restore. A restore
+receipt must not republish the failed pack (`decideProductUpdateHandoff`
+returns `rolledBack`).
+
+The parent records **READY admission**, not replacement.
+`applicationWillTerminate` calls `noteUIShutdownPreservingHandoff` when a
+helper is admitted and does **not** terminate that helper. User cancel
+before READY still kills the helper. Missing replacement receipts are not
+success. A live admitted helper with no receipt is a bounded wait, not
+deletion of `pending-handoff.json`.
+
+`applicationDidFinishLaunching` adopts the pending handoff **before**
+`connectCommandDeck`. Waiting / publishing / restoring block the startup
+installer so repair cannot race adoption. Interrupted or failed helpers
+leave journal, admission, and recovery records.
 
 ## User-visible states
 
@@ -88,6 +118,7 @@ Every check ends in a result:
 | retained | Interrupted or failed mutation, and the transaction receipt plus recovered identity still show the previous working version. |
 | error | Timeout, HTTP failure, or an interrupt while a publish may still have been in flight. |
 | restarting | The helper was admitted. The window closes and reopens. Healthy is not claimed yet. |
+| finishing | The new UI opened and is applying the matching Runtime Pack, or waiting for a live helper receipt. |
 | success | Installed App and pack match the candidate. |
 
 Healthy is claimed only when the running App, installed pack, candidate
@@ -115,9 +146,16 @@ Production feeds must be HTTPS. `file://` and `http://` are rejected unless
 
 The fixture still verifies the detached signature, payload hashes, codesign
 identity, Team ID, stapler, and pack identity. It may use local transport. It
-does not weaken production policy. Unsigned copies are refused. W2 / Founder
-provision a real signed, notarized tuple for the skipped installed-acceptance
-test (`test_product_update_real_process_fixture_preserves_sessions`).
+does not weaken production policy. Unsigned copies are refused. Harness flags
+(`--open-bin`, `--fail-after`, `--allow-unsigned`) require
+`VIBECRAFTED_UPDATE_HELPER_HARNESS=1` and are not production switches.
+
+W2 may parameterize the already-built signed pair
+`dist/*20260910-e37be2c9*` + `dist/release-output.json` (or
+`VIBECRAFTED_UPDATE_FIXTURE_ROOT`) for
+`test_product_update_signed_fixture_positive_path`. Workers must not execute
+or replace that tuple. Missing the pair skips that one test; it is not an
+excuse to skip unsigned real-process coverage.
 
 Do not invent a production URL, EdDSA key, or signed update.
 
@@ -147,6 +185,10 @@ source.
 - Installed update: signed feed + notarized App/pack, then prove console reopen
   and attach to a live Frame session without terminating PTYs.
 - Confirm an interrupted install leaves previous unique captures recoverable
-  and that pack failure can restore `prior.app`.
+  and that pack failure restores `prior.app` through the same helper (UI exit,
+  identity wait, verified restore, previous-tuple relaunch) without
+  republishing the failed pack.
+- Two destination renames remain a journaled recoverable gap, not a platform
+  atomic exchange.
 - Security hooks skipped by this W1 checkpoint must be restored by the
   integrator.
