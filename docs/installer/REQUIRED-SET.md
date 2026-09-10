@@ -197,7 +197,39 @@ backup path is `lstat`ed before publication. Missing historical rollback
 preimages therefore block a regular upgrade. That is not a license to edit
 the receipt.
 
-The single supported path is the same owner:
+The single supported owner is still
+`scripts/vetcoders_install.py runtime-install --rescue`. The public carrier
+that must present the same verified input on plan, apply, and interrupted
+resume is:
+
+```text
+scripts/install-runtime-pack.sh --pack SAME.tar.gz --rescue --plan
+scripts/install-runtime-pack.sh --pack SAME.tar.gz --rescue --apply --plan-digest <sha256>
+```
+
+Direct payload-root remains valid when the caller already has a stable
+verified tree (the prior owner proofs). The public wrapper cannot use a
+one-shot `mktemp` extract: `payload_root` is part of `input_digest` /
+`plan_digest` and of the interrupted journal binding, and EXIT cleanup
+deletes that path. Installed-state trees (`.installer-backups`,
+`tools/.incoming-*`) are not extract owners — `--plan` must not mutate
+selectors, receipt, or product config.
+
+Rescue therefore extracts into a private content-addressed slot under the
+existing installer cache namespace:
+
+`${XDG_CACHE_HOME:-$HOME/.cache}/vibecrafted/runtime-pack-rescue/<archive-sha256>/`
+
+The directory name is the verified digest of the original signed bytes.
+The leaf is `0700`, euid-owned, not a symlink, and locked with an adjacent
+`mkdir` lock for the invocation. Reuse re-checks identity + a sibling file
+manifest and refuses a stale, tampered, foreign, or concurrent tree.
+`--plan` retains the slot; a failed or interrupted `--apply` retains it
+for resume; a successful `--apply` removes it. This is one slot per unique
+signed archive, not an unbounded cache and not a shared `/tmp` name.
+A 79001 pack whose embedded installer lacks `--rescue` still bootstraps
+the source installer against that same verified extract. Do not rewrite
+the signed payload.
 
 ```text
 python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack> --rescue --plan
@@ -249,4 +281,5 @@ are preserved or refuse. User config,
 foreign commands, and unplanned rc content stay.
 A target pack whose embedded installer lacks `--rescue` is not rewritten;
 bootstrap with this source installer against the verified payload-root.
-Compatibility: `tests/tui/test_runtime_pack_rescue.py`.
+Compatibility: `tests/tui/test_runtime_pack_rescue.py` (owner) and
+`tests/tui/test_runtime_pack_rescue_wrapper.py` (public carrier).
