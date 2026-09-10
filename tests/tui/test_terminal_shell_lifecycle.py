@@ -1,9 +1,9 @@
 """A product command failure must not destroy the terminal's login shell."""
 
 import contextlib
+import json
 import os
 import pty
-import re
 import select
 import shlex
 import shutil
@@ -592,7 +592,44 @@ _AMBIENT_FRAME_ENV = (
 
 _PRODUCT_GL = "git log --oneline --graph --decorate -20"
 _EVIDENCE_END = "PROBE_END"
-_PANE_ID = re.compile(r"\bterminal_\d+\b")
+
+# Two panes, two working directories. A pane's cwd is part of what the engine
+# writes into its resurrection cache, so a cache naming both directories can
+# only have been written after both panes existed. That is what makes the wait
+# before `kill-session` a wait for a real, current write instead of a sleep.
+_STARTUP_DIR = "pane-alpha"
+_ADDED_DIR = "pane-beta"
+
+
+def _process_identity(pid: int) -> str | None:
+    """What makes this pid *this* process: its start time together with its argv.
+
+    A bare pid is not an identity, it is a slot. Between a pane reporting its
+    shell and this world being torn down the kernel may hand that number to an
+    unrelated process, and signalling it would be this test killing a stranger.
+    """
+    try:
+        probe = subprocess.run(
+            ["/bin/ps", "-p", str(pid), "-o", "lstart=", "-o", "command="],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    identity = " ".join(probe.stdout.split())
+    return identity or None
+
+
+def _process_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 class _OwnedFrameSandbox:
@@ -620,15 +657,28 @@ class _OwnedFrameSandbox:
         self.tmp = self.root / "t"
         for path in (self.home, self.socket_dir, self.config_dir / "layouts", self.tmp):
             path.mkdir(parents=True)
+        # `default_shell "zsh"` is the shipped value on a zsh host — the product
+        # only rewrites it when zsh is missing (`vc_frame_staging`) — so the
+        # engine resolves its pane shell here exactly as an install does.
+        # `serialization_interval` is the single fixture-only deviation: the
+        # engine serializes a session for resurrection every 60s by default,
+        # which outlives this whole test, so restore would otherwise be asked
+        # about state that was never written. One second brings that write
+        # inside the test's life without anyone hand-writing a cache.
         (self.config_dir / "config.kdl").write_text(
-            'keybinds clear-defaults=true {}\ndefault_shell "zsh"\n', encoding="utf-8"
+            "keybinds clear-defaults=true {}\n"
+            'default_shell "zsh"\n'
+            "serialization_interval 1\n",
+            encoding="utf-8",
         )
         (self.config_dir / "layouts" / "empty.kdl").write_text(
             "layout {\n  pane\n}\n", encoding="utf-8"
         )
         self.sessions: list[str] = []
-        self.pane_pids: set[int] = set()
+        # pid -> the fingerprint that pid carried while this test watched it.
+        self.pane_processes: dict[int, str] = {}
         self.leftover = ""
+        self.teardown_errors: list[str] = []
 
     @property
     def layout(self) -> Path:
@@ -637,6 +687,34 @@ class _OwnedFrameSandbox:
     def session_name(self, suffix: str) -> str:
         """Unique per allocation, so a stale session can never be adopted."""
         return f"{self.root.name}-{suffix}"
+
+    def remember_pane_process(self, pid: int) -> None:
+        """Record a pane shell together with the fingerprint identifying it.
+
+        A pid that cannot be fingerprinted while it is demonstrably alive is
+        never registered: teardown would have nothing to compare against, and
+        an unverifiable pid is exactly the one that must not be signalled.
+        """
+        identity = _process_identity(pid)
+        if identity is None:
+            self.teardown_errors.append(
+                f"pane shell {pid} could not be fingerprinted while alive"
+            )
+            return
+        self.pane_processes[pid] = identity
+
+    def session_layout_cache(self, session: str) -> Path | None:
+        """The engine's own resurrection cache for this session, inside this HOME.
+
+        Discovered rather than reconstructed: the engine derives the path from
+        a HOME-relative project cache dir and a client/server contract version
+        folder, and a contract bump must not quietly turn this proof into a
+        lookup that always misses.
+        """
+        found = sorted(
+            self.home.glob(f"**/session_info/{session}/session-layout.kdl")
+        )
+        return found[0] if found else None
 
     def env(self, **extra: str) -> dict[str, str]:
         environment = {
@@ -743,8 +821,16 @@ class _OwnedFrameSandbox:
         """Tear down whatever exists, including a partially started world.
 
         Never raises: the sandbox has to disappear even when the engine is
-        wedged, otherwise a failed run leaks a live server into /tmp.
+        wedged, otherwise a failed run leaks a live server into /tmp. What it
+        refuses to do is hide a failure — every refusal and every surprise is
+        recorded on `teardown_errors` for the caller to assert on.
         """
+        try:
+            self._teardown()
+        except Exception as error:  # noqa: BLE001 - teardown must not mask a failure
+            self.teardown_errors.append(f"teardown raised {error!r}")
+
+    def _teardown(self) -> None:
         environment = dict(self.env())
         for session in reversed(self.sessions):
             self._quiet(environment, "kill-session", session, "--force")
@@ -754,10 +840,52 @@ class _OwnedFrameSandbox:
         # reach the operator's own Frame.
         self._quiet(environment, "delete-all-sessions", "--yes", "--force")
         self.leftover = self._quiet(environment, "list-sessions", "--no-formatting")
-        for pid in self.pane_pids:
-            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        self._reap_pane_processes()
+        live = [
+            name
+            for name in self.sessions
+            if any(
+                name in line and "(EXITED" not in line
+                for line in self.leftover.splitlines()
+            )
+        ]
+        if live:
+            # Deleting a live server's socket directory would strand that
+            # server and destroy the evidence of why it survived. Leave the
+            # world standing and let the recorded error speak.
+            self.teardown_errors.append(f"sessions still live after teardown: {live}")
+            return
+        try:
+            shutil.rmtree(self.root)
+        except OSError as error:
+            self.teardown_errors.append(f"cannot remove {self.root}: {error}")
+
+    def _reap_pane_processes(self) -> None:
+        """Killing the sessions owns these shells; a signal is the last resort.
+
+        Every pane shell here is a child of this world's own server, so tearing
+        the sessions down is what should end them, and they are given a bounded
+        chance to do exactly that. Whatever is still running afterwards is
+        signalled only while it carries the fingerprint recorded when this test
+        saw it alive: a pid whose start time or argv has changed is a different
+        process wearing a reused number, and it is not this test's to kill.
+        """
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and any(
+            _process_is_alive(pid) for pid in self.pane_processes
+        ):
+            time.sleep(0.2)
+        for pid, identity in self.pane_processes.items():
+            if _process_identity(pid) != identity:
+                continue
+            try:
                 os.kill(pid, signal.SIGKILL)
-        shutil.rmtree(self.root, ignore_errors=True)
+            except (ProcessLookupError, PermissionError, OSError) as error:
+                self.teardown_errors.append(f"cannot signal pane shell {pid}: {error}")
+            else:
+                self.teardown_errors.append(
+                    f"pane shell {pid} outlived its session and needed SIGKILL"
+                )
 
 
 def _write_frame_probe(home: Path, name: str) -> tuple[Path, Path]:
@@ -808,25 +936,84 @@ def _read_owned_evidence(evidence: Path, timeout: float) -> str | None:
     return None
 
 
+def _terminal_panes(
+    sandbox: _OwnedFrameSandbox, environment: dict[str, str], session: str
+) -> dict[str, dict[str, object]]:
+    """Every addressable terminal pane the engine itself reports, keyed by pane id.
+
+    `list-panes` is answered straight from the screen thread without a client
+    id — unlike `list-tabs` — so it can be read in a session nobody has
+    attached to. That is the only reason this test can address the pane the
+    session opened for itself.
+    """
+    listed = sandbox.run(
+        environment, "--session", session, "action", "list-panes", "--json"
+    )
+    if listed.returncode != 0:
+        return {}
+    document = listed.stdout
+    start, end = document.find("["), document.rfind("]")
+    if start < 0 or end < start:
+        return {}
+    try:
+        entries = json.loads(document[start : end + 1])
+    except json.JSONDecodeError:
+        return {}
+    panes: dict[str, dict[str, object]] = {}
+    for entry in entries:
+        if entry.get("is_plugin") or entry.get("is_suppressed"):
+            continue
+        if entry.get("is_selectable") is False:
+            continue
+        panes[f"terminal_{entry['id']}"] = entry
+    return panes
+
+
+def _wait_for_panes(
+    sandbox: _OwnedFrameSandbox,
+    environment: dict[str, str],
+    session: str,
+    *,
+    count: int,
+    timeout: float = 30,
+) -> list[str]:
+    deadline = time.monotonic() + timeout
+    panes: dict[str, dict[str, object]] = {}
+    while time.monotonic() < deadline:
+        panes = _terminal_panes(sandbox, environment, session)
+        if len(panes) == count:
+            return sorted(panes)
+        time.sleep(0.25)
+    pytest.fail(
+        f"{session} never reported {count} terminal panes; last saw {sorted(panes)}"
+    )
+
+
 def _new_default_pane(
     sandbox: _OwnedFrameSandbox,
     environment: dict[str, str],
     session: str,
     cwd: Path,
-) -> str | None:
+) -> str:
     """Open a pane the daily way: no command, no shell argv.
 
     Passing `-- /bin/zsh -lic ...` would replace the very thing under test —
-    the engine's own default shell and the profile that shell loads.
+    the engine's own default shell and the profile that shell loads. The new
+    pane's id comes from the engine's own pane list rather than from parsing
+    the command's stdout, so the addressed pane is the pane that appeared.
     """
+    before = set(_terminal_panes(sandbox, environment, session))
     created = sandbox.run(
         environment, "--session", session, "action", "new-pane", "--cwd", str(cwd)
     )
     assert created.returncode == 0, created.stderr
-    found = _PANE_ID.search(created.stdout)
-    # The engine documents a returned pane id; without one the focused pane is
-    # the addressed pane, which is exactly what a person typing would hit.
-    return found.group(0) if found else None
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        added = set(_terminal_panes(sandbox, environment, session)) - before
+        if len(added) == 1:
+            return added.pop()
+        time.sleep(0.25)
+    pytest.fail(f"new-pane in {session} never reached the engine's pane list")
 
 
 def _type_in_pane(
@@ -835,12 +1022,21 @@ def _type_in_pane(
     session: str,
     probe: Path,
     evidence: Path,
+    pane_id: str,
     *,
-    pane_id: str | None = None,
     attempts: int = 8,
     per_attempt: float = 6.0,
 ) -> str:
-    """Type one line into a live pane and read back what that shell reports.
+    """Type one line into a named live pane and read back what that shell reports.
+
+    The pane is always named. Input without `--pane-id` is delivered to the
+    pane focused *by a client*: the engine resolves it through the requesting
+    client's active tab, falls back to the first connected client, and when a
+    session has no client at all it logs the keystrokes away. A session created
+    with `attach --create-background` has never had a client, so focus-targeted
+    input here would be typing into nobody, and retrying it would only take
+    longer to prove nothing. `--pane-id` is routed as a write to that pane id
+    and never consults a client.
 
     The engine acknowledges the write request, not the shell's consumption of
     it, so keystrokes aimed at a pane whose shell is still starting are simply
@@ -848,7 +1044,7 @@ def _type_in_pane(
     The leading Return also submits a half-line left by a dropped keystroke and
     resumes a restored pane that came back waiting for one.
     """
-    target = ["--pane-id", pane_id] if pane_id else []
+    target = ["--pane-id", pane_id]
     line = f"source {shlex.quote(str(probe))}"
     for _ in range(attempts):
         sandbox.run(environment, "--session", session, "action", "write", *target, "13")
@@ -860,8 +1056,42 @@ def _type_in_pane(
         if text is not None:
             return text
     pytest.fail(
-        f"pane {pane_id or '(focused)'} in {session} never ran {probe.name}; "
+        f"pane {pane_id} in {session} never ran {probe.name}; "
         f"screen was:\n{sandbox.screen(environment, session, pane_id)}"
+    )
+
+
+def _wait_for_serialized_panes(
+    sandbox: _OwnedFrameSandbox,
+    session: str,
+    *,
+    markers: tuple[str, ...],
+    timeout: float = 60,
+) -> str:
+    """Block until the engine's own resurrection cache names every pane.
+
+    Restore is a claim about durable state, so killing a session before the
+    engine has written that state proves nothing: what comes back is whatever
+    the last write — or no write at all — happened to hold. The engine
+    serializes from its session-metadata loop, every `serialization_interval`,
+    on a tick that slows to 5s while no client is attached; each pane's cwd is
+    part of what it writes. Waiting for both cwds to appear in that file is
+    therefore a wait for an actual current write, not a sleep long enough to
+    hope for one.
+    """
+    deadline = time.monotonic() + timeout
+    seen = ""
+    while time.monotonic() < deadline:
+        cache = sandbox.session_layout_cache(session)
+        if cache is not None:
+            with contextlib.suppress(OSError):
+                seen = cache.read_text(errors="replace")
+            if all(marker in seen for marker in markers):
+                return seen
+        time.sleep(0.25)
+    pytest.fail(
+        f"{session} was never serialized with {list(markers)}; "
+        f"last cache contents were:\n{seen}"
     )
 
 
@@ -889,9 +1119,7 @@ def _assert_persistent_pane_process(fields: dict[str, str], *, text: str) -> int
 def _wait_process_gone(pid: int, timeout: float = 15) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        try:
-            os.kill(pid, 0)
-        except (ProcessLookupError, PermissionError):
+        if not _process_is_alive(pid):
             return True
         time.sleep(0.2)
     return False
@@ -922,46 +1150,58 @@ def _stage_frame_home(sandbox: _OwnedFrameSandbox) -> tuple[Path, Path]:
 def test_real_frame_default_and_restored_panes_run_product_profile() -> None:
     """The real engine's own default shell, in a real PTY, before and after restore.
 
-    Three panes a person actually meets: the one the session opens, the one
-    `new-pane` adds, and the one a restored session brings back. None of them
-    is handed a shell argv by this test.
+    Every pane a person actually meets: the one the session opens, the one
+    `new-pane` adds, and both of them again once the session has been killed
+    and resurrected. None of them is handed a shell argv by this test, and the
+    kill only happens after the engine has durably written both panes down.
     """
     assert _REAL_FRAME is not None
     sandbox = _OwnedFrameSandbox(_REAL_FRAME, "vcsh")
     try:
         home, product_zdot = _stage_frame_home(sandbox)
-        work = home / "work"
-        work.mkdir()
+        startup_cwd = home / _STARTUP_DIR
+        added_cwd = home / _ADDED_DIR
+        startup_cwd.mkdir()
+        added_cwd.mkdir()
         environment = sandbox.env(ZDOTDIR=str(product_zdot))
         session = sandbox.session_name("panes")
-        sandbox.create_session(environment, session, cwd=work)
+        sandbox.create_session(environment, session, cwd=startup_cwd)
 
         # 1. The pane the session itself opened — the daily default shell.
+        startup_pane = _wait_for_panes(sandbox, environment, session, count=1)[0]
         startup_probe, startup_evidence = _write_frame_probe(home, "startup")
         startup_text = _type_in_pane(
-            sandbox, environment, session, startup_probe, startup_evidence
+            sandbox, environment, session, startup_probe, startup_evidence, startup_pane
         )
         startup = _assert_live_pane_shell(startup_text, name="startup")
         _assert_product_profile(
-            startup, home=home, zdotdir=product_zdot, cwd=work, text=startup_text
+            startup,
+            home=home,
+            zdotdir=product_zdot,
+            cwd=startup_cwd,
+            text=startup_text,
         )
         startup_pid = _assert_persistent_pane_process(startup, text=startup_text)
-        sandbox.pane_pids.add(startup_pid)
+        sandbox.remember_pane_process(startup_pid)
         assert not (home / "PRIVATE_PROFILE_EXECUTED").exists()
 
         # 2. A pane added to the live session, still without a named shell.
-        pane_id = _new_default_pane(sandbox, environment, session, work)
-        new_probe, new_evidence = _write_frame_probe(home, "new-pane")
-        new_text = _type_in_pane(
-            sandbox, environment, session, new_probe, new_evidence, pane_id=pane_id
+        added_pane = _new_default_pane(sandbox, environment, session, added_cwd)
+        added_probe, added_evidence = _write_frame_probe(home, "new-pane")
+        added_text = _type_in_pane(
+            sandbox, environment, session, added_probe, added_evidence, added_pane
         )
-        new_pane = _assert_live_pane_shell(new_text, name="new-pane")
+        added = _assert_live_pane_shell(added_text, name="new-pane")
         _assert_product_profile(
-            new_pane, home=home, zdotdir=product_zdot, cwd=work, text=new_text
+            added, home=home, zdotdir=product_zdot, cwd=added_cwd, text=added_text
         )
-        new_pane_pid = _assert_persistent_pane_process(new_pane, text=new_text)
-        sandbox.pane_pids.add(new_pane_pid)
-        assert new_pane_pid != startup_pid, new_text
+        added_pid = _assert_persistent_pane_process(added, text=added_text)
+        sandbox.remember_pane_process(added_pid)
+        assert added_pid != startup_pid, added_text
+
+        # 3. Only now may the session die: the engine has written a cache that
+        # names both panes, so what comes back is the work that existed here.
+        _wait_for_serialized_panes(sandbox, session, markers=(_STARTUP_DIR, _ADDED_DIR))
 
         killed = sandbox.run(environment, "kill-session", session)
         assert killed.returncode == 0, killed.stderr
@@ -979,10 +1219,10 @@ def test_real_frame_default_and_restored_panes_run_product_profile() -> None:
         # The killed panes really are gone, so what answers next is restored
         # work rather than a survivor of the old session.
         assert _wait_process_gone(startup_pid), startup_pid
-        assert _wait_process_gone(new_pane_pid), new_pane_pid
+        assert _wait_process_gone(added_pid), added_pid
 
-        # 3. The restored pane itself. Adding a fresh pane here would only
-        # re-prove step 2 and leave the restored shell untested.
+        # 4. The restored panes themselves. Adding a fresh pane here would only
+        # re-prove step 2 and leave the restored shells untested.
         restored = sandbox.run(environment, "attach", "--create-background", session)
         assert restored.returncode == 0, restored.stderr
         deadline = time.monotonic() + 20
@@ -991,21 +1231,35 @@ def test_real_frame_default_and_restored_panes_run_product_profile() -> None:
             if session in live and "(EXITED" not in live:
                 break
             time.sleep(0.25)
-        restore_probe, restore_evidence = _write_frame_probe(home, "restore")
-        restore_text = _type_in_pane(
-            sandbox, environment, session, restore_probe, restore_evidence
-        )
-        restore = _assert_live_pane_shell(restore_text, name="restore")
-        _assert_product_profile(
-            restore, home=home, zdotdir=product_zdot, cwd=work, text=restore_text
-        )
-        restore_pid = _assert_persistent_pane_process(restore, text=restore_text)
-        sandbox.pane_pids.add(restore_pid)
-        assert restore_pid not in {startup_pid, new_pane_pid}, restore_text
+        reports: dict[str, tuple[dict[str, str], str]] = {}
+        for index, pane_id in enumerate(
+            _wait_for_panes(sandbox, environment, session, count=2), start=1
+        ):
+            name = f"restore-{index}"
+            probe, evidence = _write_frame_probe(home, name)
+            text = _type_in_pane(
+                sandbox, environment, session, probe, evidence, pane_id
+            )
+            fields = _assert_live_pane_shell(text, name=name)
+            pid = _assert_persistent_pane_process(fields, text=text)
+            sandbox.remember_pane_process(pid)
+            assert pid not in {startup_pid, added_pid}, text
+            reports[fields.get("CWD", "")] = (fields, text)
+
+        assert set(reports) == {str(startup_cwd), str(added_cwd)}, sorted(reports)
+        for cwd, (fields, text) in reports.items():
+            _assert_product_profile(
+                fields,
+                home=home,
+                zdotdir=product_zdot,
+                cwd=Path(cwd),
+                text=text,
+            )
+            assert "PRIVATE_PROFILE_EXECUTED" not in text
         assert not (home / "PRIVATE_PROFILE_EXECUTED").exists()
-        assert "PRIVATE_PROFILE_EXECUTED" not in restore_text
     finally:
         sandbox.close()
+    assert not sandbox.teardown_errors, sandbox.teardown_errors
     assert session not in sandbox.leftover, sandbox.leftover
 
 
@@ -1033,16 +1287,24 @@ def test_real_frame_client_env_updates_no_server_but_a_product_server_does() -> 
         # The server that was already running when the product arrived.
         legacy_session = sandbox.session_name("legacy")
         sandbox.create_session(legacy_env, legacy_session, cwd=work)
+        legacy_pane = _wait_for_panes(sandbox, legacy_env, legacy_session, count=1)[0]
         legacy_probe, legacy_evidence = _write_frame_probe(home, "legacy-server")
         legacy_text = _type_in_pane(
-            sandbox, legacy_env, legacy_session, legacy_probe, legacy_evidence
+            sandbox,
+            legacy_env,
+            legacy_session,
+            legacy_probe,
+            legacy_evidence,
+            legacy_pane,
         )
         legacy = _assert_live_pane_shell(legacy_text, name="legacy-server")
         assert legacy.get("ZDOTDIR") == str(legacy_zdot), legacy_text
         assert legacy.get("GL") == "", legacy_text
         assert legacy.get("STARSHIP_CONFIG") == "", legacy_text
         assert (home / "LEGACY_LIVE_SERVER").exists()
-        sandbox.pane_pids.add(_assert_persistent_pane_process(legacy, text=legacy_text))
+        sandbox.remember_pane_process(
+            _assert_persistent_pane_process(legacy, text=legacy_text)
+        )
 
         # A client carrying the product environment into that live server.
         # Its env reaches the engine's argv, never the running server's panes.
@@ -1054,26 +1316,36 @@ def test_real_frame_client_env_updates_no_server_but_a_product_server_does() -> 
             legacy_session,
             late_probe,
             late_evidence,
-            pane_id=late_pane,
+            late_pane,
         )
         late = _assert_live_pane_shell(late_text, name="legacy-late-client")
         assert late.get("ZDOTDIR") == str(legacy_zdot), late_text
         assert late.get("GL") == "", late_text
         assert late.get("STARSHIP_CONFIG") == "", late_text
-        sandbox.pane_pids.add(_assert_persistent_pane_process(late, text=late_text))
+        sandbox.remember_pane_process(
+            _assert_persistent_pane_process(late, text=late_text)
+        )
 
         # The server the product itself starts, in the same owned world.
         product_session = sandbox.session_name("product")
         sandbox.create_session(product_env, product_session, cwd=work)
+        product_pane = _wait_for_panes(
+            sandbox, product_env, product_session, count=1
+        )[0]
         product_probe, product_evidence = _write_frame_probe(home, "product-server")
         product_text = _type_in_pane(
-            sandbox, product_env, product_session, product_probe, product_evidence
+            sandbox,
+            product_env,
+            product_session,
+            product_probe,
+            product_evidence,
+            product_pane,
         )
         product = _assert_live_pane_shell(product_text, name="product-server")
         _assert_product_profile(
             product, home=home, zdotdir=product_zdot, cwd=work, text=product_text
         )
-        sandbox.pane_pids.add(
+        sandbox.remember_pane_process(
             _assert_persistent_pane_process(product, text=product_text)
         )
 
@@ -1081,5 +1353,6 @@ def test_real_frame_client_env_updates_no_server_but_a_product_server_does() -> 
         assert "PRIVATE_PROFILE_EXECUTED" not in legacy_text + late_text + product_text
     finally:
         sandbox.close()
+    assert not sandbox.teardown_errors, sandbox.teardown_errors
     for name in (legacy_session, product_session):
         assert name not in sandbox.leftover, sandbox.leftover
