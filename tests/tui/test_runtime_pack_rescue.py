@@ -666,22 +666,31 @@ def test_classify_records_symlink_target_and_directory_listing_for_binding(
 def test_snapshot_covers_new_publication_and_validates_evidence(
     tmp_path, installed, capsys, monkeypatch
 ):
+    """New generation publication snapshot, not a same-version payload rewrite."""
     paths, payload, _ = installed
     _plant_missing_historical(paths)
-    new_skill = payload / "vibecrafted-core/vibecrafted_core/skills/vc-rescue-probe/SKILL.md"
+    newer = seed_runtime_pack(tmp_path / "pack-snapshot", version="9.9.10+b")
+    new_skill = newer / "vibecrafted-core/vibecrafted_core/skills/vc-rescue-probe/SKILL.md"
     new_skill.parent.mkdir(parents=True, exist_ok=True)
     new_skill.write_text("# vc-rescue-probe\n")
-    _seal_runtime_pack_for_admission(payload)
+    _seal_runtime_pack_for_admission(newer)
+    installed_identity = installer._runtime_rescue_target_identity(payload)
+    requested = installer._runtime_rescue_target_identity(newer)
+    assert installed_identity["version"] != requested["version"]
+    assert installed_identity["payload_sha256"] != requested["payload_sha256"]
     projected = Path.home() / ".agents/skills/vc-rescue-probe"
     assert not projected.exists()
-    _, plan = _plan(payload, capsys)
+    _, plan = _plan(newer, capsys)
+    assert plan["status"] == "rescueable"
+    assert plan["target"]["version"] == "9.9.10+b"
+    assert plan["generation"]["current"] == "9.9.9+a"
     original = installer._publish_runtime_config_transaction
 
     def boom(*args, **kwargs):
         raise RuntimeError("injected interrupt")
 
     monkeypatch.setattr(installer, "_publish_runtime_config_transaction", boom)
-    code, first = _apply(payload, capsys, plan["plan_digest"])
+    code, first = _apply(newer, capsys, plan["plan_digest"])
     assert code == 2
     snapshot = Path(first["pre_rescue_snapshot"]["path"])
     label = json.loads((snapshot / "label.json").read_text(encoding="utf-8"))
@@ -699,6 +708,32 @@ def test_snapshot_covers_new_publication_and_validates_evidence(
     assert "evidence" in residuals[0]["reason"]
     archive = Path(first["archived_receipt"]["path"])
     assert installer._sha256_bytes(archive.read_bytes()) == first["archived_receipt"]["sha256"]
+
+
+def test_same_version_added_skill_refuses_without_publication(installed, capsys):
+    """Same version plus new payload file is not a generation to snapshot."""
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    new_skill = payload / "vibecrafted-core/vibecrafted_core/skills/vc-rescue-probe/SKILL.md"
+    new_skill.parent.mkdir(parents=True, exist_ok=True)
+    new_skill.write_text("# vc-rescue-probe\n")
+    _seal_runtime_pack_for_admission(payload)
+    projected = Path.home() / ".agents/skills/vc-rescue-probe"
+    assert not projected.exists()
+    generation = (paths["runtime_home"] / "tools/vibecrafted-current").resolve()
+    receipt_before = _receipt(paths).read_bytes()
+    _, plan = _plan(payload, capsys)
+    code, result = _apply(payload, capsys, plan["plan_digest"])
+    assert code == 2
+    assert result["status"] == "refused"
+    assert result["status"] != "rescued"
+    assert not projected.exists()
+    assert not (result.get("pre_rescue_snapshot") or {}).get("path")
+    assert not (result.get("archived_receipt") or {}).get("path")
+    assert generation.name == "9.9.9+a"
+    assert generation.is_dir()
+    assert _load_receipt(paths)["version"] == "9.9.9+a"
+    assert _receipt(paths).read_bytes() == receipt_before
 
 
 def test_fix_rc_is_explicit_planned_stanza_preserving_user_content(
