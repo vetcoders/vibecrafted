@@ -3025,9 +3025,13 @@ def test_real_engine_inventory_and_exclusive_create_through_the_shipped_helpers(
     1. an empty namespace reads `missing` (the engine's exit-1 "No active
        vc-frame sessions found." is an answer, not an error);
     2. two concurrent shipped creates → exactly one 0 and one 3, one session;
-    3. the name then reads `live`; after kill-session it reads `dead` (an
-       EXITED record the engine would resurrect) and the public entry refuses
-       it with exit 3 and the resurrect/delete commands, creating nothing;
+    3. the name then reads `live`; the engine's own serialization job writes
+       THIS session's resurrection record to its cache dir on the product's
+       interval, and only once that real file exists is the session killed
+       (a bounded wait, never a created file) -- so the name reads `dead` (an
+       EXITED record the engine would resurrect) rather than racing into
+       `missing`, and the public entry refuses it with exit 3 and the
+       resurrect/delete commands, creating nothing;
     4. after delete-session --force the name reads `missing` again; the
        sandbox is empty afterwards.
     """
@@ -3039,6 +3043,16 @@ def test_real_engine_inventory_and_exclusive_create_through_the_shipped_helpers(
     (sandbox / "tmp").mkdir()
     repo = sandbox / "repo"
     repo.mkdir()
+    # This config file is what the direct `frame(...)` calls below read. It
+    # deliberately does NOT try to shorten serialization: the shipped helpers
+    # run in developer mode (VIBECRAFTED_PREFER_REPO_VC_FRAME, the only mode
+    # that honours VIBECRAFTED_VC_FRAME_BIN -- vc_frame.sh
+    # _vetcoders_vc_frame_bin), and that mode pins the engine's config to the
+    # repository's own `config/vc-frame/config.kdl`
+    # (frontier.sh _vetcoders_pin_vc_frame_config_dir). A sandbox
+    # `serialization_interval` would therefore be dead text: the session
+    # server never reads this file. The wait below is paced by the product's
+    # real setting instead -- see await_persisted_record.
     (sandbox / "cfg" / "config.kdl").write_text(
         "keybinds clear-defaults=true {}\n", encoding="utf-8"
     )
@@ -3123,6 +3137,59 @@ def test_real_engine_inventory_and_exclusive_create_through_the_shipped_helpers(
         assert "STATE=[" in result.stdout, result.stdout + result.stderr
         return result.stdout.split("STATE=[", 1)[1].split("]", 1)[0]
 
+    def engine_cache_dir() -> Path:
+        """The engine's own answer, not a guess: `setup --check` prints the
+        cache dir it resolved under this sandbox's HOME."""
+        check = frame("setup", "--check")
+        marker = "[CACHE DIR]: "
+        for line in (check.stdout + check.stderr).splitlines():
+            if line.startswith(marker):
+                return Path(line[len(marker) :].strip().strip('"'))
+        raise AssertionError(
+            "the engine did not report a cache dir: " + check.stdout + check.stderr
+        )
+
+    def persisted_record(cache: Path, name: str) -> Path | None:
+        """The serialized resurrection layout the engine writes for ONE name:
+        <cache>/<contract>/session_info/<name>/session-layout.kdl. The
+        contract segment belongs to the engine's build, so it is matched, not
+        spelled out. A zero-length file is a write in progress, not a record."""
+        for candidate in sorted(
+            cache.glob(f"*/session_info/{name}/session-layout.kdl")
+        ):
+            try:
+                if candidate.stat().st_size > 0:
+                    return candidate
+            except OSError:
+                continue
+        return None
+
+    def await_persisted_record(name: str, timeout: float = 120.0) -> Path:
+        """Bounded wait for the engine's real file -- never a created one.
+
+        The repository config the helpers pin sets `session_serialization
+        true` but no `serialization_interval`, so the engine keeps its
+        DEFAULT_SERIALIZATION_INTERVAL of 60000ms (Frame background_jobs.rs)
+        and the detached job writes this session's first record shortly
+        after that minute (measured: 65s on the reference host). Killing
+        before that write leaves nothing to resurrect and the name reads
+        `missing`, not `dead` -- which is the race this wait removes. The
+        budget clears the minute with room for a loaded host; it is a bound,
+        not an expected duration."""
+        cache = engine_cache_dir()
+        deadline = time.monotonic() + timeout
+        while True:
+            found = persisted_record(cache, name)
+            if found is not None:
+                return found
+            assert time.monotonic() < deadline, (
+                f"the engine serialized no record for {name} under {cache} "
+                f"within {timeout}s; killing now would leave nothing to "
+                f"resurrect. Present: "
+                f"{sorted(str(q) for q in cache.glob('*/session_info/*'))}"
+            )
+            time.sleep(0.25)
+
     try:
         assert state() == "missing"
 
@@ -3165,8 +3232,15 @@ def test_real_engine_inventory_and_exclusive_create_through_the_shipped_helpers(
         assert f"RC=[{EXIT_EXISTS}]" in entry.stdout, entry.stdout + entry.stderr
         assert "already exists in vc-frame (live" in entry.stderr, entry.stderr
 
+        # Do not race the serializer: the EXITED record asserted below is a
+        # real file this engine wrote for THIS session, proven present before
+        # the kill. kill-session ends the server and keeps the record; only
+        # delete-session removes it.
+        record = await_persisted_record(session)
+
         kill = frame("kill-session", session)
         assert kill.returncode == 0, kill.stderr
+        assert record.exists(), record
         deadline = time.monotonic() + 10
         while state() != "dead" and time.monotonic() < deadline:
             time.sleep(0.2)
