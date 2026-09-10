@@ -253,27 +253,40 @@ mutate as `damaged-pre-rescue` (never a healthy restorepoint; evidence is
 hashed before restore), archives the original receipt, drops only
 missing-historical backup map entries, and reuses the existing publication
 transaction. The journal stores the original target/inventory/payload/source
-binding. Each apply attempt allocates a unique evidence directory;
-a same-second retry must not reuse or overwrite the prior attempt's
-snapshot. Interrupted resume revalidates that input identity before every
-mutation and refuses a changed pack, mode, or path. Live installed
-partial-state from this rescue is not treated as input drift. A path
-publication will touch that cannot be captured refuses before mutation.
-Missing, unreadable, malformed, or mismatched snapshot/receipt evidence
-is a residual; destinations are not deleted or restored from it, and a
-failed rollback is never reported as complete. Preference conflicts keep
-pending journal state recoverable. Destination verification covers
+binding and the current attempt's publication phase. A leftover completed
+journal is historical evidence, not this attempt's rollback source.
+Rollback is allowed only after this attempt owns a captured publication
+(or a validated in-flight resume). Pre-publication planning or snapshot
+failures preserve current files, receipt, and historical evidence. Each
+apply attempt allocates a unique evidence directory; a same-second retry
+must not reuse or overwrite the prior attempt's snapshot. Interrupted
+resume revalidates that input identity and journal phase before every
+mutation and refuses a changed pack, mode, path, or completed journal.
+Live installed partial-state from this rescue is not treated as input
+drift. A path publication will touch that cannot be captured refuses
+before mutation. Missing, unreadable, malformed, or mismatched
+snapshot/receipt evidence is a residual; destinations are not deleted or
+restored from it, and a failed rollback is never reported as complete.
+Preference conflicts keep pending journal state recoverable. Success
+requires the selected generation, receipt, and active identity to match
+the requested target version and content identity. A healthy older
+generation is not `rescued`. Repeat apply of the exact same target remains
+a no-op once that identity verifies. Destination verification covers
 selectors, active identity, every receipted file/symlink/dir, every
-expected launcher/skill/config projection, and an isolated interactive
-`zsh -i` smoke in a real temporary HOME/ZDOTDIR. A healthy receipt is not
-a healthy shell. The exact current rescue's `rescue_pending` marker,
+expected launcher/skill/config projection, static user-rc inspection, and
+a product-owned interactive `zsh -i` surface written into a temporary
+ZDOTDIR. Substituting HOME/ZDOTDIR is not process or filesystem isolation
+and does not execute copied user startup files. Actual user-shell
+acceptance is separate evidence. A healthy receipt is not a healthy
+shell. The exact current rescue's `rescue_pending` marker,
 matched to the validated journal/binding/plan identity, is the owned
 verification phase after publication closes `install_pending`; it is not
 treated as a competing publication. Unrelated or mismatched pending
 markers, and install/config/uninstall transitions, still refuse.
 Verification failure keeps `rescue_pending` recoverable and does not
-write a healthy restorepoint. Only a successful destination and shell
-check pops the marker and finalizes the rescue record. Unsafe or unknown-ownership paths refuse. Same-type
+write a healthy restorepoint. Only a successful destination and
+product-owned shell check pops the marker and finalizes the rescue
+record. Unsafe or unknown-ownership paths refuse. Same-type
 receipted files with a different hash, and symlinks with a foreign live
 target, are not republished from receipt path alone: preference drift
 uses the existing preserving merge; foreign command/skill replacements

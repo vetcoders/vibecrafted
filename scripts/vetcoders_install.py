@@ -15487,6 +15487,18 @@ RUNTIME_RESCUE_PLAN_SCHEMA = "vibecrafted.runtime-rescue-plan.v1"
 RUNTIME_RESCUE_RESULT_SCHEMA = "vibecrafted.runtime-rescue-result.v1"
 RUNTIME_RESCUE_EVIDENCE_SCHEMA = "vibecrafted.runtime-rescue-evidence.v1"
 RUNTIME_RESCUE_PENDING_SCHEMA = "vibecrafted.runtime-rescue-pending.v1"
+RUNTIME_RESCUE_PHASE_PRE_PUBLICATION = "pre_publication"
+RUNTIME_RESCUE_PHASE_CAPTURED = "captured"
+RUNTIME_RESCUE_PHASE_RESUMED = "resumed"
+RUNTIME_RESCUE_PHASE_VERIFICATION = "verification"
+RUNTIME_RESCUE_PHASE_COMPLETED = "completed"
+_RUNTIME_RESCUE_IN_FLIGHT_PHASES = frozenset(
+    {
+        RUNTIME_RESCUE_PHASE_CAPTURED,
+        RUNTIME_RESCUE_PHASE_RESUMED,
+        RUNTIME_RESCUE_PHASE_VERIFICATION,
+    }
+)
 _RUNTIME_WRAPPER_VERBS = {
     "telemetry": "telemetry",
     "vc-dashboard": "dashboard",
@@ -17744,27 +17756,70 @@ def _runtime_rescue_validate_snapshot_evidence(
                 )
 
 
-def _runtime_rescue_interactive_shell_check() -> dict[str, str]:
-    """Post-apply isolated interactive zsh smoke. ``which`` exit 0 is not health.
+def _runtime_rescue_product_shell_helper(
+    generation: Path | None = None,
+    product_config: Path | None = None,
+) -> Path | None:
+    """Regular product-owned helper only. User startup files are never candidates."""
+    candidates: list[Path] = []
+    if product_config is not None:
+        candidates.append(product_config / "shell" / "vetcoders.zsh")
+    if generation is not None:
+        candidates.append(
+            generation / "vibecrafted-core/vibecrafted_core/runtime/shell/vetcoders.zsh"
+        )
+    for path in candidates:
+        if path.is_file() and not path.is_symlink():
+            return path
+    return None
 
-    Isolation is a real temporary HOME and ZDOTDIR, not an env dictionary
-    pointing at the caller's home. ``zsh -f -c`` is not interactive.
+
+def _runtime_rescue_interactive_shell_check(
+    generation: Path | None = None,
+    product_config: Path | None = None,
+) -> dict[str, str]:
+    """Product-owned interactive zsh verification. Not user-startup execution.
+
+    A substituted HOME/ZDOTDIR is not process or filesystem isolation and must
+    not copy or run the operator's startup files. Static user-rc inspection and
+    actual user-shell acceptance remain separate evidence. ``which`` exit 0 is
+    not health. ``zsh -f -c`` is not interactive.
     """
     zsh = shutil.which("zsh")
-    record = {"ok": "false", "reason": "", "returncode": "", "stderr": ""}
+    record = {
+        "ok": "false",
+        "reason": "",
+        "returncode": "",
+        "stderr": "",
+        "user_startup_executed": "false",
+        "process_isolation": "false",
+        "surface": "product-owned-startup",
+    }
     if zsh is None:
-        record["reason"] = "isolated interactive zsh is unavailable"
+        record["reason"] = "product-owned interactive zsh is unavailable"
         return record
     isolated = Path(tempfile.mkdtemp(prefix="vibecrafted-rescue-zdot-"))
+    helper = _runtime_rescue_product_shell_helper(generation, product_config)
     try:
         home = isolated / "home"
         zdot = isolated / "zdot"
         home.mkdir()
         zdot.mkdir()
-        for rcname in _SHELL_STARTUP_FILES:
-            source = Path.home() / rcname
-            if source.is_file() and not source.is_symlink():
-                shutil.copy2(source, zdot / rcname)
+        helper_line = ""
+        if helper is not None:
+            helper_line = (
+                'if [[ -n "${VIBECRAFTED_RESCUE_PRODUCT_ZSH:-}" '
+                '&& -f "${VIBECRAFTED_RESCUE_PRODUCT_ZSH}" ]]; then\n'
+                '  source "${VIBECRAFTED_RESCUE_PRODUCT_ZSH}"\n'
+                "fi\n"
+            )
+        (zdot / ".zshrc").write_text(
+            "# Vibecrafted product-owned rescue verification surface.\n"
+            "# Not the user's startup files. Not a sandbox.\n"
+            + helper_line
+            + "printf 'shell-ok\\n'\n",
+            encoding="utf-8",
+        )
         env = {
             "HOME": str(home),
             "ZDOTDIR": str(zdot),
@@ -17773,8 +17828,10 @@ def _runtime_rescue_interactive_shell_check() -> dict[str, str]:
             "TERM": "xterm",
             "SHELL": zsh,
         }
+        if helper is not None:
+            env["VIBECRAFTED_RESCUE_PRODUCT_ZSH"] = str(helper)
         completed = subprocess.run(
-            [zsh, "-i", "-c", "printf 'shell-ok\\n'"],
+            [zsh, "-i", "-c", "true"],
             env=env,
             cwd=str(home),
             capture_output=True,
@@ -17783,7 +17840,7 @@ def _runtime_rescue_interactive_shell_check() -> dict[str, str]:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        record["reason"] = f"isolated interactive zsh failed: {exc}"
+        record["reason"] = f"product-owned interactive zsh failed: {exc}"
         return record
     finally:
         shutil.rmtree(isolated, ignore_errors=True)
@@ -17797,11 +17854,11 @@ def _runtime_rescue_interactive_shell_check() -> dict[str, str]:
         "runtime/shell/vetcoders",
     )
     if completed.returncode != 0 or "shell-ok" not in (completed.stdout or ""):
-        record["reason"] = "isolated interactive zsh did not complete cleanly"
+        record["reason"] = "product-owned interactive zsh did not complete cleanly"
         return record
-    if any(marker in stderr for marker in unhealthy):
+    if helper is not None and any(marker in stderr for marker in unhealthy):
         record["reason"] = (
-            "interactive shell still sources an absent legacy helper; "
+            "product-owned interactive shell still sources an absent helper; "
             "which(1) exit 0 is not shell health"
         )
         return record
@@ -17859,7 +17916,10 @@ def _runtime_rescue_shell_plan() -> dict[str, Any]:
         "interactive_shell": {
             "executed": False,
             "mode": "file-evidence-only",
-            "verification": "post-apply-isolated-interactive",
+            "verification": "post-apply-product-owned-interactive",
+            "user_startup_executed": False,
+            "process_isolation": False,
+            "user_shell_acceptance": "separate-evidence",
         },
     }
 
@@ -18397,6 +18457,100 @@ def _runtime_rescue_journal_path(runtime_home: Path) -> Path:
     return runtime_home / ".installer-backups" / "rescue" / "current-journal.json"
 
 
+def _runtime_rescue_persist_journal_phase(
+    paths: Mapping[str, Path], journal: Mapping[str, Any], phase: str
+) -> dict[str, Any]:
+    """Write attempt phase onto the current journal without inventing a new token."""
+    updated = dict(journal)
+    updated["phase"] = phase
+    _atomic_json_file(_runtime_rescue_journal_path(paths["runtime_home"]), updated)
+    return updated
+
+
+def _runtime_rescue_target_from_binding(binding: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "version": str(binding.get("version") or ""),
+        "version_identity_sha256": str(binding.get("version_identity_sha256") or ""),
+        "payload_sha256": str(binding.get("payload_sha256") or ""),
+        "inventory_sha256": str(binding.get("inventory_sha256") or ""),
+    }
+
+
+def _runtime_rescue_destination_matches_requested_target(
+    paths: Mapping[str, Path],
+    target: Mapping[str, Any],
+    receipt: Mapping[str, Any] | None = None,
+) -> tuple[bool, str]:
+    """Exact requested generation/content identity, not merely a healthy destination."""
+    wanted_version = str(target.get("version") or "")
+    wanted_version_id = str(target.get("version_identity_sha256") or "")
+    wanted_payload = str(target.get("payload_sha256") or "")
+    wanted_inventory = str(target.get("inventory_sha256") or "")
+    if not wanted_version:
+        return False, "requested target version is missing"
+    if not wanted_payload or not wanted_inventory:
+        return False, "requested target content identity is incomplete"
+    current = paths["runtime_home"] / "tools/vibecrafted-current"
+    try:
+        if not current.is_symlink():
+            return False, "destination selector is not a symlink"
+        generation = current.resolve(strict=True)
+    except OSError as exc:
+        return False, f"destination generation is unreadable: {exc}"
+    if generation.name != wanted_version:
+        return False, "destination generation is not the requested target"
+    try:
+        installed_version = (generation / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        return False, f"destination VERSION is unreadable: {exc}"
+    if installed_version != wanted_version:
+        return False, "destination VERSION is not the requested target"
+    live_receipt = receipt
+    if live_receipt is None and paths["runtime_home"]:
+        live_receipt = _load_runtime_install_receipt(
+            _runtime_receipt_path(paths["runtime_home"])
+        )
+    if str((live_receipt or {}).get("version") or "") != wanted_version:
+        return False, "destination receipt is not the requested target"
+    active_path = paths["runtime_home"] / "active.json"
+    if not active_path.is_file() or active_path.is_symlink():
+        return False, "destination active identity is not a regular file"
+    try:
+        active = json.loads(active_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return False, f"destination active identity is unreadable: {exc}"
+    if not isinstance(active, dict) or str(active.get("version") or "") != wanted_version:
+        return False, "destination active version is not the requested target"
+    if Path(str(active.get("runtime_root") or "")) != generation:
+        return False, "destination active runtime_root is not the requested target"
+    try:
+        material = (generation / "VERSION").read_bytes()
+        provenance = generation / "source-provenance.json"
+        if provenance.is_file() and not provenance.is_symlink():
+            material += provenance.read_bytes()
+        installed_version_id = _sha256_bytes(material)
+    except OSError as exc:
+        return False, f"destination version identity is unreadable: {exc}"
+    if wanted_version_id and installed_version_id != wanted_version_id:
+        return False, "destination version identity is not the requested target"
+    return True, ""
+
+
+def _runtime_rescue_resume_phase_error(journal: Mapping[str, Any]) -> str:
+    """Completed or pre-publication journals are historical, not this attempt."""
+    phase = str(journal.get("phase") or "")
+    if phase == RUNTIME_RESCUE_PHASE_COMPLETED:
+        return (
+            "rescue journal is completed historical evidence; "
+            "it is not an in-flight publication to resume"
+        )
+    if phase == RUNTIME_RESCUE_PHASE_PRE_PUBLICATION:
+        return "rescue journal never captured publication for this attempt"
+    if phase and phase not in _RUNTIME_RESCUE_IN_FLIGHT_PHASES:
+        return "interrupted rescue journal phase is not resumable"
+    return ""
+
+
 def _runtime_rescue_input_binding(
     payload_root: Path, *, allow_older_runtime: bool
 ) -> dict[str, Any]:
@@ -18565,6 +18719,9 @@ def _runtime_rescue_keep_verification_pending(
     receipt["rescue"] = dict(pending)
     receipt.pop("install_pending", None)
     _checkpoint_runtime_install_receipt(paths["runtime_home"], receipt)
+    _runtime_rescue_persist_journal_phase(
+        paths, journal, RUNTIME_RESCUE_PHASE_VERIFICATION
+    )
 
 
 def _runtime_rescue_keep_pending_truthful(
@@ -18583,6 +18740,10 @@ def _runtime_rescue_keep_pending_truthful(
     receipt["rescue"] = dict(pending)
     receipt["install_pending"] = True
     _checkpoint_runtime_install_receipt(paths["runtime_home"], receipt)
+    phase = str(journal.get("phase") or RUNTIME_RESCUE_PHASE_CAPTURED)
+    if phase not in _RUNTIME_RESCUE_IN_FLIGHT_PHASES:
+        phase = RUNTIME_RESCUE_PHASE_CAPTURED
+    _runtime_rescue_persist_journal_phase(paths, journal, phase)
 
 
 def _runtime_rescue_ordered_restore_entries(
@@ -18897,7 +19058,9 @@ def _runtime_rescue_verify_destination(
     ``rescue_pending`` that matches ``expected_pending`` (journal/binding/plan)
     is this rescue's owned verification phase, not a competing publication.
     Unrelated or mismatched pending markers, and install/config/uninstall
-    transitions, still refuse. Destination and shell checks still run.
+    transitions, still refuse. Destination checks still run. The interactive
+    shell probe is a product-owned startup surface, not user-startup execution
+    and not process isolation.
     """
     errors: list[str] = []
     try:
@@ -19018,9 +19181,13 @@ def _runtime_rescue_verify_destination(
         for finding in _host_shell_contract_findings():
             if finding.level == "fail":
                 errors.append(finding.message)
-        shell = _runtime_rescue_interactive_shell_check()
+        shell = _runtime_rescue_interactive_shell_check(
+            generation, product
+        )
         if shell.get("ok") != "true":
-            errors.append(shell.get("reason") or "isolated interactive shell is unhealthy")
+            errors.append(
+                shell.get("reason") or "product-owned interactive shell is unhealthy"
+            )
     except (OSError, RuntimeError, ValueError, TypeError, KeyError) as exc:
         return False, str(exc)[:1200]
     if errors:
@@ -19075,6 +19242,9 @@ def _build_runtime_rescue_plan(
         stanza.get("action") == "doctor_fix_rc" for stanza in shell["stanzas"]
     )
     historical_rollback = "unavailable" if missing else "available"
+    target_matches, target_mismatch_reason = (
+        _runtime_rescue_destination_matches_requested_target(paths, target, receipt)
+    )
     if receipt_error:
         status, reason = "unusable", receipt_error
     elif not target["usable"]:
@@ -19090,6 +19260,15 @@ def _build_runtime_rescue_plan(
             "rescueable",
             "historical rollback is unavailable; explicit rescue can republish "
             "the verified target without fabricating missing preimages",
+        )
+    elif not target_matches:
+        status, reason = (
+            "rescueable",
+            target_mismatch_reason
+            or (
+                "destination is not the requested target; explicit rescue can "
+                "republish the verified pack"
+            ),
         )
     else:
         status, reason = (
@@ -19139,6 +19318,19 @@ def _build_runtime_rescue_plan(
                 "reason": (
                     "apply planned doctor --fix-rc stanza edits only; "
                     "user rc content outside the owned stanza is preserved"
+                ),
+            }
+        )
+    if not target_matches and status == "rescueable" and not live_damage:
+        repair_actions.append(
+            {
+                "action": "republish_requested_target",
+                "reason": (
+                    target_mismatch_reason
+                    or (
+                        "converge the requested target version and content "
+                        "identity; a healthy older generation is not success"
+                    )
                 ),
             }
         )
@@ -19348,12 +19540,14 @@ def _runtime_rescue_apply(
     receipt_path = _runtime_receipt_path(paths["runtime_home"])
     journal_path = _runtime_rescue_journal_path(paths["runtime_home"])
     original_bytes: bytes | None = None
+    owned_journal: dict[str, Any] = {}
+    publication_owned = False
     try:
-        journal: dict[str, Any] = {}
+        disk_journal: dict[str, Any] = {}
         if journal_path.is_file():
             loaded = json.loads(journal_path.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
-                journal = loaded
+                disk_journal = loaded
         live = _load_runtime_install_receipt(receipt_path) if receipt_path.is_file() else {}
         pending = bool(
             live
@@ -19365,19 +19559,26 @@ def _runtime_rescue_apply(
         )
         digest_schema_match = (
             pending
-            and journal.get("plan_digest") == expected_digest
-            and journal.get("schema") == RUNTIME_RESCUE_PENDING_SCHEMA
+            and disk_journal.get("plan_digest") == expected_digest
+            and disk_journal.get("schema") == RUNTIME_RESCUE_PENDING_SCHEMA
         )
         binding_error = (
-            _runtime_rescue_resume_binding_error(journal, args)
+            _runtime_rescue_resume_binding_error(disk_journal, args)
             if digest_schema_match
             else ""
         )
-        journal_matches = digest_schema_match and not binding_error
+        phase_error = (
+            _runtime_rescue_resume_phase_error(disk_journal)
+            if digest_schema_match
+            else ""
+        )
+        journal_matches = digest_schema_match and not binding_error and not phase_error
         if pending and not journal_matches:
             envelope["plan_digest"] = expected_digest
-            if digest_schema_match and binding_error:
-                envelope.update(status="refused", reason=binding_error)
+            if digest_schema_match and (binding_error or phase_error):
+                envelope.update(
+                    status="refused", reason=binding_error or phase_error
+                )
             elif live.get("rescue_pending"):
                 envelope.update(
                     status="refused",
@@ -19397,21 +19598,27 @@ def _runtime_rescue_apply(
             print(json.dumps(envelope, sort_keys=True))
             return 2
         if journal_matches:
+            owned_journal = _runtime_rescue_persist_journal_phase(
+                paths, disk_journal, RUNTIME_RESCUE_PHASE_RESUMED
+            )
+            publication_owned = True
             envelope.update(
                 plan_digest=expected_digest,
-                input_digest=str(journal.get("input_digest") or ""),
-                archived_receipt=dict(journal.get("archived_receipt") or {}),
-                pre_rescue_snapshot=dict(journal.get("pre_rescue_snapshot") or {}),
-                missing_history=list(journal.get("missing_history") or []),
-                repair_actions=list(journal.get("repair_actions") or []),
+                input_digest=str(owned_journal.get("input_digest") or ""),
+                archived_receipt=dict(owned_journal.get("archived_receipt") or {}),
+                pre_rescue_snapshot=dict(owned_journal.get("pre_rescue_snapshot") or {}),
+                missing_history=list(owned_journal.get("missing_history") or []),
+                repair_actions=list(owned_journal.get("repair_actions") or []),
             )
             code = _install_runtime_pack(
                 args,
-                rescue_record=_runtime_rescue_pending_record_from_journal(journal),
+                rescue_record=_runtime_rescue_pending_record_from_journal(
+                    owned_journal
+                ),
                 emit_result=False,
             )
             return _runtime_rescue_finish(
-                envelope, paths, receipt_path, journal, code
+                envelope, paths, receipt_path, owned_journal, code
             )
         receipt_bytes, receipt, receipt_error = _load_runtime_rescue_receipt(
             receipt_path
@@ -19446,20 +19653,27 @@ def _runtime_rescue_apply(
             print(json.dumps(envelope, sort_keys=True))
             return 2
         if plan["status"] == "healthy":
-            verified, verify_reason = _runtime_rescue_verify_destination(paths)
-            envelope.update(
-                status="rescued" if verified else "residual",
-                reason=(
-                    "repeat apply converged; destination already verifies"
-                    if verified
-                    else verify_reason
-                ),
-                healthy_restorepoint=verified,
-                missing_history=[],
-                repair_actions=plan["repair_actions"],
+            matched, _match_reason = (
+                _runtime_rescue_destination_matches_requested_target(
+                    paths, plan.get("target") or {}, receipt
+                )
             )
-            print(json.dumps(envelope, sort_keys=True))
-            return 0 if verified else 2
+            if matched:
+                verified, verify_reason = _runtime_rescue_verify_destination(paths)
+                envelope.update(
+                    status="rescued" if verified else "residual",
+                    reason=(
+                        "repeat apply converged; destination already verifies"
+                        if verified
+                        else verify_reason
+                    ),
+                    healthy_restorepoint=verified,
+                    missing_history=[],
+                    repair_actions=plan["repair_actions"],
+                )
+                print(json.dumps(envelope, sort_keys=True))
+                return 0 if verified else 2
+            # A healthy older generation is not the requested target. Publish.
         if receipt is None or receipt_bytes is None:
             envelope["reason"] = receipt_error or "receipt evidence is missing"
             print(json.dumps(envelope, sort_keys=True))
@@ -19498,9 +19712,10 @@ def _runtime_rescue_apply(
             "repair_actions": plan["repair_actions"],
             "binding": binding,
         }
-        journal = {
+        owned_journal = {
             "schema": RUNTIME_RESCUE_PENDING_SCHEMA,
             "token": token,
+            "phase": RUNTIME_RESCUE_PHASE_CAPTURED,
             "plan_digest": plan["plan_digest"],
             "input_digest": plan["input_digest"],
             "binding": binding,
@@ -19520,10 +19735,11 @@ def _runtime_rescue_apply(
             "evidence_sha256": snapshot.get("evidence_sha256"),
             "label_paths": snapshot.get("paths", []),
         }
-        _atomic_json_file(journal_path, journal)
+        _atomic_json_file(journal_path, owned_journal)
+        publication_owned = True
         envelope.update(
-            archived_receipt=journal["archived_receipt"],
-            pre_rescue_snapshot=journal["pre_rescue_snapshot"],
+            archived_receipt=owned_journal["archived_receipt"],
+            pre_rescue_snapshot=owned_journal["pre_rescue_snapshot"],
             missing_history=plan["missing_backups"],
             repair_actions=plan["repair_actions"],
         )
@@ -19534,31 +19750,35 @@ def _runtime_rescue_apply(
             emit_result=False,
         )
         return _runtime_rescue_finish(
-            envelope, paths, receipt_path, journal, code
+            envelope, paths, receipt_path, owned_journal, code
         )
     except PreferenceConflict:
-        _runtime_rescue_keep_pending_truthful(paths, journal, receipt_path)
+        if publication_owned and owned_journal:
+            _runtime_rescue_keep_pending_truthful(
+                paths, owned_journal, receipt_path
+            )
         raise
     except (OSError, RuntimeError, ValueError, TypeError, KeyError, AttributeError) as exc:
-        journal = {}
-        if journal_path.is_file():
-            try:
-                loaded = json.loads(journal_path.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    journal = loaded
-            except (OSError, json.JSONDecodeError):
-                journal = {}
-        residuals = _runtime_rescue_rollback_captured_state(
-            paths, journal, receipt_path, original_bytes
-        )
+        residuals: list[dict[str, str]] = []
+        journal_for_report = owned_journal
+        if publication_owned and owned_journal:
+            residuals = _runtime_rescue_rollback_captured_state(
+                paths, owned_journal, receipt_path, original_bytes
+            )
         envelope.update(
             status="residual" if residuals else "unusable",
             reason=str(exc)[:1200] or "runtime rescue apply failed",
             residuals=residuals,
             healthy_restorepoint=False,
-            archived_receipt=dict(journal.get("archived_receipt") or envelope.get("archived_receipt") or {}),
+            archived_receipt=dict(
+                journal_for_report.get("archived_receipt")
+                or envelope.get("archived_receipt")
+                or {}
+            ),
             pre_rescue_snapshot=dict(
-                journal.get("pre_rescue_snapshot") or envelope.get("pre_rescue_snapshot") or {}
+                journal_for_report.get("pre_rescue_snapshot")
+                or envelope.get("pre_rescue_snapshot")
+                or {}
             ),
         )
         print(json.dumps(envelope, sort_keys=True))
@@ -19594,6 +19814,21 @@ def _runtime_rescue_finish(
     residuals = list(shell_residuals)
     if not verified:
         residuals.append({"path": str(receipt_path), "reason": verify_reason})
+    receipt = _load_runtime_install_receipt(receipt_path) or {}
+    if not residuals:
+        matched, match_reason = _runtime_rescue_destination_matches_requested_target(
+            paths,
+            _runtime_rescue_target_from_binding(journal.get("binding") or {}),
+            receipt,
+        )
+        if not matched:
+            residuals.append(
+                {
+                    "path": str(receipt_path),
+                    "reason": match_reason
+                    or "published destination is not the requested target",
+                }
+            )
     if residuals:
         _runtime_rescue_keep_verification_pending(paths, journal, receipt_path)
         envelope.update(
@@ -19605,7 +19840,6 @@ def _runtime_rescue_finish(
         )
         print(json.dumps(envelope, sort_keys=True))
         return 2
-    receipt = _load_runtime_install_receipt(receipt_path)
     rescue = dict(receipt.get("rescue") or journal)
     rescue.update(
         {
@@ -19628,6 +19862,9 @@ def _runtime_rescue_finish(
     receipt.pop("install_pending", None)
     receipt["rescue"] = rescue
     _checkpoint_runtime_install_receipt(paths["runtime_home"], receipt)
+    _runtime_rescue_persist_journal_phase(
+        paths, journal, RUNTIME_RESCUE_PHASE_COMPLETED
+    )
     generation = (
         paths["runtime_home"] / "tools/vibecrafted-current"
     ).resolve(strict=True)

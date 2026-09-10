@@ -1409,7 +1409,7 @@ def test_verification_failed_retry_keeps_pending_then_finalizes(
     original = installer._runtime_rescue_interactive_shell_check
     calls = {"n": 0}
 
-    def boom():
+    def boom(*args, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
             return {
@@ -1418,7 +1418,7 @@ def test_verification_failed_retry_keeps_pending_then_finalizes(
                 "returncode": "1",
                 "stderr": "",
             }
-        return original()
+        return original(*args, **kwargs)
 
     monkeypatch.setattr(installer, "_runtime_rescue_interactive_shell_check", boom)
     code, first = _apply(payload, capsys, plan["plan_digest"])
@@ -1487,3 +1487,107 @@ def test_owned_pending_identity_requires_validated_binding():
         )
         == ""
     )
+
+
+def test_prepublication_failure_preserves_post_rescue_user_file(
+    installed, capsys, monkeypatch
+):
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    code, plan = _plan(payload, capsys)
+    assert code == 0
+    code, result = _apply(payload, capsys, plan["plan_digest"])
+    assert code == 0 and result["healthy_restorepoint"]
+    snapshot = Path(result["pre_rescue_snapshot"]["path"])
+    archive = Path(result["archived_receipt"]["path"])
+    journal_path = installer._runtime_rescue_journal_path(paths["runtime_home"])
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert journal.get("phase") == installer.RUNTIME_RESCUE_PHASE_COMPLETED
+    user_file = paths["product_config"] / "after-rescue-user-note.txt"
+    user_bytes = b"Founder settings created after completed rescue\n"
+    user_file.write_text(user_bytes.decode("utf-8"))
+    receipt_before = _receipt(paths).read_bytes()
+
+    def fail_before_publication(**kwargs):
+        raise RuntimeError("W2 injected planning failure before new capture/publication")
+
+    monkeypatch.setattr(installer, "_build_runtime_rescue_plan", fail_before_publication)
+    code, second = _apply(payload, capsys, "a" * 64)
+    assert code == 2
+    assert user_file.is_file(), (
+        "PRE-PUBLICATION FAILURE RESTORED OLD SNAPSHOT AND DELETED NEW USER FILE"
+    )
+    assert user_file.read_bytes() == user_bytes
+    assert _receipt(paths).read_bytes() == receipt_before
+    assert snapshot.is_dir()
+    assert archive.is_file()
+    historical = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert historical.get("phase") == installer.RUNTIME_RESCUE_PHASE_COMPLETED
+    assert historical.get("token") == journal.get("token")
+
+
+def test_healthy_old_generation_does_not_satisfy_new_target(
+    installed, tmp_path, capsys
+):
+    paths, payload, _ = installed
+    newer = seed_runtime_pack(tmp_path / "pack-b", version="9.9.10+b")
+    _seal_runtime_pack_for_admission(newer)
+    code, plan = _plan(newer, capsys)
+    assert code == 0
+    assert plan["status"] == "rescueable"
+    assert plan["target"]["version"] == "9.9.10+b"
+    assert plan["generation"]["current"] == "9.9.9+a"
+    code, result = _apply(newer, capsys, plan["plan_digest"])
+    assert code == 0
+    assert result["status"] == "rescued"
+    assert _load_receipt(paths)["version"] == "9.9.10+b", (
+        "RESCUED SUCCESS CLAIM RETAINED OLD GENERATION INSTEAD OF REQUESTED PACK"
+    )
+    _, healthy = _plan(newer, capsys)
+    assert healthy["status"] == "healthy"
+    code, repeat = _apply(newer, capsys, healthy["plan_digest"])
+    assert code == 0
+    assert repeat["status"] == "rescued"
+    assert _load_receipt(paths)["version"] == "9.9.10+b"
+    assert (paths["runtime_home"] / "tools/vibecrafted-current").resolve().name == (
+        "9.9.10+b"
+    )
+
+
+def test_product_owned_shell_check_does_not_execute_user_startup(
+    installed, tmp_path
+):
+    marker = tmp_path / "outside-smoke-home-touch"
+    zshrc = Path.home() / ".zshrc"
+    zshrc.write_text(f"touch {marker}\n", encoding="utf-8")
+    record = installer._runtime_rescue_interactive_shell_check()
+    assert record["ok"] == "true"
+    assert record["user_startup_executed"] == "false"
+    assert record["process_isolation"] == "false"
+    assert record["surface"] == "product-owned-startup"
+    assert not marker.exists()
+    paths, _payload, _ = installed
+    verified, reason = installer._runtime_rescue_verify_destination(paths)
+    assert verified is True, reason
+    assert not marker.exists()
+
+
+def test_completed_journal_is_not_an_owned_resume(installed, capsys):
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    _, plan = _plan(payload, capsys)
+    code, result = _apply(payload, capsys, plan["plan_digest"])
+    assert code == 0
+    journal_path = installer._runtime_rescue_journal_path(paths["runtime_home"])
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert journal.get("phase") == installer.RUNTIME_RESCUE_PHASE_COMPLETED
+    assert installer._runtime_rescue_resume_phase_error(journal)
+    receipt = _load_receipt(paths)
+    receipt["rescue_pending"] = installer._runtime_rescue_pending_record_from_journal(
+        journal
+    )
+    _write_receipt(paths, receipt)
+    code, refused = _apply(payload, capsys, plan["plan_digest"])
+    assert code == 2
+    assert refused["status"] == "refused"
+    assert "historical" in refused["reason"] or "completed" in refused["reason"]
