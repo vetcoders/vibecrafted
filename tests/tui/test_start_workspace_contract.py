@@ -800,6 +800,140 @@ def _eval_start_fn(
     )
 
 
+def _create_lock_env(tmp_path: Path, *, sock: Path | None = None) -> dict[str, str]:
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    env = os.environ.copy()
+    for key in IDENTITY_ENV:
+        env.pop(key, None)
+    env.update(
+        {
+            "HOME": str(home),
+            "VIBECRAFTED_HOME": str(home / ".vibecrafted"),
+            "VIBECRAFTED_START_CREATE_LOCK_TIMEOUT": "2",
+        }
+    )
+    if sock is not None:
+        env["VC_FRAME_SOCKET_DIR"] = str(sock)
+    return env
+
+
+def _create_lock_script(*body: str) -> str:
+    return "\n".join((f'source "{SHELL_SH}"', *body))
+
+
+def _run_create_lock(
+    *body: str,
+    env: dict[str, str],
+    shell: str,
+    timeout: int = 8,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        _shell_argv(shell, _create_lock_script(*body)),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def _teardown_owned_create_lock_holder(holder: subprocess.Popen[str]) -> None:
+    """Tear down only the start_new_session group this fixture created."""
+    if holder.pid is None:
+        return
+    try:
+        pgid = os.getpgid(holder.pid)
+    except ProcessLookupError:
+        try:
+            holder.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        return
+    pytest_pgid = os.getpgrp()
+    owned = pgid == holder.pid and pgid not in (0, 1, pytest_pgid)
+    if holder.poll() is None:
+        try:
+            if owned:
+                os.killpg(pgid, signal.SIGKILL)
+            else:
+                holder.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        holder.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            if owned:
+                os.killpg(pgid, signal.SIGKILL)
+            else:
+                holder.kill()
+        except ProcessLookupError:
+            pass
+        holder.wait(timeout=5)
+
+
+def _spawn_owned_create_lock_holder(
+    *,
+    tmp_path: Path,
+    env: dict[str, str],
+    shell: str,
+    session_name: str,
+    ready: Path,
+) -> subprocess.Popen[str]:
+    err_path = tmp_path / f"create-lock-holder-{session_name}.err"
+    with err_path.open("w", encoding="utf-8") as err_fh:
+        holder = subprocess.Popen(
+            _shell_argv(
+                shell,
+                _create_lock_script(
+                    f"_vetcoders_start_acquire_create_lock {shlex.quote(session_name)} || exit 9",
+                    f"printf held > {shlex.quote(str(ready))}",
+                    "while true; do sleep 1; done",
+                ),
+            ),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=err_fh,
+            text=True,
+            start_new_session=True,
+        )
+    assert holder.pid is not None
+    try:
+        pgid = os.getpgid(holder.pid)
+    except ProcessLookupError:
+        detail = err_path.read_text(encoding="utf-8") if err_path.exists() else ""
+        raise AssertionError(detail or "create-lock holder died before pgid probe")
+    assert pgid == holder.pid, (
+        "create-lock holder was not its own session/group leader"
+    )
+    assert pgid not in (0, 1, os.getpgrp()), (
+        "refusing to own a shared/system process group"
+    )
+    return holder
+
+
+def _wait_owned_create_lock_ready(
+    holder: subprocess.Popen[str],
+    ready: Path,
+    err_path: Path,
+    *,
+    timeout: float = 5.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and not ready.exists():
+        if holder.poll() is not None:
+            break
+        time.sleep(0.05)
+    if ready.exists():
+        return
+    if holder.poll() is None:
+        raise AssertionError("create-lock holder stayed live without publishing ready")
+    detail = err_path.read_text(encoding="utf-8") if err_path.exists() else ""
+    raise AssertionError(detail or "create-lock holder died before ready")
+
+
 def _run(
     scene: Scene,
     invocation: str,
@@ -1743,6 +1877,40 @@ def test_inside_host_targets_attached_owner_not_repo_or_decoy(tmp_path: Path) ->
 def test_inside_host_created_but_not_projected_keeps_host_canvas(
     tmp_path: Path,
 ) -> None:
+    """Valid correlated Refused ACK may state unchanged. Unavailable is
+    unclassified — that path is the sibling negative below, not this case."""
+    scene = Scene(
+        tmp_path,
+        project="mlx-batch-runner",
+        live=("other-place",),
+        clients=("other-place",),
+    )
+    env = _inside_host_env(scene)
+    env["VC_FRAME_PROJECT_STATUS"] = "Refused"
+    result = _run(
+        scene,
+        "vc-start",
+        developer_root=True,
+        extra_env=env,
+    )
+    combined = result.stdout + result.stderr
+    assert _rc(result) == EXIT_INVENTORY, combined
+    assert "created but not projected" in result.stderr
+    assert "previous canvas was left unchanged" in result.stderr
+    assert "not known to be unchanged" not in result.stderr
+    assert "projected workspace mlx-batch-runner" not in combined
+    receipts = _workspace_projection_receipts(combined)
+    assert receipts and receipts[0].get("status") == "Refused", combined
+    assert not _switches(scene.calls())
+    assert scene.live() == ["mlx-batch-runner", "other-place"]
+    assert any(c.get("created") == "mlx-batch-runner" for c in scene.calls())
+
+
+def test_inside_host_unavailable_receipt_does_not_claim_unchanged(
+    tmp_path: Path,
+) -> None:
+    """A well-formed Unavailable receipt is indeterminate, not a confirmed
+    refusal. The launcher must not imply unchanged or success."""
     scene = Scene(
         tmp_path,
         project="mlx-batch-runner",
@@ -1757,12 +1925,18 @@ def test_inside_host_created_but_not_projected_keeps_host_canvas(
         developer_root=True,
         extra_env=env,
     )
-    assert _rc(result) == EXIT_INVENTORY, result.stdout + result.stderr
-    assert "created but not projected" in result.stderr
-    assert "previous canvas was left unchanged" in result.stderr
+    combined = result.stdout + result.stderr
+    assert _rc(result) == EXIT_INVENTORY, combined
+    assert "created workspace mlx-batch-runner" in combined
+    assert "not confirmed" in result.stderr
+    assert "not known to be unchanged" in result.stderr
+    assert "created but not projected" not in result.stderr
+    assert "previous canvas was left unchanged" not in result.stderr
+    assert "projected workspace mlx-batch-runner" not in combined
+    receipts = _workspace_projection_receipts(combined)
+    assert receipts and receipts[0].get("status") == "Unavailable", combined
     assert not _switches(scene.calls())
     assert scene.live() == ["mlx-batch-runner", "other-place"]
-    assert any(c.get("created") == "mlx-batch-runner" for c in scene.calls())
 
 
 def test_inside_host_does_not_treat_pipe_exit_as_adoption(tmp_path: Path) -> None:
@@ -2032,94 +2206,45 @@ def test_guest_create_preserves_customized_selected_layout_marker(
     assert "vibecrafted" not in argv[argv.index("--new-session-with-layout") + 1]
 
 
-def test_create_lock_dies_with_holder_and_retry_succeeds(tmp_path: Path) -> None:
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_create_lock_dies_with_holder_and_retry_succeeds(
+    tmp_path: Path, shell: str
+) -> None:
     sock = tmp_path / "sock"
     sock.mkdir()
-    home = tmp_path / "home"
-    home.mkdir()
-    env = os.environ.copy()
-    for key in IDENTITY_ENV:
-        env.pop(key, None)
-    env.update(
-        {
-            "HOME": str(home),
-            "VIBECRAFTED_HOME": str(home / ".vibecrafted"),
-            "VC_FRAME_SOCKET_DIR": str(sock),
-            "VIBECRAFTED_START_CREATE_LOCK_TIMEOUT": "2",
-        }
-    )
+    env = _create_lock_env(tmp_path, sock=sock)
     ready = tmp_path / "lock-held"
-    holder = subprocess.Popen(
-        [
-            "bash",
-            "--noprofile",
-            "--norc",
-            "-c",
-            "\n".join(
-                [
-                    f'source "{SHELL_SH}"',
-                    "_vetcoders_start_acquire_create_lock race || exit 9",
-                    f'printf held > "{ready}"',
-                    "while true; do sleep 1; done",
-                ]
-            ),
-        ],
+    err_path = tmp_path / "create-lock-holder-race.err"
+    holder = _spawn_owned_create_lock_holder(
+        tmp_path=tmp_path,
         env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
+        shell=shell,
+        session_name="race",
+        ready=ready,
     )
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and not ready.exists():
-        if holder.poll() is not None:
-            break
-        time.sleep(0.05)
-    assert ready.exists(), holder.stderr.read() if holder.stderr else "holder died"
-    busy = subprocess.run(
-        [
-            "bash",
-            "--noprofile",
-            "--norc",
-            "-c",
-            "\n".join(
-                [
-                    f'source "{SHELL_SH}"',
-                    "_vetcoders_start_acquire_create_lock race",
-                    'printf RC=[%s]\\n "$?"',
-                ]
-            ),
-        ],
+    try:
+        _wait_owned_create_lock_ready(holder, ready, err_path)
+        busy = _run_create_lock(
+            "_vetcoders_start_acquire_create_lock race",
+            'lock_rc=$?',
+            'printf "RC=[%s]\\n" "$lock_rc"',
+            'exit "$lock_rc"',
+            env=env,
+            shell=shell,
+        )
+        assert busy.returncode == 4, busy.stdout + busy.stderr
+        assert _rc(busy) == 4, busy.stdout + busy.stderr
+        assert "could not obtain exclusive create lock" in busy.stderr
+    finally:
+        _teardown_owned_create_lock_holder(holder)
+    retry = _run_create_lock(
+        "_vetcoders_start_acquire_create_lock race",
+        'lock_rc=$?',
+        'if ((lock_rc != 0)); then printf "RC=[%s]\\n" "$lock_rc"; exit "$lock_rc"; fi',
+        "_vetcoders_start_release_create_lock",
+        "printf RETRY_OK\\n",
         env=env,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        timeout=8,
-    )
-    assert busy.returncode == 4, busy.stdout + busy.stderr
-    assert "could not obtain exclusive create lock" in busy.stderr
-    os.kill(holder.pid, signal.SIGKILL)
-    holder.wait(timeout=5)
-    retry = subprocess.run(
-        [
-            "bash",
-            "--noprofile",
-            "--norc",
-            "-c",
-            "\n".join(
-                [
-                    f'source "{SHELL_SH}"',
-                    "_vetcoders_start_acquire_create_lock race || exit $?",
-                    "_vetcoders_start_release_create_lock",
-                    "printf RETRY_OK\\n",
-                ]
-            ),
-        ],
-        env=env,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        timeout=8,
+        shell=shell,
     )
     assert retry.returncode == 0, retry.stdout + retry.stderr
     assert "RETRY_OK" in retry.stdout
@@ -2127,83 +2252,50 @@ def test_create_lock_dies_with_holder_and_retry_succeeds(tmp_path: Path) -> None
     assert lock_file.is_file()
 
 
-def test_create_locks_are_independent_per_socket_namespace(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    home.mkdir()
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_create_locks_are_independent_per_socket_namespace(
+    tmp_path: Path, shell: str
+) -> None:
     sock_a = tmp_path / "sock-a"
     sock_b = tmp_path / "sock-b"
     sock_a.mkdir()
     sock_b.mkdir()
-    env = os.environ.copy()
-    for key in IDENTITY_ENV:
-        env.pop(key, None)
-    env.update({"HOME": str(home), "VIBECRAFTED_HOME": str(home / ".vibecrafted")})
-
-    def acquire(sock: Path) -> subprocess.CompletedProcess[str]:
-        local = dict(env)
-        local["VC_FRAME_SOCKET_DIR"] = str(sock)
-        return subprocess.run(
-            [
-                "bash",
-                "--noprofile",
-                "--norc",
-                "-c",
-                "\n".join(
-                    [
-                        f'source "{SHELL_SH}"',
-                        "_vetcoders_start_acquire_create_lock shared-name || exit $?",
-                        "_vetcoders_start_release_create_lock",
-                        "printf NS_OK\\n",
-                    ]
-                ),
-            ],
-            env=local,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=8,
-        )
-
+    env = _create_lock_env(tmp_path)
+    env_a = dict(env)
+    env_a["VC_FRAME_SOCKET_DIR"] = str(sock_a)
+    env_b = dict(env)
+    env_b["VC_FRAME_SOCKET_DIR"] = str(sock_b)
     ready = tmp_path / "ns-held"
-    holder = subprocess.Popen(
-        [
-            "bash",
-            "--noprofile",
-            "--norc",
-            "-c",
-            "\n".join(
-                [
-                    f'source "{SHELL_SH}"',
-                    f'export VC_FRAME_SOCKET_DIR="{sock_a}"',
-                    "_vetcoders_start_acquire_create_lock shared-name || exit 9",
-                    f'printf held > "{ready}"',
-                    "while true; do sleep 1; done",
-                ]
-            ),
-        ],
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
+    err_path = tmp_path / "create-lock-holder-shared-name.err"
+    holder = _spawn_owned_create_lock_holder(
+        tmp_path=tmp_path,
+        env=env_a,
+        shell=shell,
+        session_name="shared-name",
+        ready=ready,
     )
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and not ready.exists():
-        if holder.poll() is not None:
-            break
-        time.sleep(0.05)
-    assert ready.exists(), holder.stderr.read() if holder.stderr else "holder died"
-    other = acquire(sock_b)
-    os.kill(holder.pid, signal.SIGKILL)
-    holder.wait(timeout=5)
-    assert other.returncode == 0, other.stdout + other.stderr
-    assert "NS_OK" in other.stdout
+    try:
+        _wait_owned_create_lock_ready(holder, ready, err_path)
+        other = _run_create_lock(
+            "_vetcoders_start_acquire_create_lock shared-name",
+            'lock_rc=$?',
+            'if ((lock_rc != 0)); then printf "RC=[%s]\\n" "$lock_rc"; exit "$lock_rc"; fi',
+            "_vetcoders_start_release_create_lock",
+            "printf NS_OK\\n",
+            env=env_b,
+            shell=shell,
+        )
+        assert other.returncode == 0, other.stdout + other.stderr
+        assert "NS_OK" in other.stdout
+    finally:
+        _teardown_owned_create_lock_holder(holder)
     assert (sock_a / ".vc-start-create.shared-name.lock").is_file()
     assert (sock_b / ".vc-start-create.shared-name.lock").is_file()
 
 
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
 def test_create_lock_refuses_leftover_mkdir_directory_without_deleting(
-    tmp_path: Path,
+    tmp_path: Path, shell: str
 ) -> None:
     sock = tmp_path / "sock"
     sock.mkdir()
@@ -2211,37 +2303,17 @@ def test_create_lock_refuses_leftover_mkdir_directory_without_deleting(
     leftover.mkdir()
     marker = leftover / "foreign"
     marker.write_text("keep\n", encoding="utf-8")
-    env = os.environ.copy()
-    for key in IDENTITY_ENV:
-        env.pop(key, None)
-    env.update(
-        {
-            "HOME": str(tmp_path / "home"),
-            "VC_FRAME_SOCKET_DIR": str(sock),
-        }
-    )
-    (tmp_path / "home").mkdir()
-    result = subprocess.run(
-        [
-            "bash",
-            "--noprofile",
-            "--norc",
-            "-c",
-            "\n".join(
-                [
-                    f'source "{SHELL_SH}"',
-                    "_vetcoders_start_acquire_create_lock stale",
-                    'printf RC=[%s]\\n "$?"',
-                ]
-            ),
-        ],
+    env = _create_lock_env(tmp_path, sock=sock)
+    result = _run_create_lock(
+        "_vetcoders_start_acquire_create_lock stale",
+        'lock_rc=$?',
+        'printf "RC=[%s]\\n" "$lock_rc"',
+        'exit "$lock_rc"',
         env=env,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        timeout=8,
+        shell=shell,
     )
     assert result.returncode == 4, result.stdout + result.stderr
+    assert _rc(result) == 4, result.stdout + result.stderr
     assert leftover.is_dir()
     assert marker.read_text(encoding="utf-8") == "keep\n"
     assert "without removing" in result.stderr

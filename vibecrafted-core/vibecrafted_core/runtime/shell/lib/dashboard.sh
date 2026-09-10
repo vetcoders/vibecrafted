@@ -1019,7 +1019,9 @@ _vetcoders_start_refuse_inventory() {
 # never unlinked, release closes this process's descriptor, and SIGKILL drops
 # the kernel lock. A leftover mkdir(2) directory is refused, not removed.
 _vetcoders_start_acquire_create_lock() {
-  local session_name="${1:-}" socket_dir="" lock_file="" status=0
+  # lock_rc — not `status`. zsh's $status is a readonly special parameter;
+  # `local status` aborts the function at line 1 (`read-only variable`).
+  local session_name="${1:-}" socket_dir="" lock_file="" lock_rc=0
   local timeout="${VIBECRAFTED_START_CREATE_LOCK_TIMEOUT:-30}"
   [[ -n "$session_name" ]] || return 4
   socket_dir="$(_vetcoders_vc_frame_socket_dir 2>/dev/null || true)"
@@ -1041,8 +1043,8 @@ _vetcoders_start_acquire_create_lock() {
     eval "exec ${_vetcoders_start_create_lock_fd}>>\"\$lock_file\"" || return 4
   fi
   [[ -n "${_vetcoders_start_create_lock_fd:-}" ]] || return 4
-  _vetcoders_os_fd_lock "$_vetcoders_start_create_lock_fd" "$timeout" || status=$?
-  if ((status != 0)); then
+  _vetcoders_os_fd_lock "$_vetcoders_start_create_lock_fd" "$timeout" || lock_rc=$?
+  if ((lock_rc != 0)); then
     eval "exec ${_vetcoders_start_create_lock_fd}>&-" 2>/dev/null || true
     _vetcoders_start_create_lock_fd=""
     printf 'vc-start: could not obtain exclusive create lock for %s.\n' \
