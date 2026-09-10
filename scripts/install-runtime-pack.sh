@@ -98,7 +98,7 @@ _write_rescue_identity() {
   local root_name="$3"
   printf 'schema=vibecrafted.runtime-pack-rescue-extract.v1\narchive_sha256=%s\narchive_root=%s\nuid=%s\n' \
     "$sha" "$root_name" "$EUID" > "$identity"
-  chmod 600 -- "$identity"
+  chmod 600 "$identity"
 }
 
 _verify_rescue_identity() {
@@ -139,7 +139,7 @@ _write_rescue_manifest() {
       done
     fi
   ) > "$dest"
-  chmod 600 -- "$dest"
+  chmod 600 "$dest"
 }
 
 _verify_rescue_manifest() {
