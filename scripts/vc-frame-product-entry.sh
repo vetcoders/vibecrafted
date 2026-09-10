@@ -43,6 +43,13 @@ pin_product_config() {
   return 1
 }
 
+pin_product_shell() {
+  # Explicit product profile for panes this server starts or restores.
+  # default_shell stays "zsh" so host substitution in vc_frame_staging still
+  # matches. An already-live server does not inherit a later client's env.
+  export ZDOTDIR="$HOME/.config/vibecrafted/vc-terminal"
+}
+
 # Follow the invoked entry to its physical generation before consulting assets.
 # An inherited root, cargo binary, PATH entry or moving current selector cannot
 # replace this already-selected payload.
@@ -73,6 +80,7 @@ export VIBECRAFTED_CORE_DIR="$root/vibecrafted-core"
 export VIBECRAFTED_PYTHON="$root/bin/python3"
 export VIBECRAFTED_VC_FRAME_BIN="$real"
 unset VIBECRAFTED_PREFER_REPO_VC_FRAME VIBECRAFTED_PREFER_REPO_SPAWN
+pin_product_shell
 pin_darwin_socket_dir
 
 if [[ $# -eq 0 ]]; then

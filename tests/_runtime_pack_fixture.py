@@ -108,6 +108,7 @@ def seed_runtime_pack(
     for relative in (
         "vibecrafted-core/vibecrafted_core/config/vc-frame",
         "config/vc-terminal",
+        "vibecrafted-core/vibecrafted_core/runtime/shell/aliases",
     ):
         shutil.copytree(REPO_ROOT / relative, payload / relative, dirs_exist_ok=True)
     for relative in (

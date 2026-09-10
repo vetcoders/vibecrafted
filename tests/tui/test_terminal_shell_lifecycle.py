@@ -200,3 +200,225 @@ def test_tab_completes_workspace_option_without_launching_workspace(
         os.kill(pid, signal.SIGKILL)
         os.waitpid(pid, 0)
         os.close(descriptor)
+
+
+def _stage_product_profile(tmp_path: Path) -> Path:
+    root = ENTRY.parents[2]
+    product = tmp_path / ".config/vibecrafted/vc-terminal"
+    product.mkdir(parents=True)
+    shutil.copy2(root / "config/vc-terminal/interactive.zsh", product / "interactive.zsh")
+    shutil.copy2(ENTRY, product / "launch-primary-shell.zsh")
+    (product / ".zshrc").write_text(
+        'source "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"\n'
+    )
+    aliases = tmp_path / ".config/vibecrafted/shell/aliases"
+    shutil.copytree(
+        root / "vibecrafted-core/vibecrafted_core/runtime/shell/aliases",
+        aliases,
+    )
+    return product
+
+
+def _zsh_profile(
+    tmp_path: Path,
+    script: str,
+    *,
+    path: str = "/usr/bin:/bin",
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    environment = {
+        "HOME": str(tmp_path),
+        "PATH": path,
+        "TERM": "dumb",
+        "VIBECRAFTED_HOME": str(tmp_path / ".vibecrafted"),
+    }
+    if extra_env:
+        environment.update(extra_env)
+    return subprocess.run(
+        ["/bin/zsh", "-dfi", "-c", script, "profile-test"],
+        capture_output=True,
+        text=True,
+        env=environment,
+        cwd=tmp_path,
+        timeout=15,
+        check=False,
+    )
+
+
+def test_aliases_catalog_reload_keeps_cwd_and_hook_identity(tmp_path: Path) -> None:
+    _stage_product_profile(tmp_path)
+    work = tmp_path / "keep-cwd"
+    work.mkdir()
+    result = _zsh_profile(
+        tmp_path,
+        (
+            'source "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"; '
+            f'cd {str(work)!r}; '
+            'before_hooks="${precmd_functions[*]}|${preexec_functions[*]}"; '
+            'print -r -- "CWD=$PWD"; '
+            'print -r -- "GL=${aliases[gl]}"; '
+            'aliases | grep -q "^git$" || exit 21; '
+            "reload; "
+            f'[[ "$PWD" == {str(work)!r} ]] || exit 22; '
+            '[[ "$before_hooks" == "${precmd_functions[*]}|${preexec_functions[*]}" ]] || exit 23; '
+            "print -r -- 'alias gl=\"git log --oneline -1\"' > "
+            '"$HOME/.config/vibecrafted/shell/aliases/git.zsh"; '
+            "reload; "
+            'print -r -- "GL_RELOADED=${aliases[gl]}"; '
+            "print -r -- READY"
+        ),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "READY" in result.stdout
+    assert f"CWD={work}" in result.stdout
+    assert "git log --oneline --graph --decorate -20" in result.stdout
+    assert "GL_RELOADED=git log --oneline -1" in result.stdout
+    assert not (tmp_path / ".vibecrafted" / "control_plane").exists()
+
+
+def test_two_line_prompt_without_starship_and_with_fake_starship(
+    tmp_path: Path,
+) -> None:
+    _stage_product_profile(tmp_path)
+    offline = _zsh_profile(
+        tmp_path,
+        (
+            'source "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"; '
+            'print -r -- "PROMPT=$PROMPT"; print -r -- READY'
+        ),
+    )
+    assert offline.returncode == 0, offline.stderr
+    assert "READY" in offline.stdout
+    assert "❯" in offline.stdout
+    assert "%~" in offline.stdout
+    prompt = offline.stdout.split("PROMPT=", 1)[1]
+    assert "\n" in prompt.split("READY", 1)[0]
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    starship = bin_dir / "starship"
+    starship.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = init ]; then\n"
+        "cat <<'EOF'\n"
+        "starship_precmd() { : }\n"
+        "precmd_functions+=(starship_precmd)\n"
+        "PROMPT='STARSHIP>'\n"
+        "EOF\n"
+        "fi\n"
+    )
+    starship.chmod(0o755)
+    with_starship = _zsh_profile(
+        tmp_path,
+        (
+            'source "$HOME/.config/vibecrafted/vc-terminal/interactive.zsh"; '
+            'print -r -- "PROMPT=$PROMPT"; '
+            '(( $+functions[starship_precmd] )) || exit 31; '
+            "print -r -- READY"
+        ),
+        path=f"{bin_dir}:/usr/bin:/bin",
+    )
+    assert with_starship.returncode == 0, with_starship.stderr
+    assert "PROMPT=STARSHIP>" in with_starship.stdout
+
+
+def test_offline_startup_keeps_native_shell_without_optional_integrations(
+    tmp_path: Path,
+) -> None:
+    _stage_product_profile(tmp_path)
+    (tmp_path / ".zshrc").write_text("print PRIVATE_PROFILE_EXECUTED\n")
+    result = _zsh_profile(
+        tmp_path,
+        (
+            'source "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"; '
+            '(( $+aliases[gl] )) || exit 41; '
+            '(( $+functions[reload] )) || exit 42; '
+            '(( $+functions[vcf-lp] )) || exit 43; '
+            'print -r -- "PROMPT=$PROMPT"; '
+            "print -r -- READY"
+        ),
+        extra_env={"VC_TERMINAL_PLUGIN_PREFIXES": str(tmp_path / "missing-plugins")},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "READY" in result.stdout
+    assert "PRIVATE_PROFILE_EXECUTED" not in result.stdout + result.stderr
+    log = (tmp_path / ".vibecrafted/shell/startup.log").read_text()
+    assert "starship is not installed" in log
+    assert "atuin is not installed" in log
+    assert "zoxide is not installed" in log
+    assert "zsh-autosuggestions is not installed" in log
+    assert not (tmp_path / ".vibecrafted" / "control_plane").exists()
+
+
+def test_frame_conveniences_forward_native_argv_without_force(
+    tmp_path: Path,
+) -> None:
+    _stage_product_profile(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    captured = tmp_path / "vc-frame-argv"
+    frame = bin_dir / "vc-frame"
+    frame.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> {str(captured)!r}\n"
+    )
+    frame.chmod(0o755)
+    result = _zsh_profile(
+        tmp_path,
+        (
+            'source "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"; '
+            "vcf-lp --help; "
+            "vcf-da --dry-run; "
+            "print -r -- READY"
+        ),
+        path=f"{bin_dir}:/usr/bin:/bin",
+    )
+    assert result.returncode == 0, result.stderr
+    argv = captured.read_text()
+    assert "action list-panes --help" in argv
+    assert "delete-all-sessions --dry-run" in argv
+    assert "--force" not in argv
+
+
+def test_restored_and_new_pane_follow_server_zdotdir_not_host_dotfiles(
+    tmp_path: Path,
+) -> None:
+    _stage_product_profile(tmp_path)
+    (tmp_path / ".zshrc").write_text("print PRIVATE_PROFILE_EXECUTED\n")
+    product_zdot = tmp_path / ".config/vibecrafted/vc-terminal"
+    restored = subprocess.run(
+        ["/bin/zsh", "-l", "-c", 'print -r -- "GL=${aliases[gl]}"; print -r -- READY'],
+        capture_output=True,
+        text=True,
+        env={
+            "HOME": str(tmp_path),
+            "PATH": "/usr/bin:/bin",
+            "TERM": "dumb",
+            "ZDOTDIR": str(product_zdot),
+            "VIBECRAFTED_HOME": str(tmp_path / ".vibecrafted"),
+        },
+        cwd=tmp_path,
+        timeout=15,
+        check=False,
+    )
+    assert restored.returncode == 0, restored.stderr
+    assert "READY" in restored.stdout
+    assert "git log --oneline --graph --decorate -20" in restored.stdout
+    assert "PRIVATE_PROFILE_EXECUTED" not in restored.stdout + restored.stderr
+
+    host = subprocess.run(
+        ["/bin/zsh", "-l", "-c", "print -r -- HOST_READY"],
+        capture_output=True,
+        text=True,
+        env={
+            "HOME": str(tmp_path),
+            "PATH": "/usr/bin:/bin",
+            "TERM": "dumb",
+        },
+        cwd=tmp_path,
+        timeout=15,
+        check=False,
+    )
+    assert host.returncode == 0, host.stderr
+    assert "PRIVATE_PROFILE_EXECUTED" in host.stdout
+    assert "git log --oneline --graph --decorate -20" not in host.stdout

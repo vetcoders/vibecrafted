@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 import tomllib
-from _runtime_pack_fixture import seed_runtime_pack
+from _runtime_pack_fixture import REPO_ROOT, seed_runtime_pack
 
 from scripts import vetcoders_install as installer
 
@@ -2013,3 +2013,43 @@ def test_abandon_unpublished_requires_physical_previous_generation(tmp_path):
         )
         is True
     )
+
+
+def test_untouched_previous_starship_default_upgrades_to_two_line_prompt() -> None:
+    previous = (
+        REPO_ROOT / "tests/tui/fixtures/starship-default-three-row.toml"
+    ).read_text(encoding="utf-8")
+    incoming = (REPO_ROOT / "config/starship.toml").read_text(encoding="utf-8")
+    assert ("starship.toml", "config/starship.toml") in installer._RUNTIME_PREFERENCE_SOURCES
+    merged = installer._merge_runtime_preferences(
+        previous, previous, incoming, toml=True
+    )
+    assert merged == incoming
+    assert "$directory\n$character" in merged
+    assert "$time$fill$jobs" not in merged
+
+
+def test_edited_starship_preference_survives_incoming_two_line_default() -> None:
+    previous = (
+        REPO_ROOT / "tests/tui/fixtures/starship-default-three-row.toml"
+    ).read_text(encoding="utf-8")
+    incoming = (REPO_ROOT / "config/starship.toml").read_text(encoding="utf-8")
+    current = incoming.replace("[❯](bold green)", "[λ](bold cyan)")
+    merged = installer._merge_runtime_preferences(
+        previous, current, incoming, toml=True
+    )
+    assert "[λ](bold cyan)" in merged
+    assert "$directory\n$character" in merged
+
+
+def test_overlapping_starship_format_edit_is_a_preference_conflict() -> None:
+    previous = (
+        REPO_ROOT / "tests/tui/fixtures/starship-default-three-row.toml"
+    ).read_text(encoding="utf-8")
+    incoming = (REPO_ROOT / "config/starship.toml").read_text(encoding="utf-8")
+    current = previous.replace(
+        "$time$fill$jobs$cmd_duration",
+        "$directory$git_branch",
+    )
+    with pytest.raises(ValueError, match="conflict"):
+        installer._merge_runtime_preferences(previous, current, incoming, toml=True)

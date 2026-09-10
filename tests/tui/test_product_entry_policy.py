@@ -1032,3 +1032,93 @@ def test_vc_start_probe_twice_is_stable(tmp_path: Path) -> None:
         outs.append(proc.stdout)
     assert outs[0] == outs[1]
     assert f"VC_FRAME_CONFIG_DIR={frontier}" in outs[0]
+
+
+def _stage_product_frame_generation(tmp_path: Path) -> tuple[Path, Path]:
+    home = tmp_path / "home"
+    generation = tmp_path / "release"
+    wrapper = generation / "bin" / "vc-frame"
+    real = generation / "libexec" / "vc-frame"
+    frame = home / ".config/vibecrafted/vc-frame"
+    frame.mkdir(parents=True)
+    (frame / "layouts").mkdir()
+    (frame / "config.kdl").write_text('default_shell "zsh"\n', encoding="utf-8")
+    wrapper.parent.mkdir(parents=True)
+    real.parent.mkdir(parents=True)
+    wrapper.write_text(WRAPPER.read_text(encoding="utf-8"), encoding="utf-8")
+    wrapper.chmod(0o755)
+    _write_fake_bin(
+        real.parent,
+        real.name,
+        (
+            "#!/bin/sh\n"
+            'printf "ZDOTDIR=%s\\n" "$ZDOTDIR"\n'
+            'printf "ARGS=%s\\n" "$*"\n'
+        ),
+    )
+    return home, wrapper
+
+
+def test_product_frame_entry_pins_zdotdir_for_new_server(tmp_path: Path) -> None:
+    home, wrapper = _stage_product_frame_generation(tmp_path)
+    tool_bin = tmp_path / "tool-bin"
+    tool_bin.mkdir()
+    _write_fake_bin(
+        tool_bin,
+        "file",
+        "#!/bin/sh\nprintf 'Mach-O 64-bit executable arm64\\n'\n",
+    )
+    env = {
+        **{k: v for k, v in os.environ.items() if not k.startswith("VC_FRAME")},
+        "PATH": f"{tool_bin}:/usr/bin:/bin",
+        "HOME": str(home),
+        "USER": "test",
+    }
+    proc = subprocess.run(
+        [str(wrapper), "list-sessions"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+        timeout=5,
+    )
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert (
+        f"ZDOTDIR={home / '.config/vibecrafted/vc-terminal'}" in proc.stdout
+    )
+    text = WRAPPER.read_text(encoding="utf-8")
+    assert "pin_product_shell" in text
+    assert "default_shell" not in text
+
+
+def test_new_client_env_does_not_rewrite_already_live_server_zdotdir(
+    tmp_path: Path,
+) -> None:
+    live = tmp_path / "live-server.env"
+    live.write_text("ZDOTDIR=/old/live/zdot\n", encoding="utf-8")
+    home, wrapper = _stage_product_frame_generation(tmp_path)
+    tool_bin = tmp_path / "tool-bin"
+    tool_bin.mkdir()
+    _write_fake_bin(
+        tool_bin,
+        "file",
+        "#!/bin/sh\nprintf 'Mach-O 64-bit executable arm64\\n'\n",
+    )
+    env = {
+        "PATH": f"{tool_bin}:/usr/bin:/bin",
+        "HOME": str(home),
+        "USER": "test",
+        "ZDOTDIR": "/new/client/zdot",
+    }
+    proc = subprocess.run(
+        [str(wrapper), "list-sessions"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+        timeout=5,
+    )
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert "ZDOTDIR=" in proc.stdout
+    assert live.read_text(encoding="utf-8") == "ZDOTDIR=/old/live/zdot\n"
+    assert "/old/live/zdot" not in proc.stdout

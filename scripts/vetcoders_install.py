@@ -330,6 +330,34 @@ SKILL_CATEGORIES: dict[str, dict[str, Any]] = {
 }
 
 
+_ZSH_PLUGIN_SHARE_FILES: dict[str, tuple[str, ...]] = {
+    "zsh-autosuggestions": (
+        "/opt/homebrew/share/zsh-autosuggestions/zsh-autosuggestions.zsh",
+        "/usr/local/share/zsh-autosuggestions/zsh-autosuggestions.zsh",
+    ),
+    "zsh-syntax-highlighting": (
+        "/opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh",
+        "/usr/local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh",
+    ),
+}
+
+
+def _zsh_plugin_share_path(name: str) -> str | None:
+    """Return a readable local zsh plugin file, or None when absent.
+
+    These are share files, not PATH binaries. Detection stays offline and
+    does not download, clone, or vendor the plugin.
+    """
+    for relative in _ZSH_PLUGIN_SHARE_FILES.get(name, ()):
+        candidate = Path(relative)
+        if candidate.is_file():
+            return str(candidate)
+    product = Path.home() / ".config/vibecrafted/shell/plugins" / name / f"{name}.zsh"
+    if product.is_file():
+        return str(product)
+    return None
+
+
 @dataclass
 class Foundation:
     """A binary tool that skills depend on."""
@@ -348,6 +376,9 @@ class Foundation:
                 found = shutil.which(candidate)
                 if found:
                     return found
+        plugin = _zsh_plugin_share_path(self.name)
+        if plugin:
+            return plugin
         found = shutil.which(self.name)
         if found:
             return found
@@ -520,6 +551,28 @@ FOUNDATIONS: list[Foundation] = [
             "github": "https://github.com/ajeetdsouza/zoxide/releases",
         },
         verify_cmd="zoxide --version",
+        required=False,
+    ),
+    Foundation(
+        name="zsh-autosuggestions",
+        description="In-line history suggestions for the product zsh profile (MIT, zsh-users)",
+        channels=["brew", "github"],
+        packages={
+            "brew": "zsh-autosuggestions",
+            "github": "https://github.com/zsh-users/zsh-autosuggestions",
+        },
+        verify_cmd="test -r /opt/homebrew/share/zsh-autosuggestions/zsh-autosuggestions.zsh",
+        required=False,
+    ),
+    Foundation(
+        name="zsh-syntax-highlighting",
+        description="Command-line syntax highlighting for the product zsh profile (BSD-3-Clause, zsh-users)",
+        channels=["brew", "github"],
+        packages={
+            "brew": "zsh-syntax-highlighting",
+            "github": "https://github.com/zsh-users/zsh-syntax-highlighting",
+        },
+        verify_cmd="test -r /opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh",
         required=False,
     ),
     Foundation(
@@ -16907,6 +16960,7 @@ _RUNTIME_PREFERENCE_SOURCES: tuple[tuple[str, str], ...] = (
         "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl",
     ),
     ("terminal-policy.toml", "config/vc-terminal/vibecrafted.toml"),
+    ("starship.toml", "config/starship.toml"),
 )
 
 
@@ -20216,7 +20270,7 @@ def _stage_runtime_product_config(
         'source "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"\n',
         encoding="utf-8",
     )
-    for relative in ("starship.toml", "atuin/config.toml"):
+    for relative in ("atuin/config.toml",):
         destination = staged / relative
         if not destination.exists():
             destination.parent.mkdir(parents=True, exist_ok=True)

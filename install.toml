@@ -134,7 +134,7 @@ additional_tools = "Additional tools"
 foundations = ["loctree-mcp", "aicx-mcp", "prview", "screenscribe"]
 toolchains = ["python3", "node", "git", "rsync"]
 agents = ["claude", "codex", "agy", "junie", "grok", "cursor-agent"]
-additional_tools = ["mise", "starship", "atuin", "zoxide"]
+additional_tools = ["mise", "starship", "atuin", "zoxide", "zsh-autosuggestions", "zsh-syntax-highlighting"]
 
 [diagnostics.paths]
 store_dir = "$VIBECRAFTED_ROOT/.vibecrafted/skills"
