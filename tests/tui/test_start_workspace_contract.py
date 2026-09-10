@@ -38,8 +38,8 @@ on-disk session table so a race is a real race, and RESURRECTS an EXITED record
 on `--create-background` exactly like the engine does -- so a start that skips
 the inventory check fails here the way it would fail for the Founder. Unknown
 verbs exit 2; `project-workspace` is an explicit command that emits one
-`WorkspaceProjectionReceipt`. The last cases run against the REAL admitted
-or installed engine in an isolated sandbox.
+compact `WorkspaceProjectionReceipt` and exits 0 only for Handled. The last
+cases run against the REAL admitted or installed engine in an isolated sandbox.
 
 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 """
@@ -482,7 +482,10 @@ if rest[:1] == ["project-workspace"]:
     if status == "Handled" and receipt_guest == guest:
         os.makedirs(os.path.join(table, "projected"), exist_ok=True)
         open(os.path.join(table, "projected", guest), "w").write("1")
-    print(json.dumps(receipt))
+    print(json.dumps(receipt, separators=(",", ":")))
+    forced = os.environ.get("VC_FRAME_PROJECT_EXIT")
+    if forced:
+        sys.exit(int(forced))
     sys.exit(0 if status == "Handled" and receipt_guest == guest else 2)
 
 sys.stderr.write(
@@ -782,6 +785,55 @@ def _projects(calls: list[dict]) -> list[dict]:
         for c in calls
         if "project-workspace" in c["argv"] and "--help" not in c["argv"]
     ]
+
+
+def _workspace_projection_receipts(text: str) -> list[dict]:
+    """Collect WorkspaceProjectionReceipt objects from engine/launcher text.
+
+    fd14 prints one compact serde_json document; the stub now matches that
+    representation. Pretty and log-prefixed forms are accepted so a test can
+    feed the real function, not a Python mirror of its parser.
+    """
+    decoder = json.JSONDecoder()
+    rows: list[dict] = []
+    idx = 0
+    while idx < len(text):
+        while idx < len(text) and text[idx] not in "{[":
+            idx += 1
+        if idx >= len(text):
+            break
+        try:
+            obj, end = decoder.raw_decode(text, idx)
+        except json.JSONDecodeError:
+            idx += 1
+            continue
+        idx = end
+        candidates = obj if isinstance(obj, list) else [obj]
+        for item in candidates:
+            if (
+                isinstance(item, dict)
+                and "request_id" in item
+                and "guest" in item
+                and "status" in item
+            ):
+                rows.append(item)
+    return rows
+
+
+def _list_panes_payload(text: str):
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+def _pane_by_id(panes, pane_id):
+    if not isinstance(panes, list) or pane_id in (None, ""):
+        return None
+    for pane in panes:
+        if isinstance(pane, dict) and pane.get("id") == pane_id:
+            return pane
+    return None
 
 
 def _destroys(calls: list[dict]) -> list[dict]:
@@ -1284,7 +1336,14 @@ def _assert_projected_into_host(
     combined = result.stdout + result.stderr
     assert "created workspace " + guest in combined, combined
     assert "projected workspace " + guest in combined, combined
-    assert '"status": "Handled"' in combined or "confirmed by host list-panes" in combined, combined
+    receipts = _workspace_projection_receipts(result.stdout)
+    assert len(receipts) == 1, result.stdout
+    receipt = receipts[0]
+    assert receipt.get("status") == "Handled", receipt
+    assert receipt.get("guest") == guest, receipt
+    assert receipt.get("pane_id") not in (None, ""), receipt
+    assert str(receipt.get("request_id") or "").strip(), receipt
+    assert "confirmed by host list-panes" not in combined
     assert not _switches(scene.calls()), scene.calls()
     assert not _attaches(scene.calls()), scene.calls()
     assert scene.terminal_launches(wait=0.3) == []
@@ -1295,6 +1354,8 @@ def _assert_projected_into_host(
     assert "project-workspace" in argv and guest in argv
     assert host != guest
     assert argv[argv.index("--session") + 1] != guest
+    recorded = projects[-1].get("receipt") or {}
+    assert recorded.get("pane_id") == receipt.get("pane_id"), (recorded, receipt)
     guest_creates = [
         c
         for c in scene.calls()
@@ -1620,7 +1681,11 @@ def test_inside_host_does_not_treat_pipe_exit_as_adoption(tmp_path: Path) -> Non
     assert _rc(result) == EXIT_INVENTORY, result.stdout + result.stderr
     combined = result.stdout + result.stderr
     assert "created workspace mlx-batch-runner" in combined
-    assert '"status": "Handled"' not in result.stdout
+    assert not [
+        receipt
+        for receipt in _workspace_projection_receipts(combined)
+        if receipt.get("status") == "Handled"
+    ], combined
     assert "projected workspace mlx-batch-runner" not in combined
     assert scene.live() == ["mlx-batch-runner", "other-place"]
 
@@ -1653,9 +1718,11 @@ def test_inside_host_malformed_ack_does_not_claim_unchanged_without_owner(
     assert scene.live() == ["mlx-batch-runner", "other-place"]
 
 
-def test_inside_host_malformed_ack_reconciles_when_owner_shows_guest(
+def test_inside_host_guest_named_pane_is_not_projection_proof(
     tmp_path: Path,
 ) -> None:
+    """list-panes has no public guest binding. A pane titled the guest, or a
+    command that echoes the guest, must not certify a missing ACK."""
     scene = Scene(
         tmp_path,
         project="mlx-batch-runner",
@@ -1671,8 +1738,37 @@ def test_inside_host_malformed_ack_reconciles_when_owner_shows_guest(
         developer_root=True,
         extra_env=env,
     )
-    assert _rc(result) == 0, result.stdout + result.stderr
-    assert "confirmed by host list-panes" in result.stdout + result.stderr
+    combined = result.stdout + result.stderr
+    assert _rc(result) == EXIT_INVENTORY, combined
+    assert "projected workspace mlx-batch-runner" not in combined
+    assert "confirmed by host list-panes" not in combined
+    assert "not confirmed" in result.stderr
+    assert scene.live() == ["mlx-batch-runner", "other-place"]
+
+
+def test_inside_host_nonzero_engine_status_is_not_ordinary_success(
+    tmp_path: Path,
+) -> None:
+    """A Handled-looking body with a nonzero Frame exit is not adoption."""
+    scene = Scene(
+        tmp_path,
+        project="mlx-batch-runner",
+        live=("other-place",),
+        clients=("other-place",),
+    )
+    env = _inside_host_env(scene)
+    env["VC_FRAME_PROJECT_STATUS"] = "Handled"
+    env["VC_FRAME_PROJECT_EXIT"] = "2"
+    result = _run(
+        scene,
+        "vc-start",
+        developer_root=True,
+        extra_env=env,
+    )
+    combined = result.stdout + result.stderr
+    assert _rc(result) == EXIT_INVENTORY, combined
+    assert "projected workspace mlx-batch-runner" not in combined
+    assert "created workspace mlx-batch-runner" in combined
     assert scene.live() == ["mlx-batch-runner", "other-place"]
 
 
@@ -1834,7 +1930,7 @@ def test_start_entry_owns_inside_host_projection_not_switch_session() -> None:
 
 
 # --------------------------------------------------------------------------
-# 7b. function-level: execute the real shell parsers (must fail on 2e7b5693)
+# 7b. function-level: execute the real shell parsers (compact ACK, no argv leak)
 # --------------------------------------------------------------------------
 
 _HANDLED_RECEIPT = {
@@ -1850,9 +1946,9 @@ _HANDLED_RECEIPT = {
 
 
 def test_start_resolve_host_tab_reads_real_list_tabs_json(tmp_path: Path) -> None:
-    """Pretty-printed TabInfo array on the engine's stdout. The function
-    must read it via argv, not sys.stdin — baseline piped JSON into
-    `python -` while a heredoc already owned stdin, so this fails there."""
+    """Pretty-printed TabInfo array on the engine's stdout. JSON is stdin
+    to python -c; putting the listing on python argv is the leak this
+    cut closes."""
     fake = tmp_path / "vc-frame"
     fake.write_text(
         "#!/usr/bin/env python3\n"
@@ -1886,16 +1982,18 @@ def test_start_resolve_host_tab_reads_real_list_tabs_json(tmp_path: Path) -> Non
 
 
 def test_start_projection_receipt_ok_accepts_real_handled_receipt() -> None:
-    receipt = json.dumps(_HANDLED_RECEIPT, indent=2)
-    result = _eval_start_fn(
-        "\n".join(
-            [
-                f"_vetcoders_start_projection_receipt_ok {shlex.quote(receipt)} mlx-batch-runner 1",
-                'printf "FN_RC=[%s]\\n" "$?"',
-            ]
+    compact = json.dumps(_HANDLED_RECEIPT, separators=(",", ":"))
+    pretty = json.dumps(_HANDLED_RECEIPT, indent=2)
+    for receipt in (compact, pretty):
+        result = _eval_start_fn(
+            "\n".join(
+                [
+                    f"_vetcoders_start_projection_receipt_ok {shlex.quote(receipt)} mlx-batch-runner 1",
+                    'printf "FN_RC=[%s]\\n" "$?"',
+                ]
+            )
         )
-    )
-    assert "FN_RC=[0]" in result.stdout, result.stdout + result.stderr
+        assert "FN_RC=[0]" in result.stdout, receipt + result.stdout + result.stderr
 
 
 def test_start_projection_receipt_ok_rejects_refused_and_malformed() -> None:
@@ -1903,9 +2001,9 @@ def test_start_projection_receipt_ok_rejects_refused_and_malformed() -> None:
     refused["status"] = "Refused"
     refused["pane_id"] = None
     for payload, guest, tab in (
-        (json.dumps(refused), "mlx-batch-runner", "1"),
+        (json.dumps(refused, separators=(",", ":")), "mlx-batch-runner", "1"),
         ("{this is not a WorkspaceProjectionReceipt", "mlx-batch-runner", "1"),
-        (json.dumps(_HANDLED_RECEIPT), "someone-else", "1"),
+        (json.dumps(_HANDLED_RECEIPT, separators=(",", ":")), "someone-else", "1"),
     ):
         result = _eval_start_fn(
             "\n".join(
@@ -1919,13 +2017,20 @@ def test_start_projection_receipt_ok_rejects_refused_and_malformed() -> None:
         assert "FN_RC=[1]" in result.stdout, result.stdout + result.stderr
 
 
-def test_start_classify_projection_distinguishes_refusal_from_indeterminate() -> None:
-    unavailable = dict(_HANDLED_RECEIPT)
-    unavailable["status"] = "Unavailable"
-    unavailable["pane_id"] = None
+def test_start_classify_projection_accepts_real_receipt_representations() -> None:
+    """Execute the shipped classifier. Compact is the fd14 emission; pretty
+    and log-prefixed must not be double-counted into indeterminate."""
+    compact = json.dumps(_HANDLED_RECEIPT, separators=(",", ":"))
+    pretty = json.dumps(_HANDLED_RECEIPT, indent=2)
+    prefixed = "vc-frame[host]: " + compact
     cases = (
-        (json.dumps(_HANDLED_RECEIPT), "handled"),
-        (json.dumps({**_HANDLED_RECEIPT, "status": "Refused", "pane_id": None}), "refused"),
+        (compact, "handled"),
+        (pretty, "handled"),
+        (prefixed, "handled"),
+        (
+            json.dumps({**_HANDLED_RECEIPT, "status": "Refused", "pane_id": None}, separators=(",", ":")),
+            "refused",
+        ),
         (
             "Refused: guest `gone` is missing. Zero process/pane mutation.\n",
             "refused",
@@ -1934,8 +2039,30 @@ def test_start_classify_projection_distinguishes_refusal_from_indeterminate() ->
             "Unavailable: no unique correlated projection receipt for request x; the surface may have changed.\n",
             "indeterminate",
         ),
-        (json.dumps(unavailable), "indeterminate"),
+        (
+            json.dumps({**_HANDLED_RECEIPT, "status": "Unavailable", "pane_id": None}, separators=(",", ":")),
+            "indeterminate",
+        ),
         ("{this is not a WorkspaceProjectionReceipt", "indeterminate"),
+        (compact + "\n" + compact, "indeterminate"),
+        (
+            compact
+            + "\n"
+            + json.dumps({**_HANDLED_RECEIPT, "request_id": "pipe-2"}, separators=(",", ":")),
+            "indeterminate",
+        ),
+        (
+            json.dumps({**_HANDLED_RECEIPT, "guest": "someone-else"}, separators=(",", ":")),
+            "indeterminate",
+        ),
+        (
+            json.dumps({**_HANDLED_RECEIPT, "tab": 4}, separators=(",", ":")),
+            "indeterminate",
+        ),
+        (
+            json.dumps({**_HANDLED_RECEIPT, "request_id": ""}, separators=(",", ":")),
+            "indeterminate",
+        ),
     )
     for text, expected in cases:
         result = _eval_start_fn(
@@ -1950,6 +2077,106 @@ def test_start_classify_projection_distinguishes_refusal_from_indeterminate() ->
             text,
             result.stdout + result.stderr,
         )
+
+
+def test_start_reconcile_host_projection_ignores_guest_substrings() -> None:
+    """Unrelated title/command mentions are not Frame guest binding."""
+    guest = "mlx-batch-runner"
+    host_pane = {
+        "id": 3,
+        "title": guest,
+        "terminal_command": "echo " + guest,
+        "name": guest,
+        "cursor_coordinates_in_pane": [1, 1],
+    }
+    same = json.dumps([host_pane])
+    drifted = json.dumps(
+        [
+            {
+                **host_pane,
+                "cursor_coordinates_in_pane": [8, 4],
+                "title": "echo " + guest,
+            },
+            {
+                "id": 4,
+                "title": guest,
+                "terminal_command": "echo " + guest,
+            },
+        ]
+    )
+    cases = (
+        (same, same, "unchanged"),
+        (same, drifted, "unknown"),
+        ("", drifted, "unknown"),
+    )
+    for before, after, expected in cases:
+        result = _eval_start_fn(
+            "\n".join(
+                [
+                    f'printf "REC=[%s]\\n" "$(_vetcoders_start_reconcile_host_projection {shlex.quote(before)} {shlex.quote(after)} {guest})"',
+                ]
+            )
+        )
+        assert f"REC=[{expected}]" in result.stdout, (
+            expected,
+            result.stdout + result.stderr,
+        )
+        assert "REC=[projected]" not in result.stdout, result.stdout
+
+
+def test_start_parsers_keep_private_json_off_python_argv(tmp_path: Path) -> None:
+    secret = "private-pane-cmd-" + uuid.uuid4().hex
+    log = tmp_path / "python-argv.json"
+    real = shutil.which("python3")
+    assert real
+    spy = tmp_path / "spy-python"
+    spy.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        f"log = {str(log)!r}\n"
+        "try:\n"
+        "    prev = json.loads(open(log, encoding='utf-8').read())\n"
+        "except Exception:\n"
+        "    prev = []\n"
+        "prev.append(list(sys.argv[1:]))\n"
+        "open(log, 'w', encoding='utf-8').write(json.dumps(prev))\n"
+        f"os.execv({real!r}, [{real!r}] + sys.argv[1:])\n",
+        encoding="utf-8",
+    )
+    spy.chmod(0o755)
+    receipt = dict(_HANDLED_RECEIPT)
+    receipt["detail"] = secret
+    panes = json.dumps(
+        [{"id": 3, "title": "host", "terminal_command": secret}]
+    )
+    fake = tmp_path / "vc-frame"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps([{"
+        '"name":"Tab","position":0,"active":True,"tab_id":0,'
+        '"panes_to_hide":0,"viewport_rows":24,"viewport_columns":80'
+        "}], indent=2))\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    result = _eval_start_fn(
+        "\n".join(
+            [
+                f'printf "CLASS=[%s]\\n" "$(_vetcoders_start_classify_projection {shlex.quote(json.dumps(receipt, separators=(",", ":")))} mlx-batch-runner 1)"',
+                f'printf "REC=[%s]\\n" "$(_vetcoders_start_reconcile_host_projection {shlex.quote(panes)} {shlex.quote(panes)} mlx-batch-runner)"',
+                f'tab="$(_vetcoders_start_resolve_host_tab host {shlex.quote(str(fake))})"',
+                'printf "TAB=[%s]\\n" "$tab"',
+            ]
+        ),
+        extra_env={"VIBECRAFTED_PYTHON": str(spy)},
+    )
+    assert "CLASS=[handled]" in result.stdout, result.stdout + result.stderr
+    assert "REC=[unchanged]" in result.stdout, result.stdout + result.stderr
+    assert "TAB=[1]" in result.stdout, result.stdout + result.stderr
+    logged = json.loads(log.read_text(encoding="utf-8"))
+    blob = json.dumps(logged)
+    assert secret not in blob, logged
 
 
 # --------------------------------------------------------------------------
@@ -2435,9 +2662,11 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
 
     Creates an isolated exclusive sandbox, a vibecrafted-host session, one
     attached PTY client, and a prior pane. Invokes public `vc-start --repo`
-    with attached-host markers. Asserts successful guest projection, stable
-    host chrome, surviving prior PTY, then client-ambiguity refusal before
-    a second create. Cleanup kills only the named test-owned sessions.
+    with attached-host markers. Success requires a compact Handled receipt
+    whose pane_id exists on the host, exact chrome titles, the same prior
+    pane id and process start identity, and a usable dump-screen of the
+    projected pane — not a guest-name substring. Then client-ambiguity
+    refuses before a second create. Cleanup kills only named test sessions.
     """
     assert _ADMITTED_FRAME is not None
     bin_path = _ADMITTED_FRAME
@@ -2501,6 +2730,10 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         return frame(
             "--session", host, "action", "list-panes", "--json", "--command"
         ).stdout
+
+    def pane_rows() -> list:
+        payload = _list_panes_payload(panes())
+        return payload if isinstance(payload, list) else []
 
     def attach(token: str) -> subprocess.Popen[str]:
         attached = home / f"pty-attached-{token}"
@@ -2587,13 +2820,27 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
 
         chrome = _wait_until(
             lambda: (
-                text
-                if "session-manager" in (text := panes()) and "VC Guest" in text
-                else ""
+                rows
+                if (
+                    (
+                        titles := {
+                            pane.get("title")
+                            for pane in (rows := pane_rows())
+                            if isinstance(pane, dict)
+                        }
+                    )
+                    and "session-manager" in titles
+                    and "VC Guest" in titles
+                )
+                else []
             ),
             25,
         )
-        assert chrome and "session-manager" in chrome and "VC Guest" in chrome, chrome
+        assert chrome, panes()
+        chrome_titles = {
+            pane.get("title") for pane in chrome if isinstance(pane, dict)
+        }
+        assert "session-manager" in chrome_titles and "VC Guest" in chrome_titles, chrome
 
         pane = frame(
             "--session",
@@ -2607,6 +2854,24 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         )
         assert pane.returncode == 0, pane.stderr
         assert _wait_until(lambda: _pid_alive(prior_pid), 15), prior_pid
+        prior_pid_value = prior_pid.read_text(encoding="utf-8").strip()
+        prior_pane = _wait_until(
+            lambda: next(
+                (
+                    row
+                    for row in pane_rows()
+                    if isinstance(row, dict)
+                    and "sleep 10000" in str(row.get("terminal_command") or "")
+                ),
+                None,
+            ),
+            15,
+        )
+        assert isinstance(prior_pane, dict) and prior_pane.get("id") not in (
+            None,
+            "",
+        ), panes()
+        prior_pane_id = prior_pane["id"]
 
         refused_layout = public_start(
             guest_repo,
@@ -2629,10 +2894,37 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         assert "switch-session" not in combined
         assert host in listing() and "(EXITED" not in listing()
         assert guest in listing()
-        after = panes()
-        assert "session-manager" in after and "VC Guest" in after, after
-        assert guest in after, after
-        assert _pid_alive(prior_pid), prior_pid.read_text(encoding="utf-8")
+        receipts = _workspace_projection_receipts(started.stdout)
+        assert len(receipts) == 1, started.stdout
+        receipt = receipts[0]
+        assert receipt.get("status") == "Handled", receipt
+        assert receipt.get("guest") == guest, receipt
+        assert receipt.get("pane_id") not in (None, ""), receipt
+        assert str(receipt.get("request_id") or "").strip(), receipt
+        after_rows = pane_rows()
+        after_titles = {
+            row.get("title") for row in after_rows if isinstance(row, dict)
+        }
+        assert "session-manager" in after_titles and "VC Guest" in after_titles, (
+            after_rows
+        )
+        guest_pane = _pane_by_id(after_rows, receipt["pane_id"])
+        assert guest_pane is not None, (receipt, after_rows)
+        surviving = _pane_by_id(after_rows, prior_pane_id)
+        assert surviving is not None, (prior_pane_id, after_rows)
+        assert prior_pid.read_text(encoding="utf-8").strip() == prior_pid_value
+        assert _pid_alive(prior_pid), prior_pid_value
+        dumped = frame(
+            "--session",
+            host,
+            "action",
+            "dump-screen",
+            "--pane-id",
+            f"terminal_{receipt['pane_id']}",
+        )
+        dump = dumped.stdout + dumped.stderr
+        assert dumped.returncode == 0, dump
+        assert "not found" not in dump.lower(), dump
 
         attach("host-second")
         two = _wait_until(
@@ -2660,8 +2952,15 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         assert "RC=[4]" in ambiguous.stdout, ambiguous.stdout + ambiguous.stderr
         assert "exactly one attached client" in ambiguous.stderr
         assert other not in listing(), listing()
+        assert prior_pid.read_text(encoding="utf-8").strip() == prior_pid_value
         assert _pid_alive(prior_pid)
-        assert "session-manager" in panes() and "VC Guest" in panes()
+        final_titles = {
+            row.get("title") for row in pane_rows() if isinstance(row, dict)
+        }
+        assert "session-manager" in final_titles and "VC Guest" in final_titles, (
+            pane_rows()
+        )
+        assert _pane_by_id(pane_rows(), prior_pane_id) is not None
     finally:
         for proc, release in ptys:
             try:

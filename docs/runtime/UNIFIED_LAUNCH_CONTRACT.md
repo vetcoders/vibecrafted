@@ -182,15 +182,18 @@ vc-frame --session <host> project-workspace <guest> [--tab <one-based>]
 
 Host identity is the attached owner (`VC_FRAME_SESSION_NAME`) verified live
 with exactly one interactive client — never the repository basename and never
-a silent `switch-session`. Success is a correlated `WorkspaceProjectionReceipt`
-with `status=Handled` and a `pane_id`, or an owner `list-panes --json --command`
-reconcile that shows the guest on the host after a missing/malformed ACK.
+a silent `switch-session`. Success is the Frame CLI exiting 0 together with
+exactly one correlated `WorkspaceProjectionReceipt` (`status=Handled`,
+`pane_id` set, guest/tab/request match). fd14 emits that receipt as one
+compact `serde_json::to_string` document. `list-panes` has no public guest
+binding: a title, command, or name that merely contains the guest is not
+projection proof, and a nonzero engine status is not ordinary success.
 A missing or older Frame binary, an unresolvable host, or an ambiguous client
 refuses before create (exit 4). A confirmed rejection or an unchanged owner
 snapshot reports created-but-not-projected and that the previous canvas was
-left unchanged. An unparseable, uncorrelated, or drifted outcome is
-indeterminate: the launcher must not claim the canvas stayed put. Name
-collisions remain exit 3.
+left unchanged. An unparseable, uncorrelated, duplicate, drifted, or
+status/ACK-disagreeing outcome is indeterminate: the launcher must not claim
+the canvas stayed put. Name collisions remain exit 3.
 
 ## Reserved integration interfaces
 
