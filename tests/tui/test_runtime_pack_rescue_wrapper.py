@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 import pytest
-from _runtime_pack_fixture import _write_test_source_provenance, seed_runtime_pack
+from _runtime_pack_fixture import seed_runtime_pack
 
 from scripts import vetcoders_install as installer
 from tests.tui.test_runtime_pack_rescue import (
@@ -587,9 +587,11 @@ def test_public_wrapper_sigkill_mid_publication_resumes_same_verified_pack(
     emitted, or fail on those records.
     """
     paths = roots
-    payload = seed_runtime_pack(tmp_path / "pack-hold", version="9.9.9+hold")
-    _instrument_pack_installer_publication_hold(payload)
-    _write_test_source_provenance(payload)
+    payload = seed_runtime_pack(
+        tmp_path / "pack-hold",
+        version="9.9.9+hold",
+        before_source_seal=_instrument_pack_installer_publication_hold,
+    )
     _seal_runtime_pack_for_admission(payload)
     _install(payload, capsys)
     planted = _plant_missing_historical(paths)
