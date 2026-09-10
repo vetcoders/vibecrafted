@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import shutil
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from scripts import vetcoders_install as installer
@@ -77,8 +78,13 @@ def seed_runtime_pack(
     version: str = "9.9.9+g12345678",
     frame_config: str | None = None,
     terminal_policy: str | None = None,
+    before_source_seal: Callable[[Path], None] | None = None,
 ) -> Path:
-    """Supply real manifest inputs; publication performs its own sealing."""
+    """Supply real manifest inputs; publication performs its own sealing.
+
+    ``before_source_seal`` mutates source inputs before provenance bind.
+    Native donors are added after that bind and must not be resealed as source.
+    """
     for destination, source in _RUNTIME_GENERATION_FIXTURE_SOURCES.items():
         if (
             "generated" in destination.parts
@@ -147,6 +153,8 @@ def seed_runtime_pack(
     ):
         if content is not None:
             (payload / relative).write_text(content, encoding="utf-8")
+    if before_source_seal is not None:
+        before_source_seal(payload)
     # Bind the distribution input before adding native donor payload.
     _write_test_source_provenance(payload)
     for relative in ("bin/vc-terminal", "libexec/vc-frame"):
