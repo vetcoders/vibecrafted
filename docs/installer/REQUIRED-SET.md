@@ -221,7 +221,9 @@ mutate as `damaged-pre-rescue` (never a healthy restorepoint; evidence is
 hashed before restore), archives the original receipt, drops only
 missing-historical backup map entries, and reuses the existing publication
 transaction. The journal stores the original target/inventory/payload/source
-binding. Interrupted resume revalidates that input identity before every
+binding. Each apply attempt allocates a unique evidence directory;
+a same-second retry must not reuse or overwrite the prior attempt's
+snapshot. Interrupted resume revalidates that input identity before every
 mutation and refuses a changed pack, mode, or path. Live installed
 partial-state from this rescue is not treated as input drift. A path
 publication will touch that cannot be captured refuses before mutation.

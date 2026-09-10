@@ -7,6 +7,7 @@ import json
 import re
 import shutil
 from argparse import Namespace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -308,6 +309,119 @@ def test_interrupted_publish_then_retry_recovers(tmp_path, installed, capsys, mo
     finalized = _load_receipt(paths)
     assert not finalized.get("rescue_pending")
     assert finalized["rescue"]["verified"] is True
+
+
+class _FrozenUtcDateTime(datetime):
+    """Pin ``datetime.now`` so interrupt+retry share a UTC second."""
+
+    @classmethod
+    def now(cls, tz=None):
+        pinned = datetime(2026, 9, 10, 0, 35, 51, tzinfo=timezone.utc)
+        return pinned if tz is not None else pinned.replace(tzinfo=None)
+
+
+def test_allocate_evidence_token_does_not_reuse_existing_directory(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(installer, "datetime", _FrozenUtcDateTime)
+    first = installer._runtime_rescue_allocate_evidence_token(tmp_path, "ab" * 32)
+    second = installer._runtime_rescue_allocate_evidence_token(tmp_path, "ab" * 32)
+    assert first == "20260910T003551Z-abababababab"
+    assert second == "20260910T003551Z-abababababab-1"
+    assert installer._runtime_rescue_evidence_root(tmp_path, first).is_dir()
+    assert installer._runtime_rescue_evidence_root(tmp_path, second).is_dir()
+
+
+def test_interrupted_publish_then_retry_recovers_when_evidence_token_collides(
+    tmp_path, installed, capsys, monkeypatch
+):
+    """Warm-suite same-second retry must not reuse the interrupted snapshot."""
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    _, plan = _plan(payload, capsys)
+    monkeypatch.setattr(installer, "datetime", _FrozenUtcDateTime)
+    original = installer._publish_runtime_config_transaction
+    calls = {"n": 0}
+
+    def boom(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("injected interrupt")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(installer, "_publish_runtime_config_transaction", boom)
+    code, first = _apply(payload, capsys, plan["plan_digest"])
+    assert code == 2
+    first_archive = Path(first["archived_receipt"]["path"])
+    first_snapshot = Path(first["pre_rescue_snapshot"]["path"])
+    assert first_archive.is_file()
+    assert first_snapshot.is_dir()
+    _, plan2 = _plan(payload, capsys)
+    code, second = _apply(payload, capsys, plan2["plan_digest"])
+    assert code == 0
+    assert second["status"] == "rescued"
+    assert second["healthy_restorepoint"] is True
+    second_archive = Path(second["archived_receipt"]["path"])
+    assert second_archive.is_file()
+    assert second_archive != first_archive
+    assert first_archive.is_file()
+    assert first_snapshot.is_dir()
+    rescue_root = paths["runtime_home"] / ".installer-backups" / "rescue"
+    tokens = {
+        path.name
+        for path in rescue_root.iterdir()
+        if path.is_dir() and path.name.startswith("20260910T003551Z-")
+    }
+    assert len(tokens) >= 2
+    finalized = _load_receipt(paths)
+    assert not finalized.get("rescue_pending")
+    assert finalized["rescue"]["verified"] is True
+
+
+def test_apply_refuses_mismatched_rescue_pending_identity(
+    installed, capsys, monkeypatch
+):
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    _, plan = _plan(payload, capsys)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("injected interrupt")
+
+    monkeypatch.setattr(installer, "_publish_runtime_config_transaction", boom)
+    code, first = _apply(payload, capsys, plan["plan_digest"])
+    assert code == 2
+    journal = json.loads(
+        installer._runtime_rescue_journal_path(paths["runtime_home"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    receipt = _load_receipt(paths)
+    receipt["rescue_pending"] = {
+        "schema": installer.RUNTIME_RESCUE_PENDING_SCHEMA,
+        "plan_digest": "a" * 64,
+        "input_digest": journal.get("input_digest"),
+        "binding": {
+            **dict(journal.get("binding") or {}),
+            "payload_sha256": "b" * 64,
+        },
+    }
+    _write_receipt(paths, receipt)
+    captured: dict[str, bool] = {}
+
+    def spy(*args, **kwargs):
+        captured["called"] = True
+        return 0
+
+    monkeypatch.setattr(installer, "_install_runtime_pack", spy)
+    code, result = _apply(payload, capsys, "a" * 64)
+    assert code == 2
+    assert result["status"] == "refused"
+    assert "journal" in result["reason"]
+    assert "plan-digest" in result["reason"]
+    assert "called" not in captured
+    assert first["archived_receipt"]["path"]
+    assert Path(first["archived_receipt"]["path"]).is_file()
 
 
 def test_interrupted_pending_journal_resumes_same_digest(

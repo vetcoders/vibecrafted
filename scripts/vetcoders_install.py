@@ -18363,6 +18363,36 @@ def _runtime_rescue_evidence_root(runtime_home: Path, token: str) -> Path:
     return runtime_home / ".installer-backups" / "rescue" / token
 
 
+def _runtime_rescue_allocate_evidence_token(
+    runtime_home: Path, receipt_sha256: str
+) -> str:
+    """Allocate a unique evidence directory for this apply attempt.
+
+    UTC-second + receipt prefix collides when interrupt+retry land in the
+    same second (warm suite). Reusing that directory leaves ``pre-rescue``
+    occupants; a second snapshot then fails before publication.
+    """
+    prefix = (
+        datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        + "-"
+        + str(receipt_sha256)[:12]
+    )
+    suffix = 0
+    while True:
+        token = prefix if suffix == 0 else f"{prefix}-{suffix}"
+        root = _runtime_rescue_evidence_root(runtime_home, token)
+        try:
+            root.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            suffix += 1
+            if suffix > 10_000:
+                raise RuntimeError(
+                    "unable to allocate a unique rescue evidence directory"
+                )
+            continue
+        return token
+
+
 def _runtime_rescue_journal_path(runtime_home: Path) -> Path:
     return runtime_home / ".installer-backups" / "rescue" / "current-journal.json"
 
@@ -18587,7 +18617,11 @@ def _runtime_rescue_snapshot_pre_rescue(
     If a path publication will touch cannot be captured, refuse before mutation.
     """
     snapshot_root = evidence_root / "pre-rescue"
-    snapshot_root.mkdir(parents=True, exist_ok=True)
+    if snapshot_root.exists():
+        raise RuntimeError(
+            "refusing rescue mutation; pre-rescue snapshot directory already exists"
+        )
+    snapshot_root.mkdir(parents=True, exist_ok=False)
     captured: list[dict[str, str]] = []
     seen: set[str] = set()
     for path in _runtime_rescue_expected_publication_paths(
@@ -19435,13 +19469,10 @@ def _runtime_rescue_apply(
             Path(args.payload_root),
             allow_older_runtime=bool(getattr(args, "allow_older_runtime", False)),
         )
-        token = (
-            datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            + "-"
-            + plan["receipt"]["sha256"][:12]
+        token = _runtime_rescue_allocate_evidence_token(
+            paths["runtime_home"], str(plan["receipt"]["sha256"])
         )
         evidence_root = _runtime_rescue_evidence_root(paths["runtime_home"], token)
-        evidence_root.mkdir(parents=True, exist_ok=True)
         archive = evidence_root / "original-receipt.json"
         archive.write_bytes(original_bytes)
         (evidence_root / "original-receipt.sha256").write_text(
