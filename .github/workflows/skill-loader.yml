@@ -65,12 +65,23 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
 
-      - name: Install vibecrafted (non-interactive)
-        # The smoke's subject is the skill loader, not server supervision.
-        # CI runners share no operator launchd/systemd domain, and service
-        # activation cannot prove a healthy managed pair there (macOS leg
-        # died on exactly that). Same isolation the portable suite uses.
-        run: make install INSTALL_SERVER_SERVICE_POLICY=isolated
+      - name: Bootstrap the provenance-bound source carrier
+        # The smoke's subject is the skill loader. A signed Runtime Pack is a
+        # macOS release carrier and cannot be synthesized on either CI platform;
+        # build the documented portable source carrier from this exact checkout
+        # and stage its repo-owned tool runtime under an isolated home instead.
+        run: |
+          set -euo pipefail
+          portable_archive="${RUNNER_TEMP:-/tmp}/vibecrafted-${RUNNER_OS,,}-${RUNNER_ARCH,,}-portable.tar.gz"
+          source_revision="$(git rev-parse HEAD)"
+          python3 scripts/distribution_manifest.py archive \
+            --source "$GITHUB_WORKSPACE" \
+            --output "$portable_archive" \
+            --root-name vibecrafted-ci-portable \
+            --owner-repo "$GITHUB_REPOSITORY" \
+            --source-revision "$source_revision"
+          INSTALL_TOOLS_SERVICE_POLICY=isolated \
+            bash install.sh --archive-file "$portable_archive" install-tools
 
       - name: Run skill-loader smoke
         run: make test-skills

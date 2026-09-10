@@ -187,6 +187,37 @@ def test_portable_workflow_requires_runtime_pack_bootstrap_on_mac_and_linux() ->
     assert "build-essential" not in bootstrap
 
 
+def test_ci_workflows_select_the_platforms_canonical_carrier() -> None:
+    """CI must not fabricate a Linux Runtime Pack or bypass its verifier.
+
+    Linux has the closed portable-source carrier; the skill smoke needs only
+    that staged source runtime on Linux and macOS. The binary Runtime Pack
+    remains the signed macOS release carrier consumed by ``make install``.
+    """
+    install_linux = (REPO_ROOT / ".github/workflows/install-linux.yml").read_text(
+        encoding="utf-8"
+    )
+    skill_loader = (REPO_ROOT / ".github/workflows/skill-loader.yml").read_text(
+        encoding="utf-8"
+    )
+
+    for workflow in (install_linux, skill_loader):
+        assert "scripts/distribution_manifest.py archive" in workflow
+        assert "--root-name vibecrafted-ci-portable" in workflow
+        assert (
+            'bash install.sh --archive-file "$portable_archive" install-tools'
+            in workflow
+        )
+        assert "run: make install" not in workflow
+        assert "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY" not in workflow
+
+    assert "vibecrafted-linux-x64-portable.tar.gz" in install_linux
+    assert "ubuntu-22.04" in install_linux
+    assert "ubuntu-24.04" in install_linux
+    assert "macos-latest" in skill_loader
+    assert "ubuntu-latest" in skill_loader
+
+
 def test_portable_source_smoke_selects_explicit_source_lane() -> None:
     portable_smoke = (REPO_ROOT / "tests/portable/run.sh").read_text(encoding="utf-8")
 
