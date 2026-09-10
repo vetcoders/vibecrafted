@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import shutil
 from argparse import Namespace
 from pathlib import Path
 
@@ -11,6 +13,70 @@ import pytest
 from _runtime_pack_fixture import seed_runtime_pack
 
 from scripts import vetcoders_install as installer
+
+
+def _seal_runtime_pack_for_admission(payload: Path) -> Path:
+    """Close a seed pack with the canonical 79001 provenance owner.
+
+    This is test construction of required release content, not a production
+    bypass. Admission still goes through ``verify_provenance``.
+    """
+    contract = installer._runtime_pack_contract_module()
+    (payload / "bin").mkdir(parents=True, exist_ok=True)
+    (payload / "libexec").mkdir(parents=True, exist_ok=True)
+    (payload / "scripts").mkdir(parents=True, exist_ok=True)
+    frame_wrapper = payload / "bin/vc-frame"
+    frame_wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    frame_wrapper.chmod(0o755)
+    terminal_src = Path(installer.__file__).resolve().parent / "vc-terminal-product-entry.sh"
+    (payload / "bin/vc-terminal").write_text(
+        terminal_src.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (payload / "bin/vc-terminal").chmod(0o755)
+    donor = Path("/usr/bin/true")
+    native = payload / "libexec/vc-terminal"
+    if donor.is_file():
+        shutil.copyfile(donor, native)
+    else:
+        native.write_bytes(b"\xcf\xfa\xed\xfe" + b"\x00" * 32)
+    native.chmod(0o755)
+    files: dict[str, str] = {}
+    for name in sorted(contract.REQUIRED_FOUNDATION_EXECUTABLES):
+        executable = payload / "bin" / name
+        if not executable.is_file():
+            executable.write_text(f"#!/bin/sh\n# {name}\n", encoding="utf-8")
+            executable.chmod(0o755)
+        files[name] = hashlib.sha256(executable.read_bytes()).hexdigest()
+    foundations = {
+        "schema": "io.vetcoders.vibecrafted.runtime-foundations.v1",
+        "versions": {},
+        "source_revisions": {},
+        "source_archives": {},
+        "licenses": {},
+        "files": files,
+    }
+    (payload / "runtime-foundations.json").write_text(
+        json.dumps(foundations, ensure_ascii=True, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    source_path = payload / "source-provenance.json"
+    source = json.loads(source_path.read_text(encoding="utf-8"))
+    revision = str(source["source_revision"])
+    source_path.write_text(
+        json.dumps(source, ensure_ascii=True, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    contract.write_provenance(
+        payload,
+        carrier_basename="Vibecrafted_RuntimePack_rescue-fixture.tar.gz",
+        version=(payload / "VERSION").read_text(encoding="utf-8").strip(),
+        platform="darwin-arm64",
+        architecture="arm64",
+        source_revision=revision,
+        terminal_revision="2" * 40,
+        frame_revision="3" * 40,
+    )
+    return payload
 
 
 @pytest.fixture
@@ -102,6 +168,7 @@ def _plant_missing_historical(paths: dict, count: int = 3) -> list[str]:
 @pytest.fixture
 def installed(tmp_path: Path, roots, capsys):
     payload = seed_runtime_pack(tmp_path / "pack-a", version="9.9.9+a")
+    _seal_runtime_pack_for_admission(payload)
     result = _install(payload, capsys)
     return roots, payload, result
 
@@ -380,6 +447,8 @@ def test_target_identity_binds_payload_bytes_not_version_hash(tmp_path, installe
     payload_digest = first["target"]["payload_sha256"]
     inventory_digest = first["target"]["inventory_sha256"]
     assert first["target"]["inventory_verified"] is True
+    assert first["target"]["provenance_verified"] is True
+    assert first["target"]["usable"] is True
     assert first["target"]["inventory_count"] >= 1
     assert payload_digest != version_identity
     assert inventory_digest != version_identity
@@ -389,6 +458,9 @@ def test_target_identity_binds_payload_bytes_not_version_hash(tmp_path, installe
     assert second["target"]["version_identity_sha256"] == version_identity
     assert second["target"]["payload_sha256"] != payload_digest
     assert second["target"]["inventory_sha256"] != inventory_digest
+    assert second["target"]["inventory_verified"] is False
+    assert second["target"]["provenance_verified"] is False
+    assert second["target"]["usable"] is False
     assert second["plan_digest"] != first["plan_digest"]
 
 
@@ -471,6 +543,7 @@ def test_snapshot_covers_new_publication_and_validates_evidence(
     new_skill = payload / "vibecrafted-core/vibecrafted_core/skills/vc-rescue-probe/SKILL.md"
     new_skill.parent.mkdir(parents=True, exist_ok=True)
     new_skill.write_text("# vc-rescue-probe\n")
+    _seal_runtime_pack_for_admission(payload)
     projected = Path.home() / ".agents/skills/vc-rescue-probe"
     assert not projected.exists()
     _, plan = _plan(payload, capsys)
@@ -538,3 +611,133 @@ def test_fix_rc_is_explicit_planned_stanza_preserving_user_content(
     assert refuse_code == 2
     assert refused["status"] == "refused"
     assert unclosed.read_text(encoding="utf-8").endswith("export KEEP_ME=1\n")
+
+
+def test_plan_does_not_execute_user_startup_marker(installed, capsys):
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    marker = Path.home() / "rescue-plan-executed-zshrc"
+    zshrc = Path.home() / ".zshrc"
+    zshrc.write_text(
+        f"print -n executed > {marker}\n"
+        "touch ${HOME}/rescue-plan-executed-zshrc\n",
+        encoding="utf-8",
+    )
+    code, plan = _plan(payload, capsys)
+    assert code == 0
+    assert not marker.exists()
+    assert plan["shell"]["interactive_shell"]["executed"] is False
+    assert "returncode" not in plan["shell"]["interactive_shell"]
+    digest_material = json.dumps(plan["shell"], sort_keys=True)
+    assert "returncode" not in digest_material
+
+
+def test_minimal_pack_is_not_verified_release_admission(tmp_path):
+    payload = tmp_path / "minimal"
+    (payload / "scripts").mkdir(parents=True)
+    (payload / "VERSION").write_text("4.3.1+g79001c3d\n", encoding="utf-8")
+    shutil.copy2(Path(installer.__file__), payload / "scripts/vetcoders_install.py")
+    identity = installer._runtime_rescue_target_identity(payload)
+    assert identity["usable"] is False
+    assert identity["inventory_verified"] is False
+    assert identity["provenance_verified"] is False
+    assert identity["inventory_count"] >= 1
+    assert identity["payload_sha256"]
+    assert "not verified release admission" in identity["reason"]
+
+
+def test_pack_admission_uses_canonical_provenance_contract(tmp_path):
+    payload = seed_runtime_pack(tmp_path / "pack")
+    _seal_runtime_pack_for_admission(payload)
+    identity = installer._runtime_rescue_target_identity(payload)
+    assert identity["usable"] is True
+    assert identity["inventory_verified"] is True
+    assert identity["provenance_verified"] is True
+
+    (payload / ".DS_Store").write_bytes(b"mutable Finder metadata")
+    (payload / "bin/.DS_Store").write_bytes(b"mutable Finder metadata")
+    identity = installer._runtime_rescue_target_identity(payload)
+    assert identity["usable"] is True
+    assert identity["inventory_verified"] is True
+
+    extra = payload / "not-in-release.txt"
+    extra.write_text("omitted-from-provenance\n", encoding="utf-8")
+    identity = installer._runtime_rescue_target_identity(payload)
+    assert identity["usable"] is False
+    assert identity["inventory_verified"] is False
+    extra.unlink()
+
+    identity = installer._runtime_rescue_target_identity(payload)
+    assert identity["usable"] is True
+
+    missing = payload / "bin/vc-start"
+    missing.unlink()
+    identity = installer._runtime_rescue_target_identity(payload)
+    assert identity["usable"] is False
+    assert identity["inventory_verified"] is False
+
+    payload2 = seed_runtime_pack(tmp_path / "pack-malformed")
+    _seal_runtime_pack_for_admission(payload2)
+    (payload2 / "runtime-pack-provenance.json").write_text("{not-json", encoding="utf-8")
+    identity = installer._runtime_rescue_target_identity(payload2)
+    assert identity["usable"] is False
+    assert identity["inventory_verified"] is False
+    assert identity["provenance_verified"] is False
+
+    payload3 = seed_runtime_pack(tmp_path / "pack-bytes")
+    _seal_runtime_pack_for_admission(payload3)
+    mutated = payload3 / "bin/vc-start"
+    mutated.write_bytes(mutated.read_bytes() + b"#changed-bytes")
+    identity = installer._runtime_rescue_target_identity(payload3)
+    assert identity["usable"] is False
+    assert identity["inventory_verified"] is False
+
+    payload4 = seed_runtime_pack(tmp_path / "pack-mode")
+    _seal_runtime_pack_for_admission(payload4)
+    mode_target = payload4 / "bin/vc-start"
+    mode_target.chmod(0o644)
+    identity = installer._runtime_rescue_target_identity(payload4)
+    assert identity["usable"] is False
+    assert identity["inventory_verified"] is False
+
+
+def test_same_type_foreign_command_replacement_refuses(installed, capsys):
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    owned = paths["launcher_home"] / "vibecrafted"
+    owned.write_text("#!/bin/sh\n# foreign occupant\n", encoding="utf-8")
+    owned.chmod(0o755)
+    original = owned.read_bytes()
+    code, plan = _plan(payload, capsys)
+    entry = next(item for item in plan["ownership"] if item["path"] == str(owned))
+    assert entry["current_type"] == "file"
+    assert entry["occupant_proof"] == "none"
+    assert entry["disposition"] == "preserve"
+    assert entry["class"] == "unknown_ownership"
+    assert plan["status"] == "refused"
+    apply_code, result = _apply(payload, capsys, plan["plan_digest"])
+    assert apply_code == 2
+    assert result["status"] == "refused"
+    assert owned.read_bytes() == original
+
+
+def test_same_type_foreign_symlink_target_refuses(tmp_path, installed, capsys):
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    foreign = tmp_path / "foreign-live-target"
+    foreign.write_text("not yours\n", encoding="utf-8")
+    selector = paths["runtime_home"] / "tools/vibecrafted-current"
+    selector.unlink()
+    selector.symlink_to(foreign)
+    code, plan = _plan(payload, capsys)
+    entry = next(item for item in plan["ownership"] if item["path"] == str(selector))
+    assert entry["current_type"] == "symlink"
+    assert entry["occupant_proof"] == "none"
+    assert entry["disposition"] == "preserve"
+    assert entry["class"] == "unknown_ownership"
+    assert plan["status"] == "refused"
+    apply_code, result = _apply(payload, capsys, plan["plan_digest"])
+    assert apply_code == 2
+    assert result["status"] == "refused"
+    assert selector.is_symlink()
+    assert selector.readlink() == foreign

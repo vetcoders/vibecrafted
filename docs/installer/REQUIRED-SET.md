@@ -204,13 +204,16 @@ python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <
 python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack> --rescue --apply --plan-digest <sha256>
 ```
 
-`--plan` is read-only. It inventories receipt digest, generation, ownership
+`--plan` is read-only file evidence. It does not execute user startup
+files. It inventories receipt digest, generation, ownership
 hashes/targets (including nonregular current type, symlink target, and
-directory listing), the verified target payload inventory/content digest
-(not a VERSION hash labeled as a payload hash), host-shell `--fix-rc`
-stanzas, and backup classes (`present`, `missing_historical`,
-`live_damage`, `unsafe`). Historical rollback is reported unavailable when
-preimages are gone. Original receipt bytes are preserved as evidence.
+directory listing), observed target payload bytes plus canonical
+`runtime-pack-provenance.json` admission (`payload.files`
+path/sha256/size/mode; hashing whatever exists is not verification),
+host-shell `--fix-rc` stanza hashes, and backup classes (`present`,
+`missing_historical`, `live_damage`, `unsafe`). Historical rollback is
+reported unavailable when preimages are gone. Original receipt bytes are
+preserved as evidence. Plan digest does not include a startup returncode.
 
 `--apply` binds to that plan digest, revalidates the live payload inventory
 under the existing install lease, snapshots every path publication can
@@ -219,8 +222,13 @@ hashed before restore), archives the original receipt, drops only
 missing-historical backup map entries, and reuses the existing publication
 transaction. Destination verification covers selectors, active identity,
 every receipted file/symlink/dir, every expected launcher/skill/config
-projection, and an isolated interactive shell. A healthy receipt is not a
-healthy shell. Unsafe or unknown-ownership paths refuse. User config,
+projection, and an isolated interactive `zsh -i` smoke in a real
+temporary HOME/ZDOTDIR. A healthy receipt is not a
+healthy shell. Unsafe or unknown-ownership paths refuse. Same-type
+receipted files with a different hash, and symlinks with a foreign live
+target, are not republished from receipt path alone: preference drift
+uses the existing preserving merge; foreign command/skill replacements
+are preserved or refuse. User config,
 foreign commands, and unplanned rc content stay.
 A target pack whose embedded installer lacks `--rescue` is not rewritten;
 bootstrap with this source installer against the verified payload-root.

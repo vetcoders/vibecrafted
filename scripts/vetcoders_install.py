@@ -17394,6 +17394,31 @@ def _runtime_rescue_command() -> str:
     )
 
 
+_RUNTIME_PACK_CONTRACT_MODULE: Any | None = None
+
+
+def _runtime_pack_contract_module() -> Any:
+    """Load the canonical Runtime Pack contract by file, never a payload copy."""
+    global _RUNTIME_PACK_CONTRACT_MODULE
+    if _RUNTIME_PACK_CONTRACT_MODULE is not None:
+        return _RUNTIME_PACK_CONTRACT_MODULE
+    module_path = (
+        Path(__file__).resolve().parents[1]
+        / "vibecrafted-core"
+        / "vibecrafted_core"
+        / "runtime_pack_contract.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "vibecrafted_installer_runtime_pack_contract", module_path
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load Runtime Pack contract from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _RUNTIME_PACK_CONTRACT_MODULE = module
+    return module
+
+
 def _runtime_rescue_payload_digest(payload_root: Path) -> str:
     """Content digest of the live pack tree via the existing payload hasher."""
     payload_root = payload_root.expanduser().resolve()
@@ -17406,74 +17431,42 @@ def _runtime_rescue_payload_digest(payload_root: Path) -> str:
         os.close(descriptor)
 
 
-def _runtime_rescue_payload_inventory(payload_root: Path) -> list[dict[str, str]]:
-    """Exact live file inventory using the receipt file digest owner."""
-    records: list[dict[str, str]] = []
-    payload_root = payload_root.expanduser().resolve()
-    for dirpath, dirnames, filenames in os.walk(payload_root, followlinks=False):
-        dirnames.sort()
-        filenames.sort()
-        for name in filenames:
-            path = Path(dirpath) / name
-            if path.name == ".DS_Store":
-                continue
-            if path.is_symlink():
-                raise RuntimeError(
-                    f"Runtime Pack inventory contains a symlink: {path}"
-                )
-            if not path.is_file():
-                raise RuntimeError(
-                    f"Runtime Pack inventory contains a nonregular file: {path}"
-                )
-            records.append(
-                {
-                    "path": path.relative_to(payload_root).as_posix(),
-                    "sha256": _sha256_path(path),
-                    "size": str(path.stat().st_size),
-                    "mode": f"{stat.S_IMODE(path.stat().st_mode):04o}",
-                }
-            )
-    if not records:
-        raise RuntimeError("Runtime Pack payload inventory is empty")
-    return records
+def _runtime_rescue_payload_inventory(payload_root: Path) -> list[dict[str, Any]]:
+    """Observed live inventory via the canonical pack ``_payload_files`` owner."""
+    contract = _runtime_pack_contract_module()
+    return list(contract._payload_files(payload_root.expanduser().resolve()))
 
 
-def _runtime_rescue_verify_pack_provenance(
-    payload_root: Path, inventory: Sequence[Mapping[str, str]]
-) -> tuple[bool, str]:
-    """Re-check a closed provenance inventory when the pack carries one.
+def _runtime_rescue_admit_pack(payload_root: Path) -> tuple[bool, bool, str]:
+    """Admit a pack only through canonical ``verify_provenance``.
 
-    Absence is not verification. Present inventory must match live
-    ``_sha256_path`` bytes. This does not invent a second verifier.
+    Observed hashing is recorded separately. Absence, malformation, extra or
+    omitted entries, and changed bytes or modes refuse. ``.DS_Store`` stays
+    the existing carrier exception. This is not a second verifier.
     """
-    path = payload_root / RUNTIME_PACK_PROVENANCE_NAME
+    contract = _runtime_pack_contract_module()
+    path = payload_root / contract.PROVENANCE_NAME
     if not path.is_file():
-        return False, ""
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Runtime Pack provenance is unreadable: {exc}") from exc
-    files = (
-        ((payload.get("payload") or {}) if isinstance(payload, dict) else {}).get(
-            "files"
+        return (
+            False,
+            False,
+            (
+                "Runtime Pack provenance is missing; observed content is not "
+                "verified release admission"
+            ),
         )
-    )
-    if not isinstance(files, list) or not files:
-        raise RuntimeError("Runtime Pack provenance inventory is empty or malformed")
-    observed = {item["path"]: item["sha256"] for item in inventory}
-    for record in files:
-        if not isinstance(record, dict):
-            raise RuntimeError("Runtime Pack provenance inventory is malformed")
-        relative = str(record.get("path") or "")
-        digest = str(record.get("sha256") or "")
-        if not relative or relative not in observed:
-            raise RuntimeError(f"Runtime Pack provenance path is missing: {relative}")
-        if observed[relative] != digest:
-            raise RuntimeError(
-                "Runtime Pack provenance digest does not match live bytes: "
-                + relative
-            )
-    return True, _sha256_path(path)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return False, False, f"Runtime Pack provenance is invalid: {exc}"
+    carrier = raw.get("carrier_basename") if isinstance(raw, dict) else None
+    if not isinstance(carrier, str) or not carrier:
+        return False, False, "Runtime Pack provenance is missing carrier_basename"
+    try:
+        contract.verify_provenance(payload_root, carrier_basename=carrier)
+    except contract.RuntimePackContractError as exc:
+        return False, False, str(exc)[:1200]
+    return True, True, ""
 
 
 def _runtime_owned_occupant_state(path: Path) -> dict[str, str]:
@@ -17517,25 +17510,60 @@ def _runtime_owned_occupant_state(path: Path) -> dict[str, str]:
     return state
 
 
+def _runtime_rescue_is_preference_path(
+    path: Path, paths: Mapping[str, Path]
+) -> bool:
+    """True when the path is owned by the existing preference-merge surface."""
+    product = paths["product_config"]
+    candidates = (
+        *_runtime_preference_paths(product),
+        *_runtime_preference_sources(product).keys(),
+        product / "starship.toml",
+        product / "atuin/config.toml",
+    )
+    return any(path == candidate for candidate in candidates)
+
+
 def _runtime_rescue_occupant_disposition(
     path: Path,
     expected_kind: str,
     occupant: Mapping[str, str],
     paths: Mapping[str, Path],
+    *,
+    expected_digest: str = "",
+    expected_target: str = "",
 ) -> str:
     """Decide whether a current occupant may be replaced.
 
     A receipted path is not proof that the current occupant is ours.
-    Dangling or runtime-owned targets may be republished; foreign
-    replacements are preserved.
+    User preference drift uses the existing preserving merge. Foreign
+    command/skill replacements are preserved. Dangling or runtime-owned
+    targets may be republished.
     """
     current = occupant.get("current_type") or "absent"
     if current == "absent":
         return "republish"
     if current in {"unreadable", "other"}:
         return "preserve"
-    if current == expected_kind:
-        return "republish"
+    if _runtime_rescue_is_preference_path(path, paths):
+        return "merge"
+    if current == "file" and expected_kind == "file":
+        if expected_digest and occupant.get("current_sha256") == expected_digest:
+            return "keep"
+        return "preserve"
+    if current == "symlink" and expected_kind == "symlink":
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError:
+            return "republish"
+        if expected_target and (
+            str(resolved) == expected_target
+            or occupant.get("current_target") == expected_target
+        ):
+            return "keep"
+        if _runtime_owned_path_is_managed(resolved, paths):
+            return "republish"
+        return "preserve"
     if current == "symlink":
         try:
             resolved = path.resolve()
@@ -17696,29 +17724,38 @@ def _runtime_rescue_validate_snapshot_evidence(
 
 
 def _runtime_rescue_interactive_shell_check() -> dict[str, str]:
-    """Isolated interactive zsh smoke. ``which`` exit 0 is not shell health."""
+    """Post-apply isolated interactive zsh smoke. ``which`` exit 0 is not health.
+
+    Isolation is a real temporary HOME and ZDOTDIR, not an env dictionary
+    pointing at the caller's home. ``zsh -f -c`` is not interactive.
+    """
     zsh = shutil.which("zsh")
     record = {"ok": "false", "reason": "", "returncode": "", "stderr": ""}
     if zsh is None:
         record["reason"] = "isolated interactive zsh is unavailable"
         return record
-    env = {
-        "HOME": str(Path.home()),
-        "USER": os.environ.get("USER", "rescue"),
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "TERM": "dumb",
-        "ZDOTDIR": str(Path.home()),
-    }
-    zshrc = Path.home() / ".zshrc"
-    script = (
-        f"source {shlex.quote(str(zshrc))} && printf 'shell-ok\\n'"
-        if zshrc.is_file()
-        else "printf 'shell-ok\\n'"
-    )
+    isolated = Path(tempfile.mkdtemp(prefix="vibecrafted-rescue-zdot-"))
     try:
+        home = isolated / "home"
+        zdot = isolated / "zdot"
+        home.mkdir()
+        zdot.mkdir()
+        for rcname in _SHELL_STARTUP_FILES:
+            source = Path.home() / rcname
+            if source.is_file() and not source.is_symlink():
+                shutil.copy2(source, zdot / rcname)
+        env = {
+            "HOME": str(home),
+            "ZDOTDIR": str(zdot),
+            "USER": os.environ.get("USER", "rescue"),
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "TERM": "xterm",
+            "SHELL": zsh,
+        }
         completed = subprocess.run(
-            [zsh, "-f", "-c", script],
+            [zsh, "-i", "-c", "printf 'shell-ok\\n'"],
             env=env,
+            cwd=str(home),
             capture_output=True,
             text=True,
             timeout=20,
@@ -17727,6 +17764,8 @@ def _runtime_rescue_interactive_shell_check() -> dict[str, str]:
     except (OSError, subprocess.TimeoutExpired) as exc:
         record["reason"] = f"isolated interactive zsh failed: {exc}"
         return record
+    finally:
+        shutil.rmtree(isolated, ignore_errors=True)
     stderr = completed.stderr or ""
     record["returncode"] = str(completed.returncode)
     record["stderr"] = stderr[:400]
@@ -17750,7 +17789,7 @@ def _runtime_rescue_interactive_shell_check() -> dict[str, str]:
 
 
 def _runtime_rescue_shell_plan() -> dict[str, Any]:
-    """Plan doctor --fix-rc stanza edits without rewriting user content."""
+    """Plan doctor --fix-rc stanza edits without executing user startup."""
     stanzas: list[dict[str, str]] = []
     refused: list[dict[str, str]] = []
     ensure_path = _find_launcher_wrapper("vibecrafted") is not None
@@ -17796,7 +17835,11 @@ def _runtime_rescue_shell_plan() -> dict[str, Any]:
     return {
         "stanzas": stanzas,
         "refused": refused,
-        "interactive_shell": _runtime_rescue_interactive_shell_check(),
+        "interactive_shell": {
+            "executed": False,
+            "mode": "file-evidence-only",
+            "verification": "post-apply-isolated-interactive",
+        },
     }
 
 
@@ -17951,7 +17994,7 @@ def _classify_runtime_owned_file(
         return record
     if occupant["current_type"] != "file":
         disposition = _runtime_rescue_occupant_disposition(
-            path, "file", occupant, paths
+            path, "file", occupant, paths, expected_digest=expected_digest
         )
         record["disposition"] = disposition
         if disposition == "preserve":
@@ -17978,9 +18021,33 @@ def _classify_runtime_owned_file(
     record["occupant_proof"] = (
         "receipt_digest" if occupant["current_sha256"] == expected_digest else "none"
     )
-    record["disposition"] = "republish"
-    if occupant["current_sha256"] != expected_digest:
-        record.update({"class": "live_damage", "reason": "owned file digest differs"})
+    if occupant["current_sha256"] == expected_digest:
+        record["disposition"] = "keep"
+        return record
+    disposition = _runtime_rescue_occupant_disposition(
+        path, "file", occupant, paths, expected_digest=expected_digest
+    )
+    record["disposition"] = disposition
+    if disposition == "merge":
+        record.update(
+            {
+                "class": "live_damage",
+                "reason": "user preference drift; existing preserving merge",
+            }
+        )
+        return record
+    if disposition == "preserve":
+        record.update(
+            {
+                "class": "unknown_ownership",
+                "reason": (
+                    "receipted file has an unproven same-type replacement; "
+                    "receipt path is not current ownership"
+                ),
+            }
+        )
+        return record
+    record.update({"class": "live_damage", "reason": "owned file digest differs"})
     return record
 
 
@@ -18019,7 +18086,7 @@ def _classify_runtime_owned_symlink(
         return record
     if occupant["current_type"] != "symlink":
         disposition = _runtime_rescue_occupant_disposition(
-            path, "symlink", occupant, paths
+            path, "symlink", occupant, paths, expected_target=expected_target
         )
         record["disposition"] = disposition
         if disposition == "preserve":
@@ -18041,10 +18108,10 @@ def _classify_runtime_owned_symlink(
             }
         )
         return record
-    record["disposition"] = "republish"
     try:
         resolved = str(path.resolve(strict=True))
     except OSError:
+        record["disposition"] = "republish"
         record.update(
             {
                 "class": "live_damage",
@@ -18054,8 +18121,25 @@ def _classify_runtime_owned_symlink(
         return record
     record["current_target"] = resolved
     record["occupant_proof"] = "receipt_target" if resolved == expected_target else "none"
-    if resolved != expected_target:
-        record.update({"class": "live_damage", "reason": "owned symlink target differs"})
+    if resolved == expected_target:
+        record["disposition"] = "keep"
+        return record
+    disposition = _runtime_rescue_occupant_disposition(
+        path, "symlink", occupant, paths, expected_target=expected_target
+    )
+    record["disposition"] = disposition
+    if disposition == "preserve":
+        record.update(
+            {
+                "class": "unknown_ownership",
+                "reason": (
+                    "receipted symlink has a foreign live target; "
+                    "receipt path is not current ownership"
+                ),
+            }
+        )
+        return record
+    record.update({"class": "live_damage", "reason": "owned symlink target differs"})
     return record
 
 
@@ -18217,16 +18301,21 @@ def _runtime_rescue_target_identity(payload_root: Path) -> dict[str, Any]:
         identity["inventory_count"] = len(inventory)
         identity["inventory_sha256"] = _canonical_digest({"files": inventory})
         identity["payload_sha256"] = _runtime_rescue_payload_digest(payload_root)
-        provenance_verified, _provenance_digest = _runtime_rescue_verify_pack_provenance(
-            payload_root, inventory
+        admitted, provenance_verified, admit_reason = _runtime_rescue_admit_pack(
+            payload_root
         )
+        identity["inventory_verified"] = admitted
         identity["provenance_verified"] = provenance_verified
-        identity["inventory_verified"] = True
-        identity["usable"] = True
+        if not admitted:
+            identity["reason"] = admit_reason
+            identity["usable"] = False
+        else:
+            identity["usable"] = True
     except (OSError, RuntimeError, ValueError) as exc:
         identity["reason"] = str(exc)[:1200]
         identity["usable"] = False
         identity["inventory_verified"] = False
+        identity["provenance_verified"] = False
     return identity
 
 
@@ -18626,7 +18715,7 @@ def _build_runtime_rescue_plan(
             "unsafe or unknown-ownership paths refuse rescue; "
             "normal install validation is unchanged",
         )
-    elif missing or live_damage or shell_needs_repair or shell["interactive_shell"].get("ok") != "true":
+    elif missing or live_damage or shell_needs_repair:
         status, reason = (
             "rescueable",
             "historical rollback is unavailable; explicit rescue can republish "
@@ -18718,11 +18807,7 @@ def _build_runtime_rescue_plan(
         "shell": {
             "stanzas": shell["stanzas"],
             "refused": shell["refused"],
-            "interactive_shell": {
-                key: value
-                for key, value in shell["interactive_shell"].items()
-                if key != "stderr"
-            },
+            "interactive_shell": dict(shell["interactive_shell"]),
         },
         "repair_actions": repair_actions,
         "bootstrap": {
