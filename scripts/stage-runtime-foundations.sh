@@ -109,18 +109,33 @@ fetch_source \
   "$AICX_ARCHIVE_SHA256" "$WORK/aicx/source.tar.gz" "$WORK/aicx/source"
 AICX_TARGET="$WORK/aicx/target"
 NATIVE_REMAP_FLAGS="-ffile-prefix-map=$HOME=/usr/src/operator-home -ffile-prefix-map=$WORK/aicx/source=/usr/src/aicx"
+# A release profile that strips runs the host `strip` on every artifact, host
+# proc-macros included; Xcode 27 beta's strip leaves those dylibs with a
+# mis-aligned LINKEDIT string pool and rustc then fails with `E0463 can't find
+# crate for tokio_macros` / `futures_macro` (MEASURED 2026-09-06 on div0).
+# Build unstripped and strip only the finished executables below, exactly like
+# vc-start and vc-frame in build-vibecrafted-release.sh.
+strip_executable() {
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    /usr/bin/strip -S "$1"
+  else
+    strip --strip-debug "$1"
+  fi
+}
 RUSTFLAGS="--remap-path-prefix=$HOME=/usr/src/operator-home --remap-path-prefix=$WORK/aicx/source=/usr/src/aicx" \
   CFLAGS="$NATIVE_REMAP_FLAGS" \
   CXXFLAGS="$NATIVE_REMAP_FLAGS" \
   OBJCFLAGS="$NATIVE_REMAP_FLAGS" \
   OBJCXXFLAGS="$NATIVE_REMAP_FLAGS" \
   CARGO_TARGET_DIR="$AICX_TARGET" \
+  CARGO_PROFILE_RELEASE_STRIP=false \
   cargo build --manifest-path "$WORK/aicx/source/Cargo.toml" \
     --release --locked --bin aicx --bin aicx-mcp
 for name in aicx aicx-mcp; do
   source_path="$AICX_TARGET/release/${name}${EXE_SUFFIX}"
   [[ -f "$source_path" ]] || die "AICX build contains no ${name}${EXE_SUFFIX}"
   install -m 0755 "$source_path" "$OUTPUT_BIN_DIR/${name}${EXE_SUFFIX}"
+  strip_executable "$OUTPUT_BIN_DIR/${name}${EXE_SUFFIX}"
 done
 rm -rf "$WORK/aicx" 2>/dev/null || true
 
@@ -134,13 +149,15 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   OPENSSL_PREFIX="$(brew --prefix openssl@3)"
   [[ -f "$OPENSSL_PREFIX/lib/libssl.a" && -f "$OPENSSL_PREFIX/lib/libcrypto.a" ]] \
     || die "static OpenSSL archives are required to build portable PRView"
-  OPENSSL_DIR="$OPENSSL_PREFIX" OPENSSL_STATIC=1 \
+  OPENSSL_DIR="$OPENSSL_PREFIX" OPENSSL_STATIC=1 CARGO_PROFILE_RELEASE_STRIP=false \
     cargo install --locked --version "$PRVIEW_VERSION" --root "$WORK/prview" prview
 else
-  cargo install --locked --version "$PRVIEW_VERSION" --root "$WORK/prview" prview
+  CARGO_PROFILE_RELEASE_STRIP=false \
+    cargo install --locked --version "$PRVIEW_VERSION" --root "$WORK/prview" prview
 fi
 install -m 0755 "$WORK/prview/bin/prview${EXE_SUFFIX}" \
   "$OUTPUT_BIN_DIR/prview${EXE_SUFFIX}"
+strip_executable "$OUTPUT_BIN_DIR/prview${EXE_SUFFIX}"
 
 if [[ "$(uname -s)" == "Darwin" ]] && \
   otool -L "$OUTPUT_BIN_DIR/prview" | grep -Eq '^[[:space:]]+/(opt|usr/local)/'; then
