@@ -21,7 +21,9 @@
 #      through install-runtime-pack.sh first, then the matching prior app.
 #   7. Destination exclusion is flock(2) on a durable inode, inlined from
 #      scripts/install-runtime-pack.sh. The lock file is never unlinked.
-#      Release closes this process's descriptor only.
+#      Release closes this process's descriptor only. Installer, sleep, and
+#      other children must not inherit a copy of that descriptor: a leftover
+#      copy keeps the inode held after this helper is SIGTERM'd.
 #
 # System tools only: the destination App and its runtime Python may be moving.
 set -euo pipefail
@@ -176,7 +178,7 @@ wait_for_identity() {
     if ! identity_live "$pid" "$expected"; then
       return 0
     fi
-    sleep 0.05
+    without_update_lock_fd /bin/sleep 0.05
     n=$((n + 1))
   done
   echo "timed out waiting for pid $pid identity" >&2
@@ -188,7 +190,7 @@ hold_if() {
   if [[ -n "$HOLD_AFTER" && "$HOLD_AFTER" == "$phase" && -n "$HOLD_UNTIL" ]]; then
     local n=0
     while [[ ! -e "$HOLD_UNTIL" ]]; do
-      sleep 0.05
+      without_update_lock_fd /bin/sleep 0.05
       n=$((n + 1))
       if (( n > 1200 )); then
         echo "timed out holding after $phase" >&2
@@ -558,7 +560,8 @@ reject_preflight() {
 # the race install-runtime-pack.sh already rejected: observing a dead owner
 # and removing the directory can delete a live successor. The lock directory
 # may exist from the previous mkdir protocol; the claim is $lock/held and is
-# never unlinked. Release closes this process's descriptor only.
+# never unlinked. Release closes this process's descriptor only. Children
+# (installer, sleep, published runtime) must not inherit a copy.
 UPDATE_LOCK_FD=""
 UPDATE_LOCK_FD_FALLBACK=201
 
@@ -566,6 +569,19 @@ close_update_lock_fd() {
   [[ -n "${UPDATE_LOCK_FD:-}" ]] || return 0
   eval "exec ${UPDATE_LOCK_FD}>&-" 2>/dev/null || true
   UPDATE_LOCK_FD=""
+}
+
+# Close this process's lock descriptor in the child only. The parent keeps
+# the flock. Never unlink held/ and never signal a foreign holder.
+without_update_lock_fd() {
+  if [[ -z "${UPDATE_LOCK_FD:-}" ]]; then
+    "$@"
+    return
+  fi
+  (
+    eval "exec ${UPDATE_LOCK_FD}>&-" || true
+    "$@"
+  )
 }
 
 open_update_held_fd() {
@@ -738,26 +754,94 @@ print(version)
 PY
 }
 
+pack_payload_in_dir() {
+  local dir="$1"
+  local packs
+  [[ -d "$dir" && ! -L "$dir" ]] || return 1
+  shopt -s nullglob
+  packs=("$dir"/Vibecrafted_RuntimePack_*.tar.gz)
+  shopt -u nullglob
+  if ((${#packs[@]} != 1)); then
+    return 1
+  fi
+  if [[ -L "${packs[0]}" || ! -f "${packs[0]}" ]]; then
+    return 1
+  fi
+  if [[ ! -f "${packs[0]}.sha256" || -L "${packs[0]}.sha256" ]]; then
+    return 1
+  fi
+  if [[ ! -f "${packs[0]}.sig" || -L "${packs[0]}.sig" ]]; then
+    return 1
+  fi
+  printf '%s' "${packs[0]}"
+}
+
+owned_historical_pack() {
+  local pack="$1"
+  local root="${CAPTURE}/historical-runtime-pack"
+  [[ -n "$pack" && -n "$CAPTURE" ]] || return 1
+  case "$pack" in
+    "${root}/"*)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  pack_payload_in_dir "$root" >/dev/null || return 1
+  [[ "$pack" == "$(pack_payload_in_dir "$root")" ]] || return 1
+}
+
+capture_owned_historical_pack() {
+  local app="$1"
+  local dest="${CAPTURE}/historical-runtime-pack"
+  local src="${app}/Contents/Resources/runtime-pack"
+  local found f
+  if [[ -e "$dest" || -L "$dest" ]]; then
+    echo "owned historical Runtime Pack capture already exists: $dest" >&2
+    return 1
+  fi
+  mkdir -m 700 -- "$dest"
+  if [[ ! -d "$src" || -L "$src" ]]; then
+    return 0
+  fi
+  shopt -s nullglob
+  local files=("$src"/Vibecrafted_RuntimePack_*.tar.gz "$src"/Vibecrafted_RuntimePack_*.tar.gz.sha256 "$src"/Vibecrafted_RuntimePack_*.tar.gz.sig)
+  shopt -u nullglob
+  for f in "${files[@]}"; do
+    if [[ -f "$f" && ! -L "$f" ]]; then
+      /bin/cp -p "$f" "$dest/$(basename "$f")" || return 1
+    fi
+  done
+  if found="$(pack_payload_in_dir "$dest")"; then
+    PRIOR_PACK="$found"
+    PRIOR_GENERATION="$(prior_pack_generation "$PRIOR_PACK" || true)"
+  fi
+  return 0
+}
+
 locate_prior_pack() {
   local app="$1"
-  local dir packs
+  local sidecar="${CAPTURE}/historical-runtime-pack"
+  local found dir
+  if [[ -e "$sidecar" ]]; then
+    if found="$(pack_payload_in_dir "$sidecar")"; then
+      printf '%s' "$found"
+      return 0
+    fi
+    echo "owned capture is missing historical Runtime Pack rollback data: $sidecar" >&2
+    return 1
+  fi
   dir="${app}/Contents/Resources/runtime-pack"
   if [[ ! -d "$dir" ]]; then
     echo "owned prior.app is missing historical Runtime Pack rollback data: $dir" >&2
     return 1
   fi
-  shopt -s nullglob
-  packs=("$dir"/Vibecrafted_RuntimePack_*.tar.gz)
-  shopt -u nullglob
-  if ((${#packs[@]} != 1)); then
-    echo "owned prior.app does not contain exactly one historical Runtime Pack (found ${#packs[@]})" >&2
-    return 1
+  if found="$(pack_payload_in_dir "$dir")"; then
+    printf '%s' "$found"
+    return 0
   fi
-  if [[ ! -f "${packs[0]}.sha256" || ! -f "${packs[0]}.sig" ]]; then
-    echo "historical Runtime Pack is missing checksum or signature beside ${packs[0]}" >&2
-    return 1
-  fi
-  printf '%s' "${packs[0]}"
+  echo "owned prior.app does not contain exactly one historical Runtime Pack" >&2
+  return 1
 }
 
 prior_pack_generation() {
@@ -1146,12 +1230,21 @@ restore_prior_runtime() {
     write_admission "rejected" "historical rollback cannot find the installer owner"
     exit 19
   }
-  PRIOR_PACK="$(locate_prior_pack "$SOURCE")" || {
-    write_journal "failed" "historical Runtime Pack rollback data is missing from owned prior.app"
-    write_admission "rejected" "historical Runtime Pack rollback data is missing"
-    echo "missing historical rollback data: owned prior.app has no recoverable Runtime Pack" >&2
-    exit 19
-  }
+  if [[ -n "$PRIOR_PACK" ]]; then
+    if ! owned_historical_pack "$PRIOR_PACK"; then
+      write_journal "failed" "historical Runtime Pack rollback data is missing from owned capture"
+      write_admission "rejected" "historical Runtime Pack rollback data is missing"
+      echo "missing historical rollback data: owned capture has no recoverable Runtime Pack" >&2
+      exit 19
+    fi
+  else
+    PRIOR_PACK="$(locate_prior_pack "$SOURCE")" || {
+      write_journal "failed" "historical Runtime Pack rollback data is missing from owned prior.app"
+      write_admission "rejected" "historical Runtime Pack rollback data is missing"
+      echo "missing historical rollback data: owned prior.app has no recoverable Runtime Pack" >&2
+      exit 19
+    }
+  fi
   PRIOR_GENERATION="$(prior_pack_generation "$PRIOR_PACK")" || {
     write_journal "failed" "historical Runtime Pack has no VERSION identity"
     write_admission "rejected" "historical Runtime Pack has no VERSION identity"
@@ -1201,7 +1294,7 @@ restore_prior_runtime() {
     live_root="$DESTINATION"
   fi
   set +e
-  /bin/bash "$installer" \
+  without_update_lock_fd /bin/bash "$installer" \
     --pack "$PRIOR_PACK" \
     --app-root "$live_root" \
     --terminal-host "$terminal_host" \
@@ -1453,6 +1546,7 @@ if [[ "$RESUME" -ne 1 && -f "$JOURNAL" ]]; then
 fi
 
 trap 'release_lock' EXIT
+trap 'exit 143' TERM INT
 acquire_lock
 
 if [[ "$RESUME" -eq 1 ]]; then
@@ -1515,6 +1609,11 @@ if [[ -e "$DESTINATION" ]]; then
   if ! verify_signed_app "$PRIOR"; then
     echo "captured prior app failed signed identity check" >&2
     write_journal "failed" "capture failed identity"
+    exit 7
+  fi
+  if ! capture_owned_historical_pack "$PRIOR"; then
+    echo "owned historical Runtime Pack capture failed" >&2
+    write_journal "failed" "historical pack capture failed"
     exit 7
   fi
   write_journal "captured" "prior identity bound"

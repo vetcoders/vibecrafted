@@ -7,11 +7,13 @@ import hashlib
 import json
 import os
 import pwd
+import secrets
 import shutil
 import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -247,6 +249,10 @@ def test_product_update_source_contract() -> None:
     assert "require_exact_identity" in helper
     assert "flock_update_lock_nb" in helper
     assert "UPDATE_LOCK_FD" in helper
+    assert "without_update_lock_fd" in helper
+    assert "historical-runtime-pack" in helper
+    assert "owned_historical_pack" in helper
+    assert "capture_owned_historical_pack" in helper
     assert "owned_displaced" in helper
     assert "journal_require operation" in helper
     assert "productUpdateObserveRuntimeEvidence" in transaction
@@ -1765,18 +1771,42 @@ root = Path(os.environ["VC_UPDATE_FRAME_PROBE"])
 ident = root / "ident"
 cmdp = root / "cmd"
 reply = root / "reply"
-ident.write_text(str(os.getpid()) + "\\n", encoding="utf-8")
+
+def atomic_write(path, body):
+    tmp = path.with_name(path.name + ".tmp." + str(os.getpid()))
+    tmp.write_text(body, encoding="utf-8")
+    os.replace(tmp, path)
+
+atomic_write(ident, str(os.getpid()) + "\\n")
 while True:
     if cmdp.is_file():
-        request = cmdp.read_text(encoding="utf-8").strip()
         try:
-            cmdp.unlink()
+            raw = cmdp.read_text(encoding="utf-8")
+        except OSError:
+            time.sleep(0.05)
+            continue
+        if not raw.endswith("\\n"):
+            time.sleep(0.05)
+            continue
+        taken = root / ("cmd.taken." + str(os.getpid()))
+        try:
+            os.replace(cmdp, taken)
+        except FileNotFoundError:
+            time.sleep(0.05)
+            continue
+        request = taken.read_text(encoding="utf-8").strip()
+        try:
+            taken.unlink()
         except FileNotFoundError:
             pass
-        if request == "ping":
-            reply.write_text("pong " + str(os.getpid()) + "\\n", encoding="utf-8")
-        elif request == "identify":
-            reply.write_text(str(os.getpid()) + "\\n", encoding="utf-8")
+        parts = request.split(" ", 1)
+        if len(parts) != 2:
+            continue
+        nonce, command = parts
+        if command == "ping":
+            atomic_write(reply, nonce + " pong " + str(os.getpid()) + "\\n")
+        elif command == "identify":
+            atomic_write(reply, nonce + " " + str(os.getpid()) + "\\n")
     time.sleep(0.05)
 """
 
@@ -1787,12 +1817,15 @@ class _IsolatedFrameSession:
     Create path matches tests/tui/test_start_workspace_contract.py section 8:
     `--new-session-with-layout` plus `attach --create-background`. A layout pane
     hosts the PTY worker used for pid/lstart identity and command roundtrip.
-    Teardown is kill-session + delete-session --force + this /tmp tag only.
+    Teardown is kill-session + delete-session --force + this exclusively
+    created /tmp directory only.
     """
 
     def __init__(self) -> None:
-        self.tag = f"vcu{os.getpid() % 100000}"
-        self.root = Path("/tmp") / self.tag
+        self.tag = f"vcu{secrets.token_hex(8)}"
+        self.root = Path(tempfile.mkdtemp(prefix=f"{self.tag}-", dir="/tmp"))
+        owned = self.root.stat()
+        self._owned = (owned.st_dev, owned.st_ino)
         self.socket_dir = self.root / "s"
         self.home = self.root / "h"
         self.config_dir = self.root / "c"
@@ -1830,10 +1863,8 @@ class _IsolatedFrameSession:
             raise
 
     def _prepare(self) -> None:
-        if self.root.exists():
-            shutil.rmtree(self.root)
         for path in (self.socket_dir, self.home, self.config_dir / "layouts", self.probe):
-            path.mkdir(parents=True)
+            path.mkdir(parents=True, exist_ok=True)
         self.worker = self.probe / "pty-worker.py"
         self.worker.write_text(_FRAME_PTY_WORKER, encoding="utf-8")
         self.layout = self.config_dir / "layouts" / "operator.kdl"
@@ -1882,12 +1913,25 @@ class _IsolatedFrameSession:
             timeout=timeout,
         )
 
+    def _atomic_write(self, path: Path, body: str) -> None:
+        tmp = path.with_name(f"{path.name}.{secrets.token_hex(8)}.tmp")
+        tmp.write_text(body, encoding="utf-8")
+        os.replace(tmp, path)
+
     def _wait_worker(self) -> None:
         ident = self.probe / "ident"
         deadline = time.time() + 20
         while time.time() < deadline:
             if ident.is_file():
-                pid_text = ident.read_text(encoding="utf-8").strip()
+                try:
+                    raw = ident.read_text(encoding="utf-8")
+                except OSError:
+                    time.sleep(0.05)
+                    continue
+                if not raw.endswith("\n"):
+                    time.sleep(0.05)
+                    continue
+                pid_text = raw.strip()
                 if pid_text.isdigit():
                     self.worker_pid = int(pid_text)
                     self.worker_start = subprocess.check_output(
@@ -1903,10 +1947,9 @@ class _IsolatedFrameSession:
         listed = subprocess.check_output(
             ["/bin/ps", "-ax", "-o", "pid=,command="], text=True
         )
+        socket = str(self.socket_dir)
         for line in listed.splitlines():
-            if "vc-frame" not in line:
-                continue
-            if self.session not in line and str(self.socket_dir) not in line:
+            if "vc-frame" not in line or socket not in line:
                 continue
             pid = int(line.strip().split(None, 1)[0])
             start = subprocess.check_output(
@@ -1920,13 +1963,28 @@ class _IsolatedFrameSession:
 
     def roundtrip(self, command: str) -> str:
         reply = self.probe / "reply"
+        nonce = secrets.token_hex(8)
         if reply.exists():
-            reply.unlink()
-        (self.probe / "cmd").write_text(command + "\n", encoding="utf-8")
+            try:
+                reply.unlink()
+            except FileNotFoundError:
+                pass
+        self._atomic_write(self.probe / "cmd", f"{nonce} {command}\n")
         deadline = time.time() + 8
         while time.time() < deadline:
             if reply.is_file():
-                return reply.read_text(encoding="utf-8").strip()
+                try:
+                    raw = reply.read_text(encoding="utf-8")
+                except OSError:
+                    time.sleep(0.05)
+                    continue
+                if not raw.endswith("\n"):
+                    time.sleep(0.05)
+                    continue
+                text = raw.strip()
+                prefix = nonce + " "
+                if text.startswith(prefix):
+                    return text[len(prefix) :]
             time.sleep(0.05)
         raise AssertionError(f"Frame PTY did not answer {command!r}")
 
@@ -1951,7 +2009,12 @@ class _IsolatedFrameSession:
             self._frame("kill-session", self.session)
             self._frame("delete-session", self.session, "--force")
         if self.root.exists():
-            shutil.rmtree(self.root, ignore_errors=True)
+            try:
+                current = self.root.stat()
+            except OSError:
+                return
+            if (current.st_dev, current.st_ino) == self._owned:
+                shutil.rmtree(self.root, ignore_errors=True)
 
 
 def _replace_prior_with_candidate(
@@ -2093,7 +2156,71 @@ def test_product_update_cross_generation_publish_then_restore_previous_tuple(
         session.close()
 
 
-def test_product_update_whole_tuple_recovery_fails_without_historical_pack(
+def test_product_update_whole_tuple_recovery_fails_without_historical_rollback_data(
+    tmp_path: Path,
+) -> None:
+    founder_before = _founder_identity_stamps()
+    env = _isolated_product_env(tmp_path)
+    runtime_home = Path(env["VIBECRAFTED_RUNTIME_HOME"])
+    with _SignedApps(tmp_path) as apps:
+        dest = apps.copy_prior(tmp_path / "Installed.app")
+        source = apps.copy_e37(tmp_path / "Candidate.app")
+        prior_pack = _install_signed_pack(apps.prior["pack"], dest, env)
+        assert prior_pack.returncode == 0, prior_pack.stderr or prior_pack.stdout
+        prior_pub = _read_installer_publication(runtime_home)
+        receipt = tmp_path / "receipt.json"
+        journal = _replace_prior_with_candidate(
+            dest=dest, source=source, receipt=receipt, apps=apps
+        )
+        apps.release(source)
+        published = _install_signed_pack(
+            apps.e37["pack"], dest, env, fail_after="published"
+        )
+        assert published.returncode == 42, published.stderr or published.stdout
+        e37_pub = _read_installer_publication(runtime_home)
+        capture = Path(journal["capture"])
+        prior_app = capture / "prior.app"
+        assert _identity_token(prior_app) == apps.prior_identity
+        sidecar = capture / "historical-runtime-pack"
+        assert sidecar.is_dir(), "replace must capture historical pack outside the signed app"
+        for child in sidecar.iterdir():
+            if child.is_file() and not child.is_symlink():
+                child.unlink()
+        recover_receipt = tmp_path / "recover-missing.json"
+        failed = _run_helper(
+            [
+                "--source",
+                str(prior_app),
+                "--destination",
+                str(dest),
+                "--receipt",
+                str(recover_receipt),
+                "--journal",
+                str(receipt) + ".journal.json",
+                "--transaction",
+                str(journal["transaction"]),
+                "--mode",
+                "recover",
+            ],
+            env={**_helper_env(), **env},
+            timeout=120,
+        )
+        err = (failed.stderr or "").lower()
+        assert failed.returncode == 19, failed.stderr or failed.stdout
+        assert "historical" in err
+        assert "codesign --verify --strict failed" not in err
+        assert not recover_receipt.is_file() or "recovered" not in recover_receipt.read_text(
+            encoding="utf-8"
+        )
+        assert _identity_token(dest) == apps.e37_identity
+        assert _identity_token(prior_app) == apps.prior_identity
+        still = _read_installer_publication(runtime_home)
+        assert still["version"] == e37_pub["version"]
+        assert still["version"] != prior_pub["version"]
+        _assert_founder_identity_untouched(founder_before)
+
+
+def test_product_update_whole_tuple_recovery_fails_on_damaged_signed_historical_app(
     tmp_path: Path,
 ) -> None:
     founder_before = _founder_identity_stamps()
@@ -2120,7 +2247,7 @@ def test_product_update_whole_tuple_recovery_fails_without_historical_pack(
         pack_dir = prior_app / "Contents/Resources/runtime-pack"
         if pack_dir.is_dir():
             shutil.rmtree(pack_dir)
-        recover_receipt = tmp_path / "recover-missing.json"
+        recover_receipt = tmp_path / "recover-damaged-signed.json"
         failed = _run_helper(
             [
                 "--source",
@@ -2139,8 +2266,9 @@ def test_product_update_whole_tuple_recovery_fails_without_historical_pack(
             env={**_helper_env(), **env},
             timeout=120,
         )
-        assert failed.returncode != 0
-        assert "historical" in (failed.stderr or "").lower() or failed.returncode == 19
+        err = failed.stderr or ""
+        assert failed.returncode == 15, err or failed.stdout
+        assert "codesign --verify --strict failed" in err
         assert not recover_receipt.is_file() or "recovered" not in recover_receipt.read_text(
             encoding="utf-8"
         )
