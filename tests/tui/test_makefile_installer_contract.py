@@ -188,12 +188,7 @@ def test_portable_workflow_requires_runtime_pack_bootstrap_on_mac_and_linux() ->
 
 
 def test_ci_workflows_select_the_platforms_canonical_carrier() -> None:
-    """CI must not fabricate a Linux Runtime Pack or bypass its verifier.
-
-    Linux has the closed portable-source carrier; the skill smoke needs only
-    that staged source runtime on Linux and macOS. The binary Runtime Pack
-    remains the signed macOS release carrier consumed by ``make install``.
-    """
+    """Product install and skill smoke must exercise their actual carriers."""
     install_linux = (REPO_ROOT / ".github/workflows/install-linux.yml").read_text(
         encoding="utf-8"
     )
@@ -201,19 +196,20 @@ def test_ci_workflows_select_the_platforms_canonical_carrier() -> None:
         encoding="utf-8"
     )
 
-    for workflow in (install_linux, skill_loader):
-        assert "scripts/distribution_manifest.py archive" in workflow
-        assert "--root-name vibecrafted-ci-portable" in workflow
-        assert (
-            'bash install.sh --archive-file "$portable_archive" install-tools'
-            in workflow
-        )
-        assert "run: make install" not in workflow
-        assert "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY" not in workflow
-
-    assert "vibecrafted-linux-x64-portable.tar.gz" in install_linux
+    assert "scripts/build-linux-arm64-runtime-pack.sh" in install_linux
+    assert "Vibecrafted_RuntimePack_linux-x64.tar.gz" in install_linux
+    assert "openssl pkeyutl -sign -rawin" in install_linux
+    assert "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY" in install_linux
+    assert 'bash install.sh --runtime-pack-file "$pack" install' in install_linux
+    assert "actions/upload-artifact@" in install_linux
+    assert "actions/download-artifact@" in install_linux
     assert "ubuntu-22.04" in install_linux
     assert "ubuntu-24.04" in install_linux
+    assert "vibecrafted_core/runtime/scripts/install.sh" in skill_loader
+    assert '--source "$GITHUB_WORKSPACE"' in skill_loader
+    assert "--skills-only" in skill_loader
+    assert "--with-shell --write-shell-rc" in skill_loader
+    assert "scripts/distribution_manifest.py archive" not in skill_loader
     assert "macos-latest" in skill_loader
     assert "ubuntu-latest" in skill_loader
 
@@ -221,10 +217,12 @@ def test_ci_workflows_select_the_platforms_canonical_carrier() -> None:
 def test_portable_source_smoke_selects_explicit_source_lane() -> None:
     portable_smoke = (REPO_ROOT / "tests/portable/run.sh").read_text(encoding="utf-8")
 
+    assert 'tar -xzf "$bootstrap_archive" --strip-components=1' in portable_smoke
     assert (
-        'bash "$repo_root/install.sh" --archive-file "$bootstrap_archive" '
-        "install-source"
-    ) in portable_smoke
+        'uv tool install --force --reinstall --editable "$stable_source/'
+        in portable_smoke
+    )
+    assert "install-python-tools" not in portable_smoke
 
 
 def test_core_gate_isolated_from_the_previously_installed_runtime_stamp() -> None:

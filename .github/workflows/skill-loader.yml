@@ -65,26 +65,21 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
 
-      - name: Bootstrap the provenance-bound source carrier
-        # The smoke's subject is the skill loader. A signed Runtime Pack is a
-        # macOS release carrier and cannot be synthesized on either CI platform;
-        # build the documented portable source carrier from this exact checkout
-        # and stage its repo-owned tool runtime under an isolated home instead.
+      - name: Install the repo-owned skill and shell surfaces
+        # This workflow owns the skill-loader contract. Exercise its granular
+        # source installer directly; the full product Runtime Pack is built and
+        # installed by the platform install workflows.
         run: |
           set -euo pipefail
-          portable_archive="${RUNNER_TEMP:-/tmp}/vibecrafted-${RUNNER_OS,,}-${RUNNER_ARCH,,}-portable.tar.gz"
-          source_revision="$(git rev-parse HEAD)"
-          python3 scripts/distribution_manifest.py archive \
+          bash vibecrafted-core/vibecrafted_core/runtime/scripts/install.sh \
             --source "$GITHUB_WORKSPACE" \
-            --output "$portable_archive" \
-            --root-name vibecrafted-ci-portable \
-            --owner-repo "$GITHUB_REPOSITORY" \
-            --source-revision "$source_revision"
-          INSTALL_TOOLS_SERVICE_POLICY=isolated \
-            bash install.sh --archive-file "$portable_archive" install-tools
+            --tool codex --tool claude --tool agy \
+            --skills-only --with-shell --write-shell-rc
 
       - name: Run skill-loader smoke
-        run: make test-skills
+        # Full product health is owned by Install (Linux Matrix) and the macOS
+        # release gates. This workflow verifies the granular skill surfaces.
+        run: bash tests/skill_loader_smoke.sh --doctor-preverified
 
       - name: Verify negative fixture is caught
         run: |

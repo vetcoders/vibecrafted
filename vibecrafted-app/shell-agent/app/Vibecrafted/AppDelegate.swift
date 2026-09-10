@@ -2192,7 +2192,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   private func installProductUpdate(
     _ candidate: ProductUpdateCandidate,
     pack: URL,
-    completion: @escaping (Result<ProductUpdateIdentity, Error>) -> Void
+    completion: @escaping @MainActor @Sendable (Result<ProductUpdateIdentity, Error>) -> Void
   ) -> () -> Void {
     let installed = currentProductUpdateIdentity()
     guard productUpdateRunningAppMatchesCandidate(installed: installed, candidate: candidate) else {
@@ -2254,7 +2254,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     _ candidate: ProductUpdateCandidate,
     staging: URL,
     payload: Data,
-    completion: @escaping (Result<ProductUpdateProof, Error>) -> Void
+    completion: @escaping @MainActor @Sendable (Result<ProductUpdateProof, Error>) -> Void
   ) -> () -> Void {
     let cancelled = ProductUpdateCancelFlag()
     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -2292,7 +2292,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     }
     let releaseOutput = staging.appendingPathComponent("release-output.json")
     let signature = staging.appendingPathComponent("release-output.json.sig")
-    guard let python = resolveProductContractPython() else {
+    guard let python = resolveInstalledProductContractPython() else {
       return .failure(ProductUpdateTrustError.pythonMissing)
     }
     switch invokeReleaseOutputVerifier(
@@ -2336,13 +2336,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
         observedFrameRevision: observed.frame))
   }
 
-  private func resolveProductContractPython() -> URL? {
+  private func resolveInstalledProductContractPython() -> URL? {
     resolveProductContractPython(installRoot: canonicalInstall?.root)
   }
 
   private func replaceProductUpdateAppBundle(
     _ request: ProductUpdateReplacementRequest,
-    completion: @escaping (Result<ProductUpdateReplacementAdmission, Error>) -> Void
+    completion: @escaping @MainActor @Sendable (Result<ProductUpdateReplacementAdmission, Error>) -> Void
   ) -> () -> Void {
     var live = request
     if live.helperURL == nil {

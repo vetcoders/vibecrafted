@@ -13736,6 +13736,7 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
     dry_run = args.dry_run
     mirror = args.mirror
     cli_with_shell = args.with_shell
+    skills_only = getattr(args, "skills_only", False)
     fw_ver = get_install_version(repo_root)
 
     shared_home = vibecrafted_home()
@@ -13847,7 +13848,7 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
         print("Installing skills:")
         skills_dir = source_skills_root(repo_root)
         packaged_skills = repo_root / "vibecrafted-core" / "vibecrafted_core" / "skills"
-        if skills_dir == packaged_skills:
+        if skills_dir == packaged_skills and not skills_only:
             print("  carried by immutable runtime generation")
         else:
             if not dry_run:
@@ -13866,35 +13867,55 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
                 rsync_skill(src, dst, dry_run=dry_run, mirror=mirror)
             for rule in sync_skill_root_rules(skills_dir, store_path, dry_run=dry_run):
                 print(f"  -> {rule}")
+        if skills_only and not dry_run:
+            # Shell functions load adjacent helpers and invoke workflow scripts,
+            # so the complete Python-owned runtime directory is the smallest
+            # self-contained helper surface. Native hosts and product launchers
+            # remain Runtime Pack-owned and are not published by this lane.
+            source_runtime = packaged_skills.parent / "runtime"
+            target_runtime = store_path.parent / "runtime"
+            if not source_runtime.is_dir():
+                raise OSError(
+                    f"skills-only source has no helper runtime: {source_runtime}"
+                )
+            if source_runtime.resolve() != target_runtime.resolve():
+                shutil.copytree(source_runtime, target_runtime, dirs_exist_ok=True)
         print()
 
         print("Refreshing staged control plane:")
-        try:
-            current_tools = refresh_current_tools(
-                repo_root, shared_home, dry_run=dry_run, mirror=mirror
+        if skills_only:
+            current_tools = store_path.parents[2]
+            print(
+                "  skipped: skills-only leaves product runtime publication to Runtime Pack"
             )
-        except (
-            OSError,
-            subprocess.CalledProcessError,
-            DistributionManifestError,
-        ) as exc:
-            print(f"  FAILED: {_staged_sync_failure_detail(exc)}")
-            _clear_compact_status(out)
-            err_line(
-                "could not refresh staged tools",
-                "rerun `vibecrafted update`",
-                str(log_path),
-            )
-            return 1
-        if current_tools is None:
-            print("  skipped: source is not a full framework checkout")
-            _compact_line(out, WARN, "Tools", "staged control plane skipped")
-        elif dry_run:
-            print(f"  would sync: {repo_root} -> {current_tools}")
-            _compact_line(out, SKIP, "Tools", "dry run")
+            _compact_line(out, green("\u2713"), "Tools", "skill store only")
         else:
-            print(f"  synced: {repo_root} -> {current_tools}")
-            _compact_line(out, green("\u2713"), "Tools", "staged current refreshed")
+            try:
+                current_tools = refresh_current_tools(
+                    repo_root, shared_home, dry_run=dry_run, mirror=mirror
+                )
+            except (
+                OSError,
+                subprocess.CalledProcessError,
+                DistributionManifestError,
+            ) as exc:
+                print(f"  FAILED: {_staged_sync_failure_detail(exc)}")
+                _clear_compact_status(out)
+                err_line(
+                    "could not refresh staged tools",
+                    "rerun `vibecrafted update`",
+                    str(log_path),
+                )
+                return 1
+            if current_tools is None:
+                print("  skipped: source is not a full framework checkout")
+                _compact_line(out, WARN, "Tools", "staged control plane skipped")
+            elif dry_run:
+                print(f"  would sync: {repo_root} -> {current_tools}")
+                _compact_line(out, SKIP, "Tools", "dry run")
+            else:
+                print(f"  synced: {repo_root} -> {current_tools}")
+                _compact_line(out, green("\u2713"), "Tools", "staged current refreshed")
         print()
 
         # Compact status lines on real stdout
@@ -14008,8 +14029,11 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
         store_display = str(store_path).replace(str(Path.home()), "~")
         _compact_line(out, green("\u2713"), "Store", store_display)
 
-        # Launcher
-        _install_launcher(repo_root, dry_run, update_rc=write_shell_rc)
+        # A source carrier can install and verify its skill views without
+        # claiming that it is a complete native Runtime Pack. Product launchers
+        # remain generation-owned and are installed only by the Runtime Pack.
+        if not skills_only:
+            _install_launcher(repo_root, dry_run, update_rc=write_shell_rc)
         if current_tools is not None:
             moved_agency = cleanse_state_home_agency(current_tools, dry_run=dry_run)
             print(f"  state agency moved: {moved_agency}")
@@ -14047,7 +14071,7 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
         print()
 
         # Doctor (logged)
-        if not dry_run:
+        if not dry_run and not skills_only:
             print("Verification:")
             findings = run_doctor(store_path, state)
             _pause_for_runtime_contract_failures(findings)
@@ -14082,10 +14106,13 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
     # backslash inside `{...}` is a SyntaxError on Python < 3.12, and this
     # project supports >=3.11. Build the pieces first, then interpolate.
     check_mark = green("\u2713")
-    product_banner = bold(
-        f"\U0001d685\U0001d692\U0001d68b\U0001d68e\U0001d68c\U0001d69b\U0001d68a"
-        f"\U0001d68f\U0001d69d\U0001d68e\U0001d68d. {fw_ver_display} installed"
-    )
+    if skills_only:
+        product_banner = bold(f"Vibecrafted {fw_ver_display} skill surfaces installed")
+    else:
+        product_banner = bold(
+            f"\U0001d685\U0001d692\U0001d68b\U0001d68e\U0001d68c\U0001d69b\U0001d68a"
+            f"\U0001d68f\U0001d69d\U0001d68e\U0001d68d. {fw_ver_display} installed"
+        )
     print()
     print(f"  {check_mark} {product_banner}")
     print()
@@ -14096,8 +14123,9 @@ def _cmd_install_compact(args: argparse.Namespace, repo_root: Path) -> int:
         names = " · ".join(f.name for f in missing_fnd)
         print(f"    {WARN} foundations missing: {names} — vibecrafted doctor")
     print()
-    print(f"    → {cyan('vibecrafted init claude')}       {dim('start here')}")
-    print(f"    → {cyan('vibecrafted doctor')}            {dim('verify')}")
+    if not skills_only:
+        print(f"    → {cyan('vibecrafted init claude')}       {dim('start here')}")
+        print(f"    → {cyan('vibecrafted doctor')}            {dim('verify')}")
     print()
 
     return 0
@@ -14119,7 +14147,7 @@ def cmd_install(args: argparse.Namespace) -> int:
     verbose = getattr(args, "verbose", False) or getattr(args, "advanced", False)
     interactive = _IS_TTY and not args.non_interactive
 
-    if verbose or interactive:
+    if (verbose or interactive) and not getattr(args, "skills_only", False):
         return _cmd_install_verbose(args, repo_root)
     return _cmd_install_compact(args, repo_root)
 
@@ -22802,6 +22830,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     p_install.add_argument(
         "--with-shell", action="store_true", help="Install the shell helper layer"
+    )
+    p_install.add_argument(
+        "--skills-only",
+        action="store_true",
+        help="Install skill views and optional shell helpers without product launchers",
     )
     p_install.add_argument(
         "--write-shell-rc",

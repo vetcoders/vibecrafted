@@ -20,7 +20,7 @@ SOURCE_PROVENANCE_SCHEMA = "vibecrafted.source-provenance.v2"
 FOUNDATIONS_SCHEMA = "io.vetcoders.vibecrafted.runtime-foundations.v1"
 GIT_SHA = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
-LINUX_ARM64_EXECUTABLES = frozenset(
+LINUX_EXECUTABLES = frozenset(
     {
         "vibecrafted",
         "vc-server",
@@ -327,14 +327,20 @@ def _source_provenance(root: Path, *, expected_revision: str) -> dict[str, Any]:
     return payload
 
 
-def _linux_arm64_inventory(root: Path) -> dict[str, Any]:
+def _linux_inventory(root: Path, *, platform: str, architecture: str) -> dict[str, Any]:
+    target = {
+        "arm64": "aarch64-unknown-linux-gnu",
+        "x64": "x86_64-unknown-linux-gnu",
+    }.get(architecture)
+    if platform != f"linux-{architecture}" or target is None:
+        raise RuntimePackContractError("unsupported Linux Runtime Pack target")
     path = root / INVENTORY_NAME
     try:
         raw = path.read_text(encoding="utf-8")
         inventory = json.loads(raw)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RuntimePackContractError(
-            "Linux arm64 Runtime Pack inventory is invalid"
+            "Linux Runtime Pack inventory is invalid"
         ) from exc
     executables = inventory.get("executables") if isinstance(inventory, dict) else None
     required_record = {
@@ -353,15 +359,15 @@ def _linux_arm64_inventory(root: Path) -> dict[str, Any]:
         not isinstance(inventory, dict)
         or set(inventory) != {"schema", "platform", "architecture", "executables"}
         or inventory.get("schema") != "io.vetcoders.vibecrafted.runtime-inventory.v1"
-        or inventory.get("platform") != "linux-arm64"
-        or inventory.get("architecture") != "arm64"
+        or inventory.get("platform") != platform
+        or inventory.get("architecture") != architecture
         or raw != _canonical_json(inventory)
         or not isinstance(executables, list)
         or {record.get("name") for record in executables if isinstance(record, dict)}
-        != LINUX_ARM64_EXECUTABLES
+        != LINUX_EXECUTABLES
     ):
         raise RuntimePackContractError(
-            "Linux arm64 Runtime Pack inventory violates the closed schema"
+            "Linux Runtime Pack inventory violates the closed schema"
         )
     for record in executables:
         if (
@@ -377,12 +383,12 @@ def _linux_arm64_inventory(root: Path) -> dict[str, Any]:
             )
             or SHA256.fullmatch(record["sha256"]) is None
             or SHA256.fullmatch(record["source_archive_sha256"]) is None
-            or record["target"] != "aarch64-unknown-linux-gnu"
+            or record["target"] != target
             or record["path"] != f"bin/{record['name']}"
             or _sha256(root / record["path"]) != record["sha256"]
         ):
             raise RuntimePackContractError(
-                "Linux arm64 Runtime Pack executable inventory is invalid"
+                "Linux Runtime Pack executable inventory is invalid"
             )
     return inventory
 
@@ -418,8 +424,8 @@ def write_provenance(
         raise RuntimePackContractError(
             "Runtime Pack platform must be the canonical <os>-<architecture> target slug"
         )
-    if platform == "linux-arm64" and architecture == "arm64":
-        _linux_arm64_inventory(payload_root)
+    if platform.startswith("linux-"):
+        _linux_inventory(payload_root, platform=platform, architecture=architecture)
     provenance = {
         "schema": SCHEMA,
         "carrier_basename": carrier_basename,
@@ -529,11 +535,12 @@ def verify_provenance(
         raise RuntimePackContractError(
             "Runtime Pack platform must be the canonical <os>-<architecture> target slug"
         )
-    if (
-        provenance["platform"] == "linux-arm64"
-        and provenance["architecture"] == "arm64"
-    ):
-        _linux_arm64_inventory(payload_root)
+    if provenance["platform"].startswith("linux-"):
+        _linux_inventory(
+            payload_root,
+            platform=provenance["platform"],
+            architecture=provenance["architecture"],
+        )
     observed = _payload_files(payload_root)
     if files != observed:
         raise RuntimePackContractError(

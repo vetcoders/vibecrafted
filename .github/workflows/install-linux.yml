@@ -34,11 +34,61 @@ permissions:
   contents: read
 
 jobs:
+  linux-runtime-pack:
+    name: build Linux x64 Runtime Pack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Runtime Pack build prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake libclang-dev libprotobuf-dev \
+            libgtk-3-dev libxdo-dev libayatana-appindicator3-dev \
+            protobuf-compiler rsync
+          rustup target add wasm32-unknown-unknown
+          curl -L --proto '=https' --tlsv1.2 -sSf \
+            -o /tmp/install-binstall.sh \
+            https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh
+          bash /tmp/install-binstall.sh
+          cargo binstall -y cargo-leptos
+          lock_version="$(cargo tree --locked --manifest-path vibecrafted-server/Cargo.toml -p wasm-bindgen --depth 0 --prefix none | awk 'NR == 1 { sub(/^v/, "", $2); print $2 }')"
+          cargo binstall -y "wasm-bindgen-cli@${lock_version}"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+
+      - name: Build and sign the exact-source CI carrier
+        run: |
+          set -euo pipefail
+          pack="$RUNNER_TEMP/Vibecrafted_RuntimePack_linux-x64.tar.gz"
+          VIBECRAFTED_SOURCE_REVISION="$GITHUB_SHA" \
+            bash scripts/build-linux-arm64-runtime-pack.sh "$pack"
+          openssl genpkey -algorithm ED25519 -out "$RUNNER_TEMP/ci-signing.key"
+          openssl pkey -in "$RUNNER_TEMP/ci-signing.key" -pubout \
+            -out "$RUNNER_TEMP/ci-signing.pub"
+          openssl pkeyutl -sign -rawin -inkey "$RUNNER_TEMP/ci-signing.key" \
+            -in "$pack" -out "$pack.sig"
+
+      - name: Upload the verified CI carrier
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-x64-runtime-pack
+          path: |
+            ${{ runner.temp }}/Vibecrafted_RuntimePack_linux-x64.tar.gz
+            ${{ runner.temp }}/Vibecrafted_RuntimePack_linux-x64.tar.gz.sha256
+            ${{ runner.temp }}/Vibecrafted_RuntimePack_linux-x64.tar.gz.sig
+            ${{ runner.temp }}/ci-signing.pub
+          if-no-files-found: error
+
   # ---------------------------------------------------------------------------
   # Ubuntu 22.04 / 24.04 — runner-native. Tests the happy path.
   # ---------------------------------------------------------------------------
   ubuntu-native:
     name: install.sh (ubuntu-${{ matrix.runner-version }})
+    needs: linux-runtime-pack
     env:
       # `cargo install aicx` is memory-heavy; keep CI runners from OOM-killing rustc.
       CARGO_BUILD_JOBS: "1"
@@ -79,6 +129,12 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
 
+      - name: Download the exact-source Runtime Pack
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: linux-x64-runtime-pack
+          path: ${{ runner.temp }}/runtime-pack
+
       - name: Install make + python3 (already present, but be explicit)
         run: |
           set -euo pipefail
@@ -104,19 +160,12 @@ jobs:
             python3 \
             python3-venv
 
-      - name: Bootstrap the provenance-bound portable source carrier
+      - name: Install the verified exact-source Runtime Pack
         run: |
           set -euo pipefail
-          portable_archive="${RUNNER_TEMP:-/tmp}/vibecrafted-linux-x64-portable.tar.gz"
-          source_revision="$(git rev-parse HEAD)"
-          python3 scripts/distribution_manifest.py archive \
-            --source "$GITHUB_WORKSPACE" \
-            --output "$portable_archive" \
-            --root-name vibecrafted-ci-portable \
-            --owner-repo "$GITHUB_REPOSITORY" \
-            --source-revision "$source_revision"
-          INSTALL_TOOLS_SERVICE_POLICY=isolated \
-            bash install.sh --archive-file "$portable_archive" install-tools
+          pack="$RUNNER_TEMP/runtime-pack/Vibecrafted_RuntimePack_linux-x64.tar.gz"
+          VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY="$RUNNER_TEMP/runtime-pack/ci-signing.pub" \
+            bash install.sh --runtime-pack-file "$pack" install
 
       - name: Run vibecrafted doctor
         run: |
@@ -152,6 +201,7 @@ jobs:
   # ---------------------------------------------------------------------------
   debian-bookworm-container:
     name: install.sh (debian-12 container)
+    needs: linux-runtime-pack
     runs-on: ubuntu-latest
     env:
       # debian:bookworm-slim runs with limited memory inside the job container.
@@ -203,6 +253,12 @@ jobs:
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Download the exact-source Runtime Pack
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: linux-x64-runtime-pack
+          path: /tmp/runtime-pack
+
       - name: Show platform fingerprint
         run: |
           set -euo pipefail
@@ -234,7 +290,7 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup-init.sh && sh rustup-init.sh -y --default-toolchain stable --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      - name: Bootstrap the provenance-bound portable source carrier
+      - name: Install the verified exact-source Runtime Pack
         run: |
           set -euo pipefail
           export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
@@ -242,16 +298,9 @@ jobs:
           # config (under an overridden HOME); this step's git calls run with
           # the job HOME and hit "dubious ownership" on the mounted workspace.
           git config --global --add safe.directory "$(pwd)"
-          portable_archive="${RUNNER_TEMP:-/tmp}/vibecrafted-linux-x64-portable.tar.gz"
-          source_revision="$(git rev-parse HEAD)"
-          python3 scripts/distribution_manifest.py archive \
-            --source "$GITHUB_WORKSPACE" \
-            --output "$portable_archive" \
-            --root-name vibecrafted-ci-portable \
-            --owner-repo "$GITHUB_REPOSITORY" \
-            --source-revision "$source_revision"
-          INSTALL_TOOLS_SERVICE_POLICY=isolated \
-            bash install.sh --archive-file "$portable_archive" install-tools
+          pack="/tmp/runtime-pack/Vibecrafted_RuntimePack_linux-x64.tar.gz"
+          VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY="/tmp/runtime-pack/ci-signing.pub" \
+            bash install.sh --runtime-pack-file "$pack" install
 
       - name: Run vibecrafted doctor
         run: |

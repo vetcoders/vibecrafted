@@ -20,13 +20,13 @@ final class ProductUpdateCoordinator {
       (Data, Data, URL, @escaping @MainActor @Sendable (Result<Void, Error>) -> Void) ->
       ProductUpdateCancel
     var verifyCandidate:
-      (ProductUpdateCandidate, URL, Data, @escaping (Result<ProductUpdateProof, Error>) -> Void) ->
+      (ProductUpdateCandidate, URL, Data, @escaping @MainActor @Sendable (Result<ProductUpdateProof, Error>) -> Void) ->
       () -> Void
     var installPack:
-      (ProductUpdateCandidate, URL, @escaping (Result<ProductUpdateIdentity, Error>) -> Void) ->
+      (ProductUpdateCandidate, URL, @escaping @MainActor @Sendable (Result<ProductUpdateIdentity, Error>) -> Void) ->
       () -> Void
     var replaceApp:
-      (ProductUpdateReplacementRequest, @escaping (Result<ProductUpdateReplacementAdmission, Error>) -> Void)
+      (ProductUpdateReplacementRequest, @escaping @MainActor @Sendable (Result<ProductUpdateReplacementAdmission, Error>) -> Void)
       -> () -> Void
     var extractApp: ((URL, URL, @escaping ProductUpdateURLCompletion) -> ProductUpdateCancel)?
     var closeUIAfterHelperArmed: () -> Void

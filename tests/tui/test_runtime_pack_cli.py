@@ -1058,7 +1058,7 @@ def test_runtime_packager_emits_one_closed_root_and_checksum(tmp_path: Path) -> 
         check=False,
     )
     assert linux.returncode != 0
-    assert "Linux arm64 Runtime Pack inventory is invalid" in linux.stderr
+    assert "Linux Runtime Pack inventory is invalid" in linux.stderr
     assert not linux_output.exists()
 
 
