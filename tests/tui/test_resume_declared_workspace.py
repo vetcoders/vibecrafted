@@ -755,6 +755,44 @@ def test_owned_terminal_boundary_is_consumed_before_a_descendant_resume(
 
 
 @pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_same_root_watched_ambient_marker_does_not_bypass_no_tty_admission(
+    tmp_path: Path, shell: str
+) -> None:
+    """Another client's matching workspace is not this pipe's surface proof."""
+    scene = Scene(
+        tmp_path,
+        live=["session-loctree-suite"],
+        clients=["session-loctree-suite"],
+        project="loctree-suite",
+    )
+    result = _run_resume(
+        scene,
+        _declared(scene),
+        shell=shell,
+        terminal_entry=False,
+        extra_env={
+            "VIBECRAFTED_TERMINAL_ENTRY": "1",
+            "VC_FRAME": "1",
+            "VC_FRAME_PANE_ID": "7",
+            "VC_FRAME_SESSION_NAME": "session-loctree-suite",
+            "ZELLIJ_SESSION_NAME": "session-loctree-suite",
+        },
+    )
+    launch = scene.terminal_launch()
+    calls = scene.calls()
+
+    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
+    assert launch is not None, f"no terminal was opened: {result.stderr}"
+    assert (
+        Path(launch["argv"][launch["argv"].index("--working-directory") + 1]).resolve()
+        == scene.root.resolve()
+    )
+    assert launch["boundary"] == "1", launch
+    assert not _creates(calls) and not _new_tabs(calls), calls
+    assert not _attaches(calls) and not _switches(calls), calls
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
 def test_child_shape_without_a_terminal_fails_closed_before_creating(
     tmp_path: Path, shell: str
 ) -> None:

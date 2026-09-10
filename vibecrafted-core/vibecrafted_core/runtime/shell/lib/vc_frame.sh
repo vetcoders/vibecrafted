@@ -452,13 +452,17 @@ _vetcoders_declaration_escalate_if_needed() {
   local project_root=""
   project_root="$(_vetcoders_effective_project_root)"
   local needs_terminal=0
-  if _vetcoders_needs_vc_terminal_entry; then
+  if _vetcoders_has_owned_vc_terminal_entry; then
+    # The terminal child consumes this boundary during facade load and keeps
+    # the guard only in its own shell, so it cannot recur but descendants do
+    # not inherit the exception.
+    needs_terminal=0
+  elif [[ ! -t 0 || ! -t 1 ]]; then
+    # A public declaration from a pipe has no proof that it controls an
+    # inherited Frame client, even when its session name happens to be this
+    # root's canonical workspace and another client is watching it.
     needs_terminal=1
-  elif [[ ! -t 0 || ! -t 1 ]] && ! _vetcoders_has_owned_vc_terminal_entry && \
-    ! _vetcoders_declared_root_has_current_vc_frame_surface "$project_root"; then
-    # A watched Frame client inherited from an agent ancestor is usable only
-    # when it belongs to this requested root. Do not switch an unrelated host
-    # just because its marker survived into a no-TTY child.
+  elif _vetcoders_needs_vc_terminal_entry; then
     needs_terminal=1
   fi
   ((needs_terminal)) || return 2

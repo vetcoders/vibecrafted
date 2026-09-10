@@ -158,31 +158,6 @@ _vetcoders_partner_command_text() {
 }
 
 
-# A process in a frame can use the direct path only when that visible frame is
-# the workspace the request resolved to. Agent descendants inherit Frame
-# markers from ancestors, and a watched ancestor workspace is not permission to
-# move that unrelated client onto the requested repository.
-_vetcoders_declared_root_has_current_vc_frame_surface() {
-  local root="$1" ambient="" expected=""
-  _vetcoders_in_vc_frame || return 1
-  ambient="$(_vetcoders_current_vc_frame_session_name)"
-  [[ -n "$ambient" ]] || return 1
-  [[ "$(_vetcoders_vc_frame_surface_state "$ambient")" == usable ]] || return 1
-  command -v _vetcoders_ensure_canonical_workspace_identity >/dev/null 2>&1 || return 1
-
-  # Resolve in a subshell: admission needs the requested workspace identity to
-  # compare it with the ambient client, but must not turn inherited identity
-  # exports into this process's target before the public child re-parses.
-  expected="$({
-    unset VIBECRAFTED_WORKSPACE_ID VIBECRAFTED_SESSION_ID \
-      VIBECRAFTED_WORKSPACE_INSTANCE_ID VIBECRAFTED_BUILD_ID \
-      VIBECRAFTED_OPERATOR_SESSION VIBECRAFTED_WORKSPACE_ROOT
-    _vetcoders_ensure_canonical_workspace_identity "$root" >/dev/null || exit $?
-    printf '%s' "${VIBECRAFTED_OPERATOR_SESSION:-}"
-  })" || return 1
-  [[ -n "$expected" && "$ambient" == "$expected" ]]
-}
-
 # Carry only the admitted command (private file references) across a new window.
 # 0: terminal handoff accepted; 2: caller already has a surface; 1: failed.
 _vetcoders_enter_admitted_interactive() {
