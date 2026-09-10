@@ -2187,7 +2187,12 @@ def test_guest_create_preserves_customized_selected_layout_marker(
     frame = scene.generation / "bin" / "vc-frame"
     result = _eval_start_fn(
         f'_vetcoders_start_create_workspace_session "{frame}" guest-layout "{layout}" guest',
-        extra_env=scene.env({"VIBECRAFTED_PREFER_REPO_VC_FRAME": "1"}),
+        extra_env=scene.env(
+            {
+                "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+                "VIBECRAFTED_VC_FRAME_BIN": str(frame),
+            }
+        ),
         cwd=scene.root,
     )
     assert _rc(result) == 0, result.stdout + result.stderr
@@ -2317,6 +2322,76 @@ def test_create_lock_refuses_leftover_mkdir_directory_without_deleting(
     assert leftover.is_dir()
     assert marker.read_text(encoding="utf-8") == "keep\n"
     assert "without removing" in result.stderr
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_create_lock_is_not_held_by_live_frame_env_child(
+    tmp_path: Path, shell: str
+) -> None:
+    """Create holds flock across `_vetcoders_start_frame_env` -> Frame/PTY.
+    An exec'd descendant must not keep the kernel lock after the owner
+    closes or exits. Closing the parent descriptor alone is not enough
+    if the child inherited it. The child is spawned the same way create
+    starts the engine; teardown kills only that owned sleeper.
+    """
+    sock = tmp_path / "sock"
+    sock.mkdir()
+    env = _create_lock_env(tmp_path, sock=sock)
+    ready = tmp_path / "inherit-released"
+    child_pid_path = tmp_path / "inherit-child.pid"
+    sleeper = (
+        "import os, signal, time\n"
+        "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "os.setsid()\n"
+        f"open({str(child_pid_path)!r}, 'w').write(str(os.getpid()))\n"
+        "time.sleep(180)\n"
+    )
+    child_pid: int | None = None
+    owner = _run_create_lock(
+        "_vetcoders_start_acquire_create_lock inherit || exit 9",
+        f"_vetcoders_start_frame_env {shlex.quote(sys.executable)} -c {shlex.quote(sleeper)} &",
+        (
+            "polls=0; while [[ ! -f "
+            + shlex.quote(str(child_pid_path))
+            + " ]]; do "
+            "if ((polls >= 80)); then exit 8; fi; "
+            "sleep 0.05; polls=$((polls + 1)); done"
+        ),
+        "_vetcoders_start_release_create_lock",
+        f"printf held > {shlex.quote(str(ready))}",
+        env=env,
+        shell=shell,
+        timeout=15,
+    )
+    try:
+        assert owner.returncode == 0, owner.stdout + owner.stderr
+        assert ready.exists(), owner.stdout + owner.stderr
+        child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+        os.kill(child_pid, 0)
+        retry = _run_create_lock(
+            "_vetcoders_start_acquire_create_lock inherit",
+            'lock_rc=$?',
+            'if ((lock_rc != 0)); then printf "RC=[%s]\\n" "$lock_rc"; exit "$lock_rc"; fi',
+            "_vetcoders_start_release_create_lock",
+            "printf INHERIT_OK\\n",
+            env=env,
+            shell=shell,
+        )
+        assert retry.returncode == 0, retry.stdout + retry.stderr
+        assert "INHERIT_OK" in retry.stdout
+        assert "could not obtain exclusive create lock" not in retry.stderr
+    finally:
+        if child_pid is None and child_pid_path.exists():
+            try:
+                child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+            except ValueError:
+                child_pid = None
+        if child_pid is not None:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 # --------------------------------------------------------------------------

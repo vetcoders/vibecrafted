@@ -892,17 +892,29 @@ _vetcoders_start_default_workspace_name() {
 # of THIS process cleared (a marker equal to the target trips Frame's nested-
 # reattach panic, src/commands.rs:844, and `(current)` tags the listing), and
 # the product socket namespace pinned when the caller has none.
+# The engine is always started from a child that has already dropped this
+# process's create-lock descriptor. flock(2) lives on the open file
+# description: `--create-background` can leave a long-lived Frame/PTY that
+# keeps the lock after the owner closes or dies if that fd is inherited.
+# The extra subshell closes only the child's copy; the create owner keeps
+# flock until it releases. `_vetcoders_os_fd_lock` is unchanged.
 _vetcoders_start_frame_env() {
   local socket_dir=""
   socket_dir="$(_vetcoders_vc_frame_socket_dir 2>/dev/null || true)"
-  if [[ -n "$socket_dir" ]]; then
-    VC_FRAME_SOCKET_DIR="$socket_dir" ZELLIJ_SOCKET_DIR="$socket_dir" \
+  (
+    if [[ -n "${_vetcoders_start_create_lock_fd:-}" ]]; then
+      _vetcoders_start_close_create_lock_fd
+      _vetcoders_start_create_lock_fd=""
+    fi
+    if [[ -n "$socket_dir" ]]; then
+      VC_FRAME_SOCKET_DIR="$socket_dir" ZELLIJ_SOCKET_DIR="$socket_dir" \
+        env -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME \
+        -u ZELLIJ -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME "$@"
+    else
       env -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME \
-      -u ZELLIJ -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME "$@"
-  else
-    env -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME \
-      -u ZELLIJ -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME "$@"
-  fi
+        -u ZELLIJ -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME "$@"
+    fi
+  )
 }
 
 # Authoritative inventory state for ONE name. Prints exactly one of:
@@ -1018,6 +1030,21 @@ _vetcoders_start_refuse_inventory() {
 # as scripts/lib/runtime-pack-selection.sh): the lock FILE is created once and
 # never unlinked, release closes this process's descriptor, and SIGKILL drops
 # the kernel lock. A leftover mkdir(2) directory is refused, not removed.
+# zsh parses `exec 11>&-` as exec of command 11 and replaces the shell
+# (exit 127) before any `|| true` or following printf. Close by variable
+# name on zsh and bash 4.1+; bash 3.2 keeps numeric close of fixed fd 211.
+_vetcoders_start_close_create_lock_fd() {
+  [[ -n "${_vetcoders_start_create_lock_fd:-}" ]] || return 0
+  if [[ -n "${ZSH_VERSION:-}" ]]; then
+    builtin exec {_vetcoders_start_create_lock_fd}>&- || :
+  elif [[ -n "${BASH_VERSINFO:-}" ]] && ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 1))); then
+    exec {_vetcoders_start_create_lock_fd}>&- || :
+  else
+    eval "exec ${_vetcoders_start_create_lock_fd}>&-" || :
+  fi
+  return 0
+}
+
 _vetcoders_start_acquire_create_lock() {
   # lock_rc — not `status`. zsh's $status is a readonly special parameter;
   # `local status` aborts the function at line 1 (`read-only variable`).
@@ -1045,7 +1072,7 @@ _vetcoders_start_acquire_create_lock() {
   [[ -n "${_vetcoders_start_create_lock_fd:-}" ]] || return 4
   _vetcoders_os_fd_lock "$_vetcoders_start_create_lock_fd" "$timeout" || lock_rc=$?
   if ((lock_rc != 0)); then
-    eval "exec ${_vetcoders_start_create_lock_fd}>&-" 2>/dev/null || true
+    _vetcoders_start_close_create_lock_fd
     _vetcoders_start_create_lock_fd=""
     printf 'vc-start: could not obtain exclusive create lock for %s.\n' \
       "$(_vetcoders_shell_quote "$session_name")" >&2
@@ -1055,7 +1082,7 @@ _vetcoders_start_acquire_create_lock() {
 
 _vetcoders_start_release_create_lock() {
   [[ -n "${_vetcoders_start_create_lock_fd:-}" ]] || return 0
-  eval "exec ${_vetcoders_start_create_lock_fd}>&-" 2>/dev/null || true
+  _vetcoders_start_close_create_lock_fd
   _vetcoders_start_create_lock_fd=""
 }
 
