@@ -15499,6 +15499,17 @@ _RUNTIME_RESCUE_IN_FLIGHT_PHASES = frozenset(
         RUNTIME_RESCUE_PHASE_VERIFICATION,
     }
 )
+_RUNTIME_RESCUE_SAME_VERSION_CONTENT_REASON = (
+    "requested pack content differs from the published immutable generation "
+    "of the same version; the current healthy generation is preserved"
+)
+_RUNTIME_RESCUE_GENERATION_REWRITTEN_PATHS = frozenset(
+    {
+        _RUNTIME_GENERATION_ENTRYPOINT,
+        Path("bin/vc-frame"),
+        Path("bin/vc-terminal"),
+    }
+)
 _RUNTIME_WRAPPER_VERBS = {
     "telemetry": "telemetry",
     "vc-dashboard": "dashboard",
@@ -18473,7 +18484,100 @@ def _runtime_rescue_target_from_binding(binding: Mapping[str, Any]) -> dict[str,
         "version_identity_sha256": str(binding.get("version_identity_sha256") or ""),
         "payload_sha256": str(binding.get("payload_sha256") or ""),
         "inventory_sha256": str(binding.get("inventory_sha256") or ""),
+        "inventory": list(binding.get("inventory") or []),
+        "payload_root": str(binding.get("payload_root") or ""),
     }
+
+
+def _runtime_rescue_inventory_is_generation_artifact(relative: str) -> bool:
+    """Installer-written generation surfaces are not sealed pack identity."""
+    posix = Path(relative).as_posix()
+    if posix == _RUNTIME_GENERATION_MANIFEST:
+        return True
+    generated = (_RUNTIME_GENERATION_CANONICAL_RUNTIME / "generated").as_posix()
+    if posix == generated or posix.startswith(generated + "/"):
+        return True
+    alias = (_RUNTIME_GENERATION_RUNTIME_ALIAS / "generated").as_posix()
+    if posix == alias or posix.startswith(alias + "/"):
+        return True
+    return Path(relative) in _RUNTIME_RESCUE_GENERATION_REWRITTEN_PATHS
+
+
+def _runtime_rescue_requested_inventory_records(
+    target: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    records = list(target.get("inventory") or [])
+    if records:
+        return records
+    payload_root = str(target.get("payload_root") or "")
+    if not payload_root:
+        return []
+    return _runtime_rescue_payload_inventory(Path(payload_root))
+
+
+def _runtime_rescue_destination_content_matches(
+    generation: Path, target: Mapping[str, Any]
+) -> tuple[bool, str]:
+    """Compare requested pack inventory to destination files.
+
+    Uses the canonical ``_payload_files`` record owner (path/sha256/size/mode).
+    Does not hash the live generation tree: postinstall writes
+    ``runtime-manifest.json``, host-adapted ``runtime/generated``, and rewritten
+    product wrappers, and a published generation may carry the canonical
+    ``runtime`` alias symlink.
+    """
+    wanted_inventory = str(target.get("inventory_sha256") or "")
+    try:
+        requested = _runtime_rescue_requested_inventory_records(target)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return False, f"requested target inventory is unreadable: {exc}"
+    if not requested:
+        return False, "requested target content identity is incomplete"
+    computed_inventory = _canonical_digest({"files": requested})
+    if wanted_inventory and computed_inventory != wanted_inventory:
+        return False, "requested target inventory digest disagrees with inventory records"
+    comparable = [
+        item
+        for item in requested
+        if not _runtime_rescue_inventory_is_generation_artifact(
+            str(item.get("path") or "")
+        )
+    ]
+    if not comparable:
+        return False, "requested target content identity is incomplete"
+    contract = _runtime_pack_contract_module()
+    observed: list[dict[str, Any]] = []
+    try:
+        for item in comparable:
+            relative = Path(str(item.get("path") or ""))
+            if relative.is_absolute() or ".." in relative.parts:
+                return False, "requested target inventory path is invalid"
+            path = generation / relative
+            if path.is_symlink() or not path.is_file():
+                return False, "destination content is not the requested target"
+            metadata = path.lstat()
+            if not stat.S_ISREG(metadata.st_mode):
+                return False, "destination content is not the requested target"
+            record = {
+                "path": relative.as_posix(),
+                "sha256": contract._sha256(path),
+                "size": path.stat().st_size,
+                "mode": f"{stat.S_IMODE(metadata.st_mode):04o}",
+            }
+            if (
+                record["sha256"] != item.get("sha256")
+                or record["size"] != item.get("size")
+                or record["mode"] != item.get("mode")
+            ):
+                return False, "destination content is not the requested target"
+            observed.append(record)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return False, f"destination inventory is unreadable: {exc}"
+    if _canonical_digest({"files": observed}) != _canonical_digest(
+        {"files": comparable}
+    ):
+        return False, "destination inventory is not the requested target"
+    return True, ""
 
 
 def _runtime_rescue_destination_matches_requested_target(
@@ -18533,7 +18637,7 @@ def _runtime_rescue_destination_matches_requested_target(
         return False, f"destination version identity is unreadable: {exc}"
     if wanted_version_id and installed_version_id != wanted_version_id:
         return False, "destination version identity is not the requested target"
-    return True, ""
+    return _runtime_rescue_destination_content_matches(generation, target)
 
 
 def _runtime_rescue_resume_phase_error(journal: Mapping[str, Any]) -> str:
@@ -19322,18 +19426,29 @@ def _build_runtime_rescue_plan(
             }
         )
     if not target_matches and status == "rescueable" and not live_damage:
-        repair_actions.append(
-            {
-                "action": "republish_requested_target",
-                "reason": (
-                    target_mismatch_reason
-                    or (
-                        "converge the requested target version and content "
-                        "identity; a healthy older generation is not success"
-                    )
-                ),
-            }
-        )
+        if generation == str(target.get("version") or ""):
+            repair_actions.append(
+                {
+                    "action": "preserve_published_generation",
+                    "reason": (
+                        target_mismatch_reason
+                        or _RUNTIME_RESCUE_SAME_VERSION_CONTENT_REASON
+                    ),
+                }
+            )
+        else:
+            repair_actions.append(
+                {
+                    "action": "republish_requested_target",
+                    "reason": (
+                        target_mismatch_reason
+                        or (
+                            "converge the requested target version and content "
+                            "identity; a healthy older generation is not success"
+                        )
+                    ),
+                }
+            )
     if status == "healthy":
         repair_actions.append(
             {
@@ -19674,6 +19789,22 @@ def _runtime_rescue_apply(
                 print(json.dumps(envelope, sort_keys=True))
                 return 0 if verified else 2
             # A healthy older generation is not the requested target. Publish.
+        current_generation = str((plan.get("generation") or {}).get("current") or "")
+        wanted_version = str((plan.get("target") or {}).get("version") or "")
+        if current_generation and current_generation == wanted_version:
+            matched, match_reason = _runtime_rescue_destination_matches_requested_target(
+                paths, plan.get("target") or {}, receipt
+            )
+            if not matched:
+                envelope.update(
+                    status="refused",
+                    reason=match_reason or _RUNTIME_RESCUE_SAME_VERSION_CONTENT_REASON,
+                    runtime=None,
+                    missing_history=plan["missing_backups"],
+                    repair_actions=plan["repair_actions"],
+                )
+                print(json.dumps(envelope, sort_keys=True))
+                return 2
         if receipt is None or receipt_bytes is None:
             envelope["reason"] = receipt_error or "receipt evidence is missing"
             print(json.dumps(envelope, sort_keys=True))

@@ -1532,6 +1532,9 @@ def test_healthy_old_generation_does_not_satisfy_new_target(
     paths, payload, _ = installed
     newer = seed_runtime_pack(tmp_path / "pack-b", version="9.9.10+b")
     _seal_runtime_pack_for_admission(newer)
+    original = installer._runtime_rescue_target_identity(payload)
+    target = installer._runtime_rescue_target_identity(newer)
+    assert original["payload_sha256"] != target["payload_sha256"]
     code, plan = _plan(newer, capsys)
     assert code == 0
     assert plan["status"] == "rescueable"
@@ -1552,6 +1555,56 @@ def test_healthy_old_generation_does_not_satisfy_new_target(
     assert (paths["runtime_home"] / "tools/vibecrafted-current").resolve().name == (
         "9.9.10+b"
     )
+
+
+def test_same_version_different_payload_is_not_false_success(
+    installed, tmp_path, capsys
+):
+    """Adopted W2 falsifier: same version/provenance is not requested content."""
+    paths, payload, _ = installed
+    other = seed_runtime_pack(tmp_path / "other-pack", version="9.9.9+a")
+    marker = other / "requested-content-marker.txt"
+    marker.write_text("unique requested bytes\n")
+    _seal_runtime_pack_for_admission(other)
+    original = installer._runtime_rescue_target_identity(payload)
+    target = installer._runtime_rescue_target_identity(other)
+    assert target["usable"]
+    assert original["version_identity_sha256"] == target["version_identity_sha256"]
+    assert original["payload_sha256"] != target["payload_sha256"]
+    assert original["inventory_sha256"] != target["inventory_sha256"]
+    code, plan = _plan(other, capsys)
+    assert code == 0
+    assert plan["status"] == "rescueable"
+    generation = (paths["runtime_home"] / "tools/vibecrafted-current").resolve()
+    receipt_before = _receipt(paths).read_bytes()
+    code, result = _apply(other, capsys, plan["plan_digest"])
+    if code == 0:
+        assert (generation / marker.name).is_file(), (
+            "rescued success retained a different payload with same version/provenance"
+        )
+        assert (generation / marker.name).read_bytes() == marker.read_bytes()
+    else:
+        assert result["status"] != "rescued"
+        assert result["status"] == "refused"
+        assert not (generation / marker.name).is_file()
+        assert generation.name == "9.9.9+a"
+        assert _load_receipt(paths)["version"] == "9.9.9+a"
+        assert _receipt(paths).read_bytes() == receipt_before
+
+
+def test_unchanged_requested_pack_repeat_is_healthy_noop(installed, capsys):
+    paths, payload, _ = installed
+    code, plan = _plan(payload, capsys)
+    assert code == 0
+    assert plan["status"] == "healthy"
+    generation = (paths["runtime_home"] / "tools/vibecrafted-current").resolve()
+    receipt_before = _receipt(paths).read_bytes()
+    code, result = _apply(payload, capsys, plan["plan_digest"])
+    assert code == 0
+    assert result["status"] == "rescued"
+    assert _receipt(paths).read_bytes() == receipt_before
+    assert generation.name == "9.9.9+a"
+    assert generation.is_dir()
 
 
 def test_product_owned_shell_check_does_not_execute_user_startup(

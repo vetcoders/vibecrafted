@@ -269,8 +269,18 @@ snapshot/receipt evidence is a residual; destinations are not deleted or
 restored from it, and a failed rollback is never reported as complete.
 Preference conflicts keep pending journal state recoverable. Success
 requires the selected generation, receipt, and active identity to match
-the requested target version and content identity. A healthy older
-generation is not `rescued`. Repeat apply of the exact same target remains
+the requested target version and content identity. Version plus
+source-provenance identity is not exact requested content. Destination
+comparison reuses the canonical pack inventory owner
+(`runtime-pack-provenance.json` / `_payload_files` path/sha256/size/mode)
+for requested files and ignores installer-generated generation surfaces
+(`runtime-manifest.json`, host-adapted `runtime/generated`, rewritten
+product wrappers). The live generation tree is not hashed as a whole.
+A healthy older generation is not `rescued` and still publishes a new
+immutable `releases/<version>`. A published immutable generation whose
+inventory is not the requested content is not `rescued` and is not
+overwritten: apply refuses and preserves the current healthy generation.
+Repeat apply of the exact same target remains
 a no-op once that identity verifies. Destination verification covers
 selectors, active identity, every receipted file/symlink/dir, every
 expected launcher/skill/config projection, static user-rc inspection, and
