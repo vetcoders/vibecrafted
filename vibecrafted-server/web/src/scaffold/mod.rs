@@ -1117,7 +1117,7 @@ pub mod api {
   // same rolling-state affordance as Codescribe tray Auto Format.
   var STATUS_CYCLE = [" ", "~", "?", "!", "x"];
   var STATUS_META = {
-    " ": { label: "todo", glyph: " " },
+    " ": { label: "todo", glyph: "\u00a0" },
     "~": { label: "running", glyph: "~" },
     "?": { label: "done?", glyph: "?" },
     "!": { label: "blocked", glyph: "!" },
@@ -1869,22 +1869,22 @@ pub mod api {
  * so every scaffold state follows the navbar theme toggle. Element selectors
  * are scoped with :where() (zero specificity) so they never leak into the
  * frame's navbar or sidebar. */
-.server-route-document{--bg:var(--surface-page);--panel:var(--surface-card);--panel-lift:var(--surface-elevated);--line:var(--border-subtle);--line-strong:var(--border-active);--text:var(--text-primary);--muted:var(--text-secondary);--accent:var(--text-primary);--warn:var(--status-warning);--bad:var(--status-danger);height:100%;min-height:0;color:var(--text);font:14px/1.45 var(--font-body)}
+.server-route-document{--bg:var(--surface-page);--panel:var(--surface-card);--panel-lift:var(--surface-elevated);--line:var(--border-subtle);--line-strong:var(--border-active);--text:var(--text-primary);--muted:var(--text-secondary);--accent:var(--amber);--warn:var(--status-warning);--bad:var(--status-danger);height:100%;min-height:0;color:var(--text);font:14px/1.45 var(--font-body)}
 :where(.server-route-document) *{box-sizing:border-box}
 :where(.server-route-document) a{color:inherit}
-.plan-library{min-height:100%;background:radial-gradient(circle at 83% 7%,rgba(77,155,142,.13),transparent 31rem),var(--bg)}
+.plan-library{min-height:100%;background:var(--bg)}
 .library-header{padding:26px clamp(24px,5vw,76px) 54px;border-bottom:1px solid var(--line)}
 .library-intro{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(280px,.6fr);gap:clamp(28px,6vw,90px);align-items:end}
 .library-intro h1{max-width:850px;margin:12px 0 0;font:400 clamp(48px,7vw,102px)/.89 var(--font-display);letter-spacing:-.055em}
 .library-lede{max-width:540px;margin:0 0 8px;color:var(--muted);font-size:clamp(15px,1.5vw,19px);line-height:1.55}
 .library-stats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));max-width:920px;margin:54px 0 0;border-top:1px solid var(--line)}
-.plan-card-invalid{border-color:rgba(255,209,102,.35);background:linear-gradient(145deg,#1b1914,var(--bg));cursor:default}
-.plan-card-invalid:hover{transform:none;border-color:rgba(255,209,102,.45)}
+.plan-card-invalid{border-color:color-mix(in srgb,var(--status-warning) 40%,transparent);background:var(--panel);cursor:default}
+.plan-card-invalid:hover{transform:none;border-color:color-mix(in srgb,var(--status-warning) 55%,transparent)}
 .plan-skip-reason{margin:0;color:var(--warn);font-size:13px;line-height:1.45}
 .plan-skip-path{margin:8px 0 0;color:var(--muted);font:11px var(--font-mono);overflow-wrap:anywhere}
 .plan-invalid-field{padding-top:8px;border-top:1px solid var(--line)}
 .library-stats div{padding:14px 24px 0 0}.library-stats dt,.plan-card-meta dt{color:var(--muted);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.12em}
-.library-stats dd{margin:2px 0 0;color:var(--amber);font:28px var(--font-mono)}
+.library-stats dd{margin:2px 0 0;color:var(--text);font:24px var(--font-mono)}
 .plan-field{padding:42px clamp(24px,5vw,76px) 80px}
 .plan-toolbar{display:flex;align-items:end;justify-content:space-between;gap:30px}.plan-toolbar h2{margin:5px 0 0;font:400 34px/1.05 var(--font-display)}
 .plan-search{position:relative;display:grid;gap:7px;width:min(100%,390px);color:var(--muted);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.12em}
@@ -1892,17 +1892,17 @@ pub mod api {
 .plan-search input:focus{border-color:var(--teal)}.plan-search kbd{position:absolute;right:0;bottom:10px;border:1px solid var(--line);border-radius:4px;padding:1px 6px;color:var(--muted);font:11px var(--font-mono)}
 .result-count{margin:32px 0 14px;color:var(--muted);font:11px var(--font-mono);text-transform:uppercase;letter-spacing:.1em}
 .plan-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:12px}
-.plan-card{min-height:290px;display:flex;flex-direction:column;justify-content:space-between;gap:28px;padding:22px;border:1px solid var(--line);border-radius:9px;background:linear-gradient(145deg,var(--panel),var(--bg));text-decoration:none;transition:transform .18s ease,border-color .18s ease,background .18s ease}
-.plan-card:hover,.plan-card:focus-visible{transform:translateY(-3px);border-color:var(--teal);background:var(--panel-lift);outline:none}
-.plan-card-blocked{border-color:rgba(255,138,138,.28);background:linear-gradient(145deg,#1b1617,var(--bg))}.plan-card-blocked .plan-access{border-color:rgba(255,138,138,.35);color:var(--bad)}
+.plan-card{min-height:290px;display:flex;flex-direction:column;justify-content:space-between;gap:28px;padding:22px;border:var(--stroke-width) solid var(--line);border-radius:var(--radius-surface);background:var(--panel);text-decoration:none;transition:transform var(--motion-base) var(--ease-ui),border-color var(--motion-base) var(--ease-ui),background var(--motion-base) var(--ease-ui)}
+.plan-card:hover,.plan-card:focus-visible{transform:translateY(-3px);border-color:var(--teal);background:var(--panel-lift)}
+.plan-card-blocked{border-color:color-mix(in srgb,var(--status-danger) 35%,transparent);background:var(--panel)}.plan-card-blocked .plan-access{border-color:color-mix(in srgb,var(--status-danger) 45%,transparent);color:var(--bad)}
 .plan-card[hidden]{display:none}.plan-card-top,.plan-card-meta,.plan-open{display:flex;align-items:center;justify-content:space-between;gap:16px}
-.plan-number{color:var(--amber);font:12px var(--font-mono)}.plan-access{border:1px solid var(--line);border-radius:99px;padding:4px 8px;color:var(--muted);font:9px var(--font-mono);text-transform:uppercase;letter-spacing:.1em}
-.plan-card-title p{margin:0 0 9px;color:var(--teal);font:11px var(--font-mono)}.plan-card-title h3{max-width:470px;margin:0;font:400 28px/1.03 var(--font-display);letter-spacing:-.025em}
+.plan-number{color:var(--muted);font:12px var(--font-mono)}.plan-access{border:1px solid var(--line);border-radius:99px;padding:4px 8px;color:var(--muted);font:9px var(--font-mono);text-transform:uppercase;letter-spacing:.1em}
+.plan-card-title p{margin:0 0 9px;color:var(--muted);font:11px var(--font-mono)}.plan-card-title h3{max-width:470px;margin:0;font:400 28px/1.03 var(--font-display);letter-spacing:-.025em}
 .plan-card-meta{margin:0;padding-top:14px;border-top:1px solid var(--line)}.plan-card-meta div{display:grid;gap:3px}.plan-card-meta div:last-child{text-align:right}.plan-card-meta dd{margin:0;color:var(--text);font:12px var(--font-mono)}
 .plan-open{color:var(--muted);font-weight:700}.plan-open b{color:var(--accent);font-size:18px}.plan-card:hover .plan-open{color:var(--text)}
 .plan-no-results{margin-top:12px;border:1px dashed var(--line);border-radius:9px;padding:50px 24px;text-align:center;color:var(--muted)}.plan-no-results strong{display:block;color:var(--text);font:400 24px var(--font-display)}.plan-library .plan-no-results button{justify-self:auto;margin:20px 0 0}
-.blocked-plan-shell{min-height:100%;padding:26px clamp(24px,5vw,76px) 80px;background:radial-gradient(circle at 85% 5%,rgba(255,138,138,.08),transparent 32rem),var(--bg)}.blocked-plan-nav{margin:0 0 26px}.blocked-plan-nav .back-link{display:inline-block;margin:0}.back-link{color:var(--muted);font:11px var(--font-mono);text-decoration:none;text-transform:uppercase;letter-spacing:.12em}.back-link:hover{color:var(--text)}
-.blocked-plan-head{display:flex;align-items:end;justify-content:space-between;gap:30px;padding-bottom:36px;border-bottom:1px solid var(--line)}.blocked-plan-head h1{max-width:900px;margin:10px 0 0;font:400 clamp(44px,6.5vw,88px)/.92 var(--font-display);letter-spacing:-.045em}.blocked-pill{flex:0 0 auto;border:1px solid rgba(255,138,138,.35);border-radius:99px;padding:7px 11px;color:var(--bad);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.1em}
+.blocked-plan-shell{min-height:100%;padding:26px clamp(24px,5vw,76px) 80px;background:var(--bg)}.blocked-plan-nav{margin:0 0 26px}.blocked-plan-nav .back-link{display:inline-block;margin:0}.back-link{color:var(--muted);font:11px var(--font-mono);text-decoration:none;text-transform:uppercase;letter-spacing:.12em}.back-link:hover{color:var(--text)}
+.blocked-plan-head{display:flex;align-items:end;justify-content:space-between;gap:30px;padding-bottom:36px;border-bottom:1px solid var(--line)}.blocked-plan-head h1{max-width:900px;margin:10px 0 0;font:600 var(--deck-title)/1.25 var(--font-display);letter-spacing:-.01em}.blocked-pill{flex:0 0 auto;border:var(--stroke-width) solid color-mix(in srgb,var(--status-danger) 45%,transparent);border-radius:99px;padding:7px 11px;color:var(--bad);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.1em}
 .blocked-plan-grid{display:grid;grid-template-columns:minmax(280px,.72fr) minmax(0,1.28fr);gap:clamp(36px,7vw,110px);padding-top:42px}.blocked-explainer h2{margin:8px 0 18px;font:400 clamp(31px,4vw,52px)/.98 var(--font-display)}.blocked-explainer>p:not(.eyebrow){max-width:520px;color:var(--muted);font-size:16px;line-height:1.6}.blocked-explainer dl{display:grid;gap:12px;margin:36px 0 0}.blocked-explainer dl div{display:grid;grid-template-columns:80px 1fr;gap:16px;padding-top:10px;border-top:1px solid var(--line)}.blocked-explainer dt{color:var(--muted);font:10px var(--font-mono);text-transform:uppercase}.blocked-explainer dd{min-width:0;margin:0;overflow-wrap:anywhere;font:12px var(--font-mono)}
 .blocked-findings{border:1px solid var(--line);border-radius:9px;background:var(--panel);overflow:hidden}.blocked-findings-head{display:flex;align-items:end;justify-content:space-between;gap:20px;padding:18px 20px;border-bottom:1px solid var(--line)}.blocked-findings-head p{margin:0}.blocked-findings-head strong{color:var(--bad);font:11px var(--font-mono)}.blocked-findings ol{max-height:68vh;margin:0;padding:0;overflow:auto;list-style:none}.blocked-findings li{padding:17px 20px;border-bottom:1px solid var(--line)}.blocked-findings li:last-child{border:0}.blocked-findings li div{display:flex;justify-content:space-between;gap:14px}.blocked-findings li span{color:var(--bad);font:11px var(--font-mono);text-transform:uppercase}.blocked-findings li code{color:var(--teal);font:11px var(--font-mono)}.blocked-findings li p{margin:8px 0 0;color:var(--muted);line-height:1.5}
 /* --- Scaffold studio shell (GlyphPulse shape: nav | canvas | inspector + stats) --- */
@@ -1912,13 +1912,13 @@ pub mod api {
 /* Plan-level navigation stays inside the studio canvas; global routes live in the frame sidebar. */
 .review-sidebar-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .review-library-link{display:inline-flex;align-items:center;min-height:26px;border:1px solid var(--line);border-radius:999px;padding:0 10px;color:var(--muted);font:550 11px/1 var(--font-body);text-decoration:none;white-space:nowrap}
-.review-library-link:hover,.review-library-link:focus-visible{border-color:var(--line-strong);background:var(--panel-lift);color:var(--text);outline:none}
+.review-library-link:hover,.review-library-link:focus-visible{border-color:var(--line-strong);background:var(--panel-lift);color:var(--text)}
 .summary{display:grid;gap:3px;color:var(--muted);flex:0 0 auto}.summary strong{color:var(--text);font-size:16px}
 .tabs{display:flex;flex-direction:column;gap:6px;overflow:auto;padding-right:4px;min-height:0;flex:1 1 auto}
 .tab{display:grid;gap:2px;text-decoration:none;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px 10px;background:var(--panel-lift)}
-.tab:hover,.tab:focus{border-color:var(--accent);outline:none}
+.tab:hover,.tab:focus{border-color:var(--accent)}
 .tab.is-active{border-color:var(--teal);background:var(--panel-lift);box-shadow:inset 2px 0 0 var(--accent)}
-.tab small{color:var(--muted);font:11px var(--font-mono)}.tab-done{border-color:#4d7041}
+.tab small{color:var(--muted);font:11px var(--font-mono)}.tab-done{border-color:color-mix(in srgb,var(--status-success) 55%,transparent)}
 .tab-done.is-active{border-color:var(--accent)}
 .api-link{display:block;color:var(--accent);font:12px var(--font-mono);text-decoration:none;margin:6px 0}
 .api-link:hover{text-decoration:underline}
@@ -1926,13 +1926,13 @@ pub mod api {
 .review-workspace{display:grid;grid-template-rows:auto minmax(0,1fr) auto;min-width:0;min-height:0;height:100%;overflow:hidden;border-right:1px solid var(--line)}
 .review-topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel);min-height:52px;flex:0 0 auto}
 .review-topbar-id{display:grid;gap:2px;min-width:0}
-.review-topbar-id .mono-cap{color:var(--teal);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.12em}
+.review-topbar-id .mono-cap{color:var(--muted);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.12em}
 .review-topbar-id strong{font:600 15px/1.2 var(--font-body);color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .review-topbar-id .path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .review-topbar-actions{display:flex;align-items:center;gap:8px;flex:0 0 auto}
 .review-main{position:relative;min-height:0;overflow:hidden;padding:0;display:block;background:var(--bg)}
 .review-main>.status{position:absolute;z-index:5;left:16px;right:16px;top:12px;margin:0}
-.status{display:none;border:1px solid #4d7041;background:#162114;padding:10px;border-radius:8px}.status:target{display:block}.status-error{border-color:var(--bad);background:#2b1717}
+.status{display:none;border:1px solid color-mix(in srgb,var(--status-success) 45%,transparent);background:var(--panel);color:var(--text);padding:10px;border-radius:8px}.status:target{display:block}.status-error{border-color:var(--bad);background:var(--panel)}
 /* One active document only — never stack every artifact */
 /* Rows: editor-form fills, trailing forms (pre-JS checkpoint) auto. The
  * .artifact-head is permanently display:none (chrome lives in the topbar) and
@@ -1955,10 +1955,10 @@ pub mod api {
   background:var(--panel-lift);color:var(--muted);white-space:nowrap
 }
 button.render-mode-btn{cursor:pointer;font-weight:500;color:var(--text);background:var(--panel-lift)}
-button.render-mode-btn:hover,button.render-mode-btn:focus-visible{border-color:var(--teal);color:var(--text);outline:none;background:var(--panel-lift)}
-button.render-mode-btn[data-next="rich"]{border-color:rgba(184,239,125,.45);color:var(--accent);background:rgba(184,239,125,.08)}
+button.render-mode-btn:hover,button.render-mode-btn:focus-visible{border-color:var(--teal);color:var(--text);background:var(--panel-lift)}
+button.render-mode-btn[data-next="rich"]{border-color:color-mix(in srgb,var(--accent) 45%,transparent);color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,transparent)}
 .checkpoint-state{color:var(--warn)}.checkpoint-state:empty{display:none}
-.inspector-pill{color:var(--warn)}.inspector-pill.is-done{color:var(--accent);border-color:#4d7041}
+.inspector-pill{color:var(--warn)}.inspector-pill.is-done{color:var(--status-success);border-color:color-mix(in srgb,var(--status-success) 55%,transparent)}
 .eyebrow,.path{margin:0;color:var(--muted);font:12px var(--font-mono)}
 .editor-form{display:grid;grid-template-rows:1fr auto;min-height:0}
 .editor-body{position:relative;min-height:0}
@@ -1968,7 +1968,7 @@ button.render-mode-btn[data-next="rich"]{border-color:rgba(184,239,125,.45);colo
   background:var(--panel);color:var(--text);-webkit-text-fill-color:var(--text);caret-color:var(--accent);
   padding:16px 18px;font:13px/1.55 var(--font-mono);overflow:auto;white-space:pre-wrap
 }
-.editor-form textarea.raw-pane:focus{outline:none;box-shadow:inset 0 0 0 1px rgba(77,155,142,.35)}
+.editor-form textarea.raw-pane:focus{outline:none;box-shadow:inset 0 0 0 2px var(--focus-ring)}
 .rich-pane.md-body{
   position:absolute;inset:0;box-sizing:border-box;min-height:0;
   padding:22px clamp(18px,3vw,36px) 36px;border:0;
@@ -1977,55 +1977,73 @@ button.render-mode-btn[data-next="rich"]{border-color:rgba(184,239,125,.45);colo
 }
 .rich-pane.md-body h1,.rich-pane.md-body h2,.rich-pane.md-body h3,.rich-pane.md-body h4{margin:1.25em 0 .5em;line-height:1.22;letter-spacing:-.02em;color:var(--text);font-weight:600}
 .rich-pane.md-body h1{font-size:1.65em;padding-bottom:.35em;border-bottom:1px solid var(--line)}
-.rich-pane.md-body h2{font-size:1.32em;padding-bottom:.28em;border-bottom:1px solid rgba(43,48,51,.85)}
+.rich-pane.md-body h2{font-size:1.32em;padding-bottom:.28em;border-bottom:var(--stroke-width) solid var(--line)}
 .rich-pane.md-body h3{font-size:1.12em}
 .rich-pane.md-body p{margin:.65em 0;max-width:78ch}
 .rich-pane.md-body ul.md-list,.rich-pane.md-body ol.md-list{margin:.55em 0;padding-left:1.35em}
 .rich-pane.md-body li{margin:.28em 0}
 .rich-pane.md-body li.md-task{list-style:none;margin-left:-.4em;display:flex;align-items:flex-start;gap:8px}
-.rich-pane.md-body blockquote{margin:.8em 0;padding:.2em 0 .2em 14px;border-left:3px solid rgba(77,155,142,.55);color:var(--muted)}
+.rich-pane.md-body blockquote{margin:.8em 0;padding:.2em 0 .2em 14px;border-left:3px solid color-mix(in srgb,var(--accent) 55%,transparent);color:var(--muted)}
 .rich-pane.md-body hr{border:0;border-top:1px solid var(--line);margin:1.2em 0}
-.rich-pane.md-body code{font:12.5px/1.45 var(--font-mono);color:var(--accent);background:rgba(184,239,125,.08);padding:.1em .35em;border-radius:4px}
+.rich-pane.md-body code{font:12.5px/1.45 var(--font-mono);color:var(--text);background:var(--panel-lift);padding:.1em .35em;border-radius:4px}
 .rich-pane.md-body pre.md-code{margin:.85em 0;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:var(--bg);overflow:auto}
 .rich-pane.md-body pre.md-code code{background:transparent;padding:0;color:var(--text);font-size:12.5px;line-height:1.5;white-space:pre}
 .rich-pane.md-body a{color:var(--teal)}.rich-pane.md-body strong{color:var(--text);font-weight:650}
 /* Frontmatter as meta card (Notion property table vibe) */
-.md-frontmatter{display:grid;gap:6px;margin:0 0 1.4em;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:rgba(27,31,32,.85)}
+.md-frontmatter{display:grid;gap:6px;margin:0 0 1.4em;padding:12px 14px;border:var(--stroke-width) solid var(--line);border-radius:var(--radius-surface);background:var(--panel)}
 .md-fm-row{display:grid;grid-template-columns:minmax(96px,160px) minmax(0,1fr);gap:10px;align-items:baseline;padding:3px 0}
 .md-fm-key{color:var(--muted);font:11px var(--font-mono);text-transform:uppercase;letter-spacing:.06em}
 .md-fm-val{font:12.5px/1.45 var(--font-mono);color:var(--text);overflow-wrap:anywhere}
 /* GFM tables */
-.md-table-wrap{margin:.9em 0 1.1em;overflow:auto;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+.md-table-wrap{margin:.9em 0 1.1em;overflow:auto;border:var(--stroke-width) solid var(--line);border-radius:var(--radius-surface);background:var(--panel)}
 .md-table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.45}
 .md-table th,.md-table td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
-.md-table th{color:var(--muted);font:11px var(--font-mono);text-transform:uppercase;letter-spacing:.06em;background:rgba(255,255,255,.02);position:sticky;top:0}
+.md-table th{color:var(--muted);font:11px var(--font-mono);text-transform:uppercase;letter-spacing:.06em;background:var(--bg);position:sticky;top:0}
 .md-table tr:last-child td{border-bottom:0}
-.md-table tr:hover td{background:rgba(255,255,255,.015)}
+.md-table tr:hover td{background:var(--btn-bg-hover)}
 /* Rolling status chips — Codescribe tray Auto Format affordance */
-button.md-status{display:inline-flex;align-items:center;gap:6px;margin:0 2px;padding:2px 8px 2px 6px;border:1px solid var(--line);border-radius:999px;background:var(--panel-lift);color:var(--muted);font:11px var(--font-mono);cursor:pointer;vertical-align:middle;line-height:1.3;transition:border-color .12s ease,color .12s ease,background .12s ease}
-button.md-status:hover,button.md-status:focus-visible{border-color:var(--teal);color:var(--text);outline:none}
-button.md-status .md-status-glyph{font-weight:700;letter-spacing:.02em}
-button.md-status .md-status-label{opacity:.85;text-transform:lowercase}
-button.md-status.md-status-todo{border-color:rgba(169,177,180,.35);color:var(--muted)}
-button.md-status.md-status-run{border-color:rgba(216,166,64,.55);color:var(--amber);background:rgba(216,166,64,.08)}
-button.md-status.md-status-maybe{border-color:rgba(77,155,142,.5);color:var(--teal);background:rgba(77,155,142,.08)}
-button.md-status.md-status-blocked{border-color:rgba(255,138,138,.55);color:var(--bad);background:rgba(255,138,138,.08)}
-button.md-status.md-status-done{border-color:rgba(184,239,125,.55);color:var(--accent);background:rgba(184,239,125,.08)}
-:where(.server-route-document) button{justify-self:start;margin:12px 16px;border:1px solid #5e7f47;background:#22321f;color:var(--text);border-radius:7px;padding:8px 12px;font-weight:700;cursor:pointer}
+/* The chip is ONE atomic control. Under a narrow tracker column the flex items
+ * used to shrink below their content and the todo glyph broke across lines,
+ * rendering as a stray [ over a stray ]. nowrap + non-shrinking items keep every
+ * state on one line; the table wrap already owns the horizontal scroll, so a
+ * squeezed column scrolls visibly instead of hiding or mangling state. */
+button.md-status{display:inline-flex;align-items:center;flex:0 0 auto;gap:6px;margin:0 2px;padding:2px 8px 2px 6px;border:1px solid var(--line);border-radius:999px;background:var(--panel-lift);color:var(--muted);font:11px var(--font-mono);cursor:pointer;vertical-align:middle;line-height:1.3;white-space:nowrap;overflow-wrap:normal;word-break:normal;transition:border-color var(--motion-fast) var(--ease-ui),color var(--motion-fast) var(--ease-ui),background var(--motion-fast) var(--ease-ui)}
+button.md-status:hover,button.md-status:focus-visible{border-color:var(--line-strong);color:var(--text);outline:none}
+button.md-status:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+button.md-status .md-status-glyph{flex:0 0 auto;white-space:pre;font-weight:700;letter-spacing:.02em;font-variant-ligatures:none}
+button.md-status .md-status-label{flex:0 0 auto;white-space:nowrap;opacity:.85;text-transform:lowercase}
+/* State rides the glyph, never the label — the same split the native recovery
+ * card uses (colored symbol, ink title). Label text therefore stays readable on
+ * both themes, and state survives without relying on color alone. */
+button.md-status.md-status-todo{border-color:var(--line-strong)}
+button.md-status.md-status-todo .md-status-glyph{color:var(--muted)}
+button.md-status.md-status-run{border-color:color-mix(in srgb,var(--status-warning) 55%,transparent);background:color-mix(in srgb,var(--status-warning) 10%,transparent)}
+button.md-status.md-status-run .md-status-glyph{color:var(--status-warning)}
+button.md-status.md-status-maybe{border-color:color-mix(in srgb,var(--status-info) 50%,transparent);background:color-mix(in srgb,var(--status-info) 10%,transparent)}
+button.md-status.md-status-maybe .md-status-glyph{color:var(--status-info)}
+button.md-status.md-status-blocked{border-color:color-mix(in srgb,var(--status-danger) 55%,transparent);background:color-mix(in srgb,var(--status-danger) 10%,transparent)}
+button.md-status.md-status-blocked .md-status-glyph{color:var(--status-danger)}
+button.md-status.md-status-done{border-color:color-mix(in srgb,var(--status-success) 55%,transparent);background:color-mix(in srgb,var(--status-success) 10%,transparent)}
+button.md-status.md-status-done .md-status-glyph{color:var(--status-success)}
+/* Native parity: CommandDeckMetrics thickens the stroke at increased contrast
+ * and CommandDeckTheme honours reduced motion; the web chip now matches. */
+@media (prefers-contrast: more){button.md-status{border-width:1.5px}}
+@media (prefers-reduced-motion: reduce){button.md-status{transition:none}}
+:where(.server-route-document) button{justify-self:start;margin:12px 16px;border:var(--stroke-width) solid color-mix(in srgb,var(--status-success) 55%,transparent);background:color-mix(in srgb,var(--status-success) 14%,transparent);color:var(--text);border-radius:var(--radius-surface);padding:8px 12px;font-weight:700;cursor:pointer}
 /* Save sits in the form's bottom auto-row (not floating in the black void). */
 .artifact-panel .save-artifact-btn{
   margin:0;padding:8px 14px;justify-self:start;align-self:center;
-  border-radius:7px;border:1px solid #5e7f47;background:#22321f;color:var(--text);font-weight:700
+  border-radius:var(--radius-surface);border:var(--stroke-width) solid color-mix(in srgb,var(--status-success) 55%,transparent);background:color-mix(in srgb,var(--status-success) 14%,transparent);color:var(--text);font-weight:700
 }
 .artifact-panel.is-active .editor-form>.save-artifact-btn{margin:8px 16px 12px}
 .checkpoint-form{display:flex;flex-direction:column;align-items:stretch;gap:10px;padding:0;margin:0}
 .checkpoint-form label{display:flex;align-items:center;gap:8px;color:var(--text);font-size:13px}
-.checkpoint-form input[name=note]{width:100%;min-width:0;border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:7px;padding:8px;font:13px var(--font-body)}
+.checkpoint-form input[name=note]{width:100%;min-width:0;border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:var(--radius-surface);padding:8px;font:13px var(--font-body)}
 .checkpoint-form button{margin:0;width:100%;justify-self:stretch}
 /* Right inspector (tools + status) */
 .review-inspector{height:100%;min-height:0;overflow:auto;padding:14px 14px 20px;background:var(--panel);display:flex;flex-direction:column;gap:14px}
 .inspector-head{color:var(--muted);font:10px var(--font-mono);text-transform:uppercase;letter-spacing:.14em;padding-bottom:6px;border-bottom:1px solid var(--line)}
-.inspector-block{display:grid;gap:8px;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+.inspector-block{display:grid;gap:8px;padding:12px;border:var(--stroke-width) solid var(--line);border-radius:var(--radius-surface);background:var(--panel)}
 .inspector-block h3{margin:0;font:600 12px/1.2 var(--font-body);color:var(--text);letter-spacing:.02em}
 .inspector-meta{margin:0;color:var(--muted);font:11px var(--font-mono);overflow-wrap:anywhere}
 .inspector-hint{margin:0;color:var(--muted);font-size:12px;line-height:1.45}
@@ -2033,7 +2051,7 @@ button.md-status.md-status-done{border-color:rgba(184,239,125,.55);color:var(--a
 /* Bottom stats bar */
 .review-statusbar{display:flex;flex-wrap:wrap;align-items:center;gap:14px;padding:8px 16px;border-top:1px solid var(--line);background:var(--panel);color:var(--muted);font:11px/1.3 var(--font-mono);flex:0 0 auto}
 .review-statusbar b{color:var(--text);font-weight:600}
-.review-statusbar .stat-plan{margin-left:auto;color:var(--teal)}
+.review-statusbar .stat-plan{margin-left:auto;color:var(--text)}
 @media(max-width:1100px){
   .review-shell{grid-template-columns:240px minmax(0,1fr) 260px}
 }
@@ -2057,7 +2075,7 @@ button.md-status.md-status-done{border-color:rgba(184,239,125,.55);color:var(--a
 .tab,.render-mode-btn,.checkpoint-state,.inspector-pill{background:var(--panel-lift)}
 .tab.is-active{border-color:var(--line-strong);background:var(--panel-lift);box-shadow:inset 2px 0 0 var(--text)}
 .tab:hover,.tab:focus,.api-link{color:var(--text)}
-.plan-library{background:radial-gradient(700px 320px at 15% -8%,rgba(63,63,70,.2),transparent 64%),var(--bg)}
+.plan-library{background:var(--bg)}
 .library-header{padding:26px 0 30px;border-bottom:1px solid var(--line)}
 .library-intro,.library-stats{margin-left:auto;margin-right:auto;width:min(calc(100% - 48px),1152px)}
 .library-intro{grid-template-columns:minmax(0,1fr) minmax(280px,.72fr);gap:40px}
@@ -2067,11 +2085,11 @@ button.md-status.md-status-done{border-color:rgba(184,239,125,.55);color:var(--a
 .library-stats div{padding-top:12px}.library-stats dd{color:var(--text);font-size:22px}
 .plan-field{width:min(100%,1200px);margin:0 auto;padding:28px 24px 68px}
 .plan-toolbar h2{font:650 26px/1.05 var(--font-mono)}
-.plan-card{min-height:230px;border-radius:16px;background:linear-gradient(145deg,var(--panel),var(--panel));box-shadow:0 1px 0 rgba(255,255,255,.025)}
+.plan-card{min-height:230px;border-radius:var(--radius-surface);background:var(--panel)}
 .plan-card:hover,.plan-card:focus-visible{transform:translateY(-2px);border-color:var(--line-strong);background:var(--panel-lift)}
 .plan-card-title h3{font:600 22px/1.08 var(--font-body)}
 .plan-card-title p,.plan-number,.plan-open b{color:var(--text)}
-.blocked-plan-shell{padding:22px clamp(24px,5vw,76px) 80px;background:radial-gradient(700px 320px at 15% -8%,rgba(63,63,70,.2),transparent 64%),var(--bg)}
+.blocked-plan-shell{padding:22px clamp(24px,5vw,76px) 80px;background:var(--bg)}
 .blocked-plan-head h1,.blocked-explainer h2{font-family:var(--font-mono)}
 @media(max-width:820px){
   .server-route-document{height:auto;min-height:100%}
@@ -2531,6 +2549,323 @@ button.md-status.md-status-done{border-color:rgba(184,239,125,.55);color:var(--a
                 html.contains("return res.json()"),
                 "a successful chip write must reconcile with canonical server bytes"
             );
+        }
+
+        /// The supplied regression: in a narrow tracker column the `todo` chip
+        /// rendered `[` and `]` on separate lines. The glyph was the only one
+        /// carrying an internal space, and nothing stopped the flex items from
+        /// shrinking below their content.
+        #[test]
+        fn status_chip_stays_one_unbreakable_control_in_a_narrow_column() {
+            let html = render_editor(&fixture());
+
+            assert!(
+                html.contains(
+                    "white-space:nowrap;overflow-wrap:normal;word-break:normal"
+                ),
+                "the chip itself must never wrap, whatever the column width"
+            );
+            assert!(
+                html.contains("button.md-status{display:inline-flex;align-items:center;flex:0 0 auto;"),
+                "the chip must not shrink below its content inside a table cell"
+            );
+            assert!(
+                html.contains("button.md-status .md-status-glyph{flex:0 0 auto;white-space:pre;"),
+                "the bracket glyph must be non-shrinking and keep its literal spacing"
+            );
+            assert!(
+                html.contains("button.md-status .md-status-label{flex:0 0 auto;white-space:nowrap;"),
+                "the state label must not wrap away from its glyph"
+            );
+            // Belt and braces: even with the stylesheet stripped, the todo glyph
+            // no longer offers a break opportunity between its brackets.
+            assert!(
+                html.contains(r#"" ": { label: "todo", glyph: "\u00a0" }"#),
+                "todo must render a non-breaking space between its brackets"
+            );
+            assert!(
+                !html.contains(r#"" ": { label: "todo", glyph: " " }"#),
+                "a bare space between brackets is what split [ and ] across lines"
+            );
+        }
+
+        /// Every state, not just the one that happened to break, is a cohesive
+        /// control; and state colour rides the glyph so the label stays legible
+        /// on the light theme too.
+        #[test]
+        fn every_status_state_is_a_cohesive_readable_control() {
+            let html = render_editor(&fixture());
+
+            for (state, token) in [
+                ("todo", "var(--muted)"),
+                ("run", "var(--status-warning)"),
+                ("maybe", "var(--status-info)"),
+                ("blocked", "var(--status-danger)"),
+                ("done", "var(--status-success)"),
+            ] {
+                assert!(
+                    html.contains(&format!(
+                        "button.md-status.md-status-{state} .md-status-glyph{{color:{token}}}"
+                    )),
+                    "state {state} must carry its colour on the glyph"
+                );
+            }
+
+            // The old palette coloured the *label*, using accents that collapsed
+            // to a neutral grey — invisible on the light theme.
+            assert!(
+                !html.contains("color:var(--amber);background:rgba(216,166,64,.08)"),
+                "stale chip palette must not come back"
+            );
+            assert!(
+                !html.contains("border-color:rgba(169,177,180,.35)"),
+                "stale chip palette must not come back"
+            );
+        }
+
+        /// Presentation changed; the source markers and the save path did not.
+        #[test]
+        fn status_presentation_change_leaves_the_persistence_contract_intact() {
+            let html = render_editor(&fixture());
+
+            assert!(
+                html.contains(r#"STATUS_CYCLE = [" ", "~", "?", "!", "x"]"#),
+                "the cycle still moves through the real source markers"
+            );
+            assert!(
+                html.contains("([ xX~!?])"),
+                "the source-marker scanner must still match the raw tracker tokens"
+            );
+            assert!(
+                html.contains("replaceStatusOcc"),
+                "a click still rewrites the matching occurrence in the raw textarea"
+            );
+            assert!(
+                html.contains(r#"chip.getAttribute("data-mark")"#),
+                "the next mark is derived from the real marker, never from the glyph"
+            );
+            assert!(
+                html.contains("markFormDirty"),
+                "checkpoint/save dirty tracking is unchanged"
+            );
+            assert!(
+                html.contains("statusRequestSeq"),
+                "stale-response reconciliation is unchanged"
+            );
+        }
+
+        /// Founder direction: keep the light theme. These surfaces were pinned to
+        /// dark slabs, so light mode rendered near-black text on a dark card.
+        #[test]
+        fn studio_surfaces_follow_the_theme_contract_not_hardcoded_dark_slabs() {
+            let html = render_editor(&fixture());
+
+            assert!(
+                !html.contains("background:rgba(27,31,32,.85)"),
+                "the frontmatter card must not be pinned to a dark slab"
+            );
+            assert!(
+                !html.contains("background:#162114") && !html.contains("background:#2b1717"),
+                "save/error banners must not be pinned to dark fills"
+            );
+            assert!(
+                html.contains("letter-spacing:.06em;background:var(--bg);position:sticky"),
+                "a sticky header needs an opaque surface; --panel is alpha on light"
+            );
+            assert!(
+                html.contains(".md-table tr:hover td{background:var(--btn-bg-hover)}"),
+                "row hover must use the themed hover token, not white alpha"
+            );
+        }
+
+        /// Parity with the native command deck, which already thickens its stroke
+        /// at increased contrast and honours reduced motion.
+        #[test]
+        fn status_chip_honours_reduced_motion_and_increased_contrast() {
+            let html = render_editor(&fixture());
+
+            assert!(
+                html.contains("@media (prefers-reduced-motion: reduce){button.md-status{transition:none}}"),
+                "chip motion must be opt-out"
+            );
+            assert!(
+                html.contains("@media (prefers-contrast: more){button.md-status{border-width:1.5px}}"),
+                "increased contrast must thicken the chip stroke, as the native deck does"
+            );
+            assert!(
+                html.contains("transition:border-color var(--motion-fast) var(--ease-ui)"),
+                "chip motion must come from the shared motion dictionary"
+            );
+            assert!(
+                html.contains("button.md-status:focus-visible{outline:2px solid var(--focus-ring)"),
+                "keyboard focus must stay visible on both themes"
+            );
+        }
+
+        /// Route-local adoption. The studio used to carry a fossil palette of a
+        /// previous brand (teal glows, lime code, two hand-mixed greens) beside
+        /// the shared tokens. Colour here must now come from the same semantic
+        /// layer the native deck feeds.
+        ///
+        /// Scope: this asserts the stylesheet the studio *owns*. The rendered
+        /// document also embeds `chrome::STYLE_MAIN`, whose first ~1400 lines
+        /// are the marketing site (hero, blog, pricing) and carry one
+        /// `linear-gradient` on `.blog-post-header` — a selector no console
+        /// route ever matches. Asserting over the whole document measured that
+        /// dead sheet instead of this one; the shared layer has its own owner
+        /// in `chrome::tests`.
+        #[test]
+        fn studio_styling_converges_on_the_shared_deck_tokens() {
+            let css = editor_css();
+
+            for fossil in [
+                "#5e7f47", "#22321f", // hand-mixed checkpoint green
+                "#4d7041",            // hand-mixed done green
+                "rgba(184,239,125",   // lime accent of a previous brand
+                "rgba(77,155,142",    // teal accent of a previous brand
+                "rgba(43,48,51",      // slab rule
+                "#1b1914", "#1b1617", // slab card fills
+            ] {
+                assert!(
+                    !css.contains(fossil),
+                    "studio css still carries the fossil literal {fossil}"
+                );
+            }
+
+            assert!(
+                !css.contains("radial-gradient") && !css.contains("linear-gradient"),
+                "the plan library is an index, not a landing page"
+            );
+            assert!(
+                css.contains("--accent:var(--amber)"),
+                "the studio bridge must point at the live accent, not plain text"
+            );
+            assert!(
+                css.contains("box-shadow:inset 0 0 0 2px var(--focus-ring)"),
+                "the raw editor focus ring must use the corrected global token"
+            );
+            assert!(
+                render_editor(&fixture()).contains(css),
+                "the studio must actually ship the stylesheet this test measures"
+            );
+        }
+
+        /// The shared sheet installs one focus owner —
+        /// `.server-app-shell :focus-visible` (`main.css`) — and the studio
+        /// canvas renders inside that shell, so the ring should reach every
+        /// control here for free. It did not: `editor_css()` is embedded in
+        /// `head_html`, i.e. *after* the shared sheet, and these four rules
+        /// carried `outline:none` at exactly equal specificity (0,2,0), so the
+        /// later declaration won and the ring was suppressed in both themes.
+        /// A border tint is not a focus indicator; `main.css` says so itself.
+        ///
+        /// The two suppressions that remain in the studio are deliberate and
+        /// keep their own replacement: the raw textarea swaps the outline for
+        /// an inset ring, and the tracker chip re-declares a real one.
+        #[test]
+        fn studio_controls_never_suppress_the_shared_focus_ring() {
+            let css = editor_css();
+
+            for control in [
+                ".plan-card:hover,.plan-card:focus-visible{",
+                ".review-library-link:hover,.review-library-link:focus-visible{",
+                ".tab:hover,.tab:focus{",
+                "button.render-mode-btn:hover,button.render-mode-btn:focus-visible{",
+            ] {
+                let mut seen = 0;
+                for (at, _) in css.match_indices(control) {
+                    let rest = &css[at..];
+                    let end = rest.find('}').expect("every studio rule is closed");
+                    assert!(
+                        !rest[..end].contains("outline"),
+                        "{control} suppresses the one focus ring the shell installs"
+                    );
+                    seen += 1;
+                }
+                assert!(seen > 0, "{control} vanished — re-point this contract");
+            }
+
+            // Deliberate, and each still shows focus.
+            assert!(
+                css.contains(
+                    ".editor-form textarea.raw-pane:focus{outline:none;box-shadow:inset 0 0 0 2px var(--focus-ring)}"
+                ),
+                "the raw editor must keep its inset focus affordance"
+            );
+            assert!(
+                css.contains(
+                    "button.md-status:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}"
+                ),
+                "the tracker chip must re-declare the ring it suppressed"
+            );
+        }
+
+        /// Founder named this one directly: the checkpoint button was a pair of
+        /// hand-mixed greens that broke in light theme. It stays green (commit
+        /// semantics) but through --status-success, in the very same color-mix
+        /// shape the status chips already use — one owner, not a second dialect.
+        #[test]
+        fn checkpoint_and_save_actions_read_from_the_semantic_palette() {
+            let css = editor_css();
+            const SUCCESS_EDGE: &str = "color-mix(in srgb,var(--status-success) 55%,transparent)";
+
+            // Named owners, not a pinned total. Three surfaces mark "done" —
+            // the sidebar tab, the inspector pill and the tracker chip — and
+            // two commit actions carry the stroke: checkpoint and save. The
+            // tracker chip joined in 00f03ce6, so a hard-coded "4" described a
+            // studio that no longer existed. Splitting the count by the shape
+            // each owner uses keeps this honest: a new dialect still fails.
+            let done_edge = format!("border-color:{SUCCESS_EDGE}");
+            let action_stroke = format!("border:var(--stroke-width) solid {SUCCESS_EDGE}");
+            assert_eq!(
+                css.matches(done_edge.as_str()).count(),
+                3,
+                "tab, inspector pill and tracker chip mark done with one edge"
+            );
+            assert_eq!(
+                css.matches(action_stroke.as_str()).count(),
+                2,
+                "checkpoint and save carry the same success stroke"
+            );
+            assert_eq!(
+                css.matches(SUCCESS_EDGE).count(),
+                5,
+                "five owners total — nothing else may mint a sixth success dialect"
+            );
+            assert_eq!(
+                css.matches("background:color-mix(in srgb,var(--status-success) 14%,transparent)")
+                    .count(),
+                2,
+                "checkpoint and save carry the same fill weight"
+            );
+            assert!(
+                css.contains("border-radius:var(--radius-surface);padding:8px 12px;font-weight:700"),
+                "the commit action takes the deck's 8px radius"
+            );
+        }
+
+        /// The repaint must not have touched a single byte of persistence. This
+        /// asserts the write path end to end: source markers, the cycle, the
+        /// request reconciliation, the save form and the checkpoint note field.
+        #[test]
+        fn the_repaint_left_every_write_path_untouched() {
+            let html = render_editor(&fixture());
+
+            for contract in [
+                "replaceStatusOcc",   // rewrites the raw markdown occurrence
+                "statusRequestSeq",   // reconciles out-of-order status POSTs
+                "STATUS_CYCLE",       // the state machine, unchanged
+                "data-mark",          // the source marker read back off the DOM
+                "nextMark",
+                "save-artifact-btn",
+                "checkpoint-form",
+                "name=note",          // the checkpoint note actually posted
+            ] {
+                assert!(
+                    html.contains(contract),
+                    "presentation change dropped the persistence contract {contract}"
+                );
+            }
         }
 
         #[test]

@@ -10,9 +10,10 @@ order: 40
 Every dispatch creates a run in the control plane, identified by a run id
 such as `impl-<timestamp>-<id>` or `scaf-<timestamp>-<id>`. The run — not the
 terminal tab, not the process — is the unit of truth. Two verbs follow it:
-`observe` reads what a run produced; `await` blocks until it lands. Both are
-clients of the existing `vc-server`; they do not start private filesystem
-pollers in each CLI process.
+`observe` reads what a run produced; `await` blocks until it lands. `observe`
+may read through `vc-server`. `await` subscribes to the dispatcher-owned Unix
+stream for that run; it does not start a private filesystem poller and does
+not require `vc-server` for wake delivery.
 
 ## The two verbs
 
@@ -31,14 +32,15 @@ vibecrafted implement codex --prompt "Ship <task>"
 vibecrafted await codex --run-id impl-<timestamp>-<id>
 ```
 
-`observe` is a one-shot server read. It never creates an await monitor.
-`await` subscribes to a shared in-memory monitor keyed by canonical
-control-plane home plus run id. Twenty clients for one run still produce one
-underlying revalidation/read loop; disconnecting one client removes only its
-subscription.
+`observe` is a one-shot read (server projection when `vc-server` is up). It
+never creates an await monitor. `await` connects to the one dispatcher Unix
+stream for that run id. Twenty CLI clients still share that one socket:
+heartbeats and the terminal line fan out to every connected awaiter, and a
+late client receives the last event replay while the dispatcher is up. Files
+remain the durable triad; the socket only wakes.
 
 `--timeout` is an **idle window**, not a wall-clock deadline. It resets while
-the shared observation moves or qualified worker ownership remains live. Use
+the dispatcher stream moves or qualified worker ownership remains live. Use
 `--hard-cap` when the caller needs an absolute bound:
 
 ```bash
@@ -46,8 +48,11 @@ vibecrafted await codex --run-id <id> --timeout 25 --hard-cap 120
 ```
 
 JSON names the two outcomes separately as `idle_stall` and `hard_cap`. Human
-output uses the same names. If `vc-server` is absent, the command fails loudly
-and quickly; it never falls back to `vibecrafted_core.control_plane.await_run`.
+output uses the same names. `await` is `control_plane.await_run` over the
+dispatcher socket. A missing, refused, or broken socket is a wake that reads
+the file triad once — it is not permission to poll, and it is not a
+requirement to start `vc-server`. Dashboards may still use the server HTTP
+`/await` projection; that eye is optional and is not the CLI wake path.
 
 Do not hedge `await` with manual sleep/poll/process monitors. If you feel the
 need to double-guard it, that is a bug report against the runtime contract,
@@ -78,7 +83,8 @@ delivery.
 
 Before declaring a run done, reconcile:
 
-1. **The await verdict** — the server returned a terminal verdict for the run id.
+1. **The await verdict** — the dispatcher socket woke `await` and the file
+   triad produced a terminal verdict for the run id.
 2. **Terminal state in run meta** — the run record shows a terminal state
    (`completed`, `failed`), not `active` or `stalled`.
 3. **Qualified process truth** — PID, PGID, start token, command identity and
@@ -113,8 +119,9 @@ Failure signatures worth knowing:
 - **Mid-flight death**: transcript frozen, pid gone — stop and refire; the
   run record stays as evidence.
 - **Evidence disagreement**: canonical state and current qualified process
-  evidence disagree — the observation fails closed and names the disagreement;
-  neither the server nor `vc-monitor` fabricates settlement.
+  evidence disagree — `await` fails closed and names the disagreement;
+  neither the dispatcher socket nor the optional server projection
+  fabricates settlement.
 
 ## Settled runs
 

@@ -1,35 +1,59 @@
 /* Vibecrafted operator-console tokens.
- * Visual authority: vc-slack-agent/console — graphite, compact, operational.
+ *
+ * Visual authority: the native Command Deck recovery/reconnect surface —
+ * `vibecrafted-app/shell-agent/app/Vibecrafted/CommandDeck/CommandDeckTheme.swift`
+ * (`CommandDeckPalette.resolved`) and `RecoveryView.swift`. Every primitive
+ * below is that palette transcribed to sRGB hex, so the web console and the
+ * native card are literally the same colours rather than two houses that
+ * merely rhyme.
+ *
+ * Native → web mapping (dark, standard contrast):
+ *   surface       #21211f  → --ink        (page)
+ *   surfaceRaised #2e2b29  → --ink2       (sections, cards)
+ *   ink/bone      #ede6d6  → --bone       (primary text)
+ *   muted         #b3ab9e  → --bone-dim   (secondary text)
+ *   amber         #e39e38  → --amber      (the one accent)
+ *   destructive   #db5247  → --status-danger
+ *   stroke        #524d45  → --border-subtle
+ *
+ * The native card knows exactly two surface levels; --ink3 is the single
+ * extrapolated step above `surfaceRaised` that the web console needs for
+ * nested rows, and it is the only colour here that is not a direct transcript.
  */
 
 :root {
-  --ink: #0a0a0b;
-  --ink2: #121214;
-  --ink3: #1a1a1e;
+  /* Surfaces — CommandDeckPalette.surface / .surfaceRaised */
+  --ink: #21211f;
+  --ink2: #2e2b29;
+  --ink3: #38342f; /* extrapolated one step above surfaceRaised */
 
-  /* Foreground (cream-on-ink, editorial print feel).
-   * Bone bumped 2026-05-03 from #ece7dc → #f5f1e7 — slightly brighter, less yellow.
-   * Body/subtle alphas raised so the text reads as "warm white" not "cream". */
-  --bone: #f4f4f5;
-  --bone-dim: #a1a1aa;
-  --bone-mute: #71717a;
-  --bone-faint: #27272a;
+  /* Foreground — CommandDeckPalette.ink / .muted / .stroke.
+   * The native card runs warm bone on warm graphite; --bone-mute is the one
+   * interpolation between `muted` and `stroke`, for third-rank labels. */
+  --bone: #ede6d6;
+  --bone-dim: #b3ab9e;
+  --bone-mute: #8f8879;
+  --bone-faint: #524d45;
 
-  /* Nav-specific themable surfaces (sticky nav has slight transparency for blur).
-   * Light theme override below flips ink → white. */
-  --nav-bg: rgba(10, 10, 11, 0.92);
-  --nav-bg-mobile: rgba(10, 10, 11, 0.96);
-  --nav-bg-strip: rgba(10, 10, 11, 0.98);
-  --btn-border: #3f3f46;
-  --btn-bg-hover: rgba(255, 255, 255, 0.05);
-  --modal-backdrop: rgba(10, 10, 11, 0.82);
+  /* Nav-specific themable surfaces (sticky nav has slight transparency).
+   * Light theme override below flips ink → parchment. */
+  --nav-bg: rgba(33, 33, 31, 0.92);
+  --nav-bg-mobile: rgba(33, 33, 31, 0.96);
+  --nav-bg-strip: rgba(33, 33, 31, 0.98);
+  --btn-border: #524d45;
+  --btn-bg-hover: rgba(237, 230, 214, 0.06);
+  --modal-backdrop: rgba(18, 18, 15, 0.82);
 
-  /* Accents — two-color editorial system (post-2026-05-05 consolidation).
-   * --amber is the narrative accent (hero emphasis, CTA, active stats, warm
-   *   markers, italic <em> in headings, tag-cycles, mistake markers).
-   * --teal is the interaction accent (hover, focus, state). */
-  --amber: #d4d4d8;
-  --teal: #d4d4d8;
+  /* Accent — ONE accent, exactly as the native deck.
+   * CommandDeckTheme carries a single `amber`; the accent button fills with
+   * it and the quiet button does not use it at all. The former two-colour
+   * editorial split (amber narrative / teal interaction) had collapsed into
+   * one dead grey on both names, so it is resolved here in the
+   * direction the native reference already took: --teal is an alias, kept so
+   * existing consumers converge instead of being overridden. */
+  --amber: #e39e38;
+  --teal: var(--amber);
+  --accent: var(--amber);
 
   /* ─── Semantic layer ────────────────────────────────────────────────────
    * UI components consume these role names, not the brand primitives above.
@@ -47,31 +71,39 @@
   --text-muted: var(--bone-mute);
   --text-faint: var(--bone-faint);
 
-  /* Accent roles — two-color editorial system */
-  --accent-narrative: var(
-    --amber
-  ); /* hero "see", evidence stats, mistake markers, narrative beats */
-  --accent-interaction: var(--teal); /* hover, focus, success, demo glow */
-  --focus-ring: var(--teal);
+  /* Accent roles — one accent, two role names for existing call sites. */
+  --accent-narrative: var(--accent);
+  --accent-interaction: var(--accent);
+  --focus-ring: var(--accent);
 
   /* Status tokens — semantic, not decorative.
-   * Without these, agents will reach for amber for warning/active/featured/error/CTA all at once. */
-  --status-success: #4ade80;
-  --status-warning: #fbbf24;
+   * Warned and danger are the native `amber` and `destructive`. Success has
+   * no native counterpart, so it is tuned to sit inside the same warm family
+   * rather than the previous neon #4ade80 — my call, not a transcript. */
+  --status-success: #8fbf6a;
+  --status-warning: var(--amber);
   --status-info: var(--bone-dim);
-  --status-danger: #f87171;
+  --status-danger: #db5247;
 
-  /* Elevation scale — sections rest, cards lift on interaction, modals own the highest layer.
-   * Do not invent ad-hoc box-shadows; pick from this scale. */
+  /* Elevation — the native card has NO shadow. It is one raised surface plus
+   * one 1px stroke, and that is the whole elevation vocabulary the console
+   * uses. The shadow scale below survives only for the legacy marketing
+   * sections at the top of main.css; console surfaces must not consume it. */
   --shadow-rest: none;
   --shadow-hover:
     0 1px 0 rgba(255, 255, 255, 0.04), 0 12px 40px rgba(0, 0, 0, 0.45);
   --shadow-modal: 0 24px 80px rgba(0, 0, 0, 0.62);
-  --border-subtle: #27272a;
-  --border-active: #3f3f46;
+  --border-subtle: #524d45;
+  --border-active: #6b6459;
 
-  /* Motion tokens — duration + easing dictionary.
-   * Motion reveals structure; it is not decoration. */
+  /* Stroke + radius — CommandDeckMetrics.strokeWidth / .cornerRadius.
+   * One radius for every console surface, chip and control: 8px. */
+  --stroke-width: 1px;
+  --radius-surface: 8px;
+
+  /* Motion tokens — --motion-base already equals
+   * CommandDeckMetrics.motionDuration (0.22s). Motion reveals structure;
+   * it is not decoration. */
   --motion-fast: 160ms;
   --motion-base: 220ms;
   --motion-slow: 420ms;
@@ -100,6 +132,15 @@
   --space-20: 5rem;
   --space-24: 6rem;
 
+  /* Console rhythm — RecoveryView's own spacing, verbatim:
+   * 28px card padding, 16px between blocks, 10px between controls,
+   * 8px inside a block, 12px chrome padding. */
+  --deck-pad-card: 28px;
+  --deck-gap-block: 16px;
+  --deck-gap-control: 10px;
+  --deck-gap-inline: 8px;
+  --deck-pad-chrome: 12px;
+
   /* Layout rhythm */
   --space-section: 80px;
   --space-section-compact: 52px;
@@ -115,14 +156,14 @@
   /* Card system */
   --ink-card: var(--ink2);
   --ink-card-code: var(--ink3);
-  --card-radius: 16px;
-  --card-border-color: #27272a;
-  --card-border-hover: #3f3f46;
-  --card-border: 1px solid var(--card-border-color);
+  --card-radius: var(--radius-surface);
+  --card-border-color: var(--border-subtle);
+  --card-border-hover: var(--border-active);
+  --card-border: var(--stroke-width) solid var(--card-border-color);
   --card-transition:
     border-color 160ms ease, background 160ms ease, transform 160ms ease;
-  --card-feature-icon-bg: rgba(61, 122, 114, 0.1);
-  --card-feature-icon-border: rgba(61, 122, 114, 0.2);
+  --card-feature-icon-bg: rgba(227, 158, 56, 0.1);
+  --card-feature-icon-border: rgba(227, 158, 56, 0.2);
 
   /* Layout width scale */
   --max-w-page: 1152px;
@@ -134,7 +175,8 @@
   --max-w-section-header: 640px;
   --container-gutter-fluid: clamp(var(--space-4), 2.6vw, var(--space-12));
 
-  /* Radii */
+  /* Radii — the console uses --radius-surface everywhere. This scale is kept
+   * for the legacy marketing sections only. */
   --radius-sm: 8px;
   --radius-md: 12px;
   --radius-lg: 16px;
@@ -152,6 +194,14 @@
   --text-5xl: 3rem;
   --text-6xl: 3.75rem;
   --text-7xl: 4.5rem;
+
+  /* Console type roles — RecoveryView's ladder (.title2 / .headline / .body /
+   * .body.monospaced) rendered at macOS point sizes. A dense operator desk
+   * does not get a landing-page headline. */
+  --deck-title: 1.0625rem; /* .title2  — 17px */
+  --deck-headline: 0.8125rem; /* .headline — 13px, semibold */
+  --deck-body: 0.8125rem; /* .body     — 13px */
+  --deck-caption: 0.6875rem; /* below .body, for mono labels */
 
   /* Typography role scale */
   --type-h1: clamp(var(--text-4xl), 6vw, var(--text-7xl));
@@ -189,34 +239,28 @@
   --icon-lg: 32px;
   --icon-stroke: 1.5;
 
-  /* Icon ink: default is dim-warm; card icons take the copper accent;
-   * stack logos sit at a quieter neutral so the chip cluster reads as a
-   * field rather than a parade. */
-  --icon-color-default: rgba(243, 238, 232, 0.68);
-  --icon-color-card: var(--amber); /* feature card icons — narrative warm */
-  --icon-color-active: var(
-    --amber
-  ); /* active interaction — consolidated into amber family */
-  --icon-color-success: var(
-    --teal
-  ); /* success state — consolidated into teal (state) family */
-  --icon-color-stack: rgba(243, 238, 232, 0.74);
+  /* Icon ink. The native card colours the SYMBOL and leaves the title in
+   * `ink` — that is why state colour lives on icons here, not on labels. */
+  --icon-color-default: rgba(237, 230, 214, 0.68);
+  --icon-color-card: var(--accent);
+  --icon-color-active: var(--accent);
+  --icon-color-success: var(--status-success);
+  --icon-color-stack: rgba(237, 230, 214, 0.74);
 
   /* Rounded square containers (NOT circles — circles read as buttons,
-   * which would mislead users). Default state is monochrome; teal enters
-   * on hover/focus as a state/highlight accent. */
+   * which would mislead users). */
   --icon-box: 40px;
-  --icon-box-radius: 10px;
-  --icon-box-bg: rgba(255, 255, 255, 0.035);
-  --icon-box-border: rgba(255, 255, 255, 0.08);
-  --icon-box-bg-hover: rgba(61, 122, 114, 0.12);
-  --icon-box-border-hover: rgba(61, 122, 114, 0.3);
+  --icon-box-radius: var(--radius-surface);
+  --icon-box-bg: rgba(237, 230, 214, 0.035);
+  --icon-box-border: rgba(237, 230, 214, 0.08);
+  --icon-box-bg-hover: rgba(227, 158, 56, 0.12);
+  --icon-box-border-hover: rgba(227, 158, 56, 0.3);
 
   /* Stack chips */
   --chip-stack-height: 34px;
   --chip-stack-gap: var(--space-2);
   --chip-stack-pad-x: 10px;
-  --chip-stack-radius: 10px;
+  --chip-stack-radius: var(--radius-surface);
 }
 
 @media (max-width: 768px) {
@@ -251,35 +295,52 @@ em.cool {
 }
 
 /* Light theme override — opt-in via <html data-theme="light"> attribute set
- * by ThemeContext in app.rs. Inverts ink/bone palette; accent micro-colors
- * (rust/teal/amber/accent-red) zostają — działają na obu tłach. */
+ * by ThemeContext in app.rs. This is CommandDeckPalette.resolved(scheme:
+ * .light, contrast: .standard), transcribed:
+ *   surface #f5f0e3 · surfaceRaised #fcfaf2 · ink #2e2b26 · muted #6b665e
+ *   amber #b87314 · destructive #b82924 · stroke #c7bdad
+ * Note the direction reverses in light: the raised card is LIGHTER than the
+ * page, exactly as the native card does it. Surfaces are opaque here (they
+ * used to be alpha), so a sticky header no longer bleeds its rows through. */
 :root[data-theme="light"] {
-  --ink: #fbfbf8; /* page background — warm off-white */
-  --ink2: rgba(5, 5, 4, 0.04); /* glass surfaces */
-  --ink3: rgba(5, 5, 4, 0.07); /* elevated glass */
+  --ink: #f5f0e3;
+  --ink2: #fcfaf2;
+  --ink3: #fffdf7; /* extrapolated one step above surfaceRaised */
 
-  --bone: #050504; /* primary text */
-  --bone-dim: rgba(5, 5, 4, 0.86); /* body text — bumped for parity with dark */
-  --bone-mute: rgba(
-    5,
-    5,
-    4,
-    0.64
-  ); /* subtle text — bumped for parity with dark */
-  --bone-faint: rgba(5, 5, 4, 0.2); /* borders */
+  --bone: #2e2b26;
+  --bone-dim: #4a463f;
+  --bone-mute: #6b665e;
+  --bone-faint: #c7bdad;
 
-  /* Nav surfaces flipped: light backdrop with subtle alpha for blur. */
-  --nav-bg: rgba(251, 251, 248, 0.88);
-  --nav-bg-mobile: rgba(251, 251, 248, 0.94);
-  --nav-bg-strip: rgba(251, 251, 248, 0.96);
-  --btn-border: rgba(5, 5, 4, 0.42);
-  --btn-bg-hover: rgba(5, 5, 4, 0.045);
-  --modal-backdrop: rgba(251, 251, 248, 0.78);
-  --card-border-color: rgba(5, 5, 4, 0.08);
-  --card-border-hover: rgba(5, 5, 4, 0.18);
-  --icon-box-bg: rgba(5, 5, 4, 0.035);
-  --icon-box-border: rgba(5, 5, 4, 0.08);
-  --icon-color-stack: rgba(5, 5, 4, 0.68);
+  --nav-bg: rgba(245, 240, 227, 0.92);
+  --nav-bg-mobile: rgba(245, 240, 227, 0.96);
+  --nav-bg-strip: rgba(245, 240, 227, 0.98);
+  --btn-border: #c7bdad;
+  --btn-bg-hover: rgba(46, 43, 38, 0.05);
+  --modal-backdrop: rgba(245, 240, 227, 0.82);
+
+  /* Deliberate deviation from the 1:1 transcript, and the only one in this
+   * file. The native LIGHT standard amber (#b87314) measures 3.36:1 against
+   * this parchment — fine for the symbol it tints natively, but below 4.5:1
+   * the moment the web console uses the accent as text or as the label on a
+   * filled accent button. So light adopts the *increased-contrast* amber from
+   * the very same palette: #945705 → 5.09:1 on the page, 5.54:1 on a card.
+   * Same reference, readable role. (The native accent button has the same
+   * shortfall in light mode; recorded for the app lane, not fixed here.) */
+  --amber: #945705;
+
+  --border-subtle: #c7bdad;
+  --border-active: #ab9f8c;
+  --card-border-color: var(--border-subtle);
+  --card-border-hover: var(--border-active);
+
+  --status-success: #4f7a35;
+  --status-danger: #b82924;
+
+  --icon-box-bg: rgba(46, 43, 38, 0.035);
+  --icon-box-border: rgba(46, 43, 38, 0.08);
+  --icon-color-default: rgba(46, 43, 38, 0.68);
+  --icon-color-stack: rgba(46, 43, 38, 0.74);
 
   /* Surface + text role re-points for light mode */
   --surface-page: var(--ink);
@@ -292,6 +353,49 @@ em.cool {
   --text-faint: var(--bone-faint);
 }
 
+/* Increased contrast — CommandDeckPalette.resolved(contrast: .increased) plus
+ * CommandDeckMetrics.contrastStrokeWidth (1.5px). The native deck thickens
+ * its stroke and deepens its palette; the console now does the same instead
+ * of ignoring the accessibility preference. */
+@media (prefers-contrast: more) {
+  :root {
+    --ink: #12120f;
+    --ink2: #1f1f1a;
+    --ink3: #2b2b24;
+    --bone: #faf5eb;
+    --bone-dim: #d1ccbd;
+    --bone-mute: #a8a394;
+    --bone-faint: #9e9480;
+    --amber: #ffb82e;
+    --status-danger: #f25c52;
+    --border-subtle: #9e9480;
+    --border-active: #bdb3a0;
+    --btn-border: #9e9480;
+    --stroke-width: 1.5px;
+    --nav-bg: rgba(18, 18, 15, 0.96);
+    --nav-bg-mobile: rgba(18, 18, 15, 0.98);
+    --nav-bg-strip: rgba(18, 18, 15, 0.99);
+  }
+
+  :root[data-theme="light"] {
+    --ink: #fffcf5;
+    --ink2: #fcfaf2;
+    --ink3: #fffdf7;
+    --bone: #14120f;
+    --bone-dim: #332f2a;
+    --bone-mute: #47423d;
+    --bone-faint: #61594d;
+    --amber: #945705;
+    --status-danger: #9e1414;
+    --border-subtle: #61594d;
+    --border-active: #47423d;
+    --btn-border: #61594d;
+    --nav-bg: rgba(255, 252, 245, 0.96);
+    --nav-bg-mobile: rgba(255, 252, 245, 0.98);
+    --nav-bg-strip: rgba(255, 252, 245, 0.99);
+  }
+}
+
 /* Smooth transition between themes (prefers-reduced-motion respected). */
 :root {
   color-scheme: dark;
@@ -302,8 +406,8 @@ em.cool {
 @media (prefers-reduced-motion: no-preference) {
   body {
     transition:
-      background-color 220ms ease,
-      color 220ms ease;
+      background-color var(--motion-base) var(--ease-ui),
+      color var(--motion-base) var(--ease-ui);
   }
 }
 

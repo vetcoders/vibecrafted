@@ -887,7 +887,7 @@ pub fn ConsolePage() -> impl IntoView {
     view! {
         <Title text="vc-server - control plane" />
         <Meta name="description" content="Vibecrafted control-plane dashboard." />
-        <Meta name="theme-color" content="#0a0a0b" />
+        <Meta name="theme-color" content="#21211f" />
         <Link rel="preload" as_="font" type_="font/woff2" href="/fonts/inter-var-latin.woff2" crossorigin="anonymous" />
         <Link rel="preload" as_="font" type_="font/woff2" href="/fonts/jetbrains-mono-var-latin.woff2" crossorigin="anonymous" />
         {control_dashboard(|dashboard| console_dashboard(dashboard).into_any())}
@@ -925,7 +925,7 @@ fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
                             <p class="section-eyebrow">"Operator workspace"</p>
                             <h1>"Control plane"</h1>
                             <p>
-                                "Live runs, lifecycle decisions, transcripts, and scaffold artifacts in one navigable operator desk."
+                                "Live runs, lifecycle decisions, transcripts and scaffold artifacts, read from the running control plane."
                             </p>
                             <p class="server-console-links">
                                 <a class="server-console-link server-console-link-primary" href="/runs">
