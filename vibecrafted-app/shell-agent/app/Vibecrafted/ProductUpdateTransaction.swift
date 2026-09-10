@@ -380,20 +380,31 @@ func productUpdateObserveInstallerPublication(runtimeHome: URL) -> ProductUpdate
   }
   let generation = pointerRoot["version"] as? String ?? ""
   let receiptVersion = receipt["version"] as? String ?? ""
-  let pendingFlags = ["install_pending", "config_pending", "uninstall_pending"].contains {
-    (receipt[$0] as? Bool) == true
-  }
+  let pendingFlags = ["install_pending", "config_pending", "uninstall_pending", "config_conflicts"]
+    .contains { installerPendingPublicationValue(receipt[$0]) }
   let phase = receipt["install_phase"] as? String ?? ""
   let midPublish = phase == "preparing" || phase == "ancillary"
   let pending =
     pendingFlags
     || receipt["config_transaction"] != nil
-    || receipt["config_conflicts"] != nil
     || midPublish
+    || generation.isEmpty
+    || receiptVersion.isEmpty
   let rolledBack = {
     if let stamp = receipt["rolled_back_at"] as? String, !stamp.isEmpty { return true }
     return false
   }()
+  if generation.isEmpty || receiptVersion.isEmpty {
+    return ProductUpdateInstallerPublication(
+      generation: generation,
+      receiptVersion: receiptVersion,
+      pointerPresent: true,
+      receiptPresent: true,
+      pending: true,
+      readable: false,
+      rolledBack: rolledBack,
+      detail: "installer publication is missing a matching active.json and receipt version")
+  }
   if !generation.isEmpty && !receiptVersion.isEmpty && generation != receiptVersion {
     return ProductUpdateInstallerPublication(
       generation: generation,
@@ -451,6 +462,25 @@ func productUpdateDerivePackPublication(
     return observed.rolledBack ? .rolledBack : .unpublished
   }
   return .unresolved
+}
+
+func installerPendingPublicationValue(_ value: Any?) -> Bool {
+  switch value {
+  case nil:
+    return false
+  case let flag as Bool:
+    return flag
+  case let text as String:
+    return !text.isEmpty
+  case is [String: Any]:
+    return true
+  case is [Any]:
+    return true
+  case let number as NSNumber:
+    return number.boolValue
+  default:
+    return true
+  }
 }
 
 func decodeProductUpdateJournalBinding(_ data: Data) -> ProductUpdateJournalBinding? {
@@ -580,9 +610,8 @@ func decideProductUpdateHandoff(
       if transaction != handoff.transactionID {
         return .stale("the restore receipt does not belong to this update")
       }
-      let operation = replacement.operation ?? replacement.mode ?? ""
-      if operation != handoff.mode {
-        return .stale("the restore receipt is not a \(handoff.mode) operation")
+      guard let operation = nonemptyReceiptOperation(replacement), operation == handoff.mode else {
+        return .stale("the restore receipt is missing a matching \(handoff.mode) operation")
       }
       if replacement.destination != handoff.destination {
         return .stale("the restore receipt names a different app")
@@ -605,9 +634,10 @@ func decideProductUpdateHandoff(
     if transaction != handoff.transactionID {
       return .stale("the replacement receipt does not belong to this update")
     }
-    let operation = replacement.operation ?? replacement.mode ?? ProductUpdateHelperMode.replace.rawValue
-    if operation != ProductUpdateHelperMode.replace.rawValue {
-      return .stale("the replacement receipt is not a replace operation")
+    guard let operation = nonemptyReceiptOperation(replacement),
+      operation == ProductUpdateHelperMode.replace.rawValue
+    else {
+      return .stale("the replacement receipt is missing a matching replace operation")
     }
     if replacement.destination != handoff.destination {
       return .stale("the replacement receipt names a different app")
@@ -681,6 +711,12 @@ private func decideRestoredHandoff(
     }
     return .rolledBack("the previous working version was restored")
   }
+}
+
+private func nonemptyReceiptOperation(_ receipt: ProductUpdateReplacementReceipt) -> String? {
+  if let operation = receipt.operation, !operation.isEmpty { return operation }
+  if let mode = receipt.mode, !mode.isEmpty { return mode }
+  return nil
 }
 
 func productUpdateRecoverRequest(
@@ -803,9 +839,16 @@ func decodeProductUpdateTransaction(_ data: Data) throws -> ProductUpdateTransac
     let boundary = ProductUpdateMutationBoundary(rawValue: boundaryRaw),
     let terminalRaw = root["terminal"] as? String,
     let terminal = ProductUpdateTransactionTerminal(rawValue: terminalRaw),
-    let installed = root["installed_generation"] as? String
+    let installed = root["installed_generation"] as? String, !installed.isEmpty
   else {
     throw ProductUpdateFeedError.malformed("update transaction receipt is malformed")
+  }
+  let transactionID = root["transaction_id"] as? String
+  if terminal != .inFlight || boundary != .none {
+    guard let transactionID, !transactionID.isEmpty else {
+      throw ProductUpdateFeedError.malformed(
+        "update transaction receipt is missing its transaction binding")
+    }
   }
   return ProductUpdateTransactionReceipt(
     schema: schema,
@@ -821,7 +864,7 @@ func decodeProductUpdateTransaction(_ data: Data) throws -> ProductUpdateTransac
     helperPID: int32(root["helper_pid"]),
     receiptPath: root["receipt_path"] as? String,
     capturePath: root["capture_path"] as? String,
-    transactionID: root["transaction_id"] as? String,
+    transactionID: transactionID,
     journalPath: root["journal_path"] as? String)
 }
 

@@ -718,12 +718,22 @@ if receipt_doc.get("schema") != "vibecrafted.runtime-install.v1":
     sys.exit(1)
 version = pointer_doc.get("version") or ""
 receipt_version = receipt_doc.get("version") or ""
-if not version or version != receipt_version:
-    sys.exit(1)
-if receipt_doc.get("install_pending") is True:
+if not version or not receipt_version or version != receipt_version:
     sys.exit(1)
 if receipt_doc.get("install_phase") in {"preparing", "ancillary"}:
     sys.exit(1)
+# Canonical installer pending publication: truthy flags plus any
+# config_transaction key (even an empty object) is incomplete.
+if "config_transaction" in receipt_doc:
+    sys.exit(1)
+for key in (
+    "install_pending",
+    "config_pending",
+    "uninstall_pending",
+    "config_conflicts",
+):
+    if receipt_doc.get(key):
+        sys.exit(1)
 print(version)
 PY
 }
@@ -761,19 +771,39 @@ prior_pack_generation() {
 }
 
 resolve_pack_installer() {
-  local here bundled
-  here="$(cd "$(dirname "$0")" && pwd)"
-  if [[ -x "$here/install-runtime-pack.sh" ]]; then
-    printf '%s' "$here/install-runtime-pack.sh"
-    return 0
+  local sibling bundled
+  # Prefer the historical app's own installer, then the running helper's sibling.
+  # Do not walk a source checkout independently of those two owners.
+  if [[ -n "${SOURCE:-}" ]]; then
+    for bundled in \
+      "$SOURCE/Contents/Resources/runtime-pack/install-runtime-pack.sh" \
+      "$SOURCE/Contents/Helpers/install-runtime-pack.sh" \
+      "$SOURCE/Contents/Resources/runtime/scripts/install-runtime-pack.sh"
+    do
+      if [[ -x "$bundled" ]]; then
+        printf '%s' "$(cd "$(dirname "$bundled")" && pwd)/$(basename "$bundled")"
+        return 0
+      fi
+    done
   fi
-  bundled="$here/../Resources/runtime-pack/install-runtime-pack.sh"
-  if [[ -x "$bundled" ]]; then
-    printf '%s' "$(cd "$(dirname "$bundled")" && pwd)/$(basename "$bundled")"
+  sibling="$(cd "$(dirname "$0")" && pwd)/install-runtime-pack.sh"
+  if [[ -x "$sibling" ]]; then
+    printf '%s' "$sibling"
     return 0
   fi
   echo "Runtime Pack installer owner is missing; cannot recover the previous runtime" >&2
   return 1
+}
+
+require_recovered_tuple() {
+  local label="$1"
+  local published
+  require_exact_identity "$DESTINATION" "$PRIOR_IDENTITY" "$label"
+  published="$(observe_published_generation || true)"
+  if [[ -z "$PRIOR_GENERATION" || "$published" != "$PRIOR_GENERATION" ]]; then
+    echo "recover resume refused app-only success; installer generation ${published:-unresolved} is not prior ${PRIOR_GENERATION}" >&2
+    exit 19
+  fi
 }
 
 emit_success_and_exit() {
@@ -867,7 +897,7 @@ reconcile_resume() {
           ;;
         receipt_written|adopted|relaunched|relaunching)
           if [[ "$DEST_PRESENT" -eq 1 ]]; then
-            require_exact_identity "$DESTINATION" "$PRIOR_IDENTITY" "recovered destination"
+            require_recovered_tuple "recovered destination"
             if [[ ! -f "$RECEIPT" ]]; then
               write_terminal_receipt "recovered" "true"
             fi
@@ -1147,8 +1177,8 @@ restore_prior_runtime() {
     local helper_dir source_installer
     helper_dir="$(cd "$(dirname "$0")" && pwd)"
     for source_installer in \
-      "$helper_dir/vetcoders_install.py" \
-      "$helper_dir/../Resources/runtime/scripts/vetcoders_install.py"
+      "$SOURCE/Contents/Resources/runtime/scripts/vetcoders_install.py" \
+      "$helper_dir/vetcoders_install.py"
     do
       if [[ -f "$source_installer" ]] && grep -Fq -- '--allow-older-runtime' "$source_installer"; then
         export VIBECRAFTED_SOURCE_INSTALLER="$source_installer"
@@ -1156,10 +1186,14 @@ restore_prior_runtime() {
       fi
     done
   fi
+  local live_root="$SOURCE"
+  if [[ -d "$DESTINATION" ]]; then
+    live_root="$DESTINATION"
+  fi
   set +e
   /bin/bash "$installer" \
     --pack "$PRIOR_PACK" \
-    --app-root "$SOURCE" \
+    --app-root "$live_root" \
     --terminal-host "$terminal_host" \
     --frame-helper "$frame_helper" \
     --allow-older-runtime

@@ -30,10 +30,13 @@ the existing `install-runtime-pack.sh --allow-older-runtime` owner, then
 restores `prior.app` through the same transaction owner (`--mode recover`)
 and must not overwrite that capture.
 Whole-tuple recovery observes the installer's `active.json` and
-`install-receipt.json`; a caller-written pack enum is not that proof.
-App-only restore is not whole-tuple success: unresolved or still-published
-newer pack state keeps recovery open. Missing historical rollback data
-fails closed without inventing restored evidence. A failed handoff persist keeps the
+`install-receipt.json` with the same pending-publication refusal as the
+installer owner; a caller-written pack enum is not that proof.
+App-only restore is not whole-tuple success: unresolved, pending, or
+still-published newer pack state keeps recovery open. Missing historical
+rollback data fails closed without inventing restored evidence. Recover
+uses bundled prior-app or helper-sibling installer paths and binds the
+live destination as `app_root`. A failed handoff persist keeps the
 current UI and does not abandon the helper. Then the new App publishes the
 matching pack. The running process does not publish a newer pack under the
 old App.

@@ -825,8 +825,7 @@ if [[ "$allow_older_runtime" == "1" ]]; then
     source_installer=""
     for candidate in \
       "${VIBECRAFTED_SOURCE_INSTALLER:-}" \
-      "$SCRIPT_DIR/vetcoders_install.py" \
-      "$REPO_ROOT/scripts/vetcoders_install.py"
+      "$SCRIPT_DIR/vetcoders_install.py"
     do
       [[ -n "$candidate" ]] || continue
       if [[ -f "$candidate" ]] && grep -Fq -- '--allow-older-runtime' "$candidate"; then

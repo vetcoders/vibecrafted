@@ -104,12 +104,18 @@ receipt must not republish the failed pack.
 Whole-tuple recovery after a published Runtime Pack failure is
 `--mode recover` → `recover_whole_tuple`. It locates the historical pack
 inside owned `prior.app`, calls the existing
-`install-runtime-pack.sh --allow-older-runtime` owner (source-installer
-bootstrap if the historical pack lacks that flag), observes
-`active.json` / `install-receipt.json`, and only then restores the
-matching prior app. App-only restore is refused while the candidate
-runtime remains selected. Missing historical rollback data is an honest
-failure: verified state stays, and no recovered receipt is written.
+`install-runtime-pack.sh --allow-older-runtime` owner from the bundled
+prior app or the running helper sibling (not a source-checkout hop),
+observes `active.json` / `install-receipt.json` with canonical installer
+pending semantics (`install_pending`, `config_pending`,
+`uninstall_pending`, `config_transaction`, `config_conflicts`), and only
+then restores the matching prior app. Helpers and pack bytes come from
+`prior.app`; `--app-root` is the live destination so the install receipt
+does not name the temporary capture. Resume of a terminal recover phase
+revalidates the runtime+app tuple, not app identity alone. App-only
+restore is refused while the candidate runtime remains selected. Missing
+historical rollback data is an honest failure: verified state stays, and
+no recovered receipt is written.
 `VIBECRAFTED_RUNTIME_PACK_HARNESS=1 --fail-after published` is the
 narrow test seam after real publication mutation; it does not change
 trust acceptance.
@@ -217,10 +223,13 @@ These production surfaces do **not** exist yet:
    `python -m vibecrafted_core.product_contract release-output` and the closed
    tree in `scripts/distribution_manifest.py`. No HTTPS origin, DNS name, or
    GitHub Releases URL is authorized in this repository. `VCUpdateFeedURL` is
-   therefore omitted from `Info.plist`. Check for Updates shows the bounded
-   unavailable card — that is the honest product state. Provisioning still
-   required (Founder-authorized, not invented here): an HTTPS URL that serves
-   the exact signed `release-output.json` and `.sig` plus the matching DMG and
+   therefore omitted from `Info.plist`. AppDelegate owns that Info.plist key
+   (`resolveLiveUpdateChannel`); Policy only validates a caller-supplied
+   HTTPS string (`resolveProductUpdateFeedURL`) and does not invent a
+   production origin. Check for Updates shows the bounded unavailable card —
+   that is the honest product state. Provisioning still required
+   (Founder-authorized, not invented here): an HTTPS URL that serves the
+   exact signed `release-output.json` and `.sig` plus the matching DMG and
    pack artifacts, then set `VCUpdateFeedURL` to that URL at release
    packaging time. The bundled `vibecrafted-signing-v1.pub` is already the
    trust root.

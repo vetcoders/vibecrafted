@@ -8,6 +8,7 @@ import os
 import pwd
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -60,7 +61,12 @@ def test_product_update_source_contract() -> None:
     assert "case readyToReplace" not in policy
     assert "io.vetcoders.vibecrafted.release-output.v1" in policy
     assert "vibecrafted-signing-v1" in policy
-    assert "VCUpdateFeedURL" in policy and "VCUpdateFeedURL" in delegate
+    assert 'forInfoDictionaryKey: "VCUpdateFeedURL"' in delegate
+    assert "func resolveLiveUpdateChannel(" in delegate
+    assert "func resolveProductUpdateFeedURL(" in policy
+    assert 'scheme == "https"' in policy
+    assert "VCUpdateFeedURL" not in policy
+    assert "VCUpdateFeedURL" not in info
     assert "Contents/Helpers/vc-app-update" in delegate
     assert "vc-app-update:" not in project
     assert "BUILT_PRODUCTS_DIR/vc-app-update" not in project
@@ -91,6 +97,9 @@ def test_product_update_source_contract() -> None:
     assert "restore_previous_tuple" in helper
     assert "recover_whole_tuple" in helper
     assert "restore_prior_runtime" in helper
+    assert "require_recovered_tuple" in helper
+    assert "config_conflicts" in helper
+    assert "config_transaction" in helper
     assert "--mode recover" in helper or "recover" in helper
     assert "--allow-older-runtime" in (
         REPO_ROOT / "scripts/install-runtime-pack.sh"
@@ -125,6 +134,8 @@ def test_product_update_source_contract() -> None:
     authored = (REPO_ROOT / "tests/tui/test_product_update.py").read_text(encoding="utf-8")
     assert "product_contract" in authored
     assert "VC_FRAME_SOCKET_DIR" in authored
+    assert "_IsolatedFrameSession" in authored
+    assert 'live-session.sock").write_text' not in authored
     assert "VIBECRAFTED_LAUNCHER_BIN" in authored
     assert "allow-older-runtime" in authored
     assert '"--mode"' in authored and '"recover"' in authored
@@ -689,9 +700,13 @@ def _read_installer_publication(runtime_home: Path) -> dict[str, object]:
     version = str(pointer_doc.get("version") or "")
     receipt_version = str(receipt_doc.get("version") or "")
     assert version, "active.json has no version"
+    assert receipt_version, "install-receipt.json has no version"
     assert version == receipt_version, f"{version} != {receipt_version}"
     assert receipt_doc.get("install_pending") is not True
     assert receipt_doc.get("install_phase") not in {"preparing", "ancillary"}
+    assert "config_transaction" not in receipt_doc
+    for key in ("config_pending", "uninstall_pending", "config_conflicts"):
+        assert not receipt_doc.get(key), f"installer left pending {key}"
     return {
         "version": version,
         "receipt_version": receipt_version,
@@ -707,6 +722,19 @@ def _assert_isolated_receipt_roots(receipt: dict[str, object], tmp_path: Path) -
     for name, value in roots.items():
         resolved = str(Path(str(value)).resolve())
         assert resolved.startswith(prefix), f"receipt root {name} escaped isolation: {resolved}"
+
+
+def _assert_receipt_names_live_app(receipt: dict[str, object], dest: Path) -> None:
+    app_root = str(receipt.get("app_root") or "")
+    assert app_root, "install-receipt.json has no app_root"
+    assert Path(app_root).resolve() == dest.resolve()
+    assert ".vc-update-capture-" not in app_root
+    roots = receipt.get("roots")
+    assert isinstance(roots, dict), "install-receipt.json has no roots"
+    for name, value in roots.items():
+        resolved = str(Path(str(value)).resolve())
+        assert ".vc-update-capture-" not in resolved, f"receipt root {name} names the capture"
+        assert not resolved.endswith("/prior.app"), f"receipt root {name} still names prior.app"
 
 
 def _app_helpers(dest: Path) -> tuple[Path, Path]:
@@ -861,7 +889,22 @@ def _attach_signed_app(dmg: Path, mount: Path) -> Path:
 
 def _copy_signed_app(src: Path, dest: Path) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["/usr/bin/ditto", str(src), str(dest)], check=True, timeout=60)
+    if dest.exists():
+        shutil.rmtree(dest)
+    cloned = subprocess.run(
+        ["/bin/cp", "-cR", str(src), str(dest)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if cloned.returncode != 0 or not dest.exists():
+        if dest.exists():
+            shutil.rmtree(dest)
+        subprocess.run(
+            ["/usr/bin/ditto", str(src), str(dest)],
+            check=True,
+            timeout=60,
+        )
     return dest
 
 
@@ -886,6 +929,7 @@ class _SignedApps:
         self.e37 = _require_e37_artifacts()
         self.prior = _require_prior_79001_artifacts()
         self.mounts: list[Path] = []
+        self.copies: list[Path] = []
 
     def __enter__(self) -> "_SignedApps":
         e37_mount = self.tmp / "mnt-e37"
@@ -911,19 +955,62 @@ class _SignedApps:
             )
         return self
 
-    def __exit__(self, *exc: object) -> None:
-        for mount in self.mounts:
+    def __exit__(self, exc_type: object, exc: object, _tb: object) -> None:
+        if exc is not None:
+            evidence = self.tmp / "signed-fixture-failure.json"
+            evidence.write_text(
+                json.dumps(
+                    {
+                        "e37_identity": getattr(self, "e37_identity", ""),
+                        "prior_identity": getattr(self, "prior_identity", ""),
+                        "error": str(exc),
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        self.release_copies()
+        for leftover in (
+            *self.tmp.glob(".vc-update-capture-*"),
+            *self.tmp.glob(".vc-update-prepared-*.app"),
+        ):
+            shutil.rmtree(leftover, ignore_errors=True)
+        self.detach_mounts()
+
+    def detach_mounts(self) -> None:
+        while self.mounts:
+            mount = self.mounts.pop()
             subprocess.run(
                 ["/usr/bin/hdiutil", "detach", str(mount), "-quiet"],
                 capture_output=True,
                 timeout=30,
             )
 
+    def release_copies(self) -> None:
+        while self.copies:
+            path = self.copies.pop()
+            if path.exists():
+                shutil.rmtree(path, ignore_errors=True)
+
+    def release(self, path: Path) -> None:
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+        self.copies = [item for item in self.copies if item != path]
+
     def copy_e37(self, dest: Path) -> Path:
-        return _copy_signed_app(self.e37_app, dest)
+        copied = _copy_signed_app(self.e37_app, dest)
+        self.copies.append(copied)
+        if len(self.copies) >= 2:
+            self.detach_mounts()
+        return copied
 
     def copy_prior(self, dest: Path) -> Path:
-        return _copy_signed_app(self.prior_app, dest)
+        copied = _copy_signed_app(self.prior_app, dest)
+        self.copies.append(copied)
+        if len(self.copies) >= 2:
+            self.detach_mounts()
+        return copied
 
 
 def test_product_update_helper_writes_ready_before_waiting(tmp_path: Path) -> None:
@@ -1148,33 +1235,75 @@ def test_product_update_helper_rejects_overlapping_lock(tmp_path: Path) -> None:
             stderr=subprocess.PIPE,
             text=True,
         )
-        admission = Path(str(receipt) + ".admission.json")
-        deadline = time.time() + 20
-        while time.time() < deadline and not admission.is_file():
-            if first.poll() is not None:
-                break
-            time.sleep(0.05)
-        assert admission.is_file()
-        held = dest.parent / ".vc-update.lock" / "held"
-        assert held.is_file()
-        second = _run_helper(
-            [
-                "--source",
-                str(source),
-                "--destination",
-                str(dest),
-                "--receipt",
-                str(tmp_path / "other-receipt.json"),
-                "--resume",
-            ],
-            env=_helper_env(),
-        )
-        assert second.returncode == 13
-        assert held.is_file()
-        assert _identity_token(dest) == apps.prior_identity
-        gate.write_text("go", encoding="utf-8")
-        first.wait(timeout=20)
-        assert held.is_file()
+        try:
+            admission = Path(str(receipt) + ".admission.json")
+            deadline = time.time() + 20
+            while time.time() < deadline and not admission.is_file():
+                if first.poll() is not None:
+                    break
+                time.sleep(0.05)
+            assert admission.is_file()
+            held = dest.parent / ".vc-update.lock" / "held"
+            assert held.is_file()
+            invalid = _run_helper(
+                [
+                    "--source",
+                    str(source),
+                    "--destination",
+                    str(dest),
+                    "--receipt",
+                    str(tmp_path / "other-receipt.json"),
+                    "--resume",
+                ],
+                env=_helper_env(),
+            )
+            assert invalid.returncode == 14, invalid.stderr
+            assert "complete immutable journal" in (invalid.stderr or "")
+            fresh = _run_helper(
+                [
+                    "--source",
+                    str(source),
+                    "--destination",
+                    str(dest),
+                    "--receipt",
+                    str(tmp_path / "other-receipt.json"),
+                ],
+                env=_helper_env(),
+            )
+            assert fresh.returncode == 13, fresh.stderr
+            assert "another update transaction holds the destination lock" in (
+                fresh.stderr or ""
+            )
+            journal_path = Path(str(receipt) + ".journal.json")
+            assert journal_path.is_file()
+            contended = _run_helper(
+                [
+                    "--source",
+                    str(source),
+                    "--destination",
+                    str(dest),
+                    "--receipt",
+                    str(receipt),
+                    "--journal",
+                    str(journal_path),
+                    "--resume",
+                ],
+                env=_helper_env(),
+            )
+            assert contended.returncode == 13, contended.stderr
+            assert "another update transaction holds the destination lock" in (
+                contended.stderr or ""
+            )
+            assert held.is_file()
+            assert _identity_token(dest) == apps.prior_identity
+            gate.write_text("go", encoding="utf-8")
+            first.wait(timeout=20)
+            assert held.is_file()
+        finally:
+            if first.poll() is None:
+                gate.write_text("go", encoding="utf-8")
+                first.terminate()
+                first.wait(timeout=5)
 
 
 def test_product_update_helper_missing_receipt_is_not_success(tmp_path: Path) -> None:
@@ -1425,9 +1554,134 @@ def _plant_custom_settings(env: dict[str, str]) -> Path:
         'custom_marker = "tuple-recovery-260910"\nbind = "tailscale-preserved"\n',
         encoding="utf-8",
     )
-    sockets = Path(env["VC_FRAME_SOCKET_DIR"])
-    (sockets / "live-session.sock").write_text("persistent-process-identity\n", encoding="utf-8")
     return settings
+
+
+_ISOLATED_FRAME_STANDIN = r"""
+import os
+import pty
+import socket
+import sys
+import time
+
+socket_path = sys.argv[1]
+master, slave = pty.openpty()
+child = os.fork()
+if child == 0:
+    os.setsid()
+    os.close(master)
+    os.dup2(slave, 0)
+    os.dup2(slave, 1)
+    os.dup2(slave, 2)
+    if slave > 2:
+        os.close(slave)
+    while True:
+        time.sleep(3600)
+os.close(slave)
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+if os.path.exists(socket_path):
+    os.unlink(socket_path)
+server.bind(socket_path)
+server.listen(4)
+while True:
+    conn, _ = server.accept()
+    command = conn.recv(64).decode("utf-8", "replace").strip()
+    if command == "ping":
+        conn.sendall(f"pong {os.getpid()}\n".encode("utf-8"))
+    elif command == "identify":
+        conn.sendall(f"{os.getpid()} {child}\n".encode("utf-8"))
+    conn.close()
+"""
+
+
+class _IsolatedFrameSession:
+    def __init__(self, socket_dir: Path) -> None:
+        self.socket_dir = socket_dir
+        self.socket_dir.mkdir(parents=True, exist_ok=True)
+        self.socket = socket_dir / "session.sock"
+        self.script = socket_dir / "frame-standin.py"
+        self.proc: subprocess.Popen[str] | None = None
+        self.pid = 0
+        self.start = ""
+        self.pty_pid = 0
+
+    def start(self) -> None:
+        self.script.write_text(_ISOLATED_FRAME_STANDIN, encoding="utf-8")
+        self.proc = subprocess.Popen(
+            [sys.executable, str(self.script), str(self.socket)],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        deadline = time.time() + 8
+        while time.time() < deadline and not self.socket.exists():
+            if self.proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        assert self.socket.exists(), "isolated Frame/PTY stand-in did not bind its socket"
+        self.pid = self.proc.pid
+        self.start = subprocess.check_output(
+            ["/bin/ps", "-p", str(self.pid), "-o", "lstart="], text=True
+        ).strip()
+        identity = self.roundtrip("identify")
+        parts = identity.split()
+        assert len(parts) == 2, identity
+        assert parts[0] == str(self.pid)
+        self.pty_pid = int(parts[1])
+        assert self.roundtrip("ping") == f"pong {self.pid}"
+        assert (
+            subprocess.run(
+                ["/bin/ps", "-p", str(self.pty_pid)],
+                capture_output=True,
+                timeout=5,
+            ).returncode
+            == 0
+        )
+
+    def roundtrip(self, command: str) -> str:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            client.settimeout(5)
+            client.connect(str(self.socket))
+            client.sendall((command + "\n").encode("utf-8"))
+            return client.recv(256).decode("utf-8", "replace").strip()
+        finally:
+            client.close()
+
+    def assert_survived(self) -> None:
+        assert self.proc is not None and self.proc.poll() is None
+        now = subprocess.check_output(
+            ["/bin/ps", "-p", str(self.pid), "-o", "lstart="], text=True
+        ).strip()
+        assert now == self.start
+        assert self.roundtrip("ping") == f"pong {self.pid}"
+        assert (
+            subprocess.run(
+                ["/bin/ps", "-p", str(self.pty_pid)],
+                capture_output=True,
+                timeout=5,
+            ).returncode
+            == 0
+        )
+
+    def close(self) -> None:
+        if self.proc is None:
+            return
+        if self.proc.poll() is None:
+            try:
+                os.killpg(self.proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(self.proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                self.proc.wait(timeout=5)
+        if self.socket.exists():
+            self.socket.unlink()
 
 
 def _replace_prior_with_candidate(
@@ -1494,72 +1748,79 @@ def test_product_update_cross_generation_publish_then_restore_previous_tuple(
     env = _isolated_product_env(tmp_path)
     settings = _plant_custom_settings(env)
     runtime_home = Path(env["VIBECRAFTED_RUNTIME_HOME"])
-    with _SignedApps(tmp_path) as apps:
-        dest = apps.copy_prior(tmp_path / "Installed.app")
-        source = apps.copy_e37(tmp_path / "Candidate.app")
-        prior_pack = _install_signed_pack(apps.prior["pack"], dest, env)
-        assert prior_pack.returncode == 0, prior_pack.stderr or prior_pack.stdout
-        prior_pub = _read_installer_publication(runtime_home)
-        assert "79001c3d" in str(prior_pub["version"]).lower()
-        _assert_isolated_receipt_roots(prior_pub["receipt"], tmp_path)  # type: ignore[arg-type]
+    session = _IsolatedFrameSession(Path(env["VC_FRAME_SOCKET_DIR"]))
+    session.start()
+    try:
+        with _SignedApps(tmp_path) as apps:
+            dest = apps.copy_prior(tmp_path / "Installed.app")
+            source = apps.copy_e37(tmp_path / "Candidate.app")
+            prior_pack = _install_signed_pack(apps.prior["pack"], dest, env)
+            assert prior_pack.returncode == 0, prior_pack.stderr or prior_pack.stdout
+            prior_pub = _read_installer_publication(runtime_home)
+            assert "79001c3d" in str(prior_pub["version"]).lower()
+            _assert_isolated_receipt_roots(prior_pub["receipt"], tmp_path)  # type: ignore[arg-type]
+            _assert_receipt_names_live_app(prior_pub["receipt"], dest)  # type: ignore[arg-type]
 
-        receipt = tmp_path / "receipt.json"
-        journal = _replace_prior_with_candidate(
-            dest=dest, source=source, receipt=receipt, apps=apps
-        )
-        published = _install_signed_pack(
-            apps.e37["pack"], dest, env, fail_after="published"
-        )
-        assert published.returncode == 42, published.stderr or published.stdout
-        assert "harness injected failure after published" in (published.stderr or "")
-        e37_pub = _read_installer_publication(runtime_home)
-        assert "e37be2c9" in str(e37_pub["version"]).lower()
-        assert e37_pub["version"] != prior_pub["version"]
-        _assert_isolated_receipt_roots(e37_pub["receipt"], tmp_path)  # type: ignore[arg-type]
+            receipt = tmp_path / "receipt.json"
+            journal = _replace_prior_with_candidate(
+                dest=dest, source=source, receipt=receipt, apps=apps
+            )
+            apps.release(source)
+            published = _install_signed_pack(
+                apps.e37["pack"], dest, env, fail_after="published"
+            )
+            assert published.returncode == 42, published.stderr or published.stdout
+            assert "harness injected failure after published" in (published.stderr or "")
+            e37_pub = _read_installer_publication(runtime_home)
+            assert "e37be2c9" in str(e37_pub["version"]).lower()
+            assert e37_pub["version"] != prior_pub["version"]
+            _assert_isolated_receipt_roots(e37_pub["receipt"], tmp_path)  # type: ignore[arg-type]
+            _assert_receipt_names_live_app(e37_pub["receipt"], dest)  # type: ignore[arg-type]
 
-        capture = Path(journal["capture"])
-        prior_app = capture / "prior.app"
-        assert _identity_token(prior_app) == apps.prior_identity
-        recover_receipt = tmp_path / "recover-a.json"
-        recovered = _run_helper(
-            [
-                "--source",
-                str(prior_app),
-                "--destination",
-                str(dest),
-                "--receipt",
-                str(recover_receipt),
-                "--journal",
-                str(receipt) + ".journal.json",
-                "--transaction",
-                str(journal["transaction"]),
-                "--mode",
-                "recover",
-            ],
-            env={**_helper_env(), **env},
-            timeout=300,
-        )
-        assert recovered.returncode == 0, recovered.stderr or recovered.stdout
-        payload = json.loads(recover_receipt.read_text(encoding="utf-8"))
-        assert payload["replaced"] is True
-        assert payload["recovered"] is True
-        assert payload["detail"] == "recovered"
-        assert payload["mode"] == "recover"
-        assert payload["operation"] == "recover"
-        assert payload["installer_status"] == "0"
-        assert payload["pack_generation"] == prior_pub["version"]
-        assert _identity_token(dest) == apps.prior_identity
-        restored = _read_installer_publication(runtime_home)
-        assert restored["version"] == prior_pub["version"]
-        assert "79001c3d" in str(restored["version"]).lower()
-        _assert_isolated_receipt_roots(restored["receipt"], tmp_path)  # type: ignore[arg-type]
-        assert settings.read_text(encoding="utf-8").count("tuple-recovery-260910") == 1
-        assert (
-            Path(env["VC_FRAME_SOCKET_DIR"]) / "live-session.sock"
-        ).read_text(encoding="utf-8") == "persistent-process-identity\n"
-        evidence_path = tmp_path / "pack-evidence.json"
-        assert not evidence_path.exists(), "caller-written pack enum is not installer proof"
-        _assert_founder_identity_untouched(founder_before)
+            capture = Path(journal["capture"])
+            prior_app = capture / "prior.app"
+            assert _identity_token(prior_app) == apps.prior_identity
+            recover_receipt = tmp_path / "recover-a.json"
+            recovered = _run_helper(
+                [
+                    "--source",
+                    str(prior_app),
+                    "--destination",
+                    str(dest),
+                    "--receipt",
+                    str(recover_receipt),
+                    "--journal",
+                    str(receipt) + ".journal.json",
+                    "--transaction",
+                    str(journal["transaction"]),
+                    "--mode",
+                    "recover",
+                ],
+                env={**_helper_env(), **env},
+                timeout=300,
+            )
+            assert recovered.returncode == 0, recovered.stderr or recovered.stdout
+            payload = json.loads(recover_receipt.read_text(encoding="utf-8"))
+            assert payload["replaced"] is True
+            assert payload["recovered"] is True
+            assert payload["detail"] == "recovered"
+            assert payload["mode"] == "recover"
+            assert payload["operation"] == "recover"
+            assert payload["installer_status"] == "0"
+            assert payload["pack_generation"] == prior_pub["version"]
+            assert _identity_token(dest) == apps.prior_identity
+            restored = _read_installer_publication(runtime_home)
+            assert restored["version"] == prior_pub["version"]
+            assert "79001c3d" in str(restored["version"]).lower()
+            _assert_isolated_receipt_roots(restored["receipt"], tmp_path)  # type: ignore[arg-type]
+            _assert_receipt_names_live_app(restored["receipt"], dest)  # type: ignore[arg-type]
+            assert settings.read_text(encoding="utf-8").count("tuple-recovery-260910") == 1
+            session.assert_survived()
+            evidence_path = tmp_path / "pack-evidence.json"
+            assert not evidence_path.exists(), "caller-written pack enum is not installer proof"
+            _assert_founder_identity_untouched(founder_before)
+    finally:
+        session.close()
 
 
 def test_product_update_whole_tuple_recovery_fails_without_historical_pack(
@@ -1578,6 +1839,7 @@ def test_product_update_whole_tuple_recovery_fails_without_historical_pack(
         journal = _replace_prior_with_candidate(
             dest=dest, source=source, receipt=receipt, apps=apps
         )
+        apps.release(source)
         published = _install_signed_pack(
             apps.e37["pack"], dest, env, fail_after="published"
         )
@@ -1627,131 +1889,139 @@ def test_product_update_whole_tuple_recovery_interrupted_then_resumed(
     settings = _plant_custom_settings(env)
     runtime_home = Path(env["VIBECRAFTED_RUNTIME_HOME"])
     helper_env = {**_helper_env(), **env}
-    with _SignedApps(tmp_path) as apps:
-        dest = apps.copy_prior(tmp_path / "Installed.app")
-        source = apps.copy_e37(tmp_path / "Candidate.app")
-        prior_pack = _install_signed_pack(apps.prior["pack"], dest, env)
-        assert prior_pack.returncode == 0, prior_pack.stderr or prior_pack.stdout
-        prior_pub = _read_installer_publication(runtime_home)
-        receipt = tmp_path / "receipt.json"
-        journal = _replace_prior_with_candidate(
-            dest=dest, source=source, receipt=receipt, apps=apps
-        )
-        published = _install_signed_pack(
-            apps.e37["pack"], dest, env, fail_after="published"
-        )
-        assert published.returncode == 42, published.stderr or published.stdout
-        capture = Path(journal["capture"])
-        prior_app = capture / "prior.app"
-        gate = tmp_path / "hold-recover"
-        recover_receipt = tmp_path / "recover-a.json"
-        first = None
-        try:
-            first = subprocess.Popen(
-                [
-                    str(HELPER),
-                    "--source",
-                    str(prior_app),
-                    "--destination",
-                    str(dest),
-                    "--receipt",
-                    str(recover_receipt),
-                    "--journal",
-                    str(receipt) + ".journal.json",
-                    "--transaction",
-                    str(journal["transaction"]),
-                    "--mode",
-                    "recover",
-                    "--hold-after",
-                    "runtime_restored",
-                    "--until",
-                    str(gate),
-                ],
-                env=helper_env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
+    session = _IsolatedFrameSession(Path(env["VC_FRAME_SOCKET_DIR"]))
+    session.start()
+    try:
+        with _SignedApps(tmp_path) as apps:
+            dest = apps.copy_prior(tmp_path / "Installed.app")
+            source = apps.copy_e37(tmp_path / "Candidate.app")
+            prior_pack = _install_signed_pack(apps.prior["pack"], dest, env)
+            assert prior_pack.returncode == 0, prior_pack.stderr or prior_pack.stdout
+            prior_pub = _read_installer_publication(runtime_home)
+            receipt = tmp_path / "receipt.json"
+            journal = _replace_prior_with_candidate(
+                dest=dest, source=source, receipt=receipt, apps=apps
             )
-            recover_admission = Path(str(recover_receipt) + ".admission.json")
-            deadline = time.time() + 180
-            while time.time() < deadline and not recover_admission.is_file():
-                if first.poll() is not None:
-                    break
-                time.sleep(0.05)
-            assert recover_admission.is_file(), first.stderr
-            mid_deadline = time.time() + 180
-            mid = None
-            while time.time() < mid_deadline:
-                if first.poll() is not None:
-                    break
-                try:
-                    mid = _read_installer_publication(runtime_home)
-                except AssertionError:
+            apps.release(source)
+            published = _install_signed_pack(
+                apps.e37["pack"], dest, env, fail_after="published"
+            )
+            assert published.returncode == 42, published.stderr or published.stdout
+            capture = Path(journal["capture"])
+            prior_app = capture / "prior.app"
+            gate = tmp_path / "hold-recover"
+            recover_receipt = tmp_path / "recover-a.json"
+            first = None
+            try:
+                first = subprocess.Popen(
+                    [
+                        str(HELPER),
+                        "--source",
+                        str(prior_app),
+                        "--destination",
+                        str(dest),
+                        "--receipt",
+                        str(recover_receipt),
+                        "--journal",
+                        str(receipt) + ".journal.json",
+                        "--transaction",
+                        str(journal["transaction"]),
+                        "--mode",
+                        "recover",
+                        "--hold-after",
+                        "runtime_restored",
+                        "--until",
+                        str(gate),
+                    ],
+                    env=helper_env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                recover_admission = Path(str(recover_receipt) + ".admission.json")
+                deadline = time.time() + 180
+                while time.time() < deadline and not recover_admission.is_file():
+                    if first.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                assert recover_admission.is_file(), first.stderr
+                mid_deadline = time.time() + 180
+                mid = None
+                while time.time() < mid_deadline:
+                    if first.poll() is not None:
+                        break
+                    try:
+                        mid = _read_installer_publication(runtime_home)
+                    except AssertionError:
+                        time.sleep(0.2)
+                        continue
+                    if mid["version"] == prior_pub["version"]:
+                        break
                     time.sleep(0.2)
-                    continue
-                if mid["version"] == prior_pub["version"]:
-                    break
-                time.sleep(0.2)
-            assert mid is not None and mid["version"] == prior_pub["version"]
-            assert _identity_token(dest) == apps.e37_identity
-            concurrent = _run_helper(
-                [
-                    "--source",
-                    str(prior_app),
-                    "--destination",
-                    str(dest),
-                    "--receipt",
-                    str(tmp_path / "recover-b.json"),
-                    "--journal",
-                    str(receipt) + ".journal.json",
-                    "--transaction",
-                    str(journal["transaction"]),
-                    "--mode",
-                    "recover",
-                    "--resume",
-                ],
-                env=helper_env,
-            )
-            assert concurrent.returncode == 13
-            assert (dest.parent / ".vc-update.lock" / "held").is_file()
-            first.send_signal(signal.SIGTERM)
-            first.wait(timeout=20)
-            resumed = _run_helper(
-                [
-                    "--source",
-                    str(prior_app),
-                    "--destination",
-                    str(dest),
-                    "--receipt",
-                    str(tmp_path / "recover-resume.json"),
-                    "--journal",
-                    str(receipt) + ".journal.json",
-                    "--transaction",
-                    str(journal["transaction"]),
-                    "--mode",
-                    "recover",
-                    "--resume",
-                ],
-                env=helper_env,
-                timeout=300,
-            )
-            assert resumed.returncode == 0, resumed.stderr or resumed.stdout
-        finally:
-            if first is not None and first.poll() is None:
-                gate.write_text("go", encoding="utf-8")
-                first.terminate()
-                first.wait(timeout=5)
+                assert mid is not None and mid["version"] == prior_pub["version"]
+                assert _identity_token(dest) == apps.e37_identity
+                concurrent = _run_helper(
+                    [
+                        "--source",
+                        str(prior_app),
+                        "--destination",
+                        str(dest),
+                        "--receipt",
+                        str(tmp_path / "recover-b.json"),
+                        "--journal",
+                        str(receipt) + ".journal.json",
+                        "--transaction",
+                        str(journal["transaction"]),
+                        "--mode",
+                        "recover",
+                        "--resume",
+                    ],
+                    env=helper_env,
+                )
+                assert concurrent.returncode == 13
+                assert (dest.parent / ".vc-update.lock" / "held").is_file()
+                first.send_signal(signal.SIGTERM)
+                first.wait(timeout=20)
+                resumed = _run_helper(
+                    [
+                        "--source",
+                        str(prior_app),
+                        "--destination",
+                        str(dest),
+                        "--receipt",
+                        str(tmp_path / "recover-resume.json"),
+                        "--journal",
+                        str(receipt) + ".journal.json",
+                        "--transaction",
+                        str(journal["transaction"]),
+                        "--mode",
+                        "recover",
+                        "--resume",
+                    ],
+                    env=helper_env,
+                    timeout=300,
+                )
+                assert resumed.returncode == 0, resumed.stderr or resumed.stdout
+            finally:
+                if first is not None and first.poll() is None:
+                    gate.write_text("go", encoding="utf-8")
+                    first.terminate()
+                    first.wait(timeout=5)
 
-        assert _identity_token(dest) == apps.prior_identity
-        restored = _read_installer_publication(runtime_home)
-        assert restored["version"] == prior_pub["version"]
-        resume_payload = json.loads(
-            (tmp_path / "recover-resume.json").read_text(encoding="utf-8")
-        )
-        assert resume_payload["recovered"] is True
-        assert resume_payload["pack_generation"] == prior_pub["version"]
-        assert settings.read_text(encoding="utf-8").count("tuple-recovery-260910") == 1
-        _assert_founder_identity_untouched(founder_before)
+            assert _identity_token(dest) == apps.prior_identity
+            restored = _read_installer_publication(runtime_home)
+            assert restored["version"] == prior_pub["version"]
+            _assert_receipt_names_live_app(restored["receipt"], dest)  # type: ignore[arg-type]
+            resume_payload = json.loads(
+                (tmp_path / "recover-resume.json").read_text(encoding="utf-8")
+            )
+            assert resume_payload["recovered"] is True
+            assert resume_payload["pack_generation"] == prior_pub["version"]
+            assert settings.read_text(encoding="utf-8").count("tuple-recovery-260910") == 1
+            session.assert_survived()
+            _assert_founder_identity_untouched(founder_before)
+    finally:
+        session.close()
 
 
 def test_product_update_policy_swift_behavior(tmp_path: Path) -> None:

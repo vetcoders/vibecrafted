@@ -252,7 +252,7 @@ func decodeProductUpdateHelperAdmission(_ data: Data) -> ProductUpdateHelperAdmi
     receipt: root["receipt"] as? String ?? "",
     detail: root["detail"] as? String ?? "",
     sourceIdentity: root["source_identity"] as? String ?? "",
-    mode: root["mode"] as? String ?? ProductUpdateHelperMode.replace.rawValue)
+    mode: root["mode"] as? String ?? "")
 }
 
 func productUpdateAdmissionMatches(
@@ -430,18 +430,22 @@ private func runProductUpdateHelper(
 
 func decodeReplacementReceipt(_ data: Data) -> ProductUpdateReplacementReceipt? {
   guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-    let destination = root["destination"] as? String
+    let destination = root["destination"] as? String, !destination.isEmpty,
+    let transaction = root["transaction"] as? String, !transaction.isEmpty
   else { return nil }
+  let operation = (root["operation"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+  let mode = (root["mode"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+  guard let boundOperation = operation ?? mode else { return nil }
   return ProductUpdateReplacementReceipt(
     replaced: (root["replaced"] as? Bool) ?? false,
     relaunched: (root["relaunched"] as? Bool) ?? false,
     destination: destination,
     detail: (root["detail"] as? String) ?? "",
     capture: root["capture"] as? String,
-    transaction: root["transaction"] as? String,
+    transaction: transaction,
     journal: root["journal"] as? String,
-    mode: root["mode"] as? String,
-    operation: root["operation"] as? String,
+    mode: mode ?? boundOperation,
+    operation: boundOperation,
     phase: root["phase"] as? String,
     sourceIdentity: root["source_identity"] as? String,
     priorIdentity: root["prior_identity"] as? String)

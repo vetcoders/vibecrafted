@@ -1298,6 +1298,93 @@ struct ProductUpdatePolicyTests {
       "an unmatched installer generation defaulted to unpublished or replace")
   }
 
+  static func testObserveInstallerPublicationRejectsIncompleteStates() throws {
+    let runtime = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "vc-observe-pending-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: runtime, withIntermediateDirectories: true)
+    let pointer = activeRuntimePointerURL(runtimeHome: runtime)
+    let receipt = runtimeInstallReceiptURL(runtimeHome: runtime)
+    try """
+      {"schema":"vibecrafted.active-runtime.v1","version":"\(generation)","runtime_root":"\(runtime.path)/releases/\(generation)"}
+      """.write(to: pointer, atomically: true, encoding: .utf8)
+    let pendingBodies = [
+      "{\"schema\":\"vibecrafted.runtime-install.v1\",\"version\":\"\(generation)\",\"config_pending\":{\"staged\":true}}",
+      "{\"schema\":\"vibecrafted.runtime-install.v1\",\"version\":\"\(generation)\",\"uninstall_pending\":true}",
+      "{\"schema\":\"vibecrafted.runtime-install.v1\",\"version\":\"\(generation)\",\"config_transaction\":{}}",
+      "{\"schema\":\"vibecrafted.runtime-install.v1\",\"version\":\"\(generation)\",\"config_conflicts\":{\"keep\":\"x\"}}",
+      "{\"schema\":\"vibecrafted.runtime-install.v1\",\"version\":\"\"}",
+    ]
+    for body in pendingBodies {
+      try body.write(to: receipt, atomically: true, encoding: .utf8)
+      let observed = productUpdateObserveInstallerPublication(runtimeHome: runtime)
+      try require(observed.pending, "incomplete publication was accepted: \(body)")
+      try require(
+        productUpdateDerivePackPublication(
+          observed, priorGeneration: previous, candidateGeneration: generation) == .unresolved,
+        "incomplete publication was not unresolved: \(body)")
+    }
+  }
+
+  static func testReplacementReceiptRequiresTransactionAndOperation() throws {
+    let missing = """
+      {"schema":"io.vetcoders.vibecrafted.app-replacement.v1","destination":"/Applications/Vibecrafted.app","replaced":true,"detail":"replaced"}
+      """.data(using: .utf8)!
+    try require(
+      decodeReplacementReceipt(missing) == nil,
+      "a helper receipt without transaction/operation was accepted")
+    let bound = """
+      {"schema":"io.vetcoders.vibecrafted.app-replacement.v1","destination":"/Applications/Vibecrafted.app","replaced":true,"detail":"replaced","transaction":"txn-1","operation":"replace","mode":"replace","phase":"receipt_written"}
+      """.data(using: .utf8)!
+    guard let decoded = decodeReplacementReceipt(bound) else {
+      throw Failure(message: "a bound replacement receipt did not decode")
+    }
+    try require(decoded.transaction == "txn-1", "bound receipt dropped its transaction")
+    try require(decoded.operation == "replace", "bound receipt dropped its operation")
+    switch decideProductUpdateHandoff(
+      handoff: sampleHandoff(),
+      replacement: ProductUpdateReplacementReceipt(
+        replaced: true,
+        relaunched: false,
+        destination: "/Applications/Vibecrafted.app",
+        detail: "replaced",
+        capture: nil,
+        transaction: "txn-1",
+        journal: nil,
+        mode: nil,
+        operation: nil,
+        phase: "receipt_written"),
+      helperLive: false,
+      runningDestination: "/Applications/Vibecrafted.app",
+      evidence: boundEvidence())
+    {
+    case .stale(let reason):
+      try require(reason.contains("operation"), reason)
+    default:
+      throw Failure(message: "a receipt without operation defaulted to replace")
+    }
+  }
+
+  static func testPersistedTransactionRequiresBinding() throws {
+    let start = try encodeProductUpdateTransaction(
+      ProductUpdateTransactionReceipt.start(installed: previousInstalled()))
+    _ = try decodeProductUpdateTransaction(start)
+    var retained = ProductUpdateTransactionReceipt.start(installed: previousInstalled())
+    retained.boundary = .committed
+    retained.terminal = .retained
+    let unbound = try encodeProductUpdateTransaction(retained)
+    do {
+      _ = try decodeProductUpdateTransaction(unbound)
+      throw Failure(message: "a retained transaction without an id decoded")
+    } catch {
+      try require(
+        String(describing: error).contains("transaction"),
+        "missing transaction id was not a malformed receipt")
+    }
+    retained.transactionID = "txn-1"
+    let bound = try decodeProductUpdateTransaction(try encodeProductUpdateTransaction(retained))
+    try require(bound.transactionID == "txn-1", "bound transaction id was dropped")
+  }
+
   static func testCoordinatorDoesNotCloseUIWhenHandoffWriteFails() throws {
     var closed = 0
     let blocked = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -1402,6 +1489,9 @@ struct ProductUpdatePolicyTests {
     try testAdmissionRecordRequiresBinding()
     try testHandoffReadRefusesDefaultReplaceMode()
     try testObserveInstallerPublicationIgnoresCallerEnum()
+    try testObserveInstallerPublicationRejectsIncompleteStates()
+    try testReplacementReceiptRequiresTransactionAndOperation()
+    try testPersistedTransactionRequiresBinding()
     try testCoordinatorDoesNotCloseUIWhenHandoffWriteFails()
     try testCoordinatorDoesNotCloseUIWithoutReadyAdmission()
     try testProgressCopyHasNoArchitectureJargon()
