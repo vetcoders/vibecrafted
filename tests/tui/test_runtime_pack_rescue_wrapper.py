@@ -6,8 +6,10 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import tarfile
+import time
 from pathlib import Path
 
 import pytest
@@ -161,6 +163,112 @@ def _expected_payload_root(cache_home: Path, archive: Path) -> Path:
 
 def _cache_home() -> Path:
     return Path(os.environ["XDG_CACHE_HOME"])
+
+
+def _wait_exists(path: Path, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists() and path.stat().st_size > 0:
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"timed out waiting for {path}")
+
+
+def _lock_holder_script(
+    lock: Path, ready: Path, child_pid: Path | None = None
+) -> str:
+    inherit = ""
+    if child_pid is not None:
+        inherit = f'sleep 86400 &\nprintf \'%s\' "$!" > "{child_pid}"\n'
+    return (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f'source "{WRAPPER}"\n'
+        f'_acquire_rescue_lock "{lock}"\n'
+        f"{inherit}"
+        f'printf \'acquired\\n\' > "{ready}"\n'
+        "read -r _ || true\n"
+    )
+
+
+def _start_lock_holder(
+    work: Path,
+    lock: Path,
+    env: dict[str, str],
+    *,
+    inherit_child: bool = False,
+) -> tuple[subprocess.Popen[str], Path | None]:
+    work.mkdir(parents=True, exist_ok=True)
+    ready = work / "lock-ready"
+    child_pid = work / "lock-child.pid" if inherit_child else None
+    script = work / "lock-holder.sh"
+    script.write_text(_lock_holder_script(lock, ready, child_pid), encoding="utf-8")
+    script.chmod(0o700)
+    holder = subprocess.Popen(
+        ["bash", str(script)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        cwd=str(REPO_ROOT),
+    )
+    try:
+        _wait_exists(ready)
+    except AssertionError:
+        stdout, stderr = holder.communicate(timeout=2)
+        raise AssertionError(
+            f"holder failed rc={holder.returncode} stdout={stdout!r} stderr={stderr!r}"
+        ) from None
+    return holder, child_pid
+
+
+def _acquire_once(
+    work: Path, lock: Path, env: dict[str, str], name: str = "retry"
+) -> subprocess.CompletedProcess[str]:
+    work.mkdir(parents=True, exist_ok=True)
+    script = work / f"{name}.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f'source "{WRAPPER}"\n'
+        f'_acquire_rescue_lock "{lock}"\n',
+        encoding="utf-8",
+    )
+    script.chmod(0o700)
+    return subprocess.run(
+        ["bash", str(script)],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+
+def _release_holder(holder: subprocess.Popen[str]) -> None:
+    if holder.poll() is None and holder.stdin is not None:
+        holder.stdin.write("\n")
+        holder.stdin.close()
+    try:
+        holder.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        holder.kill()
+        holder.wait(timeout=5)
+
+
+def _kill_fixture_pid(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.02)
 
 
 def test_public_wrapper_plan_then_apply_same_verified_pack(
@@ -448,14 +556,18 @@ def test_public_wrapper_refuses_concurrent_extract_lock(
     )
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.parent.chmod(0o700)
-    lock.mkdir()
-
-    planned = _run_wrapper(
-        "--pack", str(archive), "--rescue", "--plan", *flags, env=env
-    )
-    assert planned.returncode != 0
-    assert "concurrent" in planned.stderr
-    assert lock.is_dir()
+    holder, _ = _start_lock_holder(tmp_path / "holder-work", lock, env)
+    try:
+        planned = _run_wrapper(
+            "--pack", str(archive), "--rescue", "--plan", *flags, env=env
+        )
+        assert planned.returncode != 0
+        assert "concurrent" in planned.stderr
+        assert lock.is_dir()
+        assert (lock / "held").is_file()
+        assert holder.poll() is None
+    finally:
+        _release_holder(holder)
 
 
 def test_public_wrapper_bootstraps_source_installer_without_rewriting_pack(
@@ -488,3 +600,96 @@ def test_public_wrapper_bootstraps_source_installer_without_rewriting_pack(
     published = expected / "scripts/vetcoders_install.py"
     assert "RUNTIME_RESCUE_PLAN_SCHEMA" not in published.read_text(encoding="utf-8")
     assert archive.read_bytes() == (tmp_path / "signed" / CARRIER).read_bytes()
+
+
+def test_rescue_lock_recovers_after_killed_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    env = {**os.environ}
+    lock = tmp_path / "archive.lock"
+    holder, _ = _start_lock_holder(tmp_path / "owner-work", lock, env)
+    assert lock.is_dir()
+    assert (lock / "held").is_file()
+    assert holder.poll() is None
+    holder.send_signal(signal.SIGKILL)
+    assert holder.wait(timeout=5) == -signal.SIGKILL
+    assert holder.poll() is not None
+    assert lock.is_dir()
+    retry = _acquire_once(tmp_path / "retry-work", lock, env)
+    assert retry.returncode == 0, retry.stderr
+    assert lock.is_dir()
+    assert (lock / "held").is_file()
+
+
+def test_rescue_lock_refuses_concurrent_live_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    env = {**os.environ}
+    lock = tmp_path / "archive.lock"
+    holder, _ = _start_lock_holder(tmp_path / "live-work", lock, env)
+    try:
+        assert holder.poll() is None
+        refused = _acquire_once(tmp_path / "contender-work", lock, env)
+        assert refused.returncode == 1, refused.stdout
+        assert "concurrent" in refused.stderr
+        assert holder.poll() is None
+        assert lock.is_dir()
+        assert (lock / "held").is_file()
+    finally:
+        _release_holder(holder)
+
+
+def test_rescue_lock_holds_while_inherited_child_lives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    env = {**os.environ}
+    lock = tmp_path / "archive.lock"
+    holder, child_path = _start_lock_holder(
+        tmp_path / "parent-work", lock, env, inherit_child=True
+    )
+    assert child_path is not None
+    child_pid = int(child_path.read_text(encoding="utf-8"))
+    os.kill(child_pid, 0)
+    holder.send_signal(signal.SIGKILL)
+    assert holder.wait(timeout=5) == -signal.SIGKILL
+    os.kill(child_pid, 0)
+    refused = _acquire_once(tmp_path / "while-child", lock, env, name="while-child")
+    try:
+        assert refused.returncode == 1, refused.stdout
+        assert "concurrent" in refused.stderr
+        assert lock.is_dir()
+    finally:
+        _kill_fixture_pid(child_pid)
+    retry = _acquire_once(tmp_path / "after-child", lock, env, name="after-child")
+    assert retry.returncode == 0, retry.stderr
+
+
+def test_rescue_lock_refuses_foreign_malformed_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    env = {**os.environ}
+    as_file = tmp_path / "file.lock"
+    as_file.write_text("not-a-lock-dir\n", encoding="utf-8")
+    refused_file = _acquire_once(tmp_path / "file-work", as_file, env, name="file")
+    assert refused_file.returncode == 1, refused_file.stdout
+    assert "malformed" in refused_file.stderr
+    assert as_file.is_file()
+
+    as_link = tmp_path / "link.lock"
+    as_link.symlink_to(tmp_path / "foreign-target")
+    refused_link = _acquire_once(tmp_path / "link-work", as_link, env, name="link")
+    assert refused_link.returncode == 1, refused_link.stdout
+    assert "symlink" in refused_link.stderr
+    assert as_link.is_symlink()

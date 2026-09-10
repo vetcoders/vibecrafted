@@ -81,12 +81,118 @@ _ensure_rescue_cache_root() {
     || die "cannot resolve rescue staging root"
 }
 
+# Rescue staging exclusion is flock(2) on a durable inode, the same primitive
+# as scripts/lib/runtime-pack-selection.sh. That library is absent from the
+# App-shipped copy of this script, so the helper is inlined here rather than
+# sourced. mkdir+pid reclaim is the race that file already rejected: observing
+# a dead pid and removing the directory can delete a live successor's claim,
+# and a pid is not an identity (reuse, subshell). flock has no reclaim window
+# because the kernel drops the lock when the last descriptor closes, including
+# SIGKILL. The descriptor is inherited by the Python installer child (no
+# CLOEXEC), so a dead wrapper must not look free while publication still owns
+# it. The lock FILE is created once and never unlinked: removing it would let
+# two rescuers flock two inodes under one name.
+#
+# ${sha}.lock stays a directory so leftover empty mkdir-only dirs from the
+# previous protocol become flockable by creating held inside them. The claim
+# is $lock/held. Active owners are refused immediately (no guessed timeout).
+_rescue_lock_fd=""
+_RESCUE_LOCK_FD_FALLBACK=201
+
+_close_rescue_lock_fd() {
+  [[ -n "${_rescue_lock_fd:-}" ]] || return 0
+  eval "exec ${_rescue_lock_fd}>&-" 2>/dev/null || true
+  _rescue_lock_fd=""
+}
+
+_open_rescue_held_fd() {
+  local held="$1"
+  _rescue_lock_fd=""
+  if ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 1))); then
+    exec {_rescue_lock_fd}>>"$held" || return 1
+  else
+    _rescue_lock_fd="$_RESCUE_LOCK_FD_FALLBACK"
+    eval "exec ${_rescue_lock_fd}>>\"\$held\"" || return 1
+  fi
+  [[ -n "${_rescue_lock_fd:-}" ]] || return 1
+}
+
+# 0 acquired · 1 held by a live descriptor · 2 this host offers no file lock
+# · 3 the inherited descriptor could not be flocked
+_flock_rescue_lock_nb() {
+  local fd="$1"
+  if command -v flock >/dev/null 2>&1; then
+    flock -n "$fd"
+    return
+  fi
+  if command -v perl >/dev/null 2>&1; then
+    perl -e '
+      use Fcntl qw(:flock);
+      open(my $handle, ">&=", $ARGV[0]) or exit 3;
+      exit(flock($handle, LOCK_EX | LOCK_NB) ? 0 : 1);
+    ' "$fd"
+    return
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import fcntl
+import sys
+try:
+    fcntl.flock(int(sys.argv[1]), fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError:
+    raise SystemExit(1)
+' "$fd"
+    return
+  fi
+  return 2
+}
+
 _acquire_rescue_lock() {
   local lock="$1"
+  local held uid flock_status=0
   if [[ -L "$lock" ]]; then
     die "rescue staging lock is a symlink: $lock"
   fi
-  if ! mkdir -- "$lock" 2>/dev/null; then
+  if [[ -e "$lock" && ! -d "$lock" ]]; then
+    die "rescue staging lock is malformed: $lock"
+  fi
+  if [[ ! -d "$lock" ]]; then
+    mkdir -m 700 -- "$lock" 2>/dev/null || true
+  fi
+  if [[ -L "$lock" ]]; then
+    die "rescue staging lock is a symlink: $lock"
+  fi
+  if [[ ! -d "$lock" ]]; then
+    die "rescue staging lock is malformed: $lock"
+  fi
+  uid="$(_stat_uid "$lock")" || die "cannot stat rescue staging lock: $lock"
+  [[ "$uid" == "$EUID" ]] || die "rescue staging lock is not privately owned: $lock"
+  if _world_writable "$lock"; then
+    die "rescue staging lock is world-writable: $lock"
+  fi
+  held="$lock/held"
+  if [[ -L "$held" ]]; then
+    die "rescue staging lock holder is a symlink: $held"
+  fi
+  if [[ -e "$held" && ! -f "$held" ]]; then
+    die "rescue staging lock holder is malformed: $held"
+  fi
+  _close_rescue_lock_fd
+  _open_rescue_held_fd "$held" || die "cannot open rescue staging lock: $held"
+  if [[ -L "$held" ]]; then
+    _close_rescue_lock_fd
+    die "rescue staging lock holder is a symlink: $held"
+  fi
+  chmod 600 "$held" 2>/dev/null || true
+  _flock_rescue_lock_nb "$_rescue_lock_fd" || flock_status=$?
+  if ((flock_status != 0)); then
+    _close_rescue_lock_fd
+    if ((flock_status == 2)); then
+      die "this host cannot take a rescue staging lock (need flock, perl, or python3)"
+    fi
+    if ((flock_status == 3)); then
+      die "cannot take rescue staging lock descriptor: $held"
+    fi
     die "concurrent Runtime Pack rescue is already in progress for this archive"
   fi
   rescue_lock="$lock"
@@ -226,10 +332,17 @@ _release_rescue_extract() {
   fi
 }
 
+# Lock-lifetime tests source this file for the exact helpers. Do not run the
+# installer body when sourced.
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+  return 0
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 pack="${VIBECRAFTED_RUNTIME_PACK:-}"
 temporary=""
+_rescue_lock_fd=""
 rescue_lock=""
 rescue_staging=""
 rescue_identity=""
@@ -263,8 +376,11 @@ plan_digest=""
 cleanup() {
   local status=$?
   local _attempt
-  if [[ -n "${rescue_lock:-}" && -d "$rescue_lock" ]]; then
-    rmdir -- "$rescue_lock" 2>/dev/null || true
+  # Release is closing this process's descriptor. Do not unlink held or rmdir
+  # the lock namespace: that is the inode-swap race (two rescuers, two locks).
+  if [[ -n "${_rescue_lock_fd:-}" ]]; then
+    eval "exec ${_rescue_lock_fd}>&-" 2>/dev/null || true
+    _rescue_lock_fd=""
   fi
   if [[ -n "$temporary" && -d "$temporary" ]]; then
     # Finder/metadata services can recreate .DS_Store while a large extracted
