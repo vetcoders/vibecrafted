@@ -83,6 +83,7 @@ struct ProductUpdateProof: Equatable, Sendable {
   var verifierOwner: String
   var payloadHashesMatch: Bool
   var codesignIdentifier: String?
+  var codesignTeamID: String?
   var notarizedAndStapled: Bool
   var packIdentityMatches: Bool
   var observedSourceRevision: String?
@@ -95,6 +96,7 @@ struct ProductUpdateProof: Equatable, Sendable {
       verifierOwner: "none",
       payloadHashesMatch: false,
       codesignIdentifier: nil,
+      codesignTeamID: nil,
       notarizedAndStapled: false,
       packIdentityMatches: false,
       observedSourceRevision: nil,
@@ -124,6 +126,8 @@ struct ProductUpdateProgress: Equatable, Sendable {
 let productUpdateFixtureFlag = "VIBECRAFTED_UPDATE_FIXTURE"
 let productUpdateFixtureRootKey = "VIBECRAFTED_UPDATE_FIXTURE_ROOT"
 let productUpdateExpectedBundleIdentifier = "io.vetcoders.vibecrafted"
+let productUpdateExpectedTeamID = "MW223P3NPX"
+let productUpdateExpectedVerifierOwner = "product_contract.release-output"
 let productUpdateExpectedKeyID = "vibecrafted-signing-v1"
 let productUpdateExpectedAlgorithm = "rsa-pkcs1v15-sha256"
 let productUpdateExpectedSPKI =
@@ -262,6 +266,10 @@ func admitProductUpdateCandidate(
     return .refuse(
       "The update signature did not match the bundled signing key. Your current version stays installed.")
   }
+  guard proof.verifierOwner == productUpdateExpectedVerifierOwner else {
+    return .refuse(
+      "The update was not verified with the signed release checker. Your current version stays installed.")
+  }
   guard candidate.keyID == channel.expectedKeyID,
     candidate.algorithm == productUpdateExpectedAlgorithm,
     candidate.spkiSHA256 == productUpdateExpectedSPKI
@@ -273,7 +281,9 @@ func admitProductUpdateCandidate(
     return .refuse(
       "The downloaded files did not match the signed sizes and hashes. Your current version stays installed.")
   }
-  guard proof.codesignIdentifier == expectedBundleIdentifier else {
+  guard proof.codesignIdentifier == expectedBundleIdentifier,
+    proof.codesignTeamID == productUpdateExpectedTeamID
+  else {
     return .refuse(
       "The update is not the Vibecrafted app. Your current version stays installed.")
   }

@@ -61,13 +61,24 @@ struct ProductUpdatePolicyTests {
     terminal: String = terminal,
     frame: String = frame
   ) -> ProductUpdateProof {
-    makeVerifiedProductUpdateProof(
+    ProductUpdateProof(
+      signatureVerifiedOverExactBytes: true,
+      verifierOwner: productUpdateExpectedVerifierOwner,
+      payloadHashesMatch: true,
       codesignIdentifier: productUpdateExpectedBundleIdentifier,
+      codesignTeamID: productUpdateExpectedTeamID,
       notarizedAndStapled: true,
       packIdentityMatches: true,
       observedSourceRevision: source,
       observedTerminalRevision: terminal,
       observedFrameRevision: frame)
+  }
+
+  static func helperScript() throws -> URL {
+    guard let url = productUpdateRepositoryHelperScript() else {
+      throw Failure(message: "scripts/vc-app-update.sh is missing")
+    }
+    return url
   }
 
   static func matchingInstalled(pack: String? = generation) -> ProductUpdateIdentity {
@@ -111,6 +122,18 @@ struct ProductUpdatePolicyTests {
         \(bundleField)
       }
       """.data(using: .utf8)!
+  }
+
+  static func testStagedRelativePathRejectsBuildAuthority() throws {
+    try require(
+      productUpdateStagedRelativePath("/tmp/Vibecrafted.app") == nil,
+      "absolute path became local authority")
+    try require(
+      productUpdateStagedRelativePath("../Vibecrafted.app") == nil,
+      "parent path became local authority")
+    try require(
+      productUpdateStagedRelativePath("Vibecrafted_4.4.0.dmg") == "Vibecrafted_4.4.0.dmg",
+      "signed relative dmg locator was refused")
   }
 
   static func testMissingFeedIsUnavailable() throws {
@@ -165,6 +188,16 @@ struct ProductUpdatePolicyTests {
     default:
       throw Failure(message: "forged signature_valid without proof was admitted")
     }
+    var wrongOwner = validProof()
+    wrongOwner.verifierOwner = "self-attested"
+    switch admitProductUpdateCandidate(
+      channel: provisionedChannel(), candidate: forged, proof: wrongOwner)
+    {
+    case .refuse:
+      break
+    default:
+      throw Failure(message: "a non-owner verifier proof was admitted")
+    }
     var unsigned = ProductUpdateProof.unsigned()
     unsigned.signatureVerifiedOverExactBytes = false
     switch admitProductUpdateCandidate(
@@ -194,6 +227,16 @@ struct ProductUpdatePolicyTests {
       break
     default:
       throw Failure(message: "JSON bundle_identifier defaulted the identity")
+    }
+    var foreignTeam = validProof()
+    foreignTeam.codesignTeamID = "XXXXXXXXXX"
+    switch admitProductUpdateCandidate(
+      channel: provisionedChannel(), candidate: forged, proof: foreignTeam)
+    {
+    case .refuse:
+      break
+    default:
+      throw Failure(message: "a foreign Team ID was admitted")
     }
   }
 
@@ -301,7 +344,7 @@ struct ProductUpdatePolicyTests {
     installPack: @escaping (ProductUpdateCandidate, URL, (Result<ProductUpdateIdentity, Error>) -> Void) -> Void = { _, _, _ in
       fatalError("pack must not publish")
     },
-    replaceApp: @escaping (ProductUpdateReplacementRequest, (Result<ProductUpdateReplacementReceipt, Error>) -> Void) -> Void = { _, _ in
+    replaceApp: @escaping (ProductUpdateReplacementRequest, (Result<ProductUpdateReplacementAdmission, Error>) -> Void) -> Void = { _, _ in
       fatalError("app must not replace")
     },
     closeUI: @escaping () -> Void = {},
@@ -309,7 +352,10 @@ struct ProductUpdatePolicyTests {
   ) -> ProductUpdateCoordinator {
     let staging = FileManager.default.temporaryDirectory.appendingPathComponent(
       "vc-update-stage-\(UUID().uuidString)", isDirectory: true)
+    let home = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "vc-update-home-\(UUID().uuidString)", isDirectory: true)
     try! FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
     let pack = staging.appendingPathComponent("pack.tar.gz")
     let app = staging.appendingPathComponent("Vibecrafted.app")
     try! Data(repeating: 9, count: 16).write(to: pack)
@@ -319,6 +365,7 @@ struct ProductUpdatePolicyTests {
         channel: channel,
         installed: installed,
         stagingRoot: { staging },
+        home: { home },
         fetchBytes: { url, completion in
           if url.path.hasSuffix(".sig") || url.lastPathComponent.hasSuffix(".sig") {
             completion(.success(signature))
@@ -338,7 +385,10 @@ struct ProductUpdatePolicyTests {
           completion(.success(destination))
           return {}
         },
-        verifyFeedSignature: { _, _, _ in verifySignature },
+        verifyFeedSignature: { _, _, _, completion in
+          completion(verifySignature)
+          return {}
+        },
         verifyCandidate: { _, _, _, completion in
           completion(.success(proof))
           return {}
@@ -351,7 +401,11 @@ struct ProductUpdatePolicyTests {
           replaceApp(request, completion)
           return {}
         },
-        extractApp: nil,
+        extractApp: { _, destination, completion in
+          try? FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+          completion(.success(destination))
+          return {}
+        },
         closeUIAfterHelperArmed: closeUI,
         checkTimeout: timeout))
   }
@@ -407,22 +461,26 @@ struct ProductUpdatePolicyTests {
         packs += 1
         completion(.success(matchingInstalled()))
       },
-      replaceApp: { _, completion in
+      replaceApp: { request, completion in
         replaces += 1
-        current = matchingInstalled()
         completion(
           .success(
-            ProductUpdateReplacementReceipt(
-              replaced: true, relaunched: true, destination: "/tmp/Vibecrafted.app", detail: "test")))
+            ProductUpdateReplacementAdmission(
+              helperPID: 4242,
+              waitIdentity: ProductUpdateProcessIdentity(pid: 1, startTime: "test"),
+              receiptURL: request.receiptURL,
+              transactionURL: request.transactionURL)))
       },
       closeUI: { closed += 1 })
     coordinator.checkForUpdates()
     try wait { coordinator.progress.canInstall }
     coordinator.installUpdate()
-    try wait { coordinator.progress.phase == .success || coordinator.progress.phase == .restarting }
+    try wait { coordinator.progress.phase == .restarting }
     try require(replaces == 1, "newer app did not call the replacement owner")
     try require(closed == 1, "replacement did not close the UI after the helper was armed")
-    try require(packs == 0 || coordinator.progress.claimsHealthy, "pack published under the old app unexpectedly")
+    try require(packs == 0, "old app published a pack after helper admission")
+    try require(coordinator.hasAdmittedHelperHandoff, "helper admission was not recorded")
+    try require(!coordinator.progress.claimsHealthy, "parent synthesized a healthy replace")
   }
 
   static func testCoordinatorSameAppRepairPublishesPack() throws {
@@ -470,9 +528,10 @@ struct ProductUpdatePolicyTests {
         channel: { provisionedChannel() },
         installed: { previousInstalled() },
         stagingRoot: { FileManager.default.temporaryDirectory },
+        home: { FileManager.default.temporaryDirectory },
         fetchBytes: { _, _ in {} },
         downloadFile: { _, _, _ in {} },
-        verifyFeedSignature: { _, _, _ in .success(()) },
+        verifyFeedSignature: { _, _, _, _ in {} },
         verifyCandidate: { _, _, _, _ in {} },
         installPack: { _, _, _ in {} },
         replaceApp: { _, _ in {} },
@@ -498,6 +557,7 @@ struct ProductUpdatePolicyTests {
         channel: { provisionedChannel() },
         installed: { matchingInstalled(pack: previous) },
         stagingRoot: { FileManager.default.temporaryDirectory },
+        home: { FileManager.default.temporaryDirectory },
         fetchBytes: { url, completion in
           if url.path.hasSuffix(".sig") {
             completion(.success(Data(repeating: 3, count: 256)))
@@ -511,7 +571,10 @@ struct ProductUpdatePolicyTests {
           completion(.success(destination))
           return {}
         },
-        verifyFeedSignature: { _, _, _ in .success(()) },
+        verifyFeedSignature: { _, _, _, completion in
+          completion(.success(()))
+          return {}
+        },
         verifyCandidate: { _, _, _, completion in
           completion(.success(validProof()))
           return {}
@@ -520,7 +583,11 @@ struct ProductUpdatePolicyTests {
           { cancelCount += 1 }
         },
         replaceApp: { _, _ in {} },
-        extractApp: nil,
+        extractApp: { _, destination, completion in
+          try? FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+          completion(.success(destination))
+          return {}
+        },
         closeUIAfterHelperArmed: {},
         checkTimeout: 30))
     coordinator.checkForUpdates()
@@ -541,9 +608,10 @@ struct ProductUpdatePolicyTests {
         channel: { provisionedChannel() },
         installed: { previousInstalled() },
         stagingRoot: { FileManager.default.temporaryDirectory },
+        home: { FileManager.default.temporaryDirectory },
         fetchBytes: { _, _ in {} },
         downloadFile: { _, _, _ in {} },
-        verifyFeedSignature: { _, _, _ in .success(()) },
+        verifyFeedSignature: { _, _, _, _ in {} },
         verifyCandidate: { _, _, _, _ in {} },
         installPack: { _, _, _ in {} },
         replaceApp: { _, _ in {} },
@@ -558,6 +626,51 @@ struct ProductUpdatePolicyTests {
     try require(coordinator.progress.canRetry, "timeout must be retryable")
   }
 
+  static func testCoordinatorUIShutdownDoesNotCancelAdmittedHelper() throws {
+    var cancelled = 0
+    let coordinator = makeCoordinator(
+      replaceApp: { request, completion in
+        completion(
+          .success(
+            ProductUpdateReplacementAdmission(
+              helperPID: 4242,
+              waitIdentity: ProductUpdateProcessIdentity(pid: 1, startTime: "test"),
+              receiptURL: request.receiptURL,
+              transactionURL: request.transactionURL)))
+        return { cancelled += 1 }
+      })
+    coordinator.checkForUpdates()
+    try wait { coordinator.progress.canInstall }
+    coordinator.installUpdate()
+    try wait { coordinator.hasAdmittedHelperHandoff }
+    coordinator.interrupt()
+    coordinator.noteUIShutdownPreservingHandoff()
+    try require(cancelled == 0, "UI shutdown cancelled the admitted helper")
+    try require(coordinator.progress.phase == .restarting, "UI shutdown left restarting")
+    try require(coordinator.hasAdmittedHelperHandoff, "handoff was dropped on UI shutdown")
+    try require(!coordinator.progress.claimsHealthy, "parent claimed replace without a receipt")
+  }
+
+  static func testReplacementOwnerRequiresExplicitHelper() throws {
+    let source = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "vc-nohelper-src-\(UUID().uuidString).app", isDirectory: true)
+    let dest = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "vc-nohelper-dst-\(UUID().uuidString).app")
+    let receipt = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "vc-nohelper-receipt-\(UUID().uuidString).json")
+    try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+    switch replaceProductUpdateApp(
+      ProductUpdateReplacementRequest(
+        sourceApp: source, destinationApp: dest, relaunch: false,
+        receiptURL: receipt, helperURL: nil))
+    {
+    case .failure(.helperMissing):
+      break
+    default:
+      throw Failure(message: "a compile-time source path was used as helper authority")
+    }
+  }
+
   static func testReplacementOwnerRefusesMissingSource() throws {
     let dest = FileManager.default.temporaryDirectory.appendingPathComponent(
       "vc-missing-dest-\(UUID().uuidString).app")
@@ -569,7 +682,7 @@ struct ProductUpdatePolicyTests {
       destinationApp: dest,
       relaunch: false,
       receiptURL: receipt,
-      helperURL: nil)
+      helperURL: try helperScript())
     switch replaceProductUpdateApp(request) {
     case .failure(.sourceMissing):
       break
@@ -579,7 +692,7 @@ struct ProductUpdatePolicyTests {
     try require(!FileManager.default.fileExists(atPath: dest.path), "failed replace created a destination")
   }
 
-  static func testReplacementOwnerCopiesFixtureApp() throws {
+  static func testReplacementOwnerRefusesUnsignedSource() throws {
     let source = FileManager.default.temporaryDirectory.appendingPathComponent(
       "vc-src-\(UUID().uuidString).app", isDirectory: true)
     let dest = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -587,19 +700,126 @@ struct ProductUpdatePolicyTests {
     let receipt = FileManager.default.temporaryDirectory.appendingPathComponent(
       "vc-receipt-\(UUID().uuidString).json")
     try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+    try Data("previous".utf8).write(to: dest.appendingPathComponent("marker.txt"))
     try Data("payload".utf8).write(to: source.appendingPathComponent("Contents.txt"))
     let request = ProductUpdateReplacementRequest(
-      waitPID: nil, sourceApp: source, destinationApp: dest, relaunch: false,
-      receiptURL: receipt, helperURL: nil)
+      sourceApp: source, destinationApp: dest, relaunch: false,
+      receiptURL: receipt, helperURL: try helperScript())
     switch replaceProductUpdateApp(request) {
-    case .success(let result):
-      try require(result.replaced, "replace did not report replaced")
-      try require(
-        FileManager.default.fileExists(atPath: dest.appendingPathComponent("Contents.txt").path),
-        "replace did not copy payload")
-    case .failure(let error):
-      throw Failure(message: error.localizedDescription)
+    case .success:
+      throw Failure(message: "unsigned source was replaced")
+    case .failure:
+      break
     }
+    try require(
+      (try String(contentsOf: dest.appendingPathComponent("marker.txt"), encoding: .utf8)) == "previous",
+      "unsigned replace mutated the destination")
+    try require(!FileManager.default.fileExists(atPath: receipt.path), "unsigned replace wrote a receipt")
+  }
+
+  static func testReplacementOwnerTimesOutLiveParent() throws {
+    let sleeper = Process()
+    sleeper.executableURL = URL(fileURLWithPath: "/bin/sleep")
+    sleeper.arguments = ["30"]
+    try sleeper.run()
+    defer {
+      if sleeper.isRunning { sleeper.terminate() }
+      sleeper.waitUntilExit()
+    }
+    guard let identity = captureProductUpdateProcessIdentity(pid: sleeper.processIdentifier) else {
+      throw Failure(message: "could not bind sleeper identity")
+    }
+    let dest = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "vc-live-dest-\(UUID().uuidString).app", isDirectory: true)
+    let receipt = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "vc-live-receipt-\(UUID().uuidString).json")
+    try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+    try Data("keep".utf8).write(to: dest.appendingPathComponent("marker.txt"))
+    let request = ProductUpdateReplacementRequest(
+      waitPID: identity.pid,
+      waitStart: identity.startTime,
+      waitTimeout: 1,
+      sourceApp: dest,
+      destinationApp: dest,
+      relaunch: false,
+      receiptURL: receipt,
+      helperURL: try helperScript())
+    switch replaceProductUpdateApp(request) {
+    case .failure(.destinationBusy):
+      break
+    default:
+      throw Failure(message: "a live parent was not a destinationBusy failure")
+    }
+    try require(
+      (try String(contentsOf: dest.appendingPathComponent("marker.txt"), encoding: .utf8)) == "keep",
+      "timed-out parent was replaced")
+    try require(!FileManager.default.fileExists(atPath: receipt.path), "timeout wrote a replacement receipt")
+  }
+
+  static func testReplacementOwnerKeepsPreviousCapture() throws {
+    let dest = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "vc-capture-dest-\(UUID().uuidString).app", isDirectory: true)
+    let receipt = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "vc-capture-receipt-\(UUID().uuidString).json")
+    try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+    try Data("keep".utf8).write(to: dest.appendingPathComponent("marker.txt"))
+    let old = dest.deletingLastPathComponent().appendingPathComponent(
+      ".vc-update-capture-oldid", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: old.appendingPathComponent("prior.app", isDirectory: true), withIntermediateDirectories: true)
+    try Data("old".utf8).write(
+      to: old.appendingPathComponent("prior.app").appendingPathComponent("keep.txt"))
+    let sleeper = Process()
+    sleeper.executableURL = URL(fileURLWithPath: "/bin/sleep")
+    sleeper.arguments = ["30"]
+    try sleeper.run()
+    defer {
+      if sleeper.isRunning { sleeper.terminate() }
+      sleeper.waitUntilExit()
+    }
+    guard let identity = captureProductUpdateProcessIdentity(pid: sleeper.processIdentifier) else {
+      throw Failure(message: "could not bind sleeper identity")
+    }
+    let request = ProductUpdateReplacementRequest(
+      waitPID: identity.pid,
+      waitStart: identity.startTime,
+      waitTimeout: 1,
+      sourceApp: dest,
+      destinationApp: dest,
+      relaunch: false,
+      receiptURL: receipt,
+      helperURL: try helperScript())
+    _ = replaceProductUpdateApp(request)
+    try require(
+      (try String(
+        contentsOf: old.appendingPathComponent("prior.app").appendingPathComponent("keep.txt"),
+        encoding: .utf8)) == "old",
+      "previous capture was deleted during interruption")
+  }
+
+  static func testReplacementOwnerDoesNotSynthesizeReceipt() throws {
+    let stub = writeTemp("fake-helper.sh", Data("#!/bin/bash\nexit 0\n".utf8))
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
+    let source = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "vc-stub-src-\(UUID().uuidString).app", isDirectory: true)
+    let dest = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "vc-stub-dst-\(UUID().uuidString).app", isDirectory: true)
+    let receipt = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "vc-stub-receipt-\(UUID().uuidString).json")
+    try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+    switch replaceProductUpdateApp(
+      ProductUpdateReplacementRequest(
+        sourceApp: source, destinationApp: dest, relaunch: false,
+        receiptURL: receipt, helperURL: stub))
+    {
+    case .failure(.receiptMissing):
+      break
+    default:
+      throw Failure(message: "helper exit 0 without a receipt was treated as replaced")
+    }
+    try require(!FileManager.default.fileExists(atPath: receipt.path), "missing receipt was invented")
   }
 
   static func testProgressCopyHasNoArchitectureJargon() throws {
@@ -613,6 +833,7 @@ struct ProductUpdatePolicyTests {
   }
 
   static func main() throws {
+    try testStagedRelativePathRejectsBuildAuthority()
     try testMissingFeedIsUnavailable()
     try testHTTPFeedIsRejected()
     try testFixtureFileURLRequiresExplicitEnv()
@@ -631,8 +852,13 @@ struct ProductUpdatePolicyTests {
     try testCoordinatorInterruptDuringDownloadRetains()
     try testCoordinatorInterruptDuringPackDoesNotLie()
     try testCoordinatorFeedTimeoutIsBounded()
+    try testCoordinatorUIShutdownDoesNotCancelAdmittedHelper()
+    try testReplacementOwnerRequiresExplicitHelper()
     try testReplacementOwnerRefusesMissingSource()
-    try testReplacementOwnerCopiesFixtureApp()
+    try testReplacementOwnerRefusesUnsignedSource()
+    try testReplacementOwnerTimesOutLiveParent()
+    try testReplacementOwnerKeepsPreviousCapture()
+    try testReplacementOwnerDoesNotSynthesizeReceipt()
     try testProgressCopyHasNoArchitectureJargon()
     print("ProductUpdatePolicyTests passed")
   }

@@ -29,24 +29,52 @@ installed (COMPILE_EMBARGO).
 
 1. `ProductUpdatePolicy` parses locator fields from `release-output.v1`. It does
    **not** treat `signature_valid`, notarization tickets, or a default bundle id
-   as proof.
+   as proof. Admission requires the established verifier owner
+   `product_contract.release-output`, observed codesign identifier
+   `io.vetcoders.vibecrafted`, and Team ID `MW223P3NPX`.
 2. `ProductUpdateTrust` verifies the detached signature with `/usr/bin/openssl
    dgst -sha256 -verify` and the bundled `vibecrafted-signing-v1.pub` — the same
    check as `product_contract._verify_release_signature`. Payload hashes are
-   checked against the signed document. When Python from the installed runtime
-   is available, `python -m vibecrafted_core.product_contract release-output`
-   is the established owner for codesign, stapler/spctl, and pack identity.
+   checked against the signed document. Python is resolved only from the already
+   trusted generation (`<installRoot>/bin/python3`), never `PATH` or
+   `VIBECRAFTED_PYTHON`. That interpreter runs
+   `python -m vibecrafted_core.product_contract release-output` against the
+   staged `release-output.json` + `.sig`. Codesign uses `--verify --strict`
+   before `--display`. Stapler is required. Fixture transport is `file://` only;
+   it does not skip stapler or codesign.
 3. `ProductUpdateCoordinator` downloads the feed, `.sig`, DMG, and Runtime Pack
-   into a staging directory, then exposes **Install Update**.
+   into a staging directory. The DMG is extracted **before** observation so the
+   proof is not a default identity. **Install Update** then either publishes a
+   matching pack or admits the helper.
 4. Same-App pack repair calls `install-runtime-pack.sh` through
    `NativeInstallerProcess` / `runRuntimePackInstaller` with
    `--expected-*-revision`. Receipts are not deleted.
-5. A newer App is replaced by `Contents/Helpers/vc-app-update`
-   (`scripts/vc-app-update.sh`, also a `vc-app-update` tool target). The helper
-   waits for the UI pid, copies the bundle with `ditto`, and relaunches. It does
-   not stop Frame, PTYs, workers, or rewrite PATH / MCP. The new App publishes
-   the matching pack; this process does not publish a newer pack under the old
-   App.
+5. A newer App is replaced by one helper: `scripts/vc-app-update.sh`, installed
+   as `Contents/Helpers/vc-app-update`. There is no compiled Swift mutation twin
+   and no `dist/vc-app-update` preference. The App launches `/bin/bash` plus
+   that bundled script. A compile-time `#filePath` walk is not helper authority.
+
+## Helper transaction
+
+The script is the only mutation implementation. It:
+
+- survives parent UI death (`trap '' HUP`; the App also `setpgid`s the helper)
+- waits for PID + `ps -o lstart=` identity, then **fails before mutation**
+  (exit 5) if that identity is still live
+- refuses symlink source or destination
+- captures the previous destination under a unique
+  `.vc-update-capture-<uuid>/prior.app` (sibling captures are left alone)
+- prepares `.vc-update-prepared-<uuid>.app`, verifies codesign identity, then
+  `mv`s the prepared bundle into place
+- revalidates identifier + Team ID on source, prepared, and destination
+- writes `replaced: true` only after the destination verifies
+- keeps the capture so a later pack failure can restore `prior.app`
+
+The parent records **admission**, not replacement. `applicationWillTerminate`
+calls `noteUIShutdownPreservingHandoff` when a helper is admitted and does
+**not** terminate that helper. Missing replacement receipts are not success.
+The next launch reads `~/.vibecrafted/product-update/pending-handoff.json` and
+only continues pack publish after an observed `replaced: true` receipt.
 
 ## User-visible states
 
@@ -59,16 +87,22 @@ Every check ends in a result:
 | ready | A verified candidate is staged. **Install Update** applies it. |
 | retained | Interrupted or failed mutation, and the transaction receipt plus recovered identity still show the previous working version. |
 | error | Timeout, HTTP failure, or an interrupt while a publish may still have been in flight. |
-| restarting | The helper is replacing the UI. The window closes and reopens. Healthy is not claimed yet. |
+| restarting | The helper was admitted. The window closes and reopens. Healthy is not claimed yet. |
 | success | Installed App and pack match the candidate. |
 
 Healthy is claimed only when the running App, installed pack, candidate
-generation, and source revision match (`productUpdateClaimsHealthy`).
+generation, and source revision match (`productUpdateClaimsHealthy`). The
+parent never claims healthy from a missing helper receipt.
 
 Quit / `applicationShouldTerminate` still terminate the UI only. Frame, PTYs,
 workers, sessions, and foreign PATH/MCP ownership are not stopped as a shortcut.
-`applicationWillTerminate` cancels an in-flight installer process and interrupts
-the coordinator.
+`applicationWillTerminate` cancels an in-flight pack installer and interrupts
+the coordinator **only when no helper has been admitted**.
+
+Blocking openssl / codesign / stapler / hdiutil / verifier work runs off the
+UI actor through `runProductUpdateBoundProcess` (bounded lifetime, concurrent
+pipe drain, terminate then KILL). Terminal phases do not depend on a spinner
+alone.
 
 ## Fixture seam
 
@@ -79,10 +113,11 @@ Production feeds must be HTTPS. `file://` and `http://` are rejected unless
 - `VIBECRAFTED_UPDATE_FIXTURE_ROOT` pointing at a directory that already contains
   `release-output.json` and `release-output.json.sig`
 
-The fixture still verifies the detached signature with the bundled public key.
-It does not weaken production policy. W2 / Founder provision a real signed
-tuple when they want the skipped real-process test
-(`test_product_update_real_process_fixture_preserves_sessions`).
+The fixture still verifies the detached signature, payload hashes, codesign
+identity, Team ID, stapler, and pack identity. It may use local transport. It
+does not weaken production policy. Unsigned copies are refused. W2 / Founder
+provision a real signed, notarized tuple for the skipped installed-acceptance
+test (`test_product_update_real_process_fixture_preserves_sessions`).
 
 Do not invent a production URL, EdDSA key, or signed update.
 
@@ -108,9 +143,10 @@ source.
 ## Physical acceptance still open (W2 / Founder)
 
 - Compile and run `tests/tui/test_product_update.py` and
-  `ProductUpdatePolicyTests`.
+  `ProductUpdatePolicyTests`. This W1 did not execute them (COMPILE_EMBARGO).
 - Installed update: signed feed + notarized App/pack, then prove console reopen
   and attach to a live Frame session without terminating PTYs.
-- Confirm an interrupted install leaves the previous receipt recoverable.
+- Confirm an interrupted install leaves previous unique captures recoverable
+  and that pack failure can restore `prior.app`.
 - Security hooks skipped by this W1 checkpoint must be restored by the
   integrator.

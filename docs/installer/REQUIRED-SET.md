@@ -19,7 +19,9 @@ Implementation: `cmd_runtime_install`, `cmd_runtime_uninstall`,
 `Vibecrafted.app/Contents/Resources/runtime/scripts/`; AppDelegate delegates to
 it and does not write the installation itself. In-app Check for Updates
 (`docs/installer/IN_APP_UPDATE.md`) reuses that same installer for same-App
-pack repair. A newer App is replaced by `Contents/Helpers/vc-app-update`, then
+pack repair. A newer App is replaced by the script helper installed at
+`Contents/Helpers/vc-app-update` (`scripts/vc-app-update.sh`; no compiled twin),
+then
 the new App publishes the matching pack. The running process does not publish a
 newer pack under the old App.
 Regression coverage:

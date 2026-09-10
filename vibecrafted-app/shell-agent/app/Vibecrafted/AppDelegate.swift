@@ -239,6 +239,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
 
     showMainWindowIfNeeded()
     connectCommandDeck()
+    adoptPendingProductUpdateIfNeeded()
   }
 
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
@@ -270,8 +271,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   }
 
   func applicationWillTerminate(_ notification: Notification) {
-    cancelRuntimePackInstaller()
-    productUpdate?.interrupt()
+    if productUpdate?.hasAdmittedHelperHandoff == true {
+      productUpdate?.noteUIShutdownPreservingHandoff()
+    } else {
+      cancelRuntimePackInstaller()
+      productUpdate?.interrupt()
+    }
     // The workspace terminal is now started through the generation wrapper, so
     // it is a child of this process rather than an independent application.
     // That changes nothing about its lifetime: quitting the App is a view
@@ -2084,19 +2089,32 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
           FileManager.default.temporaryDirectory.appendingPathComponent(
             "vibecrafted-product-update", isDirectory: true)
         },
+        home: { [weak self] in
+          self?.craftedHomeURL()
+            ?? URL(fileURLWithPath: NSHomeDirectory() + "/.vibecrafted", isDirectory: true)
+        },
         fetchBytes: { url, completion in
           productUpdateFetchBytes(url, completion: completion)
         },
         downloadFile: { url, destination, completion in
           productUpdateDownloadFile(url, to: destination, completion: completion)
         },
-        verifyFeedSignature: { payload, signature, publicKey in
-          verifyDetachedReleaseSignature(
-            payload: payload, signature: signature, publicKeyPath: publicKey.path)
-            .mapError { $0 as Error }
+        verifyFeedSignature: { payload, signature, publicKey, completion in
+          let cancelled = ProductUpdateCancelFlag()
+          DispatchQueue.global(qos: .userInitiated).async {
+            let result = verifyDetachedReleaseSignature(
+              payload: payload, signature: signature, publicKeyPath: publicKey.path)
+            DispatchQueue.main.async {
+              if !cancelled.marked {
+                completion(result.mapError { $0 as Error })
+              }
+            }
+          }
+          return { cancelled.mark() }
         },
-        verifyCandidate: { [weak self] candidate, staging, _, completion in
-          self?.verifyProductUpdateCandidate(candidate, staging: staging, completion: completion)
+        verifyCandidate: { [weak self] candidate, staging, payload, completion in
+          self?.verifyProductUpdateCandidate(
+            candidate, staging: staging, payload: payload, completion: completion)
             ?? {}
         },
         installPack: { [weak self] candidate, pack, completion in
@@ -2109,7 +2127,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
           productUpdateExtractApp(from: dmg, to: destination, completion: completion)
         },
         closeUIAfterHelperArmed: { [weak self] in self?.requestQuit() },
-        checkTimeout: 15))
+        checkTimeout: 180))
     coordinator.onProgress = { [weak self] _ in
       self?.renderProductUpdatePanel()
       self?.updateDeckPresentation()
@@ -2212,99 +2230,179 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   private func verifyProductUpdateCandidate(
     _ candidate: ProductUpdateCandidate,
     staging: URL,
+    payload: Data,
     completion: @escaping (Result<ProductUpdateProof, Error>) -> Void
   ) -> () -> Void {
-    let pack = staging.appendingPathComponent(candidate.packRelativePath)
-    let dmg = staging.appendingPathComponent((candidate.appRelativePath as NSString).lastPathComponent)
+    let cancelled = ProductUpdateCancelFlag()
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      let result = self?.observeVerifiedProductUpdateProof(
+        candidate, staging: staging, payload: payload) ?? .failure(ProductUpdateTrustError.pythonMissing)
+      DispatchQueue.main.async {
+        if !cancelled.marked { completion(result) }
+      }
+    }
+    return { cancelled.mark() }
+  }
+
+  private func observeVerifiedProductUpdateProof(
+    _ candidate: ProductUpdateCandidate,
+    staging: URL,
+    payload: Data
+  ) -> Result<ProductUpdateProof, Error> {
+    guard let packRelative = productUpdateStagedRelativePath(candidate.packRelativePath),
+      let appRelative = productUpdateStagedRelativePath(candidate.appRelativePath)
+    else {
+      return .failure(ProductUpdateTrustError.verifierFailed("signed artifact path is not relative"))
+    }
+    let pack = staging.appendingPathComponent(packRelative)
+    let dmg = staging.appendingPathComponent(appRelative)
     if case .failure(let error) = verifyProductUpdatePayloadDigest(
       fileURL: pack, expectedSHA256: candidate.packSHA256, expectedSize: candidate.packSize)
     {
-      completion(.failure(error))
-      return {}
+      return .failure(error)
     }
     if FileManager.default.fileExists(atPath: dmg.path),
       case .failure(let error) = verifyProductUpdatePayloadDigest(
         fileURL: dmg, expectedSHA256: candidate.appSHA256, expectedSize: candidate.appSize)
     {
-      completion(.failure(error))
-      return {}
+      return .failure(error)
     }
     let releaseOutput = staging.appendingPathComponent("release-output.json")
     let signature = staging.appendingPathComponent("release-output.json.sig")
-    if let python = resolveProductContractPython() {
-      switch invokeReleaseOutputVerifier(
-        releaseOutput: releaseOutput, signature: signature, python: python)
-      {
-      case .failure(let error):
-        completion(.failure(error))
-        return {}
-      case .success:
-        break
-      }
+    guard let python = resolveProductContractPython() else {
+      return .failure(ProductUpdateTrustError.pythonMissing)
     }
-    let app = staging.appendingPathComponent("Vibecrafted.app")
-    let observedApp = FileManager.default.fileExists(atPath: app.path) ? app : nil
-    let identifier = observedApp.flatMap { observeProductUpdateCodesignIdentifier(appURL: $0) }
-    let stapled = observedApp.map { observeProductUpdateStapledNotarization(appURL: $0) } ?? false
-    let pythonOwned = resolveProductContractPython() != nil
-    let owner = pythonOwned ? "product_contract.release-output" : "openssl.dgst+codesign+stapler"
-    if let identifier, identifier != productUpdateExpectedBundleIdentifier {
-      completion(.failure(ProductUpdateTrustError.codesignFailed))
-      return {}
-    }
-    if observedApp != nil && !stapled && !productUpdateFixtureAllowed(
-      environment: ProcessInfo.processInfo.environment)
+    switch invokeReleaseOutputVerifier(
+      releaseOutput: releaseOutput, signature: signature, python: python)
     {
-      completion(.failure(ProductUpdateTrustError.notarizationFailed))
-      return {}
+    case .failure(let error):
+      return .failure(error)
+    case .success:
+      break
     }
-    completion(
-      .success(
-        ProductUpdateProof(
-          signatureVerifiedOverExactBytes: true,
-          verifierOwner: owner,
-          payloadHashesMatch: true,
-          codesignIdentifier: identifier ?? (pythonOwned ? productUpdateExpectedBundleIdentifier : nil),
-          notarizedAndStapled: pythonOwned || stapled,
-          packIdentityMatches: runtimePackMatchesCarrier(
-            generation: candidate.generation, signedSourceRevision: candidate.sourceRevision),
-          observedSourceRevision: candidate.sourceRevision,
-          observedTerminalRevision: candidate.terminalRevision,
-          observedFrameRevision: candidate.frameRevision)))
-    return {}
+    let observed = observeProductUpdateRevisions(from: payload)
+    let app = staging.appendingPathComponent("Vibecrafted.app")
+    guard FileManager.default.fileExists(atPath: app.path),
+      let identity = observeProductUpdateCodesignIdentity(appURL: app)
+    else {
+      return .failure(ProductUpdateTrustError.codesignFailed)
+    }
+    guard identity.identifier == productUpdateExpectedBundleIdentifier,
+      identity.teamID == productUpdateExpectedTeamID
+    else {
+      return .failure(ProductUpdateTrustError.codesignFailed)
+    }
+    guard observeProductUpdateStapledNotarization(appURL: app) else {
+      return .failure(ProductUpdateTrustError.notarizationFailed)
+    }
+    let packMatches =
+      runtimePackMatchesCarrier(
+        generation: candidate.generation, signedSourceRevision: observed.source ?? "")
+      && (observed.source?.lowercased() == candidate.sourceRevision.lowercased())
+    return .success(
+      ProductUpdateProof(
+        signatureVerifiedOverExactBytes: true,
+        verifierOwner: productUpdateExpectedVerifierOwner,
+        payloadHashesMatch: true,
+        codesignIdentifier: identity.identifier,
+        codesignTeamID: identity.teamID,
+        notarizedAndStapled: true,
+        packIdentityMatches: packMatches,
+        observedSourceRevision: observed.source,
+        observedTerminalRevision: observed.terminal,
+        observedFrameRevision: observed.frame))
   }
 
   private func resolveProductContractPython() -> URL? {
-    if let override = ProcessInfo.processInfo.environment["VIBECRAFTED_PYTHON"],
-      FileManager.default.isExecutableFile(atPath: override)
-    {
-      return URL(fileURLWithPath: override)
-    }
-    if let root = canonicalInstall?.root {
-      let candidate = root.appendingPathComponent("bin/python3")
-      if FileManager.default.isExecutableFile(atPath: candidate.path) {
-        return candidate
-      }
-    }
-    return nil
+    resolveProductContractPython(installRoot: canonicalInstall?.root)
   }
 
   private func replaceProductUpdateAppBundle(
     _ request: ProductUpdateReplacementRequest,
-    completion: @escaping (Result<ProductUpdateReplacementReceipt, Error>) -> Void
+    completion: @escaping (Result<ProductUpdateReplacementAdmission, Error>) -> Void
   ) -> () -> Void {
     var live = request
     if live.helperURL == nil {
       live.helperURL = resolveLiveUpdateChannel().helperURL
     }
+    if live.waitStart == nil, let pid = live.waitPID {
+      live.waitStart = captureProductUpdateProcessIdentity(pid: pid)?.startTime
+    }
     do {
       let process = try spawnProductUpdateHelper(live)
-      return {
-        if process.isRunning { process.terminate() }
+      guard process.isRunning else {
+        completion(.failure(ProductUpdateReplacementError.helperFailed("helper exited before admission")))
+        return {}
       }
+      completion(
+        .success(
+          ProductUpdateReplacementAdmission(
+            helperPID: process.processIdentifier,
+            waitIdentity: live.waitPID.map {
+              ProductUpdateProcessIdentity(pid: $0, startTime: live.waitStart ?? "")
+            },
+            receiptURL: live.receiptURL,
+            transactionURL: live.transactionURL)))
+      return {}
     } catch {
       completion(.failure(error))
       return {}
+    }
+  }
+
+  private func adoptPendingProductUpdateIfNeeded() {
+    let pendingURL = productUpdatePendingHandoffURL(home: craftedHomeURL())
+    guard FileManager.default.isReadableFile(atPath: pendingURL.path),
+      let handoff = try? readProductUpdateHandoff(from: pendingURL)
+    else { return }
+    let receiptURL = URL(fileURLWithPath: handoff.receiptURL)
+    guard let replacement = productUpdateObservedReplacementReceipt(at: receiptURL),
+      replacement.replaced
+    else {
+      showNativeMessage(
+        "Update did not finish",
+        "The update helper did not leave a replacement receipt. The previous version should still be installed.")
+      try? FileManager.default.removeItem(at: pendingURL)
+      return
+    }
+    let capture = replacement.capture ?? handoff.capturePath
+    guard let packPath = handoff.packURL, FileManager.default.isReadableFile(atPath: packPath)
+    else { return }
+    let pack = URL(fileURLWithPath: packPath)
+    let candidate = ProductUpdateCandidate(
+      generation: handoff.candidateGeneration,
+      sourceRevision: handoff.sourceRevision,
+      terminalRevision: handoff.terminalRevision,
+      frameRevision: handoff.frameRevision,
+      keyID: productUpdateExpectedKeyID,
+      algorithm: productUpdateExpectedAlgorithm,
+      spkiSHA256: productUpdateExpectedSPKI,
+      packRelativePath: pack.lastPathComponent,
+      appRelativePath: "Vibecrafted.app",
+      packSHA256: String(repeating: "00", count: 32),
+      appSHA256: String(repeating: "00", count: 32),
+      packSize: 1,
+      appSize: 1)
+    _ = installProductUpdate(candidate, pack: pack) { [weak self] outcome in
+      guard let self else { return }
+      switch outcome {
+      case .success:
+        try? FileManager.default.removeItem(at: pendingURL)
+      case .failure:
+        if let capture, !capture.isEmpty {
+          let prior = URL(fileURLWithPath: capture).appendingPathComponent("prior.app")
+          if FileManager.default.fileExists(atPath: prior.path) {
+            _ = replaceProductUpdateApp(
+              ProductUpdateReplacementRequest(
+                sourceApp: prior,
+                destinationApp: URL(fileURLWithPath: handoff.destination),
+                relaunch: false,
+                receiptURL: receiptURL.deletingLastPathComponent()
+                  .appendingPathComponent("restore-receipt.json"),
+                helperURL: self.resolveLiveUpdateChannel().helperURL))
+          }
+        }
+      }
     }
   }
 

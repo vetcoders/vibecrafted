@@ -20,6 +20,9 @@ def test_product_update_source_contract() -> None:
     policy = (APP / "ProductUpdatePolicy.swift").read_text(encoding="utf-8")
     coordinator = (APP / "ProductUpdateCoordinator.swift").read_text(encoding="utf-8")
     trust = (APP / "ProductUpdateTrust.swift").read_text(encoding="utf-8")
+    process = (APP / "ProductUpdateProcess.swift").read_text(encoding="utf-8")
+    replacement = (APP / "ProductUpdateReplacement.swift").read_text(encoding="utf-8")
+    transaction = (APP / "ProductUpdateTransaction.swift").read_text(encoding="utf-8")
     view = (APP / "ProductUpdateView.swift").read_text(encoding="utf-8")
     delegate = (APP / "AppDelegate.swift").read_text(encoding="utf-8")
     tray = (APP / "CommandDeck/StatusItemController.swift").read_text(encoding="utf-8")
@@ -38,8 +41,14 @@ def test_product_update_source_contract() -> None:
     assert "signature_valid" in policy
     assert "let signatureValid" not in policy
     assert "product_contract" in trust
+    assert "productUpdateExpectedVerifierOwner" in policy
+    assert "productUpdateExpectedTeamID" in policy
+    assert "codesignTeamID" in policy
     assert "VIBECRAFTED_UPDATE_FIXTURE" in policy
     assert "func installUpdate(" in coordinator
+    assert "hasAdmittedHelperHandoff" in coordinator
+    assert "noteUIShutdownPreservingHandoff" in coordinator
+    assert "ProductUpdateReplacementAdmission" in coordinator
     assert "Install Update" in view
     assert "Quit App" not in view
     assert "case readyToReplace" not in policy
@@ -47,10 +56,32 @@ def test_product_update_source_contract() -> None:
     assert "vibecrafted-signing-v1" in policy
     assert "VCUpdateFeedURL" in policy and "VCUpdateFeedURL" in delegate
     assert "Contents/Helpers/vc-app-update" in delegate
-    assert "vc-app-update:" in project
+    assert "vc-app-update:" not in project
+    assert "BUILT_PRODUCTS_DIR/vc-app-update" not in project
+    assert "scripts/vc-app-update.sh" in project
     assert "scripts/vc-app-update.sh" in release
+    assert "dist/vc-app-update" not in release
+    assert not (SHELL / "app/Helpers/vc-app-update/main.swift").exists()
     assert "does not stop Frame" in helper
-    assert "--wait-pid" in helper and "/usr/bin/ditto" in helper
+    assert "--wait-pid" in helper and "--wait-start" in helper
+    assert "wait_for_identity" in helper
+    assert "/usr/bin/ditto" in helper
+    assert "codesign --verify --strict" in helper
+    assert ".vc-update-capture-" in helper
+    assert ".vibecrafted-update-backup" not in helper
+    assert "rm -rf \"$DESTINATION\"" not in helper
+    assert "replaced\":true" in helper
+    assert "func runProductUpdateBoundProcess(" in process
+    assert "func productUpdateStagedRelativePath(" in process
+    assert "VIBECRAFTED_PYTHON" in process
+    assert "VIBECRAFTED_PYTHON" not in trust
+    assert "makeVerifiedProductUpdateProof" not in trust
+    assert "makeVerifiedProductUpdateProof" not in delegate
+    assert "--verify" in trust and "--strict" in trust
+    assert "receiptMissing" in replacement
+    assert "productUpdateRepositoryHelperScript" in replacement
+    assert "return productUpdateRepositoryHelperScript()" not in replacement
+    assert "helperAdmitted" in transaction
     assert "case checkForUpdates" in tray
     assert 'title: "Check for Updates…"' in tray
     assert 'toolTip = "Sprawdź aktualizacje"' in tray
@@ -59,7 +90,8 @@ def test_product_update_source_contract() -> None:
     assert "installProductUpdate(" in delegate
     assert "runRuntimePackInstaller(" in delegate
     assert "cancelRuntimePackInstaller(" in delegate
-    assert "productUpdate?.interrupt()" in delegate
+    assert "noteUIShutdownPreservingHandoff" in delegate
+    assert "hasAdmittedHelperHandoff" in delegate
     assert "Stop Runtime" not in policy
     assert "performServerAction" not in coordinator
     assert "Sprawdź aktualizacje" in view
@@ -84,16 +116,20 @@ def test_product_update_quit_stays_ui_only() -> None:
             "private func startNativeNotifications("
         )
     ]
+    assert "hasAdmittedHelperHandoff" in will_terminate
+    assert "noteUIShutdownPreservingHandoff" in will_terminate
     assert "productUpdate?.interrupt()" in will_terminate
     assert "cancelRuntimePackInstaller()" in will_terminate
     assert "Nothing here stops the terminal" in will_terminate
     assert "closeUIAfterHelperArmed" in coordinator
-    assert "nothing here stops frame" in coordinator.lower()
+    assert "An admitted helper is not owned" in coordinator
+    assert "nothing here stops frame" in coordinator.lower() or "Frame, terminals, agents" in coordinator
     assert "launchctl" not in helper
     assert "stop runtime" not in helper.lower()
+    assert "trap '' HUP" in helper
 
 
-def test_product_update_helper_replaces_fixture_app(tmp_path: Path) -> None:
+def test_product_update_helper_refuses_unsigned_source(tmp_path: Path) -> None:
     source = tmp_path / "Vibecrafted.app"
     source.mkdir()
     (source / "Contents.txt").write_text("candidate", encoding="utf-8")
@@ -112,14 +148,95 @@ def test_product_update_helper_replaces_fixture_app(tmp_path: Path) -> None:
             "--receipt",
             str(receipt),
         ],
-        check=True,
         capture_output=True,
         text=True,
         timeout=15,
     )
-    assert result.returncode == 0
-    assert (dest / "Contents.txt").read_text(encoding="utf-8") == "candidate"
-    assert '"replaced":true' in receipt.read_text(encoding="utf-8")
+    assert result.returncode != 0
+    assert (dest / "Contents.txt").read_text(encoding="utf-8") == "previous"
+    assert not receipt.exists()
+
+
+def test_product_update_helper_times_out_live_parent(tmp_path: Path) -> None:
+    dest = tmp_path / "Installed.app"
+    dest.mkdir()
+    (dest / "marker.txt").write_text("keep", encoding="utf-8")
+    receipt = tmp_path / "receipt.json"
+    HELPER.chmod(HELPER.stat().st_mode | stat.S_IXUSR)
+    sleeper = subprocess.Popen(["/bin/sleep", "30"])
+    try:
+        start = subprocess.check_output(
+            ["/bin/ps", "-p", str(sleeper.pid), "-o", "lstart="],
+            text=True,
+        ).strip()
+        result = subprocess.run(
+            [
+                str(HELPER),
+                "--source",
+                str(dest),
+                "--destination",
+                str(dest),
+                "--receipt",
+                str(receipt),
+                "--wait-pid",
+                str(sleeper.pid),
+                "--wait-start",
+                start,
+                "--wait-timeout",
+                "1",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert result.returncode == 5
+        assert (dest / "marker.txt").read_text(encoding="utf-8") == "keep"
+        assert not receipt.exists()
+    finally:
+        sleeper.terminate()
+        sleeper.wait(timeout=5)
+
+
+def test_product_update_helper_keeps_previous_capture(tmp_path: Path) -> None:
+    dest = tmp_path / "Installed.app"
+    dest.mkdir()
+    (dest / "marker.txt").write_text("keep", encoding="utf-8")
+    old = tmp_path / ".vc-update-capture-oldid" / "prior.app"
+    old.mkdir(parents=True)
+    (old / "keep.txt").write_text("old", encoding="utf-8")
+    receipt = tmp_path / "receipt.json"
+    HELPER.chmod(HELPER.stat().st_mode | stat.S_IXUSR)
+    sleeper = subprocess.Popen(["/bin/sleep", "30"])
+    try:
+        start = subprocess.check_output(
+            ["/bin/ps", "-p", str(sleeper.pid), "-o", "lstart="],
+            text=True,
+        ).strip()
+        subprocess.run(
+            [
+                str(HELPER),
+                "--source",
+                str(dest),
+                "--destination",
+                str(dest),
+                "--receipt",
+                str(receipt),
+                "--wait-pid",
+                str(sleeper.pid),
+                "--wait-start",
+                start,
+                "--wait-timeout",
+                "1",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert (old / "keep.txt").read_text(encoding="utf-8") == "old"
+        assert (dest / "marker.txt").read_text(encoding="utf-8") == "keep"
+    finally:
+        sleeper.terminate()
+        sleeper.wait(timeout=5)
 
 
 def test_product_update_helper_unable_to_replace(tmp_path: Path) -> None:
@@ -142,12 +259,31 @@ def test_product_update_helper_unable_to_replace(tmp_path: Path) -> None:
     )
     assert result.returncode != 0
     assert not dest.exists()
-    assert not receipt.exists() or "replaced" not in receipt.read_text(encoding="utf-8")
+    assert not receipt.exists()
+
+
+def test_product_update_helper_does_not_synthesize_receipt(tmp_path: Path) -> None:
+    stub = tmp_path / "fake-helper.sh"
+    stub.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    dest = tmp_path / "Installed.app"
+    dest.mkdir()
+    (dest / "marker.txt").write_text("keep", encoding="utf-8")
+    receipt = tmp_path / "receipt.json"
+    result = subprocess.run(
+        [str(stub)],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0
+    assert not receipt.exists()
+    assert (dest / "marker.txt").read_text(encoding="utf-8") == "keep"
 
 
 @pytest.mark.skipif(
     os.environ.get("VIBECRAFTED_UPDATE_FIXTURE") != "1",
-    reason="real-process fixture coverage: integrator sets VIBECRAFTED_UPDATE_FIXTURE=1",
+    reason="signed real-process fixture: W2 supplies the notarized tuple",
 )
 def test_product_update_real_process_fixture_preserves_sessions() -> None:
     root = os.environ.get("VIBECRAFTED_UPDATE_FIXTURE_ROOT")
@@ -179,6 +315,7 @@ def test_product_update_policy_swift_behavior(tmp_path: Path) -> None:
             str(APP / "ProductUpdateTrust.swift"),
             str(APP / "ProductUpdateReplacement.swift"),
             str(APP / "ProductUpdateTransfer.swift"),
+            str(APP / "ProductUpdateProcess.swift"),
             str(APP / "ProductUpdateCoordinator.swift"),
             str(SHELL / "tests/ProductUpdatePolicyTests.swift"),
             "-o",
@@ -188,6 +325,6 @@ def test_product_update_policy_swift_behavior(tmp_path: Path) -> None:
         timeout=180,
     )
     result = subprocess.run(
-        [str(binary)], capture_output=True, text=True, timeout=30, check=True
+        [str(binary)], capture_output=True, text=True, timeout=90, check=True
     )
     assert "ProductUpdatePolicyTests passed" in result.stdout
