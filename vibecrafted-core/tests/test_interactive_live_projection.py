@@ -373,13 +373,62 @@ def _meta(home: Path, run_id: str) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _wait_until(predicate, *, timeout: float, what: str) -> None:
+def _load_json(path: Path) -> dict[str, object] | None:
+    """Read a JSON object that may still be mid-write. None is not-yet-ready."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _projection_receipt(home: Path, run_id: str) -> dict[str, object] | None:
+    meta = _load_json(home / "control_plane" / "runtime_runs" / run_id / "meta.json")
+    if meta is None or meta.get("run_id") != run_id:
+        return None
+    projection = meta.get("projection")
+    return projection if isinstance(projection, dict) else None
+
+
+def _active_snapshot_and_published_receipt(
+    home: Path, run_id: str
+) -> tuple[dict[str, object], dict[str, object]] | None:
+    """True only when the active snapshot and published stamp name the same run.
+
+    ``_InteractiveProjection._attempt`` writes the canonical snapshot first,
+    then ``_stamp`` mirrors ``status=published`` into a separate meta file.
+    Waiting on the snapshot path alone can observe that gap. This predicate
+    never calls ``sync_state`` and never invents a receipt.
+    """
+    snapshot = _load_json(home / "control_plane" / "runs" / f"{run_id}.json")
+    if (
+        snapshot is None
+        or snapshot.get("run_id") != run_id
+        or snapshot.get("state") != "active"
+    ):
+        return None
+    meta = _load_json(home / "control_plane" / "runtime_runs" / run_id / "meta.json")
+    if meta is None or meta.get("run_id") != run_id:
+        return None
+    projection = meta.get("projection")
+    if not isinstance(projection, dict) or projection.get("status") != "published":
+        return None
+    return snapshot, meta
+
+
+def _wait_until(predicate, *, timeout: float, what: str, evidence=None) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
             return
         time.sleep(0.02)
-    raise AssertionError(f"timed out waiting for {what}")
+    detail = ""
+    if evidence is not None:
+        try:
+            detail = f"; observed {evidence()}"
+        except (OSError, TypeError, ValueError) as exc:
+            detail = f"; evidence unavailable: {type(exc).__name__}: {exc}"
+    raise AssertionError(f"timed out waiting for {what}{detail}")
 
 
 def _drain_pty(master_fd: int) -> str:
@@ -457,22 +506,62 @@ def test_active_projection_recovers_after_transient_storage_failure(
             timeout=5.0,
             what="lifecycle:active event",
         )
-        time.sleep(0.3)
-        # The fault held: the run is durable (meta + event) but not projected.
+
+        def _deferred_without_snapshot() -> bool:
+            if (snapshots / f"{run_id}.json").exists():
+                return False
+            receipt = _projection_receipt(home, run_id)
+            return bool(
+                receipt
+                and receipt.get("status") == "pending"
+                and receipt.get("first_failed_at")
+                and int(receipt.get("attempts") or 0) >= 1
+            )
+
+        # The fault held: durable meta + deferred receipt, no snapshot yet.
+        _wait_until(
+            _deferred_without_snapshot,
+            timeout=5.0,
+            what="deferred publication receipt while the snapshot is still missing",
+            evidence=lambda: (
+                f"snapshot_exists={(snapshots / f'{run_id}.json').exists()} "
+                f"projection={_projection_receipt(home, run_id)!r}"
+            ),
+        )
         assert not (snapshots / f"{run_id}.json").exists()
         assert _meta(home, run_id)["status"] == "active"
 
         # Release the contention while the provider idles. Nothing else runs.
+        # Snapshot-then-meta is a legitimate gap: wait for both, not the path.
         snapshots.chmod(0o755)
-        _wait_for(snapshots / f"{run_id}.json", timeout=6.0)
-        live = _snapshot(home, run_id)
+        converged: list[tuple[dict[str, object], dict[str, object]]] = []
+
+        def _both_ready() -> bool:
+            found = _active_snapshot_and_published_receipt(home, run_id)
+            if found is None:
+                return False
+            converged.clear()
+            converged.append(found)
+            return True
+
+        _wait_until(
+            _both_ready,
+            timeout=6.0,
+            what=f"active snapshot and published receipt for {run_id}",
+            evidence=lambda: (
+                f"snapshot={_load_json(snapshots / f'{run_id}.json')!r} "
+                f"projection={_projection_receipt(home, run_id)!r}"
+            ),
+        )
+        live, published_meta = converged[0]
         assert live["state"] == "active"
         assert live["health"] == "active"
         assert live["liveness"] == "active"
         assert "worker_pgid" not in live
         assert _stop_signal_target(live) == ("worker_pid", live["worker_pid"])
         assert sorted(path.stem for path in snapshots.glob("*.json")) == [run_id]
-        projection = _meta(home, run_id)["projection"]
+        projection = published_meta["projection"]
+        assert isinstance(projection, dict)
         assert projection["status"] == "published"
         assert projection["attempts"] >= 2
         assert projection["first_failed_at"]
@@ -489,6 +578,66 @@ def test_active_projection_recovers_after_transient_storage_failure(
             owner.kill()
             owner.wait()
         os.close(master_fd)
+
+
+def test_snapshot_before_meta_gap_is_not_publication_success(tmp_path: Path) -> None:
+    """The snapshot-before-stamp gap is not publication success.
+
+    ``_attempt`` can leave an active snapshot on disk while meta still says
+    pending. The recovery wait must stay red until the published receipt
+    arrives for the same run, including when it never does.
+    """
+    home = tmp_path / "home"
+    run_id = "init-260910-000000-00007"
+    snapshots = _snapshot_dir(home)
+    snapshot_path = snapshots / f"{run_id}.json"
+    meta_path = home / "control_plane" / "runtime_runs" / run_id / "meta.json"
+    meta_path.parent.mkdir(parents=True)
+    snapshot_body = {
+        "run_id": run_id,
+        "state": "active",
+        "health": "active",
+        "liveness": "active",
+    }
+    pending_projection = {
+        "status": "pending",
+        "attempts": 2,
+        "first_failed_at": "2026-09-10T00:00:00+00:00",
+        "last_error": "PermissionError: [Errno 13] Permission denied",
+    }
+    pending_meta = {
+        "run_id": run_id,
+        "status": "active",
+        "projection": dict(pending_projection),
+    }
+    snapshot_path.write_text("{", encoding="utf-8")
+    assert _load_json(snapshot_path) is None
+    snapshot_path.write_text(json.dumps(snapshot_body), encoding="utf-8")
+    assert _active_snapshot_and_published_receipt(home, run_id) is None
+    meta_path.write_text(json.dumps(pending_meta), encoding="utf-8")
+    assert _active_snapshot_and_published_receipt(home, run_id) is None
+    with pytest.raises(AssertionError, match="published receipt") as timed_out:
+        _wait_until(
+            lambda: _active_snapshot_and_published_receipt(home, run_id) is not None,
+            timeout=0.08,
+            what=f"active snapshot and published receipt for {run_id}",
+            evidence=lambda: f"projection={_projection_receipt(home, run_id)!r}",
+        )
+    assert "pending" in str(timed_out.value)
+    published = {
+        **pending_meta,
+        "projection": {
+            **pending_projection,
+            "status": "published",
+            "published_at": "2026-09-10T00:00:01+00:00",
+        },
+    }
+    meta_path.write_text(json.dumps(published), encoding="utf-8")
+    found = _active_snapshot_and_published_receipt(home, run_id)
+    assert found is not None
+    live, meta = found
+    assert live["run_id"] == run_id
+    assert meta["projection"]["status"] == "published"
 
 
 def test_terminal_projection_recovers_with_retained_terminal_truth(
