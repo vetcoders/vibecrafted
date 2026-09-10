@@ -253,7 +253,9 @@ def test_conflicting_repo_and_root_are_refused_not_silently_picked(
     assert "--root" in result.stderr
 
 
-def test_worktree_requires_a_git_repository_root(tmp_path: Path) -> None:
+def test_worktree_requires_git_but_accepts_a_selected_subdirectory(
+    tmp_path: Path,
+) -> None:
     repo = tmp_path / "repo"
     _git_repo(repo)
     plain = tmp_path / "plain"
@@ -286,17 +288,15 @@ def test_worktree_requires_a_git_repository_root(tmp_path: Path) -> None:
         cwd=tmp_path,
         env=env,
     )
-    assert result.returncode == 1
+    assert result.returncode == 0, result.stderr
     receipt = json.loads(result.stdout)
-    assert receipt["accepted"] is False
-    assert receipt["reason"] == "worktree_rejected"
-    assert receipt["status"] == "failed"
-    assert "subdirectory" in receipt["error"]
+    assert receipt["accepted"] is True
     assert receipt["worktree"] is True
-    assert receipt["parent_root"] == str((repo / "sub").resolve())
+    assert receipt["parent_root"] == str(repo.resolve())
+    assert Path(receipt["worktree_path"]).is_dir()
 
 
-def test_worktree_refuses_a_dirty_selected_repository(tmp_path: Path) -> None:
+def test_worktree_preserves_dirty_parent_without_copying_dirt(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _git_repo(repo)
     (repo / "dirty.txt").write_text("unstaged\n", encoding="utf-8")
@@ -320,11 +320,14 @@ def test_worktree_refuses_a_dirty_selected_repository(tmp_path: Path) -> None:
         env=env,
     )
 
-    assert result.returncode == 1
+    assert result.returncode == 0, result.stderr
     receipt = json.loads(result.stdout)
-    assert receipt["accepted"] is False
-    assert receipt["reason"] == "worktree_rejected"
-    assert "clean selected workspace" in receipt["error"]
+    assert receipt["accepted"] is True
+    assert receipt["worktree"] is True
+    worker = Path(receipt["worktree_path"])
+    assert worker.is_dir()
+    assert not (worker / "dirty.txt").exists()
+    assert (repo / "dirty.txt").read_text(encoding="utf-8") == "unstaged\n"
     listing = subprocess.run(
         ["git", "worktree", "list", "--porcelain"],
         cwd=repo,
@@ -332,7 +335,7 @@ def test_worktree_refuses_a_dirty_selected_repository(tmp_path: Path) -> None:
         text=True,
         check=True,
     ).stdout
-    assert listing.count("worktree ") == 1
+    assert listing.count("worktree ") == 2
 
 
 def test_bad_worktree_word_is_refused(tmp_path: Path) -> None:
@@ -383,8 +386,8 @@ def test_repository_independent_commands_do_not_need_git(tmp_path: Path) -> None
 
     workflow_help = _cli(["help", "workflow"], cwd=outside, env=env)
     assert workflow_help.returncode == 0
-    assert "--repo <path>" in workflow_help.stdout
-    assert "--worktree [true|false]" in workflow_help.stdout
+    assert "--repo ~/Projects/app" in workflow_help.stdout
+    assert "--worktree true" in workflow_help.stdout
     assert (
         "--model claude-fable-5-1 --worktree true --permissions auto --sandbox true "
         "--repo" in workflow_help.stdout

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -46,6 +47,9 @@ def _runtime_env(monkeypatch, tmp_path: Path, run_id: str) -> Path:
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(bin_dir))
+    monkeypatch.setenv(
+        "PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', os.defpath)}"
+    )
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
     monkeypatch.setenv("VIBECRAFTED_RUN_ID", run_id)
@@ -84,7 +88,7 @@ def test_child_env_keeps_selected_generation_over_stale_inherited_bin(
     _write_generation_command(stale, "codex", "old")
     home = tmp_path / "home"
     provider_bin = home / ".local" / "bin"
-    _write_generation_command(home / ".local", "claude", "provider")
+    _write_generation_command(home / ".local", "codex", "provider")
 
     monkeypatch.setenv("VIBECRAFTED_RUNTIME_ROOT", str(selected))
     monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(stale_bin))
@@ -103,10 +107,10 @@ def test_child_env_keeps_selected_generation_over_stale_inherited_bin(
         command, env=environment, text=True, capture_output=True, check=True
     )
 
-    assert command[0] == str(selected_bin / "codex")
+    assert command[0] == str(provider_bin / "codex")
     assert (
         result.stdout.strip()
-        == f"new|{selected}|{selected_bin}|{selected_bin / 'python3'}"
+        == f"provider|{selected}|{selected_bin}|{selected_bin / 'python3'}"
     )
     assert str(provider_bin) in environment["PATH"]
 

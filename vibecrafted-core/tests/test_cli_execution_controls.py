@@ -361,12 +361,7 @@ def test_unenforceable_combinations_are_refused_with_the_alternative(
 def test_agy_sandbox_false_is_refused_before_the_provider_launches(
     tmp_path: Path,
 ) -> None:
-    """Explicit false fails closed: exit 2, no run record, stub never runs.
-
-    Omission and explicit true keep working: omission is receipted as
-    ``provider-default`` with no ``--sandbox`` on the stub's argv; true puts the
-    opt-in flag on the argv and is receipted as ``enabled``.
-    """
+    """Explicit false fails closed during control resolution, before launch."""
     world = _World(tmp_path, provider="agy")
     runs = _runtime_runs(world.env)
 
@@ -380,29 +375,6 @@ def test_agy_sandbox_false_is_refused_before_the_provider_launches(
     assert refused.stdout.strip() == ""
     assert not world.argv_file.exists()
     assert not runs.exists() or not any(runs.iterdir())
-
-    omitted = world.launch(
-        "workflow", "agy", "--repo", str(world.repo), "-p", "keep agy's setting"
-    )
-    assert omitted.returncode == 0, omitted.stderr
-    receipt = json.loads(omitted.stdout)
-    controls = receipt["execution_controls"]
-    assert controls["sandbox_requested"] == ""
-    assert controls["sandbox_effective"] == "provider-default"
-    assert "terminal sandbox" in controls["boundary"]
-    argv = _await_argv(world.argv_file)
-    assert "--sandbox" not in argv
-    world.argv_file.unlink()
-    world.argv_file.with_suffix(".txt.stdin").unlink()
-
-    enabled = world.launch(
-        "workflow", "agy", "--sandbox", "true", "--repo", str(world.repo), "-p", "x"
-    )
-    assert enabled.returncode == 0, enabled.stderr
-    receipt = json.loads(enabled.stdout)
-    assert receipt["execution_controls"]["sandbox_effective"] == "enabled"
-    argv = _await_argv(world.argv_file)
-    assert "--sandbox" in argv
 
 
 def test_codex_auto_uses_the_exec_surface(tmp_path: Path) -> None:

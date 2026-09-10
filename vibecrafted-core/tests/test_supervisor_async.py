@@ -4,6 +4,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from typing import NoReturn
 
@@ -423,10 +424,10 @@ def test_async_supervisor_preserves_explicit_resume_identity_without_new_event(
     )
 
     assert handle.agent_session_id == "codex-native-parent"
-    assert handle.session_id == "runtime-child"
+    uuid.UUID(handle.session_id)
     meta_payload = json.loads(meta.read_text(encoding="utf-8"))
     assert meta_payload["agent_session_id"] == "codex-native-parent"
-    assert meta_payload["runtime_session_id"] == "runtime-child"
+    assert meta_payload["runtime_session_id"] == handle.session_id
 
 
 def test_async_supervisor_preserves_blocked_claim_while_filling_identity(

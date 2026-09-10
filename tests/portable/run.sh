@@ -188,6 +188,11 @@ HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" \
   --tool codex --tool claude --tool agy \
   --skills-only --with-shell --write-shell-rc
 
+# Skills-only installs no product launchers. Python entry points are staged by
+# the explicit uv-tool step below and Runtime Pack wrappers remain out of scope.
+[[ ! -e "$home_dir/.local/bin/vc-help" ]] || die "skills-only published vc-help"
+[[ ! -e "$home_dir/.local/bin/vc-marbles" ]] || die "skills-only published vc-marbles"
+
 # Stage the source-carrier Python launchers without pretending this archive is
 # a closed Runtime Pack. Full product installation is exercised by the Runtime
 # Pack workflows; this portable lane owns source extraction and agent scripts.
@@ -202,10 +207,10 @@ require_file "$home_dir/.local/share/vibecrafted/tools/vibecrafted-current/vibec
 require_file "$home_dir/.local/share/vibecrafted/tools/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/claude_spawn.sh"
 require_file "$home_dir/.local/share/vibecrafted/tools/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/agy_spawn.sh"
 require_file "$home_dir/.local/bin/vibecrafted"
-# Product-owned vc-* wrappers are Runtime Pack launchers. The source carrier
-# installs Python entry points only and must not synthesize that generation.
+# vc-marbles is an owned Python entry point; vc-help remains a Runtime Pack
+# wrapper and must not be synthesized by the source-carrier lane.
+require_file "$home_dir/.local/bin/vc-marbles"
 [[ ! -e "$home_dir/.local/bin/vc-help" ]] || die "source lane published vc-help"
-[[ ! -e "$home_dir/.local/bin/vc-marbles" ]] || die "source lane published vc-marbles"
 # Explicit --tool selections keep their requested compatibility views.
 require_symlink "$home_dir/.agents/skills/vc-agents"
 require_symlink "$home_dir/.codex/skills/vc-agents"
@@ -426,7 +431,7 @@ resume_output="$(
     FAKE_CODEX_CAPTURE="$resume_capture" \
     FAKE_CODEX_STDIN_CAPTURE="$resume_prompt_capture" \
     "$home_dir/.local/bin/vibecrafted" resume codex \
-      --session fake-session-001 --prompt "resume smoke"
+      --repo "$work_repo" --session fake-session-001 --prompt "resume smoke"
 )"
 printf '%s\n' "$resume_output"
 resume_run_id="$(

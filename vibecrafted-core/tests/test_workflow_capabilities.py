@@ -244,6 +244,7 @@ def _launch_research(
     # probe would otherwise drive the process-global subprocess.run into the
     # faked Popen below.
     monkeypatch.setattr(workflow, "shutil", SimpleNamespace(which=lambda _name: None))
+    monkeypatch.setattr(workflow, "git_toplevel", lambda _root: "")
     _fake_popen(monkeypatch, [])
     brief = tmp_path / "brief.md"
     brief.write_text("map the target\n", encoding="utf-8")

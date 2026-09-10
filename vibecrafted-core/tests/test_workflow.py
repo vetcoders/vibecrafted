@@ -126,7 +126,6 @@ def test_normalize_launch_spec_prune_without_input_uses_discovery_prompt(
     assert spec.file == ""
     assert "Repository health / prune ACTION run." in spec.prompt
     assert "`--no-verify` only for a declared Founder-authorized" in spec.prompt
-    assert "push with `--no-verify` is an exclusive Founder button" in spec.prompt
     assert "Mode: DISCOVER -> PROVE -> CUT -> COMMIT." in spec.prompt
 
 

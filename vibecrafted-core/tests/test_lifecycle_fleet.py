@@ -945,11 +945,11 @@ def _bounded_runtime_env(tmp_path: Path) -> dict[str, str]:
     package_root = str(Path(vibecrafted_core.__file__).resolve().parents[1])
     return {
         "HOME": str(home),
-        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
+        "PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
         "VIBECRAFTED_HOME": str(home / ".vibecrafted"),
         "XDG_DATA_HOME": str(home / ".local/share"),
-        # The existing provider-discovery seam: this directory is searched
-        # first, so the fake wins without the launcher being touched.
+        # Private runtime bins are deliberately excluded from provider lookup;
+        # keep the legacy value to prove it cannot override the public PATH.
         "VIBECRAFTED_RUNTIME_BIN": str(fake_bin),
         "VIBECRAFTED_GUARD": "0",
         "PYTHONPATH": package_root,
