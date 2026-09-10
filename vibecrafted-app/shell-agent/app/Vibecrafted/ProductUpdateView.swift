@@ -6,7 +6,7 @@ import SwiftUI
 struct ProductUpdateView: View {
   let progress: ProductUpdateProgress
   var onRetry: (() -> Void)?
-  var onQuitUI: (() -> Void)?
+  var onInstall: (() -> Void)?
   var onClose: (() -> Void)?
 
   @Environment(\.commandDeckTheme) private var theme
@@ -37,13 +37,13 @@ struct ProductUpdateView: View {
           .font(.body.monospaced())
           .foregroundStyle(theme.palette.ink)
           .textSelection(.enabled)
-          .accessibilityLabel("Installed generation")
+          .accessibilityLabel("Installed version")
           .accessibilityValue(progress.installedGeneration)
-        Text("Candidate: \(progress.candidateGeneration ?? "none")")
+        Text("Available: \(progress.candidateGeneration ?? "none")")
           .font(.body.monospaced())
           .foregroundStyle(theme.palette.ink)
           .textSelection(.enabled)
-          .accessibilityLabel("Candidate generation")
+          .accessibilityLabel("Available version")
           .accessibilityValue(progress.candidateGeneration ?? "none")
       }
 
@@ -55,16 +55,24 @@ struct ProductUpdateView: View {
       }
 
       HStack(spacing: CommandDeckMetrics.chromeSpacing) {
-        if progress.canRetry, let onRetry {
-          Button("Check Again", systemImage: "arrow.clockwise", action: onRetry)
+        if progress.canInstall, let onInstall {
+          Button("Install Update", systemImage: "arrow.down.app", action: onInstall)
             .buttonStyle(.commandDeckAccent)
-            .accessibilityHint("Runs Check for Updates again.")
-            .accessibilityInputLabels(["Check Again", "Check for Updates", "Sprawdź aktualizacje"])
+            .accessibilityHint("Installs the signed update. Frame, terminals, agents and sessions stay running.")
+            .accessibilityInputLabels(["Install Update", "Install", "Zainstaluj aktualizację"])
         }
-        if progress.requestsUIOnlyQuit, let onQuitUI {
-          Button("Quit App", systemImage: "rectangle.portrait.and.arrow.right", action: onQuitUI)
-            .buttonStyle(.commandDeckAccent)
-            .accessibilityHint("Closes the App UI only. Frame, terminals, agents and sessions stay running.")
+        if progress.canRetry, let onRetry {
+          if progress.canInstall {
+            Button("Check Again", systemImage: "arrow.clockwise", action: onRetry)
+              .buttonStyle(.commandDeckQuiet)
+              .accessibilityHint("Runs Check for Updates again.")
+              .accessibilityInputLabels(["Check Again", "Check for Updates", "Sprawdź aktualizacje"])
+          } else {
+            Button("Check Again", systemImage: "arrow.clockwise", action: onRetry)
+              .buttonStyle(.commandDeckAccent)
+              .accessibilityHint("Runs Check for Updates again.")
+              .accessibilityInputLabels(["Check Again", "Check for Updates", "Sprawdź aktualizacje"])
+          }
         }
         if let onClose {
           Button("Close", action: onClose)
@@ -89,17 +97,17 @@ struct ProductUpdateView: View {
 
   private var showsBusyIndicator: Bool {
     switch progress.phase {
-    case .checking, .downloading, .verifying, .installing: true
-    case .idle, .success, .readyToReplace, .unavailable, .refused, .retained, .error: false
+    case .checking, .downloading, .verifying, .installing, .restarting: true
+    case .idle, .ready, .success, .unavailable, .refused, .retained, .error: false
     }
   }
 
   private var symbolName: String {
     switch progress.phase {
     case .idle, .checking, .downloading: "arrow.triangle.2.circlepath"
-    case .verifying, .installing: "checkmark.seal"
+    case .verifying, .installing, .restarting: "checkmark.seal"
+    case .ready: "arrow.down.app"
     case .success: "checkmark.circle.fill"
-    case .readyToReplace: "rectangle.portrait.and.arrow.right"
     case .unavailable, .error: "exclamationmark.triangle.fill"
     case .refused, .retained: "exclamationmark.octagon.fill"
     }
@@ -107,10 +115,9 @@ struct ProductUpdateView: View {
 
   private var symbolColor: Color {
     switch progress.phase {
-    case .success: theme.palette.ink
-    case .readyToReplace: theme.palette.ink
+    case .success, .ready: theme.palette.ink
     case .refused, .retained: theme.palette.destructive
-    case .unavailable, .error, .checking, .downloading, .verifying, .installing, .idle:
+    case .unavailable, .error, .checking, .downloading, .verifying, .installing, .restarting, .idle:
       theme.palette.amber
     }
   }

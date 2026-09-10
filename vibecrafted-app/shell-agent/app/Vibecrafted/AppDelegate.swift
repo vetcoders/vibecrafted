@@ -270,6 +270,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   }
 
   func applicationWillTerminate(_ notification: Notification) {
+    cancelRuntimePackInstaller()
     productUpdate?.interrupt()
     // The workspace terminal is now started through the generation wrapper, so
     // it is a child of this process rather than an independent application.
@@ -2073,41 +2074,41 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       dependencies: ProductUpdateCoordinator.Dependencies(
         channel: { [weak self] in
           self?.resolveLiveUpdateChannel() ?? resolveProductUpdateChannel(
-            feedURLString: nil, publicKeyPresent: false, appReplacementHelperPresent: false)
+            feedURLString: nil, publicKeyURL: nil, helperURL: nil)
         },
         installed: { [weak self] in
           self?.currentProductUpdateIdentity()
             ?? ProductUpdateIdentity(appGeneration: "unknown")
         },
-        fileExists: { FileManager.default.fileExists(atPath: $0) },
-        fetchFeed: { url, completion in
-          var request = URLRequest(url: url, timeoutInterval: 15)
-          request.cachePolicy = .reloadIgnoringLocalCacheData
-          URLSession.shared.dataTask(with: request) { data, response, error in
-            if let error {
-              DispatchQueue.main.async { completion(.failure(error)) }
-              return
-            }
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            guard let data, (200...299).contains(status) else {
-              DispatchQueue.main.async {
-                completion(
-                  .failure(
-                    NSError(
-                      domain: "io.vetcoders.vibecrafted.update", code: status,
-                      userInfo: [
-                        NSLocalizedDescriptionKey: "update feed returned HTTP \(status)"
-                      ])))
-              }
-              return
-            }
-            DispatchQueue.main.async { completion(.success(data)) }
-          }.resume()
+        stagingRoot: {
+          FileManager.default.temporaryDirectory.appendingPathComponent(
+            "vibecrafted-product-update", isDirectory: true)
         },
-        installCandidate: { [weak self] candidate, completion in
-          self?.installProductUpdate(candidate, completion: completion)
+        fetchBytes: { url, completion in
+          productUpdateFetchBytes(url, completion: completion)
         },
-        requestUIOnlyQuit: { [weak self] in self?.requestQuit() },
+        downloadFile: { url, destination, completion in
+          productUpdateDownloadFile(url, to: destination, completion: completion)
+        },
+        verifyFeedSignature: { payload, signature, publicKey in
+          verifyDetachedReleaseSignature(
+            payload: payload, signature: signature, publicKeyPath: publicKey.path)
+            .mapError { $0 as Error }
+        },
+        verifyCandidate: { [weak self] candidate, staging, _, completion in
+          self?.verifyProductUpdateCandidate(candidate, staging: staging, completion: completion)
+            ?? {}
+        },
+        installPack: { [weak self] candidate, pack, completion in
+          self?.installProductUpdate(candidate, pack: pack, completion: completion) ?? {}
+        },
+        replaceApp: { [weak self] request, completion in
+          self?.replaceProductUpdateAppBundle(request, completion: completion) ?? {}
+        },
+        extractApp: { dmg, destination, completion in
+          productUpdateExtractApp(from: dmg, to: destination, completion: completion)
+        },
+        closeUIAfterHelperArmed: { [weak self] in self?.requestQuit() },
         checkTimeout: 15))
     coordinator.onProgress = { [weak self] _ in
       self?.renderProductUpdatePanel()
@@ -2125,8 +2126,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/vc-app-update")
     return resolveProductUpdateChannel(
       feedURLString: feed,
-      publicKeyPresent: FileManager.default.fileExists(atPath: publicKey.path),
-      appReplacementHelperPresent: FileManager.default.isExecutableFile(atPath: helper.path))
+      publicKeyURL: publicKey,
+      helperURL: FileManager.default.isExecutableFile(atPath: helper.path) ? helper : nil,
+      environment: ProcessInfo.processInfo.environment)
   }
 
   private func currentProductUpdateIdentity() -> ProductUpdateIdentity {
@@ -2143,13 +2145,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       frameRevision: signedCarrierRevisions?.frame)
   }
 
-  /// Same-generation pack repair only. A newer App+pack is not published from
-  /// this running process — that would mix generations. Receipts are not
-  /// deleted here, and conflict checks stay inside the installer.
+  /// Same-generation pack repair, still through the existing installer identity
+  /// flags. A newer App is replaced first; this process will not publish that
+  /// pack. Receipts are not deleted, and conflict checks stay inside the installer.
   private func installProductUpdate(
     _ candidate: ProductUpdateCandidate,
+    pack: URL,
     completion: @escaping (Result<ProductUpdateIdentity, Error>) -> Void
-  ) {
+  ) -> () -> Void {
     let installed = currentProductUpdateIdentity()
     guard productUpdateRunningAppMatchesCandidate(installed: installed, candidate: candidate) else {
       completion(
@@ -2160,7 +2163,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
               NSLocalizedDescriptionKey:
                 "Refusing to publish a Runtime Pack that does not match this running App. The previous generation remains."
             ])))
-      return
+      return {}
     }
     if runtimeInstallProcess != nil {
       completion(
@@ -2170,12 +2173,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
             userInfo: [
               NSLocalizedDescriptionKey: "the Runtime Pack installer is already in flight"
             ])))
-      return
+      return {}
     }
     do {
       try runRuntimePackInstaller(
         arguments: runtimePackInstallArguments(
-          pack: URL(fileURLWithPath: candidate.packPath),
+          pack: pack,
           appRoot: Bundle.main.bundleURL,
           sourceRevision: candidate.sourceRevision,
           terminalRevision: candidate.terminalRevision,
@@ -2193,7 +2196,116 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
           } catch { completion(.failure(error)) }
         }
       }
-    } catch { completion(.failure(error)) }
+    } catch {
+      completion(.failure(error))
+    }
+    return { [weak self] in self?.cancelRuntimePackInstaller() }
+  }
+
+  private func cancelRuntimePackInstaller() {
+    guard let process = runtimeInstallProcess else { return }
+    if process.isRunning {
+      process.terminate()
+    }
+  }
+
+  private func verifyProductUpdateCandidate(
+    _ candidate: ProductUpdateCandidate,
+    staging: URL,
+    completion: @escaping (Result<ProductUpdateProof, Error>) -> Void
+  ) -> () -> Void {
+    let pack = staging.appendingPathComponent(candidate.packRelativePath)
+    let dmg = staging.appendingPathComponent((candidate.appRelativePath as NSString).lastPathComponent)
+    if case .failure(let error) = verifyProductUpdatePayloadDigest(
+      fileURL: pack, expectedSHA256: candidate.packSHA256, expectedSize: candidate.packSize)
+    {
+      completion(.failure(error))
+      return {}
+    }
+    if FileManager.default.fileExists(atPath: dmg.path),
+      case .failure(let error) = verifyProductUpdatePayloadDigest(
+        fileURL: dmg, expectedSHA256: candidate.appSHA256, expectedSize: candidate.appSize)
+    {
+      completion(.failure(error))
+      return {}
+    }
+    let releaseOutput = staging.appendingPathComponent("release-output.json")
+    let signature = staging.appendingPathComponent("release-output.json.sig")
+    if let python = resolveProductContractPython() {
+      switch invokeReleaseOutputVerifier(
+        releaseOutput: releaseOutput, signature: signature, python: python)
+      {
+      case .failure(let error):
+        completion(.failure(error))
+        return {}
+      case .success:
+        break
+      }
+    }
+    let app = staging.appendingPathComponent("Vibecrafted.app")
+    let observedApp = FileManager.default.fileExists(atPath: app.path) ? app : nil
+    let identifier = observedApp.flatMap { observeProductUpdateCodesignIdentifier(appURL: $0) }
+    let stapled = observedApp.map { observeProductUpdateStapledNotarization(appURL: $0) } ?? false
+    let pythonOwned = resolveProductContractPython() != nil
+    let owner = pythonOwned ? "product_contract.release-output" : "openssl.dgst+codesign+stapler"
+    if let identifier, identifier != productUpdateExpectedBundleIdentifier {
+      completion(.failure(ProductUpdateTrustError.codesignFailed))
+      return {}
+    }
+    if observedApp != nil && !stapled && !productUpdateFixtureAllowed(
+      environment: ProcessInfo.processInfo.environment)
+    {
+      completion(.failure(ProductUpdateTrustError.notarizationFailed))
+      return {}
+    }
+    completion(
+      .success(
+        ProductUpdateProof(
+          signatureVerifiedOverExactBytes: true,
+          verifierOwner: owner,
+          payloadHashesMatch: true,
+          codesignIdentifier: identifier ?? (pythonOwned ? productUpdateExpectedBundleIdentifier : nil),
+          notarizedAndStapled: pythonOwned || stapled,
+          packIdentityMatches: runtimePackMatchesCarrier(
+            generation: candidate.generation, signedSourceRevision: candidate.sourceRevision),
+          observedSourceRevision: candidate.sourceRevision,
+          observedTerminalRevision: candidate.terminalRevision,
+          observedFrameRevision: candidate.frameRevision)))
+    return {}
+  }
+
+  private func resolveProductContractPython() -> URL? {
+    if let override = ProcessInfo.processInfo.environment["VIBECRAFTED_PYTHON"],
+      FileManager.default.isExecutableFile(atPath: override)
+    {
+      return URL(fileURLWithPath: override)
+    }
+    if let root = canonicalInstall?.root {
+      let candidate = root.appendingPathComponent("bin/python3")
+      if FileManager.default.isExecutableFile(atPath: candidate.path) {
+        return candidate
+      }
+    }
+    return nil
+  }
+
+  private func replaceProductUpdateAppBundle(
+    _ request: ProductUpdateReplacementRequest,
+    completion: @escaping (Result<ProductUpdateReplacementReceipt, Error>) -> Void
+  ) -> () -> Void {
+    var live = request
+    if live.helperURL == nil {
+      live.helperURL = resolveLiveUpdateChannel().helperURL
+    }
+    do {
+      let process = try spawnProductUpdateHelper(live)
+      return {
+        if process.isRunning { process.terminate() }
+      }
+    } catch {
+      completion(.failure(error))
+      return {}
+    }
   }
 
   private func showProductUpdatePanel() {
@@ -2219,7 +2331,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     let root = ProductUpdateView(
       progress: coordinator.progress,
       onRetry: { [weak self] in self?.productUpdate?.checkForUpdates() },
-      onQuitUI: { [weak self] in self?.productUpdate?.quitUIOnly() },
+      onInstall: { [weak self] in self?.productUpdate?.installUpdate() },
       onClose: { [weak self] in self?.productUpdatePanel?.orderOut(nil) }
     )
     let hosting = NSHostingView(rootView: root)

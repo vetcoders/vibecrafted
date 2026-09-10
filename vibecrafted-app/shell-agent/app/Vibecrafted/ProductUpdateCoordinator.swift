@@ -1,34 +1,50 @@
 import Foundation
 
-/// Host for one in-app update check.
+/// Host for one in-app update check and install.
 ///
-/// The coordinator never publishes a generation itself. Admission lives in
-/// `ProductUpdatePolicy`. Publication, if any, is injected and must call the
-/// existing Runtime Pack installer. A UI-only quit is requested only after a
-/// healthy identity match. Nothing here stops Frame, PTYs, workers or config.
+/// Downloads the signed feed and payloads, verifies them through the established
+/// owner, then exposes **Install Update**. Publication of a matching Runtime Pack
+/// goes through the existing installer. A newer App is replaced by the implemented
+/// helper, which relaunches the UI. Nothing here stops Frame, PTYs, workers or
+/// config. Interrupt cancels the owned download, installer, or helper and only
+/// reports retained when the transaction receipt plus recovered identity justify it.
 @MainActor
 final class ProductUpdateCoordinator {
   struct Dependencies {
     var channel: () -> ProductUpdateChannel
     var installed: () -> ProductUpdateIdentity
-    var fileExists: (String) -> Bool
-    var fetchFeed: ((URL, @escaping (Result<Data, Error>) -> Void) -> Void)?
-    var installCandidate:
-      ((ProductUpdateCandidate, @escaping (Result<ProductUpdateIdentity, Error>) -> Void) -> Void)?
-    var requestUIOnlyQuit: () -> Void
+    var stagingRoot: () -> URL
+    var fetchBytes: (URL, @escaping (Result<Data, Error>) -> Void) -> () -> Void
+    var downloadFile: (URL, URL, @escaping (Result<URL, Error>) -> Void) -> () -> Void
+    var verifyFeedSignature: (Data, Data, URL) -> Result<Void, Error>
+    var verifyCandidate:
+      (ProductUpdateCandidate, URL, Data, @escaping (Result<ProductUpdateProof, Error>) -> Void) ->
+      () -> Void
+    var installPack:
+      (ProductUpdateCandidate, URL, @escaping (Result<ProductUpdateIdentity, Error>) -> Void) ->
+      () -> Void
+    var replaceApp:
+      (ProductUpdateReplacementRequest, @escaping (Result<ProductUpdateReplacementReceipt, Error>) -> Void)
+      -> () -> Void
+    var extractApp: ((URL, URL, @escaping (Result<URL, Error>) -> Void) -> () -> Void)?
+    var closeUIAfterHelperArmed: () -> Void
     var checkTimeout: TimeInterval
   }
 
   private let dependencies: Dependencies
   private(set) var progress: ProductUpdateProgress
+  private(set) var receipt: ProductUpdateTransactionReceipt
+  private(set) var staged: ProductUpdateStagedTuple?
   private var generation: UInt64 = 0
   private var busy = false
+  private var cancelInFlight: (() -> Void)?
   var onProgress: ((ProductUpdateProgress) -> Void)?
 
   init(dependencies: Dependencies) {
     self.dependencies = dependencies
-    self.progress = deriveProductUpdateProgress(
-      phase: .idle, installed: dependencies.installed(), candidate: nil)
+    let installed = dependencies.installed()
+    self.progress = deriveProductUpdateProgress(phase: .idle, installed: installed, candidate: nil)
+    self.receipt = .start(installed: installed)
   }
 
   var isBusy: Bool { busy }
@@ -39,157 +55,454 @@ final class ProductUpdateCoordinator {
     generation += 1
     let token = generation
     let installed = dependencies.installed()
+    receipt = .start(installed: installed)
+    staged = nil
     publish(deriveProductUpdateProgress(phase: .checking, installed: installed, candidate: nil))
     let channel = dependencies.channel()
     if let gap = channel.provisioningGap {
       finish(
         deriveProductUpdateProgress(
           phase: .unavailable, installed: installed, candidate: nil, detail: gap),
-        token: token)
+        token: token, terminal: .retained)
       return
     }
-    guard let feed = channel.feedURL, let fetch = dependencies.fetchFeed else {
+    guard let feed = channel.feedURL, let signatureURL = channel.signatureURL,
+      let publicKey = channel.publicKeyURL
+    else {
       finish(
         deriveProductUpdateProgress(
           phase: .unavailable, installed: installed, candidate: nil,
-          detail: "The update feed is not reachable from this App. The installed generation is unchanged."),
-        token: token)
+          detail: "The update feed is not reachable from this App. Your current version stays installed."),
+        token: token, terminal: .retained)
       return
     }
-    var settled = false
-    fetch(feed) { [weak self] result in
+    publish(
+      deriveProductUpdateProgress(
+        phase: .downloading, installed: installed, candidate: nil,
+        detail: "Downloading the signed update list."))
+    var cancelled = false
+    let cancelFeed = dependencies.fetchBytes(feed) { [weak self] result in
       Task { @MainActor in
-        guard let self, self.generation == token else { return }
-        settled = true
-        self.consumeFeed(result, channel: channel, installed: installed, token: token)
+        guard let self, self.generation == token, !cancelled else { return }
+        switch result {
+        case .failure(let error):
+          self.finish(
+            deriveProductUpdateProgress(
+              phase: .error, installed: installed, candidate: nil,
+              detail: "The update list could not be downloaded. \(error.localizedDescription)"),
+            token: token, terminal: .retained)
+        case .success(let payload):
+          self.receipt.boundary = .downloadedFeed
+          self.fetchSignature(
+            signatureURL, payload: payload, publicKey: publicKey, channel: channel,
+            installed: installed, token: token)
+        }
       }
     }
-    let timeout = dependencies.checkTimeout
-    DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
-      guard let self, self.generation == token, self.busy, !settled else { return }
-      self.generation += 1
-      self.finish(
-        deriveProductUpdateProgress(
-          phase: .error, installed: installed, candidate: nil,
-          detail:
-            "The update feed did not answer within \(Int(timeout))s. The installed generation is unchanged."),
-        token: self.generation)
+    armTimeout(token: token, installed: installed)
+    cancelInFlight = {
+      cancelled = true
+      cancelFeed()
     }
   }
 
-  /// Interruption while work is in flight keeps the previous generation.
+  func installUpdate() {
+    guard progress.canInstall, let staged, !busy else { return }
+    busy = true
+    generation += 1
+    let token = generation
+    let installed = dependencies.installed()
+    publish(
+      deriveProductUpdateProgress(
+        phase: .installing, installed: installed, candidate: staged.candidate))
+    if productUpdateRunningAppMatchesCandidate(installed: installed, candidate: staged.candidate) {
+      publishPack(staged, installed: installed, token: token)
+      return
+    }
+    replaceRunningApp(staged, installed: installed, token: token)
+  }
+
+  /// Cancel owned work. Retained is reported only when the receipt and recovered
+  /// identity justify it — a cancelled callback is not enough if a publish may
+  /// still be in flight.
   func interrupt() {
     guard busy else { return }
+    let previous = dependencies.installed()
+    let ownedStillLive = cancelInFlight != nil
+    cancelInFlight?()
+    cancelInFlight = nil
     generation += 1
-    finish(
-      deriveProductUpdateProgress(
-        phase: .retained, installed: dependencies.installed(), candidate: nil,
-        detail:
-          "The update was interrupted. The previous working generation remains. The installer receipt was not replaced."),
-      token: generation)
+    var next = receipt
+    next.cancelledWhileOwnedProcessLive = ownedStillLive && (next.packPublished || next.appReplaced || next.helperArmed
+      || next.boundary == .packPublishing || next.boundary == .appReplacing)
+    next.terminal = .retained
+    receipt = next
+    let recovered = dependencies.installed()
+    if productUpdateRetentionJustified(receipt: next, recovered: recovered, previous: previous) {
+      finish(
+        deriveProductUpdateProgress(
+          phase: .retained, installed: recovered, candidate: staged?.candidate,
+          detail:
+            "The update was stopped. The previous working version \(next.installedGeneration) is still installed."),
+        token: generation, terminal: .retained, alreadyFinished: true)
+    } else {
+      finish(
+        deriveProductUpdateProgress(
+          phase: .error, installed: recovered, candidate: staged?.candidate,
+          detail:
+            "The update was stopped while files were still changing. Open Check for Updates again to see the current version."),
+        token: generation, terminal: .retained, alreadyFinished: true)
+    }
   }
 
-  func quitUIOnly() {
-    guard progress.requestsUIOnlyQuit else { return }
-    dependencies.requestUIOnlyQuit()
-  }
-
-  private func consumeFeed(
-    _ result: Result<Data, Error>,
+  private func fetchSignature(
+    _ signatureURL: URL,
+    payload: Data,
+    publicKey: URL,
     channel: ProductUpdateChannel,
     installed: ProductUpdateIdentity,
     token: UInt64
   ) {
-    switch result {
-    case .failure(let error):
+    let cancelSig = dependencies.fetchBytes(signatureURL) { [weak self] result in
+      Task { @MainActor in
+        guard let self, self.generation == token else { return }
+        switch result {
+        case .failure(let error):
+          self.finish(
+            deriveProductUpdateProgress(
+              phase: .error, installed: installed, candidate: nil,
+              detail: "The update signature could not be downloaded. \(error.localizedDescription)"),
+            token: token, terminal: .retained)
+        case .success(let signature):
+          self.verifyAndStage(
+            payload: payload, signature: signature, publicKey: publicKey, channel: channel,
+            installed: installed, token: token)
+        }
+      }
+    }
+    cancelInFlight = cancelSig
+  }
+
+  private func verifyAndStage(
+    payload: Data,
+    signature: Data,
+    publicKey: URL,
+    channel: ProductUpdateChannel,
+    installed: ProductUpdateIdentity,
+    token: UInt64
+  ) {
+    publish(
+      deriveProductUpdateProgress(
+        phase: .verifying, installed: installed, candidate: nil,
+        detail: "Checking the update list signature."))
+    switch dependencies.verifyFeedSignature(payload, signature, publicKey) {
+    case .failure:
       finish(
         deriveProductUpdateProgress(
-          phase: .error, installed: installed, candidate: nil,
-          detail: "The update feed failed: \(error.localizedDescription). The installed generation is unchanged."),
-        token: token)
-    case .success(let data):
-      publish(deriveProductUpdateProgress(phase: .downloading, installed: installed, candidate: nil))
-      let candidate: ProductUpdateCandidate
-      do {
-        candidate = try decodeProductUpdateFeed(data)
-      } catch {
-        finish(
-          deriveProductUpdateProgress(
-            phase: .refused, installed: installed, candidate: nil,
-            detail: "The update feed was refused: \(error.localizedDescription). The installed generation is unchanged."),
-          token: token)
-        return
+          phase: .refused, installed: installed, candidate: nil,
+          detail: "The update list signature did not match the bundled signing key. Your current version stays installed."),
+        token: token, terminal: .retained)
+      return
+    case .success:
+      break
+    }
+    let candidate: ProductUpdateCandidate
+    do {
+      candidate = try decodeProductUpdateFeed(payload)
+    } catch {
+      finish(
+        deriveProductUpdateProgress(
+          phase: .refused, installed: installed, candidate: nil,
+          detail: "The update list was not a signed release. Your current version stays installed."),
+        token: token, terminal: .retained)
+      return
+    }
+    publish(
+      deriveProductUpdateProgress(
+        phase: .downloading, installed: installed, candidate: candidate))
+    let root = dependencies.stagingRoot()
+    let staging = root.appendingPathComponent("product-update-\(candidate.generation)", isDirectory: true)
+    do {
+      try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+      try payload.write(to: staging.appendingPathComponent("release-output.json"), options: .atomic)
+      try signature.write(to: staging.appendingPathComponent("release-output.json.sig"), options: .atomic)
+    } catch {
+      finish(
+        deriveProductUpdateProgress(
+          phase: .error, installed: installed, candidate: candidate,
+          detail: "Could not prepare a staging folder. Your current version stays installed."),
+        token: token, terminal: .retained)
+      return
+    }
+    guard let feed = channel.feedURL else {
+      finish(
+        deriveProductUpdateProgress(
+          phase: .unavailable, installed: installed, candidate: candidate),
+        token: token, terminal: .retained)
+      return
+    }
+    let packURL = resolveSiblingAsset(feed: feed, relative: candidate.packRelativePath)
+    let appURL = resolveSiblingAsset(feed: feed, relative: candidate.appRelativePath)
+    let packDest = staging.appendingPathComponent(candidate.packRelativePath)
+    let appDest = staging.appendingPathComponent((candidate.appRelativePath as NSString).lastPathComponent)
+    let cancelPack = dependencies.downloadFile(packURL, packDest) { [weak self] packResult in
+      Task { @MainActor in
+        guard let self, self.generation == token else { return }
+        switch packResult {
+        case .failure(let error):
+          self.finish(
+            deriveProductUpdateProgress(
+              phase: .error, installed: installed, candidate: candidate,
+              detail: "The Runtime Pack could not be downloaded. \(error.localizedDescription)"),
+            token: token, terminal: .retained)
+        case .success(let packFile):
+          let cancelApp = self.dependencies.downloadFile(appURL, appDest) { appResult in
+            Task { @MainActor in
+              guard let self, self.generation == token else { return }
+              switch appResult {
+              case .failure(let error):
+                self.finish(
+                  deriveProductUpdateProgress(
+                    phase: .error, installed: installed, candidate: candidate,
+                    detail: "The app update could not be downloaded. \(error.localizedDescription)"),
+                  token: token, terminal: .retained)
+              case .success(let appFile):
+                self.receipt.boundary = .downloadedPayloads
+                self.verifyStaged(
+                  candidate: candidate, staging: staging, pack: packFile, app: appFile,
+                  payload: payload, installed: installed, token: token)
+              }
+            }
+          }
+          self.cancelInFlight = cancelApp
+        }
       }
-      publish(
-        deriveProductUpdateProgress(phase: .verifying, installed: installed, candidate: candidate))
-      switch admitProductUpdateCandidate(
-        channel: channel, candidate: candidate, fileExists: dependencies.fileExists)
-      {
-      case .unavailable(let reason):
-        finish(
-          deriveProductUpdateProgress(
-            phase: .unavailable, installed: installed, candidate: candidate, detail: reason),
-          token: token)
-      case .refuse(let reason):
-        finish(
-          deriveProductUpdateProgress(
-            phase: .refused, installed: installed, candidate: candidate, detail: reason),
-          token: token)
-      case .admit(let admitted):
-        if productUpdateClaimsHealthy(installed: installed, candidate: admitted) {
-          finish(
-            deriveProductUpdateProgress(phase: .success, installed: installed, candidate: admitted),
-            token: token)
-          return
-        }
-        if !productUpdateRunningAppMatchesCandidate(installed: installed, candidate: admitted) {
-          finish(
+    }
+    cancelInFlight = cancelPack
+  }
+
+  private func verifyStaged(
+    candidate: ProductUpdateCandidate,
+    staging: URL,
+    pack: URL,
+    app: URL,
+    payload: Data,
+    installed: ProductUpdateIdentity,
+    token: UInt64
+  ) {
+    publish(
+      deriveProductUpdateProgress(
+        phase: .verifying, installed: installed, candidate: candidate))
+    let cancel = dependencies.verifyCandidate(candidate, staging, payload) { [weak self] result in
+      Task { @MainActor in
+        guard let self, self.generation == token else { return }
+        switch result {
+        case .failure(let error):
+          self.finish(
             deriveProductUpdateProgress(
-              phase: .readyToReplace, installed: installed, candidate: admitted),
-            token: token)
-          return
-        }
-        guard let install = dependencies.installCandidate else {
-          finish(
-            deriveProductUpdateProgress(
-              phase: .unavailable, installed: installed, candidate: admitted,
-              detail:
-                "The Runtime Pack installer is not wired for updates. The installed generation is unchanged."),
-            token: token)
-          return
-        }
-        publish(
-          deriveProductUpdateProgress(
-            phase: .installing, installed: installed, candidate: admitted))
-        install(admitted) { [weak self] outcome in
-          Task { @MainActor in
-            guard let self, self.generation == token else { return }
-            switch outcome {
-            case .failure(let error):
+              phase: .refused, installed: installed, candidate: candidate,
+              detail: "This update was refused. \(error.localizedDescription)"),
+            token: token, terminal: .retained)
+        case .success(let proof):
+          switch admitProductUpdateCandidate(
+            channel: self.dependencies.channel(), candidate: candidate, proof: proof)
+          {
+          case .unavailable(let reason):
+            self.finish(
+              deriveProductUpdateProgress(
+                phase: .unavailable, installed: installed, candidate: candidate, detail: reason),
+              token: token, terminal: .retained)
+          case .refuse(let reason):
+            self.finish(
+              deriveProductUpdateProgress(
+                phase: .refused, installed: installed, candidate: candidate, detail: reason),
+              token: token, terminal: .retained)
+          case .admit(let admitted):
+            self.receipt.boundary = .verified
+            self.receipt.candidateGeneration = admitted.generation
+            self.staged = ProductUpdateStagedTuple(
+              candidate: admitted, staging: staging, pack: pack, appOrDMG: app, proof: proof)
+            if productUpdateClaimsHealthy(installed: installed, candidate: admitted) {
               self.finish(
                 deriveProductUpdateProgress(
-                  phase: .retained, installed: self.dependencies.installed(), candidate: admitted,
-                  detail:
-                    "The installer did not publish the candidate (\(error.localizedDescription)). The previous working generation remains."),
-                token: token)
-            case .success(let published):
-              if productUpdateClaimsHealthy(installed: published, candidate: admitted) {
-                self.finish(
-                  deriveProductUpdateProgress(
-                    phase: .success, installed: published, candidate: admitted),
-                  token: token)
-              } else {
-                self.finish(
-                  deriveProductUpdateProgress(
-                    phase: .refused, installed: published, candidate: admitted,
-                    detail:
-                      "The installer did not reconcile App and Runtime Pack identity. Healthy is not claimed. The receipt remains the authority."),
-                  token: token)
-              }
+                  phase: .success, installed: installed, candidate: admitted),
+                token: token, terminal: .committed)
+              return
+            }
+            self.busy = false
+            self.cancelInFlight = nil
+            self.publish(
+              deriveProductUpdateProgress(
+                phase: .ready, installed: installed, candidate: admitted))
+          }
+        }
+      }
+    }
+    cancelInFlight = cancel
+  }
+
+  private func publishPack(
+    _ staged: ProductUpdateStagedTuple,
+    installed: ProductUpdateIdentity,
+    token: UInt64
+  ) {
+    receipt.boundary = .packPublishing
+    let cancel = dependencies.installPack(staged.candidate, staged.pack) { [weak self] outcome in
+      Task { @MainActor in
+        guard let self, self.generation == token else { return }
+        switch outcome {
+        case .failure(let error):
+          self.receipt.packPublished = false
+          let recovered = self.dependencies.installed()
+          if productUpdateRetentionJustified(
+            receipt: self.receipt.retainedCopy(), recovered: recovered, previous: installed)
+          {
+            self.finish(
+              deriveProductUpdateProgress(
+                phase: .retained, installed: recovered, candidate: staged.candidate,
+                detail:
+                  "The Runtime Pack was not published. The previous working version remains. \(error.localizedDescription)"),
+              token: token, terminal: .retained)
+          } else {
+            self.finish(
+              deriveProductUpdateProgress(
+                phase: .error, installed: recovered, candidate: staged.candidate,
+                detail: "The Runtime Pack install did not finish cleanly. \(error.localizedDescription)"),
+              token: token, terminal: .retained)
+          }
+        case .success(let published):
+          self.receipt.packPublished = true
+          self.receipt.boundary = .packPublished
+          if productUpdateClaimsHealthy(installed: published, candidate: staged.candidate) {
+            self.finish(
+              deriveProductUpdateProgress(
+                phase: .success, installed: published, candidate: staged.candidate),
+              token: token, terminal: .committed)
+          } else {
+            self.finish(
+              deriveProductUpdateProgress(
+                phase: .refused, installed: published, candidate: staged.candidate,
+                detail:
+                  "The installer did not leave matching app and Runtime Pack versions. The receipt remains the authority."),
+              token: token, terminal: .retained)
+          }
+        }
+      }
+    }
+    cancelInFlight = cancel
+  }
+
+  private func replaceRunningApp(
+    _ staged: ProductUpdateStagedTuple,
+    installed: ProductUpdateIdentity,
+    token: UInt64
+  ) {
+    let extract = dependencies.extractApp
+    let proceed: (URL) -> Void = { [weak self] sourceApp in
+      guard let self, self.generation == token else { return }
+      self.receipt.boundary = .appReplacing
+      self.receipt.helperArmed = true
+      let request = ProductUpdateReplacementRequest(
+        waitPID: ProcessInfo.processInfo.processIdentifier,
+        sourceApp: sourceApp,
+        destinationApp: Bundle.main.bundleURL,
+        relaunch: true,
+        receiptURL: staged.staging.appendingPathComponent("replacement-receipt.json"),
+        helperURL: self.dependencies.channel().helperURL)
+      let cancel = self.dependencies.replaceApp(request) { [weak self] outcome in
+        Task { @MainActor in
+          guard let self, self.generation == token else { return }
+          switch outcome {
+          case .failure(let error):
+            self.receipt.appReplaced = false
+            self.receipt.helperArmed = false
+            self.finish(
+              deriveProductUpdateProgress(
+                phase: .retained, installed: self.dependencies.installed(),
+                candidate: staged.candidate,
+                detail:
+                  "The app could not be replaced. Your current version stays installed. \(error.localizedDescription)"),
+              token: token, terminal: .retained)
+          case .success:
+            self.receipt.appReplaced = true
+            self.receipt.boundary = .appReplaced
+            let recovered = self.dependencies.installed()
+            if productUpdateClaimsHealthy(installed: recovered, candidate: staged.candidate) {
+              self.finish(
+                deriveProductUpdateProgress(
+                  phase: .success, installed: recovered, candidate: staged.candidate),
+                token: token, terminal: .committed)
+            } else if productUpdateRunningAppMatchesCandidate(
+              installed: recovered, candidate: staged.candidate)
+            {
+              self.publishPack(staged, installed: recovered, token: token)
+            } else {
+              self.finish(
+                deriveProductUpdateProgress(
+                  phase: .restarting, installed: recovered, candidate: staged.candidate),
+                token: token, terminal: .committed)
             }
           }
         }
       }
+      self.cancelInFlight = cancel
+      var closing = self.progress
+      closing.willCloseUIForReplacement = true
+      closing.summary =
+        "Installing \(staged.candidate.generation). The window will close and reopen. Frame, terminals, agents and sessions stay running."
+      self.publish(closing)
+      self.dependencies.closeUIAfterHelperArmed()
+    }
+    if staged.appOrDMG.pathExtension.lowercased() == "app" {
+      proceed(staged.appOrDMG)
+      return
+    }
+    guard let extract else {
+      finish(
+        deriveProductUpdateProgress(
+          phase: .error, installed: installed, candidate: staged.candidate,
+          detail: "The downloaded update is a disk image, but it could not be opened."),
+        token: token, terminal: .retained)
+      return
+    }
+    let extracted = staged.staging.appendingPathComponent("Vibecrafted.app")
+    let cancel = extract(staged.appOrDMG, extracted) { [weak self] result in
+      Task { @MainActor in
+        guard let self, self.generation == token else { return }
+        switch result {
+        case .failure(let error):
+          self.finish(
+            deriveProductUpdateProgress(
+              phase: .error, installed: installed, candidate: staged.candidate,
+              detail: "The downloaded disk image could not be opened. \(error.localizedDescription)"),
+            token: token, terminal: .retained)
+        case .success(let app):
+          proceed(app)
+        }
+      }
+    }
+    cancelInFlight = cancel
+  }
+
+  private func resolveSiblingAsset(feed: URL, relative: String) -> URL {
+    if feed.isFileURL {
+      return feed.deletingLastPathComponent().appendingPathComponent(relative)
+    }
+    return feed.deletingLastPathComponent().appendingPathComponent(relative)
+  }
+
+  private func armTimeout(token: UInt64, installed: ProductUpdateIdentity) {
+    let timeout = dependencies.checkTimeout
+    DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
+      guard let self, self.generation == token, self.busy else { return }
+      self.interrupt()
+      if self.progress.phase == .retained || self.progress.phase == .error { return }
+      self.generation += 1
+      self.finish(
+        deriveProductUpdateProgress(
+          phase: .error, installed: installed, candidate: nil,
+          detail: "The update did not answer in time. Your current version stays installed."),
+        token: self.generation, terminal: .retained)
     }
   }
 
@@ -198,9 +511,35 @@ final class ProductUpdateCoordinator {
     onProgress?(value)
   }
 
-  private func finish(_ value: ProductUpdateProgress, token: UInt64) {
+  private func finish(
+    _ value: ProductUpdateProgress,
+    token: UInt64,
+    terminal: ProductUpdateTransactionTerminal,
+    alreadyFinished: Bool = false
+  ) {
     guard generation == token else { return }
+    cancelInFlight = nil
     busy = false
+    receipt.terminal = terminal
+    if terminal == .committed {
+      receipt.boundary = .committed
+    }
     publish(value)
+  }
+}
+
+struct ProductUpdateStagedTuple: Equatable, Sendable {
+  var candidate: ProductUpdateCandidate
+  var staging: URL
+  var pack: URL
+  var appOrDMG: URL
+  var proof: ProductUpdateProof
+}
+
+private extension ProductUpdateTransactionReceipt {
+  func retainedCopy() -> ProductUpdateTransactionReceipt {
+    var copy = self
+    copy.terminal = .retained
+    return copy
   }
 }

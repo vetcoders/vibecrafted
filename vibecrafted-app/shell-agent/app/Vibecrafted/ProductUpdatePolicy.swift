@@ -2,23 +2,25 @@ import Foundation
 
 /// In-app product update owner.
 ///
-/// Codescribe updates a standalone `.app` through Sparkle 2. Vibecrafted's
-/// product is the signed App plus the Runtime Pack published by the existing
-/// transactional installer. Sparkle would be a second publisher and can leave
-/// a mixed generation, so it is not the owner here.
+/// Codescribe updates a standalone `.app` through Sparkle 2 (`SPUStandardUpdaterController`,
+/// `SUFeedURL` appcast, `SUPublicEDKey` Ed25519). Sparkle is MIT and maintained, but it
+/// cannot verify this product's `release-output.v1` detached RSA signature or publish a
+/// Runtime Pack receipt. It is therefore not pinned and not linked. See
+/// `docs/installer/IN_APP_UPDATE.md`.
 ///
-/// This file is Foundation-only. It admits a candidate, names progress a
-/// person can act on, and never claims healthy unless App and pack identities
-/// match. Missing feed, trust root, replacement helper or staged payloads is a
-/// bounded unavailable state — never an infinite spinner.
+/// Admission never reads `signature_valid`, notarization tickets, or a default bundle
+/// identity from untrusted JSON. Those are claims. Proof comes from the established
+/// release-output verifier, `/usr/bin/openssl dgst` over exact bytes with the bundled
+/// `vibecrafted-signing-v1.pub`, payload hashes, `codesign` identity, and stapler/spctl.
 enum ProductUpdatePhase: String, Equatable, Sendable {
   case idle
   case checking
   case downloading
   case verifying
+  case ready
   case installing
+  case restarting
   case success
-  case readyToReplace
   case unavailable
   case refused
   case retained
@@ -27,22 +29,23 @@ enum ProductUpdatePhase: String, Equatable, Sendable {
 
 struct ProductUpdateChannel: Equatable, Sendable {
   var feedURL: URL?
-  var publicKeyPresent: Bool
+  var signatureURL: URL?
+  var publicKeyURL: URL?
   var publicKeyName: String
   var expectedKeyID: String
-  var appReplacementHelperPresent: Bool
+  var fixtureAllowed: Bool
+  var helperURL: URL?
 
   var provisioningGap: String? {
     var missing: [String] = []
     if feedURL == nil {
-      missing.append("VCUpdateFeedURL (HTTPS release-output.v1 feed)")
-    }
-    if !publicKeyPresent {
-      missing.append("\(publicKeyName) trust root")
-    }
-    if !appReplacementHelperPresent {
       missing.append(
-        "signed helper Contents/Helpers/vc-app-update that replaces the App after a UI-only quit")
+        fixtureAllowed
+          ? "fixture root has no signed release-output.json"
+          : "a signed update feed is not configured yet")
+    }
+    if publicKeyURL == nil {
+      missing.append("\(publicKeyName) trust root")
     }
     return missing.isEmpty ? nil : missing.joined(separator: "; ")
   }
@@ -56,17 +59,48 @@ struct ProductUpdateIdentity: Equatable, Sendable {
   var frameRevision: String?
 }
 
+/// Locator fields parsed from a feed document. None of these fields is a verification
+/// result. `signature_valid`, ticket booleans, and a default bundle id are ignored.
 struct ProductUpdateCandidate: Equatable, Sendable {
   var generation: String
   var sourceRevision: String
   var terminalRevision: String
   var frameRevision: String
-  var bundleIdentifier: String
   var keyID: String
-  var signatureValid: Bool
-  var notarized: Bool
-  var packPath: String
-  var appPath: String
+  var algorithm: String
+  var spkiSHA256: String
+  var packRelativePath: String
+  var appRelativePath: String
+  var packSHA256: String
+  var appSHA256: String
+  var packSize: Int
+  var appSize: Int
+}
+
+/// Verification results produced by an established owner. Never decoded from feed JSON.
+struct ProductUpdateProof: Equatable, Sendable {
+  var signatureVerifiedOverExactBytes: Bool
+  var verifierOwner: String
+  var payloadHashesMatch: Bool
+  var codesignIdentifier: String?
+  var notarizedAndStapled: Bool
+  var packIdentityMatches: Bool
+  var observedSourceRevision: String?
+  var observedTerminalRevision: String?
+  var observedFrameRevision: String?
+
+  static func unsigned() -> ProductUpdateProof {
+    ProductUpdateProof(
+      signatureVerifiedOverExactBytes: false,
+      verifierOwner: "none",
+      payloadHashesMatch: false,
+      codesignIdentifier: nil,
+      notarizedAndStapled: false,
+      packIdentityMatches: false,
+      observedSourceRevision: nil,
+      observedTerminalRevision: nil,
+      observedFrameRevision: nil)
+  }
 }
 
 enum ProductUpdateAdmission: Equatable, Sendable {
@@ -82,34 +116,85 @@ struct ProductUpdateProgress: Equatable, Sendable {
   var installedGeneration: String
   var candidateGeneration: String?
   var canRetry: Bool
-  var requestsUIOnlyQuit: Bool
+  var canInstall: Bool
   var claimsHealthy: Bool
+  var willCloseUIForReplacement: Bool
+}
+
+let productUpdateFixtureFlag = "VIBECRAFTED_UPDATE_FIXTURE"
+let productUpdateFixtureRootKey = "VIBECRAFTED_UPDATE_FIXTURE_ROOT"
+let productUpdateExpectedBundleIdentifier = "io.vetcoders.vibecrafted"
+let productUpdateExpectedKeyID = "vibecrafted-signing-v1"
+let productUpdateExpectedAlgorithm = "rsa-pkcs1v15-sha256"
+let productUpdateExpectedSPKI =
+  "521ed59d3c446c540afe1557c2dbc39c9c190775f99896b2b65206c32814b25b"
+let productUpdateSignatureBytes = 256
+
+func productUpdateFixtureAllowed(environment: [String: String]) -> Bool {
+  let flag = environment[productUpdateFixtureFlag]?.trimmingCharacters(in: .whitespacesAndNewlines)
+  return flag == "1" || flag?.lowercased() == "true"
+}
+
+func productUpdateFixtureRoot(environment: [String: String]) -> URL? {
+  guard productUpdateFixtureAllowed(environment: environment) else { return nil }
+  let raw = environment[productUpdateFixtureRootKey]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+  guard !raw.isEmpty else { return nil }
+  let url = URL(fileURLWithPath: raw, isDirectory: true)
+  let feed = url.appendingPathComponent("release-output.json")
+  let signature = url.appendingPathComponent("release-output.json.sig")
+  guard FileManager.default.isReadableFile(atPath: feed.path),
+    FileManager.default.isReadableFile(atPath: signature.path)
+  else { return nil }
+  return url
+}
+
+func resolveProductUpdateFeedURL(
+  feedURLString: String?,
+  environment: [String: String]
+) -> URL? {
+  if let root = productUpdateFixtureRoot(environment: environment) {
+    return root.appendingPathComponent("release-output.json")
+  }
+  let trimmed = feedURLString?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+  guard !trimmed.isEmpty, let url = URL(string: trimmed), let scheme = url.scheme?.lowercased(),
+    scheme == "https", url.host != nil
+  else { return nil }
+  return url
+}
+
+func resolveProductUpdateSignatureURL(for feedURL: URL) -> URL {
+  if feedURL.isFileURL {
+    return feedURL.deletingLastPathComponent().appendingPathComponent("release-output.json.sig")
+  }
+  if feedURL.path.hasSuffix(".json") {
+    return feedURL.appendingPathExtension("sig")
+  }
+  return feedURL.appendingPathComponent("release-output.json.sig")
 }
 
 func resolveProductUpdateChannel(
   feedURLString: String?,
-  publicKeyPresent: Bool,
+  publicKeyURL: URL?,
+  helperURL: URL?,
+  environment: [String: String] = [:],
   publicKeyName: String = "vibecrafted-signing-v1.pub",
-  expectedKeyID: String = "vibecrafted-signing-v1",
-  appReplacementHelperPresent: Bool
+  expectedKeyID: String = productUpdateExpectedKeyID
 ) -> ProductUpdateChannel {
-  let trimmed = feedURLString?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-  let feed: URL?
-  if trimmed.isEmpty {
-    feed = nil
-  } else if let url = URL(string: trimmed), let scheme = url.scheme?.lowercased(),
-    scheme == "https", url.host != nil
-  {
-    feed = url
+  let feed = resolveProductUpdateFeedURL(feedURLString: feedURLString, environment: environment)
+  let key: URL?
+  if let publicKeyURL, FileManager.default.isReadableFile(atPath: publicKeyURL.path) {
+    key = publicKeyURL
   } else {
-    feed = nil
+    key = nil
   }
   return ProductUpdateChannel(
     feedURL: feed,
-    publicKeyPresent: publicKeyPresent,
+    signatureURL: feed.map(resolveProductUpdateSignatureURL(for:)),
+    publicKeyURL: key,
     publicKeyName: publicKeyName,
     expectedKeyID: expectedKeyID,
-    appReplacementHelperPresent: appReplacementHelperPresent)
+    fixtureAllowed: productUpdateFixtureAllowed(environment: environment),
+    helperURL: helperURL)
 }
 
 func productUpdateGenerationLabel(version: String, sourceRevision: String) -> String {
@@ -118,17 +203,6 @@ func productUpdateGenerationLabel(version: String, sourceRevision: String) -> St
   return "\(version)+g\(token)"
 }
 
-func productUpdatePayloadsAreStaged(
-  _ candidate: ProductUpdateCandidate,
-  fileExists: (String) -> Bool
-) -> Bool {
-  candidate.packPath.hasPrefix("/") && fileExists(candidate.packPath)
-    && candidate.appPath.hasPrefix("/") && fileExists(candidate.appPath)
-}
-
-/// True when this running App already carries the candidate source identity.
-/// A newer App must be replaced after a UI-only quit; publishing its pack
-/// here would leave a mixed generation on disk.
 func productUpdateRunningAppMatchesCandidate(
   installed: ProductUpdateIdentity,
   candidate: ProductUpdateCandidate
@@ -170,45 +244,74 @@ func productUpdateClaimsHealthy(
 func admitProductUpdateCandidate(
   channel: ProductUpdateChannel,
   candidate: ProductUpdateCandidate?,
-  expectedBundleIdentifier: String = "io.vetcoders.vibecrafted",
-  fileExists: (String) -> Bool = { _ in false }
+  proof: ProductUpdateProof?,
+  expectedBundleIdentifier: String = productUpdateExpectedBundleIdentifier
 ) -> ProductUpdateAdmission {
   if let gap = channel.provisioningGap {
     return .unavailable(
-      "Updates are not provisioned yet: \(gap). The installed generation stays as it is.")
+      "Updates are not available yet. \(gap). Your current version stays installed.")
   }
   guard let candidate else {
-    return .unavailable("The update feed did not name a candidate. Nothing was installed.")
+    return .unavailable("No update was named. Your current version stays installed.")
   }
-  guard candidate.signatureValid else {
+  guard let proof else {
     return .refuse(
-      "The candidate signature is not valid for \(channel.expectedKeyID). The installed generation is unchanged.")
+      "The update was not verified with the signed release checker. Your current version stays installed.")
   }
-  guard candidate.keyID == channel.expectedKeyID else {
+  guard proof.signatureVerifiedOverExactBytes else {
     return .refuse(
-      "The candidate key \(candidate.keyID) is not \(channel.expectedKeyID). The installed generation is unchanged.")
+      "The update signature did not match the bundled signing key. Your current version stays installed.")
   }
-  guard candidate.notarized else {
+  guard candidate.keyID == channel.expectedKeyID,
+    candidate.algorithm == productUpdateExpectedAlgorithm,
+    candidate.spkiSHA256 == productUpdateExpectedSPKI
+  else {
     return .refuse(
-      "The candidate is not a notarized, stapled App. The installed generation is unchanged.")
+      "The update was signed with an unexpected key. Your current version stays installed.")
   }
-  guard candidate.bundleIdentifier == expectedBundleIdentifier else {
+  guard proof.payloadHashesMatch else {
     return .refuse(
-      "The candidate bundle \(candidate.bundleIdentifier) is not \(expectedBundleIdentifier). The installed generation is unchanged.")
+      "The downloaded files did not match the signed sizes and hashes. Your current version stays installed.")
+  }
+  guard proof.codesignIdentifier == expectedBundleIdentifier else {
+    return .refuse(
+      "The update is not the Vibecrafted app. Your current version stays installed.")
+  }
+  guard proof.notarizedAndStapled else {
+    return .refuse(
+      "The update is not a notarized, stapled app. Your current version stays installed.")
+  }
+  guard proof.packIdentityMatches else {
+    return .refuse(
+      "The app and Runtime Pack in this update do not match. Your current version stays installed.")
+  }
+  if let observed = proof.observedSourceRevision, !observed.isEmpty,
+    observed.lowercased() != candidate.sourceRevision.lowercased()
+  {
+    return .refuse(
+      "The Runtime Pack was cut from a different revision than the app. Your current version stays installed.")
+  }
+  if let terminal = proof.observedTerminalRevision, !terminal.isEmpty,
+    terminal.lowercased() != candidate.terminalRevision.lowercased()
+  {
+    return .refuse(
+      "The Terminal revision in this update does not match the Runtime Pack. Your current version stays installed.")
+  }
+  if let frame = proof.observedFrameRevision, !frame.isEmpty,
+    frame.lowercased() != candidate.frameRevision.lowercased()
+  {
+    return .refuse(
+      "The Frame revision in this update does not match the Runtime Pack. Your current version stays installed.")
   }
   guard runtimePackMatchesCarrier(
     generation: candidate.generation, signedSourceRevision: candidate.sourceRevision)
   else {
     return .refuse(
-      "The candidate App and Runtime Pack identities do not match. The installed generation is unchanged.")
+      "The update version does not match its source revision. Your current version stays installed.")
   }
   guard !candidate.terminalRevision.isEmpty, !candidate.frameRevision.isEmpty else {
     return .refuse(
-      "The candidate is missing vc-terminal or vc-frame revisions. The installed generation is unchanged.")
-  }
-  guard productUpdatePayloadsAreStaged(candidate, fileExists: fileExists) else {
-    return .unavailable(
-      "A signed candidate was named, but the App and Runtime Pack are not staged as local files. In-app download is not provisioned, so nothing was installed.")
+      "The update is missing Terminal or Frame revisions. Your current version stays installed.")
   }
   return .admit(candidate)
 }
@@ -226,119 +329,142 @@ func deriveProductUpdateProgress(
     return ProductUpdateProgress(
       phase: phase,
       title: "Check for Updates",
-      summary: "Look for a signed App and matching Runtime Pack. This does not stop Frame, terminals, agents or sessions.",
+      summary: detail
+        ?? "Look for a newer signed app and matching Runtime Pack. This does not stop Frame, terminals, agents or sessions.",
       installedGeneration: installedLabel,
       candidateGeneration: candidateLabel,
       canRetry: true,
-      requestsUIOnlyQuit: false,
-      claimsHealthy: false)
+      canInstall: false,
+      claimsHealthy: false,
+      willCloseUIForReplacement: false)
   case .checking:
     return ProductUpdateProgress(
       phase: phase,
-      title: "Looking for a signed update",
-      summary: detail ??
-        "Asking the update feed. Installed: \(installedLabel). This check ends with a result or an error; it does not spin forever.",
+      title: "Looking for an update",
+      summary: detail ?? "Checking for a newer version. Installed: \(installedLabel).",
       installedGeneration: installedLabel,
       candidateGeneration: candidateLabel,
       canRetry: false,
-      requestsUIOnlyQuit: false,
-      claimsHealthy: false)
+      canInstall: false,
+      claimsHealthy: false,
+      willCloseUIForReplacement: false)
   case .downloading:
     return ProductUpdateProgress(
       phase: phase,
-      title: "Reading the signed candidate",
-      summary: detail ??
-        "Installed: \(installedLabel). Candidate: \(candidateLabel ?? "unknown"). The feed document is being read.",
+      title: "Downloading the update",
+      summary: detail
+        ?? "Installed: \(installedLabel). Candidate: \(candidateLabel ?? "unknown"). Files are being copied to a staging folder.",
       installedGeneration: installedLabel,
       candidateGeneration: candidateLabel,
       canRetry: false,
-      requestsUIOnlyQuit: false,
-      claimsHealthy: false)
+      canInstall: false,
+      claimsHealthy: false,
+      willCloseUIForReplacement: false)
   case .verifying:
     return ProductUpdateProgress(
       phase: phase,
-      title: "Verifying signature and identity",
-      summary: detail ??
-        "Installed: \(installedLabel). Candidate: \(candidateLabel ?? "unknown"). The installer remains the authority for publication.",
+      title: "Checking the update is genuine",
+      summary: detail
+        ?? "Installed: \(installedLabel). Candidate: \(candidateLabel ?? "unknown"). Checking the signature, files, and matching Runtime Pack.",
       installedGeneration: installedLabel,
       candidateGeneration: candidateLabel,
       canRetry: false,
-      requestsUIOnlyQuit: false,
-      claimsHealthy: false)
+      canInstall: false,
+      claimsHealthy: false,
+      willCloseUIForReplacement: false)
+  case .ready:
+    return ProductUpdateProgress(
+      phase: phase,
+      title: "An update is ready",
+      summary: detail
+        ?? "Installed: \(installedLabel). Available: \(candidateLabel ?? "unknown"). Choose Install Update to apply it. Frame, terminals, agents and sessions stay running.",
+      installedGeneration: installedLabel,
+      candidateGeneration: candidateLabel,
+      canRetry: true,
+      canInstall: true,
+      claimsHealthy: false,
+      willCloseUIForReplacement: false)
   case .installing:
     return ProductUpdateProgress(
       phase: phase,
-      title: "Installing through the Runtime Pack owner",
-      summary: detail ??
-        "Installed: \(installedLabel). Candidate: \(candidateLabel ?? "unknown"). A failure keeps the previous working generation.",
+      title: "Installing the update",
+      summary: detail
+        ?? "Installed: \(installedLabel). Candidate: \(candidateLabel ?? "unknown"). If this is interrupted, the previous working version is kept.",
       installedGeneration: installedLabel,
       candidateGeneration: candidateLabel,
       canRetry: false,
-      requestsUIOnlyQuit: false,
-      claimsHealthy: false)
+      canInstall: false,
+      claimsHealthy: false,
+      willCloseUIForReplacement: false)
+  case .restarting:
+    return ProductUpdateProgress(
+      phase: phase,
+      title: "Restarting to finish the update",
+      summary: detail
+        ?? "The app window will close and reopen on \(candidateLabel ?? installedLabel). Frame, terminals, agents and sessions stay running. The new app publishes the matching Runtime Pack.",
+      installedGeneration: installedLabel,
+      candidateGeneration: candidateLabel,
+      canRetry: false,
+      canInstall: false,
+      claimsHealthy: false,
+      willCloseUIForReplacement: true)
   case .success:
     return ProductUpdateProgress(
       phase: phase,
       title: "Update installed",
-      summary: detail ??
-        "Installed and candidate are \(candidateLabel ?? installedLabel). Quit the App if you want to close the UI. Frame, terminals, agents and sessions stay running.",
+      summary: detail
+        ?? "You are on \(candidateLabel ?? installedLabel). You can open the console again and reconnect to the same session.",
       installedGeneration: candidateLabel ?? installedLabel,
       candidateGeneration: candidateLabel,
       canRetry: false,
-      requestsUIOnlyQuit: true,
-      claimsHealthy: true)
-  case .readyToReplace:
-    return ProductUpdateProgress(
-      phase: phase,
-      title: "Ready to replace the App",
-      summary: detail ??
-        "Installed: \(installedLabel). Candidate: \(candidateLabel ?? "unknown"). This running App will not publish the candidate Runtime Pack. Quit the App so a signed helper can replace the UI; the new App then uses the existing installer. Frame, terminals, agents and sessions stay running.",
-      installedGeneration: installedLabel,
-      candidateGeneration: candidateLabel,
-      canRetry: true,
-      requestsUIOnlyQuit: true,
-      claimsHealthy: false)
+      canInstall: false,
+      claimsHealthy: true,
+      willCloseUIForReplacement: false)
   case .unavailable:
     return ProductUpdateProgress(
       phase: phase,
       title: "Updates are not available yet",
-      summary: detail ?? "The update channel is not provisioned. The installed generation is unchanged.",
+      summary: detail ?? "Automatic updates are not configured on this copy. Your current version stays installed.",
       installedGeneration: installedLabel,
       candidateGeneration: candidateLabel,
       canRetry: true,
-      requestsUIOnlyQuit: false,
-      claimsHealthy: false)
+      canInstall: false,
+      claimsHealthy: false,
+      willCloseUIForReplacement: false)
   case .refused:
     return ProductUpdateProgress(
       phase: phase,
       title: "This update was refused",
-      summary: detail ?? "Signature or identity did not match. The installed generation is unchanged.",
+      summary: detail ?? "The update did not pass the signature or identity check. Your current version stays installed.",
       installedGeneration: installedLabel,
       candidateGeneration: candidateLabel,
       canRetry: false,
-      requestsUIOnlyQuit: false,
-      claimsHealthy: false)
+      canInstall: false,
+      claimsHealthy: false,
+      willCloseUIForReplacement: false)
   case .retained:
     return ProductUpdateProgress(
       phase: phase,
       title: "The update did not finish",
-      summary: detail ??
-        "The previous working generation \(installedLabel) is still installed. The installer receipt was not replaced.",
+      summary: detail
+        ?? "The previous working version \(installedLabel) is still installed.",
       installedGeneration: installedLabel,
       candidateGeneration: candidateLabel,
       canRetry: true,
-      requestsUIOnlyQuit: false,
-      claimsHealthy: false)
+      canInstall: false,
+      claimsHealthy: false,
+      willCloseUIForReplacement: false)
   case .error:
     return ProductUpdateProgress(
       phase: phase,
       title: "The update check failed",
-      summary: detail ?? "The feed or installer returned an error. The installed generation is unchanged.",
+      summary: detail ?? "The check did not finish. Your current version stays installed.",
       installedGeneration: installedLabel,
       candidateGeneration: candidateLabel,
       canRetry: true,
-      requestsUIOnlyQuit: false,
-      claimsHealthy: false)
+      canInstall: false,
+      claimsHealthy: false,
+      willCloseUIForReplacement: false)
   }
 }
 
@@ -347,13 +473,19 @@ func decodeProductUpdateFeed(_ data: Data) throws -> ProductUpdateCandidate {
   guard let root = object as? [String: Any] else {
     throw ProductUpdateFeedError.malformed("update feed is not a JSON object")
   }
+  // Untrusted self-attestations. Reading them as proof is a trust-boundary bug.
+  _ = root["signature_valid"]
+  _ = (root["notarization"] as? [String: Any])
+  _ = root["bundle_identifier"]
   guard root["schema"] as? String == "io.vetcoders.vibecrafted.release-output.v1" else {
     throw ProductUpdateFeedError.malformed("update feed is not release-output.v1")
   }
   guard let policy = root["signature_policy"] as? [String: Any],
-    let keyID = policy["key_id"] as? String
+    let keyID = policy["key_id"] as? String,
+    let algorithm = policy["algorithm"] as? String,
+    let spki = policy["spki_sha256"] as? String
   else {
-    throw ProductUpdateFeedError.malformed("update feed has no signature_policy.key_id")
+    throw ProductUpdateFeedError.malformed("update feed has no signature_policy")
   }
   guard let product = root["product"] as? [String: Any],
     let version = product["version"] as? String, !version.isEmpty
@@ -368,41 +500,33 @@ func decodeProductUpdateFeed(_ data: Data) throws -> ProductUpdateCandidate {
     throw ProductUpdateFeedError.malformed("update feed is missing source_revisions")
   }
   guard let pack = root["runtime_pack"] as? [String: Any],
-    let packPath = pack["path"] as? String
+    let packPath = pack["path"] as? String,
+    let packHash = pack["sha256"] as? String,
+    let packSize = pack["size"] as? Int, packSize > 0
   else {
-    throw ProductUpdateFeedError.malformed("update feed has no runtime_pack.path")
+    throw ProductUpdateFeedError.malformed("update feed has no runtime_pack path, hash and size")
   }
   guard let dmg = root["dmg"] as? [String: Any],
-    let dmgPath = dmg["path"] as? String
+    let dmgPath = dmg["path"] as? String,
+    let dmgHash = dmg["sha256"] as? String,
+    let dmgSize = dmg["size"] as? Int, dmgSize > 0
   else {
-    throw ProductUpdateFeedError.malformed("update feed has no dmg.path")
+    throw ProductUpdateFeedError.malformed("update feed has no dmg path, hash and size")
   }
-  guard let notarization = root["notarization"] as? [String: Any],
-    let appTicket = notarization["app"] as? [String: Any],
-    let dmgTicket = notarization["dmg"] as? [String: Any],
-    appTicket["ticket"] as? Bool == true,
-    dmgTicket["ticket"] as? Bool == true
-  else {
-    throw ProductUpdateFeedError.malformed("update feed does not attest notarization tickets")
-  }
-  let assets = root["assets"] as? [String: Any]
-  let resolvedPack = (assets?["runtime_pack"] as? String) ?? packPath
-  let resolvedApp = (assets?["app"] as? String) ?? dmgPath
-  let signatureValid = (root["signature_valid"] as? Bool) ?? false
-  let bundle =
-    (root["bundle_identifier"] as? String)
-    ?? "io.vetcoders.vibecrafted"
   return ProductUpdateCandidate(
     generation: productUpdateGenerationLabel(version: version, sourceRevision: source),
     sourceRevision: source,
     terminalRevision: terminal,
     frameRevision: frame,
-    bundleIdentifier: bundle,
     keyID: keyID,
-    signatureValid: signatureValid,
-    notarized: true,
-    packPath: resolvedPack,
-    appPath: resolvedApp)
+    algorithm: algorithm,
+    spkiSHA256: spki,
+    packRelativePath: packPath,
+    appRelativePath: dmgPath,
+    packSHA256: packHash,
+    appSHA256: dmgHash,
+    packSize: packSize,
+    appSize: dmgSize)
 }
 
 enum ProductUpdateFeedError: Error, Equatable {

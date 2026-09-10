@@ -70,5 +70,33 @@ targets:
     postBuildScripts:
       - script: |
           bash $SRCROOT/../scripts/fix-dylib-install-names.sh "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH"
+          mkdir -p "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers"
+          if [[ -x "$BUILT_PRODUCTS_DIR/vc-app-update" ]]; then
+            install -m 0755 "$BUILT_PRODUCTS_DIR/vc-app-update" \
+              "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers/vc-app-update"
+          else
+            install -m 0755 "$SRCROOT/../../../scripts/vc-app-update.sh" \
+              "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers/vc-app-update"
+          fi
         name: Normalize notification FFI install names
         shell: /bin/bash
+
+  vc-app-update:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Helpers/vc-app-update
+      - path: Vibecrafted/ProductUpdateReplacement.swift
+      - path: Vibecrafted/ProductUpdateTransaction.swift
+      - path: Vibecrafted/ProductUpdatePolicy.swift
+      - path: Vibecrafted/RuntimePackMenuPolicy.swift
+    settings:
+      base:
+        PRODUCT_NAME: vc-app-update
+        PRODUCT_BUNDLE_IDENTIFIER: io.vetcoders.vibecrafted.app-update
+        GENERATE_INFOPLIST_FILE: true
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
+        SKIP_INSTALL: true
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        SWIFT_VERSION: "6.0"
