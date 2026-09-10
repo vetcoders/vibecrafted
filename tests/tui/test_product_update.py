@@ -1797,12 +1797,12 @@ def _plant_custom_settings(env: dict[str, str]) -> Path:
 
 _FRAME_PTY_WORKER = """\
 import os
+import sys
 import time
 from pathlib import Path
 
 root = Path(os.environ["VC_UPDATE_FRAME_PROBE"])
 ident = root / "ident"
-cmdp = root / "cmd"
 reply = root / "reply"
 
 def atomic_write(path, body):
@@ -1810,37 +1810,26 @@ def atomic_write(path, body):
     tmp.write_text(body, encoding="utf-8")
     os.replace(tmp, path)
 
-atomic_write(ident, str(os.getpid()) + "\\n")
+if not os.isatty(0):
+    sys.stderr.write("probe pane stdin is not a PTY\\n")
+    raise SystemExit(2)
+tty = os.ttyname(0)
+atomic_write(ident, str(os.getpid()) + " " + tty + "\\n")
 while True:
-    if cmdp.is_file():
-        try:
-            raw = cmdp.read_text(encoding="utf-8")
-        except OSError:
-            time.sleep(0.05)
-            continue
-        if not raw.endswith("\\n"):
-            time.sleep(0.05)
-            continue
-        taken = root / ("cmd.taken." + str(os.getpid()))
-        try:
-            os.replace(cmdp, taken)
-        except FileNotFoundError:
-            time.sleep(0.05)
-            continue
-        request = taken.read_text(encoding="utf-8").strip()
-        try:
-            taken.unlink()
-        except FileNotFoundError:
-            pass
-        parts = request.split(" ", 1)
-        if len(parts) != 2:
-            continue
-        nonce, command = parts
-        if command == "ping":
-            atomic_write(reply, nonce + " pong " + str(os.getpid()) + "\\n")
-        elif command == "identify":
-            atomic_write(reply, nonce + " " + str(os.getpid()) + "\\n")
-    time.sleep(0.05)
+    line = sys.stdin.readline()
+    if not line:
+        time.sleep(0.05)
+        continue
+    parts = line.strip().split(" ", 1)
+    if len(parts) != 2:
+        continue
+    nonce, command = parts
+    if len(nonce) != 16 or any(char not in "0123456789abcdef" for char in nonce):
+        continue
+    if command == "ping":
+        atomic_write(reply, nonce + " pong " + str(os.getpid()) + "\\n")
+    elif command == "identify":
+        atomic_write(reply, nonce + " " + str(os.getpid()) + "\\n")
 """
 
 
@@ -1867,6 +1856,7 @@ class _IsolatedFrameSession:
         self.frame = _installed_frame_engine()
         self.worker_pid = 0
         self.worker_start = ""
+        self.worker_tty = ""
         self.server_pid = 0
         self.server_start = ""
         self._prepared = False
@@ -1964,14 +1954,19 @@ class _IsolatedFrameSession:
                 if not raw.endswith("\n"):
                     time.sleep(0.05)
                     continue
-                pid_text = raw.strip()
-                if pid_text.isdigit():
-                    self.worker_pid = int(pid_text)
+                parts = raw.strip().split()
+                if (
+                    len(parts) == 2
+                    and parts[0].isdigit()
+                    and parts[1].startswith("/dev/")
+                ):
+                    self.worker_pid = int(parts[0])
+                    self.worker_tty = parts[1]
                     self.worker_start = subprocess.check_output(
                         ["/bin/ps", "-p", str(self.worker_pid), "-o", "lstart="],
                         text=True,
                     ).strip()
-                    if self.worker_start:
+                    if self.worker_start and os.path.exists(self.worker_tty):
                         return
             time.sleep(0.05)
         raise AssertionError("Frame PTY worker did not publish its process identity")
@@ -2006,7 +2001,12 @@ class _IsolatedFrameSession:
                 reply.unlink()
             except FileNotFoundError:
                 pass
-        self._atomic_write(self.probe / "cmd", f"{nonce} {command}\n")
+        assert self.worker_tty, "Frame PTY worker did not publish a tty"
+        fd = os.open(self.worker_tty, os.O_WRONLY | os.O_NOCTTY)
+        try:
+            os.write(fd, f"{nonce} {command}\n".encode("utf-8"))
+        finally:
+            os.close(fd)
         deadline = time.time() + 8
         while time.time() < deadline:
             if reply.is_file():
@@ -2034,6 +2034,16 @@ class _IsolatedFrameSession:
             ["/bin/ps", "-p", str(self.worker_pid), "-o", "lstart="], text=True
         ).strip()
         assert worker_now == self.worker_start
+        tty_now = subprocess.check_output(
+            ["/bin/ps", "-p", str(self.worker_pid), "-o", "tty="], text=True
+        ).strip()
+        assert tty_now and tty_now != "??"
+        assert self.worker_tty.endswith(tty_now) or Path(self.worker_tty).name == tty_now
+        tty_fd = os.open(self.worker_tty, os.O_WRONLY | os.O_NOCTTY)
+        try:
+            assert os.isatty(tty_fd)
+        finally:
+            os.close(tty_fd)
         server_now = subprocess.check_output(
             ["/bin/ps", "-p", str(self.server_pid), "-o", "lstart="], text=True
         ).strip()

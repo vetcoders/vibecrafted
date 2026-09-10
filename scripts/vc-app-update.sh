@@ -142,7 +142,7 @@ atomic_write() {
   tmp="${dest}.tmp.$$"
   umask 077
   printf '%s\n' "$body" >"$tmp"
-  /bin/mv -f "$tmp" "$dest"
+  without_update_lock_fd /bin/mv -f "$tmp" "$dest"
 }
 
 process_lstart() {
