@@ -776,63 +776,16 @@ pack_payload_in_dir() {
   printf '%s' "${packs[0]}"
 }
 
-owned_historical_pack() {
-  local pack="$1"
-  local root="${CAPTURE}/historical-runtime-pack"
-  [[ -n "$pack" && -n "$CAPTURE" ]] || return 1
-  case "$pack" in
-    "${root}/"*)
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-  pack_payload_in_dir "$root" >/dev/null || return 1
-  [[ "$pack" == "$(pack_payload_in_dir "$root")" ]] || return 1
-}
-
-capture_owned_historical_pack() {
-  local app="$1"
-  local dest="${CAPTURE}/historical-runtime-pack"
-  local src="${app}/Contents/Resources/runtime-pack"
-  local found f
-  if [[ -e "$dest" || -L "$dest" ]]; then
-    echo "owned historical Runtime Pack capture already exists: $dest" >&2
-    return 1
-  fi
-  mkdir -m 700 -- "$dest"
-  if [[ ! -d "$src" || -L "$src" ]]; then
-    return 0
-  fi
-  shopt -s nullglob
-  local files=("$src"/Vibecrafted_RuntimePack_*.tar.gz "$src"/Vibecrafted_RuntimePack_*.tar.gz.sha256 "$src"/Vibecrafted_RuntimePack_*.tar.gz.sig)
-  shopt -u nullglob
-  for f in "${files[@]}"; do
-    if [[ -f "$f" && ! -L "$f" ]]; then
-      without_update_lock_fd /bin/cp -p "$f" "$dest/$(basename "$f")" || return 1
-    fi
-  done
-  if found="$(pack_payload_in_dir "$dest")"; then
-    PRIOR_PACK="$found"
-    PRIOR_GENERATION="$(prior_pack_generation "$PRIOR_PACK" || true)"
-  fi
-  return 0
-}
-
+# The rollback payload has exactly one authority: the Runtime Pack sealed inside
+# the verified prior.app. An owned copy beside the capture was a second source of
+# truth — losing it refused a perfectly good signed bundle — so there is none.
+# The installer only reads the pack plus its .sha256/.sig and stages elsewhere,
+# so pointing --pack into the sealed bundle never mutates the signature.
 locate_prior_pack() {
   local app="$1"
-  local sidecar="${CAPTURE}/historical-runtime-pack"
-  local found dir
-  if [[ -e "$sidecar" ]]; then
-    if found="$(pack_payload_in_dir "$sidecar")"; then
-      printf '%s' "$found"
-      return 0
-    fi
-    echo "owned capture is missing historical Runtime Pack rollback data: $sidecar" >&2
-    return 1
-  fi
+  local dir found
   dir="${app}/Contents/Resources/runtime-pack"
-  if [[ ! -d "$dir" ]]; then
+  if [[ ! -d "$dir" || -L "$dir" ]]; then
     echo "owned prior.app is missing historical Runtime Pack rollback data: $dir" >&2
     return 1
   fi
@@ -842,6 +795,32 @@ locate_prior_pack() {
   fi
   echo "owned prior.app does not contain exactly one historical Runtime Pack" >&2
   return 1
+}
+
+# Derive pack + generation from the signed bundle. Never reads them back from the
+# journal: a recorded path is a cache, not an authority.
+resolve_prior_runtime() {
+  local app="$1"
+  local pack generation
+  [[ -d "$app" && ! -L "$app" ]] || return 1
+  if [[ -n "$PRIOR_PACK" && -n "$PRIOR_GENERATION" ]]; then
+    return 0
+  fi
+  pack="$(locate_prior_pack "$app")" || return 1
+  generation="$(prior_pack_generation "$pack")" || return 1
+  [[ -n "$generation" ]] || return 1
+  PRIOR_PACK="$pack"
+  PRIOR_GENERATION="$generation"
+  return 0
+}
+
+# Resume/observation sites only ever ask "is the published generation the prior
+# one?". A derivation that fails answers "not confirmed", never "confirmed".
+published_is_prior_generation() {
+  local published="$1"
+  [[ -n "$published" ]] || return 1
+  resolve_prior_runtime "$SOURCE" || return 1
+  [[ "$published" == "$PRIOR_GENERATION" ]]
 }
 
 prior_pack_generation() {
@@ -894,8 +873,8 @@ require_recovered_tuple() {
   local published
   require_exact_identity "$DESTINATION" "$PRIOR_IDENTITY" "$label"
   published="$(observe_published_generation || true)"
-  if [[ -z "$PRIOR_GENERATION" || "$published" != "$PRIOR_GENERATION" ]]; then
-    echo "recover resume refused app-only success; installer generation ${published:-unresolved} is not prior ${PRIOR_GENERATION}" >&2
+  if ! published_is_prior_generation "$published"; then
+    echo "recover resume refused app-only success; installer generation ${published:-unresolved} is not prior ${PRIOR_GENERATION:-unresolved}" >&2
     exit 19
   fi
 }
@@ -983,7 +962,7 @@ reconcile_resume() {
           if [[ "$DEST_PRESENT" -eq 1 && -n "$PRIOR_IDENTITY" && "$DEST_IDENTITY" == "$PRIOR_IDENTITY" ]]; then
             local published
             published="$(observe_published_generation || true)"
-            if [[ -n "$PRIOR_GENERATION" && "$published" == "$PRIOR_GENERATION" ]]; then
+            if published_is_prior_generation "$published"; then
               emit_success_and_exit
             fi
           fi
@@ -1023,7 +1002,7 @@ reconcile_resume() {
           if [[ "$DEST_PRESENT" -eq 1 && "$DEST_IDENTITY" == "$PRIOR_IDENTITY" ]]; then
             local published
             published="$(observe_published_generation || true)"
-            if [[ -n "$PRIOR_GENERATION" && "$published" == "$PRIOR_GENERATION" ]]; then
+            if published_is_prior_generation "$published"; then
               emit_success_and_exit
             fi
           fi
@@ -1210,8 +1189,6 @@ bind_resume_journal() {
     echo "${MODE} resume is missing the original preserved capture identity" >&2
     exit 14
   fi
-  PRIOR_PACK="$(journal_get prior_pack || true)"
-  PRIOR_GENERATION="$(journal_get prior_generation || true)"
   INSTALLER_STATUS="$(journal_get installer_status || true)"
   if [[ -d "$SOURCE" ]]; then
     if [[ "$MODE" == "restore" || "$MODE" == "recover" ]]; then
@@ -1230,21 +1207,12 @@ restore_prior_runtime() {
     write_admission "rejected" "historical rollback cannot find the installer owner"
     exit 19
   }
-  if [[ -n "$PRIOR_PACK" ]]; then
-    if ! owned_historical_pack "$PRIOR_PACK"; then
-      write_journal "failed" "historical Runtime Pack rollback data is missing from owned capture"
-      write_admission "rejected" "historical Runtime Pack rollback data is missing"
-      echo "missing historical rollback data: owned capture has no recoverable Runtime Pack" >&2
-      exit 19
-    fi
-  else
-    PRIOR_PACK="$(locate_prior_pack "$SOURCE")" || {
-      write_journal "failed" "historical Runtime Pack rollback data is missing from owned prior.app"
-      write_admission "rejected" "historical Runtime Pack rollback data is missing"
-      echo "missing historical rollback data: owned prior.app has no recoverable Runtime Pack" >&2
-      exit 19
-    }
-  fi
+  PRIOR_PACK="$(locate_prior_pack "$SOURCE")" || {
+    write_journal "failed" "historical Runtime Pack rollback data is missing from owned prior.app"
+    write_admission "rejected" "historical Runtime Pack rollback data is missing"
+    echo "missing historical rollback data: owned prior.app has no recoverable Runtime Pack" >&2
+    exit 19
+  }
   PRIOR_GENERATION="$(prior_pack_generation "$PRIOR_PACK")" || {
     write_journal "failed" "historical Runtime Pack has no VERSION identity"
     write_admission "rejected" "historical Runtime Pack has no VERSION identity"
@@ -1366,10 +1334,10 @@ recover_whole_tuple() {
   fail_after_if "runtime_restored"
   hold_if "runtime_restored" || exit 18
   published="$(observe_published_generation || true)"
-  if [[ -z "$PRIOR_GENERATION" || "$published" != "$PRIOR_GENERATION" ]]; then
+  if ! published_is_prior_generation "$published"; then
     write_journal "failed" "refusing app-only restore while installer generation is ${published:-unresolved}"
     write_admission "rejected" "candidate runtime remains selected"
-    echo "whole-tuple recovery refused app-only restore; installer generation ${published:-unresolved} is not prior ${PRIOR_GENERATION}" >&2
+    echo "whole-tuple recovery refused app-only restore; installer generation ${published:-unresolved} is not prior ${PRIOR_GENERATION:-unresolved}" >&2
     exit 19
   fi
   restore_previous_tuple
@@ -1533,8 +1501,6 @@ if [[ "$RESUME" -ne 1 && -f "$JOURNAL" ]]; then
   if [[ "$MODE" == "restore" || "$MODE" == "recover" ]]; then
     PRIOR_IDENTITY="$(journal_get prior_identity || true)"
     SOURCE_IDENTITY="$(journal_get source_identity || true)"
-    PRIOR_PACK="$(journal_get prior_pack || true)"
-    PRIOR_GENERATION="$(journal_get prior_generation || true)"
     TRANSACTION="$(journal_get transaction || printf '%s' "$TRANSACTION")"
     validate_transaction_id "$TRANSACTION"
     CAPTURE="${parent}/.vc-update-capture-${TRANSACTION}"
@@ -1611,11 +1577,9 @@ if [[ -e "$DESTINATION" ]]; then
     write_journal "failed" "capture failed identity"
     exit 7
   fi
-  if ! capture_owned_historical_pack "$PRIOR"; then
-    echo "owned historical Runtime Pack capture failed" >&2
-    write_journal "failed" "historical pack capture failed"
-    exit 7
-  fi
+  # The capture deliberately derives nothing about the pack here. prior_pack /
+  # prior_generation stay empty until recover derives them from the sealed
+  # bundle, so the journal can only ever record what a run actually used.
   write_journal "captured" "prior identity bound"
   fail_after_if "captured"
   hold_if "captured" || exit 18
