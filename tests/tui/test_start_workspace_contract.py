@@ -3337,7 +3337,9 @@ except ChildProcessError:
 # Persistent session_layer chrome is owned by plugin_url, not titles.
 # Real vibecrafted-host rails: vc-frame:link, vc-frame:vc-tab-title,
 # frame-host ("Sessions"). session-manager ("VC Guest") is the replaceable
-# workspace_surface placeholder, not chrome. Title is never the URL.
+# workspace_surface placeholder, not chrome. A plugin title is rendered
+# asynchronously and legitimately starts out equal to the plugin name, so
+# identity is typed id + plugin_url + plugin_runtime_id + geometry.
 _SESSION_LAYER_PLUGIN_URLS = (
     "vc-frame:link",
     "vc-frame:vc-tab-title",
@@ -3367,6 +3369,24 @@ def _plugins_by_url(rows, urls) -> dict[str, dict]:
     return owned
 
 
+def _count_plugins_by_url(rows, urls) -> dict[str, int]:
+    """Real occurrences per owner. `_plugins_by_url` keeps the first pane
+    per URL, so a duplicated rail would otherwise stay invisible."""
+    wanted = set(urls)
+    counts = dict.fromkeys(wanted, 0)
+    if not isinstance(rows, list):
+        return counts
+    for pane in rows:
+        if not isinstance(pane, dict):
+            continue
+        if not bool(pane.get("is_plugin")):
+            continue
+        url = _pane_plugin_url(pane)
+        if url in wanted:
+            counts[url] += 1
+    return counts
+
+
 def _session_layer_plugins(rows) -> dict[str, dict]:
     return _plugins_by_url(rows, _SESSION_LAYER_PLUGIN_URLS)
 
@@ -3392,11 +3412,11 @@ def _session_layer_geometry(rows) -> dict[str, tuple]:
 
 
 def _session_layer_ready(rows):
-    """Persistent rails: one link, one tab-title, one frame-host."""
+    """Persistent rails: exactly one link, one tab-title, one frame-host."""
     if not isinstance(rows, list) or not rows:
         return []
-    plugins = _session_layer_plugins(rows)
-    if set(plugins) == set(_SESSION_LAYER_PLUGIN_URLS):
+    counts = _count_plugins_by_url(rows, _SESSION_LAYER_PLUGIN_URLS)
+    if all(counts.get(url) == 1 for url in _SESSION_LAYER_PLUGIN_URLS):
         return rows
     return []
 
@@ -3414,15 +3434,19 @@ def _host_chrome_ready(rows):
 
 
 def _assert_session_layer(rows, *, previous_geometry=None):
-    """Stable session-layer IDs/runtime IDs/geometry; never title==URL."""
+    """Stable session-layer identity across every projection: exactly one
+    owner per plugin_url, each keeping its typed pane id, plugin_runtime_id
+    and geometry. Plugin-rendered titles are never identity."""
     assert _session_layer_ready(rows), rows
+    counts = _count_plugins_by_url(rows, _SESSION_LAYER_PLUGIN_URLS)
+    assert counts == dict.fromkeys(_SESSION_LAYER_PLUGIN_URLS, 1), (counts, rows)
     plugins = _session_layer_plugins(rows)
     for url, pane in plugins.items():
         assert bool(pane.get("is_plugin")) is True, pane
         assert _pane_plugin_url(pane) == url, pane
-        assert pane.get("title") != url, pane
-    host = plugins["frame-host"]
-    assert host.get("title") != "frame-host", host
+        # `plugin_runtime_id` is legitimately 0, so absence is `is None`.
+        assert pane.get("id") is not None, pane
+        assert pane.get("plugin_runtime_id") is not None, pane
     geometry = _session_layer_geometry(rows)
     assert set(geometry) == set(_SESSION_LAYER_PLUGIN_URLS), geometry
     if previous_geometry is not None:
@@ -3661,7 +3685,9 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         alias projects on the same canvas (A/B); real Frame project-workspace
         returns the original guest (A/B/A). An owned guest `sh -s` pane
         records PID/start identity and a completed command; both survive
-        the viewport swap. The prior pane accepts a second command after B. One current viewport —
+        the viewport swap, and that same process answers a fresh correlated
+        command after B and again after A. The prior pane accepts a second
+        command after B. One current viewport —
         leftover visitors are not required. `--layout` stays usage-refused.
         Then client-ambiguity refuses before another create. Cleanup
         identities are registered before ops that can throw.
@@ -3698,7 +3724,11 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         guest_pid = home / "guest.pid"
         guest_lstart = home / "guest.lstart"
         guest_done = home / "guest.done"
+        guest_done_b = home / "guest-b.done"
+        guest_done_a = home / "guest-a.done"
         guest_token = "guest-ok-" + uuid.uuid4().hex[:12]
+        guest_token_b = "guest-b-" + uuid.uuid4().hex[:12]
+        guest_token_a = "guest-a-" + uuid.uuid4().hex[:12]
         owner = _write(sandbox / "owner-cli", OWNER_CLI)
         env = os.environ.copy()
         _strip_identity_env(env)
@@ -4049,6 +4079,20 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         assert guest_after_b is not None and guest_after_b.get("id") == guest_term_id
         _assert_pid_identity(guest_pid, guest_pid_value, guest_identity)
         assert guest_token in guest_done.read_text(encoding="utf-8")
+        # Re-reading the pre-swap guest.done proves nothing about the process
+        # now: drive a fresh correlated command through the same guest pane.
+        _typed_write_chars(
+            frame,
+            guest,
+            guest_term_id,
+            f"echo {guest_token_b} > {guest_done_b}",
+        )
+        assert _wait_until(
+            lambda: guest_done_b.is_file()
+            and guest_token_b in guest_done_b.read_text(encoding="utf-8"),
+            15,
+        ), guest_done_b
+        _assert_pid_identity(guest_pid, guest_pid_value, guest_identity)
         _assert_pid_identity(prior_pid, prior_pid_value, prior_identity)
         assert prior_token in prior_done.read_text(encoding="utf-8")
         _typed_write_chars(
@@ -4069,7 +4113,10 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
 
         return_argv = ["--session", host, "project-workspace", guest]
         if receipt.get("tab") not in (None, ""):
-            return_argv.extend(["--tab", str(receipt["tab"])])
+            # The receipt persists the engine's zero-based tab index; the
+            # public `project-workspace --tab` contract is one-based. Return
+            # to the explicit original tab, never by omitting the flag.
+            return_argv.extend(["--tab", str(int(receipt["tab"]) + 1)])
         returned = frame(*return_argv)
         assert returned.returncode == 0, returned.stdout + returned.stderr
         returned_receipts = _workspace_projection_receipts(returned.stdout)
@@ -4089,6 +4136,19 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         assert guest_after_a is not None and guest_after_a.get("id") == guest_term_id
         _assert_pid_identity(guest_pid, guest_pid_value, guest_identity)
         assert guest_token in guest_done.read_text(encoding="utf-8")
+        assert guest_token_b in guest_done_b.read_text(encoding="utf-8")
+        _typed_write_chars(
+            frame,
+            guest,
+            guest_term_id,
+            f"echo {guest_token_a} > {guest_done_a}",
+        )
+        assert _wait_until(
+            lambda: guest_done_a.is_file()
+            and guest_token_a in guest_done_a.read_text(encoding="utf-8"),
+            15,
+        ), guest_done_a
+        _assert_pid_identity(guest_pid, guest_pid_value, guest_identity)
         assert guest in listing() and alias in listing()
         _assert_pid_identity(prior_pid, prior_pid_value, prior_identity)
         assert prior_token in prior_done.read_text(encoding="utf-8")
@@ -4112,6 +4172,8 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         assert prior_token in prior_done.read_text(encoding="utf-8")
         assert prior_token_b in prior_done_b.read_text(encoding="utf-8")
         assert guest_token in guest_done.read_text(encoding="utf-8")
+        assert guest_token_b in guest_done_b.read_text(encoding="utf-8")
+        assert guest_token_a in guest_done_a.read_text(encoding="utf-8")
         final_rows = pane_rows()
         _assert_session_layer(final_rows, previous_geometry=chrome_geometry)
         _assert_placeholder_replaced(final_rows)
