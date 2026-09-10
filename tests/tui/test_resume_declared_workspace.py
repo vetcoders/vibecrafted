@@ -555,6 +555,33 @@ def _tab_script(call: dict) -> str:
     return Path(argv[argv.index("--") + 1]).read_text(encoding="utf-8")
 
 
+def _tab_admission(call: dict) -> dict[str, object]:
+    """Read the private interactive receipt referenced by a provider tab.
+
+    The tab script deliberately carries only the canonical private handoff,
+    rather than an expanded provider command.  The receipt is therefore the
+    authoritative declaration boundary for assertions about agent identity and
+    root selection.
+    """
+    command = shlex.split(_tab_script(call), comments=True)[-1]
+    tokens = shlex.split(command)
+    assert "interactive-launch" in tokens
+    admission_file = Path(tokens[tokens.index("--admission-file") + 1])
+    return json.loads(admission_file.read_text(encoding="utf-8"))
+
+
+def _assert_resume_admission(admission: dict[str, object], scene: Scene) -> None:
+    assert admission["agent"] == "codex"
+    assert admission["skill"] == "resume"
+    assert admission["agent_session_id"] == NATIVE_SESSION
+    assert admission["root"] == str(scene.root)
+    selection = admission["session_selection"]
+    assert isinstance(selection, dict)
+    assert selection["agent_session_id"] == NATIVE_SESSION
+    assert selection["selection_root"] == str(scene.root)
+    assert selection["session_selector"] == NATIVE_SESSION
+
+
 def _cwd_of(call: dict) -> Path:
     argv = call["argv"]
     return Path(argv[argv.index("--cwd") + 1])
@@ -1079,7 +1106,14 @@ def test_repo_and_root_are_one_declaration(tmp_path: Path) -> None:
     repo_tab = _new_tabs(repo_scene.calls())[0]
     assert _session_of(root_tab) == _session_of(repo_tab) == "session-project-b"
     assert _cwd_of(root_tab).name == _cwd_of(repo_tab).name == "project-b"
-    assert _tab_script(root_tab) == _tab_script(repo_tab)
+    root_admission = _tab_admission(root_tab)
+    repo_admission = _tab_admission(repo_tab)
+    for admission, scene in (
+        (root_admission, root_scene),
+        (repo_admission, repo_scene),
+    ):
+        _assert_resume_admission(admission, scene)
+    assert root_admission["source_digest"] == repo_admission["source_digest"]
 
     other = tmp_path / "a" / "other"
     other.mkdir()
@@ -1121,7 +1155,8 @@ def test_declared_root_with_spaces_binds_the_exact_cwd_and_session(
     tabs = _new_tabs(calls)
     assert len(tabs) == 1, calls
     assert _cwd_of(tabs[0]) == scene.root, tabs
-    assert f"codex resume {NATIVE_SESSION}" in _tab_script(tabs[0])
+    admission = _tab_admission(tabs[0])
+    _assert_resume_admission(admission, scene)
 
 
 @pytest.mark.parametrize("shell", ["bash", "zsh"])
