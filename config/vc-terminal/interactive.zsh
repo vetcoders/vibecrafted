@@ -1,8 +1,29 @@
 # Loaded only by the product terminal's private ZDOTDIR.
 [[ -o interactive ]] || return 0
 
+# Remember the file that defined this profile so reload can re-read it after
+# an on-disk update. ${(%):-%x} is this sourced path; keep a fallback.
+typeset -g _VC_TERMINAL_PROFILE_FILE="${${(%):-%x}:-$HOME/.config/vibecrafted/vc-terminal/interactive.zsh}"
+
 _vc_terminal_owned_alias_names=(ll la l .. ... .... gs ga gc gp gl gd)
 _vc_terminal_product_shell="$HOME/.config/vibecrafted/shell"
+
+_vc_terminal_pin_product_env() {
+  # Product tool paths must exist before zoxide/atuin/starship `init`.
+  # Those commands read STARSHIP_CONFIG / ATUIN_* / _ZO_DATA_DIR at init time.
+  export VIBECRAFTED_TERMINAL_ENTRY=1
+  export VC_FRAME_CONFIG_DIR="$HOME/.config/vibecrafted/vc-frame"
+  export STARSHIP_CONFIG="$HOME/.config/vibecrafted/starship.toml"
+  export ATUIN_CONFIG_DIR="$HOME/.config/vibecrafted/atuin"
+  export ATUIN_DATA_DIR="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/atuin"
+  export ATUIN_DB_PATH="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/history.db"
+  export _ZO_DATA_DIR="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/zoxide"
+  export STARSHIP_CACHE="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/starship"
+  mkdir -p \
+    "${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/atuin" \
+    "$_ZO_DATA_DIR" \
+    "$STARSHIP_CACHE"
+}
 
 _vc_terminal_apply_fallback_prompt() {
   # Two-line offline prompt: path, then a simple ❯. Used only when Starship
@@ -17,14 +38,7 @@ _vc_terminal_apply_fallback_prompt() {
 
 _vc_terminal_load_owned_layer() {
   local vc_alias_dir vc_alias_file vc_alias_name
-  export VIBECRAFTED_TERMINAL_ENTRY=1
-  export VC_FRAME_CONFIG_DIR="$HOME/.config/vibecrafted/vc-frame"
-  export STARSHIP_CONFIG="$HOME/.config/vibecrafted/starship.toml"
-  export ATUIN_CONFIG_DIR="$HOME/.config/vibecrafted/atuin"
-  export ATUIN_DATA_DIR="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/atuin"
-  export ATUIN_DB_PATH="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/history.db"
-  export _ZO_DATA_DIR="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/zoxide"
-  export STARSHIP_CACHE="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/starship"
+  _vc_terminal_pin_product_env
   for vc_alias_name in "${_vc_terminal_owned_alias_names[@]}"; do
     unalias "$vc_alias_name" 2>/dev/null || true
   done
@@ -52,8 +66,13 @@ _vc_terminal_load_owned_layer() {
 }
 
 reload() {
-  # Refresh owned aliases and product preference paths. Do not re-run
-  # plugin/ZLE/history initialization or reprint the ready banner.
+  # Re-read the installed profile so a changed interactive.zsh becomes the
+  # live definition. The load-once guard below skips tool/ZLE/banner work.
+  # Then apply the (possibly new) owned layer. cwd and HISTFILE stay put.
+  local vc_profile="${_VC_TERMINAL_PROFILE_FILE:-$HOME/.config/vibecrafted/vc-terminal/interactive.zsh}"
+  if [[ -r "$vc_profile" ]]; then
+    source "$vc_profile"
+  fi
   _vc_terminal_load_owned_layer
 }
 
@@ -63,7 +82,8 @@ typeset -g _VC_TERMINAL_PROFILE_LOADED=1
 HISTFILE="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/zsh_history"
 HISTSIZE=20000
 SAVEHIST=20000
-mkdir -p "${HISTFILE:h}" "${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/zoxide" "${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/starship"
+mkdir -p "${HISTFILE:h}"
+_vc_terminal_pin_product_env
 setopt appendhistory histignorespace
 path=("$HOME/.local/bin" $path)
 typeset -U path
@@ -116,6 +136,7 @@ if (( $+functions[compdef] )); then
 else
   _VC_TERMINAL_WARNINGS+=('shell completion unavailable')
 fi
+# STARSHIP_CONFIG / ATUIN_* / _ZO_DATA_DIR were pinned above. Init reads them.
 for vc_tool in zoxide atuin starship; do
   if (( ! $+commands[$vc_tool] )); then
     _VC_TERMINAL_WARNINGS+=("$vc_tool is not installed; install it with its upstream installer")
@@ -171,7 +192,7 @@ if [[ -t 1 ]]; then
   print '  vc-frame attach <name>   Return to a workspace'
   print '  vibecrafted --help      Explore commands'
   print '  aliases                 List product shortcuts'
-  print '  reload                  Refresh product aliases and preferences'
+  print '  reload                  Re-read the installed product profile'
   (( ! $+commands[atuin] )) || print '  Ctrl+R history'
   (( ! $+commands[zoxide] )) || print '  z <directory> jump'
   print '  Tab completion'

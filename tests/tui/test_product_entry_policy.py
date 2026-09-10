@@ -1083,19 +1083,19 @@ def test_product_frame_entry_pins_zdotdir_for_new_server(tmp_path: Path) -> None
         timeout=5,
     )
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
-    assert (
-        f"ZDOTDIR={home / '.config/vibecrafted/vc-terminal'}" in proc.stdout
-    )
+    product_zdot = home / ".config/vibecrafted/vc-terminal"
+    assert f"ZDOTDIR={product_zdot}" in proc.stdout
+    config = home / ".config/vibecrafted/vc-frame/config.kdl"
+    assert 'default_shell "zsh"' in config.read_text(encoding="utf-8")
     text = WRAPPER.read_text(encoding="utf-8")
     assert "pin_product_shell" in text
-    assert "default_shell" not in text
+    assert 'export ZDOTDIR="$HOME/.config/vibecrafted/vc-terminal"' in text
 
 
-def test_new_client_env_does_not_rewrite_already_live_server_zdotdir(
+def test_wrapper_pin_replaces_incoming_client_zdotdir_for_this_process(
     tmp_path: Path,
 ) -> None:
-    live = tmp_path / "live-server.env"
-    live.write_text("ZDOTDIR=/old/live/zdot\n", encoding="utf-8")
+    """Wrapper pin is this-process behavior, not live-server reception."""
     home, wrapper = _stage_product_frame_generation(tmp_path)
     tool_bin = tmp_path / "tool-bin"
     tool_bin.mkdir()
@@ -1119,6 +1119,9 @@ def test_new_client_env_does_not_rewrite_already_live_server_zdotdir(
         timeout=5,
     )
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
-    assert "ZDOTDIR=" in proc.stdout
-    assert live.read_text(encoding="utf-8") == "ZDOTDIR=/old/live/zdot\n"
-    assert "/old/live/zdot" not in proc.stdout
+    product_zdot = home / ".config/vibecrafted/vc-terminal"
+    assert f"ZDOTDIR={product_zdot}" in proc.stdout
+    assert "/new/client/zdot" not in proc.stdout
+    assert 'default_shell "zsh"' in (
+        home / ".config/vibecrafted/vc-frame/config.kdl"
+    ).read_text(encoding="utf-8")
