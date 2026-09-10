@@ -708,6 +708,47 @@ def _core_cli_body(
     )
 
 
+def _git_project(path: Path) -> Path:
+    """Stage a real Git work tree, carrying one commit, at ``path``.
+
+    vc-start selects its root through the shipped launch resolver
+    (``_vetcoders_select_repo`` -> ``vibecrafted_core.repo_selection``), which
+    demands BOTH a work tree (``require_git=True``) and a commit, because the
+    launch spec pins ``--base HEAD``. A bare ``git init`` is therefore still
+    refused, only with "--base does not resolve to one available commit on this
+    host" in place of "is not inside a Git repository".
+
+    The directory is its own top level on purpose: the resolver answers with
+    the top level, and THAT is what reaches ``workspace resolve --root``. A
+    repository staged in a parent would silently name the parent instead.
+
+    The name is kept short for the same reason: the default workspace name is
+    the root's basename, and it is validated (24 characters) BEFORE the entry
+    prepares, so a pytest-generated directory name would refuse there instead
+    of at the contract under test.
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    assert len(path.name) <= 24, f"workspace name would be refused: {path.name}"
+    env = {
+        "PATH": "/usr/bin:/bin",
+        # Isolated from the host's own Git config: no templates, no hooks.
+        "HOME": str(path.parent),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "vibecrafted-test",
+        "GIT_AUTHOR_EMAIL": "test@vetcoders.io",
+        "GIT_COMMITTER_NAME": "vibecrafted-test",
+        "GIT_COMMITTER_EMAIL": "test@vetcoders.io",
+    }
+    for argv in (
+        ["git", "init", "-q", "-b", "main", "."],
+        ["git", "commit", "-q", "--allow-empty", "-m", "product entry fixture"],
+    ):
+        subprocess.run(
+            argv, cwd=path, env=env, check=True, capture_output=True, text=True
+        )
+    return path.resolve()
+
+
 class DeveloperEntry(NamedTuple):
     """An explicitly developer-mode vc-start harness (never install acceptance)."""
 
@@ -803,8 +844,7 @@ def test_vc_start_probe_pins_the_product_config_in_developer_mode(
     Developer mode is stated in the environment, not implied: this proves the
     shell choke, NOT that an installed product would be admitted.
     """
-    workspace = (tmp_path / "workspace").resolve()
-    workspace.mkdir()
+    workspace = _git_project(tmp_path / "workspace")
     entry = _developer_entry(tmp_path, resolve_root=workspace)
 
     proc = _run_shell(_VC_START_CAPTURE, env=entry.env, cwd=workspace)
@@ -832,8 +872,7 @@ def test_vc_start_failure_is_not_masked_by_a_later_command(tmp_path: Path) -> No
     The regression this guards: a trailing `printf`/attach in the harness (or
     in a caller) replaced the entry's status with its own success.
     """
-    workspace = (tmp_path / "workspace").resolve()
-    workspace.mkdir()
+    workspace = _git_project(tmp_path / "workspace")
     entry = _developer_entry(tmp_path, resolve_root=workspace, resolve_status=64)
 
     proc = _run_shell(
@@ -852,9 +891,8 @@ def test_vc_start_foreign_workspace_env_cannot_override_requested_root(
     tmp_path: Path,
 ) -> None:
     """An inherited foreign identity never redirects the requested root."""
-    requested = (tmp_path / "requested").resolve()
+    requested = _git_project(tmp_path / "requested")
     foreign = (tmp_path / "codescribe").resolve()
-    requested.mkdir()
     foreign.mkdir()
     entry = _developer_entry(tmp_path, resolve_root=requested)
     env = {
@@ -890,8 +928,7 @@ def test_vc_start_reuses_the_resolved_tuple_for_frame_attachment(
     tmp_path: Path,
 ) -> None:
     """The attachment binds the ids the ONE resolve produced — no second walk."""
-    workspace = (tmp_path / "workspace").resolve()
-    workspace.mkdir()
+    workspace = _git_project(tmp_path / "workspace")
     entry = _developer_entry(tmp_path, resolve_root=workspace)
 
     proc = _run_shell(
@@ -924,8 +961,7 @@ def test_product_entry_prepares_path_then_workspace_then_control_plane_eye(
     The sanitized PATH must already be in place when the workspace owner is
     called, and the control-plane eye must come after it.
     """
-    workspace = (tmp_path / "workspace").resolve()
-    workspace.mkdir()
+    workspace = _git_project(tmp_path / "workspace")
     entry = _developer_entry(tmp_path, resolve_root=workspace)
     founder_bin = (tmp_path / "founder-tools").resolve()
     _write_probe_tool(founder_bin, "founder-tool", "founder-tool")
@@ -945,8 +981,7 @@ def test_product_entry_prepares_path_then_workspace_then_control_plane_eye(
 
 def test_product_entry_probe_is_stable_across_repeated_runs(tmp_path: Path) -> None:
     """Verification plan: the same preparation twice, byte for byte."""
-    workspace = (tmp_path / "workspace").resolve()
-    workspace.mkdir()
+    workspace = _git_project(tmp_path / "workspace")
     entry = _developer_entry(tmp_path, resolve_root=workspace)
 
     outputs = []
@@ -1016,11 +1051,12 @@ def test_vc_start_refuses_a_checkout_that_is_not_an_installed_generation(
     """Without the developer opt-in, a shell outside `releases/` is refused."""
     root = _stage_shell_generation(tmp_path, under_releases=False)
     env = _installed_entry_env(tmp_path, root)
+    project = _git_project(tmp_path / "project")
 
     proc = _run_shell(
         _VC_START_CAPTURE,
         env=env,
-        cwd=tmp_path,
+        cwd=project,
         helper=root / "vibecrafted-core/vibecrafted_core/runtime/shell/vetcoders.sh",
     )
 
@@ -1035,11 +1071,12 @@ def test_vc_start_refuses_an_installed_generation_without_runtime_identity(
     """Inside `releases/`, the read-only resolver still has to admit it."""
     root = _stage_shell_generation(tmp_path, under_releases=True)
     env = _installed_entry_env(tmp_path, root)
+    project = _git_project(tmp_path / "project")
 
     proc = _run_shell(
         _VC_START_CAPTURE,
         env=env,
-        cwd=tmp_path,
+        cwd=project,
         helper=root / "vibecrafted-core/vibecrafted_core/runtime/shell/vetcoders.sh",
     )
 
@@ -1056,16 +1093,18 @@ def test_vc_start_refuses_a_generation_without_its_own_python_or_core(
     root = _stage_shell_generation(tmp_path, under_releases=True)
     (root / "bin" / "python3").unlink()
     env = _installed_entry_env(tmp_path, root)
+    project = _git_project(tmp_path / "project")
 
     proc = _run_shell(
         _VC_START_CAPTURE,
         env=env,
-        cwd=tmp_path,
+        cwd=project,
         helper=root / "vibecrafted-core/vibecrafted_core/runtime/shell/vetcoders.sh",
     )
 
     assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert "selected runtime Python/core missing under" in proc.stderr
+    assert "installed runtime is missing its own interpreter" in proc.stderr
+    assert "refusing to substitute a host python3" in proc.stderr
     assert str(root) in proc.stderr
 
 
