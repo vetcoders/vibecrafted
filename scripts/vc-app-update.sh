@@ -147,7 +147,7 @@ atomic_write() {
 
 process_lstart() {
   local pid="$1"
-  /bin/ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+  without_update_lock_fd /bin/ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
 identity_live() {
@@ -316,7 +316,7 @@ verify_signed_app() {
 }
 
 app_cdhash() {
-  /usr/bin/codesign --display --verbose=4 "$1" 2>&1 | /usr/bin/awk -F= '/^CDHash=/{print $2; exit}'
+  without_update_lock_fd /usr/bin/codesign --display --verbose=4 "$1" 2>&1 | /usr/bin/awk -F= '/^CDHash=/{print $2; exit}'
 }
 
 app_identity_token() {
@@ -369,7 +369,7 @@ owned_prepared() {
 remove_owned_prepared() {
   local path="$1"
   if owned_prepared "$path"; then
-    /bin/rm -rf "$path"
+    without_update_lock_fd /bin/rm -rf "$path"
     return 0
   fi
   echo "refusing to remove a path this helper does not own: $path" >&2
@@ -914,12 +914,12 @@ finish_replace_adopt() {
   if [[ "$PREPARED_PRESENT" -eq 1 ]]; then
     require_exact_identity "$PREPARED" "$SOURCE_IDENTITY" "prepared candidate"
     write_journal "adopting" "resume prepared rename"
-    if ! /bin/mv "$PREPARED" "$DESTINATION"; then
+    if ! without_update_lock_fd /bin/mv "$PREPARED" "$DESTINATION"; then
       echo "resume could not adopt the prepared app" >&2
       write_journal "failed" "resume could not adopt prepared"
       if [[ "$DISPLACED_PRESENT" -eq 1 ]]; then
         require_exact_identity "$DISPLACED" "$PRIOR_IDENTITY" "displaced prior"
-        if ! /bin/mv "$DISPLACED" "$DESTINATION"; then
+        if ! without_update_lock_fd /bin/mv "$DISPLACED" "$DESTINATION"; then
           echo "resume could not restore the displaced app" >&2
           exit 11
         fi
@@ -937,7 +937,7 @@ finish_replace_adopt() {
 
 restore_displaced_prior() {
   require_exact_identity "$DISPLACED" "$PRIOR_IDENTITY" "displaced prior"
-  if ! /bin/mv "$DISPLACED" "$DESTINATION"; then
+  if ! without_update_lock_fd /bin/mv "$DISPLACED" "$DESTINATION"; then
     echo "resume could not restore the displaced app" >&2
     write_journal "failed" "resume restore of displaced failed"
     exit 11
@@ -951,11 +951,11 @@ finish_restore_adopt() {
   if [[ "$PREPARED_PRESENT" -eq 1 ]]; then
     require_exact_identity "$PREPARED" "$PRIOR_IDENTITY" "prepared previous app"
     write_journal "adopting" "resume restore prepared rename"
-    if ! /bin/mv "$PREPARED" "$DESTINATION"; then
+    if ! without_update_lock_fd /bin/mv "$PREPARED" "$DESTINATION"; then
       echo "resume could not adopt the previous app" >&2
       write_journal "failed" "resume restore adopt failed"
       if [[ "$FAILED_NEW_PRESENT" -eq 1 ]] && verify_signed_app "$FAILED_NEW"; then
-        /bin/mv "$FAILED_NEW" "$DESTINATION" || true
+        without_update_lock_fd /bin/mv "$FAILED_NEW" "$DESTINATION" || true
       fi
       exit 11
     fi
@@ -1429,10 +1429,10 @@ restore_previous_tuple() {
         echo "refusing to replace a path this restore does not own: $FAILED_NEW" >&2
         exit 7
       fi
-      /bin/rm -rf "$FAILED_NEW"
+      without_update_lock_fd /bin/rm -rf "$FAILED_NEW"
     fi
     write_journal "displacing" "quarantine failed destination; prior.app stays untouched"
-    if ! /bin/mv "$DESTINATION" "$FAILED_NEW"; then
+    if ! without_update_lock_fd /bin/mv "$DESTINATION" "$FAILED_NEW"; then
       echo "could not quarantine the failed destination" >&2
       write_journal "failed" "restore quarantine failed"
       exit 10
@@ -1456,11 +1456,11 @@ restore_previous_tuple() {
   write_journal "prepared" "previous app prepared"
   fail_after_if "prepared"
   write_journal "adopting" "restore prepared rename"
-  if ! /bin/mv "$PREPARED" "$DESTINATION"; then
+  if ! without_update_lock_fd /bin/mv "$PREPARED" "$DESTINATION"; then
     echo "could not adopt the previous app" >&2
     write_journal "failed" "restore adopt failed"
     if [[ -d "$FAILED_NEW" ]] && verify_signed_app "$FAILED_NEW"; then
-      /bin/mv "$FAILED_NEW" "$DESTINATION" || true
+      without_update_lock_fd /bin/mv "$FAILED_NEW" "$DESTINATION" || true
     fi
     exit 11
   fi
@@ -1635,7 +1635,7 @@ if [[ -e "$DESTINATION" ]]; then
   hold_if "prepared" || exit 18
 
   write_journal "displacing" "destination move is journaled, not atomic"
-  if ! /bin/mv "$DESTINATION" "$DISPLACED"; then
+  if ! without_update_lock_fd /bin/mv "$DESTINATION" "$DISPLACED"; then
     echo "could not displace the live destination" >&2
     write_journal "failed" "displace failed"
     remove_owned_prepared "$PREPARED" || true
@@ -1647,12 +1647,12 @@ if [[ -e "$DESTINATION" ]]; then
   hold_if "displaced" || exit 18
 
   write_journal "adopting" "prepared rename"
-  if ! /bin/mv "$PREPARED" "$DESTINATION"; then
+  if ! without_update_lock_fd /bin/mv "$PREPARED" "$DESTINATION"; then
     echo "could not adopt the prepared app; restoring the verified displaced app" >&2
     write_journal "failed" "adopt failed"
     if [[ -d "$DISPLACED" ]]; then
       require_exact_identity "$DISPLACED" "$PRIOR_IDENTITY" "displaced prior"
-      if ! /bin/mv "$DISPLACED" "$DESTINATION"; then
+      if ! without_update_lock_fd /bin/mv "$DISPLACED" "$DESTINATION"; then
         echo "verified restore of the displaced app failed" >&2
         exit 11
       fi
@@ -1665,11 +1665,11 @@ if [[ -e "$DESTINATION" ]]; then
     echo "adopted destination failed signed identity check; restoring the verified previous app" >&2
     write_journal "failed" "adopted identity failed"
     if [[ -d "$DESTINATION" ]]; then
-      /bin/mv "$DESTINATION" "${CAPTURE}/failed-adopt.app"
+      without_update_lock_fd /bin/mv "$DESTINATION" "${CAPTURE}/failed-adopt.app"
     fi
     if [[ -d "$DISPLACED" ]]; then
       require_exact_identity "$DISPLACED" "$PRIOR_IDENTITY" "displaced prior"
-      if ! /bin/mv "$DISPLACED" "$DESTINATION"; then
+      if ! without_update_lock_fd /bin/mv "$DISPLACED" "$DESTINATION"; then
         echo "verified restore of the displaced app failed" >&2
         exit 12
       fi
@@ -1694,7 +1694,7 @@ else
   write_journal "prepared" "prepared candidate verified"
   fail_after_if "prepared"
   write_journal "adopting" "prepared rename"
-  if ! /bin/mv "$PREPARED" "$DESTINATION"; then
+  if ! without_update_lock_fd /bin/mv "$PREPARED" "$DESTINATION"; then
     echo "could not adopt the prepared app" >&2
     write_journal "failed" "adopt failed"
     exit 11
@@ -1703,7 +1703,7 @@ else
   if ! verify_signed_app "$DESTINATION"; then
     echo "adopted destination failed signed identity check" >&2
     write_journal "failed" "adopted identity failed"
-    /bin/mv "$DESTINATION" "${parent}/.vc-update-failed-${TRANSACTION}.app"
+    without_update_lock_fd /bin/mv "$DESTINATION" "${parent}/.vc-update-failed-${TRANSACTION}.app"
     exit 12
   fi
   require_exact_identity "$DESTINATION" "$SOURCE_IDENTITY" "adopted destination"

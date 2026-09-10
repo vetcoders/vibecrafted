@@ -250,6 +250,8 @@ def test_product_update_source_contract() -> None:
     assert "flock_update_lock_nb" in helper
     assert "UPDATE_LOCK_FD" in helper
     assert "without_update_lock_fd" in helper
+    assert "without_update_lock_fd /bin/mv" in helper
+    assert "if ! /bin/mv" not in helper
     assert "historical-runtime-pack" in helper
     assert "owned_historical_pack" in helper
     assert "capture_owned_historical_pack" in helper
