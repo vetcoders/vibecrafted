@@ -457,6 +457,9 @@ _vetcoders_looks_like_run_id() {
 _vetcoders_resume_agent() {
   local tool="$1"
   shift
+  # Keep the caller's public vector for a possible no-TTY handoff. The parsed
+  # contract projection intentionally does not retain every public spelling.
+  local -a _vetcoders_resume_public_argv=("$@")
   local _vetcoders_contract_allow_model=1
   local _vetcoders_contract_single_prompt=1
   _vetcoders_parse_contract "$@" || return 1
@@ -610,6 +613,25 @@ _vetcoders_resume_agent() {
   # assemble a pack and then fail.
   _vetcoders_core_python_spec >/dev/null || return 1
 
+  [[ -z "$_vetcoders_contract_count" ]] || {
+    echo "--count is only supported by vibecrafted marbles." >&2
+    return 1
+  }
+  [[ -z "$_vetcoders_contract_depth" ]] || {
+    echo "--depth is only supported by vibecrafted marbles." >&2
+    return 1
+  }
+
+  # Admission is deliberately before AICX: a public no-TTY request must hand
+  # the declaration to its visible terminal child before composing continuity
+  # or a provider command. The child re-parses this exact public argv and does
+  # each side effect exactly once.
+  local runtime="${_vetcoders_contract_runtime:-terminal}"
+  local _resume_terminal_admission=0
+  _vetcoders_declaration_escalate_if_needed resume "$tool" \
+    "${_vetcoders_resume_public_argv[@]}" || _resume_terminal_admission=$?
+  case "$_resume_terminal_admission" in 0) return 0 ;; 1) return 1 ;; esac
+
   local aicx_fallback_mode=""
   local aicx_context_file=""
   if [[ -z "$_vetcoders_contract_session" && -z "${_vetcoders_contract_run_id:-}${_vetcoders_contract_last:-}" && -z "$resume_explicit_input" ]]; then
@@ -648,16 +670,7 @@ _vetcoders_resume_agent() {
     aicx_fallback_mode="new_session"
   fi
 
-  [[ -z "$_vetcoders_contract_count" ]] || {
-    echo "--count is only supported by vibecrafted marbles." >&2
-    return 1
-  }
-  [[ -z "$_vetcoders_contract_depth" ]] || {
-    echo "--depth is only supported by vibecrafted marbles." >&2
-    return 1
-  }
-
-  local runtime="${_vetcoders_contract_runtime:-terminal}" resume_cmd
+  local resume_cmd
   local _vetcoders_interactive_skill=resume
   resume_cmd="$(_vetcoders_init_command_text "$tool" "${_vetcoders_contract_prompt:-}" "${_vetcoders_contract_policy_runtime:-local-native}" "${_vetcoders_contract_permissions:-bypass}" "${_vetcoders_contract_token_budget:-unmetered}")" || return 1
   local _resume_admission=0

@@ -75,6 +75,7 @@ IDENTITY_ENV = (
     "VIBECRAFTED_PENDING_VC_FRAME_SWITCH",
     "VIBECRAFTED_PREPARED_VC_FRAME_SESSION",
     "VIBECRAFTED_TERMINAL_ENTRY",
+    "VIBECRAFTED_TERMINAL_ENTRY_OWNER",
     # The suite-wide no-PTY create bypass (tests/conftest.py) would let a
     # caller with no terminal create and "enter" a session; these scenes model
     # real callers, with a pty where a terminal is meant.
@@ -319,6 +320,7 @@ def _generation(root: Path, terminal_capture: Path) -> Path:
         f"open({str(terminal_capture)!r}, 'w').write(json.dumps("
         "{'argv': sys.argv[1:], 'cwd': os.getcwd(),"
         " 'boundary': os.environ.get('VIBECRAFTED_TERMINAL_ENTRY', ''),"
+        " 'boundary_owner': os.environ.get('VIBECRAFTED_TERMINAL_ENTRY_OWNER', ''),"
         " 'markers': {k: os.environ.get(k) for k in MARKER_KEYS}}))\n"
         f"sys.exit(int(os.environ.get('VC_TERMINAL_EXIT', '0')))\n",
     )
@@ -458,6 +460,9 @@ def _run_resume(
     env = scene.env(extra_env)
     if terminal_entry:
         env["VIBECRAFTED_TERMINAL_ENTRY"] = "1"
+        env["VIBECRAFTED_TERMINAL_ENTRY_OWNER"] = str(
+            scene.generation / "bin" / "vibecrafted"
+        )
     script = _entry_script(scene, invocation)
     if tty:
         argv = [
@@ -617,6 +622,136 @@ def test_explicit_root_from_stale_attached_marker_opens_the_declared_workspace(
     _assert_no_foreign_mutation(calls, (STALE_MARKER, FOREIGN_LIVE))
     assert not scene.aicx_capture.exists(), "an explicit --session assembled AICX"
     assert "vc-frame attach" not in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_inherited_unqualified_terminal_entry_opens_requested_root_before_aicx(
+    tmp_path: Path, shell: str
+) -> None:
+    """A bare inherited boundary cannot give an unrelated Frame client away."""
+    scene = Scene(
+        tmp_path,
+        live=[FOREIGN_LIVE],
+        clients=[FOREIGN_LIVE],
+        project="loctree-suite",
+    )
+    subprocess.run(
+        ["git", "init", "-q"], cwd=scene.root, check=True, capture_output=True
+    )
+    (scene.root / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "README.md"],
+        cwd=scene.root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        cwd=scene.root,
+        check=True,
+        capture_output=True,
+    )
+    result = _run_resume(
+        scene,
+        f"_vetcoders_resume_agent codex --root {shlex.quote(str(scene.root))}",
+        shell=shell,
+        terminal_entry=False,
+        extra_env={
+            "VIBECRAFTED_TERMINAL_ENTRY": "1",
+            "VC_FRAME": "1",
+            "VC_FRAME_PANE_ID": "7",
+            "VC_FRAME_SESSION_NAME": FOREIGN_LIVE,
+            "ZELLIJ_SESSION_NAME": FOREIGN_LIVE,
+        },
+    )
+    launch = scene.terminal_launch()
+    calls = scene.calls()
+
+    assert "RC=[0]" in result.stdout, result.stdout + result.stderr
+    assert launch is not None, f"no terminal was opened: {result.stderr}"
+    argv = launch["argv"]
+    assert (
+        Path(argv[argv.index("--working-directory") + 1]).resolve()
+        == scene.root.resolve()
+    )
+    hosted = argv[argv.index("-e") + 1 :]
+    assert hosted[2:] == ["resume", "codex", "--root", str(scene.root)], hosted
+    assert launch["boundary"] == "1", launch
+    assert launch["boundary_owner"] == str(scene.generation / "bin" / "vibecrafted")
+    assert all(value is None for value in launch["markers"].values()), launch
+    assert not scene.aicx_capture.exists(), "AICX ran before terminal admission"
+    assert not _creates(calls) and not _new_tabs(calls), calls
+    assert not _attaches(calls) and not _switches(calls), calls
+    _assert_no_foreign_mutation(calls, (FOREIGN_LIVE,))
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_owned_terminal_boundary_is_consumed_before_a_descendant_resume(
+    tmp_path: Path, shell: str
+) -> None:
+    """The immediate terminal child does not loop, but its descendant admits.
+
+    A provider can launch another agent from a different checkout. Its process
+    must not inherit the terminal child's recursion exemption merely because
+    both descendants retain the same product generation on PATH.
+    """
+    scene = Scene(tmp_path, live=[], project="loctree-suite")
+    descendant = "\n".join(
+        [
+            f'source "{SHELL_SH}"',
+            f'_vetcoders_vc_frame_loaded_root="{scene.generation}"',
+            f"_vetcoders_resume_agent codex --session {NATIVE_SESSION} --root {shlex.quote(str(scene.root))}",
+            'printf "DESCENDANT_RC=[%s]\\n" "$?"',
+        ]
+    )
+    script = "\n".join(
+        [
+            f'source "{SHELL_SH}"',
+            f'_vetcoders_vc_frame_loaded_root="{scene.generation}"',
+            "if _vetcoders_needs_vc_terminal_entry; then echo IMMEDIATE_NEEDS; else echo IMMEDIATE_DIRECT; fi",
+            'if [[ -z "${VIBECRAFTED_TERMINAL_ENTRY:-}" && -z "${VIBECRAFTED_TERMINAL_ENTRY_OWNER:-}" ]]; then echo EXPORTED_BOUNDARY_CONSUMED; fi',
+            f"env {shell} {'--noprofile --norc' if shell == 'bash' else '-f'} -c {shlex.quote(descendant)}",
+        ]
+    )
+    result = subprocess.run(
+        _shell_argv(shell, script),
+        check=False,
+        cwd=scene.cwd,
+        env=scene.env(
+            {
+                "_vetcoders_vc_frame_loaded_root": str(scene.generation),
+                "VIBECRAFTED_TERMINAL_ENTRY": "1",
+                "VIBECRAFTED_TERMINAL_ENTRY_OWNER": str(
+                    scene.generation / "bin" / "vibecrafted"
+                ),
+            }
+        ),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    launch = scene.terminal_launch()
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "IMMEDIATE_DIRECT" in result.stdout, result.stdout + result.stderr
+    assert "IMMEDIATE_NEEDS" not in result.stdout, result.stdout + result.stderr
+    assert "EXPORTED_BOUNDARY_CONSUMED" in result.stdout, result.stdout + result.stderr
+    assert "DESCENDANT_RC=[0]" in result.stdout, result.stdout + result.stderr
+    assert launch is not None, (
+        f"descendant did not receive one terminal: {result.stderr}"
+    )
+    assert launch["boundary"] == "1", launch
+    assert launch["boundary_owner"] == str(scene.generation / "bin" / "vibecrafted")
 
 
 @pytest.mark.parametrize("shell", ["bash", "zsh"])
