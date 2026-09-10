@@ -2036,11 +2036,23 @@ def _seed_complete_vibecrafted_runtime(tools: Path) -> Path:
     return runtime
 
 
+def _clear_ambient_vc_frame_authority(monkeypatch) -> None:
+    """Make healthy delivery views depend only on their seeded installation."""
+    for variable in (
+        "VC_FRAME_CONFIG_DIR",
+        "VC_FRAME_CONFIG_FILE",
+        "VIBECRAFTED_RUNTIME_ROOT",
+        "VIBECRAFTED_RUNTIME_BIN",
+    ):
+        monkeypatch.delenv(variable, raising=False)
+
+
 def test_vc_frame_delivery_healthy_store_view_ok(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     tools = home / ".local" / "share" / "vibecrafted" / "tools"
     _seed_complete_vibecrafted_runtime(tools)
+    _clear_ambient_vc_frame_authority(monkeypatch)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     monkeypatch.delenv("VIBECRAFTED_PREFER_REPO_VC_FRAME", raising=False)
     findings = _vc_frame_delivery_findings(home=home, tools_home=tools)
@@ -2100,6 +2112,7 @@ def test_vc_frame_delivery_host_path_does_not_redefine_installed_defaults(
     home.mkdir()
     tools = home / ".local/share/vibecrafted/tools"
     _seed_complete_vibecrafted_runtime(tools)
+    _clear_ambient_vc_frame_authority(monkeypatch)
     findings = _vc_frame_delivery_findings(
         home=home, tools_home=tools, path_env=str(tmp_path / "empty")
     )
