@@ -1,12 +1,16 @@
 """A product command failure must not destroy the terminal's login shell."""
 
+import contextlib
+import json
 import os
 import pty
 import select
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -552,13 +556,31 @@ def _installed_frame() -> Path | None:
 
 _REAL_FRAME = _installed_frame()
 
-_FRAME_IDENTITY_ENV = (
+# Ambient identity that must never reach an owned engine. `os.environ.copy()`
+# minus a deny-list is the wrong shape here: `VC_FRAME_SERVER_IDLE_EXIT_SECS`
+# alone lets the operator's shell reap this test's background session mid-run,
+# and every future engine variable would leak in unnoticed. The environment
+# below is therefore built from nothing; this tuple only guards the result.
+_AMBIENT_FRAME_ENV = (
     "VC_FRAME",
     "VC_FRAME_PANE_ID",
     "VC_FRAME_SESSION_NAME",
+    "VC_FRAME_AUTO_ATTACH",
+    "VC_FRAME_AUTO_EXIT",
+    "VC_FRAME_CALLER",
+    "VC_FRAME_SERVER_IDLE_EXIT_SECS",
+    "VC_FRAME_WORKSPACE_SESSION_ID",
     "ZELLIJ",
+    "ZELLIJ_AUTO_ATTACH",
+    "ZELLIJ_AUTO_EXIT",
+    "ZELLIJ_CONFIG_DIR",
+    "ZELLIJ_CONFIG_FILE",
     "ZELLIJ_PANE_ID",
     "ZELLIJ_SESSION_NAME",
+    "PYTHONPATH",
+    "VIRTUAL_ENV",
+    "STARSHIP_CONFIG",
+    "VIBECRAFTED_TERMINAL_ENTRY",
     "VIBECRAFTED_OPERATOR_SESSION",
     "VIBECRAFTED_WORKSPACE_ID",
     "VIBECRAFTED_SESSION_ID",
@@ -567,309 +589,805 @@ _FRAME_IDENTITY_ENV = (
     "VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME",
 )
 
+_PRODUCT_GL = "git log --oneline --graph --decorate -20"
+_EVIDENCE_END = "PROBE_END"
 
-def _wait_owned_evidence(path: Path, timeout: float = 25) -> str:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if path.exists() and path.stat().st_size:
-            return path.read_text()
-        time.sleep(0.1)
-    pytest.fail(f"owned Frame pane did not write {path}")
+# Two panes, two working directories. A pane's cwd is part of what the engine
+# writes into its resurrection cache, so a cache naming both directories can
+# only have been written after both panes existed. That is what makes the wait
+# before `kill-session` a wait for a real, current write instead of a sleep.
+_STARTUP_DIR = "pane-alpha"
+_ADDED_DIR = "pane-beta"
 
 
-def _write_frame_probe(home: Path, name: str) -> Path:
+def _process_identity(pid: int) -> str | None:
+    """What makes this pid *this* process: its start time together with its argv.
+
+    A bare pid is not an identity, it is a slot. Between a pane reporting its
+    shell and this world being torn down the kernel may hand that number to an
+    unrelated process, and signalling it would be this test killing a stranger.
+    """
+    try:
+        probe = subprocess.run(
+            ["/bin/ps", "-p", str(pid), "-o", "lstart=", "-o", "command="],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    identity = " ".join(probe.stdout.split())
+    return identity or None
+
+
+def _process_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+class _OwnedFrameSandbox:
+    """One exclusively allocated engine world: socket dir, config, HOME, sessions.
+
+    `mkdtemp` is the ownership proof. A predictable `/tmp/vcsh<PID>` root that
+    starts with `rmtree` proves the opposite: it deletes whatever a stranger
+    (or a concurrent run whose PID shares the modulus) left there, and then
+    shares one socket namespace with it. The kernel either hands this process a
+    fresh directory or the allocation fails.
+
+    The root is resolved because `/tmp` is a symlink on macOS: a pane shell
+    reports the physical `$PWD`, so an unresolved root makes every cwd
+    assertion compare `/tmp/...` against `/private/tmp/...`.
+    """
+
+    def __init__(self, frame: Path, prefix: str) -> None:
+        self.binary = frame
+        # Short by construction: the session socket path lives under this root
+        # and must stay inside sun_path (104 bytes on macOS).
+        self.root = Path(tempfile.mkdtemp(prefix=prefix, dir="/tmp")).resolve()
+        self.home = self.root / "home"
+        self.socket_dir = self.root / "s"
+        self.config_dir = self.root / "cfg"
+        self.tmp = self.root / "t"
+        for path in (self.home, self.socket_dir, self.config_dir / "layouts", self.tmp):
+            path.mkdir(parents=True)
+        # `default_shell "zsh"` is the shipped value on a zsh host — the product
+        # only rewrites it when zsh is missing (`vc_frame_staging`) — so the
+        # engine resolves its pane shell here exactly as an install does.
+        # `serialization_interval` is the single fixture-only deviation: the
+        # engine serializes a session for resurrection every 60s by default,
+        # which outlives this whole test, so restore would otherwise be asked
+        # about state that was never written. One second brings that write
+        # inside the test's life without anyone hand-writing a cache.
+        (self.config_dir / "config.kdl").write_text(
+            "keybinds clear-defaults=true {}\n"
+            'default_shell "zsh"\n'
+            "serialization_interval 1\n",
+            encoding="utf-8",
+        )
+        (self.config_dir / "layouts" / "empty.kdl").write_text(
+            "layout {\n  pane\n}\n", encoding="utf-8"
+        )
+        self.sessions: list[str] = []
+        # pid -> the fingerprint that pid carried while this test watched it.
+        self.pane_processes: dict[int, str] = {}
+        self.leftover = ""
+        self.teardown_errors: list[str] = []
+
+    @property
+    def layout(self) -> Path:
+        return self.config_dir / "layouts" / "empty.kdl"
+
+    def session_name(self, suffix: str) -> str:
+        """Unique per allocation, so a stale session can never be adopted."""
+        return f"{self.root.name}-{suffix}"
+
+    def remember_pane_process(self, pid: int) -> None:
+        """Record a pane shell together with the fingerprint identifying it.
+
+        A pid that cannot be fingerprinted while it is demonstrably alive is
+        never registered: teardown would have nothing to compare against, and
+        an unverifiable pid is exactly the one that must not be signalled.
+        """
+        identity = _process_identity(pid)
+        if identity is None:
+            self.teardown_errors.append(
+                f"pane shell {pid} could not be fingerprinted while alive"
+            )
+            return
+        self.pane_processes[pid] = identity
+
+    def session_layout_cache(self, session: str) -> Path | None:
+        """The engine's own resurrection cache for this session, inside this HOME.
+
+        Discovered rather than reconstructed: the engine derives the path from
+        a HOME-relative project cache dir and a client/server contract version
+        folder, and a contract bump must not quietly turn this proof into a
+        lookup that always misses.
+        """
+        found = sorted(self.home.glob(f"**/session_info/{session}/session-layout.kdl"))
+        return found[0] if found else None
+
+    def env(self, **extra: str) -> dict[str, str]:
+        environment = {
+            "HOME": str(self.home),
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            # A real daily terminal: the pane shell gets a working line editor
+            # instead of the degraded `dumb` path.
+            "TERM": "xterm-256color",
+            "LANG": "en_US.UTF-8",
+            "TMPDIR": str(self.tmp),
+            # The pane shell must come from the product's `default_shell`, not
+            # from an ambient hint. Pointing SHELL at a non-shell makes that
+            # difference visible instead of accidentally correct on a zsh host.
+            "SHELL": "/usr/bin/false",
+            "VIBECRAFTED_HOME": str(self.home / ".vibecrafted"),
+            "XDG_CONFIG_HOME": str(self.home / ".config"),
+            "XDG_DATA_HOME": str(self.home / ".local" / "share"),
+            "XDG_CACHE_HOME": str(self.home / ".cache"),
+            "VC_FRAME_SOCKET_DIR": str(self.socket_dir),
+            "ZELLIJ_SOCKET_DIR": str(self.socket_dir),
+            "VC_FRAME_CONFIG_DIR": str(self.config_dir),
+            "VC_FRAME_CONFIG_FILE": str(self.config_dir / "config.kdl"),
+            "VIBECRAFTED_VC_FRAME_BIN": str(self.binary),
+        }
+        environment.update(extra)
+        leaked = sorted(set(_AMBIENT_FRAME_ENV) & environment.keys())
+        assert not leaked, f"ambient Frame identity reached the owned engine: {leaked}"
+        return environment
+
+    def run(
+        self,
+        environment: dict[str, str],
+        *args: str,
+        cwd: Path | None = None,
+        timeout: int = 30,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(self.binary), *args],
+            check=False,
+            env=environment,
+            cwd=str(cwd or self.root),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
+    def create_session(
+        self, environment: dict[str, str], session: str, *, cwd: Path
+    ) -> None:
+        # Registered before the engine runs: a session that half-started still
+        # has to be torn down.
+        self.sessions.append(session)
+        # `--layout`, not `--new-session-with-layout`. Both name a layout for
+        # the session `attach --create-background` is about to create, and only
+        # one of them arrives: the engine dispatches `Sessions::Attach` in an
+        # `else if` arm above the arm that folds `new_session_with_layout` into
+        # `opts.layout`, so under an `attach` subcommand that fold is
+        # unreachable and the flag is dropped without a word. What answers then
+        # is the engine's built-in default layout, whose tabs open command
+        # panes ("Shell", "voc") in place of the single pane asked for here.
+        # `--layout` is already in `opts` when the attach arm starts the
+        # client, so it survives that arm and reaches the new session.
+        created = self.run(
+            environment,
+            "--layout",
+            str(self.layout),
+            "attach",
+            "--create-background",
+            session,
+            cwd=cwd,
+        )
+        assert created.returncode == 0, created.stderr
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            listed = self.run(
+                environment, "list-sessions", "--no-formatting", "--short"
+            )
+            if session in listed.stdout.split():
+                return
+            time.sleep(0.2)
+        pytest.fail(f"session {session} never became live")
+
+    def screen(
+        self, environment: dict[str, str], session: str, pane_id: str | None
+    ) -> str:
+        """Best-effort pane contents, used only to explain a failure."""
+        target = ["--pane-id", pane_id] if pane_id else []
+        dump = self.tmp / "screen.dump"
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            self.run(
+                environment,
+                "--session",
+                session,
+                "action",
+                "dump-screen",
+                "--full",
+                *target,
+                "--path",
+                str(dump),
+                timeout=15,
+            )
+            if dump.exists():
+                return dump.read_text(errors="replace")
+        return "<no pane dump available>"
+
+    def _quiet(self, environment: dict[str, str], *args: str) -> str:
+        try:
+            return self.run(environment, *args, timeout=20).stdout
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    def close(self) -> None:
+        """Tear down whatever exists, including a partially started world.
+
+        Never raises: the sandbox has to disappear even when the engine is
+        wedged, otherwise a failed run leaks a live server into /tmp. What it
+        refuses to do is hide a failure — every refusal and every surprise is
+        recorded on `teardown_errors` for the caller to assert on.
+        """
+        try:
+            self._teardown()
+        except Exception as error:  # noqa: BLE001 - teardown must not mask a failure
+            self.teardown_errors.append(f"teardown raised {error!r}")
+
+    def _teardown(self) -> None:
+        environment = dict(self.env())
+        for session in reversed(self.sessions):
+            self._quiet(environment, "kill-session", session, "--force")
+            self._quiet(environment, "delete-session", session, "--force")
+        # A partial start can leave a session this test never named. The socket
+        # dir belongs to this allocation alone, so clearing it wholesale cannot
+        # reach the operator's own Frame.
+        self._quiet(environment, "delete-all-sessions", "--yes", "--force")
+        self.leftover = self._quiet(environment, "list-sessions", "--no-formatting")
+        self._reap_pane_processes()
+        live = [
+            name
+            for name in self.sessions
+            if any(
+                name in line and "(EXITED" not in line
+                for line in self.leftover.splitlines()
+            )
+        ]
+        if live:
+            # Deleting a live server's socket directory would strand that
+            # server and destroy the evidence of why it survived. Leave the
+            # world standing and let the recorded error speak.
+            self.teardown_errors.append(f"sessions still live after teardown: {live}")
+            return
+        try:
+            shutil.rmtree(self.root)
+        except OSError as error:
+            self.teardown_errors.append(f"cannot remove {self.root}: {error}")
+
+    def _reap_pane_processes(self) -> None:
+        """Killing the sessions owns these shells; a signal is the last resort.
+
+        Every pane shell here is a child of this world's own server, so tearing
+        the sessions down is what should end them, and they are given a bounded
+        chance to do exactly that. Whatever is still running afterwards is
+        signalled only while it carries the fingerprint recorded when this test
+        saw it alive: a pid whose start time or argv has changed is a different
+        process wearing a reused number, and it is not this test's to kill.
+        """
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and any(
+            _process_is_alive(pid) for pid in self.pane_processes
+        ):
+            time.sleep(0.2)
+        for pid, identity in self.pane_processes.items():
+            if _process_identity(pid) != identity:
+                continue
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError) as error:
+                self.teardown_errors.append(f"cannot signal pane shell {pid}: {error}")
+            else:
+                self.teardown_errors.append(
+                    f"pane shell {pid} outlived its session and needed SIGKILL"
+                )
+
+
+def _write_frame_probe(home: Path, name: str) -> tuple[Path, Path]:
+    """A line a human could type, answered by the pane's own shell.
+
+    The staging file plus rename keeps the reader from ever seeing a half
+    written record, and the closing marker makes "complete" explicit.
+    """
     probe = home / f"{name}.probe.zsh"
     evidence = home / f"{name}.evidence"
+    staging = home / f"{name}.evidence.part"
     probe.write_text(
         "{\n"
         f'  print -r -- "PROBE={name}"\n'
-        '  print -r -- "GL=${aliases[gl]}"\n'
+        '  print -r -- "SHELL_PID=$$"\n'
+        '  print -r -- "ZSH_VERSION=${ZSH_VERSION:-}"\n'
+        '  print -r -- "INTERACTIVE=${options[interactive]}"\n'
+        '  print -r -- "TTY=${TTY:-}"\n'
+        '  print -r -- "ZDOTDIR=${ZDOTDIR:-}"\n'
         '  print -r -- "CWD=$PWD"\n'
-        '  print -r -- "ZDOTDIR=$ZDOTDIR"\n'
+        '  print -r -- "GL=${aliases[gl]}"\n'
         '  print -r -- "STARSHIP_CONFIG=${STARSHIP_CONFIG:-}"\n'
-        "} > "
-        f"{str(evidence)!r}\n"
+        f'  print -r -- "{_EVIDENCE_END}={name}"\n'
+        f"}} > {str(staging)!r}\n"
+        f"command mv -f {str(staging)!r} {str(evidence)!r}\n",
+        encoding="utf-8",
     )
-    return probe
+    return probe, evidence
 
 
-def _isolated_frame_env(
-    sandbox: Path, frame: Path, extra: dict[str, str] | None = None
-) -> dict[str, str]:
-    env = os.environ.copy()
-    for key in _FRAME_IDENTITY_ENV:
-        env.pop(key, None)
-    env.update(
-        {
-            "HOME": str(sandbox / "home"),
-            "VIBECRAFTED_HOME": str(sandbox / "home" / ".vibecrafted"),
-            "XDG_CONFIG_HOME": str(sandbox / "home" / ".config"),
-            "VC_FRAME_SOCKET_DIR": str(sandbox / "sock"),
-            "VC_FRAME_CONFIG_DIR": str(sandbox / "cfg"),
-            "VC_FRAME_CONFIG_FILE": str(sandbox / "cfg" / "config.kdl"),
-            "VIBECRAFTED_VC_FRAME_BIN": str(frame),
-            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-            "TERM": "dumb",
-        }
+def _evidence_fields(text: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for line in text.splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            fields[key.strip()] = value
+    return fields
+
+
+def _read_owned_evidence(evidence: Path, timeout: float) -> str | None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if evidence.exists():
+            text = evidence.read_text(errors="replace")
+            if _EVIDENCE_END in text:
+                return text
+        time.sleep(0.1)
+    return None
+
+
+def _terminal_panes(
+    sandbox: _OwnedFrameSandbox, environment: dict[str, str], session: str
+) -> dict[str, dict[str, object]]:
+    """Every addressable terminal pane the engine itself reports, keyed by pane id.
+
+    `list-panes` is answered straight from the screen thread without a client
+    id — unlike `list-tabs` — so it can be read in a session nobody has
+    attached to. That is the only reason this test can address the pane the
+    session opened for itself.
+    """
+    listed = sandbox.run(
+        environment, "--session", session, "action", "list-panes", "--json"
     )
-    if extra:
-        env.update(extra)
-    return env
+    if listed.returncode != 0:
+        return {}
+    document = listed.stdout
+    start, end = document.find("["), document.rfind("]")
+    if start < 0 or end < start:
+        return {}
+    try:
+        entries = json.loads(document[start : end + 1])
+    except json.JSONDecodeError:
+        return {}
+    panes: dict[str, dict[str, object]] = {}
+    for entry in entries:
+        if entry.get("is_plugin") or entry.get("is_suppressed"):
+            continue
+        if entry.get("is_selectable") is False:
+            continue
+        panes[f"terminal_{entry['id']}"] = entry
+    return panes
 
 
-@pytest.mark.skipif(_REAL_FRAME is None, reason="no installed vc-frame engine")
-def test_real_frame_new_pane_and_restore_use_product_profile(tmp_path: Path) -> None:
-    """Real engine, isolated socket/home. Not a host-shell imitation."""
-    assert tmp_path.is_dir()
-    assert _REAL_FRAME is not None
-    tag = f"vcsh{os.getpid() % 100000}"
-    sandbox = Path("/tmp") / tag
-    if sandbox.exists():
-        shutil.rmtree(sandbox)
-    (sandbox / "sock").mkdir(parents=True)
-    (sandbox / "cfg" / "layouts").mkdir(parents=True)
-    home = sandbox / "home"
-    home.mkdir()
+def _wait_for_panes(
+    sandbox: _OwnedFrameSandbox,
+    environment: dict[str, str],
+    session: str,
+    *,
+    count: int,
+    timeout: float = 30,
+) -> list[str]:
+    deadline = time.monotonic() + timeout
+    panes: dict[str, dict[str, object]] = {}
+    while time.monotonic() < deadline:
+        panes = _terminal_panes(sandbox, environment, session)
+        if len(panes) == count:
+            return sorted(panes)
+        time.sleep(0.25)
+    pytest.fail(
+        f"{session} never reported {count} terminal panes; last saw {sorted(panes)}"
+    )
+
+
+def _assert_engine_chose_the_shell(
+    sandbox: _OwnedFrameSandbox,
+    environment: dict[str, str],
+    session: str,
+    pane_id: str,
+) -> None:
+    """Nothing told this pane what to run, so the shell inside it is the engine's.
+
+    `default_shell` is only under test while the pane was left to resolve it.
+    A pane carrying a `terminal_command` was handed its program by a layout,
+    and a product profile proven on that pane would be a fact about the layout
+    instead. This is also how a foreign layout announces itself here: the
+    engine's built-in default opens command panes, so it arrives as a command
+    where there should be none — a named difference rather than a pane count
+    this test would otherwise have to guess at.
+    """
+    entry = _terminal_panes(sandbox, environment, session).get(pane_id)
+    assert entry is not None, f"{pane_id} left the pane list of {session}"
+    assert not entry.get("terminal_command"), (
+        f"{pane_id} was handed a command by a layout: {entry.get('terminal_command')!r}"
+    )
+
+
+def _new_default_pane(
+    sandbox: _OwnedFrameSandbox,
+    environment: dict[str, str],
+    session: str,
+    cwd: Path,
+) -> str:
+    """Open a pane the daily way: no command, no shell argv.
+
+    Passing `-- /bin/zsh -lic ...` would replace the very thing under test —
+    the engine's own default shell and the profile that shell loads. The new
+    pane's id comes from the engine's own pane list rather than from parsing
+    the command's stdout, so the addressed pane is the pane that appeared.
+    """
+    before = set(_terminal_panes(sandbox, environment, session))
+    created = sandbox.run(
+        environment, "--session", session, "action", "new-pane", "--cwd", str(cwd)
+    )
+    assert created.returncode == 0, created.stderr
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        added = set(_terminal_panes(sandbox, environment, session)) - before
+        if len(added) == 1:
+            return added.pop()
+        time.sleep(0.25)
+    pytest.fail(f"new-pane in {session} never reached the engine's pane list")
+
+
+def _type_in_pane(
+    sandbox: _OwnedFrameSandbox,
+    environment: dict[str, str],
+    session: str,
+    probe: Path,
+    evidence: Path,
+    pane_id: str,
+    *,
+    attempts: int = 8,
+    per_attempt: float = 6.0,
+) -> str:
+    """Type one line into a named live pane and read back what that shell reports.
+
+    The pane is always named. Input without `--pane-id` is delivered to the
+    pane focused *by a client*: the engine resolves it through the requesting
+    client's active tab, falls back to the first connected client, and when a
+    session has no client at all it logs the keystrokes away. A session created
+    with `attach --create-background` has never had a client, so focus-targeted
+    input here would be typing into nobody, and retrying it would only take
+    longer to prove nothing. `--pane-id` is routed as a write to that pane id
+    and never consults a client.
+
+    The engine acknowledges the write request, not the shell's consumption of
+    it, so keystrokes aimed at a pane whose shell is still starting are simply
+    dropped. Only the input is retried; no assertion is retried or relaxed.
+    The leading Return also submits a half-line left by a dropped keystroke and
+    resumes a restored pane that came back waiting for one.
+    """
+    target = ["--pane-id", pane_id]
+    line = f"source {shlex.quote(str(probe))}"
+    for _ in range(attempts):
+        sandbox.run(environment, "--session", session, "action", "write", *target, "13")
+        sandbox.run(
+            environment, "--session", session, "action", "write-chars", *target, line
+        )
+        sandbox.run(environment, "--session", session, "action", "write", *target, "13")
+        text = _read_owned_evidence(evidence, per_attempt)
+        if text is not None:
+            return text
+    pytest.fail(
+        f"pane {pane_id} in {session} never ran {probe.name}; "
+        f"screen was:\n{sandbox.screen(environment, session, pane_id)}"
+    )
+
+
+def _wait_for_serialized_panes(
+    sandbox: _OwnedFrameSandbox,
+    session: str,
+    *,
+    markers: tuple[str, ...],
+    timeout: float = 60,
+) -> str:
+    """Block until the engine's own resurrection cache names every pane.
+
+    Restore is a claim about durable state, so killing a session before the
+    engine has written that state proves nothing: what comes back is whatever
+    the last write — or no write at all — happened to hold. The engine
+    serializes from its session-metadata loop, every `serialization_interval`,
+    on a tick that slows to 5s while no client is attached; each pane's cwd is
+    part of what it writes. Waiting for both cwds to appear in that file is
+    therefore a wait for an actual current write, not a sleep long enough to
+    hope for one.
+    """
+    deadline = time.monotonic() + timeout
+    seen = ""
+    while time.monotonic() < deadline:
+        cache = sandbox.session_layout_cache(session)
+        if cache is not None:
+            with contextlib.suppress(OSError):
+                seen = cache.read_text(errors="replace")
+            if all(marker in seen for marker in markers):
+                return seen
+        time.sleep(0.25)
+    pytest.fail(
+        f"{session} was never serialized with {list(markers)}; "
+        f"last cache contents were:\n{seen}"
+    )
+
+
+def _assert_live_pane_shell(text: str, *, name: str) -> dict[str, str]:
+    """The pane is a real interactive zsh on a real terminal, not an imitation."""
+    fields = _evidence_fields(text)
+    assert fields.get("PROBE") == name, text
+    assert fields.get("ZSH_VERSION"), f"default pane shell is not zsh:\n{text}"
+    assert fields.get("INTERACTIVE") == "on", text
+    assert fields.get("TTY", "").startswith("/dev/"), text
+    assert fields.get("SHELL_PID", "").isdigit(), text
+    return fields
+
+
+def _assert_persistent_pane_process(fields: dict[str, str], *, text: str) -> int:
+    """A daily pane keeps its shell; a `zsh -c` payload would already be gone."""
+    pid = int(fields["SHELL_PID"])
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        pytest.fail(f"pane shell {pid} did not outlive its own report:\n{text}")
+    return pid
+
+
+def _wait_process_gone(pid: int, timeout: float = 15) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _process_is_alive(pid):
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def _assert_product_profile(
+    fields: dict[str, str], *, home: Path, zdotdir: Path, cwd: Path, text: str
+) -> None:
+    assert fields.get("ZDOTDIR") == str(zdotdir), text
+    assert fields.get("CWD") == str(cwd), text
+    assert fields.get("GL") == _PRODUCT_GL, text
+    assert fields.get("STARSHIP_CONFIG") == str(
+        home / ".config" / "vibecrafted" / "starship.toml"
+    ), text
+
+
+def _stage_frame_home(sandbox: _OwnedFrameSandbox) -> tuple[Path, Path]:
+    """Product profile plus the private canary that must never run."""
+    home = sandbox.home
     _stage_product_profile(home)
     (home / ".zshrc").write_text(
         'touch "$HOME/PRIVATE_PROFILE_EXECUTED"\nprint PRIVATE_PROFILE_EXECUTED\n'
     )
-    work = home / "restore-cwd"
-    work.mkdir()
-    (sandbox / "cfg" / "config.kdl").write_text(
-        'keybinds clear-defaults=true {}\ndefault_shell "zsh"\n',
-        encoding="utf-8",
-    )
-    (sandbox / "cfg" / "layouts" / "empty.kdl").write_text(
-        "layout {\n  pane\n}\n", encoding="utf-8"
-    )
-    product_zdot = home / ".config/vibecrafted/vc-terminal"
-    new_probe = _write_frame_probe(home, "new-pane")
-    restore_probe = _write_frame_probe(home, "restore")
-    env = _isolated_frame_env(
-        sandbox,
-        _REAL_FRAME,
-        extra={"ZDOTDIR": str(product_zdot)},
-    )
-    session = tag
+    return home, home / ".config/vibecrafted/vc-terminal"
 
-    def frame(*args: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [str(_REAL_FRAME), *args],
-            check=False,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
 
+@pytest.mark.skipif(_REAL_FRAME is None, reason="no installed vc-frame engine")
+def test_real_frame_default_and_restored_panes_run_product_profile() -> None:
+    """The real engine's own default shell, in a real PTY, before and after restore.
+
+    Every pane a person actually meets: the one the session opens, the one
+    `new-pane` adds, and both of them again once the session has been killed
+    and resurrected. None of them is handed a shell argv by this test, and the
+    kill only happens after the engine has durably written both panes down.
+    """
+    assert _REAL_FRAME is not None
+    sandbox = _OwnedFrameSandbox(_REAL_FRAME, "vcsh")
     try:
-        created = frame(
-            "--new-session-with-layout",
-            str(sandbox / "cfg" / "layouts" / "empty.kdl"),
-            "attach",
-            "--create-background",
-            session,
-        )
-        assert created.returncode == 0, created.stderr
-        deadline = time.monotonic() + 15
-        while session not in frame("ls").stdout and time.monotonic() < deadline:
-            time.sleep(0.25)
-        assert session in frame("ls").stdout
+        home, product_zdot = _stage_frame_home(sandbox)
+        startup_cwd = home / _STARTUP_DIR
+        added_cwd = home / _ADDED_DIR
+        startup_cwd.mkdir()
+        added_cwd.mkdir()
+        environment = sandbox.env(ZDOTDIR=str(product_zdot))
+        session = sandbox.session_name("panes")
+        sandbox.create_session(environment, session, cwd=startup_cwd)
 
-        new_pane = frame(
-            "--session",
-            session,
-            "action",
-            "new-pane",
-            "--cwd",
-            str(work),
-            "--",
-            "/bin/zsh",
-            "-lic",
-            f"source {str(new_probe)!r}",
+        # 1. The pane the session itself opened — the daily default shell.
+        startup_pane = _wait_for_panes(sandbox, environment, session, count=1)[0]
+        _assert_engine_chose_the_shell(sandbox, environment, session, startup_pane)
+        startup_probe, startup_evidence = _write_frame_probe(home, "startup")
+        startup_text = _type_in_pane(
+            sandbox, environment, session, startup_probe, startup_evidence, startup_pane
         )
-        assert new_pane.returncode == 0, new_pane.stderr
-        new_text = _wait_owned_evidence(home / "new-pane.evidence")
-        assert "PROBE=new-pane" in new_text
-        assert "git log --oneline --graph --decorate -20" in new_text
-        assert f"CWD={work}" in new_text
-        assert f"ZDOTDIR={product_zdot}" in new_text
+        startup = _assert_live_pane_shell(startup_text, name="startup")
+        _assert_product_profile(
+            startup,
+            home=home,
+            zdotdir=product_zdot,
+            cwd=startup_cwd,
+            text=startup_text,
+        )
+        startup_pid = _assert_persistent_pane_process(startup, text=startup_text)
+        sandbox.remember_pane_process(startup_pid)
         assert not (home / "PRIVATE_PROFILE_EXECUTED").exists()
 
-        killed = frame("kill-session", session)
+        # 2. A pane added to the live session, still without a named shell.
+        added_pane = _new_default_pane(sandbox, environment, session, added_cwd)
+        added_probe, added_evidence = _write_frame_probe(home, "new-pane")
+        added_text = _type_in_pane(
+            sandbox, environment, session, added_probe, added_evidence, added_pane
+        )
+        added = _assert_live_pane_shell(added_text, name="new-pane")
+        _assert_product_profile(
+            added, home=home, zdotdir=product_zdot, cwd=added_cwd, text=added_text
+        )
+        added_pid = _assert_persistent_pane_process(added, text=added_text)
+        sandbox.remember_pane_process(added_pid)
+        assert added_pid != startup_pid, added_text
+
+        # 3. Only now may the session die: the engine has written a cache that
+        # names both panes, so what comes back is the work that existed here.
+        _wait_for_serialized_panes(sandbox, session, markers=(_STARTUP_DIR, _ADDED_DIR))
+
+        killed = sandbox.run(environment, "kill-session", session)
         assert killed.returncode == 0, killed.stderr
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 15
         listing = ""
         while time.monotonic() < deadline:
-            listing = frame("list-sessions", "--no-formatting").stdout
+            listing = sandbox.run(
+                environment, "list-sessions", "--no-formatting"
+            ).stdout
             if session in listing and "(EXITED" in listing:
                 break
             time.sleep(0.2)
-        assert session in listing
+        assert session in listing, listing
         assert "(EXITED" in listing, listing
+        # The killed panes really are gone, so what answers next is restored
+        # work rather than a survivor of the old session.
+        assert _wait_process_gone(startup_pid), startup_pid
+        assert _wait_process_gone(added_pid), added_pid
 
-        restored = frame("attach", "--create-background", session)
+        # 4. The restored panes themselves. Adding a fresh pane here would only
+        # re-prove step 2 and leave the restored shells untested.
+        restored = sandbox.run(environment, "attach", "--create-background", session)
         assert restored.returncode == 0, restored.stderr
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
-            live = frame("list-sessions", "--no-formatting").stdout
+            live = sandbox.run(environment, "list-sessions", "--no-formatting").stdout
             if session in live and "(EXITED" not in live:
                 break
             time.sleep(0.25)
-        restore_pane = frame(
-            "--session",
-            session,
-            "action",
-            "new-pane",
-            "--cwd",
-            str(work),
-            "--",
-            "/bin/zsh",
-            "-lic",
-            f"source {str(restore_probe)!r}",
-        )
-        assert restore_pane.returncode == 0, restore_pane.stderr
-        restore_text = _wait_owned_evidence(home / "restore.evidence")
-        assert "PROBE=restore" in restore_text
-        assert "git log --oneline --graph --decorate -20" in restore_text
-        assert f"CWD={work}" in restore_text
-        assert f"ZDOTDIR={product_zdot}" in restore_text
+        reports: dict[str, tuple[dict[str, str], str]] = {}
+        for index, pane_id in enumerate(
+            _wait_for_panes(sandbox, environment, session, count=2), start=1
+        ):
+            name = f"restore-{index}"
+            probe, evidence = _write_frame_probe(home, name)
+            text = _type_in_pane(
+                sandbox, environment, session, probe, evidence, pane_id
+            )
+            fields = _assert_live_pane_shell(text, name=name)
+            pid = _assert_persistent_pane_process(fields, text=text)
+            sandbox.remember_pane_process(pid)
+            assert pid not in {startup_pid, added_pid}, text
+            reports[fields.get("CWD", "")] = (fields, text)
+
+        assert set(reports) == {str(startup_cwd), str(added_cwd)}, sorted(reports)
+        for cwd, (fields, text) in reports.items():
+            _assert_product_profile(
+                fields,
+                home=home,
+                zdotdir=product_zdot,
+                cwd=Path(cwd),
+                text=text,
+            )
+            assert "PRIVATE_PROFILE_EXECUTED" not in text
         assert not (home / "PRIVATE_PROFILE_EXECUTED").exists()
     finally:
-        frame("kill-session", session)
-        frame("delete-session", session, "--force")
-        leftover = frame("list-sessions", "--no-formatting").stdout
-        shutil.rmtree(sandbox, ignore_errors=True)
-    assert session not in leftover, leftover
+        sandbox.close()
+    assert not sandbox.teardown_errors, sandbox.teardown_errors
+    assert session not in sandbox.leftover, sandbox.leftover
 
 
 @pytest.mark.skipif(_REAL_FRAME is None, reason="no installed vc-frame engine")
-def test_real_frame_live_server_keeps_zdotdir_when_new_client_differs(
-    tmp_path: Path,
-) -> None:
-    """A later client env does not rewrite an already-live server."""
-    assert tmp_path.is_dir()
+def test_real_frame_client_env_updates_no_server_but_a_product_server_does() -> None:
+    """Two claims that only mean something together.
+
+    A live server keeps the profile it was started with, whatever a later
+    client carries — and a server started as the product does hand its panes
+    the product profile. Without the second half, the first is equally
+    satisfied by a mechanism that never works at all.
+    """
     assert _REAL_FRAME is not None
-    tag = f"vcso{os.getpid() % 100000}"
-    sandbox = Path("/tmp") / tag
-    if sandbox.exists():
-        shutil.rmtree(sandbox)
-    (sandbox / "sock").mkdir(parents=True)
-    (sandbox / "cfg" / "layouts").mkdir(parents=True)
-    home = sandbox / "home"
-    home.mkdir()
-    _stage_product_profile(home)
-    (home / ".zshrc").write_text(
-        'touch "$HOME/PRIVATE_PROFILE_EXECUTED"\nprint PRIVATE_PROFILE_EXECUTED\n'
-    )
-    old_zdot = home / "old-live-zdot"
-    old_zdot.mkdir()
-    (old_zdot / ".zshrc").write_text(
-        'touch "$HOME/OLD_LIVE_SERVER"\nprint OLD_LIVE_SERVER\n'
-    )
-    product_zdot = home / ".config/vibecrafted/vc-terminal"
-    work = home / "live-cwd"
-    work.mkdir()
-    (sandbox / "cfg" / "config.kdl").write_text(
-        'keybinds clear-defaults=true {}\ndefault_shell "zsh"\n',
-        encoding="utf-8",
-    )
-    (sandbox / "cfg" / "layouts" / "empty.kdl").write_text(
-        "layout {\n  pane\n}\n", encoding="utf-8"
-    )
-    old_probe = _write_frame_probe(home, "old-server")
-    client_probe = _write_frame_probe(home, "new-client")
-    server_env = _isolated_frame_env(
-        sandbox,
-        _REAL_FRAME,
-        extra={"ZDOTDIR": str(old_zdot)},
-    )
-    client_env = _isolated_frame_env(
-        sandbox,
-        _REAL_FRAME,
-        extra={"ZDOTDIR": str(product_zdot)},
-    )
-    session = tag
-
-    def run_frame(
-        environment: dict[str, str], *args: str, timeout: int = 30
-    ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [str(_REAL_FRAME), *args],
-            check=False,
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-
+    sandbox = _OwnedFrameSandbox(_REAL_FRAME, "vcso")
     try:
-        created = run_frame(
-            server_env,
-            "--new-session-with-layout",
-            str(sandbox / "cfg" / "layouts" / "empty.kdl"),
-            "attach",
-            "--create-background",
-            session,
-        )
-        assert created.returncode == 0, created.stderr
-        deadline = time.monotonic() + 15
-        while (
-            session not in run_frame(server_env, "ls").stdout
-            and time.monotonic() < deadline
-        ):
-            time.sleep(0.25)
-        assert session in run_frame(server_env, "ls").stdout
+        home, product_zdot = _stage_frame_home(sandbox)
+        legacy_zdot = home / "legacy-zdot"
+        legacy_zdot.mkdir()
+        (legacy_zdot / ".zshrc").write_text('touch "$HOME/LEGACY_LIVE_SERVER"\n')
+        work = home / "work"
+        work.mkdir()
+        legacy_env = sandbox.env(ZDOTDIR=str(legacy_zdot))
+        product_env = sandbox.env(ZDOTDIR=str(product_zdot))
 
-        first = run_frame(
-            server_env,
-            "--session",
-            session,
-            "action",
-            "new-pane",
-            "--cwd",
-            str(work),
-            "--",
-            "/bin/zsh",
-            "-lic",
-            f"source {str(old_probe)!r}",
+        # The server that was already running when the product arrived.
+        legacy_session = sandbox.session_name("legacy")
+        sandbox.create_session(legacy_env, legacy_session, cwd=work)
+        legacy_pane = _wait_for_panes(sandbox, legacy_env, legacy_session, count=1)[0]
+        _assert_engine_chose_the_shell(sandbox, legacy_env, legacy_session, legacy_pane)
+        legacy_probe, legacy_evidence = _write_frame_probe(home, "legacy-server")
+        legacy_text = _type_in_pane(
+            sandbox,
+            legacy_env,
+            legacy_session,
+            legacy_probe,
+            legacy_evidence,
+            legacy_pane,
         )
-        assert first.returncode == 0, first.stderr
-        old_text = _wait_owned_evidence(home / "old-server.evidence")
-        assert "PROBE=old-server" in old_text
-        assert f"ZDOTDIR={old_zdot}" in old_text
-        assert "git log --oneline --graph --decorate -20" not in old_text
-        assert (home / "OLD_LIVE_SERVER").exists()
-
-        listing = run_frame(client_env, "list-sessions", "--no-formatting")
-        assert listing.returncode == 0, listing.stderr
-        assert session in listing.stdout
-
-        later = run_frame(
-            client_env,
-            "--session",
-            session,
-            "action",
-            "new-pane",
-            "--cwd",
-            str(work),
-            "--",
-            "/bin/zsh",
-            "-lic",
-            f"source {str(client_probe)!r}",
+        legacy = _assert_live_pane_shell(legacy_text, name="legacy-server")
+        assert legacy.get("ZDOTDIR") == str(legacy_zdot), legacy_text
+        assert legacy.get("GL") == "", legacy_text
+        assert legacy.get("STARSHIP_CONFIG") == "", legacy_text
+        assert (home / "LEGACY_LIVE_SERVER").exists()
+        sandbox.remember_pane_process(
+            _assert_persistent_pane_process(legacy, text=legacy_text)
         )
-        assert later.returncode == 0, later.stderr
-        later_text = _wait_owned_evidence(home / "new-client.evidence")
-        assert "PROBE=new-client" in later_text
-        assert f"ZDOTDIR={old_zdot}" in later_text
-        assert "git log --oneline --graph --decorate -20" not in later_text
+
+        # A client carrying the product environment into that live server.
+        # Its env reaches the engine's argv, never the running server's panes.
+        late_pane = _new_default_pane(sandbox, product_env, legacy_session, work)
+        late_probe, late_evidence = _write_frame_probe(home, "legacy-late-client")
+        late_text = _type_in_pane(
+            sandbox,
+            product_env,
+            legacy_session,
+            late_probe,
+            late_evidence,
+            late_pane,
+        )
+        late = _assert_live_pane_shell(late_text, name="legacy-late-client")
+        assert late.get("ZDOTDIR") == str(legacy_zdot), late_text
+        assert late.get("GL") == "", late_text
+        assert late.get("STARSHIP_CONFIG") == "", late_text
+        sandbox.remember_pane_process(
+            _assert_persistent_pane_process(late, text=late_text)
+        )
+
+        # The server the product itself starts, in the same owned world.
+        product_session = sandbox.session_name("product")
+        sandbox.create_session(product_env, product_session, cwd=work)
+        product_pane = _wait_for_panes(sandbox, product_env, product_session, count=1)[
+            0
+        ]
+        _assert_engine_chose_the_shell(
+            sandbox, product_env, product_session, product_pane
+        )
+        product_probe, product_evidence = _write_frame_probe(home, "product-server")
+        product_text = _type_in_pane(
+            sandbox,
+            product_env,
+            product_session,
+            product_probe,
+            product_evidence,
+            product_pane,
+        )
+        product = _assert_live_pane_shell(product_text, name="product-server")
+        _assert_product_profile(
+            product, home=home, zdotdir=product_zdot, cwd=work, text=product_text
+        )
+        sandbox.remember_pane_process(
+            _assert_persistent_pane_process(product, text=product_text)
+        )
+
         assert not (home / "PRIVATE_PROFILE_EXECUTED").exists()
+        assert "PRIVATE_PROFILE_EXECUTED" not in legacy_text + late_text + product_text
     finally:
-        run_frame(server_env, "kill-session", session)
-        run_frame(server_env, "delete-session", session, "--force")
-        leftover = run_frame(server_env, "list-sessions", "--no-formatting").stdout
-        shutil.rmtree(sandbox, ignore_errors=True)
-    assert session not in leftover, leftover
+        sandbox.close()
+    assert not sandbox.teardown_errors, sandbox.teardown_errors
+    for name in (legacy_session, product_session):
+        assert name not in sandbox.leftover, sandbox.leftover
