@@ -231,6 +231,11 @@ def test_rescue_preserves_user_config_and_foreign_commands(
     assert apply_code == 0
     assert result["status"] == "rescued"
     assert result["healthy_restorepoint"] is True
+    receipt = _load_receipt(paths)
+    assert not receipt.get("rescue_pending")
+    assert not receipt.get("install_pending")
+    assert receipt["rescue"]["verified"] is True
+    assert receipt["rescue"]["healthy_restorepoint"] is True
     assert starship.read_text() == user_starship
     assert foreign.read_text() == "#!/bin/sh\necho mine\n"
     assert external.read_text() == "#!/bin/sh\n# user foundation\n"
@@ -300,6 +305,9 @@ def test_interrupted_publish_then_retry_recovers(tmp_path, installed, capsys, mo
     assert second["status"] == "rescued"
     assert second["healthy_restorepoint"] is True
     assert archive.is_file()
+    finalized = _load_receipt(paths)
+    assert not finalized.get("rescue_pending")
+    assert finalized["rescue"]["verified"] is True
 
 
 def test_interrupted_pending_journal_resumes_same_digest(
@@ -341,6 +349,9 @@ def test_interrupted_pending_journal_resumes_same_digest(
     assert second["healthy_restorepoint"] is True
     assert first["archived_receipt"]["path"]
     assert Path(first["archived_receipt"]["path"]).is_file()
+    finalized = _load_receipt(paths)
+    assert not finalized.get("rescue_pending")
+    assert finalized["rescue"]["verified"] is True
 
 
 def test_repeat_apply_converges_and_keeps_healthy_restorepoint_after_verify(
@@ -357,6 +368,9 @@ def test_repeat_apply_converges_and_keeps_healthy_restorepoint_after_verify(
     assert label["healthy_restorepoint"] is False
     receipt = _load_receipt(paths)
     assert receipt["rescue"]["healthy_restorepoint"] is True
+    assert receipt["rescue"]["verified"] is True
+    assert not receipt.get("rescue_pending")
+    assert not receipt.get("install_pending")
     assert receipt["rescue"]["archived_receipt_sha256"]
     assert receipt["rescue"]["missing_history"]
     _, healthy = _plan(payload, capsys)
@@ -596,6 +610,9 @@ def test_fix_rc_is_explicit_planned_stanza_preserving_user_content(
     apply_code, result = _apply(payload, capsys, plan["plan_digest"])
     assert apply_code == 0
     assert result["healthy_restorepoint"] is True
+    finalized = _load_receipt(paths)
+    assert not finalized.get("rescue_pending")
+    assert finalized["rescue"]["verified"] is True
     repaired = zshrc.read_text(encoding="utf-8")
     assert "alias keep-me=true" in repaired
     assert installer._shell_source_line() not in repaired
@@ -887,6 +904,9 @@ def test_interrupted_resume_valid_same_binding_resumes(
     assert second["healthy_restorepoint"] is True
     assert first["archived_receipt"]["path"]
     assert Path(first["archived_receipt"]["path"]).is_file()
+    finalized = _load_receipt(paths)
+    assert not finalized.get("rescue_pending")
+    assert finalized["rescue"]["verified"] is True
 
 
 def test_rollback_both_missing_reports_residual(tmp_path, roots):
@@ -1168,3 +1188,188 @@ def test_preference_conflict_keeps_pending_recoverable(
     assert receipt.get("rescue_pending")
     assert receipt.get("install_pending") is True
     assert receipt["rescue_pending"].get("binding", {}).get("payload_sha256")
+
+
+def _owned_pending_from_journal(paths: dict) -> tuple[dict, dict]:
+    journal = json.loads(
+        installer._runtime_rescue_journal_path(paths["runtime_home"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    return installer._runtime_rescue_pending_record_from_journal(journal), journal
+
+
+def test_verify_destination_refuses_unrelated_pending_identity(
+    installed, capsys
+):
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    _, plan = _plan(payload, capsys)
+    code, result = _apply(payload, capsys, plan["plan_digest"])
+    assert code == 0
+    expected, _ = _owned_pending_from_journal(paths)
+    receipt = _load_receipt(paths)
+    assert not receipt.get("rescue_pending")
+
+    receipt["rescue_pending"] = {
+        "schema": installer.RUNTIME_RESCUE_PENDING_SCHEMA,
+        "plan_digest": "a" * 64,
+        "input_digest": expected.get("input_digest"),
+        "binding": dict(expected.get("binding") or {}),
+    }
+    _write_receipt(paths, receipt)
+    verified, reason = installer._runtime_rescue_verify_destination(
+        paths, expected_pending=expected
+    )
+    assert verified is False
+    assert reason == "destination publication is still pending"
+
+    receipt = _load_receipt(paths)
+    receipt["rescue_pending"] = dict(expected)
+    receipt["install_pending"] = True
+    _write_receipt(paths, receipt)
+    verified, reason = installer._runtime_rescue_verify_destination(
+        paths, expected_pending=expected
+    )
+    assert verified is False
+    assert reason == "destination publication is still pending"
+
+    receipt = _load_receipt(paths)
+    receipt.pop("install_pending", None)
+    receipt["rescue_pending"] = dict(expected)
+    receipt["config_pending"] = {"staged": True}
+    _write_receipt(paths, receipt)
+    verified, reason = installer._runtime_rescue_verify_destination(
+        paths, expected_pending=expected
+    )
+    assert verified is False
+    assert reason == "destination publication is still pending"
+
+    receipt = _load_receipt(paths)
+    receipt.pop("config_pending", None)
+    receipt["uninstall_pending"] = True
+    receipt["rescue_pending"] = dict(expected)
+    _write_receipt(paths, receipt)
+    verified, reason = installer._runtime_rescue_verify_destination(
+        paths, expected_pending=expected
+    )
+    assert verified is False
+    assert reason == "destination publication is still pending"
+
+    receipt = _load_receipt(paths)
+    receipt.pop("uninstall_pending", None)
+    mismatched = dict(expected)
+    mismatched["binding"] = dict(expected.get("binding") or {})
+    mismatched["binding"]["payload_sha256"] = "b" * 64
+    receipt["rescue_pending"] = mismatched
+    _write_receipt(paths, receipt)
+    verified, reason = installer._runtime_rescue_verify_destination(
+        paths, expected_pending=expected
+    )
+    assert verified is False
+    assert reason == "destination publication is still pending"
+
+    receipt = _load_receipt(paths)
+    receipt["rescue_pending"] = dict(expected)
+    _write_receipt(paths, receipt)
+    verified, reason = installer._runtime_rescue_verify_destination(paths)
+    assert verified is False
+    assert reason == "destination publication is still pending"
+
+    receipt = _load_receipt(paths)
+    receipt["rescue_pending"] = dict(expected)
+    _write_receipt(paths, receipt)
+    verified, reason = installer._runtime_rescue_verify_destination(
+        paths, expected_pending=expected
+    )
+    assert verified is True
+    assert reason == ""
+
+
+def test_verification_failed_retry_keeps_pending_then_finalizes(
+    installed, capsys, monkeypatch
+):
+    paths, payload, _ = installed
+    _plant_missing_historical(paths)
+    _, plan = _plan(payload, capsys)
+    original = installer._runtime_rescue_interactive_shell_check
+    calls = {"n": 0}
+
+    def boom():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "ok": "false",
+                "reason": "injected destination shell residual",
+                "returncode": "1",
+                "stderr": "",
+            }
+        return original()
+
+    monkeypatch.setattr(installer, "_runtime_rescue_interactive_shell_check", boom)
+    code, first = _apply(payload, capsys, plan["plan_digest"])
+    assert code == 2
+    assert first["status"] == "residual"
+    assert first["healthy_restorepoint"] is False
+    assert "injected destination shell residual" in first["reason"]
+    receipt = _load_receipt(paths)
+    assert receipt.get("rescue_pending")
+    assert receipt["rescue_pending"]["plan_digest"] == plan["plan_digest"]
+    assert receipt["rescue_pending"]["binding"]["payload_sha256"]
+    assert receipt["rescue_pending"]["healthy_restorepoint"] is False
+    assert not receipt.get("install_pending")
+    journal = json.loads(
+        installer._runtime_rescue_journal_path(paths["runtime_home"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert journal["plan_digest"] == plan["plan_digest"]
+    code, second = _apply(payload, capsys, plan["plan_digest"])
+    assert code == 0
+    assert second["status"] == "rescued"
+    assert second["healthy_restorepoint"] is True
+    receipt = _load_receipt(paths)
+    assert not receipt.get("rescue_pending")
+    assert not receipt.get("install_pending")
+    assert receipt["rescue"]["verified"] is True
+    assert receipt["rescue"]["healthy_restorepoint"] is True
+    assert receipt["rescue"]["schema"] == "vibecrafted.runtime-rescue.v1"
+
+
+def test_owned_pending_identity_requires_validated_binding():
+    expected = {
+        "schema": installer.RUNTIME_RESCUE_PENDING_SCHEMA,
+        "plan_digest": "c" * 64,
+        "input_digest": "d" * 64,
+        "binding": {
+            "payload_root": "/tmp/pack",
+            "payload_sha256": "e" * 64,
+            "inventory_sha256": "f" * 64,
+            "version_identity_sha256": "1" * 64,
+            "mode": "apply",
+            "allow_older_runtime": False,
+        },
+    }
+    stub = {
+        "schema": installer.RUNTIME_RESCUE_PENDING_SCHEMA,
+        "plan_digest": "c" * 64,
+    }
+    assert installer._runtime_rescue_pending_matches_owned_identity(stub, expected) is False
+    assert (
+        installer._runtime_rescue_pending_matches_owned_identity(expected, expected)
+        is True
+    )
+    receipt = {"rescue_pending": expected, "install_pending": True}
+    assert (
+        installer._runtime_rescue_pending_publication_reason(
+            receipt, expected_pending=expected
+        )
+        == "destination publication is still pending"
+    )
+    receipt = {"rescue_pending": expected}
+    assert (
+        installer._runtime_rescue_pending_publication_reason(
+            receipt, expected_pending=expected
+        )
+        == ""
+    )

@@ -18449,6 +18449,94 @@ def _runtime_rescue_pending_record_from_journal(
     }
 
 
+def _runtime_rescue_pending_matches_owned_identity(
+    pending: Any, expected: Mapping[str, Any] | None
+) -> bool:
+    """True only when pending is this rescue's validated verification-phase marker."""
+    if expected is None or not isinstance(pending, dict):
+        return False
+    if pending.get("schema") != RUNTIME_RESCUE_PENDING_SCHEMA:
+        return False
+    if expected.get("schema") != RUNTIME_RESCUE_PENDING_SCHEMA:
+        return False
+    plan_digest = str(pending.get("plan_digest") or "")
+    expected_digest = str(expected.get("plan_digest") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", plan_digest):
+        return False
+    if plan_digest != expected_digest:
+        return False
+    input_digest = str(pending.get("input_digest") or "")
+    expected_input = str(expected.get("input_digest") or "")
+    if expected_input and input_digest != expected_input:
+        return False
+    pending_binding = pending.get("binding")
+    expected_binding = expected.get("binding")
+    if not isinstance(pending_binding, dict) or not isinstance(expected_binding, dict):
+        return False
+    if not expected_binding:
+        return False
+    for key in (
+        "payload_root",
+        "payload_sha256",
+        "inventory_sha256",
+        "version_identity_sha256",
+        "mode",
+        "allow_older_runtime",
+    ):
+        if pending_binding.get(key) != expected_binding.get(key):
+            return False
+        if key in {
+            "payload_root",
+            "payload_sha256",
+            "inventory_sha256",
+            "version_identity_sha256",
+        } and not pending_binding.get(key):
+            return False
+    return True
+
+
+def _runtime_rescue_pending_publication_reason(
+    receipt: Mapping[str, Any],
+    *,
+    expected_pending: Mapping[str, Any] | None = None,
+) -> str:
+    """Refuse unrelated pending. Owned verification-phase rescue_pending is not pending publication."""
+    if any(
+        receipt.get(key)
+        for key in (
+            "install_pending",
+            "config_pending",
+            "config_transaction",
+            "uninstall_pending",
+        )
+    ):
+        return "destination publication is still pending"
+    pending = receipt.get("rescue_pending")
+    if not pending:
+        return ""
+    if _runtime_rescue_pending_matches_owned_identity(pending, expected_pending):
+        return ""
+    return "destination publication is still pending"
+
+
+def _runtime_rescue_keep_verification_pending(
+    paths: Mapping[str, Path],
+    journal: Mapping[str, Any],
+    receipt_path: Path,
+) -> None:
+    """Keep owned rescue_pending after a destination/shell residual. Do not reopen install_pending."""
+    if not journal:
+        return
+    receipt = _load_runtime_install_receipt(receipt_path) if receipt_path.is_file() else {}
+    if not receipt:
+        return
+    pending = _runtime_rescue_pending_record_from_journal(journal)
+    receipt["rescue_pending"] = pending
+    receipt["rescue"] = dict(pending)
+    receipt.pop("install_pending", None)
+    _checkpoint_runtime_install_receipt(paths["runtime_home"], receipt)
+
+
 def _runtime_rescue_keep_pending_truthful(
     paths: Mapping[str, Path],
     journal: Mapping[str, Any],
@@ -18767,8 +18855,16 @@ def _runtime_rescue_rollback_captured_state(
 
 def _runtime_rescue_verify_destination(
     paths: Mapping[str, Path],
+    *,
+    expected_pending: Mapping[str, Any] | None = None,
 ) -> tuple[bool, str]:
-    """Complete destination verification. A receipt is not a healthy shell."""
+    """Complete destination verification. A receipt is not a healthy shell.
+
+    ``rescue_pending`` that matches ``expected_pending`` (journal/binding/plan)
+    is this rescue's owned verification phase, not a competing publication.
+    Unrelated or mismatched pending markers, and install/config/uninstall
+    transitions, still refuse. Destination and shell checks still run.
+    """
     errors: list[str] = []
     try:
         runtime_home = paths["runtime_home"]
@@ -18777,17 +18873,11 @@ def _runtime_rescue_verify_destination(
             return False, "destination receipt is absent"
         if receipt.get("schema") != RUNTIME_INSTALL_SCHEMA:
             return False, "destination receipt schema is unsupported"
-        if any(
-            receipt.get(key)
-            for key in (
-                "install_pending",
-                "config_pending",
-                "config_transaction",
-                "rescue_pending",
-                "uninstall_pending",
-            )
-        ):
-            return False, "destination publication is still pending"
+        pending_reason = _runtime_rescue_pending_publication_reason(
+            receipt, expected_pending=expected_pending
+        )
+        if pending_reason:
+            return False, pending_reason
         _validate_runtime_backup_receipts(receipt, paths)
         current = runtime_home / "tools/vibecrafted-current"
         _assert_runtime_physical_path(current, leaf_symlink=True)
@@ -19466,13 +19556,24 @@ def _runtime_rescue_finish(
     shell_residuals = _runtime_rescue_apply_shell_stanzas(
         list(((journal.get("shell") or {}).get("stanzas") or []))
     )
-    verified, verify_reason = _runtime_rescue_verify_destination(paths)
+    expected_pending = _runtime_rescue_pending_record_from_journal(journal)
+    verified, verify_reason = _runtime_rescue_verify_destination(
+        paths, expected_pending=expected_pending
+    )
     residuals = list(shell_residuals)
     if not verified:
         residuals.append({"path": str(receipt_path), "reason": verify_reason})
     if residuals:
-        verified = False
-        verify_reason = verify_reason or residuals[0]["reason"]
+        _runtime_rescue_keep_verification_pending(paths, journal, receipt_path)
+        envelope.update(
+            status="residual",
+            reason=verify_reason or residuals[0]["reason"],
+            healthy_restorepoint=False,
+            runtime=None,
+            residuals=residuals,
+        )
+        print(json.dumps(envelope, sort_keys=True))
+        return 2
     receipt = _load_runtime_install_receipt(receipt_path)
     rescue = dict(receipt.get("rescue") or journal)
     rescue.update(
@@ -19488,32 +19589,31 @@ def _runtime_rescue_finish(
                 (journal.get("pre_rescue_snapshot") or {}).get("path") or ""
             ),
             "pre_rescue_label": "damaged-pre-rescue",
-            "healthy_restorepoint": verified,
-            "verified": verified,
+            "healthy_restorepoint": True,
+            "verified": True,
         }
     )
     receipt.pop("rescue_pending", None)
+    receipt.pop("install_pending", None)
     receipt["rescue"] = rescue
     _checkpoint_runtime_install_receipt(paths["runtime_home"], receipt)
-    result = None
-    if verified:
-        generation = (
-            paths["runtime_home"] / "tools/vibecrafted-current"
-        ).resolve(strict=True)
-        result = _runtime_install_result(
-            generation=generation,
-            app_root=_receipt_app_root(receipt),
-            paths=paths,
-        )
+    generation = (
+        paths["runtime_home"] / "tools/vibecrafted-current"
+    ).resolve(strict=True)
+    result = _runtime_install_result(
+        generation=generation,
+        app_root=_receipt_app_root(receipt),
+        paths=paths,
+    )
     envelope.update(
-        status="rescued" if verified else "residual",
-        reason="" if verified else verify_reason,
-        healthy_restorepoint=verified,
+        status="rescued",
+        reason="",
+        healthy_restorepoint=True,
         runtime=result,
-        residuals=residuals,
+        residuals=[],
     )
     print(json.dumps(envelope, sort_keys=True))
-    return 0 if verified else 2
+    return 0
 
 
 def _stage_runtime_product_config(

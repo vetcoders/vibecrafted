@@ -232,7 +232,14 @@ pending journal state recoverable. Destination verification covers
 selectors, active identity, every receipted file/symlink/dir, every
 expected launcher/skill/config projection, and an isolated interactive
 `zsh -i` smoke in a real temporary HOME/ZDOTDIR. A healthy receipt is not
-a healthy shell. Unsafe or unknown-ownership paths refuse. Same-type
+a healthy shell. The exact current rescue's `rescue_pending` marker,
+matched to the validated journal/binding/plan identity, is the owned
+verification phase after publication closes `install_pending`; it is not
+treated as a competing publication. Unrelated or mismatched pending
+markers, and install/config/uninstall transitions, still refuse.
+Verification failure keeps `rescue_pending` recoverable and does not
+write a healthy restorepoint. Only a successful destination and shell
+check pops the marker and finalizes the rescue record. Unsafe or unknown-ownership paths refuse. Same-type
 receipted files with a different hash, and symlinks with a foreign live
 target, are not republished from receipt path alone: preference drift
 uses the existing preserving merge; foreign command/skill replacements
