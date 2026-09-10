@@ -23,6 +23,10 @@ if [[ -f "$SCRIPT_DIR/VERSION" ]]; then
 fi
 expected_platform=""
 expected_architecture=""
+resolve_preference=""
+preference_current_sha256=""
+preference_incoming_sha256=""
+preference_path=""
 
 cleanup() {
   local status=$?
@@ -90,7 +94,7 @@ while (($#)); do
       verify_only="1"
       shift
       ;;
-    --app-root|--terminal-host|--frame-helper|--expected-source-revision|--expected-terminal-revision|--expected-frame-revision|--expected-version|--expected-platform|--expected-architecture)
+    --app-root|--terminal-host|--frame-helper|--expected-source-revision|--expected-terminal-revision|--expected-frame-revision|--expected-version|--expected-platform|--expected-architecture|--resolve-preference|--preference-current-sha256|--preference-incoming-sha256|--preference-path)
       (($# >= 2)) || die "$1 requires a path or revision"
       case "$1" in
         --app-root) app_root="$2" ;;
@@ -102,6 +106,10 @@ while (($#)); do
         --expected-version) expected_version="$2" ;;
         --expected-platform) expected_platform="$2" ;;
         --expected-architecture) expected_architecture="$2" ;;
+        --resolve-preference) resolve_preference="$2" ;;
+        --preference-current-sha256) preference_current_sha256="$2" ;;
+        --preference-incoming-sha256) preference_incoming_sha256="$2" ;;
+        --preference-path) preference_path="$2" ;;
       esac
       shift 2
       ;;
@@ -110,7 +118,7 @@ while (($#)); do
       shift
       ;;
     --help|-h)
-      printf 'usage: %s [--pack <RuntimePack.tar.gz>] [--verify-only] [--expected-*-revision <sha>] [--app-root <Vibecrafted.app> --terminal-host <path> --frame-helper <path>] [--uninstall [--dry-run]]\n' "$0"
+      printf 'usage: %s [--pack <RuntimePack.tar.gz>] [--verify-only] [--expected-*-revision <sha>] [--app-root <Vibecrafted.app> --terminal-host <path> --frame-helper <path>] [--resolve-preference keep-current|use-incoming --preference-current-sha256 <hex> --preference-incoming-sha256 <hex>] [--uninstall [--dry-run]]\n' "$0"
       exit 0
       ;;
     *) die "unknown argument: $1" ;;
@@ -396,6 +404,20 @@ if [[ "$operation" == "install" && -n "$app_root" ]]; then
   # helpers-agree already proved App copies match the signed pack. Do not
   # forward --terminal-host/--frame-helper into the installer — that would
   # replace pack Mach-O bytes with the bundle-signed helper.
+fi
+if [[ "$operation" == "install" && -n "$resolve_preference" ]]; then
+  case "$resolve_preference" in
+    keep-current|use-incoming) ;;
+    *) die "unsupported --resolve-preference: $resolve_preference" ;;
+  esac
+  [[ -n "$preference_current_sha256" && -n "$preference_incoming_sha256" ]] \
+    || die "--resolve-preference requires bound current and incoming hashes"
+  arguments+=(
+    --resolve-preference "$resolve_preference"
+    --preference-current-sha256 "$preference_current_sha256"
+    --preference-incoming-sha256 "$preference_incoming_sha256"
+  )
+  [[ -n "$preference_path" ]] && arguments+=(--preference-path "$preference_path")
 fi
 
 if [[ -n "$temporary" ]]; then

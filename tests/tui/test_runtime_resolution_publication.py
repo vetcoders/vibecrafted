@@ -12,6 +12,7 @@ from argparse import Namespace
 from pathlib import Path
 
 import pytest
+import tomllib
 from _runtime_pack_fixture import seed_runtime_pack
 
 from scripts import vetcoders_install as installer
@@ -60,7 +61,7 @@ def roots(tmp_path: Path, monkeypatch):
     return installer._runtime_install_paths()
 
 
-def _install(payload: Path, capsys) -> dict:
+def _install(payload: Path, capsys, **choice) -> dict:
     assert (
         installer.cmd_runtime_install(
             Namespace(
@@ -68,11 +69,33 @@ def _install(payload: Path, capsys) -> dict:
                 app_root=None,
                 terminal_host=None,
                 frame_helper=None,
+                resolve_preference=choice.get("resolve_preference"),
+                preference_current_sha256=choice.get("preference_current_sha256"),
+                preference_incoming_sha256=choice.get("preference_incoming_sha256"),
+                preference_path=choice.get("preference_path"),
             )
         )
         == 0
     )
     return json.loads(capsys.readouterr().out.splitlines()[-1])
+
+
+def _install_conflict(payload: Path, capsys, **choice):
+    with pytest.raises(installer.PreferenceConflict) as caught:
+        installer.cmd_runtime_install(
+            Namespace(
+                payload_root=str(payload),
+                app_root=None,
+                terminal_host=None,
+                frame_helper=None,
+                resolve_preference=choice.get("resolve_preference"),
+                preference_current_sha256=choice.get("preference_current_sha256"),
+                preference_incoming_sha256=choice.get("preference_incoming_sha256"),
+                preference_path=choice.get("preference_path"),
+            )
+        )
+    capsys.readouterr()
+    return caught.value
 
 
 def _resolve(paths: dict, capsys, *, status: str) -> dict:
@@ -423,21 +446,31 @@ def test_same_setting_kdl_conflict_refuses_publication_and_preserves_evidence(
             "mouse_mode true", "mouse_mode true\ncopy_on_select false"
         ),
     )
-    with pytest.raises(
-        RuntimeError, match="KDL settings conflict with changed shipped defaults"
-    ):
+    with pytest.raises(installer.PreferenceConflict) as caught:
         _install(payload_b, capsys)
+    conflict = caught.value
+    assert conflict.envelope["schema"] == installer.PREFERENCE_CONFLICT_SCHEMA
+    assert conflict.envelope["status"] == "conflict"
+    settings = [
+        setting
+        for item in conflict.envelope.get("files", [])
+        for setting in item.get("settings", [])
+    ]
+    assert "copy_on_select" in settings
+    assert "keep-current" in conflict.envelope["choices"]
+    assert "use-incoming" in conflict.envelope["choices"]
     capsys.readouterr()
     assert _snapshot(product) == before
     assert (paths["runtime_home"] / "active.json").read_bytes() == active
     receipt = json.loads(
         (paths["runtime_home"] / installer.RUNTIME_INSTALL_RECEIPT).read_text()
     )
-    conflict = receipt["config_conflicts"][0]
+    assert "config_conflicts" not in receipt
+    conflict = receipt["candidate_conflicts"][0]
     assert Path(conflict["backup"]).read_bytes() == config.read_bytes()
     assert Path(conflict["previous_defaults"]).is_file()
     assert Path(conflict["incoming_defaults"]).is_file()
-    _resolve(paths, capsys, status="unusable")
+    _resolve(paths, capsys, status="ready")
 
 
 def test_nested_kdl_edit_refuses_publication_and_preserves_evidence(
@@ -467,7 +500,7 @@ def test_nested_kdl_edit_refuses_publication_and_preserves_evidence(
     capsys.readouterr()
     assert _snapshot(product) == before
     assert (paths["runtime_home"] / "active.json").read_bytes() == active
-    _resolve(paths, capsys, status="unusable")
+    _resolve(paths, capsys, status="ready")
 
 
 def test_unsupported_changed_kdl_scalar_syntax_refuses_publication(
@@ -501,7 +534,7 @@ def test_unsupported_changed_kdl_scalar_syntax_refuses_publication(
     capsys.readouterr()
     assert _snapshot(product) == before
     assert (paths["runtime_home"] / "active.json").read_bytes() == active
-    _resolve(paths, capsys, status="unusable")
+    _resolve(paths, capsys, status="ready")
 
 
 def _crash_install(payload: Path, paths: dict, cut: str) -> None:
@@ -1260,3 +1293,723 @@ def test_config_repair_records_one_redacted_receipt(installed, capsys):
     blob = json.dumps(receipt)
     assert secret.strip() not in blob
     assert "Traceback" not in blob
+
+
+_REPO_TERMINAL_POLICY = (
+    Path(__file__).resolve().parents[2] / "config/vc-terminal/vibecrafted.toml"
+)
+_INCOMING_SHELL = 'shell = { program = "/bin/sh", args = ["-c", "exec \\"$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh\\""] }'
+_PREVIOUS_SHELL = 'shell = { program = "/bin/zsh", args = ["-lc", "exec \\"${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-terminal/launch-primary-shell.zsh\\" \\"$VIBECRAFTED_RUNTIME_ROOT/bin/vc-start\\" operator"] }'
+_USER_STRIPPED_SHELL = 'shell = { program = "/bin/zsh", args = ["-lc", "exec \\"${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-terminal/launch-primary-shell.zsh\\""] }'
+_EXPLICIT_FISH_SHELL = 'shell = { program = "/usr/bin/fish", args = ["-l"] }'
+
+
+def _previous_terminal_policy() -> str:
+    return (
+        _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
+        .replace(_INCOMING_SHELL, _PREVIOUS_SHELL)
+        .replace("padding = { x = 8, y = 24 }", "padding = { x = 0, y = 0 }")
+    )
+
+
+def _user_terminal_policy(*, shell: str = _USER_STRIPPED_SHELL) -> str:
+    return (
+        _previous_terminal_policy()
+        .replace(_PREVIOUS_SHELL, shell)
+        .replace('family = "Spot Mono"', 'family = "User Mono"', 1)
+        .replace('background = "#0b0b12"', 'background = "#111111"')
+        # Trailing [[keyboard.bindings]] group, split from the first by other tables.
+        .replace('key = "Enter"\nmods = "Shift"', 'key = "Enter"\nmods = "Control"')
+    )
+
+
+def test_three_way_shell_correction_keeps_user_chrome_and_accepts_new_defaults(
+    tmp_path, roots, capsys
+):
+    """Exact prior/current/incoming shell: user stripped operator args only."""
+    previous = _previous_terminal_policy()
+    incoming = _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
+    assert _PREVIOUS_SHELL in previous
+    assert _INCOMING_SHELL in incoming
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-a", version="9.9.9+a", terminal_policy=previous
+        ),
+        capsys,
+    )
+    policy = roots["product_config"] / "terminal-policy.toml"
+    user = _user_terminal_policy()
+    policy.write_text(user, encoding="utf-8")
+    selector = (roots["runtime_home"] / "tools/vibecrafted-current").readlink()
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-b", version="9.9.10+b", terminal_policy=incoming
+        ),
+        capsys,
+    )
+    text = policy.read_text(encoding="utf-8")
+    assert _INCOMING_SHELL in text
+    assert "padding = { x = 8, y = 24 }" in text
+    assert 'family = "User Mono"' in text
+    assert 'background = "#111111"' in text
+    assert 'mods = "Control"' in text
+    assert (
+        "vc-start" not in text
+        or "operator" not in text.split("shell =", 1)[1].split("\n", 1)[0]
+    )
+    assert (roots["runtime_home"] / "tools/vibecrafted-current").readlink() != selector
+    _resolve(roots, capsys, status="ready")
+
+
+def test_disjoint_toml_edits_still_merge(installed, tmp_path, capsys):
+    paths, _, _ = installed
+    policy = paths["product_config"] / "terminal-policy.toml"
+    policy.write_text(policy.read_text().replace("opacity = 0.9", "opacity = 0.75"))
+    original = installed[1] / "config/vc-terminal/vibecrafted.toml"
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-b",
+            version="9.9.10+b",
+            terminal_policy=original.read_text().replace(
+                "history = 50000", "history = 60000"
+            ),
+        ),
+        capsys,
+    )
+    merged = policy.read_text()
+    assert "opacity = 0.75" in merged
+    assert "history = 60000" in merged
+    _resolve(paths, capsys, status="ready")
+
+
+def test_explicit_shell_preference_stays_a_bound_choice(tmp_path, roots, capsys):
+    previous = _previous_terminal_policy()
+    incoming = _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-a", version="9.9.9+a", terminal_policy=previous
+        ),
+        capsys,
+    )
+    policy = roots["product_config"] / "terminal-policy.toml"
+    user = _user_terminal_policy(shell=_EXPLICIT_FISH_SHELL)
+    policy.write_text(user, encoding="utf-8")
+    current_sha = installer._sha256_path(policy)
+    incoming_source = tmp_path / "pack-b/config/vc-terminal/vibecrafted.toml"
+    payload = seed_runtime_pack(
+        tmp_path / "pack-b", version="9.9.10+b", terminal_policy=incoming
+    )
+    incoming_sha = installer._sha256_path(incoming_source)
+    selector = (roots["runtime_home"] / "tools/vibecrafted-current").readlink()
+    active = (roots["runtime_home"] / "active.json").read_bytes()
+    conflict = _install_conflict(payload, capsys)
+    assert conflict.envelope["schema"] == installer.PREFERENCE_CONFLICT_SCHEMA
+    assert conflict.envelope["previous_runtime_available"] is True
+    assert "terminal.shell" in json.dumps(conflict.envelope)
+    assert "/usr/bin/fish" not in json.dumps(conflict.envelope)
+    assert "Traceback" not in json.dumps(conflict.envelope)
+    assert "^^^^" not in json.dumps(conflict.envelope)
+    receipt = json.loads(
+        (roots["runtime_home"] / installer.RUNTIME_INSTALL_RECEIPT).read_text()
+    )
+    assert "config_conflicts" not in receipt
+    assert receipt["candidate_conflicts"]
+    assert (roots["runtime_home"] / "tools/vibecrafted-current").readlink() == selector
+    assert (roots["runtime_home"] / "active.json").read_bytes() == active
+    _resolve(roots, capsys, status="ready")
+
+    drifted = policy.read_text(encoding="utf-8").replace(
+        "opacity = 0.9", "opacity = 0.5"
+    )
+    policy.write_text(drifted, encoding="utf-8")
+    concurrent = _install_conflict(
+        payload,
+        capsys,
+        resolve_preference="keep-current",
+        preference_current_sha256=current_sha,
+        preference_incoming_sha256=incoming_sha,
+        preference_path=str(policy),
+    )
+    assert "concurrent" in str(concurrent).lower() or "changed during retry" in str(
+        concurrent
+    )
+    policy.write_text(user, encoding="utf-8")
+    for _ in range(2):
+        _install(
+            payload,
+            capsys,
+            resolve_preference="keep-current",
+            preference_current_sha256=current_sha,
+            preference_incoming_sha256=incoming_sha,
+            preference_path=str(policy),
+        )
+        assert _EXPLICIT_FISH_SHELL in policy.read_text(encoding="utf-8")
+        assert "padding = { x = 8, y = 24 }" in policy.read_text(encoding="utf-8")
+        _resolve(roots, capsys, status="ready")
+
+
+def test_use_incoming_shell_choice_is_bound_and_preserves_chrome(
+    tmp_path, roots, capsys
+):
+    previous = _previous_terminal_policy()
+    incoming = _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-a", version="9.9.9+a", terminal_policy=previous
+        ),
+        capsys,
+    )
+    policy = roots["product_config"] / "terminal-policy.toml"
+    user = _user_terminal_policy(shell=_EXPLICIT_FISH_SHELL)
+    policy.write_text(user, encoding="utf-8")
+    current_sha = installer._sha256_path(policy)
+    incoming_source = tmp_path / "pack-b/config/vc-terminal/vibecrafted.toml"
+    payload = seed_runtime_pack(
+        tmp_path / "pack-b", version="9.9.10+b", terminal_policy=incoming
+    )
+    incoming_sha = installer._sha256_path(incoming_source)
+    _install_conflict(payload, capsys)
+    _resolve(roots, capsys, status="ready")
+    _install(
+        payload,
+        capsys,
+        resolve_preference="use-incoming",
+        preference_current_sha256=current_sha,
+        preference_incoming_sha256=incoming_sha,
+        preference_path=str(policy),
+    )
+    text = policy.read_text(encoding="utf-8")
+    assert _INCOMING_SHELL in text
+    assert _EXPLICIT_FISH_SHELL not in text
+    assert 'family = "User Mono"' in text
+    assert 'background = "#111111"' in text
+    assert 'mods = "Control"' in text
+    _resolve(roots, capsys, status="ready")
+    _install(
+        payload,
+        capsys,
+        resolve_preference="use-incoming",
+        preference_current_sha256=current_sha,
+        preference_incoming_sha256=incoming_sha,
+        preference_path=str(policy),
+    )
+    assert _INCOMING_SHELL in policy.read_text(encoding="utf-8")
+    _resolve(roots, capsys, status="ready")
+
+
+def test_failed_upgrade_without_prior_runtime_is_not_ready(roots, tmp_path, capsys):
+    incoming = _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
+    policy = roots["product_config"] / "terminal-policy.toml"
+    policy.parent.mkdir(parents=True)
+    policy.write_text(
+        _user_terminal_policy(shell=_EXPLICIT_FISH_SHELL), encoding="utf-8"
+    )
+    conflict = _install_conflict(
+        seed_runtime_pack(
+            tmp_path / "pack-a", version="9.9.9+a", terminal_policy=incoming
+        ),
+        capsys,
+    )
+    assert conflict.envelope["previous_runtime_available"] is False
+    assert "not connected" in conflict.envelope["message"].lower() or (
+        "no previously verified runtime" in conflict.envelope["message"].lower()
+    )
+    envelope = _resolve(roots, capsys, status="unusable")
+    assert envelope["runtime"] is None
+    assert envelope["status"] == "unusable"
+
+
+def test_cli_preference_conflict_is_json_without_traceback(tmp_path, roots, capsys):
+    previous = _previous_terminal_policy()
+    incoming = _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-a", version="9.9.9+a", terminal_policy=previous
+        ),
+        capsys,
+    )
+    policy = roots["product_config"] / "terminal-policy.toml"
+    policy.write_text(
+        _user_terminal_policy(shell=_EXPLICIT_FISH_SHELL), encoding="utf-8"
+    )
+    payload = seed_runtime_pack(
+        tmp_path / "pack-b", version="9.9.10+b", terminal_policy=incoming
+    )
+    code = installer.main(["runtime-install", "--payload-root", str(payload)])
+    captured = capsys.readouterr()
+    assert code == 2
+    envelope = json.loads(captured.out.splitlines()[-1])
+    assert envelope["schema"] == installer.PREFERENCE_CONFLICT_SCHEMA
+    assert "terminal.shell" in json.dumps(envelope)
+    assert "/usr/bin/fish" not in captured.out
+    assert "/usr/bin/fish" not in captured.err
+    assert "Traceback" not in captured.err
+    assert "^^^^" not in captured.err
+    _resolve(roots, capsys, status="ready")
+
+
+def _assert_toml_tree(text: str, intended: dict) -> None:
+    """Parsed merge output must equal the intended resolved tree."""
+    assert installer._toml_trees_equal(tomllib.loads(text), intended)
+
+
+def test_toml_merge_respects_user_deletion_of_unchanged_default():
+    """Current removed opacity; incoming still ships previous 0.8 and new history."""
+    previous = "[window]\nopacity = 0.8\n\n[scrolling]\nhistory = 100\n"
+    current = "[scrolling]\nhistory = 100\n"
+    incoming = "[window]\nopacity = 0.8\n\n[scrolling]\nhistory = 200\n"
+    merged = installer._merge_toml_runtime_preferences(previous, current, incoming)
+    _assert_toml_tree(merged, {"scrolling": {"history": 200}})
+    assert "opacity" not in tomllib.loads(merged).get("window", {})
+
+
+def test_toml_merge_keep_current_preserves_deletion_against_changed_incoming():
+    previous = "[window]\nopacity = 0.8\n"
+    current = "# kept empty\n"
+    incoming = "[window]\nopacity = 0.9\n"
+    with pytest.raises(ValueError, match="settings conflict"):
+        installer._merge_toml_runtime_preferences(previous, current, incoming)
+    kept = installer._merge_toml_runtime_preferences(
+        previous, current, incoming, choice="keep-current"
+    )
+    _assert_toml_tree(kept, {})
+    assert "opacity" not in tomllib.loads(kept)
+    incoming_choice = installer._merge_toml_runtime_preferences(
+        previous, current, incoming, choice="use-incoming"
+    )
+    _assert_toml_tree(incoming_choice, {"window": {"opacity": 0.9}})
+
+
+def test_toml_merge_array_table_stays_under_keyboard_not_window():
+    previous = (
+        '[[keyboard.bindings]]\nkey = "A"\naction = "Copy"\n\n[window]\nopacity = 0.8\n'
+    )
+    current = (
+        '[[keyboard.bindings]]\nkey = "B"\naction = "Copy"\n\n[window]\nopacity = 0.8\n'
+    )
+    incoming = (
+        '[[keyboard.bindings]]\nkey = "A"\naction = "Copy"\n\n[window]\nopacity = 0.9\n'
+    )
+    merged = installer._merge_toml_runtime_preferences(previous, current, incoming)
+    parsed = tomllib.loads(merged)
+    _assert_toml_tree(
+        merged,
+        {
+            "keyboard": {"bindings": [{"key": "B", "action": "Copy"}]},
+            "window": {"opacity": 0.9},
+        },
+    )
+    assert "keyboard" not in parsed.get("window", {})
+
+
+def test_toml_raw_assignment_joins_array_table_span_strings():
+    text = (
+        '[[keyboard.bindings]]\nkey = "B"\n\n[window]\nopacity = 0.8\n\n'
+        '[[keyboard.bindings]]\nkey = "C"\n'
+    )
+    raw = installer._toml_raw_assignment(text, "keyboard.bindings")
+    assert isinstance(raw, str)
+    assert 'key = "B"' in raw
+    assert 'key = "C"' in raw
+
+
+def test_toml_merge_fail_closed_on_dotted_quoted_key():
+    previous = '"foo.bar" = 1\n'
+    current = '"foo.bar" = 2\n'
+    incoming = '"foo.bar" = 1\n'
+    with pytest.raises(ValueError, match="quoted or dotted"):
+        installer._merge_toml_runtime_preferences(previous, current, incoming)
+
+
+def test_preference_shell_correction_is_exact_not_first_flag():
+    previous = {
+        "program": "/bin/zsh",
+        "args": [
+            "-lc",
+            'exec "launch-primary-shell.zsh" "$VIBECRAFTED_RUNTIME_ROOT/bin/vc-start" operator',
+        ],
+    }
+    allowed = {
+        "program": "/bin/zsh",
+        "args": ["-lc", 'exec "launch-primary-shell.zsh"'],
+    }
+    extra = {
+        "program": "/bin/zsh",
+        "args": ["-lc", 'exec "launch-primary-shell.zsh"; echo extra; curl evil'],
+    }
+    incoming = {
+        "program": "/bin/sh",
+        "args": ["-c", 'exec "launch-primary-shell.zsh"'],
+    }
+    assert installer._preference_shell_is_previous_minus_operator(previous, allowed)
+    assert not installer._preference_shell_is_previous_minus_operator(previous, extra)
+    assert installer._preference_shell_accepts_incoming(previous, allowed, incoming)
+    assert not installer._preference_shell_accepts_incoming(previous, extra, incoming)
+    previous_toml = (
+        "[terminal]\n"
+        'shell = { program = "/bin/zsh", args = ["-lc", '
+        '"exec \\"launch-primary-shell.zsh\\" \\"$VIBECRAFTED_RUNTIME_ROOT/bin/vc-start\\" operator"] }\n'
+    )
+    extra_toml = (
+        "[terminal]\n"
+        'shell = { program = "/bin/zsh", args = ["-lc", '
+        '"exec \\"launch-primary-shell.zsh\\"; echo extra"] }\n'
+    )
+    incoming_toml = (
+        "[terminal]\n"
+        'shell = { program = "/bin/sh", args = ["-c", '
+        '"exec \\"launch-primary-shell.zsh\\""] }\n'
+    )
+    with pytest.raises(ValueError, match="settings conflict"):
+        installer._merge_toml_runtime_preferences(
+            previous_toml, extra_toml, incoming_toml
+        )
+    kept = installer._merge_toml_runtime_preferences(
+        previous_toml, extra_toml, incoming_toml, choice="keep-current"
+    )
+    _assert_toml_tree(kept, tomllib.loads(extra_toml))
+    assert "[terminal.shell]" not in kept
+    assert 'program = "/usr/bin/fish"' not in kept
+    assert "echo extra" in kept
+
+
+def test_toml_flatten_keeps_shell_record_and_bindings_path():
+    parsed = tomllib.loads(
+        "[terminal]\n"
+        'shell = { program = "/bin/zsh", args = ["-lc"] }\n'
+        "\n"
+        "[[keyboard.bindings]]\n"
+        'key = "B"\n'
+        'action = "Copy"\n'
+        "\n"
+        "[window]\n"
+        "opacity = 0.8\n"
+        "padding = { x = 8, y = 24 }\n"
+    )
+    flat = installer._toml_flatten(parsed)
+    assert flat["terminal.shell"] == {"program": "/bin/zsh", "args": ["-lc"]}
+    assert "terminal.shell.program" not in flat
+    assert "terminal.shell.args" not in flat
+    assert flat["keyboard.bindings"] == [{"key": "B", "action": "Copy"}]
+    assert "keyboard" not in flat
+    assert flat["window.opacity"] == 0.8
+    assert flat["window.padding.x"] == 8
+    assert flat["window.padding.y"] == 24
+    assert "window.padding" not in flat
+    empty_bindings = installer._toml_flatten(tomllib.loads("[[keyboard.bindings]]\n"))
+    assert empty_bindings == {"keyboard.bindings": [{}]}
+    explicit_empty = installer._toml_flatten(
+        tomllib.loads("[keyboard]\nbindings = []\n")
+    )
+    assert explicit_empty == {"keyboard.bindings": []}
+    assert "keyboard" not in explicit_empty
+
+
+def test_toml_keep_current_nested_shell_replaces_inline_without_duplicate():
+    previous = (
+        "[terminal]\n"
+        "[terminal.shell]\n"
+        'program = "/bin/zsh"\n'
+        'args = ["-lc", "exec \\"launch-primary-shell.zsh\\" operator"]\n'
+    )
+    current = '[terminal]\n[terminal.shell]\nprogram = "/usr/bin/fish"\nargs = ["-l"]\n'
+    incoming = (
+        "[terminal]\n"
+        'shell = { program = "/bin/sh", args = ["-c", "exec \\"launch-primary-shell.zsh\\""] }\n'
+        "other = 1\n"
+    )
+    with pytest.raises(ValueError, match="settings conflict"):
+        installer._merge_toml_runtime_preferences(previous, current, incoming)
+    kept = installer._merge_toml_runtime_preferences(
+        previous, current, incoming, choice="keep-current"
+    )
+    _assert_toml_tree(
+        kept,
+        {
+            "terminal": {
+                "shell": {"program": "/usr/bin/fish", "args": ["-l"]},
+                "other": 1,
+            }
+        },
+    )
+    parsed = tomllib.loads(kept)
+    assert parsed["terminal"]["shell"]["program"] == "/usr/bin/fish"
+    assert "shell" in parsed["terminal"]
+    assert kept.count("[terminal.shell]") + kept.count("shell =") == 1
+
+
+def test_toml_merge_same_table_disjoint_scalars_do_not_conflict():
+    """Root probe: sibling scalars keep independent identity."""
+    previous = '[window]\nopacity = 0.8\ndecorations = "Full"\n'
+    current = '[window]\nopacity = 0.9\ndecorations = "Full"\n'
+    incoming = '[window]\nopacity = 0.8\ndecorations = "None"\n'
+    assert installer._toml_flatten(tomllib.loads(previous)) == {
+        "window.opacity": 0.8,
+        "window.decorations": "Full",
+    }
+    merged = installer._merge_toml_runtime_preferences(previous, current, incoming)
+    _assert_toml_tree(merged, {"window": {"opacity": 0.9, "decorations": "None"}})
+    assert "settings conflict" not in merged
+
+
+def test_toml_merge_sibling_add_or_remove_does_not_rebind_identity():
+    previous = '[window]\nopacity = 0.8\ndecorations = "Full"\n'
+    current = (
+        '[window]\nopacity = 0.8\ndecorations = "Full"\nstartup_mode = "Maximized"\n'
+    )
+    incoming = '[window]\nopacity = 0.9\ndecorations = "None"\n'
+    merged = installer._merge_toml_runtime_preferences(previous, current, incoming)
+    _assert_toml_tree(
+        merged,
+        {
+            "window": {
+                "opacity": 0.9,
+                "decorations": "None",
+                "startup_mode": "Maximized",
+            }
+        },
+    )
+    removed = installer._merge_toml_runtime_preferences(current, previous, incoming)
+    _assert_toml_tree(removed, {"window": {"opacity": 0.9, "decorations": "None"}})
+
+
+def test_toml_merge_inline_and_nested_window_are_the_same_settings():
+    previous = '[window]\nopacity = 0.8\ndecorations = "Full"\n'
+    current = '[window]\nopacity = 0.9\ndecorations = "Full"\n'
+    incoming = 'window = { opacity = 0.8, decorations = "None" }\n'
+    merged = installer._merge_toml_runtime_preferences(previous, current, incoming)
+    _assert_toml_tree(merged, {"window": {"opacity": 0.9, "decorations": "None"}})
+    nested_in = '[window]\nopacity = 0.8\ndecorations = "None"\n'
+    inline_cur = 'window = { opacity = 0.9, decorations = "Full" }\n'
+    crossed = installer._merge_toml_runtime_preferences(previous, inline_cur, nested_in)
+    _assert_toml_tree(crossed, {"window": {"opacity": 0.9, "decorations": "None"}})
+
+
+def test_toml_merge_disjoint_padding_leaves_keep_inline_form():
+    previous = "[window]\npadding = { x = 0, y = 0 }\nopacity = 0.8\n"
+    current = "[window]\npadding = { x = 4, y = 0 }\nopacity = 0.8\n"
+    incoming = "[window]\npadding = { x = 0, y = 24 }\nopacity = 0.9\n"
+    merged = installer._merge_toml_runtime_preferences(previous, current, incoming)
+    _assert_toml_tree(
+        merged, {"window": {"padding": {"x": 4, "y": 24}, "opacity": 0.9}}
+    )
+    assert "padding = { x = 4, y = 24 }" in merged
+    assert "[window.padding]" not in merged
+
+
+def test_toml_merge_comment_on_sibling_survives_disjoint_edit():
+    previous = '[window]\nopacity = 0.8\ndecorations = "Full"  # keep-chrome\n'
+    current = '[window]\nopacity = 0.9\ndecorations = "Full"  # keep-chrome\n'
+    incoming = '[window]\nopacity = 0.8\ndecorations = "None"  # keep-chrome\n'
+    merged = installer._merge_toml_runtime_preferences(previous, current, incoming)
+    _assert_toml_tree(merged, {"window": {"opacity": 0.9, "decorations": "None"}})
+    assert "# keep-chrome" in merged
+
+
+_TOML_WINDOW_FORMS = ("nested", "dotted", "inline")
+_TOML_WINDOW_FORM_TRIPLES = tuple(
+    (previous_form, current_form, incoming_form)
+    for previous_form in _TOML_WINDOW_FORMS
+    for current_form in _TOML_WINDOW_FORMS
+    for incoming_form in _TOML_WINDOW_FORMS
+)
+_ORACLE_MISSING = object()
+
+
+def _window_pref_text(form: str, *, opacity: float, decorations: str | None) -> str:
+    if form == "nested":
+        text = f"[window]\nopacity = {opacity}\n"
+        if decorations is not None:
+            text += f'decorations = "{decorations}"\n'
+        return text
+    if form == "dotted":
+        text = f"window.opacity = {opacity}\n"
+        if decorations is not None:
+            text += f'window.decorations = "{decorations}"\n'
+        return text
+    if form == "inline":
+        if decorations is None:
+            return f"window = {{ opacity = {opacity} }}\n"
+        return f'window = {{ opacity = {opacity}, decorations = "{decorations}" }}\n'
+    raise AssertionError(form)
+
+
+def _oracle_leaf_map(text: str) -> dict[str, object]:
+    """Independent tomllib walk — not installer flatten or atomic exceptions."""
+
+    def walk(node: object, prefix: str) -> dict[str, object]:
+        if not isinstance(node, dict):
+            return {prefix: node} if prefix else {}
+        leaves: dict[str, object] = {}
+        for key, value in node.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if isinstance(value, dict):
+                leaves.update(walk(value, path))
+            else:
+                leaves[path] = value
+        return leaves
+
+    return walk(tomllib.loads(text), "")
+
+
+def _oracle_three_way_tree(previous: str, current: str, incoming: str) -> dict:
+    prev = _oracle_leaf_map(previous)
+    curr = _oracle_leaf_map(current)
+    inc = _oracle_leaf_map(incoming)
+    resolved: dict[str, object] = {}
+    for key in sorted(set(prev) | set(curr) | set(inc)):
+        prev_value = prev.get(key, _ORACLE_MISSING)
+        curr_value = curr.get(key, _ORACLE_MISSING)
+        inc_value = inc.get(key, _ORACLE_MISSING)
+        if curr_value == inc_value:
+            if curr_value is not _ORACLE_MISSING:
+                resolved[key] = curr_value
+            continue
+        if curr_value == prev_value:
+            if inc_value is not _ORACLE_MISSING:
+                resolved[key] = inc_value
+            continue
+        if inc_value == prev_value:
+            if curr_value is not _ORACLE_MISSING:
+                resolved[key] = curr_value
+            continue
+        raise AssertionError(
+            f"oracle conflict on {key}: {prev_value!r} {curr_value!r} {inc_value!r}"
+        )
+    tree: dict = {}
+    for dotted, value in resolved.items():
+        node = tree
+        parts = dotted.split(".")
+        for part in parts[:-1]:
+            child = node.get(part)
+            if child is None:
+                child = {}
+                node[part] = child
+            node = child
+        node[parts[-1]] = value
+    return tree
+
+
+def test_toml_overlay_dotted_raw_keeps_nested_table_path():
+    incoming = '[window]\nopacity = 0.8\ndecorations = "None"\n'
+    overlayed = installer._overlay_toml_assignment(
+        incoming, "window.opacity", "window.opacity = 0.9\n"
+    )
+    assert tomllib.loads(overlayed) == {
+        "window": {"opacity": 0.9, "decorations": "None"}
+    }
+    after_header = overlayed.split("[window]", 1)[-1]
+    assert "window.opacity" not in after_header
+
+
+@pytest.mark.parametrize(
+    "previous_form,current_form,incoming_form", _TOML_WINDOW_FORM_TRIPLES
+)
+def test_toml_merge_all_window_forms_keep_independent_leaves(
+    previous_form, current_form, incoming_form
+):
+    previous = _window_pref_text(previous_form, opacity=0.8, decorations="Full")
+    current = _window_pref_text(current_form, opacity=0.9, decorations="Full")
+    incoming = _window_pref_text(incoming_form, opacity=0.8, decorations="None")
+    expected = _oracle_three_way_tree(previous, current, incoming)
+    assert expected == {"window": {"opacity": 0.9, "decorations": "None"}}
+    merged = installer._merge_toml_runtime_preferences(previous, current, incoming)
+    assert tomllib.loads(merged) == expected
+
+
+@pytest.mark.parametrize(
+    "previous_form,current_form,incoming_form", _TOML_WINDOW_FORM_TRIPLES
+)
+def test_toml_merge_all_window_forms_honor_incoming_deletion(
+    previous_form, current_form, incoming_form
+):
+    previous = _window_pref_text(previous_form, opacity=0.8, decorations="Full")
+    current = _window_pref_text(current_form, opacity=0.9, decorations="Full")
+    incoming = _window_pref_text(incoming_form, opacity=0.8, decorations=None)
+    expected = _oracle_three_way_tree(previous, current, incoming)
+    assert expected == {"window": {"opacity": 0.9}}
+    merged = installer._merge_toml_runtime_preferences(previous, current, incoming)
+    parsed = tomllib.loads(merged)
+    assert parsed == expected
+    assert "decorations" not in parsed.get("window", {})
+
+
+def test_published_previous_receipt_rejects_config_conflicts():
+    healthy = {
+        "schema": installer.RUNTIME_INSTALL_SCHEMA,
+        "version": "9.9.9+a",
+    }
+    poisoned = {
+        **healthy,
+        "config_conflicts": [{"path": "terminal-policy.toml"}],
+    }
+    assert (
+        installer._published_previous_receipt({"preparing_previous_receipt": healthy})
+        is not None
+    )
+    assert (
+        installer._published_previous_receipt({"preparing_previous_receipt": poisoned})
+        is None
+    )
+
+
+def test_abandon_unpublished_requires_physical_previous_generation(tmp_path):
+    runtime_home = tmp_path / "runtime"
+    runtime_home.mkdir()
+    saved = {
+        "schema": installer.RUNTIME_INSTALL_SCHEMA,
+        "version": "9.9.9+ghost",
+        "owned_symlinks": {},
+    }
+    receipt = {
+        "schema": installer.RUNTIME_INSTALL_SCHEMA,
+        "install_pending": True,
+        "install_phase": "preparing",
+        "preparing_previous_receipt": saved,
+        "roots": {},
+    }
+    available = installer._abandon_unpublished_preference_conflicts(
+        runtime_home=runtime_home,
+        receipt=receipt,
+        conflicts=[{"path": "terminal-policy.toml", "reason": "overlap"}],
+    )
+    assert available is False
+    assert receipt["candidate_conflicts"]
+    assert "config_conflicts" not in receipt
+
+    version = "9.9.9+real"
+    generation = runtime_home / "releases" / version
+    generation.mkdir(parents=True)
+    current = runtime_home / "tools/vibecrafted-current"
+    current.parent.mkdir(parents=True)
+    current.symlink_to(generation)
+    (runtime_home / "active.json").write_text(
+        json.dumps(
+            {
+                "schema": "vibecrafted.active-runtime.v1",
+                "runtime_root": str(generation),
+                "version": version,
+            }
+        ),
+        encoding="utf-8",
+    )
+    physical = {
+        "schema": installer.RUNTIME_INSTALL_SCHEMA,
+        "version": version,
+        "owned_symlinks": {str(current): str(generation)},
+    }
+    live = {
+        "schema": installer.RUNTIME_INSTALL_SCHEMA,
+        "install_pending": True,
+        "install_phase": "preparing",
+        "preparing_previous_receipt": physical,
+        "roots": {},
+    }
+    assert (
+        installer._abandon_unpublished_preference_conflicts(
+            runtime_home=runtime_home,
+            receipt=live,
+            conflicts=[{"path": "terminal-policy.toml", "reason": "overlap"}],
+        )
+        is True
+    )

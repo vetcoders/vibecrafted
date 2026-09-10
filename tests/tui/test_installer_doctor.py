@@ -122,6 +122,39 @@ def test_doctor_runtime_receipt_findings_flag_drift_and_missing(
     ] == ["ok"]
 
 
+def test_doctor_candidate_conflicts_do_not_suppress_receipt_drift(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A pending preference choice is a warning, not a healthy-receipt shield."""
+    runtime_home = tmp_path / "runtime"
+    runtime_home.mkdir()
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    owned = tmp_path / "bin" / "vc-start"
+    owned.parent.mkdir()
+    owned.write_text("#!/bin/sh\noriginal\n", encoding="utf-8")
+    digest = installer._sha256_path(owned)
+    receipt_path = runtime_home / installer.RUNTIME_INSTALL_RECEIPT
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "schema": installer.RUNTIME_INSTALL_SCHEMA,
+                "owned_files": {str(owned): digest},
+                "candidate_conflicts": [
+                    {"path": "terminal-policy.toml", "reason": "overlap"}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    owned.write_text("#!/bin/sh\ndrifted\n", encoding="utf-8")
+
+    findings = installer._doctor_runtime_receipt_findings()
+    messages = [finding.message for finding in findings]
+    assert any("pending upgrade preference choice" in message for message in messages)
+    assert any("drifted" in message for message in messages)
+    assert all(finding.level != "ok" for finding in findings)
+
+
 def test_doctor_foundation_service_findings_flag_dangling_plist(
     tmp_path: Path, monkeypatch
 ) -> None:

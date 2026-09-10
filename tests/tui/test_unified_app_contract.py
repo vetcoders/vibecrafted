@@ -1143,17 +1143,38 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     # UI installation never waits on the App's main actor. Every UI-reachable
     # caller joins the one carrier publication, and both streams are drained
     # from process start with finite capture rather than after waitUntilExit.
+    # The completion-bearing overload is the UI form. Optional preferenceChoice
+    # sits before completion; do not pin the first parameter name.
+    async_completion = (
+        "completion: @escaping (Result<CanonicalRuntimeInstall, Error>) -> Void"
+    )
+    async_sig = delegate.rfind(
+        "private func installCanonicalRuntime(",
+        0,
+        delegate.index(async_completion) + len(async_completion),
+    )
+    assert async_sig != -1
     async_installer = delegate[
-        delegate.index(
-            "private func installCanonicalRuntime(\n    completion:"
-        ) : delegate.index("private func runtimePackInstallArguments")
+        async_sig : delegate.index("private func runtimePackInstallArguments")
     ]
     assert "runtimeInstallProcess != nil" in async_installer
     assert "runtimeInstallWaiters.append(completion)" in async_installer
+    assert "runtimeInstallWaiters.removeAll()" in async_installer
+    assert "waiters.forEach { $0(outcome) }" in async_installer
+    assert "preferenceChoice: PreferenceResolutionChoice? = nil" in async_installer
     assert (
-        "runRuntimePackInstaller(arguments: runtimePackInstallArguments())"
-        in async_installer
+        "runRuntimePackInstaller(arguments: runtimePackInstallArguments("
+        "preferenceChoice: preferenceChoice))" in async_installer
     )
+    args_builder = delegate[
+        delegate.index("private func runtimePackInstallArguments") : delegate.index(
+            "private func decodeCanonicalRuntimeInstall"
+        )
+    ]
+    assert "preferenceChoice: PreferenceResolutionChoice? = nil" in args_builder
+    assert "if let choice = preferenceChoice" in args_builder
+    assert '"--resolve-preference", choice.action' in args_builder
+    assert "installCanonicalRuntime(preferenceChoice: choice)" in delegate
     ui_installer = delegate[
         delegate.index(
             "private func runRuntimePackInstaller(\n    arguments: [String], completion:"
