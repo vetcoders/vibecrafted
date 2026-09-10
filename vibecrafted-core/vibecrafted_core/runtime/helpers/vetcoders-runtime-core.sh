@@ -95,18 +95,26 @@ _vetcoders_absolute_physical_path() {
 # nothing when neither did (the caller keeps its own fallback), and exits 2
 # with a stderr reason on a conflicting pair or a missing/non-directory path.
 # It never demands Git: the selected directory is the answer, and only verbs
-# that truly need a work tree check for one themselves.
+# that truly need a work tree check for one themselves. Launch-spec flags
+# (--base / --worktree / --execution-runtime) opt into the launch resolver;
+# create-only `vc-start` must not send --prepare-worktree on every call.
 _vetcoders_select_repo() {
   local label="${1:-vibecrafted}" repo_raw="${2:-}" root_raw="${3:-}"
   local python_spec py import_root
   python_spec="$(_vetcoders_core_python_spec)" || return 1
   py="${python_spec%%$'\t'*}"
   import_root="${python_spec#*$'\t'}"
-  local -a argv=("$py" -m vibecrafted_core.repo_selection --repo "$repo_raw" --root "$root_raw")
-  [[ "$label" != vc-start ]] || argv+=(--prepare-worktree)
+  local -a argv=(
+    "$py" -m vibecrafted_core.repo_selection
+    --label "$label"
+    --repo "$repo_raw"
+    --root "$root_raw"
+  )
   [[ -z "${_vetcoders_contract_base:-}" ]] || argv+=(--base "$_vetcoders_contract_base")
   [[ -z "${_vetcoders_contract_execution_runtime:-}" ]] || argv+=(--execution-runtime "$_vetcoders_contract_execution_runtime")
-  [[ -z "${_vetcoders_contract_worktree:-}" ]] || argv+=(--worktree "$_vetcoders_contract_worktree")
+  if [[ -n "${_vetcoders_contract_worktree:-}" ]]; then
+    argv+=(--worktree "$_vetcoders_contract_worktree" --prepare-worktree)
+  fi
   if [[ -n "$import_root" ]]; then
     PYTHONPATH="$import_root${PYTHONPATH:+:$PYTHONPATH}" "${argv[@]}"
   else

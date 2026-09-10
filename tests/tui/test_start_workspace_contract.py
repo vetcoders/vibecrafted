@@ -531,6 +531,68 @@ def _write(path: Path, body: str) -> Path:
     return path
 
 
+def _seed_committed_git(root: Path, *, home: Path | None = None) -> str:
+    """Make ``root`` a genuine repository with a resolvable HEAD commit.
+
+    ``git init`` alone leaves HEAD unborn; launch-spec ``--base`` (default
+    HEAD) and any commit-based start path refuse that fixture. Create-only
+    start can name a top-level without a commit, but tests that opt into
+    ``git=True`` must still be real repositories.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    if home is not None:
+        env["HOME"] = str(home)
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_AUTHOR_NAME"] = "start-fixture"
+    env["GIT_AUTHOR_EMAIL"] = "start-fixture@example.invalid"
+    env["GIT_COMMITTER_NAME"] = "start-fixture"
+    env["GIT_COMMITTER_EMAIL"] = "start-fixture@example.invalid"
+    subprocess.run(
+        ["git", "init", "-q", str(root)],
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    marker = root / "README"
+    if not marker.exists():
+        marker.write_text("seed\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(root), "add", "-A"],
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=start-fixture",
+            "-c",
+            "user.email=start-fixture@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "seed",
+        ],
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    head = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    sha = head.stdout.strip()
+    assert len(sha) == 40 and all(c in "0123456789abcdef" for c in sha), sha
+    return sha
+
+
 class Scene:
     """One isolated home, generation, catalogue owner, Frame table and stub."""
 
@@ -575,13 +637,7 @@ class Scene:
         )
         self.root = tmp_path / project
         self.root.mkdir(parents=True, exist_ok=True)
-        if git:
-            subprocess.run(
-                ["git", "init", "-q", str(self.root)],
-                check=True,
-                capture_output=True,
-                env={**os.environ, "HOME": str(self.home)},
-            )
+        self.head = _seed_committed_git(self.root, home=self.home) if git else ""
         self.cwd = self.root
 
     def _generation(self, root: Path) -> Path:
@@ -888,6 +944,7 @@ def test_default_name_is_the_git_toplevel_basename_from_a_subdirectory(
     contract: the Git top-level basename, from the root and from `src/deep`
     alike, and the terminal child is handed that root as `--repo`."""
     scene = Scene(tmp_path, project="mlx-batch-runner", git=True)
+    assert scene.head, "git=True scenes must be committed repositories"
     deep = scene.root / "src" / "deep"
     deep.mkdir(parents=True)
 
@@ -912,7 +969,14 @@ def test_default_name_is_the_git_toplevel_basename_from_a_subdirectory(
 
 
 def test_outside_git_the_directory_itself_is_the_root(tmp_path: Path) -> None:
+    """Create-only start: no Git means the caller's directory is the root.
+
+    Launch-spec ``require_git`` / default ``--base HEAD`` is a different
+    owner. ``vc-start`` without ``--base``/``--worktree`` must not refuse a
+    plain directory, and must not invert this into a refusal-only success.
+    """
     scene = Scene(tmp_path, project="plain-dir")
+    assert not scene.head
     result = _run(scene, "vc-start")
     assert _rc(result) == 0, result.stderr
     assert scene.live() == ["plain-dir"]
@@ -2475,8 +2539,84 @@ except ChildProcessError:
 """
 
 
-def _exclusive_sandbox(prefix: str = "vc-start-admit-") -> Path:
-    return Path(tempfile.mkdtemp(prefix=prefix))
+# Host chrome is owned by plugin_url, not by guessed titles. Real vibecrafted-host
+# panes (W2 short-TMPDIR listing): vc-frame:link, vc-frame:vc-tab-title,
+# frame-host ("Sessions"), session-manager ("VC Guest"). Title is never the URL.
+_HOST_CHROME_PLUGIN_URLS = (
+    "vc-frame:link",
+    "vc-frame:vc-tab-title",
+    "frame-host",
+    "session-manager",
+)
+_SHORT_TEMP_ROOT = "/tmp"
+
+
+def _pane_plugin_url(pane: dict) -> str:
+    return str(pane.get("plugin_url") or "").strip()
+
+
+def _host_chrome_plugins(rows) -> dict[str, dict]:
+    owned: dict[str, dict] = {}
+    if not isinstance(rows, list):
+        return owned
+    for pane in rows:
+        if not isinstance(pane, dict):
+            continue
+        url = _pane_plugin_url(pane)
+        if url in _HOST_CHROME_PLUGIN_URLS and url not in owned:
+            owned[url] = pane
+    return owned
+
+
+def _chrome_geometry(rows) -> dict[str, tuple]:
+    return {
+        url: (
+            pane.get("id"),
+            pane.get("plugin_runtime_id"),
+            pane.get("pane_x"),
+            pane.get("pane_y"),
+            pane.get("pane_rows"),
+            pane.get("pane_columns"),
+        )
+        for url, pane in _host_chrome_plugins(rows).items()
+    }
+
+
+def _host_chrome_ready(rows):
+    """Single host chrome: one session-manager and one frame-host plugin."""
+    if not isinstance(rows, list) or not rows:
+        return []
+    urls = [
+        _pane_plugin_url(pane)
+        for pane in rows
+        if isinstance(pane, dict) and _pane_plugin_url(pane) in _HOST_CHROME_PLUGIN_URLS
+    ]
+    if urls.count("session-manager") == 1 and urls.count("frame-host") == 1:
+        return rows
+    return []
+
+
+def _assert_host_chrome(rows, *, previous_geometry=None):
+    """Exact plugin_url ownership + stable chrome IDs/geometry; never title==URL."""
+    assert _host_chrome_ready(rows), rows
+    plugins = _host_chrome_plugins(rows)
+    guest = plugins["session-manager"]
+    host = plugins["frame-host"]
+    assert _pane_plugin_url(guest) == "session-manager", guest
+    assert _pane_plugin_url(host) == "frame-host", host
+    assert guest.get("title") != "session-manager", guest
+    assert host.get("title") != "frame-host", host
+    assert guest.get("title") == "VC Guest", guest
+    geometry = _chrome_geometry(rows)
+    assert set(geometry) >= {"session-manager", "frame-host"}, geometry
+    if previous_geometry is not None:
+        assert geometry == previous_geometry, (previous_geometry, geometry)
+    return geometry
+
+
+def _exclusive_sandbox(prefix: str = "vcs-") -> Path:
+    """Short exclusive socket-capable root. Default $TMPDIR is too long on macOS."""
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=_SHORT_TEMP_ROOT))
 
 
 def _short_token(prefix: str) -> str:
@@ -2602,7 +2742,7 @@ def test_admitted_frame_project_workspace_is_a_real_verb_not_a_stub() -> None:
     )
     assert bogus.returncode != 0, "unknown verb must not be accepted"
 
-    sandbox = _exclusive_sandbox("vc-start-verb-")
+    sandbox = _exclusive_sandbox("vcs-v-")
     sock = sandbox / "sock"
     home = sandbox / "home"
     sock.mkdir()
@@ -2656,6 +2796,7 @@ def test_admitted_frame_project_workspace_is_a_real_verb_not_a_stub() -> None:
             if r.get("status") == "Handled" and r.get("pane_id") not in (None, "")
         ], missing_guest.stdout
 
+        owned.append(guest)
         created = frame(
             "--guest-workspace",
             "--layout",
@@ -2665,7 +2806,6 @@ def test_admitted_frame_project_workspace_is_a_real_verb_not_a_stub() -> None:
             guest,
         )
         assert created.returncode == 0, created.stderr
-        owned.append(guest)
         self_project = frame("--session", guest, "project-workspace", guest)
         assert self_project.returncode != 0
         assert "cannot project into itself" in (
@@ -2682,144 +2822,147 @@ def test_admitted_frame_project_workspace_is_a_real_verb_not_a_stub() -> None:
 def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -> None:
     """W2 acceptance: public vc-start inside a PTY-backed admitted host.
 
-    Creates an isolated exclusive sandbox, a vibecrafted-host session, one
-    attached PTY client, and a prior pane whose process records PID plus
-    start identity and then reads commands (`exec sh -s`). Invokes public
-    `vc-start --repo` with attached-host markers. Success requires a compact
-    Handled receipt whose pane_id exists on the host, exact chrome titles,
-    the same prior pane id / PID / start identity, and a harmless command
-    completed in that same prior pane via public `action write-chars
-    --pane-id` — not sleep-alive or guest dump-screen alone. Offered
-    `operator` layout alias must also project on the same canvas; `--layout`
-    stays usage-refused. Then client-ambiguity refuses before another
-    create. Cleanup kills only named test sessions.
+        Creates an isolated exclusive short sandbox, a vibecrafted-host session,
+        one attached PTY client, and a prior pane whose process records PID plus
+        start identity and then reads commands (`exec sh -s`). Invokes public
+        `vc-start --repo` with attached-host markers. Guest/alias/other dirs are
+        committed repositories. Success requires a compact Handled receipt whose
+        pane_id exists on the host, semantic plugin_url chrome (not title==URL),
+        the same prior pane id / PID / start identity, and a harmless command
+        completed in that same prior pane via public `action write-chars
+        --pane-id` — not sleep-alive or guest dump-screen alone. Offered
+        `operator` layout alias must also project on the same canvas; `--layout`
+        stays usage-refused. Then client-ambiguity refuses before another
+        create. Cleanup identities are registered before ops that can throw.
     """
     assert _ADMITTED_FRAME is not None
     bin_path = _ADMITTED_FRAME
-    sandbox = _exclusive_sandbox("vc-start-admit-")
-    home = sandbox / "home"
-    sock = sandbox / "sock"
-    home.mkdir()
-    sock.mkdir()
-    (home / "config" / "vc-frame").mkdir(parents=True)
-    (home / "data").mkdir()
-    host = _short_token("h")
-    guest = _short_token("g")
-    alias = _short_token("a")
-    other = _short_token("o")
-    guest_repo = sandbox / guest
-    alias_repo = sandbox / alias
-    other_repo = sandbox / other
-    guest_repo.mkdir()
-    alias_repo.mkdir()
-    other_repo.mkdir()
-    prior_pid = home / "prior.pid"
-    prior_lstart = home / "prior.lstart"
-    prior_done = home / "prior.done"
-    prior_token = "prior-ok-" + uuid.uuid4().hex[:12]
-    owner = _write(sandbox / "owner-cli", OWNER_CLI)
-    env = os.environ.copy()
-    for key in IDENTITY_ENV:
-        env.pop(key, None)
-    env.update(
-        {
-            "HOME": str(home),
-            "VIBECRAFTED_HOME": str(home / "vibecrafted"),
-            "XDG_CONFIG_HOME": str(home / "config"),
-            "XDG_DATA_HOME": str(home / "data"),
-            "XDG_CACHE_HOME": str(home / "cache"),
-            "VC_FRAME_SOCKET_DIR": str(sock),
-            "ZELLIJ_SOCKET_DIR": str(sock),
-            "VC_FRAME_CONFIG_DIR": str(home / "config" / "vc-frame"),
-            "VC_FRAME_SERVER_FOREGROUND": "1",
-            "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
-            "VIBECRAFTED_VC_FRAME_BIN": str(bin_path),
-            "VIBECRAFTED_PRODUCT_CORE_CLI": str(owner),
-            "OWNER_CLI_LOG": str(sandbox / "owner.log"),
-        }
-    )
-    cli_env = _cli_frame_env(env)
-    script_path = home / "pty_attach.py"
-    script_path.write_text(_PTY_ATTACH_PY, encoding="utf-8")
+    sandbox = _exclusive_sandbox("vcs-a-")
     ptys: list[tuple[subprocess.Popen[str], Path]] = []
-    owned = [host]
-
-    def frame(*args: str, timeout: int = 40) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [str(bin_path), *args],
-            check=False,
-            env=cli_env,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-
-    def listing() -> str:
-        return frame("list-sessions", "--no-formatting").stdout
-
-    def panes() -> str:
-        return frame(
-            "--session", host, "action", "list-panes", "--json", "--command"
-        ).stdout
-
-    def pane_rows() -> list:
-        payload = _list_panes_payload(panes())
-        return payload if isinstance(payload, list) else []
-
-    def attach(token: str) -> subprocess.Popen[str]:
-        attached = home / f"pty-attached-{token}"
-        release = home / f"pty-release-{token}"
-        attached.unlink(missing_ok=True)
-        release.unlink(missing_ok=True)
-        proc = subprocess.Popen(
-            [
-                sys.executable,
-                str(script_path),
-                str(bin_path),
-                host,
-                str(attached),
-                str(release),
-            ],
-            env=cli_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        ptys.append((proc, release))
-        assert _wait_until(lambda: attached.is_file() and proc.poll() is None, 30), attached
-        return proc
-
-    def public_start(repo: Path, invocation: str) -> subprocess.CompletedProcess[str]:
-        start_env = env.copy()
-        start_env.update(
+    owned: list[str] = []
+    cli_env: dict[str, str] | None = None
+    try:
+        home = sandbox / "home"
+        sock = sandbox / "sock"
+        home.mkdir()
+        sock.mkdir()
+        (home / "config" / "vc-frame").mkdir(parents=True)
+        (home / "data").mkdir()
+        host = _short_token("h")
+        guest = _short_token("g")
+        alias = _short_token("a")
+        other = _short_token("o")
+        guest_repo = sandbox / guest
+        alias_repo = sandbox / alias
+        other_repo = sandbox / other
+        _seed_committed_git(guest_repo, home=home)
+        _seed_committed_git(alias_repo, home=home)
+        _seed_committed_git(other_repo, home=home)
+        prior_pid = home / "prior.pid"
+        prior_lstart = home / "prior.lstart"
+        prior_done = home / "prior.done"
+        prior_token = "prior-ok-" + uuid.uuid4().hex[:12]
+        owner = _write(sandbox / "owner-cli", OWNER_CLI)
+        env = os.environ.copy()
+        for key in IDENTITY_ENV:
+            env.pop(key, None)
+        env.update(
             {
-                "VC_FRAME": "1",
-                "VC_FRAME_PANE_ID": "1",
-                "VC_FRAME_SESSION_NAME": host,
+                "HOME": str(home),
+                "VIBECRAFTED_HOME": str(home / "vibecrafted"),
+                "XDG_CONFIG_HOME": str(home / "config"),
+                "XDG_DATA_HOME": str(home / "data"),
+                "XDG_CACHE_HOME": str(home / "cache"),
+                "VC_FRAME_SOCKET_DIR": str(sock),
+                "ZELLIJ_SOCKET_DIR": str(sock),
+                "VC_FRAME_CONFIG_DIR": str(home / "config" / "vc-frame"),
+                "VC_FRAME_SERVER_FOREGROUND": "1",
+                "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+                "VIBECRAFTED_VC_FRAME_BIN": str(bin_path),
+                "VIBECRAFTED_PRODUCT_CORE_CLI": str(owner),
+                "OWNER_CLI_LOG": str(sandbox / "owner.log"),
             }
         )
-        start_env.pop("VC_FRAME_CONFIG_FILE", None)
-        script = "\n".join(
-            [
-                f'source "{SHELL_SH}"',
-                f'_vetcoders_vc_frame_loaded_root="{REPO_ROOT}"',
-                invocation,
-                'printf "RC=[%s]\\n" "$?"',
-            ]
-        )
-        return subprocess.run(
-            ["bash", "--noprofile", "--norc", "-c", script],
-            check=False,
-            cwd=repo,
-            env=start_env,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
+        cli_env = _cli_frame_env(env)
+        script_path = home / "pty_attach.py"
+        script_path.write_text(_PTY_ATTACH_PY, encoding="utf-8")
+        owned.append(host)
 
-    try:
+        def frame(*args: str, timeout: int = 40) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [str(bin_path), *args],
+                check=False,
+                env=cli_env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+
+        def listing() -> str:
+            return frame("list-sessions", "--no-formatting").stdout
+
+        def panes() -> str:
+            return frame(
+                "--session", host, "action", "list-panes", "--json", "--command"
+            ).stdout
+
+        def pane_rows() -> list:
+            payload = _list_panes_payload(panes())
+            return payload if isinstance(payload, list) else []
+
+        def attach(token: str) -> subprocess.Popen[str]:
+            attached = home / f"pty-attached-{token}"
+            release = home / f"pty-release-{token}"
+            attached.unlink(missing_ok=True)
+            release.unlink(missing_ok=True)
+            proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(script_path),
+                    str(bin_path),
+                    host,
+                    str(attached),
+                    str(release),
+                ],
+                env=cli_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            ptys.append((proc, release))
+            assert _wait_until(lambda: attached.is_file() and proc.poll() is None, 30), attached
+            return proc
+
+        def public_start(repo: Path, invocation: str) -> subprocess.CompletedProcess[str]:
+            start_env = env.copy()
+            start_env.update(
+                {
+                    "VC_FRAME": "1",
+                    "VC_FRAME_PANE_ID": "1",
+                    "VC_FRAME_SESSION_NAME": host,
+                }
+            )
+            start_env.pop("VC_FRAME_CONFIG_FILE", None)
+            script = "\n".join(
+                [
+                    f'source "{SHELL_SH}"',
+                    f'_vetcoders_vc_frame_loaded_root="{REPO_ROOT}"',
+                    invocation,
+                    'printf "RC=[%s]\\n" "$?"',
+                ]
+            )
+            return subprocess.run(
+                ["bash", "--noprofile", "--norc", "-c", script],
+                check=False,
+                cwd=repo,
+                env=start_env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+
         created = frame(
             "--layout",
             "vibecrafted-host",
@@ -2842,22 +2985,11 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         )
 
         def host_chrome_rows():
-            rows = pane_rows()
-            titles = {
-                pane.get("title")
-                for pane in rows
-                if isinstance(pane, dict)
-            }
-            if "session-manager" in titles and "VC Guest" in titles:
-                return rows
-            return []
+            return _host_chrome_ready(pane_rows())
 
         chrome = _wait_until(host_chrome_rows, 25)
         assert chrome, panes()
-        chrome_titles = {
-            pane.get("title") for pane in chrome if isinstance(pane, dict)
-        }
-        assert "session-manager" in chrome_titles and "VC Guest" in chrome_titles, chrome
+        chrome_geometry = _assert_host_chrome(chrome)
 
         pane = frame(
             "--session",
@@ -2916,11 +3048,11 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         )
         assert guest not in listing(), listing()
 
+        owned.append(guest)
         started = public_start(
             guest_repo,
             f"vc-start --repo {shlex.quote(str(guest_repo))}",
         )
-        owned.append(guest)
         combined = started.stdout + started.stderr
         assert "RC=[0]" in started.stdout, combined
         assert f"created workspace {guest}" in combined, combined
@@ -2936,12 +3068,7 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         assert receipt.get("pane_id") not in (None, ""), receipt
         assert str(receipt.get("request_id") or "").strip(), receipt
         after_rows = pane_rows()
-        after_titles = {
-            row.get("title") for row in after_rows if isinstance(row, dict)
-        }
-        assert "session-manager" in after_titles and "VC Guest" in after_titles, (
-            after_rows
-        )
+        _assert_host_chrome(after_rows, previous_geometry=chrome_geometry)
         guest_pane = _pane_by_id(after_rows, receipt["pane_id"])
         assert guest_pane is not None, (receipt, after_rows)
         surviving = _pane_by_id(after_rows, prior_pane_id)
@@ -3005,11 +3132,11 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         assert dumped.returncode == 0, dump
         assert "not found" not in dump.lower(), dump
 
+        owned.append(alias)
         alias_started = public_start(
             alias_repo,
             f"vc-start operator --repo {shlex.quote(str(alias_repo))}",
         )
-        owned.append(alias)
         alias_combined = alias_started.stdout + alias_started.stderr
         assert "RC=[0]" in alias_started.stdout, alias_combined
         assert f"created workspace {alias}" in alias_combined, alias_combined
@@ -3023,12 +3150,7 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         assert alias_receipts[0].get("guest") == alias, alias_receipts[0]
         assert alias_receipts[0].get("pane_id") not in (None, ""), alias_receipts[0]
         alias_rows = pane_rows()
-        alias_titles = {
-            row.get("title") for row in alias_rows if isinstance(row, dict)
-        }
-        assert "session-manager" in alias_titles and "VC Guest" in alias_titles, (
-            alias_rows
-        )
+        _assert_host_chrome(alias_rows, previous_geometry=chrome_geometry)
         assert _pane_by_id(alias_rows, receipt["pane_id"]) is not None
         assert _pane_by_id(alias_rows, alias_receipts[0]["pane_id"]) is not None
         assert _pane_by_id(alias_rows, prior_pane_id) is not None
@@ -3041,6 +3163,7 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         assert two and _count_list_clients(two) == 2, (
             frame("--session", host, "action", "list-clients").stdout
         )
+        owned.append(other)
         ambiguous = public_start(
             other_repo,
             f"vc-start --repo {shlex.quote(str(other_repo))}",
@@ -3052,12 +3175,7 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         assert _pid_alive(prior_pid)
         assert _pid_file_start_identity(prior_pid) == prior_identity
         assert prior_token in prior_done.read_text(encoding="utf-8")
-        final_titles = {
-            row.get("title") for row in pane_rows() if isinstance(row, dict)
-        }
-        assert "session-manager" in final_titles and "VC Guest" in final_titles, (
-            pane_rows()
-        )
+        _assert_host_chrome(pane_rows(), previous_geometry=chrome_geometry)
         assert _pane_by_id(pane_rows(), prior_pane_id) is not None
     finally:
         for proc, release in ptys:
@@ -3070,10 +3188,23 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=5)
-        for name in owned:
-            frame("kill-session", name)
-            frame("delete-session", name, "--force")
-        leftover = frame("list-sessions", "--no-formatting").stdout
+        leftover = ""
+        if cli_env is not None:
+            def _cleanup_frame(*args: str, timeout: int = 40) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [str(bin_path), *args],
+                    check=False,
+                    env=cli_env,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+
+            for name in owned:
+                _cleanup_frame("kill-session", name)
+                _cleanup_frame("delete-session", name, "--force")
+            leftover = _cleanup_frame("list-sessions", "--no-formatting").stdout
         shutil.rmtree(sandbox, ignore_errors=True)
         for name in owned:
             assert name not in leftover, leftover

@@ -389,7 +389,14 @@ __all__ = [
 
 
 def main() -> int:
-    """Shell adapters use the canonical launch resolver; no shell path twin."""
+    """Shell adapters select a directory unless launch-spec flags are present.
+
+    Empty ``--repo`` / ``--root`` prints nothing so the caller keeps its own
+    fallback (``vc-start`` then uses Git top-level or ``pwd``). Directory
+    selection never demands Git. ``--base``, ``--worktree``,
+    ``--execution-runtime``, or ``--prepare-worktree`` enter the launch
+    resolver, which does require a resolvable commit.
+    """
     import json
     import sys
 
@@ -399,12 +406,30 @@ def main() -> int:
         description="Resolve a launch repository and pinned base"
     )
     add_repo_arguments(parser)
+    parser.add_argument(
+        "--label",
+        default="",
+        help="stderr prefix for directory-selection refusals (vc-start, …)",
+    )
     parser.add_argument("--base", default="")
     parser.add_argument("--execution-runtime", default="")
     parser.add_argument("--worktree", default="")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--prepare-worktree", action="store_true")
     args = parser.parse_args()
+    launch = bool(
+        args.base or args.execution_runtime or args.worktree or args.prepare_worktree
+    )
+    if not launch:
+        if not str(args.repo or "").strip() and not str(args.root or "").strip():
+            return 0
+        try:
+            selection = select_repository(args.repo, args.root, label=args.label)
+        except RepoSelectionError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        print(json.dumps(selection.to_dict()) if args.json else selection.path)
+        return 0
     try:
         spec = normalize_launch_spec(
             {
