@@ -30,12 +30,12 @@ def test_default_runtime_passes_through_explicit_runtime(monkeypatch) -> None:
     assert cli._default_runtime("headless", "/some/repo") == "headless"
 
 
-def test_default_runtime_terminal_for_real_operator_tty(monkeypatch) -> None:
+def test_default_runtime_headless_for_real_operator_tty(monkeypatch) -> None:
     _clear_session_env(monkeypatch)
     _force_real_tty(monkeypatch)
-    # A genuine interactive operator (real stdin+stdout TTY, no --runtime given)
-    # still gets a terminal surface.
-    assert cli._default_runtime("", "/some/repo") == "terminal"
+    # A terminal invocation still launches an ordinary worker headless. A
+    # visible compatibility host is an explicit --runtime choice.
+    assert cli._default_runtime("", "/some/repo") == "headless"
 
 
 def test_default_runtime_headless_for_nontty_without_session_env(monkeypatch) -> None:

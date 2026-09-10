@@ -412,6 +412,13 @@ def test_missing_generation_helper_fails_closed(world: dict[str, Path]) -> None:
 def test_direct_source_execution_keeps_its_own_route(world: dict[str, Path]) -> None:
     """Explicit development execution stays deliberate; it never hijacks nor is hijacked."""
     checkout = world["checkout"]
+    env_log = world["base"] / "source-env.log"
+    facade = checkout / CORE / "runtime" / "shell" / "vetcoders.sh"
+    with facade.open("a", encoding="utf-8") as handle:
+        handle.write(
+            f'printf "%s|%s\\n" "${{VIBECRAFTED_ROOT-}}" '
+            f'"${{VIBECRAFTED_RUNTIME_ROOT-}}" > {str(env_log)!r}\n'
+        )
     result, launch = _run(
         world,
         checkout / "scripts" / "vibecrafted",
@@ -424,7 +431,8 @@ def test_direct_source_execution_keeps_its_own_route(world: dict[str, Path]) -> 
     assert _sourced(world) == [SOURCE_MARK]
     assert OWNER_MARK not in _sourced(world)
     assert launch is None
-    assert "runtime-install --payload-root <Runtime-Pack>" in result.stderr
+    assert "no installed vibecrafted front door" in result.stderr
+    assert env_log.read_text(encoding="utf-8").strip() == f"{checkout}|"
 
 
 @pytest.mark.parametrize("stale", [False, True])

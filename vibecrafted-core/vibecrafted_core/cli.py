@@ -601,7 +601,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _default_runtime(explicit_runtime: str, root: str = "") -> str:
-    """Resolve launch surface: explicit > real operator TTY > headless.
+    """Resolve launch surface: explicit presentation or headless.
 
     DELIBERATE REVERSAL of 141a19d / 3d794af (July 2026): those commits made
     dispatched workers prefer a visible ``terminal`` tab — either by
@@ -620,8 +620,6 @@ def _default_runtime(explicit_runtime: str, root: str = "") -> str:
     runtime = str(explicit_runtime or "").strip()
     if runtime:
         return runtime
-    if sys.stdin.isatty() and sys.stdout.isatty():
-        return "terminal"
     return "headless"
 
 
