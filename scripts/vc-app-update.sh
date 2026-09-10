@@ -770,28 +770,38 @@ prior_pack_generation() {
   /usr/bin/tar -xOf "$pack" "$member" | tr -d '[:space:]'
 }
 
+installer_admits_allow_older() {
+  local path="$1"
+  [[ -x "$path" && -f "$path" ]] || return 1
+  grep -Fq -- '--allow-older-runtime' "$path"
+}
+
 resolve_pack_installer() {
-  local sibling bundled
-  # Prefer the historical app's own installer, then the running helper's sibling.
-  # Do not walk a source checkout independently of those two owners.
-  if [[ -n "${SOURCE:-}" ]]; then
-    for bundled in \
-      "$SOURCE/Contents/Resources/runtime-pack/install-runtime-pack.sh" \
-      "$SOURCE/Contents/Helpers/install-runtime-pack.sh" \
-      "$SOURCE/Contents/Resources/runtime/scripts/install-runtime-pack.sh"
-    do
-      if [[ -x "$bundled" ]]; then
-        printf '%s' "$(cd "$(dirname "$bundled")" && pwd)/$(basename "$bundled")"
-        return 0
-      fi
-    done
-  fi
+  local sibling candidate
+  # Recover must call a wrapper that actually admits --allow-older-runtime.
+  # Historical 79001 wrappers may lack that flag; prefer the running helper's
+  # sibling, then a bundled wrapper that greps as supported. Never walk a
+  # source checkout.
   sibling="$(cd "$(dirname "$0")" && pwd)/install-runtime-pack.sh"
-  if [[ -x "$sibling" ]]; then
+  if installer_admits_allow_older "$sibling"; then
     printf '%s' "$sibling"
     return 0
   fi
-  echo "Runtime Pack installer owner is missing; cannot recover the previous runtime" >&2
+  for candidate in \
+    "${DESTINATION:-}/Contents/Resources/runtime-pack/install-runtime-pack.sh" \
+    "${DESTINATION:-}/Contents/Helpers/install-runtime-pack.sh" \
+    "${DESTINATION:-}/Contents/Resources/runtime/scripts/install-runtime-pack.sh" \
+    "${SOURCE:-}/Contents/Resources/runtime-pack/install-runtime-pack.sh" \
+    "${SOURCE:-}/Contents/Helpers/install-runtime-pack.sh" \
+    "${SOURCE:-}/Contents/Resources/runtime/scripts/install-runtime-pack.sh"
+  do
+    [[ -n "$candidate" && "$candidate" != "/Contents/"* ]] || continue
+    if installer_admits_allow_older "$candidate"; then
+      printf '%s' "$(cd "$(dirname "$candidate")" && pwd)/$(basename "$candidate")"
+      return 0
+    fi
+  done
+  echo "Runtime Pack installer owner is missing or does not admit --allow-older-runtime; cannot recover the previous runtime" >&2
   return 1
 }
 

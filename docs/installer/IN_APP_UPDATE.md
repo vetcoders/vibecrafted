@@ -104,11 +104,13 @@ receipt must not republish the failed pack.
 Whole-tuple recovery after a published Runtime Pack failure is
 `--mode recover` → `recover_whole_tuple`. It locates the historical pack
 inside owned `prior.app`, calls the existing
-`install-runtime-pack.sh --allow-older-runtime` owner from the bundled
-prior app or the running helper sibling (not a source-checkout hop),
+`install-runtime-pack.sh --allow-older-runtime` owner from a wrapper that
+actually admits that flag (running helper sibling first, then a live or
+prior bundled wrapper that greps as supported — not a source-checkout hop),
 observes `active.json` / `install-receipt.json` with canonical installer
 pending semantics (`install_pending`, `config_pending`,
-`uninstall_pending`, `config_transaction`, `config_conflicts`), and only
+`uninstall_pending`, `config_transaction`, `config_conflicts`; empty or
+absent pending objects are not pending, matching installer truthiness), and only
 then restores the matching prior app. Helpers and pack bytes come from
 `prior.app`; `--app-root` is the live destination so the install receipt
 does not name the temporary capture. Resume of a terminal recover phase

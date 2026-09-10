@@ -468,14 +468,18 @@ func installerPendingPublicationValue(_ value: Any?) -> Bool {
   switch value {
   case nil:
     return false
+  case is NSNull:
+    return false
   case let flag as Bool:
     return flag
   case let text as String:
     return !text.isEmpty
-  case is [String: Any]:
-    return true
-  case is [Any]:
-    return true
+  case let dict as [String: Any]:
+    return !dict.isEmpty
+  case let dict as [AnyHashable: Any]:
+    return !dict.isEmpty
+  case let array as [Any]:
+    return !array.isEmpty
   case let number as NSNumber:
     return number.boolValue
   default:

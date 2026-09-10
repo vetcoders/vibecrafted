@@ -1323,6 +1323,41 @@ struct ProductUpdatePolicyTests {
           observed, priorGeneration: previous, candidateGeneration: generation) == .unresolved,
         "incomplete publication was not unresolved: \(body)")
     }
+    let publishedBodies = [
+      "{\"schema\":\"vibecrafted.runtime-install.v1\",\"version\":\"\(generation)\"}",
+      "{\"schema\":\"vibecrafted.runtime-install.v1\",\"version\":\"\(generation)\",\"config_pending\":{}}",
+      "{\"schema\":\"vibecrafted.runtime-install.v1\",\"version\":\"\(generation)\",\"config_pending\":[]}",
+      "{\"schema\":\"vibecrafted.runtime-install.v1\",\"version\":\"\(generation)\",\"config_pending\":false}",
+      "{\"schema\":\"vibecrafted.runtime-install.v1\",\"version\":\"\(generation)\",\"uninstall_pending\":false}",
+    ]
+    for body in publishedBodies {
+      try body.write(to: receipt, atomically: true, encoding: .utf8)
+      let observed = productUpdateObserveInstallerPublication(runtimeHome: runtime)
+      try require(!observed.pending, "empty or absent pending was treated as incomplete: \(body)")
+      try require(
+        productUpdateDerivePackPublication(
+          observed, priorGeneration: previous, candidateGeneration: generation) == .published,
+        "empty pending blocked publication: \(body)")
+    }
+  }
+
+  static func testInstallerPendingPublicationMatchesInstallerTruthiness() throws {
+    try require(!installerPendingPublicationValue(nil), "absent pending was treated as pending")
+    try require(
+      !installerPendingPublicationValue(NSNull()), "null pending was treated as pending")
+    try require(!installerPendingPublicationValue(false), "false pending was treated as pending")
+    try require(!installerPendingPublicationValue(""), "empty string pending was treated as pending")
+    try require(
+      !installerPendingPublicationValue([String: Any]()),
+      "empty object pending was treated as pending")
+    try require(
+      !installerPendingPublicationValue([Any]()), "empty array pending was treated as pending")
+    try require(installerPendingPublicationValue(true), "true pending was ignored")
+    try require(installerPendingPublicationValue("staged"), "nonempty string pending was ignored")
+    try require(
+      installerPendingPublicationValue(["staged": true] as [String: Any]),
+      "nonempty object pending was ignored")
+    try require(installerPendingPublicationValue(["x"] as [Any]), "nonempty array pending was ignored")
   }
 
   static func testReplacementReceiptRequiresTransactionAndOperation() throws {
@@ -1372,14 +1407,21 @@ struct ProductUpdatePolicyTests {
     retained.boundary = .committed
     retained.terminal = .retained
     let unbound = try encodeProductUpdateTransaction(retained)
+    var decodedUnbound = false
+    var bindingError: ProductUpdateFeedError?
     do {
       _ = try decodeProductUpdateTransaction(unbound)
-      throw Failure(message: "a retained transaction without an id decoded")
-    } catch {
-      try require(
-        String(describing: error).contains("transaction"),
-        "missing transaction id was not a malformed receipt")
+      decodedUnbound = true
+    } catch let error as ProductUpdateFeedError {
+      bindingError = error
     }
+    try require(!decodedUnbound, "a retained transaction without an id decoded")
+    guard case .malformed(let message) = bindingError else {
+      throw Failure(message: "missing transaction id was not ProductUpdateFeedError.malformed")
+    }
+    try require(
+      message.contains("transaction binding"),
+      "missing transaction id was not a binding refusal: \(message)")
     retained.transactionID = "txn-1"
     let bound = try decodeProductUpdateTransaction(try encodeProductUpdateTransaction(retained))
     try require(bound.transactionID == "txn-1", "bound transaction id was dropped")
@@ -1490,6 +1532,7 @@ struct ProductUpdatePolicyTests {
     try testHandoffReadRefusesDefaultReplaceMode()
     try testObserveInstallerPublicationIgnoresCallerEnum()
     try testObserveInstallerPublicationRejectsIncompleteStates()
+    try testInstallerPendingPublicationMatchesInstallerTruthiness()
     try testReplacementReceiptRequiresTransactionAndOperation()
     try testPersistedTransactionRequiresBinding()
     try testCoordinatorDoesNotCloseUIWhenHandoffWriteFails()

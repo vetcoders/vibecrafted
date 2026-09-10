@@ -14,10 +14,11 @@ final class ProductUpdateCoordinator {
     var installed: () -> ProductUpdateIdentity
     var stagingRoot: () -> URL
     var home: () -> URL
-    var fetchBytes: (URL, @escaping (Result<Data, Error>) -> Void) -> () -> Void
-    var downloadFile: (URL, URL, @escaping (Result<URL, Error>) -> Void) -> () -> Void
+    var fetchBytes: (URL, @escaping ProductUpdateDataCompletion) -> ProductUpdateCancel
+    var downloadFile: (URL, URL, @escaping ProductUpdateURLCompletion) -> ProductUpdateCancel
     var verifyFeedSignature:
-      (Data, Data, URL, @escaping (Result<Void, Error>) -> Void) -> () -> Void
+      (Data, Data, URL, @escaping @MainActor @Sendable (Result<Void, Error>) -> Void) ->
+      ProductUpdateCancel
     var verifyCandidate:
       (ProductUpdateCandidate, URL, Data, @escaping (Result<ProductUpdateProof, Error>) -> Void) ->
       () -> Void
@@ -27,7 +28,7 @@ final class ProductUpdateCoordinator {
     var replaceApp:
       (ProductUpdateReplacementRequest, @escaping (Result<ProductUpdateReplacementAdmission, Error>) -> Void)
       -> () -> Void
-    var extractApp: ((URL, URL, @escaping (Result<URL, Error>) -> Void) -> () -> Void)?
+    var extractApp: ((URL, URL, @escaping ProductUpdateURLCompletion) -> ProductUpdateCancel)?
     var closeUIAfterHelperArmed: () -> Void
     var checkTimeout: TimeInterval
   }
@@ -84,10 +85,10 @@ final class ProductUpdateCoordinator {
       deriveProductUpdateProgress(
         phase: .downloading, installed: installed, candidate: nil,
         detail: "Downloading the signed update list."))
-    var cancelled = false
+    let cancelled = ProductUpdateCancelFlag()
     let cancelFeed = dependencies.fetchBytes(feed) { [weak self] result in
       Task { @MainActor in
-        guard let self, self.generation == token, !cancelled else { return }
+        guard let self, self.generation == token, !cancelled.marked else { return }
         switch result {
         case .failure(let error):
           self.finish(
@@ -105,7 +106,7 @@ final class ProductUpdateCoordinator {
     }
     armTimeout(token: token, installed: installed)
     cancelInFlight = {
-      cancelled = true
+      cancelled.mark()
       cancelFeed()
     }
   }

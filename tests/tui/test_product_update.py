@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
 import pwd
 import shutil
 import signal
-import socket
 import stat
 import subprocess
 import sys
@@ -21,6 +21,75 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 APP = REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted"
 SHELL = REPO_ROOT / "vibecrafted-app/shell-agent"
 HELPER = REPO_ROOT / "scripts/vc-app-update.sh"
+
+_FRAME_IDENTITY_ENV = (
+    "VIBECRAFTED_OPERATOR_SESSION",
+    "VIBECRAFTED_WORKER_SESSION",
+    "VIBECRAFTED_WORKSPACE_ID",
+    "VIBECRAFTED_SESSION_ID",
+    "VIBECRAFTED_WORKSPACE_INSTANCE_ID",
+    "VIBECRAFTED_WORKSPACE_ROOT",
+    "VIBECRAFTED_DECLARED_WORKSPACE_ROOT",
+    "VIBECRAFTED_PENDING_VC_FRAME_ATTACH",
+    "VIBECRAFTED_PENDING_VC_FRAME_SWITCH",
+    "VIBECRAFTED_PREPARED_VC_FRAME_SESSION",
+    "VIBECRAFTED_START_CREATED_SESSION",
+    "VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME",
+    "VIBECRAFTED_PRODUCT_ENTRY",
+    "VIBECRAFTED_PREFER_REPO_VC_FRAME",
+    "VIBECRAFTED_VC_FRAME_BIN",
+    "VIBECRAFTED_LEGACY_VC_FRAME_SOCKET_DIR",
+    "VC_FRAME",
+    "VC_FRAME_PANE_ID",
+    "VC_FRAME_SESSION_NAME",
+    "VC_FRAME_CONFIG_DIR",
+    "VC_FRAME_CONFIG_FILE",
+    "VC_FRAME_SOCKET_DIR",
+    "ZELLIJ",
+    "ZELLIJ_PANE_ID",
+    "ZELLIJ_SESSION_NAME",
+    "ZELLIJ_SOCKET_DIR",
+)
+
+
+def _authored_writes_named_socket(source: str, filename: str) -> bool:
+    """AST: a write/open call whose arguments name `filename`. Not a text search."""
+    tree = ast.parse(source)
+    writers = {"write_text", "write_bytes", "touch", "open"}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = ""
+        if isinstance(func, ast.Attribute):
+            name = func.attr
+        elif isinstance(func, ast.Name):
+            name = func.id
+        if name not in writers:
+            continue
+        for child in ast.walk(node):
+            if isinstance(child, ast.Constant) and child.value == filename:
+                return True
+    return False
+
+
+def _installed_frame_engine() -> Path | None:
+    for candidate in (
+        os.environ.get("VIBECRAFTED_VC_FRAME_BIN", ""),
+        os.environ.get("VIBECRAFTED_RUNTIME_ROOT", "")
+        and os.path.join(os.environ["VIBECRAFTED_RUNTIME_ROOT"], "libexec", "vc-frame"),
+    ):
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return Path(candidate)
+    founder = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    releases = founder / ".local" / "share" / "vibecrafted" / "releases"
+    if releases.is_dir():
+        found = sorted(
+            releases.glob("*/libexec/vc-frame"), key=lambda p: p.stat().st_mtime
+        )
+        if found:
+            return found[-1]
+    return None
 
 
 def test_product_update_source_contract() -> None:
@@ -104,6 +173,8 @@ def test_product_update_source_contract() -> None:
     assert "--allow-older-runtime" in (
         REPO_ROOT / "scripts/install-runtime-pack.sh"
     ).read_text(encoding="utf-8")
+    assert "installer_admits_allow_older" in helper
+    assert "grep -Fq -- '--allow-older-runtime'" in helper
     assert "failed-new.app" in helper
     assert "rolledBack" in transaction
     assert "reconcile_resume" in helper
@@ -135,7 +206,24 @@ def test_product_update_source_contract() -> None:
     assert "product_contract" in authored
     assert "VC_FRAME_SOCKET_DIR" in authored
     assert "_IsolatedFrameSession" in authored
-    assert 'live-session.sock").write_text' not in authored
+    assert "_installed_frame_engine" in authored
+    assert "--create-background" in authored
+    assert "delete-session" in authored
+    assert "list-sessions" in authored
+    tree = ast.parse(authored)
+    assigns_start_blank = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Attribute)
+                    and target.attr == "start"
+                    and isinstance(node.value, ast.Constant)
+                    and node.value.value == ""
+                ):
+                    assigns_start_blank = True
+    assert not assigns_start_blank, "self.start = '' hides IsolatedFrameSession.start"
+    assert not _authored_writes_named_socket(authored, "live-session" + ".sock")
     assert "VIBECRAFTED_LAUNCHER_BIN" in authored
     assert "allow-older-runtime" in authored
     assert '"--mode"' in authored and '"recover"' in authored
@@ -636,7 +724,9 @@ def _assert_founder_identity_untouched(before: dict[str, int | None]) -> None:
     assert after == before, f"Founder installer identity changed: {before} -> {after}"
 
 
-def _isolated_product_env(tmp_path: Path) -> dict[str, str]:
+def _isolated_product_env(
+    tmp_path: Path, *, frame_socket_dir: Path | None = None
+) -> dict[str, str]:
     home = tmp_path / "isolated-home"
     runtime = tmp_path / "isolated-runtime"
     crafted = tmp_path / "isolated-crafted"
@@ -645,7 +735,7 @@ def _isolated_product_env(tmp_path: Path) -> dict[str, str]:
     xdg_data = tmp_path / "isolated-xdg-data"
     xdg_cache = tmp_path / "isolated-xdg-cache"
     xdg_state = tmp_path / "isolated-xdg-state"
-    sockets = tmp_path / "isolated-frame-sockets"
+    sockets = frame_socket_dir if frame_socket_dir is not None else tmp_path / "isolated-frame-sockets"
     scratch = tmp_path / "isolated-tmp"
     for path in (
         home,
@@ -891,21 +981,31 @@ def _copy_signed_app(src: Path, dest: Path) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
         shutil.rmtree(dest)
-    cloned = subprocess.run(
-        ["/bin/cp", "-cR", str(src), str(dest)],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    if cloned.returncode != 0 or not dest.exists():
-        if dest.exists():
-            shutil.rmtree(dest)
-        subprocess.run(
-            ["/usr/bin/ditto", str(src), str(dest)],
-            check=True,
+    try:
+        cloned = subprocess.run(
+            ["/bin/cp", "-cR", str(src), str(dest)],
+            capture_output=True,
+            text=True,
             timeout=60,
         )
-    return dest
+        if cloned.returncode != 0 or not dest.exists():
+            if dest.exists():
+                shutil.rmtree(dest)
+            copied = subprocess.run(
+                ["/usr/bin/ditto", str(src), str(dest)],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if copied.returncode != 0 or not dest.exists():
+                raise RuntimeError(
+                    f"signed copy failed for {dest}: {copied.stderr or copied.stdout or cloned.stderr}"
+                )
+        return dest
+    except BaseException:
+        if dest.exists():
+            shutil.rmtree(dest)
+        raise
 
 
 def _identity_token(app: Path) -> str:
@@ -932,28 +1032,34 @@ class _SignedApps:
         self.copies: list[Path] = []
 
     def __enter__(self) -> "_SignedApps":
-        e37_mount = self.tmp / "mnt-e37"
-        prior_mount = self.tmp / "mnt-79001"
-        self.e37_app = _attach_signed_app(self.e37["dmg"], e37_mount)
-        self.prior_app = _attach_signed_app(self.prior["dmg"], prior_mount)
-        self.mounts = [e37_mount, prior_mount]
-        _verify_signed_generation(self.e37_app, source_token="e37be2c9", label="e37 app")
-        _verify_signed_generation(self.prior_app, source_token="79001c3d", label="79001 app")
-        if "feed" in self.prior:
-            prior_feed = json.loads(self.prior["feed"].read_text(encoding="utf-8"))
-            prior_source = str(
-                (prior_feed.get("source_revisions") or {}).get("vibecrafted") or ""
-            )
-            if "79001c3d" not in prior_source.lower():
-                pytest.fail("prior artifacts labeled a non-79001 feed as the prior manifest")
-        self.e37_identity = _identity_token(self.e37_app)
-        self.prior_identity = _identity_token(self.prior_app)
-        if self.e37_identity == self.prior_identity:
-            pytest.fail(
-                "unresolved required gate: e37 and 79001 fixtures have the same "
-                "CDHash; cross-generation acceptance needs two signed generations"
-            )
-        return self
+        try:
+            e37_mount = self.tmp / "mnt-e37"
+            prior_mount = self.tmp / "mnt-79001"
+            self.mounts.append(e37_mount)
+            self.e37_app = _attach_signed_app(self.e37["dmg"], e37_mount)
+            self.mounts.append(prior_mount)
+            self.prior_app = _attach_signed_app(self.prior["dmg"], prior_mount)
+            _verify_signed_generation(self.e37_app, source_token="e37be2c9", label="e37 app")
+            _verify_signed_generation(self.prior_app, source_token="79001c3d", label="79001 app")
+            if "feed" in self.prior:
+                prior_feed = json.loads(self.prior["feed"].read_text(encoding="utf-8"))
+                prior_source = str(
+                    (prior_feed.get("source_revisions") or {}).get("vibecrafted") or ""
+                )
+                if "79001c3d" not in prior_source.lower():
+                    pytest.fail("prior artifacts labeled a non-79001 feed as the prior manifest")
+            self.e37_identity = _identity_token(self.e37_app)
+            self.prior_identity = _identity_token(self.prior_app)
+            if self.e37_identity == self.prior_identity:
+                pytest.fail(
+                    "unresolved required gate: e37 and 79001 fixtures have the same "
+                    "CDHash; cross-generation acceptance needs two signed generations"
+                )
+            return self
+        except BaseException:
+            self.release_copies()
+            self.detach_mounts()
+            raise
 
     def __exit__(self, exc_type: object, exc: object, _tb: object) -> None:
         if exc is not None:
@@ -999,18 +1105,26 @@ class _SignedApps:
         self.copies = [item for item in self.copies if item != path]
 
     def copy_e37(self, dest: Path) -> Path:
-        copied = _copy_signed_app(self.e37_app, dest)
-        self.copies.append(copied)
-        if len(self.copies) >= 2:
-            self.detach_mounts()
-        return copied
+        self.copies.append(dest)
+        try:
+            copied = _copy_signed_app(self.e37_app, dest)
+            if len(self.copies) >= 2:
+                self.detach_mounts()
+            return copied
+        except BaseException:
+            self.release(dest)
+            raise
 
     def copy_prior(self, dest: Path) -> Path:
-        copied = _copy_signed_app(self.prior_app, dest)
-        self.copies.append(copied)
-        if len(self.copies) >= 2:
-            self.detach_mounts()
-        return copied
+        self.copies.append(dest)
+        try:
+            copied = _copy_signed_app(self.prior_app, dest)
+            if len(self.copies) >= 2:
+                self.detach_mounts()
+            return copied
+        except BaseException:
+            self.release(dest)
+            raise
 
 
 def test_product_update_helper_writes_ready_before_waiting(tmp_path: Path) -> None:
@@ -1557,131 +1671,202 @@ def _plant_custom_settings(env: dict[str, str]) -> Path:
     return settings
 
 
-_ISOLATED_FRAME_STANDIN = r"""
+_FRAME_PTY_WORKER = """\
 import os
-import pty
-import socket
-import sys
 import time
+from pathlib import Path
 
-socket_path = sys.argv[1]
-master, slave = pty.openpty()
-child = os.fork()
-if child == 0:
-    os.setsid()
-    os.close(master)
-    os.dup2(slave, 0)
-    os.dup2(slave, 1)
-    os.dup2(slave, 2)
-    if slave > 2:
-        os.close(slave)
-    while True:
-        time.sleep(3600)
-os.close(slave)
-server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-if os.path.exists(socket_path):
-    os.unlink(socket_path)
-server.bind(socket_path)
-server.listen(4)
+root = Path(os.environ["VC_UPDATE_FRAME_PROBE"])
+ident = root / "ident"
+cmdp = root / "cmd"
+reply = root / "reply"
+ident.write_text(str(os.getpid()) + "\\n", encoding="utf-8")
 while True:
-    conn, _ = server.accept()
-    command = conn.recv(64).decode("utf-8", "replace").strip()
-    if command == "ping":
-        conn.sendall(f"pong {os.getpid()}\n".encode("utf-8"))
-    elif command == "identify":
-        conn.sendall(f"{os.getpid()} {child}\n".encode("utf-8"))
-    conn.close()
+    if cmdp.is_file():
+        request = cmdp.read_text(encoding="utf-8").strip()
+        try:
+            cmdp.unlink()
+        except FileNotFoundError:
+            pass
+        if request == "ping":
+            reply.write_text("pong " + str(os.getpid()) + "\\n", encoding="utf-8")
+        elif request == "identify":
+            reply.write_text(str(os.getpid()) + "\\n", encoding="utf-8")
+    time.sleep(0.05)
 """
 
 
 class _IsolatedFrameSession:
-    def __init__(self, socket_dir: Path) -> None:
-        self.socket_dir = socket_dir
-        self.socket_dir.mkdir(parents=True, exist_ok=True)
-        self.socket = socket_dir / "session.sock"
-        self.script = socket_dir / "frame-standin.py"
-        self.proc: subprocess.Popen[str] | None = None
-        self.pid = 0
-        self.start = ""
-        self.pty_pid = 0
+    """Real signed/admitted vc-frame engine, isolated from the Founder namespace.
+
+    Create path matches tests/tui/test_start_workspace_contract.py section 8:
+    `--new-session-with-layout` plus `attach --create-background`. A layout pane
+    hosts the PTY worker used for pid/lstart identity and command roundtrip.
+    Teardown is kill-session + delete-session --force + this /tmp tag only.
+    """
+
+    def __init__(self) -> None:
+        self.tag = f"vcu{os.getpid() % 100000}"
+        self.root = Path("/tmp") / self.tag
+        self.socket_dir = self.root / "s"
+        self.home = self.root / "h"
+        self.config_dir = self.root / "c"
+        self.probe = self.root / "p"
+        self.session = self.tag
+        self.frame = _installed_frame_engine()
+        self.worker_pid = 0
+        self.worker_start = ""
+        self.server_pid = 0
+        self.server_start = ""
+        self._prepared = False
 
     def start(self) -> None:
-        self.script.write_text(_ISOLATED_FRAME_STANDIN, encoding="utf-8")
-        self.proc = subprocess.Popen(
-            [sys.executable, str(self.script), str(self.socket)],
-            start_new_session=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+        if self.frame is None:
+            pytest.skip("no installed vc-frame engine")
+        try:
+            self._prepare()
+            created = self._frame(
+                "--new-session-with-layout",
+                str(self.layout),
+                "attach",
+                "--create-background",
+                self.session,
+                timeout=60,
+            )
+            assert created.returncode == 0, created.stderr or created.stdout
+            listing = self._frame("list-sessions", "--no-formatting")
+            assert self.session in listing.stdout, listing.stdout or listing.stderr
+            self._wait_worker()
+            self._record_server()
+            assert self.roundtrip("identify") == str(self.worker_pid)
+            assert self.roundtrip("ping") == f"pong {self.worker_pid}"
+        except BaseException:
+            self.close()
+            raise
+
+    def _prepare(self) -> None:
+        if self.root.exists():
+            shutil.rmtree(self.root)
+        for path in (self.socket_dir, self.home, self.config_dir / "layouts", self.probe):
+            path.mkdir(parents=True)
+        self.worker = self.probe / "pty-worker.py"
+        self.worker.write_text(_FRAME_PTY_WORKER, encoding="utf-8")
+        self.layout = self.config_dir / "layouts" / "operator.kdl"
+        self.layout.write_text(
+            "layout {\n"
+            f'    pane command="{sys.executable}" name="probe" {{\n'
+            f'        args "-u" "{self.worker}"\n'
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
         )
-        deadline = time.time() + 8
-        while time.time() < deadline and not self.socket.exists():
-            if self.proc.poll() is not None:
-                break
+        (self.config_dir / "config.kdl").write_text(
+            "keybinds clear-defaults=true {}\n", encoding="utf-8"
+        )
+        self._prepared = True
+
+    def _env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        for key in _FRAME_IDENTITY_ENV:
+            env.pop(key, None)
+        env.update(
+            {
+                "HOME": str(self.home),
+                "VIBECRAFTED_HOME": str(self.home / ".vibecrafted"),
+                "XDG_CONFIG_HOME": str(self.home / ".config"),
+                "VC_FRAME_SOCKET_DIR": str(self.socket_dir),
+                "ZELLIJ_SOCKET_DIR": str(self.socket_dir),
+                "VC_FRAME_CONFIG_DIR": str(self.config_dir),
+                "VC_FRAME_CONFIG_FILE": str(self.config_dir / "config.kdl"),
+                "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",
+                "VIBECRAFTED_VC_FRAME_BIN": str(self.frame),
+                "VC_UPDATE_FRAME_PROBE": str(self.probe),
+            }
+        )
+        return env
+
+    def _frame(self, *args: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+        assert self.frame is not None
+        return subprocess.run(
+            [str(self.frame), *args],
+            check=False,
+            env=self._env(),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
+    def _wait_worker(self) -> None:
+        ident = self.probe / "ident"
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if ident.is_file():
+                pid_text = ident.read_text(encoding="utf-8").strip()
+                if pid_text.isdigit():
+                    self.worker_pid = int(pid_text)
+                    self.worker_start = subprocess.check_output(
+                        ["/bin/ps", "-p", str(self.worker_pid), "-o", "lstart="],
+                        text=True,
+                    ).strip()
+                    if self.worker_start:
+                        return
             time.sleep(0.05)
-        assert self.socket.exists(), "isolated Frame/PTY stand-in did not bind its socket"
-        self.pid = self.proc.pid
-        self.start = subprocess.check_output(
-            ["/bin/ps", "-p", str(self.pid), "-o", "lstart="], text=True
-        ).strip()
-        identity = self.roundtrip("identify")
-        parts = identity.split()
-        assert len(parts) == 2, identity
-        assert parts[0] == str(self.pid)
-        self.pty_pid = int(parts[1])
-        assert self.roundtrip("ping") == f"pong {self.pid}"
-        assert (
-            subprocess.run(
-                ["/bin/ps", "-p", str(self.pty_pid)],
-                capture_output=True,
-                timeout=5,
-            ).returncode
-            == 0
+        raise AssertionError("Frame PTY worker did not publish its process identity")
+
+    def _record_server(self) -> None:
+        listed = subprocess.check_output(
+            ["/bin/ps", "-ax", "-o", "pid=,command="], text=True
         )
+        for line in listed.splitlines():
+            if "vc-frame" not in line:
+                continue
+            if self.session not in line and str(self.socket_dir) not in line:
+                continue
+            pid = int(line.strip().split(None, 1)[0])
+            start = subprocess.check_output(
+                ["/bin/ps", "-p", str(pid), "-o", "lstart="], text=True
+            ).strip()
+            if start:
+                self.server_pid = pid
+                self.server_start = start
+                return
+        raise AssertionError("isolated Frame server process was not found")
 
     def roundtrip(self, command: str) -> str:
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            client.settimeout(5)
-            client.connect(str(self.socket))
-            client.sendall((command + "\n").encode("utf-8"))
-            return client.recv(256).decode("utf-8", "replace").strip()
-        finally:
-            client.close()
+        reply = self.probe / "reply"
+        if reply.exists():
+            reply.unlink()
+        (self.probe / "cmd").write_text(command + "\n", encoding="utf-8")
+        deadline = time.time() + 8
+        while time.time() < deadline:
+            if reply.is_file():
+                return reply.read_text(encoding="utf-8").strip()
+            time.sleep(0.05)
+        raise AssertionError(f"Frame PTY did not answer {command!r}")
 
     def assert_survived(self) -> None:
-        assert self.proc is not None and self.proc.poll() is None
-        now = subprocess.check_output(
-            ["/bin/ps", "-p", str(self.pid), "-o", "lstart="], text=True
+        listing = self._frame("list-sessions", "--no-formatting")
+        assert self.session in listing.stdout, listing.stdout
+        after = listing.stdout.split(self.session, 1)[1]
+        assert "(EXITED" not in after.splitlines()[0]
+        worker_now = subprocess.check_output(
+            ["/bin/ps", "-p", str(self.worker_pid), "-o", "lstart="], text=True
         ).strip()
-        assert now == self.start
-        assert self.roundtrip("ping") == f"pong {self.pid}"
-        assert (
-            subprocess.run(
-                ["/bin/ps", "-p", str(self.pty_pid)],
-                capture_output=True,
-                timeout=5,
-            ).returncode
-            == 0
-        )
+        assert worker_now == self.worker_start
+        server_now = subprocess.check_output(
+            ["/bin/ps", "-p", str(self.server_pid), "-o", "lstart="], text=True
+        ).strip()
+        assert server_now == self.server_start
+        assert self.roundtrip("ping") == f"pong {self.worker_pid}"
+        assert self.roundtrip("identify") == str(self.worker_pid)
 
     def close(self) -> None:
-        if self.proc is None:
-            return
-        if self.proc.poll() is None:
-            try:
-                os.killpg(self.proc.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(self.proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                self.proc.wait(timeout=5)
-        if self.socket.exists():
-            self.socket.unlink()
+        if self.frame is not None and self._prepared:
+            self._frame("kill-session", self.session)
+            self._frame("delete-session", self.session, "--force")
+        if self.root.exists():
+            shutil.rmtree(self.root, ignore_errors=True)
 
 
 def _replace_prior_with_candidate(
@@ -1745,12 +1930,12 @@ def test_product_update_cross_generation_publish_then_restore_previous_tuple(
     tmp_path: Path,
 ) -> None:
     founder_before = _founder_identity_stamps()
-    env = _isolated_product_env(tmp_path)
-    settings = _plant_custom_settings(env)
-    runtime_home = Path(env["VIBECRAFTED_RUNTIME_HOME"])
-    session = _IsolatedFrameSession(Path(env["VC_FRAME_SOCKET_DIR"]))
-    session.start()
+    session = _IsolatedFrameSession()
     try:
+        session.start()
+        env = _isolated_product_env(tmp_path, frame_socket_dir=session.socket_dir)
+        settings = _plant_custom_settings(env)
+        runtime_home = Path(env["VIBECRAFTED_RUNTIME_HOME"])
         with _SignedApps(tmp_path) as apps:
             dest = apps.copy_prior(tmp_path / "Installed.app")
             source = apps.copy_e37(tmp_path / "Candidate.app")
@@ -1885,13 +2070,13 @@ def test_product_update_whole_tuple_recovery_interrupted_then_resumed(
     tmp_path: Path,
 ) -> None:
     founder_before = _founder_identity_stamps()
-    env = _isolated_product_env(tmp_path)
-    settings = _plant_custom_settings(env)
-    runtime_home = Path(env["VIBECRAFTED_RUNTIME_HOME"])
-    helper_env = {**_helper_env(), **env}
-    session = _IsolatedFrameSession(Path(env["VC_FRAME_SOCKET_DIR"]))
-    session.start()
+    session = _IsolatedFrameSession()
     try:
+        session.start()
+        env = _isolated_product_env(tmp_path, frame_socket_dir=session.socket_dir)
+        settings = _plant_custom_settings(env)
+        runtime_home = Path(env["VIBECRAFTED_RUNTIME_HOME"])
+        helper_env = {**_helper_env(), **env}
         with _SignedApps(tmp_path) as apps:
             dest = apps.copy_prior(tmp_path / "Installed.app")
             source = apps.copy_e37(tmp_path / "Candidate.app")

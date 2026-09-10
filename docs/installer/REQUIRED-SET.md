@@ -35,8 +35,10 @@ installer owner; a caller-written pack enum is not that proof.
 App-only restore is not whole-tuple success: unresolved, pending, or
 still-published newer pack state keeps recovery open. Missing historical
 rollback data fails closed without inventing restored evidence. Recover
-uses bundled prior-app or helper-sibling installer paths and binds the
-live destination as `app_root`. A failed handoff persist keeps the
+resolves a bundled helper-sibling or app wrapper that actually admits
+`--allow-older-runtime` (never a source-checkout hop) and binds the
+live destination as `app_root`. Empty `config_pending` objects are not
+pending publication. A failed handoff persist keeps the
 current UI and does not abandon the helper. Then the new App publishes the
 matching pack. The running process does not publish a newer pack under the
 old App.

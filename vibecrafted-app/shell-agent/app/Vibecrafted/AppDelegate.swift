@@ -2127,7 +2127,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
           DispatchQueue.global(qos: .userInitiated).async {
             let result = verifyDetachedReleaseSignature(
               payload: payload, signature: signature, publicKeyPath: publicKey.path)
-            DispatchQueue.main.async {
+            Task { @MainActor in
               if !cancelled.marked {
                 completion(result.mapError { $0 as Error })
               }
