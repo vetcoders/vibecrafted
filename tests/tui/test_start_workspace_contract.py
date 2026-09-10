@@ -61,11 +61,12 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-RUNTIME = REPO_ROOT / "vibecrafted-core" / "vibecrafted_core" / "runtime"
+SOURCE_CORE_DIR = REPO_ROOT / "vibecrafted-core"
+RUNTIME = SOURCE_CORE_DIR / "vibecrafted_core" / "runtime"
 SHELL_SH = RUNTIME / "shell" / "vetcoders.sh"
 DASHBOARD_SH = RUNTIME / "shell" / "lib" / "dashboard.sh"
 DISPATCH_SH = RUNTIME / "shell" / "lib" / "dispatch.sh"
-DECK = REPO_ROOT / "vibecrafted-core" / "vibecrafted_core" / "deck" / "vibecrafted"
+DECK = SOURCE_CORE_DIR / "vibecrafted_core" / "deck" / "vibecrafted"
 PRIMARY_SHELL = REPO_ROOT / "config" / "alacritty" / "launch-primary-shell.zsh"
 
 EXIT_USAGE = 2
@@ -100,6 +101,7 @@ IDENTITY_ENV = (
     "VIBECRAFTED_RUNTIME_BIN",
     "VIBECRAFTED_RUNTIME_HOME",
     "VIBECRAFTED_PYTHON",
+    "VIBECRAFTED_CORE_DIR",
     "VIBECRAFTED_RUN_ID",
     "VIBECRAFTED_RUN_LOCK",
     "VIBECRAFTED_PREFER_REPO_VC_FRAME",
@@ -125,6 +127,21 @@ MARKER_KEYS = (
     "ZELLIJ_SESSION_NAME",
     "VIBECRAFTED_OPERATOR_SESSION",
 )
+
+
+def _strip_identity_env(env: dict[str, str]) -> dict[str, str]:
+    """Drop ambient worker/runtime identity and pin the tested source core.
+
+    A launcher run exports VIBECRAFTED_CORE_DIR at the installed generation.
+    Fixtures that source this checkout's shell must not inherit that path.
+    """
+    for key in IDENTITY_ENV:
+        env.pop(key, None)
+    for key in ("PYTHONPATH", "PYTHONHOME"):
+        env.pop(key, None)
+    env["VIBECRAFTED_CORE_DIR"] = str(SOURCE_CORE_DIR)
+    return env
+
 
 # The Frame engine stand-in. Sessions are FILES: `<table>/live/<name>` and
 # `<table>/dead/<name>`, so `attach --create-background` is an O_EXCL create
@@ -691,8 +708,7 @@ class Scene:
 
     def env(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         env = os.environ.copy()
-        for key in IDENTITY_ENV:
-            env.pop(key, None)
+        _strip_identity_env(env)
         env["HOME"] = str(self.home)
         env["VIBECRAFTED_HOME"] = str(self.home / ".vibecrafted")
         env["XDG_CONFIG_HOME"] = str(self.home / ".config")
@@ -785,8 +801,7 @@ def _eval_start_fn(
         ]
     )
     env = os.environ.copy()
-    for key in IDENTITY_ENV:
-        env.pop(key, None)
+    _strip_identity_env(env)
     env.update(extra_env or {})
     return subprocess.run(
         ["bash", "--noprofile", "--norc", "-c", script],
@@ -804,8 +819,7 @@ def _create_lock_env(tmp_path: Path, *, sock: Path | None = None) -> dict[str, s
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     env = os.environ.copy()
-    for key in IDENTITY_ENV:
-        env.pop(key, None)
+    _strip_identity_env(env)
     env.update(
         {
             "HOME": str(home),
@@ -986,14 +1000,94 @@ def _reap_owned_pid(pid: int | None, *, timeout: float = 5.0) -> None:
         return
 
 
+def _frame_env_daemon_python(child_pid_path: Path) -> str:
+    """Synchronous CLI payload: parent forks a daemon and _exit(0)s.
+
+    This is the production Frame shape: `_vetcoders_start_frame_env` waits
+    for the immediate command, which daemonizes and leaves a living child.
+    An outer `&` shell is not part of that contract and keeps a lock fd.
+    """
+    return (
+        "import os, signal, time\n"
+        "child = os.fork()\n"
+        "if child:\n"
+        "    os._exit(0)\n"
+        "os.setsid()\n"
+        "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+        f"open({str(child_pid_path)!r}, 'w').write(str(os.getpid()))\n"
+        "fd = os.open(os.devnull, os.O_RDWR)\n"
+        "for n in (0, 1, 2):\n"
+        "    os.dup2(fd, n)\n"
+        "if fd > 2:\n"
+        "    os.close(fd)\n"
+        "time.sleep(60)\n"
+    )
+
+
+def _run_owned_frame_env_lock_inherit_daemon(
+    *,
+    env: dict[str, str],
+    shell: str,
+    child_pid_path: Path,
+    close_lock_fd: bool,
+) -> subprocess.CompletedProcess[str]:
+    """Acquire, run frame-env (fork+exit parent), release, return."""
+    body: list[str] = []
+    if not close_lock_fd:
+        body.append("_vetcoders_start_close_create_lock_fd() { :; }")
+    body.extend(
+        [
+            "_vetcoders_start_acquire_create_lock inherit || exit 9",
+            (
+                "_vetcoders_start_frame_env "
+                + shlex.quote(sys.executable)
+                + " -c "
+                + shlex.quote(_frame_env_daemon_python(child_pid_path))
+            ),
+            "_vetcoders_start_release_create_lock",
+        ]
+    )
+    return _run_create_lock(*body, env=env, shell=shell, timeout=8)
+
+
+def _wait_owned_daemon_pid(child_pid_path: Path, *, timeout: float = 3.0) -> int:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        child = _read_owned_optional_pid(child_pid_path)
+        if child is not None:
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                time.sleep(0.05)
+                continue
+            return child
+        time.sleep(0.05)
+    raise AssertionError("inherit-lock daemon child did not publish a live pid")
+
+
+def _create_lock_holder_pids(lock_file: Path) -> list[int]:
+    result = subprocess.run(
+        ["/usr/sbin/lsof", "-n", "-P", "-t", str(lock_file)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    pids: list[int] = []
+    for raw in result.stdout.split():
+        try:
+            pid = int(raw)
+        except ValueError:
+            continue
+        if pid > 1:
+            pids.append(pid)
+    return pids
+
+
 def _teardown_owned_frame_env_lock_inherit(
-    owner: subprocess.Popen[str] | None,
     child_pid: int | None,
     child_pid_path: Path,
 ) -> None:
-    """Reap the inherit owner, then the setsid sleeper, even after timeout."""
-    if owner is not None:
-        _teardown_owned_create_lock_holder(owner)
+    """Reap only the daemon child published by this fixture."""
     resolved = child_pid
     if resolved is None:
         deadline = time.monotonic() + 1.0
@@ -1004,123 +1098,6 @@ def _teardown_owned_frame_env_lock_inherit(
     if resolved is None:
         resolved = _read_owned_optional_pid(child_pid_path)
     _reap_owned_pid(resolved)
-
-
-def _spawn_owned_frame_env_lock_inherit_owner(
-    *,
-    tmp_path: Path,
-    env: dict[str, str],
-    shell: str,
-    ready: Path,
-    child_pid_path: Path,
-) -> subprocess.Popen[str]:
-    """Acquire, start a frame-env child with detached stdio, release, exit.
-
-    Owner stdout/stderr are files, not PIPEs. The child is launched through
-    `_vetcoders_start_frame_env` with 0/1/2 redirected away from the owner
-    so a 180s sleeper cannot hold `communicate` open after the owner exits.
-    """
-    out_path = tmp_path / "inherit-owner.out"
-    err_path = tmp_path / "inherit-owner.err"
-    child_out = tmp_path / "inherit-child.out"
-    child_err = tmp_path / "inherit-child.err"
-    sleeper = (
-        "import os, signal, time\n"
-        "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
-        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-        "os.setsid()\n"
-        f"open({str(child_pid_path)!r}, 'w').write(str(os.getpid()))\n"
-        "devnull = os.open(os.devnull, os.O_RDWR)\n"
-        "os.dup2(devnull, 0)\n"
-        "os.dup2(devnull, 1)\n"
-        "os.dup2(devnull, 2)\n"
-        "if devnull > 2:\n"
-        "    os.close(devnull)\n"
-        "time.sleep(180)\n"
-    )
-    child_cmd = (
-        f"_vetcoders_start_frame_env {shlex.quote(sys.executable)} "
-        f"-c {shlex.quote(sleeper)} "
-        f"< /dev/null > {shlex.quote(str(child_out))} "
-        f"2> {shlex.quote(str(child_err))} &"
-    )
-    with out_path.open("w", encoding="utf-8") as out_fh, err_path.open(
-        "w", encoding="utf-8"
-    ) as err_fh:
-        owner = subprocess.Popen(
-            _shell_argv(
-                shell,
-                _create_lock_script(
-                    "_vetcoders_start_acquire_create_lock inherit || exit 9",
-                    child_cmd,
-                    (
-                        "polls=0; while [[ ! -f "
-                        + shlex.quote(str(child_pid_path))
-                        + " ]]; do "
-                        "if ((polls >= 80)); then exit 8; fi; "
-                        "sleep 0.05; polls=$((polls + 1)); done"
-                    ),
-                    "_vetcoders_start_release_create_lock",
-                    f"printf held > {shlex.quote(str(ready))}",
-                ),
-            ),
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=out_fh,
-            stderr=err_fh,
-            text=True,
-            start_new_session=True,
-        )
-    assert owner.pid is not None
-    try:
-        pgid = os.getpgid(owner.pid)
-    except ProcessLookupError:
-        detail = err_path.read_text(encoding="utf-8") if err_path.exists() else ""
-        raise AssertionError(detail or "inherit-lock owner died before pgid probe")
-    try:
-        assert pgid == owner.pid, (
-            "inherit-lock owner was not its own session/group leader"
-        )
-        assert pgid not in (0, 1, os.getpgrp()), (
-            "refusing to own a shared/system process group"
-        )
-    except AssertionError:
-        _teardown_owned_create_lock_holder(owner)
-        _reap_owned_pid(_read_owned_optional_pid(child_pid_path))
-        raise
-    return owner
-
-
-def _wait_owned_frame_env_lock_inherit_ready(
-    owner: subprocess.Popen[str],
-    ready: Path,
-    err_path: Path,
-    *,
-    timeout: float = 15.0,
-) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline and not ready.exists():
-        if owner.poll() is not None:
-            break
-        time.sleep(0.05)
-    if not ready.exists():
-        if owner.poll() is None:
-            raise AssertionError(
-                "inherit-lock owner stayed live without publishing ready"
-            )
-        detail = err_path.read_text(encoding="utf-8") if err_path.exists() else ""
-        out_path = err_path.with_name("inherit-owner.out")
-        extra = out_path.read_text(encoding="utf-8") if out_path.exists() else ""
-        raise AssertionError(
-            detail or extra or "inherit-lock owner died before ready"
-        )
-    remaining = deadline - time.monotonic()
-    try:
-        owner.wait(timeout=max(0.1, remaining))
-    except subprocess.TimeoutExpired as exc:
-        raise AssertionError(
-            "inherit-lock owner published ready but did not exit"
-        ) from exc
 
 
 def _run(
@@ -1233,13 +1210,65 @@ def _list_panes_payload(text: str):
         return None
 
 
-def _pane_by_id(panes, pane_id):
+def _pane_by_id(panes, pane_id, *, is_plugin: bool = False):
+    """Typed pane identity: terminal0 is not plugin0."""
     if not isinstance(panes, list) or pane_id in (None, ""):
         return None
+    want_plugin = bool(is_plugin)
     for pane in panes:
-        if isinstance(pane, dict) and pane.get("id") == pane_id:
+        if not isinstance(pane, dict):
+            continue
+        if pane.get("id") != pane_id:
+            continue
+        if bool(pane.get("is_plugin")) == want_plugin:
             return pane
     return None
+
+
+def _typed_terminal_rows(rows):
+    if not isinstance(rows, list):
+        return []
+    found = []
+    for pane in rows:
+        if not isinstance(pane, dict):
+            continue
+        if bool(pane.get("is_plugin")):
+            continue
+        if pane.get("id") in (None, ""):
+            continue
+        if pane.get("exited"):
+            continue
+        found.append(pane)
+    return found
+
+
+def _terminal_identity(rows) -> tuple:
+    return tuple(
+        (
+            pane.get("id"),
+            str(pane.get("terminal_command") or ""),
+            str(pane.get("pane_cwd") or ""),
+        )
+        for pane in _typed_terminal_rows(rows)
+    )
+
+
+def _start_identities_matching(commands) -> tuple[str, ...]:
+    needles = [command for command in commands if command]
+    if not needles:
+        return ()
+    result = subprocess.run(
+        ["ps", "-ax", "-o", "pid=,lstart=,command="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    found: list[str] = []
+    for raw in result.stdout.splitlines():
+        line = " ".join(raw.split())
+        if any(needle in line for needle in needles):
+            found.append(line)
+    return tuple(sorted(found))
 
 
 def _destroys(calls: list[dict]) -> list[dict]:
@@ -2514,52 +2543,40 @@ def test_create_lock_refuses_leftover_mkdir_directory_without_deleting(
 
 
 @pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize(
+    "close_lock_fd",
+    [True, False],
+    ids=["close", "no-close"],
+)
 def test_create_lock_is_not_held_by_live_frame_env_child(
-    tmp_path: Path, shell: str
+    tmp_path: Path, shell: str, close_lock_fd: bool
 ) -> None:
     """Create holds flock across `_vetcoders_start_frame_env` -> Frame/PTY.
-    An exec'd descendant must not keep the kernel lock after the owner
-    closes or exits. Closing the parent descriptor alone is not enough
-    if the child inherited it. The child is spawned the same way create
-    starts the engine.
 
-    Cleanup boundary: owner Popen and the setsid sleeper are created
-    inside try/finally. Owner stdio is files (wait, not communicate).
-    Child 0/1/2 are redirected and then dup2'd to /dev/null; other
-    fds stay so this still proves the production lock-fd drop.
-    Start/timeout errors still reap owner then the pid-file child.
+    The owner is a synchronous CLI: acquire, invoke frame-env, release.
+    The payload forks a daemon and `_exit`s the parent so frame-env
+    returns while the child stays alive. An extra background shell job
+    is not the production topology and keeps a lock fd.
 
-    Proof boundary: the same live child survives a real second
-    `_vetcoders_start_acquire_create_lock`. Teardown SIGKILLs only
-    that owned sleeper.
+    Negative control: when `_vetcoders_start_close_create_lock_fd` is a
+    no-op, the living child holds the lock and a second acquire fails.
+    Teardown SIGKILLs only that owned daemon.
     """
     sock = tmp_path / "sock"
     sock.mkdir()
     env = _create_lock_env(tmp_path, sock=sock)
-    ready = tmp_path / "inherit-released"
     child_pid_path = tmp_path / "inherit-child.pid"
-    owner: subprocess.Popen[str] | None = None
+    lock_file = sock / ".vc-start-create.inherit.lock"
     child_pid: int | None = None
     try:
-        owner = _spawn_owned_frame_env_lock_inherit_owner(
-            tmp_path=tmp_path,
+        owner = _run_owned_frame_env_lock_inherit_daemon(
             env=env,
             shell=shell,
-            ready=ready,
             child_pid_path=child_pid_path,
+            close_lock_fd=close_lock_fd,
         )
-        _wait_owned_frame_env_lock_inherit_ready(
-            owner,
-            ready,
-            tmp_path / "inherit-owner.err",
-        )
-        assert owner.returncode == 0, (
-            (tmp_path / "inherit-owner.out").read_text(encoding="utf-8")
-            + (tmp_path / "inherit-owner.err").read_text(encoding="utf-8")
-        )
-        assert ready.exists()
-        child_pid = _read_owned_optional_pid(child_pid_path)
-        assert child_pid is not None, "inherit-lock child did not publish pid"
+        assert owner.returncode == 0, owner.stdout + owner.stderr
+        child_pid = _wait_owned_daemon_pid(child_pid_path)
         os.kill(child_pid, 0)
         retry = _run_create_lock(
             "_vetcoders_start_acquire_create_lock inherit",
@@ -2571,12 +2588,20 @@ def test_create_lock_is_not_held_by_live_frame_env_child(
             shell=shell,
         )
         os.kill(child_pid, 0)
-        assert retry.returncode == 0, retry.stdout + retry.stderr
-        assert "INHERIT_OK" in retry.stdout
-        assert "could not obtain exclusive create lock" not in retry.stderr
+        if close_lock_fd:
+            assert retry.returncode == 0, retry.stdout + retry.stderr
+            assert "INHERIT_OK" in retry.stdout
+            assert "could not obtain exclusive create lock" not in retry.stderr
+        else:
+            assert retry.returncode == 4, retry.stdout + retry.stderr
+            assert "could not obtain exclusive create lock" in retry.stderr
+            assert child_pid in _create_lock_holder_pids(lock_file), (
+                child_pid,
+                _create_lock_holder_pids(lock_file),
+            )
         os.kill(child_pid, 0)
     finally:
-        _teardown_owned_frame_env_lock_inherit(owner, child_pid, child_pid_path)
+        _teardown_owned_frame_env_lock_inherit(child_pid, child_pid_path)
 
 
 # --------------------------------------------------------------------------
@@ -3015,8 +3040,7 @@ def test_real_engine_inventory_and_exclusive_create_through_the_shipped_helpers(
         "keybinds clear-defaults=true {}\n", encoding="utf-8"
     )
     shipped = (
-        REPO_ROOT
-        / "vibecrafted-core"
+        SOURCE_CORE_DIR
         / "vibecrafted_core"
         / "config"
         / "vc-frame"
@@ -3025,11 +3049,11 @@ def test_real_engine_inventory_and_exclusive_create_through_the_shipped_helpers(
     )
     layout = sandbox / "cfg" / "layouts" / "operator.kdl"
     shutil.copy2(shipped, layout)
-    session = _short_token("x")
+    # Public `vc-start --repo <dir>` names the workspace after the basename.
+    session = repo.name
 
     env = os.environ.copy()
-    for key in IDENTITY_ENV:
-        env.pop(key, None)
+    _strip_identity_env(env)
     for key in (
         "ZELLIJ_SOCKET_DIR",
         "ZELLIJ_CONFIG_DIR",
@@ -3233,15 +3257,16 @@ except ChildProcessError:
 """
 
 
-# Host chrome is owned by plugin_url, not by guessed titles. Real vibecrafted-host
-# panes (W2 short-TMPDIR listing): vc-frame:link, vc-frame:vc-tab-title,
-# frame-host ("Sessions"), session-manager ("VC Guest"). Title is never the URL.
-_HOST_CHROME_PLUGIN_URLS = (
+# Persistent session_layer chrome is owned by plugin_url, not titles.
+# Real vibecrafted-host rails: vc-frame:link, vc-frame:vc-tab-title,
+# frame-host ("Sessions"). session-manager ("VC Guest") is the replaceable
+# workspace_surface placeholder, not chrome. Title is never the URL.
+_SESSION_LAYER_PLUGIN_URLS = (
     "vc-frame:link",
     "vc-frame:vc-tab-title",
     "frame-host",
-    "session-manager",
 )
+_WORKSPACE_SURFACE_PLUGIN_URL = "session-manager"
 _SHORT_TEMP_ROOT = "/tmp"
 
 
@@ -3249,20 +3274,33 @@ def _pane_plugin_url(pane: dict) -> str:
     return str(pane.get("plugin_url") or "").strip()
 
 
-def _host_chrome_plugins(rows) -> dict[str, dict]:
+def _plugins_by_url(rows, urls) -> dict[str, dict]:
+    wanted = set(urls)
     owned: dict[str, dict] = {}
     if not isinstance(rows, list):
         return owned
     for pane in rows:
         if not isinstance(pane, dict):
             continue
+        if not bool(pane.get("is_plugin")):
+            continue
         url = _pane_plugin_url(pane)
-        if url in _HOST_CHROME_PLUGIN_URLS and url not in owned:
+        if url in wanted and url not in owned:
             owned[url] = pane
     return owned
 
 
-def _chrome_geometry(rows) -> dict[str, tuple]:
+def _session_layer_plugins(rows) -> dict[str, dict]:
+    return _plugins_by_url(rows, _SESSION_LAYER_PLUGIN_URLS)
+
+
+def _workspace_surface_pane(rows):
+    return _plugins_by_url(rows, (_WORKSPACE_SURFACE_PLUGIN_URL,)).get(
+        _WORKSPACE_SURFACE_PLUGIN_URL
+    )
+
+
+def _session_layer_geometry(rows) -> dict[str, tuple]:
     return {
         url: (
             pane.get("id"),
@@ -3272,40 +3310,58 @@ def _chrome_geometry(rows) -> dict[str, tuple]:
             pane.get("pane_rows"),
             pane.get("pane_columns"),
         )
-        for url, pane in _host_chrome_plugins(rows).items()
+        for url, pane in _session_layer_plugins(rows).items()
     }
 
 
-def _host_chrome_ready(rows):
-    """Single host chrome: one session-manager and one frame-host plugin."""
+def _session_layer_ready(rows):
+    """Persistent rails: one link, one tab-title, one frame-host."""
     if not isinstance(rows, list) or not rows:
         return []
-    urls = [
-        _pane_plugin_url(pane)
-        for pane in rows
-        if isinstance(pane, dict) and _pane_plugin_url(pane) in _HOST_CHROME_PLUGIN_URLS
-    ]
-    if urls.count("session-manager") == 1 and urls.count("frame-host") == 1:
+    plugins = _session_layer_plugins(rows)
+    if set(plugins) == set(_SESSION_LAYER_PLUGIN_URLS):
         return rows
     return []
 
 
-def _assert_host_chrome(rows, *, previous_geometry=None):
-    """Exact plugin_url ownership + stable chrome IDs/geometry; never title==URL."""
-    assert _host_chrome_ready(rows), rows
-    plugins = _host_chrome_plugins(rows)
-    guest = plugins["session-manager"]
+def _host_chrome_ready(rows):
+    """Initial host: persistent session_layer plus the VC Guest placeholder."""
+    if not _session_layer_ready(rows):
+        return []
+    surface = _workspace_surface_pane(rows)
+    if surface is None:
+        return []
+    if surface.get("title") != "VC Guest":
+        return []
+    return rows
+
+
+def _assert_session_layer(rows, *, previous_geometry=None):
+    """Stable session-layer IDs/runtime IDs/geometry; never title==URL."""
+    assert _session_layer_ready(rows), rows
+    plugins = _session_layer_plugins(rows)
+    for url, pane in plugins.items():
+        assert bool(pane.get("is_plugin")) is True, pane
+        assert _pane_plugin_url(pane) == url, pane
+        assert pane.get("title") != url, pane
     host = plugins["frame-host"]
-    assert _pane_plugin_url(guest) == "session-manager", guest
-    assert _pane_plugin_url(host) == "frame-host", host
-    assert guest.get("title") != "session-manager", guest
     assert host.get("title") != "frame-host", host
-    assert guest.get("title") == "VC Guest", guest
-    geometry = _chrome_geometry(rows)
-    assert set(geometry) >= {"session-manager", "frame-host"}, geometry
+    geometry = _session_layer_geometry(rows)
+    assert set(geometry) == set(_SESSION_LAYER_PLUGIN_URLS), geometry
     if previous_geometry is not None:
         assert geometry == previous_geometry, (previous_geometry, geometry)
     return geometry
+
+
+def _assert_placeholder_present(rows) -> None:
+    surface = _workspace_surface_pane(rows)
+    assert surface is not None, rows
+    assert bool(surface.get("is_plugin")) is True, surface
+    assert surface.get("title") == "VC Guest", surface
+
+
+def _assert_placeholder_replaced(rows) -> None:
+    assert _workspace_surface_pane(rows) is None, rows
 
 
 def _exclusive_sandbox(prefix: str = "vcs-") -> Path:
@@ -3444,8 +3500,7 @@ def test_admitted_frame_project_workspace_is_a_real_verb_not_a_stub() -> None:
     host = _short_token("h")
     guest = _short_token("g")
     env = os.environ.copy()
-    for key in IDENTITY_ENV:
-        env.pop(key, None)
+    _strip_identity_env(env)
     env.update(
         {
             "HOME": str(home),
@@ -3521,13 +3576,16 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         start identity and then reads commands (`exec sh -s`). Invokes public
         `vc-start --repo` with attached-host markers. Guest/alias/other dirs are
         committed repositories. Success requires a compact Handled receipt whose
-        pane_id exists on the host, semantic plugin_url chrome (not title==URL),
-        the same prior pane id / PID / start identity, and a harmless command
-        completed in that same prior pane via public `action write-chars
-        --pane-id` — not sleep-alive or guest dump-screen alone. Offered
-        `operator` layout alias must also project on the same canvas; `--layout`
-        stays usage-refused. Then client-ambiguity refuses before another
-        create. Cleanup identities are registered before ops that can throw.
+        typed terminal pane_id exists on the host, persistent session-layer
+        chrome (not the replaceable VC Guest placeholder), the same prior pane
+        id / PID / start identity, and a harmless command completed in that
+        same prior pane via public `action write-chars --pane-id` — not
+        sleep-alive or guest dump-screen alone. Offered `operator` layout
+        alias projects on the same canvas (A/B); real Frame project-workspace
+        returns the original guest (A/B/A). One current viewport — leftover
+        visitors are not required. `--layout` stays usage-refused. Then
+        client-ambiguity refuses before another create. Cleanup identities
+        are registered before ops that can throw.
     """
     assert _ADMITTED_FRAME is not None
     bin_path = _ADMITTED_FRAME
@@ -3558,8 +3616,7 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         prior_token = "prior-ok-" + uuid.uuid4().hex[:12]
         owner = _write(sandbox / "owner-cli", OWNER_CLI)
         env = os.environ.copy()
-        for key in IDENTITY_ENV:
-            env.pop(key, None)
+        _strip_identity_env(env)
         env.update(
             {
                 "HOME": str(home),
@@ -3683,7 +3740,8 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
 
         chrome = _wait_until(host_chrome_rows, 25)
         assert chrome, panes()
-        chrome_geometry = _assert_host_chrome(chrome)
+        chrome_geometry = _assert_session_layer(chrome)
+        _assert_placeholder_present(chrome)
 
         pane = frame(
             "--session",
@@ -3717,13 +3775,34 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
 
         def find_prior_pane():
             marker = str(prior_pid)
-            for row in pane_rows():
-                if not isinstance(row, dict):
-                    continue
+            for row in _typed_terminal_rows(pane_rows()):
                 command = str(row.get("terminal_command") or "")
                 if marker in command or "sh -s" in command:
                     return row
             return None
+
+        def guest_session_rows(name: str) -> list:
+            payload = _list_panes_payload(
+                frame(
+                    "--session",
+                    name,
+                    "action",
+                    "list-panes",
+                    "--json",
+                    "--command",
+                ).stdout
+            )
+            return payload if isinstance(payload, list) else []
+
+        def guest_workload(name: str, repo: Path):
+            rows = guest_session_rows(name)
+            identity = _terminal_identity(rows)
+            distinctive = tuple(
+                command
+                for _, command, _cwd in identity
+                if command and (name in command or str(repo) in command)
+            )
+            return identity, _start_identities_matching(distinctive)
 
         prior_pane = _wait_until(find_prior_pane, 15)
         assert isinstance(prior_pane, dict) and prior_pane.get("id") not in (
@@ -3762,11 +3841,20 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         assert receipt.get("pane_id") not in (None, ""), receipt
         assert str(receipt.get("request_id") or "").strip(), receipt
         after_rows = pane_rows()
-        _assert_host_chrome(after_rows, previous_geometry=chrome_geometry)
-        guest_pane = _pane_by_id(after_rows, receipt["pane_id"])
+        _assert_session_layer(after_rows, previous_geometry=chrome_geometry)
+        _assert_placeholder_replaced(after_rows)
+        guest_pane = _pane_by_id(after_rows, receipt["pane_id"], is_plugin=False)
         assert guest_pane is not None, (receipt, after_rows)
-        surviving = _pane_by_id(after_rows, prior_pane_id)
+        surviving = _pane_by_id(after_rows, prior_pane_id, is_plugin=False)
         assert surviving is not None, (prior_pane_id, after_rows)
+        assert unique_client_listing(1)
+        def guest_a_ready():
+            identity, procs = guest_workload(guest, guest_repo)
+            return (identity, procs) if identity else None
+
+        guest_ready = _wait_until(guest_a_ready, 15)
+        assert guest_ready, guest_session_rows(guest)
+        guest_a_identity, guest_a_procs = guest_ready
         assert str(surviving.get("terminal_command") or "") == prior_command or (
             "sh -s" in str(surviving.get("terminal_command") or "")
         ), (prior_command, surviving)
@@ -3844,10 +3932,57 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         assert alias_receipts[0].get("guest") == alias, alias_receipts[0]
         assert alias_receipts[0].get("pane_id") not in (None, ""), alias_receipts[0]
         alias_rows = pane_rows()
-        _assert_host_chrome(alias_rows, previous_geometry=chrome_geometry)
-        assert _pane_by_id(alias_rows, receipt["pane_id"]) is not None
-        assert _pane_by_id(alias_rows, alias_receipts[0]["pane_id"]) is not None
-        assert _pane_by_id(alias_rows, prior_pane_id) is not None
+        _assert_session_layer(alias_rows, previous_geometry=chrome_geometry)
+        _assert_placeholder_replaced(alias_rows)
+        assert unique_client_listing(1)
+        current_b = _pane_by_id(
+            alias_rows, alias_receipts[0]["pane_id"], is_plugin=False
+        )
+        assert current_b is not None, (alias_receipts[0], alias_rows)
+        assert _pane_by_id(alias_rows, prior_pane_id, is_plugin=False) is not None
+        later_guest_identity, later_guest_procs = guest_workload(guest, guest_repo)
+        assert later_guest_identity == guest_a_identity, (
+            guest_a_identity,
+            later_guest_identity,
+        )
+        if guest_a_procs:
+            assert later_guest_procs == guest_a_procs, (
+                guest_a_procs,
+                later_guest_procs,
+            )
+        assert prior_pid.read_text(encoding="utf-8").strip() == prior_pid_value
+        assert _pid_file_start_identity(prior_pid) == prior_identity
+        assert prior_token in prior_done.read_text(encoding="utf-8")
+
+        return_argv = ["--session", host, "project-workspace", guest]
+        if receipt.get("tab") not in (None, ""):
+            return_argv.extend(["--tab", str(receipt["tab"])])
+        returned = frame(*return_argv)
+        assert returned.returncode == 0, returned.stdout + returned.stderr
+        returned_receipts = _workspace_projection_receipts(returned.stdout)
+        assert len(returned_receipts) == 1, returned.stdout
+        assert returned_receipts[0].get("status") == "Handled", returned_receipts[0]
+        assert returned_receipts[0].get("guest") == guest, returned_receipts[0]
+        assert unique_client_listing(1)
+        aba_rows = pane_rows()
+        _assert_session_layer(aba_rows, previous_geometry=chrome_geometry)
+        _assert_placeholder_replaced(aba_rows)
+        current_a = _pane_by_id(
+            aba_rows, returned_receipts[0]["pane_id"], is_plugin=False
+        )
+        assert current_a is not None, (returned_receipts[0], aba_rows)
+        assert _pane_by_id(aba_rows, prior_pane_id, is_plugin=False) is not None
+        final_guest_identity, final_guest_procs = guest_workload(guest, guest_repo)
+        assert final_guest_identity == guest_a_identity, (
+            guest_a_identity,
+            final_guest_identity,
+        )
+        if guest_a_procs:
+            assert final_guest_procs == guest_a_procs, (
+                guest_a_procs,
+                final_guest_procs,
+            )
+        assert guest in listing() and alias in listing()
         assert prior_pid.read_text(encoding="utf-8").strip() == prior_pid_value
         assert _pid_file_start_identity(prior_pid) == prior_identity
         assert prior_token in prior_done.read_text(encoding="utf-8")
@@ -3869,8 +4004,10 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         assert _pid_alive(prior_pid)
         assert _pid_file_start_identity(prior_pid) == prior_identity
         assert prior_token in prior_done.read_text(encoding="utf-8")
-        _assert_host_chrome(pane_rows(), previous_geometry=chrome_geometry)
-        assert _pane_by_id(pane_rows(), prior_pane_id) is not None
+        final_rows = pane_rows()
+        _assert_session_layer(final_rows, previous_geometry=chrome_geometry)
+        _assert_placeholder_replaced(final_rows)
+        assert _pane_by_id(final_rows, prior_pane_id, is_plugin=False) is not None
     finally:
         for proc, release in ptys:
             try:
