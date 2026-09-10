@@ -1253,22 +1253,54 @@ def _terminal_identity(rows) -> tuple:
     )
 
 
-def _start_identities_matching(commands) -> tuple[str, ...]:
-    needles = [command for command in commands if command]
-    if not needles:
-        return ()
-    result = subprocess.run(
-        ["ps", "-ax", "-o", "pid=,lstart=,command="],
-        check=False,
-        capture_output=True,
-        text=True,
+_INTERACTIVE_TERMINAL_NEEDLES = (
+    "exec zsh",
+    "exec sh",
+    "sh -s",
+    'exec "${SHELL',
+    "exec ${SHELL",
+)
+
+
+def _first_interactive_terminal(rows):
+    terminals = _typed_terminal_rows(rows)
+    for pane in terminals:
+        command = str(pane.get("terminal_command") or "")
+        if any(needle in command for needle in _INTERACTIVE_TERMINAL_NEEDLES):
+            return pane
+    return terminals[0] if terminals else None
+
+
+def _typed_write_chars(run, session: str, pane_id, text: str) -> None:
+    written = run(
+        "--session",
+        session,
+        "action",
+        "write-chars",
+        "--pane-id",
+        f"terminal_{pane_id}",
+        text,
     )
-    found: list[str] = []
-    for raw in result.stdout.splitlines():
-        line = " ".join(raw.split())
-        if any(needle in line for needle in needles):
-            found.append(line)
-    return tuple(sorted(found))
+    submitted = run(
+        "--session",
+        session,
+        "action",
+        "send-keys",
+        "--pane-id",
+        f"terminal_{pane_id}",
+        "Enter",
+    )
+    assert written.returncode == 0, written.stdout + written.stderr
+    assert submitted.returncode == 0, submitted.stdout + submitted.stderr
+
+
+def _assert_pid_identity(path: Path, expected_pid: str, expected_identity: str) -> None:
+    assert path.read_text(encoding="utf-8").strip() == expected_pid, path
+    assert _pid_alive(path), expected_pid
+    assert _pid_file_start_identity(path) == expected_identity, (
+        expected_identity,
+        _pid_file_start_identity(path),
+    )
 
 
 def _destroys(calls: list[dict]) -> list[dict]:
@@ -3582,10 +3614,12 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         same prior pane via public `action write-chars --pane-id` — not
         sleep-alive or guest dump-screen alone. Offered `operator` layout
         alias projects on the same canvas (A/B); real Frame project-workspace
-        returns the original guest (A/B/A). One current viewport — leftover
-        visitors are not required. `--layout` stays usage-refused. Then
-        client-ambiguity refuses before another create. Cleanup identities
-        are registered before ops that can throw.
+        returns the original guest (A/B/A). Guest session PID/start identity
+        and a completed guest command survive the viewport swap; the prior
+        pane accepts a second command after B. One current viewport —
+        leftover visitors are not required. `--layout` stays usage-refused.
+        Then client-ambiguity refuses before another create. Cleanup
+        identities are registered before ops that can throw.
     """
     assert _ADMITTED_FRAME is not None
     bin_path = _ADMITTED_FRAME
@@ -3613,7 +3647,13 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         prior_pid = home / "prior.pid"
         prior_lstart = home / "prior.lstart"
         prior_done = home / "prior.done"
+        prior_done_b = home / "prior-b.done"
         prior_token = "prior-ok-" + uuid.uuid4().hex[:12]
+        prior_token_b = "prior-b-" + uuid.uuid4().hex[:12]
+        guest_pid = home / "guest.pid"
+        guest_lstart = home / "guest.lstart"
+        guest_done = home / "guest.done"
+        guest_token = "guest-ok-" + uuid.uuid4().hex[:12]
         owner = _write(sandbox / "owner-cli", OWNER_CLI)
         env = os.environ.copy()
         _strip_identity_env(env)
@@ -3794,16 +3834,6 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
             )
             return payload if isinstance(payload, list) else []
 
-        def guest_workload(name: str, repo: Path):
-            rows = guest_session_rows(name)
-            identity = _terminal_identity(rows)
-            distinctive = tuple(
-                command
-                for _, command, _cwd in identity
-                if command and (name in command or str(repo) in command)
-            )
-            return identity, _start_identities_matching(distinctive)
-
         prior_pane = _wait_until(find_prior_pane, 15)
         assert isinstance(prior_pane, dict) and prior_pane.get("id") not in (
             None,
@@ -3848,50 +3878,61 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         surviving = _pane_by_id(after_rows, prior_pane_id, is_plugin=False)
         assert surviving is not None, (prior_pane_id, after_rows)
         assert unique_client_listing(1)
-        def guest_a_ready():
-            identity, procs = guest_workload(guest, guest_repo)
-            return (identity, procs) if identity else None
-
-        guest_ready = _wait_until(guest_a_ready, 15)
-        assert guest_ready, guest_session_rows(guest)
-        guest_a_identity, guest_a_procs = guest_ready
+        guest_term = _wait_until(
+            lambda: _first_interactive_terminal(guest_session_rows(guest)),
+            15,
+        )
+        assert guest_term is not None, guest_session_rows(guest)
+        time.sleep(0.5)
+        guest_term = _first_interactive_terminal(guest_session_rows(guest))
+        assert guest_term is not None, guest_session_rows(guest)
+        guest_term_id = guest_term["id"]
+        guest_surface = _terminal_identity(guest_session_rows(guest))
+        assert guest_surface, guest_session_rows(guest)
+        _typed_write_chars(
+            frame,
+            guest,
+            guest_term_id,
+            f"echo $$ > {guest_pid}; ps -p $$ -o lstart= > {guest_lstart}",
+        )
+        assert _wait_until(
+            lambda: _pid_alive(guest_pid) and guest_lstart.is_file(),
+            15,
+        ), (guest_pid, guest_lstart, guest_session_rows(guest))
+        guest_pid_value = guest_pid.read_text(encoding="utf-8").strip()
+        guest_identity = _pid_file_start_identity(guest_pid)
+        assert guest_pid_value.isdigit() and guest_identity, guest_pid_value
+        _typed_write_chars(
+            frame,
+            guest,
+            guest_term_id,
+            f"echo {guest_token} > {guest_done}",
+        )
+        assert _wait_until(
+            lambda: guest_done.is_file()
+            and guest_token in guest_done.read_text(encoding="utf-8"),
+            15,
+        ), guest_done
+        _assert_pid_identity(guest_pid, guest_pid_value, guest_identity)
         assert str(surviving.get("terminal_command") or "") == prior_command or (
             "sh -s" in str(surviving.get("terminal_command") or "")
         ), (prior_command, surviving)
-        assert prior_pid.read_text(encoding="utf-8").strip() == prior_pid_value
-        assert _pid_alive(prior_pid), prior_pid_value
-        after_identity = _pid_file_start_identity(prior_pid)
-        assert after_identity == prior_identity, (prior_identity, after_identity)
+        _assert_pid_identity(prior_pid, prior_pid_value, prior_identity)
 
-        written = frame(
-            "--session",
+        _typed_write_chars(
+            frame,
             host,
-            "action",
-            "write-chars",
-            "--pane-id",
-            f"terminal_{prior_pane_id}",
+            prior_pane_id,
             f"echo {prior_token} > {prior_done}",
         )
-        submitted = frame(
-            "--session",
-            host,
-            "action",
-            "send-keys",
-            "--pane-id",
-            f"terminal_{prior_pane_id}",
-            "Enter",
-        )
-        assert written.returncode == 0, written.stdout + written.stderr
-        assert submitted.returncode == 0, submitted.stdout + submitted.stderr
         assert _wait_until(
             lambda: (
                 prior_done.is_file()
                 and prior_token in prior_done.read_text(encoding="utf-8")
             ),
             15,
-        ), (prior_done, written.stdout + written.stderr + submitted.stdout + submitted.stderr)
-        assert prior_pid.read_text(encoding="utf-8").strip() == prior_pid_value
-        assert _pid_file_start_identity(prior_pid) == prior_identity
+        ), prior_done
+        _assert_pid_identity(prior_pid, prior_pid_value, prior_identity)
         prior_dump = frame(
             "--session",
             host,
@@ -3940,19 +3981,26 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         )
         assert current_b is not None, (alias_receipts[0], alias_rows)
         assert _pane_by_id(alias_rows, prior_pane_id, is_plugin=False) is not None
-        later_guest_identity, later_guest_procs = guest_workload(guest, guest_repo)
-        assert later_guest_identity == guest_a_identity, (
-            guest_a_identity,
-            later_guest_identity,
-        )
-        if guest_a_procs:
-            assert later_guest_procs == guest_a_procs, (
-                guest_a_procs,
-                later_guest_procs,
-            )
-        assert prior_pid.read_text(encoding="utf-8").strip() == prior_pid_value
-        assert _pid_file_start_identity(prior_pid) == prior_identity
+        assert _terminal_identity(guest_session_rows(guest)) == guest_surface
+        _assert_pid_identity(guest_pid, guest_pid_value, guest_identity)
+        assert guest_token in guest_done.read_text(encoding="utf-8")
+        _assert_pid_identity(prior_pid, prior_pid_value, prior_identity)
         assert prior_token in prior_done.read_text(encoding="utf-8")
+        _typed_write_chars(
+            frame,
+            host,
+            prior_pane_id,
+            f"echo {prior_token_b} > {prior_done_b}",
+        )
+        assert _wait_until(
+            lambda: (
+                prior_done_b.is_file()
+                and prior_token_b in prior_done_b.read_text(encoding="utf-8")
+            ),
+            15,
+        ), prior_done_b
+        _assert_pid_identity(prior_pid, prior_pid_value, prior_identity)
+        _assert_pid_identity(guest_pid, guest_pid_value, guest_identity)
 
         return_argv = ["--session", host, "project-workspace", guest]
         if receipt.get("tab") not in (None, ""):
@@ -3972,20 +4020,13 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         )
         assert current_a is not None, (returned_receipts[0], aba_rows)
         assert _pane_by_id(aba_rows, prior_pane_id, is_plugin=False) is not None
-        final_guest_identity, final_guest_procs = guest_workload(guest, guest_repo)
-        assert final_guest_identity == guest_a_identity, (
-            guest_a_identity,
-            final_guest_identity,
-        )
-        if guest_a_procs:
-            assert final_guest_procs == guest_a_procs, (
-                guest_a_procs,
-                final_guest_procs,
-            )
+        assert _terminal_identity(guest_session_rows(guest)) == guest_surface
+        _assert_pid_identity(guest_pid, guest_pid_value, guest_identity)
+        assert guest_token in guest_done.read_text(encoding="utf-8")
         assert guest in listing() and alias in listing()
-        assert prior_pid.read_text(encoding="utf-8").strip() == prior_pid_value
-        assert _pid_file_start_identity(prior_pid) == prior_identity
+        _assert_pid_identity(prior_pid, prior_pid_value, prior_identity)
         assert prior_token in prior_done.read_text(encoding="utf-8")
+        assert prior_token_b in prior_done_b.read_text(encoding="utf-8")
 
         attach("host-second")
         two = _wait_until(lambda: unique_client_listing(2), 20)
@@ -4000,10 +4041,11 @@ def test_admitted_frame_inside_host_vc_start_projects_guest_on_stable_canvas() -
         assert "RC=[4]" in ambiguous.stdout, ambiguous.stdout + ambiguous.stderr
         assert "exactly one attached client" in ambiguous.stderr
         assert other not in listing(), listing()
-        assert prior_pid.read_text(encoding="utf-8").strip() == prior_pid_value
-        assert _pid_alive(prior_pid)
-        assert _pid_file_start_identity(prior_pid) == prior_identity
+        _assert_pid_identity(prior_pid, prior_pid_value, prior_identity)
+        _assert_pid_identity(guest_pid, guest_pid_value, guest_identity)
         assert prior_token in prior_done.read_text(encoding="utf-8")
+        assert prior_token_b in prior_done_b.read_text(encoding="utf-8")
+        assert guest_token in guest_done.read_text(encoding="utf-8")
         final_rows = pane_rows()
         _assert_session_layer(final_rows, previous_geometry=chrome_geometry)
         _assert_placeholder_replaced(final_rows)
