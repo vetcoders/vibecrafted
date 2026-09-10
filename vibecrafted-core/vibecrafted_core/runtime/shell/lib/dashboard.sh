@@ -283,7 +283,14 @@ _vetcoders_start_validate_workspace_name() {
 
 _vetcoders_start_prepare_arguments() {
   local raw_root="" raw_repo="" normalized_root="" arg
-  local _vetcoders_contract_base="" _vetcoders_contract_execution_runtime="" _vetcoders_contract_worktree=""
+  # Parse-only: these survive the function so execution can call the launch-spec
+  # owner once. They must not enter `_vetcoders_select_repo`.
+  _vetcoders_start_contract_base=""
+  _vetcoders_start_contract_execution_runtime=""
+  _vetcoders_start_contract_worktree=""
+  unset VIBECRAFTED_START_LAUNCH_PINNED
+  unset VIBECRAFTED_START_BASELINE_SHA
+  unset VIBECRAFTED_START_PARENT_ROOT
   _vetcoders_start_frame_argv=()
   _vetcoders_start_workspace_name=""
   _vetcoders_start_mode="start"
@@ -298,17 +305,27 @@ _vetcoders_start_prepare_arguments() {
     case "$arg" in
       --base)
         shift; [[ $# -gt 0 && -n "$1" ]] || return 2
-        _vetcoders_contract_base="$1"
+        _vetcoders_start_contract_base="$1"
         ;;
       --execution-runtime)
         shift; [[ $# -gt 0 && -n "$1" ]] || return 2
-        _vetcoders_contract_execution_runtime="$1"
+        _vetcoders_start_contract_execution_runtime="$1"
         ;;
       --worktree)
-        _vetcoders_contract_worktree=true
-        if [[ $# -gt 1 ]] && _vetcoders_is_worktree_word "$2"; then shift; _vetcoders_contract_worktree="$1"; fi
+        _vetcoders_start_contract_worktree=true
+        if [[ $# -gt 1 ]] && _vetcoders_is_worktree_word "$2"; then
+          shift
+          _vetcoders_start_contract_worktree="$(_vetcoders_worktree_word_value "$1")"
+        fi
         ;;
-      --worktree=*) _vetcoders_contract_worktree="${1#--worktree=}" ;;
+      --worktree=*)
+        if ! _vetcoders_is_worktree_word "${arg#--worktree=}"; then
+          printf 'vc-start: --worktree expects true or false, got %s.\n' \
+            "$(_vetcoders_shell_quote "${arg#--worktree=}")" >&2
+          return 2
+        fi
+        _vetcoders_start_contract_worktree="$(_vetcoders_worktree_word_value "${arg#--worktree=}")"
+        ;;
       --root)
         shift
         if (($# == 0)) || [[ -z "$1" ]]; then
@@ -381,10 +398,75 @@ _vetcoders_start_prepare_arguments() {
 
   unset VIBECRAFTED_START_ROOT
   # Same selector as every other public verb: `--repo` standard, `--root`
-  # legacy, conflicting pair refused, path must already exist.
+  # legacy, conflicting pair refused, path must already exist. Launch-spec
+  # flags stay out of this call; execution owns materialization.
   normalized_root="$(_vetcoders_select_repo "vc-start" "$raw_repo" "$raw_root")" || return $?
   [[ -n "$normalized_root" ]] || return 0
   export VIBECRAFTED_START_ROOT="$normalized_root"
+}
+
+# Execution-time launch-spec owner. Called once from `_vetcoders_start_entry`
+# after directory selection. Pins SHA/branch/HEAD and materializes a worktree
+# only when `--base` / `--worktree true` / `--execution-runtime` asked for it.
+# `--worktree false` and an empty flag stay on the selected directory.
+# The resolved root is exported so terminal escalation can replay `--repo`
+# of the effective checkout instead of rematerializing.
+_vetcoders_start_apply_launch_spec() {
+  local selected="${1:-}"
+  local base="${_vetcoders_start_contract_base:-}"
+  local runtime="${_vetcoders_start_contract_execution_runtime:-}"
+  local worktree="${_vetcoders_start_contract_worktree:-}"
+  local wants="false" python_spec py import_root payload="" prepared="" baseline="" parent=""
+  if [[ "${VIBECRAFTED_START_LAUNCH_PINNED:-}" == "1" ]]; then
+    return 0
+  fi
+  if [[ -n "$worktree" ]] && ! _vetcoders_is_worktree_word "$worktree"; then
+    printf 'vc-start: --worktree expects true or false, got %s.\n' \
+      "$(_vetcoders_shell_quote "$worktree")" >&2
+    return 2
+  fi
+  if [[ -n "$worktree" && "$(_vetcoders_worktree_word_value "$worktree")" == "true" ]]; then
+    wants="true"
+  fi
+  if [[ -z "$base" && -z "$runtime" && "$wants" != "true" ]]; then
+    return 0
+  fi
+  python_spec="$(_vetcoders_core_python_spec)" || return 1
+  py="${python_spec%%$'\t'*}"
+  import_root="${python_spec#*$'\t'}"
+  local -a argv=(
+    "$py" -m vibecrafted_core.repo_selection
+    --label vc-start
+    --json
+  )
+  if [[ -n "$selected" ]]; then
+    argv+=(--repo "$selected")
+  fi
+  if [[ -n "$base" ]]; then
+    argv+=(--base "$base")
+  fi
+  if [[ -n "$runtime" ]]; then
+    argv+=(--execution-runtime "$runtime")
+  fi
+  if [[ -n "$worktree" ]]; then
+    argv+=(--worktree "$worktree")
+  fi
+  if [[ "$wants" == "true" || "$runtime" == "local-worktrees" ]]; then
+    argv+=(--prepare-worktree)
+  fi
+  if [[ -n "$import_root" ]]; then
+    payload="$(PYTHONPATH="$import_root${PYTHONPATH:+:$PYTHONPATH}" "${argv[@]}")" || return $?
+  else
+    payload="$("${argv[@]}")" || return $?
+  fi
+  prepared="$(printf '%s\n' "$payload" | "$py" -c 'import json,sys; print(json.load(sys.stdin).get("root") or "")')" || return 2
+  baseline="$(printf '%s\n' "$payload" | "$py" -c 'import json,sys; print(json.load(sys.stdin).get("baseline_sha") or "")')" || true
+  parent="$(printf '%s\n' "$payload" | "$py" -c 'import json,sys; print(json.load(sys.stdin).get("parent_root") or "")')" || true
+  [[ -n "$prepared" ]] || return 2
+  export VIBECRAFTED_START_ROOT="$prepared"
+  export VIBECRAFTED_START_BASELINE_SHA="$baseline"
+  export VIBECRAFTED_START_PARENT_ROOT="${parent:-$selected}"
+  export VIBECRAFTED_START_LAUNCH_PINNED=1
 }
 
 # Open the product terminal for a start that has no visible surface here.
@@ -931,55 +1013,73 @@ _vetcoders_start_refuse_inventory() {
 # Exclusive create lock for one session name in this socket namespace.
 # Frame `--new-session-with-layout` + `attach --create-background` follows
 # ClientInfo::New and can return 0 on both racers (the "Session already exists"
-# string is the Attach arm). The adapter must refuse the loser. mkdir(2) is
-# the bash-3.2-safe exclusive; hold it through inventory + create + readiness.
+# string is the Attach arm). The adapter must refuse the loser.
+# Ownership is the existing OS fd-lock (`_vetcoders_os_fd_lock`, same flock(2)
+# as scripts/lib/runtime-pack-selection.sh): the lock FILE is created once and
+# never unlinked, release closes this process's descriptor, and SIGKILL drops
+# the kernel lock. A leftover mkdir(2) directory is refused, not removed.
 _vetcoders_start_acquire_create_lock() {
-  local session_name="${1:-}" socket_dir="" lock_dir="" i=0
+  local session_name="${1:-}" socket_dir="" lock_file="" status=0
+  local timeout="${VIBECRAFTED_START_CREATE_LOCK_TIMEOUT:-30}"
   [[ -n "$session_name" ]] || return 4
   socket_dir="$(_vetcoders_vc_frame_socket_dir 2>/dev/null || true)"
   [[ -n "$socket_dir" ]] || socket_dir="${TMPDIR:-/tmp}"
   mkdir -p "$socket_dir" || return 4
-  lock_dir="$socket_dir/.vc-start-create.${session_name}.lock"
-  while ! mkdir "$lock_dir" 2>/dev/null; do
-    i=$((i + 1))
-    if ((i > 900)); then
-      printf 'vc-start: could not obtain exclusive create lock for %s.\n' \
-        "$(_vetcoders_shell_quote "$session_name")" >&2
-      return 4
-    fi
-    sleep 0.1
-  done
-  _vetcoders_start_create_lock_dir="$lock_dir"
+  lock_file="$socket_dir/.vc-start-create.${session_name}.lock"
+  if [[ -d "$lock_file" ]]; then
+    printf 'vc-start: create lock %s is a directory left by an older mkdir lock; refusing without removing it.\n' \
+      "$(_vetcoders_shell_quote "$lock_file")" >&2
+    return 4
+  fi
+  _vetcoders_start_create_lock_fd=""
+  if [[ -n "${BASH_VERSINFO:-}" ]] && ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 1))); then
+    exec {_vetcoders_start_create_lock_fd}>>"$lock_file" || return 4
+  elif [[ -n "${ZSH_VERSION:-}" ]]; then
+    exec {_vetcoders_start_create_lock_fd}>>"$lock_file" || return 4
+  else
+    _vetcoders_start_create_lock_fd=211
+    eval "exec ${_vetcoders_start_create_lock_fd}>>\"\$lock_file\"" || return 4
+  fi
+  [[ -n "${_vetcoders_start_create_lock_fd:-}" ]] || return 4
+  _vetcoders_os_fd_lock "$_vetcoders_start_create_lock_fd" "$timeout" || status=$?
+  if ((status != 0)); then
+    eval "exec ${_vetcoders_start_create_lock_fd}>&-" 2>/dev/null || true
+    _vetcoders_start_create_lock_fd=""
+    printf 'vc-start: could not obtain exclusive create lock for %s.\n' \
+      "$(_vetcoders_shell_quote "$session_name")" >&2
+    return 4
+  fi
 }
 
 _vetcoders_start_release_create_lock() {
-  [[ -n "${_vetcoders_start_create_lock_dir:-}" ]] || return 0
-  rmdir "$_vetcoders_start_create_lock_dir" 2>/dev/null || true
-  unset _vetcoders_start_create_lock_dir
+  [[ -n "${_vetcoders_start_create_lock_fd:-}" ]] || return 0
+  eval "exec ${_vetcoders_start_create_lock_fd}>&-" 2>/dev/null || true
+  _vetcoders_start_create_lock_fd=""
 }
 
 # The one create primitive. Returns 0 (created and live), 3 (the exact name
 # was taken meanwhile -- the caller re-reads the inventory and refuses), or 4
 # (any other engine refusal / the session never came up). Never waits a real
 # refusal out, never treats "already exists" as success.
-# $4 = host (default; full operator chrome from the shipped operator.kdl) or
+# $4 = host (default; full operator chrome from the selected operator.kdl) or
 # guest (--guest-workspace so Frame strips nested rail/tab chrome). Guest
-# create uses Frame's builtin product workspace name `vibecrafted` (aliases
-# default/operator/vibecrafted-host resolve to that surface). An absolute
-# layouts/operator.kdl path is not a builtin: guest_workspace_layout_info
-# then IoError's "The layout was not found".
+# create keeps the selected File. Frame `from_cli` treats a path with an
+# extension as File; `guest_workspace_layout_info` → `stringified_from_dir`
+# does `dir.join(layout)`. Rust Path::join keeps an absolute layout, so the
+# shipped/custom operator.kdl content is read and session_layer is stripped.
+# Do not substitute the `vibecrafted` builtin — that discards selected content.
 _vetcoders_start_create_workspace_session() {
   local vc_frame_bin="${1:-}" session_name="${2:-}" layout_file="${3:-}" kind="${4:-host}" out="" rc=0
   local create_argv=() state=""
   [[ -n "$vc_frame_bin" && -n "$session_name" ]] || return 4
+  if [[ -z "$layout_file" || ! -f "$layout_file" ]]; then
+    printf 'vc-start: operator layout missing under: %s\n' "$(_vetcoders_vc_frame_config_dir 2>/dev/null || printf '?')" >&2
+    printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
+    return 4
+  fi
   if [[ "$kind" == guest ]]; then
-    create_argv+=(--guest-workspace --new-session-with-layout vibecrafted)
+    create_argv+=(--guest-workspace --new-session-with-layout "$layout_file")
   else
-    if [[ -z "$layout_file" || ! -f "$layout_file" ]]; then
-      printf 'vc-start: operator layout missing under: %s\n' "$(_vetcoders_vc_frame_config_dir 2>/dev/null || printf '?')" >&2
-      printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
-      return 4
-    fi
     create_argv+=(--new-session-with-layout "$layout_file")
   fi
   create_argv+=(attach --create-background "$session_name")
@@ -1512,6 +1612,11 @@ _vetcoders_start_launch_workspace() {
 # _vetcoders_start_prepare_arguments. $@ = _vetcoders_start_frame_argv.
 _vetcoders_start_entry() {
   local root="" session_name="" state="" rc=0
+  root="$(_vetcoders_start_resolve_root)" || {
+    printf 'vc-start: could not resolve the project root.\n' >&2
+    return 1
+  }
+  _vetcoders_start_apply_launch_spec "$root" || return $?
   root="$(_vetcoders_start_resolve_root)" || {
     printf 'vc-start: could not resolve the project root.\n' >&2
     return 1

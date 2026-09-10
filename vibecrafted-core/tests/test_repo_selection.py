@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -223,3 +224,50 @@ def test_cli_worktree_true_still_requires_git_for_launch(tmp_path: Path) -> None
     assert result.returncode == 2
     assert "not inside a Git repository" in result.stderr
     assert not any(path != plain for path in tmp_path.iterdir() if path.is_dir())
+
+
+def test_cli_prepare_worktree_pins_commit_and_keeps_dirty_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _git_repo(tmp_path / "repo")
+    (repo / "README.md").write_text("dirty parent\n", encoding="utf-8")
+    (repo / "private.txt").write_text("parent only\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / ".vibecrafted"))
+    sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    result = _repo_selection_cli(
+        "--repo",
+        str(repo),
+        "--worktree",
+        "true",
+        "--base",
+        sha,
+        "--prepare-worktree",
+        "--json",
+        cwd=repo,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    worker = Path(payload["root"])
+    assert payload["baseline_sha"] == sha
+    assert payload["worktree"] is True
+    assert worker.resolve() != repo.resolve()
+    assert worker.is_dir()
+    head = subprocess.run(
+        ["git", "-C", str(worker), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert head == sha
+    assert (repo / "README.md").read_text(encoding="utf-8") == "dirty parent\n"
+    assert (repo / "private.txt").read_text(encoding="utf-8") == "parent only\n"

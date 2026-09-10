@@ -50,6 +50,7 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -87,6 +88,9 @@ IDENTITY_ENV = (
     "VIBECRAFTED_PREPARED_VC_FRAME_SESSION",
     "VIBECRAFTED_START_CREATED_SESSION",
     "VIBECRAFTED_START_ROOT",
+    "VIBECRAFTED_START_LAUNCH_PINNED",
+    "VIBECRAFTED_START_BASELINE_SHA",
+    "VIBECRAFTED_START_PARENT_ROOT",
     "VIBECRAFTED_TERMINAL_ENTRY",
     "VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME",
     "VIBECRAFTED_PRODUCT_ENTRY",
@@ -322,9 +326,18 @@ if rest[:2] == ["attach", "--create-background"]:
             sys.stderr.write("Session already exists\\n")
             sys.exit(1)
         raise
-    os.write(fd, layout.encode() if layout else b"")
+    layout_text = ""
+    if layout and os.path.isfile(layout):
+        with open(layout, encoding="utf-8") as handle:
+            layout_text = handle.read()
+    os.write(fd, (layout_text or layout or "").encode())
     os.close(fd)
-    record({"created": name, "guest_workspace": guest_workspace})
+    record({
+        "created": name,
+        "guest_workspace": guest_workspace,
+        "layout": layout,
+        "layout_bytes": len(layout_text) if layout_text else 0,
+    })
     sys.exit(0)
 
 if rest[:1] == ["attach"]:
@@ -1361,9 +1374,9 @@ def test_same_basename_from_a_different_repository_is_a_conflict_with_a_rename_o
 
 
 def test_two_concurrent_starts_create_exactly_one_workspace(tmp_path: Path) -> None:
-    """Both callers read `missing`, both call the exclusive create: the engine
-    admits one. The loser reports exit 3 as a conflict (not an engine
-    failure), opens no terminal, and nothing is left behind twice."""
+    """Both callers read `missing` then serialize on the create lock. The
+    winner creates; the loser re-reads inventory and reports exit 3. One
+    workspace, no second terminal, nothing left behind twice."""
     scene = Scene(tmp_path, project="mlx-batch-runner")
     env = scene.env()
     script = _entry_script(scene, "vc-start")
@@ -1386,7 +1399,6 @@ def test_two_concurrent_starts_create_exactly_one_workspace(tmp_path: Path) -> N
     assert scene.live() == ["mlx-batch-runner"]
     created = [c for c in scene.calls() if c.get("created")]
     assert len(created) == 1, scene.calls()
-    assert len(_creates(scene.calls())) == 2, "both callers must have raced the create"
     loser = next(o for o in outs if f"RC=[{EXIT_EXISTS}]" in o[0])
     assert "already exists in vc-frame" in loser[1], loser[1]
     assert "refused to create" not in loser[1], loser[1]
@@ -1443,7 +1455,16 @@ def _assert_projected_into_host(
     assert "--guest-workspace" in guest_creates[0]["argv"]
     guest_argv = guest_creates[0]["argv"]
     assert "--new-session-with-layout" in guest_argv
-    assert guest_argv[guest_argv.index("--new-session-with-layout") + 1] == "vibecrafted"
+    selected = guest_argv[guest_argv.index("--new-session-with-layout") + 1]
+    assert selected != "vibecrafted"
+    assert Path(selected).is_file(), selected
+    selected_text = Path(selected).read_text(encoding="utf-8")
+    assert "layout {" in selected_text
+    recorded_layout = guest_creates[0].get("layout")
+    if recorded_layout:
+        assert recorded_layout == selected
+    live_blob = (scene.table / "live" / guest).read_text(encoding="utf-8")
+    assert live_blob == selected_text
     return projects[-1]
 
 
@@ -1923,6 +1944,307 @@ def test_two_concurrent_inside_host_starts_create_exactly_one_guest(
     assert len(created) == 1, scene.calls()
     winner = next(o for o in outs if "RC=[0]" in o[0])
     assert "projected workspace mlx-batch-runner" in winner[0] + winner[1]
+
+
+SHIPPED_OPERATOR_LAYOUT = (
+    REPO_ROOT
+    / "vibecrafted-core"
+    / "vibecrafted_core"
+    / "config"
+    / "vc-frame"
+    / "layouts"
+    / "operator.kdl"
+)
+
+
+def test_inside_host_guest_uses_shipped_operator_layout_content(
+    tmp_path: Path,
+) -> None:
+    scene = Scene(
+        tmp_path,
+        project="mlx-batch-runner",
+        live=("other-place",),
+        clients=("other-place",),
+    )
+    result = _run(
+        scene,
+        "vc-start",
+        developer_root=True,
+        extra_env=_inside_host_env(scene),
+    )
+    assert _rc(result) == 0, result.stdout + result.stderr
+    projected = _assert_projected_into_host(
+        scene, host="other-place", guest="mlx-batch-runner", result=result
+    )
+    guest_creates = [
+        c
+        for c in scene.calls()
+        if c.get("created") == "mlx-batch-runner" and c.get("guest_workspace") is True
+    ]
+    selected = Path(guest_creates[0]["argv"][guest_creates[0]["argv"].index("--new-session-with-layout") + 1])
+    assert selected.resolve() == SHIPPED_OPERATOR_LAYOUT.resolve()
+    text = selected.read_text(encoding="utf-8")
+    assert "session_layer" in text
+    assert "session-manager" in text
+    assert "VC Guest" in text or "pane_title" in text
+    assert (scene.table / "live" / "mlx-batch-runner").read_text(encoding="utf-8") == text
+    assert "--guest-workspace" in guest_creates[0]["argv"]
+    assert projected
+
+
+def test_guest_create_preserves_customized_selected_layout_marker(
+    tmp_path: Path,
+) -> None:
+    """Public start in developer mode selects shipped operator.kdl. The same
+    create owner must also pass a customized File through --guest-workspace
+    so Frame can strip session_layer from that content, not a builtin."""
+    scene = Scene(
+        tmp_path,
+        project="guest-layout",
+        live=("other-place",),
+        clients=("other-place",),
+    )
+    marker = "VC_START_LAYOUT_MARKER_" + uuid.uuid4().hex
+    layout = tmp_path / "custom-operator.kdl"
+    layout.write_text(
+        f"// {marker}\nlayout {{\n    session_layer {{\n        pane size=1\n    }}\n    pane\n}}\n",
+        encoding="utf-8",
+    )
+    frame = scene.generation / "bin" / "vc-frame"
+    result = _eval_start_fn(
+        f'_vetcoders_start_create_workspace_session "{frame}" guest-layout "{layout}" guest',
+        extra_env=scene.env({"VIBECRAFTED_PREFER_REPO_VC_FRAME": "1"}),
+        cwd=scene.root,
+    )
+    assert _rc(result) == 0, result.stdout + result.stderr
+    guest_creates = [
+        c
+        for c in scene.calls()
+        if c.get("created") == "guest-layout" and c.get("guest_workspace") is True
+    ]
+    assert guest_creates, scene.calls()
+    argv = guest_creates[0]["argv"]
+    assert "--guest-workspace" in argv
+    selected = Path(argv[argv.index("--new-session-with-layout") + 1])
+    assert selected.resolve() == layout.resolve()
+    assert marker in selected.read_text(encoding="utf-8")
+    assert marker in (scene.table / "live" / "guest-layout").read_text(encoding="utf-8")
+    assert "vibecrafted" not in argv[argv.index("--new-session-with-layout") + 1]
+
+
+def test_create_lock_dies_with_holder_and_retry_succeeds(tmp_path: Path) -> None:
+    sock = tmp_path / "sock"
+    sock.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = os.environ.copy()
+    for key in IDENTITY_ENV:
+        env.pop(key, None)
+    env.update(
+        {
+            "HOME": str(home),
+            "VIBECRAFTED_HOME": str(home / ".vibecrafted"),
+            "VC_FRAME_SOCKET_DIR": str(sock),
+            "VIBECRAFTED_START_CREATE_LOCK_TIMEOUT": "2",
+        }
+    )
+    ready = tmp_path / "lock-held"
+    holder = subprocess.Popen(
+        [
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            "\n".join(
+                [
+                    f'source "{SHELL_SH}"',
+                    "_vetcoders_start_acquire_create_lock race || exit 9",
+                    f'printf held > "{ready}"',
+                    "while true; do sleep 1; done",
+                ]
+            ),
+        ],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not ready.exists():
+        if holder.poll() is not None:
+            break
+        time.sleep(0.05)
+    assert ready.exists(), holder.stderr.read() if holder.stderr else "holder died"
+    busy = subprocess.run(
+        [
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            "\n".join(
+                [
+                    f'source "{SHELL_SH}"',
+                    "_vetcoders_start_acquire_create_lock race",
+                    'printf RC=[%s]\\n "$?"',
+                ]
+            ),
+        ],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=8,
+    )
+    assert busy.returncode == 4, busy.stdout + busy.stderr
+    assert "could not obtain exclusive create lock" in busy.stderr
+    os.kill(holder.pid, signal.SIGKILL)
+    holder.wait(timeout=5)
+    retry = subprocess.run(
+        [
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            "\n".join(
+                [
+                    f'source "{SHELL_SH}"',
+                    "_vetcoders_start_acquire_create_lock race || exit $?",
+                    "_vetcoders_start_release_create_lock",
+                    "printf RETRY_OK\\n",
+                ]
+            ),
+        ],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=8,
+    )
+    assert retry.returncode == 0, retry.stdout + retry.stderr
+    assert "RETRY_OK" in retry.stdout
+    lock_file = sock / ".vc-start-create.race.lock"
+    assert lock_file.is_file()
+
+
+def test_create_locks_are_independent_per_socket_namespace(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    sock_a = tmp_path / "sock-a"
+    sock_b = tmp_path / "sock-b"
+    sock_a.mkdir()
+    sock_b.mkdir()
+    env = os.environ.copy()
+    for key in IDENTITY_ENV:
+        env.pop(key, None)
+    env.update({"HOME": str(home), "VIBECRAFTED_HOME": str(home / ".vibecrafted")})
+
+    def acquire(sock: Path) -> subprocess.CompletedProcess[str]:
+        local = dict(env)
+        local["VC_FRAME_SOCKET_DIR"] = str(sock)
+        return subprocess.run(
+            [
+                "bash",
+                "--noprofile",
+                "--norc",
+                "-c",
+                "\n".join(
+                    [
+                        f'source "{SHELL_SH}"',
+                        "_vetcoders_start_acquire_create_lock shared-name || exit $?",
+                        "_vetcoders_start_release_create_lock",
+                        "printf NS_OK\\n",
+                    ]
+                ),
+            ],
+            env=local,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+
+    ready = tmp_path / "ns-held"
+    holder = subprocess.Popen(
+        [
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            "\n".join(
+                [
+                    f'source "{SHELL_SH}"',
+                    f'export VC_FRAME_SOCKET_DIR="{sock_a}"',
+                    "_vetcoders_start_acquire_create_lock shared-name || exit 9",
+                    f'printf held > "{ready}"',
+                    "while true; do sleep 1; done",
+                ]
+            ),
+        ],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not ready.exists():
+        if holder.poll() is not None:
+            break
+        time.sleep(0.05)
+    assert ready.exists(), holder.stderr.read() if holder.stderr else "holder died"
+    other = acquire(sock_b)
+    os.kill(holder.pid, signal.SIGKILL)
+    holder.wait(timeout=5)
+    assert other.returncode == 0, other.stdout + other.stderr
+    assert "NS_OK" in other.stdout
+    assert (sock_a / ".vc-start-create.shared-name.lock").is_file()
+    assert (sock_b / ".vc-start-create.shared-name.lock").is_file()
+
+
+def test_create_lock_refuses_leftover_mkdir_directory_without_deleting(
+    tmp_path: Path,
+) -> None:
+    sock = tmp_path / "sock"
+    sock.mkdir()
+    leftover = sock / ".vc-start-create.stale.lock"
+    leftover.mkdir()
+    marker = leftover / "foreign"
+    marker.write_text("keep\n", encoding="utf-8")
+    env = os.environ.copy()
+    for key in IDENTITY_ENV:
+        env.pop(key, None)
+    env.update(
+        {
+            "HOME": str(tmp_path / "home"),
+            "VC_FRAME_SOCKET_DIR": str(sock),
+        }
+    )
+    (tmp_path / "home").mkdir()
+    result = subprocess.run(
+        [
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            "\n".join(
+                [
+                    f'source "{SHELL_SH}"',
+                    "_vetcoders_start_acquire_create_lock stale",
+                    'printf RC=[%s]\\n "$?"',
+                ]
+            ),
+        ],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=8,
+    )
+    assert result.returncode == 4, result.stdout + result.stderr
+    assert leftover.is_dir()
+    assert marker.read_text(encoding="utf-8") == "keep\n"
+    assert "without removing" in result.stderr
 
 
 # --------------------------------------------------------------------------

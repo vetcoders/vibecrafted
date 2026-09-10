@@ -134,6 +134,54 @@ _vetcoders_worktree_word_value() {
   esac
 }
 
+# Process-lifetime exclusive lock. The owner is scripts/lib/runtime-pack-selection.sh
+# (`runtime_pack_selection_flock`): flock(2) on an open file description, lock
+# FILE created once and never unlinked, release = close this process's fd.
+# The kernel drops the lock when the last descriptor dies, including SIGKILL.
+# A leftover mkdir(2) directory is an older adapter lock; refusing it is the
+# only recovery. Removing it would reintroduce the stale-takeover race.
+_vetcoders_os_fd_lock() {
+  local fd="$1" timeout="$2"
+  if command -v flock >/dev/null 2>&1; then
+    flock -w "$timeout" "$fd"
+    return
+  fi
+  if command -v perl >/dev/null 2>&1; then
+    perl -e '
+      use Fcntl qw(:flock);
+      open(my $handle, ">&=", $ARGV[0]) or exit 3;
+      my $deadline = time + $ARGV[1];
+      while (1) {
+        exit 0 if flock($handle, LOCK_EX | LOCK_NB);
+        exit 1 if time >= $deadline;
+        select(undef, undef, undef, 0.1);
+      }
+    ' "$fd" "$timeout"
+    return
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import fcntl
+import sys
+import time
+
+descriptor = int(sys.argv[1])
+deadline = time.monotonic() + float(sys.argv[2])
+while True:
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        if time.monotonic() >= deadline:
+            sys.exit(1)
+        time.sleep(0.1)
+    else:
+        sys.exit(0)
+' "$fd" "$timeout"
+    return
+  fi
+  return 2
+}
+
 # The runtime generation is NOT a project. Every product front door exports
 # VIBECRAFTED_ROOT and VIBECRAFTED_RUNTIME_ROOT to the same generation path
 # (vc_start.rs run(), scripts/vc-terminal-product-entry.sh,

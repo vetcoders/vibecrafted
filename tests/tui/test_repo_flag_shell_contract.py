@@ -232,3 +232,172 @@ printf 'missing=refused\\n'
     assert "missing=refused" in result.stdout
     assert "vc-start: conflicting --repo" in result.stderr
     assert "vc-start: --repo is not an existing directory" in result.stderr
+
+
+def _committed_repo(path: Path, home: Path) -> str:
+    path.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    subprocess.run(["git", "init", "-q", str(path)], check=True, capture_output=True, env=env)
+    (path / "README.md").write_text("seed\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(path), "add", "-A"], check=True, capture_output=True, env=env)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(path),
+            "-c",
+            "user.name=start-fixture",
+            "-c",
+            "user.email=start-fixture@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "seed",
+        ],
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    head = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--verify", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    return head.stdout.strip()
+
+
+def test_vc_start_parse_does_not_materialize_worktree(tmp_path: Path, home: Path) -> None:
+    repo = tmp_path / "repo"
+    sha = _committed_repo(repo, home)
+    (repo / "README.md").write_text("dirty parent\n", encoding="utf-8")
+    result = _shell(
+        f"""
+_vetcoders_start_prepare_arguments --repo {repo} --worktree true --base {sha} || exit $?
+printf 'parsed=%s|%s|%s\\n' "$VIBECRAFTED_START_ROOT" "$_vetcoders_start_contract_worktree" "$_vetcoders_start_contract_base"
+""",
+        cwd=tmp_path,
+        home=home,
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"parsed={repo.resolve()}|true|{sha}" in result.stdout
+    assert not any(
+        path.is_dir() and path.name.startswith(repo.name) and path != repo
+        for path in tmp_path.iterdir()
+    )
+    assert (repo / "README.md").read_text(encoding="utf-8") == "dirty parent\n"
+
+
+def test_vc_start_execution_pins_base_and_materializes_worktree(
+    tmp_path: Path, home: Path
+) -> None:
+    repo = tmp_path / "repo"
+    sha = _committed_repo(repo, home)
+    (repo / "README.md").write_text("dirty parent\n", encoding="utf-8")
+    (repo / "private.txt").write_text("parent only\n", encoding="utf-8")
+    result = _shell(
+        f"""
+_vetcoders_start_prepare_arguments --repo {repo} --worktree true --base {sha} || exit $?
+_vetcoders_start_apply_launch_spec "$VIBECRAFTED_START_ROOT" || exit $?
+printf 'root=%s\\n' "$VIBECRAFTED_START_ROOT"
+printf 'base=%s\\n' "$VIBECRAFTED_START_BASELINE_SHA"
+printf 'parent=%s\\n' "$VIBECRAFTED_START_PARENT_ROOT"
+printf 'pinned=%s\\n' "$VIBECRAFTED_START_LAUNCH_PINNED"
+_vetcoders_start_apply_launch_spec "$VIBECRAFTED_START_ROOT" || exit $?
+printf 'second=%s\\n' "$VIBECRAFTED_START_ROOT"
+""",
+        cwd=tmp_path,
+        home=home,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    root_line = next(line for line in result.stdout.splitlines() if line.startswith("root="))
+    worker = Path(root_line.split("=", 1)[1])
+    assert worker.is_dir()
+    assert worker.resolve() != repo.resolve()
+    assert f"base={sha}" in result.stdout
+    worker_head = subprocess.run(
+        ["git", "-C", str(worker), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert worker_head == sha
+    assert (repo / "README.md").read_text(encoding="utf-8") == "dirty parent\n"
+    assert (repo / "private.txt").read_text(encoding="utf-8") == "parent only\n"
+    assert f"second={worker}" in result.stdout
+
+
+def test_vc_start_worktree_false_keeps_selected_directory(
+    tmp_path: Path, home: Path
+) -> None:
+    repo = tmp_path / "repo"
+    sha = _committed_repo(repo, home)
+    result = _shell(
+        f"""
+_vetcoders_start_prepare_arguments --repo {repo} --worktree false --base {sha} || exit $?
+_vetcoders_start_apply_launch_spec "$VIBECRAFTED_START_ROOT" || exit $?
+printf 'root=%s\\n' "$VIBECRAFTED_START_ROOT"
+printf 'base=%s\\n' "$VIBECRAFTED_START_BASELINE_SHA"
+""",
+        cwd=tmp_path,
+        home=home,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert f"root={repo.resolve()}" in result.stdout
+    assert f"base={sha}" in result.stdout
+    assert not any(
+        path.is_dir() and "worktrees" in str(path)
+        for path in (home / ".vibecrafted").rglob("*")
+        if path.is_dir()
+    )
+
+
+def test_vc_start_invalid_launch_flags_are_refused(tmp_path: Path, home: Path) -> None:
+    repo = tmp_path / "repo"
+    sha = _committed_repo(repo, home)
+    bad_word = _shell(
+        f"_vetcoders_start_prepare_arguments --repo {repo} --worktree=maybe && exit 88",
+        cwd=tmp_path,
+        home=home,
+    )
+    assert bad_word.returncode != 0
+    assert "--worktree expects true or false" in bad_word.stderr
+    missing_base = _shell(
+        f"""
+_vetcoders_start_prepare_arguments --repo {repo} --worktree true --base not-a-ref || exit $?
+_vetcoders_start_apply_launch_spec {repo}
+""",
+        cwd=tmp_path,
+        home=home,
+    )
+    assert missing_base.returncode != 0
+    assert (repo / "README.md").read_text(encoding="utf-8") == "seed\n"
+
+
+def test_vc_start_child_receives_effective_root_not_a_second_worktree(
+    tmp_path: Path, home: Path
+) -> None:
+    repo = tmp_path / "repo"
+    sha = _committed_repo(repo, home)
+    result = _shell(
+        f"""
+_vetcoders_start_prepare_arguments --repo {repo} --worktree true --base {sha} || exit $?
+_vetcoders_start_apply_launch_spec "$VIBECRAFTED_START_ROOT" || exit $?
+worker="$VIBECRAFTED_START_ROOT"
+_vetcoders_start_prepare_arguments --repo "$worker" || exit $?
+_vetcoders_start_apply_launch_spec "$VIBECRAFTED_START_ROOT" || exit $?
+printf 'child=%s\\n' "$VIBECRAFTED_START_ROOT"
+printf 'worker=%s\\n' "$worker"
+""",
+        cwd=tmp_path,
+        home=home,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    child = next(line for line in result.stdout.splitlines() if line.startswith("child="))
+    worker = next(line for line in result.stdout.splitlines() if line.startswith("worker="))
+    assert child.split("=", 1)[1] == worker.split("=", 1)[1]
+    trees = list((home / ".vibecrafted" / "worktrees").rglob(".git")) if (home / ".vibecrafted" / "worktrees").exists() else []
+    assert len(trees) == 1, trees
