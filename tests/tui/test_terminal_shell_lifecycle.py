@@ -768,9 +768,19 @@ class _OwnedFrameSandbox:
         # Registered before the engine runs: a session that half-started still
         # has to be torn down.
         self.sessions.append(session)
+        # `--layout`, not `--new-session-with-layout`. Both name a layout for
+        # the session `attach --create-background` is about to create, and only
+        # one of them arrives: the engine dispatches `Sessions::Attach` in an
+        # `else if` arm above the arm that folds `new_session_with_layout` into
+        # `opts.layout`, so under an `attach` subcommand that fold is
+        # unreachable and the flag is dropped without a word. What answers then
+        # is the engine's built-in default layout, whose tabs open command
+        # panes ("Shell", "voc") in place of the single pane asked for here.
+        # `--layout` is already in `opts` when the attach arm starts the
+        # client, so it survives that arm and reaches the new session.
         created = self.run(
             environment,
-            "--new-session-with-layout",
+            "--layout",
             str(self.layout),
             "attach",
             "--create-background",
@@ -989,6 +999,30 @@ def _wait_for_panes(
     )
 
 
+def _assert_engine_chose_the_shell(
+    sandbox: _OwnedFrameSandbox,
+    environment: dict[str, str],
+    session: str,
+    pane_id: str,
+) -> None:
+    """Nothing told this pane what to run, so the shell inside it is the engine's.
+
+    `default_shell` is only under test while the pane was left to resolve it.
+    A pane carrying a `terminal_command` was handed its program by a layout,
+    and a product profile proven on that pane would be a fact about the layout
+    instead. This is also how a foreign layout announces itself here: the
+    engine's built-in default opens command panes, so it arrives as a command
+    where there should be none — a named difference rather than a pane count
+    this test would otherwise have to guess at.
+    """
+    entry = _terminal_panes(sandbox, environment, session).get(pane_id)
+    assert entry is not None, f"{pane_id} left the pane list of {session}"
+    assert not entry.get("terminal_command"), (
+        f"{pane_id} was handed a command by a layout: "
+        f"{entry.get('terminal_command')!r}"
+    )
+
+
 def _new_default_pane(
     sandbox: _OwnedFrameSandbox,
     environment: dict[str, str],
@@ -1169,6 +1203,7 @@ def test_real_frame_default_and_restored_panes_run_product_profile() -> None:
 
         # 1. The pane the session itself opened — the daily default shell.
         startup_pane = _wait_for_panes(sandbox, environment, session, count=1)[0]
+        _assert_engine_chose_the_shell(sandbox, environment, session, startup_pane)
         startup_probe, startup_evidence = _write_frame_probe(home, "startup")
         startup_text = _type_in_pane(
             sandbox, environment, session, startup_probe, startup_evidence, startup_pane
@@ -1288,6 +1323,7 @@ def test_real_frame_client_env_updates_no_server_but_a_product_server_does() -> 
         legacy_session = sandbox.session_name("legacy")
         sandbox.create_session(legacy_env, legacy_session, cwd=work)
         legacy_pane = _wait_for_panes(sandbox, legacy_env, legacy_session, count=1)[0]
+        _assert_engine_chose_the_shell(sandbox, legacy_env, legacy_session, legacy_pane)
         legacy_probe, legacy_evidence = _write_frame_probe(home, "legacy-server")
         legacy_text = _type_in_pane(
             sandbox,
@@ -1332,6 +1368,9 @@ def test_real_frame_client_env_updates_no_server_but_a_product_server_does() -> 
         product_pane = _wait_for_panes(
             sandbox, product_env, product_session, count=1
         )[0]
+        _assert_engine_chose_the_shell(
+            sandbox, product_env, product_session, product_pane
+        )
         product_probe, product_evidence = _write_frame_probe(home, "product-server")
         product_text = _type_in_pane(
             sandbox,
