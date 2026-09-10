@@ -2478,7 +2478,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       return publishAdoptedProductUpdate(
         handoff, replacement: receipt, pendingURL: pendingURL)
     case .restorePrevious(let prior):
-      return beginProductUpdateRestore(handoff: handoff, prior: prior)
+      return beginProductUpdateRecover(handoff: handoff, prior: prior)
     case .rolledBack(let reason):
       do {
         try writeProductUpdateRecovery(
@@ -2620,12 +2620,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     switch derived {
     case .published:
       if installerFailed {
-        retainProductUpdateEvidence(
-          handoff,
-          reason:
-            "the installer published \(observed.generation); the previous app was not restored so generations are not mixed. \(observed.detail)")
-        productUpdateStartupAdoption = .retained
-        connectCommandDeck()
+        if let prior = productUpdateOwnedPriorApp(at: handoff.capturePath) {
+          _ = beginProductUpdateRecover(handoff: handoff, prior: prior)
+        } else {
+          retainProductUpdateEvidence(
+            handoff,
+            reason:
+              "the installer published \(observed.generation) and then failed; historical rollback data is missing. \(observed.detail)")
+          productUpdateStartupAdoption = .retained
+          connectCommandDeck()
+        }
         return
       }
       try? FileManager.default.removeItem(at: pendingURL)
@@ -2633,7 +2637,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       connectCommandDeck()
     case .unpublished, .rolledBack:
       if let prior = productUpdateOwnedPriorApp(at: handoff.capturePath) {
-        _ = beginProductUpdateRestore(handoff: handoff, prior: prior)
+        _ = beginProductUpdateRecover(handoff: handoff, prior: prior)
       } else {
         retainProductUpdateEvidence(
           handoff,
@@ -2656,6 +2660,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   private func beginProductUpdateRestore(
     handoff: ProductUpdateHandoffRecord, prior: URL
   ) -> ProductUpdateHandoffAdoption {
+    beginProductUpdateRecover(handoff: handoff, prior: prior)
+  }
+
+  /// Restore prior runtime/config/launchers through the installer owner, then
+  /// the matching prior app. App-only restore is not treated as success.
+  @discardableResult
+  private func beginProductUpdateRecover(
+    handoff: ProductUpdateHandoffRecord, prior: URL
+  ) -> ProductUpdateHandoffAdoption {
     guard productUpdateOwnedPriorApp(at: prior.deletingLastPathComponent().path) != nil else {
       retainProductUpdateEvidence(
         handoff, reason: "the previous app capture is not an owned recovery path")
@@ -2665,8 +2678,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       pid: ProcessInfo.processInfo.processIdentifier)
     let receiptURL = URL(fileURLWithPath: handoff.receiptURL)
       .deletingLastPathComponent()
-      .appendingPathComponent("restore-receipt.json")
-    let request = productUpdateRestoreRequest(
+      .appendingPathComponent("recover-receipt.json")
+    let request = productUpdateRecoverRequest(
       handoff: handoff,
       priorApp: prior,
       waitPID: identity?.pid ?? ProcessInfo.processInfo.processIdentifier,
@@ -2687,7 +2700,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
           restoring.helperPID = admission.helperPID
           restoring.helperStart =
             captureProductUpdateProcessIdentity(pid: admission.helperPID)?.startTime ?? ""
-          restoring.mode = ProductUpdateHelperMode.restore.rawValue
+          restoring.mode = ProductUpdateHelperMode.recover.rawValue
           if !admission.candidateIdentity.isEmpty {
             restoring.priorIdentity = admission.candidateIdentity
           }
@@ -2698,7 +2711,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
             self.retainProductUpdateEvidence(
               restoring,
               reason:
-                "Could not save the restore handoff. The window stays open so the helper is not abandoned. \(error.localizedDescription)")
+                "Could not save the recover handoff. The window stays open so the helper is not abandoned. \(error.localizedDescription)")
             self.productUpdateStartupAdoption = .retained
             self.connectCommandDeck()
             return
@@ -2707,13 +2720,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
           self.requestQuit()
         case .success:
           self.retainProductUpdateEvidence(
-            handoff, reason: "the restore helper started but did not admit the previous version")
+            handoff, reason: "the recover helper started but did not admit the previous version")
           self.productUpdateStartupAdoption = .retained
           self.connectCommandDeck()
         case .failure(let error):
           self.retainProductUpdateEvidence(
             handoff,
-            reason: "the previous version could not be restored. \(error.localizedDescription)")
+            reason: "the previous app and Runtime Pack could not be restored. \(error.localizedDescription)")
           self.productUpdateStartupAdoption = .retained
           self.connectCommandDeck()
         }

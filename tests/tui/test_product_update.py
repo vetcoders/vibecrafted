@@ -7,6 +7,7 @@ import json
 import os
 import pwd
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -84,8 +85,16 @@ def test_product_update_source_contract() -> None:
     assert "productUpdateRestoreRequest" in transaction
     assert "awaitProductUpdateReceipt" in delegate
     assert "beginProductUpdateRestore" in delegate
+    assert "beginProductUpdateRecover" in delegate
+    assert "productUpdateRecoverRequest" in delegate
     assert "admitProductUpdateHelper" in delegate
     assert "restore_previous_tuple" in helper
+    assert "recover_whole_tuple" in helper
+    assert "restore_prior_runtime" in helper
+    assert "--mode recover" in helper or "recover" in helper
+    assert "--allow-older-runtime" in (
+        REPO_ROOT / "scripts/install-runtime-pack.sh"
+    ).read_text(encoding="utf-8")
     assert "failed-new.app" in helper
     assert "rolledBack" in transaction
     assert "reconcile_resume" in helper
@@ -111,13 +120,18 @@ def test_product_update_source_contract() -> None:
     assert ".terminateCancel" in delegate
     assert 'try? writeProductUpdateHandoff' not in coordinator
     assert 'try? writeProductUpdateHandoff' not in delegate
-    restore = delegate[delegate.index("beginProductUpdateRestore") :]
-    assert "Could not save the restore handoff" in restore
+    recover = delegate[delegate.index("beginProductUpdateRecover") :]
+    assert "Could not save the recover handoff" in recover
     authored = (REPO_ROOT / "tests/tui/test_product_update.py").read_text(encoding="utf-8")
     assert "product_contract" in authored
     assert "VC_FRAME_SOCKET_DIR" in authored
     assert "VIBECRAFTED_LAUNCHER_BIN" in authored
     assert "allow-older-runtime" in authored
+    assert '"--mode"' in authored and '"recover"' in authored
+    assert "VIBECRAFTED_RUNTIME_PACK_HARNESS" in authored
+    assert "fail-after" in authored
+    cross = authored[authored.index("def test_product_update_cross_generation") :]
+    assert "allow_older=True" not in cross.split("def test_product_update_policy_swift")[0]
     assert "pwd.getpwuid" in authored
     assert ("deadbeef" * 5) not in authored
     assert "signed fixture pair not mounted" not in helper
@@ -131,10 +145,11 @@ def test_product_update_source_contract() -> None:
         )
     ]
     assert launch.index("adoptPendingProductUpdateIfNeeded") < launch.index("connectCommandDeck")
-    restore = delegate[delegate.index("beginProductUpdateRestore") :]
-    assert "productUpdateRestoreRequest" in restore
-    assert "relaunch: false" not in restore
-    assert "admitProductUpdateHelper" in restore
+    recover = delegate[delegate.index("beginProductUpdateRecover") :]
+    assert "productUpdateRecoverRequest" in recover
+    assert "relaunch: false" not in recover
+    assert "admitProductUpdateHelper" in recover
+    assert "ProductUpdateHelperMode.recover" in recover
     assert "func runProductUpdateBoundProcess(" in process
     assert "func productUpdateStagedRelativePath(" in process
     assert "VIBECRAFTED_PYTHON" in process
@@ -706,26 +721,33 @@ def _install_signed_pack(
     env: dict[str, str],
     *,
     allow_older: bool = False,
+    fail_after: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     terminal, frame = _app_helpers(dest)
     if not allow_older:
+        command = [
+            "/bin/bash",
+            str(REPO_ROOT / "scripts/install-runtime-pack.sh"),
+            "--pack",
+            str(pack),
+            "--app-root",
+            str(dest),
+            "--terminal-host",
+            str(terminal),
+            "--frame-helper",
+            str(frame),
+        ]
+        run_env = env
+        if fail_after:
+            command += ["--fail-after", fail_after]
+            run_env = env.copy()
+            run_env["VIBECRAFTED_RUNTIME_PACK_HARNESS"] = "1"
         return subprocess.run(
-            [
-                "/bin/bash",
-                str(REPO_ROOT / "scripts/install-runtime-pack.sh"),
-                "--pack",
-                str(pack),
-                "--app-root",
-                str(dest),
-                "--terminal-host",
-                str(terminal),
-                "--frame-helper",
-                str(frame),
-            ],
+            command,
             capture_output=True,
             text=True,
             timeout=300,
-            env=env,
+            env=run_env,
         )
     extract = Path(env["TMPDIR"]) / f"pack-extract-{os.getpid()}-{pack.stem}"
     extract.mkdir(parents=True, exist_ok=True)
@@ -1395,11 +1417,82 @@ def test_product_update_result_before_new_ui_and_restore(tmp_path: Path) -> None
                 helper.wait(timeout=5)
 
 
+def _plant_custom_settings(env: dict[str, str]) -> Path:
+    config_home = Path(env["XDG_CONFIG_HOME"]) / "vibecrafted"
+    config_home.mkdir(parents=True, exist_ok=True)
+    settings = config_home / "founder-settings.toml"
+    settings.write_text(
+        'custom_marker = "tuple-recovery-260910"\nbind = "tailscale-preserved"\n',
+        encoding="utf-8",
+    )
+    sockets = Path(env["VC_FRAME_SOCKET_DIR"])
+    (sockets / "live-session.sock").write_text("persistent-process-identity\n", encoding="utf-8")
+    return settings
+
+
+def _replace_prior_with_candidate(
+    *,
+    dest: Path,
+    source: Path,
+    receipt: Path,
+    apps: _SignedApps,
+) -> dict[str, object]:
+    sleeper = subprocess.Popen(["/bin/sleep", "30"])
+    helper = None
+    try:
+        start = subprocess.check_output(
+            ["/bin/ps", "-p", str(sleeper.pid), "-o", "lstart="], text=True
+        ).strip()
+        helper = subprocess.Popen(
+            [
+                str(HELPER),
+                "--source",
+                str(source),
+                "--destination",
+                str(dest),
+                "--receipt",
+                str(receipt),
+                "--wait-pid",
+                str(sleeper.pid),
+                "--wait-start",
+                start,
+                "--wait-timeout",
+                "20",
+            ],
+            env=_helper_env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        admission = Path(str(receipt) + ".admission.json")
+        deadline = time.time() + 20
+        while time.time() < deadline and not admission.is_file():
+            if helper.poll() is not None:
+                break
+            time.sleep(0.05)
+        assert admission.is_file(), "old UI must see READY before it exits"
+        assert helper.poll() is None
+        assert sleeper.poll() is None
+        sleeper.terminate()
+        sleeper.wait(timeout=5)
+        assert helper.wait(timeout=90) == 0
+    finally:
+        if sleeper.poll() is None:
+            sleeper.terminate()
+            sleeper.wait(timeout=5)
+        if helper is not None and helper.poll() is None:
+            helper.terminate()
+            helper.wait(timeout=5)
+    assert _identity_token(dest) == apps.e37_identity
+    return json.loads(Path(str(receipt) + ".journal.json").read_text(encoding="utf-8"))
+
+
 def test_product_update_cross_generation_publish_then_restore_previous_tuple(
     tmp_path: Path,
 ) -> None:
     founder_before = _founder_identity_stamps()
     env = _isolated_product_env(tmp_path)
+    settings = _plant_custom_settings(env)
     runtime_home = Path(env["VIBECRAFTED_RUNTIME_HOME"])
     with _SignedApps(tmp_path) as apps:
         dest = apps.copy_prior(tmp_path / "Installed.app")
@@ -1411,66 +1504,147 @@ def test_product_update_cross_generation_publish_then_restore_previous_tuple(
         _assert_isolated_receipt_roots(prior_pub["receipt"], tmp_path)  # type: ignore[arg-type]
 
         receipt = tmp_path / "receipt.json"
-        sleeper = subprocess.Popen(["/bin/sleep", "30"])
-        helper = None
-        try:
-            start = subprocess.check_output(
-                ["/bin/ps", "-p", str(sleeper.pid), "-o", "lstart="], text=True
-            ).strip()
-            helper = subprocess.Popen(
-                [
-                    str(HELPER),
-                    "--source",
-                    str(source),
-                    "--destination",
-                    str(dest),
-                    "--receipt",
-                    str(receipt),
-                    "--wait-pid",
-                    str(sleeper.pid),
-                    "--wait-start",
-                    start,
-                    "--wait-timeout",
-                    "20",
-                ],
-                env=_helper_env(),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            admission = Path(str(receipt) + ".admission.json")
-            deadline = time.time() + 20
-            while time.time() < deadline and not admission.is_file():
-                if helper.poll() is not None:
-                    break
-                time.sleep(0.05)
-            assert admission.is_file(), "old UI must see READY before it exits"
-            assert helper.poll() is None
-            assert sleeper.poll() is None
-            sleeper.terminate()
-            sleeper.wait(timeout=5)
-            assert helper.wait(timeout=90) == 0
-        finally:
-            if sleeper.poll() is None:
-                sleeper.terminate()
-                sleeper.wait(timeout=5)
-            if helper is not None and helper.poll() is None:
-                helper.terminate()
-                helper.wait(timeout=5)
-
-        assert _identity_token(dest) == apps.e37_identity
-        published = _install_signed_pack(apps.e37["pack"], dest, env)
-        assert published.returncode == 0, published.stderr or published.stdout
+        journal = _replace_prior_with_candidate(
+            dest=dest, source=source, receipt=receipt, apps=apps
+        )
+        published = _install_signed_pack(
+            apps.e37["pack"], dest, env, fail_after="published"
+        )
+        assert published.returncode == 42, published.stderr or published.stdout
+        assert "harness injected failure after published" in (published.stderr or "")
         e37_pub = _read_installer_publication(runtime_home)
         assert "e37be2c9" in str(e37_pub["version"]).lower()
         assert e37_pub["version"] != prior_pub["version"]
         _assert_isolated_receipt_roots(e37_pub["receipt"], tmp_path)  # type: ignore[arg-type]
 
-        journal = json.loads(Path(str(receipt) + ".journal.json").read_text(encoding="utf-8"))
         capture = Path(journal["capture"])
         prior_app = capture / "prior.app"
         assert _identity_token(prior_app) == apps.prior_identity
-        gate = tmp_path / "hold-restore"
+        recover_receipt = tmp_path / "recover-a.json"
+        recovered = _run_helper(
+            [
+                "--source",
+                str(prior_app),
+                "--destination",
+                str(dest),
+                "--receipt",
+                str(recover_receipt),
+                "--journal",
+                str(receipt) + ".journal.json",
+                "--transaction",
+                str(journal["transaction"]),
+                "--mode",
+                "recover",
+            ],
+            env={**_helper_env(), **env},
+            timeout=300,
+        )
+        assert recovered.returncode == 0, recovered.stderr or recovered.stdout
+        payload = json.loads(recover_receipt.read_text(encoding="utf-8"))
+        assert payload["replaced"] is True
+        assert payload["recovered"] is True
+        assert payload["detail"] == "recovered"
+        assert payload["mode"] == "recover"
+        assert payload["operation"] == "recover"
+        assert payload["installer_status"] == "0"
+        assert payload["pack_generation"] == prior_pub["version"]
+        assert _identity_token(dest) == apps.prior_identity
+        restored = _read_installer_publication(runtime_home)
+        assert restored["version"] == prior_pub["version"]
+        assert "79001c3d" in str(restored["version"]).lower()
+        _assert_isolated_receipt_roots(restored["receipt"], tmp_path)  # type: ignore[arg-type]
+        assert settings.read_text(encoding="utf-8").count("tuple-recovery-260910") == 1
+        assert (
+            Path(env["VC_FRAME_SOCKET_DIR"]) / "live-session.sock"
+        ).read_text(encoding="utf-8") == "persistent-process-identity\n"
+        evidence_path = tmp_path / "pack-evidence.json"
+        assert not evidence_path.exists(), "caller-written pack enum is not installer proof"
+        _assert_founder_identity_untouched(founder_before)
+
+
+def test_product_update_whole_tuple_recovery_fails_without_historical_pack(
+    tmp_path: Path,
+) -> None:
+    founder_before = _founder_identity_stamps()
+    env = _isolated_product_env(tmp_path)
+    runtime_home = Path(env["VIBECRAFTED_RUNTIME_HOME"])
+    with _SignedApps(tmp_path) as apps:
+        dest = apps.copy_prior(tmp_path / "Installed.app")
+        source = apps.copy_e37(tmp_path / "Candidate.app")
+        prior_pack = _install_signed_pack(apps.prior["pack"], dest, env)
+        assert prior_pack.returncode == 0, prior_pack.stderr or prior_pack.stdout
+        prior_pub = _read_installer_publication(runtime_home)
+        receipt = tmp_path / "receipt.json"
+        journal = _replace_prior_with_candidate(
+            dest=dest, source=source, receipt=receipt, apps=apps
+        )
+        published = _install_signed_pack(
+            apps.e37["pack"], dest, env, fail_after="published"
+        )
+        assert published.returncode == 42, published.stderr or published.stdout
+        e37_pub = _read_installer_publication(runtime_home)
+        capture = Path(journal["capture"])
+        prior_app = capture / "prior.app"
+        pack_dir = prior_app / "Contents/Resources/runtime-pack"
+        if pack_dir.is_dir():
+            shutil.rmtree(pack_dir)
+        recover_receipt = tmp_path / "recover-missing.json"
+        failed = _run_helper(
+            [
+                "--source",
+                str(prior_app),
+                "--destination",
+                str(dest),
+                "--receipt",
+                str(recover_receipt),
+                "--journal",
+                str(receipt) + ".journal.json",
+                "--transaction",
+                str(journal["transaction"]),
+                "--mode",
+                "recover",
+            ],
+            env={**_helper_env(), **env},
+            timeout=120,
+        )
+        assert failed.returncode != 0
+        assert "historical" in (failed.stderr or "").lower() or failed.returncode == 19
+        assert not recover_receipt.is_file() or "recovered" not in recover_receipt.read_text(
+            encoding="utf-8"
+        )
+        assert _identity_token(dest) == apps.e37_identity
+        still = _read_installer_publication(runtime_home)
+        assert still["version"] == e37_pub["version"]
+        assert still["version"] != prior_pub["version"]
+        _assert_founder_identity_untouched(founder_before)
+
+
+def test_product_update_whole_tuple_recovery_interrupted_then_resumed(
+    tmp_path: Path,
+) -> None:
+    founder_before = _founder_identity_stamps()
+    env = _isolated_product_env(tmp_path)
+    settings = _plant_custom_settings(env)
+    runtime_home = Path(env["VIBECRAFTED_RUNTIME_HOME"])
+    helper_env = {**_helper_env(), **env}
+    with _SignedApps(tmp_path) as apps:
+        dest = apps.copy_prior(tmp_path / "Installed.app")
+        source = apps.copy_e37(tmp_path / "Candidate.app")
+        prior_pack = _install_signed_pack(apps.prior["pack"], dest, env)
+        assert prior_pack.returncode == 0, prior_pack.stderr or prior_pack.stdout
+        prior_pub = _read_installer_publication(runtime_home)
+        receipt = tmp_path / "receipt.json"
+        journal = _replace_prior_with_candidate(
+            dest=dest, source=source, receipt=receipt, apps=apps
+        )
+        published = _install_signed_pack(
+            apps.e37["pack"], dest, env, fail_after="published"
+        )
+        assert published.returncode == 42, published.stderr or published.stdout
+        capture = Path(journal["capture"])
+        prior_app = capture / "prior.app"
+        gate = tmp_path / "hold-recover"
+        recover_receipt = tmp_path / "recover-a.json"
         first = None
         try:
             first = subprocess.Popen(
@@ -1481,30 +1655,45 @@ def test_product_update_cross_generation_publish_then_restore_previous_tuple(
                     "--destination",
                     str(dest),
                     "--receipt",
-                    str(tmp_path / "restore-a.json"),
+                    str(recover_receipt),
                     "--journal",
                     str(receipt) + ".journal.json",
                     "--transaction",
-                    journal["transaction"],
+                    str(journal["transaction"]),
                     "--mode",
-                    "restore",
+                    "recover",
                     "--hold-after",
-                    "ready",
+                    "runtime_restored",
                     "--until",
                     str(gate),
                 ],
-                env=_helper_env(),
+                env=helper_env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
             )
-            restore_admission = Path(str(tmp_path / "restore-a.json") + ".admission.json")
-            deadline = time.time() + 20
-            while time.time() < deadline and not restore_admission.is_file():
+            recover_admission = Path(str(recover_receipt) + ".admission.json")
+            deadline = time.time() + 180
+            while time.time() < deadline and not recover_admission.is_file():
                 if first.poll() is not None:
                     break
                 time.sleep(0.05)
-            assert restore_admission.is_file()
+            assert recover_admission.is_file(), first.stderr
+            mid_deadline = time.time() + 180
+            mid = None
+            while time.time() < mid_deadline:
+                if first.poll() is not None:
+                    break
+                try:
+                    mid = _read_installer_publication(runtime_home)
+                except AssertionError:
+                    time.sleep(0.2)
+                    continue
+                if mid["version"] == prior_pub["version"]:
+                    break
+                time.sleep(0.2)
+            assert mid is not None and mid["version"] == prior_pub["version"]
+            assert _identity_token(dest) == apps.e37_identity
             concurrent = _run_helper(
                 [
                     "--source",
@@ -1512,41 +1701,56 @@ def test_product_update_cross_generation_publish_then_restore_previous_tuple(
                     "--destination",
                     str(dest),
                     "--receipt",
-                    str(tmp_path / "restore-b.json"),
+                    str(tmp_path / "recover-b.json"),
                     "--journal",
                     str(receipt) + ".journal.json",
                     "--transaction",
-                    journal["transaction"],
+                    str(journal["transaction"]),
                     "--mode",
-                    "restore",
+                    "recover",
                     "--resume",
                 ],
-                env=_helper_env(),
+                env=helper_env,
             )
             assert concurrent.returncode == 13
             assert (dest.parent / ".vc-update.lock" / "held").is_file()
-            gate.write_text("go", encoding="utf-8")
-            assert first.wait(timeout=90) == 0
+            first.send_signal(signal.SIGTERM)
+            first.wait(timeout=20)
+            resumed = _run_helper(
+                [
+                    "--source",
+                    str(prior_app),
+                    "--destination",
+                    str(dest),
+                    "--receipt",
+                    str(tmp_path / "recover-resume.json"),
+                    "--journal",
+                    str(receipt) + ".journal.json",
+                    "--transaction",
+                    str(journal["transaction"]),
+                    "--mode",
+                    "recover",
+                    "--resume",
+                ],
+                env=helper_env,
+                timeout=300,
+            )
+            assert resumed.returncode == 0, resumed.stderr or resumed.stdout
         finally:
             if first is not None and first.poll() is None:
+                gate.write_text("go", encoding="utf-8")
                 first.terminate()
                 first.wait(timeout=5)
 
         assert _identity_token(dest) == apps.prior_identity
-        mixed = _read_installer_publication(runtime_home)
-        assert mixed["version"] == e37_pub["version"]
-        evidence_path = tmp_path / "pack-evidence.json"
-        assert not evidence_path.exists(), "caller-written pack enum is not installer proof"
-
-        restored_pack = _install_signed_pack(
-            apps.prior["pack"], dest, env, allow_older=True
-        )
-        assert restored_pack.returncode == 0, restored_pack.stderr or restored_pack.stdout
         restored = _read_installer_publication(runtime_home)
-        assert "79001c3d" in str(restored["version"]).lower()
         assert restored["version"] == prior_pub["version"]
-        assert _identity_token(dest) == apps.prior_identity
-        _assert_isolated_receipt_roots(restored["receipt"], tmp_path)  # type: ignore[arg-type]
+        resume_payload = json.loads(
+            (tmp_path / "recover-resume.json").read_text(encoding="utf-8")
+        )
+        assert resume_payload["recovered"] is True
+        assert resume_payload["pack_generation"] == prior_pub["version"]
+        assert settings.read_text(encoding="utf-8").count("tuple-recovery-260910") == 1
         _assert_founder_identity_untouched(founder_before)
 
 

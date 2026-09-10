@@ -99,7 +99,22 @@ Restore is a separate owner path (`--mode restore` →
 `restore_previous_tuple`). It never dittos the failed new app onto
 `prior.app`. The failed destination is quarantined as `failed-new.app`.
 Capture validity is checked before any destructive restore. A restore
-receipt must not republish the failed pack. `decideProductUpdateHandoff`
+receipt must not republish the failed pack.
+
+Whole-tuple recovery after a published Runtime Pack failure is
+`--mode recover` → `recover_whole_tuple`. It locates the historical pack
+inside owned `prior.app`, calls the existing
+`install-runtime-pack.sh --allow-older-runtime` owner (source-installer
+bootstrap if the historical pack lacks that flag), observes
+`active.json` / `install-receipt.json`, and only then restores the
+matching prior app. App-only restore is refused while the candidate
+runtime remains selected. Missing historical rollback data is an honest
+failure: verified state stays, and no recovered receipt is written.
+`VIBECRAFTED_RUNTIME_PACK_HARNESS=1 --fail-after published` is the
+narrow test seam after real publication mutation; it does not change
+trust acceptance.
+
+`decideProductUpdateHandoff`
 requires the exact transaction, operation, candidate/restore identity,
 validated phase, and pack publication observed from the installer's own
 `active.json` + `install-receipt.json` (`vibecrafted.active-runtime.v1` /
@@ -225,9 +240,10 @@ source. Production discoverability remains open.
 - Installed update: signed feed + notarized App/pack, then prove console reopen
   and attach to a live Frame session without terminating PTYs.
 - Confirm an interrupted install leaves previous unique captures recoverable
-  and that pack failure restores `prior.app` through the same helper (UI exit,
-  identity wait, verified restore, previous-tuple relaunch) without
-  republishing the failed pack.
+  and that pack failure restores the prior Runtime Pack/config/launchers
+  through `install-runtime-pack.sh`, then `prior.app` through the same helper
+  (`--mode recover`; UI exit, identity wait, verified whole-tuple restore)
+  without republishing the failed pack or treating app-only restore as success.
 - Two destination renames remain a journaled recoverable gap, not a platform
   atomic exchange.
 - Security hooks skipped by this W1 checkpoint must be restored by the

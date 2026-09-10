@@ -1110,6 +1110,63 @@ struct ProductUpdatePolicyTests {
     try require(request.sourceApp == prior, "restore source was not the owned prior.app")
   }
 
+  static func testRecoverRequestUsesInstallerOwnerMode() throws {
+    let prior = URL(fileURLWithPath: "/tmp/.vc-update-capture-txn-1/prior.app")
+    let request = productUpdateRecoverRequest(
+      handoff: sampleHandoff(),
+      priorApp: prior,
+      waitPID: 77,
+      waitStart: "now",
+      helperURL: URL(fileURLWithPath: "/tmp/helper"),
+      receiptURL: URL(fileURLWithPath: "/tmp/recover-receipt.json"))
+    try require(request.mode == .recover, "whole-tuple recover used app-only restore")
+    try require(request.relaunch, "recover did not relaunch the previous app")
+    try require(request.waitPID == 77, "recover overwrote a running app without waiting")
+    try require(request.transactionID == "txn-1", "recover started a new transaction")
+    try require(request.sourceApp == prior, "recover source was not the owned prior.app")
+    let arguments = productUpdateHelperArguments(request)
+    try require(arguments.contains("--mode"), "recover helper omitted mode")
+    try require(
+      arguments.contains(ProductUpdateHelperMode.recover.rawValue),
+      "recover helper did not invoke --mode recover")
+  }
+
+  static func testHandoffRecoverWithPublishedPackKeepsRecoveryOpen() throws {
+    switch decideProductUpdateHandoff(
+      handoff: sampleHandoff(mode: ProductUpdateHelperMode.recover.rawValue),
+      replacement: boundReceipt(
+        detail: "recovered",
+        mode: ProductUpdateHelperMode.recover.rawValue),
+      helperLive: false,
+      runningDestination: "/Applications/Vibecrafted.app",
+      evidence: boundEvidence(
+        operation: ProductUpdateHelperMode.recover.rawValue,
+        running: "cdhash:prior",
+        pack: .published))
+    {
+    case .retain(let reason):
+      try require(reason.contains("published"), reason)
+    default:
+      throw Failure(message: "recover receipt claimed whole-tuple success while candidate pack stayed published")
+    }
+    switch decideProductUpdateHandoff(
+      handoff: sampleHandoff(mode: ProductUpdateHelperMode.recover.rawValue),
+      replacement: boundReceipt(
+        detail: "recovered",
+        mode: ProductUpdateHelperMode.recover.rawValue),
+      helperLive: false,
+      runningDestination: "/Applications/Vibecrafted.app",
+      evidence: boundEvidence(
+        operation: ProductUpdateHelperMode.recover.rawValue,
+        running: "cdhash:prior"))
+    {
+    case .rolledBack(let reason):
+      try require(reason.contains("Runtime Pack"), reason)
+    default:
+      throw Failure(message: "recover receipt with prior pack was not whole-tuple rolledBack")
+    }
+  }
+
   static func testOwnedCaptureRejectsForeignPaths() throws {
     try require(
       productUpdateOwnedPriorApp(at: "/tmp/arbitrary/prior.app") == nil,
@@ -1339,6 +1396,8 @@ struct ProductUpdatePolicyTests {
     try testHandoffUnresolvedPackKeepsRecoveryOpen()
     try testHandoffRequiresExactIdentityAndPhase()
     try testRestoreRequestBindsSameTransactionAndWaitsForUI()
+    try testRecoverRequestUsesInstallerOwnerMode()
+    try testHandoffRecoverWithPublishedPackKeepsRecoveryOpen()
     try testOwnedCaptureRejectsForeignPaths()
     try testAdmissionRecordRequiresBinding()
     try testHandoffReadRefusesDefaultReplaceMode()

@@ -557,6 +557,7 @@ func decideProductUpdateHandoff(
   }
   if handoff.mode != ProductUpdateHelperMode.replace.rawValue
     && handoff.mode != ProductUpdateHelperMode.restore.rawValue
+    && handoff.mode != ProductUpdateHelperMode.recover.rawValue
   {
     return .stale("the pending update has an unknown operation")
   }
@@ -569,7 +570,9 @@ func decideProductUpdateHandoff(
   if !evidence.journalOperation.isEmpty, evidence.journalOperation != handoff.mode {
     return .stale("the journal operation does not belong to this update")
   }
-  if handoff.mode == ProductUpdateHelperMode.restore.rawValue {
+  if handoff.mode == ProductUpdateHelperMode.restore.rawValue
+    || handoff.mode == ProductUpdateHelperMode.recover.rawValue
+  {
     if let replacement {
       guard let transaction = replacement.transaction, !transaction.isEmpty else {
         return .stale("the restore receipt is missing its transaction")
@@ -578,8 +581,8 @@ func decideProductUpdateHandoff(
         return .stale("the restore receipt does not belong to this update")
       }
       let operation = replacement.operation ?? replacement.mode ?? ""
-      if operation != ProductUpdateHelperMode.restore.rawValue {
-        return .stale("the restore receipt is not a restore operation")
+      if operation != handoff.mode {
+        return .stale("the restore receipt is not a \(handoff.mode) operation")
       }
       if replacement.destination != handoff.destination {
         return .stale("the restore receipt names a different app")
@@ -671,8 +674,37 @@ private func decideRestoredHandoff(
     return .retain(
       "the previous app is back, but the newer Runtime Pack \(evidence.packGeneration) is still published; recovery stays open")
   case .unpublished, .rolledBack:
+    if replacement.mode == ProductUpdateHelperMode.recover.rawValue
+      || replacement.operation == ProductUpdateHelperMode.recover.rawValue
+    {
+      return .rolledBack("the previous working app and Runtime Pack were restored")
+    }
     return .rolledBack("the previous working version was restored")
   }
+}
+
+func productUpdateRecoverRequest(
+  handoff: ProductUpdateHandoffRecord,
+  priorApp: URL,
+  waitPID: Int32?,
+  waitStart: String?,
+  helperURL: URL?,
+  receiptURL: URL
+) -> ProductUpdateReplacementRequest {
+  ProductUpdateReplacementRequest(
+    waitPID: waitPID,
+    waitStart: waitStart,
+    sourceApp: priorApp,
+    destinationApp: URL(fileURLWithPath: handoff.destination),
+    relaunch: true,
+    receiptURL: receiptURL,
+    helperURL: helperURL,
+    transactionURL: nil,
+    admissionURL: URL(fileURLWithPath: receiptURL.path + ".admission.json"),
+    journalURL: URL(fileURLWithPath: handoff.journalURL),
+    transactionID: handoff.transactionID,
+    mode: .recover,
+    resume: false)
 }
 
 func productUpdateRestoreRequest(

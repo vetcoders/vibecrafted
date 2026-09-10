@@ -4,6 +4,7 @@ import Foundation
 enum ProductUpdateHelperMode: String, Equatable, Sendable {
   case replace
   case restore
+  case recover
 }
 
 struct ProductUpdateReplacementRequest: Equatable, Sendable {

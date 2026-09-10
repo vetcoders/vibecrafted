@@ -25,12 +25,15 @@ The helper writes a READY admission after preflight, a phase journal before
 any destination mutation, and the terminal replacement receipt before
 `/usr/bin/open -n`. Resume reconciles every write-ahead phase and requires
 the original candidate/prior identities. Destination locking is flock on
-`.vc-update.lock/held`, never mkdir+rm. Pack failure restores `prior.app`
-through the same transaction owner and must not overwrite that capture.
+`.vc-update.lock/held`, never mkdir+rm. Pack failure recovers the prior Runtime Pack/config/launchers through
+the existing `install-runtime-pack.sh --allow-older-runtime` owner, then
+restores `prior.app` through the same transaction owner (`--mode recover`)
+and must not overwrite that capture.
 Whole-tuple recovery observes the installer's `active.json` and
 `install-receipt.json`; a caller-written pack enum is not that proof.
 App-only restore is not whole-tuple success: unresolved or still-published
-newer pack state keeps recovery open. A failed handoff persist keeps the
+newer pack state keeps recovery open. Missing historical rollback data
+fails closed without inventing restored evidence. A failed handoff persist keeps the
 current UI and does not abandon the helper. Then the new App publishes the
 matching pack. The running process does not publish a newer pack under the
 old App.

@@ -17,7 +17,8 @@
 #      reconciles every write-ahead phase against the observed
 #      source/dest/prepared/displaced tuple and never falls through to recapture.
 #   6. Write the validated terminal receipt BEFORE relaunch. Restore emits
-#      restored, never replaced.
+#      restored, never replaced. Recover restores the prior Runtime Pack
+#      through install-runtime-pack.sh first, then the matching prior app.
 #   7. Destination exclusion is flock(2) on a durable inode, inlined from
 #      scripts/install-runtime-pack.sh. The lock file is never unlinked.
 #      Release closes this process's descriptor only.
@@ -43,6 +44,9 @@ OPEN_BIN="/usr/bin/open"
 FAIL_AFTER=""
 HOLD_AFTER=""
 HOLD_UNTIL=""
+PRIOR_PACK=""
+PRIOR_GENERATION=""
+INSTALLER_STATUS=""
 
 HARNESS=0
 if [[ "${VIBECRAFTED_UPDATE_HELPER_HARNESS:-}" == "1" ]]; then
@@ -50,7 +54,7 @@ if [[ "${VIBECRAFTED_UPDATE_HELPER_HARNESS:-}" == "1" ]]; then
 fi
 
 usage() {
-  echo "usage: vc-app-update --source APP --destination APP --receipt FILE [--admission FILE] [--journal FILE] [--transaction ID] [--mode replace|restore] [--wait-pid PID] [--wait-start LSTART] [--wait-timeout SECONDS] [--relaunch] [--resume] [--expected-identifier ID] [--expected-team TEAM]" >&2
+  echo "usage: vc-app-update --source APP --destination APP --receipt FILE [--admission FILE] [--journal FILE] [--transaction ID] [--mode replace|restore|recover] [--wait-pid PID] [--wait-start LSTART] [--wait-timeout SECONDS] [--relaunch] [--resume] [--expected-identifier ID] [--expected-team TEAM]" >&2
   exit 2
 }
 
@@ -114,8 +118,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$SOURCE" && -n "$DESTINATION" && -n "$RECEIPT" ]] || usage
-if [[ "$MODE" != "replace" && "$MODE" != "restore" ]]; then
-  echo "mode must be replace or restore" >&2
+if [[ "$MODE" != "replace" && "$MODE" != "restore" && "$MODE" != "recover" ]]; then
+  echo "mode must be replace, restore, or recover" >&2
   exit 2
 fi
 
@@ -420,13 +424,14 @@ journal_require() {
 write_journal() {
   local phase="$1"
   local detail="${2:-}"
-  atomic_write "$JOURNAL" "$(printf '{"schema":"io.vetcoders.vibecrafted.app-update-journal.v1","capture":"%s","candidate_identity":"%s","destination":"%s","detail":"%s","displaced":"%s","identifier":"%s","mode":"%s","operation":"%s","parent":"%s","parent_pid":"%s","parent_start":"%s","phase":"%s","prepared":"%s","prior_identity":"%s","receipt":"%s","source":"%s","source_identity":"%s","team_id":"%s","transaction":"%s"}' \
+  atomic_write "$JOURNAL" "$(printf '{"schema":"io.vetcoders.vibecrafted.app-update-journal.v1","capture":"%s","candidate_identity":"%s","destination":"%s","detail":"%s","displaced":"%s","identifier":"%s","installer_status":"%s","mode":"%s","operation":"%s","parent":"%s","parent_pid":"%s","parent_start":"%s","phase":"%s","prepared":"%s","prior_generation":"%s","prior_identity":"%s","prior_pack":"%s","receipt":"%s","source":"%s","source_identity":"%s","team_id":"%s","transaction":"%s"}' \
     "$(escape_json "$CAPTURE")" \
     "$(escape_json "$SOURCE_IDENTITY")" \
     "$(escape_json "$DESTINATION")" \
     "$(escape_json "$detail")" \
     "$(escape_json "$DISPLACED")" \
     "$(escape_json "$EXPECTED_IDENTIFIER")" \
+    "$(escape_json "$INSTALLER_STATUS")" \
     "$(escape_json "$MODE")" \
     "$(escape_json "$MODE")" \
     "$(escape_json "$parent")" \
@@ -434,7 +439,9 @@ write_journal() {
     "$(escape_json "$WAIT_START")" \
     "$(escape_json "$phase")" \
     "$(escape_json "$PREPARED")" \
+    "$(escape_json "$PRIOR_GENERATION")" \
     "$(escape_json "$PRIOR_IDENTITY")" \
+    "$(escape_json "$PRIOR_PACK")" \
     "$(escape_json "$RECEIPT")" \
     "$(escape_json "$SOURCE")" \
     "$(escape_json "$SOURCE_IDENTITY")" \
@@ -464,7 +471,9 @@ write_admission() {
 }
 
 terminal_detail() {
-  if [[ "$MODE" == "restore" ]]; then
+  if [[ "$MODE" == "recover" ]]; then
+    printf '%s' "recovered"
+  elif [[ "$MODE" == "restore" ]]; then
     printf '%s' "restored"
   else
     printf '%s' "replaced"
@@ -474,15 +483,22 @@ terminal_detail() {
 write_terminal_receipt() {
   local detail="$1"
   local replaced="$2"
-  atomic_write "$RECEIPT" "$(printf '{"schema":"io.vetcoders.vibecrafted.app-replacement.v1","capture":"%s","destination":"%s","detail":"%s","identifier":"%s","journal":"%s","mode":"%s","operation":"%s","phase":"receipt_written","prior_identity":"%s","relaunched":false,"replaced":%s,"source_identity":"%s","team_id":"%s","transaction":"%s"}' \
+  local recovered="false"
+  if [[ "$MODE" == "recover" ]]; then
+    recovered="true"
+  fi
+  atomic_write "$RECEIPT" "$(printf '{"schema":"io.vetcoders.vibecrafted.app-replacement.v1","capture":"%s","destination":"%s","detail":"%s","identifier":"%s","installer_status":"%s","journal":"%s","mode":"%s","operation":"%s","pack_generation":"%s","phase":"receipt_written","prior_identity":"%s","recovered":%s,"relaunched":false,"replaced":%s,"source_identity":"%s","team_id":"%s","transaction":"%s"}' \
     "$(escape_json "$CAPTURE")" \
     "$(escape_json "$DESTINATION")" \
     "$(escape_json "$detail")" \
     "$(escape_json "$EXPECTED_IDENTIFIER")" \
+    "$(escape_json "$INSTALLER_STATUS")" \
     "$(escape_json "$JOURNAL")" \
     "$(escape_json "$MODE")" \
     "$(escape_json "$MODE")" \
+    "$(escape_json "$PRIOR_GENERATION")" \
     "$(escape_json "$PRIOR_IDENTITY")" \
+    "$recovered" \
     "$replaced" \
     "$(escape_json "$SOURCE_IDENTITY")" \
     "$(escape_json "$EXPECTED_TEAM")" \
@@ -683,6 +699,83 @@ observe_tuple() {
   fi
 }
 
+observe_published_generation() {
+  local runtime_home pointer receipt
+  runtime_home="${VIBECRAFTED_RUNTIME_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted}"
+  pointer="$runtime_home/active.json"
+  receipt="$runtime_home/install-receipt.json"
+  /usr/bin/python3 - "$pointer" "$receipt" <<'PY'
+import json, sys
+pointer, receipt = sys.argv[1], sys.argv[2]
+try:
+    pointer_doc = json.load(open(pointer, encoding="utf-8"))
+    receipt_doc = json.load(open(receipt, encoding="utf-8"))
+except Exception:
+    sys.exit(1)
+if pointer_doc.get("schema") != "vibecrafted.active-runtime.v1":
+    sys.exit(1)
+if receipt_doc.get("schema") != "vibecrafted.runtime-install.v1":
+    sys.exit(1)
+version = pointer_doc.get("version") or ""
+receipt_version = receipt_doc.get("version") or ""
+if not version or version != receipt_version:
+    sys.exit(1)
+if receipt_doc.get("install_pending") is True:
+    sys.exit(1)
+if receipt_doc.get("install_phase") in {"preparing", "ancillary"}:
+    sys.exit(1)
+print(version)
+PY
+}
+
+locate_prior_pack() {
+  local app="$1"
+  local dir packs
+  dir="${app}/Contents/Resources/runtime-pack"
+  if [[ ! -d "$dir" ]]; then
+    echo "owned prior.app is missing historical Runtime Pack rollback data: $dir" >&2
+    return 1
+  fi
+  shopt -s nullglob
+  packs=("$dir"/Vibecrafted_RuntimePack_*.tar.gz)
+  shopt -u nullglob
+  if ((${#packs[@]} != 1)); then
+    echo "owned prior.app does not contain exactly one historical Runtime Pack (found ${#packs[@]})" >&2
+    return 1
+  fi
+  if [[ ! -f "${packs[0]}.sha256" || ! -f "${packs[0]}.sig" ]]; then
+    echo "historical Runtime Pack is missing checksum or signature beside ${packs[0]}" >&2
+    return 1
+  fi
+  printf '%s' "${packs[0]}"
+}
+
+prior_pack_generation() {
+  local pack="$1"
+  local member
+  member="$(/usr/bin/tar -tzf "$pack" | /usr/bin/grep -E '(^|/)VERSION$' | /usr/bin/head -n 1)" || true
+  if [[ -z "$member" ]]; then
+    return 1
+  fi
+  /usr/bin/tar -xOf "$pack" "$member" | tr -d '[:space:]'
+}
+
+resolve_pack_installer() {
+  local here bundled
+  here="$(cd "$(dirname "$0")" && pwd)"
+  if [[ -x "$here/install-runtime-pack.sh" ]]; then
+    printf '%s' "$here/install-runtime-pack.sh"
+    return 0
+  fi
+  bundled="$here/../Resources/runtime-pack/install-runtime-pack.sh"
+  if [[ -x "$bundled" ]]; then
+    printf '%s' "$(cd "$(dirname "$bundled")" && pwd)/$(basename "$bundled")"
+    return 0
+  fi
+  echo "Runtime Pack installer owner is missing; cannot recover the previous runtime" >&2
+  return 1
+}
+
 emit_success_and_exit() {
   local detail
   detail="$(terminal_detail)"
@@ -755,10 +848,69 @@ finish_restore_adopt() {
 
 # Mode-aware reconciliation for every write-ahead phase and the observed
 # source/dest/prepared/displaced/failed-new tuple. Restore never emits replaced.
+# Recover finishes runtime first; app-only resume is not whole-tuple success.
 reconcile_resume() {
   local phase="$1"
   observe_tuple
   case "$MODE" in
+    recover)
+      case "$phase" in
+        runtime_recovering|runtime_restored)
+          if [[ "$DEST_PRESENT" -eq 1 && -n "$PRIOR_IDENTITY" && "$DEST_IDENTITY" == "$PRIOR_IDENTITY" ]]; then
+            local published
+            published="$(observe_published_generation || true)"
+            if [[ -n "$PRIOR_GENERATION" && "$published" == "$PRIOR_GENERATION" ]]; then
+              emit_success_and_exit
+            fi
+          fi
+          return 0
+          ;;
+        receipt_written|adopted|relaunched|relaunching)
+          if [[ "$DEST_PRESENT" -eq 1 ]]; then
+            require_exact_identity "$DESTINATION" "$PRIOR_IDENTITY" "recovered destination"
+            if [[ ! -f "$RECEIPT" ]]; then
+              write_terminal_receipt "recovered" "true"
+            fi
+            relaunch_destination || true
+            exit 0
+          fi
+          echo "recover resume is missing the restored destination" >&2
+          exit 14
+          ;;
+        displacing|displaced|adopting|prepared|preparing)
+          if [[ "$DEST_PRESENT" -eq 1 && "$DEST_IDENTITY" == "$PRIOR_IDENTITY" ]]; then
+            finish_restore_adopt
+          fi
+          if [[ "$DEST_PRESENT" -eq 0 && "$PREPARED_PRESENT" -eq 1 ]]; then
+            finish_restore_adopt
+          fi
+          if [[ "$DEST_PRESENT" -eq 0 && "$FAILED_NEW_PRESENT" -eq 1 && "$PRIOR_PRESENT" -eq 1 ]]; then
+            require_exact_identity "$SOURCE" "$PRIOR_IDENTITY" "owned prior.app"
+            return 0
+          fi
+          if [[ "$DEST_PRESENT" -eq 1 && "$PRIOR_PRESENT" -eq 1 && "$DEST_IDENTITY" != "$PRIOR_IDENTITY" ]]; then
+            require_exact_identity "$SOURCE" "$PRIOR_IDENTITY" "owned prior.app"
+            return 0
+          fi
+          echo "recover resume could not reconcile phase ${phase} with the observed tuple" >&2
+          exit 14
+          ;;
+        preflight|ready|waiting_parent|failed)
+          if [[ "$DEST_PRESENT" -eq 1 && "$DEST_IDENTITY" == "$PRIOR_IDENTITY" ]]; then
+            local published
+            published="$(observe_published_generation || true)"
+            if [[ -n "$PRIOR_GENERATION" && "$published" == "$PRIOR_GENERATION" ]]; then
+              emit_success_and_exit
+            fi
+          fi
+          return 0
+          ;;
+        *)
+          echo "recover resume does not recognize phase ${phase}" >&2
+          exit 14
+          ;;
+      esac
+      ;;
     restore)
       case "$phase" in
         receipt_written|adopted|relaunched|relaunching)
@@ -923,25 +1075,167 @@ bind_resume_journal() {
   local phase
   phase="$(journal_require phase)"
   case "$phase" in
-    captured|preparing|prepared|displacing|displaced|adopting|adopted|receipt_written|relaunching|relaunched)
+    captured|preparing|prepared|displacing|displaced|adopting|adopted|receipt_written|relaunching|relaunched|runtime_recovering|runtime_restored)
       if [[ -z "$PRIOR_IDENTITY" ]]; then
         echo "resume journal is missing the original prior content identity" >&2
         exit 14
       fi
       ;;
   esac
-  if [[ "$MODE" == "restore" && -z "$PRIOR_IDENTITY" ]]; then
-    echo "restore resume is missing the original preserved capture identity" >&2
+  if [[ "$MODE" == "restore" || "$MODE" == "recover" ]] && [[ -z "$PRIOR_IDENTITY" ]]; then
+    echo "${MODE} resume is missing the original preserved capture identity" >&2
     exit 14
   fi
+  PRIOR_PACK="$(journal_get prior_pack || true)"
+  PRIOR_GENERATION="$(journal_get prior_generation || true)"
+  INSTALLER_STATUS="$(journal_get installer_status || true)"
   if [[ -d "$SOURCE" ]]; then
-    if [[ "$MODE" == "restore" ]]; then
-      require_exact_identity "$SOURCE" "$PRIOR_IDENTITY" "restore source"
+    if [[ "$MODE" == "restore" || "$MODE" == "recover" ]]; then
+      require_exact_identity "$SOURCE" "$PRIOR_IDENTITY" "${MODE} source"
     else
       require_exact_identity "$SOURCE" "$SOURCE_IDENTITY" "candidate source"
     fi
   fi
   reconcile_resume "$phase"
+}
+
+restore_prior_runtime() {
+  local installer published terminal_host frame_helper public_key
+  installer="$(resolve_pack_installer)" || {
+    write_journal "failed" "Runtime Pack installer owner is missing"
+    write_admission "rejected" "historical rollback cannot find the installer owner"
+    exit 19
+  }
+  PRIOR_PACK="$(locate_prior_pack "$SOURCE")" || {
+    write_journal "failed" "historical Runtime Pack rollback data is missing from owned prior.app"
+    write_admission "rejected" "historical Runtime Pack rollback data is missing"
+    echo "missing historical rollback data: owned prior.app has no recoverable Runtime Pack" >&2
+    exit 19
+  }
+  PRIOR_GENERATION="$(prior_pack_generation "$PRIOR_PACK")" || {
+    write_journal "failed" "historical Runtime Pack has no VERSION identity"
+    write_admission "rejected" "historical Runtime Pack has no VERSION identity"
+    echo "missing historical rollback data: prior Runtime Pack has no VERSION" >&2
+    exit 19
+  }
+  published="$(observe_published_generation || true)"
+  if [[ "$published" == "$PRIOR_GENERATION" ]]; then
+    INSTALLER_STATUS="0"
+    write_journal "runtime_restored" "installer already published prior generation ${PRIOR_GENERATION}"
+    return 0
+  fi
+  terminal_host="${SOURCE}/Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
+  frame_helper="${SOURCE}/Contents/Helpers/vc-frame"
+  if [[ ! -x "$terminal_host" || ! -x "$frame_helper" ]]; then
+    write_journal "failed" "owned prior.app is missing matching helper binaries"
+    write_admission "rejected" "owned prior.app is missing matching helper binaries"
+    echo "missing historical rollback data: prior.app helpers are not executable" >&2
+    exit 19
+  fi
+  write_journal "runtime_recovering" "restoring prior runtime ${PRIOR_GENERATION} through the installer owner"
+  fail_after_if "runtime_recovering"
+  public_key=""
+  if [[ -n "${VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY:-}" && -f "$VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY" ]]; then
+    public_key="$VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY"
+  elif [[ -f "$(dirname "$installer")/vibecrafted-signing-v1.pub" ]]; then
+    public_key="$(dirname "$installer")/vibecrafted-signing-v1.pub"
+  fi
+  if [[ -n "$public_key" ]]; then
+    export VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY="$public_key"
+  fi
+  if [[ -z "${VIBECRAFTED_SOURCE_INSTALLER:-}" ]]; then
+    local helper_dir source_installer
+    helper_dir="$(cd "$(dirname "$0")" && pwd)"
+    for source_installer in \
+      "$helper_dir/vetcoders_install.py" \
+      "$helper_dir/../Resources/runtime/scripts/vetcoders_install.py"
+    do
+      if [[ -f "$source_installer" ]] && grep -Fq -- '--allow-older-runtime' "$source_installer"; then
+        export VIBECRAFTED_SOURCE_INSTALLER="$source_installer"
+        break
+      fi
+    done
+  fi
+  set +e
+  /bin/bash "$installer" \
+    --pack "$PRIOR_PACK" \
+    --app-root "$SOURCE" \
+    --terminal-host "$terminal_host" \
+    --frame-helper "$frame_helper" \
+    --allow-older-runtime
+  INSTALLER_STATUS="$?"
+  set -e
+  if [[ "$INSTALLER_STATUS" != "0" ]]; then
+    write_journal "failed" "installer did not restore prior runtime (exit ${INSTALLER_STATUS})"
+    write_admission "rejected" "installer did not restore prior runtime"
+    echo "whole-tuple recovery failed: installer exited ${INSTALLER_STATUS} before the previous app was touched" >&2
+    exit "$INSTALLER_STATUS"
+  fi
+  published="$(observe_published_generation || true)"
+  if [[ "$published" != "$PRIOR_GENERATION" ]]; then
+    write_journal "failed" "installer left generation ${published:-unresolved}; prior ${PRIOR_GENERATION} was not selected"
+    write_admission "rejected" "installer did not select the prior generation"
+    echo "whole-tuple recovery failed: candidate runtime remains selected after installer; previous app was not restored" >&2
+    exit 19
+  fi
+  write_journal "runtime_restored" "installer published prior generation ${PRIOR_GENERATION}"
+}
+
+# Whole-tuple recovery: restore prior runtime/config/launchers through the
+# existing installer owner, then the matching prior app. App-only restore is
+# not success while the candidate runtime remains selected.
+recover_whole_tuple() {
+  if [[ ! -d "$SOURCE" ]]; then
+    echo "recover source missing: $SOURCE" >&2
+    exit 3
+  fi
+  local source_abs
+  source_abs="$(physical_existing_dir "$SOURCE")"
+  if [[ "$(basename "$source_abs")" != "prior.app" ]] || ! owned_capture_root "$(dirname "$source_abs")"; then
+    echo "recover source is not this transaction's owned prior.app" >&2
+    exit 15
+  fi
+  SOURCE="$source_abs"
+  CAPTURE="$(dirname "$source_abs")"
+  PRIOR="$source_abs"
+  FAILED_NEW="${CAPTURE}/failed-new.app"
+  if [[ -z "$PRIOR_IDENTITY" ]]; then
+    echo "recover is missing the original preserved capture identity" >&2
+    exit 14
+  fi
+  require_exact_identity "$SOURCE" "$PRIOR_IDENTITY" "owned prior.app"
+  SOURCE_IDENTITY="$PRIOR_IDENTITY"
+  write_journal "preflight" "owned prior.app accepted; runtime will be restored before the app"
+  fail_after_if "preflight"
+  write_admission "ready" "recover helper preflight complete"
+  write_journal "ready" "recover admission persisted"
+  fail_after_if "ready"
+  hold_if "ready" || exit 18
+
+  if [[ -n "$WAIT_PID" ]]; then
+    write_journal "waiting_parent" "bound parent still live"
+    if ! wait_for_identity "$WAIT_PID" "$WAIT_START" "$WAIT_TIMEOUT"; then
+      write_journal "failed" "parent identity still live"
+      write_admission "rejected" "parent identity still live"
+      exit 5
+    fi
+  fi
+  require_exact_identity "$SOURCE" "$PRIOR_IDENTITY" "owned prior.app"
+  local phase published
+  phase="$(journal_get phase || true)"
+  if [[ "$phase" != "runtime_restored" ]]; then
+    restore_prior_runtime
+  fi
+  fail_after_if "runtime_restored"
+  hold_if "runtime_restored" || exit 18
+  published="$(observe_published_generation || true)"
+  if [[ -z "$PRIOR_GENERATION" || "$published" != "$PRIOR_GENERATION" ]]; then
+    write_journal "failed" "refusing app-only restore while installer generation is ${published:-unresolved}"
+    write_admission "rejected" "candidate runtime remains selected"
+    echo "whole-tuple recovery refused app-only restore; installer generation ${published:-unresolved} is not prior ${PRIOR_GENERATION}" >&2
+    exit 19
+  fi
+  restore_previous_tuple
 }
 
 # Restore must never ditto the failed destination onto prior.app. The source
@@ -1097,11 +1391,13 @@ SOURCE_IDENTITY=""
 PRIOR_IDENTITY=""
 
 if [[ "$RESUME" -ne 1 && -f "$JOURNAL" ]]; then
-  # Fresh restore must compare the original preserved capture identity. A
-  # leftover replace journal is the authority; do not hash whatever is live.
-  if [[ "$MODE" == "restore" ]]; then
+  # Fresh restore/recover must compare the original preserved capture identity.
+  # A leftover replace journal is the authority; do not hash whatever is live.
+  if [[ "$MODE" == "restore" || "$MODE" == "recover" ]]; then
     PRIOR_IDENTITY="$(journal_get prior_identity || true)"
     SOURCE_IDENTITY="$(journal_get source_identity || true)"
+    PRIOR_PACK="$(journal_get prior_pack || true)"
+    PRIOR_GENERATION="$(journal_get prior_generation || true)"
     TRANSACTION="$(journal_get transaction || printf '%s' "$TRANSACTION")"
     validate_transaction_id "$TRANSACTION"
     CAPTURE="${parent}/.vc-update-capture-${TRANSACTION}"
@@ -1117,6 +1413,10 @@ acquire_lock
 
 if [[ "$RESUME" -eq 1 ]]; then
   bind_resume_journal
+fi
+
+if [[ "$MODE" == "recover" ]]; then
+  recover_whole_tuple
 fi
 
 if [[ "$MODE" == "restore" ]]; then
