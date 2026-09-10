@@ -1885,9 +1885,15 @@ while True:
 class _IsolatedFrameSession:
     """Real signed/admitted vc-frame engine, isolated from the Founder namespace.
 
-    Create path matches tests/tui/test_start_workspace_contract.py section 8:
-    `--new-session-with-layout` plus `attach --create-background`. A layout pane
-    hosts the PTY worker used for pid/lstart identity and command roundtrip.
+    Create path is `--layout` plus `attach --create-background`: the detached
+    create is the only form that needs no TTY, and `--layout` is the surface
+    that actually carries a layout into it. The `--new-session-with-layout`
+    alias is dropped on this route — the engine builds its default layout
+    instead, so this test's worker pane never exists and every later assertion
+    is really measuring somebody else's shell. Repairing that alias belongs to
+    the engine; this proof uses the interface the engine supports today.
+    A layout pane hosts the PTY worker used for pid/lstart identity and command
+    roundtrip.
 
     Commands travel the engine's own addressed pane input
     (`action write-chars --pane-id` plus a CR through `action write`), which the
@@ -1927,7 +1933,7 @@ class _IsolatedFrameSession:
         try:
             self._prepare()
             created = self._frame(
-                "--new-session-with-layout",
+                "--layout",
                 str(self.layout),
                 "attach",
                 "--create-background",
@@ -2004,6 +2010,7 @@ class _IsolatedFrameSession:
         """Identify the pane by real ownership: the command it is running."""
         deadline = time.time() + 20
         last = ""
+        foreign: list[str] = []
         while time.time() < deadline:
             listed = self._action("list-panes", "--json", "--all")
             last = listed.stderr or listed.stdout
@@ -2012,16 +2019,56 @@ class _IsolatedFrameSession:
                     panes = json.loads(listed.stdout)
                 except json.JSONDecodeError:
                     panes = []
-                for pane in panes:
-                    if pane.get("is_plugin"):
-                        continue
-                    command = str(pane.get("terminal_command") or "")
-                    if str(self.worker) in command and not pane.get("exited"):
-                        self.pane_id = f"terminal_{pane['id']}"
-                        self._assert_pane_fits_protocol(pane)
-                        return
+                terminals = [pane for pane in panes if not self._is_engine_chrome(pane)]
+                owned = [
+                    pane
+                    for pane in terminals
+                    if str(self.worker) in str(pane.get("terminal_command") or "")
+                    and not pane.get("exited")
+                ]
+                if owned:
+                    self._assert_layout_is_this_test(terminals)
+                    pane = owned[0]
+                    self.pane_id = f"terminal_{pane['id']}"
+                    self._assert_pane_fits_protocol(pane)
+                    return
+                if terminals:
+                    foreign = [
+                        str(pane.get("terminal_command") or "") for pane in terminals
+                    ]
             time.sleep(0.1)
-        raise AssertionError(f"isolated Frame pane running the probe was not found: {last}")
+        raise AssertionError(
+            "isolated Frame pane running the probe was not found. This session "
+            f"carries {foreign or 'no terminal pane'} instead of this test's "
+            f"layout, so the create route never delivered it: {last}"
+        )
+
+    @staticmethod
+    def _is_engine_chrome(pane: dict[str, object]) -> bool:
+        """Plugin/suppressed panes are engine chrome, never a layout's worker."""
+        return bool(
+            pane.get("is_plugin")
+            or pane.get("is_suppressed")
+            or pane.get("is_selectable") is False
+        )
+
+    def _assert_layout_is_this_test(self, terminals: list[dict[str, object]]) -> None:
+        """The session must carry THIS test's layout, not an engine default.
+
+        A create route that drops the layout still yields a live session — one
+        built from the engine default, whose panes run the Founder's shell and
+        are far too narrow for the reply protocol. Owning the worker is only
+        half the claim; the other half is that nothing else is in the session.
+        """
+        foreign = [
+            str(pane.get("terminal_command") or "")
+            for pane in terminals
+            if str(self.worker) not in str(pane.get("terminal_command") or "")
+        ]
+        assert not foreign, (
+            "isolated Frame session carries panes outside this test's layout, so "
+            f"the chosen layout was not applied: {foreign}"
+        )
 
     @staticmethod
     def _assert_pane_fits_protocol(pane: dict[str, object]) -> None:
