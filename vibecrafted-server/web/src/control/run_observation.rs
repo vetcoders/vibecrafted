@@ -375,6 +375,14 @@ async fn invoke_python_revalidation(
     config: &WriterConfig,
     cancellation: Option<WriterCancellation>,
 ) -> WriterOutcome {
+    // Keep the external writer boundary self-validating. HTTP callers already
+    // reject unsafe identifiers, but monitors retain the value across async
+    // tasks; validate again immediately before it becomes a process argument.
+    if !is_safe_run_id(run_id) {
+        return WriterOutcome {
+            status: "invalid_run_id".to_string(),
+        };
+    }
     let Some(home) = plane.control_plane_home().parent().map(ToOwned::to_owned) else {
         return WriterOutcome {
             status: "invalid_control_plane_home".to_string(),
@@ -691,6 +699,21 @@ mod tests {
         })
         .await
         .expect("writer child terminated and reaped");
+    }
+
+    #[tokio::test]
+    async fn writer_boundary_rejects_unsafe_run_id_before_spawn() {
+        let home = fixture_home("unsafe-run-id");
+        let plane = ControlPlane::new(&home);
+        let config = WriterConfig {
+            executable: PathBuf::from("/bin/false"),
+            timeout: Duration::from_secs(1),
+        };
+
+        let outcome = invoke_python_revalidation(&plane, "../../foreign", &config, None).await;
+
+        assert_eq!(outcome.status, "invalid_run_id");
+        fs::remove_dir_all(home).expect("remove fixture");
     }
 
     #[tokio::test]

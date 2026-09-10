@@ -32,13 +32,19 @@ import { join } from "node:path";
 const args = process.argv.slice(2);
 const url = args.find((a) => !a.startsWith("--"));
 if (!url) {
-  console.error("usage: loctree_report_browser.mjs <report-url> [--json <file>]");
+  console.error(
+    "usage: loctree_report_browser.mjs <report-url> [--json <file>]",
+  );
   process.exit(2);
 }
-const jsonOut = args.includes("--json") ? args[args.indexOf("--json") + 1] : null;
+const jsonOut = args.includes("--json")
+  ? args[args.indexOf("--json") + 1]
+  : null;
 // Optional free-form expression evaluated at the end, recorded under `probe`
 // (diagnostics only; never part of the verdict).
-const probe = args.includes("--probe") ? args[args.indexOf("--probe") + 1] : null;
+const probe = args.includes("--probe")
+  ? args[args.indexOf("--probe") + 1]
+  : null;
 
 const CHROMIUM =
   process.env.CHROMIUM ||
@@ -74,7 +80,10 @@ const chrome = spawn(
 
 const wsEndpoint = await new Promise((resolve, reject) => {
   let buffer = "";
-  const timer = setTimeout(() => reject(new Error("chromium did not announce DevTools")), 20000);
+  const timer = setTimeout(
+    () => reject(new Error("chromium did not announce DevTools")),
+    20000,
+  );
   chrome.stderr.on("data", (chunk) => {
     buffer += chunk.toString();
     const match = buffer.match(/DevTools listening on (ws:\/\/\S+)/);
@@ -83,7 +92,9 @@ const wsEndpoint = await new Promise((resolve, reject) => {
       resolve(match[1]);
     }
   });
-  chrome.on("exit", (code) => reject(new Error(`chromium exited early (${code})`)));
+  chrome.on("exit", (code) =>
+    reject(new Error(`chromium exited early (${code})`)),
+  );
 });
 
 let nextId = 0;
@@ -99,10 +110,16 @@ ws.onmessage = (event) => {
   if (message.id !== undefined && pending.has(message.id)) {
     const { resolve, reject } = pending.get(message.id);
     pending.delete(message.id);
-    message.error ? reject(new Error(message.error.message)) : resolve(message.result);
+    message.error
+      ? reject(new Error(message.error.message))
+      : resolve(message.result);
     return;
   }
-  if (message.method && message.sessionId && sessionHandlers.has(message.sessionId)) {
+  if (
+    message.method &&
+    message.sessionId &&
+    sessionHandlers.has(message.sessionId)
+  ) {
     sessionHandlers.get(message.sessionId)(message);
   }
 };
@@ -114,7 +131,10 @@ const send = (method, params = {}, sessionId) =>
   });
 
 const { targetId } = await send("Target.createTarget", { url: "about:blank" });
-const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
+const { sessionId } = await send("Target.attachToTarget", {
+  targetId,
+  flatten: true,
+});
 
 const record = {
   url,
@@ -130,7 +150,11 @@ sessionHandlers.set(sessionId, (message) => {
   switch (message.method) {
     case "Network.responseReceived": {
       const { response, type } = message.params;
-      record.responses.push({ url: response.url, status: response.status, type });
+      record.responses.push({
+        url: response.url,
+        status: response.status,
+        type,
+      });
       break;
     }
     case "Network.loadingFailed":
@@ -143,20 +167,26 @@ sessionHandlers.set(sessionId, (message) => {
     case "Runtime.exceptionThrown": {
       const details = message.params.exceptionDetails;
       record.exceptions.push(
-        details.exception?.description || details.text || JSON.stringify(details),
+        details.exception?.description ||
+          details.text ||
+          JSON.stringify(details),
       );
       break;
     }
     case "Runtime.consoleAPICalled":
       if (message.params.type === "error") {
         record.consoleErrors.push(
-          message.params.args.map((a) => a.description ?? a.value ?? "").join(" "),
+          message.params.args
+            .map((a) => a.description ?? a.value ?? "")
+            .join(" "),
         );
       }
       break;
     case "Log.entryAdded":
       if (message.params.entry.level === "error") {
-        record.consoleErrors.push(`${message.params.entry.source}: ${message.params.entry.text}`);
+        record.consoleErrors.push(
+          `${message.params.entry.source}: ${message.params.entry.text}`,
+        );
       }
       break;
   }
@@ -185,7 +215,9 @@ const evaluate = async (expression) => {
     sessionId,
   );
   if (exceptionDetails) {
-    throw new Error(exceptionDetails.exception?.description || exceptionDetails.text);
+    throw new Error(
+      exceptionDetails.exception?.description || exceptionDetails.text,
+    );
   }
   return result.value;
 };
@@ -245,14 +277,15 @@ const clickTab = async (name) => {
     );
   }
   await new Promise((r) => setTimeout(r, 1200));
-  return (await evaluate("document.querySelector('.tab-panel.active')?.dataset.tabName ?? null")) === name;
+  return (
+    (await evaluate(
+      "document.querySelector('.tab-panel.active')?.dataset.tabName ?? null",
+    )) === name
+  );
 };
 // The Twins and Crowds graphs sit behind collapsible section headers and are
 // built on first expansion — click those headers the way a reader would.
-const clickAt = async (selector) => {
-  const box = await evaluate(
-    `(() => { const b = document.querySelector(${JSON.stringify(selector)}); if (!b) return null; b.scrollIntoView({block: 'center'}); const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0 ? { x: r.x + r.width / 2, y: r.y + r.height / 2 } : null; })()`,
-  );
+const clickAt = async (box) => {
   if (!box) return false;
   for (const type of ["mousePressed", "mouseReleased"]) {
     await send(
@@ -265,17 +298,21 @@ const clickAt = async (selector) => {
   return true;
 };
 record.checks.twinsTabSwitched = await clickTab("twins");
-record.checks.twinsGraphExpanded = await clickAt(
-  '.twins-section-header[data-toggle="twins-exact-content"]',
+const twinsSectionBox = await evaluate(
+  `(() => { const b = document.querySelector('.twins-section-header[data-toggle="twins-exact-content"]'); if (!b) return null; b.scrollIntoView({block: 'center'}); const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0 ? { x: r.x + r.width / 2, y: r.y + r.height / 2 } : null; })()`,
 );
+record.checks.twinsGraphExpanded = await clickAt(twinsSectionBox);
 record.checks.crowdsTabSwitched = await clickTab("crowds");
-record.checks.crowdsGraphExpanded = await clickAt(
-  '.crowds-section-header[data-toggle="crowds-graph-content"]',
+const crowdsSectionBox = await evaluate(
+  `(() => { const b = document.querySelector('.crowds-section-header[data-toggle="crowds-graph-content"]'); if (!b) return null; b.scrollIntoView({block: 'center'}); const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0 ? { x: r.x + r.width / 2, y: r.y + r.height / 2 } : null; })()`,
 );
+record.checks.crowdsGraphExpanded = await clickAt(crowdsSectionBox);
 record.checks.graphData = await evaluate(
   `({ graphs: (window.__LOCTREE_GRAPHS || []).length, twins: window.__TWINS_DATA__ ? 1 : 0, crowds: Array.isArray(window.__CROWDS_DATA__) ? window.__CROWDS_DATA__.length : (window.__CROWDS_DATA__ ? 1 : 0) })`,
 );
-record.checks.documentCanvases = await evaluate("document.querySelectorAll('canvas').length");
+record.checks.documentCanvases = await evaluate(
+  "document.querySelectorAll('canvas').length",
+);
 
 record.checks.theme = await evaluate(
   `(() => { const before = document.documentElement.className; const t = document.querySelector('[data-role="theme-toggle"]'); if (!t) return { ok: false, error: 'no toggle' }; t.click(); const after = document.documentElement.className; return { ok: before !== after, before, after }; })()`,
@@ -292,7 +329,8 @@ if (probe) {
 
 const subresources = record.responses.filter((r) => r.type !== "Document");
 record.checks.subresourceFailures = subresources.filter((r) => r.status >= 400);
-record.checks.documentStatus = record.responses.find((r) => r.type === "Document")?.status ?? null;
+record.checks.documentStatus =
+  record.responses.find((r) => r.type === "Document")?.status ?? null;
 
 const verdict = {
   documentOk: record.checks.documentStatus === 200,
@@ -319,7 +357,9 @@ const verdict = {
   noExceptions: record.exceptions.length === 0,
   noConsoleErrors: record.consoleErrors.length === 0,
 };
-record.graphDataDeclared = Object.values(record.checks.graphData).some((n) => n > 0);
+record.graphDataDeclared = Object.values(record.checks.graphData).some(
+  (n) => n > 0,
+);
 record.verdict = verdict;
 record.pass = Object.values(verdict).every(Boolean);
 
