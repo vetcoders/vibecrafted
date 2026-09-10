@@ -898,14 +898,15 @@ _vetcoders_start_default_workspace_name() {
 # keeps the lock after the owner closes or dies if that fd is inherited.
 # The extra subshell closes only the child's copy; the create owner keeps
 # flock until it releases. `_vetcoders_os_fd_lock` is unchanged.
+# The close is unconditional -- `_vetcoders_start_close_create_lock_fd` already
+# returns 0 when no lock is held. The child copy must NOT clear
+# `_vetcoders_start_create_lock_fd`: that name is the owning process's state,
+# it is not exported, and nothing after the close reads it in this subshell.
 _vetcoders_start_frame_env() {
   local socket_dir=""
   socket_dir="$(_vetcoders_vc_frame_socket_dir 2>/dev/null || true)"
   (
-    if [[ -n "${_vetcoders_start_create_lock_fd:-}" ]]; then
-      _vetcoders_start_close_create_lock_fd
-      _vetcoders_start_create_lock_fd=""
-    fi
+    _vetcoders_start_close_create_lock_fd
     if [[ -n "$socket_dir" ]]; then
       VC_FRAME_SOCKET_DIR="$socket_dir" ZELLIJ_SOCKET_DIR="$socket_dir" \
         env -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME \
