@@ -2410,6 +2410,10 @@ def test_product_update_whole_tuple_recovery_interrupted_then_resumed(
                     time.sleep(0.2)
                 assert mid is not None and mid["version"] == prior_pub["version"]
                 assert _identity_token(dest) == apps.e37_identity
+                held = dest.parent / ".vc-update.lock" / "held"
+                assert held.is_file()
+                held_inode = held.stat()
+                held_key = (held_inode.st_dev, held_inode.st_ino)
                 concurrent = _run_helper(
                     [
                         "--source",
@@ -2429,9 +2433,13 @@ def test_product_update_whole_tuple_recovery_interrupted_then_resumed(
                     env=helper_env,
                 )
                 assert concurrent.returncode == 13
-                assert (dest.parent / ".vc-update.lock" / "held").is_file()
+                assert held.is_file()
+                after_concurrent = held.stat()
+                assert (after_concurrent.st_dev, after_concurrent.st_ino) == held_key
                 first.send_signal(signal.SIGTERM)
                 first.wait(timeout=20)
+                after_term = held.stat()
+                assert (after_term.st_dev, after_term.st_ino) == held_key
                 resumed = _run_helper(
                     [
                         "--source",
@@ -2452,6 +2460,8 @@ def test_product_update_whole_tuple_recovery_interrupted_then_resumed(
                     timeout=300,
                 )
                 assert resumed.returncode == 0, resumed.stderr or resumed.stdout
+                after_resume = held.stat()
+                assert (after_resume.st_dev, after_resume.st_ino) == held_key
             finally:
                 if first is not None and first.poll() is None:
                     gate.write_text("go", encoding="utf-8")
