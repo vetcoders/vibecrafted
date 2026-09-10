@@ -274,6 +274,30 @@ def _write(path: Path, body: str) -> Path:
     return path
 
 
+def _initialize_fixture_repo(root: Path) -> None:
+    """Give every declared workspace the minimum valid Git identity."""
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True, capture_output=True)
+    (root / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "README.md"], cwd=root, check=True, capture_output=True
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+
+
 def _root_aware_owner_cli(path: Path) -> Path:
     """The canonical catalogue owner, answering for the root it was asked about.
 
@@ -380,6 +404,7 @@ class Scene:
         self.cwd.mkdir(parents=True, exist_ok=True)
         self.root = tmp_path / project
         self.root.mkdir(parents=True, exist_ok=True)
+        _initialize_fixture_repo(self.root)
 
     def env(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         env = os.environ.copy()
@@ -634,31 +659,6 @@ def test_inherited_unqualified_terminal_entry_opens_requested_root_before_aicx(
         live=[FOREIGN_LIVE],
         clients=[FOREIGN_LIVE],
         project="loctree-suite",
-    )
-    subprocess.run(
-        ["git", "init", "-q"], cwd=scene.root, check=True, capture_output=True
-    )
-    (scene.root / "README.md").write_text("fixture\n", encoding="utf-8")
-    subprocess.run(
-        ["git", "add", "README.md"],
-        cwd=scene.root,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "-qm",
-            "fixture",
-        ],
-        cwd=scene.root,
-        check=True,
-        capture_output=True,
     )
     result = _run_resume(
         scene,
@@ -1364,7 +1364,7 @@ def test_native_bounded_create_survives_an_inherited_marker(tmp_path: Path) -> N
     try:
         hazard = frame("attach", "--create-background", session)
         assert hazard.returncode == 101, (hazard.returncode, hazard.stderr)
-        assert "commands.rs:844" in hazard.stderr, hazard.stderr
+        assert "You are trying to attach to the current session" in hazard.stderr, hazard.stderr
         assert session not in frame("ls", clean=True).stdout
 
         script = "\n".join(
@@ -1387,7 +1387,7 @@ def test_native_bounded_create_survives_an_inherited_marker(tmp_path: Path) -> N
         )
         assert "CREATE=[0]" in created.stdout, created.stdout + created.stderr
         assert "STATE=[live]" in created.stdout, created.stdout + created.stderr
-        assert "commands.rs:844" not in created.stderr, created.stderr
+        assert "You are trying to attach to the current session" not in created.stderr, created.stderr
 
         probe = repo / "cwd.txt"
         tab = frame(
