@@ -23,10 +23,13 @@ pack repair. A newer App is replaced by the script helper installed at
 `Contents/Helpers/vc-app-update` (`scripts/vc-app-update.sh`; no compiled twin).
 The helper writes a READY admission after preflight, a phase journal before
 any destination mutation, and the terminal replacement receipt before
-`/usr/bin/open -n`. Pack failure restores `prior.app` through the same
-transaction owner and must not overwrite that capture. Then
-the new App publishes the matching pack. The running process does not publish a
-newer pack under the old App.
+`/usr/bin/open -n`. Resume reconciles every write-ahead phase and requires
+the original candidate/prior identities. Destination locking is flock on
+`.vc-update.lock/held`, never mkdir+rm. Pack failure restores `prior.app`
+through the same transaction owner and must not overwrite that capture.
+App-only restore is not whole-tuple proof: unresolved installer state keeps
+recovery open. Then the new App publishes the matching pack. The running
+process does not publish a newer pack under the old App.
 Regression coverage:
 `tests/tui/test_installer_uninstall.py`, `tests/tui/test_installer_restore.py`.
 

@@ -2423,11 +2423,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     let replacement = productUpdateObservedReplacementReceipt(at: receiptURL)
     let helperLive = productUpdateHelperIdentityLive(
       pid: handoff.helperPID, start: handoff.helperStart)
+    let evidence = productUpdateObserveRuntimeEvidence(
+      handoff: handoff,
+      runningApp: Bundle.main.bundleURL,
+      home: craftedHomeURL())
     let decision = decideProductUpdateHandoff(
       handoff: handoff,
       replacement: replacement,
       helperLive: helperLive,
-      runningDestination: Bundle.main.bundleURL.path)
+      runningDestination: Bundle.main.bundleURL.path,
+      evidence: evidence)
     switch decision {
     case .awaitReceipt:
       if alreadyWaited {
@@ -2540,10 +2545,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       guard let self else { return }
       switch outcome {
       case .success:
+        try? writeProductUpdatePackEvidence(
+          transaction: bound.transactionID,
+          state: .published,
+          to: productUpdatePackEvidenceURL(home: self.craftedHomeURL()))
         try? FileManager.default.removeItem(at: pendingURL)
         self.productUpdateStartupAdoption = .none
         self.connectCommandDeck()
       case .failure:
+        try? writeProductUpdatePackEvidence(
+          transaction: bound.transactionID,
+          state: .unresolved,
+          to: productUpdatePackEvidenceURL(home: self.craftedHomeURL()))
         if let prior = productUpdateOwnedPriorApp(at: bound.capturePath) {
           _ = self.beginProductUpdateRestore(handoff: bound, prior: prior)
         } else {
@@ -2593,6 +2606,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
           restoring.helperStart =
             captureProductUpdateProcessIdentity(pid: admission.helperPID)?.startTime ?? ""
           restoring.mode = ProductUpdateHelperMode.restore.rawValue
+          if !admission.candidateIdentity.isEmpty {
+            restoring.priorIdentity = admission.candidateIdentity
+          }
           try? writeProductUpdateHandoff(
             restoring, to: productUpdatePendingHandoffURL(home: self.craftedHomeURL()))
           self.productUpdate?.noteUIShutdownPreservingHandoff()

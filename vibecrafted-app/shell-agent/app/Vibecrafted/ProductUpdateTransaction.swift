@@ -86,9 +86,55 @@ struct ProductUpdateHandoffRecord: Equatable, Sendable {
   var transactionID: String
   var mode: String
   var phase: String
+  var candidateIdentity: String
+  var priorIdentity: String
 
   static let schemaID = "io.vetcoders.vibecrafted.product-update-handoff.v2"
 }
+
+enum ProductUpdatePackPublicationState: String, Equatable, Sendable {
+  case unpublished
+  case published
+  case rolledBack = "rolled_back"
+  case unresolved
+}
+
+struct ProductUpdateRuntimeEvidence: Equatable, Sendable {
+  var runningAppIdentity: String
+  var expectedCandidateIdentity: String
+  var expectedRestoreIdentity: String
+  var journalPhase: String
+  var journalTransaction: String
+  var journalOperation: String
+  var packPublication: ProductUpdatePackPublicationState
+
+  static func unbound() -> ProductUpdateRuntimeEvidence {
+    ProductUpdateRuntimeEvidence(
+      runningAppIdentity: "",
+      expectedCandidateIdentity: "",
+      expectedRestoreIdentity: "",
+      journalPhase: "",
+      journalTransaction: "",
+      journalOperation: "",
+      packPublication: .unresolved)
+  }
+}
+
+struct ProductUpdateJournalBinding: Equatable, Sendable {
+  var schema: String
+  var transaction: String
+  var operation: String
+  var destination: String
+  var parent: String
+  var source: String
+  var sourceIdentity: String
+  var priorIdentity: String
+  var phase: String
+}
+
+let productUpdateValidatedReceiptPhases: Set<String> = [
+  "receipt_written", "adopted", "relaunched",
+]
 
 enum ProductUpdateHandoffDecision: Equatable, Sendable {
   case awaitReceipt
@@ -119,6 +165,10 @@ func productUpdateRecoveryURL(home: URL) -> URL {
   productUpdatePendingDirectory(home: home).appendingPathComponent("recovery.json")
 }
 
+func productUpdatePackEvidenceURL(home: URL) -> URL {
+  productUpdatePendingDirectory(home: home).appendingPathComponent("pack-evidence.json")
+}
+
 func writeProductUpdateHandoff(_ record: ProductUpdateHandoffRecord, to url: URL) throws {
   try FileManager.default.createDirectory(
     at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -142,6 +192,8 @@ func writeProductUpdateHandoff(_ record: ProductUpdateHandoffRecord, to url: URL
     "transaction_id": record.transactionID,
     "mode": record.mode,
     "phase": record.phase,
+    "candidate_identity": record.candidateIdentity,
+    "prior_identity": record.priorIdentity,
   ]
   let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .prettyPrinted])
   try data.write(to: url, options: .atomic)
@@ -193,7 +245,9 @@ func readProductUpdateHandoff(from url: URL) throws -> ProductUpdateHandoffRecor
     frameRevision: frameRevision,
     transactionID: transactionID,
     mode: root["mode"] as? String ?? ProductUpdateHelperMode.replace.rawValue,
-    phase: root["phase"] as? String ?? "helper_ready")
+    phase: root["phase"] as? String ?? "helper_ready",
+    candidateIdentity: root["candidate_identity"] as? String ?? "",
+    priorIdentity: root["prior_identity"] as? String ?? "")
 }
 
 func productUpdateObservedReplacementReceipt(at url: URL) -> ProductUpdateReplacementReceipt? {
@@ -221,27 +275,169 @@ func productUpdateHelperIdentityLive(pid: Int32, start: String) -> Bool {
   return false
 }
 
+func writeProductUpdatePackEvidence(
+  transaction: String,
+  state: ProductUpdatePackPublicationState,
+  to url: URL
+) throws {
+  try FileManager.default.createDirectory(
+    at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+  let object: [String: Any] = [
+    "schema": "io.vetcoders.vibecrafted.product-update-pack-evidence.v1",
+    "transaction": transaction,
+    "state": state.rawValue,
+  ]
+  let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .prettyPrinted])
+  try data.write(to: url, options: .atomic)
+}
+
+func readProductUpdatePackEvidence(from url: URL, transaction: String)
+  -> ProductUpdatePackPublicationState?
+{
+  guard let data = try? Data(contentsOf: url),
+    let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+    root["schema"] as? String == "io.vetcoders.vibecrafted.product-update-pack-evidence.v1",
+    let stored = root["transaction"] as? String, !stored.isEmpty,
+    stored == transaction,
+    let raw = root["state"] as? String,
+    let state = ProductUpdatePackPublicationState(rawValue: raw)
+  else { return nil }
+  return state
+}
+
+func decodeProductUpdateJournalBinding(_ data: Data) -> ProductUpdateJournalBinding? {
+  guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+    let schema = root["schema"] as? String,
+    schema == "io.vetcoders.vibecrafted.app-update-journal.v1",
+    let transaction = root["transaction"] as? String, !transaction.isEmpty,
+    let destination = root["destination"] as? String, !destination.isEmpty,
+    let parent = root["parent"] as? String, !parent.isEmpty,
+    let source = root["source"] as? String, !source.isEmpty,
+    let sourceIdentity = root["source_identity"] as? String, !sourceIdentity.isEmpty,
+    let phase = root["phase"] as? String, !phase.isEmpty
+  else { return nil }
+  guard let operation = root["operation"] as? String, !operation.isEmpty else { return nil }
+  return ProductUpdateJournalBinding(
+    schema: schema,
+    transaction: transaction,
+    operation: operation,
+    destination: destination,
+    parent: parent,
+    source: source,
+    sourceIdentity: sourceIdentity,
+    priorIdentity: root["prior_identity"] as? String ?? "",
+    phase: phase)
+}
+
+func productUpdateContentIdentityToken(at app: URL) -> String? {
+  switch runProductUpdateBoundProcess(
+    executable: "/usr/bin/codesign",
+    arguments: ["--display", "--verbose=4", app.path],
+    timeout: 10)
+  {
+  case .success(let result):
+    let text =
+      (String(data: result.stderr, encoding: .utf8) ?? "")
+      + "\n" + (String(data: result.stdout, encoding: .utf8) ?? "")
+    for line in text.split(whereSeparator: \.isNewline) {
+      if line.hasPrefix("CDHash=") {
+        return "cdhash:\(line.dropFirst("CDHash=".count))"
+      }
+    }
+    return nil
+  default:
+    return nil
+  }
+}
+
+func productUpdateObservePackPublication(
+  handoff: ProductUpdateHandoffRecord,
+  home: URL
+) -> ProductUpdatePackPublicationState {
+  if let stored = readProductUpdatePackEvidence(
+    from: productUpdatePackEvidenceURL(home: home), transaction: handoff.transactionID)
+  {
+    return stored
+  }
+  switch handoff.phase {
+  case "publishing", "packPublishing", "pack_publishing":
+    return .unresolved
+  default:
+    return .unpublished
+  }
+}
+
+func productUpdateObserveRuntimeEvidence(
+  handoff: ProductUpdateHandoffRecord,
+  runningApp: URL,
+  home: URL
+) -> ProductUpdateRuntimeEvidence {
+  let running = productUpdateContentIdentityToken(at: runningApp) ?? ""
+  var journalPhase = ""
+  var journalTransaction = ""
+  var journalOperation = ""
+  var candidate = handoff.candidateIdentity
+  var prior = handoff.priorIdentity
+  if let data = try? Data(contentsOf: URL(fileURLWithPath: handoff.journalURL)),
+    let journal = decodeProductUpdateJournalBinding(data)
+  {
+    journalPhase = journal.phase
+    journalTransaction = journal.transaction
+    journalOperation = journal.operation
+    if candidate.isEmpty { candidate = journal.sourceIdentity }
+    if prior.isEmpty { prior = journal.priorIdentity }
+  }
+  return ProductUpdateRuntimeEvidence(
+    runningAppIdentity: running,
+    expectedCandidateIdentity: candidate,
+    expectedRestoreIdentity: prior,
+    journalPhase: journalPhase,
+    journalTransaction: journalTransaction,
+    journalOperation: journalOperation,
+    packPublication: productUpdateObservePackPublication(handoff: handoff, home: home))
+}
+
 func decideProductUpdateHandoff(
   handoff: ProductUpdateHandoffRecord,
   replacement: ProductUpdateReplacementReceipt?,
   helperLive: Bool,
-  runningDestination: String
+  runningDestination: String,
+  evidence: ProductUpdateRuntimeEvidence
 ) -> ProductUpdateHandoffDecision {
+  if handoff.transactionID.isEmpty {
+    return .stale("the pending update is missing its transaction")
+  }
+  if handoff.mode != ProductUpdateHelperMode.replace.rawValue
+    && handoff.mode != ProductUpdateHelperMode.restore.rawValue
+  {
+    return .stale("the pending update has an unknown operation")
+  }
   if handoff.destination != runningDestination {
     return .stale("the pending update belongs to a different app location")
   }
+  if !evidence.journalTransaction.isEmpty, evidence.journalTransaction != handoff.transactionID {
+    return .stale("the journal transaction does not belong to this update")
+  }
+  if !evidence.journalOperation.isEmpty, evidence.journalOperation != handoff.mode {
+    return .stale("the journal operation does not belong to this update")
+  }
   if handoff.mode == ProductUpdateHelperMode.restore.rawValue {
     if let replacement {
-      if let transaction = replacement.transaction, !transaction.isEmpty,
-        transaction != handoff.transactionID
-      {
+      guard let transaction = replacement.transaction, !transaction.isEmpty else {
+        return .stale("the restore receipt is missing its transaction")
+      }
+      if transaction != handoff.transactionID {
         return .stale("the restore receipt does not belong to this update")
+      }
+      let operation = replacement.operation ?? replacement.mode ?? ""
+      if operation != ProductUpdateHelperMode.restore.rawValue {
+        return .stale("the restore receipt is not a restore operation")
       }
       if replacement.destination != handoff.destination {
         return .stale("the restore receipt names a different app")
       }
       if replacement.replaced {
-        return .rolledBack("the previous working version was restored")
+        return decideRestoredHandoff(replacement: replacement, evidence: evidence)
       }
       return .retain("the restore helper left a receipt that does not mark the previous app restored")
     }
@@ -252,16 +448,21 @@ func decideProductUpdateHandoff(
       "the restore helper stopped before writing a restore receipt; recovery files were kept")
   }
   if let replacement {
-    if let transaction = replacement.transaction, !transaction.isEmpty,
-      transaction != handoff.transactionID
-    {
+    guard let transaction = replacement.transaction, !transaction.isEmpty else {
+      return .stale("the replacement receipt is missing its transaction")
+    }
+    if transaction != handoff.transactionID {
       return .stale("the replacement receipt does not belong to this update")
+    }
+    let operation = replacement.operation ?? replacement.mode ?? ProductUpdateHelperMode.replace.rawValue
+    if operation != ProductUpdateHelperMode.replace.rawValue {
+      return .stale("the replacement receipt is not a replace operation")
     }
     if replacement.destination != handoff.destination {
       return .stale("the replacement receipt names a different app")
     }
     if replacement.replaced {
-      return .publishPack(replacement)
+      return decideReplacedHandoff(replacement: replacement, evidence: evidence)
     }
     return .retain("the helper left a receipt that does not mark the app replaced")
   }
@@ -270,6 +471,58 @@ func decideProductUpdateHandoff(
   }
   return .retain(
     "the update helper stopped before writing a replacement receipt; recovery files were kept")
+}
+
+private func productUpdatePhaseValidated(_ receipt: ProductUpdateReplacementReceipt) -> Bool {
+  guard let phase = receipt.phase, productUpdateValidatedReceiptPhases.contains(phase) else {
+    return false
+  }
+  return true
+}
+
+private func decideReplacedHandoff(
+  replacement: ProductUpdateReplacementReceipt,
+  evidence: ProductUpdateRuntimeEvidence
+) -> ProductUpdateHandoffDecision {
+  if !productUpdatePhaseValidated(replacement) {
+    return .retain("the replacement receipt phase is not a validated terminal phase")
+  }
+  if evidence.expectedCandidateIdentity.isEmpty || evidence.runningAppIdentity.isEmpty
+    || evidence.runningAppIdentity != evidence.expectedCandidateIdentity
+  {
+    return .retain("the running app is not the exact candidate identity from the journal")
+  }
+  if evidence.packPublication == .unresolved {
+    return .retain("the Runtime Pack installer reports unresolved publication state")
+  }
+  if evidence.packPublication == .published {
+    return .retain("the Runtime Pack is already published; recovery stays open for inspection")
+  }
+  return .publishPack(replacement)
+}
+
+private func decideRestoredHandoff(
+  replacement: ProductUpdateReplacementReceipt,
+  evidence: ProductUpdateRuntimeEvidence
+) -> ProductUpdateHandoffDecision {
+  if !productUpdatePhaseValidated(replacement) {
+    return .retain("the restore receipt phase is not a validated terminal phase")
+  }
+  if evidence.expectedRestoreIdentity.isEmpty || evidence.runningAppIdentity.isEmpty
+    || evidence.runningAppIdentity != evidence.expectedRestoreIdentity
+  {
+    return .retain("the running app is not the original preserved capture identity")
+  }
+  switch evidence.packPublication {
+  case .unresolved:
+    return .retain(
+      "the previous app is back, but the Runtime Pack installer reports unresolved state")
+  case .published:
+    return .retain(
+      "the previous app is back, but the newer Runtime Pack is still published; recovery stays open")
+  case .unpublished, .rolledBack:
+    return .rolledBack("the previous working version was restored")
+  }
 }
 
 func productUpdateRestoreRequest(

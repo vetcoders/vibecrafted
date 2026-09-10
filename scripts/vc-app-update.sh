@@ -6,14 +6,21 @@
 # sessions, or rewrite Founder config, PATH, interpreters, or MCP.
 #
 # Contract:
-#   1. Preflight (source/destination/capture/lock + signed identity).
-#   2. Persist a correlated READY admission (transaction, identity, destination,
+#   1. Canonicalize and reject symlink/traversal paths and path-like
+#      --transaction values before any mutation.
+#   2. Preflight (source/destination/capture + signed identity). There is no
+#      production unsigned bypass.
+#   3. Persist a correlated READY admission (transaction, identity, destination,
 #      parent PID/start). Parent may quit only after this record.
-#   3. Wait for the bound parent identity to disappear.
-#   4. Journal every mutation phase before changing the destination.
-#   5. Write the validated terminal replacement receipt BEFORE relaunch.
-#   6. Restore uses the same owner, verifies capture, and never treats
-#      `mv ... || true` as rollback.
+#   4. Wait for the bound parent identity to disappear.
+#   5. Journal every mutation phase before changing the destination. Resume
+#      reconciles every write-ahead phase against the observed
+#      source/dest/prepared/displaced tuple and never falls through to recapture.
+#   6. Write the validated terminal receipt BEFORE relaunch. Restore emits
+#      restored, never replaced.
+#   7. Destination exclusion is flock(2) on a durable inode, inlined from
+#      scripts/install-runtime-pack.sh. The lock file is never unlinked.
+#      Release closes this process's descriptor only.
 #
 # System tools only: the destination App and its runtime Python may be moving.
 set -euo pipefail
@@ -36,7 +43,6 @@ OPEN_BIN="/usr/bin/open"
 FAIL_AFTER=""
 HOLD_AFTER=""
 HOLD_UNTIL=""
-ALLOW_UNSIGNED=0
 
 HARNESS=0
 if [[ "${VIBECRAFTED_UPDATE_HELPER_HARNESS:-}" == "1" ]]; then
@@ -100,12 +106,8 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --allow-unsigned)
-      if [[ "$HARNESS" -ne 1 ]]; then
-        echo "refusing --allow-unsigned without VIBECRAFTED_UPDATE_HELPER_HARNESS=1" >&2
-        exit 2
-      fi
-      ALLOW_UNSIGNED=1
-      shift
+      echo "refusing --allow-unsigned: production and fixture trust share codesign --verify --strict" >&2
+      exit 2
       ;;
     *) usage ;;
   esac
@@ -202,10 +204,93 @@ fail_after_if() {
   fi
 }
 
+validate_transaction_id() {
+  local id="$1"
+  [[ -n "$id" ]] || return 0
+  case "$id" in
+    */*|*"\\"*|.*|*..*)
+      echo "refusing path-like --transaction: $id" >&2
+      exit 2
+      ;;
+  esac
+  if ! printf '%s' "$id" | /usr/bin/grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$'; then
+    echo "refusing unsafe --transaction" >&2
+    exit 2
+  fi
+}
+
+path_has_dotdot() {
+  case "/$1/" in
+    */../*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+assert_no_symlink_components() {
+  local input="$1"
+  local abs current=""
+  if path_has_dotdot "$input"; then
+    echo "refusing traversal path: $input" >&2
+    exit 6
+  fi
+  case "$input" in
+    /*) abs="$input" ;;
+    *) abs="$PWD/$input" ;;
+  esac
+  if path_has_dotdot "$abs"; then
+    echo "refusing traversal path: $abs" >&2
+    exit 6
+  fi
+  local rest="${abs#/}"
+  current=""
+  while [[ -n "$rest" ]]; do
+    local part="${rest%%/*}"
+    if [[ "$rest" == */* ]]; then
+      rest="${rest#*/}"
+    else
+      rest=""
+    fi
+    [[ -n "$part" && "$part" != "." ]] || continue
+    current="${current}/${part}"
+    if [[ -L "$current" ]]; then
+      echo "refusing symlink path component: $current" >&2
+      exit 6
+    fi
+    if [[ ! -e "$current" ]]; then
+      break
+    fi
+  done
+}
+
+physical_existing_dir() {
+  local path="$1"
+  assert_no_symlink_components "$path"
+  if [[ ! -d "$path" || -L "$path" ]]; then
+    echo "refusing non-directory path: $path" >&2
+    exit 6
+  fi
+  (cd -P "$path" && pwd -P)
+}
+
+canonical_leaf_path() {
+  local path="$1"
+  local parent base parent_phys
+  assert_no_symlink_components "$path"
+  parent="$(dirname "$path")"
+  base="$(basename "$path")"
+  parent_phys="$(physical_existing_dir "$parent")"
+  if [[ -e "${parent_phys}/${base}" && -L "${parent_phys}/${base}" ]]; then
+    echo "refusing symlink leaf: ${parent_phys}/${base}" >&2
+    exit 6
+  fi
+  printf '%s/%s\n' "$parent_phys" "$base"
+}
+
 verify_signed_app() {
   local app="$1"
-  if [[ "$ALLOW_UNSIGNED" -eq 1 ]]; then
-    return 0
+  if [[ -L "$app" ]]; then
+    echo "refusing symlink app: $app" >&2
+    return 1
   fi
   if ! /usr/bin/codesign --verify --strict --verbose=4 "$app" >/dev/null 2>&1; then
     echo "codesign --verify --strict failed: $app" >&2
@@ -231,20 +316,37 @@ app_cdhash() {
 app_identity_token() {
   local app="$1"
   local hash
+  if [[ ! -d "$app" || -L "$app" ]]; then
+    return 1
+  fi
   hash="$(app_cdhash "$app")"
-  if [[ -n "$hash" ]]; then
-    printf 'cdhash:%s' "$hash"
-    return 0
+  if [[ -z "$hash" ]]; then
+    return 1
   fi
-  if [[ "$ALLOW_UNSIGNED" -eq 1 && -d "$app" ]]; then
-    /usr/bin/find "$app" -type f -print0 2>/dev/null \
-      | /usr/bin/sort -z \
-      | /usr/bin/xargs -0 /usr/sbin/shasum -a 256 2>/dev/null \
-      | /usr/sbin/shasum -a 256 \
-      | /usr/bin/awk '{print "sha256:"$1}'
-    return 0
+  printf 'cdhash:%s' "$hash"
+}
+
+require_exact_identity() {
+  local app="$1"
+  local expected="$2"
+  local label="$3"
+  local now
+  if [[ -z "$expected" ]]; then
+    echo "journal is missing the expected $label identity" >&2
+    exit 14
   fi
-  return 1
+  if ! verify_signed_app "$app"; then
+    echo "$label failed signed identity check: $app" >&2
+    exit 15
+  fi
+  now="$(app_identity_token "$app")" || {
+    echo "$label has no durable content identity: $app" >&2
+    exit 15
+  }
+  if [[ "$now" != "$expected" ]]; then
+    echo "$label identity ${now} is not the journaled ${expected}" >&2
+    exit 15
+  fi
 }
 
 owned_prepared() {
@@ -301,16 +403,33 @@ else:
 PY
 }
 
+journal_require() {
+  local key="$1"
+  local value
+  value="$(journal_get "$key")" || {
+    echo "resume journal missing required field: $key" >&2
+    exit 14
+  }
+  if [[ -z "$value" ]]; then
+    echo "resume journal has empty required field: $key" >&2
+    exit 14
+  fi
+  printf '%s' "$value"
+}
+
 write_journal() {
   local phase="$1"
   local detail="${2:-}"
-  atomic_write "$JOURNAL" "$(printf '{"schema":"io.vetcoders.vibecrafted.app-update-journal.v1","capture":"%s","destination":"%s","detail":"%s","displaced":"%s","identifier":"%s","mode":"%s","parent_pid":"%s","parent_start":"%s","phase":"%s","prepared":"%s","prior_identity":"%s","receipt":"%s","source":"%s","source_identity":"%s","team_id":"%s","transaction":"%s"}' \
+  atomic_write "$JOURNAL" "$(printf '{"schema":"io.vetcoders.vibecrafted.app-update-journal.v1","capture":"%s","candidate_identity":"%s","destination":"%s","detail":"%s","displaced":"%s","identifier":"%s","mode":"%s","operation":"%s","parent":"%s","parent_pid":"%s","parent_start":"%s","phase":"%s","prepared":"%s","prior_identity":"%s","receipt":"%s","source":"%s","source_identity":"%s","team_id":"%s","transaction":"%s"}' \
     "$(escape_json "$CAPTURE")" \
+    "$(escape_json "$SOURCE_IDENTITY")" \
     "$(escape_json "$DESTINATION")" \
     "$(escape_json "$detail")" \
     "$(escape_json "$DISPLACED")" \
     "$(escape_json "$EXPECTED_IDENTIFIER")" \
     "$(escape_json "$MODE")" \
+    "$(escape_json "$MODE")" \
+    "$(escape_json "$parent")" \
     "$(escape_json "$WAIT_PID")" \
     "$(escape_json "$WAIT_START")" \
     "$(escape_json "$phase")" \
@@ -326,12 +445,13 @@ write_journal() {
 write_admission() {
   local status="$1"
   local detail="${2:-}"
-  atomic_write "$ADMISSION" "$(printf '{"schema":"io.vetcoders.vibecrafted.app-replacement-admission.v1","capture":"%s","destination":"%s","detail":"%s","identifier":"%s","journal":"%s","mode":"%s","parent_pid":"%s","parent_start":"%s","receipt":"%s","source":"%s","source_identity":"%s","status":"%s","team_id":"%s","transaction":"%s"}' \
+  atomic_write "$ADMISSION" "$(printf '{"schema":"io.vetcoders.vibecrafted.app-replacement-admission.v1","capture":"%s","destination":"%s","detail":"%s","identifier":"%s","journal":"%s","mode":"%s","operation":"%s","parent_pid":"%s","parent_start":"%s","receipt":"%s","source":"%s","source_identity":"%s","status":"%s","team_id":"%s","transaction":"%s"}' \
     "$(escape_json "$CAPTURE")" \
     "$(escape_json "$DESTINATION")" \
     "$(escape_json "$detail")" \
     "$(escape_json "$EXPECTED_IDENTIFIER")" \
     "$(escape_json "$JOURNAL")" \
+    "$(escape_json "$MODE")" \
     "$(escape_json "$MODE")" \
     "$(escape_json "$WAIT_PID")" \
     "$(escape_json "$WAIT_START")" \
@@ -343,16 +463,26 @@ write_admission() {
     "$(escape_json "$TRANSACTION")")"
 }
 
+terminal_detail() {
+  if [[ "$MODE" == "restore" ]]; then
+    printf '%s' "restored"
+  else
+    printf '%s' "replaced"
+  fi
+}
+
 write_terminal_receipt() {
   local detail="$1"
   local replaced="$2"
-  atomic_write "$RECEIPT" "$(printf '{"schema":"io.vetcoders.vibecrafted.app-replacement.v1","capture":"%s","destination":"%s","detail":"%s","identifier":"%s","journal":"%s","mode":"%s","phase":"receipt_written","relaunched":false,"replaced":%s,"source_identity":"%s","team_id":"%s","transaction":"%s"}' \
+  atomic_write "$RECEIPT" "$(printf '{"schema":"io.vetcoders.vibecrafted.app-replacement.v1","capture":"%s","destination":"%s","detail":"%s","identifier":"%s","journal":"%s","mode":"%s","operation":"%s","phase":"receipt_written","prior_identity":"%s","relaunched":false,"replaced":%s,"source_identity":"%s","team_id":"%s","transaction":"%s"}' \
     "$(escape_json "$CAPTURE")" \
     "$(escape_json "$DESTINATION")" \
     "$(escape_json "$detail")" \
     "$(escape_json "$EXPECTED_IDENTIFIER")" \
     "$(escape_json "$JOURNAL")" \
     "$(escape_json "$MODE")" \
+    "$(escape_json "$MODE")" \
+    "$(escape_json "$PRIOR_IDENTITY")" \
     "$replaced" \
     "$(escape_json "$SOURCE_IDENTITY")" \
     "$(escape_json "$EXPECTED_TEAM")" \
@@ -388,15 +518,443 @@ owned_failed_new() {
   esac
 }
 
+owned_displaced() {
+  case "$1" in
+    "${CAPTURE}/displaced.app"|"${CAPTURE}/displaced.app/")
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+reject_preflight() {
+  local detail="$1"
+  local code="$2"
+  write_journal "failed" "$detail"
+  write_admission "rejected" "$detail"
+  echo "$detail" >&2
+  exit "$code"
+}
+
+# Destination exclusion is flock(2) on a durable inode. mkdir+pid reclaim is
+# the race install-runtime-pack.sh already rejected: observing a dead owner
+# and removing the directory can delete a live successor. The lock directory
+# may exist from the previous mkdir protocol; the claim is $lock/held and is
+# never unlinked. Release closes this process's descriptor only.
+UPDATE_LOCK_FD=""
+UPDATE_LOCK_FD_FALLBACK=201
+
+close_update_lock_fd() {
+  [[ -n "${UPDATE_LOCK_FD:-}" ]] || return 0
+  eval "exec ${UPDATE_LOCK_FD}>&-" 2>/dev/null || true
+  UPDATE_LOCK_FD=""
+}
+
+open_update_held_fd() {
+  local held="$1"
+  UPDATE_LOCK_FD=""
+  if ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 1))); then
+    exec {UPDATE_LOCK_FD}>>"$held" || return 1
+  else
+    UPDATE_LOCK_FD="$UPDATE_LOCK_FD_FALLBACK"
+    eval "exec ${UPDATE_LOCK_FD}>>\"\$held\"" || return 1
+  fi
+  [[ -n "${UPDATE_LOCK_FD:-}" ]] || return 1
+}
+
+# 0 acquired · 1 held by a live descriptor · 2 this host offers no file lock
+# · 3 the inherited descriptor could not be flocked
+flock_update_lock_nb() {
+  local fd="$1"
+  if command -v flock >/dev/null 2>&1; then
+    flock -n "$fd"
+    return
+  fi
+  if command -v perl >/dev/null 2>&1; then
+    perl -e '
+      use Fcntl qw(:flock);
+      open(my $handle, ">&=", $ARGV[0]) or exit 3;
+      exit(flock($handle, LOCK_EX | LOCK_NB) ? 0 : 1);
+    ' "$fd"
+    return
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import fcntl
+import sys
+try:
+    fcntl.flock(int(sys.argv[1]), fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError:
+    raise SystemExit(1)
+' "$fd"
+    return
+  fi
+  return 2
+}
+
+acquire_lock() {
+  local lock="$LOCKDIR"
+  local held flock_status=0
+  if [[ -L "$lock" ]]; then
+    echo "update lock is a symlink: $lock" >&2
+    exit 13
+  fi
+  if [[ -e "$lock" && ! -d "$lock" ]]; then
+    echo "update lock is malformed: $lock" >&2
+    exit 13
+  fi
+  if [[ ! -d "$lock" ]]; then
+    mkdir -m 700 -- "$lock" 2>/dev/null || true
+  fi
+  if [[ -L "$lock" || ! -d "$lock" ]]; then
+    echo "update lock is malformed: $lock" >&2
+    exit 13
+  fi
+  held="${lock}/held"
+  if [[ -L "$held" ]]; then
+    echo "update lock holder is a symlink: $held" >&2
+    exit 13
+  fi
+  if [[ -e "$held" && ! -f "$held" ]]; then
+    echo "update lock holder is malformed: $held" >&2
+    exit 13
+  fi
+  close_update_lock_fd
+  open_update_held_fd "$held" || {
+    echo "cannot open update lock: $held" >&2
+    exit 13
+  }
+  if [[ -L "$held" ]]; then
+    close_update_lock_fd
+    echo "update lock holder is a symlink: $held" >&2
+    exit 13
+  fi
+  chmod 600 "$held" 2>/dev/null || true
+  flock_update_lock_nb "$UPDATE_LOCK_FD" || flock_status=$?
+  if ((flock_status != 0)); then
+    close_update_lock_fd
+    if ((flock_status == 2)); then
+      echo "this host cannot take an update lock (need flock, perl, or python3)" >&2
+      exit 13
+    fi
+    echo "another update transaction holds the destination lock" >&2
+    exit 13
+  fi
+  atomic_write "$lock/owner.json" "$(printf '{"pid":"%s","start":"%s","transaction":"%s","schema":"io.vetcoders.vibecrafted.app-update-lock.v1"}' \
+    "$$" "$(escape_json "$(process_lstart "$$")")" "$(escape_json "$TRANSACTION")")"
+}
+
+release_lock() {
+  # Close only this process's descriptor. Never unlink held or the lock dir:
+  # removing the inode would let two recoverers flock two names.
+  close_update_lock_fd
+}
+
+observe_tuple() {
+  DEST_PRESENT=0
+  PREPARED_PRESENT=0
+  DISPLACED_PRESENT=0
+  PRIOR_PRESENT=0
+  FAILED_NEW_PRESENT=0
+  DEST_IDENTITY=""
+  PREPARED_IDENTITY=""
+  DISPLACED_IDENTITY=""
+  PRIOR_LIVE_IDENTITY=""
+  if [[ -d "$DESTINATION" && ! -L "$DESTINATION" ]]; then
+    DEST_PRESENT=1
+    DEST_IDENTITY="$(app_identity_token "$DESTINATION" || true)"
+  fi
+  if [[ -d "$PREPARED" && ! -L "$PREPARED" ]]; then
+    PREPARED_PRESENT=1
+    PREPARED_IDENTITY="$(app_identity_token "$PREPARED" || true)"
+  fi
+  if [[ -d "$DISPLACED" && ! -L "$DISPLACED" ]]; then
+    DISPLACED_PRESENT=1
+    DISPLACED_IDENTITY="$(app_identity_token "$DISPLACED" || true)"
+  fi
+  if [[ -d "$PRIOR" && ! -L "$PRIOR" ]]; then
+    PRIOR_PRESENT=1
+    PRIOR_LIVE_IDENTITY="$(app_identity_token "$PRIOR" || true)"
+  fi
+  if [[ -d "$FAILED_NEW" && ! -L "$FAILED_NEW" ]]; then
+    FAILED_NEW_PRESENT=1
+  fi
+}
+
+emit_success_and_exit() {
+  local detail
+  detail="$(terminal_detail)"
+  write_journal "adopted" "$detail"
+  write_terminal_receipt "$detail" "true"
+  fail_after_if "receipt"
+  relaunch_destination || true
+  exit 0
+}
+
+finish_replace_adopt() {
+  if [[ "$PREPARED_PRESENT" -eq 1 ]]; then
+    require_exact_identity "$PREPARED" "$SOURCE_IDENTITY" "prepared candidate"
+    write_journal "adopting" "resume prepared rename"
+    if ! /bin/mv "$PREPARED" "$DESTINATION"; then
+      echo "resume could not adopt the prepared app" >&2
+      write_journal "failed" "resume could not adopt prepared"
+      if [[ "$DISPLACED_PRESENT" -eq 1 ]]; then
+        require_exact_identity "$DISPLACED" "$PRIOR_IDENTITY" "displaced prior"
+        if ! /bin/mv "$DISPLACED" "$DESTINATION"; then
+          echo "resume could not restore the displaced app" >&2
+          exit 11
+        fi
+        write_journal "rolled_back" "restored displaced after failed resume adopt"
+        write_admission "rejected" "resume restored the previous destination"
+        exit 11
+      fi
+      exit 11
+    fi
+    fail_after_if "adopting"
+  fi
+  require_exact_identity "$DESTINATION" "$SOURCE_IDENTITY" "adopted destination"
+  emit_success_and_exit
+}
+
+restore_displaced_prior() {
+  require_exact_identity "$DISPLACED" "$PRIOR_IDENTITY" "displaced prior"
+  if ! /bin/mv "$DISPLACED" "$DESTINATION"; then
+    echo "resume could not restore the displaced app" >&2
+    write_journal "failed" "resume restore of displaced failed"
+    exit 11
+  fi
+  write_journal "rolled_back" "restored displaced after interruption"
+  write_admission "rejected" "destination restored after interruption"
+  exit 16
+}
+
+finish_restore_adopt() {
+  if [[ "$PREPARED_PRESENT" -eq 1 ]]; then
+    require_exact_identity "$PREPARED" "$PRIOR_IDENTITY" "prepared previous app"
+    write_journal "adopting" "resume restore prepared rename"
+    if ! /bin/mv "$PREPARED" "$DESTINATION"; then
+      echo "resume could not adopt the previous app" >&2
+      write_journal "failed" "resume restore adopt failed"
+      if [[ "$FAILED_NEW_PRESENT" -eq 1 ]] && verify_signed_app "$FAILED_NEW"; then
+        /bin/mv "$FAILED_NEW" "$DESTINATION" || true
+      fi
+      exit 11
+    fi
+    fail_after_if "adopting"
+  fi
+  require_exact_identity "$DESTINATION" "$PRIOR_IDENTITY" "restored destination"
+  if [[ ! -d "$SOURCE" ]]; then
+    echo "owned prior.app was destroyed during restore resume" >&2
+    exit 15
+  fi
+  require_exact_identity "$SOURCE" "$PRIOR_IDENTITY" "owned prior.app"
+  emit_success_and_exit
+}
+
+# Mode-aware reconciliation for every write-ahead phase and the observed
+# source/dest/prepared/displaced/failed-new tuple. Restore never emits replaced.
+reconcile_resume() {
+  local phase="$1"
+  observe_tuple
+  case "$MODE" in
+    restore)
+      case "$phase" in
+        receipt_written|adopted|relaunched|relaunching)
+          if [[ "$DEST_PRESENT" -eq 1 ]]; then
+            require_exact_identity "$DESTINATION" "$PRIOR_IDENTITY" "restored destination"
+            if [[ ! -f "$RECEIPT" ]]; then
+              write_terminal_receipt "restored" "true"
+            fi
+            relaunch_destination || true
+            exit 0
+          fi
+          echo "restore resume is missing the restored destination" >&2
+          exit 14
+          ;;
+        displacing|displaced|adopting|prepared|preparing)
+          if [[ "$DEST_PRESENT" -eq 1 && "$DEST_IDENTITY" == "$PRIOR_IDENTITY" ]]; then
+            finish_restore_adopt
+          fi
+          if [[ "$DEST_PRESENT" -eq 0 && "$PREPARED_PRESENT" -eq 1 ]]; then
+            finish_restore_adopt
+          fi
+          if [[ "$DEST_PRESENT" -eq 0 && "$FAILED_NEW_PRESENT" -eq 1 && "$PRIOR_PRESENT" -eq 1 ]]; then
+            require_exact_identity "$SOURCE" "$PRIOR_IDENTITY" "owned prior.app"
+            return 0
+          fi
+          # Write-ahead displacing is journaled before the quarantine rename.
+          # Destination still holds the failed new app; prior.app is intact.
+          if [[ "$DEST_PRESENT" -eq 1 && "$PRIOR_PRESENT" -eq 1 && "$DEST_IDENTITY" != "$PRIOR_IDENTITY" ]]; then
+            require_exact_identity "$SOURCE" "$PRIOR_IDENTITY" "owned prior.app"
+            return 0
+          fi
+          echo "restore resume could not reconcile phase ${phase} with the observed tuple" >&2
+          exit 14
+          ;;
+        preflight|ready|waiting_parent|failed)
+          if [[ "$DEST_PRESENT" -eq 1 ]]; then
+            write_journal "failed" "restore resume aborted before destination displacement"
+            write_admission "rejected" "destination is still installed"
+            exit 17
+          fi
+          return 0
+          ;;
+        *)
+          echo "restore resume does not recognize phase ${phase}" >&2
+          exit 14
+          ;;
+      esac
+      ;;
+    replace)
+      case "$phase" in
+        receipt_written|adopted|relaunched|relaunching)
+          if [[ "$DEST_PRESENT" -eq 1 ]]; then
+            require_exact_identity "$DESTINATION" "$SOURCE_IDENTITY" "replaced destination"
+            if [[ ! -f "$RECEIPT" ]]; then
+              write_terminal_receipt "replaced" "true"
+            fi
+            relaunch_destination || true
+            exit 0
+          fi
+          echo "replace resume is missing the adopted destination" >&2
+          exit 14
+          ;;
+        displacing|displaced|adopting)
+          if [[ "$DEST_PRESENT" -eq 1 && "$DEST_IDENTITY" == "$SOURCE_IDENTITY" ]]; then
+            finish_replace_adopt
+          fi
+          if [[ "$DEST_PRESENT" -eq 0 && "$PREPARED_PRESENT" -eq 1 && "$DISPLACED_PRESENT" -eq 1 ]]; then
+            finish_replace_adopt
+          fi
+          if [[ "$DEST_PRESENT" -eq 0 && "$PREPARED_PRESENT" -eq 0 && "$DISPLACED_PRESENT" -eq 1 ]]; then
+            restore_displaced_prior
+          fi
+          if [[ "$DEST_PRESENT" -eq 1 && "$DISPLACED_PRESENT" -eq 0 ]]; then
+            write_journal "failed" "resume aborted; destination was never displaced"
+            write_admission "rejected" "previous destination is still installed"
+            exit 17
+          fi
+          echo "replace resume could not reconcile phase ${phase} with the observed tuple" >&2
+          exit 14
+          ;;
+        capturing|captured|preparing|prepared|preflight|ready|waiting_parent)
+          if [[ "$DEST_PRESENT" -eq 1 ]]; then
+            if owned_prepared "$PREPARED" && [[ -e "$PREPARED" ]]; then
+              remove_owned_prepared "$PREPARED" || true
+            fi
+            write_journal "failed" "resume aborted before destination displacement"
+            write_admission "rejected" "previous destination is still installed"
+            exit 17
+          fi
+          echo "replace resume found destination missing before displacement" >&2
+          exit 14
+          ;;
+        *)
+          echo "replace resume does not recognize phase ${phase}" >&2
+          exit 14
+          ;;
+      esac
+      ;;
+  esac
+}
+
+bind_resume_journal() {
+  local journal_schema journal_mode journal_operation journal_txn journal_dest journal_parent journal_source
+  journal_schema="$(journal_require schema)"
+  if [[ "$journal_schema" != "io.vetcoders.vibecrafted.app-update-journal.v1" ]]; then
+    echo "resume journal schema is not app-update-journal.v1" >&2
+    exit 14
+  fi
+  journal_txn="$(journal_require transaction)"
+  journal_mode="$(journal_require mode)"
+  journal_operation="$(journal_require operation)"
+  journal_dest="$(journal_require destination)"
+  journal_parent="$(journal_require parent)"
+  journal_source="$(journal_require source)"
+  if [[ -n "$TRANSACTION" && "$TRANSACTION" != "$journal_txn" ]]; then
+    echo "resume journal transaction does not match" >&2
+    exit 14
+  fi
+  TRANSACTION="$journal_txn"
+  validate_transaction_id "$TRANSACTION"
+  if [[ "$journal_mode" != "$MODE" || "$journal_operation" != "$MODE" ]]; then
+    echo "resume journal operation ${journal_operation} does not match mode ${MODE}" >&2
+    exit 14
+  fi
+  if [[ "$journal_dest" != "$DESTINATION" ]]; then
+    echo "resume journal destination does not match" >&2
+    exit 14
+  fi
+  if [[ "$journal_parent" != "$parent" ]]; then
+    echo "resume journal parent does not match" >&2
+    exit 14
+  fi
+  if [[ "$journal_source" != "$SOURCE" ]]; then
+    echo "resume journal source does not match" >&2
+    exit 14
+  fi
+  SOURCE_IDENTITY="$(journal_require source_identity)"
+  local candidate
+  candidate="$(journal_require candidate_identity)"
+  if [[ "$candidate" != "$SOURCE_IDENTITY" ]]; then
+    echo "resume journal candidate identity does not match source identity" >&2
+    exit 14
+  fi
+  CAPTURE="$(journal_require capture)"
+  PREPARED="$(journal_require prepared)"
+  DISPLACED="$(journal_require displaced)"
+  PRIOR="${CAPTURE}/prior.app"
+  FAILED_NEW="${CAPTURE}/failed-new.app"
+  if ! owned_capture_root "$CAPTURE"; then
+    echo "resume capture path is not owned by this transaction" >&2
+    exit 14
+  fi
+  if ! owned_prepared "$PREPARED"; then
+    echo "resume prepared path is not owned by this transaction" >&2
+    exit 14
+  fi
+  if ! owned_displaced "$DISPLACED"; then
+    echo "resume displaced path is not owned by this transaction" >&2
+    exit 14
+  fi
+  PRIOR_IDENTITY="$(journal_get prior_identity || true)"
+  local phase
+  phase="$(journal_require phase)"
+  case "$phase" in
+    captured|preparing|prepared|displacing|displaced|adopting|adopted|receipt_written|relaunching|relaunched)
+      if [[ -z "$PRIOR_IDENTITY" ]]; then
+        echo "resume journal is missing the original prior content identity" >&2
+        exit 14
+      fi
+      ;;
+  esac
+  if [[ "$MODE" == "restore" && -z "$PRIOR_IDENTITY" ]]; then
+    echo "restore resume is missing the original preserved capture identity" >&2
+    exit 14
+  fi
+  if [[ -d "$SOURCE" ]]; then
+    if [[ "$MODE" == "restore" ]]; then
+      require_exact_identity "$SOURCE" "$PRIOR_IDENTITY" "restore source"
+    else
+      require_exact_identity "$SOURCE" "$SOURCE_IDENTITY" "candidate source"
+    fi
+  fi
+  reconcile_resume "$phase"
+}
+
 # Restore must never ditto the failed destination onto prior.app. The source
 # is the owned capture; the failed new bundle is quarantined beside it.
+# PRIOR_IDENTITY is the original preserved capture identity from the replace
+# journal, never a live hash of whatever is currently at source.
 restore_previous_tuple() {
   if [[ ! -d "$SOURCE" ]]; then
     echo "restore source missing: $SOURCE" >&2
     exit 3
   fi
-  local source_abs capture_abs
-  source_abs="$(cd "$SOURCE" && pwd)"
+  local source_abs
+  source_abs="$(physical_existing_dir "$SOURCE")"
   if [[ "$(basename "$source_abs")" != "prior.app" ]] || ! owned_capture_root "$(dirname "$source_abs")"; then
     echo "restore source is not this transaction's owned prior.app" >&2
     exit 15
@@ -404,13 +962,12 @@ restore_previous_tuple() {
   CAPTURE="$(dirname "$source_abs")"
   PRIOR="$source_abs"
   FAILED_NEW="${CAPTURE}/failed-new.app"
-  if ! SOURCE_IDENTITY="$(app_identity_token "$SOURCE")"; then
-    SOURCE_IDENTITY=""
+  if [[ -z "$PRIOR_IDENTITY" ]]; then
+    echo "restore is missing the original preserved capture identity" >&2
+    exit 14
   fi
-  PRIOR_IDENTITY="$SOURCE_IDENTITY"
-  if ! verify_signed_app "$SOURCE"; then
-    reject_preflight "restore source failed signed identity check" 9
-  fi
+  require_exact_identity "$SOURCE" "$PRIOR_IDENTITY" "owned prior.app"
+  SOURCE_IDENTITY="$PRIOR_IDENTITY"
   write_journal "preflight" "owned prior.app accepted; destination will not overwrite it"
   fail_after_if "preflight"
   write_admission "ready" "restore helper preflight complete"
@@ -426,13 +983,11 @@ restore_previous_tuple() {
       exit 5
     fi
   fi
-  if ! verify_signed_app "$SOURCE"; then
-    reject_preflight "restore source failed signed identity re-check" 9
-  fi
+  require_exact_identity "$SOURCE" "$PRIOR_IDENTITY" "owned prior.app"
 
   if [[ -d "$DESTINATION" ]]; then
     local dest_abs
-    dest_abs="$(cd "$DESTINATION" && pwd)"
+    dest_abs="$(physical_existing_dir "$DESTINATION")"
     if [[ "$dest_abs" == "$source_abs" ]]; then
       write_terminal_receipt "restored" "true"
       relaunch_destination || true
@@ -451,6 +1006,7 @@ restore_previous_tuple() {
       write_journal "failed" "restore quarantine failed"
       exit 10
     fi
+    fail_after_if "displacing"
     write_journal "displaced" "destination absent; prior.app and failed-new present"
     fail_after_if "displaced"
     hold_if "displaced" || exit 18
@@ -465,12 +1021,7 @@ restore_previous_tuple() {
     write_journal "failed" "restore prepare failed"
     exit 8
   fi
-  if ! verify_signed_app "$PREPARED"; then
-    echo "prepared previous app failed signed identity check" >&2
-    write_journal "failed" "restore prepared identity failed"
-    remove_owned_prepared "$PREPARED" || true
-    exit 9
-  fi
+  require_exact_identity "$PREPARED" "$PRIOR_IDENTITY" "prepared previous app"
   write_journal "prepared" "previous app prepared"
   fail_after_if "prepared"
   write_journal "adopting" "restore prepared rename"
@@ -482,26 +1033,14 @@ restore_previous_tuple() {
     fi
     exit 11
   fi
-  if ! verify_signed_app "$DESTINATION"; then
-    echo "restored destination failed signed identity check" >&2
-    write_journal "failed" "restore adopted identity failed"
-    if [[ -d "$DESTINATION" ]]; then
-      /bin/mv "$DESTINATION" "${CAPTURE}/failed-restore.app"
-    fi
-    exit 12
-  fi
-  local now_identity
-  now_identity="$(app_identity_token "$DESTINATION" || true)"
-  if [[ -n "$PRIOR_IDENTITY" && -n "$now_identity" && "$now_identity" != "$PRIOR_IDENTITY" ]]; then
-    echo "restored destination identity drifted from owned prior.app" >&2
-    write_journal "failed" "restore identity drifted"
-    exit 15
-  fi
+  fail_after_if "adopting"
+  require_exact_identity "$DESTINATION" "$PRIOR_IDENTITY" "restored destination"
   if [[ ! -d "$SOURCE" ]]; then
     echo "owned prior.app was destroyed during restore" >&2
     write_journal "failed" "prior.app missing after restore"
     exit 15
   fi
+  require_exact_identity "$SOURCE" "$PRIOR_IDENTITY" "owned prior.app"
   write_journal "adopted" "previous app restored; capture retained"
   fail_after_if "adopted"
   write_terminal_receipt "restored" "true"
@@ -510,211 +1049,83 @@ restore_previous_tuple() {
   exit 0
 }
 
-reject_preflight() {
-  local detail="$1"
-  local code="$2"
-  write_journal "failed" "$detail"
-  write_admission "rejected" "$detail"
-  echo "$detail" >&2
-  exit "$code"
-}
+validate_transaction_id "$TRANSACTION"
+if [[ "$RESUME" -eq 1 && -z "$JOURNAL" ]]; then
+  JOURNAL="${RECEIPT}.journal.json"
+fi
 
 [[ -e "$SOURCE" ]] || { echo "source app missing: $SOURCE" >&2; exit 3; }
-if [[ -L "$SOURCE" || -L "$DESTINATION" ]]; then
-  echo "refusing symlink source or destination" >&2
-  exit 6
+SOURCE="$(physical_existing_dir "$SOURCE")"
+DESTINATION="$(canonical_leaf_path "$DESTINATION")"
+RECEIPT="$(canonical_leaf_path "$RECEIPT")"
+if [[ -n "$ADMISSION" ]]; then
+  ADMISSION="$(canonical_leaf_path "$ADMISSION")"
+fi
+if [[ -n "$JOURNAL" ]]; then
+  JOURNAL="$(canonical_leaf_path "$JOURNAL")"
 fi
 if [[ -e "$DESTINATION" && ! -d "$DESTINATION" ]]; then
   echo "destination is not an application directory" >&2
   exit 6
 fi
 
-parent="$(cd "$(dirname "$DESTINATION")" && pwd)"
-if [[ -z "$TRANSACTION" ]]; then
-  if [[ "$RESUME" -eq 1 && -n "$JOURNAL" && -f "$JOURNAL" ]]; then
-    TRANSACTION="$(journal_get transaction || true)"
-  fi
-  if [[ -z "$TRANSACTION" ]]; then
-    TRANSACTION="$(/usr/bin/uuidgen | /usr/bin/tr '[:upper:]' '[:lower:]')"
-  fi
-fi
+parent="$(physical_existing_dir "$(dirname "$DESTINATION")")"
 if [[ -z "$ADMISSION" ]]; then
-  ADMISSION="${RECEIPT}.admission.json"
+  ADMISSION="$(canonical_leaf_path "${RECEIPT}.admission.json")"
 fi
 if [[ -z "$JOURNAL" ]]; then
-  JOURNAL="${RECEIPT}.journal.json"
+  JOURNAL="$(canonical_leaf_path "${RECEIPT}.journal.json")"
 fi
+
+if [[ "$RESUME" -eq 1 ]]; then
+  if [[ ! -f "$JOURNAL" ]]; then
+    echo "resume requires a complete immutable journal" >&2
+    exit 14
+  fi
+elif [[ -z "$TRANSACTION" ]]; then
+  TRANSACTION="$(/usr/bin/uuidgen | /usr/bin/tr '[:upper:]' '[:lower:]')"
+fi
+validate_transaction_id "$TRANSACTION"
 
 CAPTURE="${parent}/.vc-update-capture-${TRANSACTION}"
 PREPARED="${parent}/.vc-update-prepared-${TRANSACTION}.app"
 DISPLACED="${CAPTURE}/displaced.app"
 PRIOR="${CAPTURE}/prior.app"
+FAILED_NEW="${CAPTURE}/failed-new.app"
 LOCKDIR="${parent}/.vc-update.lock"
 SOURCE_IDENTITY=""
 PRIOR_IDENTITY=""
-LOCK_OWNED=0
 
-release_lock() {
-  if [[ "$LOCK_OWNED" -eq 1 && -d "$LOCKDIR" ]]; then
-    /bin/rm -rf "$LOCKDIR"
-    LOCK_OWNED=0
+if [[ "$RESUME" -ne 1 && -f "$JOURNAL" ]]; then
+  # Fresh restore must compare the original preserved capture identity. A
+  # leftover replace journal is the authority; do not hash whatever is live.
+  if [[ "$MODE" == "restore" ]]; then
+    PRIOR_IDENTITY="$(journal_get prior_identity || true)"
+    SOURCE_IDENTITY="$(journal_get source_identity || true)"
+    TRANSACTION="$(journal_get transaction || printf '%s' "$TRANSACTION")"
+    validate_transaction_id "$TRANSACTION"
+    CAPTURE="${parent}/.vc-update-capture-${TRANSACTION}"
+    PREPARED="${parent}/.vc-update-prepared-${TRANSACTION}.app"
+    DISPLACED="${CAPTURE}/displaced.app"
+    PRIOR="${CAPTURE}/prior.app"
+    FAILED_NEW="${CAPTURE}/failed-new.app"
   fi
-}
-
-lock_owner_live() {
-  local owner="$LOCKDIR/owner.json"
-  if [[ ! -f "$owner" ]]; then
-    return 1
-  fi
-  local pid start
-  pid="$(/usr/bin/python3 - "$owner" <<'PY'
-import json, sys
-data = json.load(open(sys.argv[1], encoding="utf-8"))
-print(data.get("pid") or "")
-PY
-)"
-  start="$(/usr/bin/python3 - "$owner" <<'PY'
-import json, sys
-data = json.load(open(sys.argv[1], encoding="utf-8"))
-print(data.get("start") or "")
-PY
-)"
-  if [[ -z "$pid" ]]; then
-    return 1
-  fi
-  identity_live "$pid" "$start"
-}
-
-acquire_lock() {
-  if mkdir "$LOCKDIR" 2>/dev/null; then
-    LOCK_OWNED=1
-    atomic_write "$LOCKDIR/owner.json" "$(printf '{"pid":"%s","start":"%s","transaction":"%s"}' \
-      "$$" "$(escape_json "$(process_lstart "$$")")" "$(escape_json "$TRANSACTION")")"
-    return 0
-  fi
-  if lock_owner_live; then
-    echo "another update transaction holds the destination lock" >&2
-    exit 13
-  fi
-  if [[ "$RESUME" -eq 1 ]]; then
-    /bin/rm -rf "$LOCKDIR"
-    if mkdir "$LOCKDIR" 2>/dev/null; then
-      LOCK_OWNED=1
-      atomic_write "$LOCKDIR/owner.json" "$(printf '{"pid":"%s","start":"%s","transaction":"%s"}' \
-        "$$" "$(escape_json "$(process_lstart "$$")")" "$(escape_json "$TRANSACTION")")"
-      return 0
-    fi
-  fi
-  echo "another update transaction holds the destination lock" >&2
-  exit 13
-}
+fi
 
 trap 'release_lock' EXIT
-mkdir -p "$parent"
 acquire_lock
 
-if [[ "$RESUME" -eq 1 && -f "$JOURNAL" ]]; then
-  local_phase="$(journal_get phase || true)"
-  journal_txn="$(journal_get transaction || true)"
-  journal_dest="$(journal_get destination || true)"
-  if [[ -n "$journal_txn" && "$journal_txn" != "$TRANSACTION" ]]; then
-    echo "resume journal transaction does not match" >&2
-    exit 14
-  fi
-  if [[ -n "$journal_dest" && "$journal_dest" != "$DESTINATION" ]]; then
-    echo "resume journal destination does not match" >&2
-    exit 14
-  fi
-  CAPTURE="$(journal_get capture || printf '%s' "$CAPTURE")"
-  PREPARED="$(journal_get prepared || printf '%s' "$PREPARED")"
-  DISPLACED="$(journal_get displaced || printf '%s' "$DISPLACED")"
-  PRIOR_IDENTITY="$(journal_get prior_identity || true)"
-  SOURCE_IDENTITY="$(journal_get source_identity || true)"
-  case "$local_phase" in
-    displaced)
-      if [[ ! -e "$DESTINATION" && -d "$DISPLACED" ]]; then
-        if [[ -d "$PREPARED" ]] && verify_signed_app "$PREPARED"; then
-          if ! /bin/mv "$PREPARED" "$DESTINATION"; then
-            write_journal "failed" "resume could not adopt prepared"
-            if [[ -d "$DISPLACED" ]] && verify_signed_app "$DISPLACED"; then
-              if ! /bin/mv "$DISPLACED" "$DESTINATION"; then
-                echo "resume could not restore the displaced app" >&2
-                exit 11
-              fi
-              write_journal "rolled_back" "restored displaced after failed resume adopt"
-              write_admission "rejected" "resume restored the previous destination"
-              exit 11
-            fi
-            exit 11
-          fi
-          if ! verify_signed_app "$DESTINATION"; then
-            echo "resumed destination failed signed identity check" >&2
-            if [[ -d "$DESTINATION" ]]; then
-              /bin/mv "$DESTINATION" "${CAPTURE}/failed-adopt.app"
-            fi
-            if [[ -d "$DISPLACED" ]] && verify_signed_app "$DISPLACED"; then
-              if ! /bin/mv "$DISPLACED" "$DESTINATION"; then
-                exit 12
-              fi
-              write_journal "rolled_back" "restored displaced after invalid resumed adopt"
-              exit 12
-            fi
-            exit 12
-          fi
-          write_journal "adopted" "resumed adopt"
-          write_terminal_receipt "replaced" "true"
-          relaunch_destination || true
-          exit 0
-        fi
-        if [[ -d "$DISPLACED" ]] && verify_signed_app "$DISPLACED"; then
-          if [[ -n "$PRIOR_IDENTITY" ]]; then
-            now_identity="$(app_identity_token "$DISPLACED" || true)"
-            if [[ -n "$now_identity" && "$now_identity" != "$PRIOR_IDENTITY" ]]; then
-              echo "displaced capture identity drifted; refusing blind restore" >&2
-              write_journal "failed" "displaced identity drifted"
-              exit 15
-            fi
-          fi
-          if ! /bin/mv "$DISPLACED" "$DESTINATION"; then
-            echo "resume could not restore the displaced app" >&2
-            write_journal "failed" "resume restore of displaced failed"
-            exit 11
-          fi
-          write_journal "rolled_back" "restored displaced after interruption"
-          write_admission "rejected" "destination restored after interruption"
-          exit 16
-        fi
-      fi
-      ;;
-    receipt_written|adopted|relaunched|relaunching)
-      if [[ -d "$DESTINATION" ]] && verify_signed_app "$DESTINATION"; then
-        if [[ ! -f "$RECEIPT" ]]; then
-          write_terminal_receipt "replaced" "true"
-        fi
-        relaunch_destination || true
-        exit 0
-      fi
-      ;;
-    captured|prepared|preflight|ready|waiting_parent)
-      if [[ -d "$DESTINATION" ]]; then
-        if owned_prepared "$PREPARED" && [[ -e "$PREPARED" ]]; then
-          remove_owned_prepared "$PREPARED" || true
-        fi
-        write_journal "failed" "resume aborted before destination displacement"
-        write_admission "rejected" "previous destination is still installed"
-        exit 17
-      fi
-      ;;
-  esac
+if [[ "$RESUME" -eq 1 ]]; then
+  bind_resume_journal
 fi
 
 if [[ "$MODE" == "restore" ]]; then
   restore_previous_tuple
 fi
 
-if ! SOURCE_IDENTITY="$(app_identity_token "$SOURCE")"; then
-  SOURCE_IDENTITY=""
-fi
+SOURCE_IDENTITY="$(app_identity_token "$SOURCE")" || {
+  reject_preflight "source has no durable content identity" 9
+}
 if ! verify_signed_app "$SOURCE"; then
   reject_preflight "source failed signed identity check at the mutation boundary" 9
 fi
@@ -743,6 +1154,7 @@ fi
 if ! verify_signed_app "$SOURCE"; then
   reject_preflight "source failed signed identity re-check at the mutation boundary" 9
 fi
+require_exact_identity "$SOURCE" "$SOURCE_IDENTITY" "candidate source"
 
 if [[ -e "$DESTINATION" ]]; then
   write_journal "capturing" "unique owned capture"
@@ -751,12 +1163,12 @@ if [[ -e "$DESTINATION" ]]; then
     write_journal "failed" "capture failed"
     exit 7
   fi
-  if ! PRIOR_IDENTITY="$(app_identity_token "$PRIOR")"; then
+  PRIOR_IDENTITY="$(app_identity_token "$PRIOR")" || {
     echo "captured prior app has no durable identity" >&2
     write_journal "failed" "capture identity missing"
     exit 7
-  fi
-  if [[ "$ALLOW_UNSIGNED" -ne 1 ]] && ! verify_signed_app "$PRIOR"; then
+  }
+  if ! verify_signed_app "$PRIOR"; then
     echo "captured prior app failed signed identity check" >&2
     write_journal "failed" "capture failed identity"
     exit 7
@@ -774,12 +1186,7 @@ if [[ -e "$DESTINATION" ]]; then
     fi
     exit 8
   fi
-  if ! verify_signed_app "$PREPARED"; then
-    echo "prepared candidate failed signed identity check" >&2
-    write_journal "failed" "prepared identity failed"
-    remove_owned_prepared "$PREPARED" || true
-    exit 9
-  fi
+  require_exact_identity "$PREPARED" "$SOURCE_IDENTITY" "prepared candidate"
   write_journal "prepared" "prepared candidate verified"
   fail_after_if "prepared"
   hold_if "prepared" || exit 18
@@ -791,6 +1198,7 @@ if [[ -e "$DESTINATION" ]]; then
     remove_owned_prepared "$PREPARED" || true
     exit 10
   fi
+  fail_after_if "displacing"
   write_journal "displaced" "destination absent; displaced and prepared present"
   fail_after_if "displaced"
   hold_if "displaced" || exit 18
@@ -799,12 +1207,8 @@ if [[ -e "$DESTINATION" ]]; then
   if ! /bin/mv "$PREPARED" "$DESTINATION"; then
     echo "could not adopt the prepared app; restoring the verified displaced app" >&2
     write_journal "failed" "adopt failed"
-    if [[ -d "$DISPLACED" ]] && verify_signed_app "$DISPLACED"; then
-      now_identity="$(app_identity_token "$DISPLACED" || true)"
-      if [[ -n "$PRIOR_IDENTITY" && -n "$now_identity" && "$now_identity" != "$PRIOR_IDENTITY" ]]; then
-        echo "displaced capture identity drifted; refusing blind restore" >&2
-        exit 15
-      fi
+    if [[ -d "$DISPLACED" ]]; then
+      require_exact_identity "$DISPLACED" "$PRIOR_IDENTITY" "displaced prior"
       if ! /bin/mv "$DISPLACED" "$DESTINATION"; then
         echo "verified restore of the displaced app failed" >&2
         exit 11
@@ -813,18 +1217,15 @@ if [[ -e "$DESTINATION" ]]; then
     fi
     exit 11
   fi
+  fail_after_if "adopting"
   if ! verify_signed_app "$DESTINATION"; then
     echo "adopted destination failed signed identity check; restoring the verified previous app" >&2
     write_journal "failed" "adopted identity failed"
     if [[ -d "$DESTINATION" ]]; then
       /bin/mv "$DESTINATION" "${CAPTURE}/failed-adopt.app"
     fi
-    if [[ -d "$DISPLACED" ]] && verify_signed_app "$DISPLACED"; then
-      now_identity="$(app_identity_token "$DISPLACED" || true)"
-      if [[ -n "$PRIOR_IDENTITY" && -n "$now_identity" && "$now_identity" != "$PRIOR_IDENTITY" ]]; then
-        echo "displaced capture identity drifted; refusing blind restore" >&2
-        exit 15
-      fi
+    if [[ -d "$DISPLACED" ]]; then
+      require_exact_identity "$DISPLACED" "$PRIOR_IDENTITY" "displaced prior"
       if ! /bin/mv "$DISPLACED" "$DESTINATION"; then
         echo "verified restore of the displaced app failed" >&2
         exit 12
@@ -833,6 +1234,7 @@ if [[ -e "$DESTINATION" ]]; then
     fi
     exit 12
   fi
+  require_exact_identity "$DESTINATION" "$SOURCE_IDENTITY" "adopted destination"
   write_journal "adopted" "destination verified"
   fail_after_if "adopted"
 else
@@ -845,39 +1247,30 @@ else
     fi
     exit 8
   fi
-  if ! verify_signed_app "$PREPARED"; then
-    echo "prepared candidate failed signed identity check" >&2
-    write_journal "failed" "prepared identity failed"
-    remove_owned_prepared "$PREPARED" || true
-    exit 9
-  fi
+  require_exact_identity "$PREPARED" "$SOURCE_IDENTITY" "prepared candidate"
   write_journal "prepared" "prepared candidate verified"
   fail_after_if "prepared"
+  write_journal "adopting" "prepared rename"
   if ! /bin/mv "$PREPARED" "$DESTINATION"; then
     echo "could not adopt the prepared app" >&2
     write_journal "failed" "adopt failed"
     exit 11
   fi
+  fail_after_if "adopting"
   if ! verify_signed_app "$DESTINATION"; then
     echo "adopted destination failed signed identity check" >&2
     write_journal "failed" "adopted identity failed"
-    if owned_prepared "${parent}/.vc-update-failed-${TRANSACTION}.app"; then
-      :
-    fi
     /bin/mv "$DESTINATION" "${parent}/.vc-update-failed-${TRANSACTION}.app"
     exit 12
   fi
+  require_exact_identity "$DESTINATION" "$SOURCE_IDENTITY" "adopted destination"
   write_journal "adopted" "destination verified"
   fail_after_if "adopted"
 fi
 
 # Capture is retained after a verified adopt so pack failure can restore the
 # previous working tuple. Do not delete it here.
-detail="replaced"
-if [[ "$MODE" == "restore" ]]; then
-  detail="restored"
-fi
-write_terminal_receipt "$detail" "true"
+write_terminal_receipt "$(terminal_detail)" "true"
 fail_after_if "receipt"
 relaunch_destination || true
 exit 0

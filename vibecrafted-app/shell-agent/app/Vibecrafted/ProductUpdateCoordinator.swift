@@ -564,7 +564,9 @@ final class ProductUpdateCoordinator {
               frameRevision: staged.candidate.frameRevision,
               transactionID: admission.transactionID,
               mode: request.mode.rawValue,
-              phase: "helper_ready")
+              phase: "helper_ready",
+              candidateIdentity: admission.candidateIdentity,
+              priorIdentity: productUpdateContentIdentityToken(at: request.destinationApp) ?? "")
             self.admittedHandoff = handoff
             try? writeProductUpdateHandoff(
               handoff, to: productUpdatePendingHandoffURL(home: self.dependencies.home()))

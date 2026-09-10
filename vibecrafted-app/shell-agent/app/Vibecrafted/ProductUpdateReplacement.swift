@@ -70,6 +70,10 @@ struct ProductUpdateReplacementReceipt: Equatable, Sendable {
   var transaction: String?
   var journal: String? = nil
   var mode: String? = nil
+  var operation: String? = nil
+  var phase: String? = nil
+  var sourceIdentity: String? = nil
+  var priorIdentity: String? = nil
 }
 
 /// Helper-owned READY after preflight. Process.isRunning is not admission.
@@ -85,6 +89,7 @@ struct ProductUpdateReplacementAdmission: Equatable, Sendable {
   var candidateIdentifier: String
   var candidateTeamID: String
   var ready: Bool
+  var candidateIdentity: String
 
   init(
     helperPID: Int32,
@@ -97,7 +102,8 @@ struct ProductUpdateReplacementAdmission: Equatable, Sendable {
     destination: String = "",
     candidateIdentifier: String = productUpdateExpectedBundleIdentifier,
     candidateTeamID: String = productUpdateExpectedTeamID,
-    ready: Bool = false
+    ready: Bool = false,
+    candidateIdentity: String = ""
   ) {
     self.helperPID = helperPID
     self.waitIdentity = waitIdentity
@@ -110,6 +116,7 @@ struct ProductUpdateReplacementAdmission: Equatable, Sendable {
     self.candidateIdentifier = candidateIdentifier
     self.candidateTeamID = candidateTeamID
     self.ready = ready
+    self.candidateIdentity = candidateIdentity
   }
 }
 
@@ -255,6 +262,7 @@ func productUpdateAdmissionMatches(
   if record.identifier != request.expectedIdentifier { return false }
   if record.teamID != request.expectedTeamID { return false }
   if record.mode != request.mode.rawValue { return false }
+  if record.transaction.isEmpty { return false }
   if let transaction = request.transactionID, !transaction.isEmpty,
     record.transaction != transaction
   {
@@ -315,7 +323,8 @@ func waitForProductUpdateHelperAdmission(
             destination: record.destination,
             candidateIdentifier: record.identifier,
             candidateTeamID: record.teamID,
-            ready: true))
+            ready: true,
+            candidateIdentity: record.sourceIdentity))
       }
     }
     if !process.isRunning {
@@ -430,5 +439,9 @@ func decodeReplacementReceipt(_ data: Data) -> ProductUpdateReplacementReceipt? 
     capture: root["capture"] as? String,
     transaction: root["transaction"] as? String,
     journal: root["journal"] as? String,
-    mode: root["mode"] as? String)
+    mode: root["mode"] as? String,
+    operation: root["operation"] as? String,
+    phase: root["phase"] as? String,
+    sourceIdentity: root["source_identity"] as? String,
+    priorIdentity: root["prior_identity"] as? String)
 }

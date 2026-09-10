@@ -60,8 +60,7 @@ installed (COMPILE_EMBARGO).
 The script is the only mutation implementation. There is no compiled Swift
 mutation twin. Two `mv` calls are **not** atomic: every phase is journaled
 before the destination changes, and resume/rollback never delete a foreign
-path. A destination lock (`.vc-update.lock` + live owner pid/start) refuses
-overlapping retries (exit 13).
+path. Destination exclusion is flock(2) on `.vc-update.lock/held` (exit 13).
 
 The script:
 
@@ -74,9 +73,18 @@ The script:
   the current UI alive
 - waits for that bound parent identity, then **fails before mutation**
   (exit 5) if it is still live
-- refuses symlink source or destination
+- refuses symlink components, `..` traversal, and path-like `--transaction`
+  values before any mutation
 - writes a durable phase journal (`app-update-journal.v1`) with a unique
-  owned capture/hash **before** any destination mutation
+  owned capture/hash **before** any destination mutation. Resume requires the
+  complete immutable binding (transaction, operation, parent/destination,
+  candidate and prior content identities) and reconciles every write-ahead
+  phase against the observed source/dest/prepared/displaced tuple. It does
+  not hash whatever is currently on disk to fill missing journal fields.
+- destination exclusion is flock(2) on `.vc-update.lock/held`, inlined from
+  `scripts/install-runtime-pack.sh`. The lock inode is never unlinked. Release
+  closes this process's descriptor only. `--resume` does not remove another
+  owner's lock.
 - captures the previous destination under
   `.vc-update-capture-<transaction>/prior.app` (sibling captures are left alone)
 - prepares `.vc-update-prepared-<transaction>.app`, verifies codesign
@@ -91,8 +99,10 @@ Restore is a separate owner path (`--mode restore` →
 `restore_previous_tuple`). It never dittos the failed new app onto
 `prior.app`. The failed destination is quarantined as `failed-new.app`.
 Capture validity is checked before any destructive restore. A restore
-receipt must not republish the failed pack (`decideProductUpdateHandoff`
-returns `rolledBack`).
+receipt must not republish the failed pack. `decideProductUpdateHandoff`
+requires the exact transaction, operation, candidate/restore identity,
+validated phase, and pack publication evidence. Unresolved installer state
+keeps recovery open; app-only restore is not whole-tuple `rolledBack`.
 
 The parent records **READY admission**, not replacement.
 `applicationWillTerminate` calls `noteUIShutdownPreservingHandoff` when a
@@ -146,16 +156,17 @@ Production feeds must be HTTPS. `file://` and `http://` are rejected unless
 
 The fixture still verifies the detached signature, payload hashes, codesign
 identity, Team ID, stapler, and pack identity. It may use local transport. It
-does not weaken production policy. Unsigned copies are refused. Harness flags
-(`--open-bin`, `--fail-after`, `--allow-unsigned`) require
-`VIBECRAFTED_UPDATE_HELPER_HARNESS=1` and are not production switches.
+does not weaken production policy. Unsigned copies are refused. There is no
+`--allow-unsigned` trust bypass. Harness flags (`--open-bin`, `--fail-after`,
+`--hold-after`) require `VIBECRAFTED_UPDATE_HELPER_HARNESS=1` and may only
+schedule failures, not change trust acceptance.
 
-W2 may parameterize the already-built signed pair
-`dist/*20260910-e37be2c9*` + `dist/release-output.json` (or
-`VIBECRAFTED_UPDATE_FIXTURE_ROOT`) for
-`test_product_update_signed_fixture_positive_path`. Workers must not execute
-or replace that tuple. Missing the pair skips that one test; it is not an
-excuse to skip unsigned real-process coverage.
+W2 must run the cross-generation process tests against the already-built
+signed pair `dist/*20260910-e37be2c9*` plus the prior
+`dist/*20260909-79001c3d*` archive (or `VIBECRAFTED_UPDATE_FIXTURE_ROOT` /
+`VIBECRAFTED_UPDATE_PRIOR_FIXTURE_ROOT`). Workers must not execute or replace
+those tuples. Missing or unmountable signed fixtures are an unresolved
+required gate, not a skip.
 
 Do not invent a production URL, EdDSA key, or signed update.
 
@@ -168,15 +179,27 @@ and release-packaging copy are in tree.
 
 These production surfaces do **not** exist yet:
 
-1. A hosted HTTPS feed (`VCUpdateFeedURL` in `Info.plist`). The key is omitted
-   until that feed exists. Check for Updates then shows the bounded unavailable
-   card — that is the honest product state.
+1. A hosted HTTPS product channel. The release distribution owner is
+   `scripts/build-vibecrafted-release.sh` writing `dist/release-output.json` +
+   `.sig` + DMG + Runtime Pack, verified by
+   `python -m vibecrafted_core.product_contract release-output` and the closed
+   tree in `scripts/distribution_manifest.py`. No HTTPS origin, DNS name, or
+   GitHub Releases URL is authorized in this repository. `VCUpdateFeedURL` is
+   therefore omitted from `Info.plist`. Check for Updates shows the bounded
+   unavailable card — that is the honest product state. Provisioning still
+   required (Founder-authorized, not invented here): an HTTPS URL that serves
+   the exact signed `release-output.json` and `.sig` plus the matching DMG and
+   pack artifacts, then set `VCUpdateFeedURL` to that URL at release
+   packaging time. The bundled `vibecrafted-signing-v1.pub` is already the
+   trust root.
 2. A Founder-signed fixture tuple in this worktree (the private key is not
-   present). Negative signature tests use invalid bytes on purpose.
+   present). Acceptance uses the existing signed local e37 / 79001 artifacts
+   on the SSD dist / archive paths. Negative signature tests use invalid
+   bytes on purpose.
 
 Until (1) is provisioned, a normal install cannot download a production update.
 The mechanism, helper, verifier, installer wiring, and fixture seam are in
-source.
+source. Production discoverability remains open.
 
 ## Physical acceptance still open (W2 / Founder)
 

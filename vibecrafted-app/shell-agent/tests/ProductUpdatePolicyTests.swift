@@ -855,13 +855,58 @@ struct ProductUpdatePolicyTests {
       frameRevision: frame,
       transactionID: transaction,
       mode: mode,
-      phase: "helper_ready")
+      phase: "helper_ready",
+      candidateIdentity: "cdhash:candidate",
+      priorIdentity: "cdhash:prior")
+  }
+
+  static func boundEvidence(
+    transaction: String = "txn-1",
+    operation: String = ProductUpdateHelperMode.replace.rawValue,
+    phase: String = "receipt_written",
+    running: String = "cdhash:candidate",
+    candidate: String = "cdhash:candidate",
+    restore: String = "cdhash:prior",
+    pack: ProductUpdatePackPublicationState = .unpublished
+  ) -> ProductUpdateRuntimeEvidence {
+    ProductUpdateRuntimeEvidence(
+      runningAppIdentity: running,
+      expectedCandidateIdentity: candidate,
+      expectedRestoreIdentity: restore,
+      journalPhase: phase,
+      journalTransaction: transaction,
+      journalOperation: operation,
+      packPublication: pack)
+  }
+
+  static func boundReceipt(
+    replaced: Bool = true,
+    destination: String = "/Applications/Vibecrafted.app",
+    detail: String = "replaced",
+    transaction: String? = "txn-1",
+    mode: String? = ProductUpdateHelperMode.replace.rawValue,
+    phase: String? = "receipt_written"
+  ) -> ProductUpdateReplacementReceipt {
+    ProductUpdateReplacementReceipt(
+      replaced: replaced,
+      relaunched: false,
+      destination: destination,
+      detail: detail,
+      capture: "/tmp/.vc-update-capture-txn-1",
+      transaction: transaction,
+      journal: "/tmp/replacement-receipt.json.journal.json",
+      mode: mode,
+      operation: mode,
+      phase: phase,
+      sourceIdentity: "cdhash:candidate",
+      priorIdentity: "cdhash:prior")
   }
 
   static func testHandoffMissingReceiptWithLiveHelperWaits() throws {
     switch decideProductUpdateHandoff(
       handoff: sampleHandoff(), replacement: nil, helperLive: true,
-      runningDestination: "/Applications/Vibecrafted.app")
+      runningDestination: "/Applications/Vibecrafted.app",
+      evidence: boundEvidence())
     {
     case .awaitReceipt:
       break
@@ -873,7 +918,8 @@ struct ProductUpdatePolicyTests {
   static func testHandoffMissingReceiptWithDeadHelperRetains() throws {
     switch decideProductUpdateHandoff(
       handoff: sampleHandoff(), replacement: nil, helperLive: false,
-      runningDestination: "/Applications/Vibecrafted.app")
+      runningDestination: "/Applications/Vibecrafted.app",
+      evidence: boundEvidence())
     {
     case .retain(let reason):
       try require(reason.contains("receipt"), reason)
@@ -883,24 +929,22 @@ struct ProductUpdatePolicyTests {
   }
 
   static func testHandoffCorruptOrStaleReceiptIsNotAdopted() throws {
-    let foreign = ProductUpdateReplacementReceipt(
-      replaced: true, relaunched: false, destination: "/Applications/Vibecrafted.app",
-      detail: "replaced", capture: "/tmp/.vc-update-capture-other", transaction: "other-txn")
+    let foreign = boundReceipt(transaction: "other-txn")
     switch decideProductUpdateHandoff(
       handoff: sampleHandoff(), replacement: foreign, helperLive: false,
-      runningDestination: "/Applications/Vibecrafted.app")
+      runningDestination: "/Applications/Vibecrafted.app",
+      evidence: boundEvidence())
     {
     case .stale:
       break
     default:
       throw Failure(message: "a receipt from another transaction was adopted")
     }
-    let wrongDest = ProductUpdateReplacementReceipt(
-      replaced: true, relaunched: false, destination: "/tmp/Other.app",
-      detail: "replaced", capture: nil, transaction: "txn-1")
+    let wrongDest = boundReceipt(destination: "/tmp/Other.app")
     switch decideProductUpdateHandoff(
       handoff: sampleHandoff(), replacement: wrongDest, helperLive: false,
-      runningDestination: "/Applications/Vibecrafted.app")
+      runningDestination: "/Applications/Vibecrafted.app",
+      evidence: boundEvidence())
     {
     case .stale:
       break
@@ -909,22 +953,42 @@ struct ProductUpdatePolicyTests {
     }
     switch decideProductUpdateHandoff(
       handoff: sampleHandoff(), replacement: nil, helperLive: false,
-      runningDestination: "/tmp/Other.app")
+      runningDestination: "/tmp/Other.app",
+      evidence: boundEvidence())
     {
     case .stale:
       break
     default:
       throw Failure(message: "a handoff for another running app was adopted")
     }
+    let emptyTxn = boundReceipt(transaction: "")
+    switch decideProductUpdateHandoff(
+      handoff: sampleHandoff(), replacement: emptyTxn, helperLive: false,
+      runningDestination: "/Applications/Vibecrafted.app",
+      evidence: boundEvidence())
+    {
+    case .stale:
+      break
+    default:
+      throw Failure(message: "a receipt with an empty transaction was adopted")
+    }
+    switch decideProductUpdateHandoff(
+      handoff: sampleHandoff(transaction: ""), replacement: boundReceipt(), helperLive: false,
+      runningDestination: "/Applications/Vibecrafted.app",
+      evidence: boundEvidence(transaction: ""))
+    {
+    case .stale:
+      break
+    default:
+      throw Failure(message: "a handoff with an empty transaction was adopted")
+    }
   }
 
   static func testHandoffVerifiedReceiptPublishesPack() throws {
-    let receipt = ProductUpdateReplacementReceipt(
-      replaced: true, relaunched: false, destination: "/Applications/Vibecrafted.app",
-      detail: "replaced", capture: "/tmp/.vc-update-capture-txn-1", transaction: "txn-1")
     switch decideProductUpdateHandoff(
-      handoff: sampleHandoff(), replacement: receipt, helperLive: false,
-      runningDestination: "/Applications/Vibecrafted.app")
+      handoff: sampleHandoff(), replacement: boundReceipt(), helperLive: false,
+      runningDestination: "/Applications/Vibecrafted.app",
+      evidence: boundEvidence())
     {
     case .publishPack(let observed):
       try require(observed.replaced, "verified receipt was not publishable")
@@ -934,21 +998,89 @@ struct ProductUpdatePolicyTests {
   }
 
   static func testHandoffRestoreReceiptDoesNotPublishPack() throws {
-    let receipt = ProductUpdateReplacementReceipt(
-      replaced: true, relaunched: true, destination: "/Applications/Vibecrafted.app",
-      detail: "restored", capture: "/tmp/.vc-update-capture-txn-1", transaction: "txn-1",
-      journal: "/tmp/restore-receipt.json.journal.json", mode: ProductUpdateHelperMode.restore.rawValue)
+    let receipt = boundReceipt(
+      detail: "restored",
+      mode: ProductUpdateHelperMode.restore.rawValue)
     switch decideProductUpdateHandoff(
       handoff: sampleHandoff(
         mode: ProductUpdateHelperMode.restore.rawValue,
         receiptURL: "/tmp/restore-receipt.json"),
       replacement: receipt, helperLive: false,
-      runningDestination: "/Applications/Vibecrafted.app")
+      runningDestination: "/Applications/Vibecrafted.app",
+      evidence: boundEvidence(
+        operation: ProductUpdateHelperMode.restore.rawValue,
+        running: "cdhash:prior"))
     {
     case .rolledBack(let reason):
       try require(reason.contains("previous"), reason)
     default:
       throw Failure(message: "a restore receipt must not republish the failed pack")
+    }
+  }
+
+  static func testHandoffUnresolvedPackKeepsRecoveryOpen() throws {
+    switch decideProductUpdateHandoff(
+      handoff: sampleHandoff(), replacement: boundReceipt(), helperLive: false,
+      runningDestination: "/Applications/Vibecrafted.app",
+      evidence: boundEvidence(pack: .unresolved))
+    {
+    case .retain(let reason):
+      try require(reason.contains("unresolved"), reason)
+    default:
+      throw Failure(message: "unresolved installer state was treated as committed")
+    }
+    switch decideProductUpdateHandoff(
+      handoff: sampleHandoff(mode: ProductUpdateHelperMode.restore.rawValue),
+      replacement: boundReceipt(detail: "restored", mode: ProductUpdateHelperMode.restore.rawValue),
+      helperLive: false,
+      runningDestination: "/Applications/Vibecrafted.app",
+      evidence: boundEvidence(
+        operation: ProductUpdateHelperMode.restore.rawValue,
+        running: "cdhash:prior",
+        pack: .unresolved))
+    {
+    case .retain(let reason):
+      try require(reason.contains("unresolved"), reason)
+    default:
+      throw Failure(message: "app-only restore claimed rolledBack while pack state was unresolved")
+    }
+    switch decideProductUpdateHandoff(
+      handoff: sampleHandoff(mode: ProductUpdateHelperMode.restore.rawValue),
+      replacement: boundReceipt(detail: "restored", mode: ProductUpdateHelperMode.restore.rawValue),
+      helperLive: false,
+      runningDestination: "/Applications/Vibecrafted.app",
+      evidence: boundEvidence(
+        operation: ProductUpdateHelperMode.restore.rawValue,
+        running: "cdhash:prior",
+        pack: .published))
+    {
+    case .retain(let reason):
+      try require(reason.contains("published"), reason)
+    default:
+      throw Failure(message: "app-only restore claimed whole-tuple rollback after pack publish")
+    }
+  }
+
+  static func testHandoffRequiresExactIdentityAndPhase() throws {
+    switch decideProductUpdateHandoff(
+      handoff: sampleHandoff(), replacement: boundReceipt(), helperLive: false,
+      runningDestination: "/Applications/Vibecrafted.app",
+      evidence: boundEvidence(running: "cdhash:other"))
+    {
+    case .retain:
+      break
+    default:
+      throw Failure(message: "path-only identity was treated as the candidate")
+    }
+    switch decideProductUpdateHandoff(
+      handoff: sampleHandoff(), replacement: boundReceipt(phase: "displacing"), helperLive: false,
+      runningDestination: "/Applications/Vibecrafted.app",
+      evidence: boundEvidence())
+    {
+    case .retain:
+      break
+    default:
+      throw Failure(message: "an unvalidated receipt phase was treated as committed")
     }
   }
 
@@ -1072,6 +1204,9 @@ struct ProductUpdatePolicyTests {
     try testHandoffMissingReceiptWithDeadHelperRetains()
     try testHandoffCorruptOrStaleReceiptIsNotAdopted()
     try testHandoffVerifiedReceiptPublishesPack()
+    try testHandoffRestoreReceiptDoesNotPublishPack()
+    try testHandoffUnresolvedPackKeepsRecoveryOpen()
+    try testHandoffRequiresExactIdentityAndPhase()
     try testRestoreRequestBindsSameTransactionAndWaitsForUI()
     try testOwnedCaptureRejectsForeignPaths()
     try testAdmissionRecordRequiresBinding()

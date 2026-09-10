@@ -8,7 +8,6 @@ import shutil
 import stat
 import subprocess
 import time
-import uuid
 from pathlib import Path
 
 import pytest
@@ -86,6 +85,24 @@ def test_product_update_source_contract() -> None:
     assert "restore_previous_tuple" in helper
     assert "failed-new.app" in helper
     assert "rolledBack" in transaction
+    assert "reconcile_resume" in helper
+    assert "require_exact_identity" in helper
+    assert "flock_update_lock_nb" in helper
+    assert "UPDATE_LOCK_FD" in helper
+    assert "owned_displaced" in helper
+    assert "journal_require operation" in helper
+    assert "productUpdateObserveRuntimeEvidence" in transaction
+    assert "ProductUpdatePackPublicationState" in transaction
+    assert "unresolved" in transaction
+    assert 'rm -rf "$LOCKDIR"' not in helper
+    assert "ALLOW_UNSIGNED" not in helper
+    assert "refusing --allow-unsigned" in helper
+    assert "productUpdateObserveRuntimeEvidence" in delegate
+    assert "writeProductUpdatePackEvidence" in delegate
+    assert "signed fixture pair not mounted" not in helper
+    assert "previous-marker.txt" not in (REPO_ROOT / "tests/tui/test_product_update.py").read_text(
+        encoding="utf-8"
+    )
     assert "case .waiting, .publishing, .restoring" in delegate
     launch = delegate[
         delegate.index("func applicationDidFinishLaunching(") : delegate.index(
@@ -305,7 +322,7 @@ def test_product_update_helper_refuses_harness_flags_in_production(tmp_path: Pat
         env={k: v for k, v in os.environ.items() if k != "VIBECRAFTED_UPDATE_HELPER_HARNESS"},
     )
     assert result.returncode == 2
-    assert "VIBECRAFTED_UPDATE_HELPER_HARNESS" in result.stderr
+    assert "allow-unsigned" in result.stderr
 
 
 def test_product_update_helper_does_not_synthesize_receipt(tmp_path: Path) -> None:
@@ -351,34 +368,372 @@ def _run_helper(args: list[str], env: dict[str, str] | None = None, timeout: flo
     )
 
 
-def _signed_fixture_root() -> Path | None:
-    configured = os.environ.get("VIBECRAFTED_UPDATE_FIXTURE_ROOT")
-    candidates = []
-    if configured:
-        candidates.append(Path(configured))
-    candidates.append(REPO_ROOT / "dist")
-    candidates.append(
-        Path("/Volumes/vc-workspace/vetcoders/vibecrafted-suite/vibecrafted/dist")
+def _fail_missing_fixture(detail: str) -> None:
+    pytest.fail(
+        "unresolved required gate: signed update fixture is missing. "
+        f"{detail} Mount the SSD dist pair or set VIBECRAFTED_UPDATE_FIXTURE_ROOT "
+        "(*20260910-e37be2c9*) and VIBECRAFTED_UPDATE_PRIOR_FIXTURE_ROOT "
+        "(*20260909-79001c3d*). This is not skippable."
     )
-    for root in candidates:
-        feed = root / "release-output.json"
-        if feed.is_file() and any(root.glob("*20260910-e37be2c9*.dmg")):
-            return root
+
+
+def _signed_search_roots() -> list[Path]:
+    roots: list[Path] = []
+    for key in (
+        "VIBECRAFTED_UPDATE_FIXTURE_ROOT",
+        "VIBECRAFTED_UPDATE_PRIOR_FIXTURE_ROOT",
+    ):
+        configured = os.environ.get(key)
+        if configured:
+            roots.append(Path(configured))
+    roots.append(REPO_ROOT / "dist")
+    roots.append(Path("/Volumes/vc-workspace/vetcoders/vibecrafted-suite/vibecrafted/dist"))
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for root in roots:
+        resolved = root.expanduser()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(resolved)
+    return unique
+
+
+def _first_glob(roots: list[Path], pattern: str) -> Path | None:
+    for root in roots:
+        if not root.is_dir():
+            continue
+        matches = sorted(root.glob(pattern))
+        if matches:
+            return matches[0]
     return None
 
 
+def _require_generation_artifacts(label: str, dmg_glob: str, pack_glob: str) -> dict[str, Path]:
+    roots = _signed_search_roots()
+    dmg = _first_glob(roots, dmg_glob)
+    pack = _first_glob(roots, pack_glob)
+    feed = _first_glob(roots, "release-output.json")
+    signature = _first_glob(roots, "release-output.json.sig")
+    if dmg is None or pack is None:
+        _fail_missing_fixture(f"{label} DMG/pack not found with {dmg_glob} / {pack_glob}.")
+    assert dmg is not None and pack is not None
+    if feed is None or signature is None:
+        _fail_missing_fixture(f"{label} release-output.json + .sig are required next to the DMG.")
+    assert feed is not None and signature is not None
+    if signature.stat().st_size != 256:
+        pytest.fail(
+            "unresolved required gate: detached signature is not 256 bytes; "
+            "do not treat an unsigned locator as a signed fixture."
+        )
+    return {"dmg": dmg, "pack": pack, "feed": feed, "signature": signature}
+
+
+def _require_e37_artifacts() -> dict[str, Path]:
+    return _require_generation_artifacts(
+        "e37",
+        "*20260910-e37be2c9*.dmg",
+        "*20260910-e37be2c9*.tar.gz",
+    )
+
+
+def _require_prior_79001_artifacts() -> dict[str, Path]:
+    return _require_generation_artifacts(
+        "79001",
+        "*20260909-79001c3d*.dmg",
+        "*20260909-79001c3d*.tar.gz",
+    )
+
+
+def _attach_signed_app(dmg: Path, mount: Path) -> Path:
+    mount.mkdir(parents=True, exist_ok=True)
+    attached = subprocess.run(
+        [
+            "/usr/bin/hdiutil",
+            "attach",
+            "-nobrowse",
+            "-readonly",
+            "-mountpoint",
+            str(mount),
+            str(dmg),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if attached.returncode != 0:
+        pytest.fail(
+            "unresolved required gate: could not attach the signed DMG "
+            f"{dmg}: {attached.stderr}"
+        )
+    apps = list(mount.rglob("Vibecrafted.app"))
+    if not apps:
+        pytest.fail(f"unresolved required gate: {dmg} has no Vibecrafted.app")
+    return apps[0]
+
+
+def _copy_signed_app(src: Path, dest: Path) -> Path:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["/usr/bin/ditto", str(src), str(dest)], check=True, timeout=60)
+    return dest
+
+
+def _identity_token(app: Path) -> str:
+    display = subprocess.run(
+        ["/usr/bin/codesign", "--display", "--verbose=4", str(app)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    text = display.stdout + display.stderr
+    for line in text.splitlines():
+        if line.startswith("CDHash="):
+            return "cdhash:" + line.split("=", 1)[1]
+    pytest.fail(f"signed app {app} has no CDHash")
+    raise AssertionError
+
+
+class _SignedApps:
+    def __init__(self, tmp_path: Path) -> None:
+        self.tmp = tmp_path
+        self.e37 = _require_e37_artifacts()
+        self.prior = _require_prior_79001_artifacts()
+        self.mounts: list[Path] = []
+
+    def __enter__(self) -> "_SignedApps":
+        e37_mount = self.tmp / "mnt-e37"
+        prior_mount = self.tmp / "mnt-79001"
+        self.e37_app = _attach_signed_app(self.e37["dmg"], e37_mount)
+        self.prior_app = _attach_signed_app(self.prior["dmg"], prior_mount)
+        self.mounts = [e37_mount, prior_mount]
+        self.e37_identity = _identity_token(self.e37_app)
+        self.prior_identity = _identity_token(self.prior_app)
+        if self.e37_identity == self.prior_identity:
+            pytest.fail(
+                "unresolved required gate: e37 and 79001 fixtures have the same "
+                "CDHash; cross-generation acceptance needs two signed generations"
+            )
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        for mount in self.mounts:
+            subprocess.run(
+                ["/usr/bin/hdiutil", "detach", str(mount), "-quiet"],
+                capture_output=True,
+                timeout=30,
+            )
+
+    def copy_e37(self, dest: Path) -> Path:
+        return _copy_signed_app(self.e37_app, dest)
+
+    def copy_prior(self, dest: Path) -> Path:
+        return _copy_signed_app(self.prior_app, dest)
+
+
 def test_product_update_helper_writes_ready_before_waiting(tmp_path: Path) -> None:
-    dest = _unsigned_app(tmp_path / "Installed.app", "keep")
-    source = _unsigned_app(tmp_path / "Candidate.app", "next")
-    receipt = tmp_path / "receipt.json"
-    gate = tmp_path / "continue"
-    sleeper = subprocess.Popen(["/bin/sleep", "30"])
-    helper = None
-    try:
-        start = subprocess.check_output(
-            ["/bin/ps", "-p", str(sleeper.pid), "-o", "lstart="], text=True
-        ).strip()
-        helper = subprocess.Popen(
+    with _SignedApps(tmp_path) as apps:
+        dest = apps.copy_prior(tmp_path / "Installed.app")
+        source = apps.copy_e37(tmp_path / "Candidate.app")
+        dest_identity = apps.prior_identity
+        receipt = tmp_path / "receipt.json"
+        gate = tmp_path / "continue"
+        sleeper = subprocess.Popen(["/bin/sleep", "30"])
+        helper = None
+        try:
+            start = subprocess.check_output(
+                ["/bin/ps", "-p", str(sleeper.pid), "-o", "lstart="], text=True
+            ).strip()
+            helper = subprocess.Popen(
+                [
+                    str(HELPER),
+                    "--source",
+                    str(source),
+                    "--destination",
+                    str(dest),
+                    "--receipt",
+                    str(receipt),
+                    "--wait-pid",
+                    str(sleeper.pid),
+                    "--wait-start",
+                    start,
+                    "--wait-timeout",
+                    "8",
+                    "--hold-after",
+                    "ready",
+                    "--until",
+                    str(gate),
+                ],
+                env=_helper_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            admission = Path(str(receipt) + ".admission.json")
+            deadline = time.time() + 20
+            while time.time() < deadline and not admission.is_file():
+                if helper.poll() is not None:
+                    break
+                time.sleep(0.05)
+            assert admission.is_file(), "helper exited before READY admission"
+            payload = json.loads(admission.read_text(encoding="utf-8"))
+            assert payload["status"] == "ready"
+            assert payload["destination"] == str(dest)
+            assert payload["parent_pid"] == str(sleeper.pid)
+            assert payload["parent_start"] == start
+            assert payload["source_identity"] == apps.e37_identity
+            assert _identity_token(dest) == dest_identity
+            assert helper.poll() is None
+            gate.write_text("go", encoding="utf-8")
+            finished = helper.wait(timeout=20)
+            assert finished == 5
+            assert _identity_token(dest) == dest_identity
+            assert not receipt.exists() or '"replaced":true' not in receipt.read_text(
+                encoding="utf-8"
+            )
+        finally:
+            if sleeper.poll() is None:
+                sleeper.terminate()
+                sleeper.wait(timeout=5)
+            if helper is not None and helper.poll() is None:
+                helper.terminate()
+                helper.wait(timeout=5)
+
+
+def test_product_update_helper_copy_failure_keeps_destination(tmp_path: Path) -> None:
+    with _SignedApps(tmp_path) as apps:
+        dest = apps.copy_prior(tmp_path / "Installed.app")
+        source = apps.copy_e37(tmp_path / "Candidate.app")
+        receipt = tmp_path / "receipt.json"
+        result = _run_helper(
+            [
+                "--source",
+                str(source),
+                "--destination",
+                str(dest),
+                "--receipt",
+                str(receipt),
+                "--fail-after",
+                "captured",
+            ],
+            env=_helper_env(),
+        )
+        assert result.returncode == 40
+        assert _identity_token(dest) == apps.prior_identity
+        journal = json.loads(Path(str(receipt) + ".journal.json").read_text(encoding="utf-8"))
+        assert journal["phase"] == "captured"
+        assert journal["prior_identity"] == apps.prior_identity
+        assert journal["source_identity"] == apps.e37_identity
+        assert not receipt.exists() or '"replaced":true' not in receipt.read_text(
+            encoding="utf-8"
+        )
+
+
+def test_product_update_helper_write_ahead_displace_is_resumable(tmp_path: Path) -> None:
+    with _SignedApps(tmp_path) as apps:
+        dest = apps.copy_prior(tmp_path / "Installed.app")
+        source = apps.copy_e37(tmp_path / "Candidate.app")
+        receipt = tmp_path / "receipt.json"
+        first = _run_helper(
+            [
+                "--source",
+                str(source),
+                "--destination",
+                str(dest),
+                "--receipt",
+                str(receipt),
+                "--fail-after",
+                "displacing",
+            ],
+            env=_helper_env(),
+        )
+        assert first.returncode == 40
+        assert not dest.exists()
+        journal = json.loads(Path(str(receipt) + ".journal.json").read_text(encoding="utf-8"))
+        assert journal["phase"] == "displacing"
+        capture = Path(journal["capture"])
+        assert _identity_token(capture / "displaced.app") == apps.prior_identity
+        sibling = tmp_path / ".vc-update-capture-oldid" / "prior.app"
+        sibling.mkdir(parents=True)
+        (sibling / "keep.txt").write_text("old", encoding="utf-8")
+        resumed = _run_helper(
+            [
+                "--source",
+                str(source),
+                "--destination",
+                str(dest),
+                "--receipt",
+                str(receipt),
+                "--journal",
+                str(receipt) + ".journal.json",
+                "--transaction",
+                journal["transaction"],
+                "--resume",
+            ],
+            env=_helper_env(),
+        )
+        assert resumed.returncode == 0, resumed.stderr
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+        assert payload["replaced"] is True
+        assert payload["detail"] == "replaced"
+        assert payload["mode"] == "replace"
+        assert _identity_token(dest) == apps.e37_identity
+        assert (sibling / "keep.txt").read_text(encoding="utf-8") == "old"
+
+
+def test_product_update_helper_resume_requires_complete_journal(tmp_path: Path) -> None:
+    with _SignedApps(tmp_path) as apps:
+        dest = apps.copy_prior(tmp_path / "Installed.app")
+        source = apps.copy_e37(tmp_path / "Candidate.app")
+        receipt = tmp_path / "receipt.json"
+        first = _run_helper(
+            [
+                "--source",
+                str(source),
+                "--destination",
+                str(dest),
+                "--receipt",
+                str(receipt),
+                "--fail-after",
+                "captured",
+            ],
+            env=_helper_env(),
+        )
+        assert first.returncode == 40
+        journal_path = Path(str(receipt) + ".journal.json")
+        payload = json.loads(journal_path.read_text(encoding="utf-8"))
+        del payload["operation"]
+        journal_path.write_text(json.dumps(payload), encoding="utf-8")
+        resumed = _run_helper(
+            [
+                "--source",
+                str(source),
+                "--destination",
+                str(dest),
+                "--receipt",
+                str(receipt),
+                "--journal",
+                str(journal_path),
+                "--transaction",
+                payload["transaction"],
+                "--resume",
+            ],
+            env=_helper_env(),
+        )
+        assert resumed.returncode == 14
+        assert "operation" in resumed.stderr
+        assert _identity_token(dest) == apps.prior_identity
+        assert not receipt.exists() or '"replaced":true' not in receipt.read_text(
+            encoding="utf-8"
+        )
+
+
+def test_product_update_helper_rejects_overlapping_lock(tmp_path: Path) -> None:
+    with _SignedApps(tmp_path) as apps:
+        dest = apps.copy_prior(tmp_path / "Installed.app")
+        source = apps.copy_e37(tmp_path / "Candidate.app")
+        receipt = tmp_path / "receipt.json"
+        gate = tmp_path / "continue"
+        first = subprocess.Popen(
             [
                 str(HELPER),
                 "--source",
@@ -387,13 +742,6 @@ def test_product_update_helper_writes_ready_before_waiting(tmp_path: Path) -> No
                 str(dest),
                 "--receipt",
                 str(receipt),
-                "--wait-pid",
-                str(sleeper.pid),
-                "--wait-start",
-                start,
-                "--wait-timeout",
-                "8",
-                "--allow-unsigned",
                 "--hold-after",
                 "ready",
                 "--until",
@@ -405,414 +753,388 @@ def test_product_update_helper_writes_ready_before_waiting(tmp_path: Path) -> No
             text=True,
         )
         admission = Path(str(receipt) + ".admission.json")
-        deadline = time.time() + 8
+        deadline = time.time() + 20
         while time.time() < deadline and not admission.is_file():
-            if helper.poll() is not None:
+            if first.poll() is not None:
                 break
             time.sleep(0.05)
-        assert admission.is_file(), "helper exited before READY admission"
-        payload = json.loads(admission.read_text(encoding="utf-8"))
-        assert payload["status"] == "ready"
-        assert payload["destination"] == str(dest)
-        assert payload["parent_pid"] == str(sleeper.pid)
-        assert payload["parent_start"] == start
-        assert (dest / "marker.txt").read_text(encoding="utf-8") == "keep"
-        assert helper.poll() is None
-        gate.write_text("go", encoding="utf-8")
-        finished = helper.wait(timeout=12)
-        assert finished == 5
-        assert (dest / "marker.txt").read_text(encoding="utf-8") == "keep"
-        assert not receipt.exists() or '"replaced":true' not in receipt.read_text(
-            encoding="utf-8"
+        assert admission.is_file()
+        held = dest.parent / ".vc-update.lock" / "held"
+        assert held.is_file()
+        second = _run_helper(
+            [
+                "--source",
+                str(source),
+                "--destination",
+                str(dest),
+                "--receipt",
+                str(tmp_path / "other-receipt.json"),
+                "--resume",
+            ],
+            env=_helper_env(),
         )
-    finally:
-        if sleeper.poll() is None:
-            sleeper.terminate()
-            sleeper.wait(timeout=5)
-        if helper is not None and helper.poll() is None:
-            helper.terminate()
-            helper.wait(timeout=5)
-
-
-def test_product_update_helper_receipt_exists_before_open_bin(tmp_path: Path) -> None:
-    dest = _unsigned_app(tmp_path / "Installed.app", "keep")
-    source = _unsigned_app(tmp_path / "Candidate.app", "next")
-    receipt = tmp_path / "receipt.json"
-    opened = tmp_path / "opened.txt"
-    observer = tmp_path / "open-bin"
-    observer.write_text(
-        "#!/bin/bash\n"
-        "set -euo pipefail\n"
-        f'RECEIPT="{receipt}"\n'
-        'test -f "$RECEIPT"\n'
-        "python3 - <<'PY'\n"
-        "import json, pathlib, sys\n"
-        f"payload = json.loads(pathlib.Path({str(receipt)!r}).read_text())\n"
-        "assert payload.get('replaced') is True\n"
-        "assert payload.get('relaunched') is False\n"
-        "PY\n"
-        f'echo opened > "{opened}"\n',
-        encoding="utf-8",
-    )
-    observer.chmod(observer.stat().st_mode | stat.S_IXUSR)
-    result = _run_helper(
-        [
-            "--source",
-            str(source),
-            "--destination",
-            str(dest),
-            "--receipt",
-            str(receipt),
-            "--relaunch",
-            "--allow-unsigned",
-            "--open-bin",
-            str(observer),
-        ],
-        env=_helper_env(),
-    )
-    assert result.returncode == 0, result.stderr
-    assert json.loads(receipt.read_text(encoding="utf-8"))["replaced"] is True
-    assert opened.read_text(encoding="utf-8").strip() == "opened"
-    assert (dest / "marker.txt").read_text(encoding="utf-8") == "next"
-
-
-def test_product_update_helper_copy_failure_keeps_destination(tmp_path: Path) -> None:
-    dest = _unsigned_app(tmp_path / "Installed.app", "keep")
-    source = _unsigned_app(tmp_path / "Candidate.app", "next")
-    receipt = tmp_path / "receipt.json"
-    result = _run_helper(
-        [
-            "--source",
-            str(source),
-            "--destination",
-            str(dest),
-            "--receipt",
-            str(receipt),
-            "--allow-unsigned",
-            "--fail-after",
-            "captured",
-        ],
-        env=_helper_env(),
-    )
-    assert result.returncode == 40
-    assert (dest / "marker.txt").read_text(encoding="utf-8") == "keep"
-    journal = json.loads(Path(str(receipt) + ".journal.json").read_text(encoding="utf-8"))
-    assert journal["phase"] == "captured"
-    assert journal["capture"]
-    assert not receipt.exists() or '"replaced":true' not in receipt.read_text(encoding="utf-8")
-
-
-def test_product_update_helper_interrupt_after_displace_is_resumable(tmp_path: Path) -> None:
-    dest = _unsigned_app(tmp_path / "Installed.app", "keep")
-    source = _unsigned_app(tmp_path / "Candidate.app", "next")
-    receipt = tmp_path / "receipt.json"
-    first = _run_helper(
-        [
-            "--source",
-            str(source),
-            "--destination",
-            str(dest),
-            "--receipt",
-            str(receipt),
-            "--allow-unsigned",
-            "--fail-after",
-            "displaced",
-        ],
-        env=_helper_env(),
-    )
-    assert first.returncode == 40
-    assert not dest.exists()
-    journal = json.loads(Path(str(receipt) + ".journal.json").read_text(encoding="utf-8"))
-    assert journal["phase"] == "displaced"
-    capture = Path(journal["capture"])
-    assert (capture / "displaced.app" / "marker.txt").is_file()
-    sibling = tmp_path / ".vc-update-capture-oldid" / "prior.app"
-    sibling.mkdir(parents=True)
-    (sibling / "keep.txt").write_text("old", encoding="utf-8")
-    resumed = _run_helper(
-        [
-            "--source",
-            str(source),
-            "--destination",
-            str(dest),
-            "--receipt",
-            str(receipt),
-            "--journal",
-            str(receipt) + ".journal.json",
-            "--transaction",
-            journal["transaction"],
-            "--allow-unsigned",
-            "--resume",
-        ],
-        env=_helper_env(),
-    )
-    assert resumed.returncode == 0, resumed.stderr
-    assert dest.exists()
-    assert (dest / "marker.txt").read_text(encoding="utf-8") in {"keep", "next"}
-    assert (sibling / "keep.txt").read_text(encoding="utf-8") == "old"
-    assert json.loads(receipt.read_text(encoding="utf-8"))["replaced"] is True
-
-
-def test_product_update_helper_rejects_overlapping_lock(tmp_path: Path) -> None:
-    dest = _unsigned_app(tmp_path / "Installed.app", "keep")
-    source = _unsigned_app(tmp_path / "Candidate.app", "next")
-    receipt = tmp_path / "receipt.json"
-    gate = tmp_path / "continue"
-    first = subprocess.Popen(
-        [
-            str(HELPER),
-            "--source",
-            str(source),
-            "--destination",
-            str(dest),
-            "--receipt",
-            str(receipt),
-            "--allow-unsigned",
-            "--hold-after",
-            "ready",
-            "--until",
-            str(gate),
-        ],
-        env=_helper_env(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    admission = Path(str(receipt) + ".admission.json")
-    deadline = time.time() + 8
-    while time.time() < deadline and not admission.is_file():
-        if first.poll() is not None:
-            break
-        time.sleep(0.05)
-    assert admission.is_file()
-    second = _run_helper(
-        [
-            "--source",
-            str(source),
-            "--destination",
-            str(dest),
-            "--receipt",
-            str(tmp_path / "other-receipt.json"),
-            "--allow-unsigned",
-        ],
-        env=_helper_env(),
-    )
-    assert second.returncode == 13
-    assert (dest / "marker.txt").read_text(encoding="utf-8") == "keep"
-    gate.write_text("go", encoding="utf-8")
-    first.wait(timeout=15)
+        assert second.returncode == 13
+        assert held.is_file()
+        assert _identity_token(dest) == apps.prior_identity
+        gate.write_text("go", encoding="utf-8")
+        first.wait(timeout=20)
+        assert held.is_file()
 
 
 def test_product_update_helper_missing_receipt_is_not_success(tmp_path: Path) -> None:
-    dest = _unsigned_app(tmp_path / "Installed.app", "keep")
-    source = _unsigned_app(tmp_path / "Candidate.app", "next")
-    receipt = tmp_path / "receipt.json"
-    result = _run_helper(
-        [
-            "--source",
-            str(source),
-            "--destination",
-            str(dest),
-            "--receipt",
-            str(receipt),
-            "--allow-unsigned",
-            "--fail-after",
-            "adopted",
-        ],
-        env=_helper_env(),
-    )
-    assert result.returncode == 40
-    assert not receipt.exists() or '"replaced":true' not in receipt.read_text(encoding="utf-8")
-
-
-def test_product_update_helper_restore_does_not_overwrite_prior(tmp_path: Path) -> None:
-    transaction = str(uuid.uuid4())
-    dest = _unsigned_app(tmp_path / "Installed.app", "new-failed")
-    capture = tmp_path / f".vc-update-capture-{transaction}"
-    prior = _unsigned_app(capture / "prior.app", "old-working")
-    receipt = tmp_path / "restore-receipt.json"
-    opened = tmp_path / "opened.txt"
-    observer = tmp_path / "open-bin"
-    observer.write_text(
-        "#!/bin/bash\n"
-        "set -euo pipefail\n"
-        f"python3 -c \"import json; p=json.load(open(r'{receipt}')); assert p['replaced'] is True\"\n"
-        f'echo opened > "{opened}"\n',
-        encoding="utf-8",
-    )
-    observer.chmod(observer.stat().st_mode | stat.S_IXUSR)
-    result = _run_helper(
-        [
-            "--source",
-            str(prior),
-            "--destination",
-            str(dest),
-            "--receipt",
-            str(receipt),
-            "--transaction",
-            transaction,
-            "--mode",
-            "restore",
-            "--relaunch",
-            "--allow-unsigned",
-            "--open-bin",
-            str(observer),
-        ],
-        env=_helper_env(),
-    )
-    assert result.returncode == 0, result.stderr
-    assert (dest / "marker.txt").read_text(encoding="utf-8") == "old-working"
-    assert (prior / "marker.txt").read_text(encoding="utf-8") == "old-working"
-    failed_new = capture / "failed-new.app"
-    assert (failed_new / "marker.txt").read_text(encoding="utf-8") == "new-failed"
-    payload = json.loads(receipt.read_text(encoding="utf-8"))
-    assert payload["replaced"] is True
-    assert payload["detail"] == "restored"
-    assert payload["mode"] == "restore"
-    assert opened.is_file()
-
-
-def test_product_update_helper_restore_interrupt_keeps_prior(tmp_path: Path) -> None:
-    transaction = str(uuid.uuid4())
-    dest = _unsigned_app(tmp_path / "Installed.app", "new-failed")
-    capture = tmp_path / f".vc-update-capture-{transaction}"
-    prior = _unsigned_app(capture / "prior.app", "old-working")
-    receipt = tmp_path / "restore-receipt.json"
-    first = _run_helper(
-        [
-            "--source",
-            str(prior),
-            "--destination",
-            str(dest),
-            "--receipt",
-            str(receipt),
-            "--transaction",
-            transaction,
-            "--mode",
-            "restore",
-            "--allow-unsigned",
-            "--fail-after",
-            "displaced",
-        ],
-        env=_helper_env(),
-    )
-    assert first.returncode == 40
-    assert not dest.exists()
-    assert (prior / "marker.txt").read_text(encoding="utf-8") == "old-working"
-    assert (capture / "failed-new.app" / "marker.txt").read_text(encoding="utf-8") == "new-failed"
-    resumed = _run_helper(
-        [
-            "--source",
-            str(prior),
-            "--destination",
-            str(dest),
-            "--receipt",
-            str(receipt),
-            "--transaction",
-            transaction,
-            "--mode",
-            "restore",
-            "--allow-unsigned",
-        ],
-        env=_helper_env(),
-    )
-    assert resumed.returncode == 0, resumed.stderr
-    assert (dest / "marker.txt").read_text(encoding="utf-8") == "old-working"
-    assert (prior / "marker.txt").read_text(encoding="utf-8") == "old-working"
-
-
-def test_product_update_signed_fixture_positive_path(tmp_path: Path) -> None:
-    root = _signed_fixture_root()
-    if root is None:
-        pytest.skip(
-            "signed fixture pair not mounted in this worktree; parameterized for W2 via "
-            "VIBECRAFTED_UPDATE_FIXTURE_ROOT or dist/*20260910-e37be2c9*"
-        )
-    feed = root / "release-output.json"
-    signature = root / "release-output.json.sig"
-    dmgs = list(root.glob("*20260910-e37be2c9*.dmg"))
-    packs = list(root.glob("*20260910-e37be2c9*.tar.gz"))
-    assert feed.is_file()
-    assert dmgs, "signed fixture DMG is missing from the parameterized root"
-    assert packs, "signed fixture Runtime Pack is missing from the parameterized root"
-    if signature.is_file():
-        assert signature.stat().st_size == 256
-    mount = tmp_path / "mnt"
-    mount.mkdir()
-    attached = subprocess.run(
-        ["/usr/bin/hdiutil", "attach", "-nobrowse", "-readonly", "-mountpoint", str(mount), str(dmgs[0])],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    if attached.returncode != 0:
-        pytest.skip(f"W2 must attach the signed DMG: {attached.stderr}")
-    try:
-        apps = list(mount.rglob("Vibecrafted.app"))
-        assert apps, "signed fixture DMG has no Vibecrafted.app"
-        source = tmp_path / "Candidate.app"
-        dest = tmp_path / "Installed.app"
-        subprocess.run(["/usr/bin/ditto", str(apps[0]), str(source)], check=True, timeout=60)
-        subprocess.run(["/usr/bin/ditto", str(apps[0]), str(dest)], check=True, timeout=60)
-        (dest / "previous-marker.txt").write_text("old-tuple", encoding="utf-8")
+    with _SignedApps(tmp_path) as apps:
+        dest = apps.copy_prior(tmp_path / "Installed.app")
+        source = apps.copy_e37(tmp_path / "Candidate.app")
         receipt = tmp_path / "receipt.json"
-        opened = tmp_path / "opened.txt"
-        observer = tmp_path / "open-bin"
-        observer.write_text(
-            "#!/bin/bash\n"
-            "set -euo pipefail\n"
-            f"python3 -c \"import json; p=json.load(open(r'{receipt}')); assert p['replaced'] is True\"\n"
-            f'echo opened > "{opened}"\n',
-            encoding="utf-8",
-        )
-        observer.chmod(observer.stat().st_mode | stat.S_IXUSR)
-        sleeper = subprocess.Popen(["/bin/sleep", "2"])
-        start = subprocess.check_output(
-            ["/bin/ps", "-p", str(sleeper.pid), "-o", "lstart="], text=True
-        ).strip()
-        helper = subprocess.Popen(
+        result = _run_helper(
             [
-                str(HELPER),
                 "--source",
                 str(source),
                 "--destination",
                 str(dest),
                 "--receipt",
                 str(receipt),
-                "--wait-pid",
-                str(sleeper.pid),
-                "--wait-start",
-                start,
-                "--relaunch",
-                "--open-bin",
-                str(observer),
+                "--fail-after",
+                "adopted",
+            ],
+            env=_helper_env(),
+        )
+        assert result.returncode == 40
+        assert not receipt.exists() or '"replaced":true' not in receipt.read_text(
+            encoding="utf-8"
+        )
+
+
+def test_product_update_helper_rejects_traversal_transaction(tmp_path: Path) -> None:
+    dest = _unsigned_app(tmp_path / "Installed.app", "keep")
+    source = _unsigned_app(tmp_path / "Candidate.app", "next")
+    receipt = tmp_path / "receipt.json"
+    result = _run_helper(
+        [
+            "--source",
+            str(source),
+            "--destination",
+            str(dest),
+            "--receipt",
+            str(receipt),
+            "--transaction",
+            "../evil",
+        ]
+    )
+    assert result.returncode == 2
+    assert "transaction" in result.stderr
+    link = tmp_path / "link-dest.app"
+    link.symlink_to(dest)
+    linked = _run_helper(
+        [
+            "--source",
+            str(source),
+            "--destination",
+            str(link),
+            "--receipt",
+            str(receipt),
+        ]
+    )
+    assert linked.returncode == 6
+
+
+def test_product_update_result_before_new_ui_and_restore(tmp_path: Path) -> None:
+    with _SignedApps(tmp_path) as apps:
+        dest = apps.copy_prior(tmp_path / "Installed.app")
+        source = apps.copy_e37(tmp_path / "Candidate.app")
+        receipt = tmp_path / "receipt.json"
+        new_ui_started = tmp_path / "new-ui-started"
+        sleeper = subprocess.Popen(["/bin/sleep", "30"])
+        helper = None
+        try:
+            start = subprocess.check_output(
+                ["/bin/ps", "-p", str(sleeper.pid), "-o", "lstart="], text=True
+            ).strip()
+            helper = subprocess.Popen(
+                [
+                    str(HELPER),
+                    "--source",
+                    str(source),
+                    "--destination",
+                    str(dest),
+                    "--receipt",
+                    str(receipt),
+                    "--wait-pid",
+                    str(sleeper.pid),
+                    "--wait-start",
+                    start,
+                    "--wait-timeout",
+                    "20",
+                ],
+                env=_helper_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            admission = Path(str(receipt) + ".admission.json")
+            deadline = time.time() + 20
+            while time.time() < deadline and not admission.is_file():
+                if helper.poll() is not None:
+                    break
+                time.sleep(0.05)
+            assert admission.is_file(), "old UI must see READY before it exits"
+            assert helper.poll() is None
+            sleeper.terminate()
+            sleeper.wait(timeout=5)
+            assert helper.wait(timeout=90) == 0
+            payload = json.loads(receipt.read_text(encoding="utf-8"))
+            assert payload["replaced"] is True
+            assert payload["detail"] == "replaced"
+            assert payload["transaction"]
+            assert payload["source_identity"] == apps.e37_identity
+            assert payload["prior_identity"] == apps.prior_identity
+            assert _identity_token(dest) == apps.e37_identity
+            assert not new_ui_started.exists()
+            new_ui_started.write_text("started after receipt", encoding="utf-8")
+            journal = json.loads(Path(str(receipt) + ".journal.json").read_text(encoding="utf-8"))
+            capture = Path(journal["capture"])
+            prior = capture / "prior.app"
+            assert _identity_token(prior) == apps.prior_identity
+            restore_receipt = tmp_path / "restore-receipt.json"
+            shutil.copy2(
+                Path(str(receipt) + ".journal.json"),
+                Path(str(restore_receipt) + ".journal.json"),
+            )
+            restored = _run_helper(
+                [
+                    "--source",
+                    str(prior),
+                    "--destination",
+                    str(dest),
+                    "--receipt",
+                    str(restore_receipt),
+                    "--journal",
+                    str(restore_receipt) + ".journal.json",
+                    "--transaction",
+                    journal["transaction"],
+                    "--mode",
+                    "restore",
+                    "--fail-after",
+                    "adopting",
+                ],
+                env=_helper_env(),
+            )
+            assert restored.returncode == 40
+            restore_journal = json.loads(
+                Path(str(restore_receipt) + ".journal.json").read_text(encoding="utf-8")
+            )
+            assert restore_journal["phase"] == "adopting"
+            assert restore_journal["prior_identity"] == apps.prior_identity
+            resume = _run_helper(
+                [
+                    "--source",
+                    str(prior),
+                    "--destination",
+                    str(dest),
+                    "--receipt",
+                    str(restore_receipt),
+                    "--journal",
+                    str(restore_receipt) + ".journal.json",
+                    "--transaction",
+                    journal["transaction"],
+                    "--mode",
+                    "restore",
+                    "--resume",
+                ],
+                env=_helper_env(),
+            )
+            assert resume.returncode == 0, resume.stderr
+            restore_payload = json.loads(restore_receipt.read_text(encoding="utf-8"))
+            assert restore_payload["detail"] == "restored"
+            assert restore_payload["mode"] == "restore"
+            assert restore_payload["operation"] == "restore"
+            assert _identity_token(dest) == apps.prior_identity
+            assert _identity_token(prior) == apps.prior_identity
+            replace_again = _run_helper(
+                [
+                    "--source",
+                    str(source),
+                    "--destination",
+                    str(dest),
+                    "--receipt",
+                    str(tmp_path / "receipt-2.json"),
+                ],
+                env=_helper_env(),
+                timeout=90,
+            )
+            assert replace_again.returncode == 0, replace_again.stderr
+            journal2_path = Path(str(tmp_path / "receipt-2.json") + ".journal.json")
+            journal2 = json.loads(journal2_path.read_text(encoding="utf-8"))
+            prior2 = Path(journal2["capture"]) / "prior.app"
+            restore2 = tmp_path / "restore-displacing.json"
+            interrupted = _run_helper(
+                [
+                    "--source",
+                    str(prior2),
+                    "--destination",
+                    str(dest),
+                    "--receipt",
+                    str(restore2),
+                    "--journal",
+                    str(journal2_path),
+                    "--transaction",
+                    journal2["transaction"],
+                    "--mode",
+                    "restore",
+                    "--fail-after",
+                    "displacing",
+                ],
+                env=_helper_env(),
+            )
+            assert interrupted.returncode == 40
+            assert not dest.exists()
+            assert _identity_token(Path(journal2["capture"]) / "failed-new.app") == apps.e37_identity
+            assert _identity_token(prior2) == apps.prior_identity
+            resume_displacing = _run_helper(
+                [
+                    "--source",
+                    str(prior2),
+                    "--destination",
+                    str(dest),
+                    "--receipt",
+                    str(restore2),
+                    "--journal",
+                    str(journal2_path),
+                    "--transaction",
+                    journal2["transaction"],
+                    "--mode",
+                    "restore",
+                    "--resume",
+                ],
+                env=_helper_env(),
+            )
+            assert resume_displacing.returncode == 0, resume_displacing.stderr
+            assert json.loads(restore2.read_text(encoding="utf-8"))["detail"] == "restored"
+            assert _identity_token(dest) == apps.prior_identity
+            assert _identity_token(prior2) == apps.prior_identity
+        finally:
+            if sleeper.poll() is None:
+                sleeper.terminate()
+                sleeper.wait(timeout=5)
+            if helper is not None and helper.poll() is None:
+                helper.terminate()
+                helper.wait(timeout=5)
+
+
+def test_product_update_pack_failure_and_concurrent_recovery(tmp_path: Path) -> None:
+    installer = REPO_ROOT / "scripts/install-runtime-pack.sh"
+    with _SignedApps(tmp_path) as apps:
+        dest = apps.copy_prior(tmp_path / "Installed.app")
+        source = apps.copy_e37(tmp_path / "Candidate.app")
+        receipt = tmp_path / "receipt.json"
+        replaced = _run_helper(
+            [
+                "--source",
+                str(source),
+                "--destination",
+                str(dest),
+                "--receipt",
+                str(receipt),
+            ],
+            env=_helper_env(),
+            timeout=90,
+        )
+        assert replaced.returncode == 0, replaced.stderr
+        isolated = tmp_path / "isolated-runtime"
+        isolated.mkdir()
+        env = os.environ.copy()
+        env["VIBECRAFTED_RUNTIME_HOME"] = str(isolated)
+        env["HOME"] = str(tmp_path / "isolated-home")
+        env["XDG_DATA_HOME"] = str(tmp_path / "isolated-xdg")
+        pack = subprocess.run(
+            [
+                "/bin/bash",
+                str(installer),
+                "--pack",
+                str(apps.e37["pack"]),
+                "--app-root",
+                str(dest),
+                "--terminal-host",
+                str(dest / "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"),
+                "--frame-helper",
+                str(dest / "Contents/Helpers/vc-frame"),
+                "--expected-source-revision",
+                "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                "--expected-terminal-revision",
+                "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                "--expected-frame-revision",
+                "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            env=env,
+        )
+        assert pack.returncode != 0
+        evidence = {
+            "schema": "io.vetcoders.vibecrafted.product-update-pack-evidence.v1",
+            "transaction": json.loads(receipt.read_text(encoding="utf-8"))["transaction"],
+            "state": "unresolved",
+        }
+        (tmp_path / "pack-evidence.json").write_text(json.dumps(evidence), encoding="utf-8")
+        assert json.loads((tmp_path / "pack-evidence.json").read_text())["state"] == "unresolved"
+        journal = json.loads(Path(str(receipt) + ".journal.json").read_text(encoding="utf-8"))
+        capture = Path(journal["capture"])
+        gate = tmp_path / "hold-restore"
+        first = subprocess.Popen(
+            [
+                str(HELPER),
+                "--source",
+                str(capture / "prior.app"),
+                "--destination",
+                str(dest),
+                "--receipt",
+                str(tmp_path / "restore-a.json"),
+                "--journal",
+                str(receipt) + ".journal.json",
+                "--transaction",
+                journal["transaction"],
+                "--mode",
+                "restore",
+                "--hold-after",
+                "ready",
+                "--until",
+                str(gate),
             ],
             env=_helper_env(),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
-        admission = Path(str(receipt) + ".admission.json")
-        deadline = time.time() + 30
+        deadline = time.time() + 20
+        admission = Path(str(tmp_path / "restore-a.json") + ".admission.json")
         while time.time() < deadline and not admission.is_file():
-            if helper.poll() is not None:
+            if first.poll() is not None:
                 break
             time.sleep(0.05)
-        assert admission.is_file(), "signed helper exited before READY admission"
-        assert json.loads(admission.read_text(encoding="utf-8"))["status"] == "ready"
-        sleeper.wait(timeout=5)
-        assert helper.wait(timeout=90) == 0
-        payload = json.loads(receipt.read_text(encoding="utf-8"))
-        assert payload["replaced"] is True
-        assert payload["transaction"]
-        assert opened.is_file()
-        assert (dest / "Contents").exists()
-    finally:
-        subprocess.run(
-            ["/usr/bin/hdiutil", "detach", str(mount), "-quiet"],
-            capture_output=True,
-            timeout=30,
+        assert admission.is_file()
+        concurrent = _run_helper(
+            [
+                "--source",
+                str(capture / "prior.app"),
+                "--destination",
+                str(dest),
+                "--receipt",
+                str(tmp_path / "restore-b.json"),
+                "--journal",
+                str(receipt) + ".journal.json",
+                "--transaction",
+                journal["transaction"],
+                "--mode",
+                "restore",
+                "--resume",
+            ],
+            env=_helper_env(),
         )
+        assert concurrent.returncode == 13
+        assert (dest.parent / ".vc-update.lock" / "held").is_file()
+        gate.write_text("go", encoding="utf-8")
+        first.wait(timeout=90)
 
 
 def test_product_update_policy_swift_behavior(tmp_path: Path) -> None:
