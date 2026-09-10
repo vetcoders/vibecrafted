@@ -239,9 +239,13 @@ def _committed_repo(path: Path, home: Path) -> str:
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["GIT_CONFIG_NOSYSTEM"] = "1"
-    subprocess.run(["git", "init", "-q", str(path)], check=True, capture_output=True, env=env)
+    subprocess.run(
+        ["git", "init", "-q", str(path)], check=True, capture_output=True, env=env
+    )
     (path / "README.md").write_text("seed\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(path), "add", "-A"], check=True, capture_output=True, env=env)
+    subprocess.run(
+        ["git", "-C", str(path), "add", "-A"], check=True, capture_output=True, env=env
+    )
     subprocess.run(
         [
             "git",
@@ -270,7 +274,9 @@ def _committed_repo(path: Path, home: Path) -> str:
     return head.stdout.strip()
 
 
-def test_vc_start_parse_does_not_materialize_worktree(tmp_path: Path, home: Path) -> None:
+def test_vc_start_parse_does_not_materialize_worktree(
+    tmp_path: Path, home: Path
+) -> None:
     repo = tmp_path / "repo"
     sha = _committed_repo(repo, home)
     (repo / "README.md").write_text("dirty parent\n", encoding="utf-8")
@@ -313,7 +319,9 @@ printf 'second=%s\\n' "$VIBECRAFTED_START_ROOT"
         home=home,
     )
     assert result.returncode == 0, result.stderr + result.stdout
-    root_line = next(line for line in result.stdout.splitlines() if line.startswith("root="))
+    root_line = next(
+        line for line in result.stdout.splitlines() if line.startswith("root=")
+    )
     worker = Path(root_line.split("=", 1)[1])
     assert worker.is_dir()
     assert worker.resolve() != repo.resolve()
@@ -357,7 +365,7 @@ printf 'base=%s\\n' "$VIBECRAFTED_START_BASELINE_SHA"
 
 def test_vc_start_invalid_launch_flags_are_refused(tmp_path: Path, home: Path) -> None:
     repo = tmp_path / "repo"
-    sha = _committed_repo(repo, home)
+    _committed_repo(repo, home)
     bad_word = _shell(
         f"_vetcoders_start_prepare_arguments --repo {repo} --worktree=maybe && exit 88",
         cwd=tmp_path,
@@ -396,8 +404,16 @@ printf 'worker=%s\\n' "$worker"
         home=home,
     )
     assert result.returncode == 0, result.stderr + result.stdout
-    child = next(line for line in result.stdout.splitlines() if line.startswith("child="))
-    worker = next(line for line in result.stdout.splitlines() if line.startswith("worker="))
+    child = next(
+        line for line in result.stdout.splitlines() if line.startswith("child=")
+    )
+    worker = next(
+        line for line in result.stdout.splitlines() if line.startswith("worker=")
+    )
     assert child.split("=", 1)[1] == worker.split("=", 1)[1]
-    trees = list((home / ".vibecrafted" / "worktrees").rglob(".git")) if (home / ".vibecrafted" / "worktrees").exists() else []
+    trees = (
+        list((home / ".vibecrafted" / "worktrees").rglob(".git"))
+        if (home / ".vibecrafted" / "worktrees").exists()
+        else []
+    )
     assert len(trees) == 1, trees

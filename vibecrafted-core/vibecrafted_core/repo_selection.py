@@ -426,10 +426,7 @@ def main() -> int:
             print(str(exc), file=sys.stderr)
             return 2
     launch = bool(
-        args.base
-        or args.execution_runtime
-        or wants_worktree
-        or args.prepare_worktree
+        args.base or args.execution_runtime or wants_worktree or args.prepare_worktree
     )
     if not launch:
         if not str(args.repo or "").strip() and not str(args.root or "").strip():
