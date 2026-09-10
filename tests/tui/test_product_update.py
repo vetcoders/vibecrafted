@@ -279,6 +279,9 @@ def test_product_update_source_contract() -> None:
     assert "VC_FRAME_SOCKET_DIR" in authored
     assert "_IsolatedFrameSession" in authored
     assert "_installed_frame_engine" in authored
+    assert "os.ttyname" in authored
+    assert "os.isatty" in authored
+    assert "O_NOCTTY" in authored
     assert "--create-background" in authored
     assert "delete-session" in authored
     assert "list-sessions" in authored
