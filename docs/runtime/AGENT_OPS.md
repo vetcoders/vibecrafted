@@ -10,9 +10,10 @@ no-await lifecycle, subagents, watchers) and what actually fixes it.
 After dispatch, arm `vibecrafted await <agent> --run-id <id>` immediately,
 supervisor-side. Control-plane JSON, report files, transcripts, panes, and
 scheduled wakeups are diagnostic only, not wake signals. Hedging await with
-ad-hoc pollers/watchers is a Class 3 violation; fix the `vc-server` await hub,
-do not normalize the hedge. `--timeout` is an idle window; add `--hard-cap`
-when the caller requires an absolute deadline.
+ad-hoc pollers/watchers is a Class 3 violation; fix `control_plane.await_run`
+and the dispatcher Unix-stream fanout, do not normalize the hedge.
+`--timeout` is an idle window; add `--hard-cap` when the caller requires an
+absolute deadline.
 
 Liveness is always a 3-signal decision before declaring a run done: confirm (1)
 the await verdict, (2) terminal state in run meta, and (3) worker pid dead; when

@@ -151,10 +151,65 @@ fn lifecycle_nonce_accepts_canonical_value_forms() {
     }
 }
 
+fn http_await_json(port: u16, run_id: &str) -> Value {
+    let path = format!(
+        "/api/control/runs/{run_id}/await?idle_timeout=5&hard_cap=10"
+    );
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("await connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .expect("await read timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .expect("await write timeout");
+    stream
+        .write_all(
+            format!(
+                "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .expect("await request");
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).expect("await response");
+    let text = String::from_utf8_lossy(&raw);
+    let body = text
+        .split("\r\n\r\n")
+        .nth(1)
+        .expect("HTTP body after headers");
+    let json_body = if text.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+        decode_chunked_body(body)
+    } else {
+        body.trim().to_string()
+    };
+    serde_json::from_str(&json_body).unwrap_or_else(|err| {
+        panic!("server await JSON: {err}; body={json_body:?} raw={text:?}");
+    })
+}
+
+fn decode_chunked_body(body: &str) -> String {
+    let mut rest = body;
+    let mut out = String::new();
+    loop {
+        let (size_line, after) = rest.split_once("\r\n").expect("chunk size");
+        let size = usize::from_str_radix(size_line.trim(), 16).expect("chunk hex");
+        if size == 0 {
+            break;
+        }
+        out.push_str(&after[..size]);
+        rest = after[size..].strip_prefix("\r\n").unwrap_or(&after[size..]);
+    }
+    out
+}
+
 #[test]
-fn twenty_real_cli_await_clients_share_one_server_observation() {
+fn twenty_real_http_await_clients_share_one_server_observation() {
+    // CLI await is dispatcher UDS (see vibecrafted-core/tests/test_run_signal.py).
+    // This fixture is the server HTTP projection only: twenty real TCP clients
+    // share one in-process monitor. It must not spawn vibecrafted_core.cli.
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::CommandExt;
+    use std::sync::{Arc, Mutex};
 
     let root = fixture_root();
     let home = root.join("home");
@@ -172,16 +227,6 @@ fn twenty_real_cli_await_clients_share_one_server_observation() {
     .expect("server config");
     write_runtime_meta(&home, "running", None);
 
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("repository root");
-    let project_python = fs::canonicalize(repo.join(".venv/bin/python3"))
-        .expect("resolve checkout Python without the macOS symlink launcher");
-    assert!(
-        project_python.is_file(),
-        "checkout Python is required for CLI e2e"
-    );
     let writer = root.join("control-plane-writer.sh");
     fs::write(&writer, "#!/bin/sh\nexit 0\n").expect("writer shim");
     let mut permissions = fs::metadata(&writer)
@@ -199,92 +244,48 @@ fn twenty_real_cli_await_clients_share_one_server_observation() {
         .env("VC_RUN_AWAIT_POLL_SECONDS", "0.03")
         .env("VC_RUN_AWAIT_EMPTY_GRACE_SECONDS", "0.05")
         .env("VC_SERVER_SITE_ROOT", &site_root)
-        .env("PYTHONPATH", repo.join("vibecrafted-core"))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .process_group(0);
     let mut server = ChildGuard(server.spawn().expect("start isolated vc-server"));
     wait_for_server(port);
 
-    let mut clients = Vec::new();
+    let errors = Arc::new(Mutex::new(Vec::new()));
+    let mut joins = Vec::new();
     for _ in 0..20 {
-        let mut command = Command::new(&project_python);
-        command
-            .args([
-                "-m",
-                "vibecrafted_core.cli",
-                "await",
-                "codex",
-                "--run-id",
-                "run-http-fanin",
-                "--timeout",
-                "5",
-                "--hard-cap",
-                "10",
-                "--json",
-            ])
-            .current_dir(repo)
-            .env_clear()
-            .env("HOME", &root)
-            .env("PATH", "/opt/homebrew/bin:/usr/bin:/bin")
-            .env("PYTHONPATH", repo.join("vibecrafted-core"))
-            .env("VIBECRAFTED_HOME", &home)
-            .env("XDG_CONFIG_HOME", &config_home)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0);
-        clients.push(ChildGuard(
-            command.spawn().expect("start real CLI await client"),
-        ));
+        let errors = Arc::clone(&errors);
+        joins.push(thread::spawn(move || {
+            match std::panic::catch_unwind(|| http_await_json(port, "run-http-fanin")) {
+                Ok(payload) => Some(payload),
+                Err(panic) => {
+                    errors.lock().expect("error lock").push(format!("{panic:?}"));
+                    None
+                }
+            }
+        }));
     }
-    // Keep the fixture live long enough for all real interpreter processes to
-    // cross HTTP accept and join the same monitor before terminal settlement.
+    // Give every TCP client time to join the shared server monitor before
+    // terminal settlement. This is join-window, not await-timeout inflation.
     thread::sleep(Duration::from_secs(2));
     write_runtime_meta(&home, "report_validated", Some(0));
 
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline {
-        if clients
-            .iter_mut()
-            .all(|child| child.try_wait().expect("poll CLI client").is_some())
-        {
-            break;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
     let mut observations = Vec::new();
-    for child in &mut clients {
-        if child.try_wait().expect("final CLI poll").is_none() {
-            stop_child(child);
-            stop_child(&mut server);
-            panic!("CLI await client exceeded deterministic test deadline");
-        }
-        let mut stdout = String::new();
-        let mut stderr = String::new();
-        child
-            .stdout
-            .take()
-            .expect("captured stdout")
-            .read_to_string(&mut stdout)
-            .expect("read CLI stdout");
-        child
-            .stderr
-            .take()
-            .expect("captured stderr")
-            .read_to_string(&mut stderr)
-            .expect("read CLI stderr");
-        let status = child.wait().expect("collect CLI status");
-        if !status.success() {
+    for join in joins {
+        let payload = join
+            .join()
+            .expect("http client thread")
+            .unwrap_or_else(|| {
+                stop_child(&mut server);
+                let errs = errors.lock().expect("error lock");
+                panic!("HTTP await client failed: {errs:?}");
+            });
+        if payload["outcome"] != "terminal"
+            || payload["subscription"]["ownership"] != "server_await_subscription"
+        {
             stop_child(&mut server);
             let _ = fs::remove_dir_all(&root);
-            panic!("CLI failed with {status}: stdout={stdout:?} stderr={stderr:?}");
+            panic!("unexpected HTTP await payload: {payload}");
         }
-        let payload: Value = serde_json::from_str(&stdout).expect("CLI verdict JSON");
-        assert_eq!(payload["outcome"], "terminal");
-        assert_eq!(
-            payload["subscription"]["ownership"],
-            "server_await_subscription"
-        );
         observations.push(payload["generated_at"].clone());
     }
     assert!(observations.iter().all(|stamp| stamp == &observations[0]));
