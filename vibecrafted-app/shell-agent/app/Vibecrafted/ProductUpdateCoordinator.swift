@@ -330,7 +330,7 @@ final class ProductUpdateCoordinator {
               detail: "The Runtime Pack could not be downloaded. \(error.localizedDescription)"),
             token: token, terminal: .retained)
         case .success(let packFile):
-          let cancelApp = self.dependencies.downloadFile(appURL, appDest) { appResult in
+          let cancelApp = self.dependencies.downloadFile(appURL, appDest) { [weak self] appResult in
             Task { @MainActor in
               guard let self, self.generation == token else { return }
               switch appResult {

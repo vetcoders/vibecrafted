@@ -73,6 +73,72 @@ def _authored_writes_named_socket(source: str, filename: str) -> bool:
     return False
 
 
+def _call_func_name(node: ast.Call) -> str:
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return ""
+
+
+def _module_functions(tree: ast.AST) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    found: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    for node in getattr(tree, "body", []):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            found[node.name] = node
+    return found
+
+
+def _string_constants(node: ast.AST) -> set[object]:
+    return {
+        child.value
+        for child in ast.walk(node)
+        if isinstance(child, ast.Constant)
+    }
+
+
+def _call_argv_strings(call: ast.Call) -> list[str]:
+    """Flatten string constants from positional list/tuple argv (helper / Popen)."""
+    strings: list[str] = []
+    for arg in call.args:
+        if isinstance(arg, (ast.List, ast.Tuple)):
+            for elt in arg.elts:
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                    strings.append(elt.value)
+        elif isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            strings.append(arg.value)
+    return strings
+
+
+def _function_invokes_helper_mode(fn: ast.AST, mode: str) -> bool:
+    """True when a call in `fn` passes adjacent `--mode`, `<mode>` argv strings."""
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call):
+            continue
+        argv = _call_argv_strings(node)
+        for index, item in enumerate(argv[:-1]):
+            if item == "--mode" and argv[index + 1] == mode:
+                return True
+    return False
+
+
+def _function_calls_install_signed_pack_allow_older(fn: ast.AST) -> bool:
+    """True when `fn` calls `_install_signed_pack` with allow_older other than False."""
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call):
+            continue
+        if _call_func_name(node) != "_install_signed_pack":
+            continue
+        for keyword in node.keywords:
+            if keyword.arg != "allow_older":
+                continue
+            if isinstance(keyword.value, ast.Constant) and keyword.value.value is False:
+                continue
+            return True
+    return False
+
+
 def _installed_frame_engine() -> Path | None:
     for candidate in (
         os.environ.get("VIBECRAFTED_VC_FRAME_BIN", ""),
@@ -229,14 +295,33 @@ def test_product_update_source_contract() -> None:
     assert '"--mode"' in authored and '"recover"' in authored
     assert "VIBECRAFTED_RUNTIME_PACK_HARNESS" in authored
     assert "fail-after" in authored
-    cross = authored[authored.index("def test_product_update_cross_generation") :]
-    assert "allow_older=True" not in cross.split("def test_product_update_policy_swift")[0]
+    functions = _module_functions(tree)
+    recovery_names = [
+        name
+        for name in functions
+        if name.startswith("test_product_update_cross_generation")
+        or name.startswith("test_product_update_whole_tuple_recovery")
+    ]
+    assert recovery_names, "cross-generation / whole-tuple recovery tests are missing"
+    for name in recovery_names:
+        fn = functions[name]
+        assert not _function_calls_install_signed_pack_allow_older(fn), (
+            f"{name} must not call _install_signed_pack with allow_older True"
+        )
+        assert _function_invokes_helper_mode(fn, "recover"), (
+            f"{name} must invoke production helper --mode recover"
+        )
+    other_constants: set[object] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name == "test_product_update_source_contract":
+            continue
+        other_constants.update(_string_constants(node))
+    assert "previous-marker.txt" not in other_constants
+    assert ("deadbeef" * 5) not in other_constants
     assert "pwd.getpwuid" in authored
-    assert ("deadbeef" * 5) not in authored
     assert "signed fixture pair not mounted" not in helper
-    assert "previous-marker.txt" not in (REPO_ROOT / "tests/tui/test_product_update.py").read_text(
-        encoding="utf-8"
-    )
     assert "case .waiting, .publishing, .restoring" in delegate
     launch = delegate[
         delegate.index("func applicationDidFinishLaunching(") : delegate.index(
