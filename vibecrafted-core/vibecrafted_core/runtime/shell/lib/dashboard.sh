@@ -1029,7 +1029,10 @@ _vetcoders_start_host_has_unique_client() {
 }
 
 # One-based host tab from the engine's list-tabs JSON (`active` + `position`).
+# Frame prints a pretty-printed TabInfo array (not a {tabs: ...} wrapper).
 # Omitted when the owner cannot name exactly one focused tab.
+# JSON travels on argv; the heredoc is the program only. Never pipe payload
+# into `python -` while a heredoc also owns stdin.
 _vetcoders_start_resolve_host_tab() {
   local host="${1:-}" vc_frame_bin="${2:-}" raw="" python_bin=""
   [[ -n "$host" && -n "$vc_frame_bin" ]] || return 1
@@ -1039,11 +1042,11 @@ _vetcoders_start_resolve_host_tab() {
   [[ -n "$raw" ]] || return 1
   python_bin="$(_vetcoders_internal_python 2>/dev/null || true)"
   [[ -n "$python_bin" ]] || return 1
-  printf '%s' "$raw" | "$python_bin" - <<'PY'
+  "$python_bin" - "$raw" <<'PY'
 import json
 import sys
 
-raw = sys.stdin.read().strip()
+raw = sys.argv[1].strip()
 if not raw:
     raise SystemExit(1)
 try:
@@ -1069,67 +1072,231 @@ print(position + 1)
 PY
 }
 
-# Exactly one WorkspaceProjectionReceipt, Handled, guest match, pane_id set.
-# Pipe write / engine exit 0 is not adoption without this ACK.
-_vetcoders_start_projection_receipt_ok() {
+# Classify engine output against one WorkspaceProjectionReceipt.
+# Prints exactly one of: handled | refused | indeterminate
+# handled  — one correlated Handled ACK, guest match, pane_id set, tab match
+# refused  — correlated Refused, or a pre-send Refused with zero mutation
+# indeterminate — missing/malformed/unparseable/Unavailable/uncorrelated
+# Payload is argv[1]; heredoc is the program. Never share stdin.
+_vetcoders_start_classify_projection() {
   local text="${1:-}" guest="${2:-}" tab="${3:-}" python_bin=""
-  [[ -n "$text" && -n "$guest" ]] || return 1
+  [[ -n "$guest" ]] || { printf 'indeterminate\n'; return 0; }
   python_bin="$(_vetcoders_internal_python 2>/dev/null || true)"
-  [[ -n "$python_bin" ]] || return 1
-  printf '%s' "$text" | "$python_bin" - "$guest" "$tab" <<'PY'
+  if [[ -z "$python_bin" ]]; then
+    printf 'indeterminate\n'
+    return 0
+  fi
+  "$python_bin" - "$text" "$guest" "$tab" <<'PY'
 import json
 import sys
 
-guest = sys.argv[1]
-tab = sys.argv[2] if len(sys.argv) > 2 else ""
-rows = []
-for line in sys.stdin.read().splitlines():
-    line = line.strip()
-    if not line.startswith("{"):
-        continue
-    try:
-        obj = json.loads(line)
-    except Exception:
-        continue
-    if (
-        isinstance(obj, dict)
-        and "request_id" in obj
-        and "guest" in obj
-        and "status" in obj
+text = sys.argv[1]
+guest = sys.argv[2]
+tab = sys.argv[3] if len(sys.argv) > 3 else ""
+
+
+def receipts(raw):
+    rows = []
+    stripped = raw.strip()
+    candidates = []
+    if stripped.startswith("{") or stripped.startswith("["):
+        try:
+            candidates.append(json.loads(stripped))
+        except Exception:
+            pass
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            candidates.append(json.loads(line))
+        except Exception:
+            continue
+    for obj in candidates:
+        if isinstance(obj, list):
+            for item in obj:
+                if (
+                    isinstance(item, dict)
+                    and "request_id" in item
+                    and "guest" in item
+                    and "status" in item
+                ):
+                    rows.append(item)
+        elif (
+            isinstance(obj, dict)
+            and "request_id" in obj
+            and "guest" in obj
+            and "status" in obj
+        ):
+            rows.append(obj)
+    return rows
+
+
+rows = receipts(text)
+if not rows:
+    lowered = text.lower()
+    if "surface may have changed" in lowered:
+        print("indeterminate")
+        raise SystemExit(0)
+    if "zero process/pane mutation" in lowered or (
+        "refused:" in lowered
+        and (
+            "cannot project into itself" in lowered
+            or ("guest" in lowered and "missing" in lowered)
+        )
     ):
-        rows.append(obj)
+        print("refused")
+        raise SystemExit(0)
+    print("indeterminate")
+    raise SystemExit(0)
 if len(rows) != 1:
-    raise SystemExit(1)
+    print("indeterminate")
+    raise SystemExit(0)
 receipt = rows[0]
-if receipt.get("status") != "Handled":
-    raise SystemExit(1)
+if not str(receipt.get("request_id") or "").strip():
+    print("indeterminate")
+    raise SystemExit(0)
 if receipt.get("guest") != guest:
-    raise SystemExit(1)
-if receipt.get("pane_id") in (None, ""):
-    raise SystemExit(1)
+    print("indeterminate")
+    raise SystemExit(0)
+status = receipt.get("status")
+if status not in ("Handled", "Refused", "Unavailable"):
+    print("indeterminate")
+    raise SystemExit(0)
 if tab:
     try:
         expected = int(tab) - 1
     except ValueError:
-        raise SystemExit(1)
+        print("indeterminate")
+        raise SystemExit(0)
     if receipt.get("tab") != expected:
-        raise SystemExit(1)
-raise SystemExit(0)
+        print("indeterminate")
+        raise SystemExit(0)
+if status == "Handled":
+    if receipt.get("pane_id") in (None, ""):
+        print("indeterminate")
+        raise SystemExit(0)
+    print("handled")
+    raise SystemExit(0)
+if status == "Refused":
+    print("refused")
+    raise SystemExit(0)
+print("indeterminate")
+PY
+}
+
+# Exactly one WorkspaceProjectionReceipt, Handled, guest match, pane_id set.
+# Pipe write / engine exit 0 is not adoption without this ACK.
+_vetcoders_start_projection_receipt_ok() {
+  local text="${1:-}" guest="${2:-}" tab="${3:-}"
+  [[ -n "$text" && -n "$guest" ]] || return 1
+  [[ "$(_vetcoders_start_classify_projection "$text" "$guest" "$tab")" == handled ]]
+}
+
+# Authoritative host pane list. Empty on query failure — never invent panes.
+_vetcoders_start_host_pane_snapshot() {
+  local host="${1:-}" vc_frame_bin="${2:-}"
+  [[ -n "$host" && -n "$vc_frame_bin" ]] || return 1
+  env -u VC_FRAME -u VC_FRAME_PANE_ID -u VC_FRAME_SESSION_NAME \
+    -u ZELLIJ -u ZELLIJ_PANE_ID -u ZELLIJ_SESSION_NAME \
+    "$vc_frame_bin" --session "$host" action list-panes --json --command 2>/dev/null
+}
+
+# Compare pre/post host list-panes. Prints projected | unchanged | unknown.
+# Guest visibility is title/command containing the guest name (Frame owner).
+# Cursor coordinates are volatile and stripped before identity compare.
+_vetcoders_start_reconcile_host_projection() {
+  local before="${1:-}" after="${2:-}" guest="${3:-}" python_bin=""
+  python_bin="$(_vetcoders_internal_python 2>/dev/null || true)"
+  if [[ -z "$python_bin" || -z "$guest" ]]; then
+    printf 'unknown\n'
+    return 0
+  fi
+  "$python_bin" - "$before" "$after" "$guest" <<'PY'
+import json
+import sys
+
+before, after, guest = sys.argv[1], sys.argv[2], sys.argv[3]
+VOLATILE = "cursor_coordinates_in_pane"
+
+
+def parse(raw):
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def identity(obj):
+    if isinstance(obj, list):
+        return [identity(item) for item in obj]
+    if isinstance(obj, dict):
+        return {key: identity(value) for key, value in obj.items() if key != VOLATILE}
+    return obj
+
+
+def mentions_guest(obj):
+    if isinstance(obj, dict):
+        for key in ("title", "terminal_command", "pane_command", "name"):
+            value = obj.get(key)
+            if isinstance(value, str) and guest in value:
+                return True
+        return any(mentions_guest(value) for value in obj.values())
+    if isinstance(obj, list):
+        return any(mentions_guest(item) for item in obj)
+    return False
+
+
+parsed_before, parsed_after = parse(before), parse(after)
+if parsed_after is not None and mentions_guest(parsed_after):
+    print("projected")
+    raise SystemExit(0)
+if (
+    parsed_before is not None
+    and parsed_after is not None
+    and identity(parsed_before) == identity(parsed_after)
+):
+    print("unchanged")
+    raise SystemExit(0)
+print("unknown")
 PY
 }
 
 _vetcoders_start_project_guest_into_host() {
   local vc_frame_bin="${1:-}" host="${2:-}" guest="${3:-}" tab="${4:-}"
-  local out="" rc=0
+  local out="" rc=0 before="" after="" classified="" reconciled=""
   local project_argv=(--session "$host" project-workspace "$guest")
+  _vetcoders_start_projection_outcome=""
   [[ -n "$vc_frame_bin" && -n "$host" && -n "$guest" ]] || return 4
   [[ -n "$tab" ]] && project_argv+=(--tab "$tab")
+  before="$(_vetcoders_start_host_pane_snapshot "$host" "$vc_frame_bin" || true)"
   out="$(_vetcoders_start_frame_env "$vc_frame_bin" "${project_argv[@]}" 2>&1)" || rc=$?
-  if _vetcoders_start_projection_receipt_ok "$out" "$guest" "$tab" && ((rc == 0)); then
+  classified="$(_vetcoders_start_classify_projection "$out" "$guest" "$tab")"
+  if [[ "$classified" == handled ]]; then
+    _vetcoders_start_projection_outcome="handled"
+    printf '%s\n' "$out"
+    return 0
+  fi
+  after="$(_vetcoders_start_host_pane_snapshot "$host" "$vc_frame_bin" || true)"
+  reconciled="$(_vetcoders_start_reconcile_host_projection "$before" "$after" "$guest")"
+  if [[ "$classified" != refused && "$reconciled" == projected ]]; then
+    _vetcoders_start_projection_outcome="reconciled"
     printf '%s\n' "$out"
     return 0
   fi
   [[ -z "$out" ]] || printf '%s\n' "$out" >&2
+  if [[ "$classified" == refused ]]; then
+    _vetcoders_start_projection_outcome="refused"
+    return 4
+  fi
+  if [[ "$reconciled" == unchanged ]]; then
+    _vetcoders_start_projection_outcome="unchanged"
+    return 4
+  fi
+  _vetcoders_start_projection_outcome="indeterminate"
   return 4
 }
 
@@ -1187,18 +1354,33 @@ _vetcoders_start_inside_host_guest() {
     "$(_vetcoders_shell_quote "$session_name")" "$(_vetcoders_shell_quote "$root")"
 
   if ! _vetcoders_start_project_guest_into_host "$vc_frame_bin" "$host" "$session_name" "$tab"; then
-    printf 'vc-start: workspace %s was created but not projected into host %s; the previous canvas was left unchanged. Project later with: vc-frame --session %s project-workspace %s%s\n' \
-      "$(_vetcoders_shell_quote "$session_name")" \
-      "$(_vetcoders_shell_quote "$host")" \
-      "$(_vetcoders_shell_quote "$host")" \
-      "$(_vetcoders_shell_quote "$session_name")" \
-      "${tab:+ --tab ${tab}}" >&2
+    case "${_vetcoders_start_projection_outcome:-indeterminate}" in
+      refused|unchanged)
+        printf 'vc-start: workspace %s was created but not projected into host %s; the previous canvas was left unchanged. Project later with: vc-frame --session %s project-workspace %s%s\n' \
+          "$(_vetcoders_shell_quote "$session_name")" \
+          "$(_vetcoders_shell_quote "$host")" \
+          "$(_vetcoders_shell_quote "$host")" \
+          "$(_vetcoders_shell_quote "$session_name")" \
+          "${tab:+ --tab ${tab}}" >&2
+        ;;
+      *)
+        printf 'vc-start: workspace %s was created; projection into host %s was not confirmed (ACK missing, malformed, or uncorrelated). The previous canvas is not known to be unchanged. Inspect: vc-frame --session %s action list-panes --json --command\n' \
+          "$(_vetcoders_shell_quote "$session_name")" \
+          "$(_vetcoders_shell_quote "$host")" \
+          "$(_vetcoders_shell_quote "$host")" >&2
+        ;;
+    esac
     return 4
   fi
 
   export VIBECRAFTED_OPERATOR_SESSION="$session_name"
-  printf 'vc-start: projected workspace %s into host %s (shared canvas)\n' \
-    "$(_vetcoders_shell_quote "$session_name")" "$(_vetcoders_shell_quote "$host")"
+  if [[ "${_vetcoders_start_projection_outcome:-}" == reconciled ]]; then
+    printf 'vc-start: projected workspace %s into host %s (shared canvas; confirmed by host list-panes)\n' \
+      "$(_vetcoders_shell_quote "$session_name")" "$(_vetcoders_shell_quote "$host")"
+  else
+    printf 'vc-start: projected workspace %s into host %s (shared canvas)\n' \
+      "$(_vetcoders_shell_quote "$session_name")" "$(_vetcoders_shell_quote "$host")"
+  fi
   return 0
 }
 

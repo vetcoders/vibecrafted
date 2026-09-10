@@ -182,11 +182,15 @@ vc-frame --session <host> project-workspace <guest> [--tab <one-based>]
 
 Host identity is the attached owner (`VC_FRAME_SESSION_NAME`) verified live
 with exactly one interactive client — never the repository basename and never
-a silent `switch-session`. Success requires one correlated
-`WorkspaceProjectionReceipt` with `status=Handled` and a `pane_id`. A missing
-or older Frame binary, an unresolvable host, or an ambiguous client refuses
-before create (exit 4). Failed projection leaves the previous canvas and
-reports created-but-not-projected. Name collisions remain exit 3.
+a silent `switch-session`. Success is a correlated `WorkspaceProjectionReceipt`
+with `status=Handled` and a `pane_id`, or an owner `list-panes --json --command`
+reconcile that shows the guest on the host after a missing/malformed ACK.
+A missing or older Frame binary, an unresolvable host, or an ambiguous client
+refuses before create (exit 4). A confirmed rejection or an unchanged owner
+snapshot reports created-but-not-projected and that the previous canvas was
+left unchanged. An unparseable, uncorrelated, or drifted outcome is
+indeterminate: the launcher must not claim the canvas stayed put. Name
+collisions remain exit 3.
 
 ## Reserved integration interfaces
 
