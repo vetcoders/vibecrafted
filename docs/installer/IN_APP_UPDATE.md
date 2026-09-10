@@ -101,8 +101,21 @@ Restore is a separate owner path (`--mode restore` →
 Capture validity is checked before any destructive restore. A restore
 receipt must not republish the failed pack. `decideProductUpdateHandoff`
 requires the exact transaction, operation, candidate/restore identity,
-validated phase, and pack publication evidence. Unresolved installer state
-keeps recovery open; app-only restore is not whole-tuple `rolledBack`.
+validated phase, and pack publication observed from the installer's own
+`active.json` + `install-receipt.json` (`vibecrafted.active-runtime.v1` /
+`vibecrafted.runtime-install.v1`). A caller-written pack enum or
+`pack-evidence.json` is a snapshot, not publication proof. Unreadable,
+pending, or unmatched installer documents stay `unresolved` and keep
+recovery open. App-only restore while the newer pack remains published is
+not whole-tuple `rolledBack`. Missing handoff `mode` / `phase` does not
+default to `replace` / `helper_ready`.
+
+Durable handoff is a prerequisite to UI exit. The coordinator persists the
+admitted helper record before `closeUIAfterHelperArmed`. Restore persists
+before `requestQuit`. `applicationShouldTerminate` cancels quit when that
+write fails. A failed persist keeps the current UI and transaction, shows
+the error, and does not abandon the helper. Pack-observation and recovery
+record writes are also visible failures, not `try?` silence.
 
 The parent records **READY admission**, not replacement.
 `applicationWillTerminate` calls `noteUIShutdownPreservingHandoff` when a
@@ -164,7 +177,11 @@ schedule failures, not change trust acceptance.
 W2 must run the cross-generation process tests against the already-built
 signed pair `dist/*20260910-e37be2c9*` plus the prior
 `dist/*20260909-79001c3d*` archive (or `VIBECRAFTED_UPDATE_FIXTURE_ROOT` /
-`VIBECRAFTED_UPDATE_PRIOR_FIXTURE_ROOT`). Workers must not execute or replace
+`VIBECRAFTED_UPDATE_PRIOR_FIXTURE_ROOT`). The current pair is bound by
+`python -m vibecrafted_core.product_contract release-output` plus sibling
+feed hashes. The prior pair is independently codesign/stapler-checked
+against `79001c3d` in `product-manifest.json`; the current e37 feed is
+never labeled as the prior manifest. Workers must not execute or replace
 those tuples. Missing or unmountable signed fixtures are an unresolved
 required gate, not a skip.
 

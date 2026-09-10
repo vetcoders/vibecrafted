@@ -348,14 +348,20 @@ struct ProductUpdatePolicyTests {
       fatalError("app must not replace")
     },
     closeUI: @escaping () -> Void = {},
-    timeout: TimeInterval = 15
+    timeout: TimeInterval = 15,
+    homeURL: URL? = nil
   ) -> ProductUpdateCoordinator {
     let staging = FileManager.default.temporaryDirectory.appendingPathComponent(
       "vc-update-stage-\(UUID().uuidString)", isDirectory: true)
-    let home = FileManager.default.temporaryDirectory.appendingPathComponent(
-      "vc-update-home-\(UUID().uuidString)", isDirectory: true)
+    let home: URL
+    if let homeURL {
+      home = homeURL
+    } else {
+      home = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "vc-update-home-\(UUID().uuidString)", isDirectory: true)
+      try! FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    }
     try! FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
-    try! FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
     let pack = staging.appendingPathComponent("pack.tar.gz")
     let app = staging.appendingPathComponent("Vibecrafted.app")
     try! Data(repeating: 9, count: 16).write(to: pack)
@@ -867,7 +873,9 @@ struct ProductUpdatePolicyTests {
     running: String = "cdhash:candidate",
     candidate: String = "cdhash:candidate",
     restore: String = "cdhash:prior",
-    pack: ProductUpdatePackPublicationState = .unpublished
+    pack: ProductUpdatePackPublicationState = .unpublished,
+    packGeneration: String = "",
+    packDetail: String = ""
   ) -> ProductUpdateRuntimeEvidence {
     ProductUpdateRuntimeEvidence(
       runningAppIdentity: running,
@@ -876,7 +884,9 @@ struct ProductUpdatePolicyTests {
       journalPhase: phase,
       journalTransaction: transaction,
       journalOperation: operation,
-      packPublication: pack)
+      packPublication: pack,
+      packGeneration: packGeneration,
+      packDetail: packDetail)
   }
 
   static func boundReceipt(
@@ -1141,6 +1151,127 @@ struct ProductUpdatePolicyTests {
       "a stale transaction was admitted")
   }
 
+  static func testHandoffReadRefusesDefaultReplaceMode() throws {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "vc-handoff-nomode-\(UUID().uuidString).json")
+    let object: [String: Any] = [
+      "schema": ProductUpdateHandoffRecord.schemaID,
+      "helper_pid": 1,
+      "helper_start": "s",
+      "wait_pid": 2,
+      "wait_start": "p",
+      "receipt_url": "/tmp/r.json",
+      "admission_url": "/tmp/a.json",
+      "journal_url": "/tmp/j.json",
+      "destination": "/Applications/Vibecrafted.app",
+      "candidate_generation": generation,
+      "installed_generation": previous,
+      "source_revision": source,
+      "terminal_revision": terminal,
+      "frame_revision": frame,
+      "transaction_id": "txn-1",
+      "candidate_identity": "cdhash:candidate",
+      "prior_identity": "cdhash:prior",
+    ]
+    let data = try JSONSerialization.data(withJSONObject: object)
+    try data.write(to: url)
+    do {
+      _ = try readProductUpdateHandoff(from: url)
+      throw Failure(message: "handoff missing mode/phase defaulted to replace")
+    } catch {
+      try require(
+        String(describing: error).contains("malformed")
+          || String(describing: error).contains("handoff"),
+        "missing mode was not a malformed handoff")
+    }
+  }
+
+  static func testObserveInstallerPublicationIgnoresCallerEnum() throws {
+    let runtime = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "vc-observe-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: runtime, withIntermediateDirectories: true)
+    let home = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "vc-observe-home-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    try writeProductUpdatePackEvidence(
+      transaction: "txn-1",
+      observation: ProductUpdateInstallerPublication(
+        generation: "",
+        receiptVersion: "",
+        pointerPresent: false,
+        receiptPresent: false,
+        pending: false,
+        readable: true,
+        rolledBack: false,
+        detail: "caller note"),
+      derived: .published,
+      priorGeneration: previous,
+      candidateGeneration: generation,
+      to: productUpdatePackEvidenceURL(home: home))
+    let observed = productUpdateObserveInstallerPublication(runtimeHome: runtime)
+    try require(!observed.pointerPresent && !observed.receiptPresent, "empty runtime was not absent")
+    try require(
+      productUpdateDerivePackPublication(
+        observed, priorGeneration: previous, candidateGeneration: generation) == .unpublished,
+      "absent installer docs were not unpublished")
+    let pointer = activeRuntimePointerURL(runtimeHome: runtime)
+    let receipt = runtimeInstallReceiptURL(runtimeHome: runtime)
+    try """
+      {"schema":"vibecrafted.active-runtime.v1","version":"\(generation)","runtime_root":"\(runtime.path)/releases/\(generation)"}
+      """.write(to: pointer, atomically: true, encoding: .utf8)
+    try """
+      {"schema":"vibecrafted.runtime-install.v1","version":"\(generation)"}
+      """.write(to: receipt, atomically: true, encoding: .utf8)
+    let published = productUpdateObserveInstallerPublication(runtimeHome: runtime)
+    try require(published.generation == generation, published.detail)
+    try require(
+      productUpdateDerivePackPublication(
+        published, priorGeneration: previous, candidateGeneration: generation) == .published,
+      "installer generation was not published")
+    try """
+      {"schema":"vibecrafted.active-runtime.v1","version":"mystery","runtime_root":"\(runtime.path)/releases/mystery"}
+      """.write(to: pointer, atomically: true, encoding: .utf8)
+    try """
+      {"schema":"vibecrafted.runtime-install.v1","version":"mystery"}
+      """.write(to: receipt, atomically: true, encoding: .utf8)
+    let mystery = productUpdateObserveInstallerPublication(runtimeHome: runtime)
+    try require(
+      productUpdateDerivePackPublication(
+        mystery, priorGeneration: previous, candidateGeneration: generation) == .unresolved,
+      "an unmatched installer generation defaulted to unpublished or replace")
+  }
+
+  static func testCoordinatorDoesNotCloseUIWhenHandoffWriteFails() throws {
+    var closed = 0
+    let blocked = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "vc-handoff-blocked-\(UUID().uuidString)")
+    FileManager.default.createFile(atPath: blocked.path, contents: Data(), attributes: nil)
+    let coordinator = makeCoordinator(
+      replaceApp: { request, completion in
+        completion(
+          .success(
+            ProductUpdateReplacementAdmission(
+              helperPID: 4242,
+              waitIdentity: ProductUpdateProcessIdentity(pid: 1, startTime: "test"),
+              receiptURL: request.receiptURL,
+              transactionURL: request.transactionURL,
+              transactionID: request.transactionID ?? "test-txn",
+              ready: true)))
+      },
+      closeUI: { closed += 1 },
+      homeURL: blocked)
+    coordinator.checkForUpdates()
+    try wait { coordinator.progress.canInstall }
+    coordinator.installUpdate()
+    try wait { coordinator.progress.phase == .error }
+    try require(closed == 0, "UI closed after a failed handoff persist")
+    try require(coordinator.hasAdmittedHelperHandoff, "failed persist dropped the admitted helper")
+    try require(
+      coordinator.progress.summary.contains("handoff")
+        || coordinator.progress.summary.contains("window stays open"),
+      coordinator.progress.summary)
+  }
+
   static func testCoordinatorDoesNotCloseUIWithoutReadyAdmission() throws {
     var closed = 0
     let coordinator = makeCoordinator(
@@ -1210,6 +1341,9 @@ struct ProductUpdatePolicyTests {
     try testRestoreRequestBindsSameTransactionAndWaitsForUI()
     try testOwnedCaptureRejectsForeignPaths()
     try testAdmissionRecordRequiresBinding()
+    try testHandoffReadRefusesDefaultReplaceMode()
+    try testObserveInstallerPublicationIgnoresCallerEnum()
+    try testCoordinatorDoesNotCloseUIWhenHandoffWriteFails()
     try testCoordinatorDoesNotCloseUIWithoutReadyAdmission()
     try testProgressCopyHasNoArchitectureJargon()
     print("ProductUpdatePolicyTests passed")

@@ -259,7 +259,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
 
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
     // Quit closes UI only; the service, terminals and agent lanes keep running.
-    .terminateNow
+    // An admitted helper must have a durable handoff before this process dies.
+    if productUpdate?.hasAdmittedHelperHandoff == true {
+      do {
+        try productUpdate?.persistAdmittedHandoff()
+      } catch {
+        showNativeMessage(
+          "Update handoff was not saved",
+          "The window stays open so the update helper is not abandoned. \(error.localizedDescription)")
+        return .terminateCancel
+      }
+    }
+    return .terminateNow
   }
 
   func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
@@ -2426,7 +2437,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     let evidence = productUpdateObserveRuntimeEvidence(
       handoff: handoff,
       runningApp: Bundle.main.bundleURL,
-      home: craftedHomeURL())
+      home: craftedHomeURL(),
+      runtimeHome: currentRuntimeHome())
     let decision = decideProductUpdateHandoff(
       handoff: handoff,
       replacement: replacement,
@@ -2468,9 +2480,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     case .restorePrevious(let prior):
       return beginProductUpdateRestore(handoff: handoff, prior: prior)
     case .rolledBack(let reason):
-      try? writeProductUpdateRecovery(
-        handoff: handoff, reason: reason,
-        to: productUpdateRecoveryURL(home: craftedHomeURL()))
+      do {
+        try writeProductUpdateRecovery(
+          handoff: handoff, reason: reason,
+          to: productUpdateRecoveryURL(home: craftedHomeURL()))
+      } catch {
+        retainProductUpdateEvidence(
+          handoff,
+          reason:
+            "\(reason) Recovery record was not saved. \(error.localizedDescription)")
+        return .retained
+      }
       try? FileManager.default.removeItem(at: pendingURL)
       showNativeMessage("Previous version restored", reason)
       return .retained
@@ -2503,10 +2523,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
   private func retainProductUpdateEvidence(
     _ handoff: ProductUpdateHandoffRecord, reason: String
   ) {
-    try? writeProductUpdateRecovery(
-      handoff: handoff, reason: reason,
-      to: productUpdateRecoveryURL(home: craftedHomeURL()))
-    showNativeMessage("Update did not finish", reason)
+    var message = reason
+    do {
+      try writeProductUpdateRecovery(
+        handoff: handoff, reason: reason,
+        to: productUpdateRecoveryURL(home: craftedHomeURL()))
+    } catch {
+      message =
+        "\(reason) Recovery record was not saved. \(error.localizedDescription)"
+    }
+    showNativeMessage("Update did not finish", message)
   }
 
   private func publishAdoptedProductUpdate(
@@ -2517,7 +2543,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     var bound = handoff
     bound.capturePath = replacement.capture ?? handoff.capturePath
     bound.phase = "app_replaced"
-    try? writeProductUpdateHandoff(bound, to: pendingURL)
+    do {
+      try writeProductUpdateHandoff(bound, to: pendingURL)
+    } catch {
+      retainProductUpdateEvidence(
+        bound,
+        reason:
+          "Could not save the replaced-app handoff. The Runtime Pack was not published. \(error.localizedDescription)")
+      return .retained
+    }
     guard let packPath = bound.packURL, FileManager.default.isReadableFile(atPath: packPath) else {
       retainProductUpdateEvidence(
         bound, reason: "the app was replaced, but the matching Runtime Pack was not found")
@@ -2545,29 +2579,77 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       guard let self else { return }
       switch outcome {
       case .success:
-        try? writeProductUpdatePackEvidence(
-          transaction: bound.transactionID,
-          state: .published,
-          to: productUpdatePackEvidenceURL(home: self.craftedHomeURL()))
-        try? FileManager.default.removeItem(at: pendingURL)
-        self.productUpdateStartupAdoption = .none
-        self.connectCommandDeck()
+        self.reconcileAdoptedPack(handoff: bound, pendingURL: pendingURL, installerFailed: false)
       case .failure:
-        try? writeProductUpdatePackEvidence(
-          transaction: bound.transactionID,
-          state: .unresolved,
-          to: productUpdatePackEvidenceURL(home: self.craftedHomeURL()))
-        if let prior = productUpdateOwnedPriorApp(at: bound.capturePath) {
-          _ = self.beginProductUpdateRestore(handoff: bound, prior: prior)
-        } else {
-          self.retainProductUpdateEvidence(
-            bound, reason: "the Runtime Pack did not publish, and the previous app capture is missing")
-          self.productUpdateStartupAdoption = .retained
-          self.connectCommandDeck()
-        }
+        self.reconcileAdoptedPack(handoff: bound, pendingURL: pendingURL, installerFailed: true)
       }
     }
     return .publishing
+  }
+
+  /// Reconcile the App replace against the installer's own identity documents.
+  /// A caller-written enum is not publication proof. App-only restore is not
+  /// whole-tuple success.
+  private func reconcileAdoptedPack(
+    handoff: ProductUpdateHandoffRecord,
+    pendingURL: URL,
+    installerFailed: Bool
+  ) {
+    let observed = productUpdateObserveInstallerPublication(runtimeHome: currentRuntimeHome())
+    let derived = productUpdateDerivePackPublication(
+      observed,
+      priorGeneration: handoff.installedGeneration,
+      candidateGeneration: handoff.candidateGeneration)
+    do {
+      try writeProductUpdatePackEvidence(
+        transaction: handoff.transactionID,
+        observation: observed,
+        derived: derived,
+        priorGeneration: handoff.installedGeneration,
+        candidateGeneration: handoff.candidateGeneration,
+        to: productUpdatePackEvidenceURL(home: craftedHomeURL()))
+    } catch {
+      retainProductUpdateEvidence(
+        handoff,
+        reason:
+          "Could not persist Runtime Pack observation. \(error.localizedDescription). \(observed.detail)")
+      productUpdateStartupAdoption = .retained
+      connectCommandDeck()
+      return
+    }
+    switch derived {
+    case .published:
+      if installerFailed {
+        retainProductUpdateEvidence(
+          handoff,
+          reason:
+            "the installer published \(observed.generation); the previous app was not restored so generations are not mixed. \(observed.detail)")
+        productUpdateStartupAdoption = .retained
+        connectCommandDeck()
+        return
+      }
+      try? FileManager.default.removeItem(at: pendingURL)
+      productUpdateStartupAdoption = .none
+      connectCommandDeck()
+    case .unpublished, .rolledBack:
+      if let prior = productUpdateOwnedPriorApp(at: handoff.capturePath) {
+        _ = beginProductUpdateRestore(handoff: handoff, prior: prior)
+      } else {
+        retainProductUpdateEvidence(
+          handoff,
+          reason:
+            "the Runtime Pack did not stay published, and the previous app capture is missing. \(observed.detail)")
+        productUpdateStartupAdoption = .retained
+        connectCommandDeck()
+      }
+    case .unresolved:
+      retainProductUpdateEvidence(
+        handoff,
+        reason:
+          "the Runtime Pack installer did not leave a coherent generation. \(observed.detail)")
+      productUpdateStartupAdoption = .retained
+      connectCommandDeck()
+    }
   }
 
   @discardableResult
@@ -2609,8 +2691,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
           if !admission.candidateIdentity.isEmpty {
             restoring.priorIdentity = admission.candidateIdentity
           }
-          try? writeProductUpdateHandoff(
-            restoring, to: productUpdatePendingHandoffURL(home: self.craftedHomeURL()))
+          do {
+            try writeProductUpdateHandoff(
+              restoring, to: productUpdatePendingHandoffURL(home: self.craftedHomeURL()))
+          } catch {
+            self.retainProductUpdateEvidence(
+              restoring,
+              reason:
+                "Could not save the restore handoff. The window stays open so the helper is not abandoned. \(error.localizedDescription)")
+            self.productUpdateStartupAdoption = .retained
+            self.connectCommandDeck()
+            return
+          }
           self.productUpdate?.noteUIShutdownPreservingHandoff()
           self.requestQuit()
         case .success:

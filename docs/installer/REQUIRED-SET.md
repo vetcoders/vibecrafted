@@ -27,9 +27,13 @@ any destination mutation, and the terminal replacement receipt before
 the original candidate/prior identities. Destination locking is flock on
 `.vc-update.lock/held`, never mkdir+rm. Pack failure restores `prior.app`
 through the same transaction owner and must not overwrite that capture.
-App-only restore is not whole-tuple proof: unresolved installer state keeps
-recovery open. Then the new App publishes the matching pack. The running
-process does not publish a newer pack under the old App.
+Whole-tuple recovery observes the installer's `active.json` and
+`install-receipt.json`; a caller-written pack enum is not that proof.
+App-only restore is not whole-tuple success: unresolved or still-published
+newer pack state keeps recovery open. A failed handoff persist keeps the
+current UI and does not abandon the helper. Then the new App publishes the
+matching pack. The running process does not publish a newer pack under the
+old App.
 Regression coverage:
 `tests/tui/test_installer_uninstall.py`, `tests/tui/test_installer_restore.py`.
 

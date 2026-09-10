@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import pwd
 import shutil
 import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -92,13 +95,31 @@ def test_product_update_source_contract() -> None:
     assert "owned_displaced" in helper
     assert "journal_require operation" in helper
     assert "productUpdateObserveRuntimeEvidence" in transaction
+    assert "productUpdateObserveInstallerPublication" in transaction
+    assert "productUpdateDerivePackPublication" in transaction
     assert "ProductUpdatePackPublicationState" in transaction
     assert "unresolved" in transaction
+    assert "vibecrafted.active-runtime.v1" in transaction
+    assert "vibecrafted.runtime-install.v1" in transaction
     assert 'rm -rf "$LOCKDIR"' not in helper
     assert "ALLOW_UNSIGNED" not in helper
     assert "refusing --allow-unsigned" in helper
     assert "productUpdateObserveRuntimeEvidence" in delegate
     assert "writeProductUpdatePackEvidence" in delegate
+    assert "reconcileAdoptedPack" in delegate
+    assert "persistAdmittedHandoff" in coordinator
+    assert ".terminateCancel" in delegate
+    assert 'try? writeProductUpdateHandoff' not in coordinator
+    assert 'try? writeProductUpdateHandoff' not in delegate
+    restore = delegate[delegate.index("beginProductUpdateRestore") :]
+    assert "Could not save the restore handoff" in restore
+    authored = (REPO_ROOT / "tests/tui/test_product_update.py").read_text(encoding="utf-8")
+    assert "product_contract" in authored
+    assert "VC_FRAME_SOCKET_DIR" in authored
+    assert "VIBECRAFTED_LAUNCHER_BIN" in authored
+    assert "allow-older-runtime" in authored
+    assert "pwd.getpwuid" in authored
+    assert ("deadbeef" * 5) not in authored
     assert "signed fixture pair not mounted" not in helper
     assert "previous-marker.txt" not in (REPO_ROOT / "tests/tui/test_product_update.py").read_text(
         encoding="utf-8"
@@ -409,39 +430,383 @@ def _first_glob(roots: list[Path], pattern: str) -> Path | None:
     return None
 
 
-def _require_generation_artifacts(label: str, dmg_glob: str, pack_glob: str) -> dict[str, Path]:
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sibling_feed(artifact: Path) -> tuple[Path, Path] | None:
+    feed = artifact.parent / "release-output.json"
+    signature = artifact.parent / "release-output.json.sig"
+    if feed.is_file() and signature.is_file():
+        return feed, signature
+    return None
+
+
+def _require_pair(label: str, dmg_glob: str, pack_glob: str) -> tuple[Path, Path]:
     roots = _signed_search_roots()
     dmg = _first_glob(roots, dmg_glob)
     pack = _first_glob(roots, pack_glob)
-    feed = _first_glob(roots, "release-output.json")
-    signature = _first_glob(roots, "release-output.json.sig")
     if dmg is None or pack is None:
         _fail_missing_fixture(f"{label} DMG/pack not found with {dmg_glob} / {pack_glob}.")
-    assert dmg is not None and pack is not None
-    if feed is None or signature is None:
-        _fail_missing_fixture(f"{label} release-output.json + .sig are required next to the DMG.")
-    assert feed is not None and signature is not None
+    return dmg, pack
+
+
+_E37_ARTIFACTS: dict[str, Path] | None = None
+
+
+def _require_e37_artifacts() -> dict[str, Path]:
+    global _E37_ARTIFACTS
+    if _E37_ARTIFACTS is not None:
+        return _E37_ARTIFACTS
+    dmg, pack = _require_pair(
+        "e37",
+        "*20260910-e37be2c9*.dmg",
+        "*20260910-e37be2c9*.tar.gz",
+    )
+    sibling = _sibling_feed(dmg) or _sibling_feed(pack)
+    if sibling is None:
+        _fail_missing_fixture(
+            "e37 release-output.json + .sig must sit next to the e37 DMG or pack; "
+            "do not reuse another generation's feed."
+        )
+    feed, signature = sibling
+    payload = json.loads(feed.read_text(encoding="utf-8"))
+    if payload.get("schema") != "io.vetcoders.vibecrafted.release-output.v1":
+        pytest.fail("e37 feed is not release-output.v1")
+    source = str((payload.get("source_revisions") or {}).get("vibecrafted") or "")
+    if "e37be2c9" not in source.lower():
+        pytest.fail(
+            f"sibling feed source {source} is not the e37 generation; "
+            "refusing to treat a different manifest as the current pair"
+        )
+    dmg_name = Path(str((payload.get("dmg") or {}).get("path") or "")).name
+    if dmg_name and dmg_name != dmg.name:
+        pytest.fail(f"e37 feed dmg.path {dmg_name} does not name {dmg.name}")
+    if payload.get("dmg", {}).get("sha256") != _sha256_file(dmg):
+        pytest.fail("e37 feed dmg.sha256 does not match the DMG bytes")
+    if payload.get("runtime_pack", {}).get("sha256") != _sha256_file(pack):
+        pytest.fail("e37 feed runtime_pack.sha256 does not match the pack bytes")
     if signature.stat().st_size != 256:
         pytest.fail(
             "unresolved required gate: detached signature is not 256 bytes; "
             "do not treat an unsigned locator as a signed fixture."
         )
-    return {"dmg": dmg, "pack": pack, "feed": feed, "signature": signature}
-
-
-def _require_e37_artifacts() -> dict[str, Path]:
-    return _require_generation_artifacts(
-        "e37",
-        "*20260910-e37be2c9*.dmg",
-        "*20260910-e37be2c9*.tar.gz",
+    verify_env = os.environ.copy()
+    verify_env["PYTHONPATH"] = str(REPO_ROOT / "vibecrafted-core")
+    verified = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "vibecrafted_core.product_contract",
+            "release-output",
+            str(feed),
+            str(signature),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        cwd=str(REPO_ROOT),
+        env=verify_env,
     )
+    if verified.returncode != 0:
+        pytest.fail(
+            "unresolved required gate: product_contract refused the e37 pair: "
+            f"{verified.stderr or verified.stdout}"
+        )
+    _E37_ARTIFACTS = {"dmg": dmg, "pack": pack, "feed": feed, "signature": signature}
+    return _E37_ARTIFACTS
 
 
 def _require_prior_79001_artifacts() -> dict[str, Path]:
-    return _require_generation_artifacts(
+    dmg, pack = _require_pair(
         "79001",
         "*20260909-79001c3d*.dmg",
         "*20260909-79001c3d*.tar.gz",
+    )
+    artifacts: dict[str, Path] = {"dmg": dmg, "pack": pack}
+    sibling = _sibling_feed(dmg) or _sibling_feed(pack)
+    if sibling is None:
+        return artifacts
+    feed, signature = sibling
+    try:
+        payload = json.loads(feed.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return artifacts
+    source = str((payload.get("source_revisions") or {}).get("vibecrafted") or "")
+    if "79001c3d" not in source.lower():
+        # Current e37 feed sitting in the same dist/ must not be labeled prior.
+        return artifacts
+    artifacts["feed"] = feed
+    artifacts["signature"] = signature
+    return artifacts
+
+
+def _verify_signed_generation(app: Path, *, source_token: str, label: str) -> None:
+    verified = subprocess.run(
+        ["/usr/bin/codesign", "--verify", "--strict", str(app)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if verified.returncode != 0:
+        pytest.fail(
+            f"unresolved required gate: {label} failed codesign --verify --strict: "
+            f"{verified.stderr or verified.stdout}"
+        )
+    display = subprocess.run(
+        ["/usr/bin/codesign", "--display", "--verbose=4", str(app)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    text = display.stdout + display.stderr
+    if "Identifier=io.vetcoders.vibecrafted" not in text:
+        pytest.fail(f"{label} is not io.vetcoders.vibecrafted")
+    if "TeamIdentifier=MW223P3NPX" not in text:
+        pytest.fail(f"{label} is not Team ID MW223P3NPX")
+    stapled = subprocess.run(
+        ["/usr/bin/stapler", "validate", str(app)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if stapled.returncode != 0:
+        pytest.fail(
+            f"unresolved required gate: {label} failed stapler validate: "
+            f"{stapled.stderr or stapled.stdout}"
+        )
+    manifest_path = app / "Contents/Resources/product-manifest.json"
+    if not manifest_path.is_file():
+        pytest.fail(f"{label} has no Contents/Resources/product-manifest.json")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    git_sha = str(manifest.get("git_sha") or "")
+    if source_token.lower() not in git_sha.lower():
+        pytest.fail(
+            f"{label} product-manifest git_sha {git_sha} is not {source_token}; "
+            "refusing to treat another generation as this fixture"
+        )
+
+
+def _founder_home() -> Path:
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
+def _founder_identity_stamps() -> dict[str, int | None]:
+    home = _founder_home()
+    watched = (
+        home / "Library/LaunchAgents/io.vetcoders.vibecrafted.server.plist",
+        home / ".local/share/vibecrafted/active.json",
+        home / ".local/share/vibecrafted/install-receipt.json",
+    )
+    return {str(path): (path.stat().st_mtime_ns if path.exists() else None) for path in watched}
+
+
+def _assert_founder_identity_untouched(before: dict[str, int | None]) -> None:
+    after = _founder_identity_stamps()
+    assert after == before, f"Founder installer identity changed: {before} -> {after}"
+
+
+def _isolated_product_env(tmp_path: Path) -> dict[str, str]:
+    home = tmp_path / "isolated-home"
+    runtime = tmp_path / "isolated-runtime"
+    crafted = tmp_path / "isolated-crafted"
+    launcher = tmp_path / "isolated-launcher"
+    xdg_config = tmp_path / "isolated-xdg-config"
+    xdg_data = tmp_path / "isolated-xdg-data"
+    xdg_cache = tmp_path / "isolated-xdg-cache"
+    xdg_state = tmp_path / "isolated-xdg-state"
+    sockets = tmp_path / "isolated-frame-sockets"
+    scratch = tmp_path / "isolated-tmp"
+    for path in (
+        home,
+        runtime,
+        crafted,
+        launcher,
+        xdg_config,
+        xdg_data,
+        xdg_cache,
+        xdg_state,
+        sockets,
+        scratch,
+    ):
+        path.mkdir(parents=True, exist_ok=True)
+        path.chmod(0o700)
+    env = os.environ.copy()
+    for key in (
+        "VIBECRAFTED_WORKSPACE_ID",
+        "VIBECRAFTED_RUNTIME_ROOT",
+        "VIBECRAFTED_PYTHON",
+        "VIBECRAFTED_REPO",
+        "VIBECRAFTED_CONTROL_PLANE",
+    ):
+        env.pop(key, None)
+    env.update(
+        {
+            "HOME": str(home),
+            "VIBECRAFTED_HOME": str(crafted),
+            "VIBECRAFTED_RUNTIME_HOME": str(runtime),
+            "VIBECRAFTED_LAUNCHER_BIN": str(launcher),
+            "XDG_CONFIG_HOME": str(xdg_config),
+            "XDG_DATA_HOME": str(xdg_data),
+            "XDG_CACHE_HOME": str(xdg_cache),
+            "XDG_STATE_HOME": str(xdg_state),
+            "VC_FRAME_SOCKET_DIR": str(sockets),
+            "TMPDIR": str(scratch),
+            "VIBECRAFTED_UPDATE_HELPER_HARNESS": "1",
+        }
+    )
+    return env
+
+
+def _read_installer_publication(runtime_home: Path) -> dict[str, object]:
+    pointer = runtime_home / "active.json"
+    receipt = runtime_home / "install-receipt.json"
+    assert pointer.is_file(), f"installer did not write {pointer}"
+    assert receipt.is_file(), f"installer did not write {receipt}"
+    pointer_doc = json.loads(pointer.read_text(encoding="utf-8"))
+    receipt_doc = json.loads(receipt.read_text(encoding="utf-8"))
+    assert pointer_doc.get("schema") == "vibecrafted.active-runtime.v1"
+    assert receipt_doc.get("schema") == "vibecrafted.runtime-install.v1"
+    version = str(pointer_doc.get("version") or "")
+    receipt_version = str(receipt_doc.get("version") or "")
+    assert version, "active.json has no version"
+    assert version == receipt_version, f"{version} != {receipt_version}"
+    assert receipt_doc.get("install_pending") is not True
+    assert receipt_doc.get("install_phase") not in {"preparing", "ancillary"}
+    return {
+        "version": version,
+        "receipt_version": receipt_version,
+        "pointer": pointer_doc,
+        "receipt": receipt_doc,
+    }
+
+
+def _assert_isolated_receipt_roots(receipt: dict[str, object], tmp_path: Path) -> None:
+    roots = receipt.get("roots")
+    assert isinstance(roots, dict), "install-receipt.json has no roots"
+    prefix = str(tmp_path.resolve())
+    for name, value in roots.items():
+        resolved = str(Path(str(value)).resolve())
+        assert resolved.startswith(prefix), f"receipt root {name} escaped isolation: {resolved}"
+
+
+def _app_helpers(dest: Path) -> tuple[Path, Path]:
+    terminal = dest / "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
+    frame = dest / "Contents/Helpers/vc-frame"
+    return terminal, frame
+
+
+def _install_signed_pack(
+    pack: Path,
+    dest: Path,
+    env: dict[str, str],
+    *,
+    allow_older: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    terminal, frame = _app_helpers(dest)
+    if not allow_older:
+        return subprocess.run(
+            [
+                "/bin/bash",
+                str(REPO_ROOT / "scripts/install-runtime-pack.sh"),
+                "--pack",
+                str(pack),
+                "--app-root",
+                str(dest),
+                "--terminal-host",
+                str(terminal),
+                "--frame-helper",
+                str(frame),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env=env,
+        )
+    extract = Path(env["TMPDIR"]) / f"pack-extract-{os.getpid()}-{pack.stem}"
+    extract.mkdir(parents=True, exist_ok=True)
+    unpacked = subprocess.run(
+        ["/usr/bin/tar", "-xpzf", str(pack), "-C", str(extract)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if unpacked.returncode != 0:
+        return unpacked
+    roots = [path for path in extract.iterdir() if path.is_dir()]
+    if len(roots) != 1:
+        return subprocess.CompletedProcess(
+            args=["extract"],
+            returncode=2,
+            stdout="",
+            stderr=f"Runtime Pack archive did not have one root: {roots}",
+        )
+    payload = roots[0]
+    pack_python = payload / "bin/python3"
+    verify_env = env.copy()
+    verify_env["PYTHONPATH"] = str(payload / "vibecrafted-core")
+    verified = subprocess.run(
+        [
+            str(pack_python),
+            "-m",
+            "vibecrafted_core.runtime_pack_contract",
+            "verify",
+            "--root",
+            str(payload),
+            "--carrier-basename",
+            pack.name,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=verify_env,
+    )
+    if verified.returncode != 0:
+        return verified
+    agree_env = verify_env
+    for app_copy, pack_copy in (
+        (terminal, payload / "libexec/vc-terminal"),
+        (frame, payload / "libexec/vc-frame"),
+    ):
+        agreed = subprocess.run(
+            [
+                str(pack_python),
+                "-m",
+                "vibecrafted_core.runtime_pack_contract",
+                "helpers-agree",
+                "--app-copy",
+                str(app_copy),
+                "--pack-copy",
+                str(pack_copy),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=agree_env,
+        )
+        if agreed.returncode != 0:
+            return agreed
+    return subprocess.run(
+        [
+            str(pack_python),
+            str(REPO_ROOT / "scripts/vetcoders_install.py"),
+            "runtime-install",
+            "--payload-root",
+            str(payload),
+            "--app-root",
+            str(dest),
+            "--runtime-home",
+            env["VIBECRAFTED_RUNTIME_HOME"],
+            "--allow-older-runtime",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env=env,
     )
 
 
@@ -506,6 +871,15 @@ class _SignedApps:
         self.e37_app = _attach_signed_app(self.e37["dmg"], e37_mount)
         self.prior_app = _attach_signed_app(self.prior["dmg"], prior_mount)
         self.mounts = [e37_mount, prior_mount]
+        _verify_signed_generation(self.e37_app, source_token="e37be2c9", label="e37 app")
+        _verify_signed_generation(self.prior_app, source_token="79001c3d", label="79001 app")
+        if "feed" in self.prior:
+            prior_feed = json.loads(self.prior["feed"].read_text(encoding="utf-8"))
+            prior_source = str(
+                (prior_feed.get("source_revisions") or {}).get("vibecrafted") or ""
+            )
+            if "79001c3d" not in prior_source.lower():
+                pytest.fail("prior artifacts labeled a non-79001 feed as the prior manifest")
         self.e37_identity = _identity_token(self.e37_app)
         self.prior_identity = _identity_token(self.prior_app)
         if self.e37_identity == self.prior_identity:
@@ -1021,120 +1395,159 @@ def test_product_update_result_before_new_ui_and_restore(tmp_path: Path) -> None
                 helper.wait(timeout=5)
 
 
-def test_product_update_pack_failure_and_concurrent_recovery(tmp_path: Path) -> None:
-    installer = REPO_ROOT / "scripts/install-runtime-pack.sh"
+def test_product_update_cross_generation_publish_then_restore_previous_tuple(
+    tmp_path: Path,
+) -> None:
+    founder_before = _founder_identity_stamps()
+    env = _isolated_product_env(tmp_path)
+    runtime_home = Path(env["VIBECRAFTED_RUNTIME_HOME"])
     with _SignedApps(tmp_path) as apps:
         dest = apps.copy_prior(tmp_path / "Installed.app")
         source = apps.copy_e37(tmp_path / "Candidate.app")
+        prior_pack = _install_signed_pack(apps.prior["pack"], dest, env)
+        assert prior_pack.returncode == 0, prior_pack.stderr or prior_pack.stdout
+        prior_pub = _read_installer_publication(runtime_home)
+        assert "79001c3d" in str(prior_pub["version"]).lower()
+        _assert_isolated_receipt_roots(prior_pub["receipt"], tmp_path)  # type: ignore[arg-type]
+
         receipt = tmp_path / "receipt.json"
-        replaced = _run_helper(
-            [
-                "--source",
-                str(source),
-                "--destination",
-                str(dest),
-                "--receipt",
-                str(receipt),
-            ],
-            env=_helper_env(),
-            timeout=90,
-        )
-        assert replaced.returncode == 0, replaced.stderr
-        isolated = tmp_path / "isolated-runtime"
-        isolated.mkdir()
-        env = os.environ.copy()
-        env["VIBECRAFTED_RUNTIME_HOME"] = str(isolated)
-        env["HOME"] = str(tmp_path / "isolated-home")
-        env["XDG_DATA_HOME"] = str(tmp_path / "isolated-xdg")
-        pack = subprocess.run(
-            [
-                "/bin/bash",
-                str(installer),
-                "--pack",
-                str(apps.e37["pack"]),
-                "--app-root",
-                str(dest),
-                "--terminal-host",
-                str(dest / "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"),
-                "--frame-helper",
-                str(dest / "Contents/Helpers/vc-frame"),
-                "--expected-source-revision",
-                "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-                "--expected-terminal-revision",
-                "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-                "--expected-frame-revision",
-                "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=90,
-            env=env,
-        )
-        assert pack.returncode != 0
-        evidence = {
-            "schema": "io.vetcoders.vibecrafted.product-update-pack-evidence.v1",
-            "transaction": json.loads(receipt.read_text(encoding="utf-8"))["transaction"],
-            "state": "unresolved",
-        }
-        (tmp_path / "pack-evidence.json").write_text(json.dumps(evidence), encoding="utf-8")
-        assert json.loads((tmp_path / "pack-evidence.json").read_text())["state"] == "unresolved"
+        sleeper = subprocess.Popen(["/bin/sleep", "30"])
+        helper = None
+        try:
+            start = subprocess.check_output(
+                ["/bin/ps", "-p", str(sleeper.pid), "-o", "lstart="], text=True
+            ).strip()
+            helper = subprocess.Popen(
+                [
+                    str(HELPER),
+                    "--source",
+                    str(source),
+                    "--destination",
+                    str(dest),
+                    "--receipt",
+                    str(receipt),
+                    "--wait-pid",
+                    str(sleeper.pid),
+                    "--wait-start",
+                    start,
+                    "--wait-timeout",
+                    "20",
+                ],
+                env=_helper_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            admission = Path(str(receipt) + ".admission.json")
+            deadline = time.time() + 20
+            while time.time() < deadline and not admission.is_file():
+                if helper.poll() is not None:
+                    break
+                time.sleep(0.05)
+            assert admission.is_file(), "old UI must see READY before it exits"
+            assert helper.poll() is None
+            assert sleeper.poll() is None
+            sleeper.terminate()
+            sleeper.wait(timeout=5)
+            assert helper.wait(timeout=90) == 0
+        finally:
+            if sleeper.poll() is None:
+                sleeper.terminate()
+                sleeper.wait(timeout=5)
+            if helper is not None and helper.poll() is None:
+                helper.terminate()
+                helper.wait(timeout=5)
+
+        assert _identity_token(dest) == apps.e37_identity
+        published = _install_signed_pack(apps.e37["pack"], dest, env)
+        assert published.returncode == 0, published.stderr or published.stdout
+        e37_pub = _read_installer_publication(runtime_home)
+        assert "e37be2c9" in str(e37_pub["version"]).lower()
+        assert e37_pub["version"] != prior_pub["version"]
+        _assert_isolated_receipt_roots(e37_pub["receipt"], tmp_path)  # type: ignore[arg-type]
+
         journal = json.loads(Path(str(receipt) + ".journal.json").read_text(encoding="utf-8"))
         capture = Path(journal["capture"])
+        prior_app = capture / "prior.app"
+        assert _identity_token(prior_app) == apps.prior_identity
         gate = tmp_path / "hold-restore"
-        first = subprocess.Popen(
-            [
-                str(HELPER),
-                "--source",
-                str(capture / "prior.app"),
-                "--destination",
-                str(dest),
-                "--receipt",
-                str(tmp_path / "restore-a.json"),
-                "--journal",
-                str(receipt) + ".journal.json",
-                "--transaction",
-                journal["transaction"],
-                "--mode",
-                "restore",
-                "--hold-after",
-                "ready",
-                "--until",
-                str(gate),
-            ],
-            env=_helper_env(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+        first = None
+        try:
+            first = subprocess.Popen(
+                [
+                    str(HELPER),
+                    "--source",
+                    str(prior_app),
+                    "--destination",
+                    str(dest),
+                    "--receipt",
+                    str(tmp_path / "restore-a.json"),
+                    "--journal",
+                    str(receipt) + ".journal.json",
+                    "--transaction",
+                    journal["transaction"],
+                    "--mode",
+                    "restore",
+                    "--hold-after",
+                    "ready",
+                    "--until",
+                    str(gate),
+                ],
+                env=_helper_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            restore_admission = Path(str(tmp_path / "restore-a.json") + ".admission.json")
+            deadline = time.time() + 20
+            while time.time() < deadline and not restore_admission.is_file():
+                if first.poll() is not None:
+                    break
+                time.sleep(0.05)
+            assert restore_admission.is_file()
+            concurrent = _run_helper(
+                [
+                    "--source",
+                    str(prior_app),
+                    "--destination",
+                    str(dest),
+                    "--receipt",
+                    str(tmp_path / "restore-b.json"),
+                    "--journal",
+                    str(receipt) + ".journal.json",
+                    "--transaction",
+                    journal["transaction"],
+                    "--mode",
+                    "restore",
+                    "--resume",
+                ],
+                env=_helper_env(),
+            )
+            assert concurrent.returncode == 13
+            assert (dest.parent / ".vc-update.lock" / "held").is_file()
+            gate.write_text("go", encoding="utf-8")
+            assert first.wait(timeout=90) == 0
+        finally:
+            if first is not None and first.poll() is None:
+                first.terminate()
+                first.wait(timeout=5)
+
+        assert _identity_token(dest) == apps.prior_identity
+        mixed = _read_installer_publication(runtime_home)
+        assert mixed["version"] == e37_pub["version"]
+        evidence_path = tmp_path / "pack-evidence.json"
+        assert not evidence_path.exists(), "caller-written pack enum is not installer proof"
+
+        restored_pack = _install_signed_pack(
+            apps.prior["pack"], dest, env, allow_older=True
         )
-        deadline = time.time() + 20
-        admission = Path(str(tmp_path / "restore-a.json") + ".admission.json")
-        while time.time() < deadline and not admission.is_file():
-            if first.poll() is not None:
-                break
-            time.sleep(0.05)
-        assert admission.is_file()
-        concurrent = _run_helper(
-            [
-                "--source",
-                str(capture / "prior.app"),
-                "--destination",
-                str(dest),
-                "--receipt",
-                str(tmp_path / "restore-b.json"),
-                "--journal",
-                str(receipt) + ".journal.json",
-                "--transaction",
-                journal["transaction"],
-                "--mode",
-                "restore",
-                "--resume",
-            ],
-            env=_helper_env(),
-        )
-        assert concurrent.returncode == 13
-        assert (dest.parent / ".vc-update.lock" / "held").is_file()
-        gate.write_text("go", encoding="utf-8")
-        first.wait(timeout=90)
+        assert restored_pack.returncode == 0, restored_pack.stderr or restored_pack.stdout
+        restored = _read_installer_publication(runtime_home)
+        assert "79001c3d" in str(restored["version"]).lower()
+        assert restored["version"] == prior_pub["version"]
+        assert _identity_token(dest) == apps.prior_identity
+        _assert_isolated_receipt_roots(restored["receipt"], tmp_path)  # type: ignore[arg-type]
+        _assert_founder_identity_untouched(founder_before)
 
 
 def test_product_update_policy_swift_behavior(tmp_path: Path) -> None:
@@ -1153,6 +1566,7 @@ def test_product_update_policy_swift_behavior(tmp_path: Path) -> None:
             "-target",
             f"{target}-apple-macosx14.0",
             str(APP / "RuntimePackMenuPolicy.swift"),
+            str(APP / "ServerMenuPolicy.swift"),
             str(APP / "ProductUpdatePolicy.swift"),
             str(APP / "ProductUpdateTransaction.swift"),
             str(APP / "ProductUpdateTrust.swift"),

@@ -107,6 +107,8 @@ struct ProductUpdateRuntimeEvidence: Equatable, Sendable {
   var journalTransaction: String
   var journalOperation: String
   var packPublication: ProductUpdatePackPublicationState
+  var packGeneration: String
+  var packDetail: String
 
   static func unbound() -> ProductUpdateRuntimeEvidence {
     ProductUpdateRuntimeEvidence(
@@ -116,8 +118,22 @@ struct ProductUpdateRuntimeEvidence: Equatable, Sendable {
       journalPhase: "",
       journalTransaction: "",
       journalOperation: "",
-      packPublication: .unresolved)
+      packPublication: .unresolved,
+      packGeneration: "",
+      packDetail: "installer publication has not been observed")
   }
+}
+
+/// Installer-owned publication snapshot. This is not an App-written verdict.
+struct ProductUpdateInstallerPublication: Equatable, Sendable {
+  var generation: String
+  var receiptVersion: String
+  var pointerPresent: Bool
+  var receiptPresent: Bool
+  var pending: Bool
+  var readable: Bool
+  var rolledBack: Bool
+  var detail: String
 }
 
 struct ProductUpdateJournalBinding: Equatable, Sendable {
@@ -222,7 +238,9 @@ func readProductUpdateHandoff(from url: URL) throws -> ProductUpdateHandoffRecor
     let sourceRevision = root["source_revision"] as? String,
     let terminalRevision = root["terminal_revision"] as? String,
     let frameRevision = root["frame_revision"] as? String,
-    let transactionID = root["transaction_id"] as? String
+    let transactionID = root["transaction_id"] as? String,
+    let mode = root["mode"] as? String, !mode.isEmpty,
+    let phase = root["phase"] as? String, !phase.isEmpty
   else {
     throw ProductUpdateFeedError.malformed("update handoff record is malformed")
   }
@@ -244,8 +262,8 @@ func readProductUpdateHandoff(from url: URL) throws -> ProductUpdateHandoffRecor
     terminalRevision: terminalRevision,
     frameRevision: frameRevision,
     transactionID: transactionID,
-    mode: root["mode"] as? String ?? ProductUpdateHelperMode.replace.rawValue,
-    phase: root["phase"] as? String ?? "helper_ready",
+    mode: mode,
+    phase: phase,
     candidateIdentity: root["candidate_identity"] as? String ?? "",
     priorIdentity: root["prior_identity"] as? String ?? "")
 }
@@ -277,32 +295,162 @@ func productUpdateHelperIdentityLive(pid: Int32, start: String) -> Bool {
 
 func writeProductUpdatePackEvidence(
   transaction: String,
-  state: ProductUpdatePackPublicationState,
+  observation: ProductUpdateInstallerPublication,
+  derived: ProductUpdatePackPublicationState,
+  priorGeneration: String,
+  candidateGeneration: String,
   to url: URL
 ) throws {
   try FileManager.default.createDirectory(
     at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
   let object: [String: Any] = [
-    "schema": "io.vetcoders.vibecrafted.product-update-pack-evidence.v1",
+    "schema": "io.vetcoders.vibecrafted.product-update-pack-evidence.v2",
     "transaction": transaction,
-    "state": state.rawValue,
+    "observed_generation": observation.generation,
+    "receipt_version": observation.receiptVersion,
+    "pointer_present": observation.pointerPresent,
+    "receipt_present": observation.receiptPresent,
+    "pending": observation.pending,
+    "readable": observation.readable,
+    "rolled_back": observation.rolledBack,
+    "derived_state": derived.rawValue,
+    "prior_generation": priorGeneration,
+    "candidate_generation": candidateGeneration,
+    "detail": observation.detail,
   ]
   let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .prettyPrinted])
   try data.write(to: url, options: .atomic)
 }
 
-func readProductUpdatePackEvidence(from url: URL, transaction: String)
-  -> ProductUpdatePackPublicationState?
-{
-  guard let data = try? Data(contentsOf: url),
-    let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-    root["schema"] as? String == "io.vetcoders.vibecrafted.product-update-pack-evidence.v1",
-    let stored = root["transaction"] as? String, !stored.isEmpty,
-    stored == transaction,
-    let raw = root["state"] as? String,
-    let state = ProductUpdatePackPublicationState(rawValue: raw)
-  else { return nil }
-  return state
+func productUpdateObserveInstallerPublication(runtimeHome: URL) -> ProductUpdateInstallerPublication {
+  let pointer = activeRuntimePointerURL(runtimeHome: runtimeHome)
+  let receiptURL = runtimeInstallReceiptURL(runtimeHome: runtimeHome)
+  let pointerPresent = FileManager.default.fileExists(atPath: pointer.path)
+  let receiptPresent = FileManager.default.fileExists(atPath: receiptURL.path)
+  if !pointerPresent && !receiptPresent {
+    return ProductUpdateInstallerPublication(
+      generation: "",
+      receiptVersion: "",
+      pointerPresent: false,
+      receiptPresent: false,
+      pending: false,
+      readable: true,
+      rolledBack: false,
+      detail: "installer identity documents are absent")
+  }
+  if pointerPresent != receiptPresent {
+    return ProductUpdateInstallerPublication(
+      generation: "",
+      receiptVersion: "",
+      pointerPresent: pointerPresent,
+      receiptPresent: receiptPresent,
+      pending: true,
+      readable: false,
+      rolledBack: false,
+      detail:
+        "runtime identity is partial (active.json present=\(pointerPresent), install-receipt.json present=\(receiptPresent))")
+  }
+  guard let pointerData = try? Data(contentsOf: pointer),
+    let pointerRoot = try? JSONSerialization.jsonObject(with: pointerData) as? [String: Any],
+    pointerRoot["schema"] as? String == "vibecrafted.active-runtime.v1"
+  else {
+    return ProductUpdateInstallerPublication(
+      generation: "",
+      receiptVersion: "",
+      pointerPresent: true,
+      receiptPresent: true,
+      pending: true,
+      readable: false,
+      rolledBack: false,
+      detail: "active.json is unreadable or not vibecrafted.active-runtime.v1")
+  }
+  guard let receiptData = try? Data(contentsOf: receiptURL),
+    let receipt = try? JSONSerialization.jsonObject(with: receiptData) as? [String: Any],
+    receipt["schema"] as? String == "vibecrafted.runtime-install.v1"
+  else {
+    return ProductUpdateInstallerPublication(
+      generation: "",
+      receiptVersion: "",
+      pointerPresent: true,
+      receiptPresent: true,
+      pending: true,
+      readable: false,
+      rolledBack: false,
+      detail: "install-receipt.json is unreadable or not vibecrafted.runtime-install.v1")
+  }
+  let generation = pointerRoot["version"] as? String ?? ""
+  let receiptVersion = receipt["version"] as? String ?? ""
+  let pendingFlags = ["install_pending", "config_pending", "uninstall_pending"].contains {
+    (receipt[$0] as? Bool) == true
+  }
+  let phase = receipt["install_phase"] as? String ?? ""
+  let midPublish = phase == "preparing" || phase == "ancillary"
+  let pending =
+    pendingFlags
+    || receipt["config_transaction"] != nil
+    || receipt["config_conflicts"] != nil
+    || midPublish
+  let rolledBack = {
+    if let stamp = receipt["rolled_back_at"] as? String, !stamp.isEmpty { return true }
+    return false
+  }()
+  if !generation.isEmpty && !receiptVersion.isEmpty && generation != receiptVersion {
+    return ProductUpdateInstallerPublication(
+      generation: generation,
+      receiptVersion: receiptVersion,
+      pointerPresent: true,
+      receiptPresent: true,
+      pending: true,
+      readable: false,
+      rolledBack: rolledBack,
+      detail:
+        "active.json version \(generation) disagrees with install-receipt.json version \(receiptVersion)")
+  }
+  if pending {
+    return ProductUpdateInstallerPublication(
+      generation: generation,
+      receiptVersion: receiptVersion,
+      pointerPresent: true,
+      receiptPresent: true,
+      pending: true,
+      readable: true,
+      rolledBack: rolledBack,
+      detail:
+        "installer reports pending or interrupted publication (phase=\(phase.isEmpty ? "none" : phase))")
+  }
+  let published = generation.isEmpty ? "no generation" : "generation \(generation)"
+  return ProductUpdateInstallerPublication(
+    generation: generation,
+    receiptVersion: receiptVersion,
+    pointerPresent: true,
+    receiptPresent: true,
+    pending: false,
+    readable: true,
+    rolledBack: rolledBack,
+    detail: "installer published \(published)")
+}
+
+func productUpdateDerivePackPublication(
+  _ observed: ProductUpdateInstallerPublication,
+  priorGeneration: String,
+  candidateGeneration: String
+) -> ProductUpdatePackPublicationState {
+  if !observed.readable || observed.pending {
+    return .unresolved
+  }
+  if !observed.pointerPresent && !observed.receiptPresent {
+    return .unpublished
+  }
+  if observed.generation.isEmpty {
+    return .unresolved
+  }
+  if !candidateGeneration.isEmpty && observed.generation == candidateGeneration {
+    return .published
+  }
+  if !priorGeneration.isEmpty && observed.generation == priorGeneration {
+    return observed.rolledBack ? .rolledBack : .unpublished
+  }
+  return .unresolved
 }
 
 func decodeProductUpdateJournalBinding(_ data: Data) -> ProductUpdateJournalBinding? {
@@ -352,25 +500,19 @@ func productUpdateContentIdentityToken(at app: URL) -> String? {
 
 func productUpdateObservePackPublication(
   handoff: ProductUpdateHandoffRecord,
-  home: URL
+  runtimeHome: URL
 ) -> ProductUpdatePackPublicationState {
-  if let stored = readProductUpdatePackEvidence(
-    from: productUpdatePackEvidenceURL(home: home), transaction: handoff.transactionID)
-  {
-    return stored
-  }
-  switch handoff.phase {
-  case "publishing", "packPublishing", "pack_publishing":
-    return .unresolved
-  default:
-    return .unpublished
-  }
+  productUpdateDerivePackPublication(
+    productUpdateObserveInstallerPublication(runtimeHome: runtimeHome),
+    priorGeneration: handoff.installedGeneration,
+    candidateGeneration: handoff.candidateGeneration)
 }
 
 func productUpdateObserveRuntimeEvidence(
   handoff: ProductUpdateHandoffRecord,
   runningApp: URL,
-  home: URL
+  home _: URL,
+  runtimeHome: URL
 ) -> ProductUpdateRuntimeEvidence {
   let running = productUpdateContentIdentityToken(at: runningApp) ?? ""
   var journalPhase = ""
@@ -387,6 +529,7 @@ func productUpdateObserveRuntimeEvidence(
     if candidate.isEmpty { candidate = journal.sourceIdentity }
     if prior.isEmpty { prior = journal.priorIdentity }
   }
+  let observed = productUpdateObserveInstallerPublication(runtimeHome: runtimeHome)
   return ProductUpdateRuntimeEvidence(
     runningAppIdentity: running,
     expectedCandidateIdentity: candidate,
@@ -394,7 +537,12 @@ func productUpdateObserveRuntimeEvidence(
     journalPhase: journalPhase,
     journalTransaction: journalTransaction,
     journalOperation: journalOperation,
-    packPublication: productUpdateObservePackPublication(handoff: handoff, home: home))
+    packPublication: productUpdateDerivePackPublication(
+      observed,
+      priorGeneration: handoff.installedGeneration,
+      candidateGeneration: handoff.candidateGeneration),
+    packGeneration: observed.generation,
+    packDetail: observed.detail)
 }
 
 func decideProductUpdateHandoff(
@@ -493,10 +641,12 @@ private func decideReplacedHandoff(
     return .retain("the running app is not the exact candidate identity from the journal")
   }
   if evidence.packPublication == .unresolved {
-    return .retain("the Runtime Pack installer reports unresolved publication state")
+    return .retain(
+      "the Runtime Pack installer reports unresolved publication state. \(evidence.packDetail)")
   }
   if evidence.packPublication == .published {
-    return .retain("the Runtime Pack is already published; recovery stays open for inspection")
+    return .retain(
+      "the Runtime Pack is already published (\(evidence.packGeneration)); recovery stays open for inspection")
   }
   return .publishPack(replacement)
 }
@@ -516,10 +666,10 @@ private func decideRestoredHandoff(
   switch evidence.packPublication {
   case .unresolved:
     return .retain(
-      "the previous app is back, but the Runtime Pack installer reports unresolved state")
+      "the previous app is back, but the Runtime Pack installer reports unresolved state. \(evidence.packDetail)")
   case .published:
     return .retain(
-      "the previous app is back, but the newer Runtime Pack is still published; recovery stays open")
+      "the previous app is back, but the newer Runtime Pack \(evidence.packGeneration) is still published; recovery stays open")
   case .unpublished, .rolledBack:
     return .rolledBack("the previous working version was restored")
   }

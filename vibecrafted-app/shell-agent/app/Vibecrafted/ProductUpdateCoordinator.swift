@@ -167,12 +167,31 @@ final class ProductUpdateCoordinator {
     publish(deriveProductUpdateProgress(phase: .finishing, installed: installed, candidate: candidate))
   }
 
+  /// Persist the admitted helper handoff. Failure must not be ignored: the UI
+  /// stays up so the helper is not abandoned without a durable record.
+  func persistAdmittedHandoff() throws {
+    guard let handoff = admittedHandoff else {
+      throw ProductUpdateFeedError.malformed("no admitted update handoff to persist")
+    }
+    try writeProductUpdateHandoff(
+      handoff, to: productUpdatePendingHandoffURL(home: dependencies.home()))
+  }
+
   /// Normal UI shutdown after the helper was admitted. Does not terminate the helper.
+  /// A failed persist keeps the current transaction and does not claim restarting.
   func noteUIShutdownPreservingHandoff() {
     cancelInFlight = nil
-    if let handoff = admittedHandoff {
-      try? writeProductUpdateHandoff(
-        handoff, to: productUpdatePendingHandoffURL(home: dependencies.home()))
+    do {
+      try persistAdmittedHandoff()
+    } catch {
+      let installed = dependencies.installed()
+      finish(
+        deriveProductUpdateProgress(
+          phase: .error, installed: installed, candidate: staged?.candidate,
+          detail:
+            "Could not save the update handoff. The window stays open so the helper is not abandoned. \(error.localizedDescription)"),
+        token: generation, terminal: .inFlight)
+      return
     }
     if busy {
       let installed = dependencies.installed()
@@ -568,8 +587,18 @@ final class ProductUpdateCoordinator {
               candidateIdentity: admission.candidateIdentity,
               priorIdentity: productUpdateContentIdentityToken(at: request.destinationApp) ?? "")
             self.admittedHandoff = handoff
-            try? writeProductUpdateHandoff(
-              handoff, to: productUpdatePendingHandoffURL(home: self.dependencies.home()))
+            do {
+              try self.persistAdmittedHandoff()
+            } catch {
+              self.finish(
+                deriveProductUpdateProgress(
+                  phase: .error, installed: self.dependencies.installed(),
+                  candidate: staged.candidate,
+                  detail:
+                    "Could not save the update handoff. The window stays open so the helper is not abandoned. \(error.localizedDescription)"),
+                token: token, terminal: .inFlight)
+              return
+            }
             var closing = self.progress
             closing.willCloseUIForReplacement = true
             closing.phase = .restarting
