@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -179,3 +180,46 @@ def test_selection_expands_user_home(
     assert os.path.expanduser("~") == str(home)
 
     assert select_repository("~/proj", "").path == str((home / "proj").resolve())
+
+
+def _repo_selection_cli(
+    *args: str, cwd: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    core = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(core) + (
+        f":{env['PYTHONPATH']}" if env.get("PYTHONPATH") else ""
+    )
+    return subprocess.run(
+        [sys.executable, "-m", "vibecrafted_core.repo_selection", *args],
+        check=False,
+        cwd=cwd or core,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_cli_worktree_false_stays_directory_only(tmp_path: Path) -> None:
+    """Parse-time ``--worktree false`` must not enter the launch resolver."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    result = _repo_selection_cli("--worktree", "false", "--repo", str(plain))
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(plain.resolve())
+    assert "Git repository" not in result.stderr
+    assert not any(path != plain for path in tmp_path.iterdir() if path.is_dir())
+
+
+def test_cli_worktree_true_still_requires_git_for_launch(tmp_path: Path) -> None:
+    """Launch-time ``--worktree true`` still refuses a plain directory."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    result = _repo_selection_cli("--worktree", "true", "--repo", str(plain))
+
+    assert result.returncode == 2
+    assert "not inside a Git repository" in result.stderr
+    assert not any(path != plain for path in tmp_path.iterdir() if path.is_dir())

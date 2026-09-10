@@ -128,6 +128,25 @@ printf 'f=refused\\n'
     assert "e=" in result.stdout
     assert "f=refused" in result.stdout
     assert "--worktree expects true or false" in result.stderr
+    assert "Git repository" not in result.stderr
+    extra = _shell(
+        f"""
+_vetcoders_parse_skill_contract --base HEAD --repo {repo} --prompt x || exit $?
+printf 'base=%s|%s\\n' "$_vetcoders_contract_base" "$_vetcoders_contract_root"
+_vetcoders_parse_skill_contract --execution-runtime living-tree --repo {repo} --prompt x || exit $?
+printf 'rt=%s|%s\\n' "$_vetcoders_contract_execution_runtime" "$_vetcoders_contract_root"
+""",
+        cwd=tmp_path,
+        home=home,
+    )
+    assert extra.returncode == 0, extra.stderr
+    assert f"base=HEAD|{repo.resolve()}" in extra.stdout
+    assert f"rt=living-tree|{repo.resolve()}" in extra.stdout
+    assert "Git repository" not in extra.stderr
+    assert not any(
+        path.is_dir() and path.name.startswith(repo.name) and path != repo
+        for path in tmp_path.iterdir()
+    )
 
 
 @pytest.mark.parametrize("shell", ["bash", "zsh"])

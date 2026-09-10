@@ -23,7 +23,7 @@ The contract proven here, in the shipped shell sources (not a reimplementation):
   session (attached or detached) or an EXITED resurrection record under the
   name refuses with exit 3 and real commands; an unreadable inventory refuses
   with exit 4. Nothing is killed, deleted, switched, attached or renamed.
-* **exclusive create** -- Frame's server-side `attach --create-background`;
+* **exclusive create** -- adapter lock plus inventory, then Frame create;
   two concurrent starts yield exactly one workspace and one refusal.
 * **enter** -- a caller with a terminal outside Frame attaches. Inside a live
   Frame host, start creates a `--guest-workspace` session and projects it with
@@ -290,7 +290,21 @@ if rest[:2] == ["attach", "--create-background"]:
     if forced:
         sys.stderr.write(forced + "\\n")
         sys.exit(1)
-    if layout is not None and not os.path.isfile(layout):
+    _FRAME_BUILTIN_LAYOUTS = (
+        "default",
+        "vibecrafted",
+        "vibecrafted-host",
+        "vibecrafted-guest",
+        "vc-workflow",
+        "vc-marbles",
+        "vc-research",
+        "operator",
+    )
+    if (
+        layout is not None
+        and not os.path.isfile(layout)
+        and layout not in _FRAME_BUILTIN_LAYOUTS
+    ):
         sys.stderr.write("Error occurred in server: could not read the layout file\\n")
         sys.exit(1)
     os.makedirs(os.path.join(table, "live"), exist_ok=True)
@@ -1427,6 +1441,9 @@ def _assert_projected_into_host(
     ]
     assert guest_creates, scene.calls()
     assert "--guest-workspace" in guest_creates[0]["argv"]
+    guest_argv = guest_creates[0]["argv"]
+    assert "--new-session-with-layout" in guest_argv
+    assert guest_argv[guest_argv.index("--new-session-with-layout") + 1] == "vibecrafted"
     return projects[-1]
 
 
@@ -2333,31 +2350,54 @@ def test_real_engine_inventory_and_exclusive_create_through_the_shipped_helpers(
        sandbox is empty afterwards.
     """
     assert _REAL_FRAME is not None
-    tag = f"vcs{os.getpid() % 100000}"
-    sandbox = Path("/tmp") / tag
-    if sandbox.exists():
-        shutil.rmtree(sandbox)
+    sandbox = _exclusive_sandbox("vcs-x-")
     (sandbox / "sock").mkdir(parents=True)
     (sandbox / "cfg" / "layouts").mkdir(parents=True)
     (sandbox / "home").mkdir()
-    repo = sandbox / tag
+    (sandbox / "tmp").mkdir()
+    repo = sandbox / "repo"
     repo.mkdir()
     (sandbox / "cfg" / "config.kdl").write_text(
         "keybinds clear-defaults=true {}\n", encoding="utf-8"
     )
+    shipped = (
+        REPO_ROOT
+        / "vibecrafted-core"
+        / "vibecrafted_core"
+        / "config"
+        / "vc-frame"
+        / "layouts"
+        / "operator.kdl"
+    )
     layout = sandbox / "cfg" / "layouts" / "operator.kdl"
-    layout.write_text("layout {\n}\n", encoding="utf-8")
-    session = tag
+    shutil.copy2(shipped, layout)
+    session = _short_token("x")
 
     env = os.environ.copy()
     for key in IDENTITY_ENV:
+        env.pop(key, None)
+    for key in (
+        "ZELLIJ_SOCKET_DIR",
+        "ZELLIJ_CONFIG_DIR",
+        "ZELLIJ_CONFIG_FILE",
+        "XDG_RUNTIME_DIR",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "TMPDIR",
+        "VC_FRAME_SOCKET_DIR",
+    ):
         env.pop(key, None)
     env.update(
         {
             "HOME": str(sandbox / "home"),
             "VIBECRAFTED_HOME": str(sandbox / "home" / ".vibecrafted"),
             "XDG_CONFIG_HOME": str(sandbox / "home" / ".config"),
+            "XDG_DATA_HOME": str(sandbox / "home" / ".local" / "share"),
+            "XDG_STATE_HOME": str(sandbox / "home" / ".local" / "state"),
+            "XDG_RUNTIME_DIR": str(sandbox / "tmp"),
+            "TMPDIR": str(sandbox / "tmp"),
             "VC_FRAME_SOCKET_DIR": str(sandbox / "sock"),
+            "ZELLIJ_SOCKET_DIR": str(sandbox / "sock"),
             "VC_FRAME_CONFIG_DIR": str(sandbox / "cfg"),
             "VC_FRAME_CONFIG_FILE": str(sandbox / "cfg" / "config.kdl"),
             "VIBECRAFTED_PREFER_REPO_VC_FRAME": "1",

@@ -928,28 +928,79 @@ _vetcoders_start_refuse_inventory() {
   return 4
 }
 
+# Exclusive create lock for one session name in this socket namespace.
+# Frame `--new-session-with-layout` + `attach --create-background` follows
+# ClientInfo::New and can return 0 on both racers (the "Session already exists"
+# string is the Attach arm). The adapter must refuse the loser. mkdir(2) is
+# the bash-3.2-safe exclusive; hold it through inventory + create + readiness.
+_vetcoders_start_acquire_create_lock() {
+  local session_name="${1:-}" socket_dir="" lock_dir="" i=0
+  [[ -n "$session_name" ]] || return 4
+  socket_dir="$(_vetcoders_vc_frame_socket_dir 2>/dev/null || true)"
+  [[ -n "$socket_dir" ]] || socket_dir="${TMPDIR:-/tmp}"
+  mkdir -p "$socket_dir" || return 4
+  lock_dir="$socket_dir/.vc-start-create.${session_name}.lock"
+  while ! mkdir "$lock_dir" 2>/dev/null; do
+    i=$((i + 1))
+    if ((i > 900)); then
+      printf 'vc-start: could not obtain exclusive create lock for %s.\n' \
+        "$(_vetcoders_shell_quote "$session_name")" >&2
+      return 4
+    fi
+    sleep 0.1
+  done
+  _vetcoders_start_create_lock_dir="$lock_dir"
+}
+
+_vetcoders_start_release_create_lock() {
+  [[ -n "${_vetcoders_start_create_lock_dir:-}" ]] || return 0
+  rmdir "$_vetcoders_start_create_lock_dir" 2>/dev/null || true
+  unset _vetcoders_start_create_lock_dir
+}
+
 # The one create primitive. Returns 0 (created and live), 3 (the exact name
 # was taken meanwhile -- the caller re-reads the inventory and refuses), or 4
 # (any other engine refusal / the session never came up). Never waits a real
 # refusal out, never treats "already exists" as success.
-# $4 = host (default; full operator chrome) or guest (--guest-workspace so
-# Frame strips nested rail/tab chrome for a shared host canvas).
+# $4 = host (default; full operator chrome from the shipped operator.kdl) or
+# guest (--guest-workspace so Frame strips nested rail/tab chrome). Guest
+# create uses Frame's builtin product workspace name `vibecrafted` (aliases
+# default/operator/vibecrafted-host resolve to that surface). An absolute
+# layouts/operator.kdl path is not a builtin: guest_workspace_layout_info
+# then IoError's "The layout was not found".
 _vetcoders_start_create_workspace_session() {
   local vc_frame_bin="${1:-}" session_name="${2:-}" layout_file="${3:-}" kind="${4:-host}" out="" rc=0
-  local create_argv=()
+  local create_argv=() state=""
   [[ -n "$vc_frame_bin" && -n "$session_name" ]] || return 4
-  if [[ -z "$layout_file" || ! -f "$layout_file" ]]; then
-    printf 'vc-start: operator layout missing under: %s\n' "$(_vetcoders_vc_frame_config_dir 2>/dev/null || printf '?')" >&2
-    printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
+  if [[ "$kind" == guest ]]; then
+    create_argv+=(--guest-workspace --new-session-with-layout vibecrafted)
+  else
+    if [[ -z "$layout_file" || ! -f "$layout_file" ]]; then
+      printf 'vc-start: operator layout missing under: %s\n' "$(_vetcoders_vc_frame_config_dir 2>/dev/null || printf '?')" >&2
+      printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
+      return 4
+    fi
+    create_argv+=(--new-session-with-layout "$layout_file")
+  fi
+  create_argv+=(attach --create-background "$session_name")
+  _vetcoders_start_acquire_create_lock "$session_name" || return $?
+  state="$(_vetcoders_start_session_inventory_state "$session_name")"
+  if [[ "$state" == error ]]; then
+    _vetcoders_start_release_create_lock
     return 4
   fi
-  _vetcoders_record_vc_frame_attachment missing "$session_name" || return $?
-  if [[ "$kind" == guest ]]; then
-    create_argv+=(--guest-workspace)
+  if [[ "$state" != missing ]]; then
+    _vetcoders_start_release_create_lock
+    return 3
   fi
-  create_argv+=(--new-session-with-layout "$layout_file" attach --create-background "$session_name")
+  _vetcoders_record_vc_frame_attachment missing "$session_name" || {
+    rc=$?
+    _vetcoders_start_release_create_lock
+    return "$rc"
+  }
   out="$(_vetcoders_start_frame_env "$vc_frame_bin" "${create_argv[@]}" 2>&1)" || rc=$?
   if ((rc != 0)); then
+    _vetcoders_start_release_create_lock
     if _vetcoders_vc_frame_stderr_is_session_already_exists "$out"; then
       return 3
     fi
@@ -959,12 +1010,18 @@ _vetcoders_start_create_workspace_session() {
     return 4
   fi
   if ! _vetcoders_wait_for_vc_frame_session "$session_name" 40; then
+    _vetcoders_start_release_create_lock
     printf 'vc-start: workspace %s did not come up in vc-frame after the create call.\n' \
       "$(_vetcoders_shell_quote "$session_name")" >&2
     [[ -z "$out" ]] || printf '%s\n' "$out" >&2
     return 4
   fi
-  _vetcoders_record_vc_frame_attachment live "$session_name" || return $?
+  _vetcoders_record_vc_frame_attachment live "$session_name" || {
+    rc=$?
+    _vetcoders_start_release_create_lock
+    return "$rc"
+  }
+  _vetcoders_start_release_create_lock
   export VIBECRAFTED_PREPARED_VC_FRAME_SESSION="$session_name"
   return 0
 }
@@ -1270,6 +1327,13 @@ _vetcoders_start_project_guest_into_host() {
   [[ -z "$out" ]] || printf '%s\n' "$out" >&2
   if [[ "$classified" == refused && "$rc" -ne 0 ]]; then
     _vetcoders_start_projection_outcome="refused"
+    return 4
+  fi
+  # Malformed/uncorrelated ACK, or status/exit disagreement, is indeterminate.
+  # Exact list-panes identity may still match, but the launcher must not claim
+  # the canvas stayed put without a confirmed refusal (UNIFIED_LAUNCH_CONTRACT).
+  if [[ "$classified" != refused ]]; then
+    _vetcoders_start_projection_outcome="indeterminate"
     return 4
   fi
   if [[ "$reconciled" == unchanged ]]; then

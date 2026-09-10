@@ -393,7 +393,8 @@ def main() -> int:
 
     Empty ``--repo`` / ``--root`` prints nothing so the caller keeps its own
     fallback (``vc-start`` then uses Git top-level or ``pwd``). Directory
-    selection never demands Git. ``--base``, ``--worktree``,
+    selection never demands Git. ``--worktree false`` (and an empty
+    ``--worktree``) stay on that path. ``--base``, ``--worktree true``,
     ``--execution-runtime``, or ``--prepare-worktree`` enter the launch
     resolver, which does require a resolvable commit.
     """
@@ -417,8 +418,18 @@ def main() -> int:
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--prepare-worktree", action="store_true")
     args = parser.parse_args()
+    wants_worktree = False
+    if str(args.worktree or "").strip():
+        try:
+            wants_worktree = parse_worktree_flag(args.worktree)
+        except RepoSelectionError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
     launch = bool(
-        args.base or args.execution_runtime or args.worktree or args.prepare_worktree
+        args.base
+        or args.execution_runtime
+        or wants_worktree
+        or args.prepare_worktree
     )
     if not launch:
         if not str(args.repo or "").strip() and not str(args.root or "").strip():
