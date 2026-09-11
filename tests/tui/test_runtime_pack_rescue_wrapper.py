@@ -851,6 +851,42 @@ def test_public_wrapper_bootstraps_source_installer_without_rewriting_pack(
     assert archive.read_bytes() == (tmp_path / "signed" / CARRIER).read_bytes()
 
 
+def test_stat_helpers_return_numeric_owner_and_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GNU `stat -f` is --file-system; the helper must not swallow that dump."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    target = tmp_path / "owned"
+    target.mkdir(mode=0o700)
+    script = tmp_path / "probe.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f'source "{WRAPPER}"\n'
+        f'uid="$(_stat_uid "{target}")"\n'
+        f'mode="$(_stat_mode "{target}")"\n'
+        'printf "uid=%s mode=%s\\n" "$uid" "$mode"\n'
+        '[[ "$uid" == "$EUID" ]]\n'
+        '[[ "$uid" =~ ^[0-9]+$ ]]\n'
+        '[[ "$mode" == "700" || "$mode" == "0700" ]]\n',
+        encoding="utf-8",
+    )
+    script.chmod(0o700)
+    probed = subprocess.run(
+        ["bash", str(script)],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ},
+    )
+    assert probed.returncode == 0, probed.stderr
+    assert probed.stdout.startswith("uid="), probed.stdout
+    assert "\n" not in probed.stdout.strip()
+
+
 def test_rescue_lock_recovers_after_killed_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

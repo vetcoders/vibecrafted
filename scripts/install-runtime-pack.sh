@@ -5,13 +5,28 @@ die() { printf 'Runtime Pack install failed: %s\n' "$*" >&2; exit 1; }
 
 _stat_uid() {
   local uid
-  uid="$(stat -f %u "$1" 2>/dev/null || stat -c %u "$1")" || return 1
+  # GNU stat: -c is format, -f is --file-system. BSD-first
+  # `stat -f %u || stat -c %u` prints an overlayfs dump plus the uid, so
+  # the equality check against $EUID always fails on Linux.
+  uid="$(stat -c %u "$1" 2>/dev/null || true)"
+  if [[ "$uid" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$uid"
+    return 0
+  fi
+  uid="$(stat -f %u "$1")" || return 1
+  [[ "$uid" =~ ^[0-9]+$ ]] || return 1
   printf '%s\n' "$uid"
 }
 
 _stat_mode() {
   local mode
-  mode="$(stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1")" || return 1
+  mode="$(stat -c %a "$1" 2>/dev/null || true)"
+  if [[ "$mode" =~ ^[0-7]{3,4}$ ]]; then
+    printf '%s\n' "$mode"
+    return 0
+  fi
+  mode="$(stat -f %Lp "$1")" || return 1
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
   printf '%s\n' "$mode"
 }
 
