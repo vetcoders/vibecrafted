@@ -100,9 +100,11 @@ automatic cleanup deletes them or the input file.
 
 The initial shell argv exposure and OS ARG_MAX cannot be undone. Use file/stdin
 for inputs beyond ARG_MAX. This cut proves producer transport; it does not
-certify every downstream provider or HTTP log viewer. In particular the current
-Agy adapter expands stdin into `--print` argv: direct core Agy launches now
-refuse before launch mutation until that reserved adapter gains private transport.
+certify every downstream provider or HTTP log viewer. The Agy adapter carries
+the prompt as one stream-json user message on stdin (`agy --print=
+--input-format stream-json --output-format stream-json < prompt.ndjson`); the
+prompt never reaches argv, and the human pane / last message come from the
+shared `agent_stream --agent agy` parser (`result.response`).
 Supervised research lanes and native interactive prompt composition still need
 end-to-end privacy admission.
 
@@ -205,9 +207,13 @@ the canvas stayed put. Name collisions remain exit 3.
   source digest/reference, repo kind/request, baseline/ref, runtime class and
   presentation in durable projections. Native continuation metadata must retain
   parent linkage. Prove readiness/publication failure semantics at process launch.
-- **Spawn:** replace Agy's `--print "$(cat)"` inner argv transport, or expose it
-  as unsupported. Verify supervised lanes, provider transcript echo and HTTP log
-  viewing cannot disclose raw prompt snapshots. Verify inherited runtime Python
+- **Spawn:** Agy's `--print "$(cat)"` inner argv transport is retired. Every
+  supervised lane (workflow, research, synthesis) hands agy one stream-json
+  user turn on stdin, materialized by the async supervisor from the prompt file
+  (`prompt_transport.materialize_stdin_file`, 0600 `prompt.ndjson`); the argv
+  is `agy … --print= --input-format stream-json --output-format stream-json`.
+  Verify provider transcript echo and HTTP log viewing cannot disclose raw
+  prompt snapshots. Verify inherited runtime Python
   state is scrubbed at every provider boundary; no host interpreter repair.
 - **VOC:** add base, execution-runtime, repo identity capability, model selector
   and model-source/source-reference fields without reordering the provider
