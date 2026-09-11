@@ -30,6 +30,7 @@ from .events import append_event
 from .lifecycle import EventKind, RunState
 from .model_overrides import _model_override_receipt
 from .process_control import process_identity_receipt
+from .prompt_transport import materialize_stdin_file, stdin_transport
 from .report_contract import CLAIM_DIGEST_ENV
 from .run_mutation import RunMetaMutationError, mutate_run_meta
 
@@ -502,6 +503,14 @@ class AsyncSupervisor:
             or "unknown"
         )
         claim_digest = str(merged_env.get(CLAIM_DIGEST_ENV) or "").strip()
+        # The prompt file stays the human-readable truth (VIBECRAFTED_PROMPT_PATH);
+        # what the worker reads on stdin is the provider's private transport —
+        # verbatim text for most, one stream-json user turn for agy.
+        stdin_source = (
+            materialize_stdin_file(agent, prompt_file)
+            if prompt_file is not None
+            else None
+        )
         agent_model = resolve_default_model(agent, command=command, env=merged_env)
         model_receipt = _model_override_receipt(
             agent, str(merged_env.get("VIBECRAFTED_MODEL_REQUESTED") or "")
@@ -530,6 +539,8 @@ class AsyncSupervisor:
                 "report": str(report_path or ""),
                 "transcript": str(transcript_path or ""),
                 "prompt_file": str(prompt_file or ""),
+                "stdin_transport": stdin_transport(agent),
+                "stdin_source": str(stdin_source or ""),
                 "started_at": started_at.isoformat(),
                 "session_id": session_id,
                 "identity_required": True,
@@ -552,8 +563,8 @@ class AsyncSupervisor:
 
         stdin_handle = None
         try:
-            if prompt_file is not None:
-                stdin_handle = prompt_file.open("rb")
+            if stdin_source is not None:
+                stdin_handle = stdin_source.open("rb")
             process = await asyncio.create_subprocess_exec(
                 *command,
                 cwd=str(cwd),

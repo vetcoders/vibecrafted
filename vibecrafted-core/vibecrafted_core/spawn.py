@@ -3514,8 +3514,9 @@ def _default_command(
     if agent == "codex":
         return ["codex", "exec", *flags, prompt]
     if agent == "agy":
-        # agy >= 1.1: --print takes the prompt as its value (Go flags) and
-        # print mode does not read stdin; flags must precede it.
+        # Inline lane only: --print takes the prompt as its value (Go flags), so
+        # the prompt is on argv here like every other provider in this builder.
+        # Every supervised launch uses _stdin_command (private stream-json).
         return [
             "agy",
             *flags,
@@ -3596,16 +3597,24 @@ def _stdin_command(agent: str, controls: ExecutionControls | None = None) -> lis
             "-",
         ]
     if agent == "agy":
-        # agy >= 1.1 print mode reads no stdin and --print requires a value;
-        # a shell shim folds stdin into the flag. The prompt lands on the
-        # inner argv (ARG_MAX-bound) because agy has no file/stdin lane.
+        # agy >= 1.2 print mode has exactly one stdin lane: stream-json (one
+        # NDJSON user turn per line, requires stream-json output). ``--print=``
+        # enters print mode with an empty positional so the prompt never
+        # touches argv; the supervisor materializes the NDJSON turn from the
+        # prompt file (prompt_transport.materialize_stdin_file) and the
+        # AgentStreamParser reads model/session/tokens from the result event.
         return [
-            "bash",
-            "-c",
-            (
-                f"agy {shlex.join(flags)} --add-dir . "
-                '--print-timeout 30m --print "$(cat)"'
-            ),
+            "agy",
+            *flags,
+            "--add-dir",
+            ".",
+            "--print-timeout",
+            "30m",
+            "--print=",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
         ]
     if agent == "junie":
         return [
@@ -3652,8 +3661,9 @@ def _resolve_agent_command(
     """Pin a provider argv to the executable found on the canonical tool PATH.
 
     Commands owned by another runtime (for example ``python -m`` supervisors or
-    test fixtures) pass through unchanged.  The agy stdin adapter is the one
-    provider command embedded in ``bash -c`` and is pinned inside that script.
+    test fixtures) pass through unchanged.  A provider command embedded in
+    ``bash -c`` (``agy …``/``cli …`` as the first word) is pinned inside that
+    script; today every supervised provider, agy included, is a direct argv.
     """
 
     resolved = list(command)

@@ -2935,10 +2935,6 @@ def launch_workflow(
     — control-plane reconciliation is deliberately deferred to observe/await.
     """
     _normalized_runtime(spec.runtime)
-    if spec.agent == "agy":
-        raise ValueError(
-            "agy private prompt transport is unavailable: its current adapter expands stdin into argv; no worker started"
-        )
     if spec.runtime_class not in {"living-tree", "local-worktrees"}:
         raise ValueError("unsupported execution runtime; no host adapter")
     _source_prompt(spec)  # refuse source drift before any mutation
