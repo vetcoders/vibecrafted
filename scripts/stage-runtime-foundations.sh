@@ -132,6 +132,18 @@ if [[ "$(uname -s)" == "Linux" ]]; then
   if command -v g++ >/dev/null 2>&1; then
     export CXX="${CXX:-g++}"
   fi
+  # rustc still links with host `cc`. On Ubuntu that is often clang +
+  # rust-lld, which cannot find -lstdc++ after llama-cpp-sys-2 compiled
+  # with g++ (MEASURED: aicx link failed, libstdc++.so lives in the GCC
+  # libdir). Prefer g++/gcc as the rustc linker. Honor an explicit pin.
+  case "$(uname -m)" in
+    x86_64)
+      export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER:-${CXX:-gcc}}"
+      ;;
+    aarch64|arm64)
+      export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER:-${CXX:-gcc}}"
+      ;;
+  esac
 fi
 RUSTFLAGS="--remap-path-prefix=$HOME=/usr/src/operator-home --remap-path-prefix=$WORK/aicx/source=/usr/src/aicx" \
   CFLAGS="$NATIVE_REMAP_FLAGS" \

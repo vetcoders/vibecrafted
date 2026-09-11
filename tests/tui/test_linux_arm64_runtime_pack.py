@@ -137,3 +137,5 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     assert 'rm -rf "$WORK/aicx"' in foundations
     assert 'export CC="${CC:-gcc}"' in foundations
     assert 'export CXX="${CXX:-g++}"' in foundations
+    assert "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER" in foundations
+    assert "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER" in foundations
