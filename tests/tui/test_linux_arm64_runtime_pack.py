@@ -139,3 +139,12 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     assert "cargo build --manifest-path" not in foundations
     assert "cargo install --locked --version" in foundations
     assert "will not cargo-build those donors" in foundations
+
+
+def test_linux_x86_64_host_expects_carrier_architecture_x64() -> None:
+    """uname -m is x86_64; the Runtime Pack carrier slug is x64 / linux-x64."""
+    installer = (REPO_ROOT / "scripts/install-runtime-pack.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'expected_architecture="x64"' in installer
+    assert 'expected_architecture="x86_64"' not in installer

@@ -549,11 +549,9 @@ fi
 if [[ -z "$expected_architecture" ]]; then
   case "$(uname -m)" in
     x86_64|amd64)
-      if [[ "$expected_platform" == darwin-* ]]; then
-        expected_architecture="x64"
-      else
-        expected_architecture="x86_64"
-      fi
+      # Same slug the assembler writes (`architecture="x64"`, platform
+      # `linux-x64` / `darwin-x64`). uname -m is x86_64; the carrier is not.
+      expected_architecture="x64"
       ;;
     arm64|aarch64) expected_architecture="arm64" ;;
     *) die "unsupported Runtime Pack architecture: $(uname -m)" ;;
