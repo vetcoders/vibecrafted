@@ -28,6 +28,9 @@ source_revision="${VIBECRAFTED_SOURCE_REVISION:-}"
 # the inherited environment is an atomic pair, not a half-set GITHUB_SHA.
 export VIBECRAFTED_SOURCE_REVISION="$source_revision"
 export VIBECRAFTED_SOURCE_OWNER_REPO="${VIBECRAFTED_SOURCE_OWNER_REPO:-vetcoders/vibecrafted}"
+# vc-terminal needs edition2024. Ambient cargo 1.83 fails an hour later.
+# Honor an explicit caller RUSTUP_TOOLCHAIN.
+export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.97.0}"
 # llama-cpp-sys-2 / aicx: host `c++` is often clang, which cannot find
 # libstdc++ headers on Ubuntu (MEASURED: c++ → clang-18, cstdlib missing).
 # Prefer GCC when present. Honor an explicit CC/CXX from the caller.
