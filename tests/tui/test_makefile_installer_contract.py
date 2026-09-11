@@ -196,7 +196,8 @@ def test_ci_workflows_select_the_platforms_canonical_carrier() -> None:
         encoding="utf-8"
     )
 
-    assert "scripts/build-linux-arm64-runtime-pack.sh" in install_linux
+    assert "scripts/build-linux-runtime-pack.sh" in install_linux
+    assert "bash scripts/build-linux-arm64-runtime-pack.sh" not in install_linux
     assert "Vibecrafted_RuntimePack_linux-x64.tar.gz" in install_linux
     assert "openssl pkeyutl -sign -rawin" in install_linux
     assert "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY" in install_linux

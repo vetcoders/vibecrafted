@@ -8655,12 +8655,18 @@ def _is_native_executable(path: Path) -> bool:
     return magic in _NATIVE_EXECUTABLE_MAGIC
 
 
-def _materialize_runtime_generation_vc_terminal_entry(runtime_root: Path) -> None:
+def _materialize_runtime_generation_vc_terminal_entry(
+    runtime_root: Path, *, require_native_host: bool = True
+) -> None:
     """Pin generation `bin/vc-terminal` to the product config, host in libexec.
 
     A raw `releases/<ver>/bin/vc-terminal` used to be the Alacritty Mach-O, so
     it read `~/.config/alacritty/` and tried to spawn a literal `${HOME}/...`
     program. Same split as vc-frame: native bytes under libexec, wrapper on PATH.
+
+    A source checkout is not a Runtime Pack. Source preflight therefore keeps
+    the product wrapper and leaves `libexec/vc-terminal` absent. The Runtime
+    Pack installer still requires a native host.
     """
     source = runtime_root / "scripts" / "vc-terminal-product-entry.sh"
     bin_term = runtime_root / "bin" / "vc-terminal"
@@ -8672,8 +8678,22 @@ def _materialize_runtime_generation_vc_terminal_entry(runtime_root: Path) -> Non
         else:
             os.replace(bin_term, libexec)
             libexec.chmod(0o755)
-    if not libexec.is_file() or not _is_native_executable(libexec):
-        raise OSError(f"candidate runtime has no native vc-terminal host: {libexec}")
+    has_native_host = libexec.is_file() and _is_native_executable(libexec)
+    if not has_native_host:
+        if require_native_host:
+            raise OSError(
+                f"candidate runtime has no native vc-terminal host: {libexec}. "
+                "A source checkout is not a Runtime Pack; install a verified "
+                "Runtime Pack (--runtime-pack-file) or use --skills-only."
+            )
+        if not source.is_file():
+            raise OSError(
+                f"candidate runtime has no vc-terminal product entry: {source}"
+            )
+        bin_term.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, bin_term)
+        bin_term.chmod(0o755)
+        return
     if not source.is_file():
         raise OSError(f"candidate runtime has no vc-terminal product entry: {source}")
     shutil.copy2(source, bin_term)
@@ -9582,7 +9602,9 @@ def _prepare_runtime_generation_candidate(
     _materialize_vc_frame_generation(staging)
     _materialize_runtime_generation_entrypoint(staging)
     _materialize_runtime_generation_vc_frame_entry(staging)
-    _materialize_runtime_generation_vc_terminal_entry(staging)
+    _materialize_runtime_generation_vc_terminal_entry(
+        staging, require_native_host=False
+    )
     audit_errors = _runtime_generation_audit_errors(staging, source_root=src)
     if audit_errors:
         raise OSError("\n".join(audit_errors))

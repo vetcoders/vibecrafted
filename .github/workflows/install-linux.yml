@@ -65,7 +65,7 @@ jobs:
           set -euo pipefail
           pack="$RUNNER_TEMP/Vibecrafted_RuntimePack_linux-x64.tar.gz"
           VIBECRAFTED_SOURCE_REVISION="$GITHUB_SHA" \
-            bash scripts/build-linux-arm64-runtime-pack.sh "$pack"
+            bash scripts/build-linux-runtime-pack.sh "$pack"
           openssl genpkey -algorithm ED25519 -out "$RUNNER_TEMP/ci-signing.key"
           openssl pkey -in "$RUNNER_TEMP/ci-signing.key" -pubout \
             -out "$RUNNER_TEMP/ci-signing.pub"

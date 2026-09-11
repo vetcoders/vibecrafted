@@ -23,6 +23,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Linux source install no longer pretends to be a native Runtime Pack. A
+  checkout without `libexec/vc-terminal` keeps the product wrapper and
+  refuses pack publication; `--runtime-pack-file` still requires the host.
+  `scripts/build-linux-runtime-pack.sh` is the honest multi-arch assembler
+  name (`linux-x64` / `linux-arm64`). The Darwin publisher allowlist stays
+  closed; Linux packs are built on Linux.
+- `install.ps1` names the current `VERSION` and states that Windows native
+  install is not shipped. It no longer advertises a v1.x/v2.x lane or an
+  `iwr | iex` URL that the site does not serve.
 - macOS App: the console window uses one native unified toolbar (Back,
   Forward, Home, runtime status, Retry/Repair/Terminal/Diagnostics, Open in
   Browser) instead of a second content-row chrome; the recovery card keeps one

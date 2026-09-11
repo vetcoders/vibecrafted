@@ -17,7 +17,7 @@ RELEASE_PAGE = "https://github.com/vetcoders/vibecrafted/releases/latest"
 # 2026-08-18; both copies agreed at this digest. See
 # test_windows_entry_point_does_not_drift_between_its_two_copies for why a
 # constant is needed on top of the cross-repo comparison.
-INSTALL_PS1_SHA256 = "12c2ca5b95195a2fcee0f4987962fd35ec52dde85588c226f68bcab4680450b6"
+INSTALL_PS1_SHA256 = "d23aad1c55bb8432e0d877b9be8b6dada73b9242468233676c793169f9c1830e"
 
 # Binaries a developer laptop always has and the GitHub macos-15 image does
 # not. Measured 2026-08-18 against actions/runner-images

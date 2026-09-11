@@ -74,9 +74,13 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     builder = (REPO_ROOT / "vibecrafted-vm/RuntimePack.Containerfile").read_text(
         encoding="utf-8"
     )
+    wrapper = (REPO_ROOT / "scripts/build-linux-runtime-pack.sh").read_text(
+        encoding="utf-8"
+    )
     assembler = (REPO_ROOT / "scripts/build-linux-arm64-runtime-pack.sh").read_text(
         encoding="utf-8"
     )
+    assert "build-linux-arm64-runtime-pack.sh" in wrapper
     assert "astral.sh/uv" not in builder
     assert "rustup target add wasm32-unknown-unknown wasm32-wasip1" in builder
     assert builder.index("ARG VIBECRAFTED_SOURCE_REVISION") > builder.index(
