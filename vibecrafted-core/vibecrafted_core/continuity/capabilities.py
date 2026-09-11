@@ -199,14 +199,20 @@ CAPABILITIES: Mapping[str, ProviderCapability] = {
         agent="agy",
         execution=EXECUTABLE,
         session_id_shape=_SESSION_TOKEN,
-        session_id_sources=("transcript_session_line", "run_meta"),
+        session_id_sources=(
+            "stream_json_init_event",
+            "transcript_session_line",
+            "run_meta",
+        ),
         interactive_resume=SUPPORTED,
-        noninteractive_resume=UNVERIFIED,
+        noninteractive_resume=SUPPORTED,
         native_fork=UNSUPPORTED,
-        fork_runtime_restrictions="no verified native fork adapter; top-level help is not exhaustive",
-        prompt_transport="flag_value",
+        fork_runtime_restrictions=(
+            "no native fork flag on agy 1.2.1 help; do not present resume as a fork"
+        ),
+        prompt_transport="stdin",
         session_identity_event=(
-            "none structured; runner-captured transcript `session:` line"
+            "stream-json `init`/`result` events carrying `conversation_id`"
         ),
         cwd_safety=("workspace pinned via `--add-dir .`; no checkout-mutating flags"),
         resume_preserves_cache=None,
@@ -216,12 +222,13 @@ CAPABILITIES: Mapping[str, ProviderCapability] = {
             required_markers=("--continue", "--conversation", "--print"),
         ),
         notes=(
-            "agy 1.1.3 verified on host 2026-07-18: `-c/--continue` (most "
-            "recent) and `--conversation <id>` (resume by ID) exist; the "
-            "headless `--conversation` + `--print` combination is the F06 "
-            "contract still to be proven — core spawn fails closed today. "
-            "Prompt rides the `--print` flag value (ARG_MAX-bound; stdin "
-            "folded via shell shim)"
+            "agy 1.2.1 probed 2026-09-11 on gemini-3.8-flash-high: "
+            "`--conversation <id> --print= --input-format stream-json "
+            "--output-format stream-json` continues the same conversation_id "
+            "and preserves prior-turn context. `--print <prompt>` also composes "
+            "with `--conversation` (ARG_MAX; not the supervised lane). "
+            "Native fork remains unsupported — no `--fork-session` equivalent. "
+            "Interactive `-c/--continue` is most-recent, not exact-id."
         ),
     ),
     "junie": ProviderCapability(

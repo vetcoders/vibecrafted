@@ -775,6 +775,7 @@ _print_common_skill_flags() {
   printf '%bCommon flags:%b\n' "$_bold" "$_reset"
   printf '  -p, --prompt <text>            Inline prompt\n'
   printf '  -f, --file <path.md>           Input file as prompt context\n'
+  printf '  --session <id|current|last>    Continue this provider-native session (never a work-* run id)\n'
 }
 
 _print_skill_specific_flags() {
@@ -4973,7 +4974,7 @@ cmd_help_full() {
   printf '  -f, --file <path.md>           Input file as prompt context\n'
   printf '  --count <n>                    Marbles / Polarize loop count (default: 3)\n'
   printf '  --depth <n>                    Marbles plan crawl depth (default: 3)\n'
-  printf '  --session <id|current|last>     Session selector for vibecrafted resume\n'
+  printf '  --session <id|current|last>     Provider session for workflow/resume/fork (never a work-* run id)\n'
   printf '\n'
   printf '%b=== GLOBAL OPTIONS ===%b\n' "$_bold" "$_reset"
   printf '\n'
@@ -4986,6 +4987,7 @@ cmd_help_full() {
   printf '  vibecrafted review agy .vibecrafted/plans/my-plan.md   # (gemini deprecated)\n'
   printf '  vibecrafted observe codex --last\n'
   printf '  vibecrafted resume claude --session <id> --prompt "Continue the fix"\n'
+  printf '  vibecrafted workflow agy --session <id> --file brief.md --runtime headless\n'
   printf '\n'
   printf '%b=== EXAMPLES ===%b\n' "$_bold" "$_reset"
   printf '\n'

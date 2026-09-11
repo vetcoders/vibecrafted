@@ -424,6 +424,158 @@ def test_resume_session_prints_dedicated_receipt(
     assert "resume_mode:        manual_explicit" in output
 
 
+def test_workflow_session_calls_manual_resume_and_never_launch_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    seen: dict[str, object] = {}
+
+    def fake_resume(
+        agent: str,
+        agent_session_id: str,
+        source_dir: str | Path,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        seen.update(
+            {
+                "agent": agent,
+                "agent_session_id": agent_session_id,
+                "source_dir": source_dir,
+                **kwargs,
+            }
+        )
+        return {
+            "schema": "vibecrafted.manual_explicit_resume.v1",
+            "accepted": True,
+            "run_id": "rsme-workflow-1",
+            "agent": agent,
+            "agent_session_id": agent_session_id,
+            "runtime_session_id": "runtime-workflow-1",
+            "resume_mode": "manual_explicit",
+            "skill": "workflow",
+            "root": str(tmp_path),
+            "status": "launching",
+        }
+
+    monkeypatch.setattr(cli, "manual_resume_session", fake_resume)
+    monkeypatch.setattr(
+        cli,
+        "resolve_session_selection",
+        lambda agent, token, root: {
+            "agent_session_id": token,
+            "session_selector": token,
+            "identity_source": "explicit_session",
+        },
+    )
+    monkeypatch.setattr(
+        cli,
+        "launch_workflow",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("workflow --session must not call launch_workflow")
+        ),
+    )
+
+    rc = cli.main(
+        [
+            "workflow",
+            "agy",
+            "--session",
+            "839007be-60a5-43f9-842b-cfa0f8a0dc02",
+            "--prompt",
+            "continue the throwaway probe",
+            "--model",
+            "gemini-3.8-flash-high",
+            "--runtime",
+            "headless",
+            "--root",
+            str(tmp_path),
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    assert seen["agent"] == "agy"
+    assert seen["agent_session_id"] == "839007be-60a5-43f9-842b-cfa0f8a0dc02"
+    assert seen["prompt"] == "continue the throwaway probe"
+    assert seen["model"] == "gemini-3.8-flash-high"
+    assert seen["skill"] == "workflow"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["resume_mode"] == "manual_explicit"
+    assert payload["run_id"] == "rsme-workflow-1"
+
+
+def test_research_session_is_refused_before_launch(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "launch_workflow",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("research --session must not launch")
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "manual_resume_session",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("research --session must not resume")
+        ),
+    )
+
+    rc = cli.main(
+        [
+            "research",
+            "agy",
+            "--session",
+            "839007be-60a5-43f9-842b-cfa0f8a0dc02",
+            "--prompt",
+            "continue",
+        ]
+    )
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "research is a multi-agent swarm" in err
+    assert "vibecrafted resume <agent> --session" in err
+
+
+def test_workflow_session_refuses_visible_runtime(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "launch_workflow",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("visible --session must not launch")
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "manual_resume_session",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("visible --session must not resume")
+        ),
+    )
+
+    rc = cli.main(
+        [
+            "workflow",
+            "agy",
+            "--session",
+            "839007be-60a5-43f9-842b-cfa0f8a0dc02",
+            "--prompt",
+            "continue",
+            "--runtime",
+            "visible",
+        ]
+    )
+
+    assert rc == 2
+    assert "headless-only" in capsys.readouterr().err
+
+
 def test_lifecycle_deck_inherits_verified_installer_lease(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

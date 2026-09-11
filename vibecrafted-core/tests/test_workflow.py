@@ -2907,11 +2907,118 @@ def test_manual_explicit_resume_launches_own_tracked_headless_run(
     assert forbidden_parent_claims.isdisjoint(launch["launch_meta"])
 
 
-@pytest.mark.parametrize("agent", ["agy", "junie"])
+def test_manual_explicit_resume_agy_uses_conversation_and_stream_json(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "baseline",
+        ],
+        check=True,
+    )
+    monkeypatch.setattr(workflow, "reserve_run_id", lambda _skill: "rsme-agy-1")
+    monkeypatch.setattr(
+        workflow, "ensure_session_id", lambda _value=None: "runtime-agy-1"
+    )
+    monkeypatch.setattr(
+        workflow,
+        "probe_provider",
+        lambda agent: SimpleNamespace(
+            agent=agent,
+            state="confirmed",
+            executable="/verified/bin/agy",
+            version="agy 1.2.1",
+            detail="confirmed",
+        ),
+    )
+    launches: list[dict[str, Any]] = []
+
+    def fake_launch(
+        spec: workflow.WorkflowLaunchSpec,
+        source_dir: str | Path,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        launches.append({"spec": spec, "source_dir": source_dir, **kwargs})
+        return {
+            "accepted": True,
+            "run_id": spec.run_id,
+            "agent": spec.agent,
+            "skill": spec.skill,
+            "root": spec.root,
+            "status": "launching",
+        }
+
+    monkeypatch.setattr(workflow, "launch_workflow", fake_launch)
+
+    result = workflow.manual_resume_session(
+        "agy",
+        "839007be-60a5-43f9-842b-cfa0f8a0dc02",
+        tmp_path,
+        prompt="continue from the verified session",
+        root=tmp_path,
+        model="gemini-3.8-flash-high",
+        skill="workflow",
+    )
+
+    assert result["accepted"] is True
+    assert result["run_id"] == "rsme-agy-1"
+    assert result["resume_mode"] == "manual_explicit"
+    assert result["agent_session_id"] == "839007be-60a5-43f9-842b-cfa0f8a0dc02"
+    assert result["runtime_session_id"] == "runtime-agy-1"
+    launch = launches[0]
+    assert launch["worker_command_override"] == [
+        "/verified/bin/agy",
+        "--model",
+        "gemini-3.8-flash-high",
+        "--conversation",
+        "839007be-60a5-43f9-842b-cfa0f8a0dc02",
+        "--dangerously-skip-permissions",
+        "--add-dir",
+        ".",
+        "--print-timeout",
+        "30m",
+        "--print=",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+    ]
+    assert launch["spec"].mode == "manual_explicit"
+    assert launch["spec"].runtime == "headless"
+    assert launch["spec"].skill == "workflow"
+    assert launch["spec"].model == "gemini-3.8-flash-high"
+    assert launch["env"]["VIBECRAFTED_AGENT_SESSION_ID"] == (
+        "839007be-60a5-43f9-842b-cfa0f8a0dc02"
+    )
+    assert "bash" not in launch["worker_command_override"]
+    assert "-c" not in launch["worker_command_override"]
+
+
+def test_agy_native_fork_stays_unsupported_and_names_resume() -> None:
+    result = workflow.resolve_fork_source(
+        "agy", session="839007be-60a5-43f9-842b-cfa0f8a0dc02"
+    )
+
+    assert result["accepted"] is False
+    assert result["reason"] == "native_fork_unsupported"
+    assert "no native fork flag on agy 1.2.1 help" in str(result.get("detail") or "")
+    assert "vibecrafted resume agy --session" in str(result.get("hint") or "")
+
+
 def test_manual_explicit_resume_fails_closed_for_unverified_providers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    agent: str,
 ) -> None:
     monkeypatch.setattr(
         workflow,
@@ -2929,8 +3036,8 @@ def test_manual_explicit_resume_fails_closed_for_unverified_providers(
     )
 
     result = workflow.manual_resume_session(
-        agent,
-        f"{agent}-session",
+        "junie",
+        "junie-session",
         tmp_path,
         prompt="continue",
         root=tmp_path,
@@ -4233,7 +4340,6 @@ def test_native_resume_refuses_operator_and_trust_terminals(
     ("agent", "reason"),
     [
         ("gemini", "native_resume_unsupported"),
-        ("agy", "native_resume_unverified"),
         ("junie", "native_resume_unverified"),
     ],
 )

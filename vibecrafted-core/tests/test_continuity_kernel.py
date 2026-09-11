@@ -17,7 +17,7 @@ from vibecrafted_core import spawn, workflow_runtime
 from vibecrafted_core.continuity import capabilities as continuity
 
 EXECUTABLE_AGENTS = ("claude", "codex", "agy", "junie", "grok", "cursor")
-VERIFIED_HEADLESS_RESUME_AGENTS = ("claude", "codex", "grok")
+VERIFIED_HEADLESS_RESUME_AGENTS = ("claude", "codex", "grok", "agy")
 
 
 def _spawn_accepts_headless_resume(agent: str) -> bool:

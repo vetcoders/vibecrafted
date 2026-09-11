@@ -32,6 +32,15 @@ def test_worker_help_declares_headless_as_the_default_surface() -> None:
     assert "Presentation (default: headless)" in output
     assert "--execution-runtime <living-tree|local-worktrees>" in output
     assert "--base <ref|SHA|HEAD>" in output
+    assert "--session <id|current|last>" in output
+
+
+def test_workflow_help_documents_session_continuation() -> None:
+    output = render_workflow_help("workflow")
+
+    assert "--session <id|current|last>" in output
+    assert "vibecrafted workflow agy --session <provider-uuid>" in output
+    assert "never a work-* run id" in output
 
 
 def test_partner_help_is_interactive_only() -> None:

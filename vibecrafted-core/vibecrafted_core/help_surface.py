@@ -366,6 +366,14 @@ WORKFLOW_HELP: dict[str, WorkflowHelp] = {
                 "--permissions auto --sandbox true --repo ~/Projects/app "
                 '--prompt "Ship it in an isolated, sandboxed checkout"'
             ),
+            (
+                "vibecrafted workflow agy --session <provider-uuid> "
+                "--file /path/to/brief.md --runtime headless"
+            ),
+        ),
+        (
+            "--session continues a native provider session; it is not a run id, PID, or workspace id",
+            "task continuation with --session is headless; fork remains a separate verb",
         ),
     ),
 }
@@ -599,6 +607,7 @@ def _option_lines(topic: str) -> list[str]:
         "  --permissions <policy>         bypass|auto|accept-edits|read-only, enforced by the agent CLI (default: bypass)",
         "  --sandbox [true|false]         Agent CLI sandbox on/off; refused before launch when it cannot be enforced",
         "  --model <name>                 Exact model; CLI > plan frontmatter > provider default",
+        "  --session <id|current|last>    Continue this provider-native session (never a work-* run id)",
     ]
     definition = workflow_definition(topic)
     if definition and definition.supports_count:

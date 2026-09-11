@@ -54,6 +54,7 @@ from .workflow import (
     read_prompt_stream,
     recover_launch_receipt,
     resolve_fork_source,
+    resolve_session_selection,
 )
 
 AGENTS = {"claude", "codex", "agy", "junie", "grok", "cursor", "swarm"}
@@ -328,6 +329,14 @@ def _add_launch_parser(sub: argparse._SubParsersAction, name: str) -> None:
     run.add_argument("--count", type=int)
     run.add_argument("--depth", type=int)
     run.add_argument("--model", default=None)
+    run.add_argument(
+        "--session",
+        default="",
+        help=(
+            "continue this provider-native session (id|current|last); "
+            "never a control-plane run id"
+        ),
+    )
     if name == "research":
         run.add_argument("--synthesizer", default="")
         run.add_argument("--synthesizer-model", default="")
@@ -940,6 +949,120 @@ def _print_resume_session_receipt(payload: dict[str, Any]) -> None:
     print(f"observe:            vibecrafted observe {agent} --run-id {run_id}")
     print(f"await:              vibecrafted await {agent} --run-id {run_id}")
     print("===============================================================")
+
+
+def _continue_launcher_named_session(
+    *,
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    source_dir: str,
+    prompt: str,
+    research_agents: tuple[str, ...],
+) -> int:
+    """Route ``<skill> --session`` onto the same native resume as ``resume``."""
+
+    session = str(getattr(args, "session", "") or "").strip()
+    command = str(args.command)
+    if command == "research" or research_agents:
+        print(
+            "error: --session continues one provider session; "
+            "research is a multi-agent swarm. "
+            "Use: vibecrafted resume <agent> --session <provider-uuid>",
+            file=sys.stderr,
+        )
+        return 2
+    runtime = str(getattr(args, "runtime", "") or "").strip()
+    if runtime and runtime != "headless":
+        print(
+            "error: --session continuation is headless-only; "
+            "omit --runtime or pass --runtime headless",
+            file=sys.stderr,
+        )
+        return 2
+    if str(getattr(args, "execution_runtime", "") or "").strip() == "local-worktrees":
+        print(
+            "error: --session continues the selected checkout; "
+            "worktree overrides require vibecrafted fork",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        if parse_worktree_flag(
+            getattr(args, "worktree", ""), label=f"vibecrafted {command}"
+        ):
+            print(
+                "error: --session continues the selected checkout; "
+                "worktree overrides require vibecrafted fork",
+                file=sys.stderr,
+            )
+            return 2
+    except RepoSelectionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    agent = str(args.agent or "").strip()
+    if not agent:
+        parser.error(f"{command} --session requires an agent")
+    kind = classify_resume_identity(session)
+    if kind in {"run_id", "vibecrafted_session"} or looks_like_control_plane_run_id(
+        session
+    ):
+        _print_identity_mixup("run_id" if kind == "run_id" else kind, session)
+        return 2
+    prompt_file = str(getattr(args, "file", "") or "").strip()
+    if prompt and prompt_file:
+        print(
+            "error: use one of --prompt or --file with --session",
+            file=sys.stderr,
+        )
+        return 2
+    source_path = ""
+    if prompt_file:
+        path = Path(prompt_file).expanduser()
+        try:
+            prompt = path.read_bytes().decode("utf-8")
+            source_path = str(path.resolve())
+        except OSError as exc:
+            print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 2
+    try:
+        resume_root = select_repository(
+            args.repo,
+            args.root,
+            fallback=resolve_operator_launch_root,
+            label=f"{command} --session",
+        ).path
+    except RepoSelectionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if is_operator_home_root(resume_root):
+        print(
+            "error: refusing to launch against the home directory; "
+            "open a workspace in Vibecrafted or pass --repo",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        selection = resolve_session_selection(agent, session, resume_root)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    resume_result = manual_resume_session(
+        agent,
+        selection["agent_session_id"],
+        source_dir,
+        prompt=prompt,
+        root=resume_root,
+        model=args.model,
+        source_text=prompt,
+        skill=LAUNCH_ALIASES.get(command, command),
+        launch_meta={"session_selection": selection},
+        source_path=source_path,
+    )
+    if args.json:
+        print(json.dumps(resume_result, ensure_ascii=False, indent=2))
+    else:
+        _print_resume_session_receipt(resume_result)
+    return 0 if resume_result.get("accepted") else 1
 
 
 def _print_launch_input_error(*, command: str, agent: str | None, message: str) -> None:
@@ -2139,6 +2262,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    session = str(getattr(args, "session", "") or "").strip()
+    if session:
+        return _continue_launcher_named_session(
+            parser=parser,
+            args=args,
+            source_dir=source_dir,
+            prompt=prompt,
+            research_agents=research_agents,
+        )
     payload = {
         "skill": LAUNCH_ALIASES.get(args.command, args.command),
         "agent": args.agent,

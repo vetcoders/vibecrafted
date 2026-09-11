@@ -186,6 +186,24 @@ def _write_finished_lane_meta(
                 "/dev/stdin",
             ],
         ),
+        (
+            "agy",
+            [
+                "agy",
+                "--conversation",
+                "native-123",
+                "--dangerously-skip-permissions",
+                "--add-dir",
+                ".",
+                "--print-timeout",
+                "30m",
+                "--print=",
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+            ],
+        ),
     ],
 )
 def test_native_resume_argv_is_provider_specific_and_shell_free(
@@ -198,7 +216,7 @@ def test_native_resume_argv_is_provider_specific_and_shell_free(
     assert "-c" not in command
 
 
-@pytest.mark.parametrize("agent", ["gemini", "agy", "junie", "swarm"])
+@pytest.mark.parametrize("agent", ["gemini", "junie", "swarm"])
 def test_native_resume_argv_fails_closed_for_unverified_agents(agent: str) -> None:
     with pytest.raises(ValueError, match="native_resume_unsupported"):
         workflow_runtime.native_resume_argv(agent, "native-123")

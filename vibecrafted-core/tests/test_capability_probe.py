@@ -71,10 +71,11 @@ def test_grok_forbids_checkout_mutating_recovery_flags() -> None:
 
 
 def test_unverified_never_upgraded_optimistically() -> None:
-    # AICX/host evidence shows a resume *surface* for agy and junie, but the
-    # headless contract is unproven (F06) — the table must say so.
+    # AICX/host evidence shows a resume *surface* for junie and cursor, but the
+    # headless contract is unproven (F06) — the table must say so. agy 1.2.1
+    # stream-json `--conversation` was probed 2026-09-11 and is SUPPORTED.
     assert (
-        continuity.capability_for("agy").noninteractive_resume == continuity.UNVERIFIED
+        continuity.capability_for("agy").noninteractive_resume == continuity.SUPPORTED
     )
     assert (
         continuity.capability_for("junie").noninteractive_resume

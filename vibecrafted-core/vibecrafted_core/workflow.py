@@ -4825,6 +4825,7 @@ def manual_resume_session(
     model_source: str = "",
     source_text: str | None = None,
     source_path: str = "",
+    skill: str = "workflow",
     launch_meta: dict[str, Any] | None = None,
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -4909,7 +4910,7 @@ def manual_resume_session(
         admitted = normalize_launch_spec(
             {
                 "agent": normalized_agent,
-                "skill": "workflow",
+                "skill": str(skill or "workflow").strip() or "workflow",
                 "prompt": source_text if source_text is not None else prompt_body,
                 "root": resolved_root,
                 "repo_selector": True,

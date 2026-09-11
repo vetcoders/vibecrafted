@@ -516,7 +516,7 @@ Research reports:
 """
 
 
-NATIVE_RESUME_AGENTS = frozenset({"claude", "codex", "grok"})
+NATIVE_RESUME_AGENTS = frozenset({"claude", "codex", "grok", "agy"})
 
 
 def native_resume_argv(agent: str, agent_session_id: str) -> list[str]:
@@ -567,6 +567,12 @@ def native_resume_argv(agent: str, agent_session_id: str) -> list[str]:
             "--prompt-file",
             "/dev/stdin",
         ]
+    if normalized_agent == "agy":
+        # agy 1.2.1 probe 2026-09-11: `--conversation <id>` composes with the
+        # private `--print=` + stream-json stdin lane and keeps the same
+        # conversation_id (context preserved). Prompt never rides argv.
+        command = _stdin_command("agy")
+        return [command[0], "--conversation", native_id, *command[1:]]
     raise ValueError(f"native_resume_unsupported:{normalized_agent or 'unknown'}")
 
 
