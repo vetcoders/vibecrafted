@@ -2151,10 +2151,10 @@ a.control-run-id:focus-visible {
   min-width: 0;
 }
 
-/* One chip plane for status + actions. The capsule (999px) on the status
- * pill and the 8px override on the controls were two shapes in one row;
- * `<button>` also kept UA chrome the `<a>` never had. Chip-stack tokens
- * already own this geometry — reuse them. */
+/* One chip plane for status + actions. A full-capsule status next to
+ * squared controls was two shapes in one row; the theme <button> also
+ * kept UA chrome the <a> never had. Chip-stack tokens already own this
+ * geometry — reuse them. */
 .server-status-pill,
 .server-navbar-action,
 .server-theme-toggle {
