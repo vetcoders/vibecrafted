@@ -308,12 +308,13 @@ def test_native_carrier_embeds_every_required_agent_foundation() -> None:
     assert 'generation / "libexec/vc-frame"' in installer
     assert "_write_runtime_generation_manifest(" in installer
     assert "runtime-foundations.json" in stager
-    assert "OPENSSL_STATIC=1" in stager
-    assert "PRView retains a non-system dynamic library dependency" in stager
-    assert '"$AICX_REVISION" "$AICX_ARCHIVE_SHA256" <<\'PY\'' in stager
-    assert '"aicx": aicx_revision' in stager
-    assert "remap-path-prefix" in stager
-    assert "cargo install --locked" in stager
+    assert "npm pack" in stager
+    assert "@loctree/aicx-darwin-arm64" in stager
+    assert "published PRView v" in stager
+    assert "links Homebrew OpenSSL" in stager
+    assert "cargo install" not in stager
+    assert "cargo build" not in stager
+    assert "remap-path-prefix" not in stager
     assert 'rm -rf "$WORK" 2>/dev/null || true' in stager
 
 

@@ -13,7 +13,7 @@ def _executable(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-def test_foundation_stager_accepts_linux_arm64_as_a_complete_target(
+def test_foundation_stager_rejects_linux_arm64_without_published_packages(
     tmp_path: Path,
 ) -> None:
     fake_bin = tmp_path / "bin"
@@ -38,9 +38,8 @@ def test_foundation_stager_accepts_linux_arm64_as_a_complete_target(
         capture_output=True,
         check=False,
     )
-    assert (
-        "no complete Runtime Foundations payload for Linux/aarch64" not in result.stderr
-    )
+    assert result.returncode != 0
+    assert "no published Runtime Foundations payload for Linux/aarch64" in result.stderr
 
 
 def test_local_vm_image_consumes_only_the_exact_runtime_pack_carrier() -> None:
