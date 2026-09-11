@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import shlex
 import subprocess
 from pathlib import Path
 
@@ -12,10 +11,10 @@ from vibecrafted_core.model_overrides import _with_model_override
 from vibecrafted_core.spawn import _stdin_command
 
 
-def _canonical_agy_wrapper(*prefix: str) -> list[str]:
-    """Build a canonical Agy wrapper with a controlled existing option region."""
+def _agy_argv(*prefix: str) -> list[str]:
+    """Build a canonical Agy argv with a controlled existing option region."""
 
-    argv = [
+    return [
         "agy",
         *prefix,
         "--dangerously-skip-permissions",
@@ -23,32 +22,50 @@ def _canonical_agy_wrapper(*prefix: str) -> list[str]:
         ".",
         "--print-timeout",
         "30m",
-        "--print",
-        "$(cat)",
+        "--print=",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
     ]
-    return ["bash", "-c", f'{shlex.join(argv[:-2])} --print "$(cat)"']
 
 
 def test_agy_single_pin_is_idempotent() -> None:
     pinned = _with_model_override("agy", _stdin_command("agy"), "gemini-test")
 
-    assert shlex.split(pinned[2])[:3] == ["agy", "--model", "gemini-test"]
+    assert pinned[:3] == ["agy", "--model", "gemini-test"]
     assert _with_model_override("agy", pinned, "gemini-test") == pinned
+
+
+def test_agy_pin_survives_a_resolved_executable_path() -> None:
+    resolved = ["/opt/agents/bin/agy", *_agy_argv()[1:]]
+
+    pinned = _with_model_override("agy", resolved, "gemini-test")
+
+    assert pinned[:3] == ["/opt/agents/bin/agy", "--model", "gemini-test"]
 
 
 @pytest.mark.parametrize(
     ("command", "reason"),
     [
         (
-            _canonical_agy_wrapper("--model", "first", "--model", "first"),
+            _agy_argv("--model", "first", "--model", "first"),
             "model_override_ambiguous_existing_model",
         ),
         (
-            _canonical_agy_wrapper("--model"),
+            _agy_argv("--model"),
             "model_override_missing_existing_model",
         ),
         (
+            _agy_argv("--model", "first"),
+            "model_override_conflicts_with_existing_model",
+        ),
+        (
             ["bash", "-c", 'agy --print "$(cat)"'],
+            "model_override_unsupported_agy_command_shape",
+        ),
+        (
+            ["bash", "-c", "agy --print= --input-format stream-json"],
             "model_override_unsupported_agy_command_shape",
         ),
     ],

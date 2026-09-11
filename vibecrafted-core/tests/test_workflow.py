@@ -1235,9 +1235,12 @@ def test_launch_workflow_never_runs_global_sync_after_spawn(
     assert payload["control_plane"]["sync"] == "deferred"
 
 
-def test_launch_workflow_refuses_agy_without_private_transport(
+def test_launch_workflow_admits_agy_through_the_private_stdin_transport(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """agy is no longer refused up front: its adapter feeds the prompt to
+    ``agy --input-format stream-json`` on stdin, so launch admission reaches
+    the same pre-flight as every other agent."""
     monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
     source = _source_dir(tmp_path)
     spec = workflow.WorkflowLaunchSpec(
@@ -1250,10 +1253,15 @@ def test_launch_workflow_refuses_agy_without_private_transport(
         root=str(source),
         model="gemini-pro",
     )
-    monkeypatch.setattr(
-        workflow, "_sweep_stale_runs", lambda: pytest.fail("mutation before refusal")
-    )
-    with pytest.raises(ValueError, match="private prompt transport"):
+
+    class ReachedPreflight(RuntimeError):
+        pass
+
+    def _sentinel() -> None:
+        raise ReachedPreflight
+
+    monkeypatch.setattr(workflow, "_sweep_stale_runs", _sentinel)
+    with pytest.raises(ReachedPreflight):
         workflow.launch_workflow(spec, source)
 
 
@@ -1490,8 +1498,8 @@ def test_build_launch_command_applies_stage_model_flags_by_runner(
         tmp_path,
         prompt_file=tmp_path / "p.md",
     )
-    assert "gemini-pro" not in agy
-    assert "--model" not in agy
+    # agy is a direct argv now (no bash shim), so the pin is visible at the head.
+    assert agy[:3] == ["agy", "--model", "gemini-pro"]
     assert "-m" not in agy
 
     marbles = workflow.build_launch_command(
@@ -2034,7 +2042,7 @@ def test_claude_terminal_command_streams_visible_json(tmp_path: Path) -> None:
 def test_stream_capable_agents_use_native_stream_commands(tmp_path: Path) -> None:
     expected = {
         "codex": ("--json",),
-        "agy": ("bash", "-c"),  # agy uses bash -c shim containing agy
+        "agy": ("--output-format", "stream-json"),  # private stream-json stdin lane
         "junie": ("--output-format", "json-stream"),
         "grok": ("--output-format", "streaming-json"),
     }

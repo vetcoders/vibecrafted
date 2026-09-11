@@ -345,7 +345,7 @@ def test_research_runtime_yaml_wins_over_legacy_toml_and_applies_lane_models(
         ".",
         "--print-timeout",
         "30m",
-        "--print",
+        "--print=",
     ]
     assert synthesis_transcript.splitlines()[:8] == [
         "--model",
@@ -355,7 +355,7 @@ def test_research_runtime_yaml_wins_over_legacy_toml_and_applies_lane_models(
         ".",
         "--print-timeout",
         "30m",
-        "--print",
+        "--print=",
     ]
     children = {child["agent"]: child for child in meta["children"]}
     assert children["codex"]["model_requested"] == "gpt-yaml"
@@ -416,7 +416,7 @@ def test_research_runtime_applies_model_request_per_child_runner(
         ".",
         "--print-timeout",
         "30m",
-        "--print",
+        "--print=",
     ]
 
     meta = json.loads((home / "parent.meta.json").read_text(encoding="utf-8"))

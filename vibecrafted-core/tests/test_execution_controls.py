@@ -296,8 +296,14 @@ def test_stdin_command_carries_resolved_controls_verbatim() -> None:
         "agy",
         controls=resolve_execution_controls("agy", permissions="auto", sandbox=True),
     )
-    assert agy[:2] == ["bash", "-c"]
-    assert agy[2].startswith("agy --sandbox --add-dir . ")
+    assert agy[:4] == ["agy", "--sandbox", "--add-dir", "."]
+    assert agy[-5:] == [
+        "--print=",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+    ]
 
     with pytest.raises(ValueError, match="resolved for claude, not codex"):
         spawn._stdin_command("codex", controls=controls)

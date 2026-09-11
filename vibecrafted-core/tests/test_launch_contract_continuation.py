@@ -306,12 +306,19 @@ def test_dispatch_plan_model_selection(tmp_path, override, expected, origin):
     assert cut.model_source == origin
 
 
-def test_agy_private_transport_refuses_before_mutation(tmp_path, monkeypatch):
+def test_agy_is_admitted_like_every_other_agent(tmp_path, monkeypatch):
+    """The agy adapter now carries the prompt on stdin (stream-json), so the
+    launch contract admits it and proceeds to the shared pre-flight."""
     selected = spec(tmp_path, agent="agy", prompt="private")
-    monkeypatch.setattr(
-        workflow, "_sweep_stale_runs", lambda: pytest.fail("mutated before refusal")
-    )
-    with pytest.raises(ValueError, match="private prompt transport"):
+
+    class ReachedPreflight(RuntimeError):
+        pass
+
+    def _sentinel() -> None:
+        raise ReachedPreflight
+
+    monkeypatch.setattr(workflow, "_sweep_stale_runs", _sentinel)
+    with pytest.raises(ReachedPreflight):
         workflow.launch_workflow(selected, tmp_path)
 
 
