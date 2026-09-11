@@ -176,6 +176,15 @@ _EMBEDDED_DOCUMENTATION_PATHS = {
         }
     ),
 }
+_VENDORED_OPENSSL_RELATIVE_SUFFIXES = (
+    "/lib/libssl.3.dylib",
+    "/lib/libcrypto.3.dylib",
+)
+_VENDORED_OPENSSL_HOST_PREFIXES = (
+    "/opt/homebrew/Cellar/openssl@3/",
+    "/opt/homebrew/etc/openssl@3",
+    "/opt/homebrew/opt/openssl@3/",
+)
 _FILE_KINDS = frozenset({"executable", "dylib", "resource", "config"})
 _APP_ENTRYPOINTS = frozenset({"app", "terminal", "frame"})
 _WALKAROUND_CHECKS = frozenset(
@@ -1170,6 +1179,18 @@ def _verify_macho_closure(
         _fail(E_DEPENDENCY, f"unreachable declared dylibs: {', '.join(unreachable)}")
 
 
+def _vendored_openssl_host_path(relative: str, host_path: str) -> bool:
+    """True for compiled-in OPENSSLDIR/ENGINESDIR of the pinned OpenSSL dylibs.
+
+    After install_name_tool the load commands are @loader_path. Remaining
+    /opt/homebrew strings are OpenSSL's default config/cert directories, not
+    this build's first-party payload. /Users paths are never accepted here.
+    """
+    if not relative.endswith(_VENDORED_OPENSSL_RELATIVE_SUFFIXES):
+        return False
+    return host_path.startswith(_VENDORED_OPENSSL_HOST_PREFIXES)
+
+
 def _reject_host_bound_paths(path: Path, *, relative: str, kind: str) -> None:
     """Reject payload bytes that silently bind a module to the build host."""
     if kind == "resource":
@@ -1182,6 +1203,8 @@ def _reject_host_bound_paths(path: Path, *, relative: str, kind: str) -> None:
     for match in _BUILD_HOST_PATH_RE.finditer(content):
         host_path = match.group("path").decode("utf-8", errors="replace")
         if host_path in documentation_paths:
+            continue
+        if _vendored_openssl_host_path(relative, host_path):
             continue
         _fail(
             E_PATH,

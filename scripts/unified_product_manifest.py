@@ -35,6 +35,7 @@ def _entry(root: Path, relative: str, *, kind: str | None = None) -> dict[str, A
             "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty",
             "Contents/Helpers/vc-frame",
             "Contents/Resources/runtime/bin/vc-start",
+            "Contents/Resources/runtime/libexec/prview",
         }:
             kind = "executable"
         elif path.suffix == ".dylib":

@@ -148,6 +148,27 @@ assert_payload_is_anonymous() {
     arguments+=(--forbid "$literal")
   done < <(payload_hygiene_literals "$@")
 
+  local pins="$script_dir/lib/published-foundation-digests.json"
+  if [[ -f "$pins" ]]; then
+    local digest
+    while IFS= read -r digest; do
+      [[ -n "$digest" ]] || continue
+      arguments+=(--accept-digest "$digest")
+    done < <(
+      python3 - "$pins" <<'PY'
+import json
+import pathlib
+import sys
+
+payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+for item in payload.get("artifacts", []):
+    digest = item.get("sha256", "")
+    if digest:
+        print(digest)
+PY
+    )
+  fi
+
   python3 "$script_dir/payload_hygiene.py" "${arguments[@]}" \
     || die "$label leaks build-host paths; refusing to ship it"
 }

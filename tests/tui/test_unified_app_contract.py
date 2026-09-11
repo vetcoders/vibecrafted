@@ -1583,6 +1583,29 @@ def test_host_path_scan_allows_only_known_libpython_documentation_paths(
     )
 
 
+def test_host_path_scan_allows_vendored_openssl_openssl_dir_strings(
+    tmp_path: Path,
+) -> None:
+    payload = tmp_path / "libcrypto.3.dylib"
+    relative = "Contents/Resources/runtime/lib/libcrypto.3.dylib"
+    payload.write_bytes(
+        b"OPENSSLDIR=/opt/homebrew/etc/openssl@3 "
+        b"/opt/homebrew/Cellar/openssl@3/3.6.3/lib/engines-3 "
+        b"/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib"
+    )
+    contract._reject_host_bound_paths(payload, relative=relative, kind="dylib")
+
+    payload.write_bytes(b"panic at /Users/tester/src/main.rs")
+    _assert_error(
+        contract.E_PATH,
+        lambda: contract._reject_host_bound_paths(
+            payload,
+            relative=relative,
+            kind="dylib",
+        ),
+    )
+
+
 @pytest.mark.parametrize(
     ("actual_architecture", "actual_minimum"),
     [("x86_64", "13.0"), ("arm64", "13.0")],

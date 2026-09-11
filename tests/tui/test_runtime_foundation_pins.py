@@ -69,11 +69,38 @@ def test_runtime_foundations_never_compile_external_tools() -> None:
     assert "never cargo-build" in stager
     assert "no published Runtime Foundations payload for Linux/aarch64" in stager
     assert "no published Runtime Foundations payload for Windows/x86_64" in stager
-    assert "links Homebrew OpenSSL" in stager
-    assert "refuse rather than rebuilding" in stager
+    assert "darwin-relocate-openssl.sh" in stager
+    assert "@loader_path/../lib/libssl.3.dylib" in stager
+    assert "libexec/prview" in stager
+    assert "links Homebrew OpenSSL" not in stager
+    assert "refuse rather than rebuilding" not in stager
     # Historical source-build pin must not return.
     assert "215b8060fc56f3968e5a9a83a85cba845149a8bf" not in stager
     assert "ced57997dd97a2b08960f35e3a657d7b0c49a200" not in stager
     assert (
         "ffc65ad6652ee0e240beb333f54d7372b607690dcf5f6c29eb68adee2aed58e7" not in stager
     )
+
+
+def test_runtime_foundations_relocate_darwin_prview_onto_pinned_openssl() -> None:
+    stager = STAGER.read_text(encoding="utf-8")
+    relocator = (REPO_ROOT / "scripts/lib/darwin-relocate-openssl.sh").read_text(
+        encoding="utf-8"
+    )
+    pins = (REPO_ROOT / "scripts/lib/published-foundation-digests.json").read_text(
+        encoding="utf-8"
+    )
+
+    assert "stage_relocatable_openssl" in relocator
+    assert "@loader_path/libssl.3.dylib" in relocator
+    assert (
+        "ffd8ac6981000def0928367924b6cb1e7a98712efbc06e2a2f3f750138bd89ca" in relocator
+    )
+    assert (
+        "a12805a18cd5e4f733fa8727b91afa08b587f9da5a760517cd79cb508a3a3f71" in relocator
+    )
+    assert "homebrew-bottle-dylib" in stager
+    assert "SSL_CERT_FILE" in relocator
+    assert "6c88574eda7646be1850a609313d244c6c0080066d717729f8a3943b4aecb25f" in pins
+    assert "c8d8d4d94096f780eeba2a9f4060bea25099046b7ff0569878bcaea84daf20ab" in pins
+    assert "published-foundation-digests.json" in stager

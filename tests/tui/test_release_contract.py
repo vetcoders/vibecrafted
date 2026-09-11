@@ -310,8 +310,9 @@ def test_native_carrier_embeds_every_required_agent_foundation() -> None:
     assert "runtime-foundations.json" in stager
     assert "npm pack" in stager
     assert "@loctree/aicx-darwin-arm64" in stager
-    assert "published PRView v" in stager
-    assert "links Homebrew OpenSSL" in stager
+    assert "published PRView v" not in stager
+    assert "darwin-relocate-openssl.sh" in stager
+    assert "libexec/prview" in stager
     assert "cargo install" not in stager
     assert "cargo build" not in stager
     assert "remap-path-prefix" not in stager

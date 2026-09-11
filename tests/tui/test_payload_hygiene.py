@@ -13,6 +13,7 @@ reaches exactly one of them.
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -199,6 +200,65 @@ def test_make_exposes_the_gate_for_an_artifact_already_on_disk() -> None:
     assert "payload-hygiene:" in makefile
     assert "ARTIFACT" in makefile
     assert "scripts/payload-hygiene-artifact.sh" in makefile
+
+
+def test_scanner_accepts_only_exact_pinned_upstream_digests(tmp_path: Path) -> None:
+    payload = tmp_path / "payload"
+    (payload / "bin").mkdir(parents=True)
+    upstream = payload / "bin/aicx"
+    first_party = payload / "bin/voc"
+    needle = b"/Users/someone"
+    upstream.write_bytes(b"\x00" + needle + b"\x00upstream")
+    first_party.write_bytes(b"\x00" + needle + b"\x00local")
+    digest = hashlib.sha256(upstream.read_bytes()).hexdigest()
+
+    refused = run_scanner("--root", str(payload), "--forbid", "/Users/someone")
+    assert refused.returncode == 1, refused.stdout + refused.stderr
+    assert "bin/aicx" in refused.stderr
+    assert "bin/voc" in refused.stderr
+
+    scoped = run_scanner(
+        "--root",
+        str(payload),
+        "--forbid",
+        "/Users/someone",
+        "--accept-digest",
+        digest,
+    )
+    assert scoped.returncode == 1, scoped.stdout + scoped.stderr
+    assert "bin/voc" in scoped.stderr
+    assert "upstream" in scoped.stderr
+    assert "bin/aicx" in scoped.stderr
+
+
+def test_scanner_passes_when_only_pinned_upstream_bytes_name_the_host(
+    tmp_path: Path,
+) -> None:
+    payload = tmp_path / "payload"
+    (payload / "bin").mkdir(parents=True)
+    upstream = payload / "bin/aicx"
+    needle = b"/Users/someone"
+    upstream.write_bytes(b"\x00" + needle + b"\x00upstream")
+    digest = hashlib.sha256(upstream.read_bytes()).hexdigest()
+
+    result = run_scanner(
+        "--root",
+        str(payload),
+        "--forbid",
+        "/Users/someone",
+        "--accept-digest",
+        digest,
+        "--json",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "upstream_provenance" in result.stdout
+    assert "bin/aicx" in result.stdout
+
+
+def test_hygiene_library_loads_published_foundation_digests() -> None:
+    library = LIBRARY.read_text(encoding="utf-8")
+    assert "published-foundation-digests.json" in library
+    assert "--accept-digest" in library
 
 
 def run_library(snippet: str, **environment: str) -> str:

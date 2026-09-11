@@ -9,10 +9,17 @@ set -euo pipefail
 #
 # Upstream binaries may still name the publisher's CI paths. That is artifact
 # provenance, not this build host's privacy leak. Payload hygiene continues to
-# forbid THIS host's HOME/checkout; do not rebuild or patch to silence it.
+# forbid THIS host's HOME/checkout in first-party bytes; pinned published
+# Mach-O digests (see scripts/lib/published-foundation-digests.json) are scoped
+# as upstream debug/provenance, not locally authored private payload.
+# Darwin PRView is relocated onto vendored OpenSSL dylibs; it is not rebuilt.
 
 die() { printf 'FATAL: %s\n' "$*" >&2; exit 1; }
 require() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/darwin-relocate-openssl.sh"
 
 [[ $# -eq 1 ]] || die "usage: $0 OUTPUT_BIN_DIR"
 OUTPUT_BIN_DIR="$1"
@@ -148,10 +155,49 @@ fi
 install -m 0755 "$PRVIEW_BIN" "$OUTPUT_BIN_DIR/prview${EXE_SUFFIX}"
 rm -rf "$WORK/prview" 2>/dev/null || true
 
-if [[ "$(uname -s)" == "Darwin" ]] && \
-  otool -L "$OUTPUT_BIN_DIR/prview" | grep -Eq '^[[:space:]]+/(opt|usr/local)/'; then
-  otool -L "$OUTPUT_BIN_DIR/prview" >&2
-  die "published PRView v${PRVIEW_VERSION} Darwin GitHub asset links Homebrew OpenSSL; refuse rather than rebuilding. Founder must republish a portable binary."
+RUNTIME_ROOT="$(cd "$OUTPUT_BIN_DIR/.." && pwd)"
+OPENSSL_STAGED_VERSION=""
+OPENSSL_STAGED_LIBSSL=""
+OPENSSL_STAGED_LIBCRYPTO=""
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  for tool in otool install_name_tool codesign; do require "$tool"; done
+  mkdir -p "$RUNTIME_ROOT/lib" "$RUNTIME_ROOT/libexec" \
+    "$RUNTIME_ROOT/share/licenses/openssl"
+  install -m 0755 "$OUTPUT_BIN_DIR/prview" "$RUNTIME_ROOT/libexec/prview"
+  rm -f "$OUTPUT_BIN_DIR/prview"
+  stage_relocatable_openssl \
+    "$RUNTIME_ROOT/lib" \
+    "$RUNTIME_ROOT/share/licenses/openssl"
+  relocate_binary_openssl \
+    "$RUNTIME_ROOT/libexec/prview" \
+    "@loader_path/../lib/libssl.3.dylib" \
+    "@loader_path/../lib/libcrypto.3.dylib"
+  assert_no_homebrew_load_commands "$RUNTIME_ROOT/libexec/prview"
+  assert_no_homebrew_load_commands "$RUNTIME_ROOT/lib/libssl.3.dylib"
+  assert_no_homebrew_load_commands "$RUNTIME_ROOT/lib/libcrypto.3.dylib"
+  write_prview_wrapper "$OUTPUT_BIN_DIR/prview" "$RUNTIME_ROOT/libexec/prview"
+  OPENSSL_STAGED_VERSION="$OPENSSL_REDIS_VERSION"
+  OPENSSL_STAGED_LIBSSL="$OPENSSL_LIBSSL_SHA256"
+  OPENSSL_STAGED_LIBCRYPTO="$OPENSSL_LIBCRYPTO_SHA256"
+  python3 - "$SCRIPT_DIR/lib/published-foundation-digests.json" \
+    "$OUTPUT_BIN_DIR/aicx" "$OUTPUT_BIN_DIR/aicx-mcp" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+pins = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected = {item["name"]: item["sha256"] for item in pins["artifacts"]}
+for path in (pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])):
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    want = expected.get(path.name)
+    if want is None:
+        raise SystemExit(f"no published digest pin for {path.name}")
+    if digest != want:
+        raise SystemExit(
+            f"published {path.name} digest {digest} is not the pinned upstream bytes"
+        )
+PY
 fi
 
 "$OUTPUT_BIN_DIR/loct${EXE_SUFFIX}" --version | grep -F "$LOCTREE_VERSION" >/dev/null
@@ -163,7 +209,8 @@ python3 - "$OUTPUT_BIN_DIR" "$LOCTREE_VERSION" "$AICX_VERSION" "$PRVIEW_VERSION"
   "$LOCTREE_ARCHIVE_URL" "$LOCTREE_ARCHIVE_SHA256" \
   "$AICX_ARCHIVE_URL" "$AICX_ARCHIVE_SHA256" \
   "$PRVIEW_URL" "$PRVIEW_SHA256" \
-  "$LOCTREE_PACKAGE" "$AICX_PACKAGE" <<'PY'
+  "$LOCTREE_PACKAGE" "$AICX_PACKAGE" \
+  "$OPENSSL_STAGED_VERSION" "$OPENSSL_STAGED_LIBSSL" "$OPENSSL_STAGED_LIBCRYPTO" <<'PY'
 import hashlib
 import json
 import os
@@ -177,10 +224,44 @@ loctree_url, loctree_sha256 = sys.argv[8:10]
 aicx_url, aicx_sha256 = sys.argv[10:12]
 prview_url, prview_sha256 = sys.argv[12:14]
 loctree_package, aicx_package = sys.argv[14:16]
+openssl_version, openssl_libssl, openssl_libcrypto = sys.argv[16:19]
 files = {}
 for path in sorted(root.iterdir()):
     if path.is_file() and os.access(path, os.X_OK):
         files[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+source_archives = {
+    "loctree": {
+        "channel": "npm",
+        "package": loctree_package,
+        "url": loctree_url,
+        "sha256": loctree_sha256,
+    },
+    "aicx": {
+        "channel": "npm",
+        "package": aicx_package,
+        "url": aicx_url,
+        "sha256": aicx_sha256,
+    },
+    "prview": {
+        "channel": "github-release",
+        "url": prview_url,
+        "sha256": prview_sha256,
+    },
+}
+licenses = {
+    "loctree": "BUSL-1.1",
+    "aicx": "BUSL-1.1",
+    "prview": "BUSL-1.1",
+}
+if openssl_version:
+    source_archives["openssl"] = {
+        "channel": "homebrew-bottle-dylib",
+        "version": openssl_version,
+        "libssl_sha256": openssl_libssl,
+        "libcrypto_sha256": openssl_libcrypto,
+        "license": "Apache-2.0",
+    }
+    licenses["openssl"] = "Apache-2.0"
 payload = {
     "schema": "io.vetcoders.vibecrafted.runtime-foundations.v1",
     "versions": versions,
@@ -189,30 +270,8 @@ payload = {
         "aicx": aicx_revision,
         "prview": prview_revision,
     },
-    "source_archives": {
-        "loctree": {
-            "channel": "npm",
-            "package": loctree_package,
-            "url": loctree_url,
-            "sha256": loctree_sha256,
-        },
-        "aicx": {
-            "channel": "npm",
-            "package": aicx_package,
-            "url": aicx_url,
-            "sha256": aicx_sha256,
-        },
-        "prview": {
-            "channel": "github-release",
-            "url": prview_url,
-            "sha256": prview_sha256,
-        },
-    },
-    "licenses": {
-        "loctree": "BUSL-1.1",
-        "aicx": "BUSL-1.1",
-        "prview": "BUSL-1.1",
-    },
+    "source_archives": source_archives,
+    "licenses": licenses,
     "files": files,
 }
 (root.parent / "runtime-foundations.json").write_text(
