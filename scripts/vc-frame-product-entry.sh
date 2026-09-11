@@ -69,6 +69,15 @@ real="$(resolve_real_bin)" || {
   printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
   exit 127
 }
+# Identity probes must work before runtime-install writes the product
+# config/layouts view. A pack assembler that asks `--version` is not a launch.
+if [[ $# -eq 1 ]]; then
+  case "$1" in
+    --version | -V | --help | -h)
+      exec "$real" "$1"
+      ;;
+  esac
+fi
 pin_product_config || {
   printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
   exit 2
