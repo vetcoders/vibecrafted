@@ -199,7 +199,11 @@ def test_ci_workflows_select_the_platforms_canonical_carrier() -> None:
     assert "scripts/build-linux-runtime-pack.sh" in install_linux
     assert "bash scripts/build-linux-arm64-runtime-pack.sh" not in install_linux
     assert "Vibecrafted_RuntimePack_linux-x64.tar.gz" in install_linux
-    assert "openssl pkeyutl -sign -rawin" in install_linux
+    assert "openssl pkeyutl -sign -rawin" not in install_linux
+    assert "openssl dgst -sha256 -sign" in install_linux
+    assert "openssl dgst -sha256 -verify" in install_linux
+    assert "genpkey -algorithm RSA" in install_linux
+    assert "genpkey -algorithm ED25519" not in install_linux
     assert "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY" in install_linux
     assert 'bash install.sh --runtime-pack-file "$pack" install' in install_linux
     assert "actions/upload-artifact@" in install_linux

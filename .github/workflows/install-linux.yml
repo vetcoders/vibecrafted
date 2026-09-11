@@ -66,12 +66,16 @@ jobs:
           pack="$RUNNER_TEMP/Vibecrafted_RuntimePack_linux-x64.tar.gz"
           VIBECRAFTED_SOURCE_REVISION="$GITHUB_SHA" \
             bash scripts/build-linux-runtime-pack.sh "$pack"
-          openssl genpkey -algorithm ED25519 -out "$RUNNER_TEMP/ci-signing.key"
+          # dgst -sha256 -sign/-verify is RSA (or ECDSA), not Ed25519.
+          # OpenSSL 3 rejects "Key type not supported" for ED25519+SHA-256.
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+            -out "$RUNNER_TEMP/ci-signing.key"
           openssl pkey -in "$RUNNER_TEMP/ci-signing.key" -pubout \
             -out "$RUNNER_TEMP/ci-signing.pub"
-          # Match scripts/install-runtime-pack.sh: openssl dgst -sha256 -verify
           openssl dgst -sha256 -sign "$RUNNER_TEMP/ci-signing.key" \
             -out "$pack.sig" "$pack"
+          openssl dgst -sha256 -verify "$RUNNER_TEMP/ci-signing.pub" \
+            -signature "$pack.sig" "$pack"
 
       - name: Upload the verified CI carrier
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
