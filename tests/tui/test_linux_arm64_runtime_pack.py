@@ -133,9 +133,9 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     foundations = (REPO_ROOT / "scripts/stage-runtime-foundations.sh").read_text(
         encoding="utf-8"
     )
-    assert 'rm -rf "$WORK/loctree"' in foundations
-    assert 'rm -rf "$WORK/aicx"' in foundations
-    assert 'export CC="${CC:-gcc}"' in foundations
-    assert 'export CXX="${CXX:-g++}"' in foundations
-    assert "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER" in foundations
-    assert "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER" in foundations
+    assert "@loctree/aicx-linux-x64-gnu" in foundations
+    assert "@loctree/loctree-linux-x64-gnu" in foundations
+    assert "stage_npm_bins" in foundations
+    assert "cargo build --manifest-path" not in foundations
+    assert "cargo install --locked --version" in foundations
+    assert "will not cargo-build those donors" in foundations
