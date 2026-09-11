@@ -111,6 +111,15 @@ if [[ "$host" != /* || ! -x "$host" || -L "$host" || -L "$root/libexec" ]]; then
   printf 'vc-terminal: native host missing: %s\n' "$host" >&2
   exit 127
 fi
+# Identity probes must work before runtime-install writes the product
+# config. A pack assembler that asks `--version` is not a launch.
+if [[ $# -eq 1 ]]; then
+  case "$1" in
+    --version | -V | --help | -h)
+      exec "$host" "$1"
+      ;;
+  esac
+fi
 if [[ ! -f "$config" || -L "$config" || -L "$HOME/.config" \
   || -L "$HOME/.config/vibecrafted" || -L "$HOME/.config/vibecrafted/vc-terminal" ]]; then
   printf 'vc-terminal: product config missing: %s\n' "$config" >&2

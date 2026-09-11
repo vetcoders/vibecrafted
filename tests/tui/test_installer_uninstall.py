@@ -149,6 +149,14 @@ def test_vc_terminal_product_entry_pins_config_file_and_refuses_private_alacritt
     assert "product config missing" in missing.stderr
     assert str(entry) in missing.stderr
     assert "~/.config/alacritty" in missing.stderr
+    versioned = subprocess.run(
+        [str(wrapper), "--version"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert versioned.stdout.splitlines() == [f"aicx={user_aicx}", "--version"]
 
 
 def test_native_executable_probe_requires_regular_executable_bytes(
