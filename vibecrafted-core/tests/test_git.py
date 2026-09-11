@@ -122,7 +122,9 @@ def test_vc_git_reports_named_upstream_divergence_in_json_and_rich_output(
     tmp_path: Path,
 ) -> None:
     remote = tmp_path / "remote.git"
-    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    subprocess.run(
+        ["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True
+    )
     repo = tmp_path / "repo"
     _init_repo(repo)
     subprocess.run(

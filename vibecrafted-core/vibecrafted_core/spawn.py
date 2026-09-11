@@ -1003,16 +1003,17 @@ def interactive_policy_command(
             validate_cursor_resume_chat_id,
         )
 
-        flags = list(
-            _materialize_cursor_permission_flags(flags, permissions=permissions)
-        )
         session_flags: list[str] = []
         if continuity.mode == "bare-fork":
             # Interactive resume exists; bare-fork is unsupported — fail closed
-            # rather than invent a fork flag the CLI does not expose.
+            # rather than invent a fork flag the CLI does not expose. Reject
+            # before probing cursor-agent: missing CLI is not this decision.
             raise ValueError(
                 "cursor native fork is unsupported; use fresh or interactive --resume"
             )
+        flags = list(
+            _materialize_cursor_permission_flags(flags, permissions=permissions)
+        )
         if provider_session_id:
             chat_id = validate_cursor_resume_chat_id(provider_session_id)
             session_flags = ["--resume", chat_id]
@@ -4021,8 +4022,9 @@ def write_meta(
         "liveness": "pid_pending",
         "model": model,
     }
-    if str(model_requested or "").strip():
-        payload["model_requested"] = str(model_requested).strip()
+    requested = str(model_requested or model or "").strip()
+    if requested:
+        payload["model_requested"] = requested
 
     # Cut A: durable workspace identity on every new run meta (best-effort).
     try:
