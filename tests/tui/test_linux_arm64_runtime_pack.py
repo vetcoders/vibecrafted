@@ -90,6 +90,10 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     assert "d6685ead9018ad89411291d6198476666e48b0f8" in assembler
     assert "7ab84069c9b7994ce0b705ccedd708aa3a35dcb6" in assembler
     assert "git clone" not in assembler
+    assert "VIBECRAFTED_SOURCE_OWNER_REPO" in assembler
+    assert (
+        'export VIBECRAFTED_SOURCE_REVISION="$source_revision"' in assembler
+    )
     assert 'voc_target="$work/voc-target"' in assembler
     assert 'CARGO_TARGET_DIR="$voc_target" cargo build --locked' in assembler
     assert "--release -p voc --bin voc --bin vc-start" in assembler
