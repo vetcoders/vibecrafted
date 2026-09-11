@@ -28,6 +28,15 @@ source_revision="${VIBECRAFTED_SOURCE_REVISION:-}"
 # the inherited environment is an atomic pair, not a half-set GITHUB_SHA.
 export VIBECRAFTED_SOURCE_REVISION="$source_revision"
 export VIBECRAFTED_SOURCE_OWNER_REPO="${VIBECRAFTED_SOURCE_OWNER_REPO:-vetcoders/vibecrafted}"
+# llama-cpp-sys-2 / aicx: host `c++` is often clang, which cannot find
+# libstdc++ headers on Ubuntu (MEASURED: c++ → clang-18, cstdlib missing).
+# Prefer GCC when present. Honor an explicit CC/CXX from the caller.
+if command -v gcc >/dev/null 2>&1; then
+  export CC="${CC:-gcc}"
+fi
+if command -v g++ >/dev/null 2>&1; then
+  export CXX="${CXX:-g++}"
+fi
 
 version="$(tr -d '[:space:]' < "$repo_root/VERSION")"
 terminal_revision="d6685ead9018ad89411291d6198476666e48b0f8"

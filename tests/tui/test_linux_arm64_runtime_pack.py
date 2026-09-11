@@ -94,6 +94,8 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     assert (
         'export VIBECRAFTED_SOURCE_REVISION="$source_revision"' in assembler
     )
+    assert 'export CC="${CC:-gcc}"' in assembler
+    assert 'export CXX="${CXX:-g++}"' in assembler
     assert 'voc_target="$work/voc-target"' in assembler
     assert 'CARGO_TARGET_DIR="$voc_target" cargo build --locked' in assembler
     assert "--release -p voc --bin voc --bin vc-start" in assembler
@@ -132,3 +134,5 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     )
     assert 'rm -rf "$WORK/loctree"' in foundations
     assert 'rm -rf "$WORK/aicx"' in foundations
+    assert 'export CC="${CC:-gcc}"' in foundations
+    assert 'export CXX="${CXX:-g++}"' in foundations

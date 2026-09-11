@@ -122,6 +122,17 @@ strip_executable() {
     strip --strip-debug "$1"
   fi
 }
+# llama-cpp-sys-2 invokes the host `c++`. On Ubuntu that is often clang,
+# which then fails with `cstdlib` not found. Prefer GCC on Linux; honor
+# an explicit CC/CXX from the caller (Darwin keeps the host compiler).
+if [[ "$(uname -s)" == "Linux" ]]; then
+  if command -v gcc >/dev/null 2>&1; then
+    export CC="${CC:-gcc}"
+  fi
+  if command -v g++ >/dev/null 2>&1; then
+    export CXX="${CXX:-g++}"
+  fi
+fi
 RUSTFLAGS="--remap-path-prefix=$HOME=/usr/src/operator-home --remap-path-prefix=$WORK/aicx/source=/usr/src/aicx" \
   CFLAGS="$NATIVE_REMAP_FLAGS" \
   CXXFLAGS="$NATIVE_REMAP_FLAGS" \
