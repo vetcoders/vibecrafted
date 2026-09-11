@@ -393,6 +393,62 @@ def test_runtime_pack_installer_and_uninstaller_round_trip_from_one_tool(
     assert app_root.exists()
 
 
+def test_runtime_install_uses_helper_app_as_public_terminal_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    runtime_home = home / ".local/share/vibecrafted"
+    launcher_home = home / ".local/bin"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(launcher_home))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / ".vibecrafted"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    monkeypatch.setattr(
+        installer, "_teardown_owned_runtime_for_uninstall", lambda *_args, **_kwargs: []
+    )
+    payload, _ignored_host, frame_helper = _runtime_pack_fixture(tmp_path)
+    helper = (
+        tmp_path
+        / "Vibecrafted.app/Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
+    )
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    helper.write_bytes(_MACHO_MAGIC + b"helper-app")
+    helper.chmod(0o755)
+    with (helper.parents[1] / "Info.plist").open("wb") as handle:
+        plistlib.dump(
+            {
+                "CFBundleIdentifier": "io.vetcoders.vc-terminal",
+                "CFBundleExecutable": "alacritty",
+                "CFBundleDisplayName": "VC Terminal",
+                "CFBundleName": "VC Terminal",
+            },
+            handle,
+        )
+    app_root = tmp_path / "Vibecrafted.app"
+    assert (
+        installer.cmd_runtime_install(
+            Namespace(
+                payload_root=str(payload),
+                app_root=str(app_root),
+                terminal_host=str(helper),
+                frame_helper=str(frame_helper),
+            )
+        )
+        == 0
+    )
+    installed = json.loads(capsys.readouterr().out)
+    generation = runtime_home / "releases/9.9.9+g12345678"
+    assert Path(installed["terminal_host"]) == helper
+    assert Path(installed["terminal"]) == generation / "bin/vc-terminal"
+    assert (generation / "libexec/vc-terminal").is_file()
+    path_wrapper = (launcher_home / "vc-terminal").read_text(encoding="utf-8")
+    assert "VIBECRAFTED_TERMINAL_HOST=" in path_wrapper
+    assert str(helper) in path_wrapper
+    assert str(generation / "libexec/vc-terminal") not in path_wrapper
+    assert str(generation / "bin/vc-terminal") in path_wrapper
+
+
 def test_runtime_pack_uninstall_prunes_only_created_empty_xdg_parents(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

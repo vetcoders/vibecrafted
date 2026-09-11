@@ -440,6 +440,8 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
                 "CFBundleIdentifier": "io.vetcoders.vc-terminal",
                 "CFBundleExecutable": "alacritty",
                 "CFBundleIconFile": "alacritty.icns",
+                "CFBundleName": "VC Terminal",
+                "CFBundleDisplayName": "VC Terminal",
                 "CFBundlePackageType": "APPL",
             },
             handle,
@@ -3682,6 +3684,14 @@ def test_unified_release_has_one_top_level_owner() -> None:
     assert 'local terminal_app="$APP/Contents/Helpers/vc-terminal.app"' in builder
     assert '"$terminal_app/Contents/MacOS/alacritty"' in builder
     assert '"$terminal_app/Contents/Resources/alacritty.icns"' in builder
+    assert "Set :CFBundleDisplayName VC Terminal" in builder
+    assert "Set :CFBundleName VC Terminal" in builder
+    terminal_entry = (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "vc-terminal.app/Contents/MacOS/alacritty" in terminal_entry
+    assert "_vc_terminal_is_bundle_host" in terminal_entry
+    assert 'exec "$host" --config-file "$config" "$@"' in terminal_entry
     assert "sign_nested_app_bundles" in builder
     assert 'make -C "$FRAME_REPO" release-binary' in builder
     assert 'chmod 0755 "$frame_source"' in builder

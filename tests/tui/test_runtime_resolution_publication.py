@@ -1006,6 +1006,69 @@ def test_terminal_wrapper_pins_physical_owner_and_preserves_payload_argv(
         assert not result.stdout
 
 
+def _bundle_capture_host(path: Path, python: str) -> None:
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        f"#!{python}\nimport json, os, sys\nprint(json.dumps({{'argv':sys.argv[1:], 'host':sys.argv[0]}}))\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    plist = path.parents[1] / "Info.plist"
+    plist.write_text(
+        '<?xml version="1.0"?><plist version="1.0"><dict>'
+        "<key>CFBundleIdentifier</key><string>io.vetcoders.vc-terminal</string>"
+        "</dict></plist>\n",
+        encoding="utf-8",
+    )
+
+
+def test_terminal_wrapper_execs_product_bundle_host_not_naked_libexec(
+    tmp_path, monkeypatch
+):
+    import shutil
+
+    home = tmp_path / "home"
+    entry = home / ".config/vibecrafted/vc-terminal/vc-terminal.toml"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("[general]\n")
+    generation = tmp_path / "generation"
+    (generation / "bin").mkdir(parents=True)
+    (generation / "libexec").mkdir()
+    wrapper = generation / "bin/vc-terminal"
+    shutil.copy2(
+        Path(__file__).resolve().parents[2] / "scripts/vc-terminal-product-entry.sh",
+        wrapper,
+    )
+    wrapper.chmod(0o755)
+    libexec = generation / "libexec/vc-terminal"
+    libexec.write_text("#!/bin/sh\nprintf 'libexec-ran\\n'\n")
+    libexec.chmod(0o755)
+    bundle_host = (
+        tmp_path
+        / "Vibecrafted.app/Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
+    )
+    _bundle_capture_host(bundle_host, sys.executable)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_TERMINAL_HOST", str(bundle_host))
+    result = subprocess.run(
+        [str(wrapper), "-e", "true"], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    capture = json.loads(result.stdout)
+    assert capture["host"] == str(bundle_host)
+    assert capture["argv"] == ["--config-file", str(entry), "-e", "true"]
+
+    generation_bundle = generation / "libexec/vc-terminal.app/Contents/MacOS/alacritty"
+    _bundle_capture_host(generation_bundle, sys.executable)
+    monkeypatch.setenv("VIBECRAFTED_TERMINAL_HOST", str(bundle_host))
+    result = subprocess.run(
+        [str(wrapper), "-e", "true"], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    capture = json.loads(result.stdout)
+    assert capture["host"] == str(generation_bundle)
+
+
 # MARK: - Configuration self-repair
 #
 # `runtime-repair` is the owner the App calls at launch and behind Repair

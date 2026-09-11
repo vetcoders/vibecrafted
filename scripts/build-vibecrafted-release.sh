@@ -997,6 +997,20 @@ build_product() {
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' \
     "$terminal_app/Contents/Info.plist")" == "alacritty.icns" ]] \
     || die "vc-terminal helper bundle icon contract is invalid"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName VC Terminal" \
+    "$terminal_app/Contents/Info.plist" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string VC Terminal" \
+      "$terminal_app/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleName VC Terminal" \
+    "$terminal_app/Contents/Info.plist" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleName string VC Terminal" \
+      "$terminal_app/Contents/Info.plist"
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' \
+    "$terminal_app/Contents/Info.plist")" == "VC Terminal" ]] \
+    || die "vc-terminal helper display name is not canonical"
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' \
+    "$terminal_app/Contents/Info.plist")" == "VC Terminal" ]] \
+    || die "vc-terminal helper bundle name is not canonical"
   install -m 0755 "$frame_source" "$APP/Contents/Helpers/vc-frame"
   install -m 0755 "$SOURCE_ROOT/scripts/vc-app-update.sh" "$APP/Contents/Helpers/vc-app-update"
 

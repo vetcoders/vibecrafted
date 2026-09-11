@@ -8655,6 +8655,61 @@ def _is_native_executable(path: Path) -> bool:
     return magic in _NATIVE_EXECUTABLE_MAGIC
 
 
+def _is_product_bundle_terminal_host(path: Path) -> bool:
+    """True when `path` is the inner binary of a physical vc-terminal.app."""
+    try:
+        if path.name != "alacritty" or not path.is_absolute():
+            return False
+        macos = path.parent
+        contents = macos.parent
+        bundle = contents.parent
+        if (
+            macos.name != "MacOS"
+            or contents.name != "Contents"
+            or bundle.name != "vc-terminal.app"
+        ):
+            return False
+        plist = contents / "Info.plist"
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o111 == 0:
+            return False
+        for node in (path, macos, contents, bundle, plist):
+            if node.is_symlink():
+                return False
+        return plist.is_file()
+    except OSError:
+        return False
+
+
+def _product_terminal_host(*, generation: Path, app_root: Path | None) -> Path:
+    """Prefer a branded vc-terminal.app host; keep generation libexec as fallback.
+
+    Finder opens a naked libexec Mach-O through Terminal.app. The product GUI
+    identity lives in vc-terminal.app. The App helper is accepted only at that
+    exact inner path; a historical `--terminal-host` pointing at a non-bundle
+    helper is ignored.
+    """
+    libexec = generation / "libexec" / "vc-terminal"
+    candidates = [generation / "libexec/vc-terminal.app/Contents/MacOS/alacritty"]
+    if app_root is not None:
+        candidates.append(
+            Path(app_root) / "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
+        )
+    for candidate in candidates:
+        if _is_product_bundle_terminal_host(candidate):
+            return candidate
+    return libexec
+
+
+def _runtime_terminal_launcher_environment(
+    *, generation: Path, app_root: Path | None
+) -> dict[str, str] | None:
+    host = _product_terminal_host(generation=generation, app_root=app_root)
+    if host == generation / "libexec" / "vc-terminal":
+        return None
+    return {"VIBECRAFTED_TERMINAL_HOST": str(host)}
+
+
 def _materialize_runtime_generation_vc_terminal_entry(runtime_root: Path) -> None:
     """Pin generation `bin/vc-terminal` to the product config, host in libexec.
 
@@ -21116,7 +21171,9 @@ def _runtime_install_result(
         "root": str(generation),
         "launcher": str(paths["launcher_home"] / "vibecrafted"),
         "terminal": str(generation / "bin/vc-terminal"),
-        "terminal_host": str(generation / "libexec/vc-terminal"),
+        "terminal_host": str(
+            _product_terminal_host(generation=generation, app_root=app_root)
+        ),
         # AppDelegate exports this as VIBECRAFTED_VC_FRAME_BIN for the public
         # product entry. Point it at the native provider, never back at the
         # wrapper itself, or the first `vc-frame ls` recursively execs the
@@ -21341,6 +21398,7 @@ def cmd_runtime_resolve(args: argparse.Namespace) -> int:
                     raise RuntimeError(
                         f"required product entry is not executable: {path.name}"
                     )
+            resolve_app_root = _receipt_app_root(receipt)
             for name in ("vibecrafted", "vc-terminal", "vc-frame"):
                 expected = _runtime_launcher_body(
                     generation=generation,
@@ -21349,6 +21407,13 @@ def cmd_runtime_resolve(args: argparse.Namespace) -> int:
                     runtime_home=runtime_home,
                     frame_config=product / "vc-frame",
                     executable=generation / "bin" / name,
+                    environment=(
+                        _runtime_terminal_launcher_environment(
+                            generation=generation, app_root=resolve_app_root
+                        )
+                        if name == "vc-terminal"
+                        else None
+                    ),
                 )
                 if _capture_runtime_bound_file(
                     paths["launcher_home"] / name
@@ -21357,7 +21422,7 @@ def cmd_runtime_resolve(args: argparse.Namespace) -> int:
                         f"public {name} launcher selects another runtime"
                     )
             result = _runtime_install_result(
-                generation=generation, app_root=_receipt_app_root(receipt), paths=paths
+                generation=generation, app_root=resolve_app_root, paths=paths
             )
             if (
                 _capture_runtime_bound_file(active_path) != active_bytes
@@ -22118,8 +22183,9 @@ def _install_runtime_pack(
 
     generation_terminal_entry = generation / "bin/vc-terminal"
     generation_terminal_host = generation / "libexec/vc-terminal"
-    # Historical App bootstrap passes --terminal-host. The carrier remains
-    # accepted, but that hint never selects executable truth over this generation.
+    # Historical App bootstrap passes --terminal-host at a non-bundle helper.
+    # A real Contents/Helpers/vc-terminal.app inner binary is the public GUI
+    # host; any other hint still cannot replace generation libexec.
     required = [
         generation / "bin/vibecrafted",
         generation / "bin/vibecrafted-mcp",
@@ -22242,6 +22308,9 @@ def _install_runtime_pack(
         runtime_home=runtime_home,
         frame_config=frame_config,
         executable=generation_terminal_entry,
+        environment=_runtime_terminal_launcher_environment(
+            generation=generation, app_root=app_root
+        ),
     )
     stage_launcher(terminal_launcher, terminal_body)
 

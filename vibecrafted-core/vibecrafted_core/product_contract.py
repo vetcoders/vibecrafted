@@ -221,6 +221,7 @@ _LAUNCH_PRIMARY_SHELL = (
 _TERMINAL_HELPER_APP = "Contents/Helpers/vc-terminal.app"
 _TERMINAL_HELPER_BUNDLE_ID = "io.vetcoders.vc-terminal"
 _TERMINAL_HELPER_ICON = "alacritty.icns"
+_TERMINAL_HELPER_DISPLAY_NAME = "VC Terminal"
 PRODUCT_MANIFEST_REFERENT = "manifests/product-manifest.json"
 RUNTIME_MANIFEST_REFERENT = "manifests/runtime-manifest.json"
 _MAX_SIGNED_PAYLOAD_BYTES = 64 * 1024 * 1024
@@ -2088,6 +2089,10 @@ def verify_app(app_path: str | Path, *, require_clean: bool = False) -> dict[str
         _fail(E_BUNDLE, "terminal helper executable is not canonical")
     if helper_plist.get("CFBundleIconFile") != _TERMINAL_HELPER_ICON:
         _fail(E_BUNDLE, "terminal helper icon is not canonical")
+    if helper_plist.get("CFBundleDisplayName") != _TERMINAL_HELPER_DISPLAY_NAME:
+        _fail(E_BUNDLE, "terminal helper display name is not canonical")
+    if helper_plist.get("CFBundleName") != _TERMINAL_HELPER_DISPLAY_NAME:
+        _fail(E_BUNDLE, "terminal helper bundle name is not canonical")
     helper_icon_relative = (
         f"{_TERMINAL_HELPER_APP}/Contents/Resources/{_TERMINAL_HELPER_ICON}"
     )
@@ -3926,6 +3931,8 @@ def _self_test() -> int:
                     "CFBundleIdentifier": "io.vetcoders.vc-terminal",
                     "CFBundleExecutable": "alacritty",
                     "CFBundleIconFile": "alacritty.icns",
+                    "CFBundleName": "VC Terminal",
+                    "CFBundleDisplayName": "VC Terminal",
                     "CFBundlePackageType": "APPL",
                 },
                 handle,
