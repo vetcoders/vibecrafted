@@ -3716,6 +3716,12 @@ def test_unified_release_has_one_top_level_owner() -> None:
     assert "_vc_terminal_is_bundle_host" in terminal_entry
     assert 'exec "$host" --config-file "$config" "$@"' in terminal_entry
     assert "sign_nested_app_bundles" in builder
+    assert "sign_helper_scripts" in builder
+    assert builder.index("sign_nested_app_bundles") < builder.index(
+        "sign_helper_scripts"
+    )
+    assert builder.index("sign_helper_scripts") < builder.index("embed_runtime_pack")
+    assert '"$APP/Contents/Helpers/vc-app-update"' in builder
     assert 'make -C "$FRAME_REPO" release-binary' in builder
     assert 'chmod 0755 "$frame_source"' in builder
     assert "build-server-release" in builder

@@ -573,6 +573,24 @@ sign_nested_app_bundles() {
   done < <(find "$APP/Contents" -mindepth 2 -type d -name '*.app' -print0)
 }
 
+# Helpers/vc-app-update is a shebang script, not Mach-O, so sign_macho_tree
+# skips it. Outer codesign then refuses: "code object is not signed at all
+# In subcomponent: .../Contents/Helpers/vc-app-update".
+sign_helper_scripts() {
+  local helper
+  [[ -x "$APP/Contents/Helpers/vc-app-update" ]] \
+    || die "missing app-update helper: Contents/Helpers/vc-app-update"
+  while IFS= read -r -d '' helper; do
+    [[ -x "$helper" ]] || continue
+    if is_macho_file "$helper"; then
+      continue
+    fi
+    codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
+      "${CODESIGN_KEYCHAIN_ARGS[@]}" "$helper" \
+      || die "could not sign helper ${helper#"$APP"/}"
+  done < <(find "$APP/Contents/Helpers" -maxdepth 1 -type f -print0)
+}
+
 remove_ambient_swift_rpath() {
   local executable="$APP/Contents/MacOS/Vibecrafted"
   local rpaths
@@ -1035,6 +1053,7 @@ build_product() {
   log "Signing nested code and binding exact source receipts"
   sign_macho_tree "$APP/Contents" "$APP/Contents/MacOS/Vibecrafted"
   sign_nested_app_bundles
+  sign_helper_scripts
   embed_runtime_pack
   require_clean_repo "$SOURCE_ROOT" vibecrafted
   require_bound_revision "$SOURCE_ROOT" vibecrafted "$ROOT_SHA"

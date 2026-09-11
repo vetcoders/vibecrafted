@@ -210,6 +210,7 @@ def test_product_update_source_contract() -> None:
     assert "BUILT_PRODUCTS_DIR/vc-app-update" not in project
     assert "scripts/vc-app-update.sh" in project
     assert "scripts/vc-app-update.sh" in release
+    assert "sign_helper_scripts" in release
     assert "dist/vc-app-update" not in release
     assert not (SHELL / "app/Helpers/vc-app-update/main.swift").exists()
     assert "does not stop Frame" in helper
