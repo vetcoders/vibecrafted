@@ -167,7 +167,8 @@ What the tarball is, and what it is not:
   runtime.
 - Linux prebuilt packs (`linux-x64`, `linux-arm64`) are built natively by
   `scripts/build-linux-runtime-pack.sh` and are not produced by macOS
-  `make release`.
+  `make release`. 4.3.1 does not ship a systemd unit; start the server
+  and guardian with `vibecrafted server start`.
 - On Windows this is the artifact you use _inside_ WSL2. There is no native
   Windows build; `install.ps1` hands off to WSL by design.
 
