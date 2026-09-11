@@ -72,9 +72,19 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --no-modify-path --profile minimal \
       --default-toolchain 1.97.0 \
-      --component rustfmt clippy \
+      --component rustfmt --component clippy \
       --target wasm32-unknown-unknown \
   && chmod -R a+rwX "$RUSTUP_HOME" "$CARGO_HOME"
+
+# Debian's /etc/profile resets PATH for login shells, which would drop
+# /usr/local/cargo/bin (cargo/rustc) even though the image ENV sets it. A
+# profile.d snippet re-exports the Rust homes and PATH so cargo is on PATH in
+# login, non-login, and interactive shells alike.
+RUN printf '%s\n' \
+      'export RUSTUP_HOME=/usr/local/rustup' \
+      'export CARGO_HOME=/usr/local/cargo' \
+      'export PATH="/usr/local/cargo/bin:/usr/local/bin:$HOME/.local/bin:$PATH"' \
+    > /etc/profile.d/10-vibecrafted-env.sh
 
 # Debug-build linker fix for x86_64 Linux. rustc 1.97 defaults to rust-lld;
 # the combined DWARF .debug_info of the ~260-crate vc-server debug build
