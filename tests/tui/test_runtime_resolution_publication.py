@@ -2119,3 +2119,54 @@ def test_overlapping_starship_format_edit_is_a_preference_conflict() -> None:
     )
     with pytest.raises(ValueError, match="conflict"):
         installer._merge_runtime_preferences(previous, current, incoming, toml=True)
+
+
+def test_unhashed_previous_starship_keeps_current_on_bound_retry(
+    tmp_path, roots, capsys
+):
+    """Historical starship defaults are often unhashed and hold user bytes.
+
+    Bound keep-current must still publish the incoming pack without treating
+    those generation copies as a trusted three-way baseline.
+    """
+    first = seed_runtime_pack(tmp_path / "pack-a", version="9.9.9+a")
+    _install(first, capsys)
+    starship = roots["product_config"] / "starship.toml"
+    user = (
+        "add_newline = false\n"
+        'format = """\n$directory\n$character\n"""\n'
+        "[character]\nsuccess_symbol = '[λ](bold cyan)'\n"
+    )
+    starship.write_text(user, encoding="utf-8")
+    generation = (roots["runtime_home"] / "tools/vibecrafted-current").resolve()
+    (generation / "config/starship.toml").write_text(user, encoding="utf-8")
+    receipt_path = installer._runtime_receipt_path(roots["runtime_home"])
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt.get("config_defaults", {}).pop(str(starship), None)
+    receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+
+    incoming_starship = 'add_newline = true\nformat = "$character"\n'
+    second = seed_runtime_pack(
+        tmp_path / "pack-b",
+        version="9.9.10+b",
+        before_source_seal=lambda root: (root / "config/starship.toml").write_text(
+            incoming_starship, encoding="utf-8"
+        ),
+    )
+    conflict = _install_conflict(second, capsys)
+    file_hit = next(
+        item
+        for item in conflict.envelope["files"]
+        if item["path"].endswith("starship.toml")
+    )
+    _install(
+        second,
+        capsys,
+        resolve_preference="keep-current",
+        preference_current_sha256=file_hit["current_sha256"],
+        preference_incoming_sha256=file_hit["incoming_sha256"],
+        preference_path=str(starship),
+    )
+    assert starship.read_text(encoding="utf-8") == user
+    selected = (roots["runtime_home"] / "tools/vibecrafted-current").resolve()
+    assert selected.name == "9.9.10+b"

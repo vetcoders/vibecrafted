@@ -17152,12 +17152,24 @@ def _reconcile_runtime_preference(
                 or manifest["hashes"].get(relative.as_posix())
                 or previous.get("owned_files", {}).get(str(destination))
             )
-            if not expected_digest or digest != expected_digest:
-                raise ValueError("previous shipped defaults differ from their receipt")
             bound_digest = manifest["hashes"].get(relative.as_posix())
+            trusted = bool(expected_digest) and digest == expected_digest
             if bound_digest and digest != bound_digest:
+                trusted = False
+            if trusted:
+                baseline = raw.decode("utf-8")
+            elif choice in PREFERENCE_CHOICES:
+                # Historical receipts omit hashes for some preference files,
+                # and some generations hold user copies of those defaults.
+                # Unproven bytes cannot be a three-way baseline; a bound
+                # keep-current/use-incoming retry still resolves the user file.
+                baseline = None
+            elif expected_digest and digest != expected_digest:
+                raise ValueError("previous shipped defaults differ from their receipt")
+            elif bound_digest and digest != bound_digest:
                 raise ValueError("previous shipped defaults differ from their manifest")
-            baseline = raw.decode("utf-8")
+            else:
+                raise ValueError("previous shipped defaults are unavailable")
         if choice:
             if choice not in PREFERENCE_CHOICES:
                 raise ValueError("unsupported preference choice")
