@@ -369,7 +369,7 @@ _helper_candidates() {
 }
 
 _ensure_helpers_loaded() {
-  local helper owner_root="${1:-}"
+  local helper owner_kind="" owner_root="${1:-}"
   if [[ -z "$owner_root" ]]; then
     # An installed public entry owns its helper tree by where it PHYSICALLY is,
     # never by where it was run from. Without this, `vibecrafted resume` started
@@ -386,9 +386,15 @@ _ensure_helpers_loaded() {
     physical_owner="$(_script_owner_root 2>/dev/null || true)"
     if _is_installed_generation_root "$physical_owner"; then
       owner_root="$physical_owner"
+      owner_kind="runtime"
     elif _is_framework_source_root "$physical_owner"; then
       owner_root="$physical_owner"
+      owner_kind="source"
     fi
+  elif _is_installed_generation_root "$owner_root"; then
+    owner_kind="runtime"
+  elif _is_framework_source_root "$owner_root"; then
+    owner_kind="source"
   fi
   if [[ -n "$owner_root" ]]; then
     # A product entry runs on the physical deck owner, not the current checkout
@@ -403,10 +409,18 @@ _ensure_helpers_loaded() {
       return 1
     fi
     export VIBECRAFTED_ROOT="$owner_root"
-    export VIBECRAFTED_RUNTIME_ROOT="$owner_root"
-    export VIBECRAFTED_RUNTIME_BIN="$owner_root/bin"
     export VIBECRAFTED_CORE_DIR="$owner_root/vibecrafted-core"
-    unset VIBECRAFTED_PREFER_REPO_SPAWN
+    if [[ "$owner_kind" == "runtime" ]]; then
+      export VIBECRAFTED_RUNTIME_ROOT="$owner_root"
+      export VIBECRAFTED_RUNTIME_BIN="$owner_root/bin"
+      unset VIBECRAFTED_PREFER_REPO_SPAWN
+    else
+      # A checkout or source carrier owns code, not an immutable Runtime Pack.
+      # Never let its mutable root enter the runtime-generation resolver, and
+      # discard stale generation pointers inherited from the caller.
+      unset VIBECRAFTED_RUNTIME_ROOT VIBECRAFTED_RUNTIME_BIN VIBECRAFTED_RUNTIME_HOME
+      export VIBECRAFTED_PREFER_REPO_SPAWN=1
+    fi
     # shellcheck disable=SC1090
     source "$helper" || return $?
     return 0
