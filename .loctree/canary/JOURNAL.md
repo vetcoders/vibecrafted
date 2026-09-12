@@ -316,7 +316,7 @@ Make expressions instead of spelling them).
 "Which runtime is current" has **two owners**, and on this machine one of them
 is a ghost:
 
-| Owner                                                                                                                            | State on dragon                                                                                                     |
+| Owner                                                                                                                            | State on host A                                                                                                     |
 | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `active.json` (`vibecrafted.active-runtime.v1`) → `releases/4.2.4+g8d041616`, wrappers in `~/.local/bin` hardcode the generation | **alive** — everything runs from here; `vibecrafted receipt` CLEAN                                                  |
 | `tools/vibecrafted-current` (Makefile's "STABLE runtime home", uv-tool editable source, `install.toml`)                          | **does not exist** — `tools/` holds one empty `.vibecrafted-install.lock`; `uv tool list` has no vibecrafted at all |

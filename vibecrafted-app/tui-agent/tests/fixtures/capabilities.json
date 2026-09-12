@@ -1265,7 +1265,7 @@
    },
    "requested_agent_policy": "fail_closed",
    "runtime_kind": "supervised_research",
-   "selection_source": "/Users/polyversai/.vibecrafted/worktrees/vetcoders/vibecrafted/2026_0909/VOC-launchers-20260909-075653/install.toml",
+   "selection_source": "/Users/operator/.vibecrafted/worktrees/vetcoders/vibecrafted/2026_0909/VOC-launchers-20260909-075653/install.toml",
    "supports_count": false,
    "supports_depth": false,
    "synthesizer": {

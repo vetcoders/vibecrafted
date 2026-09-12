@@ -95,7 +95,7 @@
     },
     {
       "id": "plan-artifacts",
-      "truth": "plan artifacts (mission, atlas, briefs, tracker, reports) under /Users/polyversai/.vibecrafted/artifacts/<org>/<repo>/<day>/plans/",
+      "truth": "plan artifacts (mission, atlas, briefs, tracker, reports) under ~/.vibecrafted/artifacts/<org>/<repo>/<day>/plans/",
       "owner": "plan-filesystem",
       "write_surface": "direct file writes in the artifact tree (workers, operators and the scaffold editor all write the same files; the scaffold API is a convenience client of this surface and the only path for remote integrations without filesystem access)",
       "read_projections": [

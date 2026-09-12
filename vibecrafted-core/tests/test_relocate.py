@@ -17,13 +17,13 @@ def _make_home(tmp_path: Path) -> Path:
     # cursor transcript (today)
     cur = (
         home
-        / ".cursor/projects/Users-polyversai-vibecrafted/agent-transcripts"
+        / ".cursor/projects/Users-operator-vibecrafted/agent-transcripts"
         / ("11111111-1111-4111-8111-111111111111")
     )
     cur.mkdir(parents=True)
     (cur / "11111111-1111-4111-8111-111111111111.jsonl").write_text('{"role":"user"}\n')
     # claude transcript (today)
-    cla = home / ".claude/projects/-Users-polyversai-vibecrafted"
+    cla = home / ".claude/projects/-Users-operator-vibecrafted"
     cla.mkdir(parents=True)
     (cla / "22222222-2222-4222-8222-222222222222.jsonl").write_text('{"type":"user"}\n')
     # codex rollout (today)
@@ -33,7 +33,7 @@ def _make_home(tmp_path: Path) -> Path:
         cod / "rollout-2026-08-29T10-00-00-33333333-3333-4333-8333-333333333333.jsonl"
     ).write_text('{"type":"session"}\n')
     # stale transcript (8 days old — must be excluded)
-    old = home / ".claude/projects/-Users-polyversai-old"
+    old = home / ".claude/projects/-Users-operator-old"
     old.mkdir(parents=True)
     stale = old / "99999999-9999-4999-8999-999999999999.jsonl"
     stale.write_text('{"type":"user"}\n')

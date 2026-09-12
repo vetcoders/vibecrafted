@@ -220,7 +220,7 @@ CODESIGN_KEYCHAIN_ARGS=()
 # dylibs (every dylib once MACOSX_DEPLOYMENT_TARGET >= 12); dyld on macOS 27
 # refuses them and rustc reports the dependency-free proc-macros
 # (`rustversion`, `paste`) as `error[E0463]: can't find crate`. MEASURED
-# 2026-08-28 on dragon with xcode-select pointing at ~/Downloads/Xcode-beta.app;
+# 2026-08-28 on a build host with xcode-select pointing at ~/Downloads/Xcode-beta.app;
 # the same tree under /Applications/Xcode.app (26.6) builds clean. A beta
 # Xcode is therefore refused unless the operator opts in explicitly.
 #
