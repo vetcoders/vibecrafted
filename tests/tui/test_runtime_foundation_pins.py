@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STAGER = REPO_ROOT / "scripts/stage-runtime-foundations.sh"
@@ -101,6 +106,41 @@ def test_runtime_foundations_relocate_darwin_prview_onto_pinned_openssl() -> Non
     )
     assert "homebrew-bottle-dylib" in stager
     assert "SSL_CERT_FILE" in relocator
+    assert "vtool" in relocator
+    assert "-set-build-version macos" in relocator
+    assert 'DARWIN_MACOS_MINOS="14.0"' in relocator
     assert "6c88574eda7646be1850a609313d244c6c0080066d717729f8a3943b4aecb25f" in pins
     assert "c8d8d4d94096f780eeba2a9f4060bea25099046b7ff0569878bcaea84daf20ab" in pins
     assert "published-foundation-digests.json" in stager
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin OpenSSL relocation")
+def test_relocated_openssl_dylibs_are_macos_14_minos(tmp_path: Path) -> None:
+    ssl_src = Path("/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib")
+    if not ssl_src.is_file():
+        pytest.skip("pinned Homebrew OpenSSL bottle is not present")
+
+    lib_dir = tmp_path / "lib"
+    license_dir = tmp_path / "licenses"
+    env = os.environ.copy()
+    env.setdefault("DEVELOPER_DIR", "/Applications/Xcode.app/Contents/Developer")
+    subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; stage_relocatable_openssl "$2" "$3"',
+            "openssl-minos",
+            str(REPO_ROOT / "scripts/lib/darwin-relocate-openssl.sh"),
+            str(lib_dir),
+            str(license_dir),
+        ],
+        check=True,
+        env=env,
+    )
+    for name in ("libssl.3.dylib", "libcrypto.3.dylib"):
+        probe = subprocess.check_output(
+            ["otool", "-l", str(lib_dir / name)],
+            text=True,
+        )
+        assert "minos 14.0" in probe
+        assert "minos 26.0" not in probe

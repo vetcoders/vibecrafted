@@ -21,6 +21,11 @@ OPENSSL_REDIS_VERSION="3.6.3"
 # The published PRView v0.7.0 Darwin asset names these exact install names.
 OPENSSL_LIBSSL_ID="/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib"
 OPENSSL_LIBCRYPTO_ID="/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib"
+# Homebrew OpenSSL 3 bottles currently stamp LC_BUILD_VERSION minos 26.0.
+# The product contract floor is macOS 14.0; stamp after install_name_tool
+# so VCPC029 does not raise the whole payload to 26.0. Never compile OpenSSL.
+DARWIN_MACOS_MINOS="14.0"
+DARWIN_MACOS_SDK="26.5"
 
 _darwin_sha256() {
   shasum -a 256 "$1" | awk '{print $1}'
@@ -32,6 +37,31 @@ _darwin_otool_deps() {
 
 _darwin_adhoc_sign() {
   codesign --force --sign - --timestamp=none "$1" >/dev/null
+}
+
+_darwin_set_macos_minos() {
+  local binary="$1"
+  local tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/vtool.XXXXXX")"
+  DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" \
+    xcrun vtool \
+      -set-build-version macos "$DARWIN_MACOS_MINOS" "$DARWIN_MACOS_SDK" \
+      -replace \
+      -output "$tmp" \
+      "$binary" \
+    || die "vtool failed to stamp macOS ${DARWIN_MACOS_MINOS} on $binary"
+  mv -f "$tmp" "$binary"
+}
+
+_darwin_assert_macos_minos() {
+  local binary="$1"
+  local minos
+  minos="$(otool -l "$binary" | awk '
+    $1=="cmd" { cmd=$2 }
+    cmd=="LC_BUILD_VERSION" && $1=="minos" { print $2; exit }
+  ')"
+  [[ "$minos" == "$DARWIN_MACOS_MINOS" ]] \
+    || die "relocated OpenSSL minos is ${minos:-missing}, expected ${DARWIN_MACOS_MINOS}: $binary"
 }
 
 # Copy the pinned OpenSSL 3 dylibs into <lib_dir> and rewrite their ids and
@@ -64,6 +94,12 @@ stage_relocatable_openssl() {
     "$lib_dir/libcrypto.3.dylib" \
     "@loader_path/libssl.3.dylib" \
     "@loader_path/libcrypto.3.dylib"
+  _darwin_set_macos_minos "$lib_dir/libssl.3.dylib"
+  _darwin_set_macos_minos "$lib_dir/libcrypto.3.dylib"
+  _darwin_adhoc_sign "$lib_dir/libssl.3.dylib"
+  _darwin_adhoc_sign "$lib_dir/libcrypto.3.dylib"
+  _darwin_assert_macos_minos "$lib_dir/libssl.3.dylib"
+  _darwin_assert_macos_minos "$lib_dir/libcrypto.3.dylib"
 
   license_src="$(dirname "$ssl_src")/../LICENSE.txt"
   [[ -f "$license_src" ]] || license_src="/opt/homebrew/opt/openssl@3/LICENSE.txt"

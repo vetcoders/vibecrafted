@@ -160,7 +160,7 @@ OPENSSL_STAGED_VERSION=""
 OPENSSL_STAGED_LIBSSL=""
 OPENSSL_STAGED_LIBCRYPTO=""
 if [[ "$(uname -s)" == "Darwin" ]]; then
-  for tool in otool install_name_tool codesign; do require "$tool"; done
+  for tool in otool install_name_tool codesign vtool; do require "$tool"; done
   mkdir -p "$RUNTIME_ROOT/lib" "$RUNTIME_ROOT/libexec" \
     "$RUNTIME_ROOT/share/licenses/openssl"
   install -m 0755 "$OUTPUT_BIN_DIR/prview" "$RUNTIME_ROOT/libexec/prview"
