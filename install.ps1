@@ -24,9 +24,9 @@
 .EXAMPLE
     PS> .\install.ps1
 
-    Run from a repository checkout. The hosted form
-    (`iwr -useb https://vibecrafted.io/install.ps1 | iex`) is not served yet;
-    until it is, use the checkout form above or run the WSL bootstrap directly:
+    Run from a repository checkout. `https://vibecrafted.io/install.ps1`
+    is not served yet; until it is, use the checkout form above or run
+    the WSL bootstrap directly:
     PS> wsl bash -c 'curl -fsSL https://vibecrafted.io/install.sh | bash'
 
 .NOTES
@@ -37,14 +37,20 @@
       - Not scheduled: native Windows binaries (PowerShell module + signed
         installer). WSL2 is the supported answer; do not document a native
         Windows build as imminent.
-
-    Plan source: docs/plans/META_22_SCAFFOLD_TO_RELEASE.md — Plan 03.
 #>
 
 [CmdletBinding()]
 param()
 
 $ErrorActionPreference = 'Stop'
+
+function Get-VibecraftedVersion {
+    $versionFile = Join-Path $PSScriptRoot "VERSION"
+    if (Test-Path -LiteralPath $versionFile) {
+        return (Get-Content -LiteralPath $versionFile -Raw).Trim()
+    }
+    return $null
+}
 
 function Write-Banner {
     param([string]$Message)
@@ -91,7 +97,9 @@ function Get-WslDefaultDistro {
 # Main
 # -----------------------------------------------------------------------------
 
-Write-Banner "Vibecrafted v1.x — Windows native install is deferred to v2.x."
+$productVersion = Get-VibecraftedVersion
+$versionLabel = if ($productVersion) { "v$productVersion" } else { "current" }
+Write-Banner "Vibecrafted $versionLabel — Windows native install is not shipped. WSL2 is the supported path."
 
 $psVersion = $PSVersionTable.PSVersion
 Write-Host "  PowerShell version: $psVersion"
@@ -118,8 +126,8 @@ if (Test-WslAvailable) {
     Write-Host "  POSIX install.sh path. Vibecrafted's CLI will then be available"
     Write-Host "  inside WSL — open a WSL shell and run: vibecrafted help"
     Write-Host ""
-    Write-Host "  Native Windows install is on the v2.x roadmap. See"
-    Write-Host "  docs/INSTALL.md for status. This script DID NOT install anything."
+    Write-Host "  Native Windows install is not shipped. See docs/INSTALL.md."
+    Write-Host "  This script DID NOT install anything."
     Write-Host ""
     # Operator-honest: we did not install. Exit non-zero so any wrapping
     # `iex` / CI step knows to surface this as "next step needed", not done.
@@ -134,13 +142,14 @@ else {
     Write-Host "    wsl --install" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "  This installs WSL2 with the default Ubuntu distro. Reboot when"
-    Write-Host "  prompted, complete the Ubuntu first-run user setup, then re-run"
-    Write-Host "  this Vibecrafted installer:"
+    Write-Host "  prompted, complete the Ubuntu first-run user setup, then"
+    Write-Host "  bootstrap Vibecrafted inside WSL:"
     Write-Host ""
-    Write-Host "    iwr -useb https://vibecrafted.io/install.ps1 | iex" -ForegroundColor Cyan
+    Write-Host "    wsl bash -c 'curl -fsSL https://vibecrafted.io/install.sh | bash'" -ForegroundColor Cyan
     Write-Host ""
+    Write-Host "  Or re-run this checkout entry: .\install.ps1"
     Write-Host "  Docs: https://learn.microsoft.com/windows/wsl/install"
-    Write-Host "  Vibecrafted roadmap: docs/INSTALL.md (v2.x native Windows)."
+    Write-Host "  Vibecrafted matrix: docs/INSTALL.md (WSL2 is the Windows path)."
     Write-Host ""
     exit 1
 }

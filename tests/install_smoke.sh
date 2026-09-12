@@ -211,6 +211,18 @@ else
   fail "install.ps1 missing brand string"
 fi
 
+if grep -qE 'v1\.x|v2\.x' "$REPO_ROOT/install.ps1" 2>/dev/null; then
+  fail "install.ps1 still names a v1.x/v2.x Windows product that does not exist"
+else
+  ok "install.ps1 does not invent a native Windows version lane"
+fi
+
+if grep -q "WSL2 is the supported path" "$REPO_ROOT/install.ps1" 2>/dev/null; then
+  ok "install.ps1 states WSL2 as the supported Windows path"
+else
+  fail "install.ps1 missing WSL2 supported-path sentence"
+fi
+
 if grep -q "Test-WslAvailable" "$REPO_ROOT/install.ps1" 2>/dev/null; then
   ok "install.ps1 has WSL detection helper"
 else
@@ -229,7 +241,7 @@ if command -v pwsh >/dev/null 2>&1; then
     fail "install.ps1 has pwsh parse errors"
   fi
 else
-  printf '  [%s] pwsh not installed — skipping ps1 parse check (CI covers it on a Windows runner if added)\n' "$(yellow skip)"
+  printf '  [%s] pwsh not installed — skipping ps1 parse check (no Windows runner is gated)\n' "$(yellow skip)"
 fi
 
 # -----------------------------------------------------------------------------

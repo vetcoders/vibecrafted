@@ -37,6 +37,7 @@ EXPECTED_REQUIRED = {
     "install.toml",
     "scripts/distribution_manifest.py",
     "scripts/build-linux-arm64-runtime-pack.sh",
+    "scripts/build-linux-runtime-pack.sh",
     "scripts/vetcoders_install.py",
     "scripts/vibecrafted",
     "scripts/verify-vibecrafted-product.sh",

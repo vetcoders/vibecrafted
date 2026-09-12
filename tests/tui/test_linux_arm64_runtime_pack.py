@@ -73,9 +73,13 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     builder = (REPO_ROOT / "vibecrafted-vm/RuntimePack.Containerfile").read_text(
         encoding="utf-8"
     )
+    wrapper = (REPO_ROOT / "scripts/build-linux-runtime-pack.sh").read_text(
+        encoding="utf-8"
+    )
     assembler = (REPO_ROOT / "scripts/build-linux-arm64-runtime-pack.sh").read_text(
         encoding="utf-8"
     )
+    assert "build-linux-arm64-runtime-pack.sh" in wrapper
     assert "astral.sh/uv" not in builder
     assert "rustup target add wasm32-unknown-unknown wasm32-wasip1" in builder
     assert builder.index("ARG VIBECRAFTED_SOURCE_REVISION") > builder.index(
@@ -85,6 +89,10 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     assert "d6685ead9018ad89411291d6198476666e48b0f8" in assembler
     assert "7ab84069c9b7994ce0b705ccedd708aa3a35dcb6" in assembler
     assert "git clone" not in assembler
+    assert "VIBECRAFTED_SOURCE_OWNER_REPO" in assembler
+    assert 'export VIBECRAFTED_SOURCE_REVISION="$source_revision"' in assembler
+    assert 'export CC="${CC:-gcc}"' in assembler
+    assert 'export CXX="${CXX:-g++}"' in assembler
     assert 'voc_target="$work/voc-target"' in assembler
     assert 'CARGO_TARGET_DIR="$voc_target" cargo build --locked' in assembler
     assert "--release -p voc --bin voc --bin vc-start" in assembler
@@ -123,3 +131,5 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     )
     assert 'rm -rf "$WORK/loctree"' in foundations
     assert 'rm -rf "$WORK/aicx"' in foundations
+    assert 'export CC="${CC:-gcc}"' in foundations
+    assert 'export CXX="${CXX:-g++}"' in foundations

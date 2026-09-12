@@ -12,13 +12,13 @@ that matches your platform, then verify the result with `vibecrafted doctor`.
 
 ## Channels
 
-| Channel                      | Platform             | What you get                                           | Status                                   |
-| ---------------------------- | -------------------- | ------------------------------------------------------ | ---------------------------------------- |
-| Signed `Vibecrafted.app` DMG | macOS 14+, arm64     | Full desktop product: terminal, frame, runtime, server | Build path complete; publication pending |
-| Signed Runtime Pack          | macOS 14+, per-arch  | Same prebuilt runtime without DMG/App                  | Built and signed with the DMG            |
-| Bootstrap `install.sh`       | macOS, Linux, WSL2   | Command deck, runtime, control plane, skills           | Published; CI-gated                      |
-| Source checkout              | macOS, Linux, WSL2   | Everything above plus build, test and release targets  | Published                                |
-| Container                    | anywhere Docker runs | Isolated operator runtime                              | Published                                |
+| Channel                      | Platform             | What you get                                             | Status                                   |
+| ---------------------------- | -------------------- | -------------------------------------------------------- | ---------------------------------------- |
+| Signed `Vibecrafted.app` DMG | macOS 14+, arm64     | Full desktop product: terminal, frame, runtime, server   | Build path complete; publication pending |
+| Signed Runtime Pack          | macOS 14+, per-arch  | Same prebuilt runtime without DMG/App                    | Built and signed with the DMG            |
+| Bootstrap `install.sh`       | macOS, Linux, WSL2   | Command deck, runtime, control plane, skills             | Published; CI-gated                      |
+| Source checkout              | macOS, Linux, WSL2   | Development tree and targets — not a native Runtime Pack | Published                                |
+| Container                    | anywhere Docker runs | Isolated operator runtime                                | Published                                |
 
 On macOS and Linux, use the bootstrap today. On Windows, install WSL2 first and
 then use the same bootstrap inside it.
@@ -161,10 +161,13 @@ What the tarball is, and what it is not:
   `vibecrafted.source-provenance.v2`, a `vibecrafted.distribution-tree.v1`
   digest over every entry, bound to the commit the release was cut from.
   `install.sh` re-validates that carrier before it stages anything.
-- It is **not** a prebuilt-binary bundle. The Rust cockpit binaries (`voc`,
-  `vc-admin`, `vc-server`) are still compiled locally by `make install-source`, so a
-  Rust toolchain remains a prerequisite on these systems. See the prerequisites
-  section above.
+- It is **not** a prebuilt-binary bundle. Product launchers and native
+  `vc-terminal` / `vc-frame` hosts stay on the Runtime Pack. `--skills-only`
+  installs skill views from source; it does not claim a complete native
+  runtime.
+- Linux prebuilt packs (`linux-x64`, `linux-arm64`) are built natively by
+  `scripts/build-linux-runtime-pack.sh` and are not produced by macOS
+  `make release`.
 - On Windows this is the artifact you use _inside_ WSL2. There is no native
   Windows build; `install.ps1` hands off to WSL by design.
 
