@@ -669,7 +669,9 @@ def test_control_plane_staging_delegates_to_distribution_manifest(
     monkeypatch.setattr(
         installer,
         "_materialize_runtime_generation_vc_terminal_entry",
-        lambda runtime_root: seen.update(vc_terminal_entry_materialized=runtime_root),
+        lambda runtime_root, **_kwargs: seen.update(
+            vc_terminal_entry_materialized=runtime_root
+        ),
     )
     monkeypatch.setattr(
         installer,
