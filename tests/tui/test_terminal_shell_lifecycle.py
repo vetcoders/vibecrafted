@@ -387,9 +387,9 @@ def test_product_tool_env_is_set_before_tool_init(tmp_path: Path) -> None:
 
 
 def test_product_starship_does_not_name_host_python() -> None:
-    text = (
-        Path(__file__).resolve().parents[2] / "config/starship.toml"
-    ).read_text(encoding="utf-8")
+    text = (Path(__file__).resolve().parents[2] / "config/starship.toml").read_text(
+        encoding="utf-8"
+    )
     assert "$python" not in text
     assert "disabled = true" in text.split("[python]", 1)[1]
 
