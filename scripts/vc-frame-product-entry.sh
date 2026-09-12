@@ -69,11 +69,14 @@ real="$(resolve_real_bin)" || {
   printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2
   exit 127
 }
-# Identity probe: --version answers from the native engine without a session,
-# config or layouts. The Runtime Pack inventory calls bin/vc-frame --version
-# on build hosts that have no installed ~/.config/vibecrafted at all.
-if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
-  exec "$real" --version
+# Identity probes must work before runtime-install writes the product
+# config/layouts view. A pack assembler that asks `--version` is not a launch.
+if [[ $# -eq 1 ]]; then
+  case "$1" in
+    --version | -V | --help | -h)
+      exec "$real" "$1"
+      ;;
+  esac
 fi
 pin_product_config || {
   printf 'Install explicitly: python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack>\n' >&2

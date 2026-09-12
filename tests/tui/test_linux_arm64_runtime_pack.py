@@ -91,6 +91,7 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     assert "git clone" not in assembler
     assert "VIBECRAFTED_SOURCE_OWNER_REPO" in assembler
     assert 'export VIBECRAFTED_SOURCE_REVISION="$source_revision"' in assembler
+    assert 'export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.97.0}"' in assembler
     assert 'export CC="${CC:-gcc}"' in assembler
     assert 'export CXX="${CXX:-g++}"' in assembler
     assert 'voc_target="$work/voc-target"' in assembler
@@ -129,7 +130,18 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     foundations = (REPO_ROOT / "scripts/stage-runtime-foundations.sh").read_text(
         encoding="utf-8"
     )
-    assert 'rm -rf "$WORK/loctree"' in foundations
-    assert 'rm -rf "$WORK/aicx"' in foundations
-    assert 'export CC="${CC:-gcc}"' in foundations
-    assert 'export CXX="${CXX:-g++}"' in foundations
+    assert "@loctree/aicx-linux-x64-gnu" in foundations
+    assert "@loctree/loctree-linux-x64-gnu" in foundations
+    assert "stage_npm_bins" in foundations
+    assert "cargo build --manifest-path" not in foundations
+    assert "cargo install --locked --version" in foundations
+    assert "will not cargo-build those donors" in foundations
+
+
+def test_linux_x86_64_host_expects_carrier_architecture_x64() -> None:
+    """uname -m is x86_64; the Runtime Pack carrier slug is x64 / linux-x64."""
+    installer = (REPO_ROOT / "scripts/install-runtime-pack.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'expected_architecture="x64"' in installer
+    assert 'expected_architecture="x86_64"' not in installer

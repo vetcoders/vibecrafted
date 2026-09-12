@@ -28,9 +28,12 @@ source_revision="${VIBECRAFTED_SOURCE_REVISION:-}"
 # the inherited environment is an atomic pair, not a half-set GITHUB_SHA.
 export VIBECRAFTED_SOURCE_REVISION="$source_revision"
 export VIBECRAFTED_SOURCE_OWNER_REPO="${VIBECRAFTED_SOURCE_OWNER_REPO:-vetcoders/vibecrafted}"
-# llama-cpp-sys-2 / aicx: host `c++` is often clang, which cannot find
-# libstdc++ headers on Ubuntu (MEASURED: c++ → clang-18, cstdlib missing).
-# Prefer GCC when present. Honor an explicit CC/CXX from the caller.
+# vc-terminal needs edition2024. Ambient cargo 1.83 fails an hour later.
+# Honor an explicit caller RUSTUP_TOOLCHAIN.
+export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.97.0}"
+# Host `c++` is often clang, which cannot find libstdc++ headers on Ubuntu
+# (MEASURED: c++ → clang-18, cstdlib missing). Prefer GCC when present.
+# Honor an explicit CC/CXX from the caller. aicx/loctree are npm prebuilts.
 if command -v gcc >/dev/null 2>&1; then
   export CC="${CC:-gcc}"
 fi
@@ -140,6 +143,8 @@ seed_python="$(find "$work/python-seed" -type f -path '*/bin/python3.12' -print 
 python_home="$(cd "$(dirname "$seed_python")/.." && pwd -P)"
 mkdir -p "$payload/python" "$payload/python-site"
 cp -RL "$python_home/." "$payload/python/"
+# Public channel is `pipx install screenscribe`. The pack vendors the same
+# pinned PyPI wheel into the sealed CPython so the payload stays closed.
 uv pip install --python "$seed_python" --target "$payload/python-site" \
   'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7' 'screenscribe==0.1.19' \
   'fastmcp>=2.0,<3'

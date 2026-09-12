@@ -85,7 +85,9 @@ Scope, stated plainly:
   cannot pretend to be a complete native runtime.
 - Linux prebuilt packs (`linux-x64`, `linux-arm64`) are a separate carrier,
   built natively by `scripts/build-linux-runtime-pack.sh`. They are not
-  produced by macOS `make release`.
+  produced by macOS `make release`. 4.3.1 does not ship a systemd unit;
+  on Linux the process pair is `vibecrafted server start` (server +
+  guardian), not `systemctl`.
 - On Windows this is what you install _inside_ WSL2. There is no native
   Windows build; see the `install.ps1` section.
 

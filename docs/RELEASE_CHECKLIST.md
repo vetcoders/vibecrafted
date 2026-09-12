@@ -41,7 +41,9 @@ by `scripts/build-linux-runtime-pack.sh`. They are not produced by macOS
 `make release` and are not in the Darwin publisher allowlist. CI builds and
 installs the `linux-x64` pack on every Linux install gate. A published
 `v4.3.1` may attach those packs as extra assets only through a Linux-built
-upload, never by stretching the Darwin allowlist.
+upload, never by stretching the Darwin allowlist. 4.3.1 does not ship a systemd unit;
+Linux service truth is `vibecrafted server start` (server + guardian process pair),
+not a distro init script.
 
 Runtime Pack provenance uses one target identity everywhere: `platform` is the
 full target slug (`darwin-arm64`, `linux-x64`, or `linux-arm64`) and

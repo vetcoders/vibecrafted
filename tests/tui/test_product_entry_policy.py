@@ -442,6 +442,22 @@ def test_wrapper_requires_installed_config_for_every_session_name(
 
 
 @pytest.mark.parametrize(
+    "flag",
+    ["--version", "-V", "--help", "-h"],
+)
+def test_wrapper_identity_probes_do_not_require_installed_config(
+    tmp_path: Path, flag: str
+) -> None:
+    """Pack inventory asks `--version` before runtime-install writes the view."""
+    generation = _stage_generation(tmp_path, engine="recording", config="absent")
+    proc = _run_wrapper(generation, flag)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    record = _read_record(generation.record)
+    assert record["ENGINE"] == str(generation.engine)
+    assert record["argv"] == [flag]
+
+
+@pytest.mark.parametrize(
     "shape",
     ["symlinked-view", "symlinked-config", "symlinked-layouts"],
 )
