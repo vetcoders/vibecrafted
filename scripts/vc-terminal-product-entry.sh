@@ -150,6 +150,13 @@ if [[ "$host" != /* || ! -x "$host" || -L "$host" ]]; then
   printf 'vc-terminal: native host missing: %s\n' "$host" >&2
   exit 127
 fi
+# Identity probe: --version answers from the host binary without opening a
+# window or reading any config, so it must not require the installed product
+# config. The Runtime Pack inventory calls bin/vc-terminal --version on build
+# hosts that have no ~/.config/vibecrafted at all.
+if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
+  exec "$host" --version
+fi
 if [[ ! -f "$config" || -L "$config" || -L "$HOME/.config" \
   || -L "$HOME/.config/vibecrafted" || -L "$HOME/.config/vibecrafted/vc-terminal" ]]; then
   printf 'vc-terminal: product config missing: %s\n' "$config" >&2
