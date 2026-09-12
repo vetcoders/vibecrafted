@@ -1244,10 +1244,19 @@ fn projection_revision(root: &Path) -> u64 {
 
 fn hash_mtime(path: &Path, hasher: &mut DefaultHasher) {
     path.hash(hasher);
-    let modified = fs::metadata(path)
-        .and_then(|meta| meta.modified())
-        .unwrap_or(SystemTime::UNIX_EPOCH);
+    // mtime alone misses a rewrite that lands inside one filesystem clock tick
+    // (events.jsonl appended twice within ~1ms hashed identically); size is the
+    // cheap second witness for append-only projection files.
+    let (modified, len) = fs::metadata(path)
+        .map(|meta| {
+            (
+                meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                meta.len(),
+            )
+        })
+        .unwrap_or((SystemTime::UNIX_EPOCH, 0));
     modified.hash(hasher);
+    len.hash(hasher);
 }
 
 fn hash_dir_entries(path: &Path, hasher: &mut DefaultHasher) {
