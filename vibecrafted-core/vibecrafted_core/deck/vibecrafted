@@ -5032,7 +5032,7 @@ cmd_start() {
     return 1
   fi
   _vetcoders_start_prepare_arguments "$@" || return $?
-  _vetcoders_start_entry "${_vetcoders_start_frame_argv[@]}"
+  _vetcoders_start_entry ${_vetcoders_start_frame_argv[@]+"${_vetcoders_start_frame_argv[@]}"}
 }
 
 cmd_loop() {
