@@ -3096,8 +3096,13 @@ def test_resume_wrapper_accepts_bare_positional_session_id(tmp_path: Path) -> No
     )
     home.mkdir()
     fake_bin.mkdir()
-    wrapper.symlink_to(LAUNCHER)
     _write_fake_vc_frame_with_live_session(fake_bin, capture_file, "operator-test")
+    # bf028c40: a piped declaration escalates to the product terminal unless the
+    # shell proves an owned terminal entry. Build the installed-generation shape
+    # (front door exists) and declare that boundary, so the live-session direct
+    # path under test stays reachable from a pipe.
+    generation = _installed_public_generation(tmp_path, home, fake_bin / "vc-frame")
+    wrapper.symlink_to(generation / "bin" / "vibecrafted")
 
     frame = fake_bin / "vc-frame"
     frame.write_text(
@@ -3115,6 +3120,8 @@ def test_resume_wrapper_accepts_bare_positional_session_id(tmp_path: Path) -> No
     env["VIBECRAFTED_VC_FRAME_BIN"] = str(fake_bin / "vc-frame")
     env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
     env["CAPTURE_FILE"] = str(capture_file)
+    env["VIBECRAFTED_TERMINAL_ENTRY"] = "1"
+    env["VIBECRAFTED_TERMINAL_ENTRY_OWNER"] = str(generation / "bin" / "vibecrafted")
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
@@ -3126,22 +3133,21 @@ def test_resume_wrapper_accepts_bare_positional_session_id(tmp_path: Path) -> No
         env=env,
     )
 
+    # Resume now launches through the control plane and hands the live frame
+    # session an attach; the positional-id contract is recorded in the run's
+    # admission (identity_source explicit_session), not in a new-tab argv.
     payload = capture_file.read_text(encoding="utf-8").splitlines()
-    payload = payload[payload.index("--name") - 4 :]
-    assert payload[:4] == ["--session", "operator-test", "action", "new-tab"]
-    separator = payload.index("--")
-    command_script = Path(payload[separator + 1])
-    command_body = command_script.read_text(encoding="utf-8")
-    assert "interactive-launch" in command_body
-    import shlex
-
-    tokens = shlex.split(shlex.split(command_body, comments=True)[-1])
-    admission = json.loads(
-        Path(tokens[tokens.index("--admission-file") + 1]).read_text()
+    assert payload[:2] == ["attach", "operator-test"]
+    admissions = sorted(
+        (home / ".vibecrafted/control_plane/runtime_runs").glob("*/admission.json")
     )
+    assert len(admissions) == 1
+    admission = json.loads(admissions[0].read_text())
     assert admission["agent_session_id"] == "resume-session-789"
+    assert admission["session_selection"]["identity_source"] == "explicit_session"
     assert admission["root"] == str(root)
-    assert "codex exec" not in command_body
+    assert (admission["agent"], admission["skill"]) == ("codex", "resume")
+    assert admission["presentation"] == "visible"
 
 
 def _write_fake_aicx_sessions(bin_dir: Path, current_id: str, previous_id: str) -> None:
