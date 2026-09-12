@@ -144,6 +144,12 @@ _vetcoders_resolve_interactive_operator_target() {
     repo_root="$(_vetcoders_repo_root 2>/dev/null || pwd)"
   fi
   host="$(basename "$repo_root")"
+  local place=""
+  place="$(_vetcoders_operator_session_name 2>/dev/null || true)"
+  if [[ -n "$place" ]] && printf '%s\n' "$live_list" | grep -Fxq -- "$place"; then
+    printf '%s\n' "$place"
+    return 0
+  fi
   if [[ -n "$host" ]] && printf '%s\n' "$live_list" | grep -Fxq -- "$host"; then
     printf '%s\n' "$host"
     return 0
@@ -321,10 +327,8 @@ _vetcoders_operator_layout_file() {
 }
 
 _vetcoders_operator_session_name() {
-  local run_id
   _vetcoders_normalize_ambient_context
-  run_id="$(_vetcoders_effective_run_id 2>/dev/null || true)"
-  _vetcoders_operator_session_name_for_run_id "$run_id"
+  _vetcoders_operator_place_session_name
 }
 
 # G7 twin of spawn_effective_operator_session (scripts/lib/vc_frame.sh).
@@ -592,9 +596,12 @@ _vetcoders_prepare_operator_runtime() {
 
   if [[ -n "${VIBECRAFTED_OPERATOR_SESSION:-}" ]]; then
     # Honour an explicitly-provided operator session as the visible target
-    # (vc-resume / CLI dispatch rely on this). Stale ambient leaks are already
-    # blocked by the tightened _vetcoders_in_vc_frame signal above, so dropping an
-    # explicit session here only breaks legitimate targeting.
+    # (vc-resume / CLI dispatch rely on this). The old catalog fallback
+    # workspace-{8hex} is not a place — rewrite it to the human label.
+    if _vetcoders_is_legacy_operator_session_name "$VIBECRAFTED_OPERATOR_SESSION"; then
+      VIBECRAFTED_OPERATOR_SESSION="$(_vetcoders_operator_session_name)"
+      export VIBECRAFTED_OPERATOR_SESSION
+    fi
     export VC_FRAME_SESSION_NAME="${VC_FRAME_SESSION_NAME:-$VIBECRAFTED_OPERATOR_SESSION}"
     return 0
   fi

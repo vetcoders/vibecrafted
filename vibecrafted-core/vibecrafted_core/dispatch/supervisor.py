@@ -18,7 +18,12 @@ from pathlib import Path
 from typing import Any
 
 from vibecrafted_core.delivery.model import ExecutionEnvelope
+from vibecrafted_core.repository_claims import (
+    ClaimConflictError,
+    RepositoryClaimRegistry,
+)
 from vibecrafted_core.workflow import (
+    LAUNCH_IDEMPOTENCY_KEY_ENV,
     WorkflowLaunchSpec,
     launch_workflow,
     reserve_run_id,
@@ -115,7 +120,10 @@ class DispatchResult:
 
 
 def workflow_cell_launcher(
-    dispatch: Dispatch, *, source_dir: str | Path | None = None
+    dispatch: Dispatch,
+    *,
+    source_dir: str | Path | None = None,
+    dispatch_run_id: str = "",
 ) -> CellLauncher:
     """Production launcher: every cell goes through the existing
     `launch_workflow` runtime — the dispatch layer never spawns its own
@@ -145,6 +153,10 @@ def workflow_cell_launcher(
             "VIBECRAFTED_DISPATCH_SCHEDULER_SLOT": str(cut.scheduler_slot),
             "VIBECRAFTED_DISPATCH_INTEGRATOR": str(cut.integrator).lower(),
         }
+        if dispatch_run_id:
+            runtime_env[LAUNCH_IDEMPOTENCY_KEY_ENV] = (
+                f"dispatch:{dispatch_run_id}:cut:{cut.id}:attempt:{kind}"
+            )
         if cut.target_path:
             runtime_env["CARGO_TARGET_DIR"] = cut.target_path
         result = launch_workflow(spec, base_dir, env=runtime_env)
@@ -193,11 +205,15 @@ class DispatchSupervisor:
         )
         self.worktrees = WorktreeManager(self.repo) if self.manage_worktrees else None
         self.launcher = launcher or workflow_cell_launcher(
-            dispatch, source_dir=source_dir
+            dispatch,
+            source_dir=source_dir,
+            dispatch_run_id=self.run_id,
         )
         self._sleep = sleep
         self._io_lock = threading.RLock()
         self._geometries: dict[str, WorktreeGeometry] = {}
+        self._mutation_claim_id = ""
+        self._mutation_claim_session_id = f"dispatch:{self.run_id}"
 
         base = artifacts_dir
         if base is None and dispatch.meta.tracker:
@@ -212,6 +228,17 @@ class DispatchSupervisor:
             None
             if self.manage_worktrees or run_id
             else self.artifacts_dir / ".test-runtime" / self.run_id
+        )
+        claim_root = (
+            None
+            if self.manage_worktrees
+            else self.artifacts_dir
+            / ".test-runtime"
+            / self.run_id
+            / "repository_claims"
+        )
+        self._claim_registry = RepositoryClaimRegistry(
+            root=claim_root, emit_events=self.manage_worktrees
         )
         self._receipt_store = DispatchReceiptStore(
             self.run_id,
@@ -250,6 +277,7 @@ class DispatchSupervisor:
         result: DispatchResult | None = None
         poll_s, timeout_s = self._await_config()
         try:
+            self._acquire_mutation_claim()
             self._journal(
                 f"dispatch start: {self.dispatch.meta.name!r} repo={self.repo}"
                 f" cuts={len(self.dispatch.cuts)} repair_rounds={self.policy.repair_rounds}"
@@ -403,7 +431,90 @@ class DispatchSupervisor:
             return result
         finally:
             final_result = result or self._build_result(baton, line_broken)
-            self._write_final_artifacts(final_result)
+            try:
+                self._write_final_artifacts(final_result)
+            finally:
+                self._release_mutation_claim()
+
+    def _acquire_mutation_claim(self) -> None:
+        """Acquire the dispatch envelope's full mutation scope before any spawn."""
+        envelope = self.dispatch.envelope
+        if envelope is None or not envelope.owned_paths:
+            return
+        if any(self._envelope_block_failures(cut) for cut in self.dispatch.cuts):
+            # The existing per-cut gate records the precise qualification
+            # failure. An invalid envelope must not reserve paths it cannot own.
+            return
+        try:
+            result = self._claim_registry.acquire(
+                repo=self.repo,
+                worktree=self.repo,
+                owned_paths=envelope.owned_paths,
+                run_id=self.run_id,
+                session_id=self._mutation_claim_session_id,
+                agent=envelope.agent,
+                branch=envelope.branch,
+            )
+        except ClaimConflictError as exc:
+            conflicts = exc.result.get("conflicts") or []
+            details = [
+                (
+                    f"run {item.get('run_id') or '?'} session "
+                    f"{item.get('session_id') or '?'} owns "
+                    f"{item.get('overlapping_paths') or item.get('owned_paths')}"
+                )
+                for item in conflicts
+            ]
+            message = "repository mutation overlap: " + "; ".join(details)
+            for cut in self.dispatch.cuts:
+                self._receipt_store.update(
+                    cut.id,
+                    "failed",
+                    acceptance="ownership-conflict",
+                    claim_conflicts=conflicts,
+                    unresolved_surfaces=[message],
+                )
+                self._set_state(cut.id, STATE_FAILED, message)
+            raise CellContractError(message) from exc
+        claim = result.get("claim") or {}
+        self._mutation_claim_id = str(claim.get("claim_id") or "")
+        for cut in self.dispatch.cuts:
+            self._receipt_store.update(
+                cut.id,
+                mutation_claim_id=self._mutation_claim_id,
+                claimed_owned_paths=list(envelope.owned_paths),
+            )
+        self._journal(
+            "repository mutation claim acquired before spawn: "
+            f"claim_id={self._mutation_claim_id} paths={list(envelope.owned_paths)}"
+        )
+
+    def _heartbeat_mutation_claim(self) -> None:
+        if not self._mutation_claim_id:
+            return
+        self._claim_registry.heartbeat(
+            self._mutation_claim_id,
+            run_id=self.run_id,
+            session_id=self._mutation_claim_session_id,
+        )
+
+    def _release_mutation_claim(self) -> None:
+        if not self._mutation_claim_id:
+            return
+        claim_id = self._mutation_claim_id
+        self._mutation_claim_id = ""
+        self._claim_registry.release(
+            claim_id,
+            run_id=self.run_id,
+            session_id=self._mutation_claim_session_id,
+        )
+        released_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        for cut in self.dispatch.cuts:
+            self._receipt_store.update(
+                cut.id,
+                mutation_claim_released_at=released_at,
+            )
+        self._journal(f"repository mutation claim released: claim_id={claim_id}")
 
     def _run_scheduled_cut(
         self, cut: Cut, baton: Baton, verdicts: dict[str, Verdict]
@@ -892,6 +1003,13 @@ class DispatchSupervisor:
                 state=STATE_FAILED,
                 failures=(f"{cut.id}: {message}",),
             )
+        if cell.pid and self._mutation_claim_id:
+            self._claim_registry.adopt_liveness_owner(
+                self._mutation_claim_id,
+                run_id=self.run_id,
+                session_id=self._mutation_claim_session_id,
+                pid=cell.pid,
+            )
         self._journal(
             f"[{cut.id}] {kind} cell launched:"
             f" run_id={cell.run_id or '?'} pid={cell.pid or '?'}"
@@ -911,6 +1029,13 @@ class DispatchSupervisor:
             f"worker active in scheduler slot {cut.scheduler_slot}",
         )
         outcome = self._await(cell)
+        if self._mutation_claim_id:
+            self._claim_registry.adopt_liveness_owner(
+                self._mutation_claim_id,
+                run_id=self.run_id,
+                session_id=self._mutation_claim_session_id,
+                pid=os.getpid(),
+            )
         if outcome.timed_out:
             self._terminate(cell)
             self._journal(
@@ -1026,6 +1151,7 @@ class DispatchSupervisor:
         started = time.monotonic()
         wall_started = time.time()
         while not self._cell_finished(cell):
+            self._heartbeat_mutation_claim()
             elapsed = time.monotonic() - started
             if elapsed >= timeout_s:
                 return AwaitOutcome(finished=False, timed_out=True, elapsed_s=elapsed)

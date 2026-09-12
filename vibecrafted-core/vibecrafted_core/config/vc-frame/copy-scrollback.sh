@@ -36,8 +36,7 @@ fi
 if [[ -s "$tmp" ]]; then
     paste_stack=""
     for candidate in \
-        "${HOME}/.config/vetcoders/frontier/vc-frame/paste-stack.sh" \
-        "${HOME}/.config/vc-frame/paste-stack.sh" \
+        "${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame/paste-stack.sh" \
         "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/paste-stack.sh"
     do
         if [[ -x "$candidate" ]]; then

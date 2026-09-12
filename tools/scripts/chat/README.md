@@ -28,8 +28,8 @@ chmod +x chat-cli.py
 # Local server (llama.cpp, vLLM, etc.)
 ./chat-cli.py --base-url http://localhost:8080/v1
 
-# Dragon with Svetliq
-./chat-cli.py -b http://dragon:10240/v1 -m libraxisai/Svetliq-11b-v3.0-mlx
+# host-a with a local
+./chat-cli.py -b http://host-a:10240/v1 -m libraxisai/a local-11b-v3.0-mlx
 
 # OpenAI
 ./chat-cli.py -b https://api.openai.com/v1 -k $OPENAI_API_KEY -m gpt-4o
@@ -60,16 +60,16 @@ chmod +x chat-cli.py
 
 ```bash
 # Quick alias
-alias svetliq='./chat-cli.py -b http://dragon:10240/v1 -m libraxisai/Svetliq-11b'
+alias svetliq='./chat-cli.py -b http://host-a:10240/v1 -m libraxisai/a local-11b'
 
 # Chat session
 $ svetliq
 Chat CLI (OpenAI-Compatible, stdlib only)
-Connected to: http://dragon:10240/v1
-Model: libraxisai/Svetliq-11b
+Connected to: http://host-a:10240/v1
+Model: libraxisai/a local-11b
 
 You: Kim jestes?
-Assistant: Jestem Svetliq - polski model AI specjalizujacy sie w medycynie weterynaryjnej...
+Assistant: Jestem a local - polski model AI specjalizujacy sie w medycynie weterynaryjnej...
 ```
 
 ### Why stdlib only?

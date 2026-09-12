@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF_USAGE'
-Usage: skills_sync.sh <host> [--source <repo-root>] [--tool <codex|claude|agy>]... [--dry-run] [--mirror] [--with-shell] [--no-zshrc] [--no-bashrc] [--no-verify]
+Usage: skills_sync.sh <host> [--source <repo-root>] [--tool <codex|claude|agy|cursor>]... [--dry-run] [--mirror] [--with-shell] [--no-zshrc] [--no-bashrc] [--no-verify]
 
 Sync canonical skill directories from this repo to the staged tools store:
   $HOME/.local/share/vibecrafted/tools/vibecrafted-current/vibecrafted-core/vibecrafted_core/skills
@@ -12,13 +12,14 @@ Then create symlink views inside the remote tool homes:
   $HOME/.codex/skills
   $HOME/.claude/skills
   $HOME/.agy/skills
+  $HOME/.cursor/skills
 
 Examples:
-  bash runtime/scripts/skills_sync.sh mgbook16
-  bash runtime/scripts/skills_sync.sh mgbook16 --tool codex --tool claude
-  bash runtime/scripts/skills_sync.sh mgbook16 --dry-run
-  bash runtime/scripts/skills_sync.sh mgbook16 --mirror
-  bash runtime/scripts/skills_sync.sh mgbook16 --with-shell
+  bash runtime/scripts/skills_sync.sh host-b
+  bash runtime/scripts/skills_sync.sh host-b --tool codex --tool claude
+  bash runtime/scripts/skills_sync.sh host-b --dry-run
+  bash runtime/scripts/skills_sync.sh host-b --mirror
+  bash runtime/scripts/skills_sync.sh host-b --with-shell
 EOF_USAGE
 }
 
@@ -139,10 +140,16 @@ done < <(
 [[ ${#skills[@]} -gt 0 ]] || die "No skill directories found under $skills_root"
 
 if [[ ${#tools[@]} -eq 0 ]]; then
-  tools=(codex claude agy)
+  tools=(codex claude agy cursor)
 fi
 
 rsync_args=(-az --exclude '.DS_Store' --exclude '.backup' --exclude '.loctree' -e ssh)
+# Private, operator-only skills are never part of a mirror: neither pushed
+# from the repo nor deleted on the target when --delete is in effect.
+private_skills=(vc-deprivatize)
+for skill in "${private_skills[@]}"; do
+  rsync_args+=(--exclude "/${skill}/")
+done
 if (( mirror )); then
   rsync_args+=(--delete)
 fi

@@ -5,11 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+from .clock import utc_now_iso
 from .control_plane import await_run as control_plane_await_run
 from .control_plane import control_plane_home
 from .lifecycle_runner import (
@@ -19,6 +19,7 @@ from .lifecycle_runner import (
     write_lifecycle_report,
     write_lifecycle_state,
 )
+from .stage_cast import primary_stage_agent
 
 RunLifecycle = Callable[[LifecycleRunSpec], dict[str, Any]]
 StopRun = Callable[..., dict[str, Any]]
@@ -43,11 +44,6 @@ CONTROL_VERBS = frozenset(
 def lifecycle_runs_home() -> Path:
     """Directory under the control-plane home where lifecycle run state.json files live."""
     return control_plane_home() / "lifecycle_runs"
-
-
-def _now_iso() -> str:
-    """Current local time as an ISO-8601 string with numeric UTC offset."""
-    return time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
 
 def _load_state(state_path: Path) -> dict[str, Any]:
@@ -124,7 +120,7 @@ def record_operator_action(
     details: dict[str, Any],
 ) -> dict[str, Any]:
     """Persist a traced operator move: state.json, report.md, transcript line."""
-    entry = {"action": action, "at": _now_iso(), "details": details}
+    entry = {"action": action, "at": utc_now_iso(), "details": details}
     state.setdefault("operator_actions", []).append(entry)
     write_lifecycle_state(state_path, state)
     report_path = str(state.get("report_path") or "")
@@ -207,7 +203,7 @@ def _baton_agent(state: dict[str, Any], stage: str = "") -> str:
     # Operator-declared casting (mission frontmatter stage_agents) wins for a
     # stage it names; worker-requested next_agent steers only the un-cast rest.
     stage_agents = dict(spec_data.get("stage_agents") or {})
-    cast = str(stage_agents.get(str(stage or "").strip()) or "").strip()
+    cast = primary_stage_agent(stage_agents, stage)
     if cast:
         return cast
     return str(baton.get("next_agent") or spec_data.get("agent") or "codex")
@@ -425,7 +421,7 @@ def accept_dou(state_path: Path, state: dict[str, Any], finding: str) -> dict[st
     if not text:
         raise ValueError("--finding is required to accept a DoU gap consciously")
     state.setdefault("accepted_dou_findings", []).append(
-        {"finding": text, "at": _now_iso()}
+        {"finding": text, "at": utc_now_iso()}
     )
     return record_operator_action(state_path, state, "accept_dou", {"finding": text})
 

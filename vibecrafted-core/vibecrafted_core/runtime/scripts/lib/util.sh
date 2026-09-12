@@ -26,7 +26,7 @@ spawn_prepend_agent_tool_paths() {
   local entry found joined
   local -a contract final
 
-  # Mirror Silver's runtime contract for detached agent launchers whose parent
+  # Mirror the workstation runtime contract for detached agent launchers whose parent
   # process may not have gone through zsh startup files. This is intentionally
   # an allowlist: inherited PATH entries do not participate in agent command
   # resolution.

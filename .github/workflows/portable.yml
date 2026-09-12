@@ -90,41 +90,21 @@ jobs:
         run: bash scripts/check-portable.sh
 
   curl-bootstrap:
-    name: curl | bash bootstrap
-    if: github.event_name == 'merge_group'
+    name: Runtime Pack bootstrap (${{ matrix.os }})
     needs: portable
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            os: macOS
+          - runner: ubuntu-latest
+            os: Linux
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          # install.sh -> make install builds voc, whose arboard clipboard dep
-          # links gtk-sys/glib-sys on Linux. libgtk-3-dev transitively provides
-          # the glib-2.0 pkg-config files the build needs. (Rust is preinstalled
-          # on ubuntu-latest with a default toolchain, and this job uses the real
-          # HOME, so no rustup pin is needed here.)
-          sudo apt-get install -y \
-            build-essential \
-            cmake \
-            libclang-dev \
-            libgtk-3-dev \
-            libxdo-dev \
-            libayatana-appindicator3-dev \
-            protobuf-compiler
-      - name: Provision leptos toolchain for the server shell build
-        shell: bash
-        run: |
-          # Same requirement as the portable job: install.sh -> make install
-          # -> install-bundle-tools hard-requires cargo-leptos once cargo is
-          # present, plus a Cargo.lock-matched wasm-bindgen-cli.
-          rustup target add wasm32-unknown-unknown
-          curl -L --proto '=https' --tlsv1.2 -sSf -o /tmp/install-binstall.sh https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh
-          bash /tmp/install-binstall.sh
-          cargo binstall -y cargo-leptos
-          lock_version="$(cargo tree --locked --manifest-path vibecrafted-server/Cargo.toml -p wasm-bindgen --depth 0 --prefix none | awk 'NR == 1 { sub(/^v/, "", $2); print $2 }')"
-          cargo binstall -y "wasm-bindgen-cli@${lock_version}"
-      - name: Serve install.sh locally and bootstrap
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+      - name: Build canonical source side of the release tuple
         run: |
           archive="/tmp/vibecrafted-bootstrap.tar.gz"
           source_revision="$(git rev-parse HEAD)"
@@ -134,26 +114,8 @@ jobs:
             --root-name vibecrafted-bootstrap \
             --owner-repo "$GITHUB_REPOSITORY" \
             --source-revision "$source_revision"
-          bash install.sh --archive-file "$archive"
-      - name: Verify bootstrap result
+      - name: Prove canonical carrier and bootstrap contract
         run: |
-          # install.sh stages the source snapshot under the RUNTIME home
-          # ($XDG_DATA_HOME/vibecrafted, default ~/.local/share/vibecrafted),
-          # not the skills home (~/.vibecrafted). Mirror install.sh's own
-          # tools-dir resolution (default_vibecrafted_runtime_home +
-          # VIBECRAFTED_TOOLS_HOME override) so verify checks the path the
-          # installer actually wrote.
-          if [ -n "${VIBECRAFTED_RUNTIME_HOME:-}" ]; then
-            runtime_home="$VIBECRAFTED_RUNTIME_HOME"
-          elif [ -n "${XDG_DATA_HOME:-}" ]; then
-            runtime_home="$XDG_DATA_HOME/vibecrafted"
-          else
-            runtime_home="$HOME/.local/share/vibecrafted"
-          fi
-          tools_dir="${VIBECRAFTED_TOOLS_HOME:-$runtime_home/tools}"
-          test -L "$tools_dir/vibecrafted-current"
-          test -f "$tools_dir/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/codex_spawn.sh"
-          # Runtime contract: the default install lane does not wire legacy shell
-          # helpers (vc-skills.sh) — that is an explicit --with-shell opt-in — so
-          # the bootstrap verify no longer asserts the helper file here.
-          echo "Bootstrap OK"
+          env -u PYTHONPATH uv run --project vibecrafted-core --with pytest \
+            python -m pytest tests/tui/test_runtime_pack_cli.py \
+            tests/tui/test_install_bootstrap.py -q

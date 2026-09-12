@@ -163,7 +163,7 @@ konwertuje te twierdzenia na dowody, inspekcjonując kod + testy.
 NIE WOLNO ci ufać punktom z opisu PR-a, komunikatom commitów nazywającym
 fix, inline'owym komentarzom `// done` / `# implemented`, wcześniejszym
 raportom `vc-followup` lub `vc-review`, statusowi we frontmatterze
-podlinkowanych plików tasków, slice'om AICX / kroniki / pamięci ani
+podlinkowanych plików tasków, slice'om AICX / dziennika projektu / pamięci ani
 adnotacjom „fixes #123" / „closes #456" — chyba że są **niezależnie
 potwierdzone w bieżącym kodzie/testach**.
 

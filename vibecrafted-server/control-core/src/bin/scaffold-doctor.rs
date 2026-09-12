@@ -1,8 +1,8 @@
 //! Deterministic scaffold plan gate.
 //!
 //! ```text
-//! scaffold-doctor --plan <plan_root> [--json]
-//! scaffold-doctor <vibecrafted-home> <org> <repo> <day> <plan-id> [--json]
+//! scaffold-doctor --plan <plan_root> [--repo <git-root>] [--json]
+//! scaffold-doctor <vibecrafted-home> <org> <repo> <day> <plan-id> [--repo <git-root>] [--json]
 //! ```
 //!
 //! Exit 0 = pass · Exit 1 = refuse (rule violations) · Exit 2 = usage / not a plan.
@@ -10,13 +10,14 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use control_core::{ScaffoldArtifactStore, ScaffoldDoctorReport, doctor_plan_root};
+use control_core::{ScaffoldArtifactStore, ScaffoldDoctorReport, doctor_plan_root_in_repo};
 
 fn main() -> ExitCode {
     // argv values select local inputs; they never establish executable trust.
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>(); // nosemgrep: rust.lang.security.args-os.args-os
     let mut json = false;
     let mut plan: Option<PathBuf> = None;
+    let mut repo: Option<PathBuf> = None;
     let mut positional = Vec::new();
 
     let mut index = 0usize;
@@ -32,6 +33,14 @@ fn main() -> ExitCode {
                 };
                 plan = Some(PathBuf::from(value));
             }
+            "--repo" => {
+                index += 1;
+                let Some(value) = arguments.get(index) else {
+                    eprintln!("scaffold-doctor: --repo requires a path");
+                    return usage();
+                };
+                repo = Some(PathBuf::from(value));
+            }
             "-h" | "--help" => return usage(),
             other if other.starts_with('-') => {
                 eprintln!("scaffold-doctor: unknown flag {other}");
@@ -43,14 +52,19 @@ fn main() -> ExitCode {
     }
 
     let report = if let Some(plan_root) = plan {
-        doctor_plan_root(plan_root)
+        doctor_plan_root_in_repo(plan_root, repo.as_deref())
     } else if positional.len() == 5 {
         let values = positional
             .iter()
             .map(|value| value.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        ScaffoldArtifactStore::new(&values[0])
-            .doctor(&values[1], &values[2], &values[3], &values[4])
+        ScaffoldArtifactStore::new(&values[0]).doctor_with_repo(
+            &values[1],
+            &values[2],
+            &values[3],
+            &values[4],
+            repo.as_deref(),
+        )
     } else {
         return usage();
     };
@@ -121,7 +135,7 @@ fn print_human(report: &ScaffoldDoctorReport) {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage:\n  scaffold-doctor --plan <plan_root> [--json]\n  scaffold-doctor <vibecrafted-home> <org> <repo> <day> <plan-id> [--json]"
+        "usage:\n  scaffold-doctor --plan <plan_root> [--repo <git-root>] [--json]\n  scaffold-doctor <vibecrafted-home> <org> <repo> <day> <plan-id> [--repo <git-root>] [--json]"
     );
     ExitCode::from(2)
 }

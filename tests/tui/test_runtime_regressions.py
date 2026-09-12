@@ -223,6 +223,21 @@ def _probe_codex_resume_contract(
     return result, command, aicx_capture.exists()
 
 
+def _assert_command_points_at_aicx_overlay(command: str) -> None:
+    """The resume prompt is a pointer, never the inline payload.
+
+    Inlining the overlay put whole continuity packs into agent argv —
+    world-readable in `ps`, capped by ARG_MAX, mangled on newlines
+    (prompts.sh). Continuity therefore means: the command names a primary
+    input file, and that file carries the overlay body.
+    """
+    match = re.search(r"Primary input file: (\S+)", command)
+    assert match, f"resume command carries no primary-input pointer: {command!r}"
+    pointed = Path(match.group(1))
+    assert pointed.is_file(), f"pointer names a missing file: {pointed}"
+    assert "AICX OVERLAY BODY" in pointed.read_text(encoding="utf-8")
+
+
 def test_bare_codex_resume_uses_aicx_pack_in_fresh_interactive_session(
     tmp_path: Path,
 ) -> None:
@@ -231,7 +246,7 @@ def test_bare_codex_resume_uses_aicx_pack_in_fresh_interactive_session(
     assert result.returncode == 0, result.stderr
     assert aicx_called
     assert command.startswith("codex ")
-    assert "AICX OVERLAY BODY" in command
+    _assert_command_points_at_aicx_overlay(command)
     assert "codex exec" not in command
     assert "codex resume" not in command
     assert "historical-codex-session" not in command
@@ -282,7 +297,7 @@ def test_bare_resume_keeps_aicx_continuity_in_operator_session(
     assert result.returncode == 0, result.stderr
     assert aicx_called
     assert command.startswith(f"{agent} ")
-    assert "AICX OVERLAY BODY" in command
+    _assert_command_points_at_aicx_overlay(command)
     assert not command.startswith("tracked ")
     assert "historical-codex-session" not in command
     assert "--resume" not in command
@@ -343,7 +358,9 @@ def test_codex_explicit_prompt_and_file_are_fresh_noninteractive_runs(
     assert file_command.startswith(
         "codex exec --dangerously-bypass-approvals-and-sandbox "
     )
-    assert "FILE INPUT" in file_command
+    pointer = re.search(r"Primary input file: (\S+)", file_command)
+    assert pointer, f"file input must ride as a pointer: {file_command!r}"
+    assert Path(pointer.group(1)).resolve() == input_file.resolve()
 
 
 def test_codex_session_with_explicit_file_is_noninteractive_continuation(
@@ -361,7 +378,9 @@ def test_codex_session_with_explicit_file_is_noninteractive_continuation(
     assert not aicx_called
     assert command.startswith("codex exec --dangerously-bypass-approvals-and-sandbox ")
     assert "resume sess-file-123" in command
-    assert "SESSION FILE INPUT" in command
+    pointer = re.search(r"Primary input file: (\S+)", command)
+    assert pointer, f"file input must ride as a pointer: {command!r}"
+    assert Path(pointer.group(1)).resolve() == input_file.resolve()
 
 
 def test_codex_positional_resume_compatibility_preserves_mode_contract(
@@ -631,7 +650,10 @@ def test_resume_terminal_runtime_routes_headless_codex_into_worker_session(
         "new-tab",
         "--name",
     ]
-    assert "resume-codex" in new_tab_call
+    # Face tab: the workers column names tabs by agent face, not by verb
+    # (place-named operator rail). The routing assertions above carry the
+    # actual contract — worker session, new tab, non-interactive exec below.
+    assert new_tab_call[5] == "codex"
     command_script = Path(new_tab_call[-1])
     command_body = command_script.read_text(encoding="utf-8")
     # Explicit --prompt means "continue the job": the visible tab must host the

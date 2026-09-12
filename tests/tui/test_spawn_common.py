@@ -119,6 +119,25 @@ def _bash(script: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _isolated_git_root(tmp_path: Path) -> Path:
+    """Create a disposable canonical repo identity for spawn integration tests."""
+    root = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/vetcoders/spawn-test.git",
+        ],
+        check=True,
+    )
+    return root
+
+
 def _expected_operator_session(run_id: str | None = None) -> str:
     base = (
         re.sub(r"[^a-z0-9]+", "-", REPO_ROOT.name.lower()).strip("-") or "vibecrafted"
@@ -1315,6 +1334,7 @@ def test_codex_spawn_marks_meta_failed_when_codex_emits_non_json_auth_error(
     crafted_home = home / ".vibecrafted"
     fake_bin = home / ".local" / "bin"
     plan = tmp_path / "plan.md"
+    repo_root = _isolated_git_root(tmp_path)
 
     home.mkdir()
     fake_bin.mkdir(parents=True)
@@ -1343,11 +1363,11 @@ def test_codex_spawn_marks_meta_failed_when_codex_emits_non_json_auth_error(
             "--runtime",
             "headless",
             "--root",
-            str(REPO_ROOT),
+            str(repo_root),
             str(plan),
         ],
         check=True,
-        cwd=REPO_ROOT,
+        cwd=repo_root,
         env=env,
         capture_output=True,
         text=True,
@@ -1393,6 +1413,7 @@ def test_codex_spawn_preserves_standalone_report_when_last_message_is_handoff(
     crafted_home = home / ".vibecrafted"
     fake_bin = home / ".local" / "bin"
     plan = tmp_path / "research-plan.md"
+    repo_root = _isolated_git_root(tmp_path)
 
     home.mkdir()
     fake_bin.mkdir(parents=True)
@@ -1425,11 +1446,11 @@ def test_codex_spawn_preserves_standalone_report_when_last_message_is_handoff(
             "--runtime",
             "headless",
             "--root",
-            str(REPO_ROOT),
+            str(repo_root),
             str(plan),
         ],
         check=True,
-        cwd=REPO_ROOT,
+        cwd=repo_root,
         env=env,
         capture_output=True,
         text=True,
@@ -1464,6 +1485,7 @@ def test_codex_research_does_not_copy_pointer_last_message_as_report(
     crafted_home = home / ".vibecrafted"
     fake_bin = home / ".local" / "bin"
     plan = tmp_path / "research-plan.md"
+    repo_root = _isolated_git_root(tmp_path)
 
     home.mkdir()
     fake_bin.mkdir(parents=True)
@@ -1496,11 +1518,11 @@ def test_codex_research_does_not_copy_pointer_last_message_as_report(
             "--runtime",
             "headless",
             "--root",
-            str(REPO_ROOT),
+            str(repo_root),
             str(plan),
         ],
         check=True,
-        cwd=REPO_ROOT,
+        cwd=repo_root,
         env=env,
         capture_output=True,
         text=True,
@@ -1543,6 +1565,7 @@ def test_claude_spawn_marks_meta_failed_when_stream_has_no_json(
     crafted_home = home / ".vibecrafted"
     fake_bin = home / ".local" / "bin"
     plan = tmp_path / "plan.md"
+    repo_root = _isolated_git_root(tmp_path)
 
     home.mkdir()
     fake_bin.mkdir(parents=True)
@@ -1571,11 +1594,11 @@ def test_claude_spawn_marks_meta_failed_when_stream_has_no_json(
             "--runtime",
             "headless",
             "--root",
-            str(REPO_ROOT),
+            str(repo_root),
             str(plan),
         ],
         check=True,
-        cwd=REPO_ROOT,
+        cwd=repo_root,
         env=env,
         capture_output=True,
         text=True,

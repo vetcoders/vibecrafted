@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import signal
 
+import pytest
 from vibecrafted_core import process_control as pc
 from vibecrafted_core import run_reaper
 
@@ -64,7 +66,7 @@ def test_process_identity_receipt_rejects_reused_pid_or_wrong_run():
     assert reason == "process_identity_current"
     assert identity is not None
 
-    reused, reason, _identity = pc.validate_process_identity(
+    reused, reason, recaptured_identity = pc.validate_process_identity(
         receipt,
         expected_pid=904,
         expected_pgid=5004,
@@ -74,6 +76,7 @@ def test_process_identity_receipt_rejects_reused_pid_or_wrong_run():
     )
     assert reused is False
     assert reason == "process_identity_mismatch"
+    assert recaptured_identity is not None
 
     wrong_run, reason, _identity = pc.validate_process_identity(
         receipt,
@@ -85,6 +88,54 @@ def test_process_identity_receipt_rejects_reused_pid_or_wrong_run():
     )
     assert wrong_run is False
     assert reason == "process_run_id_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        (
+            lambda receipt: receipt.pop("start_token"),
+            "process_identity_receipt_invalid",
+        ),
+        (lambda receipt: receipt.pop("run_id"), "process_identity_receipt_invalid"),
+        (
+            lambda receipt: receipt.__setitem__("command_sha256", "g" * 64),
+            "process_identity_receipt_invalid",
+        ),
+    ],
+)
+def test_process_identity_rejects_malformed_receipt_before_recapture(
+    monkeypatch, mutation, reason
+):
+    original = [entry(905, pgid=5005, command="python worker.py")]
+    receipt = pc.process_identity_receipt(
+        905,
+        run_id="impl-malformed",
+        table=original,
+    )
+    assert receipt is not None
+    malformed = copy.deepcopy(receipt)
+    mutation(malformed)
+    captures: list[int] = []
+    monkeypatch.setattr(
+        pc,
+        "capture_process_identity",
+        lambda pid, **_kwargs: captures.append(pid),
+    )
+
+    current, actual_reason, identity = pc.validate_process_identity(
+        malformed,
+        expected_pid=905,
+        expected_pgid=5005,
+        expected_run_id="impl-malformed",
+        table=original,
+        env_index={905: "impl-malformed"},
+    )
+
+    assert current is False
+    assert actual_reason == reason
+    assert identity is None
+    assert captures == []
 
 
 def test_snapshot_protects_vc_frame():

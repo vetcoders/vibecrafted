@@ -15,11 +15,10 @@ from typing import Any
 
 from . import control_plane
 from .events import append_event
-from .package_resources import deck_path as package_deck_path
-from .package_resources import package_root, runtime_path
+from .package_resources import deck_path, package_root, runtime_path
 from .spawn import Supervisor
 
-AGENTS = {"claude", "codex", "agy", "junie", "grok"}
+AGENTS = {"claude", "codex", "agy", "junie", "grok", "cursor"}
 SUCCESS_STATES = {"report_validated", "completed", "closed"}
 SKILL_PREFIX = {
     "agents": "agnt",
@@ -32,17 +31,16 @@ SKILL_PREFIX = {
 }
 
 
-def repo_root() -> Path:
-    """The working directory the CLI was invoked from (the target repo root)."""
+def invocation_root() -> Path:
+    """The directory the CLI was invoked from — the target repo as the operator sees it.
+
+    Not ``loop.repo_root`` (git toplevel); the two answer different questions and
+    carried the same name until 2026-08-23."""
     return Path.cwd()
 
 
 def runtime_root() -> Path:
     return runtime_path()
-
-
-def deck_path() -> Path:
-    return package_deck_path()
 
 
 def _print_workflow_help(workflow_id: str) -> int:
@@ -246,7 +244,7 @@ def supervised_skill_main(skill: str, argv: Sequence[str] | None = None) -> int:
             " ".join(args),
             skill=skill,
             mode="raw",
-            root=repo_root(),
+            root=invocation_root(),
             command=args,
             env=_env_for_run(run_id, skill_code),
             run_id=run_id,
@@ -256,7 +254,7 @@ def supervised_skill_main(skill: str, argv: Sequence[str] | None = None) -> int:
         return handle.wait()
     if not args or args[0] not in AGENTS:
         print(
-            f"Usage: vc-{skill} <claude|codex|agy|junie|grok> [--prompt <text>|--file <path>]",
+            f"Usage: vc-{skill} <claude|codex|agy|junie|grok|cursor> [--prompt <text>|--file <path>]",
             file=sys.stderr,
         )
         return 2
@@ -272,7 +270,7 @@ def supervised_skill_main(skill: str, argv: Sequence[str] | None = None) -> int:
     if not _has_flag(rest, "--runtime"):
         command.extend(["--runtime", "headless"])
 
-    root = repo_root()
+    root = invocation_root()
     if sandbox:
         handle = Supervisor().spawn(
             agent,
@@ -446,7 +444,7 @@ def _prepare_research(args: Sequence[str], run_id: str) -> tuple[int, str]:
         command.extend(["--runtime", "headless"])
     proc = subprocess.run(
         command,
-        cwd=str(repo_root()),
+        cwd=str(invocation_root()),
         env=_env_for_run(run_id, "rsch"),
         text=True,
         stdout=subprocess.PIPE,
@@ -498,7 +496,7 @@ def research_main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
 
-    root = repo_root()
+    root = invocation_root()
     if sandbox:
         supervisor = Supervisor()
         handles = [

@@ -17,3 +17,15 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 panic = "abort"
+
+# Host-side artifacts (build scripts, proc-macros) are never shipped, so they
+# do not need `strip`. Apple `strip` from Xcode 27 beta mis-aligns the LINKEDIT
+# string pool of chained-fixups dylibs (MACOSX_DEPLOYMENT_TARGET >= 12) and
+# dyld on macOS 27 then refuses to load them; rustc surfaces that as
+# `error[E0463]: can't find crate for rustversion/paste` (the dependency-free
+# proc-macros). MEASURED 2026-08-28 on dragon, reproducible with 1.95 and 1.97.
+[profile.release.build-override]
+strip = false
+
+[profile.wasm-release.build-override]
+strip = false

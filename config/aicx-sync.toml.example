@@ -23,10 +23,10 @@ local_store = "~/.aicx/store"
 # remote corpus into ~/.frontier-vault/<remote_host>/staging before
 # aicx-sync.sh is invoked.
 #
-# Common values per kronika 2026-05-05 mesh topology:
-#   dragon, sztudio, silver, div0, mgbook16
+# Common values per doctrine 2026-05-05 mesh topology:
+#   host-a, host-b, … (the tailnet hostnames from your mesh.conf)
 #
-# remote_host = "sztudio"
+# remote_host = "host-c"
 
 # Optional: scope sync to a single AICX namespace
 # (e.g. <org>/<project>). When set, the engine narrows to

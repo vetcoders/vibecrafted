@@ -185,7 +185,10 @@ def _run_stage_in_venv(
             os.environ.pop("VIBECRAFTED_PREFER_REPO_VC_FRAME", None)
         import vibecrafted_core
         from vibecrafted_core.frontier_assets import vc_frame_config_source
-        from vibecrafted_core.vc_frame_delivery import stage_vc_frame_config
+        from vibecrafted_core.vc_frame_delivery import (
+            stage_vc_frame_config,
+            vc_frame_user_config_dir,
+        )
         from vibecrafted_core.vc_frame_staging import (
             materialize_vc_frame_config,
             resolve_clipboard_command,
@@ -218,7 +221,7 @@ def _run_stage_in_venv(
             prefer_repo={prefer_repo!r},
             path_env={path_env!r},
         )
-        view = home / ".config" / "vc-frame"
+        view = vc_frame_user_config_dir(home)
         cfg = (view / "config.kdl").resolve()
         assert cfg.is_file(), cfg
         text = cfg.read_text(encoding="utf-8")
@@ -365,7 +368,7 @@ def test_channel_dev_checkout(tmp_path: Path, monkeypatch) -> None:
         home=home, tools_home=tools, version="e2e-dev", prefer_repo=True
     )
     assert plan.channel == "dev-checkout"
-    resolved = (home / ".config" / "vc-frame" / "config.kdl").resolve()
+    resolved = (plan.view_root / "config.kdl").resolve()
     assert "config/vc-frame" in str(resolved)
     # canonical checkout layouts keep zsh
     research = (resolved.parent / "layouts" / "research.kdl").read_text(
@@ -401,7 +404,7 @@ def test_upgrade_flip_atomicity(tmp_path: Path, monkeypatch) -> None:
     stage_vc_frame_config(
         home=home, tools_home=tools, version="e2e-A", prefer_repo=False
     )
-    view = home / ".config" / "vc-frame" / "config.kdl"
+    view = home / ".config" / "vibecrafted" / "vc-frame" / "config.kdl"
     path_before = str(view)
     stage_vc_frame_config(
         home=home, tools_home=tools, version="e2e-B", prefer_repo=False, force=True

@@ -27,6 +27,11 @@ report, optionally commit if real changes match scope, stop. No push.
 prefer the smallest decision that completes the slice. Tighten scope by
 inference rather than by interrogation, but never expand it.
 
+**Adjacent finding**: surface a falsifiable finding to the active Operator.
+Do not opportunistically patch adjacent scope and do not write
+`<repo-root>/.vibecrafted/JOURNAL.md`. Redacted framework findings also go to
+the central `~/.vibecrafted/vibecrafted/vibecrafted-fail.md` intake.
+
 **Recursion**: forbidden. No `/vc-agents` from inside a worker. Native
 Task / `vc-delegate` for parallelization within your slice is allowed.
 
@@ -67,6 +72,11 @@ See [`AUTONOMY.md`](AUTONOMY.md) for the full hard-stop schedule.
 **Decision speed**: careful pacing, verify-then-advance. Each wave landing
 green earns the right to fire the next wave. Recovery dispatch is the
 _standard_ tool — not a retry.
+
+**Discovered fix**: judge whether the finding warrants action, record the
+decision in the repository Operator Journal, render a bounded brief, actively
+dispatch it into a dedicated worktree, verify it, and integrate it. Conduct the
+fix; do not personally implement it.
 
 **Recursion**: this charter is the _only_ one that authorizes wave-after-wave
 dispatch. But the _operator_ (the human) is still the one who chose this

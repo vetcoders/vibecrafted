@@ -5,6 +5,52 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 4.3.0 — prepared, not published
+
+### Changed
+
+- The root `VERSION` is the mechanical product-version authority for the core,
+  MCP, server, plugin and staged package metadata; the release gate rejects
+  drift before a carrier is built.
+- `make install` and the non-interactive bootstrap lane consume a signed,
+  provenance-closed Runtime Pack on macOS, Linux and WSL2. Maintainers can
+  still choose the explicitly named `make install-source` compiler lane.
+- Runtime Pack selection is platform/architecture specific and rejects a
+  carrier whose embedded version, platform, architecture or source/donor tuple
+  disagrees with the selected release asset.
+
+### Distribution status
+
+- v4.3.0 carrier metadata covers macOS plus Linux x86_64 and arm64. Publication,
+  production signing/notarization and the live channel update remain release
+  operator actions; this entry does not claim those outward steps occurred.
+
+> **4.2.0 scope — measured truths, finished seams.** Release integrity from the
+> donor snapshot through to the payload a stranger downloads, and one identity
+> order shared by every surface that reads a run.
+
+### Added
+
+- `vibecrafted init` carries unfinished work into every session. Each pass
+  projects this checkout's needs-attention settlement bucket, classifies every
+  run, and prints the exact command that continues it — newest first, with the
+  truncated remainder counted out loud. Silent on a clean checkout; an
+  unreadable ledger degrades to an honest `UNKNOWN` rather than bricking init.
+  Guardian-owned runs are listed without a command, because each holds a single
+  automatic attempt that a hand resume would burn.
+- `--snapshot-donors` on `scripts/build-vibecrafted-release.sh` builds a release
+  from a detached worktree at each donor's `HEAD`, so a dirty donor no longer
+  blocks a cut and never leaves a ghost worktree registration behind. A reaper
+  folded into the release cleanup trap removes and prunes them.
+- `--silence-timeout` on the dispatcher, and a supervisor bound on worker
+  **stdout silence** rather than wall-clock time. A worker that is slow but
+  talking is untouched; one blocked in `wait4` now settles through the existing
+  stall handler, which records `stall_kind=silence|wall_clock` so triage never
+  has to guess which bound fired.
+- `make payload-hygiene` refuses any release payload that names the build host,
+  reporting the topmost still-host-specific ancestor instead of only the exact
+  checkout string.
+
 ## 4.2.4 — 2026-08-22
 
 ### Changed
@@ -103,6 +149,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- The delivery proof kernel could not run its own verification subject. The
+  executor scrubs the environment to `_SAFE_ENV_KEYS` — correctly dropping
+  `PYTHONPATH` — while the subject was declared as a `-m` module invocation
+  resolved through the `sys.path` that scrub had just removed. It died with
+  `ModuleNotFoundError`, the kernel wrote `proof.failed`, and **every run it
+  judged settled `failed` regardless of the worker's real outcome.** The package
+  location is now a contract-declared argument instead of ambient state.
+- The supervisor heartbeat pulsed identically at 20 seconds and at 3 hours, so a
+  worker blocked in `wait4` held the supervisor open forever and the finished
+  `RunState.STALLED` handler was unreachable in production.
+- The live dashboard resolved its workspace identity from the repository root
+  alone, while the runtime stamps runs from the exported
+  `VIBECRAFTED_WORKSPACE_ID` first. Two implementations of one question, free to
+  disagree — and a dispatched worker in a worktree, whose root can never equal
+  its dispatcher's, was structurally invisible to the LIVE RUNS filter.
+- `docs/install.sh` exec'd `../install.sh` directly, but that file carries no
+  executable bit by design, so the shim died with exit 126 on every fresh clone.
+  It now execs `bash` explicitly, matching the packer contract.
+- Chained keychain traps under `set -e`: `_ks_trap_cleanup` returns the
+  triggering status on purpose, and that non-zero return tore the shell down
+  before the caller's chained handler ran. Measured on a real failed release
+  that skipped its own reaper and left two worktree registrations behind.
+- Four gates that guarded something real while being structurally unable to see
+  it break are now capable of failing — including the keychain regression suite,
+  which ran every child without `set -e`, the exact condition its target bug
+  requires.
 - The direct Python lifecycle test now owns an isolated `VIBECRAFTED_HOME` and
   clears inherited workspace/session identity before writing metadata. Test
   runs can no longer register `test_write_meta*` sessions in the operator's

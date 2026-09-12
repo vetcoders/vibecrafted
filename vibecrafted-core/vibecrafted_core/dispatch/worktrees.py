@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from ..runtime_paths import vibecrafted_home
 
 
 class WorktreeContractError(RuntimeError):
@@ -34,9 +35,14 @@ class WorktreeGeometry:
         return asdict(self)
 
 
-def vibecrafted_home() -> Path:
-    """Return the single global Vibecrafted state root."""
-    return Path(os.environ.get("VIBECRAFTED_HOME", "~/.vibecrafted")).expanduser()
+def _same_filesystem_location(left: str | Path, right: str | Path) -> bool:
+    """Compare existing paths by identity, including case aliases on macOS."""
+    if not str(left).strip() or not str(right).strip():
+        return False
+    try:
+        return Path(left).samefile(right)
+    except OSError:
+        return Path(left).resolve() == Path(right).resolve()
 
 
 def repo_identity(repo: str | Path) -> tuple[str, str]:
@@ -144,6 +150,27 @@ class WorktreeManager:
         self._validate_target(root)
         return geometry
 
+    def prepare_agent_launch(
+        self, provider: str, launch_id: str, baseline_sha: str
+    ) -> WorktreeGeometry:
+        """Create one clean per-Agent interactive checkout through this owner."""
+        observed_root = _git(self.main_repo, "rev-parse", "--show-toplevel")
+        if not _same_filesystem_location(observed_root, self.main_repo):
+            raise WorktreeContractError(
+                f"selected workspace is not a git repository root: {self.main_repo}"
+            )
+        observed_head = _git(self.main_repo, "rev-parse", "HEAD")
+        if not observed_head or observed_head != baseline_sha:
+            raise WorktreeContractError(
+                "selected workspace HEAD changed before worktree creation; retry the launch"
+            )
+        dirty = _git(self.main_repo, "status", "--porcelain")
+        if dirty:
+            raise WorktreeContractError(
+                f"local worktrees require a clean selected workspace: {dirty}"
+            )
+        return self.prepare(f"{provider}-{launch_id}", baseline_sha)
+
     def validate(self, geometry: WorktreeGeometry) -> None:
         """Revalidate a receipt's geometry before launch or resume."""
         if geometry.integrator_exclusive:
@@ -159,7 +186,7 @@ class WorktreeManager:
             raise WorktreeContractError(f"active recovery worktree is missing: {root}")
         observed_root = _git(root, "rev-parse", "--show-toplevel")
         observed_branch = _git(root, "branch", "--show-current")
-        if not observed_root or Path(observed_root).resolve() != root.resolve():
+        if not _same_filesystem_location(observed_root, root):
             raise WorktreeContractError(
                 f"active recovery root is not a registered worktree: {root}"
             )
@@ -217,7 +244,7 @@ class WorktreeManager:
             raise WorktreeContractError(f"worker worktree is missing: {root}")
         observed_root = _git(root, "rev-parse", "--show-toplevel")
         observed_branch = _git(root, "branch", "--show-current")
-        if Path(observed_root).resolve() != root.resolve():
+        if not _same_filesystem_location(observed_root, root):
             raise WorktreeContractError(
                 f"worker root is not the registered worktree: {root}"
             )

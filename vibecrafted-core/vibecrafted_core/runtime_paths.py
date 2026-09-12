@@ -6,9 +6,68 @@ callers never hardcode a user's layout; ``resolve_env_path`` is the shared knob.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from collections.abc import Mapping
 from pathlib import Path
+
+# Direct children of ``vibecrafted_home()`` have one product-wide ownership
+# class.  Keep this grammar here: the host-Python installer loads this module by
+# file, while the runtime imports it normally.  Unknown names are intentionally
+# absent and therefore preserved by uninstall discovery.
+VIBECRAFTED_HOME_RUNTIME_STATE = frozenset(
+    {
+        "control_plane",
+        "server",
+        "foundation",
+        "locks",
+        "runtime",
+        "install-transactions",
+        "recovery",
+        "tmp",
+        "logs",
+        ".vc-install.json",
+        "START_HERE.md",
+        "install.log",
+        ".DS_Store",
+    }
+)
+
+VIBECRAFTED_HOME_FOUNDER_DATA = frozenset(
+    {
+        "artifacts",
+        "inbox",
+        "reports",
+        "plans",
+        "prompts",
+        "specs",
+        "backups",
+        "worktrees",
+        "monitor",
+        "charter",
+        "trust",
+        "loctree",
+        "vibecrafted",
+        ".git",
+        ".loctree",
+    }
+)
+
+
+def classify_vibecrafted_home_child(child: str | Path) -> str:
+    """Classify one direct state-home child for product uninstall.
+
+    ``runtime-state`` is reproducible process/control state and is removed.
+    ``founder-data`` is durable human/generated work and is preserved.
+    Every unrecognized name is ``unknown`` and is preserved visibly.
+    """
+
+    name = Path(child).name
+    if name in VIBECRAFTED_HOME_RUNTIME_STATE:
+        return "runtime-state"
+    if name in VIBECRAFTED_HOME_FOUNDER_DATA:
+        return "founder-data"
+    return "unknown"
 
 
 def read_version_file(root: str | Path) -> str:
@@ -77,6 +136,18 @@ def vibecrafted_home() -> Path:
     if os.environ.get("VIBECRAFTED_HOME"):
         return Path(os.environ["VIBECRAFTED_HOME"]).expanduser()
     return Path.home() / ".vibecrafted"
+
+
+def run_signal_socket_path(run_id: str) -> Path:
+    """Short, home-scoped Unix socket path for one dispatcher run.
+
+    Darwin limits ``sun_path`` to 104 bytes.  Hashing both the configured
+    Vibecrafted home and run id keeps isolated test/operator homes distinct
+    without leaking long workspace paths into the socket address.
+    """
+    identity = f"{vibecrafted_home().resolve()}\0{run_id}".encode()
+    digest = hashlib.sha256(identity).hexdigest()[:24]
+    return Path("/tmp") / f"vc-cp-{os.getuid()}" / f"{digest}.sock"
 
 
 def vibecrafted_backups_home() -> Path:

@@ -37,11 +37,13 @@ from vibecrafted_core.run_triage import (
     OUTCOME_SKIPPED,
     VERDICT_FAILED,
     VERDICT_FINALIZED,
+    VERDICT_INFRA_FAILURE,
     VERDICT_NEEDS_ATTENTION,
     KernelAxes,
     TriageOutcome,
     TriagePlan,
     bucket_for_exit_code,
+    classify_provider_error,
     classify_run,
     load_vc_frame_transfer_proof,
     plan_triage,
@@ -399,6 +401,142 @@ def test_w0a_specimen_is_failed() -> None:
     assert "180b" in signals.reason
 
 
+# --- C3: provider overload is infra_failure, not worker failed -----------
+
+_ORDINARY_TRACEBACK = (
+    "Traceback (most recent call last):\n"
+    '  File "worker.py", line 12, in <module>\n'
+    "    raise RuntimeError('tool exploded')\n"
+    "RuntimeError: tool exploded\n"
+)
+
+
+@pytest.mark.parametrize(
+    "text,token",
+    [
+        ("API 529 Overloaded", "529"),
+        ("HTTP 429 Too Many Requests", "429"),
+        ("provider overloaded, retry later", "overloaded"),
+        ("codex usage limit reached", "usage_limit"),
+        ("hit a usage-limit until 2026-08-20", "usage_limit"),
+        ("openai rate limit exceeded", "rate_limit"),
+    ],
+)
+def test_classify_provider_error_matches_overload_markers(
+    text: str, token: str
+) -> None:
+    reason = classify_provider_error(text)
+    assert reason is not None
+    assert reason.startswith("provider_error:")
+    assert token in reason
+
+
+def test_classify_provider_error_ignores_ordinary_traceback() -> None:
+    assert classify_provider_error(_ORDINARY_TRACEBACK) is None
+    assert classify_provider_error("File worker.py, line 429, in run") is None
+
+
+def test_synthetic_529_transcript_is_infra_failure_not_worker_failed() -> None:
+    """Postmortem 2026-08-19 §C3 specimen: API 529 must not land in failed."""
+    classification = classify_run(
+        exit_code=1,
+        run_state="failed",
+        report_exists=False,
+        report_bytes=0,
+        transcript_bytes=TINY,
+        transcript_text="API 529 Overloaded\n",
+    )
+    assert classification.verdict == VERDICT_INFRA_FAILURE
+    assert classification.verdict != VERDICT_FAILED
+    assert classification.bucket == BUCKET_NEEDS_ATTENTION
+    assert classification.bucket_flag == "needs-attention"
+    assert classification.reason == "provider_error:529"
+
+
+def test_ordinary_traceback_stays_failed_when_the_run_died_idle() -> None:
+    classification = classify_run(
+        exit_code=1,
+        run_state="failed",
+        report_exists=False,
+        report_bytes=0,
+        transcript_bytes=TINY,
+        transcript_text=_ORDINARY_TRACEBACK,
+    )
+    assert classification.verdict == VERDICT_FAILED
+    assert "transcript" in classification.reason
+
+
+def test_ordinary_traceback_stays_needs_attention_after_real_work() -> None:
+    classification = classify_run(
+        exit_code=1,
+        run_state="failed",
+        report_exists=False,
+        report_bytes=0,
+        transcript_bytes=BIG,
+        transcript_text=_ORDINARY_TRACEBACK,
+    )
+    assert classification.verdict == VERDICT_NEEDS_ATTENTION
+
+
+def test_provider_overlay_does_not_unseal_a_delivered_run() -> None:
+    classification = classify_run(
+        exit_code=0,
+        run_state="completed",
+        report_exists=True,
+        report_bytes=512,
+        transcript_bytes=BIG,
+        kernel_axes=KernelAxes(
+            execution_state="exited",
+            proof_state="passed",
+            delivery_state="sealed",
+        ),
+        transcript_text="API 529 Overloaded\n",
+    )
+    assert classification.verdict == VERDICT_FINALIZED
+
+
+def test_kernel_execution_failed_plus_529_is_infra_failure() -> None:
+    classification = classify_run(
+        exit_code=1,
+        run_state="failed",
+        report_exists=False,
+        report_bytes=0,
+        transcript_bytes=TINY,
+        kernel_axes=KernelAxes(
+            execution_state="failed",
+            proof_state="undeclared",
+            delivery_state="unverified",
+        ),
+        transcript_text="API 529 Overloaded\n",
+        cost_usd=0.0412,
+    )
+    assert classification.verdict == VERDICT_INFRA_FAILURE
+    assert classification.cost_usd == 0.0412
+
+
+def test_infra_failure_preserves_existing_meta_cost_usd(tmp_path: Path) -> None:
+    """Parents must still aggregate cost on dead provider runs — copy, don't invent."""
+    transcript = tmp_path / "dead.transcript.log"
+    transcript.write_text(
+        "launcher banner\nAPI 529 Overloaded\n",
+        encoding="utf-8",
+    )
+    signals = read_run_signals(
+        {
+            "exit_code": 1,
+            "status": "failed",
+            "report": str(tmp_path / "missing.md"),
+            "transcript": str(transcript),
+            "cost_usd": 0.01925,
+        }
+    )
+    assert signals.cost_usd == 0.01925
+    classified = signals.classify()
+    assert classified.verdict == VERDICT_INFRA_FAILURE
+    assert classified.cost_usd == 0.01925
+    assert classified.reason == "provider_error:529"
+
+
 # --- Every contradiction routes to a human -------------------------------
 
 
@@ -452,6 +590,7 @@ def test_death_after_real_work_is_not_a_clean_failure() -> None:
         "contract_failed",
         "ghost",
         "timed_out",
+        "quota_exhausted",
         "recovery_required",
         "blocked",
         "stalled",
@@ -505,11 +644,19 @@ def test_state_matching_is_case_and_whitespace_tolerant() -> None:
 
 
 def test_every_verdict_carries_a_reason() -> None:
-    """The receipt has to be able to say *why*, for all three verdicts."""
+    """The receipt has to be able to say *why*, for all four verdicts."""
     for classification in (
         classify_run(0, "completed", True, 10, BIG),
         classify_run(1, "failed", False, 0, TINY),
         classify_run(0, "ghost", True, 10, BIG),
+        classify_run(
+            1,
+            "failed",
+            False,
+            0,
+            TINY,
+            transcript_text="API 529 Overloaded",
+        ),
     ):
         assert classification.reason
         assert classification.bucket
@@ -2777,3 +2924,23 @@ def test_plan_argv_includes_bucket_for_failed_verdict(tmp_path: Path) -> None:
     argv = plan.argv("/usr/bin/vc-frame", with_bucket=True)
     assert "--bucket" in argv
     assert argv[argv.index("--bucket") + 1] == "failed"
+
+
+def test_plan_argv_infra_failure_uses_needs_attention_rail(tmp_path: Path) -> None:
+    """Verdict is infra_failure; vc-frame still only has the three rail flags."""
+    transcript = tmp_path / "overload.transcript.log"
+    transcript.write_text("API 529 Overloaded\n", encoding="utf-8")
+    plan = plan_triage(
+        {
+            "run_id": "run-529",
+            "exit_code": 1,
+            "status": "failed",
+            "report": str(tmp_path / "gone.md"),
+            "transcript": str(transcript),
+        },
+        make_env(),
+    )
+    assert plan.verdict == VERDICT_INFRA_FAILURE
+    assert plan.bucket == BUCKET_NEEDS_ATTENTION
+    argv = plan.argv("/usr/bin/vc-frame", with_bucket=True)
+    assert argv[argv.index("--bucket") + 1] == "needs-attention"

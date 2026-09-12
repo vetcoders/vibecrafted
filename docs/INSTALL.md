@@ -311,7 +311,7 @@ release script reads it from `$KEYS` (default `~/.keys`):
 | `Certificates.p12`        | signing certificate       |
 | `cert_password.txt`       | certificate password      |
 | `vibecrafted-signing.key` | detached artifact signing |
-| `.notary.env`             | notarytool credentials    |
+| Keychain profile/API key  | notarytool credentials    |
 
 ```bash
 make app             # build Vibecrafted.app only

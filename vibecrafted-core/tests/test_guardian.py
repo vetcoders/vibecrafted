@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 import vibecrafted_core.guardian as guardian_module
 from vibecrafted_core.guardian import (
+    NATIVE_APP_BUNDLE_ID,
     BoundedBackoff,
     CompletionRecord,
     GuardianAlreadyRunning,
@@ -35,6 +36,7 @@ from vibecrafted_core.guardian import (
     SSEFrame,
     SSEHeartbeat,
     iter_sse,
+    native_app_is_alive,
     notification_for,
     notify_operator,
     parse_settlement_revision,
@@ -1634,6 +1636,38 @@ def test_terminal_triage_exhausts_bounded_retry_budget(
     )
 
 
+def test_full_terminal_triage_quarantine_archives_oldest_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(guardian_module, "vibecrafted_home", lambda: tmp_path)
+    monkeypatch.setattr(guardian_module, "TERMINAL_TRIAGE_QUARANTINE_CAPACITY", 2)
+    quarantine = guardian_module._terminal_triage_quarantine_root()
+    oldest = quarantine / "oldest.dead-letter.json"
+    newest = quarantine / "newest.dead-letter.json"
+    oldest.write_bytes(b"oldest evidence\n")
+    newest.write_bytes(b"newer evidence\n")
+    os.utime(oldest, ns=(1, 1))
+    os.utime(newest, ns=(2, 2))
+
+    outbox = guardian_module._persist_terminal_triage_outbox("run-overflow")
+    record = guardian_module._read_terminal_triage_outbox(outbox)
+    assert guardian_module._dead_letter_terminal_triage_outbox_locked(
+        record,
+        "runtime_meta_unavailable",
+    )
+
+    assert not outbox.exists()
+    assert not oldest.exists()
+    assert newest.exists()
+    assert len(list(quarantine.glob("*.dead-letter.json"))) == 2
+    archived = list(
+        guardian_module._terminal_triage_quarantine_archive_root().iterdir()
+    )
+    assert len(archived) == 1
+    assert archived[0].read_bytes() == b"oldest evidence\n"
+
+
 def test_terminal_triage_scheduler_uses_one_coalescing_background_worker(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2169,6 +2203,7 @@ def test_ready_receipt_is_atomic_and_removed_only_by_owner(tmp_path: Path) -> No
 
 def test_notification_mapping_and_macos_log_fallback(
     caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
 ) -> None:
     event = SettlementRevision(
         run_id="run-x",
@@ -2192,16 +2227,97 @@ def test_notification_mapping_and_macos_log_fallback(
             platform="darwin",
             which=lambda _name: "/usr/bin/osascript",
             runner=runner,
+            app_alive=lambda: False,
+            home=tmp_path,
         )
 
     assert notification.severity == "critical"
     assert "Vibecrafted x: failed" in caplog.text
+    assert "osascript degradation" in caplog.text
     assert calls[0][:2] == ["/usr/bin/osascript", "-e"]
     assert calls[0][3:] == [
         "--",
         "Vibecrafted x: failed",
         'run-x · r4 · bad "proof"\nnow',
     ]
+    logged = (tmp_path / "control_plane" / "events.jsonl").read_text(encoding="utf-8")
+    assert '"kind":"spawn-update"' in logged
+    assert '"state":"settled"' in logged
+    assert '"run_id":"run-x"' in logged
+
+
+def test_notify_operator_skips_osascript_when_native_app_alive(
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    notification = notification_for(
+        SettlementRevision(
+            run_id="run-live",
+            revision=1,
+            verdict="pass",
+            tui="f",
+            reason="done",
+            source="trust",
+            settled_at="2026-08-19T06:00:00+00:00",
+        )
+    )
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    with caplog.at_level(logging.INFO, logger="vibecrafted_core.guardian"):
+        notify_operator(
+            notification,
+            platform="darwin",
+            which=lambda _name: "/usr/bin/osascript",
+            runner=runner,
+            app_alive=lambda: True,
+            home=tmp_path,
+        )
+
+    assert calls == []
+    assert "skipping osascript" in caplog.text
+    assert (tmp_path / "control_plane" / "events.jsonl").is_file()
+
+
+def test_native_app_is_alive_requires_live_vibecrafted_pid(tmp_path: Path) -> None:
+    assert NATIVE_APP_BUNDLE_ID == "io.vetcoders.vibecrafted"
+    assert native_app_is_alive(home=tmp_path) is False
+    pid_path = tmp_path / "control_plane" / "native_app.pid"
+    pid_path.parent.mkdir(parents=True)
+    pid_path.write_text(f"{os.getpid()}\n{NATIVE_APP_BUNDLE_ID}\n", encoding="utf-8")
+    assert (
+        native_app_is_alive(
+            home=tmp_path,
+            comm_reader=lambda _pid: "Vibecrafted",
+        )
+        is True
+    )
+    assert (
+        native_app_is_alive(
+            home=tmp_path,
+            comm_reader=lambda _pid: "Script Editor",
+        )
+        is False
+    )
+    pid_path.write_text(f"{os.getpid()}\ncom.apple.ScriptEditor2\n", encoding="utf-8")
+    assert (
+        native_app_is_alive(
+            home=tmp_path,
+            comm_reader=lambda _pid: "Vibecrafted",
+        )
+        is False
+    )
+    pid_path.write_text(f"99999999\n{NATIVE_APP_BUNDLE_ID}\n", encoding="utf-8")
+    assert (
+        native_app_is_alive(
+            home=tmp_path,
+            comm_reader=lambda _pid: "Vibecrafted",
+        )
+        is False
+    )
 
 
 def test_invalid_server_origin_is_rejected(tmp_path: Path) -> None:

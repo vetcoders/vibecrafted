@@ -41,6 +41,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import time
@@ -72,6 +73,7 @@ __all__ = [
     "TRIAGE_GC_SCHEMA",
     "VERDICT_FAILED",
     "VERDICT_FINALIZED",
+    "VERDICT_INFRA_FAILURE",
     "VERDICT_NEEDS_ATTENTION",
     "DurableTransferProof",
     "KernelAxes",
@@ -85,6 +87,7 @@ __all__ = [
     "TriageSweepItem",
     "TriageSweepReport",
     "bucket_for_exit_code",
+    "classify_provider_error",
     "classify_run",
     "load_durable_transfer_proof",
     "load_vc_frame_transfer_proof",
@@ -116,15 +119,19 @@ BUCKET_NEEDS_ATTENTION = "Needs attention"
 #: (a vc-frame session name); vc-frame still owns the rail UI.
 BUCKET_LIVE = "Live runs"
 
-# The three verdicts. Also the receipt values written to meta.json under
+# The four verdicts. Also the receipt values written to meta.json under
 # "triage" — the headline of a receipt is where the run went.
 VERDICT_FINALIZED = "finalized"
 VERDICT_FAILED = "failed"
 VERDICT_NEEDS_ATTENTION = "needs_attention"
+#: Provider overload / quota — not a worker error. Distinct from ``failed`` so
+#: supervisors do not treat 429/529/usage-limit as "the agent worked badly".
+VERDICT_INFRA_FAILURE = "infra_failure"
 
 OUTCOME_FINALIZED = VERDICT_FINALIZED
 OUTCOME_FAILED = VERDICT_FAILED
 OUTCOME_NEEDS_ATTENTION = VERDICT_NEEDS_ATTENTION
+OUTCOME_INFRA_FAILURE = VERDICT_INFRA_FAILURE
 #: No transfer was attempted — nothing to triage, or nothing able to triage it.
 OUTCOME_SKIPPED = "skipped"
 #: The transfer itself broke. A different axis from the verdict: it says nothing
@@ -183,6 +190,10 @@ _STATES_CONTRADICTORY = frozenset(
         "blocked",
         "stalled",
         "timed_out",
+        # User-selected measured budget exhaustion is neither provider
+        # overload nor proof that the worker failed. Keep it out of the
+        # provider-error infra bucket and route it to operator attention.
+        "quota_exhausted",
         "ghost",
         "gc",
     }
@@ -192,12 +203,16 @@ _BUCKET_FOR_VERDICT = {
     VERDICT_FINALIZED: BUCKET_FINALIZED,
     VERDICT_FAILED: BUCKET_FAILED,
     VERDICT_NEEDS_ATTENTION: BUCKET_NEEDS_ATTENTION,
+    # vc-frame still has three rails. Infra is retryable substrate, not a
+    # worker death, so it shares Needs attention rather than Failed.
+    VERDICT_INFRA_FAILURE: BUCKET_NEEDS_ATTENTION,
 }
 # vc-frame's `triage-run --bucket` takes the kebab spelling (W2-B-4a).
 _BUCKET_FLAG_FOR_VERDICT = {
     VERDICT_FINALIZED: "finalized",
     VERDICT_FAILED: "failed",
     VERDICT_NEEDS_ATTENTION: "needs-attention",
+    VERDICT_INFRA_FAILURE: "needs-attention",
 }
 
 TRANSFER_PROOF_SCHEMA = "vibecrafted.vc-frame-transfer-proof.v1"
@@ -1057,6 +1072,10 @@ class RunClassification:
 
     verdict: str
     reason: str
+    #: Copied from meta ``cost_usd`` when that field already exists. Never
+    #: invented here. Parents should still aggregate this for
+    #: ``infra_failure`` children — a dead provider run is not a free run.
+    cost_usd: float | None = None
 
     @property
     def bucket(self) -> str:
@@ -1191,6 +1210,53 @@ def read_kernel_axes(meta: Mapping[str, Any]) -> KernelAxes | None:
     return None
 
 
+# Provider-overload markers. Specimen: "API 529 Overloaded" (postmortem
+# 2026-08-19 §C3). Codes require an HTTP/API/status/error frame so a traceback
+# line number 429 does not become infra_failure.
+_PROVIDER_HTTP_RE = re.compile(
+    r"(?:api|http(?:s)?|status(?:\s+code)?|error|code)[\s:=#/-]*(?:429|529)\b"
+    r"|\b(?:429|529)\s+(?:overloaded|too\s+many|error|unavailable)",
+    re.IGNORECASE,
+)
+_PROVIDER_OVERLOADED_RE = re.compile(r"\boverloaded\b", re.IGNORECASE)
+_PROVIDER_USAGE_LIMIT_RE = re.compile(r"\busage[-\s_]?limit\b", re.IGNORECASE)
+_PROVIDER_RATE_LIMIT_RE = re.compile(r"\brate[-\s_]?limit\b", re.IGNORECASE)
+_META_PROVIDER_TEXT_KEYS = (
+    "error",
+    "last_error",
+    "provider_error",
+    "message",
+    "status_message",
+    "stderr",
+    "failure_reason",
+    "incomplete_reason",
+)
+_TRANSCRIPT_PROVIDER_TAIL_BYTES = 64 * 1024
+
+
+def classify_provider_error(transcript_text: str) -> str | None:
+    """Return a ``provider_error:*`` reason if the text is provider overload.
+
+    Matches HTTP 429/529, ``overloaded``, ``usage limit`` / ``usage-limit``,
+    and ``rate limit``. Returns ``None`` for ordinary worker traces.
+    """
+    text = str(transcript_text or "")
+    if not text.strip():
+        return None
+    if _PROVIDER_HTTP_RE.search(text):
+        lowered = text.lower()
+        if "529" in lowered:
+            return "provider_error:529"
+        return "provider_error:429"
+    if _PROVIDER_OVERLOADED_RE.search(text):
+        return "provider_error:overloaded"
+    if _PROVIDER_USAGE_LIMIT_RE.search(text):
+        return "provider_error:usage_limit"
+    if _PROVIDER_RATE_LIMIT_RE.search(text):
+        return "provider_error:rate_limit"
+    return None
+
+
 def _classify_from_kernel_axes(axes: KernelAxes) -> RunClassification:
     """Drawer from the three delivery-kernel axes. Fail closed on uncertainty.
 
@@ -1224,50 +1290,17 @@ def _classify_from_kernel_axes(axes: KernelAxes) -> RunClassification:
     return _attention("axes_" + "_".join(parts))
 
 
-def classify_run(
+def _classify_from_legacy_signals(
     exit_code: Any,
     run_state: Any,
     report_exists: bool | None,
     report_bytes: int | None,
     transcript_bytes: int | None,
     *,
-    kernel_axes: KernelAxes | None = None,
     report_claim_status: str = "",
     report_frontmatter_ok: bool | None = None,
 ) -> RunClassification:
-    """Decide a finished run's drawer from its signals.
-
-    Pure. Three outcomes, and only two of them are confident.
-
-    When ``kernel_axes`` is provided (a delivery-kernel receipt was present),
-    the three orthogonal axes decide:
-
-    * **finalized** — ``delivery_state=sealed``
-    * **failed** — ``execution_state=failed`` or ``proof_state∈{failed,invalid}``
-    * **needs_attention** — every other axis combination, and any unreadable
-      receipt body
-
-    When no kernel receipt is present (``kernel_axes is None``), the legacy
-    five-signal conjunction applies:
-
-    * **finalized** — exit 0, a state asserting delivery, a non-empty report
-      with valid frontmatter claim, and claim not contradicting death. Agent
-      claim alone never finalizes.
-    * **failed** — exit non-zero, a state asserting death, no report, and a
-      transcript too small to contain work. A run that died before doing any.
-    * **needs_attention** — everything else. Every contradiction between signals
-      (exit 0 with no report, non-zero exit *with* a report, a state that
-      disagrees with the exit code, ``report_invalid``/``contract_failed``/
-      ``ghost``/``timed_out``), missing/invalid report frontmatter, claim
-      vs evidence conflicts, and every signal we could not read.
-
-    The last clause is the point: an unreadable signal fails closed, to a human,
-    never to a confident drawer. ``report_exists=None`` and
-    ``transcript_bytes=None`` mean "could not stat", not "absent".
-    """
-    if kernel_axes is not None:
-        return _classify_from_kernel_axes(kernel_axes)
-
+    """Legacy five-signal conjunction. Caller overlays provider errors."""
     state = str(run_state or "").strip().lower()
     if not state:
         return _attention("state_unreadable")
@@ -1341,6 +1374,87 @@ def classify_run(
     )
 
 
+def classify_run(
+    exit_code: Any,
+    run_state: Any,
+    report_exists: bool | None,
+    report_bytes: int | None,
+    transcript_bytes: int | None,
+    *,
+    kernel_axes: KernelAxes | None = None,
+    report_claim_status: str = "",
+    report_frontmatter_ok: bool | None = None,
+    transcript_text: str = "",
+    meta_text: str = "",
+    cost_usd: float | None = None,
+) -> RunClassification:
+    """Decide a finished run's drawer from its signals.
+
+    Pure. Four outcomes; three of them are confident.
+
+    When ``kernel_axes`` is provided (a delivery-kernel receipt was present),
+    the three orthogonal axes decide:
+
+    * **finalized** — ``delivery_state=sealed``
+    * **failed** — ``execution_state=failed`` or ``proof_state∈{failed,invalid}``
+    * **needs_attention** — every other axis combination, and any unreadable
+      receipt body
+
+    Provider overload in ``transcript_text`` / ``meta_text`` (HTTP 429/529,
+    ``overloaded``, ``usage limit``, ``usage-limit``, ``rate limit``) overlays
+    any non-finalized drawer as **infra_failure**. That class is not a worker
+    error and must not fold into ``failed``. A sealed delivery still wins:
+    the run delivered.
+
+    When no kernel receipt is present (``kernel_axes is None``), the legacy
+    five-signal conjunction applies (then the same provider overlay):
+
+    * **finalized** — exit 0, a state asserting delivery, a non-empty report
+      with valid frontmatter claim, and claim not contradicting death. Agent
+      claim alone never finalizes.
+    * **failed** — exit non-zero, a state asserting death, no report, and a
+      transcript too small to contain work. A run that died before doing any.
+    * **needs_attention** — everything else. Every contradiction between signals
+      (exit 0 with no report, non-zero exit *with* a report, a state that
+      disagrees with the exit code, ``report_invalid``/``contract_failed``/
+      ``ghost``/``timed_out``), missing/invalid report frontmatter, claim
+      vs evidence conflicts, and every signal we could not read.
+
+    ``cost_usd`` is copied from an existing meta field when the caller has one.
+    This function does not invent a billing backend. Parents should still
+    aggregate ``cost_usd`` for ``infra_failure`` children.
+
+    The last clause is the point: an unreadable signal fails closed, to a human,
+    never to a confident drawer. ``report_exists=None`` and
+    ``transcript_bytes=None`` mean "could not stat", not "absent".
+    """
+    if kernel_axes is not None:
+        classified = _classify_from_kernel_axes(kernel_axes)
+    else:
+        classified = _classify_from_legacy_signals(
+            exit_code,
+            run_state,
+            report_exists,
+            report_bytes,
+            transcript_bytes,
+            report_claim_status=report_claim_status,
+            report_frontmatter_ok=report_frontmatter_ok,
+        )
+
+    provider_reason = classify_provider_error(
+        "\n".join(part for part in (transcript_text, meta_text) if part)
+    )
+    if provider_reason and classified.verdict != VERDICT_FINALIZED:
+        return RunClassification(
+            VERDICT_INFRA_FAILURE,
+            provider_reason,
+            cost_usd=cost_usd,
+        )
+    if cost_usd is None:
+        return classified
+    return replace(classified, cost_usd=cost_usd)
+
+
 @dataclass(frozen=True)
 class RunSignals:
     """The classifier's inputs, read off a run's meta payload and its artifacts.
@@ -1360,6 +1474,9 @@ class RunSignals:
     # Agent claim from report frontmatter (claim_status/status). Empty = absent.
     report_claim_status: str = ""
     report_frontmatter_ok: bool | None = None
+    transcript_text: str = ""
+    meta_text: str = ""
+    cost_usd: float | None = None
 
     def classify(self) -> RunClassification:
         """Classify this signal bundle via :func:`classify_run`."""
@@ -1372,7 +1489,61 @@ class RunSignals:
             kernel_axes=self.kernel_axes,
             report_claim_status=self.report_claim_status,
             report_frontmatter_ok=self.report_frontmatter_ok,
+            transcript_text=self.transcript_text,
+            meta_text=self.meta_text,
+            cost_usd=self.cost_usd,
         )
+
+
+def _optional_cost_usd(raw: Any) -> float | None:
+    """Parse meta ``cost_usd`` when already present. Never invent a value."""
+    if raw is None or raw is False:
+        return None
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text or text.lower() == "unknown":
+            return None
+        raw = text
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _meta_provider_text(meta: Mapping[str, Any]) -> str:
+    """Concatenate string error fields that may name a provider overload."""
+    parts: list[str] = []
+    for key in _META_PROVIDER_TEXT_KEYS:
+        value = meta.get(key)
+        if isinstance(value, str):
+            text = value.strip()
+            if text:
+                parts.append(text)
+            continue
+        if isinstance(value, Mapping):
+            for inner in ("message", "error", "reason", "type", "incomplete_reason"):
+                nested = value.get(inner)
+                if isinstance(nested, str) and nested.strip():
+                    parts.append(nested.strip())
+    return "\n".join(parts)
+
+
+def _transcript_tail_text(raw: Any) -> str:
+    """Last ``_TRANSCRIPT_PROVIDER_TAIL_BYTES`` of a declared transcript.
+
+    Fail-open: missing/unreadable path → empty string. The classifier then
+    falls through to the other signals instead of inventing infra_failure.
+    """
+    path = str(raw or "").strip()
+    if not path:
+        return ""
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return ""
+    if len(data) > _TRANSCRIPT_PROVIDER_TAIL_BYTES:
+        data = data[-_TRANSCRIPT_PROVIDER_TAIL_BYTES:]
+    return data.decode("utf-8", errors="replace")
 
 
 def _stat_artifact(raw: Any) -> tuple[bool | None, int | None]:
@@ -1431,6 +1602,9 @@ def read_run_signals(meta: Mapping[str, Any]) -> RunSignals:
         kernel_axes=read_kernel_axes(meta),
         report_claim_status=claim_status,
         report_frontmatter_ok=frontmatter_ok,
+        transcript_text=_transcript_tail_text(meta.get("transcript")),
+        meta_text=_meta_provider_text(meta),
+        cost_usd=_optional_cost_usd(meta.get("cost_usd")),
     )
 
 

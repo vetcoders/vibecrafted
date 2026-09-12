@@ -38,13 +38,13 @@ def test_load_config_pure_defaults(tmp_path: Path) -> None:
 
 def test_load_config_env_only_enables_when_token_present(tmp_path: Path) -> None:
     env = {
-        "MEMEX_ENDPOINT": "http://silver.local:11211",
+        "MEMEX_ENDPOINT": "http://host-d.local:11211",
         "MEMEX_TOKEN": "tok-abc",
         "MEMEX_NAMESPACE": "vibecrafted",
         "MEMEX_TIMEOUT_SECONDS": "2.5",
     }
     cfg = mc.load_config(config_path=tmp_path / "absent.toml", environ=env)
-    assert cfg.endpoint == "http://silver.local:11211"
+    assert cfg.endpoint == "http://host-d.local:11211"
     assert cfg.token == "tok-abc"
     assert cfg.default_namespace == "vibecrafted"
     assert cfg.timeout_seconds == 2.5
@@ -142,9 +142,9 @@ def test_search_parses_chunks_via_mcp_bridge() -> None:
         return {
             "chunks": [
                 {
-                    "text": "kronika 2026-05-05 mesh topology",
+                    "text": "doctrine 2026-05-05 mesh topology",
                     "score": 0.93,
-                    "source": "aicx/kronika.md",
+                    "source": "aicx/chronicle.md",
                     "namespace": namespace,
                 },
                 {
@@ -229,7 +229,7 @@ def test_search_http_success(monkeypatch: pytest.MonkeyPatch) -> None:
         captured["limit"] = limit
         return {
             "chunks": [
-                {"text": "mesh topology silver", "score": 0.7, "source": "kronika"},
+                {"text": "mesh topology host-d", "score": 0.7, "source": "chronicle"},
                 {"content": "fallback content field", "score": "0.5"},  # tolerant
                 {"no_text_field": True},  # filtered out
             ]
@@ -246,7 +246,7 @@ def test_search_http_success(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     out = mc.search("vc-init", namespace="team-ns", limit=5, config=cfg)
     assert len(out) == 2
-    assert out[0].text == "mesh topology silver"
+    assert out[0].text == "mesh topology host-d"
     assert out[1].text == "fallback content field"
     assert out[1].score == pytest.approx(0.5)
     assert all(c.authority == mc.MEMEX_AUTHORITY_LABEL for c in out)

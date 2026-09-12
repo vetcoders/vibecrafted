@@ -8,11 +8,14 @@ use leptos::prelude::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServerSection {
     Overview,
+    Workspaces,
+    Sessions,
     Runs,
     Lifecycle,
     Activity,
     Structure,
     Scaffold,
+    Guide,
 }
 
 impl ServerSection {
@@ -63,20 +66,29 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
                         <a class=active.nav_class(ServerSection::Overview) href="/">
                             <span>"01"</span><strong>"Overview"</strong>
                         </a>
+                        <a class=active.nav_class(ServerSection::Workspaces) href="/workspaces">
+                            <span>"02"</span><strong>"Workspaces"</strong>
+                        </a>
+                        <a class=active.nav_class(ServerSection::Sessions) href="/sessions">
+                            <span>"03"</span><strong>"Sessions"</strong>
+                        </a>
                         <a class=active.nav_class(ServerSection::Runs) href="/runs">
-                            <span>"02"</span><strong>"Runs"</strong>
+                            <span>"04"</span><strong>"Agent Manager"</strong>
                         </a>
                         <a class=active.nav_class(ServerSection::Lifecycle) href="/lifecycle">
-                            <span>"03"</span><strong>"Lifecycle"</strong>
+                            <span>"05"</span><strong>"Control"</strong>
                         </a>
                         <a class=active.nav_class(ServerSection::Activity) href="/activity">
-                            <span>"04"</span><strong>"Activity"</strong>
+                            <span>"06"</span><strong>"Activity"</strong>
                         </a>
                         <a class=active.nav_class(ServerSection::Structure) href="/structure">
-                            <span>"05"</span><strong>"Structure"</strong>
+                            <span>"07"</span><strong>"Structure"</strong>
                         </a>
                         <a class=active.nav_class(ServerSection::Scaffold) href="/scaffold">
-                            <span>"06"</span><strong>"Scaffold"</strong>
+                            <span>"08"</span><strong>"Plans / Scaffold"</strong>
+                        </a>
+                        <a class=active.nav_class(ServerSection::Guide) href="/guide">
+                            <span>"09"</span><strong>"Guide"</strong>
                         </a>
                     </nav>
                     <div class="server-sidebar-note">
@@ -95,20 +107,29 @@ pub fn ServerFrame(active: ServerSection, status: String, children: Children) ->
                 <a class=active.nav_class(ServerSection::Overview) href="/">
                     <span>"01"</span><strong>"Overview"</strong>
                 </a>
+                <a class=active.nav_class(ServerSection::Workspaces) href="/workspaces">
+                    <span>"02"</span><strong>"Workspaces"</strong>
+                </a>
+                <a class=active.nav_class(ServerSection::Sessions) href="/sessions">
+                    <span>"03"</span><strong>"Sessions"</strong>
+                </a>
                 <a class=active.nav_class(ServerSection::Runs) href="/runs">
-                    <span>"02"</span><strong>"Runs"</strong>
+                    <span>"04"</span><strong>"Agents"</strong>
                 </a>
                 <a class=active.nav_class(ServerSection::Lifecycle) href="/lifecycle">
-                    <span>"03"</span><strong>"Lifecycle"</strong>
+                    <span>"05"</span><strong>"Control"</strong>
                 </a>
                 <a class=active.nav_class(ServerSection::Activity) href="/activity">
-                    <span>"04"</span><strong>"Activity"</strong>
+                    <span>"06"</span><strong>"Activity"</strong>
                 </a>
                 <a class=active.nav_class(ServerSection::Structure) href="/structure">
-                    <span>"05"</span><strong>"Structure"</strong>
+                    <span>"07"</span><strong>"Structure"</strong>
                 </a>
                 <a class=active.nav_class(ServerSection::Scaffold) href="/scaffold">
-                    <span>"06"</span><strong>"Scaffold"</strong>
+                    <span>"08"</span><strong>"Plans"</strong>
+                </a>
+                <a class=active.nav_class(ServerSection::Guide) href="/guide">
+                    <span>"09"</span><strong>"Guide"</strong>
                 </a>
             </nav>
         </div>

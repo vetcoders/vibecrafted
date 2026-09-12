@@ -18,7 +18,7 @@ Dziś Agent-Operator orkiestruje flotę z pamięci:
 - „Czy Wave B-2 wylądowała na zielono?" — przeczytaj ponownie własny log sesji
 - „Czy Gemini ciągnął swoją część w tym tygodniu?" — zgaduj
 - „Czy `vc-partner` jest faktycznie wywoływany?" — wykonaj empiryczny zwiad za każdym razem
-- „Czy dysk hosta dragon jest poniżej 80%?" — `ssh dragon df -h` i miej nadzieję
+- „Czy dysk hosta host-a jest poniżej 80%?" — `ssh host-a df -h` i miej nadzieję
 - „Który prompt jest teraz w locie?" — pamiętaj run_id
 
 Każdy z tych punktów danych żyje na dysku. Agent-operator i operator

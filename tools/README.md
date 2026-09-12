@@ -34,7 +34,7 @@ cp example-settings.json $HOME/.claude/settings.json
 | `memory-on-ultrathink.sh`        | Stop             | Captures AI insights from ultrathink sessions         |
 | `memory-on-compact.sh`           | PreCompact       | Saves session context before compact                  |
 | `memory-context-loader.sh`       | SessionStart     | Loads memory context at session start                 |
-| `memory-daily-sync-to-dragon.sh` | Cron             | Syncs memories to Dragon server                       |
+| `memory-daily-sync-to-host-a.sh` | Cron             | Syncs memories to host-a server                       |
 
 ### Ultrathink Variants
 
@@ -60,7 +60,7 @@ Copy `mcp-servers.json` to `$HOME/.claude/` for default MCP configuration:
 | -------------------- | ----- | ----------------------------------------- |
 | `memex`              | stdio | Local memex daemon (starts automatically) |
 | `memex-sse`          | SSE   | Connect to running memex (multi-agent)    |
-| `memex-dragon`       | SSE   | Connect to Dragon's memex (remote)        |
+| `memex-host-a`       | SSE   | Connect to host-a's memex (remote)        |
 | `youtube-transcript` | stdio | YouTube video transcripts                 |
 | `brave-search`       | stdio | Web search via Brave API                  |
 | `filesystem`         | stdio | File system access                        |

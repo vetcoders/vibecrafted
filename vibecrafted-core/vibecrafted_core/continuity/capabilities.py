@@ -30,10 +30,10 @@ import shutil
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, fields
-from datetime import datetime, timezone
 from typing import Any
 
 from ..capabilities import ProbeResult as CliProbe
+from ..clock import utc_now_iso
 from ..runtime_paths import agent_tool_search_path
 
 # Capability verdicts for the declarative table. ``unverified`` means the
@@ -288,6 +288,42 @@ CAPABILITIES: Mapping[str, ProviderCapability] = {
             "shared Living Tree — both forbidden for recovery"
         ),
     ),
+    "cursor": ProviderCapability(
+        agent="cursor",
+        execution=EXECUTABLE,
+        session_id_shape=_SESSION_TOKEN,
+        session_id_sources=(
+            "stream_json_init_event",
+            "transcript_session_line",
+            "run_meta",
+        ),
+        interactive_resume=SUPPORTED,
+        noninteractive_resume=UNVERIFIED,
+        native_fork=UNSUPPORTED,
+        fork_runtime_restrictions="no fork surface in cursor-agent 2026.08.x",
+        prompt_transport="stdin",
+        session_identity_event=(
+            "stream-json `system`/`init` event carrying `session_id`"
+        ),
+        cwd_safety=(
+            "runs in invocation cwd; `--workspace` overrides; no "
+            "checkout-mutating flags"
+        ),
+        resume_preserves_cache=None,
+        forbidden_flags=(),
+        probe_recipe=ProbeRecipe(
+            cli="cursor-agent",
+            required_markers=("--resume", "--print", "--output-format"),
+        ),
+        notes=(
+            "cursor-agent 2026.08.25-3e8eec8 probed on host 2026-08-29: "
+            "agent key is `cursor`, binary is `cursor-agent`; `-p` accepts "
+            "prompt on argv or stdin; `--output-format stream-json` emits "
+            "claude-shaped init/assistant/result events. Interactive "
+            "`--resume [chatId]` exists; headless `-p --resume <id>` is "
+            "UNVERIFIED — core native resume fails closed until proven"
+        ),
+    ),
 }
 
 
@@ -340,11 +376,6 @@ _PROBE_CACHE: dict[str, ProbeResult] = {}
 def clear_probe_cache() -> None:
     """Drop all cached per-agent probe results, forcing the next probe() to re-run."""
     _PROBE_CACHE.clear()
-
-
-def _now_iso() -> str:
-    """Current UTC time as an ISO 8601 string."""
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _default_runner(timeout: float) -> Runner:
@@ -411,7 +442,7 @@ def probe(
     capability = capability_for(agent)
     if not refresh and agent in _PROBE_CACHE:
         return _PROBE_CACHE[agent]
-    checked_at = _now_iso()
+    checked_at = utc_now_iso()
 
     if capability.execution == EVIDENCE_ONLY or capability.probe_recipe is None:
         result = ProbeResult(

@@ -10,16 +10,11 @@ import subprocess
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import control_plane, cron, ui
-
-
-def utc_now() -> str:
-    """Current UTC time as an ISO-8601 string with a trailing ``Z``."""
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+from . import control_plane, ui
+from .clock import utc_now_z
 
 
 def repo_root(start: Path | None = None) -> Path:
@@ -126,6 +121,10 @@ def command_deck() -> str:
 
 def _framework_heartbeat(*, root: Path, run_id: str, then_cmd: str = "") -> int:
     """Fire one immediate ``vibecrafted cron tick`` heartbeat for a running worker."""
+    # cron imports default_state_file from this module. Keep the reverse edge
+    # lazy so importing ship/loop in a fresh interpreter cannot form a cycle.
+    from . import cron
+
     argv = [
         "tick",
         "--root",
@@ -322,7 +321,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         or os.environ.get("VIBECRAFTED_OPERATOR_SESSION_ID")
         or ""
     )
-    now = utc_now()
+    now = utc_now_z()
     fields = {
         "active": "true",
         "runtime": "operator-interactive",
@@ -364,7 +363,7 @@ def cmd_cancel(args: argparse.Namespace) -> int:
     state = parse_state(resolve_state_file(args.state_file))
     fields = dict(state.fields)
     fields["active"] = "false"
-    fields["stopped_at"] = quote_yaml(utc_now())
+    fields["stopped_at"] = quote_yaml(utc_now_z())
     fields["stop_reason"] = "cancel"
     write_state(state.path, fields, state.prompt)
     ui.ok(f"cancelled operator loop at iteration {state.fields.get('iteration', '0')}")
@@ -380,7 +379,7 @@ def cmd_complete(args: argparse.Namespace) -> int:
         return 3
     fields = dict(state.fields)
     fields["active"] = "false"
-    fields["stopped_at"] = quote_yaml(utc_now())
+    fields["stopped_at"] = quote_yaml(utc_now_z())
     fields["stop_reason"] = "promise"
     write_state(state.path, fields, state.prompt)
     if expected not in {"", "null"}:
@@ -399,7 +398,7 @@ def cmd_next(args: argparse.Namespace) -> int:
     if state.max_iterations > 0 and state.iteration >= state.max_iterations:
         fields = dict(state.fields)
         fields["active"] = "false"
-        fields["stopped_at"] = quote_yaml(utc_now())
+        fields["stopped_at"] = quote_yaml(utc_now_z())
         fields["stop_reason"] = "max_iterations"
         write_state(state.path, fields, state.prompt)
         print(f"STOP: max iterations reached ({state.max_iterations}).")
@@ -407,7 +406,7 @@ def cmd_next(args: argparse.Namespace) -> int:
     next_iteration = state.iteration + 1
     fields = dict(state.fields)
     fields["iteration"] = str(next_iteration)
-    fields["updated_at"] = quote_yaml(utc_now())
+    fields["updated_at"] = quote_yaml(utc_now_z())
     write_state(state.path, fields, state.prompt)
     print(f"CONTINUE: operator loop iteration {next_iteration}")
     promise = state.fields.get("completion_promise", "null").strip('"')
@@ -429,11 +428,12 @@ def cmd_await_run(args: argparse.Namespace) -> int:
         "agy",
         "junie",
         "grok",
+        "cursor",
         "opencode",
     }:
         ui.err(
             f"unknown agent: {args.agent}",
-            fix="use one of: claude · codex · gemini · agy · junie · grok · opencode",
+            fix="use one of: claude · codex · gemini · agy · junie · grok · cursor · opencode",
         )
         return 1
     if not args.run_id:
@@ -442,14 +442,14 @@ def cmd_await_run(args: argparse.Namespace) -> int:
 
     def run_wait() -> int:
         """Foreground await of the run via the agent deck, then run --then-cmd on success."""
-        print(f"[{utc_now()}] awaiting {args.run_id} via {args.agent}")
+        print(f"[{utc_now_z()}] awaiting {args.run_id} via {args.agent}")
         proc = subprocess.run(
             [command_deck(), args.agent, "await", "--run-id", args.run_id], check=False
         )
-        print(f"[{utc_now()}] await finished rc={proc.returncode} for {args.run_id}")
+        print(f"[{utc_now_z()}] await finished rc={proc.returncode} for {args.run_id}")
         if proc.returncode == 0 and args.then_cmd:
             print(
-                f"[{utc_now()}] running operator-approved next command via argv: {args.then_cmd}"
+                f"[{utc_now_z()}] running operator-approved next command via argv: {args.then_cmd}"
             )
             return subprocess.run(shlex.split(args.then_cmd), check=False).returncode
         return proc.returncode
@@ -498,11 +498,12 @@ def cmd_spanko(args: argparse.Namespace) -> int:
         "agy",
         "junie",
         "grok",
+        "cursor",
         "opencode",
     }:
         ui.err(
             f"unknown agent: {args.agent}",
-            fix="use one of: claude · codex · gemini · agy · junie · grok · opencode",
+            fix="use one of: claude · codex · gemini · agy · junie · grok · cursor · opencode",
         )
         return 1
     if not args.run_id:
@@ -510,14 +511,14 @@ def cmd_spanko(args: argparse.Namespace) -> int:
         return 1
 
     root = Path(args.root or Path.cwd()).expanduser().resolve()
-    print(f"[{utc_now()}] spanko heartbeat via vibecrafted cron tick")
+    print(f"[{utc_now_z()}] spanko heartbeat via vibecrafted cron tick")
     heartbeat_rc = _framework_heartbeat(root=root, run_id=args.run_id)
     if heartbeat_rc != 0:
         ui.warn(
             "framework heartbeat failed; harness /loop is a last resort only if the vibecrafted CLI is unavailable"
         )
 
-    print(f"[{utc_now()}] awaiting {args.run_id} via control-plane await_run")
+    print(f"[{utc_now_z()}] awaiting {args.run_id} via control-plane await_run")
     payload = control_plane.await_run(
         args.run_id,
         timeout_seconds=float(args.timeout_seconds),
@@ -552,7 +553,7 @@ def cmd_spanko(args: argparse.Namespace) -> int:
     if not args.verify:
         ui.err("spanko requires --verify before tracker flip")
         return 1
-    print(f"[{utc_now()}] sprawdzenie: {args.verify}")
+    print(f"[{utc_now_z()}] sprawdzenie: {args.verify}")
     verify = subprocess.run(shlex.split(args.verify), cwd=root, check=False)
     if verify.returncode != 0:
         ui.err(f"sprawdzenie failed rc={verify.returncode}; tracker not flipped")
@@ -573,7 +574,7 @@ def cmd_spanko(args: argparse.Namespace) -> int:
     baton = _baton(args.run_id, run, phase="next", evidence=evidence)
     print(baton)
     if args.then:
-        print(f"[{utc_now()}] baton then: {args.then}")
+        print(f"[{utc_now_z()}] baton then: {args.then}")
         return _run_then(args.then, root=root, baton=baton)
     return 0
 

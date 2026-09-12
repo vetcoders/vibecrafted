@@ -49,7 +49,7 @@ case "$1" in
   bash|sh|zsh|node|npm|npx|python|python3|uv|git|make|rg|jq|curl|tar|unzip)
     exec "$@"
     ;;
-  loctree|loctree-mcp|aicx|aicx-mcp|prview|screenscribe|codex|claude|gemini)
+  loctree|loctree-mcp|aicx|aicx-mcp|prview|screenscribe|codex|claude|gemini|cursor-agent)
     exec "$@"
     ;;
   vibecrafted|vibecraft)

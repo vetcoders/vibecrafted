@@ -33,6 +33,14 @@ _vetcoders_contract_reset() {
   _vetcoders_contract_count=""
   _vetcoders_contract_depth=""
   _vetcoders_contract_runtime=""
+  _vetcoders_contract_model=""
+  _vetcoders_contract_policy_runtime=""
+  _vetcoders_contract_permissions=""
+  _vetcoders_contract_token_budget=""
+  _vetcoders_contract_operator=""
+  _vetcoders_contract_continuity=""
+  _vetcoders_contract_parent_session=""
+  _vetcoders_contract_continuity_parent=""
   _vetcoders_contract_root=""
   _vetcoders_contract_tail=""
   _vetcoders_contract_dry_run=""
@@ -119,6 +127,50 @@ _vetcoders_parse_contract() {
         [[ $# -gt 0 ]] || { echo "Missing value for --runtime" >&2; return 1; }
         _vetcoders_contract_runtime="$1"
         ;;
+      --model)
+        if [[ -z "${_vetcoders_contract_allow_model:-}" ]]; then
+          printf 'Unknown flag: %s (flags go before --prompt; use -- for literal text)\n' "$1" >&2
+          return 1
+        fi
+        shift
+        [[ $# -gt 0 ]] || { echo "Missing value for --model" >&2; return 1; }
+        _vetcoders_contract_model="$1"
+        ;;
+      --policy-runtime)
+        shift
+        [[ $# -gt 0 ]] || { echo "Missing value for --policy-runtime" >&2; return 1; }
+        _vetcoders_contract_policy_runtime="$1"
+        ;;
+      --permissions)
+        shift
+        [[ $# -gt 0 ]] || { echo "Missing value for --permissions" >&2; return 1; }
+        _vetcoders_contract_permissions="$1"
+        ;;
+      --token-budget)
+        shift
+        [[ $# -gt 0 ]] || { echo "Missing value for --token-budget" >&2; return 1; }
+        _vetcoders_contract_token_budget="$1"
+        ;;
+      --operator)
+        shift
+        [[ $# -gt 0 ]] || { echo "Missing value for --operator" >&2; return 1; }
+        _vetcoders_contract_operator="$1"
+        ;;
+      --continuity)
+        shift
+        [[ $# -gt 0 ]] || { echo "Missing value for --continuity" >&2; return 1; }
+        _vetcoders_contract_continuity="$1"
+        ;;
+      --parent-session)
+        shift
+        [[ $# -gt 0 ]] || { echo "Missing value for --parent-session" >&2; return 1; }
+        _vetcoders_contract_parent_session="$1"
+        ;;
+      --continuity-parent)
+        shift
+        [[ $# -gt 0 ]] || { echo "Missing value for --continuity-parent" >&2; return 1; }
+        _vetcoders_contract_continuity_parent="$1"
+        ;;
       --root)
         shift
         [[ $# -gt 0 ]] || { echo "Missing value for --root" >&2; return 1; }
@@ -150,6 +202,17 @@ _vetcoders_parse_contract() {
   if [[ -z "$_vetcoders_contract_prompt" && -n "$_vetcoders_contract_tail" ]]; then
     _vetcoders_contract_prompt="$_vetcoders_contract_tail"
   fi
+}
+
+# Skill launchers own model selection. Keep the shared parser fail-closed for
+# init/resume/operator call sites, while allowing documented skill syntax such
+# as `vibecrafted audit claude --model claude-opus-5 --file brief.md`.
+_vetcoders_parse_skill_contract() {
+  _vetcoders_contract_allow_model=1
+  _vetcoders_parse_contract "$@"
+  local status=$?
+  unset _vetcoders_contract_allow_model
+  return "$status"
 }
 
 _vetcoders_effective_runtime() {
@@ -190,15 +253,16 @@ _vetcoders_compose_input_context() {
     _vetcoders_require_file "$file_path" || return 1
     local abs_file
     abs_file="$(cd "$(dirname "$file_path")" && pwd)/$(basename "$file_path")"
-    local file_body
-    file_body="$(cat "$file_path")"
     if [[ -n "$combined" ]]; then
       combined+=$'\n\n'
     fi
+    # Pointer, never payload. Inlining the file body here put whole
+    # continuity packs (session ids, paths) into agent argv — world-readable
+    # in `ps`, capped by ARG_MAX, mangled on newlines. The file is the single
+    # source of truth; every agent runs with file access and reads it itself.
     combined+="Primary input file: $abs_file"
-    combined+=$'\n\n```md\n'
-    combined+="$file_body"
-    combined+=$'\n```'
+    combined+=$'\n'
+    combined+="Read that file in full before acting — it is the task payload, not optional context. Do not act on this pointer alone."
   fi
 
   printf '%s' "$combined"

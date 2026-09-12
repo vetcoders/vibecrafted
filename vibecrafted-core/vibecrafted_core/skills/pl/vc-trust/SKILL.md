@@ -77,7 +77,7 @@ journala/settlementu wymienionych niżej.
 
 ## Wywołanie
 
-- Worker: `vibecrafted trust <claude|codex|agy|junie|grok> --prompt ...`
+- Worker: `vibecrafted trust <claude|codex|agy|junie|grok|cursor> --prompt ...`
 - Interactive: `/vc-trust`
 - Linia operatora: `vibecrafted trust <agent> --file <brief.md>`
 

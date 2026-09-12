@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import importlib.metadata
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +35,31 @@ def test_lazy_workflow_exports_load_on_demand() -> None:
     assert callable(vibecrafted_core.launch_workflow)
     assert callable(vibecrafted_core.native_resume_run)
     assert callable(vibecrafted_core.vibecrafted_launcher)
+
+
+def test_bare_package_import_does_not_preload_control_plane() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-W",
+            "error",
+            "-c",
+            (
+                "import sys, vibecrafted_core; "
+                "assert 'vibecrafted_core.control_plane' not in sys.modules"
+            ),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            **__import__("os").environ,
+            "PYTHONPATH": str(CORE_ROOT),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_lazy_access_caches_into_module_globals() -> None:
@@ -127,6 +153,33 @@ def test_version_bump_updates_every_declared_projection(tmp_path: Path) -> None:
         ),
         tmp_path / "vibecrafted-app" / "Cargo.lock": ("control-core",),
     }
+    release_texts = {
+        tmp_path
+        / "vibecrafted-app"
+        / "shell-agent"
+        / "app"
+        / "project.yml": 'settings:\n  MARKETING_VERSION: "1.4.1"\n',
+        tmp_path
+        / "packaging"
+        / "homebrew"
+        / "Formula"
+        / "vibecrafted.rb": '  version "1.4.1"\n',
+        tmp_path
+        / "packaging"
+        / "homebrew"
+        / "Casks"
+        / "vibecrafted-app.rb": '  version "1.4.1,fixture"\n',
+        tmp_path
+        / "README.md": '<img alt="Version 1.4.1" src="badge/version-1.4.1-informational">\n',
+        tmp_path / "docs" / "RELEASE_CHECKLIST.md": (
+            "# Cut 1.4.1 now\n"
+            "One GitHub Release `v1.4.1`\n"
+            "`VERSION` is already `1.4.1`\n"
+            'test "$(tr -d \'[:space:]\' < VERSION)" = "1.4.1"\n'
+            'git tag -a v1.4.1 -m "release"\n'
+            "git push origin v1.4.1\n"
+        ),
+    }
     version_file.write_text("1.4.1\n", encoding="utf-8")
     plugin_manifest.write_text(
         json.dumps({"name": "vibecrafted", "version": "1.4.1"}, indent=2) + "\n",
@@ -158,6 +211,9 @@ def test_version_bump_updates_every_declared_projection(tmp_path: Path) -> None:
             ),
             encoding="utf-8",
         )
+    for path, text in release_texts.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
 
     result = subprocess.run(
         [
@@ -194,6 +250,66 @@ def test_version_bump_updates_every_declared_projection(tmp_path: Path) -> None:
             ]
         }
         assert {packages[name] for name in package_names} == {"1.5.0"}
+    for path in release_texts:
+        updated = path.read_text(encoding="utf-8")
+        assert "1.4.1" not in updated
+        assert "1.5.0" in updated
+
+
+def test_version_check_rejects_stale_readme_and_release_checklist_fixtures(
+    tmp_path: Path,
+) -> None:
+    relatives = (
+        "VERSION",
+        "plugin.json",
+        "vibecrafted-core/pyproject.toml",
+        "vibecrafted-core/vibecrafted_core/VERSION",
+        "vibecrafted-mcp/pyproject.toml",
+        "vibecrafted-mcp/vibecrafted_mcp/VERSION",
+        "vibecrafted-server/web/Cargo.toml",
+        "vibecrafted-server/control-core/Cargo.toml",
+        "vibecrafted-app/shell-agent/app/project.yml",
+        "packaging/homebrew/Formula/vibecrafted.rb",
+        "packaging/homebrew/Casks/vibecrafted-app.rb",
+        "README.md",
+        "docs/RELEASE_CHECKLIST.md",
+    )
+    for relative in relatives:
+        source = REPO_ROOT / relative
+        destination = tmp_path / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+
+    command = [
+        sys.executable,
+        str(REPO_ROOT / "scripts" / "version_bump.py"),
+        "--check",
+        "--file",
+        str(tmp_path / "VERSION"),
+    ]
+    current = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert current.returncode == 0, current.stderr
+
+    readme = tmp_path / "README.md"
+    readme.write_text(
+        readme.read_text(encoding="utf-8").replace("Version 4.3.0", "Version 9.9.9"),
+        encoding="utf-8",
+    )
+    stale_readme = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert stale_readme.returncode == 2
+    assert "README.md#projection-1=9.9.9" in stale_readme.stderr
+
+    shutil.copy2(REPO_ROOT / "README.md", readme)
+    checklist = tmp_path / "docs" / "RELEASE_CHECKLIST.md"
+    checklist.write_text(
+        checklist.read_text(encoding="utf-8").replace("# Cut 4.3.0", "# Cut 9.9.9", 1),
+        encoding="utf-8",
+    )
+    stale_checklist = subprocess.run(
+        command, capture_output=True, text=True, check=False
+    )
+    assert stale_checklist.returncode == 2
+    assert "RELEASE_CHECKLIST.md#projection-1=9.9.9" in stale_checklist.stderr
 
 
 def test_version_bump_rejects_drift_without_partial_writes(tmp_path: Path) -> None:

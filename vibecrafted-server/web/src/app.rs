@@ -4,6 +4,7 @@ use leptos::prelude::*;
 use leptos_meta::{Link, Meta, Title};
 use leptos_router::components::{Route, Router, Routes};
 use leptos_router::path;
+use serde::{Deserialize, Serialize};
 
 use crate::chrome::{ServerFrame, ServerSection};
 use crate::run_detail::RunDetailPage;
@@ -39,10 +40,19 @@ fn theme_control_script() -> &'static str {
 })();"#
 }
 
-#[derive(Clone, Default)]
-struct DashboardData {
+const DASHBOARD_EMBED_ID: &str = "vc-dashboard-data";
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct DashboardData {
+    server_status: String,
     control_plane: String,
+    control_status: String,
+    control_error: String,
     generated_at: String,
+    workspace_status: String,
+    workspace_error: String,
+    workspaces: Vec<DashboardWorkspace>,
+    sessions: Vec<DashboardSession>,
     settlement: DashboardSettlement,
     active_runs: Vec<DashboardRun>,
     stalled_runs: Vec<DashboardRun>,
@@ -53,7 +63,30 @@ struct DashboardData {
     loctree_report: String,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+struct DashboardWorkspace {
+    workspace_id: String,
+    title: String,
+    root: String,
+    status: String,
+    selected: bool,
+    active_runs: usize,
+    recent_runs: usize,
+    updated_at: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+struct DashboardSession {
+    session_id: String,
+    workspace_id: String,
+    workspace_title: String,
+    workspace_instance_id: String,
+    runtime: String,
+    state: String,
+    updated_at: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 struct DashboardSettlement {
     scope: String,
     active: usize,
@@ -65,7 +98,7 @@ struct DashboardSettlement {
     total_settled: usize,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 struct DashboardRun {
     run_id: String,
     state: String,
@@ -81,7 +114,7 @@ struct DashboardRun {
     last_error: String,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 struct DashboardLifecycleRun {
     run_id: String,
     workflow: String,
@@ -97,7 +130,7 @@ struct DashboardLifecycleRun {
     updated_at: String,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 struct DashboardEvent {
     ts: String,
     run_id: String,
@@ -176,6 +209,14 @@ fn load_dashboard_data_from(
         }
     }
 
+    let control_root = plane.control_plane_home();
+    let (control_status, control_error) = match std::fs::read_dir(&control_root) {
+        Ok(_) => ("available".to_string(), String::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            ("not_initialized".to_string(), String::new())
+        }
+        Err(error) => ("unavailable".to_string(), error.to_string()),
+    };
     let state = crate::control::api::state_payload(plane, now);
     let lifecycle_runs = plane.load_recent_lifecycle_run_summaries(24);
     let settlement = state.settlement_counts;
@@ -190,9 +231,120 @@ fn load_dashboard_data_from(
         .next()
         .unwrap_or_default();
 
+    let mut warnings = state.warnings;
+    if control_status == "unavailable" {
+        warnings.push(format!("Control-plane data unavailable: {control_error}"));
+    }
+    let (workspace_status, workspace_error, workspaces, sessions) =
+        match plane.load_workspace_projection() {
+            Ok(projection) => {
+                let titles = projection
+                    .catalog
+                    .as_ref()
+                    .map(|catalog| {
+                        catalog
+                            .workspaces
+                            .iter()
+                            .map(|workspace| {
+                                (
+                                    workspace.workspace_id.clone(),
+                                    workspace.display_label.clone(),
+                                )
+                            })
+                            .collect::<std::collections::HashMap<_, _>>()
+                    })
+                    .unwrap_or_default();
+                let sessions = projection
+                    .sessions
+                    .into_iter()
+                    .map(|session| {
+                        let runtime = session
+                            .attachments
+                            .iter()
+                            .map(|attachment| attachment.runtime.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let state = if session
+                            .attachments
+                            .iter()
+                            .any(|attachment| attachment.state == "live")
+                        {
+                            "live"
+                        } else if session.attachments.is_empty() {
+                            "detached"
+                        } else {
+                            "inactive"
+                        };
+                        DashboardSession {
+                            workspace_title: titles
+                                .get(&session.workspace_id)
+                                .cloned()
+                                .unwrap_or_else(|| "Unknown workspace".into()),
+                            session_id: session.session_id,
+                            workspace_id: session.workspace_id,
+                            workspace_instance_id: session.workspace_instance_id,
+                            runtime,
+                            state: state.into(),
+                            updated_at: session.updated_at,
+                        }
+                    })
+                    .collect();
+                match projection.catalog {
+                    Some(catalog) => {
+                        let workspaces = catalog
+                            .workspaces
+                            .into_iter()
+                            .map(|workspace| {
+                                let active_runs = state
+                                    .active_runs
+                                    .iter()
+                                    .filter(|run| run.root == workspace.canonical_root)
+                                    .count();
+                                let recent_runs = state
+                                    .recent_runs
+                                    .iter()
+                                    .filter(|run| run.root == workspace.canonical_root)
+                                    .count();
+                                DashboardWorkspace {
+                                    selected: catalog.selected_workspace_id.as_deref()
+                                        == Some(workspace.workspace_id.as_str()),
+                                    workspace_id: workspace.workspace_id,
+                                    title: workspace.display_label,
+                                    root: workspace.canonical_root,
+                                    status: workspace.status,
+                                    active_runs,
+                                    recent_runs,
+                                    updated_at: workspace.updated_at,
+                                }
+                            })
+                            .collect();
+                        ("available".into(), String::new(), workspaces, sessions)
+                    }
+                    None => (
+                        "not_initialized".into(),
+                        String::new(),
+                        Vec::new(),
+                        sessions,
+                    ),
+                }
+            }
+            Err(error) => {
+                let message = error.to_string();
+                warnings.push(format!("Workspace data unavailable: {message}"));
+                ("unavailable".into(), message, Vec::new(), Vec::new())
+            }
+        };
+
     DashboardData {
+        server_status: "healthy".into(),
         control_plane: state.control_plane,
+        control_status,
+        control_error,
         generated_at: state.generated_at,
+        workspace_status,
+        workspace_error,
+        workspaces,
+        sessions,
         settlement: DashboardSettlement {
             scope: serde_json::to_value(settlement.scope)
                 .ok()
@@ -210,15 +362,171 @@ fn load_dashboard_data_from(
         stalled_runs: state.stalled_runs.into_iter().map(run_summary).collect(),
         recent_runs: state.recent_runs.into_iter().map(run_summary).collect(),
         lifecycle_runs: lifecycle_runs.into_iter().map(lifecycle_summary).collect(),
-        warnings: state.warnings,
+        warnings,
         events: state.events.into_iter().map(event_summary).collect(),
         loctree_report,
     }
 }
 
+fn encode_dashboard_embed(data: &DashboardData) -> String {
+    serde_json::to_string(data)
+        .unwrap_or_else(|_| "{}".to_string())
+        .replace('<', "\\u003c")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
+#[cfg(any(test, not(feature = "ssr")))]
+fn decode_dashboard_embed(json: &str) -> Option<DashboardData> {
+    let data: DashboardData = serde_json::from_str(json).ok()?;
+    if data == DashboardData::default() {
+        return None;
+    }
+    Some(data)
+}
+
+fn dashboard_embed_script(json: String) -> impl IntoView {
+    view! {
+        <script id=DASHBOARD_EMBED_ID type="application/json" inner_html=json></script>
+    }
+}
+
+#[cfg(feature = "ssr")]
+pub(crate) async fn dashboard_api() -> axum::Json<DashboardData> {
+    axum::Json(load_dashboard_data())
+}
+
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
+std::thread_local! {
+    static CLIENT_DASHBOARD: std::cell::RefCell<Option<DashboardData>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
+fn store_client_dashboard(data: DashboardData) {
+    if data == DashboardData::default() {
+        return;
+    }
+    CLIENT_DASHBOARD.with(|slot| *slot.borrow_mut() = Some(data));
+}
+
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
+fn client_dashboard_now() -> Option<DashboardData> {
+    CLIENT_DASHBOARD.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
+fn read_embedded_dashboard() -> Option<DashboardData> {
+    let document = web_sys::window()?.document()?;
+    let json = document
+        .get_element_by_id(DASHBOARD_EMBED_ID)?
+        .text_content()
+        .filter(|text| !text.trim().is_empty())?;
+    decode_dashboard_embed(&json)
+}
+
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
+fn hydrate_dashboard_cache() {
+    if client_dashboard_now().is_some() {
+        return;
+    }
+    if let Some(data) = read_embedded_dashboard() {
+        store_client_dashboard(data);
+    }
+}
+
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
+async fn fetch_dashboard() -> Option<DashboardData> {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen_futures::JsFuture;
+
+    let window = web_sys::window()?;
+    let response = JsFuture::from(window.fetch_with_str("/api/control/dashboard"))
+        .await
+        .ok()?;
+    let response: web_sys::Response = response.dyn_into().ok()?;
+    if !response.ok() {
+        return None;
+    }
+    let json = JsFuture::from(response.text().ok()?)
+        .await
+        .ok()?
+        .as_string()?;
+    let data = decode_dashboard_embed(&json)?;
+    store_client_dashboard(data.clone());
+    Some(data)
+}
+
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
+fn refresh_client_dashboard() {
+    leptos::task::spawn_local(async {
+        let _ = fetch_dashboard().await;
+    });
+}
+
 #[cfg(not(feature = "ssr"))]
-fn load_dashboard_data() -> DashboardData {
-    DashboardData::default()
+fn dashboard_loading() -> impl IntoView {
+    view! {
+        <ServerFrame active=ServerSection::Overview status="loading control plane".to_string()>
+            <p class="control-empty">"Loading control plane…"</p>
+        </ServerFrame>
+    }
+}
+
+#[cfg(feature = "ssr")]
+fn control_dashboard(
+    render: impl Fn(DashboardData) -> AnyView + Clone + Send + Sync + 'static,
+) -> AnyView {
+    let data = load_dashboard_data();
+    let json = encode_dashboard_embed(&data);
+    view! {
+        {dashboard_embed_script(json)}
+        {render(data)}
+    }
+    .into_any()
+}
+
+#[cfg(all(feature = "hydrate", not(feature = "ssr")))]
+fn control_dashboard(
+    render: impl Fn(DashboardData) -> AnyView + Clone + Send + Sync + 'static,
+) -> AnyView {
+    hydrate_dashboard_cache();
+    if let Some(data) = client_dashboard_now() {
+        refresh_client_dashboard();
+        let json = encode_dashboard_embed(&data);
+        return view! {
+            {dashboard_embed_script(json)}
+            {render(data)}
+        }
+        .into_any();
+    }
+
+    let render_view = render.clone();
+    let dashboard = LocalResource::new(fetch_dashboard);
+    view! {
+        <Suspense fallback=move || dashboard_loading().into_any()>
+            {move || {
+                let render_view = render_view.clone();
+                dashboard.get().flatten().map(move |data| {
+                    let json = encode_dashboard_embed(&data);
+                    view! {
+                        {dashboard_embed_script(json)}
+                        {render_view(data)}
+                    }
+                    .into_any()
+                })
+            }}
+        </Suspense>
+    }
+    .into_any()
+}
+
+#[cfg(not(any(feature = "ssr", feature = "hydrate")))]
+fn control_dashboard(
+    render: impl Fn(DashboardData) -> AnyView + Clone + Send + Sync + 'static,
+) -> AnyView {
+    let _ = render;
+    dashboard_loading().into_any()
 }
 
 fn settlement_badge(tui: &str) -> String {
@@ -450,15 +758,20 @@ pub fn shell(_options: leptos::config::LeptosOptions) -> impl IntoView {
 #[component]
 pub fn App() -> impl IntoView {
     leptos_meta::provide_meta_context();
+    #[cfg(all(feature = "hydrate", not(feature = "ssr")))]
+    hydrate_dashboard_cache();
 
     view! {
         <Router>
             <Routes fallback=NotFoundPage>
                 <Route path=path!("/") view=ConsolePage />
+                <Route path=path!("/workspaces") view=WorkspacesPage />
+                <Route path=path!("/sessions") view=SessionsPage />
                 <Route path=path!("/runs") view=RunsPage />
                 <Route path=path!("/lifecycle") view=LifecyclePage />
                 <Route path=path!("/activity") view=ActivityPage />
                 <Route path=path!("/structure") view=StructurePage />
+                <Route path=path!("/guide") view=GuidePage />
                 <Route path=path!("/run/:run_id") view=RunDetailPage />
             </Routes>
         </Router>
@@ -467,15 +780,13 @@ pub fn App() -> impl IntoView {
 
 #[component]
 pub fn ConsolePage() -> impl IntoView {
-    let dashboard = load_dashboard_data();
-
     view! {
         <Title text="vc-server - control plane" />
         <Meta name="description" content="Vibecrafted control-plane dashboard." />
         <Meta name="theme-color" content="#0a0a0b" />
         <Link rel="preload" as_="font" type_="font/woff2" href="/fonts/inter-var-latin.woff2" crossorigin="anonymous" />
         <Link rel="preload" as_="font" type_="font/woff2" href="/fonts/jetbrains-mono-var-latin.woff2" crossorigin="anonymous" />
-        {console_dashboard(dashboard)}
+        {control_dashboard(|dashboard| console_dashboard(dashboard).into_any())}
     }
 }
 
@@ -491,15 +802,17 @@ fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
     let recent_count = dashboard.recent_runs.len();
     let warning_count = dashboard.warnings.len();
     let action_count = action_runs.len();
+    let workspace_count = dashboard.workspaces.len();
+    let workspace_status = dashboard.workspace_status;
+    let server_status = dashboard.server_status;
 
     let settlement = dashboard.settlement;
-    let attention_count = settlement.n;
     let has_loctree_report = !loctree_report.is_empty();
 
     view! {
         <ServerFrame
             active=ServerSection::Overview
-            status=format!("{active_count} live · {attention_count} attention")
+            status=format!("{server_status} · {active_count} live")
         >
             <div class="server-console-shell">
                 <section class="server-console-hero" id="now">
@@ -513,6 +826,12 @@ fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
                             <p class="server-console-links">
                                 <a class="server-console-link server-console-link-primary" href="/runs">
                                     "Inspect live runs"
+                                </a>
+                                <a class="server-console-link" href="/workspaces">
+                                    "Workspaces"
+                                </a>
+                                <a class="server-console-link" href="/sessions">
+                                    "Sessions"
                                 </a>
                                 <a class="server-console-link" href="/lifecycle">
                                     "Lifecycle decisions"
@@ -557,7 +876,14 @@ fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
                                     <dt>"recent"</dt>
                                     <dd>{recent_count}</dd>
                                 </a>
+                                <a class="operator-summary-cell" href="/workspaces">
+                                    <dt>"workspaces"</dt>
+                                    <dd>{workspace_count}</dd>
+                                </a>
                             </dl>
+                            <p class="control-plane-meta">
+                                <span>"workspace data"</span><span>{workspace_status}</span>
+                            </p>
                         </aside>
                     </div>
                 </section>
@@ -605,10 +931,151 @@ fn route_header(
     }
 }
 
+fn workspace_cards(workspaces: Vec<DashboardWorkspace>) -> impl IntoView {
+    workspaces
+        .into_iter()
+        .map(|workspace| {
+            let selection = workspace.selected.then_some("selected");
+            let workspace_id_attr = workspace.workspace_id.clone();
+            view! {
+                <article class="workspace-card" data-workspace-id=workspace_id_attr>
+                    <div class="control-run-primary">
+                        <strong class="workspace-title">{workspace.title}</strong>
+                        <code class="control-run-root">{workspace.root}</code>
+                    </div>
+                    <div class="control-run-tags">
+                        <span class="control-badge">{workspace.status}</span>
+                        {selection.map(|label| view! { <span class="control-badge">{label}</span> })}
+                        <span class="control-badge">{format!("{} live", workspace.active_runs)}</span>
+                        <span class="control-badge">{format!("{} recent", workspace.recent_runs)}</span>
+                    </div>
+                    <div class="control-run-meta">
+                        <span>{workspace.workspace_id}</span>
+                        <span>{workspace.updated_at}</span>
+                    </div>
+                </article>
+            }
+        })
+        .collect_view()
+}
+
+fn session_cards(sessions: Vec<DashboardSession>) -> impl IntoView {
+    sessions
+        .into_iter()
+        .map(|session| {
+            let session_id_attr = session.session_id.clone();
+            view! {
+                <article class="workspace-card" data-session-id=session_id_attr>
+                    <div class="control-run-primary">
+                        <strong class="workspace-title">{session.workspace_title}</strong>
+                        <span class="control-run-root">{session.runtime}</span>
+                    </div>
+                    <div class="control-run-tags">
+                        <span class="control-badge">{session.state}</span>
+                        <span class="control-badge">{format!("instance {}", session.workspace_instance_id)}</span>
+                    </div>
+                    <div class="control-run-meta">
+                        <span>{session.session_id}</span>
+                        <span>{session.workspace_id}</span>
+                        <span>{session.updated_at}</span>
+                    </div>
+                </article>
+            }
+        })
+        .collect_view()
+}
+
+#[component]
+pub fn WorkspacesPage() -> impl IntoView {
+    view! {
+        <Title text="workspaces - vc-server" />
+        <Meta name="description" content="Canonical Vibecrafted workspace identities and activity." />
+        {control_dashboard(|dashboard| workspaces_dashboard(dashboard).into_any())}
+    }
+}
+
+fn workspaces_dashboard(dashboard: DashboardData) -> impl IntoView {
+    let status = dashboard.workspace_status;
+    let error = dashboard.workspace_error;
+    let workspaces = dashboard.workspaces;
+    let count = workspaces.len();
+    let not_initialized = status == "not_initialized";
+    let unavailable = status == "unavailable";
+    view! {
+        <ServerFrame active=ServerSection::Workspaces status=format!("{count} workspaces")>
+            <div class="server-console-shell route-page-shell">
+                {route_header("Workspace", "Workspaces", "Durable identities from the canonical workspace catalog, with human labels, repository roots, and current run activity.")}
+                <section class="control-panel control-panel-wide" aria-label="Canonical workspaces" data-source-status=status.clone()>
+                    <div class="control-panel-head"><h2>"Workspace catalog"</h2><span>{status.clone()}</span></div>
+                    {not_initialized.then(|| view! {
+                        <p class="control-empty">
+                            "No workspace catalog exists yet. Create or select a workspace with the Vibecrafted workspace command; the server will project it here without inventing defaults."
+                        </p>
+                    })}
+                    {unavailable.then(|| view! {
+                        <p class="control-empty control-error">
+                            {format!("Workspace data is unavailable: {error}")}
+                        </p>
+                    })}
+                    {(count == 0 && !not_initialized && !unavailable).then(|| view! {
+                        <p class="control-empty">
+                            "The canonical catalog is healthy and contains no workspaces."
+                        </p>
+                    })}
+                    <div class="workspace-card-list">{workspace_cards(workspaces)}</div>
+                </section>
+            </div>
+        </ServerFrame>
+    }
+}
+
+#[component]
+pub fn SessionsPage() -> impl IntoView {
+    view! {
+        <Title text="sessions - vc-server" />
+        <Meta name="description" content="Canonical workspace session attachments." />
+        {control_dashboard(|dashboard| sessions_dashboard(dashboard).into_any())}
+    }
+}
+
+fn sessions_dashboard(dashboard: DashboardData) -> impl IntoView {
+    let source_status = dashboard.workspace_status;
+    let error = dashboard.workspace_error;
+    let sessions = dashboard.sessions;
+    let count = sessions.len();
+    let unavailable = source_status == "unavailable";
+    view! {
+        <ServerFrame active=ServerSection::Sessions status=format!("{count} sessions")>
+            <div class="server-console-shell route-page-shell">
+                {route_header("Workspace", "Sessions", "Logical workspace sessions and their real runtime attachments from canonical session records.")}
+                <section class="control-panel control-panel-wide" aria-label="Canonical sessions" data-source-status=source_status>
+                    <div class="control-panel-head"><h2>"Session attachments"</h2><span>{count}</span></div>
+                    <p class="control-empty control-error" hidden={!unavailable}>
+                        {format!("Session data is unavailable: {error}")}
+                    </p>
+                    <p class="control-empty" hidden={count != 0 || unavailable}>
+                        "No canonical workspace sessions are recorded."
+                    </p>
+                    <div class="workspace-card-list">{session_cards(sessions)}</div>
+                </section>
+            </div>
+        </ServerFrame>
+    }
+}
+
 #[component]
 pub fn RunsPage() -> impl IntoView {
-    let dashboard = load_dashboard_data();
+    view! {
+        <Title text="live runs - vc-server" />
+        <Meta name="description" content="Current agents and their human transcript tails." />
+        {control_dashboard(|dashboard| runs_dashboard(dashboard).into_any())}
+    }
+}
+
+fn runs_dashboard(dashboard: DashboardData) -> impl IntoView {
     let control_plane = dashboard.control_plane;
+    let control_status = dashboard.control_status;
+    let control_error = dashboard.control_error;
     let generated_at = dashboard.generated_at;
     let active = operator_active_runs(dashboard.active_runs);
     let stalled = dashboard.stalled_runs;
@@ -616,27 +1083,34 @@ pub fn RunsPage() -> impl IntoView {
     let active_count = active.len();
     let stalled_count = stalled.len();
     let recent_count = recent.len();
+    let not_initialized = control_status == "not_initialized";
+    let unavailable = control_status == "unavailable";
+    let available = control_status == "available";
 
     view! {
-        <Title text="live runs - vc-server" />
-        <Meta name="description" content="Current agents and their human transcript tails." />
         <ServerFrame active=ServerSection::Runs status=format!("{active_count} live")>
             <div class="server-console-shell route-page-shell">
                 {route_header("Runtime", "Live runs", "Choose a current agent to open its bounded transcript.human.log tail and full control-plane detail.")}
-                <p class="control-plane-meta"><span>{control_plane}</span><span>{generated_at}</span></p>
-                <section class="control-panel control-panel-wide" aria-label="Active runs">
+                <p class="control-plane-meta"><span>{control_plane}</span><span>{generated_at}</span><span>{control_status.clone()}</span></p>
+                {not_initialized.then(|| view! {
+                    <p class="control-empty">"The server is healthy, but the control plane is not initialized yet."</p>
+                })}
+                {unavailable.then(|| view! {
+                    <p class="control-empty control-error">{format!("Control-plane data is unavailable: {control_error}")}</p>
+                })}
+                <section class="control-panel control-panel-wide" aria-label="Active runs" data-source-status=control_status>
                     <div class="control-panel-head"><h2>"Current agents"</h2><span>{active_count}</span></div>
-                    <p class="control-empty" hidden={active_count != 0}>"No live agents right now."</p>
+                    {(available && active_count == 0).then(|| view! { <p class="control-empty">"No live agents right now."</p> })}
                     <div class="control-run-list">{run_cards(active)}</div>
                 </section>
                 <section class="control-panel control-panel-wide" aria-label="Stalled runs">
                     <div class="control-panel-head"><h2>"Stalled"</h2><span>{stalled_count}</span></div>
-                    <p class="control-empty" hidden={stalled_count != 0}>"No stalled runs."</p>
+                    {(available && stalled_count == 0).then(|| view! { <p class="control-empty">"No stalled runs."</p> })}
                     <div class="control-run-list">{run_cards(stalled)}</div>
                 </section>
                 <section class="control-panel control-panel-wide" aria-label="Recent state view">
                     <div class="control-panel-head"><h2>"Recent truth"</h2><span>{recent_count}</span></div>
-                    <p class="control-empty" hidden={recent_count != 0}>"No recent settled runs."</p>
+                    {(available && recent_count == 0).then(|| view! { <p class="control-empty">"No recent settled runs."</p> })}
                     <div class="control-run-list">{run_cards(recent)}</div>
                 </section>
             </div>
@@ -646,12 +1120,17 @@ pub fn RunsPage() -> impl IntoView {
 
 #[component]
 pub fn LifecyclePage() -> impl IntoView {
-    let dashboard = load_dashboard_data();
-    let actions = operator_action_runs(dashboard.lifecycle_runs);
-    let count = actions.len();
     view! {
         <Title text="lifecycle - vc-server" />
         <Meta name="description" content="Lifecycle batons that need an operator decision." />
+        {control_dashboard(|dashboard| lifecycle_dashboard(dashboard).into_any())}
+    }
+}
+
+fn lifecycle_dashboard(dashboard: DashboardData) -> impl IntoView {
+    let actions = operator_action_runs(dashboard.lifecycle_runs);
+    let count = actions.len();
+    view! {
         <ServerFrame active=ServerSection::Lifecycle status=format!("{count} next")>
             <div class="server-console-shell route-page-shell">
                 {route_header("Control plane", "Lifecycle", "Open a baton to inspect its current stage, next agent, controls, and delivery state.")}
@@ -667,14 +1146,19 @@ pub fn LifecyclePage() -> impl IntoView {
 
 #[component]
 pub fn ActivityPage() -> impl IntoView {
-    let dashboard = load_dashboard_data();
+    view! {
+        <Title text="activity - vc-server" />
+        <Meta name="description" content="Warnings and current control-plane event tail." />
+        {control_dashboard(|dashboard| activity_dashboard(dashboard).into_any())}
+    }
+}
+
+fn activity_dashboard(dashboard: DashboardData) -> impl IntoView {
     let warnings = dashboard.warnings;
     let events = dashboard.events;
     let warning_count = warnings.len();
     let event_count = events.len();
     view! {
-        <Title text="activity - vc-server" />
-        <Meta name="description" content="Warnings and current control-plane event tail." />
         <ServerFrame active=ServerSection::Activity status=format!("{warning_count} warnings")>
             <div class="server-console-shell route-page-shell">
                 {route_header("Runtime", "Activity", "Warnings and the current event tail, separated from agent selection and lifecycle decisions.")}
@@ -695,12 +1179,17 @@ pub fn ActivityPage() -> impl IntoView {
 
 #[component]
 pub fn StructurePage() -> impl IntoView {
-    let dashboard = load_dashboard_data();
-    let report = dashboard.loctree_report;
-    let has_report = !report.is_empty();
     view! {
         <Title text="structure - vc-server" />
         <Meta name="description" content="Current structural evidence and scaffold entry points." />
+        {control_dashboard(|dashboard| structure_dashboard(dashboard).into_any())}
+    }
+}
+
+fn structure_dashboard(dashboard: DashboardData) -> impl IntoView {
+    let report = dashboard.loctree_report;
+    let has_report = !report.is_empty();
+    view! {
         <ServerFrame active=ServerSection::Structure status="structural evidence".to_string()>
             <div class="server-console-shell route-page-shell">
                 {route_header("Repository", "Structure", "Structural evidence is shown as runtime truth. Local filesystem paths are never emitted as broken browser links.")}
@@ -710,6 +1199,34 @@ pub fn StructurePage() -> impl IntoView {
                     <p class="control-empty" hidden=has_report>"No Loctree report is known for the roots in the canonical state view."</p>
                     <p class="server-console-links"><a class="server-console-link server-console-link-primary" href="/scaffold">"Open scaffold studio"</a></p>
                 </section>
+            </div>
+        </ServerFrame>
+    }
+}
+
+#[component]
+pub fn GuidePage() -> impl IntoView {
+    view! {
+        <Title text="guide - vc-server" />
+        <Meta name="description" content="Truthful operator paths for Vibecrafted server." />
+        <ServerFrame active=ServerSection::Guide status="operator guide".to_string()>
+            <div class="server-console-shell route-page-shell">
+                {route_header("Guide", "From workspace to delivery", "The server is a projection of canonical state. It does not create a second scheduler or claim actions that have no server transition.")}
+                <section class="control-panel control-panel-wide" aria-label="Operator path">
+                    <div class="control-panel-head"><h2>"Product path"</h2><span>"canonical"</span></div>
+                    <ol class="operator-guide-list">
+                        <li><strong>"Workspace"</strong><span>"Create or select durable identity with the Vibecrafted workspace command, then verify it under Workspaces."</span></li>
+                        <li><strong>"Sessions"</strong><span>"Inspect the logical session and its real runtime attachment."</span></li>
+                        <li><strong>"Agent Manager"</strong><span>"Open live and historical runs from the control-plane projection."</span></li>
+                        <li><strong>"Plans"</strong><span>"Review exactly one active Scaffold document in the studio shell."</span></li>
+                        <li><strong>"Dispatch"</strong><span>"Use the validated scaffold dispatch artifact through /vc-ship. This server intentionally exposes no fake launch button while a canonical server action endpoint is absent."</span></li>
+                    </ol>
+                </section>
+                <p class="server-console-links">
+                    <a class="server-console-link server-console-link-primary" href="/workspaces">"Open workspaces"</a>
+                    <a class="server-console-link" href="/runs">"Open Agent Manager"</a>
+                    <a class="server-console-link" href="/scaffold">"Open plans"</a>
+                </p>
             </div>
         </ServerFrame>
     }
@@ -732,20 +1249,29 @@ pub fn NotFoundPage() -> impl IntoView {
 mod tests {
     use std::fs;
     use std::io::ErrorKind;
+    use std::net::SocketAddr;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
     use chrono::Utc;
     use control_core::ControlPlane;
+    use leptos::config::{Env, LeptosOptions};
     use leptos::prelude::*;
     use serde_json::{Value, json};
+    use tower::ServiceExt;
 
     use super::{
-        ActivityPage, DashboardRun, LifecyclePage, RunsPage, StructurePage, console_dashboard,
-        load_dashboard_data_from, operator_active_runs, run_cards,
+        ActivityPage, ConsolePage, DashboardData, DashboardRun, LifecyclePage, RunsPage,
+        SessionsPage, StructurePage, WorkspacesPage, console_dashboard, decode_dashboard_embed,
+        encode_dashboard_embed, load_dashboard_data_from, operator_active_runs, run_cards,
+        workspaces_dashboard,
     };
-    use crate::control::api::state_payload;
+    use crate::control::api::{control_routes, state_payload};
     use crate::theme::provide_theme_context;
+
+    static DASHBOARD_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn temp_home() -> PathBuf {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
@@ -806,6 +1332,96 @@ mod tests {
             serde_json::to_vec_pretty(&payload).expect("snapshot JSON"),
         )
         .expect("write snapshot");
+    }
+
+    fn write_workspace_catalog(home: &Path, schema: &str) {
+        let root = home.join("control_plane/workspaces");
+        fs::create_dir_all(root.join("sessions")).expect("workspace dirs");
+        fs::write(
+            root.join("catalog.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schema": schema,
+                "updated_at": "2026-08-27T10:00:00Z",
+                "selected_workspace_id": "0198f84e-1234-7abc-8def-1234567890ab",
+                "workspaces": {
+                    "0198f84e-1234-7abc-8def-1234567890ab": {
+                        "schema": "vibecrafted.workspace.v1",
+                        "workspace_id": "0198f84e-1234-7abc-8def-1234567890ab",
+                        "display_label": "Vibecrafted Product",
+                        "canonical_root": "/work/vibecrafted",
+                        "status": "active",
+                        "updated_at": "2026-08-27T10:00:00Z"
+                    }
+                }
+            }))
+            .expect("catalog JSON"),
+        )
+        .expect("catalog");
+    }
+
+    #[test]
+    fn workspace_page_renders_real_catalog_identity_and_activity() {
+        let home = temp_home();
+        let runs_dir = home.join("control_plane/runs");
+        fs::create_dir_all(&runs_dir).expect("runs dir");
+        write_snapshot(&runs_dir, "workspace-run", "finalized", "f");
+        let mut snapshot: Value = serde_json::from_slice(
+            &fs::read(runs_dir.join("workspace-run.json")).expect("snapshot"),
+        )
+        .expect("snapshot JSON");
+        snapshot["root"] = Value::String("/work/vibecrafted".into());
+        fs::write(
+            runs_dir.join("workspace-run.json"),
+            serde_json::to_vec_pretty(&snapshot).expect("snapshot JSON"),
+        )
+        .expect("snapshot");
+        write_workspace_catalog(&home, "vibecrafted.workspace-catalog.v1");
+
+        let plane = ControlPlane::new(&home);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-27T10:30:00Z")
+            .expect("fixed now")
+            .with_timezone(&Utc);
+        let dashboard = load_dashboard_data_from(&plane, now);
+        let owner = Owner::new();
+        let html = owner.with(|| {
+            provide_theme_context();
+            workspaces_dashboard(dashboard).to_html()
+        });
+
+        assert!(html.contains("Vibecrafted Product"));
+        assert!(html.contains("/work/vibecrafted"));
+        assert!(html.contains("0198f84e-1234-7abc-8def-1234567890ab"));
+        assert!(html.contains("1 recent"));
+        assert!(html.contains("data-source-status=\"available\""));
+        fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn malformed_workspace_catalog_cannot_masquerade_as_healthy_empty_data() {
+        let home = temp_home();
+        write_workspace_catalog(&home, "demo.workspace-catalog");
+        let plane = ControlPlane::new(&home);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-27T10:30:00Z")
+            .expect("fixed now")
+            .with_timezone(&Utc);
+        let dashboard = load_dashboard_data_from(&plane, now);
+        assert_eq!(dashboard.workspace_status, "unavailable");
+        assert!(dashboard.workspaces.is_empty());
+        assert!(
+            dashboard
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("Workspace data unavailable"))
+        );
+        let owner = Owner::new();
+        let html = owner.with(|| {
+            provide_theme_context();
+            workspaces_dashboard(dashboard).to_html()
+        });
+        assert!(html.contains("data-source-status=\"unavailable\""));
+        assert!(html.contains("unsupported workspace catalog schema"));
+        assert!(!html.contains("canonical catalog is healthy"));
+        fs::remove_dir_all(home).ok();
     }
 
     #[test]
@@ -898,7 +1514,7 @@ mod tests {
     #[test]
     fn navigation_uses_dedicated_views_and_run_cards_open_human_transcripts() {
         let owner = Owner::new();
-        let (runs, lifecycle, activity, structure, card) = owner.with(|| {
+        let (workspaces, sessions, runs, lifecycle, activity, structure, card) = owner.with(|| {
             leptos_meta::provide_meta_context();
             provide_theme_context();
             let card = run_cards(vec![DashboardRun {
@@ -910,6 +1526,8 @@ mod tests {
             }])
             .to_html();
             (
+                WorkspacesPage().to_html(),
+                SessionsPage().to_html(),
                 RunsPage().to_html(),
                 LifecyclePage().to_html(),
                 ActivityPage().to_html(),
@@ -918,6 +1536,8 @@ mod tests {
             )
         });
 
+        assert!(workspaces.contains("Workspace catalog"));
+        assert!(sessions.contains("Session attachments"));
         assert!(runs.contains("Live runs"));
         assert!(runs.contains("Current agents"));
         assert!(runs.contains("transcript.human.log"));
@@ -957,5 +1577,124 @@ mod tests {
 
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].run_id, "real-worker");
+    }
+
+    #[test]
+    fn client_dashboard_wire_payload_is_not_default_and_survives_script_embed() {
+        let home = temp_home();
+        let runs_dir = home.join("control_plane/runs");
+        fs::create_dir_all(&runs_dir).expect("runs dir");
+        write_snapshot(&runs_dir, "finalized", "finalized", "f");
+        write_snapshot(&runs_dir, "failed", "failed", "x");
+        write_snapshot(&runs_dir, "attention", "needs_attention", "n");
+
+        let plane = ControlPlane::new(&home);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-22T12:30:00+00:00")
+            .expect("fixed now")
+            .with_timezone(&Utc);
+        let dashboard = load_dashboard_data_from(&plane, now);
+        assert_ne!(
+            dashboard,
+            DashboardData::default(),
+            "SSR/client payload must carry control-plane truth, not DashboardData::default zeros"
+        );
+        assert_eq!(dashboard.settlement.f, 1);
+        assert_eq!(dashboard.settlement.x, 1);
+        assert_eq!(dashboard.settlement.n, 1);
+
+        let restored: DashboardData =
+            serde_json::from_str(&serde_json::to_string(&dashboard).expect("serialize dashboard"))
+                .expect("deserialize dashboard");
+        assert_eq!(restored.settlement, dashboard.settlement);
+        assert_eq!(restored.recent_runs.len(), dashboard.recent_runs.len());
+        assert_eq!(
+            decode_dashboard_embed(&encode_dashboard_embed(&dashboard)).as_ref(),
+            Some(&dashboard)
+        );
+
+        let mut hostile = dashboard.clone();
+        hostile
+            .warnings
+            .push("click <script>alert(1)</script>".into());
+        let embed = encode_dashboard_embed(&hostile);
+        assert!(
+            !embed.contains('<'),
+            "embedded JSON must not break out of <script>: {embed}"
+        );
+        let decoded = decode_dashboard_embed(&embed).expect("script-safe embed");
+        assert_eq!(decoded.warnings, hostile.warnings);
+        assert_eq!(
+            decode_dashboard_embed(&encode_dashboard_embed(&DashboardData::default())),
+            None,
+            "default zeros must not be treated as a hydrated control-plane payload"
+        );
+
+        fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn ssr_console_embeds_dashboard_json_instead_of_client_zeros() {
+        let owner = Owner::new();
+        let html = owner.with(|| {
+            leptos_meta::provide_meta_context();
+            provide_theme_context();
+            ConsolePage().to_html()
+        });
+        assert!(html.contains("id=\"vc-dashboard-data\""));
+        assert!(html.contains("type=\"application/json\""));
+        assert!(!html.contains("Loading control plane"));
+        assert!(html.contains("Control plane"));
+    }
+
+    #[tokio::test]
+    async fn dashboard_http_route_returns_ssr_payload_not_default() {
+        let _guard = DASHBOARD_ENV_LOCK.lock().await;
+        let home = temp_home();
+        let runs_dir = home.join("control_plane/runs");
+        fs::create_dir_all(&runs_dir).expect("runs dir");
+        write_snapshot(&runs_dir, "finalized", "finalized", "f");
+        write_snapshot(&runs_dir, "failed", "failed", "x");
+        write_snapshot(&runs_dir, "attention", "needs_attention", "n");
+        // Safety: process-global env is serialised by DASHBOARD_ENV_LOCK.
+        unsafe {
+            std::env::set_var("VIBECRAFTED_HOME", &home);
+        }
+
+        let opts = LeptosOptions::builder()
+            .output_name("vibecrafted-server-web-test")
+            .site_root("target/site-test")
+            .site_pkg_dir("pkg")
+            .env(Env::PROD)
+            .site_addr("127.0.0.1:0".parse::<SocketAddr>().expect("addr"))
+            .reload_port(0)
+            .build();
+        let response = control_routes()
+            .with_state(opts)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/control/dashboard")
+                    .body(Body::empty())
+                    .expect("dashboard request"),
+            )
+            .await
+            .expect("dashboard response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("dashboard body");
+        let payload: DashboardData = serde_json::from_slice(&body).expect("dashboard JSON");
+        assert_ne!(payload, DashboardData::default());
+        assert_eq!(payload.settlement.f, 1);
+        assert_eq!(payload.settlement.x, 1);
+        assert_eq!(payload.settlement.n, 1);
+        assert_eq!(
+            decode_dashboard_embed(&encode_dashboard_embed(&payload)).as_ref(),
+            Some(&payload)
+        );
+
+        unsafe {
+            std::env::remove_var("VIBECRAFTED_HOME");
+        }
+        fs::remove_dir_all(home).ok();
     }
 }

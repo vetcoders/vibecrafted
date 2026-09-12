@@ -58,7 +58,7 @@ def _dry_run_launcher(tmp_path: Path, agent: str) -> Path:
 
 
 def test_command_deck_exposes_agy_junie_and_grok_help_topics() -> None:
-    for agent in ("agy", "junie", "grok"):
+    for agent in ("agy", "junie", "grok", "cursor"):
         result = subprocess.run(
             [str(LAUNCHER), "help", agent],
             check=True,
@@ -138,8 +138,23 @@ def test_grok_spawn_dry_run_uses_prompt_file_contract(tmp_path: Path) -> None:
     # resume flag shape covered in dedicated grok test below (source contract)
 
 
+def test_cursor_spawn_dry_run_uses_stream_json_stdin_contract(
+    tmp_path: Path,
+) -> None:
+    launcher = _dry_run_launcher(tmp_path, "cursor")
+    text = launcher.read_text(encoding="utf-8")
+
+    # cursor-agent headless contract: `-p` reads the prompt from stdin,
+    # stream-json events tee'd into the transcript, --force --trust mirror
+    # the headless bypass policy used by the other fleet wrappers.
+    assert "SPAWN_AGENT=cursor" in text
+    assert "cursor-agent -p --output-format stream-json --force --trust" in text
+    assert "tee -a" in text
+    assert "Cursor failed before writing a standalone report file" in text
+
+
 def test_dry_run_meta_records_new_agents(tmp_path: Path) -> None:
-    for agent in ("agy", "junie", "grok"):
+    for agent in ("agy", "junie", "grok", "cursor"):
         launcher = _dry_run_launcher(tmp_path / agent, agent)
         meta_line = next(
             line

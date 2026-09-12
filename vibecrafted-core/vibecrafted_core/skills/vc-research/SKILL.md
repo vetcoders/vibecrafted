@@ -150,7 +150,7 @@ Create one plan file. Every agent receives this plan:
 ```markdown
 ---
 run_id: <generated-unique-id>
-agent: <claude|codex|agy>
+agent: <claude|codex|agy|cursor>
 skill: vc-research
 project: <repo-name>
 status: in-progress

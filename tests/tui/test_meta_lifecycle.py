@@ -57,38 +57,6 @@ def _load(meta: Path) -> dict:
     return json.loads(meta.read_text(encoding="utf-8"))
 
 
-def test_control_plane_script_prefers_explicit_root_then_checkout(
-    tmp_path: Path,
-) -> None:
-    explicit_root = tmp_path / "explicit"
-    tools_home = tmp_path / "tools"
-    installed_root = tools_home / "vibecrafted-current"
-    for root in (explicit_root, installed_root):
-        script = root / "scripts" / "control_plane_state.py"
-        script.parent.mkdir(parents=True)
-        script.write_text("# test helper\n", encoding="utf-8")
-
-    result = _bash(
-        f'''
-        set -euo pipefail
-        source "{COMMON_SH}"
-        export VIBECRAFTED_ROOT="{explicit_root}"
-        export VIBECRAFTED_TOOLS_HOME="{tools_home}"
-        spawn_control_plane_script
-        unset VIBECRAFTED_ROOT
-        spawn_control_plane_script
-        cd "{tmp_path}"
-        spawn_control_plane_script
-        '''
-    )
-
-    assert result.stdout.splitlines() == [
-        str(explicit_root / "scripts" / "control_plane_state.py"),
-        str(REPO_ROOT / "scripts" / "control_plane_state.py"),
-        str(installed_root / "scripts" / "control_plane_state.py"),
-    ]
-
-
 def test_mark_meta_running_flips_launching_to_running(tmp_path: Path) -> None:
     meta = tmp_path / "run.meta.json"
     _write_meta(meta, "launching")

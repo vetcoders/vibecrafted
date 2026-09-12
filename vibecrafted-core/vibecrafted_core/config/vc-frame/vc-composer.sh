@@ -18,9 +18,7 @@
 # the number of -c / +cmd arguments (~10) and dies with:
 #   Too many "+command", "-c command" or "--cmd command" arguments
 #
-# Install/symlink to:
-#   ~/.config/vetcoders/frontier/vc-frame/vc-composer.sh
-#   or ~/.config/vc-frame/vc-composer.sh
+# Installed at: $XDG_CONFIG_HOME/vibecrafted/vc-frame/vc-composer.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,8 +27,7 @@ resolve_tool() {
   local candidate
   for candidate in \
     "${SCRIPT_DIR}/${name}" \
-    "${HOME}/.config/vetcoders/frontier/vc-frame/${name}" \
-    "${HOME}/.config/vc-frame/${name}"
+    "${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame/${name}"
   do
     if [[ -x "$candidate" ]]; then
       printf '%s\n' "$candidate"

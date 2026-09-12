@@ -124,9 +124,9 @@ def validate_ownership_matrix(matrix: dict[str, Any]) -> None:
     patterns = checkout_rule.get("forbidden_path_patterns")
     if not isinstance(patterns, list) or not patterns:
         _fail("checkout-free-install rule has no forbidden_path_patterns")
-    if "/Volumes/vc-workspace" not in patterns:
+    if "**/vc-workspace/**" not in patterns:
         _fail(
-            "checkout-free-install must forbid the /Volumes/vc-workspace checkout root"
+            "checkout-free-install must forbid vc-workspace checkouts without pinning a host root"
         )
 
     resume_rule = rules_by_id["resume-lineage"]

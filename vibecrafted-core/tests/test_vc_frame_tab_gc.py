@@ -15,6 +15,7 @@ from vibecrafted_core.run_triage import (
 from vibecrafted_core.runtime_transcript import write_runtime_transcript_manifest
 from vibecrafted_core.vc_frame_tab_gc import (
     BUCKET_SESSIONS,
+    PROTECTED_TAB_NAMES,
     LiveTab,
     close_tab,
     collect_cleanup,
@@ -28,6 +29,10 @@ from vibecrafted_core.vc_frame_tab_gc import (
 ORIGIN_INSTANCE = "1" * 32
 VIEWER_INSTANCE = "2" * 32
 VIEWER_TOKEN = "a" * 32
+
+
+def test_product_workspace_tabs_are_never_gc_candidates() -> None:
+    assert PROTECTED_TAB_NAMES == {"Start here", "Agents", "Shell", "voc"}
 
 
 def _write_json(path: Path, payload: Any) -> None:

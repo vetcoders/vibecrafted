@@ -1,9 +1,9 @@
 use crate::app::{App, AppTab, LaunchFocus};
-use crate::observe::ConsoleView;
 use crate::mission_control::{
     ActionPriority, ActionQueueItem, ActionQueueKind, ActiveDispatch, AgentStatsRow, DataQuality,
     FailureEntry, FleetHealthSignal, FleetHealthStatus, SkillStatsRow, WaveSegment, WaveState,
 };
+use crate::observe::ConsoleView;
 use crate::state::RunKind;
 use ratatui::prelude::*;
 use ratatui::style::{Color, Modifier, Style};
@@ -73,10 +73,16 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     };
     frame.render_widget(Paragraph::new(title), rows[0]);
 
+    let workspace = app
+        .config
+        .launch_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("—");
     let context = format!(
-        "mission root: {}  |  active runs: {}  |  scope: {}  |  focus: {}",
-        app.config.launch_root.to_string_lossy(),
+        "workspace: {workspace}  |  active {}  stalled {}  |  scope: {}  |  {}",
         app.active_run_count(),
+        app.stalled_run_count(),
         app.queue_scope.label(),
         app.active_tab().label()
     );
@@ -126,24 +132,22 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
     let mut items = Vec::new();
     if app.observe.runs.is_empty() {
         items.push(ListItem::new(Line::from(Span::styled(
-            "no live workers on the server",
+            "no active workers on the server",
             Style::default().fg(Color::DarkGray),
         ))));
     }
     for (index, run) in app.observe.runs.iter().enumerate() {
         let selected = index == app.observe.selected;
-        let glyph = if run.state == "stalled" || run.liveness.contains("dead") {
-            "○"
-        } else {
-            "●"
-        };
+        let glyph = if run.is_genuinely_active() { "●" } else { "○" };
         let style = if selected {
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::White)
                 .add_modifier(Modifier::BOLD)
-        } else if run.state == "stalled" {
+        } else if run.kind_label() == "stalled" {
             Style::default().fg(Color::Yellow)
+        } else if run.is_genuinely_active() {
+            Style::default().fg(Color::Green)
         } else {
             Style::default().fg(Color::Gray)
         };
@@ -152,14 +156,19 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(run.list_line(), style),
         ])));
     }
-    let title = format!(
-        " Observe · {} live ",
-        app.observe
-            .runs
-            .iter()
-            .filter(|run| run.state == "active")
-            .count()
-    );
+    let active = app
+        .observe
+        .runs
+        .iter()
+        .filter(|run| run.is_genuinely_active())
+        .count();
+    let stalled = app
+        .observe
+        .runs
+        .iter()
+        .filter(|run| run.kind_label() == "stalled")
+        .count();
+    let title = format!(" Observe · {active} active · {stalled} stalled ");
     frame.render_widget(
         List::new(items).block(
             Block::default()
@@ -191,7 +200,7 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
         body.push(Line::from(""));
         if app.observe.transcript.trim().is_empty() {
             body.push(Line::from(Span::styled(
-                "human transcript pending",
+                "No human transcript yet. Events appear here when the run writes them.",
                 Style::default().fg(Color::DarkGray),
             )));
         } else {
@@ -209,13 +218,12 @@ fn draw_observe(frame: &mut Frame, area: Rect, app: &App) {
         )));
     }
     frame.render_widget(
-        Paragraph::new(body)
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(Span::styled(" Transcript ", Style::default().fg(Color::White))),
-            ),
+        Paragraph::new(body).wrap(Wrap { trim: false }).block(
+            Block::default().borders(Borders::ALL).title(Span::styled(
+                " Transcript ",
+                Style::default().fg(Color::White),
+            )),
+        ),
         columns[1],
     );
 }
@@ -246,11 +254,9 @@ fn draw_memory_overlay(frame: &mut Frame, app: &App) {
         lines.push(Line::from(line.clone()));
     }
     frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: true }).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Memory "),
-        ),
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .block(Block::default().borders(Borders::ALL).title(" Memory ")),
         area,
     );
 }
@@ -293,7 +299,11 @@ fn draw_monitor(frame: &mut Frame, area: Rect, app: &App) {
                 "Monitor pulse",
                 vec![
                     format!("{} runs visible", app.runs.len()),
-                    format!("{} active or stalled", app.active_run_count()),
+                    format!(
+                        "{} active · {} stalled",
+                        app.active_run_count(),
+                        app.stalled_run_count()
+                    ),
                 ],
                 Color::Green,
             ),
@@ -302,12 +312,8 @@ fn draw_monitor(frame: &mut Frame, area: Rect, app: &App) {
                 app.selected_run()
                     .map(|run| {
                         vec![
-                            run.snapshot.run_id.clone(),
-                            format!(
-                                "{} / {}",
-                                run.kind.label(),
-                                run.snapshot.agent.as_deref().unwrap_or("unknown")
-                            ),
+                            run.operator_title(),
+                            format!("{}  {}", run.kind.label(), run.snapshot.run_id),
                         ]
                     })
                     .unwrap_or_else(|| {
@@ -558,7 +564,7 @@ fn draw_controls(frame: &mut Frame, area: Rect, app: &App) {
     let actions = app.deep_actions();
     let selected_action = app
         .selected_deep_action()
-        .map(|action| action.label())
+        .map(|action| action.control_label())
         .unwrap_or_else(|| "No action primed".to_string());
     let artifact_count = actions
         .iter()
@@ -585,7 +591,12 @@ fn draw_controls(frame: &mut Frame, area: Rect, app: &App) {
             (
                 "Run access",
                 app.selected_run()
-                    .map(|run| vec![run.snapshot.run_id.clone(), run.snapshot.display_state()])
+                    .map(|run| {
+                        vec![
+                            run.operator_title(),
+                            format!("{}  {}", run.kind.label(), run.snapshot.run_id),
+                        ]
+                    })
                     .unwrap_or_else(|| {
                         vec![
                             "No run selected".to_string(),
@@ -597,7 +608,7 @@ fn draw_controls(frame: &mut Frame, area: Rect, app: &App) {
             (
                 "Action deck",
                 vec![
-                    format!("{} actions available", actions.len()),
+                    format!("{} contextual actions", actions.len()),
                     selected_action,
                 ],
                 Color::Cyan,
@@ -684,27 +695,18 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
 
 fn draw_runs(frame: &mut Frame, area: Rect, app: &App, emphasize_live: bool) {
     let items: Vec<ListItem> = if app.runs.is_empty() {
-        vec![ListItem::new("No run snapshots found.")]
+        vec![ListItem::new(
+            "No actionable runs in this workspace. Press f for history/archive.",
+        )]
     } else {
         app.runs
             .iter()
             .enumerate()
             .map(|(idx, run)| {
-                let snapshot = &run.snapshot;
                 let status = status_style(run.kind);
                 let selected = idx == app.selected;
-                let label = format!(
-                    "{} {} / {} / {}",
-                    snapshot.run_id,
-                    run.kind.label(),
-                    snapshot.agent.as_deref().unwrap_or("unknown"),
-                    snapshot.mode.as_deref().unwrap_or("unknown")
-                );
-                let detail = format!(
-                    "{}  {}",
-                    run.age_label,
-                    snapshot.last_error.as_deref().unwrap_or("")
-                );
+                let label = format!("{}  {}", run.kind.label(), run.operator_title());
+                let detail = format!("{}  {}", run.age_label, run.snapshot.run_id);
                 let mut spans = vec![
                     Span::styled(label, status),
                     Span::raw("\n"),
@@ -811,7 +813,7 @@ fn draw_deep_controls(frame: &mut Frame, area: Rect, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Control actions"),
+                .title("Primary actions"),
         )
         .wrap(Wrap { trim: false });
     frame.render_widget(panel, area);
@@ -1717,10 +1719,12 @@ mod tests {
         let rendered = render_to_string(&app);
 
         assert!(rendered.contains("Monitor pulse"));
-        assert!(rendered.contains("Live queue"));
+        assert!(rendered.contains("Live · this workspace"));
         assert!(rendered.contains("Run dossier"));
         assert!(rendered.contains("Recent timeline"));
         assert!(!rendered.contains("Dispatch playbook"));
+        assert!(rendered.contains("active 2"));
+        assert!(!rendered.contains("unknown unknown"));
     }
 
     #[test]
@@ -1733,7 +1737,7 @@ mod tests {
         assert!(rendered.contains("Dispatch deck"));
         assert!(rendered.contains("Dispatch playbook"));
         assert!(rendered.contains("Launch trail"));
-        assert!(!rendered.contains("Control actions"));
+        assert!(!rendered.contains("Primary actions"));
     }
 
     #[test]
@@ -1852,9 +1856,11 @@ mod tests {
         let rendered = render_to_string(&app);
 
         assert!(rendered.contains("Action deck"));
-        assert!(rendered.contains("Control actions"));
+        assert!(rendered.contains("Primary actions"));
         assert!(rendered.contains("Artifact access"));
         assert!(rendered.contains("Selected timeline"));
         assert!(!rendered.contains("Dispatch playbook"));
+        assert!(rendered.contains("contextual actions"));
+        assert!(app.deep_actions().len() < 12);
     }
 }

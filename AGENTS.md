@@ -105,6 +105,87 @@ Repeated reports are signal, not noise.
 
 ---
 
+# Vibecrafted Feedback Loop
+
+For external users and downstream adopters, the canonical intake channel for
+Vibecrafted failures is:
+
+`~/.vibecrafted/vibecrafted/vibecrafted-fail.md`
+
+Use it for framework bugs, runtime mismatches, packaging or install failures,
+missing agent or provider support, observability gaps, UX problems, misleading
+help or documentation, and cases that forced a fallback. Append enough redacted
+evidence for the Vibecrafted team to reproduce and prioritize the failure.
+
+Inside this repository, the route depends on the agent role, not on whether the
+finding happens to fit the current task:
+
+- A dispatched Worker stays inside its brief. It captures enough evidence to
+  make the failure falsifiable and surfaces the finding to the active Operator;
+  it does not opportunistically patch adjacent scope, launch another fleet, or
+  append the downstream intake log.
+- The Operator autonomously decides whether the finding warrants a repair,
+  using the wider repository, runtime, plan, and User context available in the
+  current thread. If it does, the Operator records the decision in the
+  canonical operator `journal.md`, creates a bounded brief, actively dispatches
+  the repair into a dedicated worktree, verifies the result, and integrates it.
+  The Operator conducts the fix; it does not implement the discovered product
+  repair personally. This recovery cut may extend the active plan when the
+  Operator judges it necessary, while normal trust-boundary stop points still
+  apply.
+- Agents working in downstream repositories use this file as intake. They do
+  not enter the Vibecrafted checkout and patch it incidentally.
+
+Before logging, capture the active `vibecrafted --version`, active runtime root
+and generation, source checkout SHA when relevant, exact command and error, and
+whether the failure belongs to source, installed-runtime, packaging, or
+substrate truth. Verify executable and runtime provenance first; do not let PATH
+shadowing create a false report.
+
+### Rules
+
+- Never recreate, truncate, overwrite, reorganize, or deduplicate the log.
+- Always append at the end. Repeated reports are prioritization signal.
+- On macOS, keep the canonical file protected with the `uappnd` filesystem
+  flag. On platforms without that flag, the application-level append-only
+  contract still applies.
+- Never include secrets, tokens, credentials, PII or PHI, full private prompts,
+  customer payloads, or raw session data. Redact them and describe their shape.
+- For downstream intake, if an automatic helper is unavailable, append
+  manually. Missing tooling is not a reason to skip a legitimate blocked
+  finding.
+- Triage the backlog periodically. Settle a finding by appending a new entry
+  that references the original and records `fixed`, `superseded`, or
+  `cannot-reproduce` with evidence. Never edit or delete the historical entry.
+
+## Permanent Operator Journal
+
+Every active Operator maintains one append-only journal rooted in the current
+repository:
+
+```text
+<repo-root>/.vibecrafted/JOURNAL.md
+```
+
+The repository-local `.vibecrafted/` directory is runtime state and remains
+ignored by Git except for `JOURNAL.md`, which is deliberately tracked as the
+durable decision history for this repo. Do not introduce date-partitioned
+canonical journals or a second journal system. Run-specific reports and
+trackers may project or reference it, but they do not replace it. Record
+material dispatches, awaits, stalls, recoveries, integrations, close-outs,
+security guardrails, and every meaningful deviation from the active
+Implementation Task Plan (ITP) or Task Definition (TD), including added,
+skipped, reordered, or re-substrated cuts and why the final goal remains
+coherent.
+
+Journal actions and decisions, not negative activity. Do not record that an
+agent did not edit a file, did not switch a branch, or did not create a commit.
+Runtime metadata, Git, reports, and receipts already provide that provenance.
+Worker closing rails and routine non-actions do not belong in the operator
+journal.
+
+---
+
 # Why This Matters
 
 Loctree changes agent work from:
@@ -129,6 +210,34 @@ The goal is:
 ---
 
 # Agent Behavior Standard
+
+## Selected Implementation Substrate
+
+A single active implementation lane defaults to the shared Living Tree.
+Workers do not opportunistically create or switch branches or worktrees.
+
+Parallel fleet work uses the substrate explicitly selected by the User,
+launcher, or wave contract:
+
+- When `local worktrees` (`local-worktrees`) is selected, or the User explicitly
+  orders isolated worktrees, every worker receives its own dedicated branch and
+  worktree. The integrator alone lands those changes into the target branch.
+  Sibling sessions must not touch the main checkout.
+- Fleet worktrees live under
+  `${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/worktrees`, which defaults to
+  `~/.vibecrafted/worktrees`. They do not live inside the repository checkout
+  or under `/tmp`. Tests may select an isolated `VIBECRAFTED_HOME`.
+- When `local native` (`local-native`) or the shared Living Tree is explicitly
+  selected, parallel workers adapt to the same live tree. They re-read before
+  editing, stage only their owned files, and use the repository's commit-safe
+  discipline.
+
+The explicit current User or runtime selection wins over remembered doctrine or
+stale session history. Never infer the active mode merely from the existence of
+old worktrees.
+
+In either mode, re-read files after drift, do not revert another contributor's
+work, keep staging narrow, and never use a blind reset to recover state.
 
 ## Work From Structure Before Text
 
@@ -316,6 +425,47 @@ Do not claim confidence you have not earned.
 
 ---
 
+# Release And Install Doctrine
+
+## Never Ship Non-Notarized
+
+Founder standing order (2026-08-26). Every macOS build handed to a person is
+notarized and stapled — `--no-notarize` exists only for pipeline debugging,
+never for an artifact anyone installs. Headless notarization uses a Keychain
+profile (`NOTARY_PROFILE`, e.g. `vibecrafted-notary`); raw Apple-ID
+credentials are rejected without a TTY. An unnotarized app makes Gatekeeper
+re-assess thousands of runtime binaries on first execution (observed:
+`syspolicyd` at 192% CPU).
+
+## Own Only Your Namespace
+
+The runtime install publishes launchers only for names Vibecrafted owns
+(`vc-*`, `vibecrafted*`, `vibecraft`, `telemetry`). Bundled public tools
+(loct, loctree*, aicx*, prview, screenscribe) stay generation-private, full
+stop — never a `vibecrafted-<name>` wrapper on the user's PATH. Vibecrafted
+is a guest on the operator's machine, not its landlord: the user's own PATH
+install always wins, and when a foundation is missing the fix is its
+canonical upstream release (e.g. `curl -fsSL https://loct.io/install.sh |
+sh`), not a vendored copy or shim from us. Never overwrite another product's
+command; reclaim retired launchers strictly by receipt path+digest, restore
+collision backups, and never leave dependents (LaunchAgents, MCP configs)
+dangling.
+
+## Host Metadata Is Not Payload
+
+`.DS_Store` is stamped by the host faster than any sweep can win the race.
+The carrier tar excludes it, the closed inventory skips it on write and
+verify; every other rejection (symlinks, digest/size/mode drift) stays
+fail-closed. Do not reintroduce a hard reject for names that can never ship.
+
+## Upgrades Preserve The Founder
+
+An install must never lose Founder-owned state: `[server]` config
+(`~/.config/vibecrafted/config.toml`, e.g. a Tailscale bind), live frame
+sessions (the frame server must outlive its client — detached, reattachable),
+and running agents. Replacing the app bundle under a live workspace is an
+Founder-gated action.
+
 # The Vibecrafted Manifesto
 
 ## We Do Not Treat AI Like Magic
@@ -409,7 +559,7 @@ Reality decides what survives.
 
 ## Native Discovery Before Delivery Language
 
-The operator's fastest discovery language is the language in which the thought
+The Founder's fastest discovery language is the language in which the thought
 arrives. For this team, Polish is often the shortest path from intuition to
 shape. Do not force premature English polish while the idea is still forming.
 
@@ -423,14 +573,14 @@ Only translate into English delivery text once the shape and proof obligations
 are clear. Product intuition is not less professional because it arrived in
 Polish; it is discovery signal.
 
-## Operator Echo Packets
+## Founder Echo Packets
 
 The default conversation is the chat. Do not invent a permanent second channel.
-When the operator explicitly sends `!echo '<text>'`, however, treat the echoed
-text as operator input, not as shell-log noise.
+When the Founder explicitly sends `!echo '<text>'`, however, treat the echoed
+text as Founder input, not as shell-log noise.
 
-For Codex, an echo packet is the reliable realtime operator transport. If it
-appears, Codex can trust that the operator deliberately sent that packet now,
+For Codex, an echo packet is the reliable realtime Founder transport. If it
+appears, Codex can trust that the Founder deliberately sent that packet now,
 even when the packet quotes or comments on earlier chat. Other Codex
 interactive channels can arrive late, be replayed after compaction, or be
 surfaced only when the agent returns from await/observe; they do not carry the
@@ -443,7 +593,7 @@ delivery semantics.
 
 Still read the content. An echo can be a command, correction, quote, delayed
 commentary on an earlier chat message, or confirmation. But the transport itself
-is not random send time: `echo` is the low-latency operator lane.
+is not random send time: `echo` is the low-latency Founder lane.
 
 ---
 
@@ -678,6 +828,16 @@ We ship.
 
 # Repository-Specific Instructions
 
+## Operator journal
+
+Founder decision 2026-08-28: the operator decision log is **not in git**.
+
+Path: `.vibecrafted/THE_JOURNAL.md` (gitignored). Former name
+`.vibecrafted/JOURNAL.md` is retired. Do not recreate it. Do not commit it.
+
+Read it at session start. Append material Operator decisions. Workers do not
+write here.
+
 ## Project Identity
 
 | Field                      | Value |
@@ -712,7 +872,7 @@ We ship.
 
 ### Before Editing
 
--
+- Read `.vibecrafted/THE_JOURNAL.md` before a course change a later agent must inherit.
 
 ### Before Refactoring
 
@@ -754,7 +914,7 @@ We ship.
 
 ### Checks Requiring Secrets Or External Services
 
-- DMG signing/notarization (Developer ID + notary credentials), `gh` for the release-gate probe, vibecrafted-io deploy — operator buttons, never run by workers. ***
+- DMG signing/notarization (Developer ID + notary credentials), `gh` for the release-gate probe, vibecrafted-io deploy — Founder buttons, never run by workers. \*\*\*
 
 ## Safety Boundaries
 
@@ -814,7 +974,8 @@ Implementation lives in `vibecrafted-server/web/src/scaffold/mod.rs`
 
 ## Handoff Format
 
-Every completed task should end with:
+Every completed task should report material state with these headings when they
+carry information:
 
 ### Summary
 
@@ -825,6 +986,12 @@ Every completed task should end with:
 ### Verification Not Performed
 
 ### Risks Or Follow-Up
+
+`Verification Not Performed` is only for a required acceptance surface that
+remains genuinely unverified and changes the risk or next move. Omit empty
+headings and incidental non-actions. Do not report that a file was not edited,
+a branch was not switched, or a commit was not created; repository telemetry
+already answers those questions.
 
 ---
 
@@ -846,7 +1013,7 @@ SHACE, Marbles, Loctree Mapping, PSCD, and the Vibecrafted operating language ar
 See `docs/runtime/OMNI_OBSERVER_SLACK_GATEWAY.md` — **polarized (L3 sealed)**:
 control_plane sole durable truth; server+MCP = eyes (projections);
 bot = mouth/ear; workers = hands. Unit green ≠ Slack green (STALE
-bridge / empty allowlist = operator residual, not architecture debt).
+bridge / empty allowlist = Founder residual, not architecture debt).
 Hydrate residual pack (slack-agent): `deploy/OPERATOR_SMOKE_CARD.md`,
 `npm run doctor`, `npm run install:launchagent`.
 Parent: `docs/adr/0002-unified-operator-ownership.md` (`run-lifecycle` →

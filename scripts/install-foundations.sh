@@ -44,6 +44,7 @@ AGENT_PACKAGES=(
 
 AGENT_MANUAL_INSTALLS=(
   "agy|Install Google Antigravity CLI from its vendor distribution, then run: agy install"
+  "cursor-agent|Install the Cursor CLI: curl https://cursor.com/install -fsS | bash"
 )
 
 # Script/source resolution (used by the bundled-toolchain attempt).
@@ -52,90 +53,10 @@ AGENT_MANUAL_INSTALLS=(
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_DIR="${VIBECRAFTED_SOURCE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
-default_vibecrafted_home() {
-  if [[ -n "${VIBECRAFTED_HOME:-}" ]]; then
-    printf '%s\n' "$VIBECRAFTED_HOME"
-    return
-  fi
-  if [[ -n "${VIBECRAFTED_ROOT:-}" ]]; then
-    printf '%s\n' "$VIBECRAFTED_ROOT/.vibecrafted"
-    return
-  fi
-  printf '%s\n' "$HOME/.vibecrafted"
-}
-
-default_vibecrafted_runtime_home() {
-  if [[ -n "${VIBECRAFTED_RUNTIME_HOME:-}" ]]; then
-    printf '%s\n' "$VIBECRAFTED_RUNTIME_HOME"
-    return
-  fi
-  if [[ -n "${XDG_DATA_HOME:-}" ]]; then
-    printf '%s\n' "$XDG_DATA_HOME/vibecrafted"
-    return
-  fi
-  printf '%s\n' "$HOME/.local/share/vibecrafted"
-}
-
-canonical_vibecrafted_home() {
-  printf '%s\n' "$HOME/.vibecrafted"
-}
-
-canonical_vibecrafted_runtime_home() {
-  printf '%s\n' "$HOME/.local/share/vibecrafted"
-}
-
-canonical_vibecrafted_launcher_bin() {
-  printf '%s\n' "$HOME/.local/bin"
-}
-
-pause_runtime_contract_failure() {
-  printf '\nRuntime root contract failed fast.\n'
-  printf 'No automatic cleanup was performed. Review and run the explicit migration:\n'
-  printf '  python3 scripts/vetcoders_install.py doctor --fix-legacy-bootstrap\n'
-  printf 'Then rerun make install-all with canonical roots:\n'
-  printf '  store ~/.vibecrafted · runtime ~/.local/share/vibecrafted · launchers ~/.local/bin\n\n'
-  if [[ "${VIBECRAFTED_INSTALL_NONINTERACTIVE:-0}" == "1" ]] || ! is_interactive; then
-    return
-  fi
-  printf 'Press Enter to continue after reviewing cleanup steps, or Ctrl-C to abort: '
-  read -r _ || true
-}
-
-enforce_runtime_root_contract() {
-  local expected_store expected_runtime expected_launcher
-  local resolved_store resolved_runtime resolved_launcher
-  local failed=0
-
-  expected_store="$(canonical_vibecrafted_home)"
-  expected_runtime="$(canonical_vibecrafted_runtime_home)"
-  expected_launcher="$(canonical_vibecrafted_launcher_bin)"
-
-  resolved_store="$(default_vibecrafted_home)"
-  resolved_runtime="$(default_vibecrafted_runtime_home)"
-  resolved_launcher="${VIBECRAFTED_LAUNCHER_BIN:-$expected_launcher}"
-
-  if [[ "$resolved_store" != "$expected_store" ]]; then
-    warn "Fail-fast: store root drift detected ($resolved_store, expected $expected_store)."
-    failed=1
-  fi
-
-  if [[ "$resolved_runtime" != "$expected_runtime" ]]; then
-    warn "Fail-fast: runtime root drift detected ($resolved_runtime, expected $expected_runtime)."
-    failed=1
-  fi
-
-  if [[ "$resolved_launcher" != "$expected_launcher" ]]; then
-    warn "Fail-fast: launcher root drift detected ($resolved_launcher, expected $expected_launcher)."
-    failed=1
-  fi
-
-  if [[ "$failed" == "1" ]]; then
-    pause_runtime_contract_failure
-    return 1
-  fi
-
-  return 0
-}
+# Runtime roots: one shell definition, shared with install-runtime.sh and
+# pinned to install.sh by tests/tui/test_runtime_roots_parity.py.
+# shellcheck source=scripts/lib/runtime-roots.sh
+source "$SCRIPT_DIR/lib/runtime-roots.sh"
 
 VIBECRAFTED_HOME="$(default_vibecrafted_home)"
 VIBECRAFTED_RUNTIME_HOME="$(default_vibecrafted_runtime_home)"
@@ -192,13 +113,10 @@ binary_runs() {
   "$bin" --version >/dev/null 2>&1 || "$bin" --help >/dev/null 2>&1
 }
 
-# Live config dirs the product actually reads (frontier first — VC_FRAME_CONFIG_DIR).
+# Sole live vc-frame config directory owned by the product.
 _vcframe_config_roots() {
   local xdg="${XDG_CONFIG_HOME:-$HOME/.config}"
-  printf '%s\n' \
-    "${VC_FRAME_CONFIG_DIR:-}" \
-    "$xdg/vetcoders/frontier/vc-frame" \
-    "$xdg/vc-frame"
+  printf '%s\n' "$xdg/vibecrafted/vc-frame"
 }
 
 # COCKPIT READY — hard product spine after binary is on PATH.
@@ -244,7 +162,7 @@ verify_vcframe_cockpit() {
   done < <(_vcframe_config_roots)
 
   if [[ -z "$cfg_root" ]]; then
-    warn "cockpit: no live config.kdl under frontier or ~/.config/vc-frame"
+    warn "cockpit: no live config.kdl under ~/.config/vibecrafted/vc-frame"
     warn "  fix: vibecrafted config install   # or checkout stage_vc_frame_config"
     fails=1
   else
@@ -673,14 +591,15 @@ install_vcframe() {
   fi
 
   if (( need_binary )) && ! (( CHECK_ONLY )); then
-    warn "vc-frame binary missing — cockpit cannot exist without it."
-    warn "Manual paths:"
+    warn "vc-frame (the visual cockpit) is not installed — the headless runtime works without it:"
+    warn "  vibecrafted doctor · vibecrafted implement claude --prompt \"...\" · vibecrafted await claude --last"
+    warn "To get the cockpit: install the Vibecrafted desktop app (DMG) when published,"
     sibling="$(_vcframe_sibling_root 2>/dev/null || true)"
     if [[ -n "$sibling" ]]; then
-      warn "  make -C $sibling release"
+      warn "  or build the sibling checkout: make -C $sibling release"
+    else
+      warn "  or (maintainers) set VIBECRAFTED_VC_FRAME_SOURCE to a vc-frame checkout and rerun make install"
     fi
-    warn "  set VIBECRAFTED_VC_FRAME_SOURCE to a checkout and rerun"
-    warn "  end users should install the canonical versioned Vibecrafted DMG"
     return 1
   fi
 
@@ -760,8 +679,12 @@ install_vc_frame_product_wrapper() {
   current="$tools_home/vibecrafted-current"
   if [[ -d "$current" ]]; then
     gen="$(cd "$current" && pwd -P)"
-    mkdir -p "$gen/bin"
-    install -m 0755 "$wrapper_src" "$gen/bin/vc-frame"
+    # Generations are immutable and carry bin/vc-frame since publication
+    # materializes it; only a pre-materialization generation gets the copy.
+    if [[ ! -x "$gen/bin/vc-frame" ]]; then
+      mkdir -p "$gen/bin"
+      install -m 0755 "$wrapper_src" "$gen/bin/vc-frame"
+    fi
     ln -sfn "$current/bin/vc-frame" "$dest"
     ok "product vc-frame entry installed: $dest -> $current/bin/vc-frame (real=$real)"
   else

@@ -367,6 +367,15 @@ _vetcoders_fresh_session_command() {
         printf 'grok --cwd . --permission-mode bypassPermissions --no-alt-screen %s\n' "$quoted_prompt"
       fi
       ;;
+    cursor)
+      # cursor-agent: `-p` reads the prompt positionally; --force --trust mirror
+      # the headless bypass policy (spawn.py PERMISSION_POLICIES cursor lane).
+      if [[ "$mode" == headless ]]; then
+        printf 'cursor-agent -p --output-format stream-json --force --trust %s\n' "$quoted_prompt"
+      else
+        printf 'cursor-agent --force --trust %s\n' "$quoted_prompt"
+      fi
+      ;;
     *)
       echo "Unknown agent for fresh resume session: $tool" >&2
       return 1
@@ -602,7 +611,7 @@ _vetcoders_resume_agent() {
         _vetcoders_wrap_with_agent_stream "$tool" "$resume_cmd" "$stream_raw"
       )" || return 1
       export VIBECRAFTED_WORKER_SESSION="${VIBECRAFTED_WORKER_SESSION:-$worker_host}"
-      _vetcoders_spawn_into_operator_session "resume-${tool}" "$resume_cmd" || return 1
+      _vetcoders_spawn_into_operator_session "$(_vetcoders_operator_face_tab "$tool")" "$resume_cmd" || return 1
       printf 'Resume launched in worker session: %s\n' "$VIBECRAFTED_WORKER_SESSION"
       printf '  agent:   %s\n' "$tool"
       printf '  mode:    headless (G7 workers column)\n'
@@ -628,7 +637,7 @@ _vetcoders_resume_agent() {
   if [[ "$resume_mode" == interactive ]] && [[ "$runtime" =~ ^(terminal|visible)$ ]]; then
     _vetcoders_prepare_operator_runtime "$runtime" || return 1
     if [[ -n "${VIBECRAFTED_OPERATOR_SESSION:-}" ]]; then
-      _vetcoders_spawn_into_operator_session "resume-${tool}" "$resume_cmd" || return 1
+      _vetcoders_spawn_into_operator_session "$(_vetcoders_operator_face_tab "$tool")" "$resume_cmd" || return 1
       printf 'Resume launched in operator session: %s\n' "$VIBECRAFTED_OPERATOR_SESSION"
       printf '  agent:   %s\n' "$tool"
       if [[ -n "$_vetcoders_contract_session" ]]; then
@@ -835,7 +844,7 @@ vc-resume() {
   fi
   local tool="${1:-}"
   [[ -n "$tool" ]] || {
-    echo "Usage: vc-resume <claude|codex|agy|junie|grok> [<session_id>] [prompt ...] | --session <session_id> [--prompt <text>] [--file <path>]" >&2
+    echo "Usage: vc-resume <claude|codex|agy|junie|grok|cursor> [<session_id>] [prompt ...] | --session <session_id> [--prompt <text>] [--file <path>]" >&2
     echo "  Without --session: NEW interactive session + AICX continuity pack (last ${VIBECRAFTED_RESUME_AICX_HOURS:-48}h). Never native attach." >&2
     return 1
   }
@@ -843,7 +852,7 @@ vc-resume() {
     _vetcoders_parse_contract "$@" || return 1
     tool="$(_vetcoders_agent_for_session "$_vetcoders_contract_session")" || {
       echo "Could not infer agent for session: $_vetcoders_contract_session" >&2
-      echo "Usage: vc-resume <claude|codex|agy|junie|grok> --session $_vetcoders_contract_session" >&2
+      echo "Usage: vc-resume <claude|codex|agy|junie|grok|cursor> --session $_vetcoders_contract_session" >&2
       return 1
     }
   else

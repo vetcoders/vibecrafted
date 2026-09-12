@@ -5,7 +5,7 @@
 # in the product environment, the Cargo prefix, or Vibecrafted's data root.
 #
 # Policy (goal: bare frame is backyard-safe):
-#   1. Always pin VC_FRAME_CONFIG_DIR to product frontier/view when present
+#   1. Always pin VC_FRAME_CONFIG_DIR to the canonical product config
 #      so bare attach gets the same Super binds, layouts, and scripts as vc-start.
 #   2. Product operator session names (vibecrafted / operator / default operator
 #      session) never launch without the product config root.
@@ -17,24 +17,21 @@ resolve_real_bin() {
     printf '%s\n' "$VIBECRAFTED_VC_FRAME_BIN"
     return 0
   fi
+
+  local wrapper_dir
+  wrapper_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
   for candidate in \
+    "$wrapper_dir/../libexec/vc-frame" \
     "${HOME}/.cargo/bin/vc-frame" \
     "${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted/bin/vc-frame" \
     "${HOME}/.local/share/vibecrafted/bin/vc-frame"
   do
-    if [[ -x "$candidate" ]]; then
-      # Skip if it is this wrapper (same path as argv0 when recursive).
-      if [[ -f "$candidate" ]] && ! head -1 "$candidate" 2>/dev/null | grep -q 'vc-frame-product-entry\|product choke'; then
-        # binary: no shebang
-        if ! head -c 2 "$candidate" 2>/dev/null | grep -q '#!'; then
-          printf '%s\n' "$candidate"
-          return 0
-        fi
-      fi
-      if file "$candidate" 2>/dev/null | grep -qi 'Mach-O\|ELF\|executable'; then
-        printf '%s\n' "$candidate"
-        return 0
-      fi
+    # Ambient shell wrappers are never a real vc-frame. In particular,
+    # ~/.local/share/vibecrafted/bin/vc-frame may resolve back to this product
+    # entry and recurse forever. Follow symlinks, but accept native code only.
+    if [[ -x "$candidate" ]] && file -Lb "$candidate" 2>/dev/null | grep -Eqi 'Mach-O|ELF'; then
+      printf '%s\n' "$candidate"
+      return 0
     fi
   done
   return 1
@@ -47,7 +44,9 @@ pin_darwin_socket_dir() {
   case "$(uname -s 2>/dev/null || true)" in
     Darwin)
       if [[ -z "${VC_FRAME_SOCKET_DIR:-}" && -z "${ZELLIJ_SOCKET_DIR:-}" ]]; then
-        export VC_FRAME_SOCKET_DIR="/tmp/vc-frame-$(id -u)"
+        local socket_uid
+        socket_uid="$(id -u)"
+        export VC_FRAME_SOCKET_DIR="/tmp/vc-frame-$socket_uid"
         export ZELLIJ_SOCKET_DIR="$VC_FRAME_SOCKET_DIR"
       fi
       ;;
@@ -56,15 +55,7 @@ pin_darwin_socket_dir() {
 
 pin_product_config() {
   local xdg="${XDG_CONFIG_HOME:-$HOME/.config}"
-  local frontier="$xdg/vetcoders/frontier/vc-frame"
-  local view="$xdg/vc-frame"
-  if [[ -f "${VC_FRAME_CONFIG_DIR:-}/config.kdl" ]]; then
-    return 0
-  fi
-  if [[ -f "$frontier/config.kdl" ]]; then
-    export VC_FRAME_CONFIG_DIR="$frontier"
-    return 0
-  fi
+  local view="$xdg/vibecrafted/vc-frame"
   if [[ -f "$view/config.kdl" ]]; then
     export VC_FRAME_CONFIG_DIR="$view"
     return 0

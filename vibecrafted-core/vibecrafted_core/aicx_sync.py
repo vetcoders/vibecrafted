@@ -1,7 +1,7 @@
 """AICX cross-machine sync v2 with authority-tier conflict resolution.
 
 Plan 08 (META_22) substrate. Extends the operator's existing
-``~/.scripts/sync-tool.py`` pattern (kronika 2026-05-05) — one-directional
+``~/.scripts/sync-tool.py`` pattern (doctrine 2026-05-05) — one-directional
 rsync + state-journal + JSONL-merge with guardian mode (never propagate
 deletes) — into a **bidirectional** sync with authority-label conflict
 resolution.

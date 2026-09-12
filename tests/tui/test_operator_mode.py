@@ -5,7 +5,9 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -54,6 +56,21 @@ def _write_capture_command(bin_dir: Path, name: str, capture_file: Path) -> None
         script.chmod(0o755)
 
 
+def _write_fake_claude(bin_dir: Path) -> None:
+    script = bin_dir / "claude"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [[ "${1:-}" == "--version" ]]; then\n'
+        "  printf '2.1.232 (Claude Code)\\n'\n"
+        'elif [[ "${1:-}" == "--help" ]]; then\n'
+        "  printf '%s\\n' '--session-id <uuid>'\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+
+
 def _write_stateful_vc_frame(
     bin_dir: Path, capture_file: Path, session_state_file: Path
 ) -> None:
@@ -82,6 +99,8 @@ def _write_stateful_vc_frame(
                 'elif args[:1] == ["attach"] and len(args) > 1:',
                 "    session = args[-1]",
                 'with capture.open("a", encoding="utf-8") as fh:',
+                '    fh.write("EFFECTIVE_HOME " + os.environ.get("HOME", "") + "\\n")',
+                '    fh.write("VC_FRAME_EXECUTABLE " + str(Path(sys.argv[0]).resolve()) + "\\n")',
                 '    fh.write("VC_FRAME " + " ".join(args) + "\\n")',
                 'if args[:1] == ["ls"]:',
                 '    if os.environ.get("FAKE_VC_FRAME_DUPLICATE") == "1":',
@@ -197,8 +216,10 @@ def _resolved_workspace_session(env: dict[str, str]) -> str:
         text=True,
         capture_output=True,
     )
+    # Operator session is the resolved PLACE (catalog label / root basename);
+    # workspace-{8hex} survives only as the catalog-fallback token.
     match = re.search(
-        r"^VIBECRAFTED_OPERATOR_SESSION=(workspace-[0-9a-f]{8})$",
+        r"^VIBECRAFTED_OPERATOR_SESSION=(\S+)$",
         result.stdout,
         re.MULTILINE,
     )
@@ -623,19 +644,33 @@ def test_helper_exports_vc_skill_wrappers() -> None:
 
 def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
     tmp_path: Path,
+    hermetic_login_shell: Callable[[dict[str, str], str], str],
 ) -> None:
     home = tmp_path / "home"
     crafted_home = home / ".vibecrafted"
     runtime_home = home / ".local" / "share" / "vibecrafted"
     bundled_bin = runtime_home / "bin"
     fake_bin = tmp_path / "bin"
+    operator_home = tmp_path / "forbidden-operator-home"
+    operator_bin = operator_home / ".local" / "share" / "vibecrafted" / "bin"
+    forbidden_probe = tmp_path / "forbidden-operator-runtime-used"
     capture_file = tmp_path / "capture.log"
     session_state_file = tmp_path / "session-state.txt"
 
     home.mkdir()
     bundled_bin.mkdir(parents=True)
     fake_bin.mkdir()
+    operator_bin.mkdir(parents=True)
     _write_stateful_vc_frame(bundled_bin, capture_file, session_state_file)
+    _write_fake_claude(bundled_bin)
+    forbidden_vc_frame = operator_bin / "vc-frame"
+    forbidden_vc_frame.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "used\\n" > "$FORBIDDEN_OPERATOR_PROBE"\n'
+        "exit 97\n",
+        encoding="utf-8",
+    )
+    forbidden_vc_frame.chmod(0o755)
     (fake_bin / "osascript").write_text(
         "#!/usr/bin/env bash\nexit 1\n", encoding="utf-8"
     )
@@ -644,13 +679,18 @@ def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["VIBECRAFTED_HOME"] = str(crafted_home)
-    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+    env["VIBECRAFTED_RUNTIME_HOME"] = str(runtime_home)
+    env["VIBECRAFTED_RUNTIME_BIN"] = str(bundled_bin)
     env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
+    # The test PATH intentionally excludes host tools; policy resolution is
+    # now a required core operation, so pin the current test interpreter.
+    env["VIBECRAFTED_PYTHON"] = sys.executable
     env["CAPTURE_FILE"] = str(capture_file)
     env["SESSION_STATE_FILE"] = str(session_state_file)
     env["VIBECRAFTED_OSASCRIPT_BIN"] = str(fake_bin / "osascript")
     env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session()
+    env["FORBIDDEN_OPERATOR_PROBE"] = str(forbidden_probe)
     # This test exercises the real session-create path; allow it without a TTY.
     env["VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME"] = "1"
     env.pop("VC_FRAME", None)
@@ -661,11 +701,56 @@ def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
     env.pop("VIBECRAFTED_OPERATOR_SESSION", None)
     env.pop("VIBECRAFTED_OPERATOR_MODE", None)
 
-    result = subprocess.run(
+    outcomes: list[tuple[int, str, str]] = []
+    for operator_runtime_visible in (True, False):
+        capture_file.unlink(missing_ok=True)
+        session_state_file.unlink(missing_ok=True)
+        session_state_file.with_suffix(".name").unlink(missing_ok=True)
+        forbidden_probe.unlink(missing_ok=True)
+        visible_path = f":{operator_bin}" if operator_runtime_visible else ""
+        env["PATH"] = (
+            f"{bundled_bin}:{fake_bin}{visible_path}:/usr/bin:/bin:/usr/sbin:/sbin"
+        )
+        command = hermetic_login_shell(
+            env,
+            f'source "{HELPER_SCRIPT}"; vc-init claude --prompt "Check runtime"',
+        )
+
+        result = subprocess.run(
+            ["bash", "-lc", command],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        payload = capture_file.read_text(encoding="utf-8")
+        expected_session = _expected_operator_session()
+        assert f"EFFECTIVE_HOME {home}" in payload
+        assert f"VC_FRAME_EXECUTABLE {bundled_bin / 'vc-frame'}" in payload
+        assert str(operator_home) not in payload
+        assert not forbidden_probe.exists()
+        assert f"--session {expected_session} --new-session-with-layout" in payload
+        assert f"--session {expected_session} action new-tab" in payload
+        assert f"run_id=interactive target={expected_session}/claude" in result.stdout
+        assert f"watch=vc-frame attach {expected_session}" in result.stdout
+        assert "There is no active session!" not in result.stderr
+        outcomes.append((result.returncode, result.stdout, result.stderr))
+
+    assert outcomes[0] == outcomes[1]
+
+    (bundled_bin / "vc-frame").unlink()
+    env["PATH"] = f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
+    mutated = subprocess.run(
         [
             "bash",
             "-lc",
-            f'source "{HELPER_SCRIPT}"; vc-init claude --prompt "Check runtime"',
+            hermetic_login_shell(
+                env,
+                f'source "{HELPER_SCRIPT}"; vc-init claude --prompt "Check runtime"',
+            ),
         ],
         cwd=REPO_ROOT,
         env=env,
@@ -673,15 +758,9 @@ def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
         text=True,
         check=False,
     )
-
-    assert result.returncode == 0, result.stderr
-    payload = capture_file.read_text(encoding="utf-8")
-    expected_session = _expected_operator_session()
-    assert f"--session {expected_session} --new-session-with-layout" in payload
-    assert f"--session {expected_session} action new-tab" in payload
-    assert f"run_id=interactive target={expected_session}/claude-init" in result.stdout
-    assert f"watch=vc-frame attach {expected_session}" in result.stdout
-    assert "There is no active session!" not in result.stderr
+    assert mutated.returncode != 0
+    assert "vc-frame cockpit not installed" in mutated.stderr
+    assert not forbidden_probe.exists()
 
 
 def test_operator_spawn_success_prints_actionable_receipt(tmp_path: Path) -> None:
@@ -855,27 +934,39 @@ def test_operator_spawn_failure_is_loud_and_preserves_status(tmp_path: Path) -> 
 
 def test_vc_init_missing_vc_frame_message_has_fresh_install_path_hint(
     tmp_path: Path,
+    hermetic_login_shell: Callable[[dict[str, str], str], str],
 ) -> None:
     home = tmp_path / "home"
     crafted_home = home / ".vibecrafted"
+    runtime_home = home / ".local" / "share" / "vibecrafted"
+    effective_home = tmp_path / "effective-home.txt"
+    runtime_bin = runtime_home / "bin"
 
     home.mkdir()
+    runtime_bin.mkdir(parents=True)
+    _write_fake_claude(runtime_bin)
 
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["VIBECRAFTED_HOME"] = str(crafted_home)
+    env["VIBECRAFTED_RUNTIME_HOME"] = str(runtime_home)
+    env["VIBECRAFTED_RUNTIME_BIN"] = str(runtime_home / "bin")
     env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
+    env["VIBECRAFTED_PYTHON"] = sys.executable
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
 
+    command = hermetic_login_shell(
+        env,
+        (
+            f'printf "%s\\n" "$HOME" > "{effective_home}"; '
+            f'source "{HELPER_SCRIPT}"; vc-init claude --prompt "Check runtime"'
+        ),
+    )
     result = subprocess.run(
-        [
-            "bash",
-            "-lc",
-            f'source "{HELPER_SCRIPT}"; vc-init claude --prompt "Check runtime"',
-        ],
+        ["bash", "-lc", command],
         cwd=REPO_ROOT,
         env=env,
         capture_output=True,
@@ -883,16 +974,15 @@ def test_vc_init_missing_vc_frame_message_has_fresh_install_path_hint(
         check=False,
     )
 
+    # No cockpit is not a dead end: init degrades to the caller's terminal.
+    # Under a non-TTY test harness that degraded path must still stop with a
+    # message that names the headless alternative instead of "run vc-start".
     assert result.returncode != 0
-    assert "vc-frame is required for the Vibecrafted operator runtime." in result.stderr
-    assert (
-        "Run 'vc-start' first to create or attach the operator vc-frame session, then retry."
-        in result.stderr
-    )
-    assert (
-        f"Expected vc-frame on PATH or bundled at: {home}/.local/share/vibecrafted/bin/vc-frame"
-        in result.stderr
-    )
+    assert effective_home.read_text(encoding="utf-8").strip() == str(home)
+    assert "vc-frame cockpit not installed" in result.stderr
+    assert "vibecrafted init claude --runtime plain" in result.stderr
+    assert "vc-start" not in result.stderr
+    assert 'vibecrafted implement claude --prompt "<task>"' in result.stderr
 
 
 def test_explicit_terminal_marbles_from_operator_mode_spawns_fresh_tab(
@@ -914,7 +1004,8 @@ def test_explicit_terminal_marbles_from_operator_mode_spawns_fresh_tab(
     env["VC_FRAME"] = "operator"
     env["VIBECRAFTED_RUN_ID"] = "marb-014520"
     env["VIBECRAFTED_MARBLES_RUN_ID"] = "marb-014520"
-    expected_session = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
+    expected_session = _expected_operator_session()
+    run_scoped_session = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
     env["VC_FRAME_SESSION_NAME"] = expected_session
     subprocess.run(
         [
@@ -933,8 +1024,8 @@ def test_explicit_terminal_marbles_from_operator_mode_spawns_fresh_tab(
     )
 
     payload = capture_file.read_text(encoding="utf-8").splitlines()
-    # One marbles run owns a dedicated host session. Its first surface is a
-    # fresh marbles tab, never a pane in the operator's active session.
+    # The interactive rail is the human User place. The marbles run owns a
+    # fresh tab in that place; its run id must never rename the place itself.
     assert payload[:4] == [
         "--session",
         expected_session,
@@ -944,6 +1035,7 @@ def test_explicit_terminal_marbles_from_operator_mode_spawns_fresh_tab(
     assert "--name" in payload
     assert "marbles" in " ".join(payload) or "marb-014520" in payload
     assert expected_session in payload
+    assert run_scoped_session not in payload
 
 
 def test_explicit_terminal_marbles_inside_vc_frame_prefers_bundled_vc_frame(
@@ -968,7 +1060,8 @@ def test_explicit_terminal_marbles_inside_vc_frame_prefers_bundled_vc_frame(
     env["VC_FRAME"] = "operator"
     env["VIBECRAFTED_RUN_ID"] = "marb-014520"
     env["VIBECRAFTED_MARBLES_RUN_ID"] = "marb-014520"
-    expected_session = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
+    expected_session = _expected_operator_session()
+    run_scoped_session = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
     env["VC_FRAME_SESSION_NAME"] = expected_session
 
     result = subprocess.run(
@@ -993,8 +1086,10 @@ def test_explicit_terminal_marbles_inside_vc_frame_prefers_bundled_vc_frame(
     assert result.returncode == 0
     assert result.stderr == ""
     payload = capture_file.read_text(encoding="utf-8")
-    # Bundled vc-frame must create the tab in the dedicated marbles host.
+    # Bundled vc-frame must create the run tab in the human User place without
+    # allowing the run id to become a second session authority.
     assert f"--session\n{expected_session}\naction\nnew-tab\n" in payload
+    assert run_scoped_session not in payload
     assert result.stdout.endswith(f"PATH={os.defpath}\n")
 
 
@@ -1419,13 +1514,13 @@ def test_vc_dashboard_recreates_dead_run_id_session_without_layout_suffix(
     env["CAPTURE_FILE"] = str(capture_file)
     env["SESSION_STATE_FILE"] = str(session_state_file)
     env["VIBECRAFTED_RUN_ID"] = "marb-014520"
-    env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
+    env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session()
     env["VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME"] = "1"
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
     # Scrub any operator-session context leaked from a running operator shell so
-    # the dashboard resolves the run-id session rather than the ambient one.
+    # the dashboard resolves the canonical User place rather than ambient state.
     env.pop("VIBECRAFTED_OPERATOR_SESSION", None)
     env.pop("VIBECRAFTED_OPERATOR_MODE", None)
 
@@ -1439,7 +1534,8 @@ def test_vc_dashboard_recreates_dead_run_id_session_without_layout_suffix(
     )
 
     payload = capture_file.read_text(encoding="utf-8")
-    expected_session = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
+    expected_session = _expected_operator_session()
+    run_scoped_session = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
     # Dead sessions are preserved; a fresh recovery session gets the layout.
     created = re.search(r"creating '([^']+)'", result.stderr)
     assert created is not None
@@ -1450,6 +1546,7 @@ def test_vc_dashboard_recreates_dead_run_id_session_without_layout_suffix(
     assert f"--session {recovery_session}" in payload
     assert "--new-session-with-layout" in payload
     assert f"{expected_session}-marbles" not in payload
+    assert run_scoped_session not in payload
 
 
 def test_explicit_terminal_skill_bootstraps_operator_session_before_spawning(
@@ -1531,14 +1628,14 @@ def test_skill_bootstraps_fresh_operator_session_when_existing_one_is_dead(
     env["SESSION_STATE_FILE"] = str(session_state_file)
     env["VIBECRAFTED_OSASCRIPT_BIN"] = str(fake_bin / "osascript")
     env["VIBECRAFTED_RUN_ID"] = "fwup-014520"
-    env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
+    env["FAKE_VC_FRAME_SESSION"] = _expected_operator_session()
     # This test exercises the real dead-session recreate path; allow it without a TTY.
     env["VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME"] = "1"
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
     # Scrub any operator-session context leaked from a running operator shell so
-    # the runtime recreates the dead run-id session instead of reusing the ambient one.
+    # the runtime recovers the dead User place instead of reusing ambient state.
     env.pop("VIBECRAFTED_OPERATOR_SESSION", None)
     env.pop("VIBECRAFTED_OPERATOR_MODE", None)
 
@@ -1559,7 +1656,8 @@ def test_skill_bootstraps_fresh_operator_session_when_existing_one_is_dead(
         check=False,
     )
 
-    expected_session = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
+    expected_session = _expected_operator_session()
+    run_scoped_session = _expected_operator_session(env["VIBECRAFTED_RUN_ID"])
     assert result.returncode == 0
     created = re.search(r"creating '([^']+)'", result.stderr)
     assert created is not None
@@ -1581,6 +1679,7 @@ def test_skill_bootstraps_fresh_operator_session_when_existing_one_is_dead(
         in payload
     )
     assert "--new-session-with-layout" in payload and recovery_session in payload
+    assert run_scoped_session not in payload
     assert "OSA " not in payload
 
 

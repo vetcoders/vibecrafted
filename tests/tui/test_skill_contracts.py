@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -53,3 +54,61 @@ def test_loctree_skills_match_literal_and_structural_runtime_truth() -> None:
         )
         assert "objective structural truth" not in text
         assert "Every action must trace" not in text
+
+
+def test_vc_operator_uses_one_repository_local_operator_journal() -> None:
+    operator = REPO_ROOT / "vibecrafted-core/vibecrafted_core/skills/vc-operator"
+    pl_operator = REPO_ROOT / "vibecrafted-core/vibecrafted_core/skills/pl/vc-operator"
+    canonical_docs = sorted(operator.rglob("*.md"))
+    mirror_docs = sorted(pl_operator.rglob("*.md"))
+    corpus = "\n".join(path.read_text(encoding="utf-8") for path in canonical_docs)
+    all_operator_docs = (
+        corpus
+        + "\n"
+        + "\n".join(path.read_text(encoding="utf-8") for path in mirror_docs)
+    )
+
+    assert "<repo-root>/.vibecrafted/JOURNAL.md" in corpus
+    assert "journal.md" not in all_operator_docs
+    assert "Only the Operator writes the journal" in corpus
+    assert "surface a falsifiable finding to the active Operator" in corpus
+    assert "dispatches the cut into a dedicated worktree" in corpus
+    assert "beyond the current ITP or TD" in corpus
+    assert "routine negative-work claims" in corpus
+    assert "What's NOT done (deliberately)" not in corpus
+    assert re.search(r"\bOpera\b", all_operator_docs) is None
+
+
+def test_vc_scaffold_emits_dispatch_and_preserves_embargo_recovery_contract() -> None:
+    skills = REPO_ROOT / "vibecrafted-core/vibecrafted_core/skills"
+    variants = [skills / "vc-scaffold", skills / "pl/vc-scaffold"]
+
+    for scaffold in variants:
+        skill = (scaffold / "SKILL.md").read_text(encoding="utf-8")
+        flow = (scaffold / "FLOW.md").read_text(encoding="utf-8")
+        template = (scaffold / "references/plan-template.md").read_text(
+            encoding="utf-8"
+        )
+        embargo = (scaffold / "references/compile-embargo.md").read_text(
+            encoding="utf-8"
+        )
+        corpus = f"{skill}\n{flow}\n{template}\n{embargo}"
+
+        assert 'schema = "vibecrafted.dispatch.v1"' in corpus
+        assert ".dispatch.toml" in skill
+        assert "/vc-ship" in flow
+        assert "/vc-ship" in template
+        assert "--doctor" in template
+        assert (
+            "Emergency manual fallback" in template
+            or "Awaryjny fallback ręczny" in template
+        )
+        assert "founder_interview_evidence:" in template
+        assert "AICX" in skill
+        assert "--no-verify" in embargo
+        assert "embargo/<plan-id>" in embargo
+        assert "policy-aware" in embargo
+        assert (
+            "forbidden in every phase" in embargo
+            or "zabronione w każdej fazie" in embargo
+        )

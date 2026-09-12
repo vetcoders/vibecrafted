@@ -128,7 +128,7 @@ Write to `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/plans/<ts>_<slug>
 ```markdown
 ---
 run_id: <id>
-agent: <claude|codex|agy>
+agent: <claude|codex|agy|cursor>
 skill: vc-workflow
 project: <repo>
 status: completed
@@ -183,7 +183,7 @@ WebFetch directly: query `"<API> usage example <year>"`, fetch standard docs.
 ```markdown
 ---
 run_id: <id>
-agent: <claude|codex|agy>
+agent: <claude|codex|agy|cursor>
 skill: vc-workflow
 project: <repo>
 status: completed

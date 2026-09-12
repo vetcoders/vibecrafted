@@ -21,13 +21,28 @@ CARGO_BUILD_ROOT ?= $(INSTALLER_CACHE_HOME)/vibecrafted/build/$(INSTALLER_HOST_T
 # in-tree cache is never read or written by install lanes.
 export PYTHONPYCACHEPREFIX ?= $(INSTALLER_CACHE_HOME)/vibecrafted/pycache-$(INSTALLER_HOST_TAG)
 
-.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release portable publish-release gui-install wizard wizard-dev check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate payload-hygiene install install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service server-smoke
+# Make is a shell caller: resolve the staged runtime through the shell throne,
+# never through a Python import or a literal XDG path. Keep the existence check
+# separate because install-tools-held computes the destination before staging it.
+define RESOLVE_STABLE_RUNTIME_ROOT
+. "$(SOURCE)/scripts/lib/runtime-roots.sh"; stable_root="$$(default_vibecrafted_tools_home)/vibecrafted-current"
+endef
+
+define REQUIRE_STAGED_RUNTIME_ROOT
+if [ ! -d "$$stable_root/vibecrafted-core" ]; then \
+	printf "✗ current tools root drift: staged runtime missing at %s\n" "$$stable_root" >&2; \
+	pause_runtime_contract_failure; \
+	exit 1; \
+fi
+endef
+
+.PHONY: help help-dev vibecrafted app dmg dmg-signed release-local notarize release runtime-pack portable publish-release release-rehearsal gui-install wizard wizard-dev check test test-core test-skills test-install test-parity test-vc-frame test-iterm2-migrate test-memex test-aicx-sync test-hammerspoon test-keychain-session dispatch-test unified-product-contract-gate exact-release-contract-gate release-version-gate payload-hygiene install install-source install-auto install-all install-python-tools install-bundle-tools install-tools install-tools-held install-vendored-binaries install-app-binaries install-hammerspoon skills helpers setup-dev dry-run doctor list update uninstall restore migrate migrate-dry init-hooks seed-commit-msg-hooks bundle bundle-check foundations foundations-check semgrep version version-show version-bump bump-patch bump-minor bump-major iterm-plugin iterm-plugin-refresh iterm-plugin-show iterm-plugin-uninstall iterm-plugin-migrate demo demo-full commit-safe test-race-protection skill-new server server-build build-server-release server-check server-test install-server install-server-payload install-server-service reconcile-server-service server-smoke
 
 help:
 	@printf "\n"
 	@printf "  \033[1m\033[38;5;173m⚒  𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. %s\033[0m\n" "$$(cat $(VERSION_FILE) 2>/dev/null || echo dev)"
 	@printf "\n"
-	@printf "  make install      \033[2mGuided install\033[0m\n"
+	@printf "  make install      \033[2mInstall the receipted Runtime Pack\033[0m\n"
 	@printf "  make doctor       \033[2mHealth check\033[0m\n"
 	@printf "  make update       \033[2mPull latest + reinstall\033[0m\n"
 	@printf "  make uninstall    \033[2mReverse the install\033[0m\n"
@@ -44,14 +59,14 @@ help-dev:
 	@printf "\n"
 	@printf "  \033[1m\033[38;5;173m⚒  𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. dev targets\033[0m\n"
 	@printf "\n"
-	@printf "  \033[1minstall\033[0m   install · install-auto · install-all · install-python-tools · install-vendored-binaries · install-app-binaries · install-server · install-server-service · install-hammerspoon\n"
+	@printf "  \033[1minstall\033[0m   install · install-source · install-auto · install-all · install-python-tools · install-vendored-binaries · install-app-binaries · install-server · install-server-service · install-hammerspoon\n"
 	@printf "            skills · helpers · setup-dev · wizard · wizard-dev · gui-install · dry-run · restore\n"
 	@printf "            migrate · migrate-dry · foundations · foundations-check · bundle · bundle-check\n"
 	@printf "  \033[1mtests\033[0m     test · test-core · test-skills · test-install · test-parity · test-vc-frame · test-iterm2-migrate\n"
 	@printf "            test-memex · test-aicx-sync · test-hammerspoon · test-keychain-session · dispatch-test · test-race-protection · check · semgrep\n"
 	@printf "  \033[1miterm2\033[0m    iterm-plugin · iterm-plugin-refresh · iterm-plugin-show · iterm-plugin-uninstall · iterm-plugin-migrate\n"
 	@printf "  \033[1mserver\033[0m    server · server-build · server-check · server-test · server-smoke\n"
-	@printf "  \033[1mrelease\033[0m   app · dmg · dmg-signed · release-local · notarize · release · portable · publish-release\n"
+	@printf "  \033[1mrelease\033[0m   app · dmg · dmg-signed · release-local · notarize · release · portable · publish-release · release-rehearsal\n"
 	@printf "  \033[1mversion\033[0m   version · version-show · version-bump · bump-patch · bump-minor · bump-major\n"
 	@printf "  \033[1mhooks\033[0m     init-hooks · seed-commit-msg-hooks · commit-safe\n"
 	@printf "  \033[1mmisc\033[0m      doctor · list · update · uninstall · demo · demo-full · skill-new\n"
@@ -64,6 +79,9 @@ vibecrafted: install
 
 RELEASE_SCRIPT := scripts/build-vibecrafted-release.sh
 PORTABLE_SCRIPT := scripts/build-portable-release.sh
+RUNTIME_PACK_INSTALLER := scripts/install-runtime-pack.sh
+RUNTIME_PACK_PACKAGER := scripts/package-runtime-pack.sh
+RUNTIME_PACK ?=
 KEYS ?= $(HOME)/.keys
 # Extra builder flags, e.g. RELEASE_FLAGS=--snapshot-donors to build from
 # detached worktrees at each donor HEAD instead of refusing a dirty donor.
@@ -92,6 +110,19 @@ notarize:
 release:
 	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" $${=VC_RELEASE_FLAGS}'
 
+# Build the standalone macOS Runtime Pack directly from source and native donor
+# inputs. Vibecrafted.app consumes this carrier; it is not the carrier's source.
+runtime-pack:
+	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --runtime-pack-only $${=VC_RELEASE_FLAGS}'
+	@version="$$(tr -d '[:space:]' < VERSION)"; \
+	revision="$$(git rev-parse --short=8 HEAD)"; \
+	date="$${VIBECRAFTED_RELEASE_DATE:-$$(date -u +%Y%m%d)}"; \
+	arch="$$(uname -m | sed 's/^arm64$$/arm64/; s/^aarch64$$/arm64/; s/^x86_64$$/x64/')"; \
+	output="dist/Vibecrafted_RuntimePack_$${version}-$${date}-$${revision}-darwin-$${arch}.tar.gz"; \
+	test -s "$$output" \
+		|| { echo 'release builder produced no standalone Runtime Pack' >&2; exit 1; }; \
+	printf '%s\n' "$$output"
+
 # The portable channel needs no signing identity and no notary account: it is a
 # provenance-bound source distribution, so it builds anywhere git and python3 do.
 portable:
@@ -114,10 +145,26 @@ payload-hygiene:
 		exit 2; }
 	@bash "$(PAYLOAD_HYGIENE_SCRIPT)" "$(ARTIFACT)"
 
+# In-flight delivery verifier: OLD/CURRENT identity, dry-run of the real
+# release recipes, portable inventory, optional payload-hygiene on bytes
+# already on disk. Refuses to tag, notarize, upload, or cargo --release.
+# Does not build a DMG.
+#
+#   make release-rehearsal
+#   make release-rehearsal ARTIFACT=dist/Vibecrafted.app
+RELEASE_REHEARSAL_SCRIPT := scripts/release-rehearsal.sh
+release-rehearsal:
+	@if [ -n "$(ARTIFACT)" ]; then \
+		bash "$(RELEASE_REHEARSAL_SCRIPT)" "$(ARTIFACT)"; \
+	else \
+		bash "$(RELEASE_REHEARSAL_SCRIPT)"; \
+	fi
+
 publish-release:
 	@zsh -ic 'cd "$(CURDIR)" && exec bash scripts/publish-vibecrafted-release.sh'
 
 unified-product-contract-gate:
+	@$(MAKE) --no-print-directory release-version-gate
 	@set -eu; \
 	uv run --project vibecrafted-core --with pytest python -m pytest \
 		tests/tui/test_unified_app_contract.py \
@@ -149,6 +196,27 @@ unified-product-contract-gate:
 		rc=0; env -u PYTHONPATH PYTHONNOUSERSITE=1 "$$runner" verify-release --release-output "$$tmp/release-output.json" --signature "$$tmp/release-output.json.sig" >/dev/null 2>&1 || rc=$$?; test "$$rc" -eq 22; \
 		rc=0; env -u PYTHONPATH PYTHONNOUSERSITE=1 "$$runner" walkaround --release-output "$$tmp/release-output.json" --signature "$$tmp/release-output.json.sig" --output "$$tmp/walkaround.json" >/dev/null 2>&1 || rc=$$?; test "$$rc" -eq 22; \
 		test ! -e "$$tmp/walkaround.json")
+
+# Exact signed-distribution boundary. Unlike the source-only unified gate, this
+# intentionally requires a complete release tuple already produced in dist/.
+# Running the verifier twice proves the same immutable bytes remain valid after
+# the first mount/probe cycle and catches mutable host metadata or stale inner
+# Runtime Pack foundation hashes before upload.
+EXACT_RELEASE_OUTPUT ?= dist/release-output.json
+EXACT_RELEASE_SIGNATURE ?= dist/release-output.json.sig
+exact-release-contract-gate:
+	@test -f "$(EXACT_RELEASE_OUTPUT)" || { echo "missing $(EXACT_RELEASE_OUTPUT)" >&2; exit 2; }
+	@test -f "$(EXACT_RELEASE_SIGNATURE)" || { echo "missing $(EXACT_RELEASE_SIGNATURE)" >&2; exit 2; }
+	@set -eu; \
+	for pass in 1 2; do \
+		env -u PYTHONPATH PYTHONNOUSERSITE=1 uv run --project vibecrafted-core \
+			verify-vibecrafted-walkaround verify-release \
+			--release-output "$(EXACT_RELEASE_OUTPUT)" \
+			--signature "$(EXACT_RELEASE_SIGNATURE)" >/dev/null; \
+	done
+
+release-version-gate:
+	@$(PYTHON) scripts/version_bump.py --check --file "$(VERSION_FILE)"
 
 tui-installer: init-hooks
 	@if ! command -v uv >/dev/null 2>&1; then \
@@ -231,6 +299,14 @@ endif
 install-auto: install
 
 install:
+	@VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)" bash "$(RUNTIME_PACK_INSTALLER)"
+	@$(MAKE) --no-print-directory reconcile-server-service
+
+# Explicit source/compiler lane retained for the portable Linux/WSL carrier.
+# It is not the normal customer installer: it may require Rust, cargo-leptos,
+# sibling donors, and platform targets. macOS CLI/App install the exact same
+# closed Runtime Pack through `make install` and AppDelegate respectively.
+install-source:
 	@mkdir -p "$(HOME)/.vibecrafted"
 	@: > "$(INSTALL_LOG)"
 	@printf "Installing Vibecrafted\n"
@@ -238,13 +314,17 @@ install:
 	@VIBECRAFTED_INSTALL_LOG="$(INSTALL_LOG)" VERBOSE="$(VERBOSE)" $(INSTALL_STEP) "runtime tools" -- bash scripts/install-runtime.sh --runtime "$(RUNTIME)" --yes
 	@VIBECRAFTED_INSTALL_LOG="$(INSTALL_LOG)" VERBOSE="$(VERBOSE)" $(INSTALL_STEP) "app binaries" -- bash -e -c 'make --no-print-directory install-vendored-binaries; make --no-print-directory install-app-binaries'
 	@VIBECRAFTED_INSTALL_LOG="$(INSTALL_LOG)" VERBOSE="$(VERBOSE)" $(INSTALL_STEP) "skills and launchers" -- $(MAKE) --no-print-directory install-bundle-tools
-	@VIBECRAFTED_INSTALL_LOG="$(INSTALL_LOG)" VERBOSE="$(VERBOSE)" $(INSTALL_STEP) "frontier config" -- bash -c 'stable_root="$${XDG_DATA_HOME:-$$HOME/.local/share}/vibecrafted/tools/vibecrafted-current"; bash "$$stable_root/vibecrafted-core/vibecrafted_core/runtime/scripts/install-frontier-config.sh" --source "$$stable_root" || printf "[warn] Frontier config skipped (non-fatal)\n"'
-	@VIBECRAFTED_INSTALL_LOG="$(INSTALL_LOG)" VERBOSE="$(VERBOSE)" $(INSTALL_STEP) "vc-frame config" -- bash -e -c 'export PATH="$$HOME/.local/bin:$$PATH"; stable_root="$$($(PYTHON) -c '\''import sys; sys.path.insert(0, "$(SOURCE)/scripts"); from runtime_paths import vibecrafted_tools_home; print(vibecrafted_tools_home() / "vibecrafted-current")'\'')"; tool_python="$$(uv tool dir --color never)/vibecrafted/bin/python"; test -x "$$tool_python"; PYTHONPATH="$$stable_root/vibecrafted-core" "$$tool_python" -c "from vibecrafted_core.vc_frame_delivery import wire_vc_frame_config; print(wire_vc_frame_config(force_frontier=True).render(), end=\"\")"'
-	@printf "\nVibecrafted is ready.\n\nStart here:\n  vc-start\n\nHealth:\n  vibecrafted doctor\n\nLog:\n  ~/.vibecrafted/install.log\n"
+	@VIBECRAFTED_INSTALL_LOG="$(INSTALL_LOG)" VERBOSE="$(VERBOSE)" $(INSTALL_STEP) "frontier config" -- bash -e -c '$(RESOLVE_STABLE_RUNTIME_ROOT); $(REQUIRE_STAGED_RUNTIME_ROOT); bash "$$stable_root/vibecrafted-core/vibecrafted_core/runtime/scripts/install-frontier-config.sh" --source "$$stable_root" || printf "[warn] Frontier config skipped (non-fatal)\n"'
+	@VIBECRAFTED_INSTALL_LOG="$(INSTALL_LOG)" VERBOSE="$(VERBOSE)" $(INSTALL_STEP) "vc-frame config" -- bash -e -c 'export PATH="$$HOME/.local/bin:$$PATH"; $(RESOLVE_STABLE_RUNTIME_ROOT); $(REQUIRE_STAGED_RUNTIME_ROOT); tool_python="$$(uv tool dir --color never)/vibecrafted/bin/python"; test -x "$$tool_python"; PYTHONPATH="$$stable_root/vibecrafted-core" "$$tool_python" -c "from vibecrafted_core.vc_frame_delivery import wire_vc_frame_config; print(wire_vc_frame_config(force_frontier=True).render(), end=\"\")"'
+	@if PATH="$$HOME/.local/bin:$$PATH" command -v vc-frame >/dev/null 2>&1; then \
+	  printf "\nVibecrafted is ready.\n\nStart here:\n  vc-start\n\nHealth:\n  vibecrafted doctor\n\nLog:\n  ~/.vibecrafted/install.log\n"; \
+	else \
+	  printf "\nVibecrafted is ready (headless: the vc-frame cockpit is not installed; vc-start needs it).\n\nStart here:\n  export PATH=\"\$$HOME/.local/bin:\$$PATH\"\n  vibecrafted doctor\n  vibecrafted implement claude --prompt \"describe this repo\"\n  vibecrafted await claude --last\n\nLog:\n  ~/.vibecrafted/install.log\n"; \
+	fi
+	@$(MAKE) --no-print-directory reconcile-server-service
 
-# `make install` calls `install-python-tools`; it was an empty .PHONY name
-# (no recipe) so the uv-tool install never ran during `make install`. Alias it
-# to the real recipe.
+# The explicit source/compiler lane calls `install-python-tools`; retain the
+# alias for that portable residual without putting it back on `make install`.
 install-python-tools: install-tools
 
 # Full install keeps the installer, runtime publication, Python-tool replacement,
@@ -267,7 +347,7 @@ install-bundle-tools:
 	else \
 		echo "[server] cargo not found — preserving the installed server payload" >&2; \
 	fi; \
-	VIBECRAFTED_INSTALL_SERVICE_POLICY="$(INSTALL_SERVER_SERVICE_POLICY)" VIBECRAFTED_INSTALL_SERVER_PAYLOAD="$$payload" VIBECRAFTED_INSTALL_SERVER_BIN_DIR="$(BIN_DIR)" VIBECRAFTED_INSTALL_SERVER_SITE_ROOT="$(SERVER_INSTALL_SITE_ROOT)" $(PYTHON) -c 'import os, sys; from pathlib import Path; sys.path.insert(0, "$(SOURCE)/scripts"); import vetcoders_install as v; bin_dir = Path(os.environ["VIBECRAFTED_INSTALL_SERVER_BIN_DIR"]); payload = (bin_dir / "$(SERVER_BIN)", bin_dir / "$(SERVER_COMPAT_BIN)", Path(os.environ["VIBECRAFTED_INSTALL_SERVER_SITE_ROOT"])) if os.environ.get("VIBECRAFTED_INSTALL_SERVER_PAYLOAD") == "1" else (); service_policy = os.environ["VIBECRAFTED_INSTALL_SERVICE_POLICY"]; raise SystemExit(v.run_with_tools_install_lease(v.vibecrafted_home(), sys.argv[1:], service_policy=service_policy, runtime_payload_paths=payload))' "$(MAKE)" --no-print-directory install-tools-held INSTALL_BUNDLE=1 INSTALL_SERVER_PAYLOAD="$$payload"
+	VIBECRAFTED_INSTALL_SERVICE_POLICY="$(INSTALL_SERVER_SERVICE_POLICY)" VIBECRAFTED_INSTALL_SERVER_PAYLOAD="$$payload" VIBECRAFTED_INSTALL_SERVER_BIN_DIR="$(BIN_DIR)" VIBECRAFTED_INSTALL_SERVER_SITE_ROOT="$(SERVER_INSTALL_SITE_ROOT)" $(PYTHON) -c 'import os, sys; from pathlib import Path; sys.path.insert(0, "$(SOURCE)/scripts"); import vetcoders_install as v; bin_dir = Path(os.environ["VIBECRAFTED_INSTALL_SERVER_BIN_DIR"]); payload = (bin_dir / "$(SERVER_BIN)", bin_dir / "$(SERVER_COMPAT_BIN)", Path(os.environ["VIBECRAFTED_INSTALL_SERVER_SITE_ROOT"])) if os.environ.get("VIBECRAFTED_INSTALL_SERVER_PAYLOAD") == "1" else (); service_policy = os.environ["VIBECRAFTED_INSTALL_SERVICE_POLICY"]; v.preflight_source_runtime_candidate(Path("$(SOURCE)")); raise SystemExit(v.run_with_tools_install_lease(v.vibecrafted_home(), sys.argv[1:], service_policy=service_policy, runtime_payload_paths=payload))' "$(MAKE)" --no-print-directory install-tools-held INSTALL_BUNDLE=1 INSTALL_SERVER_PAYLOAD="$$payload"
 endif
 
 # De-fragile contract: the uv-tool editable source is the STABLE runtime home
@@ -276,15 +356,15 @@ endif
 # daily-driver `vibecrafted` CLI the moment the dev tree switches to a branch
 # without `vibecrafted_core/cli.py` (ModuleNotFoundError). `make install` already
 # stages the runtime into the stable home (vetcoders_install.py refresh_current_tools)
-# before this target runs; we resolve that home via runtime_paths (single source
-# of truth, honours VIBECRAFTED_TOOLS_HOME / VIBECRAFTED_RUNTIME_HOME / XDG_DATA_HOME)
+# before this target runs; Make resolves that home via the sourced shell throne
+# (honours VIBECRAFTED_TOOLS_HOME / VIBECRAFTED_RUNTIME_HOME / XDG_DATA_HOME)
 # and refuse to fall back to the checkout if staging is missing.
 ifneq (,$(findstring n,$(firstword $(filter-out --%,$(MAKEFLAGS)))))
 install-tools:
 	@printf '%s\n' '[install-tools] dry-run: acquire lease and run install-tools-held'
 else
 install-tools:
-	@VIBECRAFTED_INSTALL_SERVICE_POLICY="$(INSTALL_TOOLS_SERVICE_POLICY)" $(PYTHON) -c 'import os, sys; sys.path.insert(0, "$(SOURCE)/scripts"); import vetcoders_install as v; raise SystemExit(v.run_with_tools_install_lease(v.vibecrafted_home(), sys.argv[1:], service_policy=os.environ["VIBECRAFTED_INSTALL_SERVICE_POLICY"]))' "$(MAKE)" --no-print-directory install-tools-held
+	@VIBECRAFTED_INSTALL_SERVICE_POLICY="$(INSTALL_TOOLS_SERVICE_POLICY)" $(PYTHON) -c 'import os, sys; from pathlib import Path; sys.path.insert(0, "$(SOURCE)/scripts"); import vetcoders_install as v; v.preflight_source_runtime_candidate(Path("$(SOURCE)")); raise SystemExit(v.run_with_tools_install_lease(v.vibecrafted_home(), sys.argv[1:], service_policy=os.environ["VIBECRAFTED_INSTALL_SERVICE_POLICY"]))' "$(MAKE)" --no-print-directory install-tools-held
 endif
 
 # Internal continuation. The outer target waits for this submake while retaining
@@ -306,17 +386,14 @@ install-tools-held:
 		curl -LsSf https://astral.sh/uv/install.sh | sh; \
 	fi; \
 	export PATH="$$HOME/.local/bin:$$PATH"; \
-	stable_root="$$($(PYTHON) -c 'import sys; sys.path.insert(0, "$(SOURCE)/scripts"); from runtime_paths import vibecrafted_tools_home; print(vibecrafted_tools_home() / "vibecrafted-current")')"; \
+	$(RESOLVE_STABLE_RUNTIME_ROOT); \
 	if [ "$(INSTALL_BUNDLE)" = "1" ]; then \
 		$(PYTHON) $(INSTALLER) install --source "$(SOURCE)" --compact --non-interactive --mirror; \
 	else \
 		echo "[install-tools] staging runtime under the cross-process installer lease..."; \
 		$(PYTHON) -c 'import sys; sys.path.insert(0, "$(SOURCE)/scripts"); from pathlib import Path; import vetcoders_install as v; v.refresh_current_tools(Path("$(SOURCE)").resolve(), v.vibecrafted_home(), mirror=True)'; \
 	fi; \
-	if [ ! -d "$$stable_root/vibecrafted-core" ]; then \
-		echo "[install-tools] FATAL: stable runtime home not staged at $$stable_root; refusing to source the uv-tool from the dev checkout" >&2; \
-		exit 1; \
-	fi; \
+	$(REQUIRE_STAGED_RUNTIME_ROOT); \
 	unset PYTHONPATH; \
 	uv tool install --force --reinstall --editable "$$stable_root/vibecrafted-core"; \
 	uv tool install --force --reinstall --editable "$$stable_root/plugins/iterm2"; \
@@ -360,7 +437,7 @@ install-tools-held:
 		fi; \
 		resolved_real="$$($(PYTHON) -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$$resolved")"; \
 		if [ "$$entrypoint" = "vibecrafted" ]; then \
-			expected_path="$$stable_root/vibecrafted-core/vibecrafted_core/deck/vibecrafted"; \
+			expected_path="$$stable_root/bin/vibecrafted"; \
 		else \
 			expected_path="$$tool_root/bin/$$entrypoint"; \
 		fi; \
@@ -416,6 +493,10 @@ install-vendored-binaries:
 			echo "[vendor] $$bin not present in $(VENDORED_FOUNDATION_DIR); keeping external fallback"; \
 			continue; \
 		fi; \
+		if existing="$$(command -v "$$bin" 2>/dev/null)" && [ -n "$$existing" ]; then \
+			echo "[vendor] preserving pre-existing $$bin -> $$existing (fill-gap policy; never downgrade)"; \
+			continue; \
+		fi; \
 		install -m 0755 "$$src" "$(BIN_DIR)/$$bin"; \
 		chmod +x "$(BIN_DIR)/$$bin"; \
 		echo "[vendor] installed $$bin -> $(BIN_DIR)/$$bin"; \
@@ -436,6 +517,9 @@ install-app-binaries:
 	for bin in $(APP_BINARIES); do \
 		rm -f "$(BIN_DIR)/$$bin"; \
 		install -m 0755 "$(APP_BUILD_TARGET)/release/$$bin" "$(BIN_DIR)/$$bin"; \
+		if [ -n "$${VIBECRAFTED_RUNTIME_ROOT:-}" ] && [ -d "$${VIBECRAFTED_RUNTIME_ROOT}/bin" ]; then \
+			install -m 0755 "$(APP_BUILD_TARGET)/release/$$bin" "$${VIBECRAFTED_RUNTIME_ROOT}/bin/$$bin"; \
+		fi; \
 	done; \
 	echo "[app] installed: $(APP_BINARIES) -> $(BIN_DIR)"
 
@@ -591,16 +675,10 @@ update:
 	fi
 
 uninstall:
-	@$(PYTHON) $(INSTALLER) uninstall
+	@VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)" bash "$(RUNTIME_PACK_INSTALLER)" --uninstall
 
 restore:
 	@$(PYTHON) $(INSTALLER) restore
-
-migrate:
-	@bash scripts/migrate_agents_workspace.sh
-
-migrate-dry:
-	@bash scripts/migrate_agents_workspace.sh --dry-run
 
 check:
 	@$(PYTHON) scripts/check_shell.py
@@ -649,7 +727,7 @@ seed-commit-msg-hooks:
 	@bash scripts/install-agent-commit-msg-hooks.sh ..
 
 # -----------------------------------------------------------------------------
-# Living Tree race protection (Plan 07 — kronika 2026-04-16/17 incident learning)
+# Living Tree race protection (Plan 07 — doctrine 2026-04-16/17 incident learning)
 #
 # Two invocation modes:
 #
@@ -704,7 +782,7 @@ test-race-protection:
 # vibecrafted-core/vibecrafted_core/agent_dispatch.py) reject same-family
 # downgrades, allow cross-family delegation, and honor the
 # VIBECRAFTED_SPAWN_ALLOW_DOWNGRADE=1 operator override with an audit
-# warning. Captures kronika 2026-04-10 doctrine.
+# warning. Captures doctrine 2026-04-10 doctrine.
 # -----------------------------------------------------------------------------
 
 test-parity:
@@ -740,10 +818,10 @@ skill-new:
 # Verifies:
 #   - all shipped layouts under config/vc-frame/layouts/*.kdl parse via
 #     `vc-frame --layout <name> setup --check`
-#   - all four mesh themes (vetcoders-dragon/sztudio/silver/div0) load
+#   - all four mesh accent themes (mesh-red/purple/cyan/green) load
 #   - auto-theme.sh passes bash -n + shellcheck
-#   - auto-theme.sh maps each canonical host (dragon, sztudio, silver, div0,
-#     mgbook16 alias) to the correct mesh theme and falls back to neutral
+#   - auto-theme.sh resolves host -> theme from mesh.conf (or
+#     VIBECRAFTED_MESH_MAP), honours aliases, and falls back to neutral
 #     for unknown hosts
 #
 # Tolerant of missing vc-frame — falls back to script-level checks only.
@@ -842,7 +920,7 @@ test-aicx-sync:
 #   grep checks. Live macOS integration is operator-driven (the test
 #   surfaces the manual command rather than spawning iTerm2 tabs during CI).
 #
-# Stack agent-native runtime context (kronika 2026-05-08): OSC 8 hyperlink
+# Stack agent-native runtime context (doctrine 2026-05-08): OSC 8 hyperlink
 # → iTerm2 Cmd+Click → macOS open URL → Hammerspoon URL handler →
 # AppleScript spawn iTerm2 tab → CLI dispatch. See docs/HAMMERSPOON.md.
 # -----------------------------------------------------------------------------
@@ -910,12 +988,29 @@ build-server-release:
 		exit 0; \
 	fi; \
 	set -e; \
+	if ! command -v rustup >/dev/null 2>&1; then \
+		echo "[server] FATAL: rustup is required; refusing an ambient cargo toolchain" >&2; \
+		exit 1; \
+	fi; \
+	cargo_bin="$$(cd "$(SERVER_DIR)" && rustup which cargo 2>/dev/null)"; \
+	if [ -z "$$cargo_bin" ] || [ ! -x "$$cargo_bin" ]; then \
+		echo "[server] FATAL: rustup could not resolve an executable cargo for $(SERVER_DIR)/rust-toolchain.toml" >&2; \
+		echo "[server] repair: cd $(SERVER_DIR) && rustup show active-toolchain" >&2; \
+		exit 1; \
+	fi; \
+	toolchain="$$(cd "$(SERVER_DIR)" && rustup show active-toolchain 2>/dev/null | awk '{print $$1}')"; \
+	echo "[server] toolchain: $$toolchain (pinned by $(SERVER_DIR)/rust-toolchain.toml)"; \
+	if ! (cd "$(SERVER_DIR)" && rustup target list --installed | grep -Fx 'wasm32-unknown-unknown' >/dev/null); then \
+		echo "[server] FATAL: wasm32 target missing from toolchain $$toolchain" >&2; \
+		echo "[server] repair: cd $(SERVER_DIR) && rustup target add wasm32-unknown-unknown" >&2; \
+		exit 1; \
+	fi; \
 	if ! command -v cargo-leptos >/dev/null 2>&1; then \
 		echo "[server] FATAL: cargo-leptos is required to build the interactive server shell" >&2; \
 		exit 1; \
 	fi; \
 	if command -v wasm-bindgen >/dev/null 2>&1; then \
-		lock_version="$$(cd "$(SERVER_DIR)" && cargo tree --locked -p wasm-bindgen --depth 0 --prefix none | awk 'NR == 1 { sub(/^v/, "", $$2); print $$2 }')"; \
+		lock_version="$$(cd "$(SERVER_DIR)" && "$$cargo_bin" tree --locked -p wasm-bindgen --depth 0 --prefix none | awk 'NR == 1 { sub(/^v/, "", $$2); print $$2 }')"; \
 		if [ -z "$$lock_version" ]; then \
 			echo "[server] FATAL: could not resolve wasm-bindgen version from Cargo.lock" >&2; \
 			exit 1; \
@@ -929,7 +1024,14 @@ build-server-release:
 	fi; \
 	echo "[server] building release package + hydration assets ($(SERVER_PACKAGE))"; \
 	mkdir -p "$(SERVER_BUILD_TARGET)"; \
-	ulimit -f unlimited; ( cd $(SERVER_DIR) && CARGO_TARGET_DIR="$(SERVER_BUILD_TARGET)" LEPTOS_SITE_ROOT="$(SERVER_BUILD_SITE_ROOT)" cargo leptos build --release --bin-cargo-args="--locked" --lib-cargo-args="--locked" ); \
+	ulimit -f unlimited; \
+	leptos_rc=0; \
+	( cd $(SERVER_DIR) && PATH="$$(dirname "$$cargo_bin"):$$PATH" CARGO_TARGET_DIR="$(SERVER_BUILD_TARGET)" LEPTOS_SITE_ROOT="$(SERVER_BUILD_SITE_ROOT)" "$$cargo_bin" leptos build --release --bin-cargo-args="--locked" --lib-cargo-args="--locked" ) || leptos_rc=$$?; \
+	if [ "$$leptos_rc" -ne 0 ]; then \
+		echo "[server] FATAL: cargo-leptos build failed (rc=$$leptos_rc) on toolchain $$toolchain" >&2; \
+		echo "[server] if the wasm link step failed with rust-lld/LC_RPATH errors: the toolchain is broken, not the code — see $(SERVER_DIR)/rust-toolchain.toml" >&2; \
+		exit "$$leptos_rc"; \
+	fi; \
 	if [ ! -x "$(SERVER_BUILD_TARGET)/release/$(SERVER_PACKAGE)" ] || [ ! -d "$(SERVER_BUILD_SITE_ROOT)/pkg" ]; then \
 		echo "[server] FATAL: cargo-leptos did not produce the server + site package" >&2; \
 		exit 1; \
@@ -998,6 +1100,31 @@ install-server-service:
 	(cd / && "$$launcher" server service install); \
 	echo "[server-service] restarting after server binary and asset replacement..."; \
 	(cd / && "$$launcher" server service restart)
+
+# Post-install drift healer for lanes that replace the launcher without the
+# managed installer transaction (`make install` via install-runtime-pack.sh,
+# `install-source`). Reconciles the installed LaunchAgent against the freshly
+# published runtime so a reboot never meets a stale-identity refusal. Never
+# enables supervision on machines that have not opted in (no plist -> no-op).
+reconcile-server-service:
+	@if [ "$$(uname -s)" != "Darwin" ]; then \
+		echo "[server-service] launchd not available — skipping service reconcile"; \
+		exit 0; \
+	fi; \
+	plist="$$HOME/Library/LaunchAgents/io.vetcoders.vibecrafted.server.plist"; \
+	if [ ! -f "$$plist" ]; then \
+		echo "[server-service] no installed LaunchAgent — skipping reconcile (supervision not opted in)"; \
+		exit 0; \
+	fi; \
+	export PATH="$(BIN_DIR):$$PATH"; \
+	unset PYTHONPATH; \
+	launcher="$$(command -v vibecrafted 2>/dev/null || true)"; \
+	if [ -z "$$launcher" ] || [ ! -x "$$launcher" ]; then \
+		echo "[server-service] vibecrafted launcher unavailable — skipping reconcile" >&2; \
+		exit 0; \
+	fi; \
+	echo "[server-service] reconciling installed LaunchAgent with the published runtime..."; \
+	(cd / && "$$launcher" server service reconcile)
 
 server-smoke: install-server
 	@echo "[server-smoke] Run 1/3" && bash tests/server_smoke.sh

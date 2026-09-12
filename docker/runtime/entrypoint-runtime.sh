@@ -58,8 +58,8 @@ log "Chaining into base entrypoint with command: $*"
 case "${1:-serve}" in
   serve)
     # No command — idle loop, sshd is the only surface. Operator gets in
-    # via `tailscale ssh runtime-dragon` and runs `vibecrafted ...` there.
-    log "Runtime mode: serve (sshd-only; tailscale ssh runtime-dragon to operate)"
+    # via `tailscale ssh runtime-host-a` and runs `vibecrafted ...` there.
+    log "Runtime mode: serve (sshd-only; tailscale ssh runtime-host-a to operate)"
     log "Stamp: $(cat /etc/vibecrafted-runtime.version 2>/dev/null || echo unknown)"
     # Seed skills synchronously so an interactive ssh session immediately
     # finds them under $VIBECRAFTED_HOME.

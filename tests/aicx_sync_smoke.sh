@@ -298,7 +298,7 @@ CFG="$SANDBOX/cfg.toml"
 cat > "$CFG" <<'TOML'
 [default]
 local_store = "/tmp/from-toml"
-remote_host = "sztudio"
+remote_host = "host-c"
 namespace = "vetcoders/vibecrafted"
 TOML
 
@@ -315,7 +315,7 @@ if grep -q "local:  /tmp/from-toml" <<< "$WRAPPER_OUT"; then
 else
     fail "wrapper did not honour toml local_store" "$WRAPPER_OUT"
 fi
-if grep -q "sztudio" <<< "$WRAPPER_OUT"; then
+if grep -q "host-c" <<< "$WRAPPER_OUT"; then
     ok "toml remote_host loaded into wrapper"
 else
     fail "wrapper did not honour toml remote_host" "$WRAPPER_OUT"

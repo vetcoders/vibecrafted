@@ -358,7 +358,7 @@ _vetcoders_research() {
         printf 'vc-research: gemini CLI is deprecated (dead upstream). Use agy (Google Antigravity CLI) instead.\n' >&2
         return 1
         ;;
-      claude|codex|agy|junie|grok)
+      claude|codex|agy|junie|grok|cursor)
         if [[ " ${positional_research_agents[*]:-} " == *" ${1} "* ]]; then
           printf 'vc-research: agent %s given twice.\n' "${1}" >&2
           return 1
@@ -378,7 +378,7 @@ _vetcoders_research() {
   # silently replaced once — never again.
   if [[ $# -gt 0 && "${1:0:1}" != "-" ]]; then
     printf 'vc-research: unknown agent or token %s.\n' "${1}" >&2
-    printf 'Supported agents: claude codex agy junie grok (gemini is deprecated - use agy).\n' >&2
+    printf 'Supported agents: claude codex agy junie grok cursor (gemini is deprecated - use agy).\n' >&2
     printf 'Usage: vc-research [uno|duo|trio] [agent ...] --prompt "..." | --file /path/to/plan.md\n' >&2
     return 1
   fi
@@ -386,7 +386,7 @@ _vetcoders_research() {
     printf 'vc-research: %s expects exactly %d agent(s), got %d (%s).\n' \
       "$([[ $expected_lane_count == 1 ]] && echo uno || { [[ $expected_lane_count == 2 ]] && echo duo || echo trio; })" \
       "$expected_lane_count" "${#positional_research_agents[@]}" "${positional_research_agents[*]:-none}" >&2
-    printf 'Supported agents: claude codex agy junie grok (gemini is deprecated - use agy).\n' >&2
+    printf 'Supported agents: claude codex agy junie grok cursor (gemini is deprecated - use agy).\n' >&2
     return 1
   fi
   if (( ${#positional_research_agents[@]} > 3 )); then
@@ -404,7 +404,7 @@ _vetcoders_research() {
         shift
         [[ $# -gt 0 ]] || { echo "Missing value for --synthesizer" >&2; return 1; }
         _vetcoders_has_agent "$1" || {
-          printf 'vc-research --synthesizer expects <claude|codex|agy|junie|grok>.\n' >&2
+          printf 'vc-research --synthesizer expects <claude|codex|agy|junie|grok|cursor>.\n' >&2
           return 1
         }
         research_synthesizer="$1"
@@ -476,7 +476,7 @@ _vetcoders_research() {
     while IFS= read -r agent; do
       case "$agent" in
         __source:*) research_agents_source="${agent#__source:}" ;;
-        claude|codex|agy|junie|grok) research_agents+=("$agent") ;;
+        claude|codex|agy|junie|grok|cursor) research_agents+=("$agent") ;;
         gemini)
           printf 'vc-research: config selects gemini, but gemini CLI is deprecated (dead upstream).\n' >&2
           printf 'Fix the picking config to use agy (Google Antigravity CLI) - refusing to silently shrink the swarm.\n' >&2

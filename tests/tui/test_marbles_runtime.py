@@ -660,6 +660,55 @@ def test_parse_contract_fails_closed_on_unknown_flag() -> None:
     assert "Unknown flag: --bogus-flag" in result.stderr
 
 
+def test_skill_contract_accepts_model_and_dispatches_it_to_provider_spawn(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    brief = tmp_path / "audit.md"
+    brief.write_text("Audit this completed plan.\n", encoding="utf-8")
+    capture = tmp_path / "dispatch-argv"
+    lock = tmp_path / "run.lock"
+    lock.write_text("owned\n", encoding="utf-8")
+    env = os.environ.copy()
+    env.update(
+        {
+            "MODEL_ROOT": str(root),
+            "MODEL_BRIEF": str(brief),
+            "MODEL_CAPTURE": str(capture),
+            "MODEL_LOCK": str(lock),
+        }
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-lc",
+            (
+                f'source "{HELPER_SCRIPT}"; '
+                '_vetcoders_effective_run_id() { printf "audt-model-test\\n"; }; '
+                '_vetcoders_effective_run_lock() { printf "%s\\n" "$MODEL_LOCK"; }; '
+                "_vetcoders_prepare_operator_runtime() { return 0; }; "
+                "_vetcoders_vc_frame_bin() { return 1; }; "
+                "_vetcoders_print_launch_receipt() { return 0; }; "
+                "_vetcoders_maybe_spawn_await_pane() { return 0; }; "
+                '_vetcoders_dispatch_skill_prompt() { printf "%s\\n" "$@" > "$MODEL_CAPTURE"; }; '
+                "_vetcoders_skill claude audit --model claude-opus-5 "
+                '--file "$MODEL_BRIEF" --root "$MODEL_ROOT"'
+            ),
+        ],
+        check=False,
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    dispatched = capture.read_text(encoding="utf-8").splitlines()
+    assert dispatched[-4:] == ["--root", str(root), "--model", "claude-opus-5"]
+
+
 def test_parse_contract_double_dash_still_passes_literal_dash_text() -> None:
     payload = subprocess.run(
         [

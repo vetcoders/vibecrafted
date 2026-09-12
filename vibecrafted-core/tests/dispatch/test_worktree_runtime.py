@@ -29,6 +29,7 @@ from vibecrafted_core.dispatch.supervisor import (
 from vibecrafted_core.dispatch.worktrees import (
     WorktreeContractError,
     WorktreeManager,
+    _same_filesystem_location,
     canonical_artifact_root,
 )
 from vibecrafted_core.report_contract import reserve_launcher_report_template
@@ -95,6 +96,19 @@ integrator = {str(integrator).lower()}
   run = "echo ok"
   expect = {{ contains = "ok" }}
 '''
+
+
+def test_filesystem_location_accepts_case_alias_on_case_insensitive_volume(
+    tmp_path: Path,
+) -> None:
+    canonical = tmp_path / "VetCoders"
+    canonical.mkdir()
+    alias = tmp_path / "vetcoders"
+    if not alias.exists():
+        pytest.skip("test volume is case-sensitive")
+
+    assert canonical.resolve() != alias.resolve()
+    assert _same_filesystem_location(canonical, alias)
 
 
 def test_rust_worktrees_never_share_mutable_cargo_outputs(

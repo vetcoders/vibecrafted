@@ -3,7 +3,7 @@
 #
 # Spec 1.2 §C:
 #   ┌─ ❯_ Quick cmd ────────────────────────────────────── PIN ◉ ┐
-#   │ maciej@div0 in ~/.vibecrafted                              │
+#   │ operator@host-a in ~/.vibecrafted                              │
 #   │ $ cargo check                                              │
 #   └──────────────────────────────────────────────────────────┘
 #

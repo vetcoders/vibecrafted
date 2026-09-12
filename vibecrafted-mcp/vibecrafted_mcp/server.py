@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -27,6 +26,9 @@ from typing import Any
 
 from vibecrafted_core import (
     capabilities as _capabilities,
+)
+from vibecrafted_core import (
+    caretaker as _caretaker,
 )
 from vibecrafted_core import (
     control_plane as _control_plane,
@@ -39,6 +41,9 @@ from vibecrafted_core import (
 )
 from vibecrafted_core import (
     lifecycle_control as _lifecycle_control,
+)
+from vibecrafted_core import (
+    server_observation as _server_observation,
 )
 from vibecrafted_core import (
     workflow as _workflow,
@@ -67,7 +72,6 @@ SLIM_BUDGET_BYTES = 5 * 1024
 OBSERVE_MAX_BYTES = 64 * 1024
 OBSERVE_RESULT_MAX_BYTES = 64 * 1024
 OBSERVE_MAX_EVENTS = 100
-OBSERVE_MAX_WAIT_SECONDS = 30.0
 
 
 @contextmanager
@@ -183,15 +187,6 @@ def _clamp_int(value: int | None, default: int, ceiling: int) -> int:
     except (TypeError, ValueError):
         parsed = default
     return min(max(parsed, 0), ceiling)
-
-
-def _clamp_float(value: float | None, default: float, ceiling: float) -> float:
-    """Coerce ``value`` to float (falling back to ``default``), clamped to ``[0.0, ceiling]``."""
-    try:
-        parsed = float(default if value is None else value)
-    except (TypeError, ValueError):
-        parsed = default
-    return min(max(parsed, 0.0), ceiling)
 
 
 def _bounded_text_read(
@@ -402,7 +397,10 @@ def _observe_run_once(
         else _clamp_int(cursor_payload.get("transcript_offset"), 0, 2**63 - 1)
     )
     with _override_vibecrafted_home(home):
-        run = _control_plane.lookup_run(target)
+        observation = _server_observation.observe_run(target)
+        run = observation.get("run")
+        if not isinstance(run, dict):
+            run = None
         events, next_event_cursor = _read_run_events_delta(
             target,
             event_cursor=event_cursor,
@@ -449,6 +447,7 @@ def _observe_run_once(
             "terminal": _run_terminal(run),
             "report_ready": _report_ready(run),
             "report_uri": f"vibecrafted://runs/{target}/report",
+            "observation": observation,
         }
     )
 
@@ -462,32 +461,22 @@ def _observe_run(
     max_events: int = OBSERVE_MAX_EVENTS,
     wait_seconds: float = 0.0,
 ) -> dict[str, Any]:
-    """Poll ``_observe_run_once`` until new data, terminal state, or ``wait_seconds`` elapses.
+    """Return one server-owned observation plus bounded local cursor deltas.
 
-    Backs the ``vc_run_observe`` tool's optional long-poll behavior; with
-    ``wait_seconds<=0`` this degrades to a single ``_observe_run_once`` call.
+    ``wait_seconds`` remains accepted for wire compatibility but no longer arms
+    an MCP-private poller. Blocking consumers use ``vc_await_run`` and join the
+    server hub.
     """
-    wait = _clamp_float(wait_seconds, 0.0, OBSERVE_MAX_WAIT_SECONDS)
-    start_event_cursor = _event_cursor_from_payload(cursor)
-    deadline = time.monotonic() + wait
-    while True:
-        payload = _observe_run_once(
-            run_id,
-            home=home,
-            cursor=cursor,
-            max_bytes=max_bytes,
-            max_events=max_events,
-        )
-        if (
-            wait <= 0
-            or payload["events"]
-            or str(payload["cursor"]["event_cursor"]) != start_event_cursor
-            or int(payload["transcript"]["bytes"]) > 0
-            or payload["terminal"]
-            or time.monotonic() >= deadline
-        ):
-            return payload
-        time.sleep(min(0.25, max(deadline - time.monotonic(), 0.0)))
+    payload = _observe_run_once(
+        run_id,
+        home=home,
+        cursor=cursor,
+        max_bytes=max_bytes,
+        max_events=max_events,
+    )
+    if wait_seconds > 0:
+        payload["wait_semantics"] = "one_shot; use vc_await_run for blocking"
+    return _bound_observe_payload(payload)
 
 
 def _run_status_resource_payload(run_id: str) -> dict[str, Any]:
@@ -638,6 +627,23 @@ def build_server() -> Any:
         with _override_vibecrafted_home(home):
             return _control_plane.sync_state()
 
+    @mcp.tool(annotations={"readOnlyHint": True})
+    def vc_caretaker(home: str | None = None) -> dict[str, Any]:
+        """The one caretaker truth: the published server/observability envelope.
+
+        Projects the ``vibecrafted.caretaker.v1`` envelope exactly as the
+        runtime published it (``vibecrafted server caretaker``) and as
+        ``GET /api/control/caretaker`` serves it — server identity, derived
+        verdict, supervision actions, resume backlog, control-plane upkeep —
+        with publication freshness attached. This tool never builds the
+        envelope and never re-derives health: MCP is eyes, not the heartbeat.
+        ``published=false`` with a reason is an honest answer, not an error.
+
+        Token budget: ~2-6k tokens depending on resume backlog size.
+        """
+        with _override_vibecrafted_home(home):
+            return _caretaker.read_caretaker_snapshot()
+
     def _launch_workflow(
         skill: str = "workflow",
         agent: str | None = None,
@@ -742,31 +748,25 @@ def build_server() -> Any:
 
     @mcp.tool(annotations={"readOnlyHint": True})
     def vc_run_status(run_id: str, home: str | None = None) -> dict[str, Any]:
-        """Lookup one run by id from synced control-plane state."""
+        """Perform one vc-server-owned run observation."""
         with _override_vibecrafted_home(home):
-            run = _control_plane.lookup_run(run_id)
-        return {
-            "run_id": run_id,
-            "found": run is not None,
-            "run": run,
-            "operator_state": (run or {}).get("operator_state", "") if run else "",
-            "artifact_gate": (run or {}).get("artifact_gate", "") if run else "",
-            "failure_card": (run or {}).get("failure_card") if run else None,
-        }
+            return _server_observation.observe_run(run_id)
 
     @mcp.tool(annotations={"readOnlyHint": True})
     def vc_await_run(
         run_id: str,
         timeout_seconds: float = 300,
         interval_seconds: float = 5,
+        hard_cap_seconds: float | None = None,
         home: str | None = None,
     ) -> dict[str, Any]:
-        """Bounded await for one run using control-plane metadata only."""
+        """Join the vc-server shared monitor for one run."""
         with _override_vibecrafted_home(home):
-            return _control_plane.await_run(
+            return _server_observation.await_run(
                 run_id,
-                timeout_seconds=timeout_seconds,
+                idle_timeout_seconds=timeout_seconds,
                 interval_seconds=interval_seconds,
+                hard_cap_seconds=hard_cap_seconds,
             )
 
     @mcp.tool(annotations={"readOnlyHint": True})

@@ -1,11 +1,13 @@
 # Output shapes — one gate, three shapes by scale
 
 Scaffold is one gate with three output shapes chosen by scope. Pick the smallest that fits; do not
-emit a wave-atlas for a single cut, nor a single brief for a whole project.
+emit a wave-atlas for a single cut, nor a single brief for a whole project. Every shape still emits
+the mandatory pair `SCAFFOLD.md` + `<plan-id>.dispatch.toml`; scale changes supporting artifacts,
+never the supervisor-readable execution contract.
 
 ## 1. Single cut → one brief
 
-A single `SCAFFOLD.md` (see `plan-template.md`). One Vector, a handful of cuts, each with a
+A single `SCAFFOLD.md` plus its one-cut `<plan-id>.dispatch.toml` (see `plan-template.md`). One Vector, a handful of cuts, each with a
 `state` column and a delivery-verifier. No tracker needed.
 
 ## 2. Multiple cuts → wave-atlas + briefs + tracker
@@ -15,6 +17,8 @@ A single `SCAFFOLD.md` (see `plan-template.md`). One Vector, a handful of cuts, 
 - **Per-wave briefs** (12-section dispatch template, below), one per wave.
 - **Tracker** (`tracker.md`): wave status table with the `state` column, run_id, baseline SHA, commit
   SHA, gate, report — visibility-through-artifacts for the absent operator.
+- **Dispatch** (`<plan-id>.dispatch.toml`): the complete cut DAG, allowed concurrency, brief paths,
+  and verifier gates handed to `/vc-ship` and consumed by its deterministic dispatcher.
 
 ## 3. Whole project → read/write pipeline with phases
 
@@ -27,7 +31,7 @@ per Vector, and the recovery-vectors for STOP states.
 ```markdown
 ---
 prompt_id: <slug>
-agent: <claude|codex|gemini>
+agent: <claude|codex|gemini|cursor>
 skill: <vc-implement|...>
 wave: <Wn>            target_repo: <repo>      baseline_branch: <living-tree>
 authored_by: <agent> <agents@vetcoders.io>     report_path: <path>

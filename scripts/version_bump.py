@@ -40,6 +40,81 @@ CARGO_LOCK_PACKAGES = {
     Path("vibecrafted-app/Cargo.lock"): ("control-core",),
 }
 PLUGIN_MANIFEST_RELATIVE = Path("plugin.json")
+RELEASE_TEXT_PROJECTIONS = {
+    Path("vibecrafted-app/shell-agent/app/project.yml"): (
+        re.compile(
+            r'^\s*MARKETING_VERSION:\s*"(?P<version>\d+\.\d+\.\d+)"',
+            re.MULTILINE,
+        ),
+    ),
+    Path("packaging/homebrew/Formula/vibecrafted.rb"): (
+        re.compile(r'^\s*version\s+"(?P<version>\d+\.\d+\.\d+)"', re.MULTILINE),
+    ),
+    Path("packaging/homebrew/Casks/vibecrafted-app.rb"): (
+        re.compile(r'^\s*version\s+"(?P<version>\d+\.\d+\.\d+),', re.MULTILINE),
+    ),
+    Path("README.md"): (
+        re.compile(r'<img alt="Version (?P<version>\d+\.\d+\.\d+)"'),
+        re.compile(r"badge/version-(?P<version>\d+\.\d+\.\d+)-informational"),
+    ),
+    Path("docs/RELEASE_CHECKLIST.md"): (
+        re.compile(r"^# Cut (?P<version>\d+\.\d+\.\d+)\b", re.MULTILINE),
+        re.compile(r"One GitHub Release `v(?P<version>\d+\.\d+\.\d+)`"),
+        re.compile(r"`VERSION` is already `(?P<version>\d+\.\d+\.\d+)`"),
+        re.compile(
+            r'test "\$\(tr -d \'\[:space:\]\' < VERSION\)" = "(?P<version>\d+\.\d+\.\d+)"'
+        ),
+        re.compile(r"git tag -a v(?P<version>\d+\.\d+\.\d+) -m"),
+        re.compile(r"git push origin v(?P<version>\d+\.\d+\.\d+)"),
+    ),
+}
+
+
+def check_version_declarations(version_file: Path) -> str:
+    """Fail when a packaged product projection drifts from root VERSION."""
+    current = version_file.read_text(encoding="utf-8").strip()
+    _parse_version(current)
+    projections = _version_projections(version_file)
+    if projections is None:
+        return current
+    pyprojects, packaged_versions, cargos = projections
+    declared: dict[Path, str] = {
+        path: _table_version(path.read_text(encoding="utf-8"), "project")
+        for path in pyprojects
+    }
+    declared.update(
+        {path: path.read_text(encoding="utf-8").strip() for path in packaged_versions}
+    )
+    declared.update(
+        {
+            path: _table_version(path.read_text(encoding="utf-8"), "package")
+            for path in cargos
+        }
+    )
+    plugin_path = version_file.parent / PLUGIN_MANIFEST_RELATIVE
+    if plugin_path.exists():
+        declared[plugin_path] = str(
+            json.loads(plugin_path.read_text(encoding="utf-8")).get("version", "")
+        )
+    for relative, patterns in RELEASE_TEXT_PROJECTIONS.items():
+        path = version_file.parent / relative
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for index, pattern in enumerate(patterns, start=1):
+            match = pattern.search(text)
+            if match is None:
+                raise ValueError(
+                    f"version declaration missing: {path} projection {index}"
+                )
+            declared[Path(f"{path}#projection-{index}")] = match.group("version")
+    drift = {path: value for path, value in declared.items() if value != current}
+    if drift:
+        details = ", ".join(f"{path}={value}" for path, value in drift.items())
+        raise ValueError(
+            f"Version drift detected; expected {current} in every declaration: {details}"
+        )
+    return current
 
 
 def _parse_version(value: str) -> tuple[int, int, int]:
@@ -234,6 +309,20 @@ def update_version_declarations(version_file: Path, requested: str) -> tuple[str
         if plugin_path.exists():
             plugin_payload = json.loads(plugin_path.read_text(encoding="utf-8"))
             declared[plugin_path] = str(plugin_payload.get("version", ""))
+        release_texts: dict[Path, tuple[str, tuple[re.Pattern[str], ...]]] = {}
+        for relative, patterns in RELEASE_TEXT_PROJECTIONS.items():
+            path = version_file.parent / relative
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8")
+            for index, pattern in enumerate(patterns, start=1):
+                match = pattern.search(text)
+                if match is None:
+                    raise ValueError(
+                        f"version declaration missing: {path} projection {index}"
+                    )
+                declared[Path(f"{path}#projection-{index}")] = match.group("version")
+            release_texts[path] = (text, patterns)
         declared.update(
             {
                 path: _table_version(text, "package")
@@ -268,6 +357,17 @@ def update_version_declarations(version_file: Path, requested: str) -> tuple[str
         if plugin_payload is not None:
             plugin_payload["version"] = next_version
             updates[plugin_path] = json.dumps(plugin_payload, indent=2) + "\n"
+        for path, (text, patterns) in release_texts.items():
+            updated = text
+            for pattern in patterns:
+                updated = pattern.sub(
+                    lambda match: match.group(0).replace(
+                        match.group("version"), next_version, 1
+                    ),
+                    updated,
+                    count=1,
+                )
+            updates[path] = updated
         for relative, package_names in CARGO_LOCK_PACKAGES.items():
             lock_path = version_file.parent / relative
             if not lock_path.exists():
@@ -289,12 +389,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Bump VERSION and every packaged version declaration.",
     )
-    parser.add_argument("version", help="{patch|minor|major|x.y.z}")
+    parser.add_argument("version", nargs="?", help="{patch|minor|major|x.y.z}")
     parser.add_argument("--file", default="VERSION", help="VERSION file path")
+    parser.add_argument("--check", action="store_true", help="verify projections only")
     args = parser.parse_args()
 
     version_file = Path(args.file)
     try:
+        if args.check:
+            current = check_version_declarations(version_file)
+            print(f"Version projections agree: v{current}")
+            return 0
+        if args.version is None:
+            parser.error("version is required unless --check is used")
         current, next_version = update_version_declarations(version_file, args.version)
     except (OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)

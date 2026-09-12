@@ -1,247 +1,96 @@
 # syntax=docker/dockerfile:1.7
-# ============================================================================
-# vc-workspace — SoTA dev container for the Vetcoders / vibecrafted / loctree
-# stack. Debian 13 trixie base, full framework + foundations + agent CLIs +
-# tailnet integration.
-#
-# Naming: vc-workspace = this container (image/node). vc-runtime = the multiroot
-# repo tree it mounts at /workspace. Two names, two things — no overlap.
-#
-# Foundations are COMPILED FROM SOURCE (builder stage) because prebuilt
-# linux/arm64 bundles do not exist (loct.io / GH releases ship only macOS-arm64
-# + linux-x86_64). Source is vendored at build time into src/ via
-# `git archive HEAD` of the local aicx + loctree-suite checkouts (refresh with
-# vendor-src.sh). Native arm64 binaries, your exact committed code, zero
-# private-repo creds in any layer.
-#
-# Build (single arch, local): docker compose up -d --build   # compose.yaml + .env
-# First build ~15-20 min (Rust workspace compile incl. aicx native-embedder /
-# llama-cpp-sys). Subsequent builds cache layer-by-layer.
-#
-# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
-# ============================================================================
 
-ARG DEBIAN_RELEASE=trixie
-ARG ZIG_VERSION=0.13.0
+# H2b3a selector carrier. The Runtime Pack is built and sealed outside this
+# image; this image only verifies and installs those exact bytes. The separate
+# docker/runtime tailnet deployment does not consume this Containerfile.
+FROM node:22.19.0-bookworm-slim@sha256:4a4884e8a44826194dff92ba316264f392056cbe243dcc9fd3551e71cea02b90
 
-# ──────────────────────────────────────────────────────────────────────────
-# Stage A — builder: compile Vetcoders foundations from vendored source
-# ──────────────────────────────────────────────────────────────────────────
-FROM debian:${DEBIAN_RELEASE} AS builder
+ARG RUNTIME_PACK_ARCHIVE=build/Vibecrafted_RuntimePack_linux-arm64.tar.gz
+ARG RUNTIME_PACK_CARRIER_BASENAME
+ARG RUNTIME_PACK_SHA256
+ARG RUNTIME_PACK_MANIFEST_SHA256
+ARG VIBECRAFTED_SOURCE_REVISION
+ARG CODEX_VERSION=0.149.1
+ARG CLAUDE_VERSION=2.1.245
+ARG GEMINI_VERSION=0.56.0
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV CARGO_TERM_COLOR=always
+LABEL org.opencontainers.image.title="Vibecrafted Local VM Runtime" \
+      org.opencontainers.image.description="Exact non-root Vibecrafted Runtime Pack carrier" \
+      org.opencontainers.image.source="https://github.com/vetcoders/vibecrafted" \
+      org.opencontainers.image.revision="${VIBECRAFTED_SOURCE_REVISION}" \
+      io.vetcoders.vibecrafted.runtime-pack.sha256="${RUNTIME_PACK_SHA256}" \
+      io.vetcoders.vibecrafted.runtime-pack.manifest-sha256="${RUNTIME_PACK_MANIFEST_SHA256}"
 
-# Build deps. cmake/ninja/clang/libclang/llvm are needed by aicx's
-# native-embedder (llama-cpp-2 / GGUF) and any bindgen sys-crates.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl git pkg-config \
-    build-essential cmake ninja-build \
-    libssl-dev libudev-dev \
-    clang libclang-dev llvm \
- && rm -rf /var/lib/apt/lists/*
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    HOME=/var/lib/vibecrafted \
+    XDG_CONFIG_HOME=/var/lib/vibecrafted/.config \
+    XDG_DATA_HOME=/var/lib/vibecrafted/.local/share \
+    VIBECRAFTED_HOME=/var/lib/vibecrafted/.vibecrafted \
+    VIBECRAFTED_RUNTIME_ROOT=/opt/vibecrafted-runtime \
+    RUNTIME_PACK_CARRIER_BASENAME=${RUNTIME_PACK_CARRIER_BASENAME} \
+    PATH=/opt/vibecrafted-runtime/bin:/usr/local/bin:/usr/bin:/bin
 
-# Rust via rustup. The aicx checkout pins rust-toolchain.toml = 1.95.0, which
-# rustup auto-installs on first cargo invocation inside that tree; loctree needs
-# MSRV 1.85+. Install a recent stable as the default for the loctree build.
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path
-ENV PATH="/root/.cargo/bin:${PATH}"
-ENV RUSTUP_HOME=/root/.rustup
-RUN rustc --version && cargo --version
-
-# Vendored source (git archive HEAD of local checkouts — clean, tracked-only).
-WORKDIR /build
-COPY src/loctree-suite ./loctree-suite
-COPY src/aicx ./aicx
-
-# Compile loctree-suite. NOTE: the loctree-rs package declares shim [[bin]]s
-# that can collide on output filename with the dedicated loctree-mcp /
-# loctree-lsp packages, so we build per-package in SEPARATE invocations and
-# install each binary immediately.
-RUN cd loctree-suite \
- && cargo build --release -p loctree --bin loct --bin loctree \
- && install -m 0755 target/release/loct /usr/local/bin/loct \
- && install -m 0755 target/release/loctree /usr/local/bin/loctree \
- && cargo build --release -p loctree-mcp \
- && install -m 0755 target/release/loctree-mcp /usr/local/bin/loctree-mcp \
- && cargo build --release -p loctree-lsp \
- && install -m 0755 target/release/loctree-lsp /usr/local/bin/loctree-lsp \
- && loct --version
-
-# Compile aicx: aicx + aicx-mcp (default features: native + cloud embedder).
-# rust-toolchain.toml in this dir pins the toolchain; rustup fetches it.
-RUN cd aicx \
- && cargo build --release --bin aicx --bin aicx-mcp \
- && install -m 0755 target/release/aicx /usr/local/bin/aicx \
- && install -m 0755 target/release/aicx-mcp /usr/local/bin/aicx-mcp \
- && aicx --version
-
-# prview — public crate, best-effort (not load-bearing). Always leave SOMETHING
-# at /usr/local/bin/prview so the runtime COPY never fails on an empty glob:
-# real binary if the build succeeds, a stub that explains itself otherwise.
-RUN ( cargo install --locked prview 2>/dev/null \
-      && cp /root/.cargo/bin/prview /usr/local/bin/prview \
-      && prview --version ) \
-    || ( echo "[warn] prview build unavailable — installing stub" \
-         && printf '#!/bin/sh\necho "prview not installed in this image (build skipped it)" >&2\nexit 127\n' \
-            > /usr/local/bin/prview \
-         && chmod 0755 /usr/local/bin/prview )
-
-# ──────────────────────────────────────────────────────────────────────────
-# Stage B — runtime: slim Debian + agent CLIs + framework + tailscale
-# ──────────────────────────────────────────────────────────────────────────
-FROM debian:${DEBIAN_RELEASE}-slim AS runtime
-
-ENV DEBIAN_FRONTEND=noninteractive
-ENV LANG=C.UTF-8
-ENV LC_ALL=C.UTF-8
-ENV TZ=UTC
-# /opt/vibecrafted is only a build-time SEED (image layer, see the framework
-# install below). The live install owns the canonical roots — store
-# ~/.vibecrafted · runtime ~/.local/share/vibecrafted · launchers
-# ~/.local/bin — so the image must not export VIBECRAFTED_ROOT or shadow
-# canonical launchers with seed paths (the installer fail-fasts on that drift).
-ENV PATH="/root/.local/bin:/usr/local/bin:/root/.cargo/bin:${PATH}"
-
-# Runtime deps. gnupg2 for signed installers; make for the vibecrafted installer
-# preflight. CLI niceties (eza/bat/fd/rg/just/zoxide) from Debian trixie apt
-# (tolerant install). libgomp1 covers aicx native-embedder runtime.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl wget git git-lfs gnupg2 openssh-client openssh-server \
-    libssl3 libudev1 libgomp1 \
-    python3 python3-pip python3-venv \
-    make coreutils \
-    jq htop tmux unzip xz-utils \
-    zsh \
-    iproute2 iptables iputils-ping dnsutils \
- && for pkg in eza bat fd-find ripgrep just zoxide; do \
-        apt-get install -y --no-install-recommends "$pkg" \
-          || echo "[warn] apt: $pkg unavailable, skipping"; \
-    done \
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates file git libayatana-appindicator3-1 libdbus-1-3 \
+      libfontconfig1 libfreetype6 libgomp1 libgtk-3-0 libssl3 libudev1 \
+      libwayland-client0 libx11-6 libxcb1 libxdo3 libxkbcommon0 passwd tini \
  && rm -rf /var/lib/apt/lists/* \
- && { [ -e /usr/bin/batcat ] && ln -sf /usr/bin/batcat /usr/local/bin/bat || true; } \
- && { [ -e /usr/bin/fdfind ] && ln -sf /usr/bin/fdfind /usr/local/bin/fd || true; }
+ && /usr/sbin/groupadd --gid 10001 vibecrafted \
+ && /usr/sbin/useradd --uid 10001 --gid 10001 --home-dir /var/lib/vibecrafted \
+      --create-home --shell /bin/bash vibecrafted
 
-# Node 22 LTS for agent CLIs
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
- && apt-get install -y --no-install-recommends nodejs \
- && rm -rf /var/lib/apt/lists/* \
- && node --version && npm --version
+# npm verifies registry integrity for these exact package versions. Their
+# expected registry integrities are recorded in runtime-provider-lock.json.
+RUN npm config set fund false \
+ && npm config set audit false \
+ && test "$(npm view @openai/codex@${CODEX_VERSION} dist.integrity)" = 'sha512-6q5pbcpFbJbqOpkubSDBwXmktQ55aD8eUzGzBF1zASob2DjwhBKDSNGtdZKalfrNJUdTDTPDMmzCXEXs5tMBYA==' \
+ && test "$(npm view @anthropic-ai/claude-code@${CLAUDE_VERSION} dist.integrity)" = 'sha512-+7baJddJXZukgd6AgC7xStHGsMTVHDPlRcAoqTSPx2NQ+QwKGtvCZQLgbnKuhjkwq9v9vKvYwIhLOwGiE77mVQ==' \
+ && test "$(npm view @google/gemini-cli@${GEMINI_VERSION} dist.integrity)" = 'sha512-q4oBfb/Oh/HNLMYBOJMp88/QQ8hLffnB0ykoVThi6A5isbGHJ/ylWLMosMGqukKY0Q1Jv/XRDpb46Q1BV+zQqw==' \
+ && npm install --global --ignore-scripts=false \
+      "@openai/codex@${CODEX_VERSION}" \
+      "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
+      "@google/gemini-cli@${GEMINI_VERSION}" \
+ && codex --version \
+ && claude --version \
+ && gemini --version
 
-# Agent CLIs (npm globals + canonical claude symlink), retry-on-flake.
-RUN npm config set fund false && npm config set audit false; \
-    ( npm install -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli \
-      || (echo "[warn] npm retry…" && sleep 3 && \
-          npm install -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli) ) \
-      || echo "[warn] agent CLI npm install had issues — continuing"; \
-    NPM_BIN="$(npm root -g 2>/dev/null)"; \
-    if [ -n "$NPM_BIN" ] && [ -f "$NPM_BIN/@anthropic-ai/claude-code/cli.js" ]; then \
-        ln -sf "$NPM_BIN/@anthropic-ai/claude-code/cli.js" /usr/local/bin/claude; \
-        chmod +x /usr/local/bin/claude; \
-    fi; \
-    for c in claude codex gemini; do command -v "$c" >/dev/null 2>&1 && echo "  ok: $c" || echo "  [warn] missing: $c"; done; true
+COPY vibecrafted-vm/runtime-provider-lock.json /usr/local/share/vibecrafted/runtime-provider-lock.json
+COPY ${RUNTIME_PACK_ARCHIVE} /tmp/runtime-pack.tar.gz
 
-# uv (Python package manager)
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
- && ln -sf /root/.local/bin/uv /usr/local/bin/uv \
- && uv --version
+RUN test -n "$RUNTIME_PACK_CARRIER_BASENAME" \
+ && test -n "$RUNTIME_PACK_SHA256" \
+ && test -n "$RUNTIME_PACK_MANIFEST_SHA256" \
+ && test -n "$VIBECRAFTED_SOURCE_REVISION" \
+ && printf '%s  %s\n' "$RUNTIME_PACK_SHA256" /tmp/runtime-pack.tar.gz | sha256sum -c - \
+ && mkdir -p /opt/vibecrafted-runtime \
+ && tar -xzf /tmp/runtime-pack.tar.gz -C /opt/vibecrafted-runtime --strip-components=1 \
+ && test "$(sha256sum /opt/vibecrafted-runtime/runtime-pack-provenance.json | cut -d' ' -f1)" = "$RUNTIME_PACK_MANIFEST_SHA256" \
+ && PYTHONPATH=/opt/vibecrafted-runtime/vibecrafted-core \
+      /opt/vibecrafted-runtime/bin/python3 -m vibecrafted_core.runtime_pack_contract verify \
+      --root /opt/vibecrafted-runtime \
+      --carrier-basename "$RUNTIME_PACK_CARRIER_BASENAME" \
+      --expected-source-revision "$VIBECRAFTED_SOURCE_REVISION" \
+      --expected-platform linux --expected-architecture arm64 \
+ && rm -f /tmp/runtime-pack.tar.gz \
+ && chown -R root:root /opt/vibecrafted-runtime
 
-# Vetcoders foundations — compiled binaries from builder
-COPY --from=builder /usr/local/bin/loct /usr/local/bin/loct
-COPY --from=builder /usr/local/bin/loctree /usr/local/bin/loctree
-COPY --from=builder /usr/local/bin/loctree-mcp /usr/local/bin/loctree-mcp
-COPY --from=builder /usr/local/bin/loctree-lsp /usr/local/bin/loctree-lsp
-COPY --from=builder /usr/local/bin/aicx /usr/local/bin/aicx
-COPY --from=builder /usr/local/bin/aicx-mcp /usr/local/bin/aicx-mcp
-COPY --from=builder /usr/local/bin/prview /usr/local/bin/prview
-RUN for b in loct loctree loctree-mcp loctree-lsp aicx aicx-mcp; do \
-        command -v "$b" >/dev/null 2>&1 && echo "  ok: $b" || echo "  [warn] missing: $b"; \
+COPY vibecrafted-vm/runtime-entry.sh /usr/local/bin/runtime-entry
+RUN chmod 0755 /usr/local/bin/runtime-entry \
+ && for binary in vibecrafted vc-server loct loctree loctree-mcp loctree-lsp aicx aicx-mcp prview screenscribe vc-frame vc-terminal voc; do \
+      test -x "/opt/vibecrafted-runtime/bin/$binary"; \
     done
 
-# semgrep (PyPI) — load-bearing quality gate, must succeed.
-RUN pip3 install --break-system-packages --quiet semgrep \
- && semgrep --version >/dev/null 2>&1 && echo "semgrep ok"
-
-# screenscribe — NOT on PyPI (it's a Vetcoders foundation distributed out-of-band,
-# like loct/aicx). Best-effort: try pip in case a private index is configured,
-# otherwise skip — it is not load-bearing for the dev container.
-RUN pip3 install --break-system-packages --quiet screenscribe 2>/dev/null \
-    && echo "screenscribe ok" \
-    || echo "[warn] screenscribe not on PyPI — skipped (install from loct.io/source if needed)"
-
-# Zig (arch-aware; for building zig projects inside the container)
-ARG ZIG_VERSION
-RUN ARCH="$(uname -m)"; \
-    case "$ARCH" in \
-        x86_64|amd64) ZIG_ARCH=x86_64 ;; \
-        aarch64|arm64) ZIG_ARCH=aarch64 ;; \
-        *) echo "unsupported arch=$ARCH" && exit 1 ;; \
-    esac \
- && curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" \
-    | tar -xJ -C /opt/ \
- && ln -sf /opt/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}/zig /usr/local/bin/zig \
- && zig version
-
-# starship + atuin + mise
-RUN curl -sS https://starship.rs/install.sh | sh -s -- -y && starship --version
-RUN curl --proto '=https' --tlsv1.2 -sSf https://setup.atuin.sh | sh \
- && ln -sf /root/.atuin/bin/atuin /usr/local/bin/atuin \
- && atuin --version || echo "atuin installed"
-RUN curl -fsSL https://mise.jdx.dev/install.sh | sh \
- && ln -sf /root/.local/bin/mise /usr/local/bin/mise
-
-# vc_frame (prebuilt release)
-RUN ARCH="$(uname -m)"; \
-    case "$ARCH" in \
-        x86_64) VC_FRAME_ARCH=x86_64-unknown-linux-musl ;; \
-        aarch64) VC_FRAME_ARCH=aarch64-unknown-linux-musl ;; \
-        *) echo "unsupported arch $ARCH" && exit 1 ;; \
-    esac; \
-    curl -fsSL "https://github.com/vc_frame-org/vc_frame/releases/latest/download/vc_frame-${VC_FRAME_ARCH}.tar.gz" \
-      | tar -xz -C /usr/local/bin/ && chmod +x /usr/local/bin/vc_frame \
- && vc_frame --version
-
-# Tailscale (userspace mode for containers, no kernel module needed)
-RUN curl -fsSL https://tailscale.com/install.sh | sh \
- && tailscale --version
-
-# Vetcoders framework — official vibecrafted.io installer.
-# Piping to bash is already non-interactive (no-TTY → compact path); `--yes`
-# skips the consent prompt. VIBECRAFTED_HOME sets the location (no --prefix
-# flag exists); /opt/vibecrafted so it does not write into the mounted
-# /root/.vibecrafted volume. Non-fatal: foundations above are verified.
-RUN curl -fsSL https://vibecrafted.io/install.sh -o /tmp/vc-install.sh \
- && (VIBECRAFTED_HOME=/opt/vibecrafted bash /tmp/vc-install.sh --yes \
-     || echo "[warn] vibecrafted framework install non-fatal — foundations still present") \
- && rm -f /tmp/vc-install.sh
-RUN for cand in /opt/vibecrafted/bin/vibecrafted \
-                /opt/vibecrafted/tools/vibecrafted-current/bin/vibecrafted; do \
-        [ -x "$cand" ] && ln -sf "$cand" /usr/local/bin/vibecrafted && break; \
-    done; \
-    vibecrafted --version 2>/dev/null || echo "[note] vibecrafted launcher not on PATH yet — check /opt/vibecrafted"
-
-# Shell setup
-RUN chsh -s /usr/bin/zsh root \
- && mkdir -p /root/.config/vetcoders
-COPY zshrc.template /root/.zshrc
-COPY entry.sh /usr/local/bin/entry.sh
-RUN chmod +x /usr/local/bin/entry.sh
-
+USER vibecrafted
 WORKDIR /workspace
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/runtime-entry"]
+CMD ["vibecrafted", "--help"]
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD aicx --version >/dev/null 2>&1 && loct --version >/dev/null 2>&1 || exit 1
-
-VOLUME ["/workspace", "/root/.aicx", "/root/.keys", "/root/.claude", "/root/.codex", "/root/.gemini", "/root/.vibecrafted", "/root/.config/vetcoders"]
-VOLUME ["/var/lib/tailscale"]
-
-ENTRYPOINT ["/usr/local/bin/entry.sh"]
-CMD ["zsh"]
-
-LABEL org.opencontainers.image.title="vc-workspace"
-LABEL org.opencontainers.image.description="SoTA dev container for Vetcoders / vibecrafted / loctree / aicx stack with tailnet integration"
-LABEL org.opencontainers.image.source="https://github.com/vetcoders/vc-workspace"
-LABEL org.opencontainers.image.licenses="MIT"
-LABEL org.opencontainers.image.authors="Vetcoders <hello@vetcoders.io>"
-LABEL org.opencontainers.image.version="0.2.0"
+HEALTHCHECK --interval=30s --timeout=15s --start-period=5s --retries=3 \
+  CMD PYTHONPATH=/opt/vibecrafted-runtime/vibecrafted-core \
+      /opt/vibecrafted-runtime/bin/python3 -m vibecrafted_core.runtime_pack_contract verify \
+      --root /opt/vibecrafted-runtime \
+      --carrier-basename "$RUNTIME_PACK_CARRIER_BASENAME" \
+      --expected-platform linux --expected-architecture arm64 >/dev/null || exit 1

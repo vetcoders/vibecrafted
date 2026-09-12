@@ -47,6 +47,8 @@ def test_root_help_uses_the_registered_ship_cycle() -> None:
     assert "Vibecrafted core command surface" not in output
     assert "resume-session" in output
     assert "--run-id" in output
+    assert "uninstall            Remove runtime" in output
+    assert "vibecrafted uninstall --dry-run" in output
 
 
 def test_resume_session_help_matches_the_tracked_headless_contract() -> None:

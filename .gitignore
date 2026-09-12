@@ -25,7 +25,8 @@ scripts/installer/**/__pycache__/
 *.zip
 *.plugin
 *.sha256
-/.vibecrafted
+/.vibecrafted/*
+# Founder 2026-08-28: operator log is THE_JOURNAL.md here, untracked. Pointer: AGENTS.md.
 /tests/tui/__pycache__
 **/__pycache__/
 *.py[cod]
@@ -50,9 +51,12 @@ vibecrafted-io-link
 /artifacts
 /operator-tui/*.md
 /operator-tui/README.md
-.loctree/
+# loctree scratch is local; the canary journal is versioned truth
+**/.loctree/*
+!/.loctree/canary/
 /.antigravitycli
 /vibecrafted-server/target
+/vibecrafted-app/shell-agent/app/Vibecrafted.xcodeproj/
 /docs/plans
 /.air
 /.venv/

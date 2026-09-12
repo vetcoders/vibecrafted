@@ -1,0 +1,11 @@
+# Pinned for reproducible server + hydration-wasm builds (vc-frame pins 1.95.0
+# the same way). History, so nobody re-litigates it: on 2026-08-28 a silent
+# cargo-leptos exit=2 was first blamed on rustup 1.98.0 (rust-lld LC_RPATH);
+# the real culprit was `strip` from an Xcode 27 beta selected via xcode-select,
+# which corrupts LINKEDIT in chained-fixup dylibs — fixed in 780fc553
+# (strip=false + DEVELOPER_DIR preflight). The pin is about determinism, not a
+# broken 1.98. Keep `rust-version` in Cargo.toml ≤ this channel.
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

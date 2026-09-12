@@ -251,6 +251,20 @@ def test_the_ancestor_walk_stops_before_generic_system_roots() -> None:
         run_library('payload_hygiene_topmost_host_root "/Volumes/ws/a/b"').strip()
         == "/Volumes/ws"
     )
+    # `/private/tmp` is the realpath of `/tmp` on macOS — a directory every box
+    # has. A checkout built from under it must forbid its own scratch root, not
+    # the generic tmp: otherwise committed `/private/tmp` literals (test
+    # fixtures, tmp-normalization docs) flag every scratchpad build as a leak.
+    assert (
+        run_library('payload_hygiene_topmost_host_root "/private/tmp/solo"').strip()
+        == ""
+    )
+    assert (
+        run_library(
+            'payload_hygiene_topmost_host_root "/private/tmp/scratch/repo"'
+        ).strip()
+        == "/private/tmp/scratch"
+    )
 
 
 # The packer refuses any path carrying one of these components, so a literal
@@ -315,3 +329,59 @@ def test_no_shipping_file_names_the_workshop_above_the_checkout() -> None:
         f"tracked shipping files name the workshop {workshop} and would reach "
         f"customers in the portable tarball: {offenders}"
     )
+
+
+def test_host_paths_mode_flags_account_homes_not_generic_roots(tmp_path: Path) -> None:
+    """Commit-time gate: /Users/<name> and /home/<name>, never the root alone."""
+    (tmp_path / "ok.md").write_text(
+        "generic roots only: /Users and /home\n", encoding="utf-8"
+    )
+    (tmp_path / "shared.md").write_text(
+        "public dir /Users/Shared/Public is not an account\n", encoding="utf-8"
+    )
+    (tmp_path / "mac.py").write_text(
+        "checkout = '/Users/alice/src'\n", encoding="utf-8"
+    )
+    (tmp_path / "linux.c").write_text('home = "/home/bob/.cargo"\n', encoding="utf-8")
+
+    clean = run_scanner(
+        "--host-paths",
+        "--no-skip-unshipped",
+        str(tmp_path / "ok.md"),
+        str(tmp_path / "shared.md"),
+    )
+    assert clean.returncode == 0, clean.stdout + clean.stderr
+
+    leak = run_scanner(
+        "--host-paths",
+        "--no-skip-unshipped",
+        str(tmp_path / "mac.py"),
+        str(tmp_path / "linux.c"),
+    )
+    assert leak.returncode == 1, leak.stdout + leak.stderr
+    assert "alice" in leak.stderr
+    assert "bob" in leak.stderr
+
+
+def test_host_paths_mode_skips_unshipped_tests_tree(tmp_path: Path) -> None:
+    planted = tmp_path / "tests" / "leak.md"
+    planted.parent.mkdir()
+    planted.write_text("/Users/alice/secret\n", encoding="utf-8")
+    skipped = run_scanner("--host-paths", str(planted))
+    assert skipped.returncode == 0, skipped.stdout + skipped.stderr
+    forced = run_scanner("--host-paths", "--no-skip-unshipped", str(planted))
+    assert forced.returncode == 1, forced.stdout + forced.stderr
+
+
+def test_host_paths_mode_skips_binaries(tmp_path: Path) -> None:
+    blob = tmp_path / "a.bin"
+    blob.write_bytes(b"\x00/Users/alice\x00")
+    result = run_scanner("--host-paths", "--no-skip-unshipped", str(blob))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_pre_commit_hook_runs_the_host_path_gate() -> None:
+    hook = (REPO_ROOT / "scripts/hooks/pre-commit").read_text(encoding="utf-8")
+    assert "payload_hygiene.py" in hook
+    assert "--host-paths" in hook
+    assert "--null" in hook

@@ -1,4 +1,4 @@
-# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Runtime Stack — for dragon (or any tailnet host)
+# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Runtime Stack — for host-a (or any tailnet host)
 #
 # Two services:
 #   - tailscale: official sidecar; owns the network namespace; advertises
@@ -11,8 +11,8 @@
 #   cp tailscale.env.example .env   # fill in TS_AUTHKEY at minimum
 #   docker compose -f docker/runtime/docker-compose.yml up -d
 #
-# Access (from any tailnet device, e.g. div0):
-#   tailscale ssh runtime-dragon
+# Access (from any tailnet device, e.g. host-b):
+#   tailscale ssh runtime-host-a
 #   # then inside:
 #   vibecrafted doctor
 #   loctree --version
@@ -28,7 +28,7 @@ services:
   tailscale:
     image: tailscale/tailscale:stable
     container_name: vibecrafted-tailscale
-    hostname: ${TS_HOSTNAME:-runtime-dragon}
+    hostname: ${TS_HOSTNAME:-runtime-host-a}
     restart: unless-stopped
     cap_add:
       - NET_ADMIN
@@ -37,7 +37,7 @@ services:
       - /dev/net/tun:/dev/net/tun
     environment:
       TS_AUTHKEY: ${TS_AUTHKEY:?TS_AUTHKEY missing — see tailscale.env.example}
-      TS_HOSTNAME: ${TS_HOSTNAME:-runtime-dragon}
+      TS_HOSTNAME: ${TS_HOSTNAME:-runtime-host-a}
       TS_STATE_DIR: /var/lib/tailscale
       TS_USERSPACE: "false"
       TS_ACCEPT_DNS: "true"

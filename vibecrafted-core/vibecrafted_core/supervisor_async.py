@@ -8,7 +8,7 @@ import os
 import signal
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,9 +20,10 @@ from .agent_stream import (
 )
 from .artifacts import ArtifactValidation, validate_artifacts
 from .control_plane import (
+    accepted_operator_stop_since,
     control_plane_home,
     ensure_session_id,
-    lookup_run,
+    event_resume_cursor,
     normalize_run_root,
 )
 from .events import append_event
@@ -102,7 +103,11 @@ def _infer_agent(command: Sequence[str]) -> str:
     if not command:
         return "agent"
     name = Path(str(command[0])).name
-    if name in {"claude", "codex", "agy", "junie", "grok"}:
+    # Fleet key is `cursor` but the spawned binary is `cursor-agent`
+    # (spawn.AGENT_BINARY_NAMES); fold the binary back onto the fleet key.
+    if name == "cursor-agent":
+        return "cursor"
+    if name in {"claude", "codex", "agy", "junie", "grok", "cursor"}:
         return name
     if name in {"python", "python3"}:
         return "python"
@@ -238,20 +243,14 @@ def _origin_fields_from_env(env: Mapping[str, str] | None = None) -> dict[str, s
     return fields
 
 
-def _accepted_operator_stop(run_id: str) -> dict[str, object] | None:
+def _accepted_operator_stop(run_id: str, since_cursor: str) -> dict[str, object] | None:
     """Read the durable operator-stop authority after the worker exits."""
 
     try:
-        run = lookup_run(run_id)
+        run = accepted_operator_stop_since(run_id, since_cursor)
     except (OSError, RuntimeError, TypeError, ValueError):
         return None
-    if (
-        isinstance(run, dict)
-        and str(run.get("state") or "") == "stopped"
-        and run.get("operator_stop_accepted") is True
-    ):
-        return run
-    return None
+    return run
 
 
 def _cache_write_line(prefix: str, value: int | None) -> str:
@@ -410,6 +409,7 @@ class AsyncRunHandle:
     heartbeat_monotonic: float = 0.0
     worker_identity: dict[str, object] | None = None
     workspace_fields: dict[str, object] = field(default_factory=dict)
+    operator_stop_cursor: str = "0"
     operator_stopped: bool = False
     operator_stop_reason: str = ""
 
@@ -422,9 +422,14 @@ class AsyncRunHandle:
 class AsyncSupervisor:
     """Async orchestrator: spawns one agent process per run, streams and settles it."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        signal_sink: Callable[[str, str], None] | None = None,
+    ) -> None:
         """Initialize an empty run-id -> AsyncRunHandle registry."""
         self._runs: dict[str, AsyncRunHandle] = {}
+        self._signal_sink = signal_sink
 
     def get(self, run_id: str) -> AsyncRunHandle | None:
         """Look up a tracked run handle by id, or None if unknown to this instance."""
@@ -502,6 +507,7 @@ class AsyncSupervisor:
             agent, str(merged_env.get("VIBECRAFTED_MODEL_REQUESTED") or "")
         )
         started_at = _utc_now()
+        operator_stop_cursor = event_resume_cursor()
         if report_path is not None:
             from .report_contract import materialize_launcher_report_template
 
@@ -585,6 +591,7 @@ class AsyncSupervisor:
                 model_receipt.get("model_override_skip_reason") or ""
             ),
             workspace_fields=dict(workspace_fields),
+            operator_stop_cursor=operator_stop_cursor,
         )
         try:
             handle.pgid = os.getpgid(process.pid)
@@ -756,6 +763,7 @@ class AsyncSupervisor:
         operator_stop = await asyncio.to_thread(
             _accepted_operator_stop,
             handle.run_id,
+            handle.operator_stop_cursor,
         )
         if operator_stop is not None:
             handle.operator_stopped = True
@@ -944,6 +952,14 @@ class AsyncSupervisor:
                 if tee_output and display_text:
                     sys.stdout.buffer.write(display_text.encode("utf-8"))
                     sys.stdout.buffer.flush()
+                # Socket heartbeats are ephemeral flow-control signals, not
+                # durable lifecycle events. Pulse on every output line so a
+                # busy worker proves movement without inflating events.jsonl.
+                if self._signal_sink is not None:
+                    try:
+                        self._signal_sink(handle.run_id, handle.state.value)
+                    except (OSError, RuntimeError):
+                        pass
                 if not handle.first_output_seen:
                     handle.first_output_seen = True
                     handle.heartbeat_monotonic = time.monotonic()
@@ -1256,3 +1272,10 @@ class AsyncSupervisor:
             message=message,
             payload=event_payload,
         )
+        if self._signal_sink is not None:
+            try:
+                self._signal_sink(run_id, state.value)
+            except (OSError, RuntimeError):
+                # Durable files own truth. A broken wake transport must never
+                # corrupt or abort the supervised lifecycle.
+                pass

@@ -2,15 +2,15 @@
 
 # Staged formula for vetcoders/homebrew-tap.
 # sha256 is a placeholder. Do not `brew install` this file until
-# v3.7.1 is tagged and the operator pastes the real archive digest.
+# v4.3.0 is tagged and the operator pastes the real archive digest.
 class Vibecrafted < Formula
   desc "Release engine for AI-built software"
   homepage "https://vibecrafted.io"
-  version "3.7.1"
+  version "4.3.0"
   license "BUSL-1.1"
 
   # GitHub source archive of the annotated tag. The product does not yet
-  # publish a 3.7.1 tarball on the Releases page (latest public release
+  # publish a 4.3.0 tarball on the Releases page (latest public release
   # is still v3.5.0).
   url "https://github.com/vetcoders/vibecrafted/archive/refs/tags/v#{version}.tar.gz"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"

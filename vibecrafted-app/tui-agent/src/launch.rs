@@ -1,7 +1,7 @@
 use anyhow::Context;
 use std::collections::BTreeMap;
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
@@ -355,8 +355,34 @@ fn vc_frame_config_dir_for_request(request: &LaunchRequest) -> Option<PathBuf> {
 }
 
 fn resolved_vc_frame_config_dir(root: Option<&Path>) -> Option<PathBuf> {
-    if let Some(explicit) = env::var_os("VC_FRAME_CONFIG_DIR").filter(|value| !value.is_empty()) {
+    let explicit = env::var_os("VC_FRAME_CONFIG_DIR").filter(|value| !value.is_empty());
+    let home = env::var_os("HOME").filter(|value| !value.is_empty());
+    let xdg_config_home = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty());
+    resolved_vc_frame_config_dir_from(
+        root,
+        explicit.as_deref(),
+        home.as_deref(),
+        xdg_config_home.as_deref(),
+    )
+}
+
+fn resolved_vc_frame_config_dir_from(
+    root: Option<&Path>,
+    explicit: Option<&OsStr>,
+    home: Option<&OsStr>,
+    xdg_config_home: Option<&OsStr>,
+) -> Option<PathBuf> {
+    if let Some(explicit) = explicit {
         return Some(PathBuf::from(explicit));
+    }
+    let config_home = xdg_config_home
+        .map(PathBuf::from)
+        .or_else(|| home.map(|home| PathBuf::from(home).join(".config")));
+    if let Some(config_home) = config_home {
+        let installed = config_home.join("vibecrafted/vc-frame");
+        if installed.join("config.kdl").is_file() {
+            return Some(installed);
+        }
     }
     let root = root?;
     let repo_config_dir = root.join("config/vc-frame");
@@ -516,5 +542,43 @@ mod tests {
             command.env.get("VC_FRAME_CONFIG_DIR"),
             Some(&explicit.into_os_string())
         );
+    }
+
+    #[test]
+    fn installed_config_precedes_repo_fallback_without_inherited_pin() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let xdg = temp.path().join("xdg");
+        let repo = temp.path().join("repo");
+        let installed = xdg.join("vibecrafted/vc-frame");
+        let repo_config = repo.join("config/vc-frame");
+        std::fs::create_dir_all(&installed).unwrap();
+        std::fs::create_dir_all(&repo_config).unwrap();
+        std::fs::write(installed.join("config.kdl"), "layout { installed }\n").unwrap();
+        std::fs::write(repo_config.join("config.kdl"), "layout { repo }\n").unwrap();
+
+        let resolved = resolved_vc_frame_config_dir_from(
+            Some(&repo),
+            None,
+            Some(home.as_os_str()),
+            Some(xdg.as_os_str()),
+        );
+
+        assert_eq!(resolved, Some(installed));
+    }
+
+    #[test]
+    fn repo_config_remains_the_development_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let repo = temp.path().join("repo");
+        let repo_config = repo.join("config/vc-frame");
+        std::fs::create_dir_all(&repo_config).unwrap();
+        std::fs::write(repo_config.join("config.kdl"), "layout { repo }\n").unwrap();
+
+        let resolved =
+            resolved_vc_frame_config_dir_from(Some(&repo), None, Some(home.as_os_str()), None);
+
+        assert_eq!(resolved, Some(repo_config));
     }
 }

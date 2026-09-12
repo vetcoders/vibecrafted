@@ -73,6 +73,18 @@ grok-implement() {
   _vetcoders_spawn_plan grok implement "$1" --runtime "$(_vetcoders_default_runtime)"
 }
 
+cursor-review() {
+  _vetcoders_spawn_plan cursor review "$1" --runtime "$(_vetcoders_default_runtime)"
+}
+
+cursor-plan() {
+  _vetcoders_spawn_plan cursor plan "$1" --runtime "$(_vetcoders_default_runtime)"
+}
+
+cursor-implement() {
+  _vetcoders_spawn_plan cursor implement "$1" --runtime "$(_vetcoders_default_runtime)"
+}
+
 codex-research() {
   _vetcoders_spawn_plan codex research "$1" --runtime "$(_vetcoders_default_runtime)"
 }
@@ -97,6 +109,10 @@ grok-research() {
   _vetcoders_spawn_plan grok research "$1" --runtime "$(_vetcoders_default_runtime)"
 }
 
+cursor-research() {
+  _vetcoders_spawn_plan cursor research "$1" --runtime "$(_vetcoders_default_runtime)"
+}
+
 codex-prompt() {
   _vetcoders_prompt codex implement "$@"
 }
@@ -119,6 +135,10 @@ junie-prompt() {
 
 grok-prompt() {
   _vetcoders_prompt grok implement "$@"
+}
+
+cursor-prompt() {
+  _vetcoders_prompt cursor implement "$@"
 }
 
 codex-observe() {
@@ -169,6 +189,14 @@ grok-await() {
   _vetcoders_await grok "$@"
 }
 
+cursor-observe() {
+  _vetcoders_observe cursor "$@"
+}
+
+cursor-await() {
+  _vetcoders_await cursor "$@"
+}
+
 _vetcoders_skill() {
   local tool="$1"
   local skill="$2"
@@ -179,7 +207,7 @@ _vetcoders_skill() {
   local inherited_run_lock
   inherited_run_id="$(_vetcoders_effective_run_id 2>/dev/null || true)"
   inherited_run_lock="$(_vetcoders_effective_run_lock 2>/dev/null || true)"
-  _vetcoders_parse_contract "$@" || return 1
+  _vetcoders_parse_skill_contract "$@" || return 1
   if [[ "$skill" == "polarize" && -n "$_vetcoders_contract_count" ]]; then
     _vetcoders_polarize_loop "$tool" "$@"
     return
@@ -252,6 +280,7 @@ _vetcoders_skill() {
   local spawn_args=(--runtime "$runtime")
   [[ -z "$_vetcoders_contract_dry_run" ]] || spawn_args+=(--dry-run)
   [[ -n "$_vetcoders_contract_root" ]] && spawn_args+=(--root "$_vetcoders_contract_root")
+  [[ -n "$_vetcoders_contract_model" ]] && spawn_args+=(--model "$_vetcoders_contract_model")
   if [[ "$skill" == "polarize" && "$prism_band" =~ ^(pass|doctrine)$ ]]; then
     local dispatch_output dispatch_status agent_log session_uuid
     agent_log="$(_vetcoders_store_dir "$root")/polarize/$run_id/${tool}.stdout.log"

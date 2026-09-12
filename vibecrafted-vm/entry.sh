@@ -64,7 +64,7 @@ if [ -n "${TAILSCALE_AUTHKEY:-}" ]; then
     # tailscale up
     # --ssh enables Tailscale SSH (peers ssh in WITHOUT an sshd in the image,
     # gated by tailnet ACLs). This is what makes `ssh root@vc-workspace-<host>`
-    # work from div0/silver/ops — the container ships no openssh-server.
+    # work from host-b/host-d/host-e — the container ships no openssh-server.
     TS_UP_ARGS=(
         --authkey="$TAILSCALE_AUTHKEY"
         --hostname="$TS_HOSTNAME"
@@ -112,7 +112,7 @@ fi
 
 # ── Verify framework readiness ────────────────────────────────────────────
 log "Framework readiness probe:"
-for tool in aicx aicx-mcp loct loctree-mcp claude codex gemini uv vc_frame starship; do
+for tool in aicx aicx-mcp loct loctree-mcp claude codex gemini cursor-agent uv vc_frame starship; do
     if command -v "$tool" >/dev/null 2>&1; then
         version="$("$tool" --version 2>&1 | head -1 | head -c 60)"
         ok "$tool — $version"

@@ -84,7 +84,7 @@ release script reads it from `$KEYS`, which defaults to `~/.keys`:
 | `Certificates.p12`        | signing certificate           |
 | `cert_password.txt`       | certificate password          |
 | `vibecrafted-signing.key` | detached artifact signing key |
-| `.notary.env`             | notarytool credentials        |
+| Keychain profile/API key  | notarytool credentials        |
 
 ```bash
 make app             # build Vibecrafted.app only

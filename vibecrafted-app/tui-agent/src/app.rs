@@ -7,11 +7,15 @@ use crate::mission_control::{self, ActionQueueItem, ActionQueueKind, MissionCont
 use crate::observe::{self, ObserveHealth, ObserveState};
 use crate::polarize::{PolarizeBand, PolarizeIntent};
 use crate::skills_catalog::{self, SkillAgent, SkillPayload, SkillPayloadKind};
-use crate::state::{ControlPlaneState, RenderedRun, RunKind, render_runs};
+use crate::state::{
+    ControlPlaneState, RenderedRun, RunKind, is_actionable_kind, render_runs, workspace_matches,
+};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppTab {
@@ -102,8 +106,8 @@ impl QueueScope {
 
     pub fn title(self) -> &'static str {
         match self {
-            QueueScope::Live => "Live queue",
-            QueueScope::History => "History",
+            QueueScope::Live => "Live · this workspace",
+            QueueScope::History => "History / archive",
             QueueScope::All => "All runs",
         }
     }
@@ -210,6 +214,35 @@ impl DeepAction {
             }
         }
     }
+
+    pub fn control_label(&self) -> String {
+        match self {
+            DeepAction::AttachSession(session) => {
+                format!("Attach session {}", truncate_id(session, 24))
+            }
+            DeepAction::ResumeSession { agent, session } => {
+                format!("Resume {agent} {}", truncate_id(session, 18))
+            }
+            DeepAction::OpenReport(_) => "Open latest report".to_string(),
+            DeepAction::OpenTranscript(_) => "Open human transcript".to_string(),
+            DeepAction::OpenRoot(_) => "Open run workspace".to_string(),
+            DeepAction::MuxHealth { service } => format!("Health-check {service}"),
+            DeepAction::MuxRestart(service) => format!("Restart {service}"),
+            DeepAction::MuxVerifyClient(_) => "Verify mux client routing".to_string(),
+            DeepAction::MuxFixClientDrift(_) => "Fix mux client drift".to_string(),
+            DeepAction::PolarizeIntent {
+                band, score, run_id, ..
+            } => format!(
+                "Polarize {} {} {}",
+                band.label(),
+                score,
+                truncate_id(run_id, 18)
+            ),
+            DeepAction::SkillLaunch { skill, agent, .. } => {
+                format!("Launch {} ({})", skill.trim_start_matches("vc-"), agent.label())
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -235,20 +268,20 @@ pub struct App {
     pub artifact_title: String,
     pub artifact_lines: Vec<String>,
     /// Cached rmcp-mux supervisor snapshots (from
-    /// `crate::mux::current_summaries`). Refreshed on every `App::refresh`
-    /// so the Monitor tab can render MCP daemon health without doing IO
-    /// inside the draw path.
+    /// `crate::mux::current_summaries`). Refreshed from mux events and by an
+    /// explicit full refresh so drawing never performs IO.
     pub mux_summaries: Vec<crate::mux::MuxSummary>,
     pub mux_subscriber: Option<crate::mux::MuxSubscriber>,
     /// Cached polarize prism intents discovered under
     /// `$VIBECRAFTED_HOME/artifacts/**/polarize/<run_id>/prism.json`.
-    /// Refreshed with the run board so draw code remains pure rendering.
+    /// Refreshed when the artifact watcher observes a Polarize path or when
+    /// the operator explicitly requests a full refresh.
     pub polarize_intents: Vec<PolarizeIntent>,
     /// Cached Mission Control view derived from
     /// `~/.vibecrafted/artifacts/**/*.meta.json` plus live control-plane
-    /// runs. Built on every `refresh` so the dashboard tab can render
-    /// without doing IO inside the draw path. The artifact root is
-    /// resolved once via `mission_control::default_artifact_root()`.
+    /// runs. Rebuilt after relevant state/artifact changes so the dashboard
+    /// tab can render without doing IO inside the draw path. The artifact root
+    /// is resolved once via `mission_control::default_artifact_root()`.
     pub mission_control: MissionControlState,
     /// Selected panel index inside the Mission Control tab (0..7).
     pub mission_focus: usize,
@@ -263,6 +296,7 @@ impl App {
     pub fn new(config: AppConfig) -> anyhow::Result<Self> {
         let state = ControlPlaneState::load(&config.state_root)
             .unwrap_or_else(|_| ControlPlaneState::empty(&config.state_root));
+        trace_expensive_refresh("control_plane");
         let runs = render_runs(&state);
         let launch_runtime = config.launch_runtime;
         let mission_artifact_root = mission_control::default_artifact_root();
@@ -304,12 +338,17 @@ impl App {
                 ..MemoryState::default()
             },
         };
-        apply_run_filters(&mut app.runs, app.queue_scope, &app.search_query);
+        apply_run_filters(
+            &mut app.runs,
+            app.queue_scope,
+            &app.search_query,
+            &app.config.launch_root,
+        );
         app.sync_selection();
         app.refresh_mux();
         app.refresh_polarize();
         app.refresh_mission_control();
-        app.refresh_observe();
+        let _ = app.refresh_observe();
         app.refresh_memory();
         let path = rmcp_mux::ipc::server::socket_path();
         let summaries = std::sync::Arc::new(std::sync::RwLock::new(app.mux_summaries.clone()));
@@ -318,25 +357,75 @@ impl App {
     }
 
     pub fn refresh(&mut self) {
-        let state = ControlPlaneState::load(&self.config.state_root)
-            .unwrap_or_else(|_| ControlPlaneState::empty(&self.config.state_root));
-        self.state = state;
-        let mut runs = render_runs(&self.state);
-        apply_run_filters(&mut runs, self.queue_scope, &self.search_query);
-        self.runs = runs;
-        self.sync_selection();
+        self.refresh_control_plane();
         self.refresh_mux();
         self.refresh_polarize();
         self.refresh_mission_control();
-        self.refresh_observe();
+        let _ = self.refresh_observe();
     }
 
-    /// Refresh the cached Mission Control view. Cheap on small artifact
-    /// trees (a few directories of `*.meta.json`); bounded on huge
-    /// trees by `mission_control::META_SCAN_CAP`. Called on every
-    /// `refresh()` so the dashboard surfaces stay live without doing
-    /// disk IO inside the draw path.
-    pub fn refresh_observe(&mut self) {
+    /// Reload the canonical control-plane projection after an invalidation.
+    /// Selection follows the stable run id across sorting/filter changes.
+    pub fn refresh_control_plane(&mut self) {
+        let selected_run_id = self.selected_run().map(|run| run.snapshot.run_id.clone());
+        match ControlPlaneState::load(&self.config.state_root) {
+            Ok(state) => {
+                trace_expensive_refresh("control_plane");
+                self.state = state;
+            }
+            Err(error) => {
+                self.append_status(format!("control-plane unavailable: {error}"));
+                if self.state.runs.is_empty() && self.state.retained_runs.is_empty() {
+                    self.state = ControlPlaneState::empty(&self.config.state_root);
+                }
+            }
+        }
+        let mut runs = render_runs(&self.state);
+        apply_run_filters(
+            &mut runs,
+            self.queue_scope,
+            &self.search_query,
+            &self.config.launch_root,
+        );
+        self.runs = runs;
+        if let Some(run_id) = selected_run_id
+            && let Some(index) = self
+                .runs
+                .iter()
+                .position(|run| run.snapshot.run_id == run_id)
+        {
+            self.selected = index;
+        }
+        self.sync_selection();
+    }
+
+    /// Recompute only time-derived labels and filters from cached state.
+    /// This keeps ages and stale classifications moving without re-reading
+    /// the control-plane filesystem.
+    pub fn refresh_rendered_runs(&mut self) {
+        let selected_run_id = self.selected_run().map(|run| run.snapshot.run_id.clone());
+        let mut runs = render_runs(&self.state);
+        apply_run_filters(
+            &mut runs,
+            self.queue_scope,
+            &self.search_query,
+            &self.config.launch_root,
+        );
+        self.runs = runs;
+        if let Some(run_id) = selected_run_id
+            && let Some(index) = self
+                .runs
+                .iter()
+                .position(|run| run.snapshot.run_id == run_id)
+        {
+            self.selected = index;
+        }
+        self.sync_selection();
+    }
+
+    /// Refresh the remote Observe projection on its own bounded cadence.
+    /// Returns whether the fetch succeeded so the scheduler can back off.
+    pub fn refresh_observe(&mut self) -> bool {
         let origin = self.config.server.clone();
         self.observe.origin = origin.clone();
         match observe::fetch_state(&origin) {
@@ -349,6 +438,7 @@ impl App {
                     self.observe.selected = self.observe.runs.len().saturating_sub(1);
                 }
                 self.refresh_observe_transcript();
+                true
             }
             Err(error) => {
                 if self.observe.runs.is_empty() {
@@ -357,6 +447,7 @@ impl App {
                     self.observe.status = ObserveHealth::Degraded;
                 }
                 self.observe.error = Some(error.to_string());
+                false
             }
         }
     }
@@ -375,7 +466,11 @@ impl App {
         }
         match observe::fetch_transcript(&self.config.server, &run_id) {
             Ok(body) => {
-                self.observe.transcript = body;
+                self.observe.transcript = if body.trim().is_empty() {
+                    String::new()
+                } else {
+                    crate::run_detail::humanize_transcript(&body)
+                };
                 self.observe.transcript_run_id = Some(run_id);
             }
             Err(error) => {
@@ -445,6 +540,7 @@ impl App {
 
     pub fn refresh_polarize(&mut self) {
         self.polarize_intents = crate::polarize::current_intents(&self.config.launch_root);
+        trace_expensive_refresh("polarize");
     }
 
     pub fn handle_ipc_event(&mut self, _event: rmcp_mux::ipc::IpcEvent) {
@@ -514,7 +610,7 @@ impl App {
 
     pub fn toggle_filter(&mut self) {
         self.queue_scope = self.queue_scope.next();
-        self.refresh();
+        self.refresh_rendered_runs();
         self.append_status(format!(
             "queue scope: {} ({} runs visible)",
             self.queue_scope.label(),
@@ -524,13 +620,13 @@ impl App {
 
     pub fn set_search_query<S: Into<String>>(&mut self, query: S) {
         self.search_query = query.into();
-        self.refresh();
+        self.refresh_rendered_runs();
     }
 
     pub fn clear_search(&mut self) {
         if !self.search_query.is_empty() {
             self.search_query.clear();
-            self.refresh();
+            self.refresh_rendered_runs();
             self.append_status("search cleared");
         }
     }
@@ -815,15 +911,13 @@ impl App {
 
         let snapshot = &run.snapshot;
         let mut lines = vec![
-            format!("run_id: {}", snapshot.run_id),
+            format!("run: {}", run.operator_title()),
+            format!("id: {}", snapshot.run_id),
             format!(
                 "status: {} ({})",
                 run.kind.label(),
                 snapshot.display_state()
             ),
-            format!("agent: {}", display_optional(snapshot.agent.as_deref())),
-            format!("skill: {}", display_optional(snapshot.skill.as_deref())),
-            format!("mode: {}", display_optional(snapshot.mode.as_deref())),
             format!("age: {}", run.age_label),
             format!(
                 "operator_session: {}",
@@ -835,13 +929,13 @@ impl App {
         }
 
         if let Some(root) = snapshot.root.as_deref() {
-            lines.push(format!("root: {root}"));
+            lines.extend(wrap_operator_line(&format!("workspace: {root}"), 88));
         }
         if let Some(report) = snapshot.latest_report.as_deref() {
-            lines.push(format!("latest_report: {report}"));
+            lines.extend(wrap_operator_line(&format!("report: {report}"), 88));
         }
         if let Some(transcript) = snapshot.latest_transcript.as_deref() {
-            lines.push(format!("latest_transcript: {transcript}"));
+            lines.extend(wrap_operator_line(&format!("transcript: {transcript}"), 88));
         }
         if let Some(error) = snapshot.last_error.as_deref() {
             lines.push(format!("last_error: {error}"));
@@ -866,16 +960,16 @@ impl App {
 
     pub fn event_lines(&self) -> Vec<String> {
         let Some(run) = self.selected_run() else {
-            return Vec::new();
+            return vec!["Select a run to inspect its timeline.".to_string()];
         };
         if run.recent_events.is_empty() {
             return vec!["No recent events for this run.".to_string()];
         }
         run.recent_events
             .iter()
-            .map(|event| {
+            .flat_map(|event| {
                 let message = event.message.as_deref().unwrap_or(event.kind.as_str());
-                format!("{} {}", event.ts, message)
+                wrap_operator_line(&format!("{}  {}", event.ts, message), 88)
             })
             .collect()
     }
@@ -960,7 +1054,14 @@ impl App {
     pub fn active_run_count(&self) -> usize {
         self.runs
             .iter()
-            .filter(|run| matches!(run.kind, RunKind::Active | RunKind::Stalled))
+            .filter(|run| matches!(run.kind, RunKind::Active))
+            .count()
+    }
+
+    pub fn stalled_run_count(&self) -> usize {
+        self.runs
+            .iter()
+            .filter(|run| matches!(run.kind, RunKind::Stalled))
             .count()
     }
 
@@ -1031,9 +1132,11 @@ impl App {
         // *no* run is healthy, so gating these on selection would defeat
         // the surface.
         for summary in &self.mux_summaries {
-            actions.push(DeepAction::MuxHealth {
-                service: summary.display_name.clone(),
-            });
+            if !summary.is_healthy() {
+                actions.push(DeepAction::MuxHealth {
+                    service: summary.display_name.clone(),
+                });
+            }
         }
         for intent in &self.polarize_intents {
             actions.push(DeepAction::PolarizeIntent {
@@ -1043,7 +1146,17 @@ impl App {
                 prism_path: intent.prism_path.clone(),
             });
         }
-        for entry in skills_catalog::CATALOG {
+        let selected_skill = self
+            .selected_run()
+            .and_then(|run| run.snapshot.skill.clone());
+        for entry in skills_catalog::CATALOG.iter().filter(|entry| {
+            matches!(
+                entry.slug,
+                "vc-workflow" | "vc-review" | "vc-marbles" | "vc-polarize"
+            ) || selected_skill
+                .as_deref()
+                .is_some_and(|skill| entry.slug == skill || entry.slug.trim_start_matches("vc-") == skill)
+        }) {
             let agent = resolve_skill_agent(entry.default_agent, self.selected_agent());
             let payload = match entry.accepts {
                 SkillPayloadKind::None => SkillPayload::None,
@@ -1055,6 +1168,14 @@ impl App {
                     }
                 }
             };
+            if actions.iter().any(|action| {
+                matches!(
+                    action,
+                    DeepAction::SkillLaunch { skill, .. } if skill == entry.slug
+                )
+            }) {
+                continue;
+            }
             actions.push(DeepAction::SkillLaunch {
                 skill: entry.slug.to_string(),
                 agent,
@@ -1110,17 +1231,22 @@ impl App {
             ];
         }
         let mut lines = vec![
-            "Deep controls".to_string(),
-            "Enter runs the selected action. Esc returns to browse.".to_string(),
+            "Primary actions".to_string(),
+            "Enter runs the focused row. f cycles live/history. IDs stay copyable.".to_string(),
             String::new(),
         ];
+        if let Some(run) = self.selected_run() {
+            lines.push(format!("focused: {}", run.operator_title()));
+            lines.push(format!("id: {}", run.snapshot.run_id));
+            lines.push(String::new());
+        }
         lines.extend(actions.iter().enumerate().map(|(idx, action)| {
             let prefix = if self.active_tab() == AppTab::Controls && idx == self.deep_selected {
                 "▶"
             } else {
                 " "
             };
-            format!("{prefix} {}", action.label())
+            format!("{prefix} {}", action.control_label())
         }));
         lines
     }
@@ -1237,6 +1363,24 @@ impl App {
     }
 }
 
+fn trace_expensive_refresh(kind: &str) {
+    let Some(path) = std::env::var_os("VOC_REFRESH_TRACE_PATH").filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    let unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let line = serde_json::json!({
+        "kind": kind,
+        "unix_ms": unix_ms,
+    });
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
 fn dispatch_line(selected: bool, content: String) -> String {
     if selected {
         format!("▶ {content}")
@@ -1308,18 +1452,29 @@ pub fn default_prompt(kind: LaunchKind) -> String {
     }
 }
 
-pub fn agents() -> [&'static str; 3] {
-    ["claude", "codex", "gemini"]
+pub fn agents() -> [&'static str; 4] {
+    ["claude", "codex", "gemini", "cursor"]
 }
 
-fn is_live_run(kind: RunKind) -> bool {
-    matches!(kind, RunKind::Active | RunKind::Stalled | RunKind::Paused)
-}
-
-fn apply_run_filters(runs: &mut Vec<RenderedRun>, queue_scope: QueueScope, search_query: &str) {
+fn apply_run_filters(
+    runs: &mut Vec<RenderedRun>,
+    queue_scope: QueueScope,
+    search_query: &str,
+    workspace: &Path,
+) {
+    let now = chrono::Utc::now();
+    let workspace_live = runs.iter().any(|run| {
+        is_actionable_kind(run.kind, &run.snapshot, now) && workspace_matches(&run.snapshot, workspace)
+    });
     match queue_scope {
-        QueueScope::Live => runs.retain(|run| is_live_run(run.kind)),
-        QueueScope::History => runs.retain(|run| !is_live_run(run.kind)),
+        QueueScope::Live => runs.retain(|run| {
+            is_actionable_kind(run.kind, &run.snapshot, now)
+                && (!workspace_live || workspace_matches(&run.snapshot, workspace))
+        }),
+        QueueScope::History => runs.retain(|run| {
+            !is_actionable_kind(run.kind, &run.snapshot, now)
+                || (workspace_live && !workspace_matches(&run.snapshot, workspace))
+        }),
         QueueScope::All => {}
     }
     let query = search_query.trim().to_ascii_lowercase();
@@ -1363,6 +1518,34 @@ fn display_optional(value: Option<&str>) -> &str {
         Some(value) if !value.is_empty() && value != "None" && value != "null" => value,
         _ => "-",
     }
+}
+
+fn truncate_id(value: &str, width: usize) -> String {
+    if value.chars().count() <= width {
+        return value.to_string();
+    }
+    let mut short = value.chars().take(width.saturating_sub(1)).collect::<String>();
+    short.push('…');
+    short
+}
+
+fn wrap_operator_line(value: &str, width: usize) -> Vec<String> {
+    if value.chars().count() <= width {
+        return vec![value.to_string()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for ch in value.chars() {
+        current.push(ch);
+        if current.chars().count() >= width {
+            lines.push(current.clone());
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
 }
 
 fn safe_marker_name(run_id: &str) -> String {
@@ -1414,12 +1597,24 @@ fn artifact_lines(path: &Path, run_root: Option<&str>) -> anyhow::Result<Vec<Str
     }
     // `safe_artifact_path` canonicalizes this path and constrains it to the selected run root.
     let text = fs::read_to_string(&path)?; // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path
-    let mut lines = text
+    let rendered = if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains("transcript"))
+    {
+        crate::run_detail::humanize_transcript(&text)
+    } else {
+        text
+    };
+    if rendered.trim().is_empty() {
+        return Ok(vec!["No transcript or events in this artifact yet.".to_string()]);
+    }
+    let mut lines = rendered
         .lines()
         .take(400)
-        .map(ToOwned::to_owned)
+        .flat_map(|line| wrap_operator_line(line, 88))
         .collect::<Vec<_>>();
-    if text.lines().count() > 400 {
+    if rendered.lines().count() > 400 {
         lines.push("[truncated after 400 lines]".to_string());
     }
     Ok(lines)

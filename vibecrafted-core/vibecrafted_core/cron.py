@@ -13,6 +13,8 @@ from pathlib import Path
 
 from . import ui
 from .autonomy_surface import destructive_remote_push
+from .clock import utc_now, utc_now_compact, utc_now_z
+from .loop import default_state_file
 from .runtime_paths import vibecrafted_home
 
 HARD_STOP_NEEDLES = (
@@ -29,14 +31,9 @@ HARD_STOP_NEEDLES = (
 )
 
 
-def utc_now() -> datetime:
-    """Return the current time as a timezone-aware UTC datetime."""
-    return datetime.now(timezone.utc)
-
-
 def iso_now() -> str:
     """Return the current UTC time as an ISO-8601 string with a trailing ``Z``."""
-    return utc_now().isoformat().replace("+00:00", "Z")
+    return utc_now_z()
 
 
 def parse_frontmatter(path: Path) -> dict[str, str]:
@@ -93,11 +90,6 @@ def idle_minutes(state: dict[str, str]) -> float | None:
     if anchor is None:
         return None
     return max((utc_now() - anchor).total_seconds() / 60, 0)
-
-
-def default_state_file(root: Path) -> Path:
-    """Return the default operator-loop state file path for a repo root."""
-    return root / ".vibecrafted" / "operator-loop.local.md"
 
 
 def default_journal() -> Path:
@@ -207,7 +199,7 @@ def capture_context(root: Path, run_id: str, timeout: int) -> list[dict[str, obj
     Output files are stamped under vibecrafted_home()/runtime/cron-context/ using
     a sanitized run_id. aicx capture tries intents, then search, then a bare list.
     """
-    stamp = utc_now().strftime("%Y%m%dT%H%M%SZ")
+    stamp = utc_now_compact()
     safe_run = "".join(
         ch if ch.isalnum() or ch in "._-" else "-" for ch in (run_id or "loop")
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -22,7 +23,7 @@ from .lifecycle_runner import (
     run_lifecycle,
 )
 
-SUPPORTED_AGENTS = {"claude", "codex", "gemini", "agy", "junie", "grok"}
+SUPPORTED_AGENTS = {"claude", "codex", "gemini", "agy", "junie", "grok", "cursor"}
 
 DEFAULT_SHIP_PROMPT = (
     "Run the full Vibecrafted lifecycle for this repository. Load Context Atlas, "
@@ -34,7 +35,23 @@ SHIP_ISSUER = "vc-ship"
 SHIP_SEAL_LAYOUT = seal.DEFAULT_SEAL_LAYOUT
 SEAL_REFUSAL_PATH = Path("delivery-seal-refusal.json")
 ZERO_DIGEST = "sha256:" + "0" * 64
+TRACKER_NAME = "tracker.md"
+DEFAULT_ROADMAP_REL = Path("docs/ROADMAP_4.2.0.md")
+ROADMAP_BEGIN = "<!-- vibecrafted-ship-roadmap:begin -->"
+ROADMAP_END = "<!-- vibecrafted-ship-roadmap:end -->"
+CUT_STATE_TOKEN = re.compile(r"\[[ x~?!]\]")
 EventSink = Callable[[str, str, str, dict[str, Any]], Mapping[str, Any]]
+
+
+@dataclass(frozen=True)
+class TrackerCut:
+    """One cut row from the plan-root tracker — the only live cut-state writer."""
+
+    wave: str
+    cut_id: str
+    state: str
+    commit_sha: str
+    gate: str
 
 
 @dataclass(frozen=True)
@@ -215,9 +232,265 @@ def build_ship_prompt(agent: str, checkpoint: str, prompt: str) -> str:
     )
 
 
+def resolve_plan_root(plan: str | Path) -> Path:
+    """Accept a plan directory or a path to ``tracker.md``."""
+    path = Path(plan).expanduser()
+    if path.is_file() and path.name == TRACKER_NAME:
+        return path.parent
+    return path
+
+
+def display_plan_path(plan_root: Path, *, original: str = "") -> str:
+    """Render a plan path without leaking a host home prefix into a shipped doc."""
+    raw = original.strip()
+    if raw.startswith("~"):
+        return Path(raw).as_posix()
+    resolved = plan_root.expanduser().resolve()
+    try:
+        return "~/" + resolved.relative_to(Path.home().resolve()).as_posix()
+    except ValueError:
+        return resolved.as_posix()
+
+
+def _table_cells(line: str) -> list[str]:
+    stripped = line.strip()
+    if not stripped.startswith("|"):
+        return []
+    return [cell.strip() for cell in stripped.strip("|").split("|")]
+
+
+def _is_separator_row(cells: Sequence[str]) -> bool:
+    if not cells:
+        return False
+    return all(
+        re.fullmatch(r":?-{3,}:?", cell.replace(" ", "") or "") for cell in cells
+    )
+
+
+def parse_tracker_cuts(text: str) -> list[TrackerCut]:
+    """Parse the first markdown table that has both Cut and state columns."""
+    lines = text.splitlines()
+    header_index = -1
+    header: list[str] = []
+    for index, line in enumerate(lines):
+        cells = _table_cells(line)
+        lowered = [cell.lower() for cell in cells]
+        if "cut" in lowered and "state" in lowered:
+            header_index = index
+            header = lowered
+            break
+    if header_index < 0:
+        raise ValueError("tracker has no cut/state table")
+
+    columns = {name: index for index, name in enumerate(header)}
+    cuts: list[TrackerCut] = []
+    for line in lines[header_index + 1 :]:
+        cells = _table_cells(line)
+        if not cells:
+            break
+        if _is_separator_row(cells):
+            continue
+        cut_index = columns["cut"]
+        state_index = columns["state"]
+        if len(cells) <= max(cut_index, state_index):
+            continue
+        cut_id = cells[cut_index]
+        if not cut_id or cut_id.lower() == "cut":
+            continue
+        match = CUT_STATE_TOKEN.search(cells[state_index])
+        if match is None:
+            continue
+        wave = ""
+        if "wave" in columns and len(cells) > columns["wave"]:
+            wave = cells[columns["wave"]]
+        commit_key = "commit sha" if "commit sha" in columns else "commit"
+        commit = ""
+        if commit_key in columns and len(cells) > columns[commit_key]:
+            commit = cells[columns[commit_key]]
+        gate = ""
+        if "gate" in columns and len(cells) > columns["gate"]:
+            gate = cells[columns["gate"]]
+        cuts.append(
+            TrackerCut(
+                wave=wave or "—",
+                cut_id=cut_id,
+                state=match.group(0),
+                commit_sha=commit or "—",
+                gate=gate or "—",
+            )
+        )
+    if not cuts:
+        raise ValueError("tracker has no cut rows")
+    return cuts
+
+
+def dou_index(cuts: Sequence[TrackerCut]) -> tuple[int, int]:
+    """Return ``(delivered, total)`` from tracker states. Render never flips them."""
+    delivered = sum(1 for cut in cuts if cut.state == "[x]")
+    return delivered, len(cuts)
+
+
+def render_roadmap_block(
+    cuts: Sequence[TrackerCut],
+    *,
+    plan_display: str,
+) -> str:
+    """Markdown projection of tracker cut states. Not a delivery certificate."""
+    delivered, total = dou_index(cuts)
+    counts = {
+        token: sum(1 for cut in cuts if cut.state == token)
+        for token in ("[x]", "[?]", "[ ]", "[~]", "[!]")
+    }
+    rows = [
+        "| Wave | Cut | State | Commit SHA | Gate |",
+        "| ---- | --- | ----- | ---------- | ---- |",
+    ]
+    for cut in cuts:
+        rows.append(
+            f"| {cut.wave} | {cut.cut_id} | {cut.state} | {cut.commit_sha} | {cut.gate} |"
+        )
+    return "\n".join(
+        [
+            "## Cut states (from tracker)",
+            "",
+            f"Source of truth: `{plan_display}/{TRACKER_NAME}`",
+            "Rendered by: `vibecrafted ship roadmap --render --plan <plan_root>`",
+            "This block is a projection of the dispatcher-written tracker.",
+            "It is not a delivery certificate and does not flip cut states.",
+            "",
+            *rows,
+            "",
+            (
+                f"**dou-index:** {delivered}/{total} — "
+                f"`[x]` {counts['[x]']} · `[?]` {counts['[?]']} · "
+                f"`[ ]` {counts['[ ]']} · `[~]` {counts['[~]']} · "
+                f"`[!]` {counts['[!]']}"
+            ),
+            "",
+            (
+                "Only a delivery-verifier flips `[~]→[x]`. Stage snapshots below, "
+                "if any, are historical notes — not a second live writer."
+            ),
+        ]
+    )
+
+
+def splice_generated_block(existing: str, block: str) -> str:
+    """Replace or insert the generated block. Leave every other line untouched."""
+    payload = f"{ROADMAP_BEGIN}\n{block.rstrip()}\n{ROADMAP_END}"
+    if ROADMAP_BEGIN in existing and ROADMAP_END in existing:
+        prefix, remainder = existing.split(ROADMAP_BEGIN, 1)
+        _, suffix = remainder.split(ROADMAP_END, 1)
+        return prefix + payload + suffix
+    if not existing.strip():
+        return payload + "\n"
+    lines = existing.splitlines(keepends=True)
+    insert_at: int | None = None
+    seen_title = False
+    for index, line in enumerate(lines):
+        if line.startswith("# "):
+            seen_title = True
+            continue
+        if seen_title and line.startswith("## "):
+            insert_at = index
+            break
+    if insert_at is None:
+        return existing.rstrip() + "\n\n" + payload + "\n"
+    before = "".join(lines[:insert_at])
+    after = "".join(lines[insert_at:])
+    if before and not before.endswith("\n"):
+        before += "\n"
+    if before and not before.endswith("\n\n"):
+        before += "\n"
+    return before + payload + "\n\n" + after
+
+
+def render_roadmap_from_tracker(
+    *,
+    plan_root: Path,
+    roadmap_path: Path | None = None,
+    stdout: bool = False,
+    original_plan: str = "",
+) -> str:
+    """Read ``tracker.md`` and project it into ROADMAP (or return the block)."""
+    root = resolve_plan_root(plan_root)
+    tracker = root / TRACKER_NAME
+    if not tracker.is_file():
+        raise FileNotFoundError(f"tracker not found: {tracker}")
+    cuts = parse_tracker_cuts(tracker.read_text(encoding="utf-8"))
+    block = render_roadmap_block(
+        cuts, plan_display=display_plan_path(root, original=original_plan)
+    )
+    if stdout or roadmap_path is None:
+        return block
+    existing = (
+        roadmap_path.read_text(encoding="utf-8") if roadmap_path.is_file() else ""
+    )
+    rendered = splice_generated_block(existing, block)
+    roadmap_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = roadmap_path.with_name(roadmap_path.name + ".tmp")
+    tmp.write_text(rendered, encoding="utf-8")
+    tmp.replace(roadmap_path)
+    return block
+
+
+def _roadmap_main(argv: Sequence[str]) -> int:
+    """``vc-ship roadmap --render --plan`` — project tracker cut states into ROADMAP."""
+    parser = argparse.ArgumentParser(prog="vc-ship roadmap")
+    parser.add_argument(
+        "--render",
+        action="store_true",
+        required=True,
+        help="write or refresh the generated ROADMAP block from tracker.md",
+    )
+    parser.add_argument(
+        "--plan",
+        required=True,
+        help="plan root directory (or path to tracker.md)",
+    )
+    parser.add_argument(
+        "--roadmap",
+        default="",
+        help=f"ROADMAP path (default: {DEFAULT_ROADMAP_REL})",
+    )
+    parser.add_argument(
+        "--stdout",
+        action="store_true",
+        help="print the generated block and do not write ROADMAP",
+    )
+    args = parser.parse_args(list(argv))
+    plan_root = resolve_plan_root(args.plan)
+    roadmap_path = (
+        Path(args.roadmap).expanduser()
+        if args.roadmap
+        else Path.cwd() / DEFAULT_ROADMAP_REL
+    )
+    try:
+        block = render_roadmap_from_tracker(
+            plan_root=plan_root,
+            roadmap_path=None if args.stdout else roadmap_path,
+            stdout=args.stdout,
+            original_plan=args.plan,
+        )
+    except (OSError, ValueError) as exc:
+        ui.err(str(exc), fix="pass --plan to a directory that contains tracker.md")
+        return 1
+    if args.stdout:
+        print(block)
+        return 0
+    delivered, total = dou_index(
+        parse_tracker_cuts((plan_root / TRACKER_NAME).read_text(encoding="utf-8"))
+    )
+    ui.ok(f"roadmap projected from tracker ({delivered}/{total})")
+    ui.next_step(str(roadmap_path), "live cut states; do not hand-edit the block")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry point: route lifecycle control verbs, --loop-only, or launch a run."""
+    """CLI entry point: roadmap projection, control verbs, --loop-only, or a run."""
     args_list = list(sys.argv[1:] if argv is None else argv)
+    if args_list and args_list[0] == "roadmap":
+        return _roadmap_main(args_list[1:])
     if args_list and args_list[0] in _control_verbs():
         from .lifecycle_control import lifecycle_control_main
 

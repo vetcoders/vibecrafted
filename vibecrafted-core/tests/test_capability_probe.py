@@ -14,7 +14,7 @@ from vibecrafted_core.runtime_paths import (
     resolve_operator_launch_root,
 )
 
-ALL_AGENTS = ("claude", "codex", "gemini", "agy", "junie", "grok")
+ALL_AGENTS = ("claude", "codex", "gemini", "agy", "junie", "grok", "cursor")
 VERDICTS = {
     continuity.SUPPORTED,
     continuity.UNSUPPORTED,
@@ -76,6 +76,10 @@ def test_unverified_never_upgraded_optimistically() -> None:
     )
     assert (
         continuity.capability_for("junie").noninteractive_resume
+        == continuity.UNVERIFIED
+    )
+    assert (
+        continuity.capability_for("cursor").noninteractive_resume
         == continuity.UNVERIFIED
     )
 

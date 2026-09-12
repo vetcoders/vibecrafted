@@ -10,10 +10,15 @@ from pathlib import Path
 from typing import Any
 
 from vibecrafted_core.control_plane import control_plane_home
+from vibecrafted_core.repository_claims import (
+    ClaimContractError,
+    RepositoryClaimRegistry,
+)
+from vibecrafted_core.runtime_paths import vibecrafted_home
 
 from .model import Dispatch
 from .schema import doctor_dispatch
-from .worktrees import canonical_artifact_root, repo_identity, vibecrafted_home
+from .worktrees import canonical_artifact_root, repo_identity
 
 
 @dataclass(frozen=True)
@@ -228,6 +233,33 @@ def diagnose_runtime(
                 f"multiple active integrators for {org}/{repo}: {', '.join(active_integrators)}",
             )
         )
+    try:
+        claim_health = RepositoryClaimRegistry().health(repo=dispatch.meta.repo)
+    except ClaimContractError as exc:
+        errors.append(
+            DoctorError("repository_claims", f"claim registry unhealthy: {exc}")
+        )
+    else:
+        for claim in claim_health["stale_claims"]:
+            errors.append(
+                DoctorError(
+                    f"repository_claims.{claim.get('claim_id')}",
+                    "stale mutation claim: "
+                    f"owner {claim.get('run_id') or '?'}/{claim.get('session_id') or '?'} "
+                    f"pid {claim.get('pid') or '?'} is {claim.get('owner_liveness')}; "
+                    f"paths {', '.join(claim.get('owned_paths') or [])}; "
+                    f"reclaimable={claim.get('reclaimable')}",
+                )
+            )
+        for conflict in claim_health["conflicts"]:
+            errors.append(
+                DoctorError(
+                    "repository_claims.conflicts",
+                    "stored mutation claims overlap: "
+                    f"{conflict.get('left_claim_id')} and {conflict.get('right_claim_id')} "
+                    f"at {conflict.get('overlapping_paths')}",
+                )
+            )
     return tuple(errors)
 
 

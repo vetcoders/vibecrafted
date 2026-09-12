@@ -83,6 +83,7 @@ def test_wrapper_never_executes_retired_sibling_shadow(tmp_path: Path) -> None:
         "PATH": f"{bin_dir}:/usr/bin:/bin",
         "HOME": str(home),
         "XDG_CONFIG_HOME": str(xdg),
+        "VIBECRAFTED_VC_FRAME_BIN": str(cargo_bin / "vc-frame"),
         "USER": "test",
     }
     proc = subprocess.run(
@@ -96,6 +97,89 @@ def test_wrapper_never_executes_retired_sibling_shadow(tmp_path: Path) -> None:
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     assert "CANONICAL_RAN args=list-sessions" in proc.stdout
     assert "RETIRED_SHADOW_RAN" not in proc.stdout
+
+
+def test_installed_wrapper_prefers_adjacent_native_libexec_without_recursing(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    xdg = tmp_path / "xdg"
+    generation = tmp_path / "release"
+    wrapper = generation / "bin" / "vc-frame"
+    real = generation / "libexec" / "vc-frame"
+    ambient = xdg / "data" / "vibecrafted" / "bin" / "vc-frame"
+    home.mkdir()
+    xdg.mkdir()
+    wrapper.parent.mkdir(parents=True)
+    real.parent.mkdir(parents=True)
+    ambient.parent.mkdir(parents=True)
+    wrapper.write_text(WRAPPER.read_text(encoding="utf-8"), encoding="utf-8")
+    wrapper.chmod(0o755)
+    _write_fake_bin(real.parent, real.name, "#!/bin/sh\nprintf '%s\\n' \"$*\"\n")
+    ambient.symlink_to(wrapper)
+    tool_bin = tmp_path / "tool-bin"
+    tool_bin.mkdir()
+    _write_fake_bin(
+        tool_bin,
+        "file",
+        "#!/bin/sh\nprintf 'Mach-O 64-bit executable arm64\\n'\n",
+    )
+
+    env = {
+        **{k: v for k, v in os.environ.items() if not k.startswith("VC_FRAME")},
+        "PATH": f"{tool_bin}:/usr/bin:/bin",
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(xdg),
+        "XDG_DATA_HOME": str(xdg / "data"),
+        "USER": "test",
+    }
+    proc = subprocess.run(
+        [str(wrapper), "list-sessions"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+        timeout=5,
+    )
+
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert proc.stdout == "list-sessions\n"
+
+
+def test_wrapper_rejects_ambient_shell_wrapper_instead_of_recursing(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    xdg = tmp_path / "xdg"
+    wrapper = tmp_path / "release" / "bin" / "vc-frame"
+    ambient = xdg / "data" / "vibecrafted" / "bin" / "vc-frame"
+    home.mkdir()
+    xdg.mkdir()
+    wrapper.parent.mkdir(parents=True)
+    ambient.parent.mkdir(parents=True)
+    wrapper.write_text(WRAPPER.read_text(encoding="utf-8"), encoding="utf-8")
+    wrapper.chmod(0o755)
+    ambient.symlink_to(wrapper)
+
+    env = {
+        **{k: v for k, v in os.environ.items() if not k.startswith("VC_FRAME")},
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(xdg),
+        "XDG_DATA_HOME": str(xdg / "data"),
+        "USER": "test",
+    }
+    proc = subprocess.run(
+        [str(wrapper), "list-sessions"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+        timeout=5,
+    )
+
+    assert proc.returncode == 127, (proc.stdout, proc.stderr)
+    assert "real binary not found" in proc.stderr
 
 
 def test_product_entry_prepare_exists_in_shipped_dashboard() -> None:
@@ -150,7 +234,9 @@ def test_shipped_deck_routes_workspace_resolution_to_core(tmp_path: Path) -> Non
     )
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     assert "VIBECRAFTED_WORKSPACE_ID=" in proc.stdout
-    assert "VIBECRAFTED_OPERATOR_SESSION=workspace-" in proc.stdout
+    # Operator session is the resolved PLACE (root basename / catalog label),
+    # not the catalog-fallback workspace-{8hex} token.
+    assert "VIBECRAFTED_OPERATOR_SESSION=workspace\n" in proc.stdout
 
 
 def test_wrapper_refuses_product_attach_without_config(tmp_path: Path) -> None:
@@ -245,7 +331,7 @@ def test_wrapper_pins_and_execs_when_frontier_config_present(tmp_path: Path) -> 
     home.mkdir()
     xdg.mkdir()
     bin_dir.mkdir()
-    frontier = xdg / "vetcoders" / "frontier" / "vc-frame"
+    frontier = xdg / "vibecrafted" / "vc-frame"
     frontier.mkdir(parents=True)
     (frontier / "config.kdl").write_text("// product\n", encoding="utf-8")
 
@@ -336,7 +422,7 @@ def test_wrapper_pins_darwin_socket_dir_when_unset(tmp_path: Path) -> None:
 
 
 def test_wrapper_allows_non_product_session_without_config(tmp_path: Path) -> None:
-    """Non-product sessions may run bare without product config (polyversai etc.)."""
+    """Non-product sessions may run bare without product config (scratch sessions etc.)."""
     home = tmp_path / "home"
     xdg = tmp_path / "xdg"
     bin_dir = tmp_path / "bin"
@@ -360,14 +446,14 @@ def test_wrapper_allows_non_product_session_without_config(tmp_path: Path) -> No
         "USER": "test",
     }
     proc = subprocess.run(
-        [str(wrapper), "attach", "polyversai"],
+        [str(wrapper), "attach", "scratch"],
         capture_output=True,
         text=True,
         env=env,
         check=False,
     )
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
-    assert "REAL_RAN args=attach polyversai" in proc.stdout
+    assert "REAL_RAN args=attach scratch" in proc.stdout
 
 
 def test_vc_start_probe_pins_product_config(tmp_path: Path) -> None:
@@ -407,7 +493,7 @@ def test_vc_start_probe_pins_product_config(tmp_path: Path) -> None:
             if [[ "$*" == "workspace resolve --env" ]]; then
               echo VIBECRAFTED_WORKSPACE_ID=019ff97a-3328-7660-b6cd-f957b1b163f8
               echo VIBECRAFTED_WORKSPACE_INSTANCE_ID=019ff97a-3328-7660-b6cd-f957b1b163f9
-              echo VIBECRAFTED_OPERATOR_SESSION=workspace-b1b163f8
+              echo VIBECRAFTED_OPERATOR_SESSION=probe-place
               exit 0
             fi
             exit 1
@@ -453,7 +539,9 @@ def test_vc_start_probe_pins_product_config(tmp_path: Path) -> None:
         "VIBECRAFTED_WORKSPACE_INSTANCE_ID=019ff97a-3328-7660-b6cd-f957b1b163f9"
         in proc.stdout
     )
-    assert "VIBECRAFTED_OPERATOR_SESSION=workspace-b1b163f8" in proc.stdout
+    # Place-named sessions pass through untouched; only the legacy
+    # workspace-{8hex} token would be rewritten to the resolved place.
+    assert "VIBECRAFTED_OPERATOR_SESSION=probe-place" in proc.stdout
     assert "should-not-run-in-probe" not in out
 
 

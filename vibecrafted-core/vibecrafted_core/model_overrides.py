@@ -7,6 +7,7 @@ from collections.abc import Sequence
 MODEL_OVERRIDE_FLAGS = {
     "claude": "--model",
     "codex": "-m",
+    "cursor": "--model",
 }
 
 

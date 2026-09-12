@@ -53,8 +53,9 @@ REQUIRED_FILES = (
     "install.ps1",
     "install.toml",
     "scripts/distribution_manifest.py",
+    "scripts/build-linux-arm64-runtime-pack.sh",
+    "scripts/installer_brand.py",
     "scripts/vetcoders_install.py",
-    "scripts/runtime_paths.py",
     "scripts/vibecrafted",
     "scripts/verify-vibecrafted-product.sh",
     "vibecrafted-core/pyproject.toml",
@@ -71,6 +72,9 @@ REQUIRED_FILES = (
     "vibecrafted-app/Cargo.lock",
     "vibecrafted-server/Cargo.toml",
     "vibecrafted-server/Cargo.lock",
+    "vibecrafted-vm/RuntimePack.Containerfile",
+    "vibecrafted-vm/runtime-entry.sh",
+    "vibecrafted-vm/runtime-provider-lock.json",
 )
 
 REQUIRED_DIRECTORIES = (
@@ -151,6 +155,7 @@ FORBIDDEN_COMPONENTS = frozenset(
         ".DS_Store",
         ".backup",
         ".build",
+        ".cache",
         ".circleci",
         ".coverage",
         ".devcontainer",
@@ -165,6 +170,7 @@ FORBIDDEN_COMPONENTS = frozenset(
         ".loctignore",
         ".loctree",
         ".mypy_cache",
+        ".netrc",
         ".next",
         ".prettierignore",
         ".pytest_cache",
@@ -180,11 +186,18 @@ FORBIDDEN_COMPONENTS = frozenset(
         "__tests__",
         "build",
         "coverage.xml",
+        "credentials.json",
         "dist",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        "id_rsa",
         "node_modules",
         "package-lock.json",
         "pnpm-lock.yaml",
         "poetry.lock",
+        "reports",
+        "secrets.json",
         "target",
         "test",
         "tests",
@@ -193,7 +206,8 @@ FORBIDDEN_COMPONENTS = frozenset(
     }
 )
 
-FORBIDDEN_SUFFIXES = (".pyc", ".pyo", ".swp", "~")
+FORBIDDEN_SUFFIXES = (".pyc", ".pyo", ".swp", "~", ".pem", ".p12", ".pfx")
+_SECRET_NAME_PREFIXES = ("id_rsa", "id_dsa", "id_ecdsa", "id_ed25519")
 REQUIRED_LOCKFILES = frozenset(
     {
         "vibecrafted-app/Cargo.lock",
@@ -854,6 +868,55 @@ def assert_source_payload_matches_provenance(
     return provenance
 
 
+def write_source_provenance_carrier(
+    source: str | Path,
+    output: str | Path,
+    *,
+    owner_repo: str | None = None,
+    source_revision: str | None = None,
+) -> dict[str, object]:
+    """Write only the canonical carrier proven by an exact source snapshot.
+
+    Native Runtime Packs need the same closed provenance record as the portable
+    archive, but they do not need a second materialized copy of the entire
+    source tree.  Deriving the carrier directly also prevents host metadata
+    writers (notably Finder's .DS_Store) from racing a transient staging tree.
+    """
+    source_root = Path(source).resolve(strict=False)
+    if not source_root.is_dir():
+        raise ManifestError(f"source root is not a directory: {source_root}")
+    provenance = assert_source_payload_matches_provenance(
+        source_root,
+        owner_repo=owner_repo,
+        source_revision=source_revision,
+    )
+    output_path = Path(os.path.abspath(output))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists() and not output_path.is_file():
+        raise ManifestError(
+            f"source provenance output must be a regular file: {output_path}"
+        )
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{output_path.name}.candidate-",
+            dir=output_path.parent,
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(_canonical_provenance_bytes(provenance))
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_path.chmod(0o644)
+        os.replace(temporary_path, output_path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    return provenance
+
+
 def _relative_path(value: str | Path) -> Path:
     """Normalize ``value`` to a relative Path, rejecting absolute or ``..`` paths."""
     relative = Path(value)
@@ -873,6 +936,14 @@ def _component_is_secret_env(name: str) -> bool:
     return name.startswith(".env.") and not name.endswith(".example")
 
 
+def _component_looks_like_secret(name: str) -> bool:
+    """Return True when a path component looks like a private key or credential file."""
+    lowered = name.lower()
+    if lowered.endswith((".pub", ".example")):
+        return False
+    return lowered.startswith(_SECRET_NAME_PREFIXES)
+
+
 def path_is_forbidden(relative: str | Path) -> bool:
     """Return True when a relative path matches a forbidden component/suffix rule."""
     relative_path = _relative_path(relative)
@@ -881,7 +952,9 @@ def path_is_forbidden(relative: str | Path) -> bool:
     if relative_path.as_posix() in REQUIRED_LOCKFILES:
         return False
     return any(
-        part in FORBIDDEN_COMPONENTS or _component_is_secret_env(part)
+        part in FORBIDDEN_COMPONENTS
+        or _component_is_secret_env(part)
+        or _component_looks_like_secret(part)
         for part in relative_path.parts
     ) or relative_path.name.endswith(FORBIDDEN_SUFFIXES)
 
@@ -1703,6 +1776,17 @@ def _assert_archive_matches_git_revision(
 
 def _write_archive(payload_root: Path, output: Path, root_name: str) -> None:
     """Write payload_root as a deterministic gzip+PAX tarball rooted at root_name."""
+    inventory = list(_walk_entries(payload_root))
+    errors = []
+    for path in inventory:
+        relative = path.relative_to(payload_root)
+        if path_is_forbidden(relative):
+            errors.append(f"forbidden path: {relative}")
+            continue
+        if relative.parts[0] not in ALLOWED_TOP_LEVEL:
+            errors.append(f"unexpected top-level path: {relative}")
+    if errors:
+        raise ManifestError("\n".join(sorted(set(errors))))
     output.parent.mkdir(parents=True, exist_ok=True)
     with (
         output.open("wb") as raw_output,
@@ -1713,7 +1797,7 @@ def _write_archive(payload_root: Path, output: Path, root_name: str) -> None:
         root_info.type = tarfile.DIRTYPE
         root_info.mode = 0o755
         tar.addfile(_normalized_tar_info(root_info))
-        for path in _walk_entries(payload_root):
+        for path in inventory:
             relative = path.relative_to(payload_root)
             archive_name = f"{root_name}/{relative.as_posix()}"
             info = _normalized_tar_info(tar.gettarinfo(str(path), arcname=archive_name))
@@ -2153,7 +2237,7 @@ def publish_archive_candidate(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """Build the CLI parser exposing the check/stage/archive subcommands."""
+    """Build the CLI parser exposing validation and carrier writers."""
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -2170,6 +2254,14 @@ def _build_parser() -> argparse.ArgumentParser:
     stage.add_argument("--owner-repo")
     stage.add_argument("--source-revision")
     stage.add_argument("--require-source-provenance", action="store_true")
+
+    carrier = subparsers.add_parser(
+        "carrier", help="Write a canonical source-provenance carrier"
+    )
+    carrier.add_argument("--source", required=True, type=Path)
+    carrier.add_argument("--output", required=True, type=Path)
+    carrier.add_argument("--owner-repo")
+    carrier.add_argument("--source-revision")
 
     archive = subparsers.add_parser("archive", help="Create a validated tarball")
     archive.add_argument("--source", required=True, type=Path)
@@ -2207,6 +2299,14 @@ def main(argv: list[str] | None = None) -> int:
                 require_source_provenance=args.require_source_provenance,
             )
             print(f"Payload staged: {args.destination}")
+        elif args.command == "carrier":
+            write_source_provenance_carrier(
+                args.source,
+                args.output,
+                owner_repo=args.owner_repo,
+                source_revision=args.source_revision,
+            )
+            print(f"Source provenance written: {args.output}")
         elif args.command == "archive":
             archive = create_archive(
                 args.source,

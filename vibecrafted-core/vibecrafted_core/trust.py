@@ -23,11 +23,11 @@ import time
 from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from . import control_plane
+from .clock import utc_now_iso
 from .run_mutation import run_mutation_locks
 from .settlement import (
     Settlement,
@@ -129,11 +129,6 @@ _CLAIMED_PATH_RE = re.compile(
     r"|(?P<bare>(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+"
     r"|[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,12}))"
 )
-
-
-def _now_iso() -> str:
-    """Current UTC timestamp in ISO 8601 form."""
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _repo_root(path: Path | None = None) -> Path:
@@ -1285,6 +1280,13 @@ def _nested_settlement(settlement: Settlement) -> dict[str, Any]:
     }
 
 
+_SUPERSEDED_AWAIT_PROJECTION = {
+    "await_rc": None,
+    "await_outcome": "",
+    "await_settled_at": "",
+}
+
+
 def _trust_projection_fields(
     settlement: Settlement,
     receipt: TrustReceiptV1,
@@ -1292,6 +1294,10 @@ def _trust_projection_fields(
     """Build the flat field set written onto run meta/snapshot to project a trust settlement."""
     return {
         **settlement.to_payload(),
+        # A Trust settlement supersedes transient await supervision. Keep the
+        # clear operation explicit so update() removes stale top-level fields
+        # from both meta and retained snapshots during crash recovery.
+        **_SUPERSEDED_AWAIT_PROJECTION,
         "run_id": receipt.run_id,
         "root": receipt.repo_root,
         "repo_root": receipt.repo_root,
@@ -1474,7 +1480,12 @@ def _can_complete_projection(
             if fields is None:
                 return True
             return all(
-                key not in payload or payload.get(key) == value
+                (
+                    key in _SUPERSEDED_AWAIT_PROJECTION
+                    and value == _SUPERSEDED_AWAIT_PROJECTION[key]
+                )
+                or key not in payload
+                or payload.get(key) == value
                 for key, value in fields.items()
             )
         if prior_receipt.settlement_revision > previous_revision:
@@ -2016,7 +2027,7 @@ def note_verdict(
     # relative roots still match guard/triage lookups.
     resolved_repo = _repo_root(repo)
     commit = _commit_record(resolved_repo, sha)
-    stamp = _now_iso()
+    stamp = utc_now_iso()
     lock = (
         run_mutation_locks(control_plane.control_plane_home(), run_id=run_id)
         if run_id

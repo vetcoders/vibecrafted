@@ -3,9 +3,9 @@ source: tui-agent/tests/mission_control_snapshots.rs
 expression: buffer_text(&buffer)
 ---
 Vibecrafted Operator Console  no live runs loaded
-mission root: /fixture/repo  |  active runs: 0  |  scope: live  |  focus: Mission Control
+workspace: repo  |  active 0  stalled 0  |  scope: live  |  Mission Control
 ┌Surface───────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│ Monitor live 0 │ Dispatch workflow/claude │ Controls 25 │ Mission 0|0                                                │
+│ Monitor live 0 │ Dispatch workflow/claude │ Controls 4 │ Mission 0|0                                                 │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌Active dispatches─────────────────────┐┌History (30d)─────────────────────────┐┌Mission posture───────────────────────┐
 │0 running                             ││0 meta.json scanned                   ││model parity 0/1                      │
@@ -27,10 +27,10 @@ mission root: /fixture/repo  |  active runs: 0  |  scope: live  |  focus: Missio
 │                                                                ││                                                    │
 └────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────────────┘
 ┌ Fleet health (4) ─────────────────────┐┌ Failure board 24h (0) ──────────────┐┌ Operator action queue (0) ───────────┐
-│✗ tailscale dragon  dispatch target of…││no failures in window                ││nothing to press                      │
+│✗ tailscale host-a  dispatch target of…││no failures in window                ││nothing to press                      │
 │! tailscale blacky  peer offline (100.…││                                     ││                                      │
 │? tailscale status  tailscaled is not …││                                     ││                                      │
-│✓ tailscale div0    online (100.73.193…││                                     ││                                      │
+│✓ tailscale host-b  online (100.64.0.1…││                                     ││                                      │
 │                                       ││                                     ││                                      │
 └───────────────────────────────────────┘└─────────────────────────────────────┘└──────────────────────────────────────┘
 ┌ Mission Control receipt ─────────────────────────────────────────────────────────────────────────────────────────────┐

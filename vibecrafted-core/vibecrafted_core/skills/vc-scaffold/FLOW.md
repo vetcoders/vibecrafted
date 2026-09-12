@@ -5,14 +5,17 @@
 ```mermaid
 flowchart TD
     A[Operator: vibecrafted scaffold claude --prompt 'Plan this'] --> G[Canonical Orientation Gate: vc-init + loctree — HARD-BLOCK]
-    G --> O[1. Orient: map landscape + constraint space]
+    G --> I{Founder interview evidence?}
+    I -->|journal / AICX / brief| O[1. Orient: map landscape + constraint space]
+    I -->|none| Q[Ask founder before shaping]
+    Q --> O
     O --> F[2. Falsify: try to break the founding assumption]
     F --> S[3. Shape: decisions · scope · product identity · output shape by scale]
     S --> D[4. Defend: agent-sized cuts, each with Vector + state + delivery-verifier]
-    D --> H[5. Handoff: plan with a state column]
+    D --> H[5. Handoff: plan + briefs + validated .dispatch.toml]
     H --> E{What next?}
-    E -->|WRITE phase| W[vc-implement / vc-workflow consume the plan]
-    E -->|conduct dispatch| OP[vc-operator reads state column → trigger/stop]
+    E -->|single cut| W[vc-implement / vc-workflow cell consumes its brief]
+    E -->|multi-cut A→Z| OP[/vc-ship consumes .dispatch.toml]
     E -->|shared steering| P[vc-partner]
     E -->|plan only| R[Write scaffold report]
 ```
@@ -32,8 +35,9 @@ Each WRITE leaves an artifact; the next READ falsifies it. See `references/caden
 
 ### Escalation edges
 
-- Plan ready for ship WRITE execution -> `vibecrafted implement <agent>` or `workflow`; posture-first prompt work -> `vibecrafted justdo <agent>`
-- Conduct a multi-wave dispatch -> `$vc-operator` posture plus `vibecrafted dispatch` or workflow lanes
+- Single cut ready for ship WRITE execution -> a bounded `vibecrafted implement <agent>` or `workflow` cell; posture-first prompt work -> `vibecrafted justdo <agent>`
+- Conduct a multi-wave dispatch -> validate `vibecrafted.dispatch.v1` with `vibecrafted dispatch <path> --doctor`, then hand the artifact to `/vc-ship` A→Z
+- Manual per-task workflow launch -> emergency fallback only; record the supervisor failure and return-control evidence
 - Shared steering still needed -> `vibecrafted partner <agent>`
 - Repo already exists and needs truth before planning -> `vibecrafted init <agent>`
 

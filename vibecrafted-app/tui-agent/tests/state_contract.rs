@@ -9,7 +9,6 @@ use tempfile::tempdir;
 use voc::app::{App, AppTab, DeepAction, DispatchFocus, LaunchFocus, QueueScope};
 use voc::config::{AppConfig, CliOptions, build_config, default_terminal_binary};
 use voc::launch::{LaunchKind, LaunchRequest, LaunchRuntime, build_launch_command};
-use voc::skills_catalog::CATALOG;
 use voc::state::{ControlPlaneState, RenderedRun, RunKind, RunSnapshot, classify_run};
 
 #[cfg(unix)]
@@ -849,8 +848,8 @@ fn mux_health_deep_actions_surface_per_known_service() {
         "no MuxHealth without summaries: {actions_no_mux:?}"
     );
 
-    // With one healthy + one failed summary → one MuxHealth action per service,
-    // appended after the per-run actions.
+    // Healthy mux daemons stay off the action deck. A failed service is the
+    // contextual MCP action, appended after the per-run actions.
     app.mux_summaries = vec![
         MuxSummary::from_path_and_result(
             PathBuf::from("/tmp/memory.json"),
@@ -866,7 +865,7 @@ fn mux_health_deep_actions_surface_per_known_service() {
         .iter()
         .filter(|action| matches!(action, DeepAction::MuxHealth { .. }))
         .collect();
-    assert_eq!(mux_actions.len(), 2, "one MuxHealth per service");
+    assert_eq!(mux_actions.len(), 1, "only unhealthy mux services are actions");
 
     let services: Vec<&str> = actions
         .iter()
@@ -875,7 +874,7 @@ fn mux_health_deep_actions_surface_per_known_service() {
             _ => None,
         })
         .collect();
-    assert!(services.contains(&"general-memory"));
+    assert!(!services.contains(&"general-memory"));
     assert!(services.contains(&"brave-search"));
 
     // Label must surface the rmcp-mux invocation so the operator knows
@@ -895,8 +894,8 @@ fn mux_health_deep_actions_surface_per_known_service() {
         .collect();
     assert_eq!(
         mux_only.len(),
-        2,
-        "MuxHealth should not depend on selected_run"
+        1,
+        "unhealthy MuxHealth should not depend on selected_run"
     );
 }
 
@@ -1180,7 +1179,15 @@ fn deep_controls_expose_attach_resume_and_artifacts() {
             DeepAction::OpenRoot("/tmp/repo".into()),
         ]
     );
-    assert_eq!(actions.len(), 5 + CATALOG.len());
+    assert!(
+        actions.len() < 12,
+        "Controls lists contextual actions, not the full skill catalog: {}",
+        actions.len()
+    );
+    assert!(actions.iter().any(|action| matches!(
+        action,
+        DeepAction::SkillLaunch { skill, .. } if skill == "vc-workflow"
+    )));
 }
 
 #[test]
@@ -1496,11 +1503,13 @@ fn tab_labels_surface_monitor_dispatch_and_controls_context() {
     let labels = app.tab_labels();
     assert_eq!(labels[0], "Monitor live 1");
     assert_eq!(labels[1], "Dispatch marbles/gemini");
-    assert_eq!(labels[2], format!("Controls {}", 5 + CATALOG.len()));
+    assert_eq!(labels[2], format!("Controls {}", app.deep_actions().len()));
+    assert!(app.deep_actions().len() < 12);
 
     app.selected = 1;
     let labels = app.tab_labels();
-    assert_eq!(labels[2], format!("Controls {}", CATALOG.len()));
+    assert_eq!(labels[2], format!("Controls {}", app.deep_actions().len()));
+    assert!(app.deep_actions().len() < 12);
 }
 
 #[tokio::test]

@@ -1,6 +1,6 @@
 [project]
 name = "vibecrafted"
-version = "4.2.4"
+version = "4.3.0"
 description = "Core Python library for Vibecrafted runtime and synthesis surfaces."
 readme = "README.md"
 requires-python = ">=3.11"

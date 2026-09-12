@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import plistlib
 import shutil
 import struct
 import subprocess
+import sys
 from argparse import Namespace
 from pathlib import Path
+from xml.parsers.expat import ExpatError
 
 import pytest
 from vibecrafted_core.doctor import _vc_frame_delivery_findings
@@ -61,80 +64,148 @@ def _pin_canonical_runtime_roots(monkeypatch, home: Path, crafted_home: Path) ->
     monkeypatch.setenv("VIBECRAFTED_HOME", str(crafted_home))
 
 
-def test_install_foundation_from_bundle_copies_platform_payload(
+def test_install_or_find_foundation_prefers_preexisting_path_install(
     tmp_path: Path, monkeypatch
 ) -> None:
+    """The user's own PATH install always wins."""
+    foundation = next(f for f in installer.FOUNDATIONS if f.name == "loct")
+    user_bin = tmp_path / "bin"
+    user_bin.mkdir()
+    user_loct = user_bin / "loct"
+    _write_executable(user_loct, "#!/bin/sh\nexit 0\n")
+    monkeypatch.setenv("PATH", f"{user_bin}:/usr/bin:/bin")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    assert installer.install_or_find_foundation(foundation) == (
+        str(user_loct),
+        "pre-existing",
+    )
+
+
+def test_install_or_find_foundation_never_copies_vendored_payload_to_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A missing foundation stays missing even when a vendored payload exists:
+    the canonical upstream release is the fix, not our copy on the user's
+    PATH. Vendored binaries stay generation-private."""
     repo_root = tmp_path / "bundle"
-    bin_dir = tmp_path / "bin"
     vendor_dir = repo_root / "bin" / "vendor" / "darwin-arm64"
     vendor_dir.mkdir(parents=True)
-    monkeypatch.setattr(installer, "detect_vendor_platform", lambda: "darwin-arm64")
-
-    foundations = [
-        f
-        for f in installer.FOUNDATIONS
-        if f.name in installer.VENDORED_FOUNDATION_BINARIES
-    ]
-    assert {f.name for f in foundations} == {
-        "aicx",
-        "aicx-mcp",
-        "loct",
-        "loctree-mcp",
-        "vc-frame",
-    }
-
-    for foundation in foundations:
-        name = installer.VENDORED_FOUNDATION_BINARIES[foundation.name]
-        _write_executable(
-            vendor_dir / name,
-            f"#!/usr/bin/env bash\nprintf '{name} 0.0.0-test\\n'\n",
-        )
-
-    installed = [
-        installer.install_foundation_from_bundle(f, repo_root, bin_dir=bin_dir)
-        for f in foundations
-    ]
-
-    assert {path.name for path in installed if path is not None} == {
-        "aicx",
-        "aicx-mcp",
-        "loct",
-        "loctree-mcp",
-        "vc-frame",
-    }
-    for path in installed:
-        assert path is not None
-        assert path.is_file()
-        assert path.stat().st_mode & 0o111
-        assert subprocess.run([str(path), "--version"], check=False).returncode == 0
-
-
-def test_install_foundation_from_bundle_ignores_platform_mismatch(
-    tmp_path: Path, monkeypatch
-) -> None:
-    repo_root = tmp_path / "bundle"
-    bin_dir = tmp_path / "bin"
-    linux_dir = repo_root / "bin" / "vendor" / "linux-x64"
-    linux_dir.mkdir(parents=True)
-    _write_executable(
-        linux_dir / "vc-frame",
-        "#!/usr/bin/env bash\nprintf 'wrong platform\\n'\n",
-    )
-    monkeypatch.setattr(installer, "detect_vendor_platform", lambda: "darwin-arm64")
+    _write_executable(vendor_dir / "loct", "#!/bin/sh\nexit 0\n")
     monkeypatch.setattr(installer.shutil, "which", lambda _name: None)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
-    foundation = next(f for f in installer.FOUNDATIONS if f.name == "vc-frame")
+    foundation = next(f for f in installer.FOUNDATIONS if f.name == "loct")
 
-    assert (
-        installer.install_foundation_from_bundle(foundation, repo_root, bin_dir=bin_dir)
-        is None
+    assert installer.install_or_find_foundation(foundation) == ("", "not-installed")
+    assert not (tmp_path / "home" / ".local" / "bin" / "loct").exists()
+
+
+def test_doctor_runtime_receipt_findings_flag_drift_and_missing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Receipt/disk drift must be visible to doctor: files the installer owns
+    are compared against the receipted digest."""
+    runtime_home = tmp_path / "runtime"
+    runtime_home.mkdir()
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    owned = tmp_path / "bin" / "vc-start"
+    owned.parent.mkdir()
+    owned.write_text("#!/bin/sh\noriginal\n", encoding="utf-8")
+    digest = installer._sha256_path(owned)
+    gone = tmp_path / "bin" / "vc-gone"
+    receipt_path = runtime_home / installer.RUNTIME_INSTALL_RECEIPT
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "schema": installer.RUNTIME_INSTALL_SCHEMA,
+                "owned_files": {str(owned): digest, str(gone): "0" * 64},
+            }
+        ),
+        encoding="utf-8",
     )
-    assert not (bin_dir / "vc-frame").exists()
-    assert installer.install_or_find_foundation(foundation, repo_root) == (
-        "",
-        "not-installed",
+    owned.write_text("#!/bin/sh\ndrifted\n", encoding="utf-8")
+
+    findings = installer._doctor_runtime_receipt_findings()
+
+    assert [finding.level for finding in findings] == ["warn"]
+    assert "drifted" in findings[0].message
+    assert "missing" in findings[0].message
+
+    receipt_path.write_text(
+        json.dumps({"schema": installer.RUNTIME_INSTALL_SCHEMA, "owned_files": {}}),
+        encoding="utf-8",
     )
+    assert [
+        finding.level for finding in installer._doctor_runtime_receipt_findings()
+    ] == ["ok"]
+
+
+def test_doctor_foundation_service_findings_flag_dangling_plist(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A foundation LaunchAgent whose program vanished must surface as a
+    failure — that is the launchd exit-78 incident class."""
+    home = tmp_path / "home"
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(tmp_path / "runtime"))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(tmp_path / "bin"))
+    monkeypatch.setattr(installer.sys, "platform", "darwin")
+    plist_path = agents / "io.vibecrafted.test.loctree-mcp.plist"
+    plist_path.write_bytes(
+        plistlib.dumps(
+            {
+                "Label": "io.vibecrafted.test.loctree-mcp",
+                "ProgramArguments": [str(tmp_path / "gone" / "loctree-mcp")],
+            }
+        )
+    )
+
+    findings = installer._doctor_foundation_service_findings()
+
+    assert [finding.level for finding in findings] == ["fail"]
+    assert "dangling" in findings[0].message
+
+
+def test_foundation_service_scan_skips_expat_malformed_plist(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """One unrelated malformed LaunchAgent must not abort the whole scan."""
+    home = tmp_path / "home"
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(installer.sys, "platform", "darwin")
+
+    malformed = agents / "ai.libraxis.aicx-push.plist"
+    malformed.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Fleet sync is additive and never --delete. -->
+<plist version="1.0"><dict><key>Label</key><string>ai.libraxis.aicx-push</string></dict></plist>
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ExpatError):
+        plistlib.loads(malformed.read_bytes())
+
+    valid = agents / "zz.libraxis.loctree-mcp.plist"
+    valid.write_bytes(
+        plistlib.dumps(
+            {
+                "Label": "ai.libraxis.loctree-mcp",
+                "ProgramArguments": ["/usr/local/bin/loctree-mcp"],
+            }
+        )
+    )
+
+    dependents = installer._foundation_service_dependent_plists()
+
+    assert [(path.name, payload["Label"]) for path, payload in dependents] == [
+        (valid.name, "ai.libraxis.loctree-mcp")
+    ]
 
 
 def test_run_doctor_smokes_helper_and_launcher_runtime(
@@ -524,6 +595,10 @@ def test_cmd_doctor_fix_launchers_repairs_missing_wrappers(
     detached_source = tmp_path / "detached-source"
     installer.stage_distribution_payload(REPO_ROOT, detached_source, mirror=True)
     (detached_source / "VERSION").write_text("1.4.1-test\n", encoding="utf-8")
+    _write_executable(
+        detached_source / "bin/python3",
+        f'#!/bin/sh\nexec {installer.shlex_quote(str(Path(sys.executable).absolute()))} "$@"\n',
+    )
     _write_test_source_provenance(detached_source)
     monkeypatch.setattr(
         installer, "_doctor_launcher_source_root", lambda _store: detached_source
@@ -785,13 +860,7 @@ def test_install_launcher_does_not_overwrite_unmanaged_dev_wrapper(
 
     _pin_canonical_runtime_roots(monkeypatch, home, crafted_home)
     installed_deck = (
-        runtime_home
-        / "tools"
-        / "vibecrafted-current"
-        / "vibecrafted-core"
-        / "vibecrafted_core"
-        / "deck"
-        / "vibecrafted"
+        runtime_home / "tools" / "vibecrafted-current" / "bin" / "vibecrafted"
     )
     installed_deck.parent.mkdir(parents=True, exist_ok=True)
     _write_executable(
@@ -862,13 +931,21 @@ _LEGACY_RUNTIME_GENERATION_HASH_PATHS = frozenset(
 
 _RUNTIME_GENERATION_FIXTURE_SOURCES = {
     Path("VERSION"): Path("VERSION"),
+    Path("scripts/distribution_manifest.py"): Path("scripts/distribution_manifest.py"),
+    Path("scripts/installer_brand.py"): Path("scripts/installer_brand.py"),
+    Path("scripts/vetcoders_install.py"): Path("scripts/vetcoders_install.py"),
     Path("scripts/vibecrafted"): Path("scripts/vibecrafted"),
     Path(
         "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
     ): Path("vibecrafted-core/vibecrafted_core/config/vc-frame/config.kdl"),
-    installer._RUNTIME_GENERATION_ENTRYPOINT: installer._RUNTIME_GENERATION_ENTRYPOINT,
+    installer._RUNTIME_GENERATION_ENTRYPOINT: Path(
+        "vibecrafted-core/vibecrafted_core/deck/vibecrafted"
+    ),
     Path("vibecrafted-core/vibecrafted_core/product_contract.py"): Path(
         "vibecrafted-core/vibecrafted_core/product_contract.py"
+    ),
+    Path("vibecrafted-core/vibecrafted_core/runtime_pack_contract.py"): Path(
+        "vibecrafted-core/vibecrafted_core/runtime_pack_contract.py"
     ),
     Path("vibecrafted-core/vibecrafted_core/walkaround_runner.py"): Path(
         "vibecrafted-core/vibecrafted_core/walkaround_runner.py"
@@ -889,7 +966,7 @@ def _write_release_contract_runtime_manifest(
     current_tools: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert len(_RUNTIME_GENERATION_FIXTURE_SOURCES) == 9
+    assert len(_RUNTIME_GENERATION_FIXTURE_SOURCES) == 13
     assert (
         frozenset(_RUNTIME_GENERATION_FIXTURE_SOURCES)
         == installer._RUNTIME_GENERATION_REQUIRED_HASHES
@@ -898,6 +975,13 @@ def _write_release_contract_runtime_manifest(
         target = current_tools / target_relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(REPO_ROOT / source_relative, target)
+
+    runtime_python = current_tools / "bin/python3"
+    runtime_python.parent.mkdir(parents=True, exist_ok=True)
+    _write_executable(
+        runtime_python,
+        f'#!/bin/sh\nexec {installer.shlex_quote(str(Path(sys.executable).absolute()))} "$@"\n',
+    )
 
     provenance = _write_test_source_provenance(current_tools)
 
@@ -909,6 +993,52 @@ def _write_release_contract_runtime_manifest(
         source_provenance=provenance,
         install_version=None,
     )
+
+
+def test_runtime_semantic_verifier_uses_candidate_interpreter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate_python = tmp_path / "runtime/bin/python3"
+    observed: list[str] = []
+
+    def fake_run(argv, **_kwargs):
+        observed.extend(str(part) for part in argv)
+        return subprocess.CompletedProcess(argv, 0, "ok\n", "")
+
+    monkeypatch.setattr(installer.subprocess, "run", fake_run)
+
+    installer._run_runtime_verifier_semantic_command(
+        ["product-contract.py", "--help"],
+        cache=tmp_path / "cache",
+        python_executable=candidate_python,
+    )
+
+    assert observed[0] == str(candidate_python)
+    assert observed[1:4] == ["-I", "-S", "-B"]
+    assert str(Path(sys.executable)) not in observed[:1]
+
+
+def test_runtime_verifier_python_falls_back_only_when_none_is_carried(
+    tmp_path: Path,
+) -> None:
+    source_staged = tmp_path / "staged"
+    (source_staged / "bin").mkdir(parents=True)
+    assert installer._runtime_verifier_python(source_staged) == Path(sys.executable)
+
+    carried = tmp_path / "pack/bin/python3"
+    carried.parent.mkdir(parents=True)
+    _write_executable(carried, "#!/bin/sh\nexit 0\n")
+    assert installer._runtime_verifier_python(carried.parents[1]) == carried
+
+    carried.chmod(0o644)
+    with pytest.raises(OSError, match="not executable"):
+        installer._runtime_verifier_python(carried.parents[1])
+
+    dangling_root = tmp_path / "dangling"
+    (dangling_root / "bin").mkdir(parents=True)
+    (dangling_root / "bin/python3").symlink_to(tmp_path / "missing")
+    with pytest.raises(OSError, match="not executable"):
+        installer._runtime_verifier_python(dangling_root)
 
 
 def test_installer_release_contract_assets_fail_closed_for_missing_or_exact_byte_drift(
@@ -1066,6 +1196,7 @@ def test_release_contract_inventory_names_runner_schema_policy_and_key() -> None
     assert "verify-vibecrafted-walkaround" in installer.PYTHON_ENTRYPOINT_LAUNCHERS
     assert installer.RELEASE_CONTRACT_PACKAGE_ASSETS == (
         "product_contract.py",
+        "runtime_pack_contract.py",
         "walkaround_runner.py",
         "schemas/unified_product.schema.v1.json",
         "trust/release-policy.v1.json",
@@ -1384,7 +1515,9 @@ def test_run_doctor_spawn_e2e_supplies_full_meta_arguments(
     helper_dir = config_home / "vetcoders"
     source_root = runtime_tools / "vibecrafted-main"
     current_link = runtime_tools / "vibecrafted-current"
-    scripts_dir = source_root / "skills" / "vc-agents" / "scripts"
+    scripts_dir = (
+        source_root / "vibecrafted-core" / "vibecrafted_core" / "runtime" / "scripts"
+    )
 
     store_path.mkdir(parents=True)
     helper_dir.mkdir(parents=True)
@@ -1963,7 +2096,7 @@ def test_vc_frame_delivery_stale_file_fails_view(tmp_path, monkeypatch):
     home.mkdir()
     tools = home / ".local" / "share" / "vibecrafted" / "tools"
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
-    view = home / ".config" / "vc-frame"
+    view = home / ".config" / "vibecrafted" / "vc-frame"
     view.mkdir(parents=True)
     (view / "config.kdl").write_text('theme "choinka"\n', encoding="utf-8")
     (view / "layouts").mkdir()
@@ -1999,7 +2132,7 @@ def test_vc_frame_delivery_pane_shell_warn_when_zsh_missing_and_layouts_unsubsti
     tools = home / ".local" / "share" / "vibecrafted" / "tools"
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     # Unsubstituted layouts (dev-style view pointing at raw kdl with zsh)
-    view = home / ".config" / "vc-frame"
+    view = home / ".config" / "vibecrafted" / "vc-frame"
     layouts = view / "layouts"
     layouts.mkdir(parents=True)
     (view / "config.kdl").write_text(

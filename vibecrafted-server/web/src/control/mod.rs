@@ -15,6 +15,8 @@
 //!   read from the Python-owned snapshots. The raw self-sufficient merge stays
 //!   available to TUI/diagnostic consumers, but is too expensive for an HTTP
 //!   request over a long-lived control plane.
+//! * `GET /api/control/dashboard` — the exact JSON the Leptos console hydrates
+//!   and client-navigates with (state + lifecycle summaries + loctree report).
 //! * `GET /api/control/runs` — every `runs/<id>.json` snapshot, newest-first.
 //!   Each run serialises optional delivery-proof axes (`execution_state`,
 //!   `proof_state`, `delivery_state`) and optional `seal` when present on the
@@ -22,6 +24,10 @@
 //!   `completed`).
 //! * `GET /api/control/runs/{run_id}` — a single run, or `404` JSON. Same axis
 //!   / seal projection as the list route.
+//! * `GET /api/control/runs/{run_id}/observe` — versioned one-shot qualified
+//!   run observation. It never creates a persistent monitor.
+//! * `GET /api/control/runs/{run_id}/await` — blocking subscription fan-in to
+//!   one ephemeral monitor per canonical control-plane home plus run id.
 //! * `GET /api/control/runs/{run_id}/transcript` — bounded, no-store tail of
 //!   the canonical `transcript.human.log` used by the live run detail view.
 //! * `GET /api/control/lifecycle` — lifecycle run summaries, newest-first.
@@ -30,9 +36,23 @@
 //! * `GET /api/control/events` — Server-Sent Events stream of `events.jsonl`
 //!   from a client-held cursor (`?since=` / `Last-Event-ID`), with `: ping`
 //!   keepalives. Read-only; see [`events_sse`].
+//! * `GET /api/control/caretaker` — the published `vibecrafted.caretaker.v1`
+//!   envelope (server identity, observability, resume backlog, control-plane
+//!   upkeep) wrapped in transport-level freshness. Answering it is itself the
+//!   liveness proof; see [`caretaker`].
+//! * `GET /api/control/observability` — the split-observability index: logs,
+//!   metrics and the run board named as projections of this one control plane
+//!   (with their routes and source paths), never as independent stores; see
+//!   [`observability`].
 
 #[cfg(feature = "ssr")]
+mod caretaker;
+#[cfg(feature = "ssr")]
 mod events_sse;
+#[cfg(feature = "ssr")]
+mod observability;
+#[cfg(feature = "ssr")]
+mod run_observation;
 
 #[cfg(feature = "ssr")]
 pub mod api {
@@ -52,7 +72,10 @@ pub mod api {
     use serde::Serialize;
     use serde_json::json;
 
+    use super::caretaker::caretaker;
     use super::events_sse::events_sse;
+    use super::observability::observability;
+    use super::run_observation::{await_run as await_run_observation, observe as observe_run};
 
     const STATE_CACHE_TTL: Duration = Duration::from_secs(15);
 
@@ -72,12 +95,20 @@ pub mod api {
         Router::<leptos::config::LeptosOptions>::new()
             .route("/api/health", get(health))
             .route("/api/control/state", get(state))
+            .route("/api/control/dashboard", get(crate::app::dashboard_api))
             .route("/api/control/runs", get(runs))
+            .route("/api/control/runs/{run_id}/observe", get(observe_run))
+            .route(
+                "/api/control/runs/{run_id}/await",
+                get(await_run_observation),
+            )
             .route("/api/control/runs/{run_id}/transcript", get(transcript))
             .route("/api/control/runs/{run_id}", get(run))
             .route("/api/control/lifecycle", get(lifecycle))
             .route("/api/control/lifecycle/{run_id}", get(lifecycle_run))
             .route("/api/control/events", get(events_sse))
+            .route("/api/control/caretaker", get(caretaker))
+            .route("/api/control/observability", get(observability))
     }
 
     /// Cheap liveness/readiness contract for the local process supervisor.

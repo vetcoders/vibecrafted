@@ -204,32 +204,62 @@ def validate_process_identity(
     ``SPAWN_RUN_ID`` evidence is best-effort on macOS. If the OS exposes it, it
     must match; when it does not, the mandatory receipt run id plus start token,
     command hash, PID, and PGID still have to match exactly.
+
+    Receipt-invalid and receipt-mismatch reasons are emitted before OS capture
+    and are never proof of stale ownership. ``process_identity_mismatch`` is
+    reserved for a complete receipt that reached capture and differed from the
+    live identity.
     """
 
     if not isinstance(receipt, Mapping):
         return False, "process_identity_unavailable", None
-    try:
-        receipt_pid = int(receipt.get("pid") or 0)
-        receipt_pgid = int(receipt.get("pgid") or 0)
-    except (TypeError, ValueError):
-        return False, "process_identity_invalid", None
-    receipt_run_id = str(receipt.get("run_id") or "").strip()
-    expected_run = str(expected_run_id or "").strip()
-    expected_start = str(receipt.get("start_token") or "").strip()
-    expected_hash = str(receipt.get("command_sha256") or "").strip()
+    receipt_pid = receipt.get("pid")
+    receipt_pgid = receipt.get("pgid")
+    receipt_run_id = receipt.get("run_id")
+    expected_start = receipt.get("start_token")
+    expected_hash = receipt.get("command_sha256")
     if (
-        receipt_pid <= 0
-        or receipt_pid != expected_pid
-        or not expected_run
-        or receipt_run_id != expected_run
+        isinstance(receipt_pid, bool)
+        or not isinstance(receipt_pid, int)
+        or receipt_pid <= 0
+        or isinstance(receipt_pgid, bool)
+        or not isinstance(receipt_pgid, int)
+        or receipt_pgid <= 0
+        or not isinstance(receipt_run_id, str)
+        or receipt_run_id != receipt_run_id.strip()
+        or not receipt_run_id
+        or not isinstance(expected_start, str)
+        or expected_start != expected_start.strip()
         or not expected_start
+        or not isinstance(expected_hash, str)
         or len(expected_hash) != 64
+        or any(char not in "0123456789abcdef" for char in expected_hash)
     ):
-        return False, "process_identity_mismatch", None
-    if expected_pgid is not None and (
-        expected_pgid <= 0 or receipt_pgid != expected_pgid
+        return False, "process_identity_receipt_invalid", None
+
+    if (
+        isinstance(expected_pid, bool)
+        or not isinstance(expected_pid, int)
+        or expected_pid <= 0
+        or not isinstance(expected_run_id, str)
+        or expected_run_id != expected_run_id.strip()
+        or not expected_run_id
+        or (
+            expected_pgid is not None
+            and (
+                isinstance(expected_pgid, bool)
+                or not isinstance(expected_pgid, int)
+                or expected_pgid <= 0
+            )
+        )
     ):
-        return False, "process_identity_mismatch", None
+        return False, "process_identity_expectation_invalid", None
+    if (
+        receipt_pid != expected_pid
+        or receipt_run_id != expected_run_id
+        or (expected_pgid is not None and receipt_pgid != expected_pgid)
+    ):
+        return False, "process_identity_receipt_mismatch", None
 
     identity = capture_process_identity(expected_pid, table=table)
     if identity is None:
@@ -247,7 +277,7 @@ def validate_process_identity(
         if env_index is None
         else env_index.get(expected_pid)
     )
-    if discovered and str(discovered).strip() != expected_run:
+    if discovered and str(discovered).strip() != expected_run_id:
         return False, "process_run_id_mismatch", identity
     return True, "process_identity_current", identity
 
@@ -443,6 +473,8 @@ def _looks_vc_family(command: str) -> bool:
         "agy ",
         "junie",
         "grok",
+        "cursor",
+        "cursor-agent",
         "mlx",
         "lbrx-stt",
         "ollama",

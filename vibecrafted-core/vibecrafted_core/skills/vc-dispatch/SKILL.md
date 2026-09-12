@@ -93,7 +93,7 @@ pre-flight → DISPATCH → SPANKO → SPRAWDZENIE → FLIP → BATON → next c
 matches its class — a mechanical, fully-briefed cut runs on a cheaper, faster
 tier, a surgical or decision-bearing cut on a stronger tier. The pin
 rides the plan into the launcher (`Cut.model` → `WorkflowLaunchSpec.model` →
-the agent's model flag: `--model` for claude, `-m` for codex). An unpinned
+the agent's model flag: `--model` for claude and cursor, `-m` for codex). An unpinned
 cut runs on the account default — which is a non-decision, not a safe default:
 pin deliberately, and treat a missing pin as a smell to resolve before launch.
 

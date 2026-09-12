@@ -295,6 +295,12 @@ def test_launch_agent_carries_the_installing_path_and_active_generation(
     assert payload["EnvironmentVariables"]["PATH"] == (
         f"{generation / 'bin'}:/opt/homebrew/bin:/usr/bin:/bin"
     )
+    assert payload["EnvironmentVariables"]["VIBECRAFTED_RUNTIME_ROOT"] == str(
+        generation
+    )
+    assert supervisor._child_environment(config.paths)[
+        "VIBECRAFTED_RUNTIME_ROOT"
+    ] == str(generation)
 
     # No active-runtime receipt: the installing PATH still survives whole.
     (config.paths.runtime_home / "active.json").unlink()
@@ -306,6 +312,8 @@ def test_launch_agent_carries_the_installing_path_and_active_generation(
     )
 
     assert payload["EnvironmentVariables"]["PATH"] == "/opt/homebrew/bin:/usr/bin:/bin"
+    assert "VIBECRAFTED_RUNTIME_ROOT" not in payload["EnvironmentVariables"]
+    assert "VIBECRAFTED_RUNTIME_ROOT" not in supervisor._child_environment(config.paths)
 
 
 def test_launch_agent_path_drops_empty_and_relative_segments(
@@ -411,7 +419,7 @@ def test_foreground_supervisor_lock_and_receipt_are_truthful(
         tmp_path / "bin" / "vibecrafted",
         f"""#!/bin/sh
 printf '%s\n' "$2" >> {str(lifecycle_log)!r}
-if [ "$2" = "status" ]; then
+if [ "$2" = "supervisor-pair-health" ]; then
     printf '%s\n' 'Server: RUNNING' 'Guardian: RUNNING'
 fi
 exit 0
@@ -462,6 +470,111 @@ exit 0
     assert lifecycle_log.read_text(encoding="utf-8").splitlines()[-1] == "stop"
 
 
+def test_healthy_supervisor_loop_probes_without_restarting_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    config = _config(tmp_path, launcher)
+    stop_event = threading.Event()
+    pair_checks = 0
+    child_calls: list[list[str]] = []
+
+    monkeypatch.setattr(
+        supervisor,
+        "_managed_pair_snapshot",
+        lambda _paths: {
+            "server_pid": os.getpid(),
+            "guardian_pid": os.getppid(),
+        },
+    )
+
+    def healthy_pair(
+        _launcher: Path,
+        _environment: dict[str, str],
+        **_kwargs: object,
+    ) -> bool:
+        nonlocal pair_checks
+        pair_checks += 1
+        if pair_checks == 2:
+            stop_event.set()
+        return True
+
+    def record_child(
+        argv: list[str],
+        **_kwargs: object,
+    ) -> supervisor._ChildResult:
+        child_calls.append(argv)
+        return supervisor._ChildResult(0, "", "")
+
+    monkeypatch.setattr(supervisor, "_pair_healthy", healthy_pair)
+    monkeypatch.setattr(supervisor, "_run_child", record_child)
+
+    assert supervisor.run_supervisor(config, stop_event=stop_event) == 0
+    assert pair_checks == 2
+    assert child_calls == [[str(launcher), "server", "stop"]]
+
+
+def test_supervisor_stop_interrupts_inflight_pair_health_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe_started = tmp_path / "pair-probe-started"
+    launcher = _executable(
+        tmp_path / "bin" / "vibecrafted",
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "import time\n"
+        "from pathlib import Path\n"
+        f"marker = Path({str(probe_started)!r})\n"
+        "if sys.argv[1:] == ['server', 'supervisor-pair-health']:\n"
+        "    marker.touch()\n"
+        "    time.sleep(60)\n"
+        "raise SystemExit(0)\n",
+    )
+    base = _config(tmp_path, launcher)
+    config = supervisor.SupervisorConfig(
+        paths=base.paths,
+        launcher=base.launcher,
+        host=base.host,
+        port=base.port,
+        interval=base.interval,
+        maximum_backoff=base.maximum_backoff,
+        command_timeout=60,
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "_managed_pair_snapshot",
+        lambda _paths: {
+            "server_pid": os.getpid(),
+            "guardian_pid": os.getppid(),
+        },
+    )
+    stop_event = threading.Event()
+    result: list[int] = []
+    worker = threading.Thread(
+        target=lambda: result.append(
+            supervisor.run_supervisor(config, stop_event=stop_event)
+        ),
+        daemon=True,
+    )
+    worker.start()
+
+    deadline = time.monotonic() + 5
+    while not probe_started.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert probe_started.exists()
+    stopped_at = time.monotonic()
+    stop_event.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert time.monotonic() - stopped_at < 5
+    assert result == [0]
+    receipt = json.loads(config.paths.receipt_file.read_text(encoding="utf-8"))
+    assert receipt["state"] == "stopped"
+
+
 def test_run_child_does_not_wait_for_daemonized_descendant_capture(
     tmp_path: Path,
 ) -> None:
@@ -475,7 +588,7 @@ exit 0
     )
 
     started = time.monotonic()
-    return_code, detail = supervisor._run_child(
+    result = supervisor._run_child(
         [str(launcher)],
         env=dict(os.environ),
         timeout=2,
@@ -483,8 +596,58 @@ exit 0
     )
 
     assert time.monotonic() - started < 2
-    assert return_code == 0
-    assert detail == "launcher complete"
+    assert result.exit_code == 0
+    assert result.stdout == "launcher complete"
+    assert result.stderr == ""
+    assert result.abort_reason is None
+
+
+def test_run_child_timeout_preserves_raw_streams(tmp_path: Path) -> None:
+    launcher = _executable(
+        tmp_path / "bin" / "launcher",
+        """#!/bin/sh
+printf 'launcher stdout\n'
+printf 'launcher stderr\n' >&2
+sleep 5
+""",
+    )
+
+    result = supervisor._run_child(
+        [str(launcher)],
+        env=dict(os.environ),
+        timeout=0.2,
+        stop_event=threading.Event(),
+    )
+
+    assert result.exit_code == 124
+    assert result.stdout == "launcher stdout"
+    assert result.stderr == "launcher stderr"
+    assert result.abort_reason == "timeout"
+    assert result.detail == "command timed out: launcher stderr"
+
+
+def test_run_child_stop_preserves_raw_streams(tmp_path: Path) -> None:
+    launcher = _executable(
+        tmp_path / "bin" / "launcher",
+        """#!/bin/sh
+sleep 5
+""",
+    )
+    stop_event = threading.Event()
+    stop_event.set()
+
+    result = supervisor._run_child(
+        [str(launcher)],
+        env=dict(os.environ),
+        timeout=2,
+        stop_event=stop_event,
+    )
+
+    assert result.exit_code == 143
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert result.abort_reason == "stopping"
+    assert result.detail == "supervisor stopping"
 
 
 def test_zero_exit_without_verified_pid_pair_is_degraded(
@@ -804,6 +967,48 @@ def test_pair_health_probe_failures_are_degraded(
     monkeypatch.setattr(supervisor.subprocess, "run", fail_probe)
 
     assert not supervisor._pair_healthy(launcher, {})
+
+
+def test_pair_health_uses_single_compact_launcher_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    calls: list[list[str]] = []
+
+    def fake_probe(
+        argv: list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            "Server: RUNNING\nGuardian: RUNNING\n",
+            "",
+        )
+
+    monkeypatch.setattr(supervisor.subprocess, "run", fake_probe)
+
+    assert supervisor._pair_healthy(launcher, {})
+    assert calls == [[str(launcher), "server", "supervisor-pair-health"]]
+
+
+def test_stop_aware_pair_health_preserves_stdout_with_stderr_warning(
+    tmp_path: Path,
+) -> None:
+    launcher = _executable(
+        tmp_path / "bin" / "vibecrafted",
+        "#!/bin/sh\n"
+        "printf '%s\\n' 'ulimit helper unavailable' >&2\n"
+        "printf '%s\\n' 'Server: RUNNING' 'Guardian: RUNNING'\n",
+    )
+
+    assert supervisor._pair_healthy(
+        launcher,
+        dict(os.environ),
+        stop_event=threading.Event(),
+    )
 
 
 def test_truncated_launch_agent_plist_degrades_service_and_runtime_status(
@@ -1427,6 +1632,42 @@ def test_linux_service_command_fails_closed_without_mutation(
     assert not (tmp_path / "operator" / "Library" / "LaunchAgents").exists()
 
 
+def test_service_logs_reports_canonical_owner_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    launcher = _executable(tmp_path / "bin" / "vibecrafted")
+    home = (tmp_path / "crafted-home").resolve()
+    runtime_home = (tmp_path / "runtime").resolve()
+    operator_home = (tmp_path / "operator").resolve()
+    monkeypatch.setattr(supervisor.sys, "platform", "darwin")
+
+    result = supervisor.main(
+        [
+            "service",
+            "logs",
+            "--json",
+            "--launcher",
+            str(launcher),
+            "--home",
+            str(home),
+            "--runtime-home",
+            str(runtime_home),
+            "--operator-home",
+            str(operator_home),
+        ]
+    )
+
+    assert result == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "directory": str(home / "server"),
+        "stdout": str(home / "server" / "supervisor.stdout.log"),
+        "stderr": str(home / "server" / "supervisor.stderr.log"),
+    }
+    assert not (operator_home / "Library" / "LaunchAgents").exists()
+
+
 def test_child_environment_is_a_minimal_nonsecret_allowlist(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1829,9 +2070,9 @@ def test_stopping_receipt_failure_does_not_skip_pair_cleanup(
     def fake_run_child(
         argv: list[str],
         **_kwargs: object,
-    ) -> tuple[int, str]:
+    ) -> supervisor._ChildResult:
         child_calls.append(argv)
-        return 0, ""
+        return supervisor._ChildResult(0, "", "")
 
     monkeypatch.setattr(supervisor, "_atomic_json", flaky_atomic_json)
     monkeypatch.setattr(supervisor, "_run_child", fake_run_child)

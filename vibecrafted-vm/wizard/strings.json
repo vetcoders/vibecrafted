@@ -61,8 +61,8 @@
       "en": "Local host needs no setup — Docker daemon available via Unix socket."
     },
     "tailnet_prompt_hostname": {
-      "pl": "Nazwa hosta w tailnet (np. dragon, ops-linux, silver)",
-      "en": "Tailnet hostname (e.g. dragon, ops-linux, silver)"
+      "pl": "Nazwa hosta w tailnet (np. host-a, host-b)",
+      "en": "Tailnet hostname (e.g. host-a, host-b)"
     },
     "tailnet_test_msg": {
       "pl": "Testowanie połączenia z mesh hostem...",
@@ -152,6 +152,10 @@
       "gemini_sessions": {
         "pl": "~/.gemini/ — sesje Gemini (persistent)",
         "en": "~/.gemini/ — Gemini sessions (persistent)"
+      },
+      "cursor_sessions": {
+        "pl": "~/.cursor/ — sesje Cursor (persistent)",
+        "en": "~/.cursor/ — Cursor sessions (persistent)"
       },
       "vibecrafted_artifacts": {
         "pl": "~/.vibecrafted/ — artefakty vibecrafted (plany, raporty)",

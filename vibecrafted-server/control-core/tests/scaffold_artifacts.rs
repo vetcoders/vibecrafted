@@ -48,7 +48,7 @@ fn frontmatter(role: &str, plan_id: &str) -> String {
 
 fn driver_body(plan_id: &str) -> String {
     format!(
-        "{}# DRIVER\n\n## 1. Pełne ścieżki\n\n| Rzecz | Ścieżka |\n|---|---|\n| Root | /Users/polyversai/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0720/plans/{plan_id}/ |\n\n## 2. Graf zależności — why\n\n| Krawędź | Why |\n|---|---|\n| A → B | why shared domain |\n\n## 3. Gotowe komendy\n\n```bash\nvibecrafted implement claude --file /Users/polyversai/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0720/plans/{plan_id}/briefs/W1-01_cut.md\n```\n\n## 4. Reguła `[ ]→[x]`\n\n`[ ]` todo · `[~]` running · `[?]` done-unverified · `[!]` blocked · `[x]` verifier-green\n**Only a delivery-verifier flips `[~]→[x]`.**\n\n## 5. Snapshot\n\nW1-01 [ ]\ndou-index = 0/1 = 0.00\n",
+        "{}# DRIVER\n\n## 1. Pełne ścieżki\n\n| Rzecz | Ścieżka |\n|---|---|\n| Root | /Users/tester/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0720/plans/{plan_id}/ |\n\n## 2. Graf zależności — why\n\n| Krawędź | Why |\n|---|---|\n| A → B | why shared domain |\n\n## 3. Gotowe komendy\n\n```bash\nvibecrafted implement claude --file /Users/tester/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0720/plans/{plan_id}/briefs/W1-01_cut.md\n```\n\n## 4. Reguła `[ ]→[x]`\n\n`[ ]` todo · `[~]` running · `[?]` done-unverified · `[!]` blocked · `[x]` verifier-green\n**Only a delivery-verifier flips `[~]→[x]`.**\n\n## 5. Snapshot\n\nW1-01 [ ]\ndou-index = 0/1 = 0.00\n",
         frontmatter("driver", plan_id)
     )
 }
@@ -104,8 +104,13 @@ fn published_schema_and_fixture_match_the_typed_model() {
     assert_eq!(manifest.schema_version, "1");
     assert_eq!(manifest.artifacts[2].role, ScaffoldArtifactRole::Brief);
     assert_eq!(manifest.artifacts[2].dependencies, ["driver", "atlas"]);
+    assert_eq!(manifest.artifacts[3].role, ScaffoldArtifactRole::Dispatch);
+    assert_eq!(
+        manifest.artifacts[3].path,
+        "aicx-product-convergence-v1.dispatch.toml"
+    );
     assert!(SCAFFOLD_MANIFEST_SCHEMA_JSON.contains("\"wave-atlas\""));
-    assert_eq!(path_pattern, r"^[^/\\].*\.md$");
+    assert_eq!(path_pattern, r"^[^/\\].*(\.md|\.dispatch\.toml)$");
 }
 
 #[test]
@@ -306,7 +311,7 @@ fn portable_export_removes_host_paths_and_freezes_no_branch() {
     fs::write(
         root.join("DRIVER.md"),
         driver.replace(
-            "/Users/polyversai/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0720/plans/plan-a",
+            "/Users/tester/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0720/plans/plan-a",
             &root.display().to_string(),
         ),
     )

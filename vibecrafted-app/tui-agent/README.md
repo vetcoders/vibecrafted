@@ -28,11 +28,27 @@ $VIBECRAFTED_HOME/control_plane/
   events.jsonl
 ```
 
-The writer is `scripts/control_plane_state.py`. The reader is strict about
+The writer is `vibecrafted_core.control_plane` (`python -m vibecrafted_core.control_plane sync`). The reader is strict about
 that shape: it does not follow symlinks out of the root and ignores anything
 outside the control-plane directory. `config::default_state_root` falls back to
 historical variants (`state/control-plane`, `state`, `control-plane`) if the
 canonical `control_plane` path is missing, so older layouts keep loading.
+
+## Refresh cadence
+
+The 250 ms UI tick redraws cached state only. Expensive control-plane
+projection and Polarize prism discovery are invalidated by filesystem events on
+the projection files (`events.jsonl`, `runs/*.json`) and `artifacts/`,
+debounced for 100 ms, and skipped when the projection revision is unchanged.
+Transcript appends under `runtime_runs/` do not recompute the board. Observe
+polling (Observe view only) starts at two seconds and backs off to 30 seconds
+when the server is offline. If a filesystem watcher cannot start, its affected
+surface falls back to a 30-second refresh. Pressing `r` always bypasses the
+scheduler and forces a complete refresh.
+
+For an isolated performance proof, set `VOC_REFRESH_TRACE_PATH` to record one
+JSONL row after each control-plane projection and Polarize discovery. Leave it
+unset in normal use; tracing is opt-in and does no filesystem IO otherwise.
 
 ## Launching workflows
 

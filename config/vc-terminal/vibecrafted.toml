@@ -46,15 +46,28 @@ vi_mode_style = { shape = "Beam", blinking = "Off" }
 semantic_escape_chars = ",│`|:\"' ()[]{}<>\\t"
 save_to_clipboard = true
 
-# Open URLs in the system browser with Command+Click.
+# Open URLs and OSC-8 hyperlinks with the macOS system launcher.
 [[hints.enabled]]
-command = "open"
+command = "/usr/bin/open"
 hyperlinks = true
 post_processing = true
 persist = false
 mouse = { enabled = true, mods = "Command" }
 binding = { key = "O", mods = "Control|Shift" }
 regex = '(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file:|git://|ssh:|ftp://)[^\u0000-\u001F\u007F-\u009F<>"\s{-}\^⟨⟩`\\]+'
+
+# Plain terminal output does not carry OSC-8 metadata. Recognize common local
+# path shapes too, then remove an optional :line[:column] suffix before asking
+# LaunchServices to open the file. Command is an explicit host gesture, so the
+# Vibecrafted terminal host keeps this hint active even during mouse reporting.
+[[hints.enabled]]
+command = { program = "/bin/zsh", args = ["-lc", 'target="$0"; target="${target/#\~/$HOME}"; candidate="$target"; if [[ "$candidate" =~ ":[0-9]+$" ]]; then candidate="${candidate%:*}"; [[ "$candidate" =~ ":[0-9]+$" ]] && candidate="${candidate%:*}"; [[ -e "$candidate" ]] && target="$candidate"; fi; exec /usr/bin/open -- "$target"'] }
+hyperlinks = false
+post_processing = true
+persist = false
+mouse = { enabled = true, mods = "Command" }
+binding = { key = "P", mods = "Control|Shift" }
+regex = '(~|\.\.?|[A-Za-z0-9._@%+=,-]+)?(/[A-Za-z0-9._@%+=,~:-]+)+'
 
 
 # Polish diacritics on either Option key, while keeping Option as Alt/Meta.

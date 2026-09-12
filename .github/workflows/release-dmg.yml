@@ -1,0 +1,196 @@
+name: Release DMG (hosted macOS)
+
+# Builds, signs and notarizes the canonical Vibecrafted_<version>-<date>-<sha8>.dmg
+# on a GitHub-hosted macOS runner. The runner's home and workspace
+# (/Users/runner, /Users/runner/work) identify nobody, so the payload-hygiene
+# gate is told they are ephemeral; every other literal is still refused.
+#
+# Operator decision 2026-08-22: signing and notarization may run from a hosted
+# runner, not only from the operator's machine. Publication to the GitHub
+# release stays a separate, explicit step (publish-vibecrafted-release.sh).
+#
+# Secrets (repository → Settings → Secrets → Actions):
+#   VC_CERT_P12_B64        base64 of Certificates.p12 (Developer ID Application)
+#   VC_CERT_PASSWORD       password of that .p12
+#   VC_SIGNING_IDENTITY    "Developer ID Application: <name> (<team>)"
+#   VC_SIGNING_KEY         vibecrafted-signing.key (release-output signature)
+#   VC_NOTARY_API_KEY_B64 / VC_NOTARY_API_KEY_ID / VC_NOTARY_API_ISSUER  notarytool
+#   VC_FONT_PASSPHRASE     decrypts assets/fonts/SpotMono.ttc.enc (licensed font, AES-256-CBC/PBKDF2)
+#
+# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: vibecrafted ref to build (branch, tag or sha)
+        required: false
+        default: main
+      frame_ref:
+        description: vc-frame donor ref (develop is the integration line; main lags it)
+        required: false
+        default: develop
+      terminal_ref:
+        description: vc-terminal donor ref
+        required: false
+        default: master
+      notarize:
+        description: submit to Apple notary (false = sign only)
+        type: boolean
+        default: true
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-dmg-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  dmg:
+    runs-on: macos-15
+    timeout-minutes: 180
+    env:
+      KEYS: ${{ github.workspace }}/.keys
+      VIBECRAFTED_FRAME_REPO: ${{ github.workspace }}/vc-frame
+      VIBECRAFTED_TERMINAL_REPO: ${{ github.workspace }}/vc-terminal
+      # The hosted runner has no identity: its home and workspace are the same
+      # on every macos-15 runner. Declared here, not in the gate.
+      PAYLOAD_HYGIENE_EPHEMERAL_ROOTS: |
+        /Users/runner
+        ${{ github.workspace }}
+      # …and what the runner must still prove: the payload names neither the
+      # operator whose Developer ID signs it nor their workshop. The literals
+      # live in the repository variable PAYLOAD_HYGIENE_EXTRA_LITERALS (one
+      # per line), not in this public file.
+      PAYLOAD_HYGIENE_EXTRA_LITERALS: ${{ vars.PAYLOAD_HYGIENE_EXTRA_LITERALS }}
+    steps:
+      - name: Check out vibecrafted
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          path: vibecrafted
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out donors (vc-frame, vc-terminal)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: vetcoders/vc-frame
+          ref: ${{ inputs.frame_ref || 'develop' }}
+          path: vc-frame
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: vetcoders/vc-terminal
+          ref: ${{ inputs.terminal_ref || 'master' }}
+          path: vc-terminal
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)/Contents/Developer"
+          xcodebuild -version
+
+      - name: Install build tools
+        run: |
+          set -euo pipefail
+          brew install xcodegen shellcheck protobuf
+          # macos-15 images ship rustup; donors pin their toolchain via rust-toolchain.toml
+          rustup --version
+          rustup default stable
+          rustup target add wasm32-wasip1 wasm32-unknown-unknown
+          # Vibecrafted Server shell (leptos); version matches the operator machine
+          cargo install --locked cargo-leptos@0.3.7
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+      - name: Materialize signing keys from secrets
+        env:
+          VC_CERT_P12_B64: ${{ secrets.VC_CERT_P12_B64 }}
+          VC_CERT_PASSWORD: ${{ secrets.VC_CERT_PASSWORD }}
+          VC_SIGNING_IDENTITY: ${{ secrets.VC_SIGNING_IDENTITY }}
+          VC_SIGNING_KEY: ${{ secrets.VC_SIGNING_KEY }}
+          VC_NOTARY_API_KEY_B64: ${{ secrets.VC_NOTARY_API_KEY_B64 }}
+          VC_NOTARY_API_KEY_ID: ${{ secrets.VC_NOTARY_API_KEY_ID }}
+          VC_NOTARY_API_ISSUER: ${{ secrets.VC_NOTARY_API_ISSUER }}
+          VC_FONT_PASSPHRASE: ${{ secrets.VC_FONT_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          for v in VC_CERT_P12_B64 VC_CERT_PASSWORD VC_SIGNING_IDENTITY VC_SIGNING_KEY VC_NOTARY_API_KEY_B64 VC_NOTARY_API_KEY_ID VC_NOTARY_API_ISSUER VC_FONT_PASSPHRASE; do
+            [[ -n "${!v:-}" ]] || { echo "::error::missing secret $v"; exit 1; }
+          done
+          [[ -n "${PAYLOAD_HYGIENE_EXTRA_LITERALS//[[:space:]]/}" ]] \
+            || { echo "::error::repository variable PAYLOAD_HYGIENE_EXTRA_LITERALS is empty; the hygiene gate would prove nothing about the operator"; exit 1; }
+          umask 077
+          mkdir -p "$KEYS/fonts"
+          printf '%s' "$VC_CERT_P12_B64" | base64 --decode > "$KEYS/Certificates.p12"
+          printf '%s\n' "$VC_CERT_PASSWORD" > "$KEYS/cert_password.txt"
+          printf '%s\n' "$VC_SIGNING_IDENTITY" > "$KEYS/signing-identity.txt"
+          printf '%s\n' "$VC_SIGNING_KEY" > "$KEYS/vibecrafted-signing.key"
+          printf '%s' "$VC_NOTARY_API_KEY_B64" | base64 --decode > "$KEYS/notary-api-key.p8"
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
+            -in vibecrafted/assets/fonts/SpotMono.ttc.enc -out "$KEYS/fonts/SpotMono.ttc" \
+            -pass env:VC_FONT_PASSPHRASE
+          file "$KEYS/Certificates.p12" "$KEYS/fonts/SpotMono.ttc"
+
+      - name: Trust the Developer ID intermediate on the runner
+        # The .p12 carries the leaf; codesign still has to chain it to Apple's
+        # Developer ID G2 CA, which the hosted image does not ship.
+        run: |
+          set -euo pipefail
+          curl -fsSL -o DeveloperIDG2CA.cer https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          security import DeveloperIDG2CA.cer -k "$HOME/Library/Keychains/login.keychain-db" -T /usr/bin/codesign
+          rm -f DeveloperIDG2CA.cer
+
+      - name: Build, sign, notarize
+        working-directory: vibecrafted
+        env:
+          VIBECRAFTED_KEYCHAIN_SEARCH_LIST: "1"
+          NOTARY_API_KEY_PATH: ${{ github.workspace }}/.keys/notary-api-key.p8
+          NOTARY_API_KEY_ID: ${{ secrets.VC_NOTARY_API_KEY_ID }}
+          NOTARY_API_ISSUER: ${{ secrets.VC_NOTARY_API_ISSUER }}
+          # --snapshot-donors: the tracked zellij-utils/assets/plugins/*.wasm
+          # blobs are build output of whichever machine last ran
+          # `make plugins-assets` (run #5 measured 411 operator-home paths
+          # reaching Contents/Helpers/vc-frame through include_bytes!). The
+          # builder recompiles them under its remaps, but only inside a donor
+          # snapshot it owns — on this runner the donors are throwaway anyway.
+          RELEASE_FLAGS: ${{ (github.event_name == 'workflow_dispatch' && inputs.notarize == false) && '--snapshot-donors --no-notarize' || '--snapshot-donors' }}
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain || true
+          make release RELEASE_FLAGS="$RELEASE_FLAGS" KEYS="$KEYS"
+          ls -la dist/*.dmg dist/*.dmg.sha256 dist/release-output.json
+
+      - name: Verify the exact signed release tuple twice
+        working-directory: vibecrafted
+        run: make exact-release-contract-gate
+
+      - name: Walk the shipped DMG through the hygiene gate once more
+        working-directory: vibecrafted
+        run: |
+          set -euo pipefail
+          dmg="$(ls dist/Vibecrafted_*.dmg | sort | tail -1)"
+          bash scripts/payload-hygiene-artifact.sh "$dmg"
+          spctl -a -t open --context context:primary-signature -v "$dmg" || true
+
+      - name: Scrub keys
+        if: always()
+        run: rm -rf "$KEYS"
+
+      - name: Upload DMG + receipts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: vibecrafted-dmg-${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            vibecrafted/dist/Vibecrafted_*.dmg
+            vibecrafted/dist/Vibecrafted_*.dmg.sha256
+            vibecrafted/dist/release-output.json
+            vibecrafted/dist/release-output.json.sig

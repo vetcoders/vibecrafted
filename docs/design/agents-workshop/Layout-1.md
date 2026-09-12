@@ -26,7 +26,7 @@ Jedna twarz. Pasek talii w tytule, nie na Quick cmd. Rail zostaje. Zero nachodz�
 SESSIONS 5          ┌ grok · vibecrafted ──────────────────────────────────────────────────────── [‹2/4›] [Voc] [Nowy] ┐
  ● Live 3           │ 4.1.0 · feat/resume-no-implicit-native-session                                                   │
 01 ○ main           │                                                                                                  │
-02 ○ lbrx-svc       │ Maciej: floating, Ctrl+P, strzalki. hehe                                                         │
+02 ○ lbrx-svc       │ Operator: floating, Ctrl+P, strzalki. hehe                                                           │
    · Shell          │ Jeden talerz. Host: float, rename, PANE, strzalki.                                               │
 03 ○ w-c207         │                                                                                                  │
    · resume-grok    │ Pasek talii: [‹][›] [Voc] [Nowy]                                                                 │

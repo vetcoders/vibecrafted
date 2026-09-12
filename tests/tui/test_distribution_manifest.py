@@ -36,8 +36,8 @@ EXPECTED_REQUIRED = {
     "install.ps1",
     "install.toml",
     "scripts/distribution_manifest.py",
+    "scripts/build-linux-arm64-runtime-pack.sh",
     "scripts/vetcoders_install.py",
-    "scripts/runtime_paths.py",
     "scripts/vibecrafted",
     "scripts/verify-vibecrafted-product.sh",
     "vibecrafted-core/pyproject.toml",
@@ -56,6 +56,9 @@ EXPECTED_REQUIRED = {
     "vibecrafted-app/Cargo.lock",
     "vibecrafted-server/Cargo.toml",
     "vibecrafted-server/Cargo.lock",
+    "vibecrafted-vm/RuntimePack.Containerfile",
+    "vibecrafted-vm/runtime-entry.sh",
+    "vibecrafted-vm/runtime-provider-lock.json",
 }
 
 
@@ -186,6 +189,43 @@ def test_load_source_provenance_accepts_only_the_exact_closed_record(
     )
 
 
+def test_carrier_cli_uses_git_objects_without_materializing_host_junk(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    revision = _committed_git_source(source)
+    (source / ".DS_Store").write_bytes(b"ignored host metadata")
+    output = tmp_path / "carrier" / manifest.SOURCE_PROVENANCE_FILE
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "distribution_manifest.py"),
+            "carrier",
+            "--source",
+            str(source),
+            "--output",
+            str(output),
+            "--owner-repo",
+            SOURCE_OWNER_REPO,
+            "--source-revision",
+            revision,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["source_revision"] == revision
+    assert payload["owner_repo"] == SOURCE_OWNER_REPO
+    assert payload["payload"] == manifest._distribution_tree_record_from_git(
+        source, revision
+    )
+    assert output.stat().st_mode & 0o777 == 0o644
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -287,10 +327,16 @@ def test_manifest_names_complete_runtime_and_forbidden_junk() -> None:
         "CONTRIBUTING.md",
         ".loctree",
         ".backup",
+        ".cache",
         "tests",
         ".github",
         ".env",
+        ".git",
+        "reports",
+        "id_rsa",
+        "credentials.json",
     } <= manifest.FORBIDDEN_COMPONENTS
+    assert {".pem", ".p12", ".pfx"} <= set(manifest.FORBIDDEN_SUFFIXES)
 
 
 @pytest.mark.parametrize(
@@ -342,6 +388,20 @@ def test_secret_env_files_are_forbidden_everywhere() -> None:
     assert manifest.path_is_included("vibecrafted-vm/.env.example")
 
 
+def test_secret_looking_names_and_dev_inventory_are_forbidden() -> None:
+    assert manifest.path_is_forbidden(".loctree/atlas.json")
+    assert manifest.path_is_forbidden(".git/HEAD")
+    assert manifest.path_is_forbidden("docs/reports/internal.md")
+    assert manifest.path_is_forbidden("scripts/.cache/tmp")
+    assert manifest.path_is_forbidden("scripts/.pytest_cache/v/cache")
+    assert manifest.path_is_forbidden("scripts/id_rsa")
+    assert manifest.path_is_forbidden("scripts/id_rsa.local")
+    assert manifest.path_is_forbidden("config/service.pem")
+    assert manifest.path_is_forbidden("config/credentials.json")
+    assert not manifest.path_is_forbidden("scripts/id_rsa.pub")
+    assert not manifest.path_is_forbidden("docs/INSTALL.md")
+
+
 def test_validate_payload_rejects_ignored_env_secret(tmp_path: Path) -> None:
     payload = tmp_path / "payload"
     _minimal_payload(payload)
@@ -353,6 +413,72 @@ def test_validate_payload_rejects_ignored_env_secret(tmp_path: Path) -> None:
         manifest.validate_payload(payload)
 
     assert "forbidden path: vibecrafted-vm/.env" in str(exc_info.value)
+
+
+def test_public_bundle_fails_closed_on_ignored_env_planted_in_staging_tree(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    staged = tmp_path / "staged"
+    _minimal_payload(source)
+    (source / ".gitignore").write_text(".env\n", encoding="utf-8")
+    (source / "vibecrafted-vm" / ".env").write_text(
+        "TAILSCALE_AUTHKEY=tskey-auth-test\n",
+        encoding="utf-8",
+    )
+
+    manifest.stage_payload(source, staged, mirror=True)
+    assert not (staged / "vibecrafted-vm" / ".env").exists()
+
+    (staged / "vibecrafted-vm" / ".env").write_text(
+        "TAILSCALE_AUTHKEY=tskey-auth-test\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(manifest.ManifestError) as check_info:
+        manifest.validate_payload(staged)
+    check_message = str(check_info.value)
+    assert "forbidden path: vibecrafted-vm/.env" in check_message
+    assert "tskey-auth-test" not in check_message
+
+    archive = tmp_path / "public.tar.gz"
+    with pytest.raises(manifest.ManifestError) as archive_info:
+        manifest._write_archive(staged, archive, "vibecrafted-public")
+    archive_message = str(archive_info.value)
+    assert "forbidden path: vibecrafted-vm/.env" in archive_message
+    assert "tskey-auth-test" not in archive_message
+    assert not archive.exists()
+
+
+@pytest.mark.parametrize(
+    ("relative", "forbidden_marker"),
+    [
+        (".loctree/atlas.json", ".loctree"),
+        (".git/HEAD", ".git"),
+        ("docs/reports/internal.md", "docs/reports"),
+        ("scripts/.pytest_cache/v/cache", "scripts/.pytest_cache"),
+        ("scripts/id_rsa", "scripts/id_rsa"),
+        ("config/service.pem", "config/service.pem"),
+    ],
+)
+def test_public_archive_fails_closed_on_forbidden_staging_inventory(
+    tmp_path: Path, relative: str, forbidden_marker: str
+) -> None:
+    payload = tmp_path / "payload"
+    _minimal_payload(payload)
+    planted = payload / relative
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_text("planted-forbidden-inventory\n", encoding="utf-8")
+
+    with pytest.raises(manifest.ManifestError) as check_info:
+        manifest.validate_payload(payload)
+    assert f"forbidden path: {forbidden_marker}" in str(check_info.value)
+
+    archive = tmp_path / "public.tar.gz"
+    with pytest.raises(manifest.ManifestError) as archive_info:
+        manifest._write_archive(payload, archive, "vibecrafted-public")
+    assert f"forbidden path: {forbidden_marker}" in str(archive_info.value)
+    assert not archive.exists()
 
 
 def test_stage_payload_never_copies_env_secret(tmp_path: Path) -> None:
@@ -1257,7 +1383,8 @@ def test_archive_has_one_safe_root_and_validated_payload(
             not name.startswith("/") and ".." not in Path(name).parts for name in names
         )
         assert not any(name.endswith(".DS_Store") for name in names)
-        archive.extractall(extracted, filter="data")
+        for member in archive.getmembers():
+            archive.extract(member, path=extracted, set_attrs=False, filter="data")
 
     payload = extracted / "vibecrafted-9.8.7"
     manifest.validate_payload(
@@ -1330,7 +1457,7 @@ def test_archive_accepts_clean_committed_included_payload(
     ("mutation", "relative"),
     [
         ("tracked", "scripts/vetcoders_install.py"),
-        ("index", "scripts/runtime_paths.py"),
+        ("index", "scripts/verify-vibecrafted-product.sh"),
         ("deleted", "scripts/distribution_manifest.py"),
     ],
 )

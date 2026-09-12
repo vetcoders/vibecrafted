@@ -18,15 +18,25 @@ from . import doctor as doctor_module
 from .agent_stream import ANSI_PATTERN, AgentStreamParser, resolve_default_model
 from .control_plane import (
     RunNotResolved,
-    await_run,
     lookup_run,
     resolve_run,
     sync_state,
 )
 from .package_resources import deck_path, package_root
 from .runtime_paths import is_operator_home_root, resolve_operator_launch_root
+from .server_observation import (
+    ServerObservationError,
+)
+from .server_observation import (
+    await_run as await_run_from_server,
+)
+from .server_observation import (
+    observe_run as observe_run_from_server,
+)
+from .server_observation import (
+    resolve_run_id as resolve_server_run_id,
+)
 from .workflow import (
-    await_launch_truth,
     classify_resume_identity,
     find_run_for_identity_token,
     launch_workflow,
@@ -34,9 +44,10 @@ from .workflow import (
     manual_resume_session,
     normalize_launch_spec,
     operator_continue_run,
+    recover_launch_receipt,
 )
 
-AGENTS = {"claude", "codex", "agy", "junie", "grok", "swarm"}
+AGENTS = {"claude", "codex", "agy", "junie", "grok", "cursor", "swarm"}
 RESEARCH_ARITY = {"uno": 1, "duo": 2, "trio": 3}
 LAUNCHERS = (
     "audit",
@@ -74,11 +85,15 @@ SHELL_WRAPPER_VERBS = {
     "telemetry": "telemetry",
     "vc-dashboard": "dashboard",
     "vc-dispatch": "dispatch",
+    "vc-doctor": "doctor",
     "vc-help": "help",
     "vc-init": "init",
     "vc-justdo": "justdo",
+    "vc-receipt": "receipt",
     "vc-resume": "resume",
     "vc-start": "start",
+    "vc-status": "status",
+    "vc-update": "update",
 }
 SUCCESS_STATES = {"report_validated", "completed", "closed"}
 TERMINAL_STATES = {
@@ -207,8 +222,26 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("dispatch", help="run or validate a dispatch plan")
+    claims = sub.add_parser("claims", help="atomic local repository-mutation claims")
+    claims.add_argument(
+        "claims_argv",
+        nargs=argparse.REMAINDER,
+        help="claims subcommand args (see vibecrafted claims --help)",
+    )
+    revalidate = sub.add_parser("control-plane-revalidate", help=argparse.SUPPRESS)
+    revalidate.add_argument("--run-id", required=True)
+    revalidate.add_argument("--json", action="store_true")
     doctor = sub.add_parser("doctor", help="verify installed Vibecrafted runtime")
     doctor.add_argument("--json", action="store_true")
+    doctor.add_argument(
+        "--release",
+        action="store_true",
+        help=(
+            "probe GitHub Latest (gh release view --json tagName) and the "
+            "latest Release source gate conclusion against the local VERSION "
+            "file; mismatch is red and names the tag/publish operator button"
+        ),
+    )
     doctor.add_argument(
         "--quarantine-legacy-runs",
         action="store_true",
@@ -237,12 +270,12 @@ def _build_parser() -> argparse.ArgumentParser:
     capabilities.add_argument("--json", action="store_true")
     config = sub.add_parser(
         "config",
-        help="install/wire packaged vc-frame config into the tools store and ~/.config/vc-frame",
+        help="install/wire packaged vc-frame config into ~/.config/vibecrafted/vc-frame",
     )
     config_sub = config.add_subparsers(dest="config_action")
     config_install = config_sub.add_parser(
         "install",
-        help="stage package config → tools store + wire ~/.config/vc-frame view",
+        help="stage package config → wire ~/.config/vibecrafted/vc-frame view",
     )
     config_install.add_argument(
         "--dry-run",
@@ -420,10 +453,32 @@ def _default_runtime(explicit_runtime: str, root: str = "") -> str:
     return "headless"
 
 
+def _argv_names_stopped_run(argv: Sequence[str]) -> bool:
+    """True when argv names a control-plane run (``--run-id`` / ``--last``)."""
+    return any(
+        token == "--last" or token == "--run-id" or token.startswith("--run-id=")
+        for token in argv
+    )
+
+
 def _normalize_raw_args(raw_args: list[str]) -> list[str]:
-    """Swap a leading ``<agent> <launcher>`` pair into ``<launcher> <agent>`` order."""
+    """Canonicalize leading pairs so later dispatch sees one shape.
+
+    ``<agent> <launcher>`` becomes ``<launcher> <agent>``.
+    ``resume <agent> --run-id|--last`` becomes ``<agent> resume …`` so the
+    stopped-run flag is not delegated to the deck (which historically had no
+    ``--run-id`` and swallowed it) or to ``_build_parser`` (no ``resume``
+    subcommand). ``--session`` / bare resume stay resume-first for the deck.
+    """
     if len(raw_args) >= 2 and raw_args[0] in AGENTS and raw_args[1] in LAUNCHERS:
         return [raw_args[1], raw_args[0], *raw_args[2:]]
+    if (
+        len(raw_args) >= 2
+        and raw_args[0] == "resume"
+        and raw_args[1] in AGENTS
+        and _argv_names_stopped_run(raw_args[2:])
+    ):
+        return [raw_args[1], "resume", *raw_args[2:]]
     return raw_args
 
 
@@ -531,6 +586,56 @@ def _print_launch_receipt(payload: dict[str, Any]) -> None:
         f"await (ARM NOW, supervisor-side): vibecrafted await {agent} --run-id {run_id}"
     )
     print("=====================================================================")
+
+
+def _emit_launch_result(result: dict[str, Any], *, json_mode: bool) -> int:
+    """Write exactly one launch receipt to stdout. Never exit 0 on empty stdout.
+
+    Diagnostics go to stderr. A run that already mutated control-plane state
+    must still emit ``run_id`` so a retry can resolve it instead of guessing.
+    """
+    from .workflow import _json_plain, machine_launch_receipt
+
+    receipt = machine_launch_receipt(result)
+    run_id = str(receipt.get("run_id") or "")
+    if json_mode:
+        payload = _json_plain(result)
+        if not isinstance(payload, dict):
+            payload = {}
+        payload.update(receipt)
+        try:
+            text = json.dumps(payload, ensure_ascii=False, indent=2)
+        except (TypeError, ValueError):
+            text = json.dumps(receipt, ensure_ascii=False, indent=2)
+        if not str(text).strip():
+            print("error: launch produced an empty receipt", file=sys.stderr)
+            if run_id:
+                print(f"run_id: {run_id}", file=sys.stderr)
+            return _EX_TEMPFAIL if run_id else 1
+        try:
+            sys.stdout.write(text if text.endswith("\n") else f"{text}\n")
+            sys.stdout.flush()
+        except BrokenPipeError:
+            print(
+                f"error: stdout closed after launch; run_id={run_id or 'unknown'}",
+                file=sys.stderr,
+            )
+            return _EX_TEMPFAIL if run_id else 1
+    else:
+        try:
+            _print_launch_receipt(result)
+            sys.stdout.flush()
+        except BrokenPipeError:
+            print(
+                f"error: stdout closed after launch; run_id={run_id or 'unknown'}",
+                file=sys.stderr,
+            )
+            return _EX_TEMPFAIL if run_id else 1
+        _watch_launch_startup(result)
+    if receipt["accepted"] and not run_id:
+        print("error: accepted launch missing run_id", file=sys.stderr)
+        return 1
+    return 0 if receipt["accepted"] else 1
 
 
 # Parity contract with the shell launcher's `spawn_watch_startup`
@@ -947,22 +1052,24 @@ def _agent_resume(agent: str, argv: Sequence[str]) -> int:
 
 
 def _agent_observe(agent: str, argv: Sequence[str]) -> int:
-    """``vibecrafted observe <agent>`` verb: print/emit one run's current status."""
+    """Print one vc-server-owned, on-demand run observation."""
     parser = argparse.ArgumentParser(prog=f"vibecrafted observe {agent}")
     parser.add_argument("--run-id", default="")
     parser.add_argument("--last", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(list(argv))
-    run = _run_for_agent(agent, args.run_id, last=args.last)
-    if run is None:
-        if args.run_id:
-            # Control-plane projection missed it; resolve read-follows-write
-            # against runtime_runs/ (where the runtime writes) before giving up.
-            return _observe_resolved(args.run_id, json_output=args.json)
+    try:
+        run_id = resolve_server_run_id(agent, args.run_id, last=args.last)
+        observation = observe_run_from_server(run_id) if run_id else {}
+    except ServerObservationError as exc:
+        print(f"observe: {exc}", file=sys.stderr)
+        return 2
+    run = observation.get("run") if isinstance(observation, dict) else None
+    if not isinstance(run, dict):
         print("No run found. Pass --run-id or --last.", file=sys.stderr)
         return 1
     if args.json:
-        print(json.dumps(run, ensure_ascii=False, indent=2, sort_keys=True))
+        print(json.dumps(observation, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     _print_run_status(run)
     return 0
@@ -1012,13 +1119,7 @@ def _observe_resolved(run_id: str, *, json_output: bool) -> int:
 
 
 def _agent_await(agent: str, argv: Sequence[str]) -> int:
-    """``vibecrafted await <agent>`` verb: block on control_plane.await_run and
-    print/emit the terminal outcome. Never implement a private polling loop here."""
-    # ONE await loop lives in control_plane.await_run — this verb must never
-    # grow a private wall-clock loop again. The old inline loop here treated
-    # --timeout as an absolute deadline and abandoned demonstrably-working
-    # runs at 300s, which taught supervising agents to distrust await and
-    # hedge with manual sleep/ps monitors.
+    """Subscribe to the dispatcher UDS; vc-server is not part of wake delivery."""
     parser = argparse.ArgumentParser(prog=f"vibecrafted await {agent}")
     parser.add_argument("--run-id", default="")
     parser.add_argument("--last", action="store_true")
@@ -1036,52 +1137,48 @@ def _agent_await(agent: str, argv: Sequence[str]) -> int:
         default=600,
         help="deprecated: superseded by the liveness-aware idle window",
     )
-    parser.add_argument("--hard-cap", type=float, default=None)
+    parser.add_argument(
+        "--hard-cap",
+        type=float,
+        default=None,
+        help="optional absolute wall-clock deadline in seconds",
+    )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(list(argv))
-    run = _run_for_agent(agent, args.run_id, last=args.last)
-    if run is None:
+    run_id = str(args.run_id or "").strip()
+    if not run_id and args.last:
+        state = sync_state()
+        candidates = list(state.get("active_runs") or []) + list(
+            state.get("recent_runs") or []
+        )
+        run_id = next(
+            (
+                str(run.get("run_id") or "")
+                for run in candidates
+                if str(run.get("agent") or "") == agent
+            ),
+            "",
+        )
+    if not run_id:
         print("No run found. Pass --run-id or --last.", file=sys.stderr)
         return 1
-    run_id = str(run.get("run_id") or "")
+    result = await_run_from_server(
+        run_id,
+        idle_timeout_seconds=args.timeout,
+        interval_seconds=args.interval,
+        hard_cap_seconds=args.hard_cap,
+    )
     if args.json:
-        result = await_launch_truth(
-            run_id,
-            timeout_seconds=args.timeout,
-            interval_seconds=args.interval,
-            hard_cap_seconds=args.hard_cap,
-        )
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        final_run = result.get("run")
         return (
             0
             if result.get("completed")
-            and result.get("artifact_ok")
-            and result.get("terminal_evidence")
+            and result.get("outcome") == "terminal"
+            and isinstance(final_run, dict)
+            and _run_succeeded(final_run)
             else 1
         )
-
-    print("await: initial status")
-    _print_run_status(run)
-
-    interval = max(float(args.interval), 0.1)
-    status_interval = max(float(args.status_interval), interval)
-    next_status = {"at": time.monotonic() + status_interval}
-
-    def _print_progress(current: dict[str, Any] | None) -> None:
-        """on_poll callback for await_run: print a status line every status_interval."""
-        now = time.monotonic()
-        if current is not None and now >= next_status["at"]:
-            print("await: still running")
-            _print_run_status(current)
-            next_status["at"] = now + status_interval
-
-    result = await_run(
-        run_id,
-        timeout_seconds=args.timeout,
-        interval_seconds=interval,
-        hard_cap_seconds=args.hard_cap,
-        on_poll=_print_progress,
-    )
     final_run = dict(result.get("run") or {})
     reason = str(result.get("reason") or "")
     if result.get("completed"):
@@ -1089,12 +1186,11 @@ def _agent_await(agent: str, argv: Sequence[str]) -> int:
         terminal_evidence = bool(
             final_run and _run_terminal(final_run) and not worker_alive
         )
-        delivered_evidence = reason == "report_delivered" and not worker_alive
         if terminal_evidence and final_run and not _run_succeeded(final_run):
             print(f"await: terminal failure ({reason})")
             _print_run_status(final_run)
             return 1
-        if not (terminal_evidence or delivered_evidence):
+        if not terminal_evidence:
             print(
                 f"await: non-terminal completion disagreement ({reason})",
                 file=sys.stderr,
@@ -1228,13 +1324,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     python_commands = {
         "acp",
         "capabilities",
+        "claims",
         "config",
+        "control-plane-revalidate",
         "dispatch",
         "doctor",
         "paste",
         "procs",
         "reap",
         "receipt",
+        "relocate",
         "resume-session",
         "settle",
         "settlements",
@@ -1300,6 +1399,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .dispatch.cli import main as dispatch_main
 
         return dispatch_main(raw_args[1:])
+    if raw_args and raw_args[0] == "claims":
+        from .repository_claims import claims_cli_main
+
+        return claims_cli_main(raw_args[1:])
+    if raw_args and raw_args[0] == "control-plane-revalidate":
+        parser = _build_parser()
+        args = parser.parse_args(raw_args)
+        run = lookup_run(str(args.run_id))
+        payload = {
+            "schema": "vibecrafted.control-plane-revalidation.v1",
+            "run_id": str(args.run_id),
+            "found": run is not None,
+            "run": run,
+        }
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        elif run is not None:
+            _print_run_status(run, include_tail=False)
+        else:
+            print(f"run not found: {args.run_id}", file=sys.stderr)
+        # Exit contract: 0 means the canonical writer performed the lookup and
+        # the payload is the answer (`found` true/false). vc-server maps any
+        # non-zero exit to "writer unavailable" (HTTP 503), so a legitimately
+        # absent run must not exit 1 — that is a clean 404, not a disagreement.
+        return 0
+    if raw_args and raw_args[0] == "relocate":
+        from .relocate import main as relocate_main
+
+        return relocate_main(raw_args[1:])
     if raw_args and raw_args[0] == "stop":
         from .wrappers import stop_main
 
@@ -1375,7 +1503,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for err in payload["parse_errors"]:
                     print(f"  parse_error: {err}")
             return 0
-        findings = doctor_module.doctor_run()
+        findings = doctor_module.doctor_run(
+            release=bool(getattr(args, "release", False))
+        )
         summary = doctor_module.doctor_summary(findings)
         from .runtime_receipt import build_receipt, render_receipt_text
 
@@ -1619,13 +1749,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             command=str(args.command), agent=args.agent, message=str(exc)
         )
         return 2
-    result = launch_workflow(spec, source_dir)
-    if args.json:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    else:
-        _print_launch_receipt(result)
-        _watch_launch_startup(result)
-    return 0 if result.get("accepted") else 1
+    try:
+        result = launch_workflow(spec, source_dir)
+    except (OSError, TypeError, ValueError, RuntimeError) as exc:
+        print(
+            f"error: launch raised {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        recovered = recover_launch_receipt(spec)
+        if recovered and recovered.get("run_id"):
+            result = recovered
+        else:
+            result = {
+                "accepted": False,
+                "run_id": "",
+                "agent": spec.agent,
+                "skill": spec.skill,
+                "root": spec.root,
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+    return _emit_launch_result(result, json_mode=bool(args.json))
 
 
 if __name__ == "__main__":  # pragma: no cover

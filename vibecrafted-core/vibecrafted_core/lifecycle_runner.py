@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -21,7 +22,23 @@ from .lifecycle_delivery import (
     claim_digest_for_text,
     try_grant_lifecycle_stage_seal,
 )
+from .lifecycle_fleet import (
+    SupervisorLaunch,
+    dispatch_recorded_children,
+    live_vc_dispatch_permitted,
+    mission_cuts,
+    record_write_stage_fleet,
+    stage_worker_may_launch_agent_lines,
+)
 from .report_contract import parse_report_path
+from .stage_cast import (
+    _mission_stage_agents,
+    _mission_stage_models,
+    _validated_stage_agents,
+    _validated_stage_models,
+    encode_stage_cast,
+    primary_stage_map,
+)
 from .workflow import (
     SUPPORTED_AGENTS,
     WorkflowLaunchSpec,
@@ -41,6 +58,16 @@ AwaitWorkflow = Callable[[dict[str, Any]], dict[str, Any]]
 LIFECYCLE_SCHEMA_ID = "vibecrafted.lifecycle.v1"
 
 
+def _lifecycle_stage_run_id(
+    lifecycle_run_id: str, stage_id: str, occurrence: int
+) -> str:
+    """Return a stable explicit child identity for one lifecycle stage attempt."""
+    material = f"{lifecycle_run_id}\n{stage_id}\n{occurrence}"
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+    prefix = re.sub(r"[^A-Za-z0-9._-]+", "-", stage_id).strip("-._") or "stage"
+    return f"{prefix[:24]}-{digest}"
+
+
 def delivery_axes_for_receipt(
     status: str, payload: dict[str, Any] | None = None
 ) -> dict[str, str]:
@@ -55,13 +82,18 @@ def delivery_axes_for_receipt(
         "launching": ExecutionState.LAUNCHED,
         "running": ExecutionState.RUNNING,
         "completed": ExecutionState.EXITED,
+        "quota_exhausted": ExecutionState.INTERRUPTED,
     }.get(str(status), ExecutionState.FAILED)
     # The execution axis states what the PROCESS did, not what the artifact
     # gate concluded. A worker that exited 0 without a report is the contract's
     # exit_0_without_report specimen — needs_attention, never a fabricated
     # execution failure (which would settle x instead of n).
     exit_code = source.get("exit_code")
-    if isinstance(exit_code, int) and str(status) not in ("launching", "running"):
+    if isinstance(exit_code, int) and str(status) not in (
+        "launching",
+        "running",
+        "quota_exhausted",
+    ):
         execution_default = (
             ExecutionState.EXITED if exit_code == 0 else ExecutionState.FAILED
         )
@@ -303,7 +335,8 @@ class LifecycleRunSpec:
     # Continuation runs (approve / force-audit) seed these so the next stage
     # prompt keeps consuming what the previous Read/Write stages produced.
     previous_reports: tuple[str, ...] = ()
-    # Operator-declared per-stage casting: {stage_id: agent}. Usually parsed
+    # Operator-declared per-stage casting: {stage_id: agent} or a comma-joined
+    # failover list (audit=claude,grok). First name is primary. Usually parsed
     # from the mission file's frontmatter (stage_agents:) so one plan file
     # carries the whole relay's crew. An explicit entry for a stage wins over
     # worker-requested next_agent steering.
@@ -587,131 +620,6 @@ def _stage_worker_liveness(
     return liveness
 
 
-def _mission_stage_agents(mission_text: str) -> dict[str, str]:
-    """Per-stage casting declared in the mission file's YAML frontmatter.
-
-    Two accepted shapes, so an operator plan file can carry the whole relay's
-    crew A-to-Z:
-
-        ---
-        stage_agents: scaffold=claude, review=codex
-        ---
-
-        ---
-        stage_agents:
-          scaffold: claude
-          review: codex
-        ---
-    """
-    lines = str(mission_text or "").splitlines()
-    if not lines or lines[0].strip() != "---":
-        return {}
-    agents: dict[str, str] = {}
-    in_block = False
-    for line in lines[1:]:
-        stripped = line.strip()
-        if stripped == "---":
-            break
-        if not in_block:
-            if not stripped.startswith("stage_agents:"):
-                continue
-            inline = stripped.split(":", 1)[1].strip()
-            if inline:
-                for pair in inline.split(","):
-                    separator = "=" if "=" in pair else ":"
-                    if separator not in pair:
-                        continue
-                    key, value = pair.split(separator, 1)
-                    agents[key.strip()] = value.strip().strip('"')
-                break
-            in_block = True
-            continue
-        if not line.startswith((" ", "\t")) or ":" not in stripped:
-            break
-        key, value = stripped.split(":", 1)
-        agents[key.strip()] = value.strip().strip('"')
-    return agents
-
-
-def _mission_stage_models(mission_text: str) -> dict[str, str]:
-    """Per-stage model pins declared in mission YAML frontmatter.
-
-    Accepted shapes mirror stage_agents. Model names are passed through
-    verbatim; the runtime only knows whether a runner has a model flag.
-    """
-
-    lines = str(mission_text or "").splitlines()
-    if not lines or lines[0].strip() != "---":
-        return {}
-    models: dict[str, str] = {}
-    in_block = False
-    for line in lines[1:]:
-        stripped = line.strip()
-        if stripped == "---":
-            break
-        if not in_block:
-            if not stripped.startswith("stage_models:"):
-                continue
-            inline = stripped.split(":", 1)[1].strip()
-            if inline:
-                for pair in inline.split(","):
-                    separator = "=" if "=" in pair else ":"
-                    if separator not in pair:
-                        continue
-                    key, value = pair.split(separator, 1)
-                    models[key.strip()] = value.strip().strip('"')
-                break
-            in_block = True
-            continue
-        if not line.startswith((" ", "\t")) or ":" not in stripped:
-            break
-        key, value = stripped.split(":", 1)
-        models[key.strip()] = value.strip().strip('"')
-    return models
-
-
-def _validated_stage_agents(
-    raw: dict[str, str], manifest: WorkflowManifest
-) -> dict[str, str]:
-    """Fail fast at launch: an A-to-Z casting with a typo must not fly."""
-    stage_ids = {stage.id for stage in manifest.stages}
-    resolved: dict[str, str] = {}
-    for stage_id, agent in dict(raw or {}).items():
-        stage_key = str(stage_id).strip()
-        agent_name = str(agent).strip()
-        if not stage_key or not agent_name:
-            continue
-        if stage_key not in stage_ids:
-            raise ValueError(
-                f"stage_agents names unknown stage '{stage_key}' "
-                f"for workflow {manifest.id}"
-            )
-        if agent_name not in SUPPORTED_AGENTS:
-            raise ValueError(
-                f"stage_agents names unsupported agent '{agent_name}' "
-                f"for stage '{stage_key}' (supported: "
-                + ", ".join(sorted(SUPPORTED_AGENTS))
-                + ")"
-            )
-        resolved[stage_key] = agent_name
-    return resolved
-
-
-def _validated_stage_models(
-    raw: dict[str, str], manifest: WorkflowManifest
-) -> dict[str, str]:
-    """Manifest-gate optional model pins without whitelisting model names."""
-    stage_ids = {stage.id for stage in manifest.stages}
-    resolved: dict[str, str] = {}
-    for stage_id, model in dict(raw or {}).items():
-        stage_key = str(stage_id).strip()
-        model_name = str(model).strip()
-        if not stage_key or not model_name or stage_key not in stage_ids:
-            continue
-        resolved[stage_key] = model_name
-    return resolved
-
-
 def _lifecycle_max_stage_launches(manifest: WorkflowManifest) -> int:
     """Ceiling on stage launches per lifecycle run.
 
@@ -740,6 +648,7 @@ class LifecycleRunner:
         *,
         launcher: LaunchWorkflow = launch_workflow,
         awaiter: AwaitWorkflow | None = None,
+        fleet_supervisor: SupervisorLaunch | None = None,
     ) -> None:
         """Wire the workflow launcher and awaiter (defaults to the real runtime paths)."""
         self.launcher = launcher
@@ -751,6 +660,7 @@ class LifecycleRunner:
                 hard_cap_seconds=_lifecycle_await_hard_cap_seconds(),
             )
         )
+        self.fleet_supervisor = fleet_supervisor
 
     async def run(self, spec: LifecycleRunSpec) -> dict[str, Any]:
         """Execute the full lifecycle: initialize state, then loop launching stages until
@@ -761,10 +671,11 @@ class LifecycleRunner:
 
         root = Path(normalize_run_root(spec.root, Path.cwd()))
         source_prompt = spec.prompt or _read_file(spec.file)
-        stage_agents = _validated_stage_agents(
+        stage_cast = _validated_stage_agents(
             dict(spec.stage_agents or {}) or _mission_stage_agents(source_prompt),
             manifest,
         )
+        stage_agents = primary_stage_map(stage_cast)
         stage_models = _validated_stage_models(
             dict(spec.stage_models or {}) or _mission_stage_models(source_prompt),
             manifest,
@@ -807,7 +718,7 @@ class LifecycleRunner:
                 "count": spec.count,
                 "depth": spec.depth,
                 "previous_reports": list(previous_reports),
-                "stage_agents": dict(stage_agents),
+                "stage_agents": encode_stage_cast(stage_cast),
                 "stage_models": dict(stage_models),
             },
             "supervisor": "vibecrafted_core.lifecycle_runner.LifecycleSupervisor",
@@ -865,6 +776,7 @@ class LifecycleRunner:
                 previous_reports=previous_reports,
                 context=context,
                 state_path=state_path,
+                lifecycle_run_id=run_id,
             )
             state["stages"].append(record)
             record.update(delivery_axes_for_receipt("launching", record.get("launch")))
@@ -978,15 +890,19 @@ class LifecycleRunner:
         previous_reports: list[str],
         context: dict[str, Any],
         state_path: Path | None = None,
+        lifecycle_run_id: str = "",
     ) -> dict[str, Any]:
         """Build the stage prompt, capture the pre-launch git baseline, and launch the
         stage worker; returns the initial stage record (before await/completion)."""
+        cuts = mission_cuts(source_prompt)
         prompt = self._stage_prompt(
             manifest=manifest,
             stage=stage,
             source_prompt=source_prompt,
             previous_reports=previous_reports,
             context=context,
+            cuts=cuts,
+            lifecycle_run_id=lifecycle_run_id,
         )
         stage_definition = workflow_definition(stage.workflow)
         launch_spec = WorkflowLaunchSpec(
@@ -1010,12 +926,17 @@ class LifecycleRunner:
             model=model,
             lifecycle_state_path=str(state_path or ""),
             claim_digest=claim_digest_for_text(source_prompt),
+            run_id=_lifecycle_stage_run_id(
+                lifecycle_run_id,
+                stage.id,
+                len(previous_reports),
+            ),
         )
         commit_before = _git_head(root)
         git_before = _git_status(root)
         git_snapshot_before = _git_worktree_snapshot(root, git_before)
         launch = await asyncio.to_thread(self.launcher, launch_spec, root)
-        return {
+        record: dict[str, Any] = {
             "id": stage.id,
             "name": stage.name,
             "workflow": stage.workflow,
@@ -1035,6 +956,21 @@ class LifecycleRunner:
             "launch": launch,
             "status": "launching",
         }
+        fleet = record_write_stage_fleet(
+            stage=stage,
+            cuts=cuts,
+            parent_run_id=lifecycle_run_id or str(launch.get("run_id") or ""),
+            repo_root=root,
+            agent=agent,
+        )
+        if fleet.children:
+            record["fleet"] = {
+                **fleet.to_payload(),
+                "supervisor_launches": dispatch_recorded_children(
+                    fleet, supervisor=self.fleet_supervisor
+                ),
+            }
+        return record
 
     def _stage_prompt(
         self,
@@ -1044,6 +980,8 @@ class LifecycleRunner:
         source_prompt: str,
         previous_reports: list[str],
         context: dict[str, Any],
+        cuts: tuple[str, ...] = (),
+        lifecycle_run_id: str = "",
     ) -> str:
         """Render the full worker-facing prompt for a stage, embedding the manifest
         contract, prior reports, the context atlas excerpt, and the operator prompt."""
@@ -1057,6 +995,21 @@ class LifecycleRunner:
         human_controls = ", ".join(manifest.human_controls) or "none"
         known_agents = ", ".join(sorted(SUPPORTED_AGENTS))
         claim_digest = claim_digest_for_text(source_prompt)
+        fleet_contract = (
+            "\n- Stage workers must not launch external agent lines "
+            "(no live vc-dispatch)."
+        )
+        if stage_worker_may_launch_agent_lines(stage=stage, cuts=cuts):
+            listed = ", ".join(cuts)
+            fleet_contract += (
+                "\n- WRITE fleet exception: this stage is a dispatcher, not the"
+                "\n  coder of every cut. Record one child run per listed cut with"
+                "\n  cut_id and worktree"
+                f" $VIBECRAFTED_HOME/worktrees/<org>/<repo>/{lifecycle_run_id or '<run_id>'}/<cut_id>."
+                "\n  Still no live vc-dispatch"
+                f" (live_vc_dispatch_permitted={live_vc_dispatch_permitted()})."
+                f"\n- Listed cuts: {listed}"
+            )
         dou_contract = ""
         if stage.workflow == "dou":
             dou_contract = (
@@ -1087,7 +1040,7 @@ READ phase rule:
   malformed values are a hard contract violation.
 
 WRITE phase rule:
-- Code changes are allowed, but changed files must be reported.
+- Code changes are allowed, but changed files must be reported.{fleet_contract}
 
 Lifecycle steering (optional, via your report YAML frontmatter):
 - next_stage: <stage-id> — steer the lifecycle forward or backward; unknown
@@ -1647,7 +1600,13 @@ def lifecycle_main(workflow_id: str, argv: Sequence[str] | None = None) -> int:
         )
     )
     if args.json:
-        print(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                state, ensure_ascii=False, indent=2, sort_keys=True, default=str
+            ),
+            flush=True,
+        )
     else:
         _print_lifecycle_receipt(state)
+        sys.stdout.flush()
     return 0 if state.get("status") in {"launching", "completed"} else 1

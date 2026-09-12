@@ -29,28 +29,35 @@ from textwrap import dedent
 from typing import Any
 from urllib.parse import urlparse
 
-try:
-    _control_plane_launch = importlib.import_module("control_plane_launch")
-    _control_plane_state = importlib.import_module("control_plane_state")
-    _installer_brand = importlib.import_module("installer_brand")
-    _runtime_paths = importlib.import_module("runtime_paths")
-except ModuleNotFoundError:  # pragma: no cover - depends on entrypoint
-    _control_plane_launch = importlib.import_module("scripts.control_plane_launch")
-    _control_plane_state = importlib.import_module("scripts.control_plane_state")
-    _installer_brand = importlib.import_module("scripts.installer_brand")
-    _runtime_paths = importlib.import_module("scripts.runtime_paths")
+# vibecrafted_core is the only owner of roots, control-plane state and
+# workflow launch. This script runs from a checkout (`python3 scripts/installer_gui.py`)
+# where the package is not installed, so the checkout's package dir is put on
+# sys.path first; there is no second copy of any of these names anywhere.
+_CORE_SRC = Path(__file__).resolve().parents[1] / "vibecrafted-core"
+if _CORE_SRC.is_dir() and str(_CORE_SRC) not in sys.path:
+    sys.path.insert(0, str(_CORE_SRC))
 
-launch_workflow = _control_plane_launch.launch_workflow
-normalize_launch_spec = _control_plane_launch.normalize_launch_spec
-sync_state = _control_plane_state.sync_state
+try:
+    _installer_brand = importlib.import_module("installer_brand")
+except ModuleNotFoundError:  # pragma: no cover - depends on entrypoint
+    _installer_brand = importlib.import_module("scripts.installer_brand")
+
+from vibecrafted_core.control_plane import sync_state
+from vibecrafted_core.runtime_paths import (
+    read_version_file,
+    vibecrafted_home,
+    vibecrafted_runtime_bin,
+    vibecrafted_tools_home,
+    xdg_config_home,
+)
+from vibecrafted_core.workflow import (
+    launch_workflow,
+    normalize_launch_spec,
+)
+
 PRODUCT_LINE = _installer_brand.PRODUCT_LINE
 TAGLINE = _installer_brand.TAGLINE
 VAPOR_HEADER = _installer_brand.VAPOR_HEADER
-read_version_file = _runtime_paths.read_version_file
-vibecrafted_runtime_bin = _runtime_paths.vibecrafted_runtime_bin
-vibecrafted_tools_home = _runtime_paths.vibecrafted_tools_home
-vibecrafted_home = _runtime_paths.vibecrafted_home
-xdg_config_home = _runtime_paths.xdg_config_home
 
 
 OUTPUT_TAIL_LIMIT = 120
@@ -66,7 +73,7 @@ CATEGORY_ORDER = tuple(CATEGORY_LABELS)
 FOUNDATION_COMMANDS = ("loctree-mcp", "aicx-mcp", "prview", "screenscribe")
 BUNDLED_BIN_NAMES = ("aicx-mcp", "aicx", "loctree-mcp", "loctree", "loct", "prview")
 TOOLCHAIN_COMMANDS = ("python3", "node", "git", "rsync")
-AGENT_COMMANDS = ("claude", "codex", "agy", "junie", "grok")
+AGENT_COMMANDS = ("claude", "codex", "agy", "junie", "grok", "cursor-agent")
 ADDITIONAL_TOOL_COMMANDS = ("mise", "starship", "atuin", "zoxide")
 
 
@@ -582,7 +589,7 @@ class InstallController:
             "control_plane": control_plane,
             "launcher_defaults": {
                 "workflows": ["workflow", "research", "review", "marbles"],
-                "agents": ["claude", "codex", "agy", "junie", "grok"],
+                "agents": ["claude", "codex", "agy", "junie", "grok", "cursor"],
                 "runtimes": ["headless", "terminal", "visible"],
             },
             "status": self.status_payload(),

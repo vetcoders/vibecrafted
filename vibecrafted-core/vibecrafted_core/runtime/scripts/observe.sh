@@ -7,7 +7,7 @@ source "$SCRIPT_DIR/common.sh"
 
 usage() {
   cat <<EOF_USAGE
-Usage: observe.sh [codex|claude|agy|junie] [--last|--run-id <id>|path-to-meta|path-to-transcript|path-to-report]
+Usage: observe.sh [codex|claude|agy|junie|grok|cursor] [--last|--run-id <id>|path-to-meta|path-to-transcript|path-to-report]
 
 Examples:
   observe.sh codex --last
@@ -45,7 +45,7 @@ run_id=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    codex|claude|agy|junie)
+    codex|claude|agy|junie|grok|cursor)
       [[ -z "$agent" ]] || spawn_die "Agent already set to $agent"
       agent="$1"
       ;;

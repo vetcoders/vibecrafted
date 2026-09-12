@@ -104,14 +104,17 @@ pub fn load_run_detail(state_root: &Path, run_id: &str) -> RunDetail {
         detail.report_path = Some(path.to_string_lossy().into_owned());
     }
 
-    // transcript.log: same prefer-meta-then-sibling resolution; surface a tail
-    // with ANSI escapes stripped.
-    if let Some(path) = resolve_artifact(
+    // Prefer the humanized projection written beside the raw JSONL log.
+    let human = run_dir.join("transcript.human.log");
+    if human.is_file() {
+        detail.transcript_tail = humanize_transcript(&read_tail_lines(&human));
+        detail.transcript_path = Some(human.to_string_lossy().into_owned());
+    } else if let Some(path) = resolve_artifact(
         meta.as_ref().and_then(|m| m.transcript.as_deref()),
         &run_dir,
         "transcript.log",
     ) {
-        detail.transcript_tail = read_tail_lines(&path);
+        detail.transcript_tail = humanize_transcript(&read_tail_lines(&path));
         detail.transcript_path = Some(path.to_string_lossy().into_owned());
     }
 
@@ -190,6 +193,75 @@ fn read_tail_bytes(path: &Path, cap: u64) -> Option<Vec<u8>> {
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).ok()?;
     Some(buf)
+}
+
+/// Project a raw control-plane transcript (JSONL, escaped shell, ANSI) into
+/// wrapped operator-readable lines. Empty input stays empty so callers can
+/// render an honest empty state.
+pub fn humanize_transcript(text: &str) -> String {
+    let mut lines = Vec::new();
+    for raw in text.lines() {
+        let cleaned = strip_ansi(raw).trim().to_string();
+        if cleaned.is_empty() {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&cleaned)
+            && let Some(human) = json_line_human(&value)
+        {
+            lines.extend(wrap_human_line(&human, 88));
+            continue;
+        }
+        if let Some(unescaped) = unescape_json_string(&cleaned) {
+            lines.extend(wrap_human_line(&unescaped, 88));
+            continue;
+        }
+        lines.extend(wrap_human_line(&cleaned, 88));
+    }
+    lines.join("\n")
+}
+
+fn json_line_human(value: &serde_json::Value) -> Option<String> {
+    for key in ["message", "text", "content", "delta", "body"] {
+        if let Some(text) = value.get(key).and_then(serde_json::Value::as_str) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    if let Some(kind) = value.get("kind").or(value.get("type")).and_then(serde_json::Value::as_str) {
+        if let Some(message) = value.get("event").and_then(serde_json::Value::as_str) {
+            return Some(format!("{kind}: {message}"));
+        }
+        return Some(kind.to_string());
+    }
+    None
+}
+
+fn unescape_json_string(raw: &str) -> Option<String> {
+    if !(raw.contains("\\n") || raw.contains("\\\"")) {
+        return None;
+    }
+    let wrapped = format!("\"{raw}\"");
+    serde_json::from_str::<String>(&wrapped).ok()
+}
+
+fn wrap_human_line(value: &str, width: usize) -> Vec<String> {
+    if value.chars().count() <= width {
+        return vec![value.to_string()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for ch in value.chars() {
+        current.push(ch);
+        if current.chars().count() >= width {
+            lines.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
 }
 
 /// Strip ANSI/VT control sequences (CSI `ESC [ … final` and OSC `ESC ] … BEL/ST`)
@@ -291,6 +363,23 @@ mod tests {
             detail.transcript_path.as_deref(),
             Some(&*transcript.to_string_lossy())
         );
+    }
+
+    #[test]
+    fn humanize_transcript_projects_jsonl_and_wraps_long_commands() {
+        let raw = concat!(
+            r#"{"kind":"tool","message":"cargo test -p voc"}"#,
+            "\n",
+            r#"{"text":"ok"}"#,
+            "\n",
+            r#"echo \"/very/long/path/to/a/workspace/and/then/some/more/segments/that/should/wrap\""#,
+            "\n"
+        );
+        let human = humanize_transcript(raw);
+        assert!(human.contains("cargo test -p voc"));
+        assert!(human.contains("ok"));
+        assert!(!human.contains("{\"kind\""));
+        assert!(human.lines().any(|line| line.chars().count() <= 88));
     }
 
     #[test]

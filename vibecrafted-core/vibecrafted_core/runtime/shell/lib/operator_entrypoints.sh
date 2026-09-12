@@ -4,7 +4,7 @@
 _vetcoders_skill_init() {
   local tool="$1"
   shift
-  local runtime init_prompt command_text
+  local runtime init_prompt command_text permissions
 
   _vetcoders_parse_contract "$@" || return 1
   [[ -z "$_vetcoders_contract_count" ]] || {
@@ -20,14 +20,40 @@ _vetcoders_skill_init() {
     return 1
   }
 
-  _vetcoders_require_vc_frame || return 1
-
   runtime="$(_vetcoders_init_runtime "${_vetcoders_contract_runtime:-terminal}")" || return 1
   init_prompt="$(_vetcoders_compose_init_prompt "$_vetcoders_contract_prompt" "$_vetcoders_contract_file")" || return 1
-  command_text="$(_vetcoders_init_command_text "$tool" "$init_prompt")" || return 1
+  permissions="${_vetcoders_contract_permissions:-}"
+  [[ -n "$permissions" ]] || { [[ "$tool" == "junie" ]] && permissions="auto" || permissions="bypass"; }
+  command_text="$(_vetcoders_init_command_text "$tool" "$init_prompt" "${_vetcoders_contract_policy_runtime:-local-native}" "$permissions" "${_vetcoders_contract_token_budget:-safe}" "${_vetcoders_contract_operator:-none}" "${_vetcoders_contract_continuity:-fresh}" "${_vetcoders_contract_parent_session:-}" "${_vetcoders_contract_continuity_parent:-}")" || return 1
+
+  # No cockpit, or an explicit `--runtime plain`: the orientation session is
+  # the agent itself, so run it right here in the caller's terminal. A fresh
+  # install without vc-frame must not dead-end on "run vc-start first" when
+  # vc-start needs the very same binary.
+  if [[ "$runtime" == "plain" ]] || ! _vetcoders_vc_frame_bin >/dev/null ; then
+    _vetcoders_init_in_current_terminal "$tool" "$command_text" "$runtime"
+    return
+  fi
 
   _vetcoders_prepare_operator_runtime "$runtime" || return 1
-  _vetcoders_spawn_into_operator_session "${tool}-init" "$command_text"
+  _vetcoders_spawn_into_operator_session "$(_vetcoders_operator_face_tab "$tool")" "$command_text"
+}
+
+# Plain-terminal init: no vc-frame tab, no layout — the agent starts in this
+# shell at the repository root with the /vc-init prompt preloaded.
+_vetcoders_init_in_current_terminal() {
+  local tool="$1"
+  local command_text="$2"
+  local runtime="${3:-plain}"
+  local root_dir="${_vetcoders_contract_root:-$(_vetcoders_repo_root)}"
+  if [[ "$runtime" != "plain" ]]; then
+    printf 'vc-frame cockpit not installed — starting %s in this terminal instead (vibecrafted init %s --runtime plain does the same explicitly).\n' "$tool" "$tool" >&2
+  fi
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    printf 'vibecrafted init needs an interactive terminal for %s; for a non-interactive run use: vibecrafted implement %s --prompt "<task>"\n' "$tool" "$tool" >&2
+    return 1
+  fi
+  ( cd "$root_dir" && eval "$command_text" )
 }
 
 # vc-operator launcher — interactive operator session entry point.
@@ -37,7 +63,7 @@ _vetcoders_skill_init() {
 _vetcoders_skill_operator() {
   local tool="$1"
   shift
-  local runtime operator_prompt command_text
+  local runtime operator_prompt command_text permissions
 
   _vetcoders_parse_contract "$@" || return 1
   [[ -z "$_vetcoders_contract_count" ]] || {
@@ -57,9 +83,10 @@ _vetcoders_skill_operator() {
 
   runtime="$(_vetcoders_operator_runtime "${_vetcoders_contract_runtime:-terminal}")" || return 1
   operator_prompt="$(_vetcoders_compose_operator_prompt "$_vetcoders_contract_prompt" "$_vetcoders_contract_file")" || return 1
-  command_text="$(_vetcoders_operator_command_text "$tool" "$operator_prompt")" || return 1
+  permissions="${_vetcoders_contract_permissions:-}"
+  [[ -n "$permissions" ]] || { [[ "$tool" == "junie" ]] && permissions="auto" || permissions="bypass"; }
+  command_text="$(_vetcoders_operator_command_text "$tool" "$operator_prompt" "${_vetcoders_contract_policy_runtime:-local-native}" "$permissions")" || return 1
 
   _vetcoders_prepare_operator_runtime "$runtime" || return 1
-  _vetcoders_spawn_into_operator_session "${tool}-operator" "$command_text"
+  _vetcoders_spawn_into_operator_session "$(_vetcoders_operator_face_tab "$tool")" "$command_text"
 }
-

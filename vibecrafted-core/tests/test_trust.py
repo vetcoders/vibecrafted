@@ -109,7 +109,9 @@ def test_registry_exposes_trust_as_read_only_and_guard_as_enforcer() -> None:
 def test_core_command_deck_exposes_trust_and_guard_launchers(capsys) -> None:
     assert cli.main(["trust", "--help"]) == 0
     trust_out = capsys.readouterr().out
-    assert "vibecrafted trust <claude|codex|agy|junie|grok>" in trust_out
+    # Agent alternation mirrors the vc-trust SKILL.md invocation canon
+    # (cursor joined the fleet with full parity in 8373c26f).
+    assert "vibecrafted trust <claude|codex|agy|junie|grok|cursor>" in trust_out
     assert "version 1.0.0 · READ" in trust_out
 
     assert cli.main(["guard", "--help"]) == 0
@@ -591,6 +593,71 @@ def test_trust_recovery_after_every_durable_transition_is_exactly_once(
     assert after_events[0]["payload"]["event_key"] == (
         f"{run_id}:{revision}:{receipt_id}"
     )
+
+
+def test_trust_recovery_clears_stale_snapshot_await_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "run-stale-await-projection"
+    repo, sha, journal, _meta_path, snapshot_path = _trust_run_fixture(
+        tmp_path,
+        monkeypatch,
+        run_id=run_id,
+    )
+
+    def stop_after_outbox(transition: str) -> None:
+        if transition == "outbox":
+            raise OSError("stop after prepared outbox")
+
+    monkeypatch.setattr(trust, "_after_trust_transition", stop_after_outbox)
+    with pytest.raises(OSError, match="stop after prepared outbox"):
+        trust.note_verdict(
+            repo=repo,
+            journal=journal,
+            sha=sha,
+            verdict="pass-with-gaps",
+            run_id=run_id,
+            claims=[
+                {
+                    "claim": "stale await projection is superseded",
+                    "grade": "strong",
+                    "evidence": "canonical recovery writer",
+                }
+            ],
+        )
+
+    outbox_path = trust._trust_outbox_path(run_id)
+    outbox = json.loads(outbox_path.read_text(encoding="utf-8"))
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    snapshot.update(outbox["projection_fields"])
+    snapshot.update(
+        {
+            "await_rc": 0,
+            "await_outcome": "completed",
+            "await_settled_at": "2026-08-26T10:00:00Z",
+        }
+    )
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+    monkeypatch.setattr(trust, "_after_trust_transition", lambda _name: None)
+
+    report = trust.recover_pending_trust_settlements()
+
+    assert report.ok is True
+    assert [item.run_id for item in report.recovered] == [run_id]
+    assert not outbox_path.exists()
+    recovered = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    assert recovered["await_rc"] is None
+    assert recovered["await_outcome"] == ""
+    assert recovered["await_settled_at"] == ""
+    assert len(trust._read_journal(journal)) == 1
+    stream = tmp_path / "crafted" / "control_plane" / "events.jsonl"
+    events = [
+        json.loads(line)
+        for line in stream.read_text(encoding="utf-8").splitlines()
+        if json.loads(line).get("kind") == "settlement.changed"
+    ]
+    assert len(events) == 1
 
 
 @pytest.mark.parametrize("transition", ["outbox", "journal", "meta", "snapshot"])

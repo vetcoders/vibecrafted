@@ -10,8 +10,9 @@ no-await lifecycle, subagents, watchers) and what actually fixes it.
 After dispatch, arm `vibecrafted await <agent> --run-id <id>` immediately,
 supervisor-side. Control-plane JSON, report files, transcripts, panes, and
 scheduled wakeups are diagnostic only, not wake signals. Hedging await with
-ad-hoc pollers/watchers is a Class 3 violation; fix `control_plane.await_run`,
-do not normalize the hedge.
+ad-hoc pollers/watchers is a Class 3 violation; fix the `vc-server` await hub,
+do not normalize the hedge. `--timeout` is an idle window; add `--hard-cap`
+when the caller requires an absolute deadline.
 
 Liveness is always a 3-signal decision before declaring a run done: confirm (1)
 the await verdict, (2) terminal state in run meta, and (3) worker pid dead; when
@@ -36,7 +37,7 @@ replace passive waiting with active verification on the side that can act.
 
 ## Class 1 — Gate-nap („Drzemka na bramce")
 
-_3 confirmed cases, prview-rs session 2026-07-02/03 (Monika). Canonical
+_3 confirmed cases, prview-rs session 2026-07-02/03 (operator). Canonical
 description by Monika._
 
 ### Symptom
@@ -305,12 +306,14 @@ contract gap, not by agent paranoia.
 
 ### Mechanism (five confirmed gaps, all fixed at the source)
 
-1. **A third private await loop**: `cli._agent_await`'s human path had its own
-   inline loop treating `--timeout` as an ABSOLUTE wall clock — it abandoned
-   demonstrably-working runs at 300 s. Fixed: the verb now blocks through the
-   one canonical `control_plane.await_run` (liveness-aware idle window), with
-   an `on_poll` callback for progress printing. There must be exactly ONE
-   await loop in the runtime; a new inline loop is this class reborn.
+1. **A private await loop per client**: `cli._agent_await` once polled files and
+   later routed wake delivery through HTTP → vc-server → subprocess → deck.
+   The latter failed when `control-plane-revalidate` was absent from the deck,
+   reporting a live run as disappeared. Fixed 2026-08-28: the dispatcher owns
+   one Unix stream socket per run and fans JSON-line heartbeats/one terminal
+   event to every connected awaiter. Clients block in `connect()` + `read()`;
+   a late client receives the last event replay. No client or server poll loop
+   owns time, and vc-server is optional for wake delivery.
 2. **Loop parents look dead while children work**: marbles/polarize rounds are
    sequenced deterministically (next round fires on the previous child
    PROCESS EXIT + artifact validation in `workflow_runtime.run_marbles`), but
@@ -353,11 +356,20 @@ the whole answer. If an agent feels the need to double-guard await with a
 manual monitor, treat that as a Class 3 bug report against the runtime — fix
 the contract, do not normalize the hedge.
 
-The operational verdict is deliberately redundant: await verdict, terminal run
-meta, and worker pid death must converge before "done" leaves the supervisor.
-Report presence is a fourth promised-artifact check, not a replacement for
-liveness. Two agreeing signals can justify recovery or cautious next action;
-three signals are the bar for done.
+The operational verdict is deliberately redundant. The first signal is now the
+dispatcher socket. Every transport outcome has the same consequence:
+
+```
+socket event | EOF | ENOENT | ECONNREFUSED → wake/invalidate → odczyt triady → werdykt
+```
+
+EOF proves only that the dispatcher connection disappeared; it is never a
+terminal verdict. The durable triad decides truth exactly once: terminal run
+meta, dispatcher/worker death, and an authored report when the run promised
+one. The socket is never an SSOT and carries no settlement authority. A
+missing/refused orphan socket is treated exactly like no socket; the file triad
+is read once, never polled. `observe` and dashboards may still use vc-server
+HTTP, but `await` must work while vc-server and the legacy deck verb are absent.
 
 ---
 
@@ -378,7 +390,7 @@ three signals are the bar for done.
 ## Provenance
 
 - Class 1: prview-rs, session 2026-07-02/03, cases #1–#3, remediation and
-  canonical description by Monika.
+  canonical description by the operator.
 - Class 2: vibecrafted, vc-ship flights `life-ship-260702-123238-24000`
   (v3.3.0) and `life-ship-260702-202338-58000` (lifecycle.schema.v1),
   supervision by claude, session `2603026d-0c40-4ca9-af91-e2ab74256926`.

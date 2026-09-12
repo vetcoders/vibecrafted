@@ -93,8 +93,8 @@ pre-flight → DISPATCH → SPANKO → SPRAWDZENIE → FLIP → BATON → next c
 swoją klasą — cut mechaniczny, w pełni rozpisany, jedzie na tańszym,
 szybszym tierze; cut chirurgiczny albo niosący decyzje — na mocniejszym
 tierze. Pin jedzie z planem do launchera (`Cut.model` →
-`WorkflowLaunchSpec.model` → flaga modelu agenta: `--model` dla claude, `-m`
-dla codex). Cut bez pinu leci na defaulcie
+`WorkflowLaunchSpec.model` → flaga modelu agenta: `--model` dla claude i
+cursor, `-m` dla codex). Cut bez pinu leci na defaulcie
 konta — a to NIE-decyzja, nie bezpieczny default: pinuj świadomie, a brak
 pinu traktuj jako smell do rozwiązania przed startem.
 

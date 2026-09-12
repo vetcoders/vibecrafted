@@ -21,6 +21,14 @@ tmp
 nohup.out
 
 operator-tui/target
+**/target
+**/build
+vibecrafted-app/target
+vibecrafted-server/target
+vibecrafted-app/shell-agent/build
+build
+dist
+.loctree
 scripts/installer/.venv
 **/__pycache__
 *.py[cod]

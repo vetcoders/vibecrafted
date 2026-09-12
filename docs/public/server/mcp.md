@@ -47,17 +47,17 @@ marked below and should stay permissioned in your client.
 
 ### Board and runs
 
-| Tool              | Purpose                                                                     |
-| ----------------- | --------------------------------------------------------------------------- |
-| `vc_board_status` | Control-plane snapshot: active runs, recent runs, events, warnings.         |
-| `vc_run_status`   | Look up one run by id from synced control-plane state.                      |
-| `vc_await_run`    | Bounded await for one run using control-plane metadata only.                |
-| `vc_run_observe`  | Bounded cursor pull of run events and transcript deltas (capped at 64 KiB). |
-| `vc_launch`       | **Mutating.** Launch a workflow; spawns an agent process.                   |
-| `vc_run_launch`   | **Mutating.** Alias of `vc_launch` for run-lifecycle naming symmetry.       |
-| `vc_run_stop`     | **Mutating.** Request graceful stop of an active run, with an audit event.  |
-| `vc_run_retry`    | **Mutating.** Retry a run from its stored launch metadata.                  |
-| `vc_run_blocked`  | **Mutating.** Mark an active run as blocked, with an audit trail.           |
+| Tool              | Purpose                                                                         |
+| ----------------- | ------------------------------------------------------------------------------- |
+| `vc_board_status` | Control-plane snapshot: active runs, recent runs, events, warnings.             |
+| `vc_run_status`   | Look up one run by id from synced control-plane state.                          |
+| `vc_await_run`    | Join the shared vc-server run monitor; idle timeout and hard cap stay distinct. |
+| `vc_run_observe`  | Bounded cursor pull of run events and transcript deltas (capped at 64 KiB).     |
+| `vc_launch`       | **Mutating.** Launch a workflow; spawns an agent process.                       |
+| `vc_run_launch`   | **Mutating.** Alias of `vc_launch` for run-lifecycle naming symmetry.           |
+| `vc_run_stop`     | **Mutating.** Request graceful stop of an active run, with an audit event.      |
+| `vc_run_retry`    | **Mutating.** Retry a run from its stored launch metadata.                      |
+| `vc_run_blocked`  | **Mutating.** Mark an active run as blocked, with an audit trail.               |
 
 ### Lifecycle (vc-ship supervision)
 
