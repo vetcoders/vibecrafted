@@ -116,7 +116,7 @@ Domyślnie:
 
 Wyjątki:
 
-- Codex: Możesz delegować do `gpt-5.3-codex-spark` z `xhigh`, gdy task korzysta na ekstremalnej szybkości. Traktuj Spark jako szybki tier wykonawczy; za finalną jakość wciąż odpowiada agent rodzic.
+- Tylko Codex: Ten wyjątek zastępuje dla Codexa domyślne reguły same-parent powyżej i same-named-first poniżej. Przestrzegaj zatwierdzonego przez operatora routingu modelu lub poziomu rozumowania. Jeśli go nie ma, wybierz model o możliwościach wystarczających do wymaganego poziomu jakości, z uzasadnionym marginesem, a następnie najbardziej ekonomiczną opcję spośród modeli spełniających ten próg. Od razu użyj mocniejszego modelu, gdy uzasadniają to niejednoznaczność, głębokość zależności lub konsekwencje błędu; nie wymuszaj próby cheap-first ani nie broń słabego wyniku jego niższą ceną. Eskaluj po wykazanym ograniczeniu, bez automatycznego wymagania, by mocniejszy model powtarzał każdy wynik modelu ekonomicznego. Sama etykieta roli subagenta nie dowodzi faktycznego modelu ani poziomu rozumowania; potwierdzając routing, użyj dostępnych metadanych runtime'u, bez obowiązkowego sprawdzania statusu po każdym uruchomieniu subagenta.
 - Claude: Do rozległych, długotrwałych tasków preferuj `opus[1m]`; do łatwiejszych lub lżejszych preferuj `sonnet[1m]`.
 - Gemini: Jeśli `gemini-3.1-pro-preview` jest niedostępny lub niestabilny w szczycie obciążenia, fallback delegacji natywnej na `auto-gemini-3`.
 
