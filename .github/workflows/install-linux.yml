@@ -165,8 +165,16 @@ jobs:
         run: |
           set -euo pipefail
           pack="$RUNNER_TEMP/runtime-pack/Vibecrafted_RuntimePack_linux-x64.tar.gz"
+          # install.sh needs the full closed tuple: without --archive-file it
+          # resolves the channel manifest, which does not bind CI branches
+          # (W4 refusal). Write the exact-source carrier archive from this
+          # checkout; the writer proves every byte against $GITHUB_SHA.
+          archive="$RUNNER_TEMP/vibecrafted-src.tar.gz"
+          python3 scripts/distribution_manifest.py archive \
+            --source . --output "$archive" --root-name vibecrafted \
+            --owner-repo "$GITHUB_REPOSITORY" --source-revision "$GITHUB_SHA"
           VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY="$RUNNER_TEMP/runtime-pack/ci-signing.pub" \
-            bash install.sh --runtime-pack-file "$pack" install
+            bash install.sh --archive-file "$archive" --runtime-pack-file "$pack" install
 
       - name: Run vibecrafted doctor
         run: |
@@ -300,8 +308,14 @@ jobs:
           # the job HOME and hit "dubious ownership" on the mounted workspace.
           git config --global --add safe.directory "$(pwd)"
           pack="/tmp/runtime-pack/Vibecrafted_RuntimePack_linux-x64.tar.gz"
+          # Same closed-tuple requirement as the ubuntu jobs: hand install.sh
+          # the exact-source carrier archive written from this checkout.
+          archive="/tmp/vibecrafted-src.tar.gz"
+          python3 scripts/distribution_manifest.py archive \
+            --source . --output "$archive" --root-name vibecrafted \
+            --owner-repo "$GITHUB_REPOSITORY" --source-revision "$GITHUB_SHA"
           VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY="/tmp/runtime-pack/ci-signing.pub" \
-            bash install.sh --runtime-pack-file "$pack" install
+            bash install.sh --archive-file "$archive" --runtime-pack-file "$pack" install
 
       - name: Run vibecrafted doctor
         run: |
