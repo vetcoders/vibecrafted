@@ -506,7 +506,7 @@ def test_product_shell_typed_python3_uses_generation_not_host(
         (
             'source "$HOME/.config/vibecrafted/vc-terminal/interactive.zsh"; '
             'print -r -- "kind=$(whence -w python3)"; '
-            'print -r -- "path_python3=$(command -v python3)"; '
+            'print -r -- "path_python3=$(whence -p python3)"; '
             'print -r -- "PATH=$PATH"; '
             'python3 -c "import sys; print(\\"used=\\" + sys.executable)"; '
             "print -r -- READY"
