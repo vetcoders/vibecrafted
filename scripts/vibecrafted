@@ -5131,10 +5131,10 @@ cmd_core_workflow_skill() {
   done
   if ((has_inline)); then
     printf '%s' "$inline_prompt" | PYTHONPATH="$core_dir" \
-      "$(_vibecrafted_python)" -m vibecrafted_core.cli "$core_skill" "${launch_args[@]}" --prompt-stdin --source-dir "$(_script_repo_root)"
+      "$(_vibecrafted_python)" -m vibecrafted_core.cli "$core_skill" ${launch_args[@]+"${launch_args[@]}"} --prompt-stdin --source-dir "$(_script_repo_root)"
   else
     PYTHONPATH="$core_dir" \
-      "$(_vibecrafted_python)" -m vibecrafted_core.cli "$core_skill" "${launch_args[@]}" --source-dir "$(_script_repo_root)"
+      "$(_vibecrafted_python)" -m vibecrafted_core.cli "$core_skill" ${launch_args[@]+"${launch_args[@]}"} --source-dir "$(_script_repo_root)"
   fi
 }
 
