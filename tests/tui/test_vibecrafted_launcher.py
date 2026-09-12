@@ -780,7 +780,14 @@ def test_bare_shell_face_opens_interactive_tab_without_print_mode(
     # A pipe-backed public entry reaches the physical terminal host. The host
     # owns provider execution, so admission is the observable boundary here.
     terminal_argv = terminal_capture.read_text(encoding="utf-8").splitlines()
-    assert f"PYTHONPATH={generation / 'vibecrafted-core'}" in terminal_argv
+    # The owned interpreter resolves fail-closed (3fe139a1): PYTHONPATH is a
+    # fallback used only when the generation python cannot import the package
+    # itself. Either way, no foreign PYTHONPATH may reach the terminal argv.
+    pythonpath_entries = [a for a in terminal_argv if a.startswith("PYTHONPATH=")]
+    assert pythonpath_entries in (
+        [],
+        [f"PYTHONPATH={generation / 'vibecrafted-core'}"],
+    ), pythonpath_entries
     assert (
         str(home / ".config/vibecrafted/vc-terminal/launch-primary-shell.zsh")
         in terminal_argv
