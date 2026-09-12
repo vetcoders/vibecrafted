@@ -1,12 +1,12 @@
-"""Event-driven f/x/n guardian for terminal Vibecrafted runs.
+"""Event-driven recovery guardian for terminal Vibecrafted runs.
 
 The guardian has one trigger substrate: the vibecrafted-server
-``GET /api/control/events`` SSE stream.  For each new typed settlement it
-durably queues one exact run-triage projection before advancing the stream
-cursor, then performs one exact run-projection read before deciding recovery.
-One bounded local startup sweep repairs terminal receipts orphaned by a dead
-dispatcher; periodic work revisits only that durable outbox.  The guardian
-never tails ``events.jsonl`` or makes Zellij/vc-frame the run owner.
+``GET /api/control/events`` SSE stream. For each new typed settlement it
+performs one exact run-projection read before deciding recovery. Production
+startup does not schedule terminal triage or mutate vc-frame presentation;
+server/control-plane evidence remains authoritative. Legacy triage helpers are
+retained only for explicit compatibility callers and injected tests. The
+guardian never tails ``events.jsonl`` or makes Zellij/vc-frame the run owner.
 
 On the first attachment, historical frames are checkpointed without side
 effects until the server's typed ``stream.caught-up`` receipt proves that the
@@ -693,7 +693,7 @@ def _ignore_board_publish() -> None:
 
 
 def _ignore_triage_schedule(_run_id: str) -> bool:
-    """Default no-op triage scheduler that reports success without persisting."""
+    """Compatibility no-op: production Guardian wiring has no terminal triage."""
     return True
 
 
@@ -3914,7 +3914,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             replay_heartbeats=args.replay_heartbeats,
             ready_callback=ready_callback,
             board_publisher=settlement_board.request_refresh,
-            triage_scheduler=_schedule_terminal_triage_run,
         )
         backoff = BoundedBackoff(args.backoff_initial, args.backoff_max)
     except ValueError as exc:
@@ -3924,11 +3923,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         with single_instance_lock(args.lock):
             try:
                 _recover_pending_trust_before_attach()
-                if not _schedule_triage_startup_sweep():
-                    LOGGER.error(
-                        "terminal triage startup sweep could not be queued; "
-                        "periodic durable recovery remains active"
-                    )
                 settlement_board.start_periodic_refresh()
                 LOGGER.info(
                     "guardian attaching to %s/api/control/events; "

@@ -1,4 +1,4 @@
-"""W3-B: e2e channel matrix (wheel→venv→stage × zsh, plus dev + upgrade)."""
+"""Packaged and checkout materialization; publication lives in installer tests."""
 
 from __future__ import annotations
 
@@ -13,11 +13,8 @@ from pathlib import Path
 
 import pytest
 from vibecrafted_core.frontier_assets import vc_frame_config_source
-from vibecrafted_core.vc_frame_delivery import stage_vc_frame_config
 from vibecrafted_core.vc_frame_staging import (
     materialize_vc_frame_config,
-    resolve_clipboard_command,
-    resolve_pane_shell,
 )
 
 CORE = Path(__file__).resolve().parents[1]
@@ -155,136 +152,54 @@ def _install_wheel_venv(wheel: Path, venv_dir: Path) -> Path:
 
 
 def _run_stage_in_venv(
-    *,
-    venv_python: Path,
-    home: Path,
-    version: str,
-    path_env: str,
-    prefer_repo: bool = False,
+    *, venv_python: Path, home: Path, version: str, path_env: str
 ) -> str:
-    """Import stage_vc_frame_config from the *installed* wheel and run it."""
-    tools = home / ".local" / "share" / "vibecrafted" / "tools"
-    script = textwrap.dedent(
-        f"""
-        import os, sys, json
+    """Use installed wheel resources only, at an unpublished destination."""
+    script = textwrap.dedent(f"""
+        import json
         from pathlib import Path
-        home = Path({str(home)!r})
-        tools = Path({str(tools)!r})
-        os.environ["XDG_CONFIG_HOME"] = str(home / ".config")
-        runtime_root = tools / "vibecrafted-full"
-        runtime_payload = runtime_root / "vibecrafted-core" / "vibecrafted_core" / "runtime"
-        (runtime_root / "vibecrafted-core").mkdir(parents=True)
-        (runtime_payload / "scripts").mkdir(parents=True)
-        (runtime_root / "Makefile").write_text("all:\\n\\t@true\\n", encoding="utf-8")
-        (runtime_payload / "scripts" / "codex_spawn.sh").write_text(
-            "#!/usr/bin/env bash\\n", encoding="utf-8"
-        )
-        if {prefer_repo!r}:
-            os.environ["VIBECRAFTED_PREFER_REPO_VC_FRAME"] = "1"
-        else:
-            os.environ.pop("VIBECRAFTED_PREFER_REPO_VC_FRAME", None)
         import vibecrafted_core
         from vibecrafted_core.frontier_assets import vc_frame_config_source
-        from vibecrafted_core.vc_frame_delivery import (
-            stage_vc_frame_config,
-            vc_frame_user_config_dir,
-        )
-        from vibecrafted_core.vc_frame_staging import (
-            materialize_vc_frame_config,
-            resolve_clipboard_command,
-            resolve_pane_shell,
-        )
-        package_root = Path(vibecrafted_core.__file__).resolve()
-        assert "site-packages" in str(package_root) or "dist-packages" in str(
-            package_root
-        ), f"expected installed wheel import, got {{package_root}}"
-        src = vc_frame_config_source()
-        assert (src / "config.kdl").is_file(), src
-        # Channel-1 must resolve package data inside the venv site-packages
-        if not {prefer_repo!r}:
-            assert "site-packages" in str(src.resolve()) or "dist-packages" in str(
-                src.resolve()
-            ), f"expected packaged source, got {{src}}"
-            materialize_vc_frame_config(
-                src,
-                runtime_payload / "generated" / "vc-frame",
-                pane_shell=resolve_pane_shell({path_env!r}),
-                clipboard_command=resolve_clipboard_command({path_env!r}),
-            )
-        current = tools / "vibecrafted-current"
-        current.parent.mkdir(parents=True, exist_ok=True)
-        current.symlink_to(runtime_root)
-        plan = stage_vc_frame_config(
-            home=home,
-            tools_home=tools,
-            version={version!r},
-            prefer_repo={prefer_repo!r},
-            path_env={path_env!r},
-        )
-        view = vc_frame_user_config_dir(home)
-        cfg = (view / "config.kdl").resolve()
-        assert cfg.is_file(), cfg
-        text = cfg.read_text(encoding="utf-8")
-        assert "theme" in text
-        layouts = (view / "layouts").resolve()
-        research = (layouts / "research.kdl").read_text(encoding="utf-8")
-        workflow = (layouts / "workflow.kdl").read_text(encoding="utf-8")
-        all_kdl = "\\n".join(
-            [text]
-            + [
-                path.read_text(encoding="utf-8")
-                for path in sorted(layouts.glob("*.kdl"))
-            ]
-        )
-        out = {{
-            "channel": plan.channel,
-            "pane_shell": plan.pane_shell,
-            "source": str(src.resolve()),
+        from vibecrafted_core.vc_frame_staging import materialize_vc_frame_config, resolve_pane_shell, resolve_clipboard_command
+        home = Path({str(home)!r})
+        source = vc_frame_config_source()
+        assert "site-packages" in str(source) or "dist-packages" in str(source)
+        assert "site-packages" in vibecrafted_core.__file__ or "dist-packages" in vibecrafted_core.__file__
+        destination = home / "candidate" / {version!r}
+        shell = resolve_pane_shell({path_env!r})
+        materialize_vc_frame_config(source, destination, pane_shell=shell, clipboard_command=resolve_clipboard_command({path_env!r}))
+        research = (destination / "layouts/research.kdl").read_text()
+        workflow = (destination / "layouts/workflow.kdl").read_text()
+        kdl = "\\n".join(p.read_text() for p in destination.rglob("*.kdl"))
+        print(json.dumps({{
+            "pane_shell": shell, "source": str(source),
             "research_zsh": research.count('command="zsh"'),
             "workflow_zsh": workflow.count('command="zsh"'),
-            "research_shell": research.count(f'command="{{plan.pane_shell}}"'),
-            "workflow_shell": workflow.count(f'command="{{plan.pane_shell}}"'),
-            "has_layouts": (view / "layouts").exists(),
-            "has_themes": (view / "themes").exists(),
-            "hard_zsh_references": sum(
-                all_kdl.count(token)
-                for token in (
-                    'command="zsh"',
-                    'default_shell "zsh"',
-                    "exec zsh -l",
-                    "exec /bin/zsh -l",
-                )
-            ),
-            "hard_pbcopy_references": (
-                all_kdl.count('copy_command "pbcopy"')
-                + all_kdl.count("pbcopy <")
-            ),
-            "runtime_pointer_preserved": current.resolve() == runtime_root.resolve(),
-            "runtime_makefile_preserved": (current / "Makefile").is_file(),
-            "runtime_core_preserved": (current / "vibecrafted-core").is_dir(),
-            "runtime_launcher_preserved": (
-                current / "vibecrafted-core" / "vibecrafted_core"
-                / "runtime" / "scripts" / "codex_spawn.sh"
-            ).is_file(),
-        }}
-        print(json.dumps(out))
-        """
-    )
-    isolated_env = {**os.environ, "PATH": path_env}
-    isolated_env.pop("PYTHONPATH", None)
+            "research_shell": research.count(f'command="{{shell}}"'),
+            "workflow_shell": workflow.count(f'command="{{shell}}"'),
+            "has_layouts": (destination / "layouts").is_dir(),
+            "has_themes": (destination / "themes").is_dir(),
+            "active_config_absent": not (home / ".config").exists(),
+            "hard_zsh_references": sum(kdl.count(t) for t in ('command="zsh"', 'default_shell "zsh"', 'exec zsh -l', 'exec /bin/zsh -l')),
+            "hard_pbcopy_references": sum(kdl.count(t) for t in ('copy_command "pbcopy"', 'pbcopy <')),
+        }}))
+    """)
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(("VIBECRAFTED", "VC_FRAME", "ZELLIJ", "PYTHON"))
+    }
+    env.update(HOME=str(home), PATH=path_env)
     proc = subprocess.run(
-        [str(venv_python), "-I", "-c", script],
-        cwd=str(home),
+        [str(venv_python), "-I", "-B", "-c", script],
+        cwd=home,
+        env=env,
         capture_output=True,
         text=True,
         timeout=120,
         check=False,
-        env=isolated_env,
     )
-    if proc.returncode != 0:
-        pytest.fail(
-            "venv stage failed:\n" + (proc.stdout or "") + "\n" + (proc.stderr or "")
-        )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
     return proc.stdout.strip().splitlines()[-1]
 
 
@@ -315,18 +230,13 @@ def test_channel1_wheel_venv_stage_zsh_present(
         home=home,
         version="e2e-whl-zsh",
         path_env=_path_with_zsh(),
-        prefer_repo=False,
     )
     data = json.loads(raw)
-    assert data["channel"] == "store-current"
+    assert data["active_config_absent"]
     assert data["pane_shell"] == "zsh"
     assert data["research_zsh"] > 0
     assert data["workflow_zsh"] > 0
     assert data["has_layouts"] and data["has_themes"]
-    assert data["runtime_pointer_preserved"]
-    assert data["runtime_makefile_preserved"]
-    assert data["runtime_core_preserved"]
-    assert data["runtime_launcher_preserved"]
     assert "site-packages" in data["source"] or "dist-packages" in data["source"]
 
 
@@ -345,10 +255,9 @@ def test_channel1_wheel_venv_stage_zsh_absent(tmp_path: Path) -> None:
         home=home,
         version="e2e-whl-bash",
         path_env=path_env,
-        prefer_repo=False,
     )
     data = json.loads(raw)
-    assert data["channel"] == "store-current"
+    assert data["active_config_absent"]
     assert data["pane_shell"] != "zsh"
     assert data["research_zsh"] == 0
     assert data["workflow_zsh"] == 0
@@ -359,66 +268,20 @@ def test_channel1_wheel_venv_stage_zsh_absent(tmp_path: Path) -> None:
 
 
 @pytest.mark.e2e_delivery
-def test_channel_dev_checkout(tmp_path: Path, monkeypatch) -> None:
-    home = tmp_path / "home"
-    home.mkdir()
-    tools = home / ".local" / "share" / "vibecrafted" / "tools"
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
-    plan = stage_vc_frame_config(
-        home=home, tools_home=tools, version="e2e-dev", prefer_repo=True
-    )
-    assert plan.channel == "dev-checkout"
-    resolved = (plan.view_root / "config.kdl").resolve()
-    assert "config/vc-frame" in str(resolved)
-    # canonical checkout layouts keep zsh
-    research = (resolved.parent / "layouts" / "research.kdl").read_text(
-        encoding="utf-8"
-    )
-    assert 'command="zsh"' in research
-
-
-@pytest.mark.e2e_delivery
-def test_upgrade_flip_atomicity(tmp_path: Path, monkeypatch) -> None:
-    home = tmp_path / "home"
-    home.mkdir()
-    tools = home / ".local" / "share" / "vibecrafted" / "tools"
-    runtime = tools / "vibecrafted-full"
-    runtime_payload = runtime / "vibecrafted-core" / "vibecrafted_core" / "runtime"
-    (runtime / "vibecrafted-core").mkdir(parents=True)
-    (runtime_payload / "scripts").mkdir(parents=True)
-    (runtime / "Makefile").write_text("all:\n\t@true\n", encoding="utf-8")
-    (runtime_payload / "scripts" / "codex_spawn.sh").write_text(
-        "#!/usr/bin/env bash\n", encoding="utf-8"
-    )
+@pytest.mark.parametrize("shell,clipboard", [("zsh", "pbcopy"), ("bash", None)])
+def test_checkout_delivery_uses_unpublished_materialization(
+    tmp_path: Path, shell: str, clipboard: str | None
+) -> None:
+    source = vc_frame_config_source()
+    before = {p: p.read_bytes() for p in source.rglob("*") if p.is_file()}
+    destination = tmp_path / "candidate/generated/vc-frame"
     materialize_vc_frame_config(
-        vc_frame_config_source(),
-        runtime_payload / "generated" / "vc-frame",
-        pane_shell=resolve_pane_shell(),
-        clipboard_command=resolve_clipboard_command(),
+        source, destination, pane_shell=shell, clipboard_command=clipboard
     )
-    current = tools / "vibecrafted-current"
-    current.parent.mkdir(parents=True, exist_ok=True)
-    current.symlink_to(runtime)
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
-    monkeypatch.delenv("VIBECRAFTED_PREFER_REPO_VC_FRAME", raising=False)
-    stage_vc_frame_config(
-        home=home, tools_home=tools, version="e2e-A", prefer_repo=False
-    )
-    view = home / ".config" / "vibecrafted" / "vc-frame" / "config.kdl"
-    path_before = str(view)
-    stage_vc_frame_config(
-        home=home, tools_home=tools, version="e2e-B", prefer_repo=False, force=True
-    )
-    assert str(view) == path_before
-    assert current.resolve() == runtime.resolve()
-    assert (current / "Makefile").is_file()
-    assert (current / "vibecrafted-core").is_dir()
-    assert (
-        current
-        / "vibecrafted-core"
-        / "vibecrafted_core"
-        / "runtime"
-        / "scripts"
-        / "codex_spawn.sh"
-    ).is_file()
-    assert not list(tools.glob(".vibecrafted-current.tmp.*"))
+    assert (destination / "config.kdl").is_file()
+    assert (destination / "themes").is_dir()
+    research = (destination / "layouts/research.kdl").read_text()
+    assert f'command="{shell}"' in research
+    assert {p: p.read_bytes() for p in source.rglob("*") if p.is_file()} == before
+    assert not (tmp_path / ".config").exists()
+    assert not (tmp_path / "tools/vibecrafted-current").exists()

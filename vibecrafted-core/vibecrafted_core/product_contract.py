@@ -176,6 +176,15 @@ _EMBEDDED_DOCUMENTATION_PATHS = {
         }
     ),
 }
+_VENDORED_OPENSSL_RELATIVE_SUFFIXES = (
+    "/lib/libssl.3.dylib",
+    "/lib/libcrypto.3.dylib",
+)
+_VENDORED_OPENSSL_HOST_PREFIXES = (
+    "/opt/homebrew/Cellar/openssl@3/",
+    "/opt/homebrew/etc/openssl@3",
+    "/opt/homebrew/opt/openssl@3/",
+)
 _FILE_KINDS = frozenset({"executable", "dylib", "resource", "config"})
 _APP_ENTRYPOINTS = frozenset({"app", "terminal", "frame"})
 _WALKAROUND_CHECKS = frozenset(
@@ -221,6 +230,7 @@ _LAUNCH_PRIMARY_SHELL = (
 _TERMINAL_HELPER_APP = "Contents/Helpers/vc-terminal.app"
 _TERMINAL_HELPER_BUNDLE_ID = "io.vetcoders.vc-terminal"
 _TERMINAL_HELPER_ICON = "alacritty.icns"
+_TERMINAL_HELPER_DISPLAY_NAME = "VC Terminal"
 PRODUCT_MANIFEST_REFERENT = "manifests/product-manifest.json"
 RUNTIME_MANIFEST_REFERENT = "manifests/runtime-manifest.json"
 _MAX_SIGNED_PAYLOAD_BYTES = 64 * 1024 * 1024
@@ -1169,6 +1179,18 @@ def _verify_macho_closure(
         _fail(E_DEPENDENCY, f"unreachable declared dylibs: {', '.join(unreachable)}")
 
 
+def _vendored_openssl_host_path(relative: str, host_path: str) -> bool:
+    """True for compiled-in OPENSSLDIR/ENGINESDIR of the pinned OpenSSL dylibs.
+
+    After install_name_tool the load commands are @loader_path. Remaining
+    /opt/homebrew strings are OpenSSL's default config/cert directories, not
+    this build's first-party payload. /Users paths are never accepted here.
+    """
+    if not relative.endswith(_VENDORED_OPENSSL_RELATIVE_SUFFIXES):
+        return False
+    return host_path.startswith(_VENDORED_OPENSSL_HOST_PREFIXES)
+
+
 def _reject_host_bound_paths(path: Path, *, relative: str, kind: str) -> None:
     """Reject payload bytes that silently bind a module to the build host."""
     if kind == "resource":
@@ -1181,6 +1203,8 @@ def _reject_host_bound_paths(path: Path, *, relative: str, kind: str) -> None:
     for match in _BUILD_HOST_PATH_RE.finditer(content):
         host_path = match.group("path").decode("utf-8", errors="replace")
         if host_path in documentation_paths:
+            continue
+        if _vendored_openssl_host_path(relative, host_path):
             continue
         _fail(
             E_PATH,
@@ -2088,6 +2112,10 @@ def verify_app(app_path: str | Path, *, require_clean: bool = False) -> dict[str
         _fail(E_BUNDLE, "terminal helper executable is not canonical")
     if helper_plist.get("CFBundleIconFile") != _TERMINAL_HELPER_ICON:
         _fail(E_BUNDLE, "terminal helper icon is not canonical")
+    if helper_plist.get("CFBundleDisplayName") != _TERMINAL_HELPER_DISPLAY_NAME:
+        _fail(E_BUNDLE, "terminal helper display name is not canonical")
+    if helper_plist.get("CFBundleName") != _TERMINAL_HELPER_DISPLAY_NAME:
+        _fail(E_BUNDLE, "terminal helper bundle name is not canonical")
     helper_icon_relative = (
         f"{_TERMINAL_HELPER_APP}/Contents/Resources/{_TERMINAL_HELPER_ICON}"
     )
@@ -3926,6 +3954,8 @@ def _self_test() -> int:
                     "CFBundleIdentifier": "io.vetcoders.vc-terminal",
                     "CFBundleExecutable": "alacritty",
                     "CFBundleIconFile": "alacritty.icns",
+                    "CFBundleName": "VC Terminal",
+                    "CFBundleDisplayName": "VC Terminal",
                     "CFBundlePackageType": "APPL",
                 },
                 handle,

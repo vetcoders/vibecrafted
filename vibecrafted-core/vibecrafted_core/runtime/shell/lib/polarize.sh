@@ -67,7 +67,7 @@ _vetcoders_write_polarize_prism_payload() {
 
 _vetcoders_polarize_score() {
   local prism_json="$1"
-  python3 - "$prism_json" <<'PY'
+  "$(_vetcoders_internal_python)" - "$prism_json" <<'PY'
 import json
 import pathlib
 import sys
@@ -79,7 +79,7 @@ PY
 
 _vetcoders_polarize_band_select() {
   local prism_json="$1"
-  python3 - "$prism_json" <<'PY'
+  "$(_vetcoders_internal_python)" - "$prism_json" <<'PY'
 import json
 import pathlib
 import sys
@@ -184,7 +184,7 @@ _vetcoders_polarize_emit_context_pack() {
     }
   fi
 
-  python3 - "$prism_json" "$sidecar_path" "$band" "$target_repo" "$slug" "$raw_path" "$task" <<'PY'
+  "$(_vetcoders_internal_python)" - "$prism_json" "$sidecar_path" "$band" "$target_repo" "$slug" "$raw_path" "$task" <<'PY'
 import hashlib
 import json
 import pathlib

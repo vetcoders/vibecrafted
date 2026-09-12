@@ -539,7 +539,10 @@ def build_maintenance_section(*, control_plane: Path | None = None) -> dict[str,
         "control_plane": str(root),
         "scanned": 0,
         "capped": False,
+        "identified_runtime_runs": 0,
+        "runtime_runs_identified_by_snapshot": 0,
         "orphan_runtime_runs": 0,
+        "runtime_runs_with_transcript_only": 0,
         "corrupt_run_snapshots": 0,
         "findings": [],
     }
@@ -553,6 +556,9 @@ def build_maintenance_section(*, control_plane: Path | None = None) -> dict[str,
     section["available"] = True
     findings: list[dict[str, Any]] = []
 
+    identified = 0
+    identified_by_snapshot = 0
+    transcript_only = 0
     orphans = 0
     scanned = 0
     try:
@@ -564,12 +570,34 @@ def build_maintenance_section(*, control_plane: Path | None = None) -> dict[str,
                 if not entry.is_dir():
                     continue
                 scanned += 1
-                if not (Path(entry.path) / "meta.json").exists():
-                    orphans += 1
+                run_dir = Path(entry.path)
+                run_id = entry.name
+                meta, _ = _read_json(run_dir / "meta.json")
+                # Runtime meta is normally the writer-owned identity receipt.
+                # A missing (or malformed) receipt is not enough to call a
+                # directory an orphan: a prior full projection may already
+                # have persisted the exact same run identity in runs/<id>.json.
+                if isinstance(meta, dict) and str(meta.get("run_id") or "") == run_id:
+                    identified += 1
+                    continue
+                snapshot, _ = _read_json(root / "runs" / f"{run_id}.json")
+                if (
+                    isinstance(snapshot, dict)
+                    and str(snapshot.get("run_id") or "") == run_id
+                ):
+                    identified += 1
+                    identified_by_snapshot += 1
+                    continue
+                orphans += 1
+                if (run_dir / "transcript.log").is_file():
+                    transcript_only += 1
     except OSError:
         pass
     section["scanned"] = scanned
+    section["identified_runtime_runs"] = identified
+    section["runtime_runs_identified_by_snapshot"] = identified_by_snapshot
     section["orphan_runtime_runs"] = orphans
+    section["runtime_runs_with_transcript_only"] = transcript_only
 
     corrupt = 0
     try:
@@ -598,9 +626,11 @@ def build_maintenance_section(*, control_plane: Path | None = None) -> dict[str,
             _finding(
                 "orphan_runtime_runs",
                 WARN,
-                f"{orphans} runtime run directory(ies) carry no meta.json; "
-                "evidence exists but identity does not",
+                f"{orphans} runtime run directory(ies) have no authoritative "
+                "runtime meta or matching run snapshot; retained evidence was "
+                "not assigned an inferred identity",
                 count=orphans,
+                transcript_only=transcript_only,
             )
         )
     if scanned >= RUNTIME_RUN_PRESSURE:

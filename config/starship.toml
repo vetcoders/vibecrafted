@@ -1,140 +1,21 @@
-scan_timeout = 20
-# Raised from 120ms because Python Framework cold-start ("--version") on
-# macOS can easily cross half a second on first invocation and was spamming
-# starship timeout warnings.
-command_timeout = 2000
+# Product default: path on line one, simple ❯ on line two.
 add_newline = true
 
-format = """$time$fill$jobs$cmd_duration
-$directory$git_branch$git_status$env_var_vetcoders_agent$env_var_vetcoders_spawn_runtime$python$nodejs$rust
+format = """$directory
 $character"""
-
-right_format = ""
 
 [character]
 success_symbol = "[❯](bold green)"
 error_symbol = "[❯](bold red)"
-vimcmd_symbol = "[❮](bold green)"
 
 [directory]
 style = "bold blue"
 truncation_length = 3
 truncate_to_repo = true
-format = "[$path]($style) "
+format = "[$path]($style)"
 home_symbol = "~"
 
-[git_branch]
-style = "bold magenta"
-format = "[$branch]($style) "
-truncation_length = 24
-truncation_symbol = "…"
-symbol = ""
-
-[git_status]
-style = "bold red"
-format = "[$all_status$ahead_behind]($style) "
-conflicted = "="
-ahead = "⇡"
-behind = "⇣"
-diverged = "⇕"
-up_to_date = ""
-untracked = "?"
-stashed = "S"
-modified = "!"
-staged = "+"
-renamed = "»"
-deleted = "✘"
-ignore_submodules = true
-
+# This prompt is the pre-vc-start door. Host python3 on macOS is 3.9.6
+# (no tomllib). Do not advertise it as the product interpreter.
 [python]
-symbol = "py "
-format = '[$symbol$version( \($virtualenv\))]($style) '
-style = "bold yellow"
-detect_extensions = ["py"]
-detect_files = ["requirements.txt", "pyproject.toml", "Pipfile"]
-# Pin the binary starship uses for version discovery. Default fallback chain
-# would probe `/opt/homebrew/opt/python/libexec/bin/python` (Framework python)
-# which is slow enough to trip command_timeout.
-python_binary = ["python3"]
-
-[nodejs]
-symbol = "node "
-format = '[$symbol$version]($style) '
-style = "bold green"
-detect_files = ["package.json", ".node-version"]
-detect_folders = ["node_modules"]
-
-[rust]
-symbol = "rs "
-format = '[$symbol$version]($style) '
-style = "bold red"
-detect_files = ["Cargo.toml", "Cargo.lock"]
-detect_folders = ["src-tauri"]
-
-[cmd_duration]
-min_time = 1500
-format = "[$duration](bold yellow) "
-show_milliseconds = false
-
-[time]
-disabled = false
-format = '[$time]($style)'
-time_format = "%d.%m.%Y | %H:%M:%S"
-style = "bold white"
-use_12hr = false
-utc_time_offset = "local"
-
-[fill]
-symbol = " "
-
-[jobs]
-symbol = "job "
-style = "bold yellow"
-threshold = 1
-format = "[$symbol$number]($style) "
-
-[env_var.VETCODERS_AGENT]
-variable = "VETCODERS_AGENT"
-symbol = "agent:"
-style = "bold cyan"
-format = "[$symbol$env_value]($style) "
-
-[env_var.VETCODERS_SPAWN_RUNTIME]
-variable = "VETCODERS_SPAWN_RUNTIME"
-symbol = "rt:"
-style = "bold purple"
-format = "[$symbol$env_value]($style) "
-
-[aws]
 disabled = true
-
-[gcloud]
-disabled = true
-
-[azure]
-disabled = true
-
-[kubernetes]
-disabled = true
-
-[docker_context]
-disabled = true
-
-[package]
-disabled = true
-
-[username]
-disabled = true
-
-[hostname]
-disabled = true
-
-[battery]
-disabled = false
-format = "[$symbol$percentage]($style) "
-
-[[battery.display]]
-threshold = 20
-style = "bold red"
-charging_symbol = "⚡"
-discharging_symbol = "🔋"

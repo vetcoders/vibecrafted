@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 
+import pytest
 from vibecrafted_core import ship
 from vibecrafted_core.lifecycle_control import lifecycle_control_main
 from vibecrafted_core.lifecycle_runner import (
@@ -476,3 +478,306 @@ def test_await_stage_reports_delivery_and_death(
     payload = json.loads(capsys.readouterr().out)
     assert payload["report_written"] is False
     assert payload["worker_dead_without_report"] is True
+
+
+# --------------------------------------------------------------------------
+# Fleet obligations as an operator gate.
+#
+# The dispatcher owns the cuts a WRITE stage launched; the stage worker's own
+# report says nothing about them.  These tests drive the REAL control verbs
+# over a REAL dispatch receipt ledger — only the provider transport is faked,
+# at the lowest boundary (CellLauncher).
+# --------------------------------------------------------------------------
+
+from vibecrafted_core.dispatch.receipts import DispatchReceiptStore
+from vibecrafted_core.lifecycle_control import (
+    approve_transition,
+    await_stage,
+    interrupt_workflow,
+)
+from vibecrafted_core.lifecycle_fleet import (
+    dispatch_recorded_children,
+    dispatcher_fleet_launch,
+    mission_cuts,
+    record_write_stage_fleet,
+    stage_dispatch_run_id,
+)
+
+from .test_lifecycle_fleet import (
+    _plan,
+    _report_writer,
+    _seed_repo,
+    _write_stage,
+)
+
+_FLEET_PARENT = "life-fleet-gate"
+_FLEET_STAGE = "implement"
+
+
+def _settled_fleet(tmp_path: Path, monkeypatch) -> tuple[Path, Path, list[str]]:
+    """Run one real three-cut fleet to settlement; return repo, plan, launches."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / ".vibecrafted"))
+    repo = tmp_path / "repo"
+    _seed_repo(repo)
+    plan = _plan(repo, ("W0-a", "W0-b", "W0-c"), ("codex", "claude", "codex"))
+    mission = f"---\ndispatch_plan: {plan.name}\ncuts: W0-a, W0-b, W0-c\n---\n"
+    launches: list[str] = []
+    fleet = record_write_stage_fleet(
+        stage=_write_stage(_FLEET_STAGE),
+        cuts=mission_cuts(mission),
+        parent_run_id=_FLEET_PARENT,
+        repo_root=repo,
+        agent="codex",
+    )
+    dispatch_recorded_children(
+        fleet,
+        fleet_launch=dispatcher_fleet_launch(
+            repo_root=repo,
+            mission_text=mission,
+            cell_launcher=_report_writer(launches),
+            wait=True,
+        ),
+    )
+    return repo, plan, launches
+
+
+def _fleet_state(tmp_path: Path, plan: Path) -> tuple[Path, dict]:
+    """A lifecycle state whose WRITE stage owns the settled fleet above.
+
+    The baton cargo is deliberately present and non-empty: the ONLY thing that
+    may hold this run back is the fleet itself.
+    """
+    report = tmp_path / "stage-report.md"
+    report.write_text("stage worker delivered\n", encoding="utf-8")
+    state_path = tmp_path / "state.json"
+    state = {
+        "schema": "vibecrafted.lifecycle.v1",
+        "run_id": _FLEET_PARENT,
+        "workflow": "vc-ship",
+        "status": "launching",
+        "root": str(tmp_path),
+        "state_path": str(state_path),
+        "report_path": str(tmp_path / "run-report.md"),
+        "human_controls": ["approve_transition", "interrupt_workflow"],
+        "spec": {"prompt": "mission", "runtime": "headless"},
+        "baton": {
+            "next_stage": "review",
+            "next_agent": "codex",
+            "previous_reports": [str(report)],
+        },
+        "stages": [
+            {
+                "id": _FLEET_STAGE,
+                "launch": {"run_id": "stage-worker-run", "report": str(report)},
+                "fleet": {
+                    "parent_run_id": _FLEET_PARENT,
+                    "stage_id": _FLEET_STAGE,
+                    "cuts": ["W0-a", "W0-b", "W0-c"],
+                    "children": [],
+                    "plan_path": str(plan),
+                },
+            }
+        ],
+    }
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    return state_path, state
+
+
+def _receipt_store(repo: Path, plan: Path) -> DispatchReceiptStore:
+    """The dispatcher's own ledger API — never a hand-edited state file."""
+    from vibecrafted_core.dispatch.doctor import diagnose_file
+
+    report = diagnose_file(plan)
+    assert report.dispatch is not None
+    return DispatchReceiptStore(
+        stage_dispatch_run_id(_FLEET_PARENT, _FLEET_STAGE),
+        report.dispatch.cuts,
+        repo_root=str(repo),
+        create=False,
+    )
+
+
+def test_approve_advances_when_the_whole_fleet_is_genuinely_settled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _repo, plan, launches = _settled_fleet(tmp_path, monkeypatch)
+    assert sorted(launches) == ["W0-a", "W0-b", "W0-c"]
+    state_path, state = _fleet_state(tmp_path, plan)
+
+    launched: list[str] = []
+
+    def _continuation(spec):
+        launched.append(spec.start_stage)
+        return {"run_id": "continuation-run"}
+
+    child = approve_transition(state_path, state, run_lifecycle_fn=_continuation)
+
+    assert child["run_id"] == "continuation-run"
+    assert launched == ["review"]
+    action = state["operator_actions"][-1]
+    assert action["details"]["fleet_verdict"] == "complete"
+
+
+def test_approve_refuses_while_the_fleet_is_active_or_failed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The recorded counterexample, inverted into a gate.
+
+    Two cuts still active, one failed, and a perfectly good stage worker
+    report: approve must not advance the lifecycle.
+    """
+    repo, plan, _ = _settled_fleet(tmp_path, monkeypatch)
+    store = _receipt_store(repo, plan)
+    store.update("W0-a", "active")
+    store.update("W0-b", "active")
+    store.update("W0-c", "failed", acceptance="failed")
+
+    state_path, state = _fleet_state(tmp_path, plan)
+    launched: list[str] = []
+
+    with pytest.raises(ValueError) as excinfo:
+        approve_transition(
+            state_path,
+            state,
+            run_lifecycle_fn=lambda spec: launched.append(spec.start_stage) or {},
+        )
+
+    message = str(excinfo.value)
+    assert "fleet obligations not settled" in message
+    assert "W0-a=active" in message and "W0-c=failed" in message
+    # The refusal must name the existing recovery verb, not a new one.
+    assert f"--resume {stage_dispatch_run_id(_FLEET_PARENT, _FLEET_STAGE)}" in message
+    assert launched == [], "no continuation may start over an open fleet"
+
+
+def test_approve_refuses_when_a_declared_cut_has_no_receipt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An obligation nobody can account for is not an obligation that is met."""
+    _repo, plan, _ = _settled_fleet(tmp_path, monkeypatch)
+    state_path, state = _fleet_state(tmp_path, plan)
+    state["stages"][0]["fleet"]["cuts"].append("W0-ghost")
+
+    with pytest.raises(ValueError, match="W0-ghost=missing"):
+        approve_transition(state_path, state, run_lifecycle_fn=lambda spec: {})
+
+
+def test_forced_approve_records_exactly_which_obligations_it_stepped_over(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo, plan, _ = _settled_fleet(tmp_path, monkeypatch)
+    _receipt_store(repo, plan).update("W0-b", "failed", acceptance="failed")
+    state_path, state = _fleet_state(tmp_path, plan)
+
+    approve_transition(
+        state_path,
+        state,
+        run_lifecycle_fn=lambda spec: {"run_id": "forced"},
+        force=True,
+    )
+
+    details = state["operator_actions"][-1]["details"]
+    assert details["forced_open_fleet"] == ["W0-b=failed(failed)"]
+
+
+def test_await_does_not_call_a_stage_complete_while_its_fleet_still_owes_work(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo, plan, _ = _settled_fleet(tmp_path, monkeypatch)
+    _receipt_store(repo, plan).update("W0-a", "active")
+    _state_path, state = _fleet_state(tmp_path, plan)
+
+    monkeypatch.setattr(
+        "vibecrafted_core.lifecycle_control.control_plane_await_run",
+        lambda *_a, **_k: {"completed": True, "worker_alive": False, "reason": "ok"},
+    )
+    payload = await_stage(state, idle_seconds=0.05, interval_seconds=0.01)
+
+    assert payload["stage_worker_completed"] is True
+    assert payload["completed"] is False
+    assert payload["reason"] == "fleet_active"
+    assert payload["fleet"]["blocking"] == ["W0-a=active(active)"]
+
+
+def test_await_hard_cap_covers_stage_and_fleet_wait_together(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo, plan, _ = _settled_fleet(tmp_path, monkeypatch)
+    _receipt_store(repo, plan).update("W0-a", "active")
+    _state_path, state = _fleet_state(tmp_path, plan)
+
+    def stage_wait(*_args, **_kwargs):
+        time.sleep(0.03)
+        return {"completed": True, "worker_alive": False, "reason": "ok"}
+
+    monkeypatch.setattr(
+        "vibecrafted_core.lifecycle_control.control_plane_await_run", stage_wait
+    )
+    started = time.monotonic()
+    payload = await_stage(
+        state, idle_seconds=1, interval_seconds=0.01, hard_cap_seconds=0.02
+    )
+    assert time.monotonic() - started < 0.05
+    assert payload["completed"] is False
+    assert payload["timed_out"] is True
+
+
+def test_await_reports_complete_once_the_ledger_says_the_fleet_settled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _repo, plan, _ = _settled_fleet(tmp_path, monkeypatch)
+    _state_path, state = _fleet_state(tmp_path, plan)
+
+    monkeypatch.setattr(
+        "vibecrafted_core.lifecycle_control.control_plane_await_run",
+        lambda *_a, **_k: {"completed": True, "worker_alive": False, "reason": "ok"},
+    )
+    payload = await_stage(state, idle_seconds=0.05, interval_seconds=0.01)
+
+    assert payload["completed"] is True
+    assert payload["fleet"]["verdict"] == "complete"
+
+
+@pytest.mark.parametrize("acceptance", ["", "unknown", "failed"])
+def test_settled_receipt_requires_verified_acceptance(
+    tmp_path: Path, monkeypatch, acceptance: str
+) -> None:
+    repo, plan, _ = _settled_fleet(tmp_path, monkeypatch)
+    _receipt_store(repo, plan).update("W0-a", "settled", acceptance=acceptance)
+    state_path, state = _fleet_state(tmp_path, plan)
+    with pytest.raises(ValueError, match="W0-a=unknown\\(settled\\)"):
+        approve_transition(state_path, state, run_lifecycle_fn=lambda spec: {})
+
+    monkeypatch.setattr(
+        "vibecrafted_core.lifecycle_control.control_plane_await_run",
+        lambda *_a, **_k: {"completed": True, "worker_alive": False, "reason": "ok"},
+    )
+    payload = await_stage(state, idle_seconds=0.05, interval_seconds=0.01)
+    assert payload["completed"] is False
+    assert payload["fleet"]["blocking"] == ["W0-a=unknown(settled)"]
+
+
+def test_interrupt_stops_live_cuts_by_their_recorded_provider_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo, plan, _ = _settled_fleet(tmp_path, monkeypatch)
+    store = _receipt_store(repo, plan)
+    store.update("W0-a", "active", provider_run_id="provider-W0-a")
+    store.update("W0-c", "failed", acceptance="failed")
+    state_path, state = _fleet_state(tmp_path, plan)
+
+    stopped: list[str] = []
+
+    def _stop(run_id, reason=""):
+        stopped.append(run_id)
+        return {"accepted": True, "reason": reason}
+
+    result = interrupt_workflow(state_path, state, stop_run_fn=_stop)
+
+    # The live cut is stopped by the identity the dispatcher recorded; the
+    # settled and failed siblings are left alone.
+    assert stopped == ["stage-worker-run", "provider-W0-a"]
+    assert [item["cut_id"] for item in result["fleet_stops"]] == ["W0-a"]
+    assert result["scheduler_stop"]["accepted"] is True
+    assert _receipt_store(repo, plan).read()["scheduler_stop_requested"] is True
+    assert state["status"] == "interrupted"

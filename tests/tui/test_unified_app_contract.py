@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import os
+import platform
 import plistlib
 import re
 import shutil
@@ -198,7 +199,7 @@ def test_final_embedded_runtime_pack_rejects_invalid_nested_macho(
     tmp_path: Path, macho_executable: Path
 ) -> None:
     payload = tmp_path / "payload/VibecraftedRuntime"
-    terminal = payload / "bin/vc-terminal"
+    terminal = payload / "libexec/vc-terminal"
     terminal.parent.mkdir(parents=True)
     shutil.copy2(macho_executable, terminal)
     _codesign_macho(terminal)
@@ -218,14 +219,14 @@ def test_final_embedded_runtime_pack_rejects_invalid_nested_macho(
 
     invalid_result = _runtime_pack_macho_preflight(invalid)
     assert invalid_result.returncode != 0
-    assert "invalid signature: bin/vc-terminal" in invalid_result.stderr
+    assert "invalid signature: libexec/vc-terminal" in invalid_result.stderr
 
 
 def test_valid_runtime_pack_preserves_success_across_late_cleanup_race(
     tmp_path: Path, macho_executable: Path
 ) -> None:
     payload = tmp_path / "payload/VibecraftedRuntime"
-    terminal = payload / "bin/vc-terminal"
+    terminal = payload / "libexec/vc-terminal"
     terminal.parent.mkdir(parents=True)
     shutil.copy2(macho_executable, terminal)
     _codesign_macho(terminal)
@@ -323,7 +324,7 @@ def _module_fixture(
     return manifest
 
 
-def _runtime_pack_fixture(app: Path) -> str:
+def _runtime_pack_fixture(app: Path, macho_executable: Path) -> str:
     name = "Vibecrafted_RuntimePack_1.0.0-20260814-22222222-darwin-arm64.tar.gz"
     embedded = app / "Contents/Resources/runtime-pack" / name
     with tempfile.TemporaryDirectory(prefix="runtime-pack-fixture.") as temporary:
@@ -343,8 +344,17 @@ def _runtime_pack_fixture(app: Path) -> str:
         frame_wrapper.chmod(0o755)
         native_frame = payload / "libexec/vc-frame"
         native_frame.parent.mkdir(parents=True)
-        native_frame.write_bytes(b"\xcf\xfa\xed\xfe" + b"\x00" * 32)
-        native_frame.chmod(0o755)
+        shutil.copy2(macho_executable, native_frame)
+        terminal_wrapper = payload / "bin/vc-terminal"
+        terminal_wrapper.write_text(
+            (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
+                encoding="utf-8"
+            ),
+            encoding="utf-8",
+        )
+        terminal_wrapper.chmod(0o755)
+        native_terminal = payload / "libexec/vc-terminal"
+        shutil.copy2(macho_executable, native_terminal)
         frame_config = payload / runtime_pack_contract.VC_FRAME_CONFIG_ROOT
         (frame_config / "layouts").mkdir(parents=True)
         (frame_config / "themes").mkdir()
@@ -430,6 +440,8 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
                 "CFBundleIdentifier": "io.vetcoders.vc-terminal",
                 "CFBundleExecutable": "alacritty",
                 "CFBundleIconFile": "alacritty.icns",
+                "CFBundleName": "VC Terminal",
+                "CFBundleDisplayName": "VC Terminal",
                 "CFBundlePackageType": "APPL",
             },
             handle,
@@ -523,7 +535,7 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
         entrypoint_name="frame",
         product_entry=frame_product_entry,
     )
-    runtime_pack_name = _runtime_pack_fixture(app)
+    runtime_pack_name = _runtime_pack_fixture(app, macho_executable)
     manifest = {
         "schema": contract.PRODUCT_SCHEMA,
         "product": contract.PRODUCT_NAME,
@@ -1009,26 +1021,53 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
             "func applicationShouldTerminateAfterLastWindowClosed"
         )
     ]
-    assert "launchWorkspaceTerminal()" in launch_handler
-    assert "showMainWindowIfNeeded()" not in launch_handler
-    assert "\t<key>LSUIElement</key>\n\t<true/>" in info
+    workspace_launch = delegate[
+        delegate.index("private func launchWorkspaceTerminal") : delegate.index(
+            "private func terminalIsLive"
+        )
+    ]
+    terminal_launch = delegate[
+        delegate.index("private func openWorkspaceTerminal") : delegate.index(
+            "private func terminalIsLive"
+        )
+    ]
+    assert "connectCommandDeck()" in launch_handler
+    assert "launchWorkspaceTerminal()" not in launch_handler
+    assert "showMainWindowIfNeeded()" in launch_handler
+    assert "\t<key>LSUIElement</key>\n\t<false/>" in info
     assert "\t<key>NSQuitAlwaysKeepsWindows</key>\n\t<false/>" in info
-    assert 'withTitle: "Open VC Console"' in delegate
-    assert 'withTitle: "Open VC Terminal"' in delegate
-    assert 'withTitle: "VC Server"' in delegate
-    assert 'withTitle: "Start"' in delegate
-    assert 'withTitle: "Stop"' in delegate
-    assert 'withTitle: "Restart"' in delegate
-    assert 'withTitle: "Open Logs"' in delegate
-    assert 'withTitle: "Server Diagnostics…"' in delegate
+    tray = (
+        REPO_ROOT
+        / "vibecrafted-app/shell-agent/app/Vibecrafted/CommandDeck/StatusItemController.swift"
+    ).read_text()
+    for title in [
+        "Open Vibecrafted",
+        "Open Terminal",
+        "Check for Updates…",
+        "Workspaces",
+        "Help & Diagnostics…",
+        "Advanced",
+        "Stop Runtime Service…",
+        "Repair Runtime…",
+        "Quit Vibecrafted",
+    ]:
+        assert title in tray
+    assert "Command Deck:" not in tray
+    assert "cappedMenuTitle" not in tray
+    help_dialog = delegate[
+        delegate.index("private func showStatusItemHelp") : delegate.index(
+            "private func activeRunSummary"
+        )
+    ]
+    assert 'alert.addButton(withTitle: "Open Diagnostics")' in help_dialog
+    assert "showServerDiagnostics()" in help_dialog
     assert 'withTitle: "About Vibecrafted"' in delegate
-    assert 'withTitle: "Vibecrafted Help"' in delegate
+    assert 'withTitle: "Check for Updates…"' in delegate
     assert 'withTitle: "Quit Vibecrafted"' in delegate
     assert "#selector(requestQuit)" in delegate
     assert 'process.arguments = ["status", "--activity", "--json"]' in delegate
     assert "func applicationShouldTerminate(" in delegate
-    assert 'withTitle: "Cancel"' in delegate
-    assert 'withTitle: "Quit Anyway"' in delegate
+    assert 'withTitle: "Stop Runtime Service"' in delegate
     # One caretaker/control_plane truth: the tray derives server health from the
     # caretaker verb, never from a second health JSON read in Swift.
     assert "process.arguments = serverCaretakerArguments()" in delegate
@@ -1038,15 +1077,12 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
         'process.arguments = ["server", "service", "status", "--json"]' not in delegate
     )
     assert 'process.arguments = ["server", "service", "logs", "--json"]' in delegate
-    assert "menu.delegate = self" in delegate
+    assert "menu.delegate = self" in tray
     assert "statusRefreshTimer = Timer.scheduledTimer(" in delegate
-    assert "statusIcon(health:" in delegate
-    assert "health.color.setFill()" in delegate
-    assert "process.isRunning" in delegate
-    assert (
-        "NSRunningApplication(processIdentifier: process.processIdentifier)?.activate(options: [])"
-        in delegate
-    )
+    assert "TrayGlyph.statusImage(health:" in tray
+    assert "NSStatusBar.system.statusItem" not in delegate
+    assert "terminalApplication?.isTerminated" in delegate
+    assert "application.activate(options: [])" in delegate
     termination_handler = delegate[
         delegate.index(
             "func applicationShouldTerminateAfterLastWindowClosed"
@@ -1054,6 +1090,35 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     ]
     assert "    false\n" in termination_handler
     assert "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty" in delegate
+    # A normal launch first asks the installer-owned read-only resolver which
+    # generation is current. Only a truly absent runtime may bootstrap the
+    # bundled carrier; an unusable one must be refused rather than overwritten.
+    assert "resolveInstalledRuntime { [weak self] resolution in" in workspace_launch
+    assert "case .ready:" in workspace_launch
+    assert "case .absent(let reason):" in workspace_launch
+    assert "self.installCanonicalRuntime { [weak self] result in" in workspace_launch
+    assert "case .unusable(let reason):" in workspace_launch
+    assert "self.openWorkspaceTerminal(install: install)" in workspace_launch
+    # The selected generation's terminal wrapper receives the explicit primary
+    # shell/start argv. The bundled terminal host remains onboarding material,
+    # never the direct launch target of the App.
+    assert "NSWorkspace.shared.openApplication(" not in terminal_launch
+    assert "generationRoot: install.root, terminal: install.terminal" in terminal_launch
+    terminal_owner = (
+        REPO_ROOT
+        / "vibecrafted-app/shell-agent/app/Vibecrafted/CommandDeck/TerminalLauncher.swift"
+    ).read_text()
+    assert 'arguments = ["-e", primaryShell.path]' in terminal_owner
+    assert (
+        "process.currentDirectoryURL = specification.workingDirectory" in terminal_owner
+    )
+    assert "environment: environment" in terminal_launch
+    assert (
+        "terminalLaunch = try TerminalLauncher.launch(specification)" in terminal_launch
+    )
+    assert "process.executableURL = install.terminalHost" not in terminal_launch
+    assert "\t<key>CFBundleIconFile</key>\n\t<string>Vibecrafted.icns</string>" in info
+    assert "NSApp.applicationIconImage.copy()" not in delegate
     assert 'appendingPathComponent("runtime-pack", isDirectory: true)' in delegate
     assert 'appendingPathComponent("install-runtime-pack.sh")' in delegate
     assert '"--expected-source-revision"' in delegate
@@ -1075,6 +1140,77 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert '"--terminal-host", terminalHost.path' in delegate
     assert '"--frame-helper", frameHelper.path' in delegate
     assert "JSONDecoder().decode(CanonicalRuntimeInstall.self" in delegate
+    native_runner = (
+        REPO_ROOT
+        / "vibecrafted-app/shell-agent/app/Vibecrafted/NativeInstallerProcess.swift"
+    ).read_text()
+    # UI installation never waits on the App's main actor. Every UI-reachable
+    # caller joins the one carrier publication, and both streams are drained
+    # from process start with finite capture rather than after waitUntilExit.
+    # The completion-bearing overload is the UI form. Optional preferenceChoice
+    # sits before completion; do not pin the first parameter name.
+    async_completion = (
+        "completion: @escaping (Result<CanonicalRuntimeInstall, Error>) -> Void"
+    )
+    async_sig = delegate.rfind(
+        "private func installCanonicalRuntime(",
+        0,
+        delegate.index(async_completion) + len(async_completion),
+    )
+    assert async_sig != -1
+    async_installer = delegate[
+        async_sig : delegate.index("private func runtimePackInstallArguments")
+    ]
+    assert "runtimeInstallProcess != nil" in async_installer
+    assert "runtimeInstallWaiters.append(completion)" in async_installer
+    assert "runtimeInstallWaiters.removeAll()" in async_installer
+    assert "waiters.forEach { $0(outcome) }" in async_installer
+    assert "preferenceChoice: PreferenceResolutionChoice? = nil" in async_installer
+    assert (
+        "runRuntimePackInstaller(arguments: runtimePackInstallArguments("
+        "preferenceChoice: preferenceChoice))" in async_installer
+    )
+    args_builder = delegate[
+        delegate.index("private func runtimePackInstallArguments") : delegate.index(
+            "private func decodeCanonicalRuntimeInstall"
+        )
+    ]
+    assert "preferenceChoice: PreferenceResolutionChoice? = nil" in args_builder
+    assert "if let choice = preferenceChoice" in args_builder
+    assert '"--resolve-preference", choice.action' in args_builder
+    assert "installCanonicalRuntime(preferenceChoice: choice)" in delegate
+    ui_installer = delegate[
+        delegate.index(
+            "private func runRuntimePackInstaller(\n    arguments: [String], completion:"
+        ) : delegate.index("private func runtimePackInstallerProcess")
+    ]
+    assert (
+        'runBounded(process, timeout: 300, label: "runtime pack install")'
+        in ui_installer
+    )
+    assert "waitUntilExit()" not in ui_installer
+    sync_installer = delegate[
+        delegate.index(
+            "private func runRuntimePackInstaller(arguments: [String])"
+        ) : delegate.index("/// Asynchronous UI launch")
+    ]
+    assert "DispatchQueue.global" in sync_installer
+    assert "readers.wait()" in sync_installer
+    assert "waitUntilExit()" in sync_installer
+    assert "storage = Data(chunk.suffix(limit))" in native_runner
+    assert "storage.removeFirst(storage.count - limit)" in native_runner
+    assert "let timedOut: Bool" in native_runner
+    assert "timeoutFlag.mark()" in native_runner
+    assert "MainActor.assumeIsolated { completion(result) }" in native_runner
+    assert "process.terminationHandler = nil" in native_runner
+    assert "durable transaction will recover or report its lease state" in delegate
+    reinstall = delegate[
+        delegate.index("private func offerRuntimePackReinstall") : delegate.index(
+            "@objc private func openConsoleFromStatusItem"
+        )
+    ]
+    assert "installCanonicalRuntime { [weak self] result in" in reinstall
+    assert "defer { repairInFlight" not in reinstall
     # The installer returns POSIX paths, not URL strings. Decoding them directly
     # as URL produces relative URLs whose `.path` passes file checks but which
     # Foundation.Process rejects as an executableURL on macOS.
@@ -1087,22 +1223,23 @@ def test_native_app_bootstraps_and_launches_only_the_canonical_product_entry() -
     assert "copyItem(at:" not in delegate
     assert "writeLauncher(" not in delegate
     assert 'appendingPathComponent("active.json")' not in delegate
-    # PATH composes: the signed generation wins, the caller's PATH survives behind
-    # it. A hard-coded system-only PATH strips Homebrew/~/.local/bin/~/.cargo/bin
-    # from every spawned agent CLI, so `#!/usr/bin/env` shebangs exit 127.
+    # PATH composes: the caller's tools win and the signed generation remains a
+    # fallback. A hard-coded system-only PATH strips Homebrew/~/.local/bin/
+    # ~/.cargo/bin from spawned agent CLIs, so `#!/usr/bin/env` shebangs exit 127.
     assert 'environment["PATH"] = composedPath(' in delegate
     assert 'environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"' not in delegate
+    assert 'return (entries + [generationBin]).joined(separator: ":")' in delegate
     assert '["server", "service", "reconcile"]' in delegate
     assert "shell-agent" not in delegate
     assert 'name = "vc-start"' in cargo
     assert '"--noprofile"' in launcher
     assert '"--norc"' in launcher
-    assert 'source "$1"; shift; vc-start "$@"' in launcher
+    assert 'source "$1" || exit $?; shift; vc-start "$@"' in launcher
     assert 'Command::new("/bin/bash")' in launcher
     assert "fn host_agent_search_path(" in launcher
     assert '"/opt/homebrew/bin"' in launcher
-    # vc-start composes: the PATH AppDelegate hands it (generation first, the
-    # operator's Homebrew/npm/cargo/nvm tail behind) must survive the handoff,
+    # vc-start composes: the PATH AppDelegate hands it (the Founder's
+    # Homebrew/npm/cargo/nvm entries first, generation fallback last) survives,
     # sanitized rather than amputated — a closed allowlist here re-created the
     # exit-127 shebang failures the composed PATH fixed one process earlier.
     assert 'let inherited_path = env::var("PATH").ok();' in launcher
@@ -1118,15 +1255,18 @@ def test_tray_menu_supervises_runtime_pack_carrier_drift() -> None:
 
     # The tray supervises the Runtime Pack carrier, not just the server: the
     # live generation is a first-class status line and the submenu carries the
-    # supervision actions (reveal home, open control plane, copy identity).
-    assert 'withTitle: "Runtime Pack"' in delegate
-    assert 'withTitle: "Reveal Runtime Home"' in delegate
-    assert 'withTitle: "Open Control Plane"' in delegate
-    assert 'withTitle: "Copy Runtime Identity"' in delegate
-    assert "#selector(revealRuntimeHomeFromStatusItem)" in delegate
-    assert "#selector(openControlPlaneFromStatusItem)" in delegate
-    assert "#selector(copyRuntimeIdentityFromStatusItem)" in delegate
-    assert "NSWorkspace.shared.open(install.runtimeHome)" in delegate
+    # supervision actions (reveal home, reveal control files, copy identity).
+    tray = (app_dir / "CommandDeck/StatusItemController.swift").read_text()
+    for title in [
+        "Open Runtime Folder",
+        "Open Control Plane Folder",
+        "Copy Runtime Identity",
+    ]:
+        assert title in tray
+    assert "case .revealRuntime: revealRuntimeHomeFromStatusItem()" in delegate
+    assert "case .revealControlPlane: openControlPlaneFromStatusItem()" in delegate
+    assert "case .copyRuntimeIdentity: copyRuntimeIdentityFromStatusItem()" in delegate
+    assert "revealNativePath(install.runtimeHome)" in delegate
     assert '"control_plane", isDirectory: true' in delegate
     assert "NSPasteboard.general.setString(blob, forType: .string)" in delegate
     # Menu state derives through the pure policy, wired from the status refresh
@@ -1433,6 +1573,29 @@ def test_host_path_scan_allows_only_known_libpython_documentation_paths(
     contract._reject_host_bound_paths(payload, relative=relative, kind="dylib")
 
     payload.write_bytes(b"load /usr/local/lib/libescape.dylib")
+    _assert_error(
+        contract.E_PATH,
+        lambda: contract._reject_host_bound_paths(
+            payload,
+            relative=relative,
+            kind="dylib",
+        ),
+    )
+
+
+def test_host_path_scan_allows_vendored_openssl_openssl_dir_strings(
+    tmp_path: Path,
+) -> None:
+    payload = tmp_path / "libcrypto.3.dylib"
+    relative = "Contents/Resources/runtime/lib/libcrypto.3.dylib"
+    payload.write_bytes(
+        b"OPENSSLDIR=/opt/homebrew/etc/openssl@3 "
+        b"/opt/homebrew/Cellar/openssl@3/3.6.3/lib/engines-3 "
+        b"/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib"
+    )
+    contract._reject_host_bound_paths(payload, relative=relative, kind="dylib")
+
+    payload.write_bytes(b"panic at /Users/tester/src/main.rs")
     _assert_error(
         contract.E_PATH,
         lambda: contract._reject_host_bound_paths(
@@ -3513,6 +3676,7 @@ def test_shell_front_door_self_test_exercises_real_verifier() -> None:
     env = {
         "HOME": os.environ["HOME"],
         "PATH": "/usr/bin:/bin",
+        "PYTHON": sys.executable,
     }
     result = subprocess.run(
         [str(VERIFY_SCRIPT), "--self-test"],
@@ -3543,7 +3707,21 @@ def test_unified_release_has_one_top_level_owner() -> None:
     assert 'local terminal_app="$APP/Contents/Helpers/vc-terminal.app"' in builder
     assert '"$terminal_app/Contents/MacOS/alacritty"' in builder
     assert '"$terminal_app/Contents/Resources/alacritty.icns"' in builder
+    assert "Set :CFBundleDisplayName VC Terminal" in builder
+    assert "Set :CFBundleName VC Terminal" in builder
+    terminal_entry = (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "vc-terminal.app/Contents/MacOS/alacritty" in terminal_entry
+    assert "_vc_terminal_is_bundle_host" in terminal_entry
+    assert 'exec "$host" --config-file "$config" "$@"' in terminal_entry
     assert "sign_nested_app_bundles" in builder
+    assert "sign_helper_scripts" in builder
+    assert builder.index("sign_nested_app_bundles") < builder.index(
+        "sign_helper_scripts"
+    )
+    assert builder.index("sign_helper_scripts") < builder.index("embed_runtime_pack")
+    assert '"$APP/Contents/Helpers/vc-app-update"' in builder
     assert 'make -C "$FRAME_REPO" release-binary' in builder
     assert 'chmod 0755 "$frame_source"' in builder
     assert "build-server-release" in builder
@@ -3613,6 +3791,7 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
     path_pattern = re.compile(path_hint["regex"])
     for rendered_path in (
         "/Volumes/vc-workspace/README.md",
+        "/Volumes/vc-workspace/Project With Spaces/README.md",
         "~/Documents/proof.pdf",
         "./report.md:12",
         "../report.md:12:3",
@@ -3621,31 +3800,69 @@ def test_terminal_policy_uses_operator_toml_and_primary_shell_chain() -> None:
         assert path_pattern.fullmatch(rendered_path), rendered_path
 
     with tempfile.TemporaryDirectory() as temp_dir:
-        target = Path(temp_dir) / "proof.md"
+        target = Path(temp_dir) / "proof with spaces.md"
         target.touch()
+        assert path_pattern.fullmatch(f"{target}:12:3")
         probe = path_command.replace(
-            'exec /usr/bin/open -- "$target"', 'printf %s "$target"'
+            'exec /usr/bin/open -- "$candidate"', 'printf %s "$candidate"'
         )
-        result = subprocess.run(
+        line_result = subprocess.run(
             ["/bin/zsh", "-lc", probe, f"{target}:12:3"],
             check=True,
             capture_output=True,
             text=True,
         )
-        assert result.stdout == str(target)
+        assert line_result.stdout == str(target)
+        prose_result = subprocess.run(
+            ["/bin/zsh", "-lc", probe, f"{target} was saved"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert prose_result.stdout == str(target)
     assert 'mods = "Command"' in terminal
-    assert 'key = "Period"' in terminal
+    assert 'key = ">"' in terminal
     assert 'mods = "Command|Shift"' in terminal
     assert 'chars = "\\u001b[46;10u"' in terminal
-    assert "launch-primary-shell.zsh" in terminal
-    assert "$VIBECRAFTED_RUNTIME_ROOT/bin/vc-start" in terminal
+    assert 'key = "N"' in terminal
+    assert 'chars = "\\u001b[110;9u"' in terminal
+    assert (
+        "$VIBECRAFTED_RUNTIME_ROOT/config/alacritty/launch-primary-shell.zsh"
+        not in terminal
+    )
+    assert terminal_policy["terminal"]["shell"] == {
+        "program": "/bin/sh",
+        "args": [
+            "-c",
+            'exec "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"',
+        ],
+    }
     assert "${1##*/}" in primary_shell
     assert '"$0" "$@"' in primary_shell
-    assert "process.executableURL = install.terminalHost" in delegate
-    assert '"-e", install.primaryShell.path, install.start.path, "operator"' in delegate
-    assert 'product_config / "terminal-entry.toml"' in installer
+    terminal_launch = delegate[
+        delegate.index("private func openWorkspaceTerminal") : delegate.index(
+            "private func terminalIsLive"
+        )
+    ]
+    assert "NSWorkspace.shared.openApplication(" not in terminal_launch
+    assert "generationRoot: install.root, terminal: install.terminal" in terminal_launch
+    assert "environment: environment" in terminal_launch
+    terminal_owner = (
+        REPO_ROOT
+        / "vibecrafted-app/shell-agent/app/Vibecrafted/CommandDeck/TerminalLauncher.swift"
+    ).read_text()
+    assert 'arguments = ["-e", primaryShell.path]' in terminal_owner
+    assert 'product_config / "vc-terminal" / "vc-terminal.toml"' in installer
+    assert 'product_config / "terminal-entry.toml"' not in installer
+    assert 'for debris in terminal.glob("launch-*.zsh"):' in installer
+    assert "if debris.name != _PRODUCT_PRIMARY_SHELL_NAME:" in installer
+    assert "_remove_path(debris)" in installer
     assert 'product_config / "terminal-policy.toml"' in installer
-    assert 'product_config / "terminal-theme.toml"' in installer
+    assert 'theme = staged / "terminal-theme.toml"' in installer
+    assert 'generation / "config/vc-terminal/themes/dark.toml"' in installer
+    assert 'tomllib.loads(theme.read_text(encoding="utf-8"))' in installer
+    assert "_materialize_runtime_generation_vc_terminal_entry" in installer
+    assert 'generation / "libexec/vc-terminal"' in installer
     assert 'let socketRoot = "/tmp/vc-frame-\\(getuid())"' in delegate
     assert 'environment["VC_FRAME_SOCKET_DIR"] = socketRoot' in delegate
     assert 'environment["ZELLIJ_SOCKET_DIR"] = socketRoot' in delegate
@@ -3663,13 +3880,15 @@ def test_installed_deck_resolves_server_binary_and_site_from_its_generation() ->
     assert 'server_bin="${runtime_root:+$runtime_root/bin/vc-server}"' in deck
     assert 'site_root="${runtime_root:+$runtime_root/server/site}"' in deck
     assert 'local server_bin="$HOME/.local/bin/vc-server"' not in deck
+    assert "_vc_source_launcher_ulimits()" in deck
     assert (
-        '"$script_dir/../vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh"'
+        'candidate="$owner_root/vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh"'
         in deck
     )
+    assert 'source "$candidate"' in deck
 
 
-def test_primary_shell_exits_instead_of_reusing_pty_after_vc_start_failure(
+def test_primary_shell_retains_error_and_usable_shell_after_vc_start_failure(
     tmp_path: Path,
 ) -> None:
     failing_start = tmp_path / "vc-start"
@@ -3686,12 +3905,15 @@ def test_primary_shell_exits_instead_of_reusing_pty_after_vc_start_failure(
         cwd=REPO_ROOT,
         env={**os.environ, "HOME": str(tmp_path)},
         capture_output=True,
+        input="printf 'NEXT_COMMAND_WORKS\\n'; exit 0\n",
         text=True,
         check=False,
         timeout=10,
     )
 
-    assert result.returncode == 7
+    assert result.returncode == 0
+    assert "exit 7" in result.stderr
+    assert "NEXT_COMMAND_WORKS" in result.stdout
 
 
 def test_manifest_producer_emits_an_app_accepted_by_the_runtime_verifier(
@@ -3811,3 +4033,537 @@ def test_production_release_receipt_platform_passes_staged_bundled_schema_verifi
         text=True,
     )
     assert verified.returncode == 0, verified.stderr
+
+
+# --- Runtime Pack debug-record boundary --------------------------------------
+#
+# MEASURED 2026-09-08 on the f131b81b release candidate: the Runtime Pack payload
+# carried 31 Mach-O files; bin/voc, bin/vc-start, bin/scaffold-doctor, bin/aicx,
+# bin/aicx-mcp and bin/prview reached the hygiene gate naming the rustup sysroot
+# and the Cargo target directory in linker N_OSO stabs, because only
+# libexec/vc-terminal and libexec/vc-frame were ever stripped and cargo's own
+# `strip` had aborted in rust-objcopy with a warning. These tests drive the
+# shared boundary, scripts/lib/macho-signing.sh::strip_macho_debug_tree, with
+# real compiled Mach-O fixtures and the real payload scanner.
+
+MACHO_SIGNING = REPO_ROOT / "scripts/lib/macho-signing.sh"
+PAYLOAD_SCANNER = REPO_ROOT / "scripts/payload_hygiene.py"
+
+
+FIXTURE_SOURCE = "int answer(void) { return 42; }\nint main(void) { return 0; }\n"
+
+
+def _compile_macho_with_debug_object(
+    path: Path,
+    object_dir: Path,
+    *,
+    shared_library: bool = False,
+    source_text: str = FIXTURE_SOURCE,
+    extra_link: tuple[str, ...] = (),
+) -> None:
+    """Two-step compile that leaves the object's path in the linker's N_OSO stab.
+
+    `_compile_macho` compiles from stdin in one step, so its object lives in
+    the OS temp root and names nobody. The release failure this guards against
+    is an object path the linker recorded verbatim, so the fixture is linked
+    from an object whose directory the test controls.
+    """
+    xcrun = _clang()
+    object_dir.mkdir(parents=True, exist_ok=True)
+    source = object_dir / "fixture.c"
+    source.write_text(source_text, encoding="utf-8")
+    obj = object_dir / "fixture.o"
+    common = [
+        xcrun,
+        "--sdk",
+        "macosx",
+        "clang",
+        "-arch",
+        "arm64",
+        "-mmacosx-version-min=14.0",
+        "-g",
+    ]
+    compiled = subprocess.run(
+        [*common, "-c", str(source), "-o", str(obj)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+    link = list(common)
+    if shared_library:
+        link += ["-dynamiclib", f"-Wl,-install_name,@rpath/{path.name}"]
+    link += list(extra_link)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    linked = subprocess.run(
+        [*link, str(obj), "-o", str(path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert linked.returncode == 0, linked.stderr
+    path.chmod(0o755)
+    assert str(object_dir).encode() in path.read_bytes(), (
+        "the fixture does not expose its object path; this falsifier is void"
+    )
+
+
+def _oso_stabs(path: Path) -> list[str]:
+    result = subprocess.run(
+        [_clang(), "nm", "-ap", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return [line for line in result.stdout.splitlines() if " OSO " in line]
+
+
+def _strip_macho_debug_tree(
+    *roots: Path, prelude: str = "", shared_libraries: bool = False
+) -> subprocess.CompletedProcess[str]:
+    shell = (
+        'set -euo pipefail; source "$1"; shift; '
+        + prelude
+        + 'strip_macho_debug_tree "$@"'
+    )
+    arguments = ["--shared-libraries"] if shared_libraries else []
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            shell,
+            "macho-strip",
+            str(MACHO_SIGNING),
+            *arguments,
+            *map(str, roots),
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _public_shape(path: Path) -> str:
+    """Exports and load commands: what a consumer of the library binds to."""
+    exports = subprocess.run(
+        [_clang(), "nm", "-gU", str(path)], check=True, capture_output=True, text=True
+    ).stdout
+    load_commands = subprocess.run(
+        [_clang(), "otool", "-l", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    kept = [
+        line
+        for line in load_commands.splitlines()
+        if re.match(r"^ *(cmd|name|path) ", line)
+    ]
+    return exports + "\n".join(kept)
+
+
+def _call_answer_through_dyld(library: Path) -> int:
+    """Load the library the way the Swift host does — dlopen — and call it.
+
+    Runs in a child of this interpreter so a library dyld refuses cannot take
+    the test process down with it. `codesign --verify` is not dyld acceptance.
+    """
+    if platform.machine() != "arm64":
+        pytest.skip("fixture libraries are linked for arm64")
+    probe = (
+        "import ctypes, signal, sys; signal.alarm(20); "
+        "lib = ctypes.CDLL(sys.argv[1], mode=ctypes.RTLD_LOCAL); "
+        "lib.answer.restype = ctypes.c_int; lib.answer.argtypes = []; "
+        "print(lib.answer())"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe, str(library)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return int(result.stdout.strip())
+
+
+def _scan_payload(root: Path, *forbidden: str) -> subprocess.CompletedProcess[str]:
+    arguments = [
+        sys.executable,
+        str(PAYLOAD_SCANNER),
+        "--root",
+        str(root),
+        "--label",
+        "fixture payload",
+    ]
+    for literal in forbidden:
+        arguments += ["--forbid", literal]
+    return subprocess.run(arguments, check=False, capture_output=True, text=True)
+
+
+def test_runtime_payload_strip_reaches_every_executable_before_the_gate(
+    tmp_path: Path,
+) -> None:
+    """Executables the old two-name list never visited are normalized too."""
+    payload = tmp_path / "payload/VibecraftedRuntime"
+    workshop = tmp_path / "Volumes/workshop"
+    build_host = workshop / "checkout/target/release/deps"
+    executables = [
+        payload / "bin/foundation-tool",
+        payload / "libexec/nested/deeper/helper",
+    ]
+    for executable in executables:
+        _compile_macho_with_debug_object(executable, build_host / executable.name)
+        assert _oso_stabs(executable)
+    refused = _scan_payload(payload, str(workshop))
+    assert refused.returncode == 1, refused.stdout + refused.stderr
+
+    result = _strip_macho_debug_tree(payload / "bin", payload / "libexec")
+
+    assert result.returncode == 0, result.stderr
+    assert "2 executable(s) stripped of debugging records" in result.stdout
+    for executable in executables:
+        assert not _oso_stabs(executable)
+        assert str(workshop).encode() not in executable.read_bytes()
+        run = subprocess.run([str(executable)], check=False, capture_output=True)
+        assert run.returncode == 0, run.stderr
+        # strip re-seals the linker's ad-hoc signature; the file stays loadable
+        # and verifiable exactly as the release binaries did.
+        verify = subprocess.run(
+            ["codesign", "--verify", "--strict", str(executable)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert verify.returncode == 0, verify.stderr
+    gate = _scan_payload(payload, str(workshop))
+    assert gate.returncode == 0, gate.stdout + gate.stderr
+
+
+def test_runtime_payload_strip_leaves_plain_literals_for_the_gate_to_refuse(
+    tmp_path: Path,
+) -> None:
+    """Only debugging records go; a path written as text stays the gate's call."""
+    payload = tmp_path / "payload/VibecraftedRuntime"
+    workshop = str(tmp_path / "Volumes/workshop")
+    launcher = payload / "bin/launcher"
+    _write_executable(launcher, f'#!/bin/sh\nexec {workshop}/checkout/bin/tool "$@"\n')
+    manifest = payload / "bin/runtime-foundations.json"
+    manifest.write_text(json.dumps({"built_at": workshop}), encoding="utf-8")
+    before = {path: path.read_bytes() for path in (launcher, manifest)}
+
+    result = _strip_macho_debug_tree(payload / "bin")
+
+    assert result.returncode == 0, result.stderr
+    assert "0 executable(s) stripped" in result.stdout
+    assert {path: path.read_bytes() for path in before} == before
+    assert _scan_payload(payload, workshop).returncode == 1
+
+
+def test_runtime_payload_strip_never_follows_a_symlink_out_of_the_payload(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside/tool"
+    _compile_macho_with_debug_object(outside, tmp_path / "outside/objects")
+    original = outside.read_bytes()
+    payload = tmp_path / "payload/VibecraftedRuntime"
+    (payload / "bin").mkdir(parents=True)
+    (payload / "bin/tool").symlink_to(outside)
+    (payload / "bin/vendor").symlink_to(tmp_path / "outside", target_is_directory=True)
+
+    result = _strip_macho_debug_tree(payload / "bin")
+
+    assert result.returncode == 0, result.stderr
+    assert "0 executable(s) stripped" in result.stdout
+    assert outside.read_bytes() == original
+    assert (payload / "bin/tool").is_symlink()
+    assert (payload / "bin/vendor").is_symlink()
+
+
+def test_runtime_payload_strip_leaves_shared_libraries_to_the_gate(
+    tmp_path: Path,
+) -> None:
+    """Without --shared-libraries a dylib is not rewritten; the gate reads it.
+
+    Measured on the f131b81b payload: every host path sat in an executable
+    under bin/, while the 24 dylibs and bundles of the uv-seeded CPython and
+    its wheels carried only their CI builders' object paths. The host `strip`
+    has a recorded history of writing dylibs dyld refuses (Xcode 27 beta, see
+    the release builder), so a vendor library is never rewritten for a leak it
+    does not have — and one that does leak is refused exactly as before. The
+    roots this build links its own libraries into opt in explicitly; see the
+    app_frameworks_strip tests below.
+    """
+    payload = tmp_path / "payload/VibecraftedRuntime"
+    workshop = tmp_path / "Volumes/workshop"
+    library = payload / "libexec/lib/libfixture.dylib"
+    _compile_macho_with_debug_object(library, workshop / "objects", shared_library=True)
+    before = library.read_bytes()
+    assert _oso_stabs(library)
+
+    result = _strip_macho_debug_tree(payload / "libexec")
+
+    assert result.returncode == 0, result.stderr
+    assert "0 executable(s) stripped" in result.stdout
+    assert library.read_bytes() == before
+    assert _scan_payload(payload, str(workshop)).returncode == 1
+
+
+def test_runtime_payload_strip_fails_closed_on_a_malformed_executable(
+    tmp_path: Path,
+) -> None:
+    payload = tmp_path / "payload/VibecraftedRuntime"
+    healthy = payload / "bin/healthy"
+    _compile_macho_with_debug_object(healthy, tmp_path / "objects")
+    broken = payload / "bin/broken"
+    # Header intact, segments cut: `file` still calls it a Mach-O executable
+    # and strip refuses to rewrite it.
+    broken.write_bytes(healthy.read_bytes()[:4096])
+    broken.chmod(0o755)
+
+    result = _strip_macho_debug_tree(payload / "bin")
+
+    assert result.returncode != 0
+    assert "strip -S failed on" in result.stderr
+    assert "truncated or malformed" in result.stderr
+
+
+def test_runtime_payload_strip_rewrites_adhoc_and_leaves_real_signatures_alone(
+    tmp_path: Path,
+) -> None:
+    """An ad-hoc seal is staging state; a real signature marks a finished artifact.
+
+    Measured 2026-09-08: the four Loctree binaries from npm arrive Developer ID
+    signed with zero debugging records; `strip -S` left them 64–80 bytes larger
+    with an invalidated signature. Whatever codesign does not report as ad-hoc
+    or unsigned is left exactly as delivered. A `codesign -s -` seal, unlike
+    the linker's, is NOT re-sealed by strip (measured here) — which is fine
+    only because the packager re-signs every Mach-O with the release identity
+    afterwards; this test performs that step to prove the file is still
+    signable and runs.
+    """
+    payload = tmp_path / "payload/VibecraftedRuntime"
+    adhoc = payload / "bin/adhoc-tool"
+    _compile_macho_with_debug_object(adhoc, tmp_path / "objects/adhoc")
+    _codesign_macho(adhoc)
+    vendor = payload / "bin/vendor-tool"
+    _compile_macho_with_debug_object(vendor, tmp_path / "objects/vendor")
+    vendor_before = vendor.read_bytes()
+    # No Developer ID is available to a test; answer codesign's question for
+    # the vendor binary the way a vendor-signed Mach-O does.
+    prelude = (
+        'codesign() { case "$*" in '
+        '*vendor-tool*) printf "Executable=%s\\nCodeDirectory v=20500 '
+        "flags=0x10000(runtime)\\nSignature size=9040\\n"
+        'TeamIdentifier=MW223P3NPX\\n" "${!#}";; '
+        '*) command codesign "$@";; esac; }; '
+    )
+
+    result = _strip_macho_debug_tree(payload / "bin", prelude=prelude)
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        "1 executable(s) stripped of debugging records, 1 signed left as delivered"
+        in result.stdout
+    )
+    assert vendor.read_bytes() == vendor_before
+    assert not _oso_stabs(adhoc)
+    _codesign_macho(adhoc)
+    verify = subprocess.run(
+        ["codesign", "--verify", "--strict", str(adhoc)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert verify.returncode == 0, verify.stderr
+    run = subprocess.run([str(adhoc)], check=False, capture_output=True)
+    assert run.returncode == 0, run.stderr
+
+
+# --- App Frameworks: the libraries this build links --------------------------
+#
+# MEASURED 2026-09-09 on the aa12980d release candidate: the Runtime Pack
+# passed its gate (6739 files) and the App gate refused
+# Contents/Frameworks/libvibecrafted_shell_ffi.dylib — 17 N_OSO stabs, 11
+# naming the Cargo target directory and 6 the rustup sysroot, nothing else in
+# the file naming the host. That dylib is linked by the "Build Rust FFI"
+# phase and embedded by Xcode as it came, so the shared boundary owns it under
+# --shared-libraries, scoped to that one root. The same helper proved on the
+# real library that exports and load commands stayed identical and dyld loads
+# it afterwards; these fixtures make that contract falsifiable here.
+
+
+def test_app_frameworks_strip_normalizes_own_shared_library_and_keeps_it_loadable(
+    tmp_path: Path,
+) -> None:
+    app = tmp_path / "Vibecrafted.app"
+    workshop = tmp_path / "Volumes/workshop"
+    library = app / "Contents/Frameworks/libfixture.dylib"
+    _compile_macho_with_debug_object(
+        library, workshop / "checkout/target/release/deps", shared_library=True
+    )
+    assert _oso_stabs(library)
+    shape_before = _public_shape(library)
+    assert "answer" in shape_before
+    assert _scan_payload(app, str(workshop)).returncode == 1
+
+    result = _strip_macho_debug_tree(app / "Contents/Frameworks", shared_libraries=True)
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        "0 executable(s) and 1 shared library(ies) stripped of debugging records"
+        in result.stdout
+    )
+    assert not _oso_stabs(library)
+    assert str(workshop).encode() not in library.read_bytes()
+    assert _public_shape(library) == shape_before
+    verify = subprocess.run(
+        ["codesign", "--verify", "--strict", str(library)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert verify.returncode == 0, verify.stderr
+    # The packager re-signs every Mach-O afterwards; the library must survive
+    # that and still be the one the Swift host dlopens.
+    _codesign_macho(library)
+    assert _call_answer_through_dyld(library) == 42
+    assert _scan_payload(app, str(workshop)).returncode == 0
+
+
+def test_app_frameworks_strip_leaves_symlinks_vendor_seals_and_plain_text_alone(
+    tmp_path: Path,
+) -> None:
+    """Only the libraries this build linked are rewritten; the gate keeps the rest."""
+    app = tmp_path / "Vibecrafted.app"
+    frameworks = app / "Contents/Frameworks"
+    workshop = tmp_path / "Volumes/workshop"
+    own = frameworks / "libown.dylib"
+    _compile_macho_with_debug_object(own, workshop / "own-objects", shared_library=True)
+    vendor = frameworks / "libvendor.dylib"
+    _compile_macho_with_debug_object(
+        vendor, workshop / "vendor-objects", shared_library=True
+    )
+    vendor_before = vendor.read_bytes()
+    outside = tmp_path / "outside/liboutside.dylib"
+    _compile_macho_with_debug_object(
+        outside, tmp_path / "outside/objects", shared_library=True
+    )
+    outside_before = outside.read_bytes()
+    (frameworks / "liblinked.dylib").symlink_to(outside)
+    notice = frameworks / "NOTICE.txt"
+    notice.write_text(f"built at {workshop}\n", encoding="utf-8")
+    notice_before = notice.read_bytes()
+    prelude = (
+        'codesign() { case "$*" in '
+        '*libvendor.dylib*) printf "Executable=%s\\nCodeDirectory v=20500 '
+        "flags=0x10000(runtime)\\nSignature size=9040\\n"
+        'TeamIdentifier=MW223P3NPX\\n" "${!#}";; '
+        '*) command codesign "$@";; esac; }; '
+    )
+
+    result = _strip_macho_debug_tree(frameworks, prelude=prelude, shared_libraries=True)
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        "0 executable(s) and 1 shared library(ies) stripped of debugging records, "
+        "1 signed left as delivered" in result.stdout
+    )
+    assert not _oso_stabs(own)
+    assert vendor.read_bytes() == vendor_before
+    assert outside.read_bytes() == outside_before
+    assert (frameworks / "liblinked.dylib").is_symlink()
+    assert notice.read_bytes() == notice_before
+    # The vendor library still names the workshop and so does the notice:
+    # the gate, not the strip, is what refuses them.
+    assert _scan_payload(app, str(workshop)).returncode == 1
+
+
+def test_app_frameworks_strip_fails_closed_when_the_library_no_longer_loads(
+    tmp_path: Path,
+) -> None:
+    """`strip -S` succeeding is not acceptance; only a real dyld load is.
+
+    A library whose dependency is gone strips cleanly and verifies, and the
+    Swift host would crash at launch. The boundary must refuse the build.
+    """
+    app = tmp_path / "Vibecrafted.app"
+    dependency_dir = tmp_path / "deps"
+    dependency = dependency_dir / "libgone.dylib"
+    _compile_macho_with_debug_object(
+        dependency,
+        tmp_path / "deps-objects",
+        shared_library=True,
+        source_text="int gone_answer(void) { return 42; }\n",
+    )
+    library = app / "Contents/Frameworks/libfixture.dylib"
+    _compile_macho_with_debug_object(
+        library,
+        tmp_path / "Volumes/workshop/objects",
+        shared_library=True,
+        source_text="int gone_answer(void);\nint answer(void) { return gone_answer(); }\n",
+        extra_link=("-L", str(dependency_dir), "-lgone"),
+    )
+    dependency.unlink()
+
+    result = _strip_macho_debug_tree(app / "Contents/Frameworks", shared_libraries=True)
+
+    assert result.returncode != 0
+    assert "stripped library does not load" in result.stderr
+    assert "libgone.dylib" in result.stderr
+
+
+def test_app_frameworks_strip_fails_closed_on_a_malformed_shared_library(
+    tmp_path: Path,
+) -> None:
+    app = tmp_path / "Vibecrafted.app"
+    healthy = app / "Contents/Frameworks/libhealthy.dylib"
+    _compile_macho_with_debug_object(healthy, tmp_path / "objects", shared_library=True)
+    broken = app / "Contents/Frameworks/libbroken.dylib"
+    broken.write_bytes(healthy.read_bytes()[:4096])
+    broken.chmod(0o755)
+
+    result = _strip_macho_debug_tree(app / "Contents/Frameworks", shared_libraries=True)
+
+    assert result.returncode != 0
+    assert "libbroken.dylib" in result.stderr
+
+
+def test_app_frameworks_strip_runs_the_strip_the_selected_toolchain_resolves(
+    tmp_path: Path,
+) -> None:
+    """The strip that rewrites a library is the one xcrun resolves for the caller.
+
+    The release builder exports DEVELOPER_DIR for the verified stable Xcode
+    and refuses a beta; the Xcode 27 beta strip has written chained-fixups
+    dylibs dyld refused (measured 2026-08-28). Whatever `strip` PATH names is
+    not the contract — `xcrun --find strip` under the caller's DEVELOPER_DIR
+    is, and the log names it.
+    """
+    app = tmp_path / "Vibecrafted.app"
+    library = app / "Contents/Frameworks/libfixture.dylib"
+    _compile_macho_with_debug_object(
+        library, tmp_path / "Volumes/workshop/objects", shared_library=True
+    )
+    ledger = tmp_path / "strip-invocations.log"
+    toolchain_strip = tmp_path / "toolchain/usr/bin/strip"
+    toolchain_strip.parent.mkdir(parents=True)
+    toolchain_strip.write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{ledger}"\nexec /usr/bin/strip "$@"\n',
+        encoding="utf-8",
+    )
+    toolchain_strip.chmod(0o755)
+    prelude = (
+        'xcrun() { if [[ "$1" == "--find" && "$2" == "strip" ]]; then '
+        f'printf "%s\\n" "{toolchain_strip}"; else command xcrun "$@"; fi; }}; '
+    )
+
+    result = _strip_macho_debug_tree(
+        app / "Contents/Frameworks", prelude=prelude, shared_libraries=True
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"macho-strip: tool {toolchain_strip}" in result.stdout
+    assert ledger.read_text(encoding="utf-8").splitlines() == [f"-S {library}"]
+    assert not _oso_stabs(library)

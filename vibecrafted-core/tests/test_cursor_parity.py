@@ -21,6 +21,7 @@ must NOT contain cursor until headless ``-p --resume`` is proven on host.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -245,21 +246,51 @@ TUI = REPO_ROOT / "vibecrafted-app" / "tui-agent"
 MUX = REPO_ROOT / "vibecrafted-app" / "mux-agent"
 
 
-def test_tui_agent_picker_offers_cursor() -> None:
+def test_tui_agent_picker_reads_the_launcher_catalog_which_offers_cursor() -> None:
+    """VOC no longer owns an agent list; parity is inherited from the catalog.
+
+    The old gate read a hardcoded ``agents()`` array out of app.rs. That array
+    is gone (it was also the last place the retired gemini launcher survived),
+    so cursor parity is now guaranteed one level up: VOC renders whatever
+    ``vibecrafted capabilities`` reports, and that payload carries cursor.
+    """
     body = (TUI / "src" / "app.rs").read_text(encoding="utf-8")
-    match = re.search(r"pub fn agents\(\) -> \[&'static str; (\d+)\] \{([^}]*)\}", body)
-    assert match, "agents() picker not found"
-    listed = re.findall(r'"(\w+)"', match.group(2))
-    assert "claude" in listed and "codex" in listed
-    assert "cursor" in listed
-    assert int(match.group(1)) == len(listed)
+    assert "pub fn agents() -> [&'static str;" not in body, (
+        "VOC must not reintroduce a hardcoded agent list; it reads the catalog"
+    )
+    assert "self.catalog" in body and "catalog.agents" in body, (
+        "agent_choices() must source the launcher catalog"
+    )
+
+    from vibecrafted_core import workflow_capabilities as caps
+
+    providers = caps.workflow_capabilities_payload()["providers"]
+    assert "claude" in providers and "codex" in providers
+    assert "cursor" in providers
+
+    # The frozen fixture VOC's own tests render against must offer cursor too,
+    # otherwise the console could pass its suite on a cursor-less catalog.
+    fixture = json.loads(
+        (TUI / "tests" / "fixtures" / "capabilities.json").read_text(encoding="utf-8")
+    )
+    assert "cursor" in fixture["agents"]
+    assert "cursor" in fixture["providers"]
 
 
-def test_tui_skills_catalog_resolves_cursor_token() -> None:
+def test_tui_skills_catalog_names_no_agents_and_defers_cursor_to_the_catalog() -> None:
+    """Skills name skills. Agent identity belongs to the launcher catalog."""
     body = (TUI / "src" / "skills_catalog.rs").read_text(encoding="utf-8")
-    assert "SkillAgent::Cursor" in body
-    assert '"cursor" => SkillAgent::Cursor' in body
-    assert 'SkillAgent::Cursor => "cursor"' in body
+    assert "SkillAgent" not in body, (
+        "the VOC-owned agent enum is retired; it carried gemini and drifted "
+        "from the launcher's real agent set"
+    )
+    # A skill may still prefer an agent, but only by name, and only one the
+    # launcher offers.
+    defaults = set(re.findall(r'default_agent:\s*"(\w*)"', body))
+    from vibecrafted_core import workflow_capabilities as caps
+
+    offered = set(caps.workflow_capabilities_payload()["providers"])
+    assert defaults - {""} <= offered, (defaults, offered)
 
 
 def test_tui_process_family_tags_cursor() -> None:
@@ -416,7 +447,10 @@ def test_cursor_spawn_wrapper_exists_and_probes_cursor_agent() -> None:
     body = wrapper.read_text(encoding="utf-8")
     # Probes the fleet binary, not the editor CLI.
     assert "spawn_require_command cursor-agent" in body
-    # Headless lane mirrors spawn.py's cursor permission policy.
-    assert "cursor-agent -p --output-format stream-json --force --trust" in body
+    # Headless lane uses canonical Python probe; requires --force/--trust.
+    assert "probe_cursor_cli_surface" in body
+    assert "require_cursor_flags" in body
+    assert "no silent downgrade" in body
+    assert "cursor-agent -p --output-format stream-json $cursor_perm_flags" in body
     # Stream events flow through the shared filter as the cursor lane.
     assert "vibecrafted_core.agent_stream --agent cursor" in body

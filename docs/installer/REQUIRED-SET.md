@@ -17,7 +17,32 @@ Implementation: `cmd_runtime_install`, `cmd_runtime_uninstall`,
 `_build_uninstall_inventory`, and `_managed_tools_entry` in
 `scripts/vetcoders_install.py`. The exact same installer is embedded under
 `Vibecrafted.app/Contents/Resources/runtime/scripts/`; AppDelegate delegates to
-it and does not write the installation itself. Regression coverage:
+it and does not write the installation itself. In-app Check for Updates
+(`docs/installer/IN_APP_UPDATE.md`) reuses that same installer for same-App
+pack repair. A newer App is replaced by the script helper installed at
+`Contents/Helpers/vc-app-update` (`scripts/vc-app-update.sh`; no compiled twin).
+The helper writes a READY admission after preflight, a phase journal before
+any destination mutation, and the terminal replacement receipt before
+`/usr/bin/open -n`. Resume reconciles every write-ahead phase and requires
+the original candidate/prior identities. Destination locking is flock on
+`.vc-update.lock/held`, never mkdir+rm. Pack failure recovers the prior Runtime Pack/config/launchers through
+the existing `install-runtime-pack.sh --allow-older-runtime` owner, then
+restores `prior.app` through the same transaction owner (`--mode recover`)
+and must not overwrite that capture.
+Whole-tuple recovery observes the installer's `active.json` and
+`install-receipt.json` with the same pending-publication refusal as the
+installer owner; a caller-written pack enum is not that proof.
+App-only restore is not whole-tuple success: unresolved, pending, or
+still-published newer pack state keeps recovery open. Missing historical
+rollback data fails closed without inventing restored evidence. Recover
+resolves a bundled helper-sibling or app wrapper that actually admits
+`--allow-older-runtime` (never a source-checkout hop) and binds the
+live destination as `app_root`. Empty `config_pending` objects are not
+pending publication. A failed handoff persist keeps the
+current UI and does not abandon the helper. Then the new App publishes the
+matching pack. The running process does not publish a newer pack under the
+old App.
+Regression coverage:
 `tests/tui/test_installer_uninstall.py`, `tests/tui/test_installer_restore.py`.
 
 ## 1. The required set
@@ -189,3 +214,120 @@ _𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)20
   generation's and refuses an older pack, naming every component revision that
   would regress (`vc-frame: f7755692 -> 915ca04e` is the 2026-08-27 case that
   orphaned 12 live sessions). `--allow-older-runtime` makes a downgrade explicit.
+
+## 6. Explicit rescue when historical rollback bytes are missing
+
+Normal `runtime-install` / uninstall / rollback stay strict: every receipted
+backup path is `lstat`ed before publication. Missing historical rollback
+preimages therefore block a regular upgrade. That is not a license to edit
+the receipt.
+
+The single supported owner is still
+`scripts/vetcoders_install.py runtime-install --rescue`. The public carrier
+that must present the same verified input on plan, apply, and interrupted
+resume is:
+
+```text
+scripts/install-runtime-pack.sh --pack SAME.tar.gz --rescue --plan
+scripts/install-runtime-pack.sh --pack SAME.tar.gz --rescue --apply --plan-digest <sha256>
+```
+
+Direct payload-root remains valid when the caller already has a stable
+verified tree (the prior owner proofs). The public wrapper cannot use a
+one-shot `mktemp` extract: `payload_root` is part of `input_digest` /
+`plan_digest` and of the interrupted journal binding, and EXIT cleanup
+deletes that path. Installed-state trees (`.installer-backups`,
+`tools/.incoming-*`) are not extract owners — `--plan` must not mutate
+selectors, receipt, or product config.
+
+Rescue therefore extracts into a private content-addressed slot under the
+existing installer cache namespace:
+
+`${XDG_CACHE_HOME:-$HOME/.cache}/vibecrafted/runtime-pack-rescue/<archive-sha256>/`
+
+The directory name is the verified digest of the original signed bytes.
+The leaf is `0700`, euid-owned, not a symlink, and locked with an adjacent
+`mkdir` lock for the invocation. Reuse re-checks identity + a sibling file
+manifest and refuses a stale, tampered, foreign, or concurrent tree.
+`--plan` retains the slot; a failed or interrupted `--apply` retains it
+for resume; a successful `--apply` removes it. This is one slot per unique
+signed archive, not an unbounded cache and not a shared `/tmp` name.
+A 79001 pack whose embedded installer lacks `--rescue` still bootstraps
+the source installer against that same verified extract. Do not rewrite
+the signed payload.
+
+```text
+python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack> --rescue --plan
+python3 <checkout>/scripts/vetcoders_install.py runtime-install --payload-root <Runtime-Pack> --rescue --apply --plan-digest <sha256>
+```
+
+`--plan` is read-only file evidence. It does not execute user startup
+files. It inventories receipt digest, generation, ownership
+hashes/targets (including nonregular current type, symlink target, and
+directory listing), observed target payload bytes plus canonical
+`runtime-pack-provenance.json` admission (`payload.files`
+path/sha256/size/mode; hashing whatever exists is not verification),
+host-shell `--fix-rc` stanza hashes, and backup classes (`present`,
+`missing_historical`, `live_damage`, `unsafe`). Historical rollback is
+reported unavailable when preimages are gone. Original receipt bytes are
+preserved as evidence. Plan digest does not include a startup returncode.
+
+`--apply` binds to that plan digest, revalidates the live payload inventory
+under the existing install lease, snapshots every path publication can
+mutate as `damaged-pre-rescue` (never a healthy restorepoint; evidence is
+hashed before restore), archives the original receipt, drops only
+missing-historical backup map entries, and reuses the existing publication
+transaction. The journal stores the original target/inventory/payload/source
+binding and the current attempt's publication phase. A leftover completed
+journal is historical evidence, not this attempt's rollback source.
+Rollback is allowed only after this attempt owns a captured publication
+(or a validated in-flight resume). Pre-publication planning or snapshot
+failures preserve current files, receipt, and historical evidence. Each
+apply attempt allocates a unique evidence directory; a same-second retry
+must not reuse or overwrite the prior attempt's snapshot. Interrupted
+resume revalidates that input identity and journal phase before every
+mutation and refuses a changed pack, mode, path, or completed journal.
+Live installed partial-state from this rescue is not treated as input
+drift. A path publication will touch that cannot be captured refuses
+before mutation. Missing, unreadable, malformed, or mismatched
+snapshot/receipt evidence is a residual; destinations are not deleted or
+restored from it, and a failed rollback is never reported as complete.
+Preference conflicts keep pending journal state recoverable. Success
+requires the selected generation, receipt, and active identity to match
+the requested target version and content identity. Version plus
+source-provenance identity is not exact requested content. Destination
+comparison reuses the canonical pack inventory owner
+(`runtime-pack-provenance.json` / `_payload_files` path/sha256/size/mode)
+for requested files and ignores installer-generated generation surfaces
+(`runtime-manifest.json`, host-adapted `runtime/generated`, rewritten
+product wrappers). The live generation tree is not hashed as a whole.
+A healthy older generation is not `rescued` and still publishes a new
+immutable `releases/<version>`. A published immutable generation whose
+inventory is not the requested content is not `rescued` and is not
+overwritten: apply refuses and preserves the current healthy generation.
+Repeat apply of the exact same target remains
+a no-op once that identity verifies. Destination verification covers
+selectors, active identity, every receipted file/symlink/dir, every
+expected launcher/skill/config projection, static user-rc inspection, and
+a product-owned interactive `zsh -i` surface written into a temporary
+ZDOTDIR. Substituting HOME/ZDOTDIR is not process or filesystem isolation
+and does not execute copied user startup files. Actual user-shell
+acceptance is separate evidence. A healthy receipt is not a healthy
+shell. The exact current rescue's `rescue_pending` marker,
+matched to the validated journal/binding/plan identity, is the owned
+verification phase after publication closes `install_pending`; it is not
+treated as a competing publication. Unrelated or mismatched pending
+markers, and install/config/uninstall transitions, still refuse.
+Verification failure keeps `rescue_pending` recoverable and does not
+write a healthy restorepoint. Only a successful destination and
+product-owned shell check pops the marker and finalizes the rescue
+record. Unsafe or unknown-ownership paths refuse. Same-type
+receipted files with a different hash, and symlinks with a foreign live
+target, are not republished from receipt path alone: preference drift
+uses the existing preserving merge; foreign command/skill replacements
+are preserved or refuse. User config,
+foreign commands, and unplanned rc content stay.
+A target pack whose embedded installer lacks `--rescue` is not rewritten;
+bootstrap with this source installer against the verified payload-root.
+Compatibility: `tests/tui/test_runtime_pack_rescue.py` (owner) and
+`tests/tui/test_runtime_pack_rescue_wrapper.py` (public carrier).

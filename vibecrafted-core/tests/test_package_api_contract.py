@@ -289,10 +289,13 @@ def test_version_check_rejects_stale_readme_and_release_checklist_fixtures(
     ]
     current = subprocess.run(command, capture_output=True, text=True, check=False)
     assert current.returncode == 0, current.stderr
+    version = (tmp_path / "VERSION").read_text(encoding="utf-8").strip()
 
     readme = tmp_path / "README.md"
     readme.write_text(
-        readme.read_text(encoding="utf-8").replace("Version 4.3.0", "Version 9.9.9"),
+        readme.read_text(encoding="utf-8").replace(
+            f"Version {version}", "Version 9.9.9"
+        ),
         encoding="utf-8",
     )
     stale_readme = subprocess.run(command, capture_output=True, text=True, check=False)
@@ -302,7 +305,9 @@ def test_version_check_rejects_stale_readme_and_release_checklist_fixtures(
     shutil.copy2(REPO_ROOT / "README.md", readme)
     checklist = tmp_path / "docs" / "RELEASE_CHECKLIST.md"
     checklist.write_text(
-        checklist.read_text(encoding="utf-8").replace("# Cut 4.3.0", "# Cut 9.9.9", 1),
+        checklist.read_text(encoding="utf-8").replace(
+            f"# Cut {version}", "# Cut 9.9.9", 1
+        ),
         encoding="utf-8",
     )
     stale_checklist = subprocess.run(

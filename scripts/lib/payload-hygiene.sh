@@ -8,10 +8,10 @@
 # release must never contain, so both release channels ask the same question.
 #
 # The literal set is exactly "every absolute path that exists only on the build
-# host": the operator's home, the checkout, both donors, and — under
-# --snapshot-donors — the ephemeral snapshot roots. If one of these appears in
-# a shipped byte, a customer can read the founder's account name and directory
-# layout out of a signed, notarized artifact.
+# host": the operator's home, the checkout, both donors, the main-source
+# snapshot, and — under --snapshot-donors — the ephemeral donor snapshot roots.
+# If one of these appears in a shipped byte, a customer can read the founder's
+# account name and directory layout out of a signed, notarized artifact.
 #
 # Measured 2026-08-18 on Vibecrafted_4.1.0-20260817-237d2814.dmg: 8 of 2955
 # files offended, across five unrelated producers. See payload_hygiene.py for
@@ -85,6 +85,7 @@ payload_hygiene_literals() {
   for root in \
     "${HOME:-}" \
     "${PAYLOAD_HYGIENE_REPO_ROOT:-${REPO_ROOT:-}}" \
+    "${SOURCE_ROOT:-}" \
     "${TERMINAL_DONOR:-}" \
     "${FRAME_DONOR:-}" \
     "${TERMINAL_REPO:-}" \
@@ -114,6 +115,7 @@ payload_hygiene_literals() {
   for candidate in \
     "${HOME:-}" \
     "${PAYLOAD_HYGIENE_REPO_ROOT:-${REPO_ROOT:-}}" \
+    "${SOURCE_ROOT:-}" \
     "${TERMINAL_DONOR:-}" \
     "${FRAME_DONOR:-}" \
     "${TERMINAL_REPO:-}" \
@@ -145,6 +147,27 @@ assert_payload_is_anonymous() {
     [[ -n "$literal" ]] || continue
     arguments+=(--forbid "$literal")
   done < <(payload_hygiene_literals "$@")
+
+  local pins="$script_dir/lib/published-foundation-digests.json"
+  if [[ -f "$pins" ]]; then
+    local digest
+    while IFS= read -r digest; do
+      [[ -n "$digest" ]] || continue
+      arguments+=(--accept-digest "$digest")
+    done < <(
+      python3 - "$pins" <<'PY'
+import json
+import pathlib
+import sys
+
+payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+for item in payload.get("artifacts", []):
+    digest = item.get("sha256", "")
+    if digest:
+        print(digest)
+PY
+    )
+  fi
 
   python3 "$script_dir/payload_hygiene.py" "${arguments[@]}" \
     || die "$label leaks build-host paths; refusing to ship it"

@@ -50,7 +50,10 @@ def test_deck_command_canon_matches_registry() -> None:
         dedicated = re.search(
             rf'(?m)^\s*{workflow_id}\)\s*run_skill "{workflow_id}"', deck_text
         )
-        assert in_alternation or dedicated, (
+        dedicated_frontend = re.search(
+            rf'(?m)^\s*{workflow_id}\)\s*cmd_{workflow_id} "\$@"', deck_text
+        )
+        assert in_alternation or dedicated or dedicated_frontend, (
             f"deck main dispatch must route '{workflow_id}' to run_skill"
         )
 

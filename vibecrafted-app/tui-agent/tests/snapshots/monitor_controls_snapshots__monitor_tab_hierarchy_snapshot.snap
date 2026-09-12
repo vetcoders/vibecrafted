@@ -39,6 +39,6 @@ workspace: vibecrafted  |  active 1  stalled 1  |  scope: live  |  Monitor
 │                                         ││                                                                           │
 │                                         ││                                                                           │
 └─────────────────────────────────────────┘└───────────────────────────────────────────────────────────────────────────┘
-Monitor: ↑/↓ runs  / search  f scope  x archive  d controls  ? help
+Monitor: click a row  wheel that pane  ↑/↓ runs  / search  f scope  x archive  ? help
 Global: q quit  r refresh  a cycle agent  v cycle runtime  y copy  Ctrl+L clear search  ? help
 state root: /fixture/state

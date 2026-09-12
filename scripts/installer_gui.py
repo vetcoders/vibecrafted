@@ -74,7 +74,24 @@ FOUNDATION_COMMANDS = ("loctree-mcp", "aicx-mcp", "prview", "screenscribe")
 BUNDLED_BIN_NAMES = ("aicx-mcp", "aicx", "loctree-mcp", "loctree", "loct", "prview")
 TOOLCHAIN_COMMANDS = ("python3", "node", "git", "rsync")
 AGENT_COMMANDS = ("claude", "codex", "agy", "junie", "grok", "cursor-agent")
-ADDITIONAL_TOOL_COMMANDS = ("mise", "starship", "atuin", "zoxide")
+ADDITIONAL_TOOL_COMMANDS = (
+    "mise",
+    "starship",
+    "atuin",
+    "zoxide",
+    "zsh-autosuggestions",
+    "zsh-syntax-highlighting",
+)
+_ZSH_PLUGIN_SHARE_FILES = {
+    "zsh-autosuggestions": (
+        Path("/opt/homebrew/share/zsh-autosuggestions/zsh-autosuggestions.zsh"),
+        Path("/usr/local/share/zsh-autosuggestions/zsh-autosuggestions.zsh"),
+    ),
+    "zsh-syntax-highlighting": (
+        Path("/opt/homebrew/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"),
+        Path("/usr/local/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"),
+    ),
+}
 
 
 def default_source_dir() -> str:
@@ -216,6 +233,39 @@ def _command_check(name: str) -> dict[str, Any]:
         "detail": path or f"{name} not found on PATH",
         "kind": "command",
     }
+
+
+def _zsh_plugin_check(name: str) -> dict[str, Any]:
+    """Diagnostics entry for a local zsh plugin share file, not a PATH binary."""
+    for candidate in _ZSH_PLUGIN_SHARE_FILES.get(name, ()):
+        if candidate.is_file():
+            return {
+                "label": name,
+                "found": True,
+                "detail": str(candidate),
+                "kind": "plugin",
+            }
+    product = Path.home() / ".config/vibecrafted/shell/plugins" / name / f"{name}.zsh"
+    if product.is_file():
+        return {
+            "label": name,
+            "found": True,
+            "detail": str(product),
+            "kind": "plugin",
+        }
+    return {
+        "label": name,
+        "found": False,
+        "detail": f"{name} plugin is not installed",
+        "kind": "plugin",
+    }
+
+
+def _additional_tool_check(name: str) -> dict[str, Any]:
+    """PATH command, or local plugin share file for zsh extras."""
+    if name in _ZSH_PLUGIN_SHARE_FILES:
+        return _zsh_plugin_check(name)
+    return _command_check(name)
 
 
 def _path_check(
@@ -363,7 +413,7 @@ def run_diagnostics(
     }
     diagnostics["agents"] = {name: _command_check(name) for name in AGENT_COMMANDS}
     diagnostics["additional_tools"] = {
-        name: _command_check(name) for name in ADDITIONAL_TOOL_COMMANDS
+        name: _additional_tool_check(name) for name in ADDITIONAL_TOOL_COMMANDS
     }
     return diagnostics
 

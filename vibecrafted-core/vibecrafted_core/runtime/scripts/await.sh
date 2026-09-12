@@ -31,7 +31,7 @@ export VIBECRAFTED_AWAIT_STORE_DIR="$store_dir"
 export VIBECRAFTED_AWAIT_REPORTS_DIR="$reports_dir"
 export VIBECRAFTED_AWAIT_REPO_ROOT="$root"
 
-exec python3 - "$@" <<'PY'
+exec "$(spawn_python_bin)" - "$@" <<'PY'
 import json
 import os
 import shlex
@@ -109,6 +109,10 @@ while i < len(argv):
 
 store_dir = Path(os.environ.get("VIBECRAFTED_AWAIT_STORE_DIR", "")).expanduser()
 reports_dir = Path(os.environ.get("VIBECRAFTED_AWAIT_REPORTS_DIR", "")).expanduser()
+home_dir = Path(
+    os.environ.get("VIBECRAFTED_HOME", str(Path.home() / ".vibecrafted"))
+).expanduser()
+runtime_runs_dir = home_dir / "control_plane" / "runtime_runs"
 
 
 def parse_launcher(path: Path) -> dict[str, str]:
@@ -181,6 +185,17 @@ def descriptor_from_target(raw: str) -> dict[str, str]:
     return backfill_from_meta(resolve_missing_meta(desc))
 
 
+def list_runtime_run_meta_files() -> list[Path]:
+    if not runtime_runs_dir.is_dir():
+        return []
+    metas = [
+        path
+        for path in runtime_runs_dir.glob("*/meta.json")
+        if path.is_file() and not path.is_symlink()
+    ]
+    return sorted(metas)
+
+
 def list_legacy_meta_files() -> list[Path]:
     if not reports_dir.is_dir():
         return []
@@ -198,7 +213,8 @@ def list_research_meta_files() -> list[Path]:
 
 
 def list_meta_files(*, include_research: bool = False) -> list[Path]:
-    metas = list_legacy_meta_files()
+    metas = list_runtime_run_meta_files()
+    metas.extend(list_legacy_meta_files())
     if include_research:
         metas.extend(list_research_meta_files())
     return sorted(dict.fromkeys(metas))
@@ -335,6 +351,10 @@ def descriptors_for_last() -> list[dict[str, str]]:
 
 def descriptors_for_run_id(target_run_id: str) -> list[dict[str, str]]:
     matches: list[dict[str, str]] = []
+    canonical = runtime_runs_dir / target_run_id / "meta.json"
+    if canonical.is_file() and not canonical.is_symlink():
+        matches.append(backfill_from_meta({"meta": str(canonical)}))
+        return matches
     include_research = research_mode or target_run_id.startswith("rsch-")
     for meta_path in list_meta_files(include_research=include_research):
         payload = load_meta(meta_path)

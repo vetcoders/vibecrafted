@@ -1,17 +1,18 @@
 # Host terminal presets (Alacritty / vc-terminal)
 
-This directory is the **vibecrafted-side pointer** for host-terminal config that
-must survive reinstalls. The **canonical preset** lives in the vc-frame repo:
+This directory contains two deliberately different inputs. Do not collapse them
+into one user-managed Alacritty configuration:
 
-| Asset                                               | Canonical path                                      |
-| --------------------------------------------------- | --------------------------------------------------- |
-| Host preset (option_as_alt, wheel split, Cmd layer) | `vc-frame/tools/alacritty/vc-frame.toml`            |
-| Plain-shell entrypoint (primary buffer only)        | `vc-frame/tools/alacritty/launch-primary-shell.zsh` |
-| Integration contract                                | `vc-frame/docs/ALACRITTY_INTEGRATION.md` §5         |
+| Asset                    | Canonical path                              |
+| ------------------------ | ------------------------------------------- |
+| Private frontier sidecar | `config/alacritty/vc-frame.toml`            | Optional import for a user's own Alacritty                    |
+| Product shell entrypoint | `config/alacritty/launch-primary-shell.zsh` | Installed at `$XDG_CONFIG_HOME/vibecrafted/vc-terminal/`      |
+| Product terminal policy  | `config/vc-terminal/vibecrafted.toml`       | Installer-owned source loaded only through `vc-terminal.toml` |
 
-Files here are staged into `$XDG_CONFIG_HOME/vetcoders/frontier/alacritty/` by
-`install-frontier-config.sh` when present. They are **sidecars** — they do not
-overwrite `~/.config/alacritty/alacritty.toml`.
+`vc-frame.toml` is staged into `$XDG_CONFIG_HOME/vetcoders/frontier/alacritty/`
+by `install-frontier-config.sh` when present. It is a sidecar and never
+overwrites `~/.config/alacritty/alacritty.toml`. The Runtime Pack installer
+publishes the product shell entrypoint separately; users do not copy it by hand.
 
 ## What the operator should wire
 
@@ -24,7 +25,9 @@ import = [
 ]
 ```
 
-Or copy from the frontier sidecar after `vc-frontier-install`.
+Or copy the optional preset from the frontier sidecar after
+`vc-frontier-install`. This private import does not configure Vibecrafted.app or
+the `vc-terminal` product launcher.
 
 ## Wheel contract (do not regress)
 

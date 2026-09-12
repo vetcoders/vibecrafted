@@ -5,7 +5,7 @@ _vetcoders_launch_receipt_field() {
   local json_path="$1"
   local field_name="$2"
   [[ -f "$json_path" ]] || return 0
-  python3 - "$json_path" "$field_name" <<'PY'
+  "$(_vetcoders_internal_python)" - "$json_path" "$field_name" <<'PY'
 import json
 import sys
 

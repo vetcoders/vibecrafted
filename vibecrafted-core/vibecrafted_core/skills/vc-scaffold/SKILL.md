@@ -264,11 +264,14 @@ it must record return-control evidence and may not become a parallel execution s
 ### Compile-embargo plans
 
 If a plan defers compile/test gates while shaping architecture, apply the phase-aware recovery
-contract in `references/compile-embargo.md`. An embargo never legalizes `--no-verify`, never weakens
-commit-message/security checks, and never silently leaves the only accepted recovery point local.
-The plan must cite the repository-owned policy mechanism that can defer only the named phase gates;
-without such a mechanism, the embargo is blocked until a prerequisite implements it or the work is
-split into ordinary hook-clean cuts.
+contract in `references/compile-embargo.md`. Once the Founder authorizes an embargo phase,
+`--no-verify` is fully authorized for each local worker checkpoint in that phase. It bypasses the
+bundled Git hook entrypoint as a whole, so workers report what ran and what was skipped; it is not
+a security or compile/test delivery claim. Workers do not push; a push using `--no-verify` is an
+exclusive Founder button. The designated integrator may make
+a local structural admission after exact commit/scope, Semgrep, and secret/security review, so later
+waves can build on the joined architecture while compile, lint, type-check, and tests remain
+deferred. Only named closure plus full language-appropriate gates creates verified delivery.
 
 ### 6. Serve & review (editable artifacts via vibecrafted-server)
 
@@ -335,6 +338,26 @@ it triggers a recovery-vector** (fallback/failover/handsoff). Full alphabet + ma
 - **Keep dependencies shallow.** Prefer independent workstreams; sequential A→B→C kills parallelism.
 - **No premature optimization / no invented patterns.** The best architecture is the one that ships.
 
+## Mandatory plan closing — Emil spirit
+
+Founder reaffirmed this on 2026-09-07; the earlier Founder-authored Emil Kurier
+instruction is in AICX Claude session `2b73c9c1-87ef-49ce-a43f-3dc980d7816a`
+(2026-05-26): CTA, a deliberately corny motivational joke, and kaomoji must be
+surprising and unique.
+
+Every master plan, DRIVER, and executable cut brief ends with:
+
+- A short, task-specific motivational line with a kaomoji.
+- **Call to Action:** the concrete next authorized step, its owner, and what they
+  return. Match the current plan state and canonical execution route; a blocked
+  plan calls for resolving its blocker, not pretending it is ready to launch.
+- **Suchar:** a fresh, deliberately corny joke related to this task, with a kaomoji.
+  Write it for this plan; do not recycle a stock punchline across the package.
+
+Use the existing [Emil closing rail](../vc-operator/DISPATCH.md#closing-rail--the-emil-default-block)
+for presentation. Preserve this voice in Polish and English plans. Keep the close
+brief; humor never substitutes for acceptance criteria or claims unverified success.
+
 ## What Success Looks Like
 
 - A cold fleet (or human) executes the plan **without asking a question** mid-flight.
@@ -357,7 +380,8 @@ it triggers a recovery-vector** (fallback/failover/handsoff). Full alphabet + ma
 - Planning before the orientation gate (composing architecture from memory = silent drift).
 - Shaping without founder answers or a cited prior interview.
 - A "Running This Plan" section made of manual per-task workflow commands.
-- Compile embargo expressed as a push ban or permission to use `--no-verify`.
+- Bare permission to use `--no-verify` without the phase authorization, declared gates,
+  checkpoint report, and integrator admission contract.
 - A 50-page design doc instead of a sharp, measurable plan.
 - Prose instead of a `state` column — the operator can't trigger/stop on prose.
 - Treating an agent's `[~]` claim as `[x]` without a verifier (the optimism trap).
@@ -370,8 +394,8 @@ it triggers a recovery-vector** (fallback/failover/handsoff). Full alphabet + ma
 - **`references/cadence.md`** — VC-ship read/write cadence (order, WRITE/READ, handoff, planning rules).
 - **`references/output-shapes.md`** — the three scale shapes + 12-section dispatch template + tracker.
 - **`references/plan-template.md`** — the SCAFFOLD.md output format (now with Vector + state + verifier).
-- **`references/compile-embargo.md`** — phase-aware, remotely recoverable embargo contract without
-  hook bypasses.
+- **`references/compile-embargo.md`** — canonical phase-aware embargo contract: authorized local
+  worker checkpoints, independent integrator admission, and deferred-gate closure.
 
 ---
 

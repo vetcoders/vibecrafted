@@ -13,10 +13,14 @@
 // Vibecrafted with AI Agents (c)2026 Vetcoders
 layout {
     // new_tab_template removed: vc-frame 0.44 broke `children` inside it.
-    // default_tab_template covers both existing and new tabs.
-    default_tab_template {
+    // Chrome lives in session_layer (tagged session_canvas); tab_template
+    // and swaps below stay content-only — mirrors native
+    // zellij-utils/assets/layouts/vibecrafted.kdl. Screen owns one canvas.
+    session_layer {
         pane size=1 borderless=true {
             plugin location="compact-bar" {
+                session_canvas true
+                session_canvas_kind "compact-bar"
                 // 🚥 zone: clear the macOS traffic lights in the native window
                 left_inset "6"
             }
@@ -24,6 +28,8 @@ layout {
         pane split_direction="vertical" {
             pane size=24 borderless=true {
                 plugin location="session-manager" {
+                    session_canvas true
+                    session_canvas_kind "session-manager"
                     rail true
                     pane_title "Sessions"
                 }
@@ -31,8 +37,17 @@ layout {
             pane { children; }
         }
         pane size=1 borderless=true {
-            plugin location="status-bar"
+            plugin location="status-bar" {
+                session_canvas true
+                session_canvas_kind "status-bar"
+            }
         }
+    }
+
+    // Content-only. The parser mounts this inside session_layer without
+    // copying chrome ownership into the tab contract.
+    default_tab_template {
+        pane { children; }
     }
 
     tab name="𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Research" {

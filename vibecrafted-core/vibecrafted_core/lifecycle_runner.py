@@ -23,11 +23,14 @@ from .lifecycle_delivery import (
     try_grant_lifecycle_stage_seal,
 )
 from .lifecycle_fleet import (
+    FleetLaunch,
     SupervisorLaunch,
     dispatch_recorded_children,
+    dispatcher_fleet_launch,
     live_vc_dispatch_permitted,
-    mission_cuts,
+    mission_stage_cuts,
     record_write_stage_fleet,
+    stage_fleet_progress,
     stage_worker_may_launch_agent_lines,
 )
 from .report_contract import parse_report_path
@@ -649,8 +652,19 @@ class LifecycleRunner:
         launcher: LaunchWorkflow = launch_workflow,
         awaiter: AwaitWorkflow | None = None,
         fleet_supervisor: SupervisorLaunch | None = None,
+        fleet_launch: FleetLaunch | None = None,
+        cell_launcher: Any | None = None,
+        fleet_await_config: dict[str, Any] | None = None,
     ) -> None:
-        """Wire the workflow launcher and awaiter (defaults to the real runtime paths)."""
+        """Wire the workflow launcher and awaiter (defaults to the real runtime paths).
+
+        The WRITE-stage fleet defaults to the existing dispatcher: absent an
+        injected seam, declared cuts are scheduled by ``run_dispatch`` against
+        real worktrees and durable receipts.  ``fleet_supervisor`` (per cut) and
+        ``fleet_launch`` (per fleet) stay available for injection;
+        ``cell_launcher`` bounds only the provider spawn, leaving the production
+        supervisor, parser, worktrees and receipts in play.
+        """
         self.launcher = launcher
         self.awaiter = awaiter or (
             lambda payload: await_launch_truth(
@@ -661,6 +675,9 @@ class LifecycleRunner:
             )
         )
         self.fleet_supervisor = fleet_supervisor
+        self.fleet_launch = fleet_launch
+        self.cell_launcher = cell_launcher
+        self.fleet_await_config = fleet_await_config
 
     async def run(self, spec: LifecycleRunSpec) -> dict[str, Any]:
         """Execute the full lifecycle: initialize state, then loop launching stages until
@@ -894,7 +911,7 @@ class LifecycleRunner:
     ) -> dict[str, Any]:
         """Build the stage prompt, capture the pre-launch git baseline, and launch the
         stage worker; returns the initial stage record (before await/completion)."""
-        cuts = mission_cuts(source_prompt)
+        cuts = mission_stage_cuts(source_prompt, stage.id)
         prompt = self._stage_prompt(
             manifest=manifest,
             stage=stage,
@@ -935,6 +952,33 @@ class LifecycleRunner:
         commit_before = _git_head(root)
         git_before = _git_status(root)
         git_snapshot_before = _git_worktree_snapshot(root, git_before)
+        # Persist and dispatch the cut identities before the stage worker can
+        # become an unobservable detached process.  The stage worker never
+        # receives authority to spawn a fleet; ``fleet_supervisor`` is the
+        # root-owned existing dispatcher seam.
+        fleet = record_write_stage_fleet(
+            stage=stage,
+            cuts=cuts,
+            parent_run_id=lifecycle_run_id or launch_spec.run_id,
+            repo_root=root,
+            agent=agent,
+        )
+        supervisor_launches = dispatch_recorded_children(
+            fleet,
+            supervisor=self.fleet_supervisor,
+            fleet_launch=(
+                None
+                if self.fleet_supervisor is not None
+                else self.fleet_launch
+                or dispatcher_fleet_launch(
+                    repo_root=root,
+                    mission_text=source_prompt,
+                    stage_model=model,
+                    cell_launcher=self.cell_launcher,
+                    await_config=self.fleet_await_config,
+                )
+            ),
+        )
         launch = await asyncio.to_thread(self.launcher, launch_spec, root)
         record: dict[str, Any] = {
             "id": stage.id,
@@ -956,19 +1000,41 @@ class LifecycleRunner:
             "launch": launch,
             "status": "launching",
         }
-        fleet = record_write_stage_fleet(
-            stage=stage,
-            cuts=cuts,
-            parent_run_id=lifecycle_run_id or str(launch.get("run_id") or ""),
-            repo_root=root,
-            agent=agent,
-        )
         if fleet.children:
             record["fleet"] = {
                 **fleet.to_payload(),
-                "supervisor_launches": dispatch_recorded_children(
-                    fleet, supervisor=self.fleet_supervisor
+                "live_dispatch": any(
+                    bool(item.get("live_dispatch")) for item in supervisor_launches
                 ),
+                # Where the authoritative per-cut truth lives, so a reopened
+                # view can recover the fleet without the launching process.
+                "dispatch_run_id": next(
+                    (
+                        str(item.get("dispatcher_run_id") or "")
+                        for item in supervisor_launches
+                        if item.get("dispatcher_run_id")
+                    ),
+                    "",
+                ),
+                "receipts_path": next(
+                    (
+                        str(item.get("receipts_path") or "")
+                        for item in supervisor_launches
+                        if item.get("receipts_path")
+                    ),
+                    "",
+                ),
+                # The typed plan this fleet was scheduled from; the operator's
+                # recovery command is not nameable without it.
+                "plan_path": next(
+                    (
+                        str(item.get("plan_path") or "")
+                        for item in supervisor_launches
+                        if item.get("plan_path")
+                    ),
+                    "",
+                ),
+                "supervisor_launches": supervisor_launches,
             }
         return record
 
@@ -1006,7 +1072,8 @@ class LifecycleRunner:
                 "\n  coder of every cut. Record one child run per listed cut with"
                 "\n  cut_id and worktree"
                 f" $VIBECRAFTED_HOME/worktrees/<org>/<repo>/{lifecycle_run_id or '<run_id>'}/<cut_id>."
-                "\n  Still no live vc-dispatch"
+                "\n  The root lifecycle supervisor records identities before invoking"
+                "\n  its existing dispatcher; stage workers still never invoke vc-dispatch"
                 f" (live_vc_dispatch_permitted={live_vc_dispatch_permitted()})."
                 f"\n- Listed cuts: {listed}"
             )
@@ -1515,6 +1582,10 @@ class LifecycleSupervisor:
             "state_path": state.get("state_path"),
             "report_path": state.get("report_path"),
             "stage_worker": _stage_worker_liveness(state, stage_launch),
+            # Fleet progress is read back from the dispatcher's receipt
+            # ledger, never recomputed here: status, await and approve must
+            # not be able to disagree about what the fleet still owes.
+            "fleet": stage_fleet_progress(state),
         }
 
 

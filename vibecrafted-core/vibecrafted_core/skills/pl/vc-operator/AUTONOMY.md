@@ -46,7 +46,9 @@ tego w bieżącej sesji, **nie wolno ci** wykonać żadnej z tych rzeczy:
 - modyfikowanie sekretów CI, zmiennych środowiskowych, deploy keys
 - modyfikowanie konfiguracji auth / billingu w jakimkolwiek serwisie produkcyjnym
 - edytowanie plików `.env*` w jakikolwiek sposób, który ujawnia sekrety
-- pomijanie bramek bezpieczeństwa (`--no-verify`, `--no-gpg-sign`) — nawet jeśli hook padnie
+- pomijanie bramek bezpieczeństwa (`--no-gpg-sign` albo `--no-verify` poza
+  lokalnym checkpointem compile embargo jawnie autoryzowanym przez Foundera);
+  push z `--no-verify` jest zawsze wyłącznie prawem Foundera
 
 ### Powierzchnia skilli / konwencji
 

@@ -4,6 +4,12 @@
 This pane is a view and launcher only. vc-frame owns navigation, the native app
 owns VC Console, and the existing Vibecrafted deck owns diagnostics and server
 truth.
+
+Theme ownership: this pane paints nothing of its own. The host terminal palette
+(``vc-theme`` publishes ``terminal-theme.toml``; the tab-bar switcher calls it)
+owns background and foreground, so every cell here is drawn with the terminal
+default colour pair. Emphasis uses bold/reverse only — never dim, never a
+hardcoded colour — so light and moon modes stay readable without a restart.
 """
 
 from __future__ import annotations
@@ -13,7 +19,70 @@ import json
 import os
 import shutil
 import subprocess
-from typing import Any
+import sys
+import textwrap
+from pathlib import Path
+from typing import Any, NamedTuple
+
+
+def _generation_python_candidates() -> list[str]:
+    """Interpreters that can import vibecrafted_core without host PYTHONPATH."""
+    home = Path.home()
+    data = Path(os.environ.get("XDG_DATA_HOME") or (home / ".local" / "share"))
+    ordered: list[str] = []
+    wanted = os.environ.get("VIBECRAFTED_PYTHON", "").strip()
+    if wanted:
+        ordered.append(wanted)
+    for key in ("VIBECRAFTED_RUNTIME_ROOT", "VIBECRAFTED_ROOT"):
+        root = os.environ.get(key, "").strip()
+        if root:
+            ordered.append(str(Path(root) / "bin" / "python3"))
+    ordered.extend(
+        (
+            str(data / "uv" / "tools" / "vibecrafted" / "bin" / "python3"),
+            str(data / "uv" / "tools" / "vibecrafted" / "bin" / "python"),
+            str(data / "uv" / "tools" / "vibecrafted-core" / "bin" / "python3"),
+            str(
+                data
+                / "vibecrafted"
+                / "tools"
+                / "vibecrafted-current"
+                / "bin"
+                / "python3"
+            ),
+        )
+    )
+    seen: set[str] = set()
+    unique: list[str] = []
+    for item in ordered:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        unique.append(item)
+    return unique
+
+
+def ensure_generation_python() -> None:
+    """Re-exec a generation interpreter when host python3 lacks vibecrafted_core."""
+    try:
+        import vibecrafted_core  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        return
+    here = os.path.realpath(sys.executable)
+    for wanted in _generation_python_candidates():
+        if not os.access(wanted, os.X_OK):
+            continue
+        if os.path.realpath(wanted) == here:
+            continue
+        os.execv(wanted, [wanted, *sys.argv])
+    raise SystemExit(
+        "vc-start-here: no module named 'vibecrafted_core'; "
+        "set VIBECRAFTED_PYTHON to the generation python3 "
+        "(or run through vc-start so the Runtime Pack is on PATH)"
+    )
+
 
 PRODUCT_LINE = (
     "Vibecrafted is a workspace where you start and coordinate AI Agents "
@@ -26,6 +95,15 @@ ACTIONS = (
     ("VC Console", "Open native run status and reports", "console"),
     ("Help & diagnostics", "Check this installed runtime and its owner", "help"),
 )
+
+HELP_LINE = "↑↓ / j k select   Enter open   click open   r refresh   q close"
+HELP_LINE_SHORT = "Enter open   r refresh   q close"
+
+# Deliberate reading width: long prose wraps here instead of running to the
+# pane edge or being clipped behind an ellipsis.
+READABLE_WIDTH = 76
+MIN_CANVAS = 20
+DETAIL_INDENT = 6
 
 
 def action_argv(action: str) -> list[str]:
@@ -126,6 +204,156 @@ def action_for_mouse_row(
     return None
 
 
+class Row(NamedTuple):
+    """One rendered screen row; ``action`` marks a mouse target."""
+
+    row: int
+    col: int
+    text: str
+    attr: int
+    action: str | None = None
+
+
+def canvas_geometry(width: int) -> tuple[int, int]:
+    """Return ``(left, canvas)`` — a left-anchored reading column.
+
+    The column keeps a small gutter and never grows past ``READABLE_WIDTH``;
+    it is not centred, so a wide pane does not float the text far right.
+    """
+    left = 2 if width < 60 else 4
+    canvas = max(MIN_CANVAS, min(READABLE_WIDTH, width - left - 2))
+    return left, canvas
+
+
+def _wrap(text: str, width: int, *, hanging: int = 0) -> list[str]:
+    """Wrap ``text`` to ``width``; continuation rows indent by ``hanging``."""
+    return textwrap.wrap(text, max(1, width), subsequent_indent=" " * hanging) or [""]
+
+
+def _compose(
+    *,
+    left: int,
+    canvas: int,
+    density: int,
+    selected: int,
+    readiness: tuple[str, str],
+    error: str,
+) -> list[Row]:
+    """Lay rows out from row 0 at one density.
+
+    0 airy · 1 tight · 2 compact (title and detail share a row) ·
+    3 essentials (no prose, one clipped row per action) for tiny panes.
+    """
+    rows: list[Row] = []
+    cursor = 0
+
+    def emit(
+        lines: list[str], attr: int, col: int = 0, action: str | None = None
+    ) -> None:
+        nonlocal cursor
+        for line in lines:
+            rows.append(Row(cursor, left + col, line, attr, action))
+            cursor += 1
+
+    def gap(minimum_density: int = 1) -> None:
+        nonlocal cursor
+        if density < minimum_density:
+            cursor += 1
+
+    essentials = density >= 3
+    emit(["START HERE"], curses.A_BOLD)
+    gap(2)
+    if not essentials:
+        emit(_wrap(PRODUCT_LINE, canvas), curses.A_NORMAL)
+        gap(2)
+    state, message = readiness
+    # The state word is spelled out: readiness must not rely on colour or dim.
+    readiness_text = (
+        f"RUNTIME [{state}]" if essentials else f"RUNTIME [{state}] {message}"
+    )
+    emit(
+        _wrap(readiness_text, canvas),
+        curses.A_BOLD if state == "ready" else curses.A_NORMAL,
+    )
+    gap(2)
+    emit(["Choose where to begin:"], curses.A_BOLD)
+    gap(1)
+    for index, (title, detail, action) in enumerate(ACTIONS):
+        marker = "▶" if index == selected else " "
+        attr = curses.A_REVERSE | curses.A_BOLD if index == selected else curses.A_BOLD
+        if essentials:
+            emit(
+                [_clip(f"{marker} [{index + 1}] {title}", canvas)], attr, action=action
+            )
+        elif density >= 2:
+            emit(
+                _wrap(
+                    f"{marker} [{index + 1}] {title} — {detail}",
+                    canvas,
+                    hanging=DETAIL_INDENT,
+                ),
+                attr,
+                action=action,
+            )
+        else:
+            emit([f"{marker} [{index + 1}] {title}"], attr, action=action)
+            emit(
+                _wrap(detail, canvas - DETAIL_INDENT),
+                curses.A_NORMAL,
+                col=DETAIL_INDENT,
+                action=action,
+            )
+            gap(1)
+    gap(2)
+    emit(_wrap(HELP_LINE_SHORT if essentials else HELP_LINE, canvas), curses.A_NORMAL)
+    if error:
+        gap(2)
+        emit(_wrap(error, canvas), curses.A_BOLD)
+    return rows
+
+
+def layout_rows(
+    height: int,
+    width: int,
+    *,
+    selected: int,
+    readiness: tuple[str, str],
+    error: str = "",
+) -> list[Row]:
+    """Compute every visible row for a pane of ``height`` × ``width``.
+
+    Prose wraps inside the reading column; the airiest layout that still shows
+    all actions and the help line wins; a little top slack is added only when
+    the pane is tall enough to afford it.
+    """
+    left, canvas = canvas_geometry(width)
+    rows: list[Row] = []
+    for density in (0, 1, 2, 3):
+        rows = _compose(
+            left=left,
+            canvas=canvas,
+            density=density,
+            selected=selected,
+            readiness=readiness,
+            error=error,
+        )
+        if rows[-1].row < height:
+            break
+    used = rows[-1].row + 1
+    top = max(0, min(2, (height - used) // 2))
+    return [row._replace(row=row.row + top) for row in rows]
+
+
+def mouse_targets(rows: list[Row], width: int) -> list[tuple[int, int, int, str]]:
+    """Every rendered action row is clickable across the reading column."""
+    left, canvas = canvas_geometry(width)
+    return [
+        (row.row, left, left + canvas, row.action)
+        for row in rows
+        if row.action is not None
+    ]
+
+
 def _clip(text: str, width: int) -> str:
     if width <= 0:
         return ""
@@ -142,6 +370,20 @@ def _put(window: curses.window, row: int, col: int, text: str, attr: int = 0) ->
         pass
 
 
+def adopt_terminal_colors() -> None:
+    """Draw with the terminal default pair instead of palette black/white.
+
+    ``curses.wrapper`` calls ``start_color()``; without this ncurses paints
+    pair 0 as palette 7 on palette 0 and the pane turns into an opaque block
+    of the theme's "black" regardless of the selected light/moon mode.
+    """
+    try:
+        if curses.has_colors():
+            curses.use_default_colors()
+    except curses.error:
+        pass
+
+
 class StartHere:
     def __init__(self, window: curses.window) -> None:
         self.window = window
@@ -151,6 +393,7 @@ class StartHere:
         self.targets: list[tuple[int, int, int, str]] = []
 
     def configure(self) -> None:
+        adopt_terminal_colors()
         curses.curs_set(0)
         curses.noecho()
         curses.cbreak()
@@ -167,6 +410,8 @@ class StartHere:
             key = self.window.getch()
             if key in (ord("q"), 27):
                 return
+            if key == curses.KEY_RESIZE:
+                continue
             if key in (curses.KEY_UP, ord("k")):
                 self.selected = (self.selected - 1) % len(ACTIONS)
             elif key in (curses.KEY_DOWN, ord("j"), 9):
@@ -184,41 +429,17 @@ class StartHere:
 
     def draw(self) -> None:
         self.window.erase()
-        self.targets.clear()
         height, width = self.window.getmaxyx()
-        canvas = min(82, max(40, width - 4))
-        left = max(2, (width - canvas) // 2)
-        top = max(1, min(5, (height - 24) // 2))
-        _put(self.window, top, left, "START HERE", curses.A_BOLD)
-        _put(self.window, top + 2, left, PRODUCT_LINE)
-        state, message = self.readiness
-        readiness_attr = curses.A_BOLD if state == "ready" else curses.A_DIM
-        _put(self.window, top + 5, left, f"RUNTIME · {message}", readiness_attr)
-        _put(self.window, top + 7, left, "Choose where to begin:", curses.A_BOLD)
-        first = top + 9
-        for index, (title, detail, action) in enumerate(ACTIONS):
-            row = first + index * 3
-            marker = "▶" if index == self.selected else " "
-            label = f"{marker} [{index + 1}] {title}"
-            attr = (
-                curses.A_REVERSE | curses.A_BOLD
-                if index == self.selected
-                else curses.A_BOLD
-            )
-            _put(self.window, row, left, label, attr)
-            _put(self.window, row + 1, left + 6, detail, curses.A_DIM)
-            self.targets.append((row, left, left + len(label), action))
-            self.targets.append((row + 1, left, left + canvas, action))
-        footer = first + len(ACTIONS) * 3 + 1
-        _put(
-            self.window,
-            footer,
-            left,
-            "↑↓ / j k select   Enter open   click open   r refresh   q close",
-            curses.A_DIM,
+        rows = layout_rows(
+            height,
+            width,
+            selected=self.selected,
+            readiness=self.readiness,
+            error=self.error,
         )
-        if self.error:
-            _put(self.window, footer + 2, left, self.error, curses.A_BOLD)
+        for row in rows:
+            _put(self.window, row.row, row.col, row.text, row.attr)
+        self.targets = mouse_targets(rows, width)
         self.window.refresh()
 
     def activate(self, action: str) -> None:
@@ -259,4 +480,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    ensure_generation_python()
     raise SystemExit(main())

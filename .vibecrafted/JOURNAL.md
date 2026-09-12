@@ -95,3 +95,43 @@ to, co od wpisu 07:05 zmieniło się na GitHubie, i zostawić Founderowi jeden g
   nazywają `fde0fbe3`). Portable CI dla fea43671 i ecf95053 w toku od 07:27.
 - Hook `commit-msg` odrzuca typ `merge(...)` i wymaga trailerów `session_id`/`time`/`runtime`;
   merge commit poszedł jako `chore(install)`.
+
+
+## 2026-09-06 — Stage 1 terminal-entry integration
+
+Agent-Operator admitted the reviewed Fleet Worktree chain through `7dc7b2d5ca1fba5540ed1469ae25dd16f50ea486` with exact merge `dd8350bf0ac611324bc1a04c629b958857b5a445` (first parent `de2d1bbc2601334a815ec3554df6a2496d5a4011`). Public non-TTY start/resume now uses the canonical terminal host and explicit project root; native detached Frame creation precedes one provider launch and foreground attach. R4 closes Bash/Zsh root-argv and reserved-status differences. Independent review and recorded 40 passing affected tests are in `~/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0906/reports/S1-start-resume-R4-admission.md`. Installed-runtime acceptance remains pending.
+
+Earlier operator continuity was appended to ignored `.vibecrafted/THE_JOURNAL.md`; current tracked charter specifies this `JOURNAL.md`. Preserve that historical file as evidence and continue material decisions here; do not erase or promote its claims without current verification. Stage 2 remains held until final build, signed installation, config preservation and live-owner/launch proof. Remote was independently verified at `de2d1bbc2601334a815ec3554df6a2496d5a4011` after all normal pre-push gates.
+
+
+## 2026-09-06 — Installed stage 1 and terminal lifetime recovery
+
+Built, signed, notarized and installed source `cb026674e9cf87f5357eebe6d182ee580339936c`; App and DMG Apple submissions were accepted and installed App identity matches the signed release tuple. Runtime owner reports ready and launchd now runs the new supervisor/server/guardian. App launch adopted that generation and opened its terminal. Original Frame session owner PIDs and sockets survived. Reports are under the day artifact `reports/stage1-verification/`; preserve the old App backup and configuration backup.
+
+Real public-entry acceptance exposed a remaining lifetime boundary: `public-start-lifetime.json` records vc-start exiting 0 while terminal PID 37536 remains alive through 12 seconds, sharing caller PGID 37470; after the outer exec invocation ends, that terminal/client disappear while detached Frame server 23753 survives. Agent inference: the background shell/disown launch is still coupled to caller-group cleanup. Operator admits a bounded R5 Fleet Worktree repair for independent terminal process lifetime; no claim of completed stage 1 or start of stage 2. A transient EXITED listing for Needs attention was falsified by unchanged owner PID 76455 and socket and subsequent live listing.
+
+## 2026-09-12T17:20+02:00 — PR #86 wchłonięty do base; pierwsza fala napraw stacku #75→#77→#80
+
+Sesja resume (rsme-260912-155701-63388). Decyzje Foundera w sesji: merge #86
+lokalnie do HEAD, push na origin, podział pracy (agent: stack; Founder: pozostałe PR-y).
+
+- **#86 → base**: fast-forward `b84f3b4a → e31b86f9` + format-fix (`39268cbe`,
+  pre-push ruff odbił plik testu z PR-a). Push przesunął head #80; #86 rozliczy
+  się jako merged.
+- **Paczka 6 commitów** (`e15a0d24..af49f375`, wypchnięta, 136 passed lokalnie
+  na dotkniętych modułach): 2× produkcyjny crash pustej tablicy pod bash 3.2
+  `set -u` w launcherze (`launch_args`, `_vetcoders_start_frame_argv` — trzeci
+  i czwarty przypadek wzorca już opisanego w pliku przy linii 1732); 4× stęchłe
+  testy wobec nowszych kanonów: retired `config install` (e1d7a791), fail-closed
+  owned interpreter bez PYTHONPATH (3fe139a1), no-tty surface admission
+  (bf028c40, eskalacja z pipe'a mimo żywej sesji jest CELOWA), agy stream-json
+  stdin lane (e33c09f0 — fake salvage agent nie dekodował NDJSON).
+- **Werdykty security (agent, zweryfikowane w kodzie)**: 3 alerty CodeQL na
+  stacku to false positives — critical `rust/command-line-injection`
+  (run_observation.rs:393; `is_safe_run_id` whitelist + argv bez shella) oraz
+  2× high `js/xss-through-dom` (playground; wszystkie ścieżki do innerHTML
+  bramkowane słownikami, prompt przez esc()). Dismiss = guzik Foundera;
+  taint-break pod skaner odrzucony jako kod-teatr.
+- Otwarte: #77/#75 Linux CI bez Runtime Packa (stara linia bez build-joba);
+  core-macos 4 testy na #80 i entry_escalation na Linuksie — ocena po świeżym
+  runie CI z tej paczki.

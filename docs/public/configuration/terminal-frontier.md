@@ -7,6 +7,38 @@ order: 30
 
 # Terminal frontier
 
+## Vibecrafted Terminal
+
+Opening **Terminal** in the app, or running `vc-terminal`, opens an independent
+interactive shell. It does not create or attach a Frame workspace. Start a
+workspace explicitly with `vc-start --repo <path>`, find existing workspaces with
+`vc-frame list-sessions`, or return to one with `vc-frame attach <name>`.
+
+The installed terminal uses its own startup files under
+`~/.config/vibecrafted/vc-terminal/`. It loads neither your private `.zshrc` nor
+your private login profile. Your other terminal applications keep their existing
+setup.
+
+The profile initializes installed Starship, Atuin, zoxide, zsh-autosuggestions
+and zsh-syntax-highlighting. Atuin uses **Ctrl+R**; ordinary Up-arrow behavior is
+preserved. Zoxide provides `z <directory-name>` after you have visited a directory.
+Tab completion uses zsh and the installed product commands' help.
+
+Prompt and history preferences live in `~/.config/vibecrafted/starship.toml` and
+`~/.config/vibecrafted/atuin/config.toml`. Reinstallation preserves edits to these
+preferences. History, Atuin data, zoxide data and prompt cache are separate from
+your ordinary shell, under `${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/`.
+
+Missing optional tools leave the shell usable and produce a setup notice.
+`startup.log` in that shell directory contains a bounded snapshot of component
+notices, without command history or tool initialization output. Install missing
+tools through their upstream package or installer. A failed explicit workspace
+launch keeps its error visible and leaves a shell available for the next command.
+
+## Legacy frontier helpers
+
+The opt-in helper layer below is separate from the installed Terminal profile.
+
 Frontier config is the lightweight, optional terminal layer that ships with the runtime: a `starship` prompt with repo and runtime context, `atuin` searchable history tuned for project recall, and dormant `vc-frame` dashboard layouts. None of it is required — `vibecrafted` works without any of it — and none of it bulldozes your existing terminal setup.
 
 ## What it gives you

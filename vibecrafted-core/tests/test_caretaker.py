@@ -185,7 +185,7 @@ def test_maintenance_names_orphans_and_corruption(tmp_path: Path) -> None:
     plane = _plane(tmp_path)
     (plane / "runtime_runs" / "with-meta").mkdir()
     (plane / "runtime_runs" / "with-meta" / "meta.json").write_text(
-        "{}", encoding="utf-8"
+        '{"run_id": "with-meta"}', encoding="utf-8"
     )
     (plane / "runtime_runs" / "orphan-a").mkdir()
     (plane / "runtime_runs" / "orphan-b").mkdir()
@@ -204,6 +204,51 @@ def test_maintenance_names_orphans_and_corruption(tmp_path: Path) -> None:
     assert "runtime_run_retention" not in by_code
 
 
+def test_maintenance_reconciles_missing_runtime_meta_from_matching_snapshot(
+    tmp_path: Path,
+) -> None:
+    """A durable projected snapshot remains an identity receipt after meta loss."""
+    plane = _plane(tmp_path)
+    run_dir = plane / "runtime_runs" / "impl-projected"
+    run_dir.mkdir()
+    (run_dir / "transcript.log").write_text("retained transcript\n", encoding="utf-8")
+    (plane / "runs" / "impl-projected.json").write_text(
+        json.dumps({"run_id": "impl-projected", "state": "completed"}),
+        encoding="utf-8",
+    )
+
+    section = caretaker.build_maintenance_section(control_plane=plane)
+
+    assert section["identified_runtime_runs"] == 1
+    assert section["runtime_runs_identified_by_snapshot"] == 1
+    assert section["orphan_runtime_runs"] == 0
+    assert "orphan_runtime_runs" not in {
+        finding["code"] for finding in section["findings"]
+    }
+
+
+def test_maintenance_preserves_unattributed_transcript_without_inventing_identity(
+    tmp_path: Path,
+) -> None:
+    """A transcript alone is evidence, not authority for provider or run state."""
+    plane = _plane(tmp_path)
+    run_dir = plane / "runtime_runs" / "unknown-evidence"
+    run_dir.mkdir()
+    (run_dir / "transcript.log").write_text("partial output\n", encoding="utf-8")
+
+    section = caretaker.build_maintenance_section(control_plane=plane)
+
+    assert section["orphan_runtime_runs"] == 1
+    assert section["runtime_runs_with_transcript_only"] == 1
+    finding = next(
+        finding
+        for finding in section["findings"]
+        if finding["code"] == "orphan_runtime_runs"
+    )
+    assert finding["transcript_only"] == 1
+    assert "inferred identity" in finding["detail"]
+
+
 def test_event_stream_pressure_is_reported(tmp_path: Path) -> None:
     """Rotation debt shows up before it makes unrelated commands slow."""
     plane = _plane(tmp_path)
@@ -215,6 +260,13 @@ def test_event_stream_pressure_is_reported(tmp_path: Path) -> None:
 
     codes = {finding["code"] for finding in section["findings"]}
     assert "event_stream_pressure" in codes
+
+
+def test_event_pressure_and_automatic_rotation_use_one_threshold() -> None:
+    """A caretaker warning must name work the event writer will perform."""
+    from vibecrafted_core import control_plane
+
+    assert caretaker.EVENT_STREAM_PRESSURE_BYTES == control_plane.EVENTS_ROTATE_BYTES
 
 
 def test_resume_classification_is_delegated_not_duplicated(

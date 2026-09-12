@@ -12,7 +12,12 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
-from vibecrafted_core import control_plane, run_signal, server_observation
+from vibecrafted_core import (
+    control_plane,
+    process_control,
+    run_signal,
+    server_observation,
+)
 from vibecrafted_core.run_signal import RunSignalServer, wait_for_run_signal
 from vibecrafted_core.runtime_paths import (
     classify_vibecrafted_home_child,
@@ -580,3 +585,250 @@ def test_united_runtime_paths_keep_uds_socket_and_home_child_classes(
     path = run_signal_socket_path("union-uds")
     assert len(os.fsencode(path)) < 104
     assert path.name.endswith(".sock")
+
+
+def _dead_server_config(root: Path) -> Path:
+    """Point XDG at a port nothing listens on so HTTP wake restore fails closed."""
+    config_home = root / "xdg-config"
+    dest = config_home / "vibecrafted"
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / "config.toml").write_text(
+        '[server]\nbind_host = "127.0.0.1"\nport = 1\n'
+        'public_url = "http://127.0.0.1:1"\n',
+        encoding="utf-8",
+    )
+    return config_home
+
+
+def _write_runtime_meta(home: Path, run_id: str, payload: dict[str, object]) -> Path:
+    run_dir = home / "control_plane" / "runtime_runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / "meta.json"
+    path.write_text(json.dumps({"run_id": run_id, **payload}), encoding="utf-8")
+    return path
+
+
+def _spawn_cli_await(
+    home: Path,
+    run_id: str,
+    *,
+    config_home: Path,
+    timeout: str = "5",
+    hard_cap: str = "10",
+) -> subprocess.Popen[str]:
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env["VIBECRAFTED_HOME"] = str(home)
+    env["HOME"] = str(home.parent / "user-home")
+    env["XDG_CONFIG_HOME"] = str(config_home)
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "vibecrafted_core.cli",
+            "await",
+            "codex",
+            "--run-id",
+            run_id,
+            "--timeout",
+            timeout,
+            "--hard-cap",
+            hard_cap,
+            "--json",
+        ],
+        cwd=Path(__file__).parents[1],
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+def _collect_cli(
+    proc: subprocess.Popen[str], *, timeout: float = 12
+) -> tuple[int, dict[str, object], str]:
+    stdout, stderr = proc.communicate(timeout=timeout)
+    payload: dict[str, object] = json.loads(stdout) if stdout.strip() else {}
+    return int(proc.returncode if proc.returncode is not None else 1), payload, stderr
+
+
+def test_twenty_real_cli_await_clients_share_dispatcher_fanout(
+    monkeypatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    config_home = _dead_server_config(tmp_path)
+    run_id = "signal-cli-fanout-20"
+    process, _meta, _report = _dispatcher(tmp_path, run_id, delay=4.0, home=home)
+    socket_path = run_signal_socket_path(run_id)
+    payloads: list[dict[str, object]] = []
+    try:
+        _wait_for(socket_path)
+        clients = [
+            _spawn_cli_await(home, run_id, config_home=config_home) for _ in range(20)
+        ]
+        for client in clients:
+            rc, payload, err = _collect_cli(client)
+            assert rc == 0, (payload, err)
+            payloads.append(payload)
+        stdout, stderr = process.communicate(timeout=5)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+    assert process.returncode == 0, (stdout, stderr)
+    assert len(payloads) == 20
+    stamps = []
+    for payload in payloads:
+        assert payload["completed"] is True
+        assert payload["outcome"] == "terminal"
+        assert payload["signal_kind"] == "terminal"
+        subscription = payload.get("subscription")
+        ownership = (
+            subscription.get("ownership") if isinstance(subscription, dict) else None
+        )
+        assert ownership != "server_await_subscription"
+        stamps.append(payload.get("signal_ts"))
+    assert stamps[0]
+    assert all(stamp == stamps[0] for stamp in stamps)
+    assert not socket_path.exists()
+
+    late_rc, late, late_err = _collect_cli(
+        _spawn_cli_await(home, run_id, config_home=config_home)
+    )
+    assert late_rc == 0, (late, late_err)
+    assert late["completed"] is True
+    assert late["outcome"] == "terminal"
+    assert late["reason"] in {"terminal", "report_delivered"}
+
+
+def test_real_cli_late_subscriber_replays_uds_terminal(
+    monkeypatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    config_home = _dead_server_config(tmp_path)
+    run_id = "signal-cli-late-replay"
+    report = tmp_path / f"{run_id}.md"
+    report.write_text(
+        "---\nrun_id: " + run_id + "\nagent: python\nskill: test\nstatus: completed\n"
+        "claim_status: completed\nfinalized: true\nclaim: late-replay\n---\nbody\n",
+        encoding="utf-8",
+    )
+    _write_runtime_meta(
+        home,
+        run_id,
+        {
+            "status": "report_validated",
+            "state": "report_validated",
+            "agent": "codex",
+            "skill": "implement",
+            "exit_code": 0,
+            "liveness": "terminal",
+            "report": str(report),
+            "artifact_ok": True,
+        },
+    )
+    with RunSignalServer(run_id) as server:
+        server.terminal(state="report_validated", report=str(report), exit_code=0)
+        rc, payload, err = _collect_cli(
+            _spawn_cli_await(home, run_id, config_home=config_home)
+        )
+    assert rc == 0, (payload, err)
+    assert payload["completed"] is True
+    assert payload["outcome"] == "terminal"
+    assert payload["signal_kind"] == "terminal"
+
+
+def test_real_cli_await_names_missing_and_broken_signal(
+    monkeypatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    config_home = _dead_server_config(tmp_path)
+
+    missing_id = "signal-cli-missing"
+    _write_runtime_meta(
+        home,
+        missing_id,
+        {
+            "status": "running",
+            "state": "running",
+            "agent": "codex",
+            "skill": "implement",
+            "liveness": "heartbeat",
+        },
+    )
+    rc, payload, _err = _collect_cli(
+        _spawn_cli_await(
+            home, missing_id, config_home=config_home, timeout="2", hard_cap="2"
+        )
+    )
+    assert rc != 0
+    assert payload["completed"] is False
+    assert payload["reason"] == "signal_missing"
+    assert payload["signal_kind"] == "missing"
+
+    broken_id = "signal-cli-broken"
+    _write_runtime_meta(
+        home,
+        broken_id,
+        {
+            "status": "running",
+            "state": "running",
+            "agent": "codex",
+            "skill": "implement",
+            "liveness": "heartbeat",
+        },
+    )
+    broken_path = run_signal_socket_path(broken_id)
+    broken_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    broken_path.write_text("not-a-socket\n", encoding="utf-8")
+    rc, payload, _err = _collect_cli(
+        _spawn_cli_await(
+            home, broken_id, config_home=config_home, timeout="2", hard_cap="2"
+        )
+    )
+    assert rc != 0
+    assert payload["completed"] is False
+    assert payload["reason"] == "signal_missing"
+    assert payload["signal_kind"] == "missing"
+
+
+def test_real_cli_await_live_worker_disagreement(monkeypatch, tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    config_home = _dead_server_config(tmp_path)
+    run_id = "signal-cli-live-disagree"
+    worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        identity = process_control.process_identity_receipt(worker.pid, run_id=run_id)
+        assert identity is not None
+        _write_runtime_meta(
+            home,
+            run_id,
+            {
+                "status": "running",
+                "state": "running",
+                "agent": "codex",
+                "skill": "implement",
+                "exit_code": 0,
+                "liveness": "terminal",
+                "worker_pid": worker.pid,
+                "worker_pgid": os.getpgid(worker.pid),
+                "worker_identity": identity,
+            },
+        )
+        rc, payload, _err = _collect_cli(
+            _spawn_cli_await(
+                home, run_id, config_home=config_home, timeout="2", hard_cap="2"
+            )
+        )
+    finally:
+        worker.terminate()
+        worker.wait(timeout=5)
+    assert rc != 0
+    assert payload["completed"] is False
+    assert payload["worker_alive"] is True
+    assert payload["reason"] == "signal_missing_live"

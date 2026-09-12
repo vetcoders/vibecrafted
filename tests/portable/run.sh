@@ -98,23 +98,6 @@ if any(line.strip().endswith(needle) for line in result.stdout.splitlines()):
 PY
 }
 
-print_installer_logs() {
-  local home="$1"
-  local log_dir="$home/.vibecrafted/logs/installer"
-  local log_file
-
-  if [[ ! -d "$log_dir" ]]; then
-    printf '[portable] no installer logs found under %s\n' "$log_dir" >&2
-    return 0
-  fi
-
-  while IFS= read -r log_file; do
-    [[ -f "$log_file" ]] || continue
-    printf '\n[portable] installer log: %s\n' "$log_file" >&2
-    sed -n '1,220p' "$log_file" >&2 || true
-  done < <(find "$log_dir" -type f -name '*.log' -print | sort)
-}
-
 log "syntax checks"
 bash -n \
   "$repo_root/install.sh" \
@@ -148,20 +131,19 @@ cleanup_workspace() {
 }
 trap cleanup_workspace EXIT
 bootstrap_home="$workspace/bootstrap-home"
-bootstrap_config_dir="$bootstrap_home/.config"
 home_dir="$workspace/home"
 config_dir="$home_dir/.config"
 work_repo="$workspace/workrepo"
 fake_bin="$home_dir/.local/bin"
 bootstrap_archive="$workspace/vibecrafted-bootstrap.tar.gz"
-mkdir -p "$bootstrap_home" "$bootstrap_config_dir" "$home_dir" "$config_dir" "$work_repo" "$fake_bin"
+mkdir -p "$bootstrap_home" "$home_dir" "$config_dir" "$work_repo" "$fake_bin"
 
 # Product spawns intentionally detach one perception watcher per durable repo.
 # This test repo is ephemeral and deleted by the EXIT trap, so keep that
 # orthogonal daemon disabled here; perception lifecycle has its own core suite.
 export VIBECRAFTED_PERCEPTION_WATCH=0
 
-log "bootstrap smoke via root install.sh"
+log "materialize the provenance-bound portable source carrier"
 read -r bootstrap_source_owner bootstrap_source_revision < <(
   python3 - "$repo_root" <<'PY'
 from pathlib import Path
@@ -185,15 +167,9 @@ python3 "$repo_root/scripts/distribution_manifest.py" archive \
   --root-name vibecrafted-bootstrap \
   --owner-repo "$bootstrap_source_owner" \
   --source-revision "$bootstrap_source_revision"
-# The portable sandbox shares the operator's launchd user domain. Install the
-# complete payload without claiming or mutating the host's fixed service label.
-if ! HOME="$bootstrap_home" XDG_CONFIG_HOME="$bootstrap_config_dir" VIBECRAFTED_HOME="$bootstrap_home/.vibecrafted" INSTALL_SERVER_SERVICE_POLICY=isolated \
-  bash "$repo_root/install.sh" --archive-file "$bootstrap_archive" install-source; then
-  print_installer_logs "$bootstrap_home"
-  die "root install.sh bootstrap failed"
-fi
-
-require_symlink "$bootstrap_home/.local/share/vibecrafted/tools/vibecrafted-current"
+bootstrap_source="$bootstrap_home/.local/share/vibecrafted/tools/vibecrafted-current"
+mkdir -p "$bootstrap_source"
+tar -xzf "$bootstrap_archive" --strip-components=1 -C "$bootstrap_source"
 require_file "$bootstrap_home/.local/share/vibecrafted/tools/vibecrafted-current/Makefile"
 require_file "$bootstrap_home/.local/share/vibecrafted/tools/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/codex_spawn.sh"
 # Source-lane contract (test_install_all_paths_do_not_install_shell_helpers_by_default):
@@ -203,29 +179,38 @@ require_file "$bootstrap_home/.local/share/vibecrafted/tools/vibecrafted-current
 # install smoke below, so the bootstrap does not assert vc-skills.sh here.
 
 log "install smoke into clean HOME"
+stable_source="$home_dir/.local/share/vibecrafted/tools/vibecrafted-current"
+mkdir -p "$stable_source"
+tar -xzf "$bootstrap_archive" --strip-components=1 -C "$stable_source"
 HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" \
-  bash "$repo_root/vibecrafted-core/vibecrafted_core/runtime/scripts/install.sh" \
-  --source "$repo_root" \
+  bash "$stable_source/vibecrafted-core/vibecrafted_core/runtime/scripts/install.sh" \
+  --source "$stable_source" \
   --tool codex --tool claude --tool agy \
-  --with-shell --write-shell-rc
+  --skills-only --with-shell --write-shell-rc
 
-# Stage the uv-tool launcher shim. The granular installer wires
-# ~/.local/bin/vibecrafted as a symlink onto the uv-tool shim (the live launcher
-# contract — see test_keys), but only `make install-python-tools` actually
-# materializes that shim via `uv tool install`. The bootstrap above runs the
-# full `make install` (which includes it); this clean-HOME smoke uses the
-# granular installer, so create the shim here too — otherwise the launcher
-# symlink dangles and the resume smoke below cannot exec it.
+# Skills-only installs no product launchers. Python entry points are staged by
+# the explicit uv-tool step below and Runtime Pack wrappers remain out of scope.
+[[ ! -e "$home_dir/.local/bin/vc-help" ]] || die "skills-only published vc-help"
+[[ ! -e "$home_dir/.local/bin/vc-marbles" ]] || die "skills-only published vc-marbles"
+
+# Stage the source-carrier Python launchers without pretending this archive is
+# a closed Runtime Pack. Full product installation is exercised by the Runtime
+# Pack workflows; this portable lane owns source extraction and agent scripts.
 log "stage python launcher tools (uv-tool shim)"
-HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" INSTALL_TOOLS_SERVICE_POLICY=isolated \
-  make --no-print-directory -C "$repo_root" install-python-tools
+HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" \
+  uv tool install --force --reinstall --editable "$stable_source/vibecrafted-core"
+HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" \
+  uv tool install --force --reinstall --editable "$stable_source/vibecrafted-mcp" \
+    --with-editable "$stable_source/vibecrafted-core"
 
 require_file "$home_dir/.local/share/vibecrafted/tools/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/codex_spawn.sh"
 require_file "$home_dir/.local/share/vibecrafted/tools/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/claude_spawn.sh"
 require_file "$home_dir/.local/share/vibecrafted/tools/vibecrafted-current/vibecrafted-core/vibecrafted_core/runtime/scripts/agy_spawn.sh"
 require_file "$home_dir/.local/bin/vibecrafted"
-require_symlink "$home_dir/.local/bin/vc-help"
-require_symlink "$home_dir/.local/bin/vc-marbles"
+# vc-marbles is an owned Python entry point; vc-help remains a Runtime Pack
+# wrapper and must not be synthesized by the source-carrier lane.
+require_file "$home_dir/.local/bin/vc-marbles"
+[[ ! -e "$home_dir/.local/bin/vc-help" ]] || die "source lane published vc-help"
 # Explicit --tool selections keep their requested compatibility views.
 require_symlink "$home_dir/.agents/skills/vc-agents"
 require_symlink "$home_dir/.codex/skills/vc-agents"
@@ -446,7 +431,7 @@ resume_output="$(
     FAKE_CODEX_CAPTURE="$resume_capture" \
     FAKE_CODEX_STDIN_CAPTURE="$resume_prompt_capture" \
     "$home_dir/.local/bin/vibecrafted" resume codex \
-      --session fake-session-001 --prompt "resume smoke"
+      --repo "$work_repo" --session fake-session-001 --prompt "resume smoke"
 )"
 printf '%s\n' "$resume_output"
 resume_run_id="$(

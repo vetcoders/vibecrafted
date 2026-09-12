@@ -10,8 +10,11 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use voc::app::{App, AppTab, DispatchFocus, LaunchFocus, QueueScope};
 use voc::config::AppConfig;
-use voc::launch::{LaunchKind, LaunchRuntime};
+use voc::launch::{Environment, LaunchKind, PermissionPolicy, Presentation, SandboxChoice};
 use voc::state::{ControlPlaneState, RenderedRun, RunKind, RunSnapshot};
+mod support;
+use support::{agent_index, fixture_catalog};
+use voc::catalog::CatalogState;
 
 const TERM_WIDTH: u16 = 120;
 const TERM_HEIGHT: u16 = 40;
@@ -49,9 +52,8 @@ fn board_app() -> App {
             no_verify_gate: false,
             state_root: "/fixture/state".into(),
             command_deck: "/usr/bin/vibecrafted".into(),
-            launch_root: "/work/vetcoders/vibecrafted".into(),
-            launch_runtime: LaunchRuntime::Terminal,
-            terminal_binary: "vc-frame".into(),
+            repo: "/work/vetcoders/vibecrafted".into(),
+            presentation: Presentation::Terminal,
             tick_rate: Duration::from_millis(250),
             server: "http://127.0.0.1:3024".into(),
             view: voc::observe::ConsoleView::Full,
@@ -64,9 +66,18 @@ fn board_app() -> App {
         selected: 0,
         active_tab: AppTab::Monitor.index(),
         launch_kind: LaunchKind::Workflow,
-        launch_agent: 0,
+        // Pinned by name: the catalog owns the order, so an index would
+        // silently redraw this board whenever the launcher adds an agent.
+        launch_agent: agent_index("claude"),
         launch_prompt: "Ship the operator surface.".to_string(),
-        launch_runtime: LaunchRuntime::Terminal,
+        launch_model: String::new(),
+        launch_presentation: Presentation::Terminal,
+        launch_environment: Environment::LivingTree,
+        launch_permissions: PermissionPolicy::Default,
+        launch_sandbox: SandboxChoice::Default,
+        catalog: CatalogState::Ready(fixture_catalog()),
+        pending_launch: None,
+        launch_outcome: None,
         dispatch_selected: DispatchFocus::Kind as usize,
         focus: LaunchFocus::Browse,
         status_line: String::new(),
@@ -85,6 +96,7 @@ fn board_app() -> App {
         mission_artifact_root: "/fixture/artifacts".into(),
         observe: Default::default(),
         memory: Default::default(),
+        interaction: Default::default(),
     }
 }
 

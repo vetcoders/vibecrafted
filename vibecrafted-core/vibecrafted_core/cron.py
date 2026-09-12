@@ -15,6 +15,7 @@ from . import ui
 from .autonomy_surface import destructive_remote_push
 from .clock import utc_now, utc_now_compact, utc_now_z
 from .loop import default_state_file
+from .repo_selection import RepoSelectionError, add_repo_arguments, select_repository
 from .runtime_paths import vibecrafted_home
 
 HARD_STOP_NEEDLES = (
@@ -36,22 +37,76 @@ def iso_now() -> str:
     return utc_now_z()
 
 
-def parse_frontmatter(path: Path) -> dict[str, str]:
+def parse_frontmatter(
+    path: Path | None = None, *, text: str | None = None, strict: bool = False
+) -> dict[str, str]:
     """Parse a simple ``---``-delimited key: value frontmatter block from a file.
 
     Returns an empty dict when the file is missing, unreadable, or lacks a
-    frontmatter block. Not a full YAML parser — one ``key: value`` per line.
+    frontmatter block in legacy mode (one ``key: value`` per line). Strict
+    launch mode uses the existing YAML dependency and rejects invalid model/agent fields.
     """
-    if not path.is_file():
+    if text is None and (path is None or not path.is_file()):
         return {}
     try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        if text is None:
+            text = (
+                path.read_bytes().decode("utf-8")
+                if strict
+                else path.read_text(encoding="utf-8", errors="replace")
+            )
+        if strict and len(text.encode("utf-8")) > 16 * 1024 * 1024:
+            raise ValueError("plan exceeds 16 MiB input limit")
+        lines = text.lstrip("\ufeff").splitlines()
     except OSError:
         # Frontmatter is optional launch metadata. A transient permission or
         # filesystem failure must not turn model discovery into a hard stop.
         return {}
     if not lines or lines[0].strip() != "---":
         return {}
+    if strict:
+        import yaml
+
+        if len(text.encode("utf-8")) > 16 * 1024 * 1024:
+            raise ValueError("frontmatter: plan exceeds 16 MiB input limit")
+        end = next(
+            (i for i, line in enumerate(lines[1:], 1) if line.strip() == "---"), None
+        )
+        if end is None:
+            raise ValueError("frontmatter: missing closing delimiter")
+        try:
+            node = yaml.compose("\n".join(lines[1:end]), Loader=yaml.SafeLoader)
+        except yaml.YAMLError:
+            # YAML exceptions can contain the private source document.
+            raise ValueError("frontmatter: invalid YAML") from None
+        if node is None:
+            return {}
+        if not isinstance(node, yaml.MappingNode):
+            raise ValueError("frontmatter: expected a mapping")
+        selected: dict[str, str] = {}
+        for key, value in node.value:
+            if not isinstance(key, yaml.ScalarNode) or key.value not in {
+                "model",
+                "agent",
+            }:
+                continue
+            name = key.value
+            if name in selected:
+                raise ValueError(f"frontmatter: duplicate {name}")
+            if (
+                not isinstance(value, yaml.ScalarNode)
+                or value.tag != "tag:yaml.org,2002:str"
+                or not value.value.strip()
+            ):
+                raise ValueError(f"frontmatter: {name} must be a non-empty string")
+            if (
+                value.value.startswith("-")
+                or value.value != value.value.strip()
+                or any(ord(c) < 32 for c in value.value)
+            ):
+                raise ValueError(f"frontmatter: invalid {name} identifier")
+            selected[name] = value.value
+        return selected
     values: dict[str, str] = {}
     for line in lines[1:]:
         if line.strip() == "---":
@@ -371,7 +426,7 @@ def _build_parser() -> argparse.ArgumentParser:
     tick_parser = sub.add_parser(
         "tick", help="append one LOOP heartbeat and optional context snapshot"
     )
-    tick_parser.add_argument("--root", default="")
+    add_repo_arguments(tick_parser)
     tick_parser.add_argument("--state-file", default="")
     tick_parser.add_argument("--journal", default="")
     tick_parser.add_argument(
@@ -388,7 +443,7 @@ def _build_parser() -> argparse.ArgumentParser:
     tick_parser.add_argument("--context-timeout", type=int, default=60)
 
     line_parser = sub.add_parser("line", help="print a crontab line for LOOP heartbeat")
-    line_parser.add_argument("--root", default="")
+    add_repo_arguments(line_parser)
     line_parser.add_argument("--every-minutes", type=int, default=10)
     line_parser.add_argument("--after-idle-minutes", type=int, default=10)
     line_parser.add_argument("--then-cmd", default="")
@@ -405,6 +460,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     """CLI entrypoint: dispatch to ``tick`` or ``line``, else print help and return 2."""
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.action in {"tick", "line"}:
+        try:
+            args.root = select_repository(
+                args.repo, args.root, fallback=Path.cwd, label=f"cron {args.action}"
+            ).path
+        except RepoSelectionError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     if args.action == "tick":
         return tick(args)
     if args.action == "line":

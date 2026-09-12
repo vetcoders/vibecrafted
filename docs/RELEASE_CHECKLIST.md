@@ -1,4 +1,4 @@
-# Cut 4.3.0 with both channels attached
+# Cut 4.3.1 with both channels attached
 
 Operator sequence. This file does not change the security boundary:
 `.github/workflows/release.yml` stays `contents: read` and does not run
@@ -17,7 +17,7 @@ below pass on downloaded bytes.
 
 ## 0. What this cut must produce
 
-One GitHub Release `v4.3.0` whose assets are exactly:
+One GitHub Release `v4.3.1` whose assets are exactly:
 
 | Asset                                                                 | Proves                                     |
 | --------------------------------------------------------------------- | ------------------------------------------ |
@@ -41,7 +41,7 @@ the independently checked CPU value (`arm64`). The carrier filename uses the
 same platform slug. The App carrier also includes `runtime-pack/VERSION`, bound
 to the payload's provenance and consumed by its copied installer.
 
-`VERSION` is already `4.3.0`. Local history includes the prior `v3.7.1`,
+`VERSION` is already `4.3.1`. Local history includes the prior `v3.7.1`,
 `v4.0.0`, and `v4.1.0` tags; there must be no `v4.3.0` tag before this cut.
 Confirm the latest published GitHub Release separately before publication.
 
@@ -79,7 +79,7 @@ Also required on this Mac:
 
 ```bash
 # this repo
-test "$(tr -d '[:space:]' < VERSION)" = "4.3.0"
+test "$(tr -d '[:space:]' < VERSION)" = "4.3.1"
 git status --porcelain          # must be empty
 git rev-parse --abbrev-ref HEAD
 
@@ -275,10 +275,10 @@ python3 scripts/distribution_manifest.py check \
 
 ```bash
 # annotated tag at this exact HEAD (not a lightweight tag)
-git tag -a v4.3.0 -m "Vibecrafted 4.3.0"
+git tag -a v4.3.1 -m "Vibecrafted 4.3.0"
 
 # OPERATOR BUTTON — this worker does not push
-git push origin v4.3.0
+git push origin v4.3.1
 ```
 
 Wait for `.github/workflows/release.yml` (`Release source gate`) to go

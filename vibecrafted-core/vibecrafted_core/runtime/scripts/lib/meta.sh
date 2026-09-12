@@ -6,11 +6,153 @@ spawn_sync_control_plane() {
   fi
 }
 
+spawn_is_safe_run_id() {
+  # Same grammar as control-core is_safe_run_id: ASCII token, no traversal.
+  local run_id="${1:-}"
+  [[ -n "$run_id" && ${#run_id} -le 255 ]] || return 1
+  [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
+}
+
+spawn_runtime_meta_path() {
+  # Canonical receipt: $VIBECRAFTED_HOME/control_plane/runtime_runs/<id>/meta.json
+  # Never advertise control_plane/runs/<id>.json — that file is not written here.
+  # Destination identity is the validated token, never a path fragment.
+  local run_id="${1:-${SPAWN_RUN_ID:-}}"
+  spawn_is_safe_run_id "$run_id" || return 1
+  printf '%s/control_plane/runtime_runs/%s/meta.json\n' \
+    "${VIBECRAFTED_HOME:-$HOME/.vibecrafted}" "$run_id"
+}
+
+spawn_mirror_meta_to_runtime_runs() {
+  # Canonical dest comes from the source document's run_id, not SPAWN_RUN_ID.
+  # finish/reap/GC may run with a different ambient run in the environment.
+  local src="${1:-}"
+  [[ -n "$src" && -f "$src" ]] || return 0
+  "$(spawn_python_bin)" - "$src" <<'PY'
+import json
+import os
+import shutil
+import sys
+
+src = sys.argv[1]
+home = os.environ.get("VIBECRAFTED_HOME") or os.path.join(
+    os.path.expanduser("~"), ".vibecrafted"
+)
+
+def is_safe_run_id(run_id: object) -> bool:
+    if not isinstance(run_id, str) or not run_id or len(run_id) > 255:
+        return False
+    if not run_id[0].isalnum() or not run_id[0].isascii():
+        return False
+    allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
+    return all(ch in allowed for ch in run_id)
+
+try:
+    with open(src, encoding="utf-8") as handle:
+        payload = json.load(handle)
+except (OSError, json.JSONDecodeError, UnicodeError):
+    raise SystemExit(1)
+
+if not isinstance(payload, dict):
+    raise SystemExit(1)
+
+run_id = payload.get("run_id")
+if not is_safe_run_id(run_id):
+    raise SystemExit(1)
+
+runtime_runs = os.path.join(os.path.abspath(home), "control_plane", "runtime_runs")
+dest_dir = os.path.join(runtime_runs, run_id)
+dest = os.path.join(dest_dir, "meta.json")
+if os.path.basename(dest) != "meta.json" or os.path.dirname(dest) != dest_dir:
+    raise SystemExit(1)
+if os.path.commonpath([runtime_runs, dest_dir]) != runtime_runs:
+    raise SystemExit(1)
+
+real_root = os.path.realpath(runtime_runs)
+if os.path.lexists(dest_dir):
+    real_dir = os.path.realpath(dest_dir)
+    if real_dir != real_root and not real_dir.startswith(real_root + os.sep):
+        raise SystemExit(1)
+    if os.path.basename(real_dir) != run_id:
+        raise SystemExit(1)
+
+src_real = os.path.realpath(src)
+if src_real.startswith(real_root + os.sep):
+    rel = os.path.relpath(src_real, real_root)
+    path_id = rel.split(os.sep, 1)[0]
+    if path_id != run_id:
+        raise SystemExit(1)
+
+if os.path.isfile(dest):
+    try:
+        with open(dest, encoding="utf-8") as handle:
+            existing = json.load(handle)
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        existing = None
+    if isinstance(existing, dict):
+        existing_id = existing.get("run_id")
+        if existing_id is not None and existing_id != run_id:
+            raise SystemExit(1)
+    try:
+        if os.path.samefile(src, dest):
+            raise SystemExit(0)
+    except OSError:
+        pass
+
+os.makedirs(dest_dir, exist_ok=True)
+tmp = f"{dest}.tmp.{os.getpid()}"
+try:
+    shutil.copyfile(src, tmp)
+    os.replace(tmp, dest)
+except OSError:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise SystemExit(1)
+PY
+}
+
+spawn_settle_early_failure() {
+  [[ -z "${SPAWN_SETTLING_EARLY_FAILURE:-}" ]] || return 0
+  SPAWN_SETTLING_EARLY_FAILURE=1
+  local reason="${1:-early failure}"
+  local meta_path="${SPAWN_META:-}"
+  local run_id="${SPAWN_RUN_ID:-}"
+  local canonical=""
+  canonical="$(spawn_runtime_meta_path "$run_id" 2>/dev/null || true)"
+  if [[ -n "$meta_path" && -f "$meta_path" ]]; then
+    spawn_finish_meta "$meta_path" "failed" "1" 2>/dev/null || true
+  fi
+  if [[ -z "$canonical" ]]; then
+    return 0
+  fi
+  if [[ -f "$canonical" ]]; then
+    spawn_finish_meta "$canonical" "failed" "1" 2>/dev/null || true
+    return 0
+  fi
+  [[ -n "$run_id" ]] || return 0
+  mkdir -p "$(dirname "$canonical")"
+  spawn_write_meta "$canonical" "failed" "${SPAWN_AGENT:-unknown}" \
+    "${SPAWN_SKILL_NAME:-unknown}" "${SPAWN_ROOT:-}" \
+    "${SPAWN_PLAN:-}" "${SPAWN_REPORT:-}" "${SPAWN_TRANSCRIPT:-}" \
+    "${SPAWN_LAUNCHER:-}" 2>/dev/null || true
+  spawn_finish_meta "$canonical" "failed" "1" 2>/dev/null || true
+  :
+}
+
 spawn_find_meta_for_run_id() {
   local reports_dir="$1"
   local target_run_id="$2"
+  local canonical=""
+  canonical="$(spawn_runtime_meta_path "$target_run_id" 2>/dev/null || true)"
+  if [[ -n "$canonical" && -f "$canonical" ]]; then
+    printf '%s\n' "$canonical"
+    spawn_sync_control_plane
+    return 0
+  fi
 
-  python3 - "$reports_dir" "$target_run_id" <<'PY'
+  "$(spawn_python_bin)" - "$reports_dir" "$target_run_id" <<'PY'
 import json
 import os
 import sys
@@ -39,7 +181,7 @@ spawn_read_meta_field() {
   local meta_path="$1"
   local field_name="$2"
 
-  python3 - "$meta_path" "$field_name" <<'PY'
+  "$(spawn_python_bin)" - "$meta_path" "$field_name" <<'PY'
 import json
 import sys
 
@@ -128,6 +270,7 @@ spawn_write_meta() {
     --skill-code "$skill_code" \
     --framework-version "$framework_version"
 
+  spawn_mirror_meta_to_runtime_runs "$meta_path"
   spawn_sync_control_plane
 }
 
@@ -141,7 +284,7 @@ spawn_update_meta_pid() {
   [[ -f "$meta_path" ]] || return 0
   [[ -n "$pid" ]] || return 0
 
-  python3 - "$meta_path" "$pid" <<'PY'
+  "$(spawn_python_bin)" - "$meta_path" "$pid" <<'PY'
 import json
 import os
 import sys
@@ -166,6 +309,8 @@ with open(tmp_path, "w", encoding="utf-8") as fh:
     fh.write("\n")
 os.replace(tmp_path, meta_path)
 PY
+  spawn_mirror_meta_to_runtime_runs "$meta_path"
+  spawn_sync_control_plane
 }
 
 spawn_mark_meta_running() {
@@ -177,7 +322,7 @@ spawn_mark_meta_running() {
   local meta_path="$1"
   [[ -f "$meta_path" ]] || return 0
 
-  python3 - "$meta_path" <<'PY'
+  "$(spawn_python_bin)" - "$meta_path" <<'PY'
 import datetime as dt
 import json
 import os
@@ -204,6 +349,7 @@ with open(tmp_path, "w", encoding="utf-8") as fh:
     fh.write("\n")
 os.replace(tmp_path, meta_path)
 PY
+  spawn_mirror_meta_to_runtime_runs "$meta_path"
   spawn_sync_control_plane
 }
 
@@ -222,7 +368,7 @@ spawn_reap_dead_run() {
   local meta_path="$1"
   [[ -f "$meta_path" ]] || return 0
 
-  python3 - "$meta_path" <<'PY'
+  "$(spawn_python_bin)" - "$meta_path" <<'PY'
 import datetime as dt
 import json
 import os
@@ -261,6 +407,7 @@ if lock_path and os.path.isfile(lock_path):
     except OSError:
         pass
 PY
+  spawn_mirror_meta_to_runtime_runs "$meta_path"
   spawn_sync_control_plane
 }
 
@@ -270,7 +417,7 @@ spawn_mark_unknown_liveness() {
   local meta_path="$1"
   [[ -f "$meta_path" ]] || return 0
 
-  python3 - "$meta_path" <<'PY'
+  "$(spawn_python_bin)" - "$meta_path" <<'PY'
 import datetime as dt
 import json
 import os
@@ -303,12 +450,10 @@ PY
   spawn_sync_control_plane
 }
 
-spawn_gc_dead_runs() {
-  # Scan a reports directory for meta.json files whose status is live
-  # (launching/running/in-progress) but whose launcher_pid is dead.
-  # Flip those to ghost. Safe to call at spawn-time before taking locks.
-  local reports_dir="$1"
-  [[ -d "$reports_dir" ]] || return 0
+spawn_gc_dead_meta_tree() {
+  local root="$1"
+  local name_glob="$2"
+  [[ -d "$root" ]] || return 0
 
   local meta_path pid_value
   while IFS= read -r -d '' meta_path; do
@@ -325,7 +470,16 @@ spawn_gc_dead_runs() {
     if ! spawn_pid_alive "$pid_value"; then
       spawn_reap_dead_run "$meta_path"
     fi
-  done < <(find "$reports_dir" -type f -name '*.meta.json' -print0 2>/dev/null)
+  done < <(find "$root" -type f -name "$name_glob" -print0 2>/dev/null)
+}
+
+spawn_gc_dead_runs() {
+  # Scan reports *.meta.json and canonical runtime_runs/<id>/meta.json.
+  local reports_dir="$1"
+  spawn_gc_dead_meta_tree "$reports_dir" "*.meta.json"
+  spawn_gc_dead_meta_tree \
+    "${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/control_plane/runtime_runs" \
+    "meta.json"
 }
 
 spawn_python_core_path() {
@@ -357,31 +511,10 @@ spawn_python_core_path() {
   return 1
 }
 
-# RESOLVER TRUTH: This resolver is kept exclusively for runtime-side/split-brain
-# ./runtime execution where the uv shim might not be directly in the execution chain.
-# This is NOT a deck-level plaster.
-#
-# Resolve an interpreter that can import vibecrafted_core. The package needs
-# tomllib (Python 3.11+); bare `python3` on macOS is often /usr/bin/python3 3.9.6
-# which lacks tomllib, so vibecrafted_core dies with ModuleNotFoundError. Prefer
-# the uv tool venv python (has the package + deps), then VIBECRAFTED_PYTHON, then
-# any 3.11+ python on PATH.
-spawn_python_bin() {
-  local candidate
-  for candidate in \
-    "${VIBECRAFTED_PYTHON:-}" \
-    "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/vibecrafted/bin/python3" \
-    "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/vibecrafted-core/bin/python3" \
-    python3.13 python3.12 python3.11 python3; do
-    [[ -n "$candidate" ]] || continue
-    command -v "$candidate" >/dev/null 2>&1 || continue
-    if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-  printf 'python3\n'
-}
+# spawn_python_bin lives in util.sh — beside spawn_prepend_agent_tool_paths, the
+# sanitizer that removed the owned generation bin from PATH and therefore created
+# the need for an explicit interpreter owner. util.sh is the no-deps layer sourced
+# first, so every module below it can name the runtime interpreter.
 
 spawn_python_module() {
   local core_path py
@@ -401,6 +534,7 @@ spawn_finish_meta() {
 
   # Terminal meta state is Python-owned; this shell call is the stable wrapper.
   spawn_python_module vibecrafted_core.spawn finish-meta "$meta_path" "$status" "$exit_code"
+  spawn_mirror_meta_to_runtime_runs "$meta_path"
   spawn_sync_control_plane
 }
 
@@ -423,28 +557,13 @@ spawn_finalize_artifacts() {
   printf '%s\n' "$final_meta"
 }
 
-# Move a finished run's tab into its vc-frame status bucket. Runs LAST, after
-# artifacts are closed: a successful transfer closes the tab this launcher is
-# running in, so anything sequenced after it may never execute.
-#
-# Triage is decoration on an already-finished run, so this never fails a run —
-# the Python side swallows every error and records a receipt instead. The `|| true`
-# is belt-and-braces for the interpreter itself failing to start.
-spawn_triage_run() {
-  local meta_path="$1"
-
-  [[ -f "$meta_path" ]] || return 0
-
-  spawn_python_module vibecrafted_core.run_triage "$meta_path" || true
-}
-
-# Sweep processes that outlived this (now terminal) run. Runs BEFORE triage: a
-# successful triage closes the tab we are running in, so anything sequenced after
-# it may never execute — and the survivors would keep burning cores until reboot.
+# Sweep processes that outlived this (now terminal) run after canonical artifact
+# closure. Run presentation belongs to vc-server/VOC; this helper never moves or
+# closes a terminal tab.
 #
 # The reaper excludes its own pid and every ancestor, so calling it from inside
 # the run it is cleaning up after is safe; only siblings (monitors, watchers) are
-# candidates. Like triage, it never fails a run that already finished.
+# candidates. It never fails a run that already finished.
 spawn_reap_run() {
   spawn_python_module vibecrafted_core.run_reaper || true
 }

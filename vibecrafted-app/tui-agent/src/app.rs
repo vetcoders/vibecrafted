@@ -1,12 +1,15 @@
+use crate::catalog::CatalogState;
 use crate::config::{AppConfig, path_display};
 use crate::launch::{
-    LaunchCommand, LaunchKind, LaunchRequest, LaunchRuntime, build_launch_command,
+    Environment, LaunchCommand, LaunchKind, LaunchOutcome, LaunchRequest, PermissionPolicy,
+    Presentation, SandboxChoice, build_launch_command,
 };
+use crate::layout::PaneId;
 use crate::memory::{self, MemoryState};
 use crate::mission_control::{self, ActionQueueItem, ActionQueueKind, MissionControlState};
 use crate::observe::{self, ObserveHealth, ObserveState};
 use crate::polarize::{PolarizeBand, PolarizeIntent};
-use crate::skills_catalog::{self, SkillAgent, SkillPayload, SkillPayloadKind};
+use crate::skills_catalog::{self, SkillPayloadKind};
 use crate::state::{
     ControlPlaneState, RenderedRun, RunKind, is_actionable_kind, render_runs, workspace_matches,
 };
@@ -60,19 +63,37 @@ impl AppTab {
 pub enum DispatchFocus {
     Kind,
     Agent,
-    Runtime,
+    Model,
+    Environment,
+    Presentation,
+    Permissions,
+    Sandbox,
     Prompt,
 }
 
 impl DispatchFocus {
-    pub const COUNT: usize = 4;
+    pub const COUNT: usize = 8;
 
     pub fn from_index(index: usize) -> Self {
         match index % Self::COUNT {
             0 => Self::Kind,
             1 => Self::Agent,
-            2 => Self::Runtime,
+            2 => Self::Model,
+            3 => Self::Environment,
+            4 => Self::Presentation,
+            5 => Self::Permissions,
+            6 => Self::Sandbox,
             _ => Self::Prompt,
+        }
+    }
+
+    /// Which stat card highlights this row (the strip carries three cards).
+    pub fn stat_index(self) -> usize {
+        match self {
+            Self::Kind => 0,
+            Self::Agent | Self::Model => 1,
+            Self::Environment | Self::Presentation | Self::Permissions | Self::Sandbox => 2,
+            Self::Prompt => 2,
         }
     }
 }
@@ -81,11 +102,83 @@ impl DispatchFocus {
 pub enum LaunchFocus {
     Browse,
     EditPrompt,
+    EditModel,
     Help,
     Search,
     Error,
+    /// Launcher receipt for the last declaration: run id, effective repo and
+    /// worktree, honored controls — or the refusal that stopped it.
+    Confirmation,
     Artifact,
     Memory,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PaneScroll {
+    pub deck: u16,
+    pub playbook: u16,
+    pub trail: u16,
+    pub monitor_list: u16,
+    pub dossier: u16,
+    pub timeline: u16,
+    pub observe_list: u16,
+    pub observe_transcript: u16,
+    pub controls_actions: u16,
+    pub controls_artifacts: u16,
+    pub controls_timeline: u16,
+    pub mission: [u16; 7],
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct InteractionState {
+    pub focused: Option<PaneId>,
+    pub scroll: PaneScroll,
+}
+
+impl InteractionState {
+    pub fn offset_mut(&mut self, pane: PaneId) -> &mut u16 {
+        match pane {
+            PaneId::DispatchDeck => &mut self.scroll.deck,
+            PaneId::DispatchPlaybook => &mut self.scroll.playbook,
+            PaneId::DispatchTrail => &mut self.scroll.trail,
+            PaneId::MonitorList => &mut self.scroll.monitor_list,
+            PaneId::MonitorDossier => &mut self.scroll.dossier,
+            PaneId::MonitorTimeline => &mut self.scroll.timeline,
+            PaneId::ObserveList => &mut self.scroll.observe_list,
+            PaneId::ObserveTranscript => &mut self.scroll.observe_transcript,
+            PaneId::ControlsActions => &mut self.scroll.controls_actions,
+            PaneId::ControlsArtifacts => &mut self.scroll.controls_artifacts,
+            PaneId::ControlsTimeline => &mut self.scroll.controls_timeline,
+            PaneId::Mission(index) => {
+                &mut self.scroll.mission[usize::from(index).min(self.scroll.mission.len() - 1)]
+            }
+        }
+    }
+
+    pub fn offset(&self, pane: PaneId) -> u16 {
+        match pane {
+            PaneId::DispatchDeck => self.scroll.deck,
+            PaneId::DispatchPlaybook => self.scroll.playbook,
+            PaneId::DispatchTrail => self.scroll.trail,
+            PaneId::MonitorList => self.scroll.monitor_list,
+            PaneId::MonitorDossier => self.scroll.dossier,
+            PaneId::MonitorTimeline => self.scroll.timeline,
+            PaneId::ObserveList => self.scroll.observe_list,
+            PaneId::ObserveTranscript => self.scroll.observe_transcript,
+            PaneId::ControlsActions => self.scroll.controls_actions,
+            PaneId::ControlsArtifacts => self.scroll.controls_artifacts,
+            PaneId::ControlsTimeline => self.scroll.controls_timeline,
+            PaneId::Mission(index) => {
+                self.scroll.mission[usize::from(index).min(self.scroll.mission.len() - 1)]
+            }
+        }
+    }
+
+    pub fn scroll_pane(&mut self, pane: PaneId, delta: i16, content_len: usize, view_height: u16) {
+        let next = crate::layout::step_scroll(self.offset(pane), delta, content_len, view_height);
+        *self.offset_mut(pane) = next;
+        self.focused = Some(pane);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,11 +243,14 @@ pub enum DeepAction {
         run_id: String,
         prism_path: PathBuf,
     },
-    /// Launch a first-class Vibecrafted skill entrypoint.
+    /// Launch a first-class Vibecrafted skill entrypoint with the operator's
+    /// current declaration (agent, model, environment, presentation, controls).
+    /// A skill launch, with the agent already resolved from the skill's
+    /// preference and the operator's live catalog selection — so the deck row
+    /// states which agent will actually run.
     SkillLaunch {
         skill: String,
-        agent: SkillAgent,
-        payload: SkillPayload,
+        agent: String,
     },
 }
 
@@ -196,22 +292,10 @@ impl DeepAction {
                 run_id,
                 prism_path.to_string_lossy()
             ),
-            DeepAction::SkillLaunch {
-                skill,
-                agent,
-                payload,
-            } => {
-                let payload_label = match payload {
-                    SkillPayload::Prompt(prompt) if !prompt.trim().is_empty() => "prompt",
-                    SkillPayload::File(_) => "file",
-                    SkillPayload::Prompt(_) | SkillPayload::None => "no payload",
-                };
-                format!(
-                    "Launch skill: vibecrafted {} {} ({payload_label})",
-                    skill.trim_start_matches("vc-"),
-                    agent.label()
-                )
-            }
+            DeepAction::SkillLaunch { skill, agent } => format!(
+                "Launch skill: vibecrafted {} {agent} with the current declaration",
+                skill.trim_start_matches("vc-")
+            ),
         }
     }
 
@@ -231,15 +315,18 @@ impl DeepAction {
             DeepAction::MuxVerifyClient(_) => "Verify mux client routing".to_string(),
             DeepAction::MuxFixClientDrift(_) => "Fix mux client drift".to_string(),
             DeepAction::PolarizeIntent {
-                band, score, run_id, ..
+                band,
+                score,
+                run_id,
+                ..
             } => format!(
                 "Polarize {} {} {}",
                 band.label(),
                 score,
                 truncate_id(run_id, 18)
             ),
-            DeepAction::SkillLaunch { skill, agent, .. } => {
-                format!("Launch {} ({})", skill.trim_start_matches("vc-"), agent.label())
+            DeepAction::SkillLaunch { skill, agent } => {
+                format!("Launch {} ({agent})", skill.trim_start_matches("vc-"))
             }
         }
     }
@@ -253,9 +340,22 @@ pub struct App {
     pub selected: usize,
     pub active_tab: usize,
     pub launch_kind: LaunchKind,
+    /// Index into the launcher catalog's agent list, not into a list VOC owns.
     pub launch_agent: usize,
     pub launch_prompt: String,
-    pub launch_runtime: LaunchRuntime,
+    pub launch_model: String,
+    pub launch_presentation: Presentation,
+    pub launch_environment: Environment,
+    pub launch_permissions: PermissionPolicy,
+    pub launch_sandbox: SandboxChoice,
+    /// Agents, models, permission/sandbox cells and environments as the
+    /// canonical launcher reports them. No launch is offered before it loads.
+    pub catalog: CatalogState,
+    /// Declaration summary of a launch the launcher has not answered yet. The
+    /// UI keeps drawing while it is set; it never blocks on the launcher.
+    pub pending_launch: Option<String>,
+    /// Receipt (or refusal) for the most recent declaration.
+    pub launch_outcome: Option<LaunchOutcome>,
     pub dispatch_selected: usize,
     pub focus: LaunchFocus,
     pub status_line: String,
@@ -290,6 +390,7 @@ pub struct App {
     pub mission_artifact_root: PathBuf,
     pub observe: ObserveState,
     pub memory: MemoryState,
+    pub interaction: InteractionState,
 }
 
 impl App {
@@ -298,10 +399,10 @@ impl App {
             .unwrap_or_else(|_| ControlPlaneState::empty(&config.state_root));
         trace_expensive_refresh("control_plane");
         let runs = render_runs(&state);
-        let launch_runtime = config.launch_runtime;
+        let launch_presentation = config.presentation;
         let mission_artifact_root = mission_control::default_artifact_root();
         let observe_origin = config.server.clone();
-        let memory_project = memory::default_project(&config.launch_root);
+        let memory_project = memory::default_project(&config.repo);
         let mut app = Self {
             config,
             state,
@@ -311,7 +412,14 @@ impl App {
             launch_kind: LaunchKind::Workflow,
             launch_agent: 0,
             launch_prompt: default_prompt(LaunchKind::Workflow),
-            launch_runtime,
+            launch_model: String::new(),
+            launch_presentation,
+            launch_environment: Environment::default(),
+            launch_permissions: PermissionPolicy::default(),
+            launch_sandbox: SandboxChoice::default(),
+            catalog: CatalogState::Loading,
+            pending_launch: None,
+            launch_outcome: None,
             dispatch_selected: DispatchFocus::Kind as usize,
             focus: LaunchFocus::Browse,
             status_line: String::new(),
@@ -337,12 +445,13 @@ impl App {
                 project: memory_project,
                 ..MemoryState::default()
             },
+            interaction: InteractionState::default(),
         };
         apply_run_filters(
             &mut app.runs,
             app.queue_scope,
             &app.search_query,
-            &app.config.launch_root,
+            &app.config.repo,
         );
         app.sync_selection();
         app.refresh_mux();
@@ -385,7 +494,7 @@ impl App {
             &mut runs,
             self.queue_scope,
             &self.search_query,
-            &self.config.launch_root,
+            &self.config.repo,
         );
         self.runs = runs;
         if let Some(run_id) = selected_run_id
@@ -397,6 +506,7 @@ impl App {
             self.selected = index;
         }
         self.sync_selection();
+        self.refresh_observe();
     }
 
     /// Recompute only time-derived labels and filters from cached state.
@@ -409,7 +519,7 @@ impl App {
             &mut runs,
             self.queue_scope,
             &self.search_query,
-            &self.config.launch_root,
+            &self.config.repo,
         );
         self.runs = runs;
         if let Some(run_id) = selected_run_id
@@ -421,35 +531,36 @@ impl App {
             self.selected = index;
         }
         self.sync_selection();
+        self.refresh_observe();
     }
 
     /// Refresh the remote Observe projection on its own bounded cadence.
     /// Returns whether the fetch succeeded so the scheduler can back off.
     pub fn refresh_observe(&mut self) -> bool {
-        let origin = self.config.server.clone();
-        self.observe.origin = origin.clone();
-        match observe::fetch_state(&origin) {
-            Ok((generated_at, runs)) => {
-                self.observe.generated_at = generated_at;
-                self.observe.status = ObserveHealth::Live;
-                self.observe.error = None;
-                self.observe.runs = runs;
-                if self.observe.selected >= self.observe.runs.len() {
-                    self.observe.selected = self.observe.runs.len().saturating_sub(1);
-                }
-                self.refresh_observe_transcript();
-                true
-            }
-            Err(error) => {
-                if self.observe.runs.is_empty() {
-                    self.observe.status = ObserveHealth::Offline;
-                } else {
-                    self.observe.status = ObserveHealth::Degraded;
-                }
-                self.observe.error = Some(error.to_string());
-                false
-            }
-        }
+        let selected_run_id = self
+            .observe
+            .runs
+            .get(self.observe.selected)
+            .map(|run| run.run_id.clone());
+        self.observe.origin = format!("control-plane:{}", self.config.state_root.display());
+        self.observe.generated_at = chrono::Utc::now().to_rfc3339();
+        self.observe.status = ObserveHealth::Live;
+        self.observe.error = None;
+        self.observe.runs = observe::project_rendered_runs(&self.runs);
+        self.observe.selected = selected_run_id
+            .and_then(|run_id| {
+                self.observe
+                    .runs
+                    .iter()
+                    .position(|run| run.run_id == run_id)
+            })
+            .unwrap_or_else(|| {
+                self.observe
+                    .selected
+                    .min(self.observe.runs.len().saturating_sub(1))
+            });
+        self.refresh_observe_transcript();
+        true
     }
 
     pub fn refresh_observe_transcript(&mut self) {
@@ -459,9 +570,17 @@ impl App {
             return;
         };
         let run_id = run.run_id.clone();
+        let transcript_path = run.transcript_path.clone();
         if self.observe.transcript_run_id.as_deref() == Some(run_id.as_str())
             && !self.observe.transcript.is_empty()
         {
+            return;
+        }
+        if let Some(path) = transcript_path
+            && let Ok(body) = fs::read_to_string(path)
+        {
+            self.observe.transcript = crate::run_detail::humanize_transcript(&body);
+            self.observe.transcript_run_id = Some(run_id);
             return;
         }
         match observe::fetch_transcript(&self.config.server, &run_id) {
@@ -495,16 +614,28 @@ impl App {
         self.refresh_observe_transcript();
     }
 
-    pub fn refresh_memory(&mut self) {
-        let project = memory::default_project(&self.config.launch_root);
-        self.memory = memory::load_continuity(&project);
+    /// Attach to the selected run's session through the canonical launcher.
+    ///
+    /// VOC does not run `vc-frame` itself: inside a frame the launcher switches
+    /// the existing canvas, outside one it opens the shared VC Terminal. Either
+    /// way one owner decides, so a launch from VOC can never nest a frame.
+    pub fn observe_switch_command(&self) -> Option<LaunchCommand> {
+        let session = self
+            .observe
+            .runs
+            .get(self.observe.selected)?
+            .switch_target()?;
+        Some(LaunchCommand {
+            program: self.config.command_deck.clone(),
+            args: vec!["dashboard".into(), "attach".into(), session.into()],
+            env: self.launch_env(),
+            stdin: None,
+        })
     }
 
-    pub fn open_aicx_wizard(&mut self) {
-        let project = memory::default_project(&self.config.launch_root);
-        if let Err(error) = memory::launch_wizard(&project) {
-            self.show_error("aicx wizard failed", vec![error.to_string()]);
-        }
+    pub fn refresh_memory(&mut self) {
+        let project = memory::default_project(&self.config.repo);
+        self.memory = memory::load_continuity(&project);
     }
 
     pub fn refresh_mission_control(&mut self) {
@@ -539,7 +670,7 @@ impl App {
     }
 
     pub fn refresh_polarize(&mut self) {
-        self.polarize_intents = crate::polarize::current_intents(&self.config.launch_root);
+        self.polarize_intents = crate::polarize::current_intents(&self.config.repo);
         trace_expensive_refresh("polarize");
     }
 
@@ -695,16 +826,33 @@ impl App {
         self.shift_agent(1);
     }
 
-    pub fn cycle_runtime(&mut self) {
-        self.shift_runtime(1);
+    pub fn cycle_presentation(&mut self) {
+        self.shift_presentation(1);
     }
 
-    pub fn selected_agent(&self) -> &'static str {
-        agents()[self.launch_agent]
+    /// Declarable agents, exactly as the launcher catalog reports them.
+    /// Empty until the catalog loads — VOC has no list of its own to fall
+    /// back on, and inventing one is how a retired launcher survives in the UI.
+    pub fn agent_choices(&self) -> &[String] {
+        self.catalog
+            .ready()
+            .map(|catalog| catalog.agents.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn selected_agent(&self) -> &str {
+        let choices = self.agent_choices();
+        if choices.is_empty() {
+            return "";
+        }
+        choices[self.launch_agent.min(choices.len() - 1)].as_str()
     }
 
     pub fn shift_agent(&mut self, delta: isize) {
-        let len = agents().len() as isize;
+        let len = self.agent_choices().len() as isize;
+        if len == 0 {
+            return;
+        }
         let mut index = self.launch_agent as isize + delta;
         while index < 0 {
             index += len;
@@ -712,31 +860,38 @@ impl App {
         self.launch_agent = (index % len) as usize;
     }
 
-    pub fn shift_runtime(&mut self, delta: isize) {
-        let runtimes = [
-            LaunchRuntime::Headless,
-            LaunchRuntime::Terminal,
-            LaunchRuntime::Visible,
-        ];
-        let current = runtimes
-            .iter()
-            .position(|runtime| *runtime == self.launch_runtime)
-            .unwrap_or(1) as isize;
-        let len = runtimes.len() as isize;
-        let mut index = current + delta;
-        while index < 0 {
-            index += len;
+    pub fn shift_presentation(&mut self, delta: isize) {
+        self.launch_presentation = shift_in(&Presentation::all(), self.launch_presentation, delta);
+    }
+
+    pub fn shift_environment(&mut self, delta: isize) {
+        self.launch_environment = shift_in(&Environment::all(), self.launch_environment, delta);
+    }
+
+    pub fn shift_permissions(&mut self, delta: isize) {
+        self.launch_permissions =
+            shift_in(&PermissionPolicy::all(), self.launch_permissions, delta);
+    }
+
+    pub fn shift_sandbox(&mut self, delta: isize) {
+        self.launch_sandbox = shift_in(&SandboxChoice::all(), self.launch_sandbox, delta);
+    }
+
+    /// Replace the launcher catalog and re-anchor the selected agent so the
+    /// index never points past a shorter list.
+    pub fn set_catalog(&mut self, state: CatalogState) {
+        self.catalog = state;
+        let len = self.agent_choices().len();
+        if len == 0 {
+            self.launch_agent = 0;
+        } else if self.launch_agent >= len {
+            self.launch_agent = len - 1;
         }
-        self.launch_runtime = runtimes[(index % len) as usize];
+        self.append_status(self.catalog.status_line());
     }
 
     pub fn shift_launch_kind(&mut self, delta: isize) {
-        let kinds = [
-            LaunchKind::Workflow,
-            LaunchKind::Research,
-            LaunchKind::Review,
-            LaunchKind::Marbles,
-        ];
+        let kinds = LaunchKind::all();
         let current = kinds
             .iter()
             .position(|kind| *kind == self.launch_kind)
@@ -767,35 +922,184 @@ impl App {
         match self.dispatch_focus() {
             DispatchFocus::Kind => self.shift_launch_kind(delta),
             DispatchFocus::Agent => self.shift_agent(delta),
-            DispatchFocus::Runtime => self.shift_runtime(delta),
+            DispatchFocus::Model => {
+                self.focus = LaunchFocus::EditModel;
+            }
+            DispatchFocus::Environment => self.shift_environment(delta),
+            DispatchFocus::Presentation => self.shift_presentation(delta),
+            DispatchFocus::Permissions => self.shift_permissions(delta),
+            DispatchFocus::Sandbox => self.shift_sandbox(delta),
             DispatchFocus::Prompt => {
                 self.focus = LaunchFocus::EditPrompt;
             }
         }
     }
 
+    /// The operator's current declaration as a launcher request.
     pub fn launch_request(&self) -> LaunchRequest {
         LaunchRequest {
             kind: self.launch_kind,
             agent: self.selected_agent().to_string(),
             prompt: self.launch_prompt.clone(),
-            runtime: self.launch_runtime,
-            root: Some(self.config.launch_root.clone()),
-            terminal_binary: Some(self.config.terminal_binary.clone()),
-            env: self.launch_env(),
+            presentation: self.launch_presentation,
+            environment: self.launch_environment,
+            permissions: self.launch_permissions,
+            sandbox: self.launch_sandbox,
+            model: self.launch_model.clone(),
+            repo: self.config.repo.clone(),
             count: Some(3),
             depth: Some(3),
-            session_name: match self.launch_runtime {
-                LaunchRuntime::Terminal | LaunchRuntime::Visible => {
-                    Some(default_session_name(self.launch_kind))
+            env: self.launch_env(),
+        }
+    }
+
+    /// Every reason the current declaration cannot be launched, checked
+    /// against the launcher's own catalog before any process is created.
+    ///
+    /// An empty vector means the launcher accepts this shape; it does not
+    /// promise the run will succeed, only that VOC is not asking for a
+    /// combination the launcher has already declared unsupported.
+    pub fn declaration_refusals(&self) -> Vec<String> {
+        let mut refusals = Vec::new();
+        let catalog = match &self.catalog {
+            CatalogState::Loading => {
+                return vec!["launcher catalog is still loading".to_string()];
+            }
+            CatalogState::Failed(reason) => {
+                return vec![format!("launcher catalog unavailable: {reason}")];
+            }
+            CatalogState::Ready(catalog) => catalog,
+        };
+        let agent = self.selected_agent();
+        if agent.is_empty() {
+            return vec!["launcher catalog lists no declarable agent".to_string()];
+        }
+        let provider = match catalog.agent_availability(agent) {
+            Ok(provider) => Some(provider),
+            Err(reason) => {
+                refusals.push(format!("agent {agent}: {reason}"));
+                None
+            }
+        };
+        if let Err(reason) = catalog.environment_availability(self.launch_environment.policy_id()) {
+            refusals.push(format!("{}: {reason}", self.launch_environment.label()));
+        }
+        if let Some(provider) = provider {
+            let model = self.launch_model.trim();
+            if !model.is_empty() && !provider.model_override.supported {
+                refusals.push(format!(
+                    "model {model}: {} exposes no model flag ({})",
+                    agent,
+                    if provider.model_override.reason.is_empty() {
+                        "unsupported_agent_model_flag"
+                    } else {
+                        provider.model_override.reason.as_str()
+                    }
+                ));
+            }
+            let declared_controls =
+                self.launch_permissions.word().is_some() || self.launch_sandbox.word().is_some();
+            if declared_controls && self.launch_kind.supervised() {
+                refusals.push(format!(
+                    "--permissions/--sandbox are not carried into the {} supervised runtime; leave both at provider default",
+                    self.launch_kind.label()
+                ));
+            } else {
+                // An absent cell is not a permissive one. The catalog is a
+                // full cross product of the public words, so silence about a
+                // combination means this launcher cannot describe it — and an
+                // undescribed combination is never launched.
+                match provider
+                    .control_cell(self.launch_permissions.word(), self.launch_sandbox.word())
+                {
+                    None => refusals.push(format!(
+                        "{agent}: the launcher catalog does not report permissions {} with sandbox {}; update vibecrafted",
+                        self.launch_permissions.label(),
+                        self.launch_sandbox.label()
+                    )),
+                    Some(cell) if !cell.supported => refusals.push(if cell.reason.is_empty() {
+                        format!(
+                            "{agent} cannot enforce permissions {} with sandbox {}",
+                            self.launch_permissions.label(),
+                            self.launch_sandbox.label()
+                        )
+                    } else {
+                        cell.reason.clone()
+                    }),
+                    Some(_) => {}
                 }
-                LaunchRuntime::Headless => None,
-            },
+            }
+        }
+        if crate::config::is_operator_home_root(&self.config.repo) {
+            refusals.push(
+                "repository is the home directory; open a workspace or pass --repo".to_string(),
+            );
+        }
+        if self.launch_kind.accepts_prompt()
+            && self.launch_prompt.trim().is_empty()
+            && !matches!(self.launch_kind, LaunchKind::Skill(entry) if matches!(entry.accepts, SkillPayloadKind::Optional))
+        {
+            refusals.push("prompt is empty; this launcher requires input".to_string());
+        }
+        refusals
+    }
+
+    /// The declaration as an argv the launcher would receive, or the refusals
+    /// that stop it before any process exists.
+    pub fn launch_plan(&self) -> Result<LaunchCommand, Vec<String>> {
+        let refusals = self.declaration_refusals();
+        if refusals.is_empty() {
+            Ok(self.launch_command())
+        } else {
+            Err(refusals)
         }
     }
 
     pub fn launch_command(&self) -> LaunchCommand {
         build_launch_command(&self.config.command_deck, &self.launch_request())
+    }
+
+    /// The declaration paired with the catalog cell the launcher published
+    /// for it, so the receipt can be judged against the launcher's own
+    /// promise rather than against VOC's assumptions.
+    pub fn launch_expectation(&self) -> crate::launch::LaunchExpectation {
+        let request = self.launch_request();
+        let cell = self
+            .catalog
+            .ready()
+            .and_then(|catalog| catalog.provider(self.selected_agent()))
+            .and_then(|provider| {
+                provider.control_cell(self.launch_permissions.word(), self.launch_sandbox.word())
+            });
+        crate::launch::LaunchExpectation::new(&request, cell)
+    }
+
+    /// Sanitized command preview: argv plus the size of the private prompt,
+    /// never its content.
+    pub fn launch_preview(&self) -> String {
+        self.launch_command().preview()
+    }
+
+    /// Record a launcher answer and surface it as the operator's confirmation.
+    pub fn record_launch_outcome(&mut self, outcome: LaunchOutcome) {
+        self.pending_launch = None;
+        self.push_launch_history(outcome.trail_line());
+        self.append_status(outcome.trail_line());
+        self.launch_outcome = Some(outcome);
+        self.focus = LaunchFocus::Confirmation;
+        self.refresh_control_plane();
+        self.refresh_mission_control();
+    }
+
+    pub fn confirmation_lines(&self) -> Vec<String> {
+        let Some(outcome) = self.launch_outcome.as_ref() else {
+            return vec!["No launch has been answered in this session yet.".to_string()];
+        };
+        let mut lines = outcome.detail_lines();
+        lines.push(String::new());
+        lines
+            .push("Esc closes · Monitor tab follows the run · Controls opens its logs".to_string());
+        lines
     }
 
     pub fn append_status<S: Into<String>>(&mut self, status: S) {
@@ -816,6 +1120,8 @@ impl App {
     pub fn error_lines(&self) -> Vec<String> {
         let mut lines = vec![self.error_title.clone(), String::new()];
         lines.extend(self.error_lines.clone());
+        lines.push(String::new());
+        lines.push("R retry launch · Esc back to dispatch".to_string());
         lines
     }
 
@@ -901,11 +1207,11 @@ impl App {
                 "3 -> Review if something already exists and needs truth".to_string(),
                 "4 -> Marbles when the system works but still drifts".to_string(),
                 String::new(),
-                "Use a / v / e / Enter in the launch panel below.".to_string(),
+                "Use a / v / n / e / Enter in the launch panel below.".to_string(),
                 "Press ? for the in-app operator guide.".to_string(),
                 String::new(),
                 format!("State root: {}", path_display(&self.config.state_root)),
-                format!("Launch root: {}", path_display(&self.config.launch_root)),
+                format!("Repository: {}", path_display(&self.config.repo)),
             ];
         };
 
@@ -974,11 +1280,37 @@ impl App {
             .collect()
     }
 
+    /// The declaration deck. The first [`DispatchFocus::COUNT`] rows are the
+    /// declaration fields in selection order, so a click maps row to field.
     pub fn prompt_lines(&self) -> Vec<String> {
-        let command_preview = self.launch_command().command_line();
+        let focus = self.dispatch_focus();
+        let catalog = self.catalog.ready();
+        let provider = catalog.and_then(|catalog| catalog.provider(self.selected_agent()));
+        let agent_note = match catalog {
+            None => " (catalog pending)".to_string(),
+            Some(catalog) => match catalog.agent_availability(self.selected_agent()) {
+                Ok(_) => String::new(),
+                Err(reason) => format!(" — unavailable: {reason}"),
+            },
+        };
+        let environment_note = match catalog {
+            None => " (catalog pending)".to_string(),
+            Some(catalog) => {
+                match catalog.environment_availability(self.launch_environment.policy_id()) {
+                    Ok(_) => String::new(),
+                    Err(reason) => format!(" — unavailable: {reason}"),
+                }
+            }
+        };
+        let model_note = match provider {
+            Some(provider) if !provider.model_override.supported => {
+                " — this agent has no model flag".to_string()
+            }
+            _ => String::new(),
+        };
         let mut lines = vec![
             dispatch_line(
-                self.dispatch_focus() == DispatchFocus::Kind,
+                focus == DispatchFocus::Kind,
                 format!(
                     "mission: {}  {}",
                     self.launch_kind.human_title(),
@@ -986,29 +1318,123 @@ impl App {
                 ),
             ),
             dispatch_line(
-                self.dispatch_focus() == DispatchFocus::Agent,
-                format!("agent: {}", self.selected_agent()),
+                focus == DispatchFocus::Agent,
+                format!(
+                    "agent: {}{agent_note}",
+                    if self.selected_agent().is_empty() {
+                        "—"
+                    } else {
+                        self.selected_agent()
+                    }
+                ),
             ),
             dispatch_line(
-                self.dispatch_focus() == DispatchFocus::Runtime,
-                format!("runtime: {}", self.launch_runtime.label()),
+                focus == DispatchFocus::Model,
+                format!(
+                    "model: {}{model_note}",
+                    if self.launch_model.trim().is_empty() {
+                        "agent default"
+                    } else {
+                        self.launch_model.trim()
+                    }
+                ),
             ),
             dispatch_line(
-                self.dispatch_focus() == DispatchFocus::Prompt,
+                focus == DispatchFocus::Environment,
+                format!(
+                    "environment: {}{environment_note}",
+                    self.launch_environment.label()
+                ),
+            ),
+            dispatch_line(
+                focus == DispatchFocus::Presentation,
+                format!("presentation: {}", self.launch_presentation.human()),
+            ),
+            dispatch_line(
+                focus == DispatchFocus::Permissions,
+                format!("permissions: {}", self.launch_permissions.label()),
+            ),
+            dispatch_line(
+                focus == DispatchFocus::Sandbox,
+                format!("sandbox: {}", self.launch_sandbox.label()),
+            ),
+            dispatch_line(
+                focus == DispatchFocus::Prompt,
                 format!("prompt: {}", one_line_prompt(&self.launch_prompt)),
             ),
             String::new(),
             "Arrows: ↑/↓ choose field  ←/→ change field  Enter launch".to_string(),
-            "Shortcuts: 1-4 mission  a agent  v runtime  e edit prompt  / search".to_string(),
+            "Shortcuts: a agent  M model  n environment  v presentation  p permissions  s sandbox  e prompt".to_string(),
             String::new(),
-            format!("root: {}", path_display(&self.config.launch_root)),
-            format!("command: {}", command_preview),
+            format!("repo: {}", path_display(&self.config.repo)),
+            format!("command: {}", self.launch_preview()),
         ];
+        match self.pending_launch.as_deref() {
+            Some(summary) => {
+                lines.push(String::new());
+                lines.push(format!(
+                    "launching: {summary} — waiting for the launcher receipt"
+                ));
+            }
+            None => {
+                let refusals = self.declaration_refusals();
+                if !refusals.is_empty() {
+                    lines.push(String::new());
+                    lines.push("cannot launch this declaration:".to_string());
+                    lines.extend(refusals.into_iter().map(|reason| format!("  · {reason}")));
+                }
+            }
+        }
         if let Some(last) = self.launch_history.last() {
             lines.push(String::new());
             lines.push(format!("last launch: {last}"));
         }
         lines
+    }
+
+    /// Model text editor state, mirroring the prompt editor overlay.
+    pub fn model_edit_lines(&self) -> Vec<String> {
+        let mut lines = vec![
+            "Model pin".to_string(),
+            String::new(),
+            format!(
+                "model: {}",
+                if self.launch_model.trim().is_empty() {
+                    "(empty — the agent picks its own default)"
+                } else {
+                    self.launch_model.trim()
+                }
+            ),
+        ];
+        match self
+            .catalog
+            .ready()
+            .and_then(|catalog| catalog.provider(self.selected_agent()))
+        {
+            Some(provider) if provider.model_override.supported => lines.push(format!(
+                "{} carries the pin as {}",
+                self.selected_agent(),
+                provider.model_override.flag
+            )),
+            Some(_) => lines.push(format!(
+                "{} exposes no model flag; a pin here is refused before launch",
+                self.selected_agent()
+            )),
+            None => lines.push("agent contract unknown until the catalog loads".to_string()),
+        }
+        lines.push(String::new());
+        lines.push("Type the exact provider model id. Ctrl+S or Esc saves.".to_string());
+        lines
+    }
+
+    pub fn finish_model_edit(&mut self) {
+        self.launch_model = self.launch_model.trim().to_string();
+        self.focus = LaunchFocus::Browse;
+        self.append_status(if self.launch_model.is_empty() {
+            "model pin cleared: the agent picks its own default".to_string()
+        } else {
+            format!("model pinned: {}", self.launch_model)
+        });
     }
 
     pub fn help_lines(&self) -> Vec<String> {
@@ -1030,8 +1456,11 @@ impl App {
             String::new(),
             "Keys".to_string(),
             "↑/↓ or j/k  navigate inside the active tab".to_string(),
-            "a           cycle launch agent".to_string(),
-            "v           cycle runtime (terminal / visible / headless)".to_string(),
+            "a           cycle launch agent (from the launcher catalog)".to_string(),
+            "M           edit the model pin".to_string(),
+            "n           cycle environment (Living Tree / Fleet Worktrees / VM)".to_string(),
+            "v           cycle presentation (headless / interactive view)".to_string(),
+            "p / s       cycle permissions / sandbox".to_string(),
             "e           edit launch prompt".to_string(),
             "Ctrl+S/Esc  save prompt edits; Enter inserts a prompt newline".to_string(),
             "Enter       launch selected action".to_string(),
@@ -1153,21 +1582,10 @@ impl App {
             matches!(
                 entry.slug,
                 "vc-workflow" | "vc-review" | "vc-marbles" | "vc-polarize"
-            ) || selected_skill
-                .as_deref()
-                .is_some_and(|skill| entry.slug == skill || entry.slug.trim_start_matches("vc-") == skill)
+            ) || selected_skill.as_deref().is_some_and(|skill| {
+                entry.slug == skill || entry.slug.trim_start_matches("vc-") == skill
+            })
         }) {
-            let agent = resolve_skill_agent(entry.default_agent, self.selected_agent());
-            let payload = match entry.accepts {
-                SkillPayloadKind::None => SkillPayload::None,
-                SkillPayloadKind::Optional | SkillPayloadKind::PromptOrFile => {
-                    if self.launch_prompt.trim().is_empty() {
-                        SkillPayload::None
-                    } else {
-                        SkillPayload::Prompt(self.launch_prompt.clone())
-                    }
-                }
-            };
             if actions.iter().any(|action| {
                 matches!(
                     action,
@@ -1178,8 +1596,7 @@ impl App {
             }
             actions.push(DeepAction::SkillLaunch {
                 skill: entry.slug.to_string(),
-                agent,
-                payload,
+                agent: resolve_skill_agent(entry.default_agent, self.selected_agent()),
             });
         }
         actions
@@ -1344,21 +1761,18 @@ impl App {
         Ok(())
     }
 
+    /// Environment handed to the canonical launcher.
+    ///
+    /// The repository travels as `--repo`, never as `VIBECRAFTED_ROOT`:
+    /// that variable names the installed runtime generation, and overwriting
+    /// it pointed launches at Vibecrafted's own install directory. VC Frame
+    /// configuration is likewise the launcher's business, not VOC's.
     pub(crate) fn launch_env(&self) -> BTreeMap<String, OsString> {
         let mut env = BTreeMap::new();
-        env.insert(
-            "VIBECRAFTED_ROOT".to_string(),
-            self.config.launch_root.as_os_str().to_os_string(),
-        );
         env.insert(
             "VIBECRAFT_OPERATOR_STATE_ROOT".to_string(),
             self.config.state_root.as_os_str().to_os_string(),
         );
-        if let Some(config_dir) =
-            std::env::var_os("VC_FRAME_CONFIG_DIR").filter(|value| !value.is_empty())
-        {
-            env.insert("VC_FRAME_CONFIG_DIR".to_string(), config_dir);
-        }
         env
     }
 }
@@ -1449,11 +1863,27 @@ pub fn default_prompt(kind: LaunchKind) -> String {
         LaunchKind::Marbles => {
             "Run a convergence loop on the selected surface until the lies are exposed.".to_string()
         }
+        LaunchKind::Skill(entry) => {
+            format!("Run {} for the task I am looking at now.", entry.display)
+        }
     }
 }
 
-pub fn agents() -> [&'static str; 4] {
-    ["claude", "codex", "gemini", "cursor"]
+/// Rotate through a fixed set of declaration choices.
+fn shift_in<T: Copy + PartialEq>(choices: &[T], current: T, delta: isize) -> T {
+    if choices.is_empty() {
+        return current;
+    }
+    let len = choices.len() as isize;
+    let at = choices
+        .iter()
+        .position(|candidate| *candidate == current)
+        .unwrap_or(0) as isize;
+    let mut index = at + delta;
+    while index < 0 {
+        index += len;
+    }
+    choices[(index % len) as usize]
 }
 
 fn apply_run_filters(
@@ -1464,7 +1894,8 @@ fn apply_run_filters(
 ) {
     let now = chrono::Utc::now();
     let workspace_live = runs.iter().any(|run| {
-        is_actionable_kind(run.kind, &run.snapshot, now) && workspace_matches(&run.snapshot, workspace)
+        is_actionable_kind(run.kind, &run.snapshot, now)
+            && workspace_matches(&run.snapshot, workspace)
     });
     match queue_scope {
         QueueScope::Live => runs.retain(|run| {
@@ -1524,12 +1955,27 @@ fn truncate_id(value: &str, width: usize) -> String {
     if value.chars().count() <= width {
         return value.to_string();
     }
-    let mut short = value.chars().take(width.saturating_sub(1)).collect::<String>();
+    let mut short = value
+        .chars()
+        .take(width.saturating_sub(1))
+        .collect::<String>();
     short.push('…');
     short
 }
 
-fn wrap_operator_line(value: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrapped_line_count<I, S>(lines: I, width: u16) -> usize
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let width = usize::from(width.max(8));
+    lines
+        .into_iter()
+        .map(|line| wrap_operator_line(line.as_ref(), width).len().max(1))
+        .sum()
+}
+
+pub(crate) fn wrap_operator_line(value: &str, width: usize) -> Vec<String> {
     if value.chars().count() <= width {
         return vec![value.to_string()];
     }
@@ -1570,10 +2016,13 @@ fn polarize_marker(band: PolarizeBand) -> &'static str {
     }
 }
 
-fn resolve_skill_agent(default_agent: SkillAgent, selected_agent: &str) -> SkillAgent {
-    match default_agent {
-        SkillAgent::Any => SkillAgent::from_cli_token(selected_agent),
-        concrete => concrete,
+/// A skill's preferred agent, or the operator's current selection when the
+/// catalog entry states no preference.
+pub(crate) fn resolve_skill_agent(default_agent: &str, selected_agent: &str) -> String {
+    if default_agent.is_empty() {
+        selected_agent.to_string()
+    } else {
+        default_agent.to_string()
     }
 }
 
@@ -1607,7 +2056,9 @@ fn artifact_lines(path: &Path, run_root: Option<&str>) -> anyhow::Result<Vec<Str
         text
     };
     if rendered.trim().is_empty() {
-        return Ok(vec!["No transcript or events in this artifact yet.".to_string()]);
+        return Ok(vec![
+            "No transcript or events in this artifact yet.".to_string(),
+        ]);
     }
     let mut lines = rendered
         .lines()
@@ -1618,15 +2069,6 @@ fn artifact_lines(path: &Path, run_root: Option<&str>) -> anyhow::Result<Vec<Str
         lines.push("[truncated after 400 lines]".to_string());
     }
     Ok(lines)
-}
-
-fn default_session_name(kind: LaunchKind) -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| (d.as_millis() % 100_000) as u32)
-        .unwrap_or(0);
-    format!("vc-op-{}-{:05}", kind.label(), suffix)
 }
 
 fn safe_artifact_path(path: &Path, run_root: Option<&str>) -> anyhow::Result<PathBuf> {

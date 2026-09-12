@@ -1,12 +1,13 @@
 [project]
 name = "vibecrafted"
-version = "4.3.0"
+version = "4.3.1"
 description = "Core Python library for Vibecrafted runtime and synthesis surfaces."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "jsonschema>=4.23,<5",
     "PyYAML>=6.0,<7",
+    "websockets>=15,<18",
 ]
 
 [project.scripts]

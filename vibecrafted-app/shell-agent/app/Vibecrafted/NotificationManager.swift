@@ -6,9 +6,9 @@ import UserNotifications
 ///
 /// `osascript display notification` is attributed to Script Editor. Posting
 /// through `UNUserNotificationCenter` from this bundle keeps the sender as
-/// Vibecrafted.app and lets a click open Mission Control on the run.
+/// Vibecrafted.app and lets a click open Command Deck on the run.
 ///
-/// Mutable state (`started`, `presentWindow`) is only written on the main
+/// Mutable state (`started`, `presentWindow`, `presentRun`) is only written on the main
 /// thread during app launch; notification-center and IPC callbacks arrive on
 /// other threads but never mutate, which is why this is @unchecked Sendable.
 final class NotificationManager: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
@@ -24,6 +24,7 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate, @un
     "settled", "completed", "failed", "error", "stopped", "cancelled",
   ]
 
+  var presentRun: ((String, String?, Bool) -> Void)?
   var presentWindow: (() -> Void)?
 
   private let log = Logger(subsystem: "io.vetcoders.vibecrafted", category: "notify")
@@ -195,20 +196,9 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate, @un
 
   private func present(runId: String, report: String?, preferReport: Bool) {
     presentWindow?()
-    NotificationCenter.default.post(
-      name: NSNotification.Name("MissionControlFocusSection"), object: nil,
-      userInfo: ["section": "active_dispatches"])
-    var userInfo: [String: Any] = ["run_id": runId]
-    if let report, !report.isEmpty {
-      userInfo["source_path"] = report
-    }
-    NotificationCenter.default.post(
-      name: NSNotification.Name("MissionControlFocusRun"), object: nil, userInfo: userInfo)
-    if preferReport {
-      NotificationCenter.default.post(
-        name: NSNotification.Name("MissionControlSelection"), object: nil,
-        userInfo: userInfo)
-    }
+    // Run detail and its report artifact belong to the existing web UI.
+    // A notification path never grants permission to open an arbitrary file.
+    presentRun?(runId, report, preferReport)
   }
 
   func userNotificationCenter(

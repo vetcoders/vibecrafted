@@ -1,34 +1,146 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STAGER = REPO_ROOT / "scripts/stage-runtime-foundations.sh"
 
-AICX_VERSION = "0.12.6"
-AICX_REVISION = "215b8060fc56f3968e5a9a83a85cba845149a8bf"
-AICX_ARCHIVE_SHA256 = "6a207d9c8ef82de919eb62db3d50294613e394416c3e28f1b7c5ac44a0151fb9"
+LOCTREE_VERSION = "0.14.4"
+LOCTREE_REVISION = "3e9eb0a74cb3c043d740de5fe7d8c93985d0a876"
+AICX_VERSION = "0.13.0"
+AICX_REVISION = "91b2fe121e97e92df7fffbc12b81abbf68a34fc1"
+PRVIEW_VERSION = "0.7.0"
+PRVIEW_REVISION = "2e11cc6d6e90a606a17d71d0d093a1e2f564bc80"
+PRVIEW_DARWIN_SHA256 = (
+    "f37729af60f21ba8d29621cc5e139b907cae0264776f44030087d65dc24261f0"
+)
+PRVIEW_LINUX_SHA256 = "a5d2024a6c4c8aeecf97771780c15a13b45046c6c3f10e88307ead07ac88a053"
 
 
-def test_runtime_foundations_use_one_reproducible_aicx_pin() -> None:
+def test_runtime_foundations_consume_published_packages() -> None:
     stager = STAGER.read_text(encoding="utf-8")
 
+    assert f'LOCTREE_VERSION="{LOCTREE_VERSION}"' in stager
+    assert f'LOCTREE_REVISION="{LOCTREE_REVISION}"' in stager
     assert f'AICX_VERSION="{AICX_VERSION}"' in stager
     assert f'AICX_REVISION="{AICX_REVISION}"' in stager
-    assert f'AICX_ARCHIVE_SHA256="{AICX_ARCHIVE_SHA256}"' in stager
+    assert f'PRVIEW_VERSION="{PRVIEW_VERSION}"' in stager
+    assert f'PRVIEW_REVISION="{PRVIEW_REVISION}"' in stager
+    assert "@loctree/loctree-darwin-arm64" in stager
+    assert "@loctree/loctree-linux-x64-gnu" in stager
+    assert "@loctree/aicx-darwin-arm64" in stager
+    assert "@loctree/aicx-linux-x64-gnu" in stager
+    assert "npm pack" in stager
     assert (
-        '"https://codeload.github.com/Loctree/aicx/tar.gz/${AICX_REVISION}"' in stager
+        "https://github.com/vetcoders/prview-rs/releases/download/v0.7.0/"
+        "prview-aarch64-apple-darwin.tar.gz" in stager
     )
-    assert '"$AICX_REVISION" "$AICX_ARCHIVE_SHA256" <<\'PY\'' in stager
-    assert "aicx_revision, aicx_archive_sha256 = sys.argv[7:9]" in stager
-    assert '"aicx": aicx_revision' in stager
     assert (
-        'f"https://codeload.github.com/Loctree/aicx/tar.gz/{aicx_revision}"' in stager
+        "https://github.com/vetcoders/prview-rs/releases/download/v0.7.0/"
+        "prview-x86_64-unknown-linux-gnu.tar.gz" in stager
     )
-    assert '"sha256": aicx_archive_sha256' in stager
+    assert f'PRVIEW_SHA256="{PRVIEW_DARWIN_SHA256}"' in stager
+    assert f'PRVIEW_SHA256="{PRVIEW_LINUX_SHA256}"' in stager
+    assert '"channel": "npm"' in stager
+    assert '"channel": "github-release"' in stager
+    assert '"prview": prview_revision' in stager
 
-    # No manifest-local historical pin may diverge from the source-build pin.
+
+def test_runtime_foundations_never_compile_external_tools() -> None:
+    stager = STAGER.read_text(encoding="utf-8")
+
+    forbidden = (
+        "cargo build",
+        "cargo install",
+        "CARGO_TARGET_DIR",
+        "CARGO_PROFILE_RELEASE_STRIP",
+        "remap-path-prefix",
+        "ffile-prefix-map",
+        "LOCTREE_SOURCE_BUILD",
+        "fetch_source",
+        "codeload.github.com/Loctree/aicx",
+        "codeload.github.com/Loctree/loctree",
+        "brew --prefix openssl",
+        "OPENSSL_STATIC",
+        "crates.io/api/v1/crates/prview",
+    )
+    present = [token for token in forbidden if token in stager]
+    assert present == []
+    assert "never cargo-build" in stager
+    assert "no published Runtime Foundations payload for Linux/aarch64" in stager
+    assert "no published Runtime Foundations payload for Windows/x86_64" in stager
+    assert "darwin-relocate-openssl.sh" in stager
+    assert "@loader_path/../lib/libssl.3.dylib" in stager
+    assert "libexec/prview" in stager
+    assert "links Homebrew OpenSSL" not in stager
+    assert "refuse rather than rebuilding" not in stager
+    # Historical source-build pin must not return.
+    assert "215b8060fc56f3968e5a9a83a85cba845149a8bf" not in stager
     assert "ced57997dd97a2b08960f35e3a657d7b0c49a200" not in stager
     assert (
         "ffc65ad6652ee0e240beb333f54d7372b607690dcf5f6c29eb68adee2aed58e7" not in stager
     )
+
+
+def test_runtime_foundations_relocate_darwin_prview_onto_pinned_openssl() -> None:
+    stager = STAGER.read_text(encoding="utf-8")
+    relocator = (REPO_ROOT / "scripts/lib/darwin-relocate-openssl.sh").read_text(
+        encoding="utf-8"
+    )
+    pins = (REPO_ROOT / "scripts/lib/published-foundation-digests.json").read_text(
+        encoding="utf-8"
+    )
+
+    assert "stage_relocatable_openssl" in relocator
+    assert "@loader_path/libssl.3.dylib" in relocator
+    assert (
+        "ffd8ac6981000def0928367924b6cb1e7a98712efbc06e2a2f3f750138bd89ca" in relocator
+    )
+    assert (
+        "a12805a18cd5e4f733fa8727b91afa08b587f9da5a760517cd79cb508a3a3f71" in relocator
+    )
+    assert "homebrew-bottle-dylib" in stager
+    assert "SSL_CERT_FILE" in relocator
+    assert "vtool" in relocator
+    assert "-set-build-version macos" in relocator
+    assert 'DARWIN_MACOS_MINOS="14.0"' in relocator
+    assert "6c88574eda7646be1850a609313d244c6c0080066d717729f8a3943b4aecb25f" in pins
+    assert "c8d8d4d94096f780eeba2a9f4060bea25099046b7ff0569878bcaea84daf20ab" in pins
+    assert "published-foundation-digests.json" in stager
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin OpenSSL relocation")
+def test_relocated_openssl_dylibs_are_macos_14_minos(tmp_path: Path) -> None:
+    ssl_src = Path("/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib")
+    if not ssl_src.is_file():
+        pytest.skip("pinned Homebrew OpenSSL bottle is not present")
+
+    lib_dir = tmp_path / "lib"
+    license_dir = tmp_path / "licenses"
+    env = os.environ.copy()
+    env.setdefault("DEVELOPER_DIR", "/Applications/Xcode.app/Contents/Developer")
+    subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; stage_relocatable_openssl "$2" "$3"',
+            "openssl-minos",
+            str(REPO_ROOT / "scripts/lib/darwin-relocate-openssl.sh"),
+            str(lib_dir),
+            str(license_dir),
+        ],
+        check=True,
+        env=env,
+    )
+    for name in ("libssl.3.dylib", "libcrypto.3.dylib"):
+        probe = subprocess.check_output(
+            ["otool", "-l", str(lib_dir / name)],
+            text=True,
+        )
+        assert "minos 14.0" in probe
+        assert "minos 26.0" not in probe

@@ -1,53 +1,57 @@
-# Compile embargo — fazowo-świadomy kontrakt recovery
+# Compile embargo — odpowiedzialność integratora W2
 
-Compile embargo może chronić fazę kształtowania architektury przed przeprojektowaniem sterowanym
-kompilatorem. Nie jest obejściem hooków Gita, push-banem ani zgodą na pozostawienie jedynego punktu
-recovery lokalnie.
+Embargo oddziela budowę architektury od wykonywalnej weryfikacji. Wynika z fazy
+pracy, nie z osobistej zgody ani decyzji konkretnej osoby.
 
-## Bramka dopuszczenia
+## Workerzy W1/W2
 
-Scaffold może zadeklarować compile embargo tylko wtedy, gdy jawne są wszystkie poniższe elementy:
+Worker mapuje zależności, implementuje kontrakt cuta, przez inspekcję sprawdza
+interfejsy i połączenia oraz zapisuje spójne lokalne checkpointy. Nie uruchamia
+kompilacji, buildów, formatterów, lintów, type-checków, testów ani wybiórczych
+bramek. Może pisać i czytać testy bez ich wykonywania. Raportuje niewiadome,
+ryzyka, brakujące połączenia i potrzebne później sprawdzenia.
 
-- decyzja foundera/operatora autoryzująca eksperyment;
-- objęte fazy i dokładne bramki compile/lint/test odroczone w każdej fazie;
-- asercje albo dowody strukturalne, które tymczasowo zastępują te bramki;
-- atestacja kończąca embargo (np. `W2_STRUCTURALLY_CLOSED`), wymagany autor, lokalizacja journala
-  i SHA commita;
-- repo-owned ścieżka hooka/polityki, która rozumie ten marker.
+Checkpoint może użyć `git commit --no-verify`, gdy hooki uruchamiałyby bramki.
+Nie wymaga wcześniejszego uruchomienia wybranych kontroli ani zbudowania polityki
+hooków. Obejście pomija całe wejście hooków Gita: trzeba zapisać wszystkie
+faktycznie pominięte kontrole, również bezpieczeństwa. Atrybucja i zakres własnych
+zmian pozostają obowiązkowe. Checkpoint zachowuje pracę, nie potwierdza jakości ani
+bezpieczeństwa i nie uprawnia do pushu, publikacji ani wydania.
 
-Bramki commit-message, sekretów, bezpieczeństwa, ref-safety i destrukcyjnych komend nigdy nie są
-odraczane. `--no-verify` i równoważne flagi obejścia są zabronione w każdej fazie.
+## Integrator W2
 
-Jeśli repo nie ma policy-aware mechanizmu hooków zdolnego odroczyć wyłącznie nazwane bramki,
-scaffold musi dodać taki mechanizm jako osobne cięcie prerequisite albo podzielić pracę na zwykłe
-hook-clean commity. Prozatorska obietnica, że hooki „powinny milczeć", nie jest implementacją i nie
-dopuszcza embarga.
+Integrator weryfikuje dokładne commity i zakresy, składa cuty, sprawdza zależności
+oraz kontrakty i usuwa luki strukturalne. Integracja strukturalna może poprzedzać
+bramki wykonywalne; pozostaje jawnie niezweryfikowana.
 
-## Kanał recovery pod embargiem
+Dopiero integrator zapisuje `W2_STRUCTURALLY_CLOSED` dla dokładnego złożonego SHA.
+To znaczy „system złożony i gotowy do sprawdzenia”, nie „system działa”. Następnie
+przywraca i uruchamia pełne właściwe bramki, w tym kontrolę bezpieczeństwa i sekretów
+pominiętą przez checkpointy, oraz rozdziela konkretne naprawy na podstawie wyników.
+Worker sam nie dobiera bramek i nie zdejmuje embarga.
 
-Każda spójna granica fazy produkuje zwykły, przypisany autorowi commit przez aktywne hooki. Gdy
-mandat bieżącej tury autoryzuje zdalną mutację, opublikuj ten commit na dedykowanym nietrunkowym
-refie recovery `embargo/<plan-id>`. Repozytoryjny policy-aware pre-push musi zweryfikować:
+Nieudana bramka po closure wymaga naprawy implementacji, nie osłabienia asercji
+ani automatycznego wznowienia embarga. Kolejna faza strukturalna wymaga jawnego
+zapisu integratora: zakresu oraz warunku jej zamknięcia.
 
-1. cel to dokładnie zadeklarowany ref embarga, nigdy trunk, release branch ani tag;
-2. marker fazy podaje plan ID, fazę, odroczone bramki, stan atestacji i dokładny commit;
-3. commit-message, security, secrets, identity i ref-safety pozostają twarde;
-4. odroczone są wyłącznie jawnie wymienione bramki compile/lint/test;
-5. receipt remote checkpointu i wypchnięty SHA trafiają do journala misji.
+## Dowody i adaptery repozytoriów
 
-To ref recovery, nie kandydat do merge ani drugi control plane. Plan, tracker, journal i
-artefakt `.dispatch.toml` pozostają źródłami prawdy wykonania. Nigdy nie wyprowadzaj zgody na push z samego
-istnienia embarga: bez autoryzacji bieżącej tury raportuj checkpoint jako local-only, a zdalną
-odzyskiwalność jako blocked. Przy autoryzacji blanket push-ban jest defektem niezawodności.
+Plan i handoff wskazują fazę, integratora W2, granice cutów, dowody strukturalne,
+odroczoną weryfikację i warunek closure. Checkpoint ma SHA, zakres, ryzyka i wykaz
+uruchomionych/pominiętych kontroli. Integrator zapisuje złożony SHA, atestację,
+wyniki bramek oraz pozostałe scenariusze odbioru. Używamy istniejącego planu,
+trackera, dispatchu i journala; w Vibecrafted jest to `.vibecrafted/THE_JOURNAL.md`.
 
-## Zdjęcie embarga
+Polityka obejmuje wszystkie języki; repo podaje dokładne komendy. Cztery bramki
+historycznego profilu Codescribe nie ograniczają jej zakresu. Marker TOML i hooki
+Codescribe są adapterem tego repo, nie potwierdzonym mechanizmem Vibecrafted.
+Błędny marker nie rozszerza uprawnień. Po closure i poza strukturalnym W1/W2
+obowiązują normalne bramki. Sam zachowany receipt closure nie przedłuża embarga.
 
-Nazwana atestacja kończy embargo. Przed następnym zwykłym checkpointem feature brancha:
+## Dostarczenie
 
-1. uruchom wszystkie odroczone bramki oraz normalny pełny zestaw bramek;
-2. zapisz wyniki i atestację dla dokładnego SHA commita;
-3. wykonaj następny commit i push przez normalną politykę feature brancha;
-4. zachowaj ref embarga jako dowód recovery, dopóki polityka integracji nie pozwoli go posprzątać.
-
-Nieudana odroczona bramka otwiera zadeklarowaną ścieżkę recovery; nigdy nie wskrzesza `--no-verify`.
-Merge, tag, release, publikacja i promocja stable pozostają przyciskami `vc-release`.
+Przed wydaniem integrator rozlicza wszystkie wymagane bramki i rzeczywiste
+scenariusze produktu dla dokładnej dostarczanej generacji. Podpis, notaryzacja,
+instalacja, zachowanie sesji i interakcje użytkownika wymagają właściwych dowodów.
+Checkpoint, integracja strukturalna, atestacja ani zielony unit test osobno nie
+potwierdzają dostarczenia. Embargo nie rozszerza uprawnień publikacji i release.

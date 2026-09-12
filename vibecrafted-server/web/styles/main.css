@@ -1408,14 +1408,7 @@ button:hover > .icon-box {
 /* W1-b_web-shell: vibecrafted server console shell */
 .server-console-shell {
   min-height: 100vh;
-  background:
-    linear-gradient(135deg, rgba(61, 122, 114, 0.14), transparent 34%),
-    radial-gradient(
-      circle at 88% 12%,
-      rgba(201, 154, 59, 0.14),
-      transparent 28%
-    ),
-    var(--surface-page);
+  background: var(--surface-page);
   color: var(--text-primary);
 }
 
@@ -1444,7 +1437,7 @@ button:hover > .icon-box {
   min-height: 40px;
   padding: 0 var(--space-4);
   border: 1px solid var(--btn-border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-surface);
   background: var(--btn-bg-hover);
   color: var(--text-primary);
   font-family: var(--font-mono);
@@ -1460,7 +1453,6 @@ button:hover > .icon-box {
 .server-console-toggle:focus-visible {
   border-color: var(--accent-interaction);
   color: var(--accent-interaction);
-  outline: none;
 }
 
 .server-console-grid {
@@ -1478,7 +1470,7 @@ button:hover > .icon-box {
   margin: 0 0 var(--space-6);
   color: var(--text-primary);
   font-family: var(--font-display);
-  font-size: clamp(2.5rem, 5vw, 5rem);
+  font-size: var(--deck-title);
   font-weight: 400;
   line-height: 0.96;
   letter-spacing: var(--tracking-normal);
@@ -1494,8 +1486,8 @@ button:hover > .icon-box {
   padding: var(--pad-card-lg);
   background: color-mix(in srgb, var(--surface-card) 92%, transparent);
   border: var(--card-border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-hover);
+  border-radius: var(--radius-surface);
+  box-shadow: var(--shadow-rest);
 }
 
 .server-console-panel-head {
@@ -1508,8 +1500,8 @@ button:hover > .icon-box {
 
 .server-console-pill {
   padding: 4px 9px;
-  border: 1px solid var(--border-active);
-  border-radius: var(--radius-sm);
+  border: var(--stroke-width) solid var(--border-active);
+  border-radius: var(--radius-surface);
   color: var(--accent-interaction);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
@@ -1526,7 +1518,7 @@ button:hover > .icon-box {
   justify-content: space-between;
   gap: var(--space-4);
   padding-bottom: var(--space-3);
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: var(--stroke-width) solid var(--border-subtle);
 }
 
 .server-console-panel div:last-child {
@@ -1542,9 +1534,9 @@ button:hover > .icon-box {
 }
 
 .server-console-panel dd {
-  color: var(--accent-narrative);
+  color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: var(--text-sm);
+  font-size: var(--deck-body);
   text-align: right;
 }
 
@@ -1599,9 +1591,8 @@ button:hover > .icon-box {
   width: fit-content;
   padding: var(--space-2);
   background: color-mix(in srgb, var(--nav-bg) 94%, transparent);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  backdrop-filter: blur(14px);
+  border: var(--stroke-width) solid var(--border-subtle);
+  border-radius: var(--radius-surface);
 }
 
 .operator-rail a {
@@ -1617,7 +1608,6 @@ button:hover > .icon-box {
 .operator-rail a:hover,
 .operator-rail a:focus-visible {
   color: var(--accent-interaction);
-  outline: none;
 }
 
 .control-plane-band {
@@ -1635,9 +1625,9 @@ button:hover > .icon-box {
   align-items: center;
   padding: var(--space-4) var(--space-5);
   background: color-mix(in srgb, var(--surface-card) 96%, transparent);
-  border: 1px solid var(--border-active);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-hover);
+  border: var(--stroke-width) solid var(--border-active);
+  border-radius: var(--radius-surface);
+  box-shadow: var(--shadow-rest);
 }
 
 .operator-summary-title,
@@ -1664,9 +1654,9 @@ button:hover > .icon-box {
 
 .operator-summary-cells div {
   padding: var(--space-3);
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
+  background: var(--surface-elevated);
+  border: var(--stroke-width) solid var(--border-subtle);
+  border-radius: var(--radius-surface);
 }
 
 .operator-summary-cells dt {
@@ -1678,9 +1668,9 @@ button:hover > .icon-box {
 
 .operator-summary-cells dd {
   margin: var(--space-1) 0 0;
-  color: var(--accent-narrative);
+  color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: var(--text-xl);
+  font-size: 1.25rem;
 }
 
 .settlement-board {
@@ -1688,9 +1678,9 @@ button:hover > .icon-box {
   gap: var(--space-5);
   padding: var(--space-6);
   background: color-mix(in srgb, var(--surface-card) 96%, transparent);
-  border: 1px solid var(--border-active);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-hover);
+  border: var(--stroke-width) solid var(--border-active);
+  border-radius: var(--radius-surface);
+  box-shadow: var(--shadow-rest);
 }
 
 .settlement-board-wrap {
@@ -1712,7 +1702,7 @@ button:hover > .icon-box {
   margin: 0;
   color: var(--text-primary);
   font-family: var(--font-display);
-  font-size: clamp(2rem, 4vw, 3.5rem);
+  font-size: var(--deck-title);
   font-weight: 400;
 }
 
@@ -1740,9 +1730,9 @@ button:hover > .icon-box {
   display: grid;
   gap: var(--space-2);
   padding: var(--space-5);
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  border: var(--stroke-width) solid var(--border-subtle);
+  border-radius: var(--radius-surface);
 }
 
 .settlement-cell dt,
@@ -1761,9 +1751,9 @@ button:hover > .icon-box {
 
 .settlement-cell dd {
   margin: 0;
-  color: var(--accent-narrative);
+  color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: clamp(2rem, 5vw, 4rem);
+  font-size: 1.5rem;
   line-height: 1;
 }
 
@@ -1797,7 +1787,7 @@ button:hover > .icon-box {
   padding: var(--space-5);
   background: color-mix(in srgb, var(--surface-card) 94%, transparent);
   border: var(--card-border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-surface);
 }
 
 .control-panel-wide {
@@ -1820,9 +1810,9 @@ button:hover > .icon-box {
 }
 
 .control-panel-head span {
-  color: var(--accent-narrative);
+  color: var(--text-muted);
   font-family: var(--font-mono);
-  font-size: var(--text-sm);
+  font-size: var(--deck-body);
 }
 
 .control-run-list {
@@ -1841,9 +1831,9 @@ button:hover > .icon-box {
   gap: var(--space-3) var(--space-5);
   min-width: 0;
   padding: var(--space-4);
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  border: var(--stroke-width) solid var(--border-subtle);
+  border-radius: var(--radius-surface);
 }
 
 .operator-action-row .control-run-tags,
@@ -1860,8 +1850,8 @@ button:hover > .icon-box {
   padding: var(--space-4);
   color: var(--text-secondary);
   background: color-mix(in srgb, var(--accent-interaction) 8%, transparent);
-  border: 1px solid var(--border-active);
-  border-radius: var(--radius-sm);
+  border: var(--stroke-width) solid var(--border-active);
+  border-radius: var(--radius-surface);
 }
 
 .operator-next-action strong {
@@ -1876,9 +1866,9 @@ button:hover > .icon-box {
   gap: var(--space-3);
   min-width: 0;
   padding: var(--space-4);
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  border: var(--stroke-width) solid var(--border-subtle);
+  border-radius: var(--radius-surface);
 }
 
 .control-run-primary,
@@ -1912,8 +1902,8 @@ button:hover > .icon-box {
   color: var(--text-secondary);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
+  border: var(--stroke-width) solid var(--border-subtle);
+  border-radius: var(--radius-surface);
 }
 
 .control-empty {
@@ -1932,9 +1922,9 @@ button:hover > .icon-box {
 .control-event-row {
   padding: var(--space-3);
   color: var(--text-secondary);
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
+  background: var(--surface-elevated);
+  border: var(--stroke-width) solid var(--border-subtle);
+  border-radius: var(--radius-surface);
 }
 
 .control-event-row {
@@ -2086,9 +2076,7 @@ a.control-run-id:focus-visible {
   min-height: 100dvh;
   height: 100dvh;
   overflow: hidden;
-  background:
-    radial-gradient(720px 360px at 12% -12%, rgba(63, 63, 70, 0.22), transparent 62%),
-    var(--surface-page);
+  background: var(--surface-page);
   color: var(--text-primary);
   font-family: var(--font-body);
   font-size: 14px;
@@ -2098,9 +2086,8 @@ a.control-run-id:focus-visible {
   position: relative;
   z-index: 40;
   min-width: 0;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: var(--stroke-width) solid var(--border-subtle);
   background: var(--nav-bg);
-  backdrop-filter: blur(18px);
 }
 
 .server-navbar-inner {
@@ -2113,8 +2100,7 @@ a.control-run-id:focus-visible {
   padding: 0 18px;
 }
 
-.server-navbar-brand,
-.studio-navbar-brand {
+.server-navbar-brand {
   display: inline-flex;
   align-items: center;
   min-width: 0;
@@ -2123,15 +2109,14 @@ a.control-run-id:focus-visible {
   text-decoration: none;
 }
 
-.server-brand-mark,
-.studio-brand-mark {
+.server-brand-mark {
   display: grid;
   place-items: center;
   flex: 0 0 auto;
   width: 30px;
   height: 30px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
+  border: var(--stroke-width) solid var(--border-subtle);
+  border-radius: var(--radius-surface);
   background: var(--surface-elevated);
   color: var(--text-secondary);
   font: 700 16px/1 var(--font-mono);
@@ -2143,8 +2128,7 @@ a.control-run-id:focus-visible {
   line-height: 1.15;
 }
 
-.server-brand-copy strong,
-.studio-navbar-brand strong {
+.server-brand-copy strong {
   overflow: hidden;
   color: var(--text-primary);
   font: 650 13px/1.2 var(--font-body);
@@ -2152,8 +2136,7 @@ a.control-run-id:focus-visible {
   white-space: nowrap;
 }
 
-.server-brand-copy small,
-.studio-navbar-brand small {
+.server-brand-copy small {
   overflow: hidden;
   color: var(--text-muted);
   font: 10px/1.3 var(--font-mono);
@@ -2177,7 +2160,7 @@ a.control-run-id:focus-visible {
   min-height: 32px;
   gap: 7px;
   padding: 0 11px;
-  border: 1px solid var(--border-subtle);
+  border: var(--stroke-width) solid var(--border-subtle);
   border-radius: 999px;
   background: var(--surface-card);
   color: var(--text-secondary);
@@ -2188,7 +2171,7 @@ a.control-run-id:focus-visible {
 
 .server-navbar-action,
 .server-theme-toggle {
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-surface);
   color: var(--text-primary);
   transition:
     background var(--motion-fast) var(--ease-ui),
@@ -2202,7 +2185,6 @@ a.control-run-id:focus-visible {
 .server-theme-toggle:focus-visible {
   border-color: var(--border-active);
   background: var(--surface-elevated);
-  outline: none;
 }
 
 .server-navbar-action:active,
@@ -2233,7 +2215,7 @@ a.control-run-id:focus-visible {
   justify-content: space-between;
   min-height: 0;
   padding: 18px 12px 14px;
-  border-right: 1px solid var(--border-subtle);
+  border-right: var(--stroke-width) solid var(--border-subtle);
   background: color-mix(in srgb, var(--surface-page) 94%, transparent);
 }
 
@@ -2258,7 +2240,7 @@ a.control-run-id:focus-visible {
   min-height: 38px;
   padding: 0 10px;
   border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-surface);
   color: var(--text-muted);
   text-decoration: none;
   transition:
@@ -2280,7 +2262,6 @@ a.control-run-id:focus-visible {
 .server-nav-link:focus-visible {
   color: var(--text-primary);
   background: var(--surface-card);
-  outline: none;
 }
 
 .server-nav-link.is-active {
@@ -2295,8 +2276,8 @@ a.control-run-id:focus-visible {
   align-items: flex-start;
   gap: 9px;
   padding: 11px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
+  border: var(--stroke-width) solid var(--border-subtle);
+  border-radius: var(--radius-surface);
   background: var(--surface-card);
 }
 
@@ -2368,10 +2349,10 @@ a.control-run-id:focus-visible {
 .server-console-panel {
   min-width: 0;
   padding: 22px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-xl);
+  border: var(--stroke-width) solid var(--border-subtle);
+  border-radius: var(--radius-surface);
   background: var(--surface-card);
-  box-shadow: var(--shadow-hover);
+  box-shadow: var(--shadow-rest);
 }
 
 .server-console-copy {
@@ -2385,7 +2366,7 @@ a.control-run-id:focus-visible {
 .server-console-copy h1 {
   margin: 4px 0 10px;
   color: var(--text-primary);
-  font-size: clamp(1.8rem, 4vw, 3rem);
+  font-size: var(--deck-title);
   font-weight: 650;
   line-height: 1;
   letter-spacing: -0.04em;
@@ -2420,10 +2401,10 @@ a.control-run-id:focus-visible {
   justify-content: center;
   min-height: 34px;
   padding: 0 11px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
+  border: var(--stroke-width) solid var(--border-subtle);
+  border-radius: var(--radius-surface);
   background: var(--surface-elevated);
-  color: var(--text-secondary);
+  color: var(--text-primary);
   font: 550 11px/1 var(--font-body);
   text-decoration: none;
   transition:
@@ -2436,18 +2417,21 @@ a.control-run-id:focus-visible {
 .server-console-link:focus-visible {
   border-color: var(--border-active);
   color: var(--text-primary);
-  outline: none;
 }
 
+/* CommandDeckAccentButtonStyle: the one accent fills, the label is drawn in
+   the page surface, and the type is bold. Exactly one of these per view. */
 .server-console-link-primary {
-  border-color: var(--text-primary);
-  background: var(--text-primary);
+  border-color: var(--accent);
+  background: var(--accent);
   color: var(--surface-page);
+  font-weight: 700;
 }
 
 .server-console-link-primary:hover,
 .server-console-link-primary:focus-visible {
-  background: var(--text-secondary);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 86%, var(--bone));
   color: var(--surface-page);
 }
 
@@ -2461,7 +2445,7 @@ a.control-run-id:focus-visible {
 
 .server-console-panel-state {
   padding: 4px 8px;
-  border: 1px solid var(--border-subtle);
+  border: var(--stroke-width) solid var(--border-subtle);
   border-radius: 999px;
   color: var(--text-muted);
   font: 9px/1 var(--font-mono);
@@ -2480,8 +2464,8 @@ a.control-run-id:focus-visible {
   gap: 6px;
   min-width: 0;
   padding: 12px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
+  border: var(--stroke-width) solid var(--border-subtle);
+  border-radius: var(--radius-surface);
   background: var(--surface-page);
   color: inherit;
   text-decoration: none;
@@ -2490,7 +2474,6 @@ a.control-run-id:focus-visible {
 .operator-summary-cell:hover,
 .operator-summary-cell:focus-visible {
   border-color: var(--border-active);
-  outline: none;
 }
 
 .operator-summary-cell dt {
@@ -2515,9 +2498,9 @@ a.control-run-id:focus-visible {
   gap: 12px;
   padding: 14px;
   border-color: var(--border-subtle);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-surface);
   background: var(--surface-card);
-  box-shadow: var(--shadow-hover);
+  box-shadow: var(--shadow-rest);
 }
 
 .operator-summary-cells {
@@ -2556,9 +2539,9 @@ a.control-run-id:focus-visible {
 .control-panel {
   padding: 18px;
   border-color: var(--border-subtle);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-surface);
   background: var(--surface-card);
-  box-shadow: var(--shadow-hover);
+  box-shadow: var(--shadow-rest);
 }
 
 .control-panel-head {
@@ -2603,8 +2586,8 @@ a.control-run-id:focus-visible {
   gap: 12px;
   min-width: 0;
   padding: 16px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
+  border: var(--stroke-width) solid var(--border-subtle);
+  border-radius: var(--radius-surface);
   background: var(--surface-page);
 }
 
@@ -2634,8 +2617,8 @@ a.control-run-id:focus-visible {
   grid-template-columns: minmax(100px, 0.25fr) 1fr;
   gap: 16px;
   padding: 12px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
+  border: var(--stroke-width) solid var(--border-subtle);
+  border-radius: var(--radius-surface);
   background: var(--surface-page);
   color: var(--text-secondary);
   font-size: 11px;
@@ -2649,7 +2632,7 @@ a.control-run-id:focus-visible {
 .control-run-row {
   gap: 10px;
   padding: 12px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-surface);
 }
 
 .control-run-id {
@@ -2678,7 +2661,6 @@ a.control-run-id:focus-visible {
 .control-run-open:hover,
 .control-run-open:focus-visible {
   color: var(--text-primary);
-  outline: none;
 }
 
 .overview-structure,
@@ -2716,12 +2698,12 @@ a.control-run-id:focus-visible {
 
 .operator-action-row {
   padding: 12px;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-surface);
 }
 
 .operator-next-action {
   border-color: var(--border-subtle);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-surface);
   background: var(--surface-elevated);
 }
 
@@ -2737,7 +2719,7 @@ a.control-run-id:focus-visible {
 
 .control-warning-list li,
 .control-event-row {
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-surface);
   font-size: 10px;
 }
 
@@ -2747,7 +2729,7 @@ a.control-run-id:focus-visible {
   gap: 16px;
   margin-top: 28px;
   padding: 16px 2px 0;
-  border-top: 1px solid var(--border-subtle);
+  border-top: var(--stroke-width) solid var(--border-subtle);
   color: var(--text-muted);
   font: 9px/1.4 var(--font-mono);
 }
@@ -2763,17 +2745,17 @@ a.control-run-id:focus-visible {
   justify-content: space-between;
   gap: 20px;
   padding: 18px 20px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-xl);
+  border: var(--stroke-width) solid var(--border-subtle);
+  border-radius: var(--radius-surface);
   background: var(--surface-card);
-  box-shadow: var(--shadow-hover);
+  box-shadow: var(--shadow-rest);
 }
 
 .run-detail-title {
   max-width: 760px;
   margin: 5px 0 0;
   color: var(--text-primary);
-  font: 650 clamp(1.25rem, 3vw, 2rem)/1.15 var(--font-mono);
+  font: 650 var(--deck-title)/1.25 var(--font-mono);
   letter-spacing: -0.04em;
 }
 
@@ -2794,7 +2776,7 @@ a.control-run-id:focus-visible {
 .transcript-panel .control-panel-head {
   padding: 14px 16px;
   margin: 0;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: var(--stroke-width) solid var(--border-subtle);
 }
 
 .transcript-panel .control-panel-head > div {
@@ -2807,8 +2789,8 @@ a.control-run-id:focus-visible {
   margin: 0;
   padding: 16px;
   overflow: auto;
-  background: #09090b;
-  color: #d4d4d8;
+  background: var(--surface-page);
+  color: var(--text-secondary);
   font: 11px/1.65 var(--font-mono);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -2826,8 +2808,8 @@ a.control-run-id:focus-visible {
 .run-detail-fact {
   min-width: 0;
   padding: 10px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
+  border: var(--stroke-width) solid var(--border-subtle);
+  border-radius: var(--radius-surface);
   background: var(--surface-page);
 }
 
@@ -2906,10 +2888,9 @@ a.control-run-id:focus-visible {
     grid-template-columns: repeat(6, minmax(0, 1fr));
     min-height: 58px;
     padding: 4px 5px max(4px, env(safe-area-inset-bottom));
-    border-top: 1px solid var(--border-subtle);
+    border-top: var(--stroke-width) solid var(--border-subtle);
     background: var(--nav-bg-mobile);
-    box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.45);
-    backdrop-filter: blur(18px);
+    box-shadow: var(--shadow-rest);
   }
 
   .server-mobile-nav .server-nav-link {
@@ -2941,7 +2922,7 @@ a.control-run-id:focus-visible {
   .server-console-panel,
   .run-detail-header {
     padding: 16px;
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-surface);
   }
 
   .server-console-copy {
@@ -2949,7 +2930,7 @@ a.control-run-id:focus-visible {
   }
 
   .server-console-copy h1 {
-    font-size: 1.8rem;
+    font-size: var(--deck-title);
   }
 
   .operator-now-cells,
@@ -2971,7 +2952,7 @@ a.control-run-id:focus-visible {
 
   .control-panel {
     padding: 14px;
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-surface);
   }
 
   .control-run-primary,
@@ -3003,5 +2984,43 @@ a.control-run-id:focus-visible {
     max-height: 44dvh;
     padding: 13px;
     font-size: 10px;
+  }
+}
+
+/* ======================================================================
+   Console focus, motion and contrast — one owner
+   Visual authority: CommandDeck. The deck gives focus a real ring
+   (`defaultFocus` + `.focusSection()`), thickens its stroke at increased
+   contrast (`CommandDeckMetrics.contrastStrokeWidth`) and animates for
+   exactly `motionDuration`. The console used to signal focus with a border
+   tint alone after suppressing the outline seven times over, which is not a
+   focus indicator for anyone who needs one.
+   ====================================================================== */
+
+.server-app-shell :focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-surface);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .server-app-shell *,
+  .server-app-shell *::before,
+  .server-app-shell *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+
+  .server-navbar-action:active,
+  .server-theme-toggle:active {
+    transform: none;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .server-app-shell :focus-visible {
+    outline-width: 3px;
   }
 }

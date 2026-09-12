@@ -96,6 +96,9 @@ qreport="$(spawn_shell_quote "$SPAWN_REPORT")"
 qtranscript="$(spawn_shell_quote "$SPAWN_TRANSCRIPT")"
 qlast_message="$(spawn_shell_quote "${SPAWN_TRANSCRIPT%.log}.last-message.md")"
 qbridge="$(spawn_shell_quote "$SCRIPT_DIR/codex_stream_bridge.py")"
+# The bridge is ours, so its interpreter is ours too — even though the command
+# line around it is generated and `codex exec` beside it is the user's tool.
+qpython="$(spawn_shell_quote "$(spawn_python_bin)")"
 qmodel="$(spawn_shell_quote "$model")"
 model_flag=""
 [[ -n "$model" ]] && model_flag="--model $qmodel"
@@ -118,7 +121,7 @@ fi
 failure_report_fallback="if [[ \$pipeline_status -ne 0 && ! -s $qreport ]]; then { printf '%s\n' '---'; printf 'run_id: %s\n' \"\${SPAWN_RUN_ID:-unknown}\"; printf 'prompt_id: %s\n' \"\${SPAWN_PROMPT_ID:-unknown}\"; printf 'agent: %s\n' \"\${SPAWN_AGENT:-codex}\"; printf 'status: failed\n'; printf '%s\n\n' '---'; printf '%s\n' 'Codex failed before writing a standalone report file.'; printf '%s\n' 'See transcript for the full event stream:'; printf '%s\n' $qtranscript; printf '%s\n' 'Last message, if present:'; printf '%s\n' $qlast_message; } > $qreport; fi;"
 # Failure fallback is emitted inside the child shell before it exits so meta
 # finalization cannot race ahead of the minimal failure report.
-launch_cmd="set -o pipefail && cd $qroot && { rm -f $qlast_message; codex exec -C $qroot --json --dangerously-bypass-approvals-and-sandbox $model_flag --output-last-message $qlast_message - < $qruntime 2>&1 | python3 $qbridge --transcript $qtranscript ${bridge_flags}; pipeline_status=\$?; $last_message_fallback $missing_report_guard $failure_report_fallback echo; { grep -oE '\\[[0-9]{2}:[0-9]{2}:[0-9]{2}\\] session: [[:alnum:]-]+' $qtranscript 2>/dev/null | tail -1 | awk '{print \$3}' | xargs -I{} printf '\\n\\033[33m━━━ session: {} ━━━\\033[0m\\n'; } || true; exit \$pipeline_status; }"
+launch_cmd="set -o pipefail && cd $qroot && { rm -f $qlast_message; codex exec -C $qroot --json --dangerously-bypass-approvals-and-sandbox $model_flag --output-last-message $qlast_message - < $qruntime 2>&1 | $qpython $qbridge --transcript $qtranscript ${bridge_flags}; pipeline_status=\$?; $last_message_fallback $missing_report_guard $failure_report_fallback echo; { grep -oE '\\[[0-9]{2}:[0-9]{2}:[0-9]{2}\\] session: [[:alnum:]-]+' $qtranscript 2>/dev/null | tail -1 | awk '{print \$3}' | xargs -I{} printf '\\n\\033[33m━━━ session: {} ━━━\\033[0m\\n'; } || true; exit \$pipeline_status; }"
 
 # shellcheck disable=SC2016
 codex_success_hook='

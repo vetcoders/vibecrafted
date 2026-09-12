@@ -37,6 +37,29 @@ def test_vc_frame_config_uses_plain_ctrl_without_option_layer() -> None:
     assert "Ctrl Shift" not in payload
 
 
+def test_composer_bind_does_not_enable_line_numbers() -> None:
+    """Composer is prose. A mouse selection copies cells; a gutter rides into paste.
+
+    The Super+e fallback must not resurrect `set number` after 60d9986f dropped
+    the gutter from vc-composer.sh.
+    """
+    payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
+    composer = (
+        REPO_ROOT
+        / "vibecrafted-core"
+        / "vibecrafted_core"
+        / "config"
+        / "vc-frame"
+        / "vc-composer.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "-c 'set number'" not in payload
+    assert "-c 'set nonumber'" in payload
+    assert "set nonumber" in composer
+    assert "set norelativenumber" in composer
+    assert "Draft in vim with: number," not in composer
+
+
 def test_vc_frame_config_enables_kitty_protocol_for_super_switcher() -> None:
     # Key-contract v3 (8a0f14e65): the global Super/Cmd switcher rides kitty
     # CSI-u sequences. Disabling this strands "Super Left/Right/Up/Down" and
@@ -45,6 +68,37 @@ def test_vc_frame_config_enables_kitty_protocol_for_super_switcher() -> None:
     payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
 
     assert "support_kitty_keyboard_protocol true" in payload
+
+
+def test_quick_cmd_shortcut_reuses_active_compact_bar_including_locked_mode() -> None:
+    """Cmd+Shift+. is a shared message, not a second quick-command launcher."""
+    payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
+    shared = payload[payload.index("    shared {") : payload.index("    shared_except")]
+    quick_cmd = shared[
+        shared.index('bind "Super Shift ."') : shared.index(
+            "        // Command Composer"
+        )
+    ]
+
+    assert 'bind "Super Shift ."' in quick_cmd
+    assert 'MessagePlugin "compact-bar"' in quick_cmd
+    assert 'name "vc_quick_cmd"' in quick_cmd
+    assert "Run " not in quick_cmd
+
+
+def test_cmd_n_opens_existing_session_manager_not_a_direct_tab() -> None:
+    """Cmd+N is Create new workspace through the existing Session Manager."""
+    payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
+    shared = payload[payload.index("    shared {") : payload.index("    shared_except")]
+    workspace = shared[
+        shared.index('bind "Super n"') : shared.index('bind "Super Shift ."')
+    ]
+
+    assert 'bind "Super n"' in workspace
+    assert 'LaunchOrFocusPlugin "session-manager"' in workspace
+    assert "floating true" in workspace
+    assert "move_to_focused_tab true" in workspace
+    assert "NewTab" not in workspace
 
 
 def test_vc_frame_config_ctrl_q_closes_focus_not_session() -> None:
@@ -93,6 +147,15 @@ def test_vc_frame_config_session_resilience() -> None:
     assert 'on_force_close "detach"' in payload
     assert "session_serialization true" in payload
     assert "serialize_pane_viewport true" in payload
+
+
+def test_native_default_names_the_packaged_operator_layout() -> None:
+    payload = VC_FRAME_CONFIG.read_text(encoding="utf-8")
+    operator = LAYOUTS_DIR / "operator.kdl"
+
+    assert 'default_layout "operator"' in payload
+    assert operator.is_file()
+    assert not operator.is_symlink()
 
 
 def test_vc_frame_config_has_plugin_aliases() -> None:
@@ -155,7 +218,7 @@ def test_marbles_layout_is_operator_centric() -> None:
 
 
 def test_operator_layout_matches_vibecrafted_standard() -> None:
-    """vc-start operator.kdl is the launch alias of default_layout vibecrafted:
+    """vc-start operator.kdl is the native default layout:
     Start here + Agents + Shell + voc, SESSIONS rail on every tab, no strider."""
     payload = (LAYOUTS_DIR / "operator.kdl").read_text(encoding="utf-8")
     assert 'tab name="Start here"' in payload
@@ -198,7 +261,10 @@ def test_operator_layout_start_here_and_shell_tabs() -> None:
     assert 'command="bash" name="Start Here"' in payload
     assert 'plugin location="about"' not in payload
     assert "pane-python" in payload
-    assert "vibecrafted config install --force" in payload
+    # `config install` is retired (e1d7a791); the Runtime Pack installer owns
+    # product configuration and the repair hint routes through make install.
+    assert "config install" not in payload
+    assert "make install" in payload
     assert 'name="Shell"' in payload
     # Shell wakes with banner then zsh (not bare suspended /bin/zsh).
     assert "exec zsh" in payload or "zsh -l" in payload

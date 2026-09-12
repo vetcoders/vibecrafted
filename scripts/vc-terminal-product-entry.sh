@@ -1,0 +1,196 @@
+#!/bin/bash
+# vc-terminal-product-entry.sh — generation-local choke point for the host
+# terminal (Alacritty branded as vc-terminal).
+#
+# The Mach-O/ELF lives at ../libexec/vc-terminal. This wrapper always pins
+# --config-file to the product vc-terminal.toml so a raw
+#   $VIBECRAFTED_RUNTIME_HOME/releases/<ver>/bin/vc-terminal
+# never falls through to the operator's private ~/.config/alacritty/.
+# Alacritty does not expand ${HOME} in [terminal].shell.program; the private
+# config is not a product surface.
+#
+# Finder treats a naked unix executable as Terminal.app's job. When a
+# generation or App helper ships vc-terminal.app, exec that bundle's
+# Contents/MacOS/alacritty so Dock/LaunchServices identity and logo attach.
+# libexec/vc-terminal remains the required native host and the fallback.
+#
+# 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
+set -euo pipefail
+
+# Root discovery cannot call PATH tools. Sanitization has not run yet, and a
+# hostile or empty inherited PATH is a supported startup case.
+_vc_terminal_entry="${BASH_SOURCE[0]}"
+_vc_terminal_scripts="${_vc_terminal_entry%/*}"
+if [[ -z "$_vc_terminal_scripts" ]]; then
+  _vc_terminal_scripts="/"
+elif [[ "$_vc_terminal_scripts" == "$_vc_terminal_entry" ]]; then
+  _vc_terminal_scripts="."
+fi
+root="$(cd "${_vc_terminal_scripts}/.." && pwd -P)"
+unset _vc_terminal_entry _vc_terminal_scripts
+native_host="$root/libexec/vc-terminal"
+config="$HOME/.config/vibecrafted/vc-terminal/vc-terminal.toml"
+
+# This terminal starts a fresh interactive shell. Old Runtime Pack bins from
+# its parent must not become ambient commands there. Mirror the runtime shell's
+# anchored ownership grammar: only direct children of this runtime home's
+# releases directory are owned; user lookalikes stay untouched.
+_vc_terminal_runtime_home() {
+  # The physical wrapper selects the generation. A parent can carry a stale
+  # runtime-root from an earlier launch, which must not choose this boundary.
+  local selected="$root" generation
+  if [[ -n "${VIBECRAFTED_RUNTIME_HOME:-}" ]]; then
+    printf '%s\n' "${VIBECRAFTED_RUNTIME_HOME%/}"
+  elif [[ "$selected" == */releases/* ]]; then
+    generation="${selected##*/releases/}"
+    if [[ -n "$generation" && "$generation" != */* ]]; then
+      printf '%s\n' "${selected%/releases/*}"
+      return
+    fi
+    printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/vibecrafted"
+  elif [[ -n "${XDG_DATA_HOME:-}" ]]; then
+    printf '%s\n' "${XDG_DATA_HOME%/}/vibecrafted"
+  else
+    printf '%s\n' "$HOME/.local/share/vibecrafted"
+  fi
+}
+
+_vc_terminal_is_owned_generation_bin() {
+  local entry="${1:-}" runtime_home generation leaf
+  runtime_home="$(_vc_terminal_runtime_home)"
+  entry="${entry%/}"
+  [[ -n "$runtime_home" && "$entry" == "$runtime_home/releases/"*/bin ]] || return 1
+  generation="${entry#"$runtime_home/releases/"}"
+  leaf="${generation%/bin}"
+  [[ -n "$leaf" && "$leaf" != */* ]]
+}
+
+_vc_terminal_sanitize_inherited_path() {
+  local inherited="${PATH-}" remaining entry joined index
+  local -a retained=()
+  # A sentinel preserves an empty final component. Empty PATH entries name the
+  # caller's working directory, so they are retained rather than normalized.
+  remaining="${inherited}:"
+  while [[ -n "$remaining" ]]; do
+    entry="${remaining%%:*}"
+    remaining="${remaining#*:}"
+    _vc_terminal_is_owned_generation_bin "$entry" || retained+=("$entry")
+  done
+  # Explicit join keeps empty, spaced, and repeated components in order.
+  joined=""
+  index=0
+  while ((index < ${#retained[@]})); do
+    if ((index)); then
+      joined="${joined}:"
+    fi
+    joined="${joined}${retained[index]}"
+    index=$((index + 1))
+  done
+  PATH="$joined"
+  export PATH
+}
+
+_vc_terminal_is_bundle_host() {
+  local candidate="${1:-}" macos contents bundle
+  [[ "$candidate" == /* ]] || return 1
+  [[ "$candidate" == */vc-terminal.app/Contents/MacOS/alacritty ]] || return 1
+  macos="${candidate%/*}"
+  contents="${macos%/*}"
+  bundle="${contents%/*}"
+  [[ "${bundle##*/}" == "vc-terminal.app" ]] || return 1
+  [[ -f "$candidate" && -x "$candidate" && ! -L "$candidate" ]] || return 1
+  [[ ! -L "$macos" && ! -L "$contents" && ! -L "$bundle" ]] || return 1
+  [[ -f "$bundle/Contents/Info.plist" && ! -L "$bundle/Contents/Info.plist" ]] || return 1
+}
+
+_vc_terminal_select_host() {
+  local fallback="$1" candidate
+  for candidate in \
+    "$root/libexec/vc-terminal.app/Contents/MacOS/alacritty" \
+    "${VIBECRAFTED_TERMINAL_HOST:-}"
+  do
+    if _vc_terminal_is_bundle_host "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  printf '%s\n' "$fallback"
+}
+
+_vc_terminal_sanitize_inherited_path
+if [[ "$native_host" != /* || ! -x "$native_host" || -L "$native_host" || -L "$root/libexec" ]]; then
+  printf 'vc-terminal: native host missing: %s\n' "$native_host" >&2
+  exit 127
+fi
+host="$(_vc_terminal_select_host "$native_host")"
+unset -f _vc_terminal_runtime_home _vc_terminal_is_owned_generation_bin \
+  _vc_terminal_sanitize_inherited_path _vc_terminal_is_bundle_host \
+  _vc_terminal_select_host
+
+export VIBECRAFTED_RUNTIME_ROOT="$root"
+export VIBECRAFTED_ROOT="$root"
+export VIBECRAFTED_RUNTIME_BIN="$root/bin"
+export VIBECRAFTED_TERMINAL_HOST="$host"
+export XDG_CONFIG_HOME="$HOME/.config"
+export VIBECRAFTED_PYTHON="$root/bin/python3"
+export VIBECRAFTED_VC_FRAME_BIN="$root/libexec/vc-frame"
+export VC_FRAME_CONFIG_DIR="$HOME/.config/vibecrafted/vc-frame"
+unset VC_FRAME_CONFIG_FILE PYTHONPATH PYTHONHOME native_host
+
+# This wrapper creates a new native terminal, so it must not pass through an
+# attachment identity from the non-interactive caller.  The child may start a
+# fresh VC Frame client, but inherited pane/session values would make its
+# front-door believe it already owns the caller's attached surface.  Clear both
+# current VC Frame and legacy Zellij twins only in this exec path; the parent
+# shell environment is unaffected.
+unset VC_FRAME VC_FRAME_PANE_ID VC_FRAME_SESSION_NAME
+unset ZELLIJ ZELLIJ_PANE_ID ZELLIJ_SESSION_NAME
+
+if [[ "$host" != /* || ! -x "$host" || -L "$host" ]]; then
+  printf 'vc-terminal: native host missing: %s\n' "$host" >&2
+  exit 127
+fi
+# Identity probe: --version answers from the host binary without opening a
+# window or reading any config, so it must not require the installed product
+# config. The Runtime Pack inventory calls bin/vc-terminal --version on build
+# hosts that have no ~/.config/vibecrafted at all.
+if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
+  exec "$host" --version
+fi
+if [[ ! -f "$config" || -L "$config" || -L "$HOME/.config" \
+  || -L "$HOME/.config/vibecrafted" || -L "$HOME/.config/vibecrafted/vc-terminal" ]]; then
+  printf 'vc-terminal: product config missing: %s\n' "$config" >&2
+  printf 'Vibecrafted does not read ~/.config/alacritty. Launch via the app or PATH vc-terminal after runtime-install.\n' >&2
+  exit 2
+fi
+
+# Alacritty's -e/--command consumes all remaining argv, including hyphens.
+# Consume values of terminal options so a title such as "-e" is not a boundary.
+value_pending=false
+for argument in "$@"; do
+  if $value_pending; then
+    value_pending=false
+    continue
+  fi
+  # clap accepts short flag clusters: -veCOMMAND has the same boundary as -e.
+  if [[ "$argument" =~ ^-[qv]*e ]]; then
+    break
+  fi
+  if [[ "$argument" =~ ^-[qv]*[tTo]$ ]]; then
+    value_pending=true
+    continue
+  fi
+  case "$argument" in
+    -e* | --command | --command=* | --)
+      break
+      ;;
+    --config-file | --config-file=*)
+      printf 'vc-terminal: --config-file is product-owned: %s\n' "$config" >&2
+      exit 2
+      ;;
+    --embed | --socket | --working-directory | --title | -T | -t | --class | -o | --option | -s)
+      value_pending=true
+      ;;
+  esac
+done
+exec "$host" --config-file "$config" "$@"

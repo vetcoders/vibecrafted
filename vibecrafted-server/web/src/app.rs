@@ -9,37 +9,6 @@ use serde::{Deserialize, Serialize};
 use crate::chrome::{ServerFrame, ServerSection};
 use crate::run_detail::RunDetailPage;
 
-#[cfg(feature = "ssr")]
-fn theme_head_script() -> &'static str {
-    r#"(() => {
-  try {
-    const saved = localStorage.getItem('loct-theme');
-    document.documentElement.dataset.theme = saved === 'light' ? 'light' : 'dark';
-  } catch (_) {
-    document.documentElement.dataset.theme = 'dark';
-  }
-})();"#
-}
-
-#[cfg(feature = "ssr")]
-fn theme_control_script() -> &'static str {
-    r#"(() => {
-  const button = document.querySelector('.server-theme-toggle');
-  if (!button) return;
-  const apply = (theme) => {
-    const next = theme === 'light' ? 'light' : 'dark';
-    document.documentElement.dataset.theme = next;
-    button.textContent = next;
-    button.setAttribute('aria-pressed', String(next === 'light'));
-    try { localStorage.setItem('loct-theme', next); } catch (_) {}
-  };
-  apply(document.documentElement.dataset.theme);
-  button.addEventListener('click', () => {
-    apply(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
-  });
-})();"#
-}
-
 const DASHBOARD_EMBED_ID: &str = "vc-dashboard-data";
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -84,6 +53,14 @@ struct DashboardSession {
     runtime: String,
     state: String,
     updated_at: String,
+    runs: Vec<DashboardSessionRun>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+struct DashboardSessionRun {
+    run_id: String,
+    state: String,
+    health: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -101,6 +78,7 @@ struct DashboardSettlement {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 struct DashboardRun {
     run_id: String,
+    logical_session_id: String,
     state: String,
     health: String,
     agent: String,
@@ -138,6 +116,21 @@ struct DashboardEvent {
     message: String,
 }
 
+fn unique_runtime_labels<I, S>(labels: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    labels
+        .into_iter()
+        .map(|label| label.as_ref().trim().to_string())
+        .filter(|label| !label.is_empty())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[cfg(feature = "ssr")]
 fn load_dashboard_data() -> DashboardData {
     use chrono::Utc;
@@ -165,6 +158,7 @@ fn load_dashboard_data_from(
             .to_string();
         DashboardRun {
             run_id: run.run_id,
+            logical_session_id: run.logical_session_id,
             state: run.state,
             health: run.health,
             agent: run.agent,
@@ -254,20 +248,53 @@ fn load_dashboard_data_from(
                             .collect::<std::collections::HashMap<_, _>>()
                     })
                     .unwrap_or_default();
+                let active_run_ids = state
+                    .active_runs
+                    .iter()
+                    .map(|run| run.run_id.as_str())
+                    .collect::<std::collections::HashSet<_>>();
+                let mut runs_by_logical_session =
+                    std::collections::HashMap::<String, Vec<DashboardSessionRun>>::new();
+                for run in state.active_runs.iter().chain(state.recent_runs.iter()) {
+                    let session_id = run.logical_session_id.trim();
+                    if session_id.is_empty() {
+                        continue;
+                    }
+                    let entries = runs_by_logical_session
+                        .entry(session_id.to_string())
+                        .or_default();
+                    if !entries.iter().any(|entry| entry.run_id == run.run_id) {
+                        entries.push(DashboardSessionRun {
+                            run_id: run.run_id.clone(),
+                            state: run.state.clone(),
+                            health: run.health.clone(),
+                        });
+                    }
+                }
                 let sessions = projection
                     .sessions
                     .into_iter()
                     .map(|session| {
-                        let runtime = session
-                            .attachments
+                        let runtime = unique_runtime_labels(
+                            session
+                                .attachments
+                                .iter()
+                                .map(|attachment| attachment.runtime.as_str()),
+                        );
+                        let runs = runs_by_logical_session
+                            .remove(&session.session_id)
+                            .unwrap_or_default();
+                        // A live attachment is live truth about the session
+                        // (an interactive frame needs no agent run to be real);
+                        // a current canonical run is live truth on its own.
+                        let has_current_run = runs
                             .iter()
-                            .map(|attachment| attachment.runtime.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        let state = if session
-                            .attachments
-                            .iter()
-                            .any(|attachment| attachment.state == "live")
+                            .any(|run| active_run_ids.contains(run.run_id.as_str()));
+                        let state = if has_current_run
+                            || session
+                                .attachments
+                                .iter()
+                                .any(|attachment| attachment.state == "live")
                         {
                             "live"
                         } else if session.attachments.is_empty() {
@@ -286,6 +313,7 @@ fn load_dashboard_data_from(
                             runtime,
                             state: state.into(),
                             updated_at: session.updated_at,
+                            runs,
                         }
                     })
                     .collect();
@@ -731,9 +759,9 @@ fn settlement_board(settlement: DashboardSettlement) -> impl IntoView {
 pub fn shell(_options: leptos::config::LeptosOptions) -> impl IntoView {
     use leptos_meta::MetaTags;
 
-    const STYLE_TOKENS: &str = include_str!("../styles/tokens.css");
-    const STYLE_FONTS: &str = include_str!("../styles/fonts.css");
-    const STYLE_MAIN: &str = include_str!("../styles/main.css");
+    use crate::chrome::{
+        STYLE_FONTS, STYLE_MAIN, STYLE_TOKENS, theme_control_script, theme_head_script,
+    };
 
     view! {
         <!DOCTYPE html>
@@ -767,14 +795,90 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/") view=ConsolePage />
                 <Route path=path!("/workspaces") view=WorkspacesPage />
                 <Route path=path!("/sessions") view=SessionsPage />
+                <Route path=path!("/agents") view=AgentManagerPage />
                 <Route path=path!("/runs") view=RunsPage />
                 <Route path=path!("/lifecycle") view=LifecyclePage />
                 <Route path=path!("/activity") view=ActivityPage />
                 <Route path=path!("/structure") view=StructurePage />
+                <Route path=path!("/aicx") view=AicxPage />
                 <Route path=path!("/guide") view=GuidePage />
                 <Route path=path!("/run/:run_id") view=RunDetailPage />
             </Routes>
         </Router>
+    }
+}
+
+/// Client behaviour of the AICX search page. Injected through `inner_html`
+/// like the theme scripts, so SSR and hydration agree on the DOM. Every hit
+/// links to the server-owned reference route, never to a `file://` path.
+fn aicx_page_script() -> &'static str {
+    r#"(() => {
+  const form = document.getElementById('aicx-search-form');
+  const q = document.getElementById('aicx-search-query');
+  const project = document.getElementById('aicx-search-project');
+  const status = document.getElementById('aicx-search-status');
+  const results = document.getElementById('aicx-search-results');
+  if (!form || !q || !status || !results) return;
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const query = q.value.trim();
+    if (!query) return;
+    status.textContent = 'Searching AICX…';
+    results.replaceChildren();
+    const params = new URLSearchParams({ q: query });
+    const scope = project ? project.value.trim() : '';
+    if (scope) params.set('project', scope);
+    try {
+      const response = await fetch('/api/aicx/search?' + params.toString(), { credentials: 'same-origin' });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || ('AICX search failed (HTTP ' + response.status + ')'));
+      const items = payload.items || [];
+      status.textContent = items.length ? items.length + ' result(s)' : 'No AICX results.';
+      for (const item of items) {
+        const li = document.createElement('li');
+        const label = [item.agent, item.date, item.session_id].filter(Boolean).join(' · ') || 'session';
+        if (item.reference) {
+          const a = document.createElement('a');
+          a.href = item.reference;
+          a.className = 'control-run-open';
+          a.textContent = label + ' →';
+          li.append(a);
+        } else {
+          const span = document.createElement('strong');
+          span.textContent = label;
+          li.append(span);
+        }
+        li.append(document.createTextNode(' — ' + (item.matches || []).join(' ')));
+        results.append(li);
+      }
+    } catch (error) {
+      status.textContent = 'AICX unavailable: ' + error.message;
+    }
+  });
+})();"#
+}
+
+#[component]
+pub fn AicxPage() -> impl IntoView {
+    view! {
+        <Title text="AICX search - vc-server" />
+        <Meta name="description" content="Search the local AICX intent corpus through the installed CLI." />
+        <ServerFrame active=ServerSection::Structure status="intent search".to_string()>
+            <div class="server-console-shell route-page-shell">
+                {route_header("Intent", "AICX search", "Search runs the installed AICX CLI on this host. The corpus is private: results are served to local peers only, and every hit opens through a server-owned reference route.")}
+                <section class="control-panel control-panel-wide" aria-label="AICX search">
+                    <form id="aicx-search-form" class="server-console-links">
+                        <input id="aicx-search-query" name="q" type="search" required=true maxlength="512" placeholder="Search intent (query)" />
+                        <input id="aicx-search-project" name="project" type="text" maxlength="129" placeholder="owner/repo (optional)" />
+                        <button class="server-console-link server-console-link-primary" type="submit">"Search AICX"</button>
+                    </form>
+                    <p id="aicx-search-status" class="control-empty">"Enter a query to search the local AICX corpus."</p>
+                    <ul id="aicx-search-results" class="control-warning-list"></ul>
+                    <script inner_html=aicx_page_script()></script>
+                </section>
+                <p class="server-console-links"><a class="server-console-link" href="/structure">"Back to Structure"</a><a class="server-console-link" href="/agents">"Agent Manager"</a></p>
+            </div>
+        </ServerFrame>
     }
 }
 
@@ -783,7 +887,7 @@ pub fn ConsolePage() -> impl IntoView {
     view! {
         <Title text="vc-server - control plane" />
         <Meta name="description" content="Vibecrafted control-plane dashboard." />
-        <Meta name="theme-color" content="#0a0a0b" />
+        <Meta name="theme-color" content="#21211f" />
         <Link rel="preload" as_="font" type_="font/woff2" href="/fonts/inter-var-latin.woff2" crossorigin="anonymous" />
         <Link rel="preload" as_="font" type_="font/woff2" href="/fonts/jetbrains-mono-var-latin.woff2" crossorigin="anonymous" />
         {control_dashboard(|dashboard| console_dashboard(dashboard).into_any())}
@@ -821,7 +925,7 @@ fn console_dashboard(dashboard: DashboardData) -> impl IntoView {
                             <p class="section-eyebrow">"Operator workspace"</p>
                             <h1>"Control plane"</h1>
                             <p>
-                                "Live runs, lifecycle decisions, transcripts, and scaffold artifacts in one navigable operator desk."
+                                "Live runs, lifecycle decisions, transcripts and scaffold artifacts, read from the running control plane."
                             </p>
                             <p class="server-console-links">
                                 <a class="server-console-link server-console-link-primary" href="/runs">
@@ -979,6 +1083,20 @@ fn session_cards(sessions: Vec<DashboardSession>) -> impl IntoView {
                         <span>{session.workspace_id}</span>
                         <span>{session.updated_at}</span>
                     </div>
+                    <div class="session-run-links" aria-label="Canonical run transcripts">
+                        {if session.runs.is_empty() {
+                            view! { <span class="control-empty">"No canonical run transcript is linked to this session."</span> }.into_any()
+                        } else {
+                            session.runs.into_iter().map(|run| {
+                                let href = format!("/run/{}", run.run_id);
+                                view! {
+                                    <a class="control-run-open" href=href>
+                                        {format!("Open transcript {} ({}, {}) →", run.run_id, run.state, run.health)}
+                                    </a>
+                                }
+                            }).collect_view().into_any()
+                        }}
+                    </div>
                 </article>
             }
         })
@@ -1058,6 +1176,30 @@ fn sessions_dashboard(dashboard: DashboardData) -> impl IntoView {
                     </p>
                     <div class="workspace-card-list">{session_cards(sessions)}</div>
                 </section>
+            </div>
+        </ServerFrame>
+    }
+}
+
+#[component]
+pub fn AgentManagerPage() -> impl IntoView {
+    view! {
+        <Title text="agent manager - vc-server" />
+        <Meta name="description" content="Supported agent providers, models, and canonical launchers." />
+        <ServerFrame active=ServerSection::Agents status="catalog".to_string()>
+            <div class="server-console-shell route-page-shell">
+                {route_header("Catalog", "Agent Manager", "Supported providers, models, and canonical launch paths. Live work and history stay in Sessions and Live runs.")}
+                <section class="control-panel control-panel-wide" aria-label="Supported agent launchers">
+                    <div class="control-panel-head"><h2>"Supported launchers"</h2><span>"catalog"</span></div>
+                    <ul class="operator-guide-list">
+                        <li><strong>"Codex"</strong><span>"Use `vibecrafted implement codex` or the matching skill command; model selection is runtime-owned."</span></li>
+                        <li><strong>"Claude"</strong><span>"Use the supported Vibecrafted worker launcher; provider-session identity remains distinct from a workspace session."</span></li>
+                        <li><strong>"Gemini"</strong><span>"Use the supported Vibecrafted worker launcher when the configured provider is available."</span></li>
+                        <li><strong>"AICX / Loctree"</strong><span>"Foundation tools: AICX retrieves intent; Loctree produces structural evidence. They are not agent-run records."</span></li>
+                    </ul>
+                    <p class="control-plane-meta">"Configuration and provider availability are read from the selected runtime at launch. This catalog does not fabricate a launch button or live state."</p>
+                </section>
+                <p class="server-console-links"><a class="server-console-link server-console-link-primary" href="/runs">"Open live runs"</a><a class="server-console-link" href="/sessions">"Open sessions"</a><a class="server-console-link" href="/aicx">"Search intent (AICX)"</a></p>
             </div>
         </ServerFrame>
     }
@@ -1196,8 +1338,12 @@ fn structure_dashboard(dashboard: DashboardData) -> impl IntoView {
                 <section class="control-panel control-panel-wide" aria-label="Structural evidence">
                     <div class="control-panel-head"><h2>"Latest Loctree report"</h2><span>{if has_report { "available" } else { "not found" }}</span></div>
                     <p class="run-detail-artifact-path" hidden={!has_report}>{report}</p>
-                    <p class="control-empty" hidden=has_report>"No Loctree report is known for the roots in the canonical state view."</p>
-                    <p class="server-console-links"><a class="server-console-link server-console-link-primary" href="/scaffold">"Open scaffold studio"</a></p>
+                    <p class="server-console-links" hidden={!has_report}>
+                        <a class="server-console-link server-console-link-primary" href="/structure/report" target="_blank" rel="noopener noreferrer">"Open Loctree report ↗"</a>
+                    </p>
+                    <p class="control-empty" hidden=has_report>"No Loctree report is known for the roots in the canonical state view. Generate one with `loct report --output .loctree/report.html` in the workspace root."</p>
+                    <p class="control-plane-meta" hidden={!has_report}>"The report opens sandboxed: its scripts run, but it holds no control-plane authority."</p>
+                    <p class="server-console-links"><a class="server-console-link server-console-link-primary" href="/scaffold">"Open scaffold studio"</a><a class="server-console-link" href="/aicx">"Search intent (AICX)"</a></p>
                 </section>
             </div>
         </ServerFrame>
@@ -1263,10 +1409,11 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        ActivityPage, ConsolePage, DashboardData, DashboardRun, LifecyclePage, RunsPage,
-        SessionsPage, StructurePage, WorkspacesPage, console_dashboard, decode_dashboard_embed,
-        encode_dashboard_embed, load_dashboard_data_from, operator_active_runs, run_cards,
-        workspaces_dashboard,
+        ActivityPage, ConsolePage, DashboardData, DashboardRun, DashboardSession,
+        DashboardSessionRun, LifecyclePage, RunsPage, SessionsPage, StructurePage, WorkspacesPage,
+        console_dashboard, decode_dashboard_embed, encode_dashboard_embed,
+        load_dashboard_data_from, operator_active_runs, run_cards, session_cards,
+        unique_runtime_labels, workspaces_dashboard,
     };
     use crate::control::api::{control_routes, state_payload};
     use crate::theme::provide_theme_context;
@@ -1483,7 +1630,7 @@ mod tests {
         assert!(html.contains("final"));
         assert!(html.contains("failed"));
         assert!(html.contains("attention"));
-        assert!(html.contains("aria-label=\"Toggle color theme\""));
+        assert!(html.contains("aria-label=\"Switch to light theme\""));
         assert!(html.contains("http://127.0.0.1:8033/"));
         assert!(html.contains("Vibecrafted server navigation"));
         assert!(html.contains("server-sidebar"));
@@ -1548,6 +1695,37 @@ mod tests {
         assert!(!structure.contains("href=\"/Volumes/"));
         assert!(card.contains("href=\"/run/impl-live-agent\""));
         assert!(card.contains("Open transcript"));
+    }
+
+    #[test]
+    fn session_transcript_links_are_explicitly_logical_not_provider_identity() {
+        let owner = Owner::new();
+        let html = owner.with(|| {
+            provide_theme_context();
+            session_cards(vec![DashboardSession {
+                session_id: "vibecrafted-session-01".into(),
+                workspace_id: "workspace-01".into(),
+                runtime: "vc-frame".into(),
+                state: "live".into(),
+                runs: vec![DashboardSessionRun {
+                    run_id: "run-logical-01".into(),
+                    state: "running".into(),
+                    health: "active".into(),
+                }],
+                ..DashboardSession::default()
+            }])
+            .to_html()
+        });
+        assert!(html.contains("href=\"/run/run-logical-01\""));
+        assert!(!html.contains("provider-session-01"));
+    }
+
+    #[test]
+    fn session_runtime_labels_dedup_repeated_attachments() {
+        assert_eq!(
+            unique_runtime_labels(["vc-frame", "vc-frame", "vc-terminal", ""]),
+            "vc-frame, vc-terminal"
+        );
     }
 
     #[test]

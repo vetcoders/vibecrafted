@@ -20,6 +20,15 @@ COMMON_SH = (
     / "scripts"
     / "common.sh"
 )
+UTIL_SH = (
+    REPO_ROOT
+    / "vibecrafted-core"
+    / "vibecrafted_core"
+    / "runtime"
+    / "scripts"
+    / "lib"
+    / "util.sh"
+)
 SHELL_SH = (
     REPO_ROOT
     / "vibecrafted-core"
@@ -172,7 +181,7 @@ def _legacy_expected_operator_session(run_id: str | None = None) -> str:
 
 
 def _write_fake_core_python(path: Path) -> None:
-    """Capture a tracked core launch without importing core or spawning an agent."""
+    """Capture core CLI calls; delegate ordinary Python work to a pinned interpreter."""
     path.write_text(
         """#!/usr/bin/env bash
 set -euo pipefail
@@ -184,13 +193,16 @@ if [[ "${1:-}" == "-c" ]]; then
 fi
 if [[ "${1:-}" == "-m" && "${2:-}" == "vibecrafted_core.cli" ]]; then
   shift 2
+  [[ "${1:-}" == "resume-session" && "${2:-}" == "codex" ]] || {
+    printf 'unexpected fake-core agent invocation: %s\\n' "$*" >&2
+    exit 98
+  }
   printf "%s\\0" "$@" > "$FAKE_CORE_ARGV_FILE"
   cat > "$FAKE_CORE_PROMPT_FILE"
   printf '%s\\n' '=============== MANUAL EXPLICIT RESUME RECEIPT ===============' 'run_id:             rsme-fixture-1' "agent_session_id:   ${FAKE_CORE_SESSION_ID}" 'resume_mode:        manual_explicit'
   exit 0
 fi
-printf "unexpected fake-core invocation: %s\\n" "$*" >&2
-exit 98
+exec "${FAKE_REAL_PYTHON:?FAKE_REAL_PYTHON must name the pinned test interpreter}" "$@"
 """,
         encoding="utf-8",
     )
@@ -250,100 +262,412 @@ def test_visible_launch_wrapper_foregrounds_transcript_tail(tmp_path: Path) -> N
     assert 'wait "$pid"' in result.stdout
 
 
-def test_spawn_tool_paths_follow_silver_runtime_contract(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    rogue_bin = tmp_path / "rogue" / "bin"
-    for rel in (
-        "tools/scripts",
-        ".local/bin",
-        ".local/share/vibecrafted/bin",
-        ".cargo/bin",
-        ".claude/plugins/cache/example/tool/bin",
-        "bin",
-        "tools",
-        "Git/tools",
-    ):
-        (home / rel).mkdir(parents=True, exist_ok=True)
-    rogue_bin.mkdir(parents=True)
-
-    result = _bash(
-        f'''
-        set -euo pipefail
-        export HOME="{home}"
-        export PATH="{rogue_bin}:{home / ".local" / "share" / "vibecrafted" / "bin"}:{home / ".cargo" / "bin"}:{home / ".claude" / "plugins" / "cache" / "example" / "tool" / "bin"}:{home / "tools"}:{home / "bin"}:{home / ".local" / "bin"}:/usr/bin:/bin:/usr/bin"
-        source "{COMMON_SH}"
-        spawn_prepend_agent_tool_paths
-        printf '%s\n' "$PATH" | tr ':' '\n'
-        '''
-    )
-
-    expected_prefix = [
-        str(home / ".local" / "share" / "vibecrafted" / "bin"),
-        str(home / ".local" / "bin"),
-        str(home / ".cargo" / "bin"),
-        str(home / "tools" / "scripts"),
-    ]
-    if Path("/opt/homebrew/bin").is_dir():
-        expected_prefix.append("/opt/homebrew/bin")
-    if Path("/opt/homebrew/sbin").is_dir():
-        expected_prefix.append("/opt/homebrew/sbin")
-    expected_prefix.extend(
-        [
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-            "/usr/sbin",
-            "/sbin",
-        ]
-    )
-
-    entries = result.stdout.splitlines()
-    assert entries[: len(expected_prefix)] == expected_prefix
-    assert len(entries) == len(set(entries))
-    assert str(rogue_bin) not in entries
-    assert (
-        str(home / ".claude" / "plugins" / "cache" / "example" / "tool" / "bin")
-        not in entries
-    )
-    assert str(home / "bin") not in entries
-    assert str(home / "tools") not in entries
-    assert str(home / "Git" / "tools") not in entries
+def _write_probe_tool(directory: Path, name: str, marker: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    tool = directory / name
+    tool.write_text(f"#!/bin/sh\nprintf '{marker}\\n'\n", encoding="utf-8")
+    tool.chmod(0o755)
+    return tool
 
 
-def test_spawn_require_command_rejects_non_contract_path_entries(
+def test_spawn_agent_path_keeps_founder_tools_and_drops_owned_generation_bins(
     tmp_path: Path,
 ) -> None:
+    """A detached agent child resolves the Founder's tools, never a private copy.
+
+    The launcher used to replace the inherited PATH with a closed allowlist, so
+    an agent child could neither see the operator's own directories nor avoid
+    the bundled generation bin that the allowlist put first.  Both halves are
+    asserted behaviourally: a real executable is resolved through ``command -v``
+    rather than by string-matching the PATH.
+    """
+
     home = tmp_path / "home"
-    rogue_bin = tmp_path / "rogue" / "bin"
-    rogue_bin.mkdir(parents=True)
-    command_name = "vc-test-rogue-agent"
-    fake_agent = rogue_bin / command_name
-    fake_agent.write_text(
-        "#!/usr/bin/env bash\nprintf 'rogue-agent\\n'\n", encoding="utf-8"
-    )
-    fake_agent.chmod(0o755)
+    runtime_home = home / ".local" / "share" / "vibecrafted"
+    stale_generation = runtime_home / "releases" / "4.3.0+gSTALE" / "bin"
+    public_bin = home / ".local" / "bin"
+    custom_bin = home / "custom" / "bin"
+    # Not owned by Vibecrafted: a framework checkout in the operator's own
+    # tree.  It merely looks like a generation bin and must be preserved.
+    lookalike_bin = home / "dev" / "vibecrafted" / "releases" / "1.0" / "bin"
 
-    result = subprocess.run(
-        [
-            "bash",
-            "-lc",
+    _write_probe_tool(public_bin, "claude", "public-claude")
+    _write_probe_tool(stale_generation, "claude", "private-claude")
+    _write_probe_tool(custom_bin, "founder-tool", "founder-tool")
+    _write_probe_tool(lookalike_bin, "checkout-tool", "checkout-tool")
+
+    inherited = os.pathsep.join(
+        (
+            str(stale_generation),
+            str(custom_bin),
+            str(lookalike_bin),
+            str(public_bin),
+            "/usr/bin",
+            "/bin",
+        )
+    )
+
+    result = _bash(
+        _ENV_SANITIZE
+        + f"""
+        set -euo pipefail
+        unset VIBECRAFTED_RUNTIME_ROOT VIBECRAFTED_RUNTIME_BIN VIBECRAFTED_RUNTIME_HOME
+        export HOME="{home}"
+        export XDG_DATA_HOME="{home / ".local" / "share"}"
+        export PATH="{inherited}"
+        source "{COMMON_SH}"
+        spawn_prepend_agent_tool_paths
+        printf 'PATH=%s\\n' "$PATH"
+        printf 'claude=%s\\n' "$(command -v claude)"
+        printf 'founder=%s\\n' "$(command -v founder-tool)"
+        printf 'checkout=%s\\n' "$(command -v checkout-tool)"
+        """
+    )
+
+    fields = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    entries = fields["PATH"].split(os.pathsep)
+
+    # The operator's own order survives verbatim, minus the owned generation.
+    assert entries[:5] == [
+        str(custom_bin),
+        str(lookalike_bin),
+        str(public_bin),
+        "/usr/bin",
+        "/bin",
+    ]
+    assert str(stale_generation) not in entries
+    assert len(entries) == len(set(entries))
+
+    # Behavioural proof, not a substring check.
+    assert fields["claude"] == str(public_bin / "claude")
+    assert fields["founder"] == str(custom_bin / "founder-tool")
+    assert fields["checkout"] == str(lookalike_bin / "checkout-tool")
+
+
+def test_spawn_agent_path_anchors_sanitation_on_custom_runtime_home(
+    tmp_path: Path,
+) -> None:
+    """Sanitation follows VIBECRAFTED_RUNTIME_HOME, not a name-shaped glob.
+
+    A custom runtime home has no ``vibecrafted`` path component, so a pattern
+    match on ``*/vibecrafted/releases/*/bin`` leaves its stale generations on
+    PATH — the exact leak this cut closes.
+    """
+
+    home = tmp_path / "home"
+    runtime_home = tmp_path / "opt" / "vcrt"
+    stale_generation = runtime_home / "releases" / "4.3.0+gSTALE" / "bin"
+    public_bin = home / ".local" / "bin"
+
+    _write_probe_tool(public_bin, "aicx", "public-aicx")
+    _write_probe_tool(stale_generation, "aicx", "private-aicx")
+
+    result = _bash(
+        _ENV_SANITIZE
+        + f"""
+        set -euo pipefail
+        unset VIBECRAFTED_RUNTIME_ROOT VIBECRAFTED_RUNTIME_BIN
+        export HOME="{home}"
+        export XDG_DATA_HOME="{home / ".local" / "share"}"
+        export VIBECRAFTED_RUNTIME_HOME="{runtime_home}"
+        export PATH="{stale_generation}:{public_bin}:/usr/bin:/bin"
+        source "{COMMON_SH}"
+        spawn_prepend_agent_tool_paths
+        printf 'PATH=%s\\n' "$PATH"
+        printf 'aicx=%s\\n' "$(command -v aicx)"
+        """
+    )
+
+    fields = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    assert str(stale_generation) not in fields["PATH"].split(os.pathsep)
+    assert fields["aicx"] == str(public_bin / "aicx")
+
+
+def test_spawn_require_command_never_selects_owned_generation_copy(
+    tmp_path: Path,
+) -> None:
+    """A missing public foundation stays missing instead of falling back.
+
+    The bundled generation carries its own ``aicx``/``loct``/``prview``, so the
+    dangerous outcome is not a hard failure — it is a silent success against a
+    stale private binary.  Refusal is the product behaviour: the caller prints
+    canonical install guidance rather than running the private copy.
+    """
+
+    home = tmp_path / "home"
+    runtime_home = home / ".local" / "share" / "vibecrafted"
+    stale_generation = runtime_home / "releases" / "4.3.0+gSTALE" / "bin"
+    custom_bin = home / "custom" / "bin"
+    command_name = "vc-test-foundation-probe"
+
+    _write_probe_tool(stale_generation, command_name, "private-copy")
+
+    def _run(extra_path: Path | None) -> subprocess.CompletedProcess[str]:
+        path_entries = [str(stale_generation)]
+        if extra_path is not None:
+            path_entries.append(str(extra_path))
+        path_entries.extend(("/usr/bin", "/bin"))
+        script = (
             _ENV_SANITIZE
-            + f'''
-            set -euo pipefail
-            export HOME="{home}"
-            export PATH="{rogue_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
-            source "{COMMON_SH}"
-            spawn_require_command "{command_name}"
-            ''',
-        ],
-        check=False,
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
+            + f"""
+        set -euo pipefail
+        unset VIBECRAFTED_RUNTIME_ROOT VIBECRAFTED_RUNTIME_BIN VIBECRAFTED_RUNTIME_HOME
+        export HOME="{home}"
+        export XDG_DATA_HOME="{home / ".local" / "share"}"
+        export PATH="{os.pathsep.join(path_entries)}"
+        source "{COMMON_SH}"
+        spawn_require_command "{command_name}"
+        command -v "{command_name}"
+        """
+        )
+        return subprocess.run(
+            ["bash", "-lc", script],
+            check=False,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+
+    refused = _run(None)
+    assert refused.returncode == 1
+    assert f"Required command not found: {command_name}" in refused.stderr
+    assert "private-copy" not in refused.stdout
+
+    # Control: the same name in the operator's own directory is legitimate.
+    _write_probe_tool(custom_bin, command_name, "founder-copy")
+    accepted = _run(custom_bin)
+    assert accepted.returncode == 0, accepted.stderr
+    assert accepted.stdout.strip() == str(custom_bin / command_name)
+
+
+def _write_hostile_python(directory: Path) -> Path:
+    """A public ``python3`` that would wreck any internal runtime call.
+
+    It fails the resolver's 3.11 version probe and, when actually executed,
+    prints a marker and exits 79 instead of doing the work — so selecting it is
+    impossible to mistake for success.  This stands in for the real host
+    interpreter that the launcher tree started reaching once the owned
+    generation bin left PATH (macOS ``/usr/bin/python3`` 3.9.6, or any shim).
+    """
+
+    directory.mkdir(parents=True, exist_ok=True)
+    tool = directory / "python3"
+    tool.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        "  -c) exit 1 ;;\n"
+        "esac\n"
+        "printf 'HOST_PYTHON_SELECTED\\n'\n"
+        "exit 79\n",
+        encoding="utf-8",
+    )
+    tool.chmod(0o755)
+    return tool
+
+
+def _fake_generation_bin(tmp_path: Path) -> Path:
+    """A generation bin whose ``python3`` is a real, capable interpreter."""
+
+    generation_bin = tmp_path / "generation" / "bin"
+    generation_bin.mkdir(parents=True, exist_ok=True)
+    (generation_bin / "python3").symlink_to(sys.executable)
+    return generation_bin
+
+
+_NEEDS_MODERN_PYTHON = pytest.mark.skipif(
+    sys.version_info < (3, 11),
+    reason="needs a 3.11+ interpreter to stand in for the generation python",
+)
+
+
+@_NEEDS_MODERN_PYTHON
+def test_internal_runtime_python_is_explicit_while_public_python3_stays_the_founders(
+    tmp_path: Path,
+) -> None:
+    """Two owners, one PATH: public python3 is the Founder's, internal is ours.
+
+    Removing the owned generation bin from PATH closed a real leak, but it also
+    silently re-pointed every *internal* runtime Python call at whatever
+    ``python3`` the Founder's PATH offers.  ``spawn_shell_quote`` is the proven
+    casualty: it is called by every ``*_spawn.sh`` launcher, so a hostile or
+    merely stale host interpreter corrupted the quoting of every dispatched
+    command line.  Internal execution must name its interpreter; public
+    resolution must stay untouched.
+    """
+
+    home = tmp_path / "home"
+    home.mkdir()
+    hostile_bin = tmp_path / "hostile-bin"
+    _write_hostile_python(hostile_bin)
+    generation_bin = _fake_generation_bin(tmp_path)
+
+    result = _bash(
+        _ENV_SANITIZE
+        + f"""
+        set -euo pipefail
+        export HOME="{home}"
+        export XDG_DATA_HOME="{home / ".local" / "share"}"
+        export PATH="{hostile_bin}:/usr/bin:/bin"
+        export VIBECRAFTED_PYTHON="{generation_bin / "python3"}"
+        export VIBECRAFTED_RUNTIME_BIN="{generation_bin}"
+        source "{COMMON_SH}"
+        spawn_prepend_agent_tool_paths
+        printf 'quote=%s\\n' "$(spawn_shell_quote 'file with spaces')"
+        printf 'public_python3=%s\\n' "$(command -v python3)"
+        printf 'internal_python=%s\\n' "$(spawn_python_bin)"
+        printf 'python3_kind=%s\\n' "$(type -t python3)"
+        printf 'PATH=%s\\n' "$PATH"
+        """
     )
 
-    assert result.returncode == 1
-    assert f"Required command not found: {command_name}" in result.stderr
+    fields = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+
+    # The regression: this returned exit 79 / HOST_PYTHON_SELECTED.
+    assert fields["quote"] == "'file with spaces'"
+    assert "HOST_PYTHON_SELECTED" not in result.stdout
+
+    # Public resolution is still the Founder's, hostile or not — we do not
+    # repair the host's python3, and we never shadow it with a shell function.
+    assert fields["public_python3"] == str(hostile_bin / "python3")
+    assert fields["python3_kind"] == "file"
+
+    # Internal execution names the runtime interpreter explicitly...
+    assert fields["internal_python"] == str(generation_bin / "python3")
+    # ...without the private carrier re-entering ambient lookup.
+    assert str(generation_bin) not in fields["PATH"].split(os.pathsep)
+
+
+@_NEEDS_MODERN_PYTHON
+def test_internal_python_owner_resolves_from_the_selected_generation_bin(
+    tmp_path: Path,
+) -> None:
+    """``VIBECRAFTED_RUNTIME_BIN`` alone is enough to own internal execution.
+
+    A private-only foundation must stay absent from PATH, so the owner has to be
+    reachable purely through the explicit runtime environment — with no
+    ``VIBECRAFTED_PYTHON`` set and a hostile public ``python3`` in the lead.
+    """
+
+    home = tmp_path / "home"
+    home.mkdir()
+    hostile_bin = tmp_path / "hostile-bin"
+    _write_hostile_python(hostile_bin)
+    generation_bin = _fake_generation_bin(tmp_path)
+
+    result = _bash(
+        _ENV_SANITIZE
+        + f"""
+        set -euo pipefail
+        unset VIBECRAFTED_PYTHON
+        export HOME="{home}"
+        export XDG_DATA_HOME="{home / ".local" / "share"}"
+        export PATH="{hostile_bin}:/usr/bin:/bin"
+        export VIBECRAFTED_RUNTIME_BIN="{generation_bin}"
+        source "{COMMON_SH}"
+        spawn_prepend_agent_tool_paths
+        printf 'quote=%s\\n' "$(spawn_shell_quote 'file with spaces')"
+        printf 'internal_python=%s\\n' "$(spawn_python_bin)"
+        printf 'framework_version=%s\\n' "$(spawn_framework_version)"
+        printf 'PATH=%s\\n' "$PATH"
+        """
+    )
+
+    fields = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    assert fields["quote"] == "'file with spaces'"
+    assert fields["internal_python"] == str(generation_bin / "python3")
+    # The sibling internal reader in the same module must not regress either.
+    assert fields["framework_version"] != ""
+    assert "HOST_PYTHON_SELECTED" not in result.stdout
+    assert str(generation_bin) not in fields["PATH"].split(os.pathsep)
+
+
+def test_internal_python_owner_refuses_macos_host_python39(tmp_path: Path) -> None:
+    """A lone host ``python3`` 3.9.6 is not a runtime interpreter.
+
+    macOS 15+ keeps Xcode ``/usr/bin/python3`` at 3.9.6 (no tomllib). The
+    resolver used to print ``python3`` after every eligible candidate failed,
+    so every internal caller exec'd the host interpreter and died. Fail closed.
+    """
+
+    home = tmp_path / "home"
+    home.mkdir()
+    hostile_bin = tmp_path / "hostile-bin"
+    err_file = tmp_path / "spawn-python-refuse.err"
+    _write_hostile_python(hostile_bin)
+
+    result = _bash(
+        _ENV_SANITIZE
+        + f"""
+        set -euo pipefail
+        unset VIBECRAFTED_PYTHON VIBECRAFTED_RUNTIME_BIN
+        export HOME="{home}"
+        export XDG_DATA_HOME="{home / ".local" / "share"}"
+        export PATH="{hostile_bin}"
+        hash -r
+        source "{UTIL_SH}"
+        if output="$(spawn_python_bin 2>{shlex.quote(str(err_file))})"; then
+          printf 'unexpected=%s\\n' "$output"
+          exit 11
+        fi
+        printf 'refused=1\\n'
+        printf 'stderr=%s\\n' "$(/usr/bin/cat {shlex.quote(str(err_file))})"
+        """
+    )
+
+    fields = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    assert fields["refused"] == "1"
+    assert "unexpected" not in fields
+    assert "tomllib" in fields["stderr"]
+    assert "3.9.6" in fields["stderr"]
+    assert "HOST_PYTHON_SELECTED" not in result.stdout
+
+
+@_NEEDS_MODERN_PYTHON
+def test_internal_python_owner_survives_standalone_util_sourcing(
+    tmp_path: Path,
+) -> None:
+    """``util.sh`` is sourced on its own (capability probes do exactly this).
+
+    The interpreter owner therefore lives in ``util.sh`` beside the PATH
+    sanitizer that created the need for it, so no module has to guard on
+    ``common.sh`` load order to reach it.
+    """
+
+    home = tmp_path / "home"
+    home.mkdir()
+    hostile_bin = tmp_path / "hostile-bin"
+    _write_hostile_python(hostile_bin)
+    generation_bin = _fake_generation_bin(tmp_path)
+
+    result = _bash(
+        _ENV_SANITIZE
+        + f"""
+        set -euo pipefail
+        export HOME="{home}"
+        export XDG_DATA_HOME="{home / ".local" / "share"}"
+        export PATH="{hostile_bin}:/usr/bin:/bin"
+        export VIBECRAFTED_PYTHON="{generation_bin / "python3"}"
+        source "{UTIL_SH}"
+        spawn_prepend_agent_tool_paths
+        printf 'quote=%s\\n' "$(spawn_shell_quote 'file with spaces')"
+        """
+    )
+
+    fields = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    assert fields["quote"] == "'file with spaces'"
+    assert "HOST_PYTHON_SELECTED" not in result.stdout
 
 
 def test_skill_dry_run_reaches_spawn_launcher_without_launching(tmp_path: Path) -> None:
@@ -1895,6 +2219,7 @@ def test_vc_resume_can_infer_agent_from_session_meta(tmp_path: Path) -> None:
     core_prompt = tmp_path / "core-prompt.txt"
     core_source = tmp_path / "core-source"
     provider_called = tmp_path / "provider-called"
+    hostile_python = _write_hostile_python(tmp_path / "hostile public bin")
     core_source.mkdir()
     _write_fake_core_python(fake_core)
     meta_dir = (
@@ -1911,6 +2236,8 @@ def test_vc_resume_can_infer_agent_from_session_meta(tmp_path: Path) -> None:
         set -euo pipefail
         export VIBECRAFTED_HOME="{crafted_home}"
         export VIBECRAFTED_PYTHON="{fake_core}"
+        export FAKE_REAL_PYTHON="{sys.executable}"
+        export PATH="{hostile_python.parent}:/usr/bin:/bin:/usr/sbin:/sbin"
         export FAKE_CORE_ARGV_FILE="{core_argv}"
         export FAKE_CORE_PROMPT_FILE="{core_prompt}"
         export FAKE_CORE_SOURCE_DIR="{core_source}"
@@ -1937,6 +2264,46 @@ def test_vc_resume_can_infer_agent_from_session_meta(tmp_path: Path) -> None:
     ]
     assert core_prompt.read_text(encoding="utf-8") == "hello"
     assert not provider_called.exists()
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_vc_frame_helpers_use_internal_python_with_hostile_public_python(
+    tmp_path: Path, shell: str
+) -> None:
+    """ANSI parsing and worker-host inference do not select public ``python3``."""
+    hostile_python = _write_hostile_python(tmp_path / "hostile public bin")
+    project_root = tmp_path / "project root with spaces"
+    project_root.mkdir()
+    script = f'''
+    set -euo pipefail
+    export HOME="{tmp_path / "home with spaces"}"
+    export PATH="{hostile_python.parent}:/usr/bin:/bin:/usr/sbin:/sbin"
+    export VIBECRAFTED_PYTHON="{sys.executable}"
+    export SPAWN_ROOT="{project_root}"
+    source "{SHELL_SH}"
+    printf 'ansi='
+    printf '\\033[31mready\\033[0m' | _vetcoders_strip_ansi
+    printf '\\nhost=%s\\n' "$(_vetcoders_effective_worker_session)"
+    '''
+    if shell == "bash":
+        result = _bash(script)
+    else:
+        env = os.environ.copy()
+        env["HOME"] = str(tmp_path / "ambient home")
+        result = subprocess.run(
+            ["zsh", "-f", "-c", _ENV_SANITIZE + script],
+            check=True,
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+    lines = result.stdout.splitlines()
+    assert lines[0] == "ansi=ready"
+    assert lines[1].startswith("host=project-root-with-spaces-")
+    assert lines[1].endswith("-w")
+    assert "HOST_PYTHON_SELECTED" not in result.stdout + result.stderr
 
 
 def test_generated_launcher_marks_meta_failed_before_failure_hook(
@@ -3556,3 +3923,312 @@ def test_shell_run_id_allocators_share_canonical_grammar() -> None:
         segments = run_id.split("-")
         assert len(segments) == 4, run_id
         assert len(segments[-1]) == 5 and segments[-1].isdigit(), run_id
+
+
+# ── Top-level entrypoints own their interpreter ───────────────────────────
+#
+# The library above is closed, but the scripts a Founder actually types were
+# still executing bare `python3` in their own heredocs.  These probes drive the
+# real entrypoints, not their source text.
+
+RUNTIME_SCRIPTS_DIR = (
+    REPO_ROOT / "vibecrafted-core" / "vibecrafted_core" / "runtime" / "scripts"
+)
+CODEX_LAUNCH_PREFIX = "Dry run mode: launcher generated only: "
+
+
+def _generation_bin_carrying_core(tmp_path: Path) -> Path:
+    """A generation bin whose ``python3`` can import ``vibecrafted_core``.
+
+    A real release bin ships the package alongside its own interpreter, so the
+    module entrypoints (``python3 -m vibecrafted_core.…``) only prove something
+    if the stand-in carries it too.  The directory name holds a space on
+    purpose: the resolved path travels through command substitution and, for
+    the codex bridge, into a generated command line.
+    """
+
+    generation_bin = tmp_path / "gene ration" / "bin"
+    generation_bin.mkdir(parents=True, exist_ok=True)
+    interpreter = generation_bin / "python3"
+    # A stale fixture may leave this path as a symlink.  ``write_text`` follows
+    # it, so remove the link itself before creating this fixture-owned wrapper.
+    if interpreter.is_symlink():
+        interpreter.unlink()
+    interpreter.write_text(
+        "#!/bin/sh\n"
+        f"PYTHONPATH={shlex.quote(str(CORE_PACKAGE_DIR))} "
+        f'exec {shlex.quote(sys.executable)} "$@"\n',
+        encoding="utf-8",
+    )
+    interpreter.chmod(0o755)
+    return generation_bin
+
+
+def test_generation_bin_wrapper_replaces_symlink_without_writing_target(
+    tmp_path: Path,
+) -> None:
+    """The fixture wrapper must never overwrite a symlink's target."""
+
+    sentinel = tmp_path / "private-sentinel"
+    sentinel_bytes = b"private sentinel must remain unchanged\n"
+    sentinel.write_bytes(sentinel_bytes)
+
+    generation_bin = tmp_path / "gene ration" / "bin"
+    generation_bin.mkdir(parents=True)
+    interpreter = generation_bin / "python3"
+    interpreter.symlink_to(sentinel)
+
+    assert _generation_bin_carrying_core(tmp_path) == generation_bin
+    assert sentinel.read_bytes() == sentinel_bytes
+    assert not interpreter.is_symlink()
+    assert interpreter.is_file()
+
+
+def _entrypoint_env(tmp_path: Path) -> tuple[dict[str, str], Path, Path]:
+    """Hostile public ``python3``, valid runtime interpreter, isolated home.
+
+    PYTHONPATH is absent rather than emptied: the runtime exports a global one
+    on installed hosts, and inheriting it would let the host answer for the
+    package the entrypoint is supposed to reach through its own interpreter.
+    """
+
+    home = tmp_path / "home with space"
+    home.mkdir(parents=True, exist_ok=True)
+    hostile_bin = tmp_path / "hostile-bin"
+    _write_hostile_python(hostile_bin)
+    generation_bin = _generation_bin_carrying_core(tmp_path)
+
+    env = {
+        "PATH": f"{hostile_bin}{os.pathsep}/usr/bin{os.pathsep}/bin",
+        "HOME": str(home),
+        "XDG_DATA_HOME": str(home / ".local" / "share"),
+        "VIBECRAFTED_HOME": str(home / ".vibecrafted"),
+        "VIBECRAFTED_PYTHON": str(generation_bin / "python3"),
+        "VIBECRAFTED_RUNTIME_BIN": str(generation_bin),
+    }
+    return env, hostile_bin, generation_bin
+
+
+def _run_entrypoint(
+    script: str,
+    args: list[str],
+    env: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", str(RUNTIME_SCRIPTS_DIR / script), *args],
+        env=env,
+        cwd=REPO_ROOT,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+
+_ENTRYPOINT_CASES = [
+    # The independently proven failure: await.sh sources common.sh and then
+    # execs a bare python3 heredoc, so it exited 79 on a hostile host.
+    pytest.param("await.sh", ["--help"], id="await-help"),
+    pytest.param("observe.sh", ["--help"], id="observe-help"),
+    pytest.param(
+        "marbles_ctl.sh", ["session", "--json"], id="marbles-ctl-session-json"
+    ),
+    pytest.param("marbles_ctl.sh", ["gc", "--dry-run"], id="marbles-ctl-gc-dry-run"),
+    pytest.param("marbles_spawn.sh", ["--help"], id="marbles-spawn-help"),
+    pytest.param("codex_spawn.sh", ["--help"], id="codex-spawn-help"),
+    # Module entrypoints: no sourced library at all before this cut.
+    pytest.param("vibecrafted-cron.sh", ["--help"], id="cron-help"),
+    pytest.param("vibecrafted-loop.sh", ["--help"], id="loop-help"),
+    pytest.param("vibecrafted-recall.sh", [], id="recall"),
+    pytest.param("vibecrafted-precompact.sh", [], id="precompact"),
+    pytest.param("vibecrafted-postcompact.sh", [], id="postcompact"),
+]
+
+
+@_NEEDS_MODERN_PYTHON
+@pytest.mark.parametrize(("script", "args"), _ENTRYPOINT_CASES)
+def test_top_level_entrypoint_runs_on_the_runtime_interpreter(
+    tmp_path: Path,
+    script: str,
+    args: list[str],
+) -> None:
+    """A hostile host ``python3`` must not reach a help/describe/dry-run path.
+
+    Each of these exits 79 with ``HOST_PYTHON_SELECTED`` before the cut: the
+    heredocs inside the entrypoints never named their interpreter, so closing
+    the PATH leak left them reaching for whatever the Founder's PATH offers.
+    """
+
+    env, _hostile_bin, _generation_bin = _entrypoint_env(tmp_path)
+    result = _run_entrypoint(script, args, env)
+
+    combined = result.stdout + result.stderr
+    assert "HOST_PYTHON_SELECTED" not in combined, combined
+    assert result.returncode == 0, combined
+
+
+@_NEEDS_MODERN_PYTHON
+def test_entrypoints_leave_public_tool_resolution_to_the_founder(
+    tmp_path: Path,
+) -> None:
+    """Owning internal execution must not repair or shadow the public surface.
+
+    ``python3`` still resolves to the Founder's hostile binary as a file (never
+    a shell function), and a private-only foundation stays missing rather than
+    being answered by a bundled generation copy.
+    """
+
+    env, hostile_bin, generation_bin = _entrypoint_env(tmp_path)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                'source "$1"\n'
+                "spawn_prepend_agent_tool_paths\n"
+                'printf "public_python3=%s\\n" "$(command -v python3)"\n'
+                'printf "python3_kind=%s\\n" "$(type -t python3)"\n'
+                'printf "internal_python=%s\\n" "$(spawn_python_bin)"\n'
+                "for tool in aicx loct prview screenscribe; do\n"
+                '  printf "%s=%s\\n" "$tool" "$(command -v "$tool" || echo MISSING)"\n'
+                "done\n"
+                'printf "PATH=%s\\n" "$PATH"\n'
+            ),
+            "_",
+            str(COMMON_SH),
+        ],
+        env=env,
+        cwd=REPO_ROOT,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    fields = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    assert fields["public_python3"] == str(hostile_bin / "python3")
+    assert fields["python3_kind"] == "file"
+    assert fields["internal_python"] == str(generation_bin / "python3")
+    # Public foundations either resolve to a user-owned tool or stay missing.
+    # What they must never do is get answered by the generation bin we just
+    # named for internal work — that is the leak the PATH closure removed.
+    for tool in ("aicx", "loct", "prview", "screenscribe"):
+        resolved = fields[tool]
+        assert not resolved.startswith(str(generation_bin)), f"{tool} -> {resolved}"
+    assert str(generation_bin) not in fields["PATH"].split(os.pathsep)
+
+
+@_NEEDS_MODERN_PYTHON
+def test_generated_codex_launcher_bridge_runs_on_the_runtime_interpreter(
+    tmp_path: Path,
+) -> None:
+    """The stream bridge is ours, so its interpreter is ours — generated or not.
+
+    ``codex exec`` in the same command line is the Founder's tool and stays
+    untouched; ``codex_stream_bridge.py`` beside it is a runtime internal, and
+    a hostile host python3 took the whole codex pipeline down with it.  The
+    check is behavioural: the interpreter the launcher actually names is pulled
+    out and made to run the real bridge.
+    """
+
+    env, _hostile_bin, generation_bin = _entrypoint_env(tmp_path)
+    root = _isolated_git_root(tmp_path)
+    plan = root / "plan.md"
+    plan.write_text("# plan\n", encoding="utf-8")
+
+    dry_run = _run_entrypoint(
+        "codex_spawn.sh", ["--dry-run", "--root", str(root), str(plan)], env
+    )
+    combined = dry_run.stdout + dry_run.stderr
+    assert "HOST_PYTHON_SELECTED" not in combined, combined
+    assert dry_run.returncode == 0, combined
+
+    launcher = next(
+        Path(line.split(CODEX_LAUNCH_PREFIX, 1)[1].strip())
+        for line in combined.splitlines()
+        if CODEX_LAUNCH_PREFIX in line
+    )
+    # The launch command is embedded in the launcher single-quoted, so any
+    # quoted argument inside it appears in the `'"'"'` escape form. Undo that
+    # one deterministic transform, then read the two tokens that were piped
+    # into -- shlex-ing the whole body is not stable, because the fallback
+    # heredocs legitimately carry unbalanced quotes.
+    body = launcher.read_text(encoding="utf-8").replace("""'"'"'""", "'")
+    piped = re.search(
+        r"\|\s*(?P<interp>'[^']*'|[^\s|]+)\s+(?P<bridge>'[^']*'|[^\s|]+)\s+--transcript",
+        body,
+    )
+    assert piped is not None, body
+    interpreter = shlex.split(piped.group("interp"))[0]
+    assert shlex.split(piped.group("bridge"))[0] == str(CODEX_STREAM_BRIDGE)
+
+    # Run the real bridge under exactly the interpreter the launcher named.
+    proof = subprocess.run(
+        [interpreter, str(CODEX_STREAM_BRIDGE), "--help"],
+        env=env,
+        cwd=REPO_ROOT,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert "HOST_PYTHON_SELECTED" not in proof.stdout + proof.stderr
+    assert proof.returncode == 0, proof.stderr
+    assert interpreter == str(generation_bin / "python3")
+
+
+@_NEEDS_MODERN_PYTHON
+def test_interactive_shell_quoting_survives_a_hostile_host_python(
+    tmp_path: Path,
+) -> None:
+    """The shell facade's quoter is the launcher casualty's twin.
+
+    ``_vetcoders_shell_quote`` did not merely fail on a hostile host: it
+    returned the marker string *as the quoted value*, and
+    ``_vetcoders_write_command_script`` writes that result into a script it
+    then executes.  The user's shell owns public resolution; it does not own
+    the interpreter our own helpers need.
+    """
+
+    env, hostile_bin, generation_bin = _entrypoint_env(tmp_path)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                'source "$1"\n'
+                'PATH="$(_vetcoders_path_with_bundled_bin_priority "$PATH")"\n'
+                "export PATH\n"
+                'printf "public_python3=%s\\n" "$(command -v python3)"\n'
+                'printf "python3_kind=%s\\n" "$(type -t python3)"\n'
+                'printf "internal_python=%s\\n" "$(_vetcoders_internal_python)"\n'
+                'printf "quote=%s\\n" "$(_vetcoders_shell_quote "file with spaces")"\n'
+                'printf "join=%s\\n" "$(_vetcoders_shell_quote_join "a b" "c;d")"\n'
+            ),
+            "_",
+            str(SHELL_SH),
+        ],
+        env=env,
+        cwd=REPO_ROOT,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    combined = result.stdout + result.stderr
+    assert "HOST_PYTHON_SELECTED" not in combined, combined
+    assert result.returncode == 0, combined
+
+    fields = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    assert fields["quote"] == "'file with spaces'"
+    assert fields["join"] == "'a b' 'c;d'"
+    assert fields["internal_python"] == str(generation_bin / "python3")
+    # Public resolution is still the Founder's, hostile or not.
+    assert fields["public_python3"] == str(hostile_bin / "python3")
+    assert fields["python3_kind"] == "file"

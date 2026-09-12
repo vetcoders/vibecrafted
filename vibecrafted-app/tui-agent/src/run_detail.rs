@@ -229,7 +229,11 @@ fn json_line_human(value: &serde_json::Value) -> Option<String> {
             }
         }
     }
-    if let Some(kind) = value.get("kind").or(value.get("type")).and_then(serde_json::Value::as_str) {
+    if let Some(kind) = value
+        .get("kind")
+        .or(value.get("type"))
+        .and_then(serde_json::Value::as_str)
+    {
         if let Some(message) = value.get("event").and_then(serde_json::Value::as_str) {
             return Some(format!("{kind}: {message}"));
         }

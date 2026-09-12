@@ -98,6 +98,8 @@ def _write_stateful_vc_frame(
                 "        session = args[idx + 1]",
                 'elif args[:1] == ["attach"] and len(args) > 1:',
                 "    session = args[-1]",
+                'elif "--create-background" in args:',
+                "    session = args[-1]",
                 'with capture.open("a", encoding="utf-8") as fh:',
                 '    fh.write("EFFECTIVE_HOME " + os.environ.get("HOME", "") + "\\n")',
                 '    fh.write("VC_FRAME_EXECUTABLE " + str(Path(sys.argv[0]).resolve()) + "\\n")',
@@ -119,6 +121,13 @@ def _write_stateful_vc_frame(
                 'if args[:1] == ["list-sessions"]:',
                 '    if state == "live":',
                 '        print(f"{session} [Created 1m ago]")',
+                "    sys.exit(0)",
+                'if "--create-background" in args:',
+                '    if state == "live" and name_file.exists() and name_file.read_text(encoding="utf-8").strip() == session:',
+                '        print("Session already exists", file=sys.stderr)',
+                "        sys.exit(1)",
+                '    state_file.write_text("live", encoding="utf-8")',
+                '    name_file.write_text(session, encoding="utf-8")',
                 "    sys.exit(0)",
                 'if args[:1] == ["attach"]:',
                 '    if "--force-run-commands" in args:',
@@ -693,6 +702,11 @@ def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
     env["FORBIDDEN_OPERATOR_PROBE"] = str(forbidden_probe)
     # This test exercises the real session-create path; allow it without a TTY.
     env["VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME"] = "1"
+    # …as the child a product terminal already opened. A public init with no
+    # TTY and no watched frame now opens that terminal first
+    # (tests/tui/test_declaration_entry.py); the in-process create below is the
+    # child's half, and the child carries this boundary.
+    env["VIBECRAFTED_TERMINAL_ENTRY"] = "1"
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
     env.pop("VC_FRAME_SESSION_NAME", None)
@@ -732,7 +746,12 @@ def test_vc_init_finds_bundled_vc_frame_and_creates_missing_operator_session(
         assert f"VC_FRAME_EXECUTABLE {bundled_bin / 'vc-frame'}" in payload
         assert str(operator_home) not in payload
         assert not forbidden_probe.exists()
-        assert f"--session {expected_session} --new-session-with-layout" in payload
+        # The missing session is created with the engine's detached form (the
+        # provider tab must exist BEFORE the terminal is handed over), never a
+        # foreground client that would block until the Founder detaches.
+        assert f"attach --create-background {expected_session}" in payload
+        assert "--new-session-with-layout" in payload
+        assert f"--session {expected_session} --new-session-with-layout" not in payload
         assert f"--session {expected_session} action new-tab" in payload
         assert f"run_id=interactive target={expected_session}/claude" in result.stdout
         assert f"watch=vc-frame attach {expected_session}" in result.stdout

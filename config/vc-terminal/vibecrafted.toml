@@ -5,9 +5,10 @@
 live_config_reload = true
 
 [terminal]
-# The app passes the generation-bound primary-shell path with `-e`. This
-# fallback gives the standalone vc-terminal launcher the identical chain.
-shell = { program = "/bin/zsh", args = ["-lc", "exec \"$VIBECRAFTED_RUNTIME_ROOT/config/alacritty/launch-primary-shell.zsh\" \"$VIBECRAFTED_RUNTIME_ROOT/bin/vc-start\" operator"] }
+# A terminal is usable without a Frame workspace. vc-start is explicit.
+# Expand the product path without first loading the user's login profile.
+# The entrypoint sets ZDOTDIR before starting the interactive zsh.
+shell = { program = "/bin/sh", args = ["-c", "exec \"$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh\""] }
 
 [window]
 blur = true
@@ -15,7 +16,8 @@ opacity = 0.9
 title = "𝓥𝓲𝓫𝓮𝓬𝓻𝓪𝓯𝓽𝓮𝓭."
 decorations = "Transparent"
 startup_mode = "Maximized"
-padding = { x = 0, y = 0 }
+# Transparent title controls must not cover terminal or alternate-screen text.
+padding = { x = 8, y = 24 }
 dynamic_padding = true
 option_as_alt = "Both"
 
@@ -61,13 +63,13 @@ regex = '(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:
 # LaunchServices to open the file. Command is an explicit host gesture, so the
 # Vibecrafted terminal host keeps this hint active even during mouse reporting.
 [[hints.enabled]]
-command = { program = "/bin/zsh", args = ["-lc", 'target="$0"; target="${target/#\~/$HOME}"; candidate="$target"; if [[ "$candidate" =~ ":[0-9]+$" ]]; then candidate="${candidate%:*}"; [[ "$candidate" =~ ":[0-9]+$" ]] && candidate="${candidate%:*}"; [[ -e "$candidate" ]] && target="$candidate"; fi; exec /usr/bin/open -- "$target"'] }
+command = { program = "/bin/zsh", args = ["-lc", 'target="$0"; target="${target/#\~/$HOME}"; candidate="$target"; if [[ "$candidate" =~ ":[0-9]+$" ]]; then candidate="${candidate%:*}"; [[ "$candidate" =~ ":[0-9]+$" ]] && candidate="${candidate%:*}"; fi; while [[ ! -e "$candidate" && "$candidate" == *" "* ]]; do candidate="${candidate% *}"; done; [[ -e "$candidate" ]] || exit 0; exec /usr/bin/open -- "$candidate"'] }
 hyperlinks = false
 post_processing = true
 persist = false
 mouse = { enabled = true, mods = "Command" }
 binding = { key = "P", mods = "Control|Shift" }
-regex = '(~|\.\.?|[A-Za-z0-9._@%+=,-]+)?(/[A-Za-z0-9._@%+=,~:-]+)+'
+regex = '(~|\.\.?|[A-Za-z0-9._@%+=,-]+)?(/[A-Za-z0-9._@%+=,~: -]+)+'
 
 
 # Polish diacritics on either Option key, while keeping Option as Alt/Meta.
@@ -199,7 +201,10 @@ mods = "Command"
 chars = "\u001b[1;9B"
 
 [[keyboard.bindings]]
-key = "Period"
+# vc-terminal matches the shifted logical key for Command+Shift+Period on
+# macOS (`>`), rather than `key_without_modifiers` (`.`).  Bind the key the
+# native matcher receives so this emits the Super+Shift CSI-u sequence.
+key = ">"
 mods = "Command|Shift"
 chars = "\u001b[46;10u"
 
@@ -207,6 +212,11 @@ chars = "\u001b[46;10u"
 key = "E"
 mods = "Command"
 chars = "\u001b[101;9u"
+
+[[keyboard.bindings]]
+key = "N"
+mods = "Command"
+chars = "\u001b[110;9u"
 
 [scrolling]
 # Keep enough output to actually browse after long make/help dumps.

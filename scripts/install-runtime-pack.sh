@@ -3,10 +3,350 @@ set -euo pipefail
 
 die() { printf 'Runtime Pack install failed: %s\n' "$*" >&2; exit 1; }
 
+_stat_uid() {
+  local uid
+  uid="$(stat -f %u "$1" 2>/dev/null || stat -c %u "$1")" || return 1
+  printf '%s\n' "$uid"
+}
+
+_stat_mode() {
+  local mode
+  mode="$(stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1")" || return 1
+  printf '%s\n' "$mode"
+}
+
+_world_writable() {
+  local mode
+  mode="$(_stat_mode "$1")" || return 1
+  case "$mode" in
+    *[2367]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_assert_physical_dir() {
+  local path="$1"
+  local label="$2"
+  [[ ! -L "$path" ]] || die "$label is a symlink: $path"
+  [[ -d "$path" ]] || die "$label is not a directory: $path"
+}
+
+_assert_private_owned_dir() {
+  local path="$1"
+  local label="$2"
+  local uid mode
+  _assert_physical_dir "$path" "$label"
+  uid="$(_stat_uid "$path")" || die "cannot stat $label: $path"
+  [[ "$uid" == "$EUID" ]] || die "$label is not privately owned: $path"
+  mode="$(_stat_mode "$path")" || die "cannot read mode of $label: $path"
+  [[ "$mode" == "700" || "$mode" == "0700" ]] || die "$label is not private (mode $mode): $path"
+}
+
+_ensure_rescue_cache_root() {
+  local cache_home parent
+  cache_home="${XDG_CACHE_HOME:-${HOME:?HOME is required for Runtime Pack rescue staging}/.cache}"
+  [[ -n "$cache_home" ]] || die "rescue staging cache home is empty"
+  if [[ -e "$cache_home" ]]; then
+    [[ -d "$cache_home" ]] || die "rescue staging cache home is not a directory: $cache_home"
+    if _world_writable "$cache_home"; then
+      die "rescue staging refuses a world-writable cache home: $cache_home"
+    fi
+  else
+    mkdir -m 700 -- "$cache_home" \
+      || die "cannot create rescue staging cache home: $cache_home"
+  fi
+  parent="$cache_home/vibecrafted"
+  if [[ -L "$parent" ]]; then
+    die "rescue staging parent is a symlink: $parent"
+  fi
+  if [[ -e "$parent" ]]; then
+    [[ -d "$parent" ]] || die "rescue staging parent is not a directory: $parent"
+    [[ "$(_stat_uid "$parent")" == "$EUID" ]] \
+      || die "rescue staging parent is not owned: $parent"
+  else
+    mkdir -m 755 -- "$parent" || die "cannot create rescue staging parent: $parent"
+  fi
+  rescue_cache_root="$parent/runtime-pack-rescue"
+  if [[ -L "$rescue_cache_root" ]]; then
+    die "rescue staging root is a symlink: $rescue_cache_root"
+  fi
+  if [[ -e "$rescue_cache_root" ]]; then
+    _assert_private_owned_dir "$rescue_cache_root" "rescue staging root"
+  else
+    mkdir -m 700 -- "$rescue_cache_root" \
+      || die "cannot create rescue staging root: $rescue_cache_root"
+    _assert_private_owned_dir "$rescue_cache_root" "rescue staging root"
+  fi
+  rescue_cache_root="$(cd "$rescue_cache_root" && pwd -P)" \
+    || die "cannot resolve rescue staging root"
+}
+
+# Rescue staging exclusion is flock(2) on a durable inode, the same primitive
+# as scripts/lib/runtime-pack-selection.sh. That library is absent from the
+# App-shipped copy of this script, so the helper is inlined here rather than
+# sourced. mkdir+pid reclaim is the race that file already rejected: observing
+# a dead pid and removing the directory can delete a live successor's claim,
+# and a pid is not an identity (reuse, subshell). flock has no reclaim window
+# because the kernel drops the lock when the last descriptor closes, including
+# SIGKILL. The descriptor is inherited by the Python installer child (no
+# CLOEXEC), so a dead wrapper must not look free while publication still owns
+# it. The lock FILE is created once and never unlinked: removing it would let
+# two rescuers flock two inodes under one name.
+#
+# ${sha}.lock stays a directory so leftover empty mkdir-only dirs from the
+# previous protocol become flockable by creating held inside them. The claim
+# is $lock/held. Active owners are refused immediately (no guessed timeout).
+_rescue_lock_fd=""
+_RESCUE_LOCK_FD_FALLBACK=201
+
+_close_rescue_lock_fd() {
+  [[ -n "${_rescue_lock_fd:-}" ]] || return 0
+  eval "exec ${_rescue_lock_fd}>&-" 2>/dev/null || true
+  _rescue_lock_fd=""
+}
+
+_open_rescue_held_fd() {
+  local held="$1"
+  _rescue_lock_fd=""
+  if ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 1))); then
+    exec {_rescue_lock_fd}>>"$held" || return 1
+  else
+    _rescue_lock_fd="$_RESCUE_LOCK_FD_FALLBACK"
+    eval "exec ${_rescue_lock_fd}>>\"\$held\"" || return 1
+  fi
+  [[ -n "${_rescue_lock_fd:-}" ]] || return 1
+}
+
+# 0 acquired · 1 held by a live descriptor · 2 this host offers no file lock
+# · 3 the inherited descriptor could not be flocked
+_flock_rescue_lock_nb() {
+  local fd="$1"
+  if command -v flock >/dev/null 2>&1; then
+    flock -n "$fd"
+    return
+  fi
+  if command -v perl >/dev/null 2>&1; then
+    perl -e '
+      use Fcntl qw(:flock);
+      open(my $handle, ">&=", $ARGV[0]) or exit 3;
+      exit(flock($handle, LOCK_EX | LOCK_NB) ? 0 : 1);
+    ' "$fd"
+    return
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import fcntl
+import sys
+try:
+    fcntl.flock(int(sys.argv[1]), fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError:
+    raise SystemExit(1)
+' "$fd"
+    return
+  fi
+  return 2
+}
+
+_acquire_rescue_lock() {
+  local lock="$1"
+  local held uid flock_status=0
+  if [[ -L "$lock" ]]; then
+    die "rescue staging lock is a symlink: $lock"
+  fi
+  if [[ -e "$lock" && ! -d "$lock" ]]; then
+    die "rescue staging lock is malformed: $lock"
+  fi
+  if [[ ! -d "$lock" ]]; then
+    mkdir -m 700 -- "$lock" 2>/dev/null || true
+  fi
+  if [[ -L "$lock" ]]; then
+    die "rescue staging lock is a symlink: $lock"
+  fi
+  if [[ ! -d "$lock" ]]; then
+    die "rescue staging lock is malformed: $lock"
+  fi
+  uid="$(_stat_uid "$lock")" || die "cannot stat rescue staging lock: $lock"
+  [[ "$uid" == "$EUID" ]] || die "rescue staging lock is not privately owned: $lock"
+  if _world_writable "$lock"; then
+    die "rescue staging lock is world-writable: $lock"
+  fi
+  held="$lock/held"
+  if [[ -L "$held" ]]; then
+    die "rescue staging lock holder is a symlink: $held"
+  fi
+  if [[ -e "$held" && ! -f "$held" ]]; then
+    die "rescue staging lock holder is malformed: $held"
+  fi
+  _close_rescue_lock_fd
+  _open_rescue_held_fd "$held" || die "cannot open rescue staging lock: $held"
+  if [[ -L "$held" ]]; then
+    _close_rescue_lock_fd
+    die "rescue staging lock holder is a symlink: $held"
+  fi
+  chmod 600 "$held" 2>/dev/null || true
+  _flock_rescue_lock_nb "$_rescue_lock_fd" || flock_status=$?
+  if ((flock_status != 0)); then
+    _close_rescue_lock_fd
+    if ((flock_status == 2)); then
+      die "this host cannot take a rescue staging lock (need flock, perl, or python3)"
+    fi
+    if ((flock_status == 3)); then
+      die "cannot take rescue staging lock descriptor: $held"
+    fi
+    die "concurrent Runtime Pack rescue is already in progress for this archive"
+  fi
+}
+
+_write_rescue_identity() {
+  local identity="$1"
+  local sha="$2"
+  local root_name="$3"
+  printf 'schema=vibecrafted.runtime-pack-rescue-extract.v1\narchive_sha256=%s\narchive_root=%s\nuid=%s\n' \
+    "$sha" "$root_name" "$EUID" > "$identity"
+  chmod 600 "$identity"
+}
+
+_verify_rescue_identity() {
+  local identity="$1"
+  local sha="$2"
+  local root_name="$3"
+  local schema stored_sha stored_root stored_uid
+  [[ ! -L "$identity" ]] || die "rescue extract identity is a symlink: $identity"
+  [[ -f "$identity" ]] || die "retained Runtime Pack rescue extract is missing identity"
+  [[ "$(_stat_uid "$identity")" == "$EUID" ]] \
+    || die "rescue extract identity is not privately owned: $identity"
+  schema="$(awk -F= '/^schema=/{print $2}' "$identity")"
+  stored_sha="$(awk -F= '/^archive_sha256=/{print $2}' "$identity")"
+  stored_root="$(awk -F= '/^archive_root=/{print $2}' "$identity")"
+  stored_uid="$(awk -F= '/^uid=/{print $2}' "$identity")"
+  [[ "$schema" == "vibecrafted.runtime-pack-rescue-extract.v1" ]] \
+    || die "retained Runtime Pack rescue extract identity is stale or tampered"
+  [[ "$stored_sha" == "$sha" ]] \
+    || die "retained Runtime Pack rescue extract no longer matches the signed archive"
+  [[ "$stored_root" == "$root_name" ]] \
+    || die "retained Runtime Pack rescue extract root does not match the signed archive"
+  [[ "$stored_uid" == "$EUID" ]] \
+    || die "retained Runtime Pack rescue extract identity owner changed"
+}
+
+_write_rescue_manifest() {
+  local payload="$1"
+  local dest="$2"
+  (
+    cd "$payload" || exit 1
+    if command -v shasum >/dev/null 2>&1; then
+      find . -type f ! -name .DS_Store -print | LC_ALL=C sort | while IFS= read -r rel; do
+        shasum -a 256 "$rel"
+      done
+    else
+      find . -type f ! -name .DS_Store -print | LC_ALL=C sort | while IFS= read -r rel; do
+        sha256sum "$rel"
+      done
+    fi
+  ) > "$dest"
+  chmod 600 "$dest"
+}
+
+_verify_rescue_manifest() {
+  local payload="$1"
+  local manifest="$2"
+  local expected actual tmp
+  [[ ! -L "$manifest" ]] || die "rescue extract manifest is a symlink: $manifest"
+  [[ -f "$manifest" ]] || die "retained Runtime Pack rescue extract is missing its manifest"
+  [[ "$(_stat_uid "$manifest")" == "$EUID" ]] \
+    || die "rescue extract manifest is not privately owned: $manifest"
+  expected="$(cat "$manifest")"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/.vibecrafted-rescue-manifest.XXXXXX")"
+  _write_rescue_manifest "$payload" "$tmp"
+  actual="$(cat "$tmp")"
+  rm -f -- "$tmp"
+  [[ "$expected" == "$actual" ]] \
+    || die "retained Runtime Pack rescue extract is stale or tampered"
+}
+
+_extract_signed_archive_into() {
+  local dest="$1"
+  tar -xpzf "$pack" -C "$dest" \
+    || die "Runtime Pack archive extraction failed"
+  find "$dest" -type f -name .DS_Store -delete
+}
+
+_prepare_rescue_extract() {
+  local sha="$1"
+  local root_name="$2"
+  local extract identity manifest lock
+  [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || die "Runtime Pack digest is not a sha256"
+  _ensure_rescue_cache_root
+  extract="$rescue_cache_root/$sha"
+  identity="$rescue_cache_root/${sha}.identity"
+  manifest="$rescue_cache_root/${sha}.manifest"
+  lock="$rescue_cache_root/${sha}.lock"
+  _acquire_rescue_lock "$lock"
+  rescue_staging="$extract"
+  rescue_identity="$identity"
+  rescue_manifest="$manifest"
+  if [[ -L "$extract" ]]; then
+    die "retained Runtime Pack rescue extract is a symlink: $extract"
+  fi
+  if [[ -e "$extract" ]]; then
+    _assert_private_owned_dir "$extract" "retained Runtime Pack rescue extract"
+    if [[ -f "$identity" && -f "$manifest" ]]; then
+      _verify_rescue_identity "$identity" "$sha" "$root_name"
+      [[ -d "$extract/$root_name" && ! -L "$extract/$root_name" ]] \
+        || die "retained Runtime Pack rescue payload is missing or a symlink"
+      if find "$extract/$root_name" -type l -print -quit | grep -q .; then
+        die "links are forbidden in retained Runtime Pack rescue extracts"
+      fi
+      find "$extract/$root_name" -type f -name .DS_Store -delete
+      _verify_rescue_manifest "$extract/$root_name" "$manifest"
+      return 0
+    fi
+    if [[ -f "$identity" ]]; then
+      _verify_rescue_identity "$identity" "$sha" "$root_name"
+    fi
+    rm -rf -- "$extract"
+    rm -f -- "$identity" "$manifest"
+  fi
+  mkdir -m 700 -- "$extract" || die "cannot create rescue extract: $extract"
+  _assert_private_owned_dir "$extract" "rescue extract"
+  _extract_signed_archive_into "$extract"
+  [[ -d "$extract/$root_name" && ! -L "$extract/$root_name" ]] \
+    || die "runtime payload missing: $extract/$root_name"
+  if find "$extract/$root_name" -type l -print -quit | grep -q .; then
+    die "links are forbidden in extracted Runtime Pack archives"
+  fi
+  _write_rescue_identity "$identity" "$sha" "$root_name"
+  _write_rescue_manifest "$extract/$root_name" "$manifest"
+}
+
+_release_rescue_extract() {
+  if [[ -n "${rescue_staging:-}" && -d "$rescue_staging" && ! -L "$rescue_staging" ]]; then
+    rm -rf -- "$rescue_staging"
+  fi
+  if [[ -n "${rescue_identity:-}" && -f "$rescue_identity" && ! -L "$rescue_identity" ]]; then
+    rm -f -- "$rescue_identity"
+  fi
+  if [[ -n "${rescue_manifest:-}" && -f "$rescue_manifest" && ! -L "$rescue_manifest" ]]; then
+    rm -f -- "$rescue_manifest"
+  fi
+}
+
+# Lock-lifetime tests source this file for the exact helpers. Do not run the
+# installer body when sourced.
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+  return 0
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 pack="${VIBECRAFTED_RUNTIME_PACK:-}"
 temporary=""
+_rescue_lock_fd=""
+rescue_staging=""
+rescue_identity=""
+rescue_manifest=""
+rescue_cache_root=""
+installer_child_pid=""
 operation="install"
 dry_run="0"
 verify_only="0"
@@ -22,10 +362,36 @@ if [[ -f "$SCRIPT_DIR/VERSION" ]]; then
 fi
 expected_platform=""
 expected_architecture=""
+resolve_preference=""
+preference_current_sha256=""
+preference_incoming_sha256=""
+preference_path=""
+rescue="0"
+rescue_plan="0"
+rescue_apply="0"
+plan_digest=""
+allow_older_runtime="0"
+fail_after=""
+pack_harness=0
+if [[ "${VIBECRAFTED_RUNTIME_PACK_HARNESS:-}" == "1" ]]; then
+  pack_harness=1
+fi
 
+# Called by the EXIT trap installed below. ShellCheck 0.11.0 models a
+# script-final `exit` as an edge that leaves the graph without running EXIT
+# handlers, so a trap-only function reads as uncalled (SC2329). The e37
+# installer ended in `exec` and never reached that edge; this one must
+# capture the installer status, so the trap is the call site.
+# shellcheck disable=SC2329,SC2317
 cleanup() {
   local status=$?
   local _attempt
+  # Release is closing this process's descriptor. Do not unlink held or rmdir
+  # the lock namespace: that is the inode-swap race (two rescuers, two locks).
+  if [[ -n "${_rescue_lock_fd:-}" ]]; then
+    eval "exec ${_rescue_lock_fd}>&-" 2>/dev/null || true
+    _rescue_lock_fd=""
+  fi
   if [[ -n "$temporary" && -d "$temporary" ]]; then
     # Finder/metadata services can recreate .DS_Store while a large extracted
     # pack is being removed.  Cleanup is best-effort bookkeeping after the
@@ -44,7 +410,38 @@ cleanup() {
   fi
   return "$status"
 }
-trap cleanup EXIT INT TERM HUP
+# Called by the TERM/INT/HUP traps installed below; see the SC2329 note on
+# cleanup for why ShellCheck cannot see a trap-only call site here.
+# shellcheck disable=SC2329,SC2317
+terminate_installer_child() {
+  local signal="$1"
+  local _attempt
+
+  # The App owns this bootstrap process, while this bootstrap owns precisely
+  # one Python installer.  Do not let a UI timeout reap only Bash and leave the
+  # Python transaction holding its publication lease after the App has made the
+  # repair control available again.  This is deliberately a PID, not a broad
+  # process-group kill: helper/service processes outside this invocation are
+  # never ours to signal.
+  if [[ -n "$installer_child_pid" ]] && kill -0 "$installer_child_pid" 2>/dev/null; then
+    kill -"$signal" "$installer_child_pid" 2>/dev/null || true
+    for _attempt in {1..10}; do
+      kill -0 "$installer_child_pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "$installer_child_pid" 2>/dev/null; then
+      kill -KILL "$installer_child_pid" 2>/dev/null || true
+    fi
+    wait "$installer_child_pid" 2>/dev/null || true
+  fi
+  installer_child_pid=""
+  exit 143
+}
+
+trap cleanup EXIT
+trap 'terminate_installer_child TERM' TERM
+trap 'terminate_installer_child INT' INT
+trap 'terminate_installer_child HUP' HUP
 
 while (($#)); do
   case "$1" in
@@ -61,7 +458,7 @@ while (($#)); do
       verify_only="1"
       shift
       ;;
-    --app-root|--terminal-host|--frame-helper|--expected-source-revision|--expected-terminal-revision|--expected-frame-revision|--expected-version|--expected-platform|--expected-architecture)
+    --app-root|--terminal-host|--frame-helper|--expected-source-revision|--expected-terminal-revision|--expected-frame-revision|--expected-version|--expected-platform|--expected-architecture|--resolve-preference|--preference-current-sha256|--preference-incoming-sha256|--preference-path)
       (($# >= 2)) || die "$1 requires a path or revision"
       case "$1" in
         --app-root) app_root="$2" ;;
@@ -73,7 +470,40 @@ while (($#)); do
         --expected-version) expected_version="$2" ;;
         --expected-platform) expected_platform="$2" ;;
         --expected-architecture) expected_architecture="$2" ;;
+        --resolve-preference) resolve_preference="$2" ;;
+        --preference-current-sha256) preference_current_sha256="$2" ;;
+        --preference-incoming-sha256) preference_incoming_sha256="$2" ;;
+        --preference-path) preference_path="$2" ;;
       esac
+      shift 2
+      ;;
+    --allow-older-runtime)
+      allow_older_runtime="1"
+      shift
+      ;;
+    --fail-after)
+      (($# >= 2)) || die "--fail-after requires a phase"
+      if [[ "$pack_harness" -ne 1 ]]; then
+        die "refusing --fail-after without VIBECRAFTED_RUNTIME_PACK_HARNESS=1"
+      fi
+      fail_after="$2"
+      shift 2
+      ;;
+    --rescue)
+      rescue="1"
+      shift
+      ;;
+    --plan)
+      rescue_plan="1"
+      shift
+      ;;
+    --apply)
+      rescue_apply="1"
+      shift
+      ;;
+    --plan-digest)
+      (($# >= 2)) || die "--plan-digest requires a hex digest"
+      plan_digest="$2"
       shift 2
       ;;
     --dry-run|-n)
@@ -81,7 +511,9 @@ while (($#)); do
       shift
       ;;
     --help|-h)
-      printf 'usage: %s [--pack <RuntimePack.tar.gz>] [--verify-only] [--expected-*-revision <sha>] [--app-root <Vibecrafted.app> --terminal-host <path> --frame-helper <path>] [--uninstall [--dry-run]]\n' "$0"
+      printf 'usage: %s [--pack <RuntimePack.tar.gz>] [--verify-only] [--expected-*-revision <sha>] [--app-root <Vibecrafted.app> --terminal-host <path> --frame-helper <path>] [--allow-older-runtime] [--resolve-preference keep-current|use-incoming --preference-current-sha256 <hex> --preference-incoming-sha256 <hex>] [--rescue --plan|--apply [--plan-digest <hex>]] [--uninstall [--dry-run]]\n' "$0"
+      printf 'Rescue: explicit plan/apply when historical rollback bytes are missing. Plan and apply reuse a private extract bound to the signed archive digest so the same verified pack keeps the same payload-root. If this pack installer lacks --rescue, bootstrap with a source installer that includes it against the verified --payload-root. Do not rewrite the signed payload.\n'
+      printf 'Older-runtime recovery: --allow-older-runtime is the explicit downgrade admission. If this pack installer lacks that flag, bootstrap with a source installer that includes it against the verified --payload-root. Do not rewrite the signed payload or invent publication evidence.\n'
       exit 0
       ;;
     *) die "unknown argument: $1" ;;
@@ -114,6 +546,27 @@ if [[ -z "$expected_architecture" ]]; then
 fi
 if [[ "$operation" == "uninstall" && "$verify_only" == "1" ]]; then
   die "--verify-only cannot be combined with --uninstall"
+fi
+if [[ "$rescue" != "1" && ( "$rescue_plan" == "1" || "$rescue_apply" == "1" || -n "$plan_digest" ) ]]; then
+  die "--plan, --apply, and --plan-digest are only valid with --rescue"
+fi
+if [[ "$rescue" == "1" && "$operation" == "uninstall" ]]; then
+  die "--rescue cannot be combined with --uninstall"
+fi
+if [[ "$rescue" == "1" && "$rescue_plan" == "1" && "$rescue_apply" == "1" ]]; then
+  die "--rescue requires exactly one of --plan or --apply"
+fi
+if [[ "$rescue" == "1" && "$rescue_plan" != "1" && "$rescue_apply" != "1" ]]; then
+  die "explicit rescue requires --plan or --apply"
+fi
+if [[ "$rescue_apply" == "1" && -z "$plan_digest" ]]; then
+  die "--rescue --apply requires --plan-digest"
+fi
+if [[ "$allow_older_runtime" == "1" && "$operation" == "uninstall" ]]; then
+  die "--allow-older-runtime cannot be combined with --uninstall"
+fi
+if [[ -n "$fail_after" && "$fail_after" != "published" ]]; then
+  die "unsupported --fail-after phase: $fail_after"
 fi
 helper_argument_count=0
 [[ -n "$app_root" ]] && ((helper_argument_count += 1))
@@ -152,10 +605,65 @@ if [[ "$operation" == "uninstall" ]]; then
 fi
 
 if [[ -z "$pack" ]]; then
+  # An explicit --pack / VIBECRAFTED_RUNTIME_PACK stays authoritative and never
+  # reaches this branch: deliberately installing another signed generation is a
+  # supported act. Only the implicit case asks the producer what it built.
+  #
+  # The record's owner is scripts/lib/runtime-pack-selection.sh. It is absent
+  # from the copy of this script that ships inside Vibecrafted.app, which always
+  # passes --pack; no owner means no record, and the legacy path below stands.
+  selection_library="$SCRIPT_DIR/lib/runtime-pack-selection.sh"
+  if [[ -f "$selection_library" ]]; then
+    # shellcheck source=/dev/null
+    . "$selection_library"
+    selection_status=0
+    runtime_pack_selection_read "$REPO_ROOT" \
+      "$expected_platform" "$expected_architecture" || selection_status=$?
+    case "$selection_status" in
+      0)
+        pack="$RUNTIME_PACK_SELECTION_PACK"
+        # Feed the producer's captured identity into the checks that already
+        # exist. This does not add trust: the checksum, detached signature and
+        # internal provenance gates below are unchanged, and now simply know
+        # which revisions the selected bytes are required to claim.
+        if [[ -z "$expected_version" ]]; then
+          expected_version="$RUNTIME_PACK_SELECTION_VERSION"
+        fi
+        if [[ -z "$expected_source_revision" ]]; then
+          expected_source_revision="$RUNTIME_PACK_SELECTION_SOURCE_REVISION"
+        fi
+        if [[ -z "$expected_terminal_revision" ]]; then
+          expected_terminal_revision="$RUNTIME_PACK_SELECTION_TERMINAL_REVISION"
+        fi
+        if [[ -z "$expected_frame_revision" ]]; then
+          expected_frame_revision="$RUNTIME_PACK_SELECTION_FRAME_REVISION"
+        fi
+        # A record produced from some other checkout, or from this one before it
+        # moved, no longer describes "the pack you just built here". Say so;
+        # never resolve the disagreement by picking a different archive.
+        if command -v git >/dev/null 2>&1 \
+          && current_source_revision="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null)" \
+          && [[ -n "$current_source_revision" ]] \
+          && [[ "$current_source_revision" != "$RUNTIME_PACK_SELECTION_SOURCE_REVISION" ]]; then
+          die "the recorded Runtime Pack was built from ${RUNTIME_PACK_SELECTION_SOURCE_REVISION:0:8}, but this source is at ${current_source_revision:0:8}; rebuild it or pass an explicit pack"
+        fi
+        ;;
+      1) ;;
+      *) die "${RUNTIME_PACK_SELECTION_ERROR:-the Runtime Pack build selection record is unusable}" ;;
+    esac
+  fi
+fi
+
+if [[ -z "$pack" ]]; then
   shopt -s nullglob
-  # The canonical platform is already a complete <os>-<architecture> slug.
-  # Architecture remains an independent provenance check below; it is not a
-  # second filename component.
+  # No build-selection record: the pre-handoff behaviour, retained for a repo
+  # holding exactly one prebuilt release asset. The canonical platform is
+  # already a complete <os>-<architecture> slug. Architecture remains an
+  # independent provenance check below; it is not a second filename component.
+  #
+  # Ambiguity is still a refusal. Historical packs are legitimate artifacts, and
+  # the answer to many of them is a producer that says which one it made — never
+  # newest mtime, glob order, or deleting the others.
   candidates=("$REPO_ROOT"/dist/Vibecrafted_RuntimePack_*-"$expected_platform".tar.gz)
   shopt -u nullglob
   if ((${#candidates[@]} == 1)); then
@@ -196,10 +704,16 @@ if [[ -f "$pack" && "$pack" == *.tar.gz ]]; then
     || die "openssl is required to verify the Runtime Pack signature"
   openssl dgst -sha256 -verify "$public_key" -signature "$signature" "$pack" >/dev/null 2>&1 \
     || die "Runtime Pack signature verification failed"
-  # Keep the extraction root hidden. Finder can otherwise discover the
-  # short-lived directory and create .DS_Store while provenance is being
-  # verified or while cleanup is removing the payload.
-  temporary="$(mktemp -d "${TMPDIR:-/tmp}/.vibecrafted-runtime-pack.XXXXXX")"
+  if command -v shasum >/dev/null 2>&1; then
+    archive_sha256="$(shasum -a 256 "$pack" | awk '{print $1}')"
+  else
+    archive_sha256="$(sha256sum "$pack" | awk '{print $1}')"
+  fi
+  [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]] \
+    || die "Runtime Pack digest is not a sha256"
+  checksum_hex="$(awk '{print $1; exit}' "$checksum")"
+  [[ "$archive_sha256" == "$checksum_hex" ]] \
+    || die "Runtime Pack checksum digest mismatch"
   tar -tzf "$pack" >/dev/null \
     || die "Runtime Pack archive cannot be listed"
   archive_root=""
@@ -224,15 +738,22 @@ if [[ -f "$pack" && "$pack" == *.tar.gz ]]; then
       *) die "links/devices are forbidden in Runtime Pack archives" ;;
     esac
   done < <(tar -tvzf "$pack")
-  # Provenance binds every payload mode. Ambient umask must not rewrite those
-  # signed bytes' metadata before the pack verifies itself.
-  tar -xpzf "$pack" -C "$temporary" \
-    || die "Runtime Pack archive extraction failed"
-  # The signed archive listing above is the carrier truth. Any .DS_Store that
-  # appears only after extraction was injected by the host and must not turn a
-  # repeat install into a provenance failure.
-  find "$temporary" -type f -name .DS_Store -delete
-  payload_root="$temporary/$archive_root"
+  # Rescue plan/apply/resume pin payload_root in the owner digest. Ephemeral
+  # mktemp paths cannot carry that identity across two wrapper invocations.
+  # Non-rescue installs keep the hidden one-shot extract and still delete it.
+  if [[ "$rescue" == "1" ]]; then
+    _prepare_rescue_extract "$archive_sha256" "$archive_root"
+    payload_root="$rescue_staging/$archive_root"
+  else
+    # Keep the extraction root hidden. Finder can otherwise discover the
+    # short-lived directory and create .DS_Store while provenance is being
+    # verified or while cleanup is removing the payload.
+    temporary="$(mktemp -d "${TMPDIR:-/tmp}/.vibecrafted-runtime-pack.XXXXXX")"
+    # Provenance binds every payload mode. Ambient umask must not rewrite those
+    # signed bytes' metadata before the pack verifies itself.
+    _extract_signed_archive_into "$temporary"
+    payload_root="$temporary/$archive_root"
+  fi
   if find "$payload_root" -type l -print -quit | grep -q .; then
     die "links are forbidden in extracted Runtime Pack archives"
   fi
@@ -240,7 +761,10 @@ else
   die "Runtime Pack must be the canonical .tar.gz carrier: $pack"
 fi
 
-[[ -d "$payload_root" ]] || die "runtime payload missing: $payload_root"
+[[ -d "$payload_root" && ! -L "$payload_root" ]] \
+  || die "runtime payload missing: $payload_root"
+payload_root="$(cd "$payload_root" && pwd -P)" \
+  || die "cannot resolve runtime payload: $payload_root"
 payload_version_file="$payload_root/VERSION"
 [[ -f "$payload_version_file" ]] || die "Runtime Pack version truth is missing: $payload_version_file"
 payload_version="$(tr -d '[:space:]' < "$payload_version_file")"
@@ -276,11 +800,63 @@ if [[ "$verify_only" == "1" ]]; then
   exit 0
 fi
 
+installer_entry="$pack_installer"
+if [[ "$rescue" == "1" ]]; then
+  if ! grep -Fq 'RUNTIME_RESCUE_PLAN_SCHEMA' "$pack_installer" \
+    || ! grep -Fq -- '--rescue' "$pack_installer"; then
+    source_installer="$SCRIPT_DIR/vetcoders_install.py"
+    if [[ -f "$source_installer" ]] \
+      && grep -Fq 'RUNTIME_RESCUE_PLAN_SCHEMA' "$source_installer" \
+      && grep -Fq -- '--rescue' "$source_installer"; then
+      installer_entry="$source_installer"
+      printf 'Runtime Pack installer lacks --rescue; bootstrapping with source installer %s against the verified payload-root. Do not rewrite the signed payload.\n' \
+        "$source_installer" >&2
+    else
+      die "This Runtime Pack installer does not support --rescue. Bootstrap with a source/version whose installer includes runtime-install --rescue (compatibility: tests/tui/test_runtime_pack_rescue.py) targeting this verified pack via --payload-root. Do not rewrite the signed payload."
+    fi
+  fi
+fi
 if [[ "$operation" == "uninstall" ]]; then
   arguments=(runtime-uninstall)
   [[ "$dry_run" == "1" ]] && arguments+=(--dry-run)
 else
   arguments=(runtime-install --payload-root "$payload_root")
+fi
+if [[ "$rescue" == "1" ]]; then
+  arguments+=(--rescue)
+  [[ "$rescue_plan" == "1" ]] && arguments+=(--plan)
+  [[ "$rescue_apply" == "1" ]] && arguments+=(--apply)
+  [[ -n "$plan_digest" ]] && arguments+=(--plan-digest "$plan_digest")
+fi
+if [[ "$allow_older_runtime" == "1" ]]; then
+  arguments+=(--allow-older-runtime)
+  if ! grep -Fq -- '--allow-older-runtime' "$installer_entry"; then
+    source_installer=""
+    for candidate in \
+      "${VIBECRAFTED_SOURCE_INSTALLER:-}" \
+      "$SCRIPT_DIR/vetcoders_install.py"
+    do
+      [[ -n "$candidate" ]] || continue
+      if [[ -f "$candidate" ]] && grep -Fq -- '--allow-older-runtime' "$candidate"; then
+        source_installer="$candidate"
+        break
+      fi
+    done
+    if [[ -z "$source_installer" && -n "$app_root" ]]; then
+      bundled_installer="$app_root/Contents/Resources/runtime/scripts/vetcoders_install.py"
+      if [[ -f "$bundled_installer" ]] \
+        && grep -Fq -- '--allow-older-runtime' "$bundled_installer"; then
+        source_installer="$bundled_installer"
+      fi
+    fi
+    if [[ -n "$source_installer" ]]; then
+      installer_entry="$source_installer"
+      printf 'Runtime Pack installer lacks --allow-older-runtime; bootstrapping with source installer %s against the verified payload-root. Do not rewrite the signed payload.\n' \
+        "$source_installer" >&2
+    else
+      die "This Runtime Pack installer does not support --allow-older-runtime. Bootstrap with a source/version whose installer includes runtime-install --allow-older-runtime targeting this verified pack via --payload-root. Do not rewrite the signed payload."
+    fi
+  fi
 fi
 if [[ "$operation" == "install" && -n "$app_root" ]]; then
   app_root="$(cd "$app_root" && pwd -P)" \
@@ -291,6 +867,8 @@ if [[ "$operation" == "install" && -n "$app_root" ]]; then
     || die "cannot resolve bundled vc-frame helper"
   [[ -x "$terminal_host" ]] || die "bundled terminal host missing: $terminal_host"
   [[ -x "$frame_helper" ]] || die "bundled vc-frame helper missing: $frame_helper"
+  pack_terminal_host="$payload_root/libexec/vc-terminal"
+  [[ -x "$pack_terminal_host" ]] || die "Runtime Pack native terminal host missing: $pack_terminal_host"
   # Same compilation product, signature-agnostic: byte equality stopped being
   # possible when the pack's binaries gained their own Developer ID signatures
   # (the App helper is bundle-signed, the pack copy bare-signed — different
@@ -298,7 +876,7 @@ if [[ "$operation" == "install" && -n "$app_root" ]]; then
   # the bytes differ. A non-Mach-O impostor has no UUID and fails closed.
   PYTHONPATH="$payload_root/vibecrafted-core" "$pack_python" \
     -m vibecrafted_core.runtime_pack_contract helpers-agree \
-    --app-copy "$terminal_host" --pack-copy "$payload_root/bin/vc-terminal" \
+    --app-copy "$terminal_host" --pack-copy "${pack_terminal_host}" \
     || die "App terminal helper disagrees with the signed Runtime Pack"
   PYTHONPATH="$payload_root/vibecrafted-core" "$pack_python" \
     -m vibecrafted_core.runtime_pack_contract helpers-agree \
@@ -307,10 +885,44 @@ if [[ "$operation" == "install" && -n "$app_root" ]]; then
   arguments+=(
     --app-root "$app_root"
   )
+  # helpers-agree already proved App copies match the signed pack. Do not
+  # forward --terminal-host/--frame-helper into the installer — that would
+  # replace pack Mach-O bytes with the bundle-signed helper.
+fi
+if [[ "$operation" == "install" && -n "$resolve_preference" ]]; then
+  case "$resolve_preference" in
+    keep-current|use-incoming) ;;
+    *) die "unsupported --resolve-preference: $resolve_preference" ;;
+  esac
+  [[ -n "$preference_current_sha256" && -n "$preference_incoming_sha256" ]] \
+    || die "--resolve-preference requires bound current and incoming hashes"
+  arguments+=(
+    --resolve-preference "$resolve_preference"
+    --preference-current-sha256 "$preference_current_sha256"
+    --preference-incoming-sha256 "$preference_incoming_sha256"
+  )
+  [[ -n "$preference_path" ]] && arguments+=(--preference-path "$preference_path")
 fi
 
-if [[ -n "$temporary" ]]; then
-  "$pack_python" "$pack_installer" "${arguments[@]}"
-  exit 0
+if [[ -n "$temporary" || -n "$rescue_staging" ]]; then
+  "$pack_python" "$installer_entry" "${arguments[@]}" &
+  installer_child_pid="$!"
+  wait "$installer_child_pid"
+  installer_status=$?
+  installer_child_pid=""
+  if [[ "$rescue_apply" == "1" && "$installer_status" -eq 0 ]]; then
+    _release_rescue_extract
+  fi
+  if [[ "$installer_status" -eq 0 && "$fail_after" == "published" ]]; then
+    printf 'harness injected failure after published\n' >&2
+    exit 42
+  fi
+  exit "$installer_status"
 fi
-exec "$pack_python" "$pack_installer" "${arguments[@]}"
+"$pack_python" "$installer_entry" "${arguments[@]}"
+installer_status=$?
+if [[ "$installer_status" -eq 0 && "$fail_after" == "published" ]]; then
+  printf 'harness injected failure after published\n' >&2
+  exit 42
+fi
+exit "$installer_status"

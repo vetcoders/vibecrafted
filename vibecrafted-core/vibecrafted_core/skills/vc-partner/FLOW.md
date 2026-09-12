@@ -173,10 +173,11 @@ original_shape:
 
 ## Routes
 
-| Entry                         | Args                   | Produces                                        | Exit            |
-| ----------------------------- | ---------------------- | ----------------------------------------------- | --------------- |
-| `vibecrafted partner <agent>` | `--prompt` or `--file` | journal entry, partner report, transcript, meta | `0` on dispatch |
-| `vc-partner <agent>`          | same                   | same                                            | `0` on dispatch |
+| Entry                         | Args                                      | Produces                                        | Exit                      |
+| ----------------------------- | ----------------------------------------- | ----------------------------------------------- | ------------------------- |
+| `vibecrafted partner <agent>` | optional `--prompt`/`--file` seed context | interactive TTY/frame face seeded `/vc-partner` | `0` on interactive launch |
+| `vc-partner` from a TTY       | none required                             | skill runs in the active session                | `0`                       |
+| `vc-partner` without a TTY    | any                                       | refuse (use `vc-init`, then trigger the skill)  | `1`                       |
 
 ### Escalation edges
 

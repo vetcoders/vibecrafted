@@ -26,7 +26,8 @@ use crate::model::{
     LifecycleRun, LifecycleRunSummary, OperatorAgentPolicyProjection, OperatorAgentProjection,
     RECENT_RUN_LIMIT, RUN_STALL_SECONDS, RunStatus, SettlementBoard, SettlementTui,
     SettlementVerdict, SupervisionRelationProjection, TrustReceiptV1, coerce_int_value,
-    is_final_state, merge_status, operator_session_name, parse_iso, skill_from_code, state_health,
+    is_active_state, is_final_state, merge_status, operator_session_name, parse_iso,
+    skill_from_code, state_health,
 };
 
 /// Resolve `~`-prefixed paths against `$HOME`. Other paths pass through.
@@ -311,6 +312,12 @@ impl ControlPlane {
         if run.runtime_session_id.is_empty() {
             run.runtime_session_id = string("runtime_session_id").to_string();
         }
+        if run.logical_session_id.is_empty() {
+            run.logical_session_id = string("vibecrafted_session_id").to_string();
+            if run.logical_session_id.is_empty() {
+                run.logical_session_id = string("workspace_session_id").to_string();
+            }
+        }
         if run.resume_of.is_empty() {
             run.resume_of = string("resume_of").to_string();
         }
@@ -345,7 +352,68 @@ impl ControlPlane {
         if probe_worker_alive {
             refresh_worker_liveness(&mut run);
         }
+        self.overlay_runtime_meta_terminal(&mut run);
         run
+    }
+
+    /// Prefer terminal runtime meta over a stale active snapshot.
+    ///
+    /// `/api/control/state` counted completed runs as active when
+    /// `runs/<id>.json` lagged `runtime_runs/<id>/meta.json`. A dead PID plus
+    /// a completed/failed meta stamp is durable truth; a live worker still
+    /// wins so we do not seal a running job.
+    fn overlay_runtime_meta_terminal(&self, run: &mut RunStatus) {
+        if !is_safe_run_id(&run.run_id) {
+            return;
+        }
+        let path = self.runtime_run_dir(&run.run_id).join("meta.json");
+        let Some(payload) = read_json::<serde_json::Value>(&path) else {
+            return;
+        };
+        let string = |key: &str| {
+            payload
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+        };
+        let status = string("status");
+        let state = string("state");
+        let meta_state = if !status.is_empty() { status } else { state };
+        let meta_run_id = string("run_id");
+        if !meta_run_id.is_empty() && meta_run_id != run.run_id {
+            return;
+        }
+        let exit_code = payload.get("exit_code").and_then(coerce_int_value);
+        let completed_at = string("completed_at");
+        if !runtime_meta_is_consistently_terminal(meta_state, exit_code, completed_at) {
+            return;
+        }
+        let worker_pid = payload
+            .get("worker_pid")
+            .and_then(coerce_int_value)
+            .or(run.worker_pid);
+        let owner_pid = payload
+            .get("owner_pid")
+            .and_then(coerce_int_value)
+            .or(run.owner_pid);
+        if worker_pid.is_some_and(pid_is_alive) || owner_pid.is_some_and(pid_is_alive) {
+            return;
+        }
+        if run.process_truth == "live" {
+            return;
+        }
+        if !meta_state.is_empty() {
+            run.state = meta_state.to_string();
+        }
+        run.health = "final".to_string();
+        run.liveness = "terminal".to_string();
+        if run.exit_code.is_none() {
+            run.exit_code = exit_code;
+        }
+        if run.completed_at.is_empty() && !completed_at.is_empty() {
+            run.completed_at = completed_at.to_string();
+        }
+        run.worker_alive = Some(false);
     }
 
     /// Read `delivery-seal.json` under the runtime run directory, if present
@@ -413,7 +481,7 @@ impl ControlPlane {
             .and_then(|payload| payload.get("exit_code"))
             .and_then(coerce_int_value);
         let completed_at = value("completed_at");
-        let terminal = is_final_state(&state) || exit_code.is_some() || !completed_at.is_empty();
+        let terminal = runtime_meta_is_consistently_terminal(&state, exit_code, &completed_at);
         let transcript = dir.join("transcript.log");
         let latest_transcript = {
             let declared = value("transcript");
@@ -459,6 +527,10 @@ impl ControlPlane {
             launcher_pid: None,
             completed_at,
             session_id: value("session_id"),
+            logical_session_id: nonempty_runtime_value(
+                &value("vibecrafted_session_id"),
+                &value("workspace_session_id"),
+            ),
             current_loop: None,
             total_loops: None,
             owner_pid: integer("owner_pid"),
@@ -819,6 +891,7 @@ impl ControlPlane {
             absorb_status(&mut merged, status);
         }
         for run in &mut merged {
+            self.overlay_runtime_meta_terminal(run);
             let operator_stopped = run.state == "stopped" && !run.stop_reason.trim().is_empty();
             if operator_stopped {
                 run.health = "final".to_string();
@@ -1140,6 +1213,18 @@ fn normalize_event(event: &Event, existing: Option<&RunStatus>, now: DateTime<Ut
                 .map(|run| run.session_id.as_str())
                 .unwrap_or_default(),
         ),
+        // Same alias order as snapshots and meta: the canonical key first, the
+        // workspace alias second, the prior projection last. Provider
+        // `session_id` is never consulted here — it is a different identity.
+        logical_session_id: existing_string(
+            &nonempty_runtime_value(
+                &payload_string("vibecrafted_session_id"),
+                &payload_string("workspace_session_id"),
+            ),
+            existing
+                .map(|run| run.logical_session_id.as_str())
+                .unwrap_or_default(),
+        ),
         current_loop: existing.and_then(|run| run.current_loop),
         total_loops: existing.and_then(|run| run.total_loops),
         owner_pid,
@@ -1337,6 +1422,20 @@ fn pid_is_alive(pid: i64) -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
+}
+
+fn runtime_meta_is_consistently_terminal(
+    meta_state: &str,
+    exit_code: Option<i64>,
+    completed_at: &str,
+) -> bool {
+    if is_final_state(meta_state) {
+        return true;
+    }
+    if is_active_state(meta_state) {
+        return false;
+    }
+    exit_code.is_some() || !completed_at.is_empty()
 }
 
 fn is_pytest_temp_path(path: &Path) -> bool {
@@ -1699,6 +1798,7 @@ fn normalize_lock(path: &Path, now: DateTime<Utc>) -> Option<RunStatus> {
         launcher_pid: None,
         completed_at: String::new(),
         session_id: String::new(),
+        logical_session_id: String::new(),
         current_loop: None,
         total_loops: None,
         owner_pid: None,
@@ -1833,6 +1933,7 @@ impl MarblesState {
             launcher_pid: None,
             completed_at: String::new(),
             session_id: String::new(),
+            logical_session_id: String::new(),
             current_loop: self.current_loop,
             total_loops: self.total_loops,
             owner_pid: None,
@@ -2269,6 +2370,146 @@ mod tests {
         );
         assert_eq!(view.settlement_counts.active, 1);
         assert_eq!(view.settlement_counts.total_settled, 0);
+
+        fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn logical_session_identity_joins_all_three_sources_and_never_borrows_the_provider_id() {
+        // Provider ids (`session_id`) and Vibecrafted session ids are distinct
+        // identities. Every source must project the logical id through the same
+        // alias order — canonical key, then `workspace_session_id` — and must
+        // never fall back to the provider id.
+        let home = temp_home("logical-session-join");
+        let control_plane = home.join("control_plane");
+        let runs = control_plane.join("runs");
+        let runtime = control_plane.join("runtime_runs/meta-run");
+        fs::create_dir_all(&runs).expect("runs");
+        fs::create_dir_all(&runtime).expect("runtime run");
+        let now = Utc::now();
+
+        // 1. Event source: first event carries only the workspace alias, the
+        //    second carries the canonical key; the provider id differs on purpose.
+        let records = [
+            json!({
+                "ts": (now - Duration::minutes(2)).to_rfc3339(),
+                "run_id": "event-run",
+                "kind": "launch",
+                "message": "launch",
+                "payload": {
+                    "root": "/srv/checkout/vibecrafted",
+                    "agent": "claude",
+                    "session_id": "provider-session-0001",
+                    "workspace_session_id": "vc-session-logical-01"
+                }
+            }),
+            json!({
+                "ts": (now - Duration::minutes(1)).to_rfc3339(),
+                "run_id": "event-run",
+                "kind": "lifecycle:active",
+                "message": "heartbeat",
+                "payload": {
+                    "state": "active",
+                    "liveness": "pid_alive",
+                    "worker_pid": std::process::id(),
+                    "vibecrafted_session_id": "vc-session-logical-01",
+                    "heartbeat_at": now.to_rfc3339()
+                }
+            }),
+            json!({
+                "ts": now.to_rfc3339(),
+                "run_id": "provider-only-run",
+                "kind": "launch",
+                "message": "launch",
+                "payload": {
+                    "root": "/srv/checkout/vibecrafted",
+                    "session_id": "provider-session-0002"
+                }
+            }),
+        ];
+        let encoded = records
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(control_plane.join("events.jsonl"), format!("{encoded}\n"))
+            .expect("event stream");
+
+        // 2. Snapshot source: only the workspace alias is present.
+        fs::write(
+            runs.join("snapshot-run.json"),
+            serde_json::to_vec(&json!({
+                "run_id": "snapshot-run",
+                "state": "completed",
+                "agent": "codex",
+                "skill": "implement",
+                "mode": "implement",
+                "root": "/srv/checkout/vibecrafted",
+                "operator_session": "repo-snapshot-run",
+                "latest_report": "",
+                "latest_transcript": "",
+                "last_error": "",
+                "updated_at": now.to_rfc3339(),
+                "started_at": now.to_rfc3339(),
+                "health": "final",
+                "source": "agent-meta",
+                "lock_present": false,
+                "session_id": "provider-session-0003",
+                "workspace_session_id": "vc-session-logical-02"
+            }))
+            .expect("snapshot json"),
+        )
+        .expect("snapshot");
+
+        // 3. Meta source: canonical key present, provider id distinct.
+        fs::write(
+            runtime.join("meta.json"),
+            serde_json::to_vec(&json!({
+                "run_id": "meta-run",
+                "status": "completed",
+                "exit_code": 0,
+                "agent": "claude",
+                "skill": "workflow",
+                "root": "/srv/checkout/vibecrafted",
+                "updated_at": now.to_rfc3339(),
+                "completed_at": now.to_rfc3339(),
+                "session_id": "provider-session-0004",
+                "vibecrafted_session_id": "vc-session-logical-03"
+            }))
+            .expect("meta json"),
+        )
+        .expect("meta");
+
+        let view = ControlPlane::new(&home).compute_view(now);
+        let find = |run_id: &str| {
+            view.active_runs
+                .iter()
+                .chain(view.stalled_runs.iter())
+                .chain(view.recent_runs.iter())
+                .find(|run| run.run_id == run_id)
+                .unwrap_or_else(|| panic!("{run_id} projected"))
+        };
+
+        let event_run = find("event-run");
+        assert_eq!(event_run.logical_session_id, "vc-session-logical-01");
+        assert_eq!(event_run.session_id, "provider-session-0001");
+        let provider_only = find("provider-only-run");
+        assert_eq!(provider_only.session_id, "provider-session-0002");
+        assert!(
+            provider_only.logical_session_id.is_empty(),
+            "provider id must never be promoted to a logical session id"
+        );
+        let snapshot_run = find("snapshot-run");
+        assert_eq!(snapshot_run.logical_session_id, "vc-session-logical-02");
+        assert_eq!(snapshot_run.session_id, "provider-session-0003");
+        let meta_run = find("meta-run");
+        assert_eq!(meta_run.logical_session_id, "vc-session-logical-03");
+        assert_eq!(meta_run.session_id, "provider-session-0004");
+
+        // The logical id survives serialisation under its canonical name only.
+        let serialised = serde_json::to_value(event_run).expect("run json");
+        assert_eq!(serialised["logical_session_id"], "vc-session-logical-01");
+        assert!(serialised.get("workspace_session_id").is_none());
 
         fs::remove_dir_all(home).ok();
     }

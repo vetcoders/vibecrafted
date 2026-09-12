@@ -26,21 +26,22 @@ xcode:
 app: bindings xcode
 	@echo "Building Vibecrafted.app..."
 	@mkdir -p build
-	@rm -rf build/Vibecrafted.app
+	@rm -rf build/Vibecrafted.app build/VibecraftedDev.app
 	@set -o pipefail && xcodebuild -project app/Vibecrafted.xcodeproj -scheme Vibecrafted -configuration Debug -derivedDataPath build/DerivedData build 2>&1 | tail -20
-	@BUILT_APP=$$(find build/DerivedData -name Vibecrafted.app -type d | head -1); \
+	@BUILT_APP=$$(find build/DerivedData \( -name VibecraftedDev.app -o -name 'Vibecrafted Dev.app' -o -name Vibecrafted.app \) -type d | head -1); \
 		if [ -z "$$BUILT_APP" ]; then \
-			echo "ERROR: Vibecrafted.app not found in build/DerivedData"; \
+			echo "ERROR: debug App bundle not found in build/DerivedData"; \
 			exit 1; \
 		fi; \
-		cp -R "$$BUILT_APP" build/Vibecrafted.app
-	@/usr/libexec/PlistBuddy -c "Set :CFBundleIconFile Vibecrafted.icns" build/Vibecrafted.app/Contents/Info.plist 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string Vibecrafted.icns" build/Vibecrafted.app/Contents/Info.plist
-	@mkdir -p build/Vibecrafted.app/Contents/Resources
-	@../../scripts/build-vibecrafted-icon.sh ../../../vc-terminal/assets/icon/vc-terminal-icon.png build/Vibecrafted.app/Contents/Resources/Vibecrafted.icns ../../../vc-terminal/assets/icon/terminal.png
-	@! find build/Vibecrafted.app/Contents/Resources -maxdepth 1 -type f -name '*.icns' ! -name 'Vibecrafted.icns' -print -quit | grep -q .
-	@./scripts/fix-dylib-install-names.sh build/Vibecrafted.app
-	@codesign --force --deep --sign - build/Vibecrafted.app
-	@echo "App built: build/Vibecrafted.app"
+		rm -rf build/VibecraftedDev.app build/Vibecrafted.app; \
+		cp -R "$$BUILT_APP" build/VibecraftedDev.app
+	@/usr/libexec/PlistBuddy -c "Set :CFBundleIconFile Vibecrafted.icns" build/VibecraftedDev.app/Contents/Info.plist 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string Vibecrafted.icns" build/VibecraftedDev.app/Contents/Info.plist
+	@mkdir -p build/VibecraftedDev.app/Contents/Resources
+	@../../scripts/build-vibecrafted-icon.sh ../../docs/presence/logo-master.png build/VibecraftedDev.app/Contents/Resources/Vibecrafted.icns
+	@! find build/VibecraftedDev.app/Contents/Resources -maxdepth 1 -type f -name '*.icns' ! -name 'Vibecrafted.icns' -print -quit | grep -q .
+	@./scripts/fix-dylib-install-names.sh build/VibecraftedDev.app
+	@codesign --force --deep --sign - build/VibecraftedDev.app
+	@echo "App built: build/VibecraftedDev.app (io.vetcoders.vibecrafted.dev)"
 
 dmg:
 	@$(MAKE) -C ../.. dmg
@@ -54,18 +55,7 @@ notarize:
 release:
 	@$(MAKE) -C ../.. release
 
-app-debug: bindings xcode
-	@cargo build --workspace --release
-	@xcodebuild -project app/Vibecrafted.xcodeproj -scheme Vibecrafted -configuration Debug -derivedDataPath build/DerivedData build
-	@BUILT_APP=$$(find build/DerivedData -name Vibecrafted.app -type d | head -1); \
-	if [ -n "$$BUILT_APP" ]; then \
-		cp ../target/release/rmcp-mux "$$BUILT_APP/Contents/MacOS/vc-mux-daemon"; \
-		cp ../target/release/vc-mux-tray "$$BUILT_APP/Contents/MacOS/vc-mux-tray"; \
-		cp ../target/release/voc "$$BUILT_APP/Contents/MacOS/voc"; \
-		chmod +x "$$BUILT_APP/Contents/MacOS/"*; \
-		./scripts/fix-dylib-install-names.sh "$$BUILT_APP"; \
-		codesign --force --deep --sign - "$$BUILT_APP"; \
-	fi
+app-debug: app
 
 help:
 	@printf "\n$(HELP_C_CYAN)shell-agent$(HELP_C_RESET) - UniFFI bridge + SwiftUI app\n\n"
@@ -73,7 +63,7 @@ help:
 	@printf "    $(HELP_C_GREEN)%-14s$(HELP_C_RESET) %s\n" "bindings" "Build Rust FFI and generate Swift bindings"
 	@printf "    $(HELP_C_GREEN)%-14s$(HELP_C_RESET) %s\n" "xcode" "Generate app/Vibecrafted.xcodeproj"
 	@printf "    $(HELP_C_GREEN)%-14s$(HELP_C_RESET) %s\n" "app" "Build and ad-hoc codesign Vibecrafted.app"
-	@printf "    $(HELP_C_GREEN)%-14s$(HELP_C_RESET) %s\n" "app-debug" "Build app with release daemon binaries copied in"
+	@printf "    $(HELP_C_GREEN)%-14s$(HELP_C_RESET) %s\n" "app-debug" "Build the same native App debug target"
 	@printf "\n  $(HELP_C_YELLOW)PACKAGE$(HELP_C_RESET)\n"
 	@printf "    $(HELP_C_GREEN)%-14s$(HELP_C_RESET) %s\n" "dmg" "Build unsigned/ad-hoc DMG"
 	@printf "    $(HELP_C_GREEN)%-14s$(HELP_C_RESET) %s\n" "dmg-signed" "Build signed DMG"

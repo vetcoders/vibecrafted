@@ -81,6 +81,10 @@ RELEASE_SCRIPT := scripts/build-vibecrafted-release.sh
 PORTABLE_SCRIPT := scripts/build-portable-release.sh
 RUNTIME_PACK_INSTALLER := scripts/install-runtime-pack.sh
 RUNTIME_PACK_PACKAGER := scripts/package-runtime-pack.sh
+# Owner of the build -> install handoff record. The builder writes which pack it
+# actually completed; this Makefile and the installer read it instead of each
+# re-deriving a filename from the current HEAD, date and a hard-coded dist.
+RUNTIME_PACK_SELECTION_LIB := scripts/lib/runtime-pack-selection.sh
 RUNTIME_PACK ?=
 KEYS ?= $(HOME)/.keys
 # Extra builder flags, e.g. RELEASE_FLAGS=--snapshot-donors to build from
@@ -112,16 +116,19 @@ release:
 
 # Build the standalone macOS Runtime Pack directly from source and native donor
 # inputs. Vibecrafted.app consumes this carrier; it is not the carrier's source.
+#
+# The path printed here is the one the builder recorded on completion, not a
+# name rebuilt from `git rev-parse` and `date` after the fact. That
+# reconstruction drifted whenever HEAD moved during the build, the build crossed
+# midnight, or VIBECRAFTED_RELEASE_DIR pointed somewhere other than dist -- and
+# then `make install` had nothing but a glob over eighteen legitimate historical
+# packs, which it correctly refused as ambiguous.
 runtime-pack:
 	@VC_RELEASE_FLAGS='$(RELEASE_FLAGS)' zsh -ic 'cd "$(CURDIR)" && KEYS="$(KEYS)" exec bash "$(RELEASE_SCRIPT)" --runtime-pack-only $${=VC_RELEASE_FLAGS}'
-	@version="$$(tr -d '[:space:]' < VERSION)"; \
-	revision="$$(git rev-parse --short=8 HEAD)"; \
-	date="$${VIBECRAFTED_RELEASE_DATE:-$$(date -u +%Y%m%d)}"; \
-	arch="$$(uname -m | sed 's/^arm64$$/arm64/; s/^aarch64$$/arm64/; s/^x86_64$$/x64/')"; \
-	output="dist/Vibecrafted_RuntimePack_$${version}-$${date}-$${revision}-darwin-$${arch}.tar.gz"; \
-	test -s "$$output" \
-		|| { echo 'release builder produced no standalone Runtime Pack' >&2; exit 1; }; \
-	printf '%s\n' "$$output"
+	@bash -c '. "$(CURDIR)/$(RUNTIME_PACK_SELECTION_LIB)"; \
+	runtime_pack_selection_read "$(CURDIR)" "" "" \
+		|| { printf "%s\n" "$${RUNTIME_PACK_SELECTION_ERROR:-release builder produced no standalone Runtime Pack}" >&2; exit 1; }; \
+	printf "%s\n" "$$RUNTIME_PACK_SELECTION_PACK"'
 
 # The portable channel needs no signing identity and no notary account: it is a
 # provenance-bound source distribution, so it builds anywhere git and python3 do.
@@ -298,30 +305,19 @@ endif
 # `curl ... | bash` path ran `make install-auto` as a silent no-op.
 install-auto: install
 
+# RUNTIME_PACK stays authoritative when given, including to install a different
+# signed generation on purpose. Left empty, the installer asks the build
+# selection record which pack the last `make runtime-pack` actually completed;
+# an incomplete or foreign build fails visibly there rather than resolving into
+# some older archive that merely looks plausible.
 install:
 	@VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)" bash "$(RUNTIME_PACK_INSTALLER)"
 	@$(MAKE) --no-print-directory reconcile-server-service
 
-# Explicit source/compiler lane retained for the portable Linux/WSL carrier.
-# It is not the normal customer installer: it may require Rust, cargo-leptos,
-# sibling donors, and platform targets. macOS CLI/App install the exact same
-# closed Runtime Pack through `make install` and AppDelegate respectively.
-install-source:
-	@mkdir -p "$(HOME)/.vibecrafted"
-	@: > "$(INSTALL_LOG)"
-	@printf "Installing Vibecrafted\n"
-	@VIBECRAFTED_INSTALL_LOG="$(INSTALL_LOG)" VERBOSE="$(VERBOSE)" $(INSTALL_STEP) "foundations" -- bash -e -c 'make --no-print-directory init-hooks; bash scripts/install-foundations.sh'
-	@VIBECRAFTED_INSTALL_LOG="$(INSTALL_LOG)" VERBOSE="$(VERBOSE)" $(INSTALL_STEP) "runtime tools" -- bash scripts/install-runtime.sh --runtime "$(RUNTIME)" --yes
-	@VIBECRAFTED_INSTALL_LOG="$(INSTALL_LOG)" VERBOSE="$(VERBOSE)" $(INSTALL_STEP) "app binaries" -- bash -e -c 'make --no-print-directory install-vendored-binaries; make --no-print-directory install-app-binaries'
-	@VIBECRAFTED_INSTALL_LOG="$(INSTALL_LOG)" VERBOSE="$(VERBOSE)" $(INSTALL_STEP) "skills and launchers" -- $(MAKE) --no-print-directory install-bundle-tools
-	@VIBECRAFTED_INSTALL_LOG="$(INSTALL_LOG)" VERBOSE="$(VERBOSE)" $(INSTALL_STEP) "frontier config" -- bash -e -c '$(RESOLVE_STABLE_RUNTIME_ROOT); $(REQUIRE_STAGED_RUNTIME_ROOT); bash "$$stable_root/vibecrafted-core/vibecrafted_core/runtime/scripts/install-frontier-config.sh" --source "$$stable_root" || printf "[warn] Frontier config skipped (non-fatal)\n"'
-	@VIBECRAFTED_INSTALL_LOG="$(INSTALL_LOG)" VERBOSE="$(VERBOSE)" $(INSTALL_STEP) "vc-frame config" -- bash -e -c 'export PATH="$$HOME/.local/bin:$$PATH"; $(RESOLVE_STABLE_RUNTIME_ROOT); $(REQUIRE_STAGED_RUNTIME_ROOT); tool_python="$$(uv tool dir --color never)/vibecrafted/bin/python"; test -x "$$tool_python"; PYTHONPATH="$$stable_root/vibecrafted-core" "$$tool_python" -c "from vibecrafted_core.vc_frame_delivery import wire_vc_frame_config; print(wire_vc_frame_config(force_frontier=True).render(), end=\"\")"'
-	@if PATH="$$HOME/.local/bin:$$PATH" command -v vc-frame >/dev/null 2>&1; then \
-	  printf "\nVibecrafted is ready.\n\nStart here:\n  vc-start\n\nHealth:\n  vibecrafted doctor\n\nLog:\n  ~/.vibecrafted/install.log\n"; \
-	else \
-	  printf "\nVibecrafted is ready (headless: the vc-frame cockpit is not installed; vc-start needs it).\n\nStart here:\n  export PATH=\"\$$HOME/.local/bin:\$$PATH\"\n  vibecrafted doctor\n  vibecrafted implement claude --prompt \"describe this repo\"\n  vibecrafted await claude --last\n\nLog:\n  ~/.vibecrafted/install.log\n"; \
-	fi
-	@$(MAKE) --no-print-directory reconcile-server-service
+# Retained public spelling: configuration and runtime publication have one
+# installer. Build the appropriate carrier separately, then supply it through
+# `make install RUNTIME_PACK=/absolute/path/to/RuntimePack.tar.gz`.
+install-source: install
 
 # The explicit source/compiler lane calls `install-python-tools`; retain the
 # alias for that portable residual without putting it back on `make install`.
@@ -428,6 +424,10 @@ install-tools-held:
 				fi ;; \
 			*) echo "[install-tools] FATAL: uv tool entrypoint $$entrypoint is not owned by the uv interpreter: $$entrypoint_shebang" >&2; exit 1 ;; \
 		esac; \
+		if ! env -u PYTHONPATH -u PYTHONHOME "$$entrypoint_path" --help >/dev/null 2>&1; then \
+			echo "[install-tools] FATAL: uv tool entrypoint $$entrypoint does not execute successfully" >&2; \
+			exit 1; \
+		fi; \
 	done; \
 	for entrypoint in vibecrafted vc-workflow vc-guardian vc-server-supervisor verify-vibecrafted-walkaround; do \
 		resolved="$$(command -v "$$entrypoint" 2>/dev/null || true)"; \

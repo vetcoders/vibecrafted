@@ -22,6 +22,7 @@ from .lifecycle_runner import (
     delivery_axes_for_receipt,
     run_lifecycle,
 )
+from .repo_selection import RepoSelectionError, add_repo_arguments, select_repository
 
 SUPPORTED_AGENTS = {"claude", "codex", "gemini", "agy", "junie", "grok", "cursor"}
 
@@ -501,7 +502,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("-f", "--file", default="")
     parser.add_argument("-p", "--prompt", default="")
     parser.add_argument("--runtime", default="")
-    parser.add_argument("--root", default="")
+    add_repo_arguments(parser)
     parser.add_argument("--start-stage", default="")
     parser.add_argument("--await-stages", action="store_true")
     parser.add_argument("--max-iterations", type=int, default=0)
@@ -538,7 +539,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     # and continuations inherit the selected runtime via the baton.
     from .cli import _default_runtime
 
-    root = args.root or str(Path.cwd())
+    try:
+        root = select_repository(
+            args.repo, args.root, fallback=Path.cwd, label="vc-ship"
+        ).path
+    except RepoSelectionError as exc:
+        ui.err(str(exc), fix="pass one existing repository with --repo <path>")
+        return 2
     state = run_lifecycle(
         LifecycleRunSpec(
             workflow_id="vc-ship",

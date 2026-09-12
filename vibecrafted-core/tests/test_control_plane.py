@@ -2291,10 +2291,10 @@ def test_await_run_live_child_keeps_loop_parent_open_past_idle_window(
         child.terminate()
         child.wait()
 
-    # A missing dispatcher is reconciled once. Child-loop liveness belongs to
-    # that dispatcher socket, not to a new client-side polling aggregate.
-    assert payload["timed_out"] is False
-    assert payload["reason"] == "signal_missing_live"
+    # A missing dispatcher is reconciled while the child remains live, until
+    # the caller's explicit hard cap ends the wait.
+    assert payload["timed_out"] is True
+    assert payload["reason"] == "hard_cap"
     assert payload["worker_alive"] is True
     assert payload["completed"] is False
 

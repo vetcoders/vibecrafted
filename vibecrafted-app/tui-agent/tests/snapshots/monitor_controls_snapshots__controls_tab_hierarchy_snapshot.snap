@@ -39,6 +39,6 @@ workspace: vibecrafted  |  active 1  stalled 1  |  scope: live  |  Controls
 │                                                     ││                                                               │
 │                                                     ││                                                               │
 └─────────────────────────────────────────────────────┘└───────────────────────────────────────────────────────────────┘
-Controls: ↑/↓ action  ←/→ run selection  Enter open  d jump here from Monitor
+Controls: click an action  wheel that pane  ↑/↓ action  Enter open
 Global: q quit  r refresh  a cycle agent  v cycle runtime  y copy  Ctrl+L clear search  ? help
 state root: /fixture/state

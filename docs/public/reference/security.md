@@ -68,8 +68,11 @@ vibecrafted doctor
   `make semgrep`, mirrored by the repository's `pre-commit` and `pre-push`
   hooks, so a secret-shaped string or a dangerous pattern is caught before
   it leaves your machine.
-- **`--no-verify` is forbidden** for commits and pushes in every worker
-  plan. A gate that can be skipped silently is not a gate.
+- **`--no-verify` is forbidden by default.** A Founder-authorized compile
+  embargo may permit it for a worker's local checkpoint when hooks would run
+  explicitly deferred gates; the receipt must name everything skipped and the
+  commit is not security-clean or verified delivery. Workers never push with
+  `--no-verify`; that push is an exclusive Founder button.
 - **No secrets in the repo.** Skills read credentials from environment
   variables only; `.env` files are never committed, and logs must not
   contain secrets.

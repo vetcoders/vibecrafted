@@ -22,7 +22,7 @@ from .research_config import (
     ResearchAgentSelection,
     resolve_research_runtime_config,
 )
-from .runtime_paths import agent_tool_search_path
+from .runtime_paths import agent_tool_search_path, selected_runtime_environment
 from .spawn import _resolve_agent_command, _stdin_command
 from .supervisor_async import AsyncRunHandle, AsyncSupervisor
 
@@ -189,7 +189,7 @@ def _child_env(
     model_requested: str = "",
 ) -> dict[str, str]:
     """Child process env: agent + artifact paths, plus model override if requested."""
-    env = os.environ.copy()
+    env = selected_runtime_environment()
     env["VIBECRAFTED_AGENT"] = agent
     env["VIBECRAFTED_REPORT_PATH"] = str(report)
     env["VIBECRAFTED_TRANSCRIPT_PATH"] = str(transcript)
@@ -516,7 +516,7 @@ Research reports:
 """
 
 
-NATIVE_RESUME_AGENTS = frozenset({"claude", "codex", "grok"})
+NATIVE_RESUME_AGENTS = frozenset({"claude", "codex", "grok", "agy"})
 
 
 def native_resume_argv(agent: str, agent_session_id: str) -> list[str]:
@@ -567,6 +567,12 @@ def native_resume_argv(agent: str, agent_session_id: str) -> list[str]:
             "--prompt-file",
             "/dev/stdin",
         ]
+    if normalized_agent == "agy":
+        # agy 1.2.1 probe 2026-09-11: `--conversation <id>` composes with the
+        # private `--print=` + stream-json stdin lane and keeps the same
+        # conversation_id (context preserved). Prompt never rides argv.
+        command = _stdin_command("agy")
+        return [command[0], "--conversation", native_id, *command[1:]]
     raise ValueError(f"native_resume_unsupported:{normalized_agent or 'unknown'}")
 
 
@@ -592,8 +598,8 @@ async def _run_child(
     prompt_body: str | None = None,
 ) -> ChildResult:
     """Spawn and await one supervised child agent process, writing its prompt
-    file, resolving its command (default: stdin command with model override),
-    and returning the collected `ChildResult`.
+    file, resolving its command, applying a requested model pin once, and
+    returning the collected `ChildResult`.
     """
     safe_label = _safe_label(label)
     run_id = f"{_parent_run_id()}-{safe_label}"
@@ -607,10 +613,10 @@ async def _run_child(
     prompt_file.write_text(
         prompt_body or _child_prompt(kind, label, root, prompt), encoding="utf-8"
     )
-    child_command = (
-        list(command)
-        if command is not None
-        else _with_model_override(agent, _stdin_command(agent), model_requested)
+    child_command = _with_model_override(
+        agent,
+        command if command is not None else _stdin_command(agent),
+        model_requested,
     )
     child_env = _child_env(agent, report, transcript, meta, model_requested)
     child_command = _resolve_agent_command(agent, child_command, child_env)
@@ -1073,6 +1079,7 @@ async def _run_research_synthesis(
         root=root,
         prompt=prompt,
         command=synthesis_command,
+        model_requested=model_requested,
         prompt_body=_research_synthesis_prompt(root, prompt, survivors),
     )
 

@@ -73,21 +73,46 @@ def test_safe_quit_policy_fails_safe_when_truth_is_unavailable(
     assert reason in result
 
 
-def test_app_termination_routes_share_the_fail_safe_policy() -> None:
+def test_app_quit_is_ui_only_and_stop_has_native_confirmation() -> None:
     delegate = (
         REPO_ROOT / "vibecrafted-app/shell-agent/app/Vibecrafted/AppDelegate.swift"
     ).read_text(encoding="utf-8")
     assert 'process.arguments = ["status", "--activity", "--json"]' in delegate
     assert "func applicationShouldTerminate(" in delegate
-    assert (
-        'alert.messageText = "Vibecrafted lifecycle truth is unavailable"' in delegate
-    )
-    assert delegate.count('alert.addButton(withTitle: "Cancel")') >= 2
-    assert delegate.count('alert.addButton(withTitle: "Quit Anyway")') >= 2
+    termination = delegate[
+        delegate.index("func applicationShouldTerminate(") : delegate.index(
+            "func applicationSupportsSecureRestorableState"
+        )
+    ]
+    assert ".terminateNow" in termination
+    assert "activeRunSummary" not in termination
+    assert "performServerAction" not in termination
+    confirmation = delegate[
+        delegate.index("private func confirmRuntimeStop()") : delegate.index(
+            "private func showNativeMessage"
+        )
+    ]
+    assert "activeRunSummary()" in confirmation
+    assert 'alert.addButton(withTitle: "Cancel")' in confirmation
+    assert 'alert.addButton(withTitle: "Stop Runtime Service")' in confirmation
     request_quit = delegate[
         delegate.index("@objc private func requestQuit()") : delegate.index(
-            "private func buildMainMenu()"
+            "@objc private func checkForUpdatesFromMenu()"
         )
     ]
     assert "NSApp.terminate(nil)" in request_quit
     assert "activeRunSummary" not in request_quit
+    assert "productUpdate?.interrupt()" in delegate
+    assert "requestUIOnlyQuit: { [weak self] in self?.requestQuit() }" in delegate
+    assert "case .checkForUpdates: checkForUpdatesFromMenu()" in delegate
+    assert "Stop Runtime" not in request_quit
+    install_update = delegate[
+        delegate.index("private func installProductUpdate(") : delegate.index(
+            "private func showProductUpdatePanel()"
+        )
+    ]
+    assert "Receipts are not deleted here" in delegate
+    assert "Refusing to publish a Runtime Pack that does not match" in install_update
+    assert "Bundle.main.bundleURL" in install_update
+    assert 'arguments: ["--uninstall"]' not in install_update
+    assert "performServerAction" not in install_update

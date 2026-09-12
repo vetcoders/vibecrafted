@@ -45,7 +45,9 @@ the current session, you **are not allowed** to perform any of these:
 - Modifying CI secrets, environment vars, deploy keys
 - Modifying auth / billing config in any production-facing service
 - Editing `.env*` files in any way that surfaces secrets
-- Skipping security gates (`--no-verify`, `--no-gpg-sign`) — even if a hook fails
+- Skipping security gates (`--no-gpg-sign`, or `--no-verify` outside a declared
+  Founder-authorized local compile-embargo checkpoint); push with `--no-verify`
+  is always Founder-only
 
 ### Skill / convention surface
 

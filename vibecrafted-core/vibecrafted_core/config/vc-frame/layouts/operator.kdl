@@ -1,7 +1,6 @@
 // operator — launch alias for the vibecrafted operator entrypoint
 // Path kept as operator.kdl for: vibecrafted start | dashboard operator
-// Content CANON = built-in default_layout "vibecrafted"
-//   (zellij-utils/assets/layouts/vibecrafted.kdl)
+// Content CANON = the shipped default_layout "operator" in config.kdl.
 //
 //
 // Tabs:
@@ -10,13 +9,17 @@
 //   "Shell"       — work shell with banner + zsh (not a silent suspended pane)
 //   "voc"         — eyes for the current workspace, not a launcher
 //
-// Contract: every tab keeps the left Sessions rail (default_tab_template).
+// Contract: Screen owns one session canvas (session_layer, tagged
+// session_canvas); tab templates and swaps below carry content only —
+// structurally at parity with native zellij-utils/assets/layouts/vibecrafted.kdl.
 //
 // 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 layout {
-    default_tab_template {
+    session_layer {
         pane size=1 borderless=true {
             plugin location="compact-bar" {
+                session_canvas true
+                session_canvas_kind "compact-bar"
                 brand_text " 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. "
                 // 🚥 zone: clear the macOS traffic lights in the native window
                 left_inset "6"
@@ -25,6 +28,8 @@ layout {
         pane split_direction="vertical" {
             pane size=24 borderless=true {
                 plugin location="session-manager" {
+                    session_canvas true
+                    session_canvas_kind "session-manager"
                     rail true
                     pane_title "Sessions"
                 }
@@ -32,19 +37,28 @@ layout {
             pane { children; }
         }
         pane size=1 borderless=true {
-            plugin location="status-bar"
+            plugin location="status-bar" {
+                session_canvas true
+                session_canvas_kind "status-bar"
+            }
         }
+    }
+
+    // Content-only. The parser mounts this inside session_layer without
+    // copying chrome ownership into the tab contract.
+    default_tab_template {
+        pane { children; }
     }
 
     tab name="Start here" focus=true {
         pane command="bash" name="Start Here" {
-            args "-lc" "root=\"${VC_FRAME_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame}\"; runner=\"$root/pane-python\"; launcher=\"$root/vc-start-here.py\"; if [ -x \"$runner\" ]; then exec \"$runner\" \"$launcher\"; fi; py=\"${VIBECRAFTED_PYTHON:-}\"; if [ -x \"$launcher\" ]; then if [ -n \"$py\" ] && [ -x \"$py\" ]; then exec \"$py\" \"$launcher\"; fi; exec \"$launcher\"; fi; printf '\\n  START HERE\\n\\n  Launcher missing: %s\\n  Run: vibecrafted config install --force\\n\\n' \"$launcher\"; exec \"${SHELL:-/bin/zsh}\" -l"
+            args "-lc" "root=\"${VC_FRAME_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame}\"; runner=\"$root/pane-python\"; launcher=\"$root/vc-start-here.py\"; if [ -x \"$runner\" ]; then exec \"$runner\" \"$launcher\"; fi; py=\"${VIBECRAFTED_PYTHON:-}\"; if [ -x \"$launcher\" ]; then if [ -n \"$py\" ] && [ -x \"$py\" ]; then exec \"$py\" \"$launcher\"; fi; exec \"$launcher\"; fi; printf '\\n  START HERE\\n\\n  Launcher missing: %s\\n  Repair: run make install from the Vibecrafted checkout with your verified Runtime Pack\\n\\n' \"$launcher\"; exec \"${SHELL:-/bin/zsh}\" -l"
         }
     }
 
     tab name="Agents" {
         pane command="bash" name="Agent Workspaces" {
-            args "-lc" "root=\"${VC_FRAME_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame}\"; runner=\"$root/pane-python\"; launcher=\"$root/vc-agent-workshop.py\"; if [ -x \"$runner\" ]; then exec \"$runner\" \"$launcher\" home; fi; py=\"${VIBECRAFTED_PYTHON:-}\"; if [ -x \"$launcher\" ]; then if [ -n \"$py\" ] && [ -x \"$py\" ]; then exec \"$py\" \"$launcher\" home; fi; exec \"$launcher\" home; fi; printf '\\n  AGENT WORKSPACES\\n\\n  Launcher missing: %s\\n  Run: vibecrafted config install --force\\n\\n' \"$launcher\"; exec \"${SHELL:-/bin/zsh}\" -l"
+            args "-lc" "root=\"${VC_FRAME_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame}\"; runner=\"$root/pane-python\"; launcher=\"$root/vc-agent-workshop.py\"; if [ -x \"$runner\" ]; then exec \"$runner\" \"$launcher\" home; fi; py=\"${VIBECRAFTED_PYTHON:-}\"; if [ -x \"$launcher\" ]; then if [ -n \"$py\" ] && [ -x \"$py\" ]; then exec \"$py\" \"$launcher\" home; fi; exec \"$launcher\" home; fi; printf '\\n  AGENT WORKSPACES\\n\\n  Launcher missing: %s\\n  Repair: run make install from the Vibecrafted checkout with your verified Runtime Pack\\n\\n' \"$launcher\"; exec \"${SHELL:-/bin/zsh}\" -l"
         }
     }
 

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 from vibecrafted_core import spawn, workflow, workflow_runtime
 from vibecrafted_core.agent_stream import AgentStreamParser
@@ -23,7 +26,29 @@ def test_cursor_capability_key_and_binary_decoupled() -> None:
     assert spawn.agent_cli_name("claude") == "claude"
 
 
-def test_cursor_headless_stdin_and_default_commands() -> None:
+def test_cursor_headless_stdin_and_default_commands(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = tmp_path / "cursor-agent"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        "  --version) printf '%s\\n' '2026.08.25' ;;\n"
+        "  --help|-h) printf '%s\\n' '--print' '--output-format' '--force' '--trust'"
+        " '--resume [chatId]' '--mode' ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}/bin{os.pathsep}/usr/bin")
+    monkeypatch.setattr(
+        spawn, "agent_tool_search_path", lambda _env=None: str(tmp_path)
+    )
+    monkeypatch.setattr(
+        continuity, "agent_tool_search_path", lambda _env=None: str(tmp_path)
+    )
+    continuity.clear_probe_cache()
+
     stdin = spawn._stdin_command("cursor")
     assert stdin[0] == "cursor-agent"
     assert "-p" in stdin

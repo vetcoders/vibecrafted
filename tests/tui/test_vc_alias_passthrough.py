@@ -22,6 +22,8 @@ DISPATCH = (
     / "lib"
     / "dispatch.sh"
 )
+DECK = REPO_ROOT / "vibecrafted-core" / "vibecrafted_core" / "deck" / "vibecrafted"
+CHECKOUT_DECK = REPO_ROOT / "scripts" / "vibecrafted"
 MARBLES = (
     REPO_ROOT
     / "vibecrafted-core"
@@ -49,6 +51,14 @@ def test_dispatch_defines_passthrough_helper() -> None:
         r"vc-research\(\)\s*\{\s*_vetcoders_vc_passthrough research",
         text,
     )
+    assert re.search(
+        r"vc-fork\(\)\s*\{\s*_vetcoders_vc_passthrough fork",
+        text,
+    )
+    assert re.search(
+        r"vc-canary\(\)\s*\{\s*_vetcoders_vc_passthrough canary",
+        text,
+    )
     assert "vc-research() { _vetcoders_research" not in text
     # start/dashboard MUST implement launch locally (no full-verb passthrough
     # re-entry: Python→deck→helper→Python fork-bombs).
@@ -57,11 +67,14 @@ def test_dispatch_defines_passthrough_helper() -> None:
     assert not re.search(
         r"vc-dashboard\(\)\s*\{\s*_vetcoders_vc_passthrough dashboard", text
     )
-    start_body = text.split("vc-start()")[1].split("vc-frontier-paths")[0]
-    # Only --help may call into the deck; bare start must launch dashboard.
-    # The help touch goes through the guarded passthrough so DECK_BIN/test-mode
-    # resolution holds even here — never a bare `command vibecrafted`.
-    assert "_vetcoders_launch_dashboard operator" in start_body
+    start_body = text.split("vc-start()")[1].split("vc-dashboard()")[0]
+    # Only --help may call into the deck; bare start must enter the one
+    # create-only workspace owner (dashboard.sh), never the dashboard
+    # reuse-or-create launcher. The help touch goes through the guarded
+    # passthrough so DECK_BIN/test-mode resolution holds even here — never a
+    # bare `command vibecrafted`.
+    assert "_vetcoders_start_entry" in start_body
+    assert "_vetcoders_launch_dashboard" not in start_body
     assert "_vetcoders_vc_passthrough start --help" in start_body
     assert re.search(r"command vibecrafted start\s+\"\$@\"", start_body) is None
     assert re.search(r"_vetcoders_vc_passthrough start\s+\"\$@\"", start_body) is None
@@ -101,6 +114,21 @@ def test_sync_script_covers_both_deck_paths() -> None:
     assert 'copy_one "$CANONICAL_DECK" "$GEN/scripts/vibecrafted"' in body
     assert "runtime/shell/lib/dispatch.sh" in body
     assert "runtime/shell/lib/marbles.sh" in body
+
+
+def test_public_start_aliases_share_the_root_ownership_contract() -> None:
+    """The packaged deck is canonical and its checkout mirror stays exact."""
+    deck = DECK.read_text(encoding="utf-8")
+    assert CHECKOUT_DECK.read_text(encoding="utf-8") == deck
+    assert '_vetcoders_start_prepare_arguments "$@"' in deck
+    assert "vibecrafted start --root <project-path>" in deck
+    start_body = (
+        DISPATCH.read_text(encoding="utf-8")
+        .split("vc-start()")[1]
+        .split("vc-dashboard()")[0]
+    )
+    assert '_vetcoders_start_prepare_arguments "$@"' in start_body
+    assert '"${_vetcoders_start_frame_argv[@]}"' in start_body
 
 
 def test_interactive_zsh_resume_help_does_not_create_runs(tmp_path: Path) -> None:

@@ -33,13 +33,18 @@ case "$meta_timeout_s" in
 esac
 report_poll_s=5
 
+# Internal runtime Python, named once for this process: the guards below and the
+# state writer must agree on the interpreter, or a guard passes on the host while
+# the write goes somewhere else.
+watcher_py="$(spawn_python_bin)"
+
 _state_json_edit() {
   local mutator="$1"
   shift
 
-  command -v python3 >/dev/null 2>&1 || return 1
+  command -v "$watcher_py" >/dev/null 2>&1 || return 1
 
-  STATE_JSON_MUTATOR="$mutator" python3 - "$state_file" "$@" <<'PY'
+  STATE_JSON_MUTATOR="$mutator" "$watcher_py" - "$state_file" "$@" <<'PY'
 import datetime
 import fcntl
 import json
@@ -110,7 +115,7 @@ _init_state() {
   initial_agent="$(spawn_frontmatter_field "$ancestor_plan" "agent")"
   [[ -n "$initial_agent" ]] || initial_agent="unknown"
 
-  if command -v python3 >/dev/null 2>&1; then
+  if command -v "$watcher_py" >/dev/null 2>&1; then
     _state_json_edit "$(cat <<'PY'
 now = datetime.datetime.now(datetime.timezone.utc).isoformat()
 payload.update(
@@ -160,7 +165,7 @@ EOF
 
 _update_status() {
   local new_status="$1"
-  if command -v python3 >/dev/null 2>&1; then
+  if command -v "$watcher_py" >/dev/null 2>&1; then
     _state_json_edit "$(cat <<'PY'
 payload["status"] = args[0]
 payload["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -178,7 +183,7 @@ _record_loop_start() {
   local model="${6:-}"
   local agent_source="${7:-}"
 
-  if command -v python3 >/dev/null 2>&1; then
+  if command -v "$watcher_py" >/dev/null 2>&1; then
     _state_json_edit "$(cat <<'PY'
 loop_nr = int(args[0])
 transcript, agent_name, focus, ancestor_slug, model, agent_source = args[1:7]
@@ -226,7 +231,7 @@ PY
 _record_confirmed() {
   local loop_nr="$1"
   local session_id="$2"
-  if command -v python3 >/dev/null 2>&1; then
+  if command -v "$watcher_py" >/dev/null 2>&1; then
     _state_json_edit "$(cat <<'PY'
 payload["status"] = "confirmed"
 payload["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -250,7 +255,7 @@ _record_loop_done() {
   local score="${7:-}"
   local commit_count="${8:-}"
   local meta_path="${9:-}"
-  if command -v python3 >/dev/null 2>&1; then
+  if command -v "$watcher_py" >/dev/null 2>&1; then
     _state_json_edit "$(cat <<'PY'
 loop_nr = int(args[0])
 report = args[1]
@@ -297,7 +302,7 @@ _record_loop_timeout() {
   local loop_nr="$1"
   local reason="$2"
   local duration="$3"
-  if command -v python3 >/dev/null 2>&1; then
+  if command -v "$watcher_py" >/dev/null 2>&1; then
     _state_json_edit "$(cat <<'PY'
 loop_nr = int(args[0])
 reason = args[1]
@@ -324,7 +329,7 @@ _record_loop_failed() {
   local report_path="${4:-}"
   local exit_code="${5:-}"
   local meta_path="${6:-}"
-  if command -v python3 >/dev/null 2>&1; then
+  if command -v "$watcher_py" >/dev/null 2>&1; then
     _state_json_edit "$(cat <<'PY'
 loop_nr = int(args[0])
 reason = args[1]
@@ -369,7 +374,7 @@ PY
 _record_verification_pending() {
   local loop_nr="$1"
 
-  if command -v python3 >/dev/null 2>&1; then
+  if command -v "$watcher_py" >/dev/null 2>&1; then
     _state_json_edit "$(cat <<'PY'
 payload["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 for loop in payload.get("loops", []):
@@ -468,7 +473,7 @@ _extract_metrics() {
   local report="$1"
 
   if [[ -f "$report" ]]; then
-    python3 - "$report" <<'PY'
+    "$watcher_py" - "$report" <<'PY'
 import re
 import sys
 
@@ -523,7 +528,7 @@ _marbles_failure_hint() {
   local hint=""
 
   hint="$(
-    python3 - "$report_path" "$transcript_path" "$meta_path" <<'PY'
+    "$watcher_py" - "$report_path" "$transcript_path" "$meta_path" <<'PY'
 import json
 import os
 import re
@@ -887,7 +892,7 @@ _check_stop() {
 _check_locker() {
   if command -v rust-ai-locker >/dev/null 2>&1; then
     local heavy_count=""
-    heavy_count=$(rust-ai-locker scan --json 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('heavy',[])))" 2>/dev/null || echo "0")
+    heavy_count=$(rust-ai-locker scan --json 2>/dev/null | "$watcher_py" -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('heavy',[])))" 2>/dev/null || echo "0")
     if [[ "$heavy_count" -gt 0 ]]; then
       printf '    %b⚠ %s heavy process(es) detected — consider waiting%b\n' "$_yellow" "$heavy_count" "$_reset"
     fi
@@ -929,8 +934,8 @@ for ((loop_nr = 1; loop_nr <= total_count; loop_nr++)); do
   fi
   # When child plan has no agent, consult state.json loop records before
   # falling back to ancestor.md — keeps watcher aligned with marbles_next.sh
-  if [[ -z "$loop_agent" && -f "$state_file" ]] && command -v python3 >/dev/null 2>&1; then
-    loop_agent="$(python3 - "$state_file" "$loop_nr" <<'PY'
+  if [[ -z "$loop_agent" && -f "$state_file" ]] && command -v "$watcher_py" >/dev/null 2>&1; then
+    loop_agent="$("$watcher_py" - "$state_file" "$loop_nr" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
     d = json.load(f)
@@ -1136,8 +1141,8 @@ total_duration=$((total_end - total_start))
 total_fmt="$(printf '%dm %02ds' $((total_duration/60)) $((total_duration%60)))"
 
 trajectory=""
-if command -v python3 >/dev/null 2>&1 && [[ -f "$state_file" ]]; then
-  trajectory=$(python3 - "$state_file" <<'PY'
+if command -v "$watcher_py" >/dev/null 2>&1 && [[ -f "$state_file" ]]; then
+  trajectory=$("$watcher_py" - "$state_file" <<'PY'
 import json
 import sys
 
@@ -1243,13 +1248,13 @@ case "$verification_grace_s" in
     ;;
 esac
 
-if command -v python3 >/dev/null 2>&1 && [[ -f "$state_file" ]]; then
+if command -v "$watcher_py" >/dev/null 2>&1 && [[ -f "$state_file" ]]; then
   printf '\n  %bverification:%b ' "$_dim" "$_reset"
   if (( verification_grace_s > 0 )); then
     sleep "$verification_grace_s"
   fi
   if [[ -f "$state_file" ]]; then
-    python3 - "$state_file" <<'PY'
+    "$watcher_py" - "$state_file" <<'PY'
 import json
 import sys
 

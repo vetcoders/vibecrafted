@@ -17,7 +17,7 @@ from vibecrafted_core import spawn, workflow_runtime
 from vibecrafted_core.continuity import capabilities as continuity
 
 EXECUTABLE_AGENTS = ("claude", "codex", "agy", "junie", "grok", "cursor")
-VERIFIED_HEADLESS_RESUME_AGENTS = ("claude", "codex", "grok")
+VERIFIED_HEADLESS_RESUME_AGENTS = ("claude", "codex", "grok", "agy")
 
 
 def _spawn_accepts_headless_resume(agent: str) -> bool:
@@ -51,7 +51,12 @@ def test_gemini_rejected_by_both_registry_and_spawn() -> None:
         workflow_runtime._resume_stdin_command("gemini", "sess-parity-check")
 
 
-def test_every_executable_agent_has_a_fresh_launch_lane() -> None:
+def test_every_executable_agent_has_a_fresh_launch_lane(monkeypatch) -> None:
+    monkeypatch.setattr(
+        spawn,
+        "_materialize_cursor_permission_flags",
+        lambda flags, *, permissions: tuple(flags),
+    )
     for agent in EXECUTABLE_AGENTS:
         command = spawn._stdin_command(agent)
         assert command, f"{agent} lost its fresh headless launch lane"

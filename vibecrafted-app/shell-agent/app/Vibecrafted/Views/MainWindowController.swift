@@ -2,79 +2,101 @@
 // Created by Vetcoders
 
 import AppKit
+import SwiftUI
 
-class MainWindowController: NSWindowController, NSToolbarDelegate {
-  private let mainViewController = MainSplitViewController()
+/// One window shape for every native tab: the console and each tool or
+/// reference tab are `NSWindow`s in one tab group, so AppKit's own tab bar,
+/// Window menu and ⌘⇧] / ⌘⇧[ tab switching apply. The SwiftUI toolbar is
+/// bridged into the unified titlebar; there is no second chrome row.
+@MainActor
+enum CommandDeckWindowFactory {
+  /// Windows sharing this identifier tab together. One product, one group.
+  static let tabbingIdentifier = "io.vetcoders.vibecrafted.command-deck"
 
-  private let toolbarSidebarItem = NSToolbarItem.Identifier("toggleSidebar")
-  private let toolbarInspectorItem = NSToolbarItem.Identifier("toggleInspector")
-
-  init() {
+  static func makeWindow(title: String, frameAutosaveName: String?) -> NSWindow {
     let window = NSWindow(
       contentRect: NSRect(x: 0, y: 0, width: 1200, height: 800),
-      styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-      backing: .buffered,
-      defer: false
-    )
-    window.title = "Vibecrafted"
-    window.titleVisibility = .hidden
-    window.titlebarAppearsTransparent = true
-    window.toolbarStyle = .unified
-    window.center()
-    window.setFrameAutosaveName("VibecraftedMainWindow")
-    window.contentViewController = mainViewController
+      styleMask: [.titled, .closable, .miniaturizable, .resizable],
+      backing: .buffered, defer: false)
+    window.title = title
+    window.isReleasedWhenClosed = false
     window.minSize = NSSize(width: 800, height: 600)
+    window.tabbingIdentifier = tabbingIdentifier
+    window.tabbingMode = .preferred
+    window.toolbarStyle = .unified
+    window.titleVisibility = .visible
+    // Frame autosave is geometry only. AppKit window restoration is owned
+    // here: titled windows default restorable; these two assignments are the
+    // verified off switch (NSWindowRestoration.h). Loginwindow must not
+    // restitch the Command Deck.
+    window.isRestorable = false
+    window.restorationClass = nil
+    if let frameAutosaveName {
+      window.setFrameAutosaveName(frameAutosaveName)
+    }
+    window.center()
+    return window
+  }
 
+  static func mount<Root: View>(_ root: Root, in window: NSWindow) {
+    let hosting = NSHostingView(rootView: root)
+    // The SwiftUI `.toolbar` becomes the window's toolbar. Title stays native
+    // so the tab bar shows the window title the controller sets.
+    hosting.sceneBridgingOptions = [.toolbars]
+    window.contentView = hosting
+  }
+}
+
+/// The console tab. The App retains this controller after close; reopen
+/// mounts the same session, so no runtime state is ever lost to a window.
+@MainActor
+final class MainWindowController: NSWindowController, CommandDeckNavigationHandling {
+  let session: WebConsoleSession
+  private let openExternally: @MainActor (URL) -> Void
+
+  init(
+    model: AppModel, session: WebConsoleSession, actions: any CommandDeckActionHandling,
+    openExternally: @escaping @MainActor (URL) -> Void = { NSWorkspace.shared.open($0) }
+  ) {
+    self.session = session
+    self.openExternally = openExternally
+    let window = CommandDeckWindowFactory.makeWindow(
+      title: "Vibecrafted", frameAutosaveName: "VibecraftedCommandDeck")
     super.init(window: window)
-
-    let toolbar = NSToolbar(identifier: "VibecraftedToolbar")
-    toolbar.delegate = self
-    toolbar.displayMode = .iconOnly
-    window.toolbar = toolbar
+    CommandDeckWindowFactory.mount(
+      CommandDeckRootView(model: model, session: session, actions: actions, navigationHandler: self),
+      in: window)
   }
 
   @available(*, unavailable)
-  required init?(coder: NSCoder) {
-    fatalError()
-  }
+  required init?(coder: NSCoder) { fatalError("Use the App-owned session initializer") }
 
-  // MARK: - NSToolbarDelegate
-
-  func toolbar(
-    _ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
-    willBeInsertedIntoToolbar flag: Bool
-  ) -> NSToolbarItem? {
-    switch itemIdentifier {
-    case toolbarSidebarItem:
-      let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-      item.label = "Sidebar"
-      item.toolTip = "Toggle Sidebar"
-      item.image = NSImage(
-        systemSymbolName: "sidebar.left", accessibilityDescription: "Toggle Sidebar")
-      item.target = mainViewController
-      item.action = #selector(NSSplitViewController.toggleSidebar(_:))
-      return item
-
-    case toolbarInspectorItem:
-      let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-      item.label = "Inspector"
-      item.toolTip = "Toggle Inspector"
-      item.image = NSImage(
-        systemSymbolName: "sidebar.right", accessibilityDescription: "Toggle Inspector")
-      item.target = mainViewController
-      item.action = #selector(NSSplitViewController.toggleInspector(_:))
-      return item
-
-    default:
-      return nil
+  /// History moves apply to this window's session only.
+  func navigate(_ action: CommandDeckNavigationAction) {
+    switch action {
+    case .home: session.goHome()
+    case .back: session.goBack()
+    case .forward: session.goForward()
+    case .openInBrowser:
+      guard let url = session.navigation.currentURL, session.runtimeOrigin?.covers(url) == true else { return }
+      openExternally(url)
     }
   }
+}
 
-  func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-    [toolbarSidebarItem, .flexibleSpace, toolbarInspectorItem]
-  }
+@MainActor
+private struct CommandDeckRootView: View {
+  let model: AppModel
+  let session: WebConsoleSession
+  let actions: any CommandDeckActionHandling
+  let navigationHandler: any CommandDeckNavigationHandling
 
-  func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-    [toolbarSidebarItem, .flexibleSpace, toolbarInspectorItem]
+  var body: some View {
+    CommandDeckView(
+      presentation: model.presentation, actions: actions,
+      navigation: session.navigation, navigationHandler: navigationHandler
+    ) {
+      WebConsoleHost(session: session)
+    }
   }
 }

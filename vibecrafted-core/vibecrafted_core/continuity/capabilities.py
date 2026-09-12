@@ -26,10 +26,12 @@ historical evidence, but nothing may ever select or execute the gemini binary
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, fields
+from pathlib import Path
 from typing import Any
 
 from ..capabilities import ProbeResult as CliProbe
@@ -42,8 +44,7 @@ from ..runtime_paths import agent_tool_search_path
 SUPPORTED = "supported"
 UNSUPPORTED = "unsupported"
 UNVERIFIED = "unverified"
-# Native-fork adds one restricted middle state (codex: fork exists but only
-# in a visible terminal runtime; ``codex exec`` has no fork command).
+# Retained capability value for providers restricted to terminal execution.
 TERMINAL_ONLY = "terminal_only"
 
 # Execution classes. ``evidence_only`` providers contribute historical session
@@ -156,10 +157,9 @@ CAPABILITIES: Mapping[str, ProviderCapability] = {
         ),
         interactive_resume=SUPPORTED,
         noninteractive_resume=SUPPORTED,
-        native_fork=TERMINAL_ONLY,
+        native_fork=SUPPORTED,
         fork_runtime_restrictions=(
-            "top-level `fork` subcommand needs a visible terminal runtime; "
-            "`codex exec` has no fork command — headless fork fails closed"
+            "interactive `fork`; noninteractive `exec fork <id> -`; exec help is checked at admission"
         ),
         prompt_transport="stdin",
         session_identity_event=(
@@ -172,7 +172,7 @@ CAPABILITIES: Mapping[str, ProviderCapability] = {
             cli="codex",
             required_markers=("exec", "resume"),
         ),
-        notes="codex-cli 0.144.5 verified on host 2026-07-18",
+        notes="Installed help 2026-09-09 advertises exec fork; live-source concurrency requires separate acceptance",
     ),
     "gemini": ProviderCapability(
         agent="gemini",
@@ -199,14 +199,20 @@ CAPABILITIES: Mapping[str, ProviderCapability] = {
         agent="agy",
         execution=EXECUTABLE,
         session_id_shape=_SESSION_TOKEN,
-        session_id_sources=("transcript_session_line", "run_meta"),
+        session_id_sources=(
+            "stream_json_init_event",
+            "transcript_session_line",
+            "run_meta",
+        ),
         interactive_resume=SUPPORTED,
-        noninteractive_resume=UNVERIFIED,
+        noninteractive_resume=SUPPORTED,
         native_fork=UNSUPPORTED,
-        fork_runtime_restrictions="no fork surface in agy 1.1.x",
-        prompt_transport="flag_value",
+        fork_runtime_restrictions=(
+            "no native fork flag on agy 1.2.1 help; do not present resume as a fork"
+        ),
+        prompt_transport="stdin",
         session_identity_event=(
-            "none structured; runner-captured transcript `session:` line"
+            "stream-json `init`/`result` events carrying `conversation_id`"
         ),
         cwd_safety=("workspace pinned via `--add-dir .`; no checkout-mutating flags"),
         resume_preserves_cache=None,
@@ -216,12 +222,13 @@ CAPABILITIES: Mapping[str, ProviderCapability] = {
             required_markers=("--continue", "--conversation", "--print"),
         ),
         notes=(
-            "agy 1.1.3 verified on host 2026-07-18: `-c/--continue` (most "
-            "recent) and `--conversation <id>` (resume by ID) exist; the "
-            "headless `--conversation` + `--print` combination is the F06 "
-            "contract still to be proven — core spawn fails closed today. "
-            "Prompt rides the `--print` flag value (ARG_MAX-bound; stdin "
-            "folded via shell shim)"
+            "agy 1.2.1 probed 2026-09-11 on gemini-3.8-flash-high: "
+            "`--conversation <id> --print= --input-format stream-json "
+            "--output-format stream-json` continues the same conversation_id "
+            "and preserves prior-turn context. `--print <prompt>` also composes "
+            "with `--conversation` (ARG_MAX; not the supervised lane). "
+            "Native fork remains unsupported — no `--fork-session` equivalent. "
+            "Interactive `-c/--continue` is most-recent, not exact-id."
         ),
     ),
     "junie": ProviderCapability(
@@ -232,7 +239,7 @@ CAPABILITIES: Mapping[str, ProviderCapability] = {
         interactive_resume=SUPPORTED,
         noninteractive_resume=UNVERIFIED,
         native_fork=UNSUPPORTED,
-        fork_runtime_restrictions="no fork surface in junie 26.x",
+        fork_runtime_restrictions="no verified native fork adapter; top-level help is not exhaustive",
         prompt_transport="stdin",
         session_identity_event=(
             "`--output-format json-stream` telemetry receipt (session id)"
@@ -300,7 +307,7 @@ CAPABILITIES: Mapping[str, ProviderCapability] = {
         interactive_resume=SUPPORTED,
         noninteractive_resume=UNVERIFIED,
         native_fork=UNSUPPORTED,
-        fork_runtime_restrictions="no fork surface in cursor-agent 2026.08.x",
+        fork_runtime_restrictions="no verified native fork adapter; top-level help is not exhaustive",
         prompt_transport="stdin",
         session_identity_event=(
             "stream-json `system`/`init` event carrying `session_id`"
@@ -310,7 +317,7 @@ CAPABILITIES: Mapping[str, ProviderCapability] = {
             "checkout-mutating flags"
         ),
         resume_preserves_cache=None,
-        forbidden_flags=(),
+        forbidden_flags=("--best-of-n",),
         probe_recipe=ProbeRecipe(
             cli="cursor-agent",
             required_markers=("--resume", "--print", "--output-format"),
@@ -321,10 +328,31 @@ CAPABILITIES: Mapping[str, ProviderCapability] = {
             "prompt on argv or stdin; `--output-format stream-json` emits "
             "claude-shaped init/assistant/result events. Interactive "
             "`--resume [chatId]` exists; headless `-p --resume <id>` is "
-            "UNVERIFIED — core native resume fails closed until proven"
+            "UNVERIFIED — core native resume fails closed until proven. "
+            "`--best-of-n` is not a cursor-agent flag — never invent it. "
+            "Permission flags (`--force`, `--trust`, `--mode`) are required "
+            "semantics from the spawn contract and must be present on the "
+            "selected binary; missing required flags fail closed (no silent "
+            "downgrade)."
         ),
     ),
 }
+
+# Flags the launch path may need to verify against the selected cursor-agent
+# --help surface. Presence is evidence; absence of a *required* contract flag
+# is a hard refusal, never a silent drop.
+CURSOR_TRACKED_FLAGS: tuple[str, ...] = (
+    "--print",
+    "--output-format",
+    "--force",
+    "--trust",
+    "--yolo",
+    "--mode",
+    "--sandbox",
+    "--resume",
+    "--workspace",
+    "--best-of-n",
+)
 
 
 def capability_for(agent: str) -> ProviderCapability:
@@ -370,12 +398,65 @@ class ProbeResult:
         }
 
 
+@dataclass(frozen=True)
+class CursorCliSurface:
+    """Installed cursor-agent flag surface — help truth for one selected binary."""
+
+    executable: str | None
+    version: str | None
+    help_text: str
+    flags: Mapping[str, bool] = field(default_factory=dict)
+    state: str = PROBE_FAILED  # confirmed | unsupported | probe_failed
+    detail: str = ""
+    checked_at: str = ""
+
+    def supports(self, flag: str) -> bool:
+        """True when ``flag`` appears on the probed help surface."""
+        return bool(self.flags.get(flag))
+
+    def to_dict(self) -> dict[str, Any]:
+        """Flatten this surface to a JSON-serializable dict."""
+        return {
+            "executable": self.executable,
+            "version": self.version,
+            "flags": dict(self.flags),
+            "state": self.state,
+            "detail": self.detail,
+            "checked_at": self.checked_at,
+            "help_chars": len(self.help_text),
+        }
+
+
 _PROBE_CACHE: dict[str, ProbeResult] = {}
+# Path → (binary identity, surface). Identity invalidates when the file at the
+# same path changes (provider upgrade/downgrade on a shared install location).
+_CURSOR_SURFACE_CACHE: dict[str, tuple[str, CursorCliSurface]] = {}
+
+
+def clear_cursor_surface_cache() -> None:
+    """Drop cached cursor-agent help surfaces (tests + refresh)."""
+    _CURSOR_SURFACE_CACHE.clear()
 
 
 def clear_probe_cache() -> None:
-    """Drop all cached per-agent probe results, forcing the next probe() to re-run."""
+    """Drop cached provider probes and cursor help surfaces."""
     _PROBE_CACHE.clear()
+    clear_cursor_surface_cache()
+
+
+def _executable_identity(path: str | None) -> str:
+    """Stable identity for the file currently at ``path`` (content-sensitive).
+
+    Uses device/inode/size/mtime so a binary replaced at the same PATH entry
+    invalidates the surface cache without requiring ``refresh=True``.
+    """
+    if not path:
+        return "missing"
+    try:
+        st = os.stat(path, follow_symlinks=True)
+    except OSError:
+        return "missing"
+    return f"{st.st_dev}:{st.st_ino}:{st.st_size}:{st.st_mtime_ns}"
 
 
 def _default_runner(timeout: float) -> Runner:
@@ -535,3 +616,247 @@ def probe(
 # Unambiguous alias for the package-root export (the foundation-tool probe is
 # `probe_tool`; this one probes agent providers).
 probe_provider = probe
+
+
+def _help_mentions_flag(help_text: str, flag: str) -> bool:
+    """True when ``flag`` appears as its own token on a help surface.
+
+    Require an identifier boundary so ``--trust`` does not match
+    ``--trusted-workspace`` by accident.
+    """
+    if not flag or flag not in help_text:
+        return False
+    pattern = re.compile(rf"(?<![A-Za-z0-9_-]){re.escape(flag)}(?![A-Za-z0-9_-])")
+    return pattern.search(help_text) is not None
+
+
+def probe_cursor_cli_surface(
+    *,
+    executable: str | None = None,
+    timeout: float = 10.0,
+    runner: Runner | None = None,
+    refresh: bool = False,
+    help_text: str | None = None,
+    version: str | None = None,
+) -> CursorCliSurface:
+    """Probe the selected ``cursor-agent`` binary for launch-relevant flags.
+
+    Read-only: ``--version`` / ``--help`` only (or an injected ``help_text`` for
+    tests). Missing binaries are ``probe_failed`` — not proof of incapability,
+    but enough to refuse a launch that would otherwise guess flags.
+
+    Only a *successful* bounded ``--help`` may establish flags. Nonzero exit,
+    timeout, or empty help stays ``probe_failed`` — error prose that happens to
+    mention ``--force`` / ``--trust`` is never capability evidence.
+    """
+    checked_at = utc_now_iso()
+    recipe = capability_for("cursor").probe_recipe
+    assert recipe is not None  # cursor always declares a recipe
+    resolved = executable or shutil.which(recipe.cli, path=agent_tool_search_path())
+    cache_key = resolved or f"missing:{recipe.cli}"
+    identity = _executable_identity(resolved)
+    if not refresh and help_text is None:
+        cached = _CURSOR_SURFACE_CACHE.get(cache_key)
+        if cached is not None and cached[0] == identity:
+            return cached[1]
+
+    def _store(surface: CursorCliSurface) -> CursorCliSurface:
+        if help_text is None:
+            _CURSOR_SURFACE_CACHE[cache_key] = (identity, surface)
+        return surface
+
+    if help_text is not None:
+        surface_text = help_text
+        version_text = version
+        state = PROBE_CONFIRMED
+        detail = "injected help surface"
+        exe = resolved
+    else:
+        if resolved is None:
+            return _store(
+                CursorCliSurface(
+                    executable=None,
+                    version=None,
+                    help_text="",
+                    flags={flag: False for flag in CURSOR_TRACKED_FLAGS},
+                    state=PROBE_FAILED,
+                    detail=(
+                        f"{recipe.cli} not found on $PATH — cannot verify required "
+                        "cursor flags; refusing to guess"
+                    ),
+                    checked_at=checked_at,
+                )
+            )
+
+        run = runner or _default_runner(timeout)
+        version_probe = run([resolved, *recipe.version_args])
+        if not version_probe.ok:
+            reason = (
+                version_probe.stderr or version_probe.stdout or "non-zero exit"
+            ).strip()
+            return _store(
+                CursorCliSurface(
+                    executable=resolved,
+                    version=None,
+                    help_text="",
+                    flags={flag: False for flag in CURSOR_TRACKED_FLAGS},
+                    state=PROBE_FAILED,
+                    detail=(
+                        f"{recipe.cli} present at {resolved} but failed to execute: "
+                        f"{reason} — cannot verify required cursor flags"
+                    ),
+                    checked_at=checked_at,
+                )
+            )
+
+        version_text = _first_line(version_probe.stdout or version_probe.stderr)
+        help_probe = run([resolved, *recipe.help_args])
+        # Success-gated: never parse flag names out of failed --help stderr.
+        if not help_probe.ok:
+            reason = (help_probe.stderr or help_probe.stdout or "non-zero exit").strip()
+            exit_bit = (
+                "timed out"
+                if reason == "timeout"
+                else f"failed (exit {help_probe.returncode})"
+            )
+            return _store(
+                CursorCliSurface(
+                    executable=resolved,
+                    version=version_text,
+                    help_text="",
+                    flags={flag: False for flag in CURSOR_TRACKED_FLAGS},
+                    state=PROBE_FAILED,
+                    detail=(
+                        f"{recipe.cli} {version_text or '(unknown version)'} --help "
+                        f"{exit_bit}: {reason} — cannot verify required cursor flags; "
+                        "refusing to treat error prose as capability evidence"
+                    ),
+                    checked_at=checked_at,
+                )
+            )
+
+        surface_text = (help_probe.stdout or "") + "\n" + (help_probe.stderr or "")
+        if not surface_text.strip():
+            return _store(
+                CursorCliSurface(
+                    executable=resolved,
+                    version=version_text,
+                    help_text="",
+                    flags={flag: False for flag in CURSOR_TRACKED_FLAGS},
+                    state=PROBE_FAILED,
+                    detail=(
+                        f"{recipe.cli} {version_text or '(unknown version)'} returned "
+                        "empty --help — cannot verify required cursor flags"
+                    ),
+                    checked_at=checked_at,
+                )
+            )
+        state = PROBE_CONFIRMED
+        detail = (
+            f"{recipe.cli} {version_text or '(unknown version)'} help surface "
+            "captured for flag enforcement"
+        )
+        exe = resolved
+
+    flags = {
+        flag: _help_mentions_flag(surface_text, flag) for flag in CURSOR_TRACKED_FLAGS
+    }
+    return _store(
+        CursorCliSurface(
+            executable=exe,
+            version=version_text,
+            help_text=surface_text,
+            flags=flags,
+            state=state,
+            detail=detail,
+            checked_at=checked_at,
+        )
+    )
+
+
+def require_cursor_flags(
+    flags: Sequence[str],
+    surface: CursorCliSurface,
+    *,
+    permissions: str = "",
+) -> tuple[str, ...]:
+    """Return ``flags`` unchanged when every required flag is on ``surface``.
+
+    Never drops a missing flag. Missing required semantics fail with a clear
+    reason naming the selected binary/version and the absent flag(s).
+    """
+    required = tuple(flag for flag in flags if flag.startswith("-"))
+    if surface.state == PROBE_FAILED:
+        raise ValueError(
+            surface.detail
+            or "cursor-agent flag probe failed — refusing to launch with guessed flags"
+        )
+    missing = [flag for flag in required if not surface.supports(flag)]
+    if missing:
+        version = surface.version or "(unknown version)"
+        exe = surface.executable or "cursor-agent"
+        policy = f" for permissions={permissions}" if permissions else ""
+        raise ValueError(
+            f"cursor-agent {version} at {exe} lacks required flag(s) "
+            f"{', '.join(missing)}{policy}; refusing to launch "
+            "(no silent downgrade). Update cursor-agent or select a binary "
+            "that exposes these flags."
+        )
+    if "--best-of-n" in required:
+        raise ValueError(
+            "cursor-agent does not support --best-of-n; refusing to invent it"
+        )
+    return tuple(flags)
+
+
+def validate_cursor_resume_chat_id(value: str) -> str:
+    """Validate interactive ``--resume`` input: chatId only, never a brief path.
+
+    ``cursor-agent --resume`` selects a session by chatId. Passing a brief
+    markdown path (Founder incident 2026-09-08) is invalid and must fail
+    before launch.
+    """
+    normalized = str(value or "").strip()
+    if not normalized:
+        raise ValueError("cursor --resume requires a non-empty chatId")
+    if normalized.startswith("-"):
+        raise ValueError(
+            f"cursor --resume takes chatId, not a flag-shaped value: {normalized!r}"
+        )
+    # Path-shaped inputs: absolute/relative paths, existing files, brief suffixes.
+    path_like = (
+        "/" in normalized
+        or "\\" in normalized
+        or normalized.startswith("~")
+        or normalized.endswith((".md", ".txt", ".markdown", ".prompt"))
+    )
+    if path_like:
+        raise ValueError(
+            "cursor --resume takes chatId, not a brief/file path; "
+            f"refusing {normalized!r}"
+        )
+    expanded = Path(normalized).expanduser()
+    try:
+        exists = expanded.exists()
+    except OSError:
+        exists = False
+    if exists:
+        raise ValueError(
+            "cursor --resume takes chatId, not a filesystem path; "
+            f"refusing existing path {normalized!r}"
+        )
+    return normalized
+
+
+def reject_unsupported_cursor_argv(argv: Sequence[str]) -> None:
+    """Fail closed when argv invents flags cursor-agent does not expose."""
+    if "--best-of-n" in argv:
+        raise ValueError(
+            "cursor-agent does not support --best-of-n; refusing to invent it"
+        )
+    for index, token in enumerate(argv):
+        if token == "--resume" and index + 1 < len(argv):
+            nxt = argv[index + 1]
+            if nxt.startswith("-"):
+                continue
+            validate_cursor_resume_chat_id(nxt)

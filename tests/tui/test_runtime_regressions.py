@@ -430,11 +430,16 @@ def test_interactive_resume_fails_without_operator_target_for_every_agent(
     assert "VIBECRAFTED_OPERATOR_SESSION" in result.stderr
 
 
+BOUND_WORKSPACE_ID = "01a06f41-ebc6-706b-990e-b7ba921310b3"
+
+
 def _probe_interactive_operator_target(
     tmp_path: Path,
     *,
     sessions_body: str,
     repo_basename: str,
+    bound_session: str = "vibecrafted-921310b3",
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Resolve interactive target against a fake vc-frame listing only.
 
@@ -469,8 +474,48 @@ def _probe_interactive_operator_target(
     ):
         env.pop(key, None)
     env["PATH"] = f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
-    env["VIBECRAFTED_ROOT"] = str(tmp_path / repo_basename)
-    (tmp_path / repo_basename).mkdir(exist_ok=True)
+    # VIBECRAFTED_ROOT cannot carry the project here: sourcing vetcoders.sh
+    # rebinds it (and VIBECRAFTED_RUNTIME_ROOT) to the runtime generation
+    # (shell/lib/core.sh). The project is the caller's location, so the probe
+    # states it the way an operator does -- by standing in the repository.
+    for stale in (
+        "SPAWN_ROOT",
+        "VIBECRAFTED_ROOT",
+        "VIBECRAFTED_RUNTIME_ROOT",
+        # A dispatched worker exports its own workspace identities and pytest
+        # inherits them; the operator's terminal starts without them.
+        "VIBECRAFTED_WORKSPACE_ID",
+        "VIBECRAFTED_SESSION_ID",
+        "VIBECRAFTED_WORKSPACE_INSTANCE_ID",
+        "VIBECRAFTED_WORKSPACE_ROOT",
+        "VIBECRAFTED_BUILD_ID",
+    ):
+        env.pop(stale, None)
+    project_dir = tmp_path / repo_basename
+    project_dir.mkdir(exist_ok=True)
+
+    # The canonical workspace owner: the selected generation's CLI. Ownership
+    # is a catalogue binding, never a name that happens to match the checkout
+    # directory, so the probe answers as the catalogue does and records which
+    # root it was asked about.
+    owner_calls = tmp_path / "owner-calls"
+    owner_cli = tmp_path / "owner-cli"
+    _write_fake_command(
+        owner_cli,
+        "#!/usr/bin/env bash\n"
+        f'printf "%s\\n" "$*" >> "{owner_calls}"\n'
+        'if [[ "$1 $2" == "workspace resolve" ]]; then\n'
+        f"  echo VIBECRAFTED_WORKSPACE_ID={BOUND_WORKSPACE_ID}\n"
+        "  echo VIBECRAFTED_SESSION_ID=sess-canonical\n"
+        "  echo VIBECRAFTED_WORKSPACE_INSTANCE_ID=inst-canonical\n"
+        f"  echo VIBECRAFTED_OPERATOR_SESSION={bound_session}\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n",
+    )
+    env["VIBECRAFTED_PRODUCT_CORE_CLI"] = str(owner_cli)
+    env["VIBECRAFTED_TEST_OWNER_CALLS"] = str(owner_calls)
+    env.update(extra_env or {})
 
     return subprocess.run(
         [
@@ -490,7 +535,7 @@ def _probe_interactive_operator_target(
             ),
         ],
         check=False,
-        cwd=REPO_ROOT,
+        cwd=project_dir,
         env=env,
         capture_output=True,
         text=True,
@@ -501,14 +546,23 @@ def _probe_interactive_operator_target(
 def test_interactive_target_prefers_repo_bound_live_session(
     tmp_path: Path,
 ) -> None:
-    """Detected target is not only (attached)/(current) — repo-bound live counts."""
+    """Detected target is the session the catalogue BINDS to this checkout.
+
+    Migrated 2026-09-07 (S1 R8): this used to assert that a live session named
+    after the repository directory is "repo-bound". It is not — a same-named
+    checkout elsewhere produces the identical name and owns nothing here. The
+    acceptance is now the stronger one: the workspace-bound session wins even
+    while a live basename twin sits next to it.
+    """
     result = _probe_interactive_operator_target(
         tmp_path,
-        sessions_body="other [Created]\nvibecrafted [Created]\n",
+        sessions_body="other [Created]\nvibecrafted [Created]\n"
+        "vibecrafted-921310b3 [Created]\n",
         repo_basename="vibecrafted",
     )
     assert result.returncode == 0, result.stderr
-    assert "target=[vibecrafted]" in result.stdout
+    assert "target=[vibecrafted-921310b3]" in result.stdout, result.stdout
+    assert "target=[vibecrafted]" not in result.stdout, result.stdout
 
 
 def test_interactive_target_ambiguous_live_sessions_fail_closed(
@@ -522,22 +576,62 @@ def test_interactive_target_ambiguous_live_sessions_fail_closed(
     )
     assert result.returncode == 0, result.stderr
     assert "target=[]" in result.stdout
-    assert "ambiguous" in result.stderr
+    assert "unrelated live vc-frame session" in result.stderr
     assert "alpha" in result.stderr
     assert "beta" in result.stderr
     assert "VIBECRAFTED_OPERATOR_SESSION" in result.stderr
 
 
-def test_interactive_target_single_live_session_is_detected(
+def test_interactive_target_single_live_session_is_not_adopted(
     tmp_path: Path,
 ) -> None:
+    """A lone live session elsewhere is a coincidence, not ownership.
+
+    Reversed on 2026-09-06. Adopting "the only live session" is what let a
+    host-a window capture a resume launched from mlx-batch-runner: the
+    provider tab was dispatched into somebody else's project. Ownership must be
+    proven (this caller's frame, an explicit target, or this project's own
+    session), never inferred from a global count.
+    """
     result = _probe_interactive_operator_target(
         tmp_path,
         sessions_body="solo-session [Created]\n",
         repo_basename="other-repo",
     )
     assert result.returncode == 0, result.stderr
-    assert "target=[solo-session]" in result.stdout
+    assert "target=[]" in result.stdout
+    assert "solo-session" in result.stderr
+
+
+def test_interactive_target_ignores_the_runtime_generation_as_project(
+    tmp_path: Path,
+) -> None:
+    """The generation is not a project, even though every front door pins it.
+
+    vc_start.rs, vc-terminal-product-entry.sh and shell/lib/core.sh all export
+    VIBECRAFTED_ROOT == VIBECRAFTED_RUNTIME_ROOT. Reading that as the project
+    named the operator's session after the release directory.
+    """
+    generation = tmp_path / "runtime-generation"
+    generation.mkdir()
+    result = _probe_interactive_operator_target(
+        tmp_path,
+        sessions_body="runtime-generation [Created]\nvibecrafted [Created]\n"
+        "vibecrafted-921310b3 [Created]\n",
+        repo_basename="vibecrafted",
+        extra_env={
+            "VIBECRAFTED_ROOT": str(generation),
+            "VIBECRAFTED_RUNTIME_ROOT": str(generation),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert "target=[vibecrafted-921310b3]" in result.stdout, result.stdout
+    assert "target=[runtime-generation]" not in result.stdout, result.stdout
+    # Stronger than the old basename assertion: the canonical owner was asked
+    # about the PROJECT, never about the release directory.
+    asked = (tmp_path / "owner-calls").read_text(encoding="utf-8")
+    assert str(tmp_path / "vibecrafted") in asked, asked
+    assert str(generation) not in asked, asked
 
 
 def test_public_and_packaged_resume_help_describe_provider_neutral_contract() -> None:

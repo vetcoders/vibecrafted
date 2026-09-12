@@ -10,9 +10,10 @@ no-await lifecycle, subagents, watchers) and what actually fixes it.
 After dispatch, arm `vibecrafted await <agent> --run-id <id>` immediately,
 supervisor-side. Control-plane JSON, report files, transcripts, panes, and
 scheduled wakeups are diagnostic only, not wake signals. Hedging await with
-ad-hoc pollers/watchers is a Class 3 violation; fix the `vc-server` await hub,
-do not normalize the hedge. `--timeout` is an idle window; add `--hard-cap`
-when the caller requires an absolute deadline.
+ad-hoc pollers/watchers is a Class 3 violation; fix `control_plane.await_run`
+and the dispatcher Unix-stream fanout, do not normalize the hedge.
+`--timeout` is an idle window; add `--hard-cap` when the caller requires an
+absolute deadline.
 
 Liveness is always a 3-signal decision before declaring a run done: confirm (1)
 the await verdict, (2) terminal state in run meta, and (3) worker pid dead; when
@@ -280,18 +281,12 @@ above was always unconditional; now the code is too._
 **Receipt truth**: launch-log / control-plane field `operator_session` is
 the **actual worker host** after the rules above, not the human seat name.
 
-**Out of scope for this cut**: sidebar UI grouping chrome inside the vc-frame
-repo beyond the existing session-manager rail; migrating live PTYs without
-recreate (vc-frame always recreates for triage); forcing marbles shell-entrypoint
-off the operator seat (primary fleet path is scripts/lib).
-
-**In scope (landed runtime wire)**: caller-side `triage_finished_run` /
-`spawn_triage_run` → `vc-frame triage-run`, origin stamp in meta, conjunction
-classifier, fail-open receipts. See
-[`TRIAGE_AND_SESSIONS.md`](./TRIAGE_AND_SESSIONS.md). If tools home lags the
-checkout that contains the wire, terminal viewer tabs may stay in the work
-session. That projection failure must not change settlement-ledger `f·x·n`
-counts — install, do not assume git alone refreshed the daily driver.
+**Current ownership**: supervised lifecycle code finalizes canonical run
+artifacts without creating, moving or closing presentation sessions. Run
+browsing belongs to vc-server/control-plane routes and VOC; the Frame rail is
+only a workspace navigator. `run_triage` and `vc-frame triage-run` remain
+manual compatibility tools, not automatic lifecycle hooks. See
+[`TRIAGE_AND_SESSIONS.md`](./TRIAGE_AND_SESSIONS.md).
 
 ---
 

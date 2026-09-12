@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import shlex
-import shutil
 import sys
+from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
 from xml.parsers.expat import ExpatError
 
 import pytest
+from _runtime_pack_fixture import seed_runtime_pack
 from vibecrafted_core import doctor
+
+from scripts import vetcoders_install as installer
 
 
 def test_installer_module_loads_source_file_without_mutating_sys_path(
@@ -638,7 +641,14 @@ def _seed_truth(root: Path, content: str = "layout ok\n") -> None:
 
 
 def _truth_sandbox(tmp_path: Path, monkeypatch) -> tuple[Path, Path, Path]:
-    """Tools home with one published generation behind vibecrafted-current."""
+    """Publish one sealed Runtime Pack behind ``vibecrafted-current``.
+
+    These tests exercise doctor after the immutable-generation admission gate,
+    so the fixture must use the same materialization, manifest binding, and
+    payload validation path as a real package.  A hand-made config tree has no
+    runtime-manifest.json and therefore correctly fails before the behavior
+    each test intends to prove.
+    """
     from vibecrafted_core import frontier_assets
 
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
@@ -647,15 +657,33 @@ def _truth_sandbox(tmp_path: Path, monkeypatch) -> tuple[Path, Path, Path]:
         raise FileNotFoundError
 
     monkeypatch.setattr(frontier_assets, "vc_frame_config_source", no_checkout)
-    tools = tmp_path / "tools"
-    generation = tools / "vibecrafted-generation-test"
-    package = generation / "vibecrafted-core" / "vibecrafted_core"
-    _seed_truth(package / "config" / "vc-frame")
-    _seed_truth(package / "runtime" / "generated" / "vc-frame")
-    tools.mkdir(parents=True, exist_ok=True)
-    (tools / "vibecrafted-current").symlink_to(generation)
     home = tmp_path / "home"
     home.mkdir()
+    runtime_home = home / ".local" / "share" / "vibecrafted"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / ".local" / "bin"))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / ".vibecrafted"))
+    monkeypatch.setenv("VC_FRAME_SOCKET_DIR", str(tmp_path / "frame-sockets"))
+    monkeypatch.setattr(
+        installer, "_teardown_owned_runtime_for_uninstall", lambda *_args, **_kwargs: ()
+    )
+    payload = seed_runtime_pack(tmp_path / "runtime-pack")
+    assert (
+        installer.cmd_runtime_install(
+            Namespace(
+                payload_root=str(payload),
+                app_root=None,
+                terminal_host=None,
+                frame_helper=None,
+            )
+        )
+        == 0
+    )
+    tools = runtime_home / "tools"
+    generation = runtime_home / "releases" / "9.9.9+g12345678"
+    assert installer._runtime_generation_payload_errors(generation) == []
+    assert (tools / "vibecrafted-current").resolve(strict=True) == generation
     return tools, generation, home
 
 
@@ -664,7 +692,7 @@ def test_truth_drift_ok_when_generation_agrees(tmp_path: Path, monkeypatch) -> N
 
     findings = doctor._vc_frame_truth_drift_findings(home=home, tools_home=tools)
 
-    assert [finding.level for finding in findings] == ["ok", "ok"]
+    assert [finding.level for finding in findings] == ["ok"]
     assert all(finding.component == "vc-frame:truth" for finding in findings)
 
 
@@ -680,52 +708,30 @@ def test_delivery_reads_package_owned_runtime_generation(
         / "generated"
         / "vc-frame"
     )
-    (generated / "themes").mkdir()
-    (generated / "vc-composer.sh").write_text("#!/bin/sh\n", encoding="utf-8")
-    monkeypatch.setenv("VIBECRAFTED_PREFER_REPO_VC_FRAME", "0")
 
     findings = doctor._vc_frame_delivery_findings(home=home, tools_home=tools)
 
-    runtime = [
-        finding for finding in findings if finding.component == "vc-frame:runtime"
-    ]
-    assert len(runtime) == 1
-    assert runtime[0].level == "ok"
-    assert "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame" in (
-        runtime[0].message
+    assert generated.is_dir()
+    assert (generated / "config.kdl").is_file()
+    assert all(finding.level == "ok" for finding in findings)
+    assert any(
+        finding.component == "vc-frame:view" and "shipped defaults" in finding.message
+        for finding in findings
     )
 
 
 def test_delivery_accepts_exact_physical_runtime_pack_config(
     tmp_path: Path, monkeypatch
 ) -> None:
-    tools, generation, home = _truth_sandbox(tmp_path, monkeypatch)
-    generated = (
-        generation
-        / "vibecrafted-core"
-        / "vibecrafted_core"
-        / "runtime"
-        / "generated"
-        / "vc-frame"
-    )
-    (generated / "themes").mkdir()
-    for name in doctor.OPERATOR_SCRIPT_NAMES:
-        (generated / name).write_text(f"#!/bin/sh\n# {name}\n", encoding="utf-8")
-    view = home / ".config" / "vibecrafted" / "vc-frame"
-    view.parent.mkdir(parents=True)
-    shutil.copytree(generated, view)
+    tools, _, home = _truth_sandbox(tmp_path, monkeypatch)
 
     findings = doctor._vc_frame_delivery_findings(home=home, tools_home=tools)
 
-    relevant = [
-        finding
-        for finding in findings
-        if finding.component == "vc-frame:view"
-        or finding.component == "vc-frame:operator-scripts:view"
-    ]
+    relevant = [finding for finding in findings if finding.component == "vc-frame:view"]
     assert relevant
     assert all(finding.level == "ok" for finding in relevant)
-    assert any("runtime-copy" in finding.message for finding in relevant)
+    assert any("physical" in finding.message for finding in relevant)
+    assert all("runtime-copy" not in finding.message for finding in relevant)
 
 
 def test_truth_drift_fails_when_generation_disagrees_with_itself(
@@ -747,11 +753,11 @@ def test_truth_drift_fails_when_generation_disagrees_with_itself(
 
     split = [finding for finding in findings if finding.level == "fail"]
     assert len(split) == 1
-    assert "disagrees with itself" in split[0].message
+    assert "generation manifest" in split[0].message
     assert "config.kdl" in split[0].message
 
 
-def test_truth_drift_warns_when_dev_checkout_runs_ahead(
+def test_truth_drift_uses_sealed_generation_when_dev_checkout_runs_ahead(
     tmp_path: Path, monkeypatch
 ) -> None:
     from vibecrafted_core import frontier_assets
@@ -763,34 +769,43 @@ def test_truth_drift_warns_when_dev_checkout_runs_ahead(
 
     findings = doctor._vc_frame_truth_drift_findings(home=home, tools_home=tools)
 
-    ahead = [finding for finding in findings if finding.level == "warn"]
-    assert len(ahead) == 1
-    assert "dev checkout differs from published store" in ahead[0].message
+    assert [finding.level for finding in findings] == ["ok"]
+    assert "sealed generation manifest" in findings[0].message
 
 
 def test_truth_drift_fails_on_projection_into_parked_generation(
     tmp_path: Path, monkeypatch
 ) -> None:
-    tools, _, home = _truth_sandbox(tmp_path, monkeypatch)
-    parked = tools / "vibecrafted-generation-parked"
-    parked_generated = (
-        parked
-        / "vibecrafted-core"
-        / "vibecrafted_core"
-        / "runtime"
-        / "generated"
-        / "vc-frame"
+    tools, generation, home = _truth_sandbox(tmp_path, monkeypatch)
+    assert (
+        installer.cmd_runtime_install(
+            Namespace(
+                payload_root=str(
+                    seed_runtime_pack(
+                        tmp_path / "runtime-pack-next", version="9.9.10+g12345679"
+                    )
+                ),
+                app_root=None,
+                terminal_host=None,
+                frame_helper=None,
+            )
+        )
+        == 0
     )
-    _seed_truth(parked_generated)
+    current = tools / "vibecrafted-current"
+    assert current.resolve(strict=True) != generation
     view = home / ".config" / "vibecrafted" / "vc-frame"
-    view.mkdir(parents=True)
-    (view / "config.kdl").symlink_to(parked_generated / "config.kdl")
+    (view / "config.kdl").unlink()
+    (view / "config.kdl").symlink_to(
+        generation
+        / "vibecrafted-core/vibecrafted_core/runtime/generated/vc-frame/config.kdl"
+    )
 
-    findings = doctor._vc_frame_truth_drift_findings(home=home, tools_home=tools)
+    findings = doctor._vc_frame_delivery_findings(home=home, tools_home=tools)
 
     stale = [finding for finding in findings if finding.level == "fail"]
     assert len(stale) == 1
-    assert "parked generation" in stale[0].message
+    assert "physical config.kdl" in stale[0].message
 
 
 def test_truth_drift_fails_on_projection_into_checkout(
@@ -800,14 +815,14 @@ def test_truth_drift_fails_on_projection_into_checkout(
     checkout = tmp_path / "repo/config/vc-frame"
     _seed_truth(checkout)
     view = home / ".config" / "vibecrafted" / "vc-frame"
-    view.mkdir(parents=True)
+    (view / "config.kdl").unlink()
     (view / "config.kdl").symlink_to(checkout / "config.kdl")
 
-    findings = doctor._vc_frame_truth_drift_findings(home=home, tools_home=tools)
+    findings = doctor._vc_frame_delivery_findings(home=home, tools_home=tools)
 
     escaped = [finding for finding in findings if finding.level == "fail"]
     assert len(escaped) == 1
-    assert "escape the active immutable Runtime Pack" in escaped[0].message
+    assert "physical config.kdl" in escaped[0].message
 
 
 def test_doctor_summary_counts_findings() -> None:

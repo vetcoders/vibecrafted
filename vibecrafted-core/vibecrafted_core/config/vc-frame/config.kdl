@@ -60,9 +60,10 @@ simplified_ui true
 // ─── Shell & Display ────────────────────────────────────────────────────────────
 default_shell "zsh"
 // compact chowal rail SESSIONS z nowego default.kdl (2026-07-07)
-// 2026-07-20: default = wbudowany "vibecrafted" (operator layout z railem,
-// Guide + vibecrafted tabs) — zrzut zywego "Vibecrafted Operator"
-default_layout "vibecrafted"
+// The native default and dashboard aliases resolve to the one shipped,
+// regular file: layouts/operator.kdl.  Runtime Packs reject symlinks, so do
+// not point this at an unmaterialized built-in `vibecrafted` layout.
+default_layout "operator"
 copy_command "pbcopy"
 mouse_mode true
 // Rail hover chrome. Defaults in vc-frame are already true; pin so product
@@ -147,10 +148,26 @@ keybinds {
                 payload "down"
             };
         }
+        // Create new workspace through the existing Session Manager. This is
+        // intentionally a plugin focus, never a direct NewTab shortcut.
+        bind "Super n" {
+            LaunchOrFocusPlugin "session-manager" {
+                floating true
+                move_to_focused_tab true
+            };
+        }
+        // Quick cmd uses the active compact-bar's existing click path. Keep
+        // this in shared so the host's Cmd+Shift+. CSI-u event works in LOCK
+        // too; the bar itself selects only its active tab instance.
+        bind "Super Shift ." {
+            MessagePlugin "compact-bar" {
+                name "vc_quick_cmd"
+            };
+        }
         // Command Composer (spec 1.2 §A): Super+e / Cmd+E. Alt+e unbound so
         // macOS Option types Polish `ę`. Uses the one installed product config.
         bind "Super e" {
-            Run "sh" "-c" "if [ -x \"${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame/vc-composer.sh\" ]; then \"${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame/vc-composer.sh\"; else f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${EDITOR:-vim} -c 'set number' -c 'set laststatus=0' -c 'set nowrap' -c 'set textwidth=0' -c 'set sidescroll=1' -c 'nnoremap <silent> <F2> :set wrap! wrap?<CR>' \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"; fi" {
+            Run "sh" "-c" "if [ -x \"${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame/vc-composer.sh\" ]; then \"${XDG_CONFIG_HOME:-$HOME/.config}/vibecrafted/vc-frame/vc-composer.sh\"; else f=$(mktemp \"${TMPDIR:-/tmp}/vc-composer.XXXXXX\") || exit 1; ${EDITOR:-vim} -c 'set nonumber' -c 'set norelativenumber' -c 'set laststatus=0' -c 'set nowrap' -c 'set textwidth=0' -c 'set sidescroll=1' -c 'nnoremap <silent> <F2> :set wrap! wrap?<CR>' \"$f\"; if [ -s \"$f\" ]; then vc-frame action toggle-floating-panes; vc-frame action write-chars \"$(cat \"$f\")\"; fi; rm -f -- \"$f\"; fi" {
                 floating true
                 close_on_exit true
                 name "✍ Composer · ⧉ Paste stack"

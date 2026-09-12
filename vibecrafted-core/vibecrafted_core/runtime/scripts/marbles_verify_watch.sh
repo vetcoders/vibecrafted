@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/util.sh
+source "$SCRIPT_DIR/lib/util.sh"
+
 state_file="$1"
 loop_nr="$2"
 report_path="$3"
@@ -26,7 +30,7 @@ _update_verification_state() {
   local new_status="$1"
   local verified_report="${2:-}"
 
-  python3 - "$state_file" "$loop_nr" "$new_status" "$verified_report" <<'PY'
+  "$(spawn_python_bin)" - "$state_file" "$loop_nr" "$new_status" "$verified_report" <<'PY'
 import datetime
 import fcntl
 import json

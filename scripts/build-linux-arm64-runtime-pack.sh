@@ -1,15 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-die() { printf 'Linux arm64 Runtime Pack build failed: %s\n' "$*" >&2; exit 1; }
+die() { printf 'Linux Runtime Pack build failed: %s\n' "$*" >&2; exit 1; }
 require() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
 
-[[ "$(uname -s):$(uname -m)" == "Linux:aarch64" ]] \
-  || die "builder must run natively on Linux/aarch64"
+[[ "$(uname -s)" == "Linux" ]] || die "builder must run natively on Linux"
+case "$(uname -m)" in
+  aarch64|arm64)
+    architecture="arm64"
+    target="aarch64-unknown-linux-gnu"
+    ;;
+  x86_64)
+    architecture="x64"
+    target="x86_64-unknown-linux-gnu"
+    ;;
+  *) die "unsupported Linux architecture: $(uname -m)" ;;
+esac
+platform="linux-$architecture"
 for tool in cargo curl make npm python3 sha256sum tar uv; do require "$tool"; done
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-output="${1:-$repo_root/build/Vibecrafted_RuntimePack_linux-arm64.tar.gz}"
+output="${1:-$repo_root/build/Vibecrafted_RuntimePack_${platform}.tar.gz}"
 source_revision="${VIBECRAFTED_SOURCE_REVISION:-}"
 [[ "$source_revision" =~ ^[0-9a-f]{40}$ ]] || die "VIBECRAFTED_SOURCE_REVISION must be a full Git SHA"
 
@@ -22,7 +33,8 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/vibecrafted-linux-arm64.XXXXXX")"
 trap 'rm -rf -- "$work"' EXIT INT TERM HUP
 payload="$work/payload"
 mkdir -p "$payload/bin" "$payload/libexec" "$payload/scripts" \
-  "$payload/vibecrafted-core" "$payload/config" "$payload/server/site"
+  "$payload/vibecrafted-core" "$payload/vibecrafted-mcp" \
+  "$payload/config" "$payload/server/site"
 
 fetch_source() {
   local url="$1" expected="$2" archive="$3" destination="$4"
@@ -41,7 +53,10 @@ fetch_source \
   "$frame_archive_sha256" "$work/vc-frame.tar.gz" "$work/vc-frame"
 
 make -C "$work/vc-terminal" release-bins
-install -m 0755 "$work/vc-terminal/target/release/alacritty" "$payload/bin/vc-terminal"
+install -m 0755 "$work/vc-terminal/target/release/alacritty" "$payload/libexec/vc-terminal"
+install -m 0755 "$repo_root/scripts/vc-terminal-product-entry.sh" \
+  "$payload/scripts/vc-terminal-product-entry.sh"
+install -m 0755 "$payload/scripts/vc-terminal-product-entry.sh" "$payload/bin/vc-terminal"
 rm -rf "$work/vc-terminal" "$work/vc-terminal.tar.gz"
 
 frame_sha="$frame_revision"
@@ -69,6 +84,17 @@ server_build="$work/server-build"
 make -C "$repo_root" CARGO_BUILD_ROOT="$server_build" build-server-release
 install -m 0755 "$server_build/vibecrafted-server/release/vibecrafted-server-web" \
   "$payload/bin/vc-server"
+install -m 0755 "$server_build/vibecrafted-server/release/vibecrafted-server-web" \
+  "$payload/bin/vibecrafted-server-web"
+install -m 0755 "$server_build/vibecrafted-server/release/vibecrafted-server-web" \
+  "$payload/bin/vc-server-supervisor"
+(
+  cd "$repo_root/vibecrafted-server"
+  CARGO_TARGET_DIR="$server_build/vibecrafted-server" \
+    cargo build --release --locked -p control-core --bin scaffold-doctor
+)
+install -m 0755 "$server_build/vibecrafted-server/release/scaffold-doctor" \
+  "$payload/bin/scaffold-doctor"
 cp -R "$server_build/vibecrafted-server/site/." "$payload/server/site/"
 rm -rf "$server_build"
 
@@ -82,8 +108,11 @@ install -m 0644 "$repo_root/scripts/installer_brand.py" "$payload/scripts/instal
 install -m 0755 "$repo_root/scripts/vc-frame-product-entry.sh" "$payload/scripts/vc-frame-product-entry.sh"
 cp -R "$repo_root/bin/." "$payload/bin/"
 cp -R "$repo_root/vibecrafted-core/vibecrafted_core" "$payload/vibecrafted-core/"
+cp -R "$repo_root/vibecrafted-mcp/vibecrafted_mcp" "$payload/vibecrafted-mcp/"
 printf '%s+g%.8s\n' "$version" "$source_revision" \
   > "$payload/vibecrafted-core/vibecrafted_core/VERSION"
+printf '%s+g%.8s\n' "$version" "$source_revision" \
+  > "$payload/vibecrafted-mcp/vibecrafted_mcp/VERSION"
 cp -R "$repo_root/config/." "$payload/config/"
 
 python3 "$repo_root/scripts/distribution_manifest.py" carrier \
@@ -98,19 +127,22 @@ python_home="$(cd "$(dirname "$seed_python")/.." && pwd -P)"
 mkdir -p "$payload/python" "$payload/python-site"
 cp -RL "$python_home/." "$payload/python/"
 uv pip install --python "$seed_python" --target "$payload/python-site" \
-  'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7' 'screenscribe==0.1.19'
+  'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7' 'screenscribe==0.1.19' \
+  'fastmcp>=2.0,<3'
 rm -rf "$payload/python-site/bin"
 cat > "$payload/bin/python3" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 runtime_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
-export PYTHONPATH="$runtime_root/vibecrafted-core:$runtime_root/python-site"
+export PYTHONPATH="$runtime_root/vibecrafted-core:$runtime_root/vibecrafted-mcp:$runtime_root/python-site"
 exec "$runtime_root/python/bin/python3.12" "$@"
 EOF
 chmod 0755 "$payload/bin/python3"
 python3 "$repo_root/scripts/render-python-entrypoint-launchers.py" \
   --pyproject "$repo_root/vibecrafted-core/pyproject.toml" --bin-dir "$payload/bin"
+python3 "$repo_root/scripts/render-python-entrypoint-launchers.py" \
+  --pyproject "$repo_root/vibecrafted-mcp/pyproject.toml" --bin-dir "$payload/bin"
 cat > "$payload/bin/screenscribe" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -124,6 +156,7 @@ find "$payload" -depth -type d -name __pycache__ -exec rm -rf {} +
 find "$payload" -type l -print -quit | grep -q . && die "payload contains symlinks"
 
 PAYLOAD="$payload" SOURCE_REVISION="$source_revision" \
+RUNTIME_PLATFORM="$platform" RUNTIME_ARCHITECTURE="$architecture" RUNTIME_TARGET="$target" \
 TERMINAL_REVISION="$terminal_revision" FRAME_REVISION="$frame_revision" python3 - <<'PY'
 import hashlib, json, os, subprocess
 from pathlib import Path
@@ -167,13 +200,14 @@ for name, argv in commands.items():
     records.append({"name": name, "path": f"bin/{name}", "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                     "version_argv": argv, "version_output": output, "source_url": url,
                     "source_revision": revision, "source_archive_sha256": archive_sha,
-                    "target": "aarch64-unknown-linux-gnu", "license": license_name})
-manifest = {"schema": "io.vetcoders.vibecrafted.runtime-inventory.v1", "platform": "linux-arm64",
-            "architecture": "arm64", "executables": records}
+                    "target": os.environ["RUNTIME_TARGET"], "license": license_name})
+manifest = {"schema": "io.vetcoders.vibecrafted.runtime-inventory.v1",
+            "platform": os.environ["RUNTIME_PLATFORM"],
+            "architecture": os.environ["RUNTIME_ARCHITECTURE"], "executables": records}
 (root / "runtime-inventory.json").write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
 PY
 
 "$repo_root/scripts/package-runtime-pack.sh" --payload-root "$payload" --output "$output" \
   --source-revision "$source_revision" --terminal-revision "$terminal_revision" \
   --frame-revision "$frame_revision" --version "$version" \
-  --platform linux-arm64 --architecture arm64
+  --platform "$platform" --architecture "$architecture"

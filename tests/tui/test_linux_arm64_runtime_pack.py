@@ -13,7 +13,7 @@ def _executable(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-def test_foundation_stager_accepts_linux_arm64_as_a_complete_target(
+def test_foundation_stager_rejects_linux_arm64_without_published_packages(
     tmp_path: Path,
 ) -> None:
     fake_bin = tmp_path / "bin"
@@ -38,9 +38,8 @@ def test_foundation_stager_accepts_linux_arm64_as_a_complete_target(
         capture_output=True,
         check=False,
     )
-    assert (
-        "no complete Runtime Foundations payload for Linux/aarch64" not in result.stderr
-    )
+    assert result.returncode != 0
+    assert "no published Runtime Foundations payload for Linux/aarch64" in result.stderr
 
 
 def test_local_vm_image_consumes_only_the_exact_runtime_pack_carrier() -> None:
@@ -70,7 +69,7 @@ def test_local_vm_image_consumes_only_the_exact_runtime_pack_carrier() -> None:
     assert "vc-frame vc-terminal voc" in entry
 
 
-def test_linux_arm64_builder_uses_pinned_public_inputs() -> None:
+def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     builder = (REPO_ROOT / "vibecrafted-vm/RuntimePack.Containerfile").read_text(
         encoding="utf-8"
     )
@@ -108,8 +107,16 @@ def test_linux_arm64_builder_uses_pinned_public_inputs() -> None:
         '"$payload/scripts/vibecrafted"' in assembler
     )
     assert 'printf \'%s+g%.8s\\n\' "$version" "$source_revision"' in assembler
-    assert '"platform": "linux-arm64"' in assembler
-    assert "--platform linux-arm64 --architecture arm64" in assembler
+    assert 'architecture="arm64"' in assembler
+    assert 'architecture="x64"' in assembler
+    assert 'target="aarch64-unknown-linux-gnu"' in assembler
+    assert 'target="x86_64-unknown-linux-gnu"' in assembler
+    assert 'platform="linux-$architecture"' in assembler
+    assert '--platform "$platform" --architecture "$architecture"' in assembler
+    assert '"$payload/bin/vibecrafted-server-web"' in assembler
+    assert '"$payload/bin/vc-server-supervisor"' in assembler
+    assert '"$payload/bin/scaffold-doctor"' in assembler
+    assert '"$payload/vibecrafted-mcp/"' in assembler
 
     foundations = (REPO_ROOT / "scripts/stage-runtime-foundations.sh").read_text(
         encoding="utf-8"

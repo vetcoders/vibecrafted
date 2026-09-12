@@ -78,13 +78,51 @@ spawn_require_file "$plan_file"
 spawn_validate_runtime "$runtime"
 spawn_prepare_paths cursor "$plan_file" "$root" "$mode" "$dry_run"
 spawn_scan_active "${SPAWN_LOG_DIR:-$SPAWN_REPORT_DIR}"
+
+# Probe the *selected* cursor-agent via the canonical Python surface before
+# writing launch meta/receipts. Headless bypass requires --force and --trust
+# (spawn.py PERMISSION_CONTRACT). Only a successful bounded --help may establish
+# flags — never swallow nonzero help or parse error prose. Probe before
+# spawn_write_meta so a refused launch never leaves status=launching.
+cursor_perm_flags="--force --trust"
+if (( !dry_run )); then
+  spawn_require_command cursor-agent
+  probe_core="$(spawn_python_core_path 2>/dev/null || { cd "$SCRIPT_DIR/../../.." && pwd; })"
+  probe_py="$(spawn_python_bin)"
+  cursor_probe_timeout="${VIBECRAFTED_CURSOR_PROBE_TIMEOUT_S:-10}"
+  set +e
+  cursor_probe_out="$(
+    PYTHONPATH="$probe_core${PYTHONPATH:+:$PYTHONPATH}" \
+      "$probe_py" - "$cursor_probe_timeout" <<'PY' 2>&1
+import sys
+
+from vibecrafted_core.continuity.capabilities import (
+    probe_cursor_cli_surface,
+    require_cursor_flags,
+)
+
+timeout = float(sys.argv[1]) if len(sys.argv) > 1 else 10.0
+try:
+    surface = probe_cursor_cli_surface(timeout=timeout, refresh=True)
+    require_cursor_flags(
+        ("--force", "--trust"), surface, permissions="bypass"
+    )
+except Exception as exc:  # noqa: BLE001 — surface refusal to spawn_die
+    print(exc)
+    raise SystemExit(1) from exc
+print(surface.version or "unknown")
+PY
+  )"
+  cursor_probe_rc=$?
+  set -e
+  if (( cursor_probe_rc != 0 )); then
+    spawn_die "${cursor_probe_out:-cursor-agent capability probe failed; cannot verify required flags --force --trust (no silent downgrade)}"
+  fi
+fi
+
 runtime_input="$SPAWN_TMP_DIR/${SPAWN_TS}_${SPAWN_RUN_ID}_${SPAWN_SLUG}_cursor_prompt.md"
 spawn_build_runtime_prompt "$SPAWN_PLAN" "$runtime_input" "$SPAWN_REPORT" cursor "$model"
 spawn_write_meta "$SPAWN_META" "launching" "cursor" "$mode" "$SPAWN_ROOT" "$SPAWN_PLAN" "$SPAWN_REPORT" "$SPAWN_TRANSCRIPT" "$SPAWN_LAUNCHER" "$model"
-
-if (( !dry_run )); then
-  spawn_require_command cursor-agent
-fi
 
 qroot="$(spawn_shell_quote "$SPAWN_ROOT")"
 qruntime="$(spawn_shell_quote "$runtime_input")"
@@ -126,15 +164,16 @@ salvage_success_report="if [[ \$pipeline_status -eq 0 && ! -s $qreport && -s $ql
 salvage_failure_report="if [[ \$pipeline_status -ne 0 && ! -s $qreport ]]; then { printf '%s\n' '---'; printf 'run_id: %s\n' \"\${SPAWN_RUN_ID:-unknown}\"; printf 'prompt_id: %s\n' \"\${SPAWN_PROMPT_ID:-unknown}\"; printf 'agent: %s\n' \"\${SPAWN_AGENT:-cursor}\"; printf 'skill: %s\n' \"\${SPAWN_SKILL_CODE:-unknown}\"; printf 'model: %s\n' \"\${SPAWN_MODEL:-unknown}\"; printf 'status: failed\n'; printf 'session_id: %s\n' \"\${SPAWN_SESSION_ID:-pending}\"; printf 'repo_path: %s\n' \"\${SPAWN_ROOT:-unknown}\"; printf 'tokens_input: 0\n'; printf 'tokens_output: 0\n'; printf 'tokens_total: 0\n'; printf 'cost_usd: unknown\n'; printf '%s\n\n' '---'; if [[ -s $qlast_message ]]; then cat $qlast_message; else printf '%s\n' 'Cursor failed before writing a standalone report file, and no final message was captured.'; printf '%s\n' 'See transcript for the full event stream:'; printf '%s\n' $qtranscript; printf '%s\n' 'Last message path checked:'; printf '%s\n' $qlast_message; fi; } > $qreport; fi;"
 # Human pane: AgentStreamParser. Raw stream-json teed to transcript for await.
 # cursor-agent emits claude-shaped init/assistant/result events; `-p` reads the
-# prompt from stdin. `--force --trust` mirror the headless bypass policy in
-# spawn.py (PERMISSION_POLICIES cursor lane).
+# prompt from stdin. Permission flags are probed above against the selected
+# binary (spawn.py PERMISSION_POLICIES cursor lane) — never invent --best-of-n;
+# --resume takes chatId, not a brief path.
 # Prefer the runtime's shared resolver because checkout launchers live at
 # <repo>/runtime/scripts while wheel launchers live under vibecrafted_core.
 filter_core="$(spawn_python_core_path 2>/dev/null || { cd "$SCRIPT_DIR/../../.." && pwd; })"
 qfilter_py="$(spawn_shell_quote "$(spawn_python_bin)")"
 qfilter_core="$(spawn_shell_quote "$filter_core")"
 qfilter_cmd="PYTHONPATH=$qfilter_core $qfilter_py -m vibecrafted_core.agent_stream --agent cursor"
-launch_cmd="set -o pipefail && cd $qroot && { rm -f $qlast_message; cursor-agent -p --output-format stream-json --force --trust $model_flag < $qruntime 2>&1 | tee -a $qtranscript | $qfilter_cmd; pipeline_status=\$?; $last_message_extract $salvage_success_report $salvage_failure_report exit \$pipeline_status; }"
+launch_cmd="set -o pipefail && cd $qroot && { rm -f $qlast_message; cursor-agent -p --output-format stream-json $cursor_perm_flags $model_flag < $qruntime 2>&1 | tee -a $qtranscript | $qfilter_cmd; pipeline_status=\$?; $last_message_extract $salvage_success_report $salvage_failure_report exit \$pipeline_status; }"
 
 combined_success="${cursor_success_hook}${success_hook_extra:+
 $success_hook_extra}"

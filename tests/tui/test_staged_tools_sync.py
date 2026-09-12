@@ -25,6 +25,9 @@ from scripts import vetcoders_install as installer
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _RUNTIME_LOADED_SERVICE_HOME = installer._runtime_loaded_service_home
+_RUNTIME_LAUNCHER_LIMITS = Path(
+    "vibecrafted-core/vibecrafted_core/runtime/scripts/lib/ulimits.sh"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -43,6 +46,19 @@ def _write_executable(path: Path, body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
     path.chmod(0o755)
+
+
+def _seed_launcher_limits(owner_root: Path) -> Path:
+    """Carry the limit helper the real deck sources out of its own owner root.
+
+    Any fixture that publishes the real `scripts/vibecrafted` must also ship
+    this file: the deck fail-closes when it is missing, unreadable, or a
+    symlink. A published generation always carries it, so real bytes it is.
+    """
+    limits = owner_root / _RUNTIME_LAUNCHER_LIMITS
+    limits.parent.mkdir(parents=True, exist_ok=True)
+    limits.write_bytes((REPO_ROOT / _RUNTIME_LAUNCHER_LIMITS).read_bytes())
+    return limits
 
 
 def _wait_for_text(path: Path, expected: str, *, timeout: float = 5.0) -> None:
@@ -91,6 +107,13 @@ def _write_complete_source(
         root / "bin" / "python3",
         f'#!/bin/sh\nexec {installer.shlex_quote(str(Path(sys.executable).absolute()))} "$@"\n',
     )
+    # The source fixture must carry its native terminal donor, as a real pack does.
+    # Git never tracks the Mach-O host, so a staged checkout alone leaves the
+    # generation materializer without one. It accepts only real executable magic,
+    # so a shell stub would bypass the check instead of satisfying it. Seed the
+    # donor before minting provenance: the carrier must describe the final tree.
+    shutil.copyfile("/usr/bin/true", root / "bin" / "vc-terminal")
+    (root / "bin" / "vc-terminal").chmod(0o755)
     _write_source_provenance_fixture(root)
 
 
@@ -330,6 +353,7 @@ def _write_valid_runtime_generation(root: Path) -> None:
     package = root / "vibecrafted-core" / "vibecrafted_core"
     (package / "skills").mkdir(parents=True)
     (package / "runtime").mkdir()
+    _seed_launcher_limits(root)
     (root / "VERSION").write_text("9.9.8+gold\n", encoding="utf-8")
     deck = root / "scripts" / "vibecrafted"
     deck.parent.mkdir(parents=True)
@@ -2002,8 +2026,6 @@ def test_service_install_executes_exact_staged_supervisor_from_repo_cwd(
     current = tools / "vibecrafted-current"
     bin_dir = home / ".local" / "bin"
     checkout = tmp_path / "checkout"
-    staged_core = current / "staged-core"
-    staged_package = staged_core / "vibecrafted_core"
     source_package = checkout / "vibecrafted-core" / "vibecrafted_core"
     deck = current / "scripts" / "vibecrafted"
     launcher = bin_dir / "vibecrafted"
@@ -2014,6 +2036,17 @@ def test_service_install_executes_exact_staged_supervisor_from_repo_cwd(
     record = tmp_path / "service-install-record.json"
     source_version = "1.0.0+gcheckout"
     staged_version = "9.9.9+gstaged"
+    # `current` is the published pointer, so the supervisor requires a coherent
+    # publication behind it: the module it imports must be the one this
+    # generation ships, and the receipt must own the pointer and entrypoints.
+    generation = runtime_home / "releases" / staged_version
+    staged_core = generation / "vibecrafted-core"
+    staged_package = staged_core / "vibecrafted_core"
+    active = runtime_home / "active.json"
+    receipt = runtime_home / "install-receipt.json"
+    generation.mkdir(parents=True)
+    current.parent.mkdir(parents=True, exist_ok=True)
+    current.symlink_to(generation)
 
     for directory in (
         checkout / "scripts",
@@ -2043,6 +2076,7 @@ def test_service_install_executes_exact_staged_supervisor_from_repo_cwd(
 
     deck.write_bytes((REPO_ROOT / "scripts" / "vibecrafted").read_bytes())
     deck.chmod(0o755)
+    _seed_launcher_limits(generation)
     (staged_package / "__init__.py").write_text(
         f"__version__ = {staged_version!r}\n",
         encoding="utf-8",
@@ -2167,6 +2201,35 @@ if sys.argv[1:2] == ["service"]:
     raise SystemExit(service_main())
 raise SystemExit(runtime.main())
 """,
+    )
+    active.write_text(
+        json.dumps(
+            {
+                "schema": "vibecrafted.active-runtime.v1",
+                "version": staged_version,
+                "runtime_root": str(generation),
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema": "vibecrafted.runtime-install.v1",
+                "version": staged_version,
+                "roots": {"launcher_home": str(bin_dir)},
+                "owned_files": {
+                    str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+                    for path in (active, launcher, supervisor_binary)
+                },
+                "owned_symlinks": {str(current): str(generation)},
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
     )
     environment = os.environ.copy()
     environment.update(
@@ -3341,23 +3404,32 @@ def test_healthy_runtime_snapshot_uses_one_correlated_service_observation(
     assert calls == [("service", "status", "--json")]
 
 
-def test_runtime_service_probe_honors_transaction_deadline(
+@contextmanager
+def _leased_probe_launcher(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+    *,
+    body: str,
+):
+    """Yield (launcher, shared_home, marker) under a real inherited lease.
+
+    ``marker`` is written by the launcher script when it actually starts, so a
+    test can prove whether a child process was launched at all.
+    """
     home = tmp_path / "home"
     shared_home = home / ".vibecrafted"
     tools = home / ".local" / "share" / "vibecrafted" / "tools"
     current = tools / "vibecrafted-current"
-    launcher = tmp_path / "slow-launcher"
+    launcher = tmp_path / "launcher"
+    marker = tmp_path / "launched.marker"
     _write_executable(
         launcher,
-        f"#!{sys.executable}\nimport time\ntime.sleep(5)\n",
+        f"#!{sys.executable}\nimport pathlib, time\n"
+        f"pathlib.Path({str(marker)!r}).write_text('launched')\n" + body,
     )
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("VIBECRAFTED_HOME", str(shared_home))
     monkeypatch.setenv("VIBECRAFTED_TOOLS_HOME", str(tools))
-
     with (
         installer._tools_install_lease(
             current,
@@ -3365,10 +3437,36 @@ def test_runtime_service_probe_honors_transaction_deadline(
         ) as descriptor,
         installer._inherited_tools_install_lease(descriptor),
     ):
-        token = installer._RUNTIME_SERVICE_COMMAND_DEADLINE.set(time.monotonic() + 0.1)
+        yield launcher, shared_home, marker
+
+
+@pytest.mark.parametrize(
+    "remaining_seconds",
+    (0.1, 0.0, -5.0),
+    ids=("sub-floor", "exact-deadline", "already-exhausted"),
+)
+def test_runtime_service_probe_refuses_budget_below_floor_without_a_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    remaining_seconds: float,
+) -> None:
+    """div0-030 contract: a budget that cannot pay for one real observation is
+    refused *before* launch as a typed ``TimeoutError`` subclass, never as a
+    ``subprocess.TimeoutExpired`` manufactured by a doomed sub-floor child."""
+    with _leased_probe_launcher(tmp_path, monkeypatch, body="time.sleep(5)\n") as (
+        launcher,
+        shared_home,
+        marker,
+    ):
+        token = installer._RUNTIME_SERVICE_COMMAND_DEADLINE.set(
+            time.monotonic() + remaining_seconds
+        )
         started = time.monotonic()
         try:
-            with pytest.raises(subprocess.TimeoutExpired):
+            with pytest.raises(
+                installer._RuntimeServiceBudgetExhausted,
+                match="budget exhausted .* below 1s probe floor",
+            ) as raised:
                 installer._run_runtime_service_command(
                     launcher,
                     shared_home,
@@ -3379,7 +3477,140 @@ def test_runtime_service_probe_honors_transaction_deadline(
         finally:
             installer._RUNTIME_SERVICE_COMMAND_DEADLINE.reset(token)
 
+    assert time.monotonic() - started < 0.5
+    assert not marker.exists(), "sub-floor budget must not launch a child"
+    # Drain callers catch (OSError, SubprocessError); the top-level installer
+    # maps TimeoutError to EX_TEMPFAIL. Both contracts stay reachable.
+    assert isinstance(raised.value, TimeoutError)
+    assert isinstance(raised.value, OSError)
+    assert not isinstance(raised.value, subprocess.SubprocessError)
+
+
+def test_runtime_service_probe_honors_transaction_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Above the floor the remaining budget, not the 45s ceiling, bounds a real
+    child; the observed timeout is the typed ``subprocess.TimeoutExpired``."""
+    remaining = 1.5
+    with _leased_probe_launcher(tmp_path, monkeypatch, body="time.sleep(5)\n") as (
+        launcher,
+        shared_home,
+        marker,
+    ):
+        token = installer._RUNTIME_SERVICE_COMMAND_DEADLINE.set(
+            time.monotonic() + remaining
+        )
+        started = time.monotonic()
+        try:
+            with pytest.raises(subprocess.TimeoutExpired) as raised:
+                installer._run_runtime_service_command(
+                    launcher,
+                    shared_home,
+                    "service",
+                    "status",
+                    "--json",
+                )
+        finally:
+            installer._RUNTIME_SERVICE_COMMAND_DEADLINE.reset(token)
+
+    elapsed = time.monotonic() - started
+    assert elapsed < 3.5, f"probe was not bounded by the deadline ({elapsed:.2f}s)"
+    assert marker.exists(), "above-floor budget must launch the real probe"
+    assert installer._RUNTIME_SERVICE_PROBE_MIN_TIMEOUT_SECONDS <= raised.value.timeout
+    assert raised.value.timeout <= remaining
+    assert not installer._runtime_service_observation_is_budget_exhausted(raised.value)
+
+
+def test_runtime_service_probe_with_sufficient_budget_completes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ordinary probe under a comfortable deadline still runs to completion."""
+    with _leased_probe_launcher(
+        tmp_path,
+        monkeypatch,
+        body="import sys\nsys.stdout.write('probe-ok\\n')\nraise SystemExit(0)\n",
+    ) as (launcher, shared_home, marker):
+        token = installer._RUNTIME_SERVICE_COMMAND_DEADLINE.set(time.monotonic() + 30)
+        try:
+            result = installer._run_runtime_service_command(
+                launcher,
+                shared_home,
+                "service",
+                "status",
+                "--json",
+            )
+        finally:
+            installer._RUNTIME_SERVICE_COMMAND_DEADLINE.reset(token)
+
+    assert marker.exists()
+    assert result.returncode == 0
+    assert result.stdout == "probe-ok\n"
+    assert result.args[1:] == ["server", "service", "status", "--json"]
+
+
+def test_runtime_service_settlement_short_circuits_on_exhausted_probe_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The settlement loop must not spin until its own deadline once a probe
+    refuses the remaining budget: the typed exhaustion ends the wait at once
+    with the bounded ``did not settle`` verdict."""
+    calls = 0
+
+    def exhausted_snapshot(_shared_home: Path):
+        nonlocal calls
+        calls += 1
+        raise installer._RuntimeServiceBudgetExhausted(
+            "runtime service observation budget exhausted "
+            "(remaining 0.0958s below 1s probe floor)"
+        )
+
+    monkeypatch.setattr(installer, "_runtime_service_snapshot", exhausted_snapshot)
+
+    started = time.monotonic()
+    with pytest.raises(
+        OSError,
+        match=r"did not settle within 30s \(last observation: .*budget exhausted",
+    ) as raised:
+        installer._wait_for_runtime_service_settlement(tmp_path, allow_healthy=False)
+
     assert time.monotonic() - started < 1
+    assert calls == 1
+    assert isinstance(raised.value.__cause__, installer._RuntimeServiceBudgetExhausted)
+
+
+def test_runtime_service_settlement_treats_plain_timeout_as_bounded_transition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the typed budget exhaustion short-circuits; a generic ``TimeoutError``
+    or a real ``TimeoutExpired`` stays a transient observation bounded by the
+    loop's own deadline."""
+    observations = iter(
+        (
+            TimeoutError("runtime service observation budget exhausted-lookalike"),
+            subprocess.TimeoutExpired(["vibecrafted", "server", "status"], 1.0),
+        )
+    )
+
+    monkeypatch.setattr(
+        installer,
+        "_runtime_service_snapshot",
+        lambda _shared_home: (_ for _ in ()).throw(next(observations)),
+    )
+    monkeypatch.setattr(installer.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(
+        OSError,
+        match=r"did not settle within 0s \(last observation: .*lookalike",
+    ):
+        installer._wait_for_runtime_service_settlement(
+            tmp_path,
+            allow_healthy=False,
+            timeout_seconds=0,
+        )
 
 
 @pytest.mark.parametrize(
@@ -5072,7 +5303,10 @@ def test_server_service_mutations_serialize_through_lifecycle_lock(
     home = tmp_path / "home"
     shared_home = home / ".vibecrafted"
     log = tmp_path / "service-mutations.log"
-    deck = tmp_path / "vibecrafted"
+    # The deck resolves its owner root one level above itself, so it has to sit
+    # in a generation-shaped tree rather than loose in tmp_path.
+    deck = tmp_path / "bin" / "vibecrafted"
+    _seed_launcher_limits(tmp_path)
     source = (REPO_ROOT / "scripts" / "vibecrafted").read_text(encoding="utf-8")
     harness = r"""
 _server_supervisor_cli() {

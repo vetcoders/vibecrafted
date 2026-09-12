@@ -31,7 +31,12 @@ Five producers, five different levers, and the set grows every time a new kind
 of artifact is bundled. So the primary defence is not another flag — it is a
 gate that reads the *finished* payload and knows nothing about how it was made.
 
-Deliberately no allowlist. An allowlist is how a leak becomes normal.
+There is no path allowlist. An allowlist of names is how a leak becomes
+normal. `--accept-digest` is the only exception, and it is exact: only a
+file whose full sha256 matches a pinned published third-party artifact is
+treated as upstream provenance. First-party bytes never match those
+digests. Changing the file, or shipping a different binary under the same
+name, restores a hard fail.
 
 Usage:
     payload_hygiene.py --root <dir> --label <name> --forbid <literal> [...]
@@ -45,6 +50,7 @@ Exit 0 when the payload names none of the forbidden literals, 1 otherwise.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -70,6 +76,14 @@ UNSHIPPED_COMPONENTS = frozenset({"tests", "test", "__tests__", ".github", ".loc
 _BINARY_PROBE = 8192
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(CHUNK), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def count_in_file(path: Path, needles: list[bytes]) -> dict[bytes, int]:
     """Count each needle in one file without holding the whole file in memory."""
     overlap = max((len(n) for n in needles), default=1) - 1
@@ -89,8 +103,14 @@ def count_in_file(path: Path, needles: list[bytes]) -> dict[bytes, int]:
     return found
 
 
-def scan(root: Path, needles: list[bytes]) -> tuple[int, list[dict[str, object]]]:
+def scan(
+    root: Path,
+    needles: list[bytes],
+    *,
+    accept_digests: set[str] | None = None,
+) -> tuple[int, list[dict[str, object]]]:
     """Return (files_scanned, offenders) for every regular file under root."""
+    accepted = {digest.lower() for digest in (accept_digests or set())}
     offenders: list[dict[str, object]] = []
     scanned = 0
     for path in sorted(root.rglob("*")):
@@ -111,12 +131,16 @@ def scan(root: Path, needles: list[bytes]) -> tuple[int, list[dict[str, object]]
                 }
             )
             continue
+        digest = sha256_file(path) if found and accepted else ""
+        upstream = bool(digest) and digest.lower() in accepted
         for needle, count in found.items():
             offenders.append(
                 {
                     "file": str(path.relative_to(root)),
                     "needle": needle.decode("utf-8", "replace"),
                     "count": count,
+                    "sha256": digest,
+                    "accepted_upstream": upstream,
                 }
             )
     offenders.sort(key=lambda row: (-int(row["count"] or 0), str(row["file"])))
@@ -298,6 +322,14 @@ def main(argv: list[str] | None = None) -> int:
         metavar="LITERAL",
         help="an absolute path the payload must never contain; repeatable",
     )
+    parser.add_argument(
+        "--accept-digest",
+        action="append",
+        default=[],
+        metavar="SHA256",
+        help="exact sha256 of a pinned published third-party file; hits in that "
+        "file are upstream provenance, not a first-party leak",
+    )
     parser.add_argument("--json", action="store_true", dest="as_json")
     args = parser.parse_args(argv)
 
@@ -329,7 +361,20 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    scanned, offenders = scan(root, needles)
+    accept_digests: set[str] = set()
+    for raw in args.accept_digest:
+        digest = raw.strip().lower()
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            print(
+                f"FATAL: --accept-digest is not a sha256: {raw!r}",
+                file=sys.stderr,
+            )
+            return 2
+        accept_digests.add(digest)
+
+    scanned, offenders = scan(root, needles, accept_digests=accept_digests)
+    fatal = [row for row in offenders if not row.get("accepted_upstream")]
+    upstream = [row for row in offenders if row.get("accepted_upstream")]
 
     if args.as_json:
         print(
@@ -340,7 +385,9 @@ def main(argv: list[str] | None = None) -> int:
                     "root": str(root),
                     "files_scanned": scanned,
                     "forbidden": [n.decode() for n in needles],
-                    "offenders": offenders,
+                    "accepted_digests": sorted(accept_digests),
+                    "offenders": fatal,
+                    "upstream_provenance": upstream,
                 },
                 indent=2,
             )
@@ -349,15 +396,21 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"payload-hygiene: {args.label} — {scanned} files scanned, {len(needles)} literals"
         )
-        for row in offenders:
+        for row in fatal:
             print(
                 f"  {row['count']:>6}  {row['needle']}  ->  {row['file']}",
                 file=sys.stderr,
             )
+        for row in upstream:
+            print(
+                f"  upstream  {row['count']:>6}  {row['needle']}  ->  {row['file']}  "
+                f"sha256={row.get('sha256')}",
+                file=sys.stderr,
+            )
 
-    if offenders:
+    if fatal:
         print(
-            f"FATAL: {args.label} names the build host in {len(offenders)} place(s); "
+            f"FATAL: {args.label} names the build host in {len(fatal)} place(s); "
             "a signed artifact must not carry the operator's account or checkout",
             file=sys.stderr,
         )

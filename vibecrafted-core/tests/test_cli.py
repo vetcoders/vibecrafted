@@ -3,12 +3,14 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from vibecrafted_core import cli, lifecycle_delivery
+from vibecrafted_core.help_surface import CORE_SURFACE_COMMANDS
 
 
 def _accepted_launch_payload() -> dict[str, object]:
@@ -55,6 +57,14 @@ def test_root_cli_without_command_returns_product_help(capsys) -> None:
     assert "Vibecrafted core command surface" not in output
 
 
+def test_python_owned_commands_keep_surface_and_internal_verbs() -> None:
+    owned = cli.python_owned_commands()
+    assert set(CORE_SURFACE_COMMANDS) <= set(owned)
+    assert "fork-source" in owned
+    assert "capabilities" in owned
+    assert "acp" in owned
+
+
 @pytest.mark.parametrize("launcher", cli.LAUNCHERS)
 def test_every_workflow_help_uses_the_core_product_surface(
     launcher: str, capsys
@@ -92,6 +102,80 @@ def test_resume_session_help_topic_matches_direct_flag(capsys) -> None:
     assert "tracked, detached headless run" in topic_output
 
 
+def test_message_help_topic_matches_direct_flag(capsys) -> None:
+    assert cli.main(["help", "message"]) == 0
+    topic_output = capsys.readouterr().out
+
+    assert cli.main(["message", "--help"]) == 0
+    direct_output = capsys.readouterr().out
+
+    assert topic_output == direct_output
+    display = " ".join(topic_output.split())
+    assert "Codex `queue --thread`" in display
+    assert "does not invent Claude" in display
+
+
+def test_relocate_and_claims_help_reach_owned_parsers(capsys) -> None:
+    assert cli.main(["help", "relocate"]) == 0
+    relocate_help = capsys.readouterr().out
+    assert "snapshot" in relocate_help
+    assert "restore" in relocate_help
+    assert cli.main(["relocate", "--help"]) == 0
+    assert capsys.readouterr().out == relocate_help
+
+    assert cli.main(["help", "claims"]) == 0
+    claims_help = capsys.readouterr().out
+    assert "acquire" in claims_help
+    assert cli.main(["claims", "--help"]) == 0
+    assert capsys.readouterr().out == claims_help
+
+
+def test_bare_partner_delegates_to_deck_not_launch_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launches: list[object] = []
+    runs: list[list[str]] = []
+
+    def fake_launch(*_args, **_kwargs):
+        launches.append(1)
+        raise AssertionError("bare partner must not call launch_workflow")
+
+    def fake_run(cmd, **_kwargs):
+        runs.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(cli, "launch_workflow", fake_launch)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert cli.main(["partner", "claude"]) == 0
+    assert launches == []
+    assert runs
+    assert runs[0][1:] == ["partner", "claude"]
+
+
+def test_partner_with_prompt_delegates_to_deck_not_launch_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launches: list[object] = []
+    runs: list[list[str]] = []
+
+    def fake_launch(*_args, **_kwargs):
+        launches.append(1)
+        raise AssertionError("partner --prompt must not call launch_workflow")
+
+    def fake_run(cmd, **_kwargs):
+        runs.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(cli, "launch_workflow", fake_launch)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert cli.main(["partner", "claude", "--prompt", "do the cut"]) == 0
+    assert launches == []
+    assert runs
+    assert runs[0][1:] == ["partner", "claude", "--prompt", "do the cut"]
+
+
 def test_core_parser_accepts_the_short_prompt_and_file_flags() -> None:
     parser = cli._build_parser()
 
@@ -107,6 +191,23 @@ def test_workflow_prompt_stdin_stays_out_of_argv_and_temp_files(
     tmp_path: Path,
     capsys,
 ) -> None:
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "baseline",
+        ],
+        check=True,
+    )
     seen: dict[str, object] = {}
 
     def fake_launch(spec, source_dir):
@@ -149,7 +250,7 @@ def test_workflow_prompt_stdin_stays_out_of_argv_and_temp_files(
     assert body["status"] == "launching"
 
 
-def test_review_from_home_uses_selected_workspace(
+def test_review_from_home_does_not_adopt_ambient_workspace(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -181,8 +282,8 @@ def test_review_from_home_uses_selected_workspace(
         ]
     )
 
-    assert rc == 0
-    assert Path(str(seen["root"])) == workspace.resolve()
+    assert rc == 2
+    assert not seen
 
 
 def test_review_from_home_without_workspace_is_refused(
@@ -323,6 +424,158 @@ def test_resume_session_prints_dedicated_receipt(
     assert "resume_mode:        manual_explicit" in output
 
 
+def test_workflow_session_calls_manual_resume_and_never_launch_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "home"))
+    seen: dict[str, object] = {}
+
+    def fake_resume(
+        agent: str,
+        agent_session_id: str,
+        source_dir: str | Path,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        seen.update(
+            {
+                "agent": agent,
+                "agent_session_id": agent_session_id,
+                "source_dir": source_dir,
+                **kwargs,
+            }
+        )
+        return {
+            "schema": "vibecrafted.manual_explicit_resume.v1",
+            "accepted": True,
+            "run_id": "rsme-workflow-1",
+            "agent": agent,
+            "agent_session_id": agent_session_id,
+            "runtime_session_id": "runtime-workflow-1",
+            "resume_mode": "manual_explicit",
+            "skill": "workflow",
+            "root": str(tmp_path),
+            "status": "launching",
+        }
+
+    monkeypatch.setattr(cli, "manual_resume_session", fake_resume)
+    monkeypatch.setattr(
+        cli,
+        "resolve_session_selection",
+        lambda agent, token, root: {
+            "agent_session_id": token,
+            "session_selector": token,
+            "identity_source": "explicit_session",
+        },
+    )
+    monkeypatch.setattr(
+        cli,
+        "launch_workflow",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("workflow --session must not call launch_workflow")
+        ),
+    )
+
+    rc = cli.main(
+        [
+            "workflow",
+            "agy",
+            "--session",
+            "839007be-60a5-43f9-842b-cfa0f8a0dc02",
+            "--prompt",
+            "continue the throwaway probe",
+            "--model",
+            "gemini-3.8-flash-high",
+            "--runtime",
+            "headless",
+            "--root",
+            str(tmp_path),
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    assert seen["agent"] == "agy"
+    assert seen["agent_session_id"] == "839007be-60a5-43f9-842b-cfa0f8a0dc02"
+    assert seen["prompt"] == "continue the throwaway probe"
+    assert seen["model"] == "gemini-3.8-flash-high"
+    assert seen["skill"] == "workflow"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["resume_mode"] == "manual_explicit"
+    assert payload["run_id"] == "rsme-workflow-1"
+
+
+def test_research_session_is_refused_before_launch(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "launch_workflow",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("research --session must not launch")
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "manual_resume_session",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("research --session must not resume")
+        ),
+    )
+
+    rc = cli.main(
+        [
+            "research",
+            "agy",
+            "--session",
+            "839007be-60a5-43f9-842b-cfa0f8a0dc02",
+            "--prompt",
+            "continue",
+        ]
+    )
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "research is a multi-agent swarm" in err
+    assert "vibecrafted resume <agent> --session" in err
+
+
+def test_workflow_session_refuses_visible_runtime(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "launch_workflow",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("visible --session must not launch")
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "manual_resume_session",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("visible --session must not resume")
+        ),
+    )
+
+    rc = cli.main(
+        [
+            "workflow",
+            "agy",
+            "--session",
+            "839007be-60a5-43f9-842b-cfa0f8a0dc02",
+            "--prompt",
+            "continue",
+            "--runtime",
+            "visible",
+        ]
+    )
+
+    assert rc == 2
+    assert "headless-only" in capsys.readouterr().err
+
+
 def test_lifecycle_deck_inherits_verified_installer_lease(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -443,9 +696,12 @@ def test_literal_help_prompt_still_launches(monkeypatch, capsys) -> None:
         ("telemetry", "telemetry"),
         ("vc-dashboard", "dashboard"),
         ("vc-dispatch", "dispatch"),
+        ("vc-canary", "canary"),
         ("vc-help", "help"),
+        ("vc-fork", "fork"),
         ("vc-init", "init"),
         ("vc-justdo", "justdo"),
+        ("vc-operator", "operator"),
         ("vc-resume", "resume"),
         ("vc-start", "start"),
     ],
@@ -1400,6 +1656,25 @@ def test_startup_watch_survives_a_null_accepted_field(tmp_path, capsys, monkeypa
 def test_json_launch_prints_one_parseable_receipt_even_with_unserializable_extras(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
 ) -> None:
+    import subprocess
+
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ],
+        check=True,
+    )
     launches = []
 
     def fake_launch(spec, _source_dir):
@@ -1445,6 +1720,26 @@ def test_json_launch_prints_one_parseable_receipt_even_with_unserializable_extra
 def test_json_launch_exception_after_run_created_emits_recovered_receipt(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
 ) -> None:
+    import subprocess
+
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ],
+        check=True,
+    )
+
     def fake_launch(_spec, _source_dir):
         raise RuntimeError("viewer exploded after spawn")
 
@@ -1487,6 +1782,25 @@ def test_json_launch_exception_after_run_created_emits_recovered_receipt(
 def test_json_launch_never_returns_empty_success_without_run_id(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
 ) -> None:
+    import subprocess
+
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ],
+        check=True,
+    )
     monkeypatch.setattr(
         cli,
         "launch_workflow",
@@ -1511,3 +1825,53 @@ def test_json_launch_never_returns_empty_success_without_run_id(
     assert body["accepted"] is True
     assert body["run_id"] == ""
     assert "missing run_id" in captured.err
+
+
+def test_message_command_reads_file_and_projects_truthful_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    message_file = tmp_path / "message.txt"
+    message_file.write_text("private steering", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    def fake_send(**kwargs: object) -> dict[str, object]:
+        seen.update(kwargs)
+        return {
+            "message_id": "msg-1",
+            "run_id": "run-1",
+            "provider": "codex",
+            "delivery_state": "provider_accepted",
+            "agent_ack_state": "unobserved",
+        }
+
+    from vibecrafted_core import message_control
+
+    monkeypatch.setattr(message_control, "send_message", fake_send)
+    assert (
+        cli.main(
+            ["message", "--run-id", "run-1", "--file", str(message_file), "--json"]
+        )
+        == 0
+    )
+    assert seen["text"] == "private steering"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["delivery_state"] == "provider_accepted"
+    assert payload["agent_ack_state"] == "unobserved"
+
+
+def test_message_command_malformed_utf8_is_bounded_failure(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    message_file = tmp_path / "message.txt"
+    message_file.write_bytes(b"\xff\xfeSECRET_MARKER_DO_NOT_PERSIST")
+
+    assert cli.main(["message", "--run-id", "run-1", "--file", str(message_file)]) == 2
+    captured = capsys.readouterr()
+    assert "error: message_file_not_utf8" in captured.err
+    assert "Traceback" not in captured.err
+    assert "Traceback" not in captured.out
+    assert "UnicodeDecodeError" not in captured.err
+    assert "SECRET_MARKER_DO_NOT_PERSIST" not in captured.err

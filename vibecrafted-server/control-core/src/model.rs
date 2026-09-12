@@ -577,6 +577,15 @@ pub struct RunStatus {
     pub completed_at: String,
     #[serde(default)]
     pub session_id: String,
+    /// Canonical Vibecrafted workspace-session identity.  This is deliberately
+    /// separate from the legacy/provider-facing `session_id` field.
+    #[serde(
+        default,
+        alias = "vibecrafted_session_id",
+        alias = "workspace_session_id",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub logical_session_id: String,
     #[serde(default)]
     pub current_loop: Option<i64>,
     #[serde(default)]
@@ -1124,6 +1133,7 @@ impl LifecycleRun {
             launcher_pid: None,
             completed_at: String::new(),
             session_id: String::new(),
+            logical_session_id: String::new(),
             current_loop: None,
             total_loops: None,
             owner_pid: None,
@@ -1384,6 +1394,12 @@ pub struct AgentMeta {
     pub completed_at: String,
     #[serde(default)]
     pub session_id: String,
+    #[serde(
+        default,
+        alias = "vibecrafted_session_id",
+        alias = "workspace_session_id"
+    )]
+    pub logical_session_id: String,
     #[serde(default, deserialize_with = "de_coerced_int")]
     pub owner_pid: Option<i64>,
     #[serde(default, deserialize_with = "de_coerced_int")]
@@ -1543,6 +1559,7 @@ impl AgentMeta {
             launcher_pid: self.launcher_pid,
             completed_at: self.completed_at.clone(),
             session_id: self.session_id.clone(),
+            logical_session_id: self.logical_session_id.clone(),
             current_loop: None,
             total_loops: None,
             owner_pid: self.owner_pid,
@@ -1655,6 +1672,7 @@ pub fn merge_status(existing: Option<RunStatus>, incoming: RunStatus) -> RunStat
         launcher_pid: preferred.launcher_pid.or(other.launcher_pid),
         completed_at: nonempty_or(&preferred.completed_at, &other.completed_at),
         session_id: nonempty_or(&preferred.session_id, &other.session_id),
+        logical_session_id: nonempty_or(&preferred.logical_session_id, &other.logical_session_id),
         current_loop: preferred.current_loop.or(other.current_loop),
         total_loops: preferred.total_loops.or(other.total_loops),
         owner_pid: preferred.owner_pid.or(other.owner_pid),
