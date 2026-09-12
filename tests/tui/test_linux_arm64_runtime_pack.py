@@ -132,10 +132,11 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     )
     assert "@loctree/aicx-linux-x64-gnu" in foundations
     assert "@loctree/loctree-linux-x64-gnu" in foundations
-    assert "stage_npm_bins" in foundations
+    # The candidate stager is the newer npm-integrity iteration: published
+    # tarballs verified by sha512 integrity, no cargo at all.
+    assert "stage_npm_binaries" in foundations
     assert "cargo build --manifest-path" not in foundations
-    assert "cargo install --locked --version" in foundations
-    assert "will not cargo-build those donors" in foundations
+    assert "cargo install" not in foundations
 
 
 def test_linux_x86_64_host_expects_carrier_architecture_x64() -> None:
