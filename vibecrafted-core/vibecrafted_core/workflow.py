@@ -3120,6 +3120,11 @@ def launch_workflow(
         initial_meta.update(worktree_receipt)
     initial_meta.update(controls_receipt)
     initial_meta.update(source_receipt)
+    # Operator model pin is launch truth, not a dispatcher afterthought.
+    # Callers (and tests) read meta.json as soon as the worker exists.
+    initial_meta.update(_model_override_receipt(spec.agent, spec.model))
+    if spec.model:
+        initial_meta["model_effective"] = spec.model
     if claim_digest:
         initial_meta["claim_digest"] = claim_digest
     if len(initial_meta) > 1:

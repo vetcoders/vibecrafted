@@ -12,34 +12,45 @@ commands.
 Live install truth for strangers is [INSTALL.md](INSTALL.md): bootstrap
 today; DMG and portable tarball when a release actually carries them. Both
 build paths are contract-gated and both have been exercised locally — treat
-the first published 4.3.0 artifacts as proven only once the walk-arounds
+the first published 4.3.1 artifacts as proven only once the walk-arounds
 below pass on downloaded bytes.
 
 ## 0. What this cut must produce
 
-One GitHub Release `v4.3.1` whose assets are exactly:
+One GitHub Release `v4.3.1`. The Darwin publisher
+(`scripts/publish-vibecrafted-release.sh`) attaches exactly these assets:
 
 | Asset                                                                 | Proves                                     |
 | --------------------------------------------------------------------- | ------------------------------------------ |
-| `Vibecrafted_4.3.0-<YYYYMMDD>-<sha8>.dmg`                             | signed, notarized desktop product          |
+| `Vibecrafted_4.3.1-<YYYYMMDD>-<sha8>.dmg`                             | signed, notarized desktop product          |
 | that name plus `.dmg.sha256`                                          | checksum a stranger can `shasum -a 256 -c` |
-| `Vibecrafted_RuntimePack_4.3.0-<YYYYMMDD>-<sha8>-darwin-arm64.tar.gz` | same signed binary runtime for macOS CLI   |
+| `Vibecrafted_RuntimePack_4.3.1-<YYYYMMDD>-<sha8>-darwin-arm64.tar.gz` | same signed binary runtime for macOS CLI   |
 | that name plus `.sha256` and `.sig`                                   | checksum plus detached release signature   |
-| `Vibecrafted_4.3.0-<YYYYMMDD>-<sha8>-portable.tar.gz`                 | source fallback for Linux / WSL2 / macOS   |
+| `Vibecrafted_4.3.1-<YYYYMMDD>-<sha8>-portable.tar.gz`                 | source fallback for Linux / WSL2 / macOS   |
 | that name plus `.sha256`                                              | checksum a stranger can `sha256sum -c`     |
 | `release-output.json`                                                 | bound source revisions + DMG path          |
 | `release-output.json.sig`                                             | detached signature over that receipt       |
 
-Exactly six assets. `publish-release` refuses anything else — including the
-old source-tarball set. `portable-output.json` stays local: it is how the
-publisher resolves the tarball name and digests, not something a stranger
-needs.
+That Darwin allowlist is closed. `publish-release` refuses anything else —
+including the old source-tarball set. `portable-output.json` stays local: it
+is how the publisher resolves the tarball name and digests, not something a
+stranger needs.
+
+Linux Runtime Packs (`linux-x64`, `linux-arm64`) are built natively on Linux
+by `scripts/build-linux-runtime-pack.sh`. They are not produced by macOS
+`make release` and are not in the Darwin publisher allowlist. CI builds and
+installs the `linux-x64` pack on every Linux install gate. A published
+`v4.3.1` may attach those packs as extra assets only through a Linux-built
+upload, never by stretching the Darwin allowlist. 4.3.1 does not ship a systemd unit;
+Linux service truth is `vibecrafted server start` (server + guardian process pair),
+not a distro init script.
 
 Runtime Pack provenance uses one target identity everywhere: `platform` is the
-full target slug (`darwin-arm64` or `linux-arm64`) and `architecture` remains
-the independently checked CPU value (`arm64`). The carrier filename uses the
-same platform slug. The App carrier also includes `runtime-pack/VERSION`, bound
-to the payload's provenance and consumed by its copied installer.
+full target slug (`darwin-arm64`, `linux-x64`, or `linux-arm64`) and
+`architecture` remains the independently checked CPU value (`arm64` or `x64`).
+The carrier filename uses the same platform slug. The App carrier also includes
+`runtime-pack/VERSION`, bound to the payload's provenance and consumed by its
+copied installer.
 
 `VERSION` is already `4.3.1`. Local history includes the prior `v3.7.1`,
 `v4.0.0`, and `v4.1.0` tags; there must be no `v4.3.0` tag before this cut.
@@ -159,8 +170,8 @@ rebuild:
 
 ```bash
 make payload-hygiene ARTIFACT=dist/Vibecrafted.app
-make payload-hygiene ARTIFACT=dist/Vibecrafted_4.3.0-<YYYYMMDD>-<sha8>.dmg
-make payload-hygiene ARTIFACT=dist/Vibecrafted_4.3.0-<YYYYMMDD>-<sha8>-portable.tar.gz
+make payload-hygiene ARTIFACT=dist/Vibecrafted_4.3.1-<YYYYMMDD>-<sha8>.dmg
+make payload-hygiene ARTIFACT=dist/Vibecrafted_4.3.1-<YYYYMMDD>-<sha8>-portable.tar.gz
 ```
 
 A `.dmg` is attached read-only and detached again; a tarball is extracted into a
@@ -202,8 +213,8 @@ Expected outputs under `dist/`:
 
 ```text
 Vibecrafted.app
-Vibecrafted_4.3.0-<YYYYMMDD>-<sha8>.dmg
-Vibecrafted_4.3.0-<YYYYMMDD>-<sha8>.dmg.sha256
+Vibecrafted_4.3.1-<YYYYMMDD>-<sha8>.dmg
+Vibecrafted_4.3.1-<YYYYMMDD>-<sha8>.dmg.sha256
 release-output.json
 release-output.json.sig
 ```
@@ -218,8 +229,8 @@ No signing identity, no notary account, no Xcode: `git` and `python3` are
 enough, which is why this channel can also be built on Linux. It adds:
 
 ```text
-Vibecrafted_4.3.0-<YYYYMMDD>-<sha8>-portable.tar.gz
-Vibecrafted_4.3.0-<YYYYMMDD>-<sha8>-portable.tar.gz.sha256
+Vibecrafted_4.3.1-<YYYYMMDD>-<sha8>-portable.tar.gz
+Vibecrafted_4.3.1-<YYYYMMDD>-<sha8>-portable.tar.gz.sha256
 portable-output.json
 ```
 
@@ -231,10 +242,10 @@ for itself. If any of that fails, no bytes are published.
 
 ```bash
 cd dist
-shasum -a 256 -c Vibecrafted_4.3.0-*.dmg.sha256
-xcrun stapler validate Vibecrafted_4.3.0-*.dmg
+shasum -a 256 -c Vibecrafted_4.3.1-*.dmg.sha256
+xcrun stapler validate Vibecrafted_4.3.1-*.dmg
 spctl --assess --type open --context context:primary-signature --verbose=2 \
-  Vibecrafted_4.3.0-*.dmg
+  Vibecrafted_4.3.1-*.dmg
 
 uv run --project vibecrafted-core verify-vibecrafted-walkaround verify-release \
   --release-output dist/release-output.json \
@@ -243,7 +254,7 @@ uv run --project vibecrafted-core verify-vibecrafted-walkaround verify-release \
 uv run --project vibecrafted-core verify-vibecrafted-walkaround walkaround \
   --release-output dist/release-output.json \
   --signature dist/release-output.json.sig \
-  --output dist/vibecrafted-4.3.0-walkaround.json
+  --output dist/vibecrafted-4.3.1-walkaround.json
 ```
 
 | Command                      | What a pass proves                                       |
@@ -257,9 +268,9 @@ uv run --project vibecrafted-core verify-vibecrafted-walkaround walkaround \
 Portable channel, same idea without an Apple ticket to lean on:
 
 ```bash
-tar -xzf dist/Vibecrafted_4.3.0-*-portable.tar.gz -C "$(mktemp -d)"
+tar -xzf dist/Vibecrafted_4.3.1-*-portable.tar.gz -C "$(mktemp -d)"
 python3 scripts/distribution_manifest.py check \
-  --root <unpacked>/vibecrafted-4.3.0 \
+  --root <unpacked>/vibecrafted-4.3.1 \
   --expected-owner-repo vetcoders/vibecrafted \
   --expected-source-revision "$(git rev-parse HEAD)"
 ```
@@ -275,7 +286,7 @@ python3 scripts/distribution_manifest.py check \
 
 ```bash
 # annotated tag at this exact HEAD (not a lightweight tag)
-git tag -a v4.3.1 -m "Vibecrafted 4.3.0"
+git tag -a v4.3.1 -m "Vibecrafted 4.3.1"
 
 # OPERATOR BUTTON — this worker does not push
 git push origin v4.3.1
@@ -322,7 +333,7 @@ never a code defect:
    `tests/tui/test_release_contract.py::test_tag_gate_only_calls_tools_its_own_runner_provides`.
 
 Consequence for whoever pushes the next tag: **treat the first run as an
-experiment, not a formality.** Push `v4.3.0` only from the exact source commit
+experiment, not a formality.** Push `v4.3.1` only from the exact source commit
 that passed this checklist, then verify the tag-triggered gate before any
 publication step depends on it.
 
@@ -346,7 +357,7 @@ GH_TOKEN=... make publish-release
 3. verifies `portable-output.json` names this exact HEAD, and checks the
    local tarball checksum
 4. creates a **draft** release if needed
-5. uploads the six assets
+5. uploads the Darwin allowlist assets
 6. downloads them back into a temp dir and `cmp`s every byte
 7. re-runs `verify-release`, `walkaround`, `stapler`, and `spctl` on the
    downloaded DMG
@@ -362,12 +373,14 @@ notarized, and the mounted app matches the signed receipt.
 ## 7. Public confirmation
 
 ```bash
-gh release view v4.3.0 --json tagName,isDraft,isLatest,assets \
+gh release view v4.3.1 --json tagName,isDraft,isLatest,assets \
   --jq '{tag:.tagName,draft:.isDraft,latest:.isLatest,assets:[.assets[].name]}'
 ```
 
-Expected: `draft=false`, `latest=true`, four names, one of them matching
-`Vibecrafted_4.3.0-*.dmg`.
+Expected: `draft=false`, `latest=true`, Darwin allowlist names, one of them
+matching `Vibecrafted_4.3.1-*.dmg`. Linux Runtime Packs appear only if a
+Linux-built upload attached them; they are not required for the Darwin
+publisher to pass.
 
 Then update the staged Homebrew cask coordinates in
 `packaging/homebrew/Casks/vibecrafted-app.rb` (in the tap repo, after the
@@ -380,7 +393,7 @@ tap exists). See [packaging/homebrew/README.md](../packaging/homebrew/README.md)
 - `release.yml` red or still running
 - Open CodeQL alert on `main`
 - `spctl` or `stapler` fail on either the local or the downloaded DMG
-- Temptation to "just `gh release upload`" a source tarball onto `v4.3.0`
+- Temptation to "just `gh release upload`" a source tarball onto `v4.3.1`
   — `publish-release` will reject unexpected assets
 
 If you only need a local unsigned look, stop after `make dmg` and do not

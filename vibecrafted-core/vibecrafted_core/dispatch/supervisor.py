@@ -20,6 +20,10 @@ from typing import Any
 from vibecrafted_core.control_plane import lookup_run
 from vibecrafted_core.delivery.model import ExecutionEnvelope
 from vibecrafted_core.process_control import validate_process_identity
+from vibecrafted_core.report_contract import (
+    parse_report_text,
+    worker_authored_report,
+)
 from vibecrafted_core.repository_claims import (
     ClaimConflictError,
     RepositoryClaimRegistry,
@@ -978,16 +982,20 @@ class DispatchSupervisor:
             commit = self._cut_delivery_head(cut) or self._git_head(cut)
             return replace(verdict, commit=commit, report=outcome.report_path)
         if receipt.get("report_path") and Path(str(receipt["report_path"])).is_file():
-            empty_report = (
-                not Path(str(receipt["report_path"]))
-                .read_text(encoding="utf-8", errors="replace")
-                .strip()
-            )
-            if empty_report and self._authenticated_terminal_progress(cut, receipt):
-                # An empty launcher-reserved report is not delivery proof. It
-                # may, however, be a killed authenticated worker whose own
-                # progress must be continued in place, not discarded.
+            report_path = Path(str(receipt["report_path"]))
+            # A leftover reserved report template is not delivery proof.
+            # After an authenticated kill/fail, relaunch even when the
+            # report path still has template bytes (those files are
+            # non-empty YAML, so a strip() emptiness check is the lie).
+            if self._authenticated_terminal_progress(cut, receipt):
                 self._mark_resume_owned_progress(cut, receipt)
+                return None
+            if not self._report_is_worker_delivery(report_path):
+                if receipt.get("state") in {"launching", "active", "reported"}:
+                    raise CellContractError(
+                        f"[{cut.id}] previous launch is no longer live and has no"
+                        " authored report; refusing duplicate launch"
+                    )
                 return None
             verdict = self._verify(cut)
             commit = self._cut_delivery_head(cut) or self._git_head(cut)
@@ -1082,24 +1090,39 @@ class DispatchSupervisor:
             )
         )
 
+    @staticmethod
+    def _report_is_worker_delivery(path: Path) -> bool:
+        """True when the file is worker-authored evidence, not a reservation."""
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if not text.strip():
+            return False
+        fields, body, _has_frontmatter = parse_report_text(text)
+        return worker_authored_report(fields, body)
+
     def _authenticated_terminal_progress(
         self, cut: Cut, receipt: dict[str, Any]
     ) -> bool:
         run_id = str(receipt.get("provider_run_id") or "")
         canonical = lookup_run(run_id) if run_id else None
         attempt = str(receipt.get("attempt") or "")
-        if (
-            not isinstance(canonical, dict)
-            or not attempt
-            or str(receipt.get("idempotency_key") or "")
-            != self._dispatch_idempotency_key(cut, attempt)
-            or not self._matches_cut_identity(
+        identity_ok = (
+            isinstance(canonical, dict)
+            and bool(attempt)
+            and str(receipt.get("idempotency_key") or "")
+            == self._dispatch_idempotency_key(cut, attempt)
+            and self._matches_cut_identity(
                 cut, canonical, attempt=attempt, run_id=run_id
             )
-            # The control-plane projection is the canonical process contract:
-            # a terminal status without this explicit absence is stale/ambiguous.
-            or canonical.get("worker_alive") is not False
-        ):
+        )
+        process_current = bool(
+            identity_ok
+            and isinstance(canonical, dict)
+            and self._canonical_process_current(canonical)
+        )
+        projection_dead = (
+            isinstance(canonical, dict) and canonical.get("worker_alive") is False
+        )
+        if not identity_ok or (process_current and not projection_dead):
             # Older providers did not project dispatch identity into meta.json.
             # Their durable launch-idempotency record is sufficient only when it
             # cryptographically binds the stored historical spec and the current
@@ -1129,7 +1152,14 @@ class DispatchSupervisor:
                 if recovered is not None:
                     return True
             return False
-        return str(canonical.get("status") or canonical.get("state") or "").lower() in {
+        # Projection can lag a SIGKILL: worker_alive stays unset/true while
+        # the process is already gone. Do not relaunch a successful completion.
+        status = str(canonical.get("status") or canonical.get("state") or "").lower()
+        if status in {"completed", "report_validated", "verified", "settled"}:
+            return False
+        if projection_dead or not process_current:
+            return True
+        return status in {
             "failed",
             "cancelled",
             "killed",

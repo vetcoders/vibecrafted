@@ -154,8 +154,12 @@ fi
 # window or reading any config, so it must not require the installed product
 # config. The Runtime Pack inventory calls bin/vc-terminal --version on build
 # hosts that have no ~/.config/vibecrafted at all.
-if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
-  exec "$host" --version
+if [[ $# -eq 1 ]]; then
+  case "$1" in
+    --version | -V | --help | -h)
+      exec "$host" "$1"
+      ;;
+  esac
 fi
 if [[ ! -f "$config" || -L "$config" || -L "$HOME/.config" \
   || -L "$HOME/.config/vibecrafted" || -L "$HOME/.config/vibecrafted/vc-terminal" ]]; then

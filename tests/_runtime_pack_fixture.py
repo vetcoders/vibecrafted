@@ -110,7 +110,12 @@ def seed_runtime_pack(
         "config/vc-terminal",
         "vibecrafted-core/vibecrafted_core/runtime/shell/aliases",
     ):
-        shutil.copytree(REPO_ROOT / relative, payload / relative, dirs_exist_ok=True)
+        shutil.copytree(
+            REPO_ROOT / relative,
+            payload / relative,
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns("__pycache__", "*.py[co]"),
+        )
     for relative in (
         "vibecrafted-core/vibecrafted_core/deck/vibecrafted",
         "vibecrafted-core/vibecrafted_core/runtime/shell/vetcoders.sh",

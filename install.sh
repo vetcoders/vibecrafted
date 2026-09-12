@@ -232,6 +232,7 @@ REQUIRED_FILES = frozenset(
         "install.toml",
         "scripts/distribution_manifest.py",
         "scripts/build-linux-arm64-runtime-pack.sh",
+        "scripts/build-linux-runtime-pack.sh",
         "scripts/installer_brand.py",
         "scripts/vetcoders_install.py",
         "scripts/vibecrafted",

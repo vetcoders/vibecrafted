@@ -23,6 +23,23 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 output="${1:-$repo_root/build/Vibecrafted_RuntimePack_${platform}.tar.gz}"
 source_revision="${VIBECRAFTED_SOURCE_REVISION:-}"
 [[ "$source_revision" =~ ^[0-9a-f]{40}$ ]] || die "VIBECRAFTED_SOURCE_REVISION must be a full Git SHA"
+# resolve_source_provenance refuses a one-sided environment pair. The
+# assembler already passes --owner-repo/--source-revision; export both so
+# the inherited environment is an atomic pair, not a half-set GITHUB_SHA.
+export VIBECRAFTED_SOURCE_REVISION="$source_revision"
+export VIBECRAFTED_SOURCE_OWNER_REPO="${VIBECRAFTED_SOURCE_OWNER_REPO:-vetcoders/vibecrafted}"
+# vc-terminal needs edition2024. Ambient cargo 1.83 fails an hour later.
+# Honor an explicit caller RUSTUP_TOOLCHAIN.
+export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.97.0}"
+# Host `c++` is often clang, which cannot find libstdc++ headers on Ubuntu
+# (MEASURED: c++ → clang-18, cstdlib missing). Prefer GCC when present.
+# Honor an explicit CC/CXX from the caller. aicx/loctree are npm prebuilts.
+if command -v gcc >/dev/null 2>&1; then
+  export CC="${CC:-gcc}"
+fi
+if command -v g++ >/dev/null 2>&1; then
+  export CXX="${CXX:-g++}"
+fi
 
 version="$(tr -d '[:space:]' < "$repo_root/VERSION")"
 terminal_revision="d6685ead9018ad89411291d6198476666e48b0f8"
@@ -126,6 +143,8 @@ seed_python="$(find "$work/python-seed" -type f -path '*/bin/python3.12' -print 
 python_home="$(cd "$(dirname "$seed_python")/.." && pwd -P)"
 mkdir -p "$payload/python" "$payload/python-site"
 cp -RL "$python_home/." "$payload/python/"
+# Public channel is `pipx install screenscribe`. The pack vendors the same
+# pinned PyPI wheel into the sealed CPython so the payload stays closed.
 uv pip install --python "$seed_python" --target "$payload/python-site" \
   'jsonschema>=4.23,<5' 'PyYAML>=6.0,<7' 'screenscribe==0.1.19' \
   'fastmcp>=2.0,<3'

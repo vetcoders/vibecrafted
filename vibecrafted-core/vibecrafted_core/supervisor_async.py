@@ -668,6 +668,29 @@ class AsyncSupervisor:
                         latest.setdefault("runtime_session_id", session_id)
                     if claim_digest:
                         latest["claim_digest"] = claim_digest
+                    # Persist the operator pin as soon as the worker exists.
+                    # Completion summary also writes it, but callers (and
+                    # tests) read meta at PROCESS_SPAWNED — before finish.
+                    requested = str(model_receipt.get("model_requested") or "").strip()
+                    if requested:
+                        latest.setdefault("model_requested", requested)
+                        if "model_override_supported" in model_receipt:
+                            latest.setdefault(
+                                "model_override_supported",
+                                model_receipt["model_override_supported"],
+                            )
+                        if "model_override_skipped" in model_receipt:
+                            latest.setdefault(
+                                "model_override_skipped",
+                                model_receipt["model_override_skipped"],
+                            )
+                        skip_reason = str(
+                            model_receipt.get("model_override_skip_reason") or ""
+                        ).strip()
+                        if skip_reason:
+                            latest.setdefault(
+                                "model_override_skip_reason", skip_reason
+                            )
                     return latest
 
                 mutate_run_meta(
