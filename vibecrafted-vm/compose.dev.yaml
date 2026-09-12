@@ -1,0 +1,56 @@
+# Persistent, per-repo personal-dev container.
+#
+# One command:   ./dev-up.sh [repo-path]     (recommended — sets project + mount)
+# Or manually:   VC_WORKSPACE_DIR=/path/to/repo \
+#                  docker compose -p vc-<repo-slug> -f compose.dev.yaml up -d --build
+# Enter shell:   docker compose -p vc-<repo-slug> -f compose.dev.yaml exec dev zsh
+#
+# Per-repo isolation comes from the Compose PROJECT NAME (-p vc-<slug>), which
+# prefixes the named volumes below. That is what makes the container
+# NON-EPHEMERAL: `down` (without -v) and `up` again keep every agent's session
+# history and the AICX corpus. Use `down -v` only when you want to wipe history.
+#
+# This uses the operator-owned Dockerfile.dev image and is not a security
+# boundary. Do not combine with the broad host mounts of compose.yaml.
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: ${VC_DEV_IMAGE:-vibecrafted-dev:debian13}
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    environment:
+      # Tailnet is optional; the node only joins when an auth key is supplied.
+      - TAILSCALE_AUTHKEY=${TAILSCALE_AUTHKEY:-}
+      - TAILSCALE_HOSTNAME=${TAILSCALE_HOSTNAME:-}
+      - TAILSCALE_TAGS=${TAILSCALE_TAGS:-}
+      - AICX_NO_MUTATION_WARN=${AICX_NO_MUTATION_WARN:-0}
+      - VC_DEV_SKIP_SYNC=${VC_DEV_SKIP_SYNC:-0}
+      - TERM=${TERM:-xterm-256color}
+      - COLORTERM=${COLORTERM:-truecolor}
+    volumes:
+      # The repository under work, mounted live (defaults to this checkout).
+      - ${VC_WORKSPACE_DIR:-..}:/workspace:rw
+      # Cross-agent session history + memory — the whole point of this container.
+      # Persisted across down/up/rebuild by the project-prefixed named volumes.
+      - aicx:/root/.aicx
+      - vibecrafted:/root/.vibecrafted
+      - claude:/root/.claude
+      - codex:/root/.codex
+      - gemini:/root/.gemini
+      - kimi:/root/.kimi
+      - vetcoders-config:/root/.config/vetcoders
+      # Tailscale node identity (kept across restarts).
+      - tailscale-state:/var/lib/tailscale
+
+volumes:
+  aicx:
+  vibecrafted:
+  claude:
+  codex:
+  gemini:
+  kimi:
+  vetcoders-config:
+  tailscale-state:

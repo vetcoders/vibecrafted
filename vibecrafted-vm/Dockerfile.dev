@@ -1,0 +1,148 @@
+# Personal-dev workstation image for the vc-workspace persistent container.
+#
+# Purpose: a NON-ephemeral, per-repo dev box that carries session-history
+# continuity across agents. It bakes the toolchain + agent CLIs + the AICX/
+# Loctree memory foundations; the repository itself is mounted at /workspace and
+# the mutable agent/session state lives in named volumes (see compose.dev.yaml),
+# so tearing the container down and rebuilding it never loses history.
+#
+# This is the operator-supplied development image referenced by compose.dev.yaml.
+# It is NOT the hardened Runtime Pack carrier (Containerfile) and NOT a security
+# boundary. Base is Debian 13 (trixie), matching .cursor/Dockerfile and the
+# rest of vibecrafted-vm.
+#
+# Build context is this directory (vibecrafted-vm/); the repo is not copied in.
+FROM debian:trixie-slim
+
+ARG INSTALL_RUST=true
+ARG INSTALL_TAILSCALE=true
+# Agent CLI versions pinned to the same generation as the hardened Containerfile.
+ARG CODEX_VERSION=0.149.1
+ARG CLAUDE_VERSION=2.1.245
+ARG GEMINI_VERSION=0.56.0
+ARG NODE_VERSION=22.19.0
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    HOME=/root \
+    VIBECRAFTED_HOME=/root/.vibecrafted \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:/root/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# System toolchain + the CLI utilities the framework and skills shell out to.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    file \
+    fzf \
+    git \
+    gnupg \
+    iproute2 \
+    iputils-ping \
+    jq \
+    less \
+    libssl-dev \
+    make \
+    openssh-client \
+    pkg-config \
+    procps \
+    python3 \
+    python3-dev \
+    python3-venv \
+    ripgrep \
+    sudo \
+    tar \
+    tmux \
+    unzip \
+    xz-utils \
+    zsh \
+  && rm -rf /var/lib/apt/lists/* \
+  && ln -sf /usr/bin/python3 /usr/local/bin/python
+
+# uv — Python environment owner for the vibecrafted uv workspace.
+RUN curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh
+
+# Node.js (official static build) + corepack. Node powers the agent CLIs and
+# corepack provides repo-pinned pnpm. Pinned to the Containerfile generation.
+RUN arch="$(dpkg --print-architecture)" \
+  && case "$arch" in \
+       amd64) node_arch=x64 ;; \
+       arm64) node_arch=arm64 ;; \
+       *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+     esac \
+  && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" -o /tmp/node.tar.xz \
+  && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
+  && rm /tmp/node.tar.xz \
+  && corepack enable \
+  && npm config set fund false \
+  && npm config set audit false
+
+# Agent CLIs. claude/codex/gemini via npm at pinned versions; Kimi Code CLI via
+# its official installer (vendor-recommended, no Node coupling) with an npm
+# fallback. Session state for each lives under /root/.<agent> and is persisted
+# by named volumes for cross-agent history continuity.
+RUN npm install --global \
+      "@openai/codex@${CODEX_VERSION}" \
+      "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
+      "@google/gemini-cli@${GEMINI_VERSION}" \
+  && codex --version \
+  && claude --version \
+  && gemini --version
+RUN curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash \
+  || npm install --global @moonshot-ai/kimi-code \
+  && { command -v kimi >/dev/null 2>&1 \
+       || ln -sf "$(find /root /usr/local -type f -name kimi -perm -u+x 2>/dev/null | head -1)" /usr/local/bin/kimi; } \
+  && kimi --version
+
+# Memory foundations: Loctree (structural perception) + AICX (agent-session
+# memory). AICX is the cross-agent session-history layer this container exists
+# to preserve; its corpus lives in /root/.aicx (a named volume).
+RUN npm install --global loctree @loctree/aicx \
+  && (command -v loct || command -v loctree || true) \
+  && (aicx --version || true)
+
+# Rust toolchain, pinned to vibecrafted-server/rust-toolchain.toml (1.97.0).
+RUN if [ "$INSTALL_RUST" = "true" ]; then \
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --no-modify-path --profile minimal \
+          --default-toolchain 1.97.0 \
+          --component rustfmt --component clippy \
+          --target wasm32-unknown-unknown \
+      && chmod -R a+rwX "$RUSTUP_HOME" "$CARGO_HOME"; \
+    fi
+
+# Optional Tailscale (userspace networking; enabled at runtime only when
+# TAILSCALE_AUTHKEY is provided). Best-effort so the image still builds on a
+# brand-new Debian release the vendor repo may not cover yet.
+RUN if [ "$INSTALL_TAILSCALE" = "true" ]; then \
+      curl -fsSL https://tailscale.com/install.sh | sh \
+        || echo "[dev image] tailscale install skipped (optional)"; \
+    fi
+
+# Nice-to-have prompt; non-fatal if unavailable.
+RUN curl -fsSL https://starship.rs/install.sh | sh -s -- -y >/dev/null 2>&1 \
+  || echo "[dev image] starship install skipped (optional)"
+
+# Login-shell PATH hardening: Debian's /etc/profile resets PATH, which would
+# drop /usr/local/cargo/bin and /root/.local/bin.
+RUN printf '%s\n' \
+      'export RUSTUP_HOME=/usr/local/rustup' \
+      'export CARGO_HOME=/usr/local/cargo' \
+      'export PATH="/usr/local/cargo/bin:/root/.local/bin:/usr/local/bin:$PATH"' \
+    > /etc/profile.d/10-vibecrafted-env.sh
+
+# Shell config + entrypoints.
+COPY zshrc.template /root/.zshrc
+COPY entry.sh /usr/local/bin/entry
+COPY dev-entry.sh /usr/local/bin/dev-entry
+RUN chmod 0755 /usr/local/bin/entry /usr/local/bin/dev-entry \
+  && mkdir -p /root/.aicx /root/.vibecrafted /root/.claude /root/.codex \
+             /root/.gemini /root/.kimi /root/.config/vetcoders
+
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/dev-entry"]
+CMD ["zsh"]
