@@ -251,6 +251,19 @@ domyślnie `plans/`, raporty → domyślnie `reports/` pod
 `$VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/`. Lokalne dla repo
 `.vibecrafted/plans` i `.vibecrafted/reports` to tylko wygodne symlinki.
 
+Po dispatchu natychmiast uzbrój po stronie supervisora
+`vibecrafted await <agent> --run-id <id>`. JSON control-plane, pliki raportów,
+transkrypty, panele i zaplanowane wybudzenia są wyłącznie diagnostyką, a nie
+sygnałami wybudzenia. Zabezpieczanie await dodatkowymi, doraźnymi
+pollerami/watcherami jest naruszeniem klasy 3; napraw `control_plane.await_run`,
+zamiast normalizować obejście. Zobacz `docs/runtime/AGENT_OPS.md`.
+
+Trzy sygnały liveness: werdykt await, terminalne meta runu, martwy PID workera
+oraz obecność obiecanego raportu. Dwa zgodne sygnały wystarczą do działania,
+trzy do ogłoszenia zakończenia; każda rozbieżność oznacza, że run należy uznać
+za żywy i ponownie uzbroić await. Znane przekłamania: rc=0 dla żywego runu oraz
+meta utknięte w `active`/`stalled` po rzeczywistym zakończeniu.
+
 ### Faza 4 — CONVERGE (Marbles & Polarize)
 
 Po ukończeniu pracy przez agentów implementacyjnych kod istnieje, ale może nie być prawdziwy ani gotowy do dowiezienia.

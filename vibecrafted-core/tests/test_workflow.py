@@ -782,7 +782,8 @@ def test_headless_launch_opens_live_bucket_viewer_and_stamps_origin(
     assert 'exec tail -n +1 -F "$transcript"' not in body
     assert "transcript.human.log" in body
     assert payload["transcript"] not in body
-    assert f"codex observe --run-id {run_id}" in body
+    assert f"vibecrafted observe codex --run-id {run_id}" in body
+    assert f"vibecrafted codex observe --run-id {run_id}" not in body
     # A viewer tails; it must never carry the dispatcher itself.
     assert "vibecrafted_core.dispatcher" not in body
 

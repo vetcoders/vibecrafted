@@ -5,6 +5,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## 4.2.4 — 2026-08-22
+
+### Changed
+
+- Public commands and every generated follow-up command use action-first,
+  agent-last grammar. The removed `vibecrafted <agent> <action>` form is rejected
+  with an exact migration command instead of remaining as compatibility syntax.
+
+### Fixed
+
+- `vibecrafted resume <agent> --run-id ...` can recover a run settled as
+  `stalled`, preserving the recorded provider session and run lineage in the
+  newly tracked continuation.
+- LIVE viewer scripts, resume receipts, and rejection hints no longer teach the
+  removed agent-first grammar.
+- The interactive `vc-resume --help` contract test now provisions its own zsh
+  startup, checkout launcher, HOME, and control plane instead of depending on a
+  preinstalled host runtime.
+- The Polish `vc-workflow` doctrine mirror includes the canonical await and
+  liveness contract and uses action-first commands.
+
 ## 4.2.1 — 2026-08-21
 
 ### Fixed

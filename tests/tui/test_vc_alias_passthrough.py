@@ -7,6 +7,7 @@ interactive zsh --help does not invent resume/work launches.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -104,14 +105,37 @@ def test_sync_script_covers_both_deck_paths() -> None:
 
 def test_interactive_zsh_resume_help_does_not_create_runs(tmp_path: Path) -> None:
     """Real user path: zsh -ic 'vc-resume --help' must not mint control-plane runs."""
-    runs_dir = Path.home() / ".vibecrafted" / "control_plane" / "runs"
-    if not runs_dir.is_dir():
-        # No control plane in this environment — structural tests still hold.
-        return
+    home = tmp_path / "home"
+    home.mkdir()
+    vibecrafted_home = home / ".vibecrafted"
+    runs_dir = vibecrafted_home / "control_plane" / "runs"
+    runs_dir.mkdir(parents=True)
+    shell_entry = (
+        REPO_ROOT
+        / "vibecrafted-core"
+        / "vibecrafted_core"
+        / "runtime"
+        / "shell"
+        / "vetcoders.zsh"
+    )
+    (home / ".zshrc").write_text(
+        f'export PATH="{REPO_ROOT / "scripts"}:$PATH"\nsource "{shell_entry}"\n',
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "ZDOTDIR": str(home),
+            "VIBECRAFTED_HOME": str(vibecrafted_home),
+            "VIBECRAFTED_ROOT": str(REPO_ROOT),
+        }
+    )
     before = {p.name for p in runs_dir.iterdir()}
     result = subprocess.run(
         ["zsh", "-ic", "vc-resume --help"],
         cwd=REPO_ROOT,
+        env=env,
         capture_output=True,
         text=True,
         check=False,

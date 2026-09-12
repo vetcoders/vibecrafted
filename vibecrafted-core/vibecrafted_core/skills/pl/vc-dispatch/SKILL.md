@@ -47,8 +47,10 @@ workflow.
 ## Kontrakty graniczne
 
 - **Wejście**: briefy + tracker wyprodukowane upstream (vc-scaffold / nadrzędny
-  workflow). vc-dispatch nie pisze briefów; jeśli żaden nie istnieje, oddaj kontrolę
-  nadrzędnemu flow albo najpierw wykonaj krok scaffold.
+  workflow) — ALBO, w **szybkiej fali** (zob. niżej), napisane przez dispatchera
+  w sesji z żywych ustaleń. Oddawaj kontrolę do scaffolda tylko wtedy, gdy
+  robota jest naprawdę nieukształtowana; operator zarządzający falę na
+  dowodach, które już trzymasz, to nie ten przypadek.
 - **Wyczuwanie kontekstu**: ten skill nie niesie kanonicznego szablonu promptu.
   Zanim ułożysz prompty, wyczuj kontekst osadzenia — skill nadrzędny,
   repo CLAUDE.md / AGENTS.md, evidence z vc-init, istniejące artefakty planu —
@@ -136,13 +138,52 @@ pinu traktuj jako smell do rozwiązania przed startem.
 6. **Baton**: prompt kolejnego cięcia niesie stan linii — które cięcia wylądowały,
    które commity, które pliki się przesunęły, co następny worker musi przeczytać ponownie.
 
+## Szybka fala (blitz) — natychmiastowy dispatch na rozkaz operatora
+
+Gdy operator wskazuje N zweryfikowanych ustaleń i zarządza falę („dispatchuj
+falę na te pakiety”, „blitzkrieg, nie partyzantka”), dispatcher JEST autorem
+briefów. Nie kieruj przez vc-scaffold, nie buduj DRIVERA, nie odpytuj rundami —
+ustalenia z dowodami są planem.
+
+Kształt (polowo sprawdzony, loctree-suite findings-wave-2, 2026-08-22):
+
+1. **Pre-flight zostaje**: świeży baseline SHA (fetch — HEAD przesuwa się między
+   twoją diagnozą a rozkazem), rozłączne domeny plików per cięcie, regiony
+   plików współdzielonych zadeklarowane jawnie w briefach, wiszące siostrzane
+   gałęzie wymienione jako do-not-touch.
+2. **Zwięzły brief per cięcie**, pisany przez dispatchera w minuty, nie godziny:
+   frontmatter + misja + dowody verbatim (komendy repro, kotwice linii) +
+   pliki + akceptacja (≥2 nietrywialne testy) + bramki + poza-zakresem +
+   blok substratu + zasady commit/trailer + ścieżka raportu + klauzula
+   idempotencji. Checklist a min z pola: `references/fast-wave-brief.md`.
+3. **Piny operatora jadą dosłownie**: agenci i modele nazwane przez operatora
+   (`gpt-5.6-sol | grok-4.6 | claude-opus-5`) idą wprost do flag `--model`
+   launchera i do tabeli trackera. Żadnych cichych podmian.
+4. **Wszystkie cięcia startują równolegle**, awaity uzbrojone natychmiast
+   supervisor-side, zwięzły tracker (cięcie | worker@model | run_id | gałąź | stan).
+5. **Dispatcher integruje**: jednowątkowo, po osadzeniu, po diffach — szybka
+   fala zmienia autorstwo briefów, nigdy rygor SPRAWDZENIE/FLIP.
+
+Szybka fala to nadal linia: tracker, evidence w ledgerze i warstwa audytu na
+końcu nie są opcjonalne. Fala tnie ceremonię, nie dowód.
+
 ## Fale równoległe to obowiązek
 
 Gdy cięcia zajmują niezależne obszary kodu, MUSISZ zaplanować fale pod maksymalną
 wieloworkerową równoległość — uruchamianie jednego workera naraz ze strachu przed konfliktem
 jest przeciwwskazane. Sekwencjonuj WYŁĄCZNIE twarde nakładania plików (ten sam plik/region).
 
-Strach, że „dirty tree = konflikty", to inwersja obserwowanej rzeczywistości:
+**Substrat to mechanika, nie preferencja** (Living Tree Rule v3): domyślny dla
+linii interaktywnej jest Living Tree, ale gdy operator zarządza worktrees dla
+równoległości, ten rozkaz JEST substratem — kropka. Każdy worker tworzy wtedy
+WŁASNY worktree (`~/.vibecrafted/worktrees/<org>/<repo>/<RRRR_MMDD>/<slug>`,
+gałąź `<agent>/workflow/<slug>`, z przypiętego baseline SHA), pushuje gałąź,
+nigdy nie merguje trunka; dispatcher jest jednowątkowym integratorem.
+Skitranie równoległej floty w jednym współdzielonym checkoucie po takim
+rozkazie to powtórka porażki substratu kanarka z 2026-08-20 — nie rób tego.
+
+Strach, że „dirty tree = konflikty”, to inwersja obserwowanej rzeczywistości
+DLA TORU LIVING TREE:
 merge hell rodzi się w NIEZARZĄDZANEJ izolacji — worktree bez verifierów i bez
 integratora, gdzie niezależne wizje workerów rozjeżdżają się i muszą zostać
 pogodzone na końcu. Living Tree (zob. vc-marbles, LIVING_TREE_RULE.md) trzyma

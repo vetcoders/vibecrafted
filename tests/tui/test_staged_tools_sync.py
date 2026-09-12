@@ -2054,6 +2054,7 @@ def test_service_install_executes_exact_staged_supervisor_from_repo_cwd(
         f"""#!{Path(sys.executable).resolve()}
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import plistlib
@@ -2139,7 +2140,13 @@ def service_main() -> int:
     finally:
         if child is not None and child.poll() is None:
             child.terminate()
-            child.wait(timeout=10)
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(ProcessLookupError):
+                    child.kill()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    child.wait(timeout=1)
 
 
 if sys.argv[1:2] == ["service"]:

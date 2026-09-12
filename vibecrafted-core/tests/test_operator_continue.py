@@ -127,6 +127,52 @@ def test_operator_continue_run_uses_provider_session_after_stop(
     assert "stopped" in str(seen.get("prompt") or "").lower()
 
 
+def test_operator_continue_run_uses_provider_session_after_stall(
+    monkeypatch, tmp_path: Path
+) -> None:
+    parent = {
+        "run_id": "owne-260822-093025-32039",
+        "agent": "claude",
+        "skill": "ownership",
+        "state": "stalled",
+        "status": "stalled",
+        "root": str(tmp_path),
+        "agent_session_id": "988ace3a-5cb9-4cae-a229-20e1d3222d45",
+        "runtime_session_id": "01a02548-3097-7cd2-b7b2-61e218253026",
+    }
+    monkeypatch.setattr(workflow, "lookup_run", lambda _run_id: dict(parent))
+    monkeypatch.setattr(workflow, "_native_resume_meta", lambda *_a, **_k: dict(parent))
+    monkeypatch.setattr(workflow, "_worker_process_alive", lambda _run: False)
+    seen: dict[str, Any] = {}
+
+    def fake_manual(
+        agent: str, agent_session_id: str, _source: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        seen.update({"agent": agent, "agent_session_id": agent_session_id, **kwargs})
+        return {
+            "accepted": True,
+            "run_id": "rsme-child",
+            "agent": agent,
+            "agent_session_id": agent_session_id,
+            "resume_mode": "manual_explicit",
+            "root": str(kwargs.get("root") or ""),
+        }
+
+    monkeypatch.setattr(workflow, "manual_resume_session", fake_manual)
+
+    result = operator_continue_run(
+        "owne-260822-093025-32039",
+        source_dir=tmp_path,
+        expected_agent="claude",
+        prompt="continue from the stalled ownership run",
+    )
+
+    assert result["accepted"] is True
+    assert result["resume_of"] == "owne-260822-093025-32039"
+    assert seen["agent_session_id"] == "988ace3a-5cb9-4cae-a229-20e1d3222d45"
+    assert "stalled ownership run" in str(seen.get("prompt") or "")
+
+
 def test_operator_continue_run_replays_prompt_without_provider_session(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -226,6 +272,10 @@ def test_agent_resume_cli_routes_run_id(monkeypatch, tmp_path: Path, capsys) -> 
     output = capsys.readouterr().out
     assert "OPERATOR CONTINUE RECEIPT" in output
     assert "work-260816-213657-08420" in output
+    assert "vibecrafted observe claude --run-id work-child" in output
+    assert "vibecrafted await claude --run-id work-child" in output
+    assert "vibecrafted claude observe" not in output
+    assert "vibecrafted claude await" not in output
 
 
 def test_agent_resume_cli_rejects_session_flag_used_as_run(capsys) -> None:

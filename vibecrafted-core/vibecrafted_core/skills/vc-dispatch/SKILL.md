@@ -47,8 +47,10 @@ workflow.
 ## Boundary contracts
 
 - **Input**: briefs + tracker produced upstream (vc-scaffold / parent
-  workflow). vc-dispatch does not author briefs; if none exist, hand back to
-  the parent flow or run the scaffold step first.
+  workflow) — OR, in a **fast wave** (see below), authored by the dispatcher
+  in-session from live findings. Hand back to the scaffold flow only when the
+  work is genuinely unshaped; an operator ordering a wave on evidence you
+  already hold is not that case.
 - **Context sensing**: this skill carries no canonical prompt template.
   Before composing prompts, sense the embedding context — parent skill,
   repo CLAUDE.md / AGENTS.md, vc-init evidence, existing plan artifacts —
@@ -147,15 +149,55 @@ pin deliberately, and treat a missing pin as a smell to resolve before launch.
 6. **Baton**: next cut's prompt carries the line state — which cuts landed,
    which commits, which files moved, what the next worker must re-read.
 
+## Fast wave (blitz) — operator-ordered immediate dispatch
+
+When the operator points at N verified findings and orders a wave ("dispatchuj
+falę na te pakiety", "blitzkrieg, nie partyzantka"), the dispatcher IS the
+brief author. Do not route through vc-scaffold, do not build a DRIVER, do not
+ask clarifying rounds — the findings-with-evidence are the plan.
+
+Shape (field-proven, loctree-suite findings-wave-2, 2026-08-22):
+
+1. **Pre-flight stays**: fresh baseline SHA (fetch — HEAD moves between your
+   diagnosis and the order), disjoint file domains per cut, shared-file
+   regions declared explicitly in the briefs, sibling pending branches listed
+   as do-not-touch.
+2. **Lean brief per cut**, written by the dispatcher in minutes, not hours:
+   frontmatter + mission + verbatim evidence (repro commands, line anchors) +
+   files + acceptance (≥2 non-trivial tests) + gates + out-of-scope +
+   substrate block + commit/trailer rules + report path + idempotency clause.
+   Checklist of field-learned mines: `references/fast-wave-brief.md`.
+3. **Operator pins ride verbatim**: agents and models named by the operator
+   (`gpt-5.6-sol | grok-4.6 | claude-opus-5`) go straight into the launcher
+   `--model` flags and the tracker table. No silent substitution.
+4. **Launch all cuts in parallel**, arm supervisor-side awaits immediately,
+   write the lean tracker (cut | worker@model | run_id | branch | state).
+5. **Dispatcher integrates**: single-thread, after settle, by diffs — the
+   fast wave changes brief authorship, never the SPRAWDZENIE/FLIP rigor.
+
+A fast wave is still a line: tracker, ledger evidence, and the audit layer at
+the end are not optional. What it cuts is ceremony, not proof.
+
 ## Parallel waves are an obligation
 
 When cuts occupy independent code areas, you MUST plan waves for maximum
 multi-worker parallelism — running one worker at a time out of conflict fear
 is contraindicated. Sequence ONLY hard file overlaps (same file/region).
 
-The fear that "dirty tree = conflicts" is the inversion of observed reality:
-merge hell is born in worktrees and side-branch isolation, where independent
-worker visions diverge and must be reconciled at the end. The Living Tree
+**Substrate is mechanics, not preference** (Living Tree Rule v3): the default
+for an interactive line is the Living Tree, but when the operator orders
+worktrees for concurrency, that order is the substrate — full stop. Each
+worker then creates its OWN worktree
+(`~/.vibecrafted/worktrees/<org>/<repo>/<YYYY_MMDD>/<slug>`, branch
+`<agent>/workflow/<slug>`, from the pinned baseline SHA), pushes its branch,
+never merges trunk; the dispatcher is the single-thread integrator. Parking a
+parallel fleet in one shared checkout after such an order is a repeat of the
+2026-08-20 canary failure — do not.
+
+The fear that "dirty tree = conflicts" is the inversion of observed reality
+FOR THE LIVING TREE LANE: merge hell is born in unordered side-branch
+isolation, where independent worker visions diverge and must be reconciled at
+the end. The Living Tree
 (see vc-marbles, LIVING_TREE_RULE.md) keeps every hand aligned to the live
 baseline continuously — someone always adapts on the spot, merge-conflict
 risk approaches zero. Workers' `git add -A` sweeps preserve concurrent work

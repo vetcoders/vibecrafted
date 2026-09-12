@@ -1091,7 +1091,7 @@ def _write_live_viewer_script(
         "set -uo pipefail\n"
         f"human_transcript={quoted_human_transcript}\n"
         "if command -v vibecrafted >/dev/null 2>&1; then\n"
-        f"  vibecrafted {quoted_agent} observe --run-id {quoted_run} || true\n"
+        f"  vibecrafted observe {quoted_agent} --run-id {quoted_run} || true\n"
         "fi\n"
         'mkdir -p "$(dirname "$human_transcript")" 2>/dev/null || true\n'
         'touch "$human_transcript" 2>/dev/null || true\n'
@@ -3828,6 +3828,7 @@ OPERATOR_CONTINUABLE_STATES = frozenset(
         "report_missing",
         "contract_failed",
         "blocked",
+        "stalled",
     }
 )
 OPERATOR_DONE_STATES = frozenset({"completed", "report_validated", "closed"})
