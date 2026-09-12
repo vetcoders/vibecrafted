@@ -261,7 +261,10 @@ def test_operator_layout_start_here_and_shell_tabs() -> None:
     assert 'command="bash" name="Start Here"' in payload
     assert 'plugin location="about"' not in payload
     assert "pane-python" in payload
-    assert "vibecrafted config install --force" in payload
+    # `config install` is retired (e1d7a791); the Runtime Pack installer owns
+    # product configuration and the repair hint routes through make install.
+    assert "config install" not in payload
+    assert "make install" in payload
     assert 'name="Shell"' in payload
     # Shell wakes with banner then zsh (not bare suspended /bin/zsh).
     assert "exec zsh" in payload or "zsh -l" in payload
