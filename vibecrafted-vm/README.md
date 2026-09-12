@@ -67,10 +67,10 @@ selector backend.
 
 `Dockerfile.dev` + `compose.dev.yaml` + `dev-up.sh` are a batteries-included
 personal workstation: a **non-ephemeral, per-repo** container that preserves
-**session-history continuity across agents**. It bakes the toolchain (Debian 13
-+ uv + Node + Rust) and the agent CLIs — **claude, codex, gemini, and kimi
-(pilot)** — plus the AICX/Loctree memory foundations. The repo is mounted live
-at `/workspace`; every agent's session state (`~/.claude`, `~/.codex`,
+**session-history continuity across agents**. It bakes the toolchain
+(Debian 13 + uv + Node + Rust) and the agent CLIs — **claude, codex, gemini,
+and kimi (pilot)** — plus the AICX/Loctree memory foundations. The repo is
+mounted live at `/workspace`; every agent's session state (`~/.claude`, `~/.codex`,
 `~/.gemini`, `~/.kimi`) and the AICX corpus (`~/.aicx`) live in per-project
 named volumes, so rebuilding the container never loses history.
 
