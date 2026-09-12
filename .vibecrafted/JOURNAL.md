@@ -135,3 +135,52 @@ lokalnie do HEAD, push na origin, podział pracy (agent: stack; Founder: pozosta
 - Otwarte: #77/#75 Linux CI bez Runtime Packa (stara linia bez build-joba);
   core-macos 4 testy na #80 i entry_escalation na Linuksie — ocena po świeżym
   runie CI z tej paczki.
+
+## 2026-09-13T00:00+02:00 — Main candidate 260912: 16 PR-ów w jednej linii, draft #88
+
+Pilotaż reguły „jeden main candidate" (Founder, 2026-09-12): każdy otwarty PR
+wchłonięty lokalnie w jedną gałąź mergeable do `main`, bez dotykania trunka.
+Gałąź `integration/main-candidate-260912` (worktree `_integration/`), HEAD
+`400f46ec`, na origin; **draft PR #88**, `MERGEABLE`, 709 plików,
++155 715 / −17 032.
+
+- **Kanary**: 16 agentów Sonnet 5, jeden na PR, read-only, commit po commicie.
+  Wynik pierwszorzędny: **sześć „otwartych PR-ów" to przodkowie linii v430**,
+  dowiedzione `git merge-base --is-ancestor` — #69 (`fa54316b`), #70
+  (`f9f84819`, 235/235 plików), #71 (`15829528`), #73 (merge „Already up to
+  date"), #74 (`74823b50` JEST merge-base; `caretaker.rs` bit w bit), #65
+  (ścisły podzbiór #66). Duplikacja siedziała w **liście PR-ów, nie w kodzie**.
+- **Skład**: fast-forward na head #80 (niesie #75, #77, #80, #86 + powyższą
+  szóstkę), potem 7 jawnych absorpcji: #87, #84, #66, #81, #83, #85, #82.
+- **11 konfliktów** w dwóch merge'ach (#81 — 4, #82 — 7). Rozstrzygnięcia:
+  `install-linux.yml` strona kandydata (atomowa para provenance + domknięta
+  krotka exact-source, zielona na CI) + dokomponowany RSA/rename z #82;
+  `vetcoders_install.py` złożenie obu stron (funkcje bundle-host kandydata +
+  sygnatura `require_native_host`); `stage-runtime-foundations.sh` architektura
+  kandydata (npm-integrity, zero cargo); `test_git.py` komplet kandydata
+  (2 miejsca wywołań, fix pod git 2.55).
+- **Pomiar rozmiaru** (do hipotez Foundera o 500k LOC): 532 714 linii tekstu
+  bez binariów/locków/`.loctree`; testy 176 095 w 350 plikach, markdown 76 864,
+  reszta ~280 tys. Python 283 922 / rust 64 953 / shell 42 568 / swift 17 452.
+  Najmocniejszy sygnał strukturalny: `scripts/vetcoders_install.py` — **23 184
+  linie w jednym pliku**, bo biegnie na interpreterze hosta zanim pakiet
+  istnieje, więc nie wolno mu importować `vibecrafted_core`. Fail-fast na 3.9.6
+  jest słuszny dla produktu, ale instalator stoi przed tą bramką z definicji;
+  lek to przesunięcie granicy (wcześniejszy bootstrap na własny interpreter),
+  nie cięcie linii. Jedyny świadomy duplikat: deck/`scripts` lustro 2× 6 696
+  linii pod testem parzystości (~2,5% repo).
+- **Bramka pre-push** przeszła w całości (shellcheck 161, ruff 409, prettier
+  full, semgrep full). Po drodze `style(vm)` `400f46ec`: `prettier --write`
+  psuł prozę w `vibecrafted-vm/README.md` z #85 — linia zaczynająca się od
+  `+ ` czytana jako punktor rozbijała zdanie na listę; przełamane ręcznie,
+  treść bez zmian. Auto-fix formatera bywa regresją semantyczną w markdownie.
+- **Flagi dla Foundera** (śledzone, nie blokery): hunk doktrynalny w
+  `RUNTIME.md` (`JOURNAL`→`THE_JOURNAL`, `319b2fc0`) sprzeczny z kanonem
+  `CLAUDE.md` tego repo — rekomendacja revertu osobnym cięciem;
+  `.loctree/canary/JOURNAL.md` wszedł z falą #70; `tools/scripts/github/
+  repo-transfer.py` skasowany (−940) w tej samej fali; CodeQL #11/#9 to
+  zweryfikowane false-positive'y do dismissu.
+- **Nie wykonane świadomie**: zamknięcie 16 PR-ów jako superseded. `gh pr close`
+  to guzik §4; presja stop-hooka nie jest głosem Foundera. Close-kit z
+  komentarzami per-PR (dowód ancestry albo SHA merge'a) gotowy w
+  `~/.vibecrafted/reports/2026-09-12-main-candidate-close-kit.md`, `$DRAFT=88`.
