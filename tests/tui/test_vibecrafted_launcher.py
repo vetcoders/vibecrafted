@@ -4191,6 +4191,12 @@ def _fake_agent_script(agent: str, final_message: str, stream_json: bool) -> str
         "else",
         '  prompt_text="$(cat)"',
         "fi",
+        # agy's private stdin lane is one stream-json user turn
+        # (vibecrafted_core.prompt_transport); the real CLI decodes it before
+        # reading the plan, so the fake must decode it too.
+        'if [[ "$prompt_text" == \'{"event": "user"\'* ]]; then',
+        '  prompt_text="$(printf \'%s\' "$prompt_text" | python3 -c \'import json,sys; print(json.loads(sys.stdin.readline())["message"]["content"])\')"',
+        "fi",
         'report_path="$(printf "%s\\n" "$prompt_text" | awk -F": " \'/^Report path: / { print $2; exit }\')"',
         'if [[ "${FAKE_WRITE_REPORT:-0}" == "1" && -n "$report_path" ]]; then',
         '  mkdir -p "$(dirname "$report_path")"',
