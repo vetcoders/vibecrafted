@@ -465,6 +465,113 @@ def test_product_shell_skips_starship_when_product_toml_is_missing(
     assert "starship.toml is missing" in log
 
 
+def _write_hostile_host_python(directory: Path) -> Path:
+    """Stand-in for macOS /usr/bin/python3 3.9.6: fails the 3.11 probe."""
+
+    directory.mkdir(parents=True, exist_ok=True)
+    tool = directory / "python3"
+    tool.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        "  -c) exit 1 ;;\n"
+        "esac\n"
+        "printf 'HOST_PYTHON_SELECTED\\n'\n"
+        "exit 79\n",
+        encoding="utf-8",
+    )
+    tool.chmod(0o755)
+    return tool
+
+
+_NEEDS_GENERATION_PYTHON = pytest.mark.skipif(
+    sys.version_info < (3, 11),
+    reason="needs a 3.11+ interpreter to stand in for generation CPython",
+)
+
+
+@_NEEDS_GENERATION_PYTHON
+def test_product_shell_typed_python3_uses_generation_not_host(
+    tmp_path: Path,
+) -> None:
+    """Door PATH stays Founder's python3; typed python3 execs generation."""
+
+    _stage_product_profile(tmp_path)
+    hostile_bin = tmp_path / "hostile-bin"
+    _write_hostile_host_python(hostile_bin)
+    generation_python = tmp_path / "releases" / "4.3.1" / "bin" / "python3"
+    generation_python.parent.mkdir(parents=True)
+    generation_python.symlink_to(sys.executable)
+    result = _zsh_profile(
+        tmp_path,
+        (
+            'source "$HOME/.config/vibecrafted/vc-terminal/interactive.zsh"; '
+            'print -r -- "kind=$(whence -w python3)"; '
+            'print -r -- "path_python3=$(command -v python3)"; '
+            'print -r -- "PATH=$PATH"; '
+            'python3 -c "import sys; print(\\"used=\\" + sys.executable)"; '
+            "print -r -- READY"
+        ),
+        path=f"{hostile_bin}:/usr/bin:/bin",
+        extra_env={
+            "VIBECRAFTED_PYTHON": str(generation_python),
+            "VIBECRAFTED_RUNTIME_BIN": str(generation_python.parent),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert "READY" in result.stdout
+    assert "HOST_PYTHON_SELECTED" not in result.stdout + result.stderr
+    assert "kind=python3: function" in result.stdout
+    assert f"path_python3={hostile_bin / 'python3'}" in result.stdout
+    assert str(generation_python.parent) not in result.stdout.split("PATH=", 1)[
+        1
+    ].splitlines()[0].split(":")
+    used = next(
+        line.split("used=", 1)[1]
+        for line in result.stdout.splitlines()
+        if line.startswith("used=")
+    )
+    assert Path(used).resolve() == Path(sys.executable).resolve()
+
+
+def test_product_shell_typed_python3_refuses_host_without_generation(
+    tmp_path: Path,
+) -> None:
+    """Missing or host-old VIBECRAFTED_PYTHON must not exec macOS 3.9.6."""
+
+    _stage_product_profile(tmp_path)
+    hostile_bin = tmp_path / "hostile-bin"
+    hostile = _write_hostile_host_python(hostile_bin)
+    missing = _zsh_profile(
+        tmp_path,
+        (
+            'source "$HOME/.config/vibecrafted/vc-terminal/interactive.zsh"; '
+            "python3 -c 'print(1)'; "
+            'print -r -- "missing_exit=$?"'
+        ),
+        path=f"{hostile_bin}:/usr/bin:/bin",
+    )
+    assert missing.returncode == 0, missing.stderr
+    assert "missing_exit=127" in missing.stdout
+    assert "HOST_PYTHON_SELECTED" not in missing.stdout + missing.stderr
+    assert "VIBECRAFTED_PYTHON" in missing.stderr
+    assert "3.9.6" in missing.stderr
+
+    host_pin = _zsh_profile(
+        tmp_path,
+        (
+            'source "$HOME/.config/vibecrafted/vc-terminal/interactive.zsh"; '
+            "python3 -c 'print(1)'; "
+            'print -r -- "host_pin_exit=$?"'
+        ),
+        path=f"{hostile_bin}:/usr/bin:/bin",
+        extra_env={"VIBECRAFTED_PYTHON": str(hostile)},
+    )
+    assert host_pin.returncode == 0, host_pin.stderr
+    assert "host_pin_exit=127" in host_pin.stdout
+    assert "HOST_PYTHON_SELECTED" not in host_pin.stdout + host_pin.stderr
+    assert "not Python >=3.11" in host_pin.stderr
+
+
 def test_two_line_prompt_without_starship_and_with_fake_starship(
     tmp_path: Path,
 ) -> None:

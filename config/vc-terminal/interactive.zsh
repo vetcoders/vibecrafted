@@ -36,6 +36,30 @@ _vc_terminal_apply_fallback_prompt() {
   RPROMPT=''
 }
 
+_vc_terminal_bind_owned_python() {
+  # Door PATH stays ~/.local/bin only. Do not prepend generation bin and do
+  # not write python3 into ~/.local/bin. Typed python / python3 in this
+  # ZDOTDIR profile exec the interpreter vc-terminal-product-entry already
+  # pinned as VIBECRAFTED_PYTHON (generation CPython >=3.11). Bare PATH
+  # python3 remains the Founder's file for command -v / env.
+  unalias python python3 2>/dev/null || true
+  python3() {
+    local bin="${VIBECRAFTED_PYTHON:-}"
+    if [[ -z "$bin" || "$bin" != /* || ! -x "$bin" || -d "$bin" ]]; then
+      print -u2 -r -- 'Vibecrafted: typed python3 needs VIBECRAFTED_PYTHON as an absolute generation interpreter (>=3.11). Host python3 (macOS 3.9.6) is not a product interpreter.'
+      return 127
+    fi
+    if ! "$bin" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+      print -u2 -r -- 'Vibecrafted: VIBECRAFTED_PYTHON is not Python >=3.11. Host python3 (macOS 3.9.6) is not a product interpreter.'
+      return 127
+    fi
+    "$bin" "$@"
+  }
+  python() {
+    python3 "$@"
+  }
+}
+
 _vc_terminal_load_owned_layer() {
   local vc_alias_dir vc_alias_file vc_alias_name
   _vc_terminal_pin_product_env
@@ -61,7 +85,10 @@ _vc_terminal_load_owned_layer() {
     print -r -- '  gs  ga  gc  gp  gl  gd'
     print -r -- 'frame'
     print -r -- '  vcf-lp  vcf-ls  vcf-da'
+    print -r -- 'python'
+    print -r -- '  python  python3  generation CPython (not host 3.9.6)'
   }
+  _vc_terminal_bind_owned_python
   _vc_terminal_apply_fallback_prompt
 }
 
@@ -97,6 +124,7 @@ typeset -ga _VC_TERMINAL_WARNINGS=()
 
 # Public VC commands remain the installed PATH launchers. No automatic Frame
 # attach/create, provider process, or private Python path export belongs here.
+# Typed python3 is a ZDOTDIR function over VIBECRAFTED_PYTHON, not a PATH pin.
 # Keep broken external completion installations out of this shell's scan.
 # Do not repair or unlink files owned by another product. compinit still audits
 # the remaining directories; -i excludes insecure entries instead of prompting.
