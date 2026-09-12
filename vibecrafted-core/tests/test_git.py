@@ -122,7 +122,12 @@ def test_vc_git_reports_named_upstream_divergence_in_json_and_rich_output(
     tmp_path: Path,
 ) -> None:
     remote = tmp_path / "remote.git"
-    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    # Pin the bare remote's HEAD to main: without -b the remote is born with
+    # HEAD -> master, and newer git (2.55 on CI runners) leaves the clone on
+    # master, so the diverging push never reaches origin/main (behind stays 0).
+    subprocess.run(
+        ["git", "init", "-q", "-b", "main", "--bare", str(remote)], check=True
+    )
     repo = tmp_path / "repo"
     _init_repo(repo)
     subprocess.run(
@@ -400,7 +405,12 @@ def test_repo_full_marks_failed_upstream_probe_unknown(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     remote = tmp_path / "remote.git"
-    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    # Pin the bare remote's HEAD to main: without -b the remote is born with
+    # HEAD -> master, and newer git (2.55 on CI runners) leaves the clone on
+    # master, so the diverging push never reaches origin/main (behind stays 0).
+    subprocess.run(
+        ["git", "init", "-q", "-b", "main", "--bare", str(remote)], check=True
+    )
     repo = tmp_path / "repo"
     _init_repo(repo)
     subprocess.run(
