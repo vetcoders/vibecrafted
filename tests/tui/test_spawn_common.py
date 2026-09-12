@@ -589,6 +589,49 @@ def test_internal_python_owner_resolves_from_the_selected_generation_bin(
     assert str(generation_bin) not in fields["PATH"].split(os.pathsep)
 
 
+def test_internal_python_owner_refuses_macos_host_python39(tmp_path: Path) -> None:
+    """A lone host ``python3`` 3.9.6 is not a runtime interpreter.
+
+    macOS 15+ keeps Xcode ``/usr/bin/python3`` at 3.9.6 (no tomllib). The
+    resolver used to print ``python3`` after every eligible candidate failed,
+    so every internal caller exec'd the host interpreter and died. Fail closed.
+    """
+
+    home = tmp_path / "home"
+    home.mkdir()
+    hostile_bin = tmp_path / "hostile-bin"
+    err_file = tmp_path / "spawn-python-refuse.err"
+    _write_hostile_python(hostile_bin)
+
+    result = _bash(
+        _ENV_SANITIZE
+        + f"""
+        set -euo pipefail
+        unset VIBECRAFTED_PYTHON VIBECRAFTED_RUNTIME_BIN
+        export HOME="{home}"
+        export XDG_DATA_HOME="{home / ".local" / "share"}"
+        export PATH="{hostile_bin}"
+        hash -r
+        source "{UTIL_SH}"
+        if output="$(spawn_python_bin 2>{shlex.quote(str(err_file))})"; then
+          printf 'unexpected=%s\\n' "$output"
+          exit 11
+        fi
+        printf 'refused=1\\n'
+        printf 'stderr=%s\\n' "$(/usr/bin/cat {shlex.quote(str(err_file))})"
+        """
+    )
+
+    fields = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    assert fields["refused"] == "1"
+    assert "unexpected" not in fields
+    assert "tomllib" in fields["stderr"]
+    assert "3.9.6" in fields["stderr"]
+    assert "HOST_PYTHON_SELECTED" not in result.stdout
+
+
 @_NEEDS_MODERN_PYTHON
 def test_internal_python_owner_survives_standalone_util_sourcing(
     tmp_path: Path,

@@ -14,3 +14,8 @@ truncation_length = 3
 truncate_to_repo = true
 format = "[$path]($style)"
 home_symbol = "~"
+
+# This prompt is the pre-vc-start door. Host python3 on macOS is 3.9.6
+# (no tomllib). Do not advertise it as the product interpreter.
+[python]
+disabled = true

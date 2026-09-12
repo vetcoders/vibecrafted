@@ -159,7 +159,7 @@ spawn_python_bin() {
     "${VIBECRAFTED_RUNTIME_BIN:+$VIBECRAFTED_RUNTIME_BIN/python3}" \
     "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/vibecrafted/bin/python3" \
     "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/vibecrafted-core/bin/python3" \
-    python3.13 python3.12 python3.11 python3; do
+    python3.14 python3.13 python3.12 python3.11 python3; do
     [[ -n "$candidate" ]] || continue
     command -v "$candidate" >/dev/null 2>&1 || continue
     if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
@@ -167,7 +167,11 @@ spawn_python_bin() {
       return 0
     fi
   done
-  printf 'python3\n'
+  # macOS 15+ keeps /usr/bin/python3 at 3.9.6 with no tomllib. Returning that
+  # name lets every internal caller exec a host interpreter the product cannot
+  # run. Fail closed; do not advertise it as the runtime python.
+  printf 'Vibecrafted requires Python >=3.11 with stdlib tomllib; host python3 (macOS 3.9.6) is not a runtime interpreter.\n' >&2
+  return 1
 }
 
 spawn_require_positive_int() {

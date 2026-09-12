@@ -137,10 +137,23 @@ else
   _VC_TERMINAL_WARNINGS+=('shell completion unavailable')
 fi
 # STARSHIP_CONFIG / ATUIN_* / _ZO_DATA_DIR were pinned above. Init reads them.
+# Starship without the product toml, or with a leftover `$python` format,
+# probes host python3 (macOS 3.9.6) and paints it as product chrome. Skip
+# init; the offline two-line prompt stays. Do not change PATH here.
 for vc_tool in zoxide atuin starship; do
   if (( ! $+commands[$vc_tool] )); then
     _VC_TERMINAL_WARNINGS+=("$vc_tool is not installed; install it with its upstream installer")
     continue
+  fi
+  if [[ $vc_tool == starship ]]; then
+    if [[ ! -f ${STARSHIP_CONFIG:-} || -L ${STARSHIP_CONFIG:-} ]]; then
+      _VC_TERMINAL_WARNINGS+=('product starship.toml is missing; using the offline prompt instead of host python chrome')
+      continue
+    fi
+    if grep -q '$python' "$STARSHIP_CONFIG" 2>/dev/null; then
+      _VC_TERMINAL_WARNINGS+=('product starship.toml still names $python; using the offline prompt instead of host python 3.9')
+      continue
+    fi
   fi
   vc_tool_args=(init zsh)
   [[ $vc_tool != atuin ]] || vc_tool_args+=(--disable-up-arrow)

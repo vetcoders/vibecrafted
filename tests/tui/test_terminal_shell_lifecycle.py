@@ -215,6 +215,10 @@ def _stage_product_profile(tmp_path: Path) -> Path:
         root / "config/vc-terminal/interactive.zsh", product / "interactive.zsh"
     )
     shutil.copy2(ENTRY, product / "launch-primary-shell.zsh")
+    shutil.copy2(
+        root / "config/starship.toml",
+        tmp_path / ".config/vibecrafted/starship.toml",
+    )
     (product / ".zshrc").write_text(
         'source "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"\n'
     )
@@ -380,6 +384,85 @@ def test_product_tool_env_is_set_before_tool_init(tmp_path: Path) -> None:
         assert f"{name} ATUIN_DATA_DIR={product_atuin_data}" in recorded
         assert f"{name} ATUIN_DB_PATH={product_atuin_db}" in recorded
         assert f"{name} _ZO_DATA_DIR={product_zoxide}" in recorded
+
+
+def test_product_starship_does_not_name_host_python() -> None:
+    text = (
+        Path(__file__).resolve().parents[2] / "config/starship.toml"
+    ).read_text(encoding="utf-8")
+    assert "$python" not in text
+    assert "disabled = true" in text.split("[python]", 1)[1]
+
+
+def test_product_shell_skips_starship_that_would_paint_host_python(
+    tmp_path: Path,
+) -> None:
+    """Old three-row starship.toml probes host python3 and prints py 3.9.6."""
+
+    _stage_product_profile(tmp_path)
+    root = ENTRY.parents[2]
+    shutil.copy2(
+        root / "tests/tui/fixtures/starship-default-three-row.toml",
+        tmp_path / ".config/vibecrafted/starship.toml",
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    starship = bin_dir / "starship"
+    starship.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = init ]; then\n'
+        "  printf 'PROMPT=HOST_PYTHON_CHROME\\n'\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    starship.chmod(0o755)
+    result = _zsh_profile(
+        tmp_path,
+        (
+            'source "$HOME/.config/vibecrafted/vc-terminal/interactive.zsh"; '
+            'print -r -- "PROMPT=$PROMPT"; print -r -- READY'
+        ),
+        path=f"{bin_dir}:/usr/bin:/bin",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "READY" in result.stdout
+    assert "HOST_PYTHON_CHROME" not in result.stdout
+    assert "❯" in result.stdout
+    log = (tmp_path / ".vibecrafted/shell/startup.log").read_text()
+    assert "$python" in log
+    assert "host python" in log
+
+
+def test_product_shell_skips_starship_when_product_toml_is_missing(
+    tmp_path: Path,
+) -> None:
+    _stage_product_profile(tmp_path)
+    (tmp_path / ".config/vibecrafted/starship.toml").unlink()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    starship = bin_dir / "starship"
+    starship.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = init ]; then\n'
+        "  printf 'PROMPT=DEFAULT_STARSHIP_PYTHON\\n'\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    starship.chmod(0o755)
+    result = _zsh_profile(
+        tmp_path,
+        (
+            'source "$HOME/.config/vibecrafted/vc-terminal/interactive.zsh"; '
+            'print -r -- "PROMPT=$PROMPT"; print -r -- READY'
+        ),
+        path=f"{bin_dir}:/usr/bin:/bin",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "READY" in result.stdout
+    assert "DEFAULT_STARSHIP_PYTHON" not in result.stdout
+    assert "❯" in result.stdout
+    log = (tmp_path / ".vibecrafted/shell/startup.log").read_text()
+    assert "starship.toml is missing" in log
 
 
 def test_two_line_prompt_without_starship_and_with_fake_starship(
