@@ -446,6 +446,44 @@ mod tests {
         assert!(css.contains("var(--stroke-width) solid var(--border-subtle)"));
     }
 
+    /// Status, "Open scaffold", and the theme toggle sit in one actions row.
+    /// They must share one chip plane (radius, stroke, fill, padding). A
+    /// capsule status next to 8px controls — or a UA-styled `<button>` next
+    /// to an `<a>` — is the split the Founder marked on the live navbar.
+    #[test]
+    fn navbar_actions_share_one_chip_plane() {
+        let css = console_css();
+        let start = css
+            .find(".server-navbar-actions {")
+            .expect("navbar actions cluster");
+        let end = css[start..]
+            .find(".server-status-dot")
+            .expect("cluster ends at the status dot")
+            + start;
+        let cluster = &css[start..end];
+
+        assert!(
+            cluster.contains(".server-status-pill,\n.server-navbar-action,\n.server-theme-toggle {"),
+            "the three siblings must be one rule, not three restyles"
+        );
+        assert!(
+            cluster.contains("border-radius: var(--chip-stack-radius);"),
+            "navbar chips reuse the existing chip-stack radius, not a second shape"
+        );
+        assert!(
+            cluster.contains("appearance: none;"),
+            "the <button> toggle must drop UA chrome so it matches the <a>"
+        );
+        assert!(
+            !cluster.contains("999px"),
+            "a capsule in this row is a second radius"
+        );
+        assert!(
+            !cluster.contains("border-radius: var(--radius-surface);"),
+            "do not re-radius the interactive pair after the shared rule"
+        );
+    }
+
     /// Focus had seven separate `outline: none` suppressions and signalled
     /// itself with a border tint, which is not a focus indicator. One owner now.
     #[test]

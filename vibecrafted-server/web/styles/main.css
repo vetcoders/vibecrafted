@@ -2147,32 +2147,42 @@ a.control-run-id:focus-visible {
 .server-navbar-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--chip-stack-gap);
   min-width: 0;
 }
 
+/* One chip plane for status + actions. A full-capsule status next to
+ * squared controls was two shapes in one row; the theme <button> also
+ * kept UA chrome the <a> never had. Chip-stack tokens already own this
+ * geometry — reuse them. */
 .server-status-pill,
 .server-navbar-action,
 .server-theme-toggle {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 32px;
+  box-sizing: border-box;
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0;
+  min-height: var(--chip-stack-height);
   gap: 7px;
-  padding: 0 11px;
+  padding: 0 var(--chip-stack-pad-x);
   border: var(--stroke-width) solid var(--border-subtle);
-  border-radius: 999px;
+  border-radius: var(--chip-stack-radius);
   background: var(--surface-card);
   color: var(--text-secondary);
   font: 550 11px/1 var(--font-body);
+  letter-spacing: 0;
   text-decoration: none;
   white-space: nowrap;
+  cursor: default;
 }
 
 .server-navbar-action,
 .server-theme-toggle {
-  border-radius: var(--radius-surface);
   color: var(--text-primary);
+  cursor: pointer;
   transition:
     background var(--motion-fast) var(--ease-ui),
     border-color var(--motion-fast) var(--ease-ui),
