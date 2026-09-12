@@ -40,9 +40,9 @@ $VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/
 
 Datowane raporty, trackery, transkrypty, briefy, zamknięcia i metadane runu to
 projekcje/evidence runu. Nie stają się drugim systemem dziennika. Jedynym
-kanonicznym stałym dziennikiem jest śledzony przez Git
-`<repo-root>/.vibecrafted/JOURNAL.md`; każdy inny repozytoryjny plik
-`.vibecrafted/` pozostaje ignorowanym stanem runtime'u.
+kanonicznym stałym dziennikiem operatora jest plik
+`<repo-root>/.vibecrafted/THE_JOURNAL.md` (gitignored; dawna nazwa `JOURNAL.md` jest
+wycofana). Repozytoryjny katalog `.vibecrafted/` pozostaje ignorowanym stanem runtime'u.
 
 ## Pasy runtime'u
 

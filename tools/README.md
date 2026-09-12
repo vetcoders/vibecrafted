@@ -28,13 +28,12 @@ cp example-settings.json $HOME/.claude/settings.json
 
 ### Memory Hooks (rmcp-memex integration)
 
-| Hook                             | Event            | Purpose                                               |
-| -------------------------------- | ---------------- | ----------------------------------------------------- |
-| `memory-on-explicit.sh`          | UserPromptSubmit | Saves user commands matching "zapamiętaj", "remember" |
-| `memory-on-ultrathink.sh`        | Stop             | Captures AI insights from ultrathink sessions         |
-| `memory-on-compact.sh`           | PreCompact       | Saves session context before compact                  |
-| `memory-context-loader.sh`       | SessionStart     | Loads memory context at session start                 |
-| `memory-daily-sync-to-host-a.sh` | Cron             | Syncs memories to host-a server                       |
+| Hook                       | Event            | Purpose                                               |
+| -------------------------- | ---------------- | ----------------------------------------------------- |
+| `memory-on-explicit.sh`    | UserPromptSubmit | Saves user commands matching "zapamiętaj", "remember" |
+| `memory-on-ultrathink.sh`  | Stop             | Captures AI insights from ultrathink sessions         |
+| `memory-on-compact.sh`     | PreCompact       | Saves session context before compact                  |
+| `memory-context-loader.sh` | SessionStart     | Loads memory context at session start                 |
 
 ### Ultrathink Variants
 

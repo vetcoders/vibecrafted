@@ -187,9 +187,7 @@ def test_portable_workflow_requires_runtime_pack_bootstrap_on_mac_and_linux() ->
 
 
 def test_portable_source_smoke_selects_explicit_source_lane() -> None:
-    portable_smoke = (REPO_ROOT / "tests/portable/run.sh").read_text(
-        encoding="utf-8"
-    )
+    portable_smoke = (REPO_ROOT / "tests/portable/run.sh").read_text(encoding="utf-8")
 
     assert (
         'bash "$repo_root/install.sh" --archive-file "$bootstrap_archive" '

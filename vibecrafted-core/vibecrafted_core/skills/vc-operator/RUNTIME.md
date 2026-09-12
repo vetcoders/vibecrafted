@@ -41,9 +41,9 @@ $VIBECRAFTED_HOME/artifacts/<org>/<repo>/<YYYY_MMDD>/
 
 Dated reports, trackers, transcripts, briefs, close-outs, and run metadata are
 run projections/evidence. They do not become a second journal system. The one
-canonical permanent journal is the Git-tracked
-`<repo-root>/.vibecrafted/JOURNAL.md`; every other repo-local `.vibecrafted/`
-file remains ignored runtime state.
+canonical permanent operator journal is
+`<repo-root>/.vibecrafted/THE_JOURNAL.md` (gitignored; former name `JOURNAL.md` is
+retired). The repo-local `.vibecrafted/` directory remains ignored runtime state.
 
 ## Runtime Lanes
 

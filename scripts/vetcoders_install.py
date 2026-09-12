@@ -66,6 +66,23 @@ except ModuleNotFoundError:  # pragma: no cover - import path depends on entrypo
     _distribution_manifest = importlib.import_module("scripts.distribution_manifest")
     _installer_brand = importlib.import_module("scripts.installer_brand")
 
+# Every way plistlib refuses bytes. ``plistlib.load`` raises ``ExpatError`` for
+# XML that is not well-formed (e.g. ``--`` inside a comment, which ``plutil``
+# tolerates but expat does not); ``InvalidFileException`` covers the binary
+# format and header sniffing; ``ValueError``/``TypeError`` cover bad payload
+# shapes.
+#
+# Callers decide fatality. Owned/runtime LaunchAgent reads wrap these into
+# ``OSError`` so a corrupt contract plist still fails closed. Foreign
+# LaunchAgent scans catch the same tuple and continue. The tuple is the
+# decode set, not a skip policy.
+_PLIST_DECODE_ERRORS: tuple[type[Exception], ...] = (
+    plistlib.InvalidFileException,
+    ExpatError,
+    ValueError,
+    TypeError,
+)
+
 
 def _load_runtime_paths() -> Any:
     """Load vibecrafted_core/runtime_paths.py by file, never through the package.
@@ -3903,7 +3920,7 @@ def _runtime_launch_agent_contract(shared_home: Path) -> dict[str, Path]:
         with os.fdopen(descriptor, "rb") as handle:
             descriptor = -1
             payload = plistlib.load(handle)
-    except (plistlib.InvalidFileException, ValueError, TypeError) as exc:
+    except _PLIST_DECODE_ERRORS as exc:
         raise OSError("loaded runtime LaunchAgent plist is invalid") from exc
     finally:
         if descriptor >= 0:
@@ -4119,7 +4136,7 @@ def _capture_runtime_launch_agent_backup(
     contents = b"".join(chunks)
     try:
         payload = plistlib.loads(contents)
-    except (plistlib.InvalidFileException, ValueError, TypeError) as exc:
+    except _PLIST_DECODE_ERRORS as exc:
         raise OSError("runtime LaunchAgent snapshot is not a valid plist") from exc
     if not isinstance(payload, dict) or payload.get("Label") != _RUNTIME_SERVICE_LABEL:
         raise OSError("runtime LaunchAgent snapshot has a foreign label")
@@ -4494,7 +4511,7 @@ def _launch_agent_identity_matches_published_binaries(
         return True
     try:
         payload = plistlib.loads(encoded)
-    except (plistlib.InvalidFileException, ValueError, TypeError):
+    except _PLIST_DECODE_ERRORS:
         return False
     if not isinstance(payload, dict):
         return False
@@ -15567,6 +15584,23 @@ def _path_is_under(path: Path, root: Path) -> bool:
         return False
 
 
+def _foreign_launch_agent_program(payload: Mapping[str, Any]) -> str:
+    """Program path from a LaunchAgent dict; empty when the schema is unusable."""
+    program = payload.get("Program")
+    if program not in (None, ""):
+        return str(program)
+    arguments = payload.get("ProgramArguments")
+    if isinstance(arguments, str):
+        return arguments
+    if (
+        isinstance(arguments, Sequence)
+        and not isinstance(arguments, (bytes, bytearray, str))
+        and arguments
+    ):
+        return str(arguments[0])
+    return ""
+
+
 def _foundation_service_dependent_plists() -> list[tuple[Path, dict[str, Any]]]:
     """LaunchAgent plists whose program is a public foundation tool.
 
@@ -15583,21 +15617,18 @@ def _foundation_service_dependent_plists() -> list[tuple[Path, dict[str, Any]]]:
         try:
             with plist_path.open("rb") as handle:
                 payload = plistlib.load(handle)
-        except (
-            OSError,
-            plistlib.InvalidFileException,
-            ExpatError,
-            ValueError,
-            TypeError,
-        ):
+        except (OSError, *_PLIST_DECODE_ERRORS):
+            # Foreign services are not ours to validate: a plist that plistlib
+            # cannot read is skipped, never a reason to abort the install.
+            continue
+        if not isinstance(payload, dict):
             continue
         label = str(payload.get("Label") or "")
         if label.startswith(("io.vetcoders.", "com.vibecrafted.")):
             # Our own services are reconciled by their own lanes.
             continue
-        arguments = payload.get("ProgramArguments") or []
-        program = payload.get("Program") or (arguments[0] if arguments else "")
-        program_name = Path(str(program)).name
+        program = _foreign_launch_agent_program(payload)
+        program_name = Path(program).name
         if program_name.removeprefix("vibecrafted-") in _FOUNDATION_TOOL_NAMES:
             dependents.append((plist_path, payload))
     return dependents
