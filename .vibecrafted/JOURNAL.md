@@ -135,3 +135,28 @@ lokalnie do HEAD, push na origin, podział pracy (agent: stack; Founder: pozosta
 - Otwarte: #77/#75 Linux CI bez Runtime Packa (stara linia bez build-joba);
   core-macos 4 testy na #80 i entry_escalation na Linuksie — ocena po świeżym
   runie CI z tej paczki.
+
+## 2026-09-12T20:30+02:00 — main-candidate pilot (host linux): 16 PR-ów w jednej gałęzi, draft PR
+
+Program Foundera: każdy host merguje wszystkie otwarte PR-y do jednego kandydata mergeable do `main`, otwiera
+DRAFT, zatrzymuje się. Ten host: gałąź `main-candidate/linux-2026-09-12`, ledger
+`docs/main-candidate/2026-09-12-linux-host.md`, rekonesans 16 PR-ów po jednym agencie Sonnet 5 na PR.
+
+- **Decyzja: abort utkniętego rebase** `cursor/runtime-own-python-89f6` → main (pick 1/15, 467 konfliktów);
+  orig-head = zdalny tip #86, nic nie przepadło.
+- **Kluczowe odkrycie**: klon był shallow na `7ba93c1`; stąd „osierocona” historia #80–#87 i 158 konfliktów
+  w merge 3-way względem main. Po `git fetch --unshallow` #77 jest przodkiem tipu #80 i merge jest czysty.
+  Fleet 9 resolverów konfliktów zatrzymany, ich praca odrzucona.
+- **Kolejność**: #75 → #77 → #80 (z #86) → #82 (zawiera #81; 8 konfliktów rozstrzygniętych: stager foundations
+  bez cargo z #80 wygrywa, z #82 zostają x64 slug, GNU stat rescue, resume fix, RSA w CI, `--help` passthrough)
+  → #83 → #85 → cherry-pick #84 (2) i #87 (1). #69/#70/#71/#73/#74 są przodkami #75; #65/#66 już w środku.
+- **Naprawy na kandydacie**: re-scrub prywatnej nazwy hosta i `/Users/<login>` (regresja #70 na linii 4.3.1);
+  `voc` projection revision haszuje rozmiar obok mtime (deterministyczny fail na Linuksie); dwa testy tui
+  dopasowane do rulingu foundations.
+- **Walidacja**: make check, skill-loader i install smoke zielone; server clippy+102 testów zielone; app
+  (Rust 1.97.0) check zielony, 278 testów zielonych; core 2498/2499 (1 flaky pre-existing: pid 999999);
+  tui 195 failing — te same 91 id-ów failuje na tipie #80 w czystym worktree, środowiskowe na Linuksie.
+- **Rozmiar**: main 408 901 linii / 1 301 plików → kandydat 547 625 / 1 510; loct health 93 → 86,
+  duplicate groups 59 → 65, dead 28 → 88 (wejście do hipotez o 500k linii).
+- Otwarte dla Foundera: merge kandydata, zamknięcie #65–#87 jako superseded, nagłówek `## 4.3.1` w CHANGELOG,
+  literówka tagu w RELEASE_CHECKLIST, kopia `install.ps1` w vibecrafted-io.
