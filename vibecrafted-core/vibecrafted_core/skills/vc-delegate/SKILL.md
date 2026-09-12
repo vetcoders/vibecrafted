@@ -116,7 +116,7 @@ Default:
 
 Exceptions:
 
-- Codex: You may delegate to `gpt-5.3-codex-spark` with `xhigh` when the task benefits from extreme speed. Treat Spark as a fast execution tier; the parent agent remains responsible for final quality.
+- Codex only: This exception overrides the same-parent defaults above and the same-named-first rule below for Codex. Respect operator-approved model or reasoning-effort routing. Otherwise, choose a model with a justified margin above the capability and quality the cut requires, then select the most economical option among the models that clear that bar. Use a stronger model immediately when ambiguity, dependency depth, or the consequence of error warrants it; never force a cheap-first trial or defend a poor result because it cost less. Escalate after a demonstrated limitation, without requiring every result from an economical model to be redone automatically by a stronger one. A subagent role label alone does not prove the actual model or reasoning effort; when confirming routing, use available runtime metadata, without mandatory polling after every spawn.
 - Claude: For extensive long-running tasks, prefer `opus[1m]`; for easier or lighter tasks, prefer `sonnet[1m]`.
 - Gemini: If `gemini-3.1-pro-preview` is unavailable or unstable during peak demand, fallback native delegation to `auto-gemini-3`.
 
