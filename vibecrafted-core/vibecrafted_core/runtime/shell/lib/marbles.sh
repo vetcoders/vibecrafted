@@ -151,7 +151,7 @@ _vetcoders_aicx_resume_fallback() {
   local agent="$1"
   local root="${2:-$(_vetcoders_repo_root)}"
   local hours="${VIBECRAFTED_RESUME_AICX_HOURS:-96}"
-  local tmp_dir context_file meta_file aicx_bin python_spec py import_root module source_dir
+  local tmp_dir context_file meta_file aicx_bin python_spec py source_dir
   aicx_bin="$(_vetcoders_aicx_bin 2>/dev/null)" || {
     echo "aicx foundation not found in the Vibecrafted runtime, ~/.local/bin, ~/.cargo/bin, or PATH." >&2
     echo "Install the AICX foundation or pass --session <session_id>." >&2
@@ -162,38 +162,25 @@ _vetcoders_aicx_resume_fallback() {
   context_file="$tmp_dir/resume-aicx-${agent}-$(date +%Y%m%d_%H%M%S).md"
   meta_file="${context_file}.meta.json"
 
-  # Prefer the module in the owned core so a stale installed package cannot
-  # hide the live assembler. Do not rediscover through BASH_SOURCE (empty
-  # under zsh).
-  module=""
+  # Run the assembler as a package module: it imports its siblings
+  # (runtime_receipt), which a bare script path cannot resolve. The owned core
+  # leads PYTHONPATH so a stale installed package cannot hide the live
+  # assembler. Do not rediscover through BASH_SOURCE (empty under zsh).
   source_dir="$(_vetcoders_owned_core_dir 2>/dev/null || true)"
-  if [[ -n "$source_dir" && -f "$source_dir/vibecrafted_core/aicx_session_chain.py" ]]; then
-    module="$source_dir/vibecrafted_core/aicx_session_chain.py"
-  fi
   python_spec="$(_vetcoders_core_python_spec)" || return 1
   py="${python_spec%%$'\t'*}"
-  import_root="${python_spec#*$'\t'}"
-  if [[ -z "$py" || -z "$module" ]]; then
+  if [[ -z "$py" || -z "$source_dir" || ! -f "$source_dir/vibecrafted_core/aicx_session_chain.py" ]]; then
     echo "Vibecrafted session-chain assembler unavailable (python or module missing)." >&2
     return 1
   fi
-  if [[ -n "$import_root" ]]; then
-    PYTHONPATH="$import_root" "$py" "$module" resume-pack \
-      --agent "$agent" \
-      --root "$root" \
-      --hours "$hours" \
-      --aicx "$aicx_bin" \
-      --context-file "$context_file" \
-      --meta-file "$meta_file"
-  else
-    "$py" "$module" resume-pack \
-      --agent "$agent" \
-      --root "$root" \
-      --hours "$hours" \
-      --aicx "$aicx_bin" \
-      --context-file "$context_file" \
-      --meta-file "$meta_file"
-  fi
+  PYTHONPATH="$source_dir${PYTHONPATH:+:$PYTHONPATH}" \
+    "$py" -m vibecrafted_core.aicx_session_chain resume-pack \
+    --agent "$agent" \
+    --root "$root" \
+    --hours "$hours" \
+    --aicx "$aicx_bin" \
+    --context-file "$context_file" \
+    --meta-file "$meta_file"
 }
 
 # Resolve one owned Python >=3.11 that can import the live vibecrafted_core
@@ -461,7 +448,9 @@ _vetcoders_resume_agent() {
   # contract projection intentionally does not retain every public spelling.
   # Bash 3.2 with `set -u` rejects an empty declared-array expansion. Keep an
   # actually empty public vector empty; it must not become one blank argument.
-  local -a _vetcoders_resume_public_argv
+  # Assign it explicitly: bash 5 treats a declared-but-unassigned array as
+  # unbound, even for `${#array[@]}`.
+  local -a _vetcoders_resume_public_argv=()
   if (( $# )); then
     _vetcoders_resume_public_argv=("$@")
   fi

@@ -187,6 +187,7 @@ def _run(
     extra_env: dict[str, str] | None = None,
     expect_launch: bool = True,
     shell: str | None = None,
+    interpreter: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], dict | None]:
     env = os.environ.copy()
     for key in (
@@ -209,6 +210,9 @@ def _run(
     env.update(extra_env or {})
 
     command = [str(entry), *argv]
+    if interpreter is not None:
+        # Bypass the shebang so one host bash is exercised explicitly.
+        command = [interpreter, *command]
     if shell is not None:
         # The caller's login shell must not change who owns the helpers.
         quoted = shlex.join(command)
@@ -259,9 +263,18 @@ def _working_directory(launch: dict) -> Path:
     return Path(argv[argv.index("--working-directory") + 1]).resolve()
 
 
-def _interactive_handoff_command(launch: dict) -> str:
-    argv = _hosted_argv(launch)
-    return argv[argv.index("--command") + 1]
+def _front_door_argv(launch: dict, world: dict[str, Path]) -> list[str]:
+    """The terminal re-enters the SELECTED generation's public declaration.
+
+    Admission, continuity and the provider belong to that child (see
+    test_terminal_child_composes_one_pack_and_one_provider); the parent's only
+    job is to hand the exact public vector to its own generation's front door.
+    """
+    hosted = _hosted_argv(launch)
+    assert hosted[0].endswith("launch-primary-shell.zsh"), hosted
+    assert hosted[1] == str(world["generation"] / "bin" / "vibecrafted"), hosted
+    assert str(world["checkout"]) not in " ".join(hosted), hosted
+    return hosted[2:]
 
 
 # --------------------------------------------------------------------------
@@ -286,25 +299,14 @@ def test_installed_resume_inside_a_checkout_uses_its_own_generation(
     # Only the selected generation's helper tree was loaded.
     assert _sourced(world) == [OWNER_MARK], result.stderr
 
-    # The public terminal handoff is a spawned core command. Its import root
-    # and child interpreter must still be owned by the selected generation,
-    # never by the checkout that happened to be the caller's cwd.
-    hosted = _hosted_argv(launch)
-    assert hosted[0].endswith("launch-primary-shell.zsh")
-    assert f"PYTHONPATH={world['generation'] / 'vibecrafted-core'}" in hosted
-    handoff_tokens = shlex.split(_interactive_handoff_command(launch))
-    assert handoff_tokens[:5] == [
-        str(world["generation"] / "bin" / "python3"),
-        "-m",
-        "vibecrafted_core.spawn",
-        "interactive-launch",
-        "codex",
-    ]
-    assert str(world["checkout"]) not in handoff_tokens
+    # The terminal hands the public vector to this generation's own front door,
+    # never to the checkout that happened to be the caller's cwd, and the
+    # boundary it exports names that same owner.
+    forwarded = _front_door_argv(launch, world)
+    assert forwarded == ["resume", "codex", "--root", str(project.resolve())]
 
     # Project identity is independent, and --root survives exactly.
     assert _working_directory(launch) == project.resolve()
-    assert handoff_tokens[handoff_tokens.index("--root") + 1] == str(project)
     assert launch["boundary"] == "1"
 
 
@@ -341,9 +343,7 @@ def test_ambient_roots_cannot_select_another_generation(
 
     assert launch is not None, result.stderr
     assert _sourced(world) == [OWNER_MARK]
-    assert str(world["generation"] / "bin" / "python3") in _interactive_handoff_command(
-        launch
-    )
+    assert _front_door_argv(launch, world)[:2] == ["resume", "codex"]
 
 
 def test_normal_cwd_outside_any_checkout_still_uses_the_generation(
@@ -362,6 +362,45 @@ def test_normal_cwd_outside_any_checkout_still_uses_the_generation(
     assert _working_directory(launch) == project.resolve()
 
 
+def _host_bash_interpreters() -> list[str]:
+    """Every distinct bash on this host (macOS: 3.2 in /bin, 5.x from Homebrew)."""
+    found: dict[str, str] = {}
+    for candidate in (
+        "/bin/bash",
+        "/usr/bin/bash",
+        "/opt/homebrew/bin/bash",
+        "/usr/local/bin/bash",
+        shutil.which("bash"),
+    ):
+        if candidate and os.access(candidate, os.X_OK):
+            found.setdefault(os.path.realpath(candidate), candidate)
+    return sorted(found.values())
+
+
+@pytest.mark.parametrize("bash", _host_bash_interpreters())
+def test_bare_resume_without_tty_survives_every_host_bash(
+    world: dict[str, Path], bash: str
+) -> None:
+    """A bare public resume has an empty vector; no bash may call it unbound.
+
+    Regression (93e68ff0): bash 5 treats a declared-but-unassigned array as
+    unbound under the deck's `set -u`, and bash 3.2 rejects expanding an empty
+    one. Either way `vibecrafted resume <agent>` died before any terminal.
+    """
+    result, launch = _run(
+        world,
+        world["generation"] / "bin" / "vibecrafted",
+        ["resume", "codex"],
+        cwd=world["project"],
+        interpreter=bash,
+    )
+
+    assert "unbound variable" not in result.stderr, result.stderr
+    assert launch is not None, result.stderr
+    assert _sourced(world) == [OWNER_MARK]
+    assert _working_directory(launch) == world["project"].resolve()
+
+
 @pytest.mark.parametrize("shell", ["bash", "zsh"])
 def test_caller_shell_does_not_change_the_owner(
     world: dict[str, Path], shell: str
@@ -375,8 +414,111 @@ def test_caller_shell_does_not_change_the_owner(
 
     assert launch is not None, result.stderr
     assert _sourced(world) == [OWNER_MARK]
-    assert str(world["generation"] / "bin" / "python3") in _interactive_handoff_command(
-        launch
+    assert _front_door_argv(launch, world)[:2] == ["resume", "codex"]
+
+
+def test_terminal_child_composes_one_pack_without_relaunching(
+    world: dict[str, Path],
+) -> None:
+    """The whole no-TTY resume scenario, parent and child, on the real deck.
+
+    The parent (a pipe) only admits: it opens one terminal on the project and
+    composes nothing. The child is replayed exactly as the terminal hosts it --
+    hosted argv, its working directory, a real PTY and the owned boundary the
+    launcher exports -- and must compose exactly one continuity pack for the
+    canonical project, through the shell entry, without opening a second
+    terminal. Regression surface of 93e68ff0: the child's assembler import and
+    the empty public vector.
+    """
+    project = world["project"]
+    deck = world["generation"] / "bin" / "vibecrafted"
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(project),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/Fixture/mlx-batch-runner.git",
+        ],
+        check=True,
+    )
+    fakebin = _ensure_dir(world["base"] / "fakebin")
+    aicx_calls = world["base"] / "aicx-calls.log"
+    _write(
+        fakebin / "aicx",
+        "#!/bin/bash\n"
+        f'printf "%s\\n" "$*" >> {shlex.quote(str(aicx_calls))}\n'
+        'if [[ "$1 $2" == "sessions list" ]]; then printf "[]\\n"; exit 0; fi\n'
+        'if [[ "$1 $2" == "continuity show" ]]; then printf "## NOW\\nfixture\\n"; exit 0; fi\n'
+        "exit 1\n",
+    )
+    path = f"{fakebin}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+
+    result, launch = _run(
+        world, deck, ["resume", "codex"], cwd=project, extra_env={"PATH": path}
+    )
+    assert launch is not None, result.stderr
+    assert not aicx_calls.exists(), "the parent composed continuity before admission"
+    hosted = _hosted_argv(launch)
+    child_cwd = _working_directory(launch)
+    assert child_cwd == project.resolve()
+
+    world["capture"].unlink()
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("VIBECRAFTED_", "VC_FRAME_", "ZELLIJ_", "PYTHON"))
+    }
+    env.update(
+        {
+            "HOME": str(world["home"]),
+            "VIBECRAFTED_HOME": str(world["home"] / ".vibecrafted"),
+            "XDG_CONFIG_HOME": str(world["home"] / ".config"),
+            "PATH": path,
+            "VIBECRAFTED_TERMINAL_ENTRY": "1",
+            "VIBECRAFTED_TERMINAL_ENTRY_OWNER": str(deck),
+        }
+    )
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import pty, sys; sys.exit(pty.spawn(sys.argv[1:]))",
+            *hosted[1:],
+        ],
+        cwd=child_cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        output, _ = child.communicate(timeout=90)
+    except subprocess.TimeoutExpired:
+        os.killpg(child.pid, 9)
+        output, _ = child.communicate()
+
+    assert "attempted relative import" not in output, output
+    assert "unbound variable" not in output, output
+    assert not world["capture"].exists(), "the terminal child opened a second terminal"
+    calls = aicx_calls.read_text(encoding="utf-8").splitlines()
+    scoped = [call for call in calls if " -p " in call]
+    assert scoped, calls
+    assert all(" -p Fixture/mlx-batch-runner " in call for call in scoped), calls
+    assert sum(call.startswith("continuity show ") for call in calls) == 1, calls
+    packs = [
+        pack
+        for pack in (world["home"] / ".vibecrafted" / "tmp").glob(
+            "resume-aicx-codex-*.md"
+        )
+        if not pack.name.endswith(".full.md")
+    ]
+    assert len(packs) == 1, packs
+    assert "aicx_project_filter: `Fixture/mlx-batch-runner`" in packs[0].read_text(
+        encoding="utf-8"
     )
 
 
