@@ -410,31 +410,24 @@ def _runtime_pack_fixture(app: Path, macho_executable: Path) -> str:
     return name
 
 
-def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
-    terminal_relative = "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
-    for relative in (
-        "Contents/MacOS/Vibecrafted",
-        terminal_relative,
-        "Contents/Helpers/vc-frame",
-        "Contents/Resources/runtime/bin/vc-start",
-    ):
-        (app / relative).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(macho_executable, app / relative)
-    for relative in (
-        terminal_relative,
-        "Contents/Helpers/vc-frame",
-        "Contents/Resources/runtime/bin/vc-start",
-    ):
-        _codesign_macho(app / relative)
-    primary_shell = app / contract._LAUNCH_PRIMARY_SHELL
-    primary_shell.parent.mkdir(parents=True, exist_ok=True)
-    primary_shell.write_text('#!/bin/zsh\nexec vc-start "$@"\n', encoding="utf-8")
-    primary_shell.chmod(0o755)
-    terminal_app = app / "Contents/Helpers/vc-terminal.app"
-    terminal_icon = terminal_app / "Contents/Resources/alacritty.icns"
-    terminal_icon.parent.mkdir(parents=True, exist_ok=True)
-    terminal_icon.write_bytes(b"terminal-icns-fixture")
-    with (terminal_app / "Contents/Info.plist").open("wb") as handle:
+def _terminal_bundle_fixture(
+    app: Path, relative: str, macho_executable: Path
+) -> list[dict[str, Any]]:
+    """One canonical vc-terminal.app, sealed the way the release builder seals it.
+
+    The inner Mach-O is signed as a file and the directory is then sealed as a
+    bundle: only the second step writes Contents/_CodeSignature, which is what
+    carries the Finder/Dock identity the contract proves.
+    """
+    bundle = app / relative
+    executable = bundle / "Contents/MacOS/alacritty"
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(macho_executable, executable)
+    _codesign_macho(executable)
+    icon = bundle / "Contents/Resources/alacritty.icns"
+    icon.parent.mkdir(parents=True, exist_ok=True)
+    icon.write_bytes(b"terminal-icns-fixture")
+    with (bundle / "Contents/Info.plist").open("wb") as handle:
         plistlib.dump(
             {
                 "CFBundleIdentifier": "io.vetcoders.vc-terminal",
@@ -446,7 +439,40 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
             },
             handle,
         )
-    _codesign_app(terminal_app)
+    _codesign_app(bundle)
+    return [
+        _entry(app, f"{relative}/Contents/MacOS/alacritty", kind="executable"),
+        _entry(app, f"{relative}/Contents/Info.plist", kind="config"),
+        _entry(app, f"{relative}/Contents/Resources/alacritty.icns", kind="resource"),
+    ]
+
+
+def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
+    terminal_relative = "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
+    for relative in (
+        "Contents/MacOS/Vibecrafted",
+        "Contents/Helpers/vc-frame",
+        "Contents/Resources/runtime/bin/vc-start",
+    ):
+        (app / relative).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(macho_executable, app / relative)
+    for relative in (
+        "Contents/Helpers/vc-frame",
+        "Contents/Resources/runtime/bin/vc-start",
+    ):
+        _codesign_macho(app / relative)
+    primary_shell = app / contract._LAUNCH_PRIMARY_SHELL
+    primary_shell.parent.mkdir(parents=True, exist_ok=True)
+    primary_shell.write_text('#!/bin/zsh\nexec vc-start "$@"\n', encoding="utf-8")
+    primary_shell.chmod(0o755)
+    # Both declared bundles: the App's Helpers copy and the one the Runtime
+    # Pack materializes for its own standalone install, which arrives inside
+    # the App because the whole pack payload is staged under Resources/runtime.
+    terminal_bundle_entries = [
+        entry
+        for bundle_relative in contract.TERMINAL_APP_BUNDLES
+        for entry in _terminal_bundle_fixture(app, bundle_relative, macho_executable)
+    ]
     terminal_config = app / "Contents/Resources/terminal/vibecrafted.toml"
     terminal_config.parent.mkdir(parents=True, exist_ok=True)
     terminal_config.write_text("[shell]\nprogram = 'vc-start'\n", encoding="utf-8")
@@ -466,7 +492,9 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
             },
             handle,
         )
-    terminal_product_entry = _entry(app, terminal_relative, kind="executable")
+    terminal_product_entry = next(
+        entry for entry in terminal_bundle_entries if entry["path"] == terminal_relative
+    )
     frame_product_entry = _entry(app, "Contents/Helpers/vc-frame", kind="executable")
 
     def add_module_binding(
@@ -570,18 +598,8 @@ def _app_fixture(app: Path, macho_executable: Path) -> dict[str, Any]:
                 f"Contents/Resources/{contract.PRODUCT_ICON_FILE}",
                 kind="resource",
             ),
-            terminal_product_entry,
+            *terminal_bundle_entries,
             frame_product_entry,
-            _entry(
-                app,
-                "Contents/Helpers/vc-terminal.app/Contents/Info.plist",
-                kind="config",
-            ),
-            _entry(
-                app,
-                "Contents/Helpers/vc-terminal.app/Contents/Resources/alacritty.icns",
-                kind="resource",
-            ),
             _entry(app, terminal_binding["manifest_path"], kind="config"),
             _entry(app, frame_binding["manifest_path"], kind="config"),
             _entry(app, terminal_binding["assembly_receipt_path"], kind="config"),
@@ -2178,6 +2196,146 @@ def test_app_negative_controls_reject_competing_or_unbound_product_shape(
     _write_json(app / "Contents/Resources/product-manifest.json", manifest)
 
     _assert_error(expected_code, lambda: contract.verify_app(app))
+
+
+def test_app_accepts_both_declared_terminal_bundles(
+    tmp_path: Path, macho_executable: Path
+) -> None:
+    """The Runtime Pack's own bundle is product, not contraband.
+
+    Before this, `verify_app` compared every nested .app against a list holding
+    only the Helpers copy, so the moment the pack payload staged under
+    Resources/runtime brought its own vc-terminal.app the whole product was
+    rejected as carrying a forbidden nested bundle.
+    """
+    app = tmp_path / "Vibecrafted.app"
+    manifest = _app_fixture(app, macho_executable)
+
+    nested = sorted(
+        path.relative_to(app).as_posix() for path in app.rglob("*.app") if path.is_dir()
+    )
+    assert nested == sorted(contract.TERMINAL_APP_BUNDLES)
+    declared = {entry["path"] for entry in manifest["files"]}
+    for bundle in contract.TERMINAL_APP_BUNDLES:
+        assert f"{bundle}/Contents/MacOS/alacritty" in declared
+        assert f"{bundle}/Contents/Resources/alacritty.icns" in declared
+        assert (app / bundle / "Contents/_CodeSignature/CodeResources").is_file()
+        # The seal is proof, never payload: nothing under it may be inventoried.
+        assert not any(
+            item.startswith(f"{bundle}/Contents/_CodeSignature") for item in declared
+        )
+
+    assert contract.verify_app(app) == manifest
+
+
+@pytest.mark.parametrize("bundle", contract.TERMINAL_APP_BUNDLES)
+@pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    [
+        ("wrong_identity", contract.E_BUNDLE),
+        ("wrong_display_name", contract.E_BUNDLE),
+        ("plist_is_not_a_dictionary", contract.E_BUNDLE),
+        ("plist_is_malformed_xml", contract.E_BUNDLE),
+        ("icon_absent_from_inventory", contract.E_INVENTORY),
+        ("bundle_seal_removed", contract.E_PROOF),
+    ],
+)
+def test_every_declared_terminal_bundle_is_held_to_one_identity(
+    tmp_path: Path,
+    macho_executable: Path,
+    bundle: str,
+    mutation: str,
+    expected_code: int,
+) -> None:
+    """Same canonical identity, same proof, whichever payload carries it.
+
+    Parametrized over both declared bundles on purpose: a check that only ever
+    ran against the Helpers copy is how the two assemblies drifted apart in the
+    first place. A malformed Info.plist is a contract failure with a code, not
+    an AttributeError escaping the verifier.
+    """
+    app = tmp_path / "Vibecrafted.app"
+    manifest = _app_fixture(app, macho_executable)
+    plist_path = app / bundle / "Contents/Info.plist"
+
+    def _reseal_plist(payload: Any) -> None:
+        with plist_path.open("wb") as handle:
+            plistlib.dump(payload, handle)
+        _resync_plist_entry()
+
+    def _resync_plist_entry() -> None:
+        relative = f"{bundle}/Contents/Info.plist"
+        entry = next(item for item in manifest["files"] if item["path"] == relative)
+        entry.update(_entry(app, relative, kind="config"))
+
+    if mutation == "wrong_identity":
+        with plist_path.open("rb") as handle:
+            info = plistlib.load(handle)
+        info["CFBundleIdentifier"] = "io.example.vc-terminal"
+        _reseal_plist(info)
+    elif mutation == "wrong_display_name":
+        with plist_path.open("rb") as handle:
+            info = plistlib.load(handle)
+        info["CFBundleDisplayName"] = "Alacritty"
+        _reseal_plist(info)
+    elif mutation == "plist_is_not_a_dictionary":
+        _reseal_plist(["not", "a", "dictionary"])
+    elif mutation == "plist_is_malformed_xml":
+        plist_path.write_bytes(b'<?xml version="1.0"?><plist version="1.0"><dict>\n')
+        _resync_plist_entry()
+    elif mutation == "icon_absent_from_inventory":
+        icon_relative = f"{bundle}/Contents/Resources/alacritty.icns"
+        (app / icon_relative).unlink()
+        manifest["files"] = [
+            item for item in manifest["files"] if item["path"] != icon_relative
+        ]
+    elif mutation == "bundle_seal_removed":
+        shutil.rmtree(app / bundle / "Contents/_CodeSignature")
+
+    _write_app_manifest(app, manifest, sign=False)
+
+    _assert_error(expected_code, lambda: contract.verify_app(app))
+
+
+def test_manifest_producer_inventories_an_undeclared_nested_bundle_seal(
+    tmp_path: Path, macho_executable: Path
+) -> None:
+    """No blanket nested-app exemption on the producer side either.
+
+    The writer used to skip anything whose path contained `_CodeSignature` or
+    was named `CodeResources`. That absolved an undeclared nested bundle of
+    being inventoried at all, so the two sides disagreed about what the payload
+    even contained. The producer now asks the contract for the exact paths the
+    signer owns, and a stranger's seal lands in the inventory.
+    """
+    app = tmp_path / "Vibecrafted.app"
+    _app_fixture(app, macho_executable)
+    intruder = "Contents/Resources/Second.app/Contents/_CodeSignature/CodeResources"
+    (app / intruder).parent.mkdir(parents=True)
+    (app / intruder).write_text("sealed\n", encoding="utf-8")
+
+    unified_product_manifest.produce_app(
+        Namespace(
+            app=app,
+            terminal_source=macho_executable,
+            frame_source=macho_executable,
+            version="1.0.0",
+            build="1",
+            vibecrafted_sha="2" * 40,
+            terminal_sha="4" * 40,
+            frame_sha="6" * 40,
+        )
+    )
+    produced = json.loads(
+        (app / "Contents/Resources/product-manifest.json").read_text(encoding="utf-8")
+    )
+
+    declared = {entry["path"] for entry in produced["files"]}
+    assert intruder in declared
+    for bundle in contract.TERMINAL_APP_BUNDLES:
+        assert f"{bundle}/Contents/_CodeSignature/CodeResources" not in declared
+        assert f"{bundle}/Contents/MacOS/alacritty" in declared
+        assert f"{bundle}/Contents/Resources/alacritty.icns" in declared
 
 
 def test_app_binds_embedded_module_receipt_bytes_and_copied_inventory(

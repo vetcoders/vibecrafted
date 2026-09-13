@@ -420,7 +420,16 @@ if [[ "$MODE" != "runtime-pack" ]]; then
   done
 fi
 [[ -f "$SIGNING_IDENTITY_FILE" ]] || die "missing $SIGNING_IDENTITY_FILE"
-if [[ "$MODE" != "runtime-pack" ]]; then
+# Every payload that materializes a Darwin vc-terminal.app consumes the
+# licensed family, because embed_terminal_font_resources is inside
+# materialize_vc_terminal_app_bundle and both callers reach it. The App build
+# always does; a Runtime Pack does when its platform is Darwin, which is the
+# very condition materialize_runtime_payload branches on. Exempting
+# MODE=runtime-pack here stopped being true the moment the pack grew its own
+# bundle: the build would run the whole native compile and then die inside the
+# payload walk instead of in this one-line preflight. Linux packs ship the flat
+# native host, have no .app identity, and need no font.
+if [[ "$MODE" != "runtime-pack" || "$RUNTIME_PACK_PLATFORM" == darwin-* ]]; then
   [[ -f "$SPOT_MONO_FONT" ]] || die "missing licensed Spot Mono input: $SPOT_MONO_FONT"
   LC_ALL=C file -b "$SPOT_MONO_FONT" \
     | grep -Eq '(OpenType|TrueType) font collection data' \
@@ -758,11 +767,14 @@ embed_runtime_pack() {
 #   * a family absent from the host resolves inside the declaring bundle and
 #     stays invisible to every other process, so a user without Spot Mono
 #     installed still gets it;
-#   * a family the user has in ~/Library/Fonts keeps winning, so the bundled
-#     copy is a fallback and never shadows the owner's own file.
+#   * a family already registered from /System/Library/Fonts or /Library/Fonts
+#     keeps winning inside the declaring process, so for those stores the
+#     bundled copy is a fallback and not a takeover. The probe deliberately
+#     does not read ~/Library/Fonts, so precedence over the owner's private
+#     collection is not claimed here — only the system stores were measured.
 # That is the whole reason this replaced the parent app's CTFontManager
-# `.session` registration, which reached the entire login session and outranked
-# the owner's installed copy.
+# `.session` registration, which reached the entire login session; there the
+# shadowing of a user-installed SpotMono.ttc WAS observed directly.
 embed_terminal_font_resources() {
   local terminal_app="$1"
   local resources="$terminal_app/Contents/Resources"

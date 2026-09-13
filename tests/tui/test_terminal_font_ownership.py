@@ -16,7 +16,10 @@ the process that draws the glyphs.
 A string in a plist is not evidence, so the macOS test below builds throwaway
 app bundles in a temporary directory and asks CoreText, in a real consuming
 process, what it can see. No installed app, user font store, or live process is
-touched.
+touched -- which also bounds what these tests may claim: the precedence case
+draws its donor from `/System/Library/Fonts` and `/Library/Fonts` only, so
+"the installed copy still wins" is proved for the system stores and is NOT a
+universal statement about `~/Library/Fonts`.
 
 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 """
@@ -212,8 +215,13 @@ def test_bundle_private_font_resolves_only_inside_the_declaring_process(tmp_path
 @pytest.mark.skipif(
     not Path("/usr/bin/clang").exists(), reason="probe needs the system clang"
 )
-def test_bundled_font_never_shadows_an_installed_family(tmp_path):
-    """A fallback, not a takeover: the already-installed file keeps winning."""
+def test_bundled_font_never_shadows_a_system_installed_family(tmp_path):
+    """A fallback, not a takeover, for the stores this test is allowed to read.
+
+    Donor comes from `/System/Library/Fonts` or `/Library/Fonts`. The owner's
+    `~/Library/Fonts` is deliberately never opened, so nothing here licenses a
+    claim about precedence over the owner's private collection.
+    """
     probe = _probe_binary(tmp_path)
     donor = _installed_family_donor(probe)
     if donor is None:
@@ -229,3 +237,153 @@ def test_bundled_font_never_shadows_an_installed_family(tmp_path):
     )
     assert answer["usable_family"] == family
     assert _same_file(answer["resolved_url"], font), "the installed copy still wins"
+
+
+BUILDER = REPO_ROOT / "scripts/build-vibecrafted-release.sh"
+
+
+def _builder_function(name: str) -> str:
+    """The shipped source of one builder function, lifted verbatim.
+
+    The release builder is a single top-level script: sourcing it would run a
+    build. Lifting the function bodies keeps the assertion on the bytes that
+    actually ship instead of on a paraphrase maintained beside them.
+    """
+    builder = BUILDER.read_text(encoding="utf-8")
+    start = builder.index(f"\n{name}() {{\n") + 1
+    end = builder.index("\n}\n", start) + len("\n}\n")
+    return builder[start:end]
+
+
+def _licensed_font_preflight_condition() -> str:
+    """The `[[ ... ]]` test that decides whether the font input is required."""
+    lines = BUILDER.read_text(encoding="utf-8").splitlines()
+    failure = next(
+        index
+        for index, line in enumerate(lines)
+        if "missing licensed Spot Mono input" in line
+    )
+    guard = next(
+        lines[index]
+        for index in range(failure, -1, -1)
+        if lines[index].startswith("if [[")
+    )
+    return guard[len("if [[") : guard.rindex("]]; then")].strip()
+
+
+@pytest.mark.parametrize(
+    ("mode", "platform_", "required"),
+    [
+        ("app", "darwin-arm64", True),
+        ("runtime-pack", "darwin-arm64", True),
+        ("runtime-pack", "linux-arm64", False),
+    ],
+)
+def test_licensed_font_preflight_covers_every_darwin_payload(
+    mode: str, platform_: str, required: bool
+) -> None:
+    """A Runtime Pack that materializes a .app consumes the licensed family.
+
+    Evaluated, not read: the shipped condition is handed to bash under each
+    payload shape. While it was `MODE != runtime-pack` the Darwin pack built
+    its whole native payload and only then died inside the bundle walk.
+    """
+    condition = _licensed_font_preflight_condition()
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"set -eu\nif [[ {condition} ]]; then echo require; else echo skip; fi",
+        ],
+        env={"MODE": mode, "RUNTIME_PACK_PLATFORM": platform_, "PATH": "/usr/bin:/bin"},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.strip() == ("require" if required else "skip")
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="PlistBuddy and ditto are macOS")
+def test_both_materializer_roles_receive_the_font_before_any_signature(
+    tmp_path: Path,
+) -> None:
+    """Run the real materializer twice; both payloads come out font-owning.
+
+    One function assembles the App helper and the Runtime Pack's own bundle, so
+    the proof has to be that the shipped body — not a second copy of it — puts
+    SpotMono.ttc and ATSApplicationFontsPath into whichever bundle it is given.
+    Nothing is signed here: the materializer runs before any signature is
+    spent, and the absence of Contents/_CodeSignature is part of the claim.
+    """
+    terminal_repo = tmp_path / "vc-terminal"
+    donor = terminal_repo / "extra/osx/vc-terminal.app"
+    (donor / "Contents/MacOS").mkdir(parents=True)
+    (donor / "Contents/Info.plist").write_bytes(
+        plistlib.dumps(
+            {
+                "CFBundleIdentifier": "org.alacritty",
+                "CFBundleExecutable": "alacritty",
+                "CFBundleIconFile": "alacritty.icns",
+                "CFBundleName": "Alacritty",
+                "CFBundlePackageType": "APPL",
+            }
+        )
+    )
+    icons = terminal_repo / "assets/icon"
+    icons.mkdir(parents=True)
+    (icons / "vc-terminal-icon.png").write_bytes(b"png-fixture")
+    (icons / "terminal.png").write_bytes(b"png-reference-fixture")
+
+    source_root = tmp_path / "vibecrafted"
+    (source_root / "scripts").mkdir(parents=True)
+    icon_builder = source_root / "scripts/build-vibecrafted-icon.sh"
+    icon_builder.write_text(
+        '#!/bin/sh\nprintf "icns-fixture\\n" > "$2"\n', encoding="utf-8"
+    )
+    icon_builder.chmod(0o755)
+
+    binary = tmp_path / "alacritty"
+    binary.write_bytes(b"terminal-binary-fixture")
+    binary.chmod(0o755)
+    font = tmp_path / "SpotMono.ttc"
+    font.write_bytes(b"spot-mono-fixture")
+
+    driver = "".join(
+        (
+            "set -euo pipefail\n",
+            _builder_function("die"),
+            _builder_function("embed_terminal_font_resources"),
+            _builder_function("materialize_vc_terminal_app_bundle"),
+            'materialize_vc_terminal_app_bundle "$1" "$2" "$3"\n',
+        )
+    )
+
+    for role, relative in (
+        ("helper", "Vibecrafted.app/Contents/Helpers/vc-terminal.app"),
+        ("Runtime Pack", "VibecraftedRuntime/libexec/vc-terminal.app"),
+    ):
+        bundle = tmp_path / "payloads" / relative
+        bundle.parent.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            ["bash", "-c", driver, "materializer", str(bundle), str(binary), role],
+            env={
+                "PATH": "/usr/bin:/bin",
+                "TERMINAL_REPO": str(terminal_repo),
+                "SOURCE_ROOT": str(source_root),
+                "SPOT_MONO_FONT": str(font),
+            },
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, f"{role}: {result.stdout}{result.stderr}"
+
+        bundled = bundle / "Contents/Resources/fonts/SpotMono.ttc"
+        assert bundled.read_bytes() == font.read_bytes(), role
+        with (bundle / "Contents/Info.plist").open("rb") as handle:
+            info = plistlib.load(handle)
+        assert info["ATSApplicationFontsPath"] == "fonts", role
+        assert info["CFBundleName"] == "VC Terminal", role
+        assert info["CFBundleDisplayName"] == "VC Terminal", role
+        assert not (bundle / "Contents/_CodeSignature").exists(), role

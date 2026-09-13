@@ -86,9 +86,14 @@ macOS 27:
 - **No global side effect.** The control bundle, asked again after the
   declaring process ran, still sees nothing. The registration is private to the
   declaring process — the opposite of `.session`.
-- **A family the host already has.** The bundled copy joins the process's
-  matching set, but resolution still returns the installed file. The bundled
-  font is a fallback and never shadows what the owner installed.
+- **A family the host already has, from the system stores.** The donor is
+  taken from `/System/Library/Fonts` or `/Library/Fonts`; the probe never
+  reads `~/Library/Fonts`. The bundled copy joins the process's matching set,
+  but resolution still returns the installed file. For those stores the
+  bundled font is a fallback, not a takeover. Precedence over the owner's
+  private `~/Library/Fonts` collection was not measured and is not claimed
+  here — what WAS measured directly is the shadowing described above, which
+  the `.session` registration caused and this key removes the cause of.
 
 Source-level assertions in the same file keep the parent app free of
 `CTFontManagerRegisterFontsForURL` and keep the builder binding the font into
@@ -99,9 +104,17 @@ modified. Only font files were read.
 
 ## Outstanding
 
-The standalone Runtime Pack materializes its own
-`libexec/vc-terminal.app` outside this cut. That bundle needs the same call —
-see the integration note in the implementation report — and the builder's
-licensed-font precondition currently runs only when `MODE != runtime-pack`.
+Both gaps named here are now closed. `materialize_vc_terminal_app_bundle` is
+the single assembler for the App helper AND the Runtime Pack's own
+`libexec/vc-terminal.app`, and it calls `embed_terminal_font_resources` once,
+inside itself, so both roles carry the licensed family before any signature is
+spent. The licensed-font precondition is no longer exempt for
+`MODE=runtime-pack`: it runs for every payload whose
+`RUNTIME_PACK_PLATFORM` is Darwin, which is every payload that materializes a
+`.app`. A non-Darwin pack ships the flat native host and still needs no font.
+
+What is genuinely outstanding is acceptance, not code: the final signed and
+installed binary rendering with Spot Mono has not been observed on an
+installed product. That belongs to the release walk-around, not to this cut.
 
 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
