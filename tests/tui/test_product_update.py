@@ -695,9 +695,6 @@ def _signed_search_roots() -> list[Path]:
         if configured:
             roots.append(Path(configured))
     roots.append(REPO_ROOT / "dist")
-    roots.append(
-        Path("/Volumes/vc-workspace/vetcoders/vibecrafted-suite/vibecrafted/dist")
-    )
     seen: set[Path] = set()
     unique: list[Path] = []
     for root in roots:
