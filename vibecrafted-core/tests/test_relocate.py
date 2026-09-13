@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import tarfile
 import time
@@ -152,6 +153,13 @@ def test_code_repos_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
 NO_NUL_BYTES = b"\xaa\xbb\xcc\xdd"
 WITH_NUL_BYTES = b"\x00\x01\x02\x03"
 NESTED_BYTES = b"\x10\x20\x30\x40\x50"
+
+# Modes spelled with the stat constants rather than octal literals: the value is
+# the point (an executable script, a private note), not the number.
+EXECUTABLE_MODE = (
+    stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
+)
+PRIVATE_MODE = stat.S_IRUSR | stat.S_IWUSR
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
@@ -508,3 +516,305 @@ def test_restore_refuses_an_unknown_schema(tmp_path: Path) -> None:
     target.mkdir()
     assert relocate.do_restore(snap_dir, target, apply_patches=False) == 1
     assert list(target.rglob("*.jsonl")) == []
+
+
+# ---------------------------------------------------------------------------
+# Containment, collision, mode, digest and completeness.
+# Reproduced against 960c5ce8 before the repair: `contained_path` accepted a
+# dangling symlink and the caller's write landed outside the store; a differing
+# transcript at the destination printed "skip" and returned 0; an untracked
+# file's execute bit did not survive the move; the manifest's sha256 was
+# written and never read; and a snapshot that dropped work still exited 0.
+# ---------------------------------------------------------------------------
+
+
+def _claude_transcript(home: Path) -> Path:
+    """The claude transcript `_make_home` plants, at its store-relative path."""
+    return Path(
+        ".claude/projects/-Users-operator-vibecrafted"
+        "/22222222-2222-4222-8222-222222222222.jsonl"
+    )
+
+
+def test_contained_path_refuses_a_dangling_symlink(tmp_path: Path) -> None:
+    """`Path.exists()` follows the link, so a dangling one reads as an absence.
+
+    The probe walk then steps over the link, measures containment for the
+    parent directory, and the caller's write goes through the link to the other
+    side. Nothing must be created outside the root.
+    """
+    root = tmp_path / "store"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "link").symlink_to(outside / "nonexistent.txt")
+
+    assert relocate.contained_path(root, "link") is None
+    assert not (outside / "nonexistent.txt").exists()
+    assert list(outside.iterdir()) == []
+
+
+def test_contained_path_refuses_a_dangling_intermediate_chain(tmp_path: Path) -> None:
+    """The same hole one level up: a dangling *directory* link in the middle."""
+    root = tmp_path / "store"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "chain").symlink_to(outside / "nodir")
+
+    assert relocate.contained_path(root, "chain/inner.txt") is None
+    assert list(outside.iterdir()) == []
+
+
+def test_contained_path_still_accepts_ordinary_new_and_existing_paths(
+    tmp_path: Path,
+) -> None:
+    """The fix must not turn containment into a blanket refusal."""
+    root = tmp_path / "store"
+    (root / "nested").mkdir(parents=True)
+    (root / "nested" / "here.txt").write_text("present\n")
+
+    assert relocate.contained_path(root, "nested/here.txt") == (
+        Path(os.path.realpath(root)) / "nested/here.txt"
+    )
+    assert relocate.contained_path(root, "nested/new.txt") is not None
+    assert relocate.contained_path(root, "brand/new/deep.txt") is not None
+
+
+def test_restore_refuses_a_dangling_symlink_at_the_transcript_destination(
+    tmp_path: Path,
+) -> None:
+    """The production instance of the probe: a planted link in the store.
+
+    The destination name does not "exist" (the target is absent), so the old
+    containment check waved it through and `shutil.copy2` wrote the transcript
+    outside the provider store while the restore reported success.
+    """
+    home = _make_home(tmp_path)
+    out = tmp_path / "snaps"
+    tarball = relocate.do_snapshot(out, home, repos=[])
+    snap_dir = _snapshot_dir(out, tarball)
+
+    target = tmp_path / "newhome"
+    outside = tmp_path / "outside-store"
+    outside.mkdir()
+    planted = target / _claude_transcript(target)
+    planted.parent.mkdir(parents=True)
+    planted.symlink_to(outside / "stolen.jsonl")
+
+    assert relocate.do_restore(snap_dir, target, apply_patches=False) == 1
+    assert not (outside / "stolen.jsonl").exists()
+    assert list(outside.iterdir()) == []
+    # the planted link is still dangling: nothing was written *through* it
+    assert planted.is_symlink() and not planted.exists()
+    # the two sessions that do not traverse the planted link still landed
+    assert len([p for p in target.rglob("*.jsonl") if p.is_file()]) == 2
+
+
+def test_restore_refuses_a_dangling_symlink_at_an_untracked_destination(
+    tmp_path: Path,
+) -> None:
+    """Untracked restore writes through `contained_path` too, and was as open."""
+    home = _make_home(tmp_path)
+    repo = _dirty_repo(tmp_path / "worktrees" / "repo1")
+    out = tmp_path / "snaps"
+    tarball = relocate.do_snapshot(out, home, repos=[repo])
+    snap_dir = _snapshot_dir(out, tarball)
+
+    _git(repo, "reset", "--hard", "-q", "HEAD")
+    _git(repo, "clean", "-qfdx")
+    outside = tmp_path / "outside-worktree"
+    outside.mkdir()
+    (repo / "untracked_root.txt").symlink_to(outside / "escaped.txt")
+
+    target = tmp_path / "newhome"
+    target.mkdir()
+    assert relocate.do_restore(snap_dir, target, apply_patches=True) == 1
+    assert not (outside / "escaped.txt").exists()
+    assert list(outside.iterdir()) == []
+    # the non-colliding untracked file still came back
+    assert (repo / "sub/dir/untracked_nested.bin").read_bytes() == NESTED_BYTES
+
+
+def test_restore_honours_a_symlinked_provider_store_root(tmp_path: Path) -> None:
+    """A store root the operator themselves symlinked is configuration, not attack.
+
+    Containment is measured against the *resolved* root, so the transcripts land
+    in the directory the link points at — and nowhere above it.
+    """
+    home = _make_home(tmp_path)
+    out = tmp_path / "snaps"
+    tarball = relocate.do_snapshot(out, home, repos=[])
+    snap_dir = _snapshot_dir(out, tarball)
+
+    target = tmp_path / "newhome"
+    elsewhere = tmp_path / "elsewhere" / "claude-projects"
+    elsewhere.mkdir(parents=True)
+    (target / ".claude").mkdir(parents=True)
+    (target / ".claude/projects").symlink_to(elsewhere, target_is_directory=True)
+
+    assert relocate.do_restore(snap_dir, target, apply_patches=False) == 0
+    landed = list(elsewhere.rglob("*.jsonl"))
+    assert [p.name for p in landed] == ["22222222-2222-4222-8222-222222222222.jsonl"]
+    assert list((tmp_path / "elsewhere").glob("*.jsonl")) == []
+
+
+def test_restore_reports_a_differing_transcript_instead_of_skipping_it(
+    tmp_path: Path,
+) -> None:
+    """A different transcript under the same session id is work that did not land."""
+    home = _make_home(tmp_path)
+    out = tmp_path / "snaps"
+    tarball = relocate.do_snapshot(out, home, repos=[])
+    snap_dir = _snapshot_dir(out, tarball)
+
+    target = tmp_path / "newhome"
+    occupied = target / _claude_transcript(target)
+    occupied.parent.mkdir(parents=True)
+    occupied.write_text('{"type":"user","note":"DESTINATION WORK"}\n')
+
+    assert relocate.do_restore(snap_dir, target, apply_patches=False) == 1
+    # the destination transcript is untouched, and the others still landed
+    assert occupied.read_text() == '{"type":"user","note":"DESTINATION WORK"}\n'
+    assert len(list(target.rglob("*.jsonl"))) == 3
+
+
+def test_restore_of_an_identical_transcript_stays_an_idempotent_success(
+    tmp_path: Path,
+) -> None:
+    """Byte-identical content is the re-run case and must remain silent and 0."""
+    home = _make_home(tmp_path)
+    out = tmp_path / "snaps"
+    tarball = relocate.do_snapshot(out, home, repos=[])
+    snap_dir = _snapshot_dir(out, tarball)
+
+    target = tmp_path / "newhome"
+    occupied = target / _claude_transcript(target)
+    occupied.parent.mkdir(parents=True)
+    occupied.write_text('{"type":"user"}\n')
+
+    assert relocate.do_restore(snap_dir, target, apply_patches=False) == 0
+    assert occupied.read_text() == '{"type":"user"}\n'
+    assert len(list(target.rglob("*.jsonl"))) == 3
+
+
+def test_untracked_file_mode_survives_the_round_trip(tmp_path: Path) -> None:
+    """An untracked `run.sh` that arrives unexecutable did not really arrive.
+
+    Untracked work is re-created by the restore rather than extracted, so the
+    only place the mode can travel is the manifest.
+    """
+    home = _make_home(tmp_path)
+    repo = _init_repo(tmp_path / "worktrees" / "modes")
+    (repo / "seed.txt").write_text("seed\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "seed")
+    script = repo / "run.sh"
+    script.write_text("#!/bin/sh\necho hi\n")
+    os.chmod(script, EXECUTABLE_MODE)
+    plain = repo / "notes.txt"
+    plain.write_text("notes\n")
+    os.chmod(plain, PRIVATE_MODE)
+    privileged = repo / "privileged.sh"
+    privileged.write_text("#!/bin/sh\n")
+    os.chmod(privileged, stat.S_ISUID | EXECUTABLE_MODE)
+
+    out = tmp_path / "snaps"
+    tarball = relocate.do_snapshot(out, home, repos=[repo])
+    snap_dir = _snapshot_dir(out, tarball)
+    manifest = json.loads((snap_dir / "manifest.json").read_text())
+    entry = next(w for w in manifest["worktrees"] if w["path"].endswith("/modes"))
+    recorded = {u["path"]: u for u in entry["untracked"]}
+    assert recorded["run.sh"]["mode"] == EXECUTABLE_MODE
+    assert recorded["notes.txt"]["mode"] == PRIVATE_MODE
+    # setuid is masked off at capture: a snapshot must not hand out privilege
+    assert recorded["privileged.sh"]["mode"] == EXECUTABLE_MODE
+
+    _git(repo, "clean", "-qfdx")
+    target = tmp_path / "newhome"
+    target.mkdir()
+    assert relocate.do_restore(snap_dir, target, apply_patches=True) == 0
+    assert os.access(script, os.X_OK)
+    assert stat.S_IMODE(script.stat().st_mode) == EXECUTABLE_MODE
+    assert stat.S_IMODE(plain.stat().st_mode) == PRIVATE_MODE
+    assert not stat.S_IMODE(privileged.stat().st_mode) & stat.S_ISUID
+
+
+def test_restore_refuses_untracked_bytes_that_fail_the_recorded_digest(
+    tmp_path: Path,
+) -> None:
+    """A sha256 that is written at snapshot and never read back is decoration."""
+    home = _make_home(tmp_path)
+    repo = _dirty_repo(tmp_path / "worktrees" / "repo1")
+    out = tmp_path / "snaps"
+    tarball = relocate.do_snapshot(out, home, repos=[repo])
+    snap_dir = _snapshot_dir(out, tarball)
+    manifest = json.loads((snap_dir / "manifest.json").read_text())
+    slug = next(w for w in manifest["worktrees"] if w["path"].endswith("/repo1"))[
+        "slug"
+    ]
+    carried = snap_dir / "worktrees" / slug / "untracked" / "untracked_root.txt"
+    assert carried.is_file()
+    carried.write_text("corrupted in transit\n")
+
+    _git(repo, "reset", "--hard", "-q", "HEAD")
+    _git(repo, "clean", "-qfdx")
+    target = tmp_path / "newhome"
+    target.mkdir()
+    assert relocate.do_restore(snap_dir, target, apply_patches=True) == 1
+    assert not (repo / "untracked_root.txt").exists()
+    # the file whose digest still matches came back
+    assert (repo / "sub/dir/untracked_nested.bin").read_bytes() == NESTED_BYTES
+
+
+def test_snapshot_records_an_incomplete_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dropped untracked work must be visible without reading the whole manifest."""
+    home = _make_home(tmp_path)
+    repo = _dirty_repo(tmp_path / "worktrees" / "repo1")
+    monkeypatch.setattr(relocate, "UNTRACKED_MAX_BYTES", 4)
+
+    out = tmp_path / "snaps"
+    tarball = relocate.do_snapshot(out, home, repos=[repo])
+    snap_dir = _snapshot_dir(out, tarball)
+    manifest = json.loads((snap_dir / "manifest.json").read_text())
+    assert manifest["complete"] is False
+    assert any("untracked_root.txt" in item for item in manifest["omissions"])
+    restore_md = (snap_dir / "RESTORE.md").read_text()
+    assert "INCOMPLETE" in restore_md
+    assert "## NOT captured" in restore_md
+
+
+def test_snapshot_of_a_whole_capture_is_marked_complete(tmp_path: Path) -> None:
+    home = _make_home(tmp_path)
+    repo = _dirty_repo(tmp_path / "worktrees" / "repo1")
+    out = tmp_path / "snaps"
+    tarball = relocate.do_snapshot(out, home, repos=[repo])
+    manifest = json.loads((_snapshot_dir(out, tarball) / "manifest.json").read_text())
+    assert manifest["complete"] is True
+    assert manifest["omissions"] == []
+    assert "INCOMPLETE" not in (_snapshot_dir(out, tarball) / "RESTORE.md").read_text()
+
+
+def test_snapshot_cli_exits_two_when_work_was_not_captured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """`relocate snapshot` must not print a tarball and exit 0 over a hole."""
+    home = _make_home(tmp_path)
+    repo = _dirty_repo(tmp_path / "worktrees" / "repo1")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("VC_RELOCATE_REPOS", str(repo))
+
+    out = tmp_path / "snaps-complete"
+    assert relocate.main(["snapshot", "--out", str(out)]) == 0
+    assert "status: complete" in capsys.readouterr().out
+
+    monkeypatch.setattr(relocate, "UNTRACKED_MAX_BYTES", 4)
+    out2 = tmp_path / "snaps-partial"
+    assert relocate.main(["snapshot", "--out", str(out2)]) == 2
+    captured = capsys.readouterr()
+    assert "status: INCOMPLETE" in captured.out
+    assert "untracked_root.txt" in captured.err
+    # the tarball is still real and still named — exit 2 is "partial", not "failed"
+    assert list(out2.glob("*.tar.gz"))
