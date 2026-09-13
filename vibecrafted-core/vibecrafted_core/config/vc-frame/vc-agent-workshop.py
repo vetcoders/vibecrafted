@@ -236,6 +236,15 @@ def parent_session_choices(
 ) -> tuple[list[SessionRecord], str]:
     """Read parent choices from the canonical AICX session catalog."""
     root_path = Path(root).expanduser().resolve()
+    # Parent choices are an exact-project answer. Without a canonical
+    # owner/repo there is nothing to ask the catalog; a basename guess would
+    # offer sessions from any same-named repository.
+    project = project_filter_for_root(root_path)
+    if not project:
+        return [], (
+            f"no canonical owner/repo for {root_path.name}; "
+            "parent sessions need a git origin"
+        )
     if chain is None:
         aicx = shutil.which("aicx")
         if not aicx:
@@ -243,7 +252,7 @@ def parent_session_choices(
         chain = CliSessionChain(aicx)
     try:
         result = chain.list_sessions(
-            project=project_filter_for_root(root_path),
+            project=project,
             root=root_path,
             agent=agent,
             hours=24 * 30,
