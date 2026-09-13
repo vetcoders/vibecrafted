@@ -100,10 +100,9 @@ if [[ -n "$codesign_identity" ]]; then
   # The static linter cannot see that the sourced helper consumes these globals.
   # shellcheck disable=SC2034
   SIGNING_IDENTITY="$codesign_identity"
-  # shellcheck disable=SC2034
   CODESIGN_KEYCHAIN_ARGS=()
   if [[ -n "$codesign_keychain" ]]; then
-    # shellcheck disable=SC2034
+    # shellcheck disable=SC2034  # consumed by the sourced macho-signing helper
     CODESIGN_KEYCHAIN_ARGS=(--keychain "$codesign_keychain")
   fi
   sign_macho_tree "$root" || die "could not sign final Runtime Pack Mach-O payload"

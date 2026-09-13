@@ -16,7 +16,10 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SHELLCHECK_EXCLUDES = ("SC1090", "SC1091", "SC2155", "SC2034", "SC2154", "SC2015")
+# Dynamic `source` paths are the only repo-wide exclusion: shellcheck runs without
+# -x and cannot follow them. Every other finding is fixed or carries a reasoned
+# inline directive.
+SHELLCHECK_EXCLUDES = ("SC1090", "SC1091")
 SHELL_SUFFIXES = {".sh", ".bash", ".zsh"}
 SHELL_NAMES = ("zsh", "bash", "sh")
 

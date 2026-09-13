@@ -807,7 +807,7 @@ materialize_runtime_payload() {
   find "$runtime" -type f -name '*.pyc' -delete
   find "$runtime" -depth -type d -name __pycache__ -empty -delete
   find "$runtime" -type f -name '.DS_Store' -delete
-  # shellcheck disable=SC2016
+  # shellcheck disable=SC2016  # writes a launcher; expansions belong to the generated script
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \
@@ -826,7 +826,7 @@ materialize_runtime_payload() {
     "$SOURCE_ROOT/scripts/render-python-entrypoint-launchers.py" \
     --pyproject "$SOURCE_ROOT/vibecrafted-mcp/pyproject.toml" \
     --bin-dir "$runtime/bin"
-  # shellcheck disable=SC2016
+  # shellcheck disable=SC2016  # writes a launcher; expansions belong to the generated script
   printf '%s\n' \
     '#!/bin/bash' \
     'set -euo pipefail' \

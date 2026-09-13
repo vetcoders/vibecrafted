@@ -123,7 +123,6 @@ fi
 detect_output="$(
   bash -c '
     set -euo pipefail
-    # shellcheck disable=SC1091
     source "'"$tmpdir"'/detection-lib-full.sh"
     detect_platform
     detect_linux_distro
