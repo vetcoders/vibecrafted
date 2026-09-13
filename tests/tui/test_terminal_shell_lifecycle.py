@@ -145,6 +145,167 @@ def test_product_profile_survives_broken_completion_and_repeated_source(
     assert not (tmp_path / ".local/share/atuin").exists()
 
 
+def test_product_shell_keeps_isolated_history_and_zle_parity(tmp_path: Path) -> None:
+    """The product profile supplies usability settings without host dotfiles."""
+    _stage_product_profile(tmp_path)
+    result = _zsh_profile(
+        tmp_path,
+        (
+            'source "$HOME/.config/vibecrafted/vc-terminal/interactive.zsh"; '
+            'print -r -- "HISTORY=$HISTSIZE/$SAVEHIST/$HISTFILE"; '
+            'setopt | grep -E "^(extendedhistory|incappendhistory|sharehistory|histignoredups|histignorealldups|histverify)$"; '
+            'print -r -- "UP=$(bindkey "^[[A")"; '
+            'print -r -- "DOWN=$(bindkey "^[[B")"; '
+            'print -r -- "CTRL_R=$(bindkey "^R")"; '
+            'zstyle -s ":completion:*" matcher-list matcher; print -r -- "MATCHER=$matcher"; '
+            'zstyle -t ":completion:*" menu select; print -r -- "MENU=$?"; '
+            'print -r -- "SUGGEST=$ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE/${ZSH_AUTOSUGGEST_STRATEGY[*]}"; '
+            "print -r -- READY"
+        ),
+        extra_env={"VC_TERMINAL_PLUGIN_PREFIXES": str(tmp_path / "missing-plugins")},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "READY" in result.stdout
+    assert (
+        f"HISTORY=100000/100000/{tmp_path / '.vibecrafted/shell/zsh_history'}"
+        in result.stdout
+    )
+    for option in (
+        "extendedhistory",
+        "incappendhistory",
+        "sharehistory",
+        "histignoredups",
+        "histignorealldups",
+        "histverify",
+    ):
+        assert option in result.stdout
+    assert 'UP="^[[A" up-line-or-beginning-search' in result.stdout
+    assert 'DOWN="^[[B" down-line-or-beginning-search' in result.stdout
+    assert 'CTRL_R="^R" history-incremental-search-backward' in result.stdout
+    assert "MATCHER=m:{a-z}={A-Z}" in result.stdout
+    assert "MENU=0" in result.stdout
+    assert "SUGGEST=fg=244/history completion" in result.stdout
+
+
+def test_product_shell_uses_multiline_safe_atuin_up_binding(tmp_path: Path) -> None:
+    """Atuin replaces only single-line Up; Down/Ctrl-R remain explicit."""
+    _stage_product_profile(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    atuin = bin_dir / "atuin"
+    atuin.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = init ]; then\n'
+        "  cat <<'EOF'\n"
+        "_atuin_search() { :; }\n"
+        "atuin-search() { :; }\n"
+        "atuin-search-viins() { :; }\n"
+        "atuin-search-vicmd() { :; }\n"
+        "EOF\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    atuin.chmod(0o755)
+    result = _zsh_profile(
+        tmp_path,
+        (
+            'source "$HOME/.config/vibecrafted/vc-terminal/interactive.zsh"; '
+            'print -r -- "UP=$(bindkey "^[[A")"; '
+            'print -r -- "UP_APP=$(bindkey "^[OA")"; '
+            'print -r -- "DOWN=$(bindkey "^[[B")"; '
+            'print -r -- "CTRL_R=$(bindkey "^R")"; '
+            "functions _vc_terminal_atuin_up_or_history; "
+            "print -r -- READY"
+        ),
+        path=f"{bin_dir}:/usr/bin:/bin",
+        extra_env={"VC_TERMINAL_PLUGIN_PREFIXES": str(tmp_path / "missing-plugins")},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "READY" in result.stdout
+    assert "_vc_terminal_atuin_up_or_history" in result.stdout
+    assert 'UP="^[[A" _vc_terminal_atuin_up_or_history' in result.stdout
+    assert 'UP_APP="^[OA" _vc_terminal_atuin_up_or_history' in result.stdout
+    assert 'DOWN="^[[B" down-line-or-history' in result.stdout
+    assert 'CTRL_R="^R" atuin-search' in result.stdout
+    assert "[[ $BUFFER == *$'\\n'* ]]" in result.stdout
+    assert "zle up-line-or-history" in result.stdout
+    assert "_atuin_search --shell-up-key-binding" in result.stdout
+
+
+def test_product_shell_pty_routes_single_line_up_to_atuin_but_not_multiline(
+    tmp_path: Path,
+) -> None:
+    """Exercise the actual escape sequences delivered to ZLE in an isolated PTY."""
+    _stage_product_profile(tmp_path)
+    profile = tmp_path / ".config/vibecrafted/vc-terminal/.zshrc"
+    profile.write_text(profile.read_text(encoding="utf-8") + "print -r -- PTY_READY\n")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    atuin = bin_dir / "atuin"
+    atuin.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = init ]; then\n'
+        "  cat <<'EOF'\n"
+        '_atuin_search() { print -r -- "UP:$BUFFER" >> "$HOME/atuin-events"; }\n'
+        'atuin-search() { print -r -- CTRL_R >> "$HOME/atuin-events"; }\n'
+        "zle -N atuin-search\n"
+        "EOF\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    atuin.chmod(0o755)
+    events = tmp_path / "atuin-events"
+    pid, descriptor = pty.fork()
+    if pid == 0:
+        os.chdir(tmp_path)
+        os.execve(
+            "/bin/zsh",
+            ["/bin/zsh", "-li"],
+            {
+                "HOME": str(tmp_path),
+                "PATH": f"{bin_dir}:/usr/bin:/bin",
+                "TERM": "xterm",
+                "ZDOTDIR": str(tmp_path / ".config/vibecrafted/vc-terminal"),
+                "VIBECRAFTED_HOME": str(tmp_path / ".vibecrafted"),
+                "VC_TERMINAL_PLUGIN_PREFIXES": str(tmp_path / "missing-plugins"),
+            },
+        )
+
+    output = bytearray()
+
+    def read_until(predicate, message: str) -> None:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            if select.select([descriptor], [], [], 0.1)[0]:
+                output.extend(os.read(descriptor, 65536))
+        pytest.fail(f"{message}: {output.decode(errors='replace')}")
+
+    try:
+        read_until(lambda: b"PTY_READY" in output, "interactive shell did not start")
+        os.write(descriptor, b"single-line\x1b[A")
+        read_until(events.exists, "single-line Up did not reach Atuin")
+        assert events.read_text().splitlines() == ["UP:single-line"]
+
+        os.write(descriptor, b"\x03one\x16\ntwo\x1b[A")
+        deadline = time.monotonic() + 0.75
+        while time.monotonic() < deadline:
+            if select.select([descriptor], [], [], 0.05)[0]:
+                os.read(descriptor, 65536)
+        assert events.read_text().splitlines() == ["UP:single-line"]
+
+        os.write(descriptor, b"\x12")
+        read_until(
+            lambda: events.exists() and "CTRL_R" in events.read_text(),
+            "Ctrl-R did not reach Atuin",
+        )
+    finally:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        os.close(descriptor)
+
+
 def test_tab_completes_workspace_option_without_launching_workspace(
     tmp_path: Path,
 ) -> None:
