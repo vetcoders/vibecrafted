@@ -14,13 +14,18 @@ from vibecrafted_core.aicx_session_chain import (
     MAX_PACK_CHARS,
     MCP_RETRIEVAL_TOOLS,
     MCP_SESSION_CHAIN_TOOLS,
+    MIN_INTENT_SUMMARY_CHARS,
     PROJECT_INTENT_LIMIT,
+    SHORTENED_SUMMARY_NOTE,
     CliSessionChain,
+    IntentItem,
     ProjectIntents,
     SessionChain,
     SessionChainError,
     SessionListResult,
     SessionRecord,
+    _merge_project_intents,
+    _render_intents_section,
     assemble_resume_continuity_pack,
     classify_aicx_failure,
     matches_exact_project,
@@ -744,8 +749,14 @@ def test_an_oversized_pack_still_carries_content_not_only_a_pointer(
     assert "session-0000" in body
     assert str(pack.full_context_file) in body
 
-    # Omission is counted in both directions, never silently swallowed.
-    assert "omitted for the injection budget" in body
+    # Every retrieved entry is now budgeted rather than dropped, so each one
+    # arrives with its own source and says outright that it was shortened.
+    for index in range(8):
+        assert f"session-{index:04d}.jsonl" in body
+    assert body.count(SHORTENED_SUMMARY_NOTE) == 8
+    assert "8 shown of 8 returned" in body
+
+    # What the retrieval limit left behind is still counted, never swallowed.
     assert "further entries exist in the window" in body
 
     # And the private full retrieval keeps everything the pack could not.
@@ -880,3 +891,210 @@ def test_bash32_nounset_resume_preserves_a_quoted_non_empty_vector() -> None:
         "arg=[--model]",
         "arg=[opus]",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Budget arithmetic: one huge entry must not eat the ones behind it
+# ---------------------------------------------------------------------------
+
+
+def _lopsided_chain(repo: Path) -> CliSessionChain:
+    """First entry far past the section budget, second one tiny.
+
+    Long metadata, long source paths and a retrieval warning are all present,
+    because they are exactly what the section footer and each entry's
+    provenance have to keep room for.
+    """
+    payload = json.dumps(
+        {
+            "results": 2,
+            "items": [
+                {
+                    "kind": "intent",
+                    "summary": "PIERWSZA MISJA · " + ("ą" * 30_000),
+                    "context": "- ## 2. Mission | ## 3. Context " + ("kontekst " * 40),
+                    "project": "vetcoders/vibecrafted",
+                    "agent": "codex",
+                    "date": "2026-09-13",
+                    "session_id": "session-lopsided-first",
+                    "source_chunk": (
+                        "/Users/polyversai/.claude/projects/"
+                        + ("-long-projection-path-segment" * 6)
+                        + "/first.jsonl"
+                    ),
+                    "claim_scope": "session_close",
+                    "freshness_contract": "historical",
+                    "verification_state": "not_verified_by_aicx",
+                },
+                {
+                    "kind": "intent",
+                    "summary": "DRUGA MISJA — krotka i konkretna",
+                    "context": "- ## 2. Mission",
+                    "project": "vetcoders/vibecrafted",
+                    "agent": "claude",
+                    "date": "2026-09-12",
+                    "session_id": "session-lopsided-second",
+                    "source_chunk": (
+                        "/Users/polyversai/.claude/projects/"
+                        + ("-long-projection-path-segment" * 6)
+                        + "/second.jsonl"
+                    ),
+                    "claim_scope": "session_close",
+                    "freshness_contract": "historical",
+                    "verification_state": "not_verified_by_aicx",
+                },
+            ],
+            "completeness": {
+                "complete": False,
+                "requested_limit": PROJECT_INTENT_LIMIT,
+                "available_before_limit": 9,
+                "matched_project_buckets": ["vetcoders/vibecrafted"],
+                "identity_source": "project-bucket-v1",
+                "warnings": ["durable catalog rebuilt " + ("d" * 300)],
+                "scope": {"match_mode": "exact"},
+            },
+        }
+    )
+
+    def runner(
+        cmd: list[str], timeout: float, cwd: Path | None
+    ) -> tuple[int, str, str]:
+        if cmd[1:3] == ["sessions", "list"]:
+            return 0, "[]", ""
+        if cmd[1] == "intents":
+            return 0, payload, ""
+        if cmd[1:3] == ["continuity", "show"]:
+            return 0, "## NOW\n" + ("ciągłość\n" * 2_000), ""
+        return 1, "", "declined"
+
+    return CliSessionChain("aicx", runner=runner)
+
+
+def test_an_oversized_first_entry_does_not_starve_the_next_one(
+    tmp_path: Path,
+) -> None:
+    """The defect: a 30k summary took the whole section and emitted nothing."""
+    repo = make_checkout(tmp_path / "vibecrafted", "vetcoders/vibecrafted")
+    pack = assemble_resume_continuity_pack(
+        agent="claude",
+        root=repo,
+        hours=DEFAULT_RESUME_AICX_HOURS,
+        context_file=tmp_path / "pack.md",
+        meta_file=tmp_path / "pack.meta.json",
+        chain=_lopsided_chain(repo),
+    )
+    body = pack.body
+
+    # The whole pack, frame included, stays inside the hard cap.
+    assert len(body) <= MAX_PACK_CHARS
+
+    # Both missions are actually there -- neither was replaced by a pointer.
+    assert "PIERWSZA MISJA" in body
+    assert "DRUGA MISJA — krotka i konkretna" in body
+
+    # And each shown summary kept the source that makes it checkable.
+    assert "/first.jsonl" in body
+    assert "/second.jsonl" in body
+    assert "session-lopsided-first" in body
+    assert "session-lopsided-second" in body
+
+    # The oversized one says it was shortened; the short one is untouched.
+    assert body.count(SHORTENED_SUMMARY_NOTE) == 1
+
+    # Stats are the real counts, and the footer survived the section budget.
+    assert "_retrieval: 2 shown of 2 returned, 9 available in window (limit 8)" in body
+    assert "7 further entries exist in the window" in body
+    assert "durable catalog rebuilt" in body
+
+    # The frame and the other evidence sections are still whole.
+    assert "## Operator instruction" in body
+    assert "Native provider attach requires an explicit operator `--session`." in body
+    assert "## Continuity (supplementary context)" in body
+
+
+def test_a_section_too_small_for_an_entry_says_so_instead_of_going_silent() -> None:
+    """Below the entry floor the section still prints its own stats."""
+    intents = ProjectIntents(
+        items=[
+            IntentItem(
+                summary="M" * 4_000,
+                source_chunk=f"/proof/{index}.jsonl",
+                session_id=f"s{index}",
+            )
+            for index in range(4)
+        ],
+        available=12,
+        limit=8,
+        complete=False,
+    )
+    # Room for the preamble and the footer, not for an entry.
+    starved = _render_intents_section(intents, budget=900)
+    assert len(starved) <= 900
+    assert "### " not in starved
+    assert "_retrieval: 0 shown of 4 returned, 12 available" in starved
+    assert "4 retrieved entries omitted for the injection budget" in starved
+    assert "8 further entries exist in the window" in starved
+
+    # Give it room and the same four entries all arrive: equal-sized entries
+    # get an equal share, so they share a fate rather than the first one
+    # spending the budget of the three behind it.
+    roomy = _render_intents_section(intents, budget=3_000)
+    assert len(roomy) <= 3_000
+    assert roomy.count("\n### ") == 4
+    assert "_retrieval: 4 shown of 4 returned, 12 available" in roomy
+    assert "omitted for the injection budget" not in roomy
+    assert "8 further entries exist in the window" in roomy
+    for index in range(4):
+        assert f"/proof/{index}.jsonl" in roomy
+
+
+def test_an_entry_is_never_printed_without_its_source() -> None:
+    """Provenance is the point of an entry; a bare sentence is not shippable."""
+    for budget in range(400, 4_000, 37):
+        intents = ProjectIntents(
+            items=[
+                IntentItem(summary="A" * 9_000, source_chunk="/proof/a.jsonl"),
+                IntentItem(summary="B" * 20, source_chunk="/proof/b.jsonl"),
+            ],
+            available=2,
+            limit=8,
+            complete=True,
+        )
+        section = _render_intents_section(intents, budget=budget)
+        assert len(section) <= budget, budget
+        for marker, source in (("AAAA", "/proof/a.jsonl"), ("BBBB", "/proof/b.jsonl")):
+            if marker in section:
+                assert source in section, (budget, marker)
+        if "AAAA" in section:
+            # A shown summary is either whole or long enough to act on. The
+            # floor is the room offered; the ellipsis is spent out of it.
+            assert section.count("A") >= MIN_INTENT_SUMMARY_CHARS - 3
+
+
+def test_a_merge_that_drops_entries_is_not_reported_as_complete() -> None:
+    """Two complete halves do not make a complete union past the limit."""
+
+    def half(prefix: str) -> ProjectIntents:
+        return ProjectIntents(
+            items=[
+                IntentItem(summary=f"{prefix}-{i}", session_id=f"{prefix}-s{i}")
+                for i in range(6)
+            ],
+            available=6,
+            limit=8,
+            complete=True,
+        )
+
+    merged = _merge_project_intents(half("a"), half("b"), limit=8)
+    assert merged.returned == 8
+    assert merged.available == 12
+    assert merged.omitted == 4
+    assert merged.complete is False, (
+        "a union truncated back to the limit is not complete"
+    )
+
+    # A union that fits keeps the completeness both halves reported.
+    small = _merge_project_intents(half("a"), half("b"), limit=12)
+    assert small.returned == 12
+    assert small.omitted == 0
+    assert small.complete is True
