@@ -89,7 +89,8 @@ _vetcoders_product_workspace_prepare() {
     esac
   done <<< "$resolved"
   if _vetcoders_is_legacy_operator_session_name "${VIBECRAFTED_OPERATOR_SESSION:-}"; then
-    export VIBECRAFTED_OPERATOR_SESSION="$(_vetcoders_operator_session_name)"
+    VIBECRAFTED_OPERATOR_SESSION="$(_vetcoders_operator_session_name)"
+    export VIBECRAFTED_OPERATOR_SESSION
   fi
 }
 
@@ -117,7 +118,7 @@ _vetcoders_product_workspace_prepare() {
 # parent shell is not authoritative just because it is nonempty, and it must
 # never override what the caller was actually asked to target. Absent an
 # explicit root, behaviour is unchanged: ambient root, else cwd.
-# shellcheck disable=SC2120 # Optional explicit root; resume intentionally omits it.
+# Optional explicit root; resume intentionally omits it.
 _vetcoders_ensure_canonical_workspace_identity() {
   local requested_root="${1:-}"
   local root_dir=""
@@ -802,7 +803,7 @@ _vetcoders_resume_operator_session() {
   # scratch and ignore the identities the owner had already resolved, so
   # `vc-start` opened `vibecrafted-<token>` while `vc-start resume` opened a
   # plain basename session with no binding receipt behind it.
-  # shellcheck disable=SC2119 # Resume intentionally selects the ambient/cwd owner.
+  # Resume intentionally selects the ambient/cwd owner.
   _vetcoders_ensure_canonical_workspace_identity || {
     identity_status=$?
     printf 'vc-start: resume could not resolve the canonical workspace owner for this project.\n' >&2
