@@ -1388,6 +1388,10 @@ def test_aicx_resume_fallback_skips_provider_pruned_candidates(
     fake_bin = tmp_path / "bin"
     for d in (home, repo, fake_bin):
         d.mkdir()
+    # Candidates are an exact-project answer: the checkout carries the canonical
+    # origin a real one has. Without it the assembler refuses to guess (see
+    # test_aicx_resume_fallback_refuses_basename_union_without_origin).
+    _git_origin_checkout(repo, "https://github.com/Fixture/repo.git")
 
     now = dt.datetime.now(dt.timezone.utc)
     fresh = now.isoformat().replace("+00:00", "Z")
@@ -1464,7 +1468,7 @@ def test_aicx_resume_fallback_skips_provider_pruned_candidates(
     meta = json.loads(meta_files[0].read_text(encoding="utf-8"))
     assert meta["mode"] == "new_session"
     assert meta["session_id"] == ""
-    pack = next((home / ".vibecrafted" / "tmp").glob("resume-aicx-claude-*.md"))
+    pack = _resume_pack(home, "claude")
     text = pack.read_text(encoding="utf-8")
     assert "prefer native resume" not in text.lower()
     assert "recover previous session" not in text.lower()
@@ -1519,7 +1523,88 @@ def test_aicx_resume_fallback_resolves_cargo_foundation_without_shell_path(
     assert "aicx foundation not found" not in result.stderr
 
 
-def test_aicx_resume_fallback_uses_cross_org_exact_repo_filter(
+def _resume_pack(home: Path, agent: str) -> Path:
+    """The injected pack, not the full retrieval artifact written beside it."""
+    packs = [
+        path
+        for path in (home / ".vibecrafted" / "tmp").glob(f"resume-aicx-{agent}-*.md")
+        if not path.name.endswith(".full.md")
+    ]
+    assert len(packs) == 1, packs
+    return packs[0]
+
+
+def _git_origin_checkout(path: Path, origin: str | None) -> None:
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    if origin is not None:
+        subprocess.run(
+            ["git", "-C", str(path), "remote", "add", "origin", origin], check=True
+        )
+
+
+def _run_resume_fallback(
+    tmp_path: Path, home: Path, fake_bin: Path, agent: str, repo: Path
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["VIBECRAFTED_HOME"] = str(home / ".vibecrafted")
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                f'source "{SHELL_SH}"\n'
+                f"_vetcoders_aicx_resume_fallback {agent} {shlex.quote(str(repo))}"
+            ),
+        ],
+        check=False,
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def test_aicx_resume_fallback_refuses_basename_union_without_origin(
+    tmp_path: Path,
+) -> None:
+    """No canonical owner/repo means no catalog question at all.
+
+    A basename filter (`-p /codescribe`) unions every same-named repository
+    across orgs. The shell entry must reach the assembler (it runs the module,
+    not a script path) and the assembler must say why it asked nothing.
+    """
+    home = tmp_path / "home"
+    repo = tmp_path / "codescribe"
+    fake_bin = tmp_path / "bin"
+    calls = tmp_path / "aicx-calls"
+    for directory in (home, repo, fake_bin):
+        directory.mkdir()
+    _git_origin_checkout(repo, None)
+    _write_fake_command(
+        fake_bin / "aicx",
+        f'#!/bin/bash\nprintf \'%s\\n\' "$*" >> "{calls}"\nexit 1\n',
+    )
+
+    result = _run_resume_fallback(tmp_path, home, fake_bin, "grok", repo)
+
+    assert result.returncode == 0, result.stderr
+    assert "ImportError" not in result.stderr, result.stderr
+    fields = dict(
+        line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+    )
+    assert fields.get("MODE") == "new_session"
+    assert fields.get("EMPTY_KIND") == "unknown_identity"
+    assert not calls.exists(), calls.read_text(encoding="utf-8")
+    pack = _resume_pack(home, "grok")
+    text = pack.read_text(encoding="utf-8")
+    assert "aicx_project_filter: unresolved" in text
+    assert "aicx_project_filter: `/codescribe`" not in text
+
+
+def test_aicx_resume_fallback_uses_canonical_origin_filter(
     tmp_path: Path,
 ) -> None:
     home = tmp_path / "home"
@@ -1528,6 +1613,7 @@ def test_aicx_resume_fallback_uses_cross_org_exact_repo_filter(
     calls = tmp_path / "aicx-calls"
     for directory in (home, repo, fake_bin):
         directory.mkdir()
+    _git_origin_checkout(repo, "https://github.com/Other-Org/codescribe.git")
     _write_fake_command(
         fake_bin / "aicx",
         "#!/bin/bash\n"
@@ -1569,15 +1655,14 @@ def test_aicx_resume_fallback_uses_cross_org_exact_repo_filter(
     assert result.returncode == 0, result.stderr
     invoked = calls.read_text(encoding="utf-8").splitlines()
     continuity = [line for line in invoked if line.startswith("continuity ")]
-    tail = [line for line in invoked if line.startswith("tail ")]
     intents = [line for line in invoked if line.startswith("intents ")]
-    assert continuity, invoked
-    assert any("-p /codescribe" in line for line in continuity)
-    assert len(tail) == 1
-    assert len(intents) == 1
-    assert tail[0].endswith("-p /codescribe")
-    assert intents[0].endswith("-p /codescribe")
-    pack = next((home / ".vibecrafted" / "tmp").glob("resume-aicx-grok-*.md"))
+    assert continuity and intents, invoked
+    # Every project-scoped question names the canonical origin, never the
+    # cross-org basename union (`-p /codescribe`) the old filter used.
+    scoped = [line for line in invoked if " -p " in line]
+    assert all(" -p Other-Org/codescribe " in f"{line} " for line in scoped), invoked
+    assert not any("-p /codescribe" in line for line in invoked), invoked
+    pack = _resume_pack(home, "grok")
     text = pack.read_text(encoding="utf-8")
-    assert "aicx_project_filter: `/codescribe`" in text
+    assert "aicx_project_filter: `Other-Org/codescribe`" in text
     assert "prefer native resume" not in text.lower()

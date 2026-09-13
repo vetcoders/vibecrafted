@@ -338,6 +338,8 @@ _vetcoders_rewrite_contract_root_argv() {
   shift
   _vetcoders_contract_argv=("$@")
   [[ -n "$normalized_root" ]] || return 0
+  # Nothing to rewrite, and bash 3.2 `set -u` rejects expanding an empty array.
+  (($#)) || return 0
 
   # Pass 1 (read-only): find the ordinal — the Nth argument overall, counting
   # from 1 — of the LAST accepted --root value before --prompt/-p/-- ends the
