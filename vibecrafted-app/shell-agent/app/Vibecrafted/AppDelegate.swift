@@ -700,7 +700,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
       return
     }
     do {
-      try registerBundledFonts()
+      // No font registration happens here. The terminal family belongs to the
+      // consuming process: vc-terminal.app declares ATSApplicationFontsPath and
+      // resolves its own bundled Spot Mono. A CTFontManager `.session`
+      // registration made here reached every process in the login session and
+      // outranked the owner's own ~/Library/Fonts copy.
       let specification = try TerminalLauncher.Specification(
         generationRoot: install.root, terminal: install.terminal,
         terminalHost: install.terminalHost, primaryShell: install.primaryShell,
@@ -1100,34 +1104,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, Comman
     installLog.error("\(message, privacy: .public)")
     lifecycleLog(message)
     applyRuntimePackMenuState()
-  }
-
-  private func registerBundledFonts() throws {
-    let font = Bundle.main.bundleURL.appendingPathComponent(
-      "Contents/Resources/fonts/SpotMono.ttc")
-    guard FileManager.default.fileExists(atPath: font.path) else {
-      throw NSError(
-        domain: "io.vetcoders.vibecrafted.fonts", code: 1,
-        userInfo: [NSLocalizedDescriptionKey: "bundled SpotMono.ttc is missing"])
-    }
-
-    var registrationError: Unmanaged<CFError>?
-    if !CTFontManagerRegisterFontsForURL(font as CFURL, .session, &registrationError) {
-      let message =
-        registrationError?.takeRetainedValue().localizedDescription
-        ?? "CoreText rejected SpotMono.ttc"
-      // A system-installed Spot Mono can already occupy the session scope.
-      // Accept that case only when CoreText resolves the required family.
-      let descriptor = CTFontDescriptorCreateWithAttributes(
-        [kCTFontFamilyNameAttribute as String: "Spot Mono"] as CFDictionary)
-      guard let match = CTFontDescriptorCreateMatchingFontDescriptor(descriptor, nil),
-        CTFontDescriptorCopyAttribute(match, kCTFontFamilyNameAttribute) as? String == "Spot Mono"
-      else {
-        throw NSError(
-          domain: "io.vetcoders.vibecrafted.fonts", code: 2,
-          userInfo: [NSLocalizedDescriptionKey: message])
-      }
-    }
   }
 
   /// Read the revision tuple this signed bundle ships and record it for the
