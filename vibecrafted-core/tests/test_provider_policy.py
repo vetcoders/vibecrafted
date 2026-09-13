@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import io
 import itertools
 import json
@@ -38,6 +39,18 @@ from vibecrafted_core.spawn import (
     resolve_provider_usage_capability,
     resolve_quota_policy,
 )
+
+
+def _reap_owner_group(owner: subprocess.Popen[bytes]) -> None:
+    """Kill the owner's whole session group, including the providers it spawned.
+
+    Owners start with start_new_session=True, so the owner pid is the group id and
+    the fake providers stay in that group. Killing only the owner pid, or skipping
+    teardown once the owner already exited, left them looping under PID 1 for hours.
+    """
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(owner.pid, signal.SIGKILL)
+    owner.wait()
 
 
 def _fake_interactive_provider(path: Path) -> None:
@@ -418,9 +431,7 @@ def test_interactive_owner_keeps_distinct_live_provider_on_inherited_tty(
         with pytest.raises(ProcessLookupError):
             os.kill(meta["worker_pid"], 0)
     finally:
-        if owner.poll() is None:
-            owner.kill()
-            owner.wait()
+        _reap_owner_group(owner)
         os.close(master_fd)
 
 
@@ -601,9 +612,7 @@ def test_operator_auto_creates_distinct_supervising_agent_relationship(
             with pytest.raises(ProcessLookupError):
                 os.kill(pid, 0)
     finally:
-        if owner.poll() is None:
-            owner.kill()
-            owner.wait()
+        _reap_owner_group(owner)
 
 
 @pytest.mark.parametrize(
@@ -752,32 +761,35 @@ def test_supervised_owner_signal_settles_operator_and_child(
         env=env,
         start_new_session=True,
     )
-    _wait_for(captures / "operator.json")
-    _wait_for(captures / "agent.json")
-    captured = {
-        role: json.loads((captures / f"{role}.json").read_text())
-        for role in ("operator", "agent")
-    }
-    owner.send_signal(signum)
-    assert owner.wait(timeout=10) == 128 + signum
-    for role in ("operator", "agent"):
-        meta = json.loads(
-            (
-                home
-                / "control_plane/runtime_runs"
-                / captured[role]["run_id"]
-                / "meta.json"
-            ).read_text()
-        )
-        assert meta["liveness"] == "terminal"
-        expected = (
-            "child_settled"
-            if role == "operator"
-            else f"owner_signal:{signal.Signals(signum).name}"
-        )
-        assert meta["terminal_reason"] == expected
-        with pytest.raises(ProcessLookupError):
-            os.kill(captured[role]["pid"], 0)
+    try:
+        _wait_for(captures / "operator.json")
+        _wait_for(captures / "agent.json")
+        captured = {
+            role: json.loads((captures / f"{role}.json").read_text())
+            for role in ("operator", "agent")
+        }
+        owner.send_signal(signum)
+        assert owner.wait(timeout=10) == 128 + signum
+        for role in ("operator", "agent"):
+            meta = json.loads(
+                (
+                    home
+                    / "control_plane/runtime_runs"
+                    / captured[role]["run_id"]
+                    / "meta.json"
+                ).read_text()
+            )
+            assert meta["liveness"] == "terminal"
+            expected = (
+                "child_settled"
+                if role == "operator"
+                else f"owner_signal:{signal.Signals(signum).name}"
+            )
+            assert meta["terminal_reason"] == expected
+            with pytest.raises(ProcessLookupError):
+                os.kill(captured[role]["pid"], 0)
+    finally:
+        _reap_owner_group(owner)
 
 
 def test_supervised_quota_exhaustion_preserves_exit_75_and_settles_operator(
@@ -1067,9 +1079,7 @@ def test_interactive_small_token_quota_stops_live_provider_with_distinct_truth(
         with pytest.raises(ProcessLookupError):
             os.kill(observed["pid"], 0)
     finally:
-        if owner.poll() is None:
-            owner.kill()
-            owner.wait()
+        _reap_owner_group(owner)
 
 
 def test_interactive_nonzero_exit_terminalizes_and_returns_provider_status(
@@ -1161,9 +1171,7 @@ def test_interactive_owner_signal_terminalizes_without_surviving_child(
         with pytest.raises(ProcessLookupError):
             os.kill(observed["pid"], 0)
     finally:
-        if owner.poll() is None:
-            owner.kill()
-            owner.wait()
+        _reap_owner_group(owner)
 
 
 def test_child_spawn_failure_publishes_no_false_active_and_removes_clean_worktree(

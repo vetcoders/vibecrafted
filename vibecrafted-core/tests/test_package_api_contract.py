@@ -71,7 +71,7 @@ def test_lazy_access_caches_into_module_globals() -> None:
 
 def test_unknown_attribute_raises_attribute_error() -> None:
     with pytest.raises(AttributeError):
-        vibecrafted_core.this_symbol_does_not_exist  # noqa: B018
+        _ = vibecrafted_core.this_symbol_does_not_exist
 
 
 def test_version_matches_distribution_metadata() -> None:

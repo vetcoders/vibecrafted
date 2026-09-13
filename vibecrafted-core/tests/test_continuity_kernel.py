@@ -61,11 +61,3 @@ def test_every_executable_agent_has_a_fresh_launch_lane(monkeypatch) -> None:
         command = spawn._stdin_command(agent)
         assert command, f"{agent} lost its fresh headless launch lane"
         assert continuity.capability_for(agent).execution == continuity.EXECUTABLE
-
-
-@pytest.mark.parametrize("surface", ["cli_alias", "mcp", "tui"])
-def test_parity_projection_placeholder(surface: str) -> None:
-    pytest.skip(
-        f"F05 {surface} projection lands with the kernel resolver (W0-03+); "
-        "core↔registry parity is enforced above"
-    )
