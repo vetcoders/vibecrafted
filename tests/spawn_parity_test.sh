@@ -33,7 +33,6 @@ if [[ ! -r $LIB ]]; then
     exit 2
 fi
 
-# shellcheck disable=SC1090
 source "$LIB"
 
 PASS=0

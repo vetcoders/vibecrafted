@@ -453,12 +453,12 @@ assert_contains "$resume_capture" 'fake-session-001'
 assert_contains "$resume_prompt_capture" 'resume smoke'
 
 log "helper bash smoke"
-# shellcheck disable=SC2016
+# shellcheck disable=SC2016  # expansion belongs to the child shell
 env HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" PATH="$home_dir/.local/bin:$fake_bin:$PATH" \
   bash -c 'source "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh"; command -v codex-implement >/dev/null && command -v claude-implement >/dev/null && command -v agy-implement >/dev/null && command -v vc-marbles >/dev/null && command -v skills-sync >/dev/null && echo helper-ok' \
   | grep -Fq 'helper-ok' || die 'bash helper layer not loaded'
 log "skill helper telemetry smoke"
-# shellcheck disable=SC2016
+# shellcheck disable=SC2016  # expansion belongs to the child shell
 skill_output="$(
   env HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" PATH="$fake_bin:$PATH" VETCODERS_SPAWN_RUNTIME=headless \
     bash -c 'cd "$1"; source "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh"; codex-marbles --count 1 --prompt "telemetry smoke"' _ "$work_repo"
@@ -481,7 +481,7 @@ assert_no_perception_watcher "$work_repo"
 # If zsh is available, also smoke test zsh loading via compat symlink
 if command -v zsh >/dev/null 2>&1; then
   log "helper zsh smoke (bonus)"
-  # shellcheck disable=SC2016
+  # shellcheck disable=SC2016  # expansion belongs to the child shell
   env HOME="$home_dir" XDG_CONFIG_HOME="$config_dir" PATH="$home_dir/.local/bin:$fake_bin:$PATH" \
     zsh -c 'source "${XDG_CONFIG_HOME:-$HOME/.config}/zsh/vc-skills.zsh"; command -v codex-implement >/dev/null && command -v claude-implement >/dev/null && command -v agy-implement >/dev/null && command -v vc-marbles >/dev/null && command -v skills-sync >/dev/null && echo helper-ok' \
     | grep -Fq 'helper-ok' || die 'zsh helper layer not loaded'

@@ -5,8 +5,6 @@ set -euo pipefail
 tmp=$(mktemp -t vc-pane-dump.XXXXXX)
 trap 'rm -f "$tmp"' EXIT
 
-current="${VC_FRAME_PANE_ID:-}"
-
 pane_id=$(vc-frame action list-panes --json --all --state 2>/dev/null | python3 -c '
 import json, os, sys
 current = os.environ.get("VC_FRAME_PANE_ID", "")
