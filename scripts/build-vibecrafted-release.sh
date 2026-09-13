@@ -701,6 +701,38 @@ embed_runtime_pack() {
     || die "embedded Runtime Pack contains an invalid or unsigned Mach-O"
 }
 
+# embed_terminal_font_resources <vc-terminal.app>
+#
+# Give the process that actually draws the glyphs its own copy of the licensed
+# terminal family, declared the way Apple documents for a consuming app:
+# ATSApplicationFontsPath names a Resources-relative directory and CoreText
+# registers it privately for that bundle's process.
+#
+# Measured on macOS 27 with an isolated probe (see
+# tests/tui/test_terminal_font_ownership.py):
+#   * a family absent from the host resolves inside the declaring bundle and
+#     stays invisible to every other process, so a user without Spot Mono
+#     installed still gets it;
+#   * a family the user has in ~/Library/Fonts keeps winning, so the bundled
+#     copy is a fallback and never shadows the owner's own file.
+# That is the whole reason this replaced the parent app's CTFontManager
+# `.session` registration, which reached the entire login session and outranked
+# the owner's installed copy.
+embed_terminal_font_resources() {
+  local terminal_app="$1"
+  local resources="$terminal_app/Contents/Resources"
+  local plist="$terminal_app/Contents/Info.plist"
+  [[ -f "$plist" ]] || die "vc-terminal bundle has no Info.plist: $terminal_app"
+  mkdir -p "$resources/fonts"
+  install -m 0644 "$SPOT_MONO_FONT" "$resources/fonts/SpotMono.ttc"
+  /usr/libexec/PlistBuddy -c "Set :ATSApplicationFontsPath fonts" "$plist" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :ATSApplicationFontsPath string fonts" "$plist"
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :ATSApplicationFontsPath' "$plist")" == "fonts" ]] \
+    || die "vc-terminal bundle does not declare its private font directory"
+  [[ -s "$resources/fonts/SpotMono.ttc" ]] \
+    || die "vc-terminal bundle is missing the bundled Spot Mono fallback"
+}
+
 materialize_runtime_payload() {
   local runtime="$1"
   local terminal_source="$2"
@@ -992,9 +1024,6 @@ build_product() {
     "$APP/Contents/Info.plist" 2>/dev/null \
     || /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string Vibecrafted.icns" \
       "$APP/Contents/Info.plist"
-  log "Embedding the canonical Spot Mono terminal family"
-  mkdir -p "$resources/fonts"
-  install -m 0644 "$SPOT_MONO_FONT" "$resources/fonts/SpotMono.ttc"
   remove_ambient_swift_rpath
 
   log "Embedding the already-materialized Runtime Pack payload"
@@ -1029,6 +1058,8 @@ build_product() {
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' \
     "$terminal_app/Contents/Info.plist")" == "VC Terminal" ]] \
     || die "vc-terminal helper bundle name is not canonical"
+  log "Embedding the canonical Spot Mono family in the terminal that draws it"
+  embed_terminal_font_resources "$terminal_app"
   install -m 0755 "$frame_source" "$APP/Contents/Helpers/vc-frame"
   install -m 0755 "$SOURCE_ROOT/scripts/vc-app-update.sh" "$APP/Contents/Helpers/vc-app-update"
 
