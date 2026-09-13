@@ -29,9 +29,10 @@ launch owner shared by init, operator, partner, resume and fork:
   declared repository and re-enters there with the exact declaration -- the
   native session id already resolved, the absolute repository, every prompt
   and execution option -- and the stale attachment context stripped;
-* the escalating parent composes nothing, creates nothing and starts no
-  provider; the child does each exactly once, in the order create -> tab ->
-  handover, and a child that still has no terminal fails closed;
+* the escalating parent admits the declaration exactly once (since 36614036
+  the window carries only that admitted handoff), creates nothing and starts
+  no provider; the child does the rest exactly once, in the order create ->
+  tab -> handover, and a child that still has no terminal fails closed;
 * inside a watched pane the in-workspace semantics stay (fork: same-tab pane);
 * a rejected terminal launch is a failure, never a "launched";
 * the admission survives the shell it really runs in: the public deck is
@@ -40,8 +41,9 @@ launch owner shared by init, operator, partner, resume and fork:
 
 Stubs: the catalogue owner, the Frame engine (refusing what the engine
 refuses, answering ``list-clients`` the way 0.47.3 does), the terminal host
-(records the launch), AICX and the provider command composers. The last cases
-run against the REAL engine in an isolated sandbox.
+(records the launch), AICX and the provider CLIs (probe-answering fakes). The
+provider command composer is the real one. The last cases run against the
+REAL engine in an isolated sandbox.
 
 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 """
@@ -93,23 +95,26 @@ _switches = _declared._switches
 _tab_script = _declared._tab_script
 _write = _declared._write
 
+_FIXTURES_SPEC = importlib.util.spec_from_file_location(
+    "declaration_fixtures", Path(__file__).with_name("_declaration_fixtures.py")
+)
+assert _FIXTURES_SPEC is not None and _FIXTURES_SPEC.loader is not None
+_fixtures = importlib.util.module_from_spec(_FIXTURES_SPEC)
+_FIXTURES_SPEC.loader.exec_module(_fixtures)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DECK = REPO_ROOT / "scripts" / "vibecrafted"
 CORE_PACKAGE = REPO_ROOT / "vibecrafted-core" / "vibecrafted_core"
 
-# The provider command composers reach into core (continuity extraction,
-# interactive-command policy). They are not under test here; each stub records
-# that -- and with which token budget -- it was asked, so a case can prove the
-# composition happened exactly once and only where the launch happens.
-COMPOSER_STUBS = (
-    "_vetcoders_compose_init_prompt() { printf 'compose init\\n' >> \"$TEST_COMPOSE_CAPTURE\"; printf '/vc-init'; }\n"
-    "_vetcoders_compose_operator_prompt() { printf 'compose operator\\n' >> \"$TEST_COMPOSE_CAPTURE\"; printf '/vc-operator'; }\n"
-    "_vetcoders_compose_partner_prompt() { printf 'compose partner\\n' >> \"$TEST_COMPOSE_CAPTURE\"; printf '/vc-partner'; }\n"
-    '_vetcoders_init_command_text() { printf \'init tool=%s budget=%s\\n\' "$1" "$5" >> "$TEST_COMMAND_CAPTURE"; printf \'%s --vc-face init --token-budget %s\' "$1" "$5"; }\n'
-    '_vetcoders_operator_command_text() { printf \'operator tool=%s budget=%s\\n\' "$1" "$5" >> "$TEST_COMMAND_CAPTURE"; printf \'%s --vc-face operator --token-budget %s\' "$1" "$5"; }\n'
-    '_vetcoders_partner_command_text() { printf \'partner tool=%s budget=%s\\n\' "$1" "$5" >> "$TEST_COMMAND_CAPTURE"; printf \'%s --vc-face partner --token-budget %s\' "$1" "$5"; }\n'
-    "_vetcoders_aicx_resume_fallback() { printf 'called\\n' >> \"$TEST_AICX_CAPTURE\"; printf 'MODE=new_session\\n'; }\n"
-)
+# The provider command composer is the REAL one (`spawn interactive-command`).
+# Since 36614036 a face carries only a canonical admitted command across a
+# terminal or tab boundary (`_vetcoders_enter_admitted_interactive`,
+# spawn.py `interactive-handoff` refuses anything else), and a shell stub
+# cannot mint the private admission that command points at. The composition
+# is observed where it lands instead: one `runtime_runs/<run>/admission.json`
+# per composition, and an `execution.claim` only once a provider starts.
+AICX_STUB = "_vetcoders_aicx_resume_fallback() { printf 'called\\n' >> \"$TEST_AICX_CAPTURE\"; printf 'MODE=new_session\\n'; }\n"
+PROVIDER_FAKES = ("codex", "claude", "grok")
 
 FACES = {
     "init": "_vetcoders_skill_init",
@@ -145,16 +150,30 @@ def _run_face(
     ends the shell exactly as it would end ``vibecrafted <verb>``.
     """
     env = scene.env(extra_env)
-    env["TEST_COMPOSE_CAPTURE"] = str(scene.tmp_path / "compose-called.txt")
-    env["TEST_COMMAND_CAPTURE"] = str(scene.tmp_path / "command-composed.txt")
+    for key in _fixtures.PARENT_CONTEXT_ENV:
+        if key not in (extra_env or {}):
+            env.pop(key, None)
+    # The real composer probes the provider it composes for; a fake with the
+    # CLI's help surface wins on PATH so no host provider is ever consulted.
+    provider_bin = scene.tmp_path / "provider-bin"
+    _fixtures.write_provider_fakes(provider_bin, PROVIDER_FAKES)
+    env["PATH"] = f"{provider_bin}{os.pathsep}{env.get('PATH', '')}"
     if terminal_entry:
+        # bf028c40: a bare VIBECRAFTED_TERMINAL_ENTRY=1 is inherited ancestry,
+        # not a re-entry boundary; the terminal child the product opens also
+        # carries the owner it was opened by (vc_frame.sh
+        # _vetcoders_open_entry_in_vc_terminal), so the child is modelled with
+        # both, exactly like test_resume_declared_workspace._run_resume.
         env["VIBECRAFTED_TERMINAL_ENTRY"] = "1"
+        env["VIBECRAFTED_TERMINAL_ENTRY_OWNER"] = str(
+            scene.generation / "bin" / "vibecrafted"
+        )
     script = "\n".join(
         [
             *(["set -euo pipefail"] if strict else []),
             f'source "{SHELL_SH}"',
             f'_vetcoders_vc_frame_loaded_root="{scene.generation}"',
-            COMPOSER_STUBS,
+            AICX_STUB,
             invocation,
             'printf "RC=[%s]\\n" "$?"',
             'printf "TARGET=[%s]\\n" "${VIBECRAFTED_OPERATOR_SESSION:-}"',
@@ -182,18 +201,46 @@ def _run_face(
     )
 
 
-def _composed(scene: Scene) -> list[str]:
-    path = scene.tmp_path / "command-composed.txt"
-    if not path.exists():
-        return []
-    return path.read_text(encoding="utf-8").splitlines()
+def _admitted(scene) -> list[dict]:
+    """Every composition this scene's control plane admitted, oldest first."""
+    return _fixtures.admissions(scene.home / ".vibecrafted")
 
 
-def _composes(scene: Scene) -> list[str]:
-    path = scene.tmp_path / "compose-called.txt"
-    if not path.exists():
-        return []
-    return path.read_text(encoding="utf-8").splitlines()
+def _started(scene, admission: dict) -> bool:
+    return _fixtures.claimed(scene.home / ".vibecrafted", admission)
+
+
+def _assert_one_unstarted_admission(scene, verb: str) -> dict:
+    """The escalating parent's whole footprint under 36614036: it admitted the
+    declaration exactly once (the child consumes that admission, it never
+    composes again) and started no provider."""
+    admitted = _admitted(scene)
+    assert len(admitted) == 1, admitted
+    admission = admitted[0]
+    assert (admission["agent"], admission["skill"]) == ("codex", verb), admission
+    assert not _started(scene, admission), admission
+    return admission
+
+
+def _assert_declaration(
+    inner: list[str],
+    admission: dict,
+    *,
+    verb: str,
+    root: Path,
+    budget: str = "unmetered",
+    prompt: str | None = None,
+) -> None:
+    """The exact declaration, read from the admitted handoff: provider, face,
+    absolute repository, token budget and the prompt's private snapshot."""
+    assert inner[:2] == ["interactive-launch", "codex"], inner
+    assert (admission["agent"], admission["skill"]) == ("codex", verb), admission
+    assert Path(admission["root"]) == root.resolve(), admission
+    assert _fixtures.flag(inner, "--root") == admission["root"], inner
+    assert _fixtures.flag(inner, "--token-budget") == budget, inner
+    snapshot = Path(admission["source_snapshot"]).read_text(encoding="utf-8")
+    if prompt is not None:
+        assert prompt in snapshot, snapshot
 
 
 def _hosted(launch: dict) -> list[str]:
@@ -252,19 +299,18 @@ def test_face_from_stale_marker_without_tty_opens_the_terminal_with_exact_argv(
     assert "launch failed" not in result.stderr, result.stderr
     assert launch is not None, f"no terminal was opened: {result.stderr}"
     assert _working_directory(launch) == scene.root.resolve()
-    assert _hosted(launch)[2:] == [
-        verb,
-        "codex",
-        "--token-budget",
-        "unmetered",
-        "--prompt",
-        "CONTINUITY",
-    ], _hosted(launch)
+    # 36614036: the window carries the canonical admitted handoff, not the
+    # public argv; the declaration (face, provider, budget, prompt) is read
+    # from the admission that handoff names.
+    inner, admission = _fixtures.spawn_handoff(_hosted(launch))
+    _assert_declaration(
+        inner, admission, verb=verb, root=scene.root, prompt="CONTINUITY"
+    )
     assert launch["boundary"] == "1", launch
     assert all(value is None for value in launch["markers"].values()), launch
-    # The parent composed nothing and touched no session: the child does it,
-    # once, where the provider actually starts.
-    assert not _composes(scene) and not _composed(scene)
+    # The parent admitted exactly this declaration once and started nothing;
+    # it touched no session: the child enters, once, where the provider starts.
+    assert _assert_one_unstarted_admission(scene, verb) == admission
     assert not _creates(calls) and not _new_tabs(calls), calls
     assert not _attaches(calls) and not _switches(calls), calls
     _assert_no_foreign_mutation(calls, (STALE_MARKER, FOREIGN_LIVE))
@@ -289,9 +335,12 @@ def test_init_with_a_declared_repo_from_elsewhere_opens_the_terminal_on_it(
     assert "RC=[0]" in result.stdout, result.stdout + result.stderr
     assert launch is not None, result.stderr
     assert _working_directory(launch) == scene.root.resolve()
-    assert _hosted(launch)[2:] == ["init", "codex", "--repo", str(scene.root)], _hosted(
-        launch
-    )
+    # The child receives the absolute repository (never the relative token as
+    # typed) inside the admitted handoff (36614036).
+    inner, admission = _fixtures.spawn_handoff(_hosted(launch))
+    _assert_declaration(inner, admission, verb="init", root=scene.root)
+    assert _fixtures.flag(inner, "--root") == str(scene.root.resolve()), inner
+    assert relative not in inner, inner
 
 
 @pytest.mark.parametrize("verb", ["init", "operator"])
@@ -321,14 +370,18 @@ def test_face_child_creates_detached_hangs_the_tab_then_enters(
     tabs = _new_tabs(calls)
     assert len(tabs) == 1 and _session_of(tabs[0]) == place, calls
     assert _cwd_of(tabs[0]) == scene.root, tabs
-    assert f"codex --vc-face {verb} --token-budget unmetered" in _tab_script(tabs[0])
+    # The tab carries the admitted command for this face (36614036).
+    inner, admission = _fixtures.script_handoff(_tab_script(tabs[0]))
+    _assert_declaration(
+        inner, admission, verb=verb, root=scene.root, prompt="CONTINUITY"
+    )
     attaches = _attaches(calls)
     assert len(attaches) == 1 and attaches[0]["argv"] == ["attach", place], calls
     assert attaches[0]["VC_FRAME_SESSION_NAME"] is None, attaches
     created_at, tab_at, attach_at = _order(calls)
     assert created_at < tab_at < attach_at, [c["argv"] for c in calls]
-    # Exactly one composition, with the Founder's budget passed through.
-    assert _composed(scene) == [f"{verb} tool=codex budget=unmetered"], _composed(scene)
+    # Exactly one composition -- the one on the tab -- with the Founder's budget.
+    assert [a["run_id"] for a in _admitted(scene)] == [admission["run_id"]]
     assert f"{verb} launched in workspace session: {place}" in result.stdout
     _assert_no_foreign_mutation(calls, (FOREIGN_LIVE,))
 
@@ -409,9 +462,14 @@ def test_face_child_without_a_terminal_fails_closed(tmp_path: Path, verb: str) -
     calls = scene.calls()
 
     assert "RC=[0]" not in result.stdout, result.stdout + result.stderr
-    assert "refusing to start" in result.stderr, result.stderr
+    # 36614036 gives every face its admitted root as the declared root, so the
+    # child fails closed in the declared-workspace owner with that owner's
+    # words (fac246a7), before vc_frame.sh's later "refusing to start" guard.
+    assert "cannot be entered from this process" in result.stderr, result.stderr
+    assert "nothing was created or launched" in result.stderr, result.stderr
     assert "launched in workspace session" not in result.stdout, result.stdout
     assert scene.terminal_launch(wait=1.0) is None
+    assert not any(_started(scene, a) for a in _admitted(scene)), _admitted(scene)
     assert not _creates(calls) and not _new_tabs(calls), calls
     _assert_no_foreign_mutation(calls, (STALE_MARKER, FOREIGN_LIVE))
 
@@ -446,7 +504,9 @@ def test_watched_live_marker_keeps_the_in_frame_path(tmp_path: Path) -> None:
     tabs = _new_tabs(calls)
     assert len(tabs) == 1 and _session_of(tabs[0]) == FOREIGN_LIVE, calls
     assert not _creates(calls) and not _attaches(calls), calls
-    assert _composed(scene) == ["init tool=codex budget=unmetered"]
+    inner, admission = _fixtures.script_handoff(_tab_script(tabs[0]))
+    _assert_declaration(inner, admission, verb="init", root=scene.root)
+    assert [a["run_id"] for a in _admitted(scene)] == [admission["run_id"]]
 
 
 def test_live_but_unattended_marker_is_not_a_surface(tmp_path: Path) -> None:
@@ -467,7 +527,9 @@ def test_live_but_unattended_marker_is_not_a_surface(tmp_path: Path) -> None:
 
     assert "RC=[0]" in result.stdout, result.stdout + result.stderr
     assert launch is not None, result.stderr
-    assert _hosted(launch)[2:] == ["init", "codex"], _hosted(launch)
+    inner, admission = _fixtures.spawn_handoff(_hosted(launch))
+    _assert_declaration(inner, admission, verb="init", root=scene.root)
+    assert _assert_one_unstarted_admission(scene, "init") == admission
     assert not _new_tabs(scene.calls()) and not _creates(scene.calls())
 
 
@@ -523,7 +585,10 @@ def test_rejected_terminal_host_is_a_failure_not_a_launch(tmp_path: Path) -> Non
 
     assert "RC=[0]" not in result.stdout, result.stdout + result.stderr
     assert "rejected this launch" in result.stderr, result.stderr
-    assert not _composes(scene) and not _composed(scene)
+    # 36614036 admits before the window is asked for; a rejected window leaves
+    # at most that one admission and never a started provider.
+    admitted = _admitted(scene)
+    assert len(admitted) <= 1 and not any(_started(scene, a) for a in admitted)
     assert not _new_tabs(scene.calls()) and not _creates(scene.calls())
 
 
@@ -647,12 +712,15 @@ class DeckScene:
             "fi\n"
             "exit 1\n",
         )
-        for provider in ("codex", "claude", "grok"):
-            _write(self.stubs / provider, "#!/bin/bash\nexit 0\n")
+        # Fork admission probes the provider's own help for its declared
+        # continuity markers (591b6dde/4a09425a); a silent `exit 0` fake is
+        # "unsupported". These fakes answer the probes and win on PATH.
+        _fixtures.write_provider_fakes(self.stubs, PROVIDER_FAKES)
         self.cwd = tmp_path / "elsewhere"
         self.cwd.mkdir(parents=True, exist_ok=True)
-        self.root = tmp_path / project
-        self.root.mkdir(parents=True, exist_ok=True)
+        # A declared workspace is a Git work tree with a commit
+        # (repo_selection require_git + `--base HEAD`, 36614036/5b25a6cd).
+        self.root = _fixtures.commit_fixture_repo(tmp_path / project)
 
     def env(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         env = {
@@ -662,6 +730,7 @@ class DeckScene:
         }
         for key in (
             *IDENTITY_ENV,
+            *_fixtures.PARENT_CONTEXT_ENV,
             "VIBECRAFTED_CORE_DIR",
             "VIBECRAFTED_PREFER_REPO_VC_FRAME",
             "VIBECRAFTED_VC_FRAME_BIN",
@@ -693,7 +762,11 @@ class DeckScene:
     ) -> subprocess.CompletedProcess[str]:
         env = self.env(extra_env)
         if terminal_entry:
+            # The owned re-entry boundary (bf028c40): marker plus its owner.
             env["VIBECRAFTED_TERMINAL_ENTRY"] = "1"
+            env["VIBECRAFTED_TERMINAL_ENTRY_OWNER"] = str(
+                self.generation / "bin" / "vibecrafted"
+            )
         deck_argv = [
             "bash",
             str(self.generation / "scripts" / "vibecrafted"),
@@ -752,18 +825,43 @@ def _pane_script(call: dict) -> str:
     return Path(argv[argv.index("--") + 1]).read_text(encoding="utf-8")
 
 
+# Fork declarations are BARE forks here. Since 591b6dde a fork carrying
+# `--prompt`/`--file`/`--prompt-stdin` is a tracked NONINTERACTIVE task fork
+# (UNIFIED_LAUNCH_CONTRACT "Bare fork remains interactive ... an explicit
+# incompatible presentation refuses"): it owes no surface, so the Founder's
+# `fork codex --session current --prompt …` repro is now a headless run and
+# the workspace/terminal contract below belongs to the bare interactive fork.
+# `current` is no longer an AICX lookup: it requires one explicit provider
+# identity from parent process context (CODEX_THREAD_ID for codex).
+CURRENT_CONTEXT = {"CODEX_THREAD_ID": NATIVE_SESSION}
+
+
+def _assert_bare_fork_admission(
+    inner: list[str], admission: dict, *, root: Path, selector: str
+) -> None:
+    assert inner[:2] == ["interactive-launch", "codex"], inner
+    assert (admission["agent"], admission["skill"]) == ("codex", "fork"), admission
+    assert _fixtures.flag(inner, "--continuity") == "bare-fork", inner
+    assert _fixtures.flag(inner, "--parent-session") == NATIVE_SESSION, inner
+    assert Path(admission["root"]) == root.resolve(), admission
+    assert admission["presentation"] == "visible", admission
+    selection = admission["session_selection"]
+    assert selection["agent_session_id"] == NATIVE_SESSION, selection
+    assert selection["session_selector"] == selector, selection
+
+
 def test_fork_current_from_stale_marker_without_tty_opens_the_repo_workspace_terminal(
     tmp_path: Path, generation: Path
 ) -> None:
     """The Founder's fork repro. Baseline: "Session 'vibecrafted' not found",
     "vc-frame refused the same-tab fork pane; no replacement session or tab
-    was created". Now: `current` is resolved HERE (AICX reads this process's
-    context), and the terminal is opened on the repository with the exact
-    native id, the absolute repository, the runtime/placement and the prompt.
-    The parent starts nothing."""
+    was created". Now: `current` is resolved HERE, from this process's own
+    explicit parent context, and the terminal is opened on the repository
+    with the admitted fork -- the exact native id as fork parent, the absolute
+    repository, the visible presentation. The parent starts nothing."""
     scene = DeckScene(tmp_path, generation, live=[FOREIGN_LIVE], project="vibecrafted")
     result = scene.fork(
-        "codex", "--session", "current", "--prompt", "CONTINUITY", extra_env=STALE
+        "codex", "--session", "current", extra_env={**STALE, **CURRENT_CONTEXT}
     )
     calls = scene.calls()
     launch = scene.terminal_launch()
@@ -773,26 +871,18 @@ def test_fork_current_from_stale_marker_without_tty_opens_the_repo_workspace_ter
     assert "needs an attached vc-frame pane" not in result.stderr, result.stderr
     assert launch is not None, f"no terminal was opened: {result.stderr}"
     assert _working_directory(launch) == scene.root.resolve()
-    assert _hosted(launch)[2:] == [
-        "fork",
-        "codex",
-        "--session",
-        NATIVE_SESSION,
-        "--repo",
-        str(scene.root.resolve()),
-        "--runtime",
-        "visible",
-        "--placement",
-        "right",
-        "--prompt",
-        "CONTINUITY",
-    ], _hosted(launch)
+    # 36614036: the window carries the admitted handoff.
+    inner, admission = _fixtures.spawn_handoff(_hosted(launch))
+    _assert_bare_fork_admission(inner, admission, root=scene.root, selector="current")
+    assert admission["session_selection"]["identity_source"] == (
+        "explicit_parent_context"
+    ), admission
     assert launch["boundary"] == "1"
     assert all(value is None for value in launch["markers"].values()), launch
-    # Resolved exactly once, in the parent, before the ambient context went.
-    assert [c for c in scene.aicx_calls() if c.startswith("sessions current")] == [
-        "sessions current --json"
-    ], scene.aicx_calls()
+    # Resolved exactly once, in the parent, before the ambient context went:
+    # one admission, never started, and no AICX lookup at all (591b6dde).
+    assert _assert_one_unstarted_admission(scene, "fork") == admission
+    assert not scene.aicx_calls(), scene.aicx_calls()
     assert not _panes(calls) and not _new_tabs(calls) and not _creates(calls), calls
     _assert_no_foreign_mutation(calls, (STALE_MARKER, FOREIGN_LIVE))
 
@@ -801,8 +891,8 @@ def test_fork_child_enters_the_repo_workspace_with_the_fork_as_a_tab(
     tmp_path: Path, generation: Path
 ) -> None:
     """The escalated child: an exact id (no AICX), the declared repository's
-    own session created detached, the native fork command as a tab in it,
-    the prompt kept interactive, the terminal handed over last."""
+    own session created detached, the admitted native fork as a tab in it,
+    the terminal handed over last."""
     scene = DeckScene(
         tmp_path, generation, live=[FOREIGN_LIVE], project="repo with space"
     )
@@ -812,8 +902,6 @@ def test_fork_child_enters_the_repo_workspace_with_the_fork_as_a_tab(
         NATIVE_SESSION,
         "--repo",
         str(scene.root),
-        "--prompt",
-        "CONTINUITY",
         cwd=scene.cwd,
         tty=True,
         terminal_entry=True,
@@ -831,9 +919,15 @@ def test_fork_child_enters_the_repo_workspace_with_the_fork_as_a_tab(
     assert len(tabs) == 1 and _session_of(tabs[0]) == place, calls
     assert _cwd_of(tabs[0]) == scene.root.resolve(), tabs
     script = _tab_script(tabs[0])
-    assert "codex fork --cd" in script and str(scene.root.resolve()) in script, script
-    assert NATIVE_SESSION in script and "CONTINUITY" in script, script
+    # The tab carries the admitted bare fork (36614036); interactive-launch
+    # performs the native fork (Codex app-server thread/fork, 591b6dde).
+    inner, admission = _fixtures.script_handoff(script)
+    _assert_bare_fork_admission(
+        inner, admission, root=scene.root, selector=NATIVE_SESSION
+    )
+    assert str(scene.root.resolve()) in script and NATIVE_SESSION in script, script
     assert "codex exec" not in script, script
+    assert [a["run_id"] for a in _admitted(scene)] == [admission["run_id"]]
     attaches = _attaches(calls)
     assert len(attaches) == 1 and attaches[0]["argv"] == ["attach", place], calls
     created_at, tab_at, attach_at = _order(calls)
@@ -842,7 +936,9 @@ def test_fork_child_enters_the_repo_workspace_with_the_fork_as_a_tab(
     assert f"fork launched in workspace session: {place}" in result.stdout, (
         result.stdout
     )
-    assert f"session:   {NATIVE_SESSION}" in result.stdout, result.stdout
+    # 4a09425a dropped the `session:` receipt line (the child's native identity
+    # stays pending); the source session is proven by the admission above.
+    assert f"root:    {scene.root.resolve()}" in result.stdout, result.stdout
     _assert_no_foreign_mutation(calls, (FOREIGN_LIVE,))
 
 
@@ -856,8 +952,6 @@ def test_fork_from_stale_marker_with_a_terminal_declares_the_workspace(
         "codex",
         "--session",
         NATIVE_SESSION,
-        "--prompt",
-        "CONTINUITY",
         extra_env=STALE,
         tty=True,
     )
@@ -889,8 +983,6 @@ def test_fork_inside_a_watched_pane_keeps_the_same_tab_pane(
         "codex",
         "--session",
         NATIVE_SESSION,
-        "-p",
-        "CONTINUITY",
         extra_env={
             "VC_FRAME": "1",
             "VC_FRAME_PANE_ID": "3",
@@ -904,7 +996,14 @@ def test_fork_inside_a_watched_pane_keeps_the_same_tab_pane(
     panes = _panes(calls)
     assert len(panes) == 1 and _session_of(panes[0]) == FOREIGN_LIVE, calls
     assert "--near-current-pane" in panes[0]["argv"], panes
-    assert "Fork launched in current vc-frame tab" in result.stdout
+    inner, admission = _fixtures.script_handoff(_pane_script(panes[0]))
+    _assert_bare_fork_admission(
+        inner, admission, root=scene.root, selector=NATIVE_SESSION
+    )
+    # 4a09425a: the pane admits the fork process; the child's native identity
+    # stays pending until the provider acknowledges it.
+    assert "Fork process admitted in current vc-frame tab" in result.stdout
+    assert "native child identity pending" in result.stdout
     assert not _creates(calls) and not _new_tabs(calls) and not _attaches(calls), calls
 
 
@@ -916,8 +1015,6 @@ def test_fork_rejected_terminal_is_reported_and_starts_nothing(
         "codex",
         "--session",
         NATIVE_SESSION,
-        "--prompt",
-        "CONTINUITY",
         extra_env={**STALE, "VC_TERMINAL_EXIT": "2"},
     )
 
@@ -925,22 +1022,43 @@ def test_fork_rejected_terminal_is_reported_and_starts_nothing(
     assert "rejected this launch" in result.stderr, result.stderr
     assert "launched" not in result.stdout, result.stdout
     assert not scene.calls() or not (_panes(scene.calls()) or _new_tabs(scene.calls()))
+    admitted = _admitted(scene)
+    assert len(admitted) <= 1 and not any(_started(scene, a) for a in admitted)
 
 
 def test_fork_still_refuses_what_it_does_not_support(
     tmp_path: Path, generation: Path
 ) -> None:
-    """No silent acceptance: a trailing bare `--` and `--worktree` stay
-    refused, before any identity resolution or terminal."""
+    """No silent acceptance, before any admission or terminal: a trailing bare
+    `--`; a prompt riding into the interactive fork (591b6dde: input selects the
+    headless task fork, an incompatible presentation refuses); and a worktree
+    on the living-tree bare fork. 36614036 made `--worktree [true|false]` a
+    declared fork execution selector, so the old "fork has no --worktree" is
+    gone -- the launch-spec owner (5b25a6cd) refuses the conflict instead."""
     scene = DeckScene(tmp_path, generation, live=[FOREIGN_LIVE], project="vibecrafted")
-    dashdash = scene.fork("codex", "--session", "current", "--", extra_env=STALE)
+    context = {**STALE, **CURRENT_CONTEXT}
+    dashdash = scene.fork("codex", "--session", "current", "--", extra_env=context)
+    prompted = scene.fork(
+        "codex",
+        "--session",
+        "current",
+        "--runtime",
+        "visible",
+        "--prompt",
+        "CONTINUITY",
+        extra_env=context,
+    )
     worktree = scene.fork(
-        "codex", "--session", "current", "--worktree", extra_env=STALE
+        "codex", "--session", "current", "--worktree", extra_env=context
     )
 
     assert dashdash.returncode == 2 and "Unknown fork argument: --" in dashdash.stderr
-    assert worktree.returncode == 2 and "fork has no --worktree" in worktree.stderr
+    assert prompted.returncode == 2, prompted.stdout + prompted.stderr
+    assert "Task fork is noninteractive; use --runtime headless." in prompted.stderr
+    assert worktree.returncode != 0, worktree.stdout + worktree.stderr
+    assert "--worktree conflicts with execution runtime" in worktree.stderr
     assert not scene.aicx_calls()
+    assert _admitted(scene) == []
     assert scene.terminal_launch(wait=0.5) is None
 
 
@@ -979,12 +1097,15 @@ def test_face_child_under_strict_mode_reaches_the_provider_once(
     assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
     assert "RC=[0]" in result.stdout, result.stdout + result.stderr
     _assert_no_panic(result, calls)
-    assert _composed(scene) == [f"{verb} tool=codex budget=unmetered"], _composed(scene)
     creates = _creates(calls)
     assert len(creates) == 1 and creates[0]["argv"][-1] == place, calls
     tabs = _new_tabs(calls)
     assert len(tabs) == 1 and _session_of(tabs[0]) == place, calls
-    assert f"codex --vc-face {verb} --token-budget unmetered" in _tab_script(tabs[0])
+    inner, admission = _fixtures.script_handoff(_tab_script(tabs[0]))
+    _assert_declaration(
+        inner, admission, verb=verb, root=scene.root, prompt="CONTINUITY"
+    )
+    assert [a["run_id"] for a in _admitted(scene)] == [admission["run_id"]]
     attaches = _attaches(calls)
     assert len(attaches) == 1 and attaches[0]["argv"] == ["attach", place], calls
     created_at, tab_at, attach_at = _order(calls)
@@ -1014,16 +1135,12 @@ def test_face_under_strict_mode_without_a_tty_still_opens_the_terminal(
     assert "RC=[0]" in result.stdout, result.stdout + result.stderr
     assert launch is not None, f"no terminal was opened: {result.stderr}"
     assert _working_directory(launch) == scene.root.resolve()
-    assert _hosted(launch)[2:] == [
-        verb,
-        "codex",
-        "--token-budget",
-        "unmetered",
-        "--prompt",
-        "CONTINUITY",
-    ], _hosted(launch)
+    inner, admission = _fixtures.spawn_handoff(_hosted(launch))
+    _assert_declaration(
+        inner, admission, verb=verb, root=scene.root, prompt="CONTINUITY"
+    )
     assert launch["boundary"] == "1", launch
-    assert not _composes(scene) and not _composed(scene)
+    assert _assert_one_unstarted_admission(scene, verb) == admission
     assert not _creates(calls) and not _new_tabs(calls), calls
     assert not _attaches(calls) and not _switches(calls), calls
 
@@ -1047,7 +1164,8 @@ def test_face_under_strict_mode_rejected_terminal_is_nonzero(
     assert result.returncode != 0, (result.returncode, result.stdout, result.stderr)
     assert "RC=[0]" not in result.stdout, result.stdout
     assert scene.terminal_launch(wait=0.5) is not None, "the host was never asked"
-    assert not _composes(scene) and not _composed(scene)
+    admitted = _admitted(scene)
+    assert len(admitted) <= 1 and not any(_started(scene, a) for a in admitted)
     assert not _creates(calls) and not _new_tabs(calls), calls
 
 
@@ -1085,7 +1203,15 @@ def test_public_deck_face_child_reaches_the_provider_once(
     script = _tab_script(tabs[0])
     assert "interactive-launch codex" in script, script
     assert "--token-budget unmetered" in script, script
-    assert f"/vc-{verb}" in script and "CONTINUITY" in script, script
+    # The tab carries only the admitted handoff (36614036). The face and the
+    # prompt live in its private admission: interactive-launch re-enters with
+    # `/vc-<skill>` plus the byte-exact source snapshot, so neither is argv.
+    inner, admission = _fixtures.script_handoff(script)
+    _assert_declaration(
+        inner, admission, verb=verb, root=scene.root, prompt="CONTINUITY"
+    )
+    assert "CONTINUITY" not in script, script
+    assert [a["run_id"] for a in _admitted(scene)] == [admission["run_id"]]
     attaches = _attaches(calls)
     assert len(attaches) == 1 and attaches[0]["argv"] == ["attach", place], calls
     created_at, tab_at, attach_at = _order(calls)
@@ -1103,7 +1229,7 @@ def test_public_deck_face_without_a_tty_opens_the_terminal_with_exact_argv(
 ) -> None:
     """The Founder's agent-shell shape through the real deck: one terminal
     request on this repository with the declaration intact, and the deck
-    itself composes nothing, creates nothing, starts nothing."""
+    itself admits it once, creates nothing, starts nothing."""
     scene = DeckScene(tmp_path, generation, live=[FOREIGN_LIVE], project="vibecrafted")
     result = scene.run(
         verb,
@@ -1120,14 +1246,13 @@ def test_public_deck_face_without_a_tty_opens_the_terminal_with_exact_argv(
     assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
     assert launch is not None, f"no terminal was opened: {result.stderr}"
     assert _working_directory(launch) == scene.root.resolve()
-    assert _hosted(launch)[2:] == [
-        verb,
-        "codex",
-        "--token-budget",
-        "unmetered",
-        "--prompt",
-        "CONTINUITY",
-    ], _hosted(launch)
+    # 36614036: the window carries the admitted handoff; the declaration is
+    # read back from its private admission.
+    inner, admission = _fixtures.spawn_handoff(_hosted(launch))
+    _assert_declaration(
+        inner, admission, verb=verb, root=scene.root, prompt="CONTINUITY"
+    )
+    assert _assert_one_unstarted_admission(scene, verb) == admission
     assert launch["boundary"] == "1", launch
     assert all(value is None for value in launch["markers"].values()), launch
     assert not _creates(calls) and not _new_tabs(calls), calls
