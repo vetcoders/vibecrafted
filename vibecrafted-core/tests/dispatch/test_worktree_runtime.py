@@ -306,6 +306,198 @@ def test_public_dispatch_recovers_killed_worker_with_monotonic_resume_attempts(
     assert second["provider_run_id"] != first["provider_run_id"]
 
 
+def test_stopped_owned_worker_recovers_original_baseline_after_projection_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recover an actually stopped worker after its parent advances.
+
+    This is the production failure shape: a real provider child is authenticated
+    and stopped through ``workflow.stop_run``; its worker checkout stays at the
+    original baseline while an unrelated parent commit advances the selected
+    baseline.  The control-plane projection then carries the observed
+    settlement ``skill`` drift, while the runtime-owned meta retains the exact
+    dispatch identity.  A live child and a forged baseline must still fail
+    closed before the real stop makes recovery admissible.
+    """
+    home = tmp_path / ".vibecrafted"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    provider = fake_bin / "codex"
+    provider.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "root=$VIBECRAFTED_DISPATCH_WORKTREE\n"
+        'if echo "$VIBECRAFTED_LAUNCH_IDEMPOTENCY_KEY" | grep -q ":attempt:initial$"; then\n'
+        '  printf progress > "$root/owned-progress.txt"\n'
+        '  touch "$root/.worker-started"\n'
+        "  sleep 30\n"
+        "fi\n"
+        'printf recovered > "$VIBECRAFTED_REPORT_PATH"\n',
+        encoding="utf-8",
+    )
+    provider.chmod(0o755)
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_GUARD", "0")
+    monkeypatch.setenv("VIBECRAFTED_REAPER", "0")
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(fake_bin))
+    monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
+    repo = tmp_path / "repo"
+    baseline = _repo(repo)
+    dispatch = _dispatch(repo, _cut("stopped"))
+    run_id = "stopped-parent-moved"
+    initial: list[dict[str, str]] = []
+
+    worker = threading.Thread(
+        target=lambda: initial.append(
+            run_dispatch(
+                dispatch,
+                artifacts_dir=tmp_path / "artifacts",
+                run_id=run_id,
+                manage_worktrees=True,
+            ).states
+        )
+    )
+    worker.start()
+    provider_run_id = ""
+    try:
+        deadline = time.monotonic() + 10
+        store: DispatchReceiptStore | None = None
+        while time.monotonic() < deadline:
+            try:
+                store = DispatchReceiptStore(run_id, dispatch.cuts, create=False)
+                break
+            except ReceiptContractError:
+                time.sleep(0.02)
+        assert store is not None
+        first: dict[str, object] = {}
+        while time.monotonic() < deadline:
+            first = store.cut("stopped")
+            if (
+                first.get("provider_run_id")
+                and Path(
+                    str(first.get("worktree_path") or ""), ".worker-started"
+                ).is_file()
+            ):
+                break
+            time.sleep(0.02)
+        assert first.get("provider_run_id")
+        original_root = Path(str(first["worktree_path"]))
+        provider_run_id = str(first["provider_run_id"])
+
+        # An unrelated parent advancement must not become the old worker's
+        # baseline; this demonstrates the exact ancestry failure at issue.
+        (repo / "parent-advance.txt").write_text("unrelated\n", encoding="utf-8")
+        _git(repo, "add", "parent-advance.txt")
+        _git(repo, "commit", "-qm", "advance parent")
+        moved_parent = _git(repo, "rev-parse", "HEAD")
+        geometry = WorktreeManager(repo).geometry(
+            "stopped", moved_parent, integrator=False
+        )
+        geometry = WorktreeGeometry(
+            **{
+                **geometry.to_dict(),
+                "worktree_path": str(original_root),
+                "branch": str(first["branch"]),
+            }
+        )
+        with pytest.raises(WorktreeContractError, match="baseline mismatch"):
+            WorktreeManager(repo).recover_active(geometry)
+
+        # The exact same receipt is not admissible while its authenticated
+        # process is live; it cannot use recovery to steal a running checkout.
+        live_supervisor = supervisor_module.DispatchSupervisor(
+            dispatch,
+            artifacts_dir=tmp_path / "artifacts",
+            run_id=run_id,
+            manage_worktrees=True,
+            resume=True,
+        )
+        assert not live_supervisor._authenticated_terminal_progress(
+            dispatch.cuts[0].__class__(
+                **{
+                    **dispatch.cuts[0].__dict__,
+                    "runtime_root": str(original_root),
+                    "runtime_branch": str(first["branch"]),
+                    "baseline_sha": baseline,
+                }
+            ),
+            first,
+        )
+        # Active receipts retain their registered root, but must not be
+        # classified as terminal-owned progress and granted a resume attempt.
+        assert (
+            live_supervisor._prepare_runtime_cut(dispatch.cuts[0], {}).baseline_sha
+            == baseline
+        )
+
+        stopped = workflow.stop_run(
+            provider_run_id, reason="test authenticated stop", grace_seconds=1
+        )
+        assert stopped["accepted"] is True
+        assert stopped["signal_sent"] is True
+        worker.join(timeout=15)
+        assert not worker.is_alive()
+        assert initial == [{"stopped": "[!]"}]
+
+        meta_path = (
+            home / "control_plane" / "runtime_runs" / provider_run_id / "meta.json"
+        )
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        assert meta["status"] == "stopped"
+        assert meta["dispatch_baseline_sha"] == baseline
+        assert meta["skill"] == "implement"
+        assert meta["operator_stop_accepted"] is True
+
+        # This mirrors the observed projection drift without faking the
+        # identity predicate: recovery must read the real runtime meta above.
+        projected = {**meta, "skill": "settlement"}
+        monkeypatch.setattr(
+            supervisor_module,
+            "lookup_run",
+            lambda observed: projected if observed == provider_run_id else None,
+        )
+        terminal_supervisor = supervisor_module.DispatchSupervisor(
+            dispatch,
+            artifacts_dir=tmp_path / "artifacts",
+            run_id=run_id,
+            manage_worktrees=True,
+            resume=True,
+        )
+        receipt = store.cut("stopped")
+        runtime_cut = terminal_supervisor._prepare_runtime_cut(dispatch.cuts[0], {})
+        assert runtime_cut.runtime_root == str(original_root)
+        assert runtime_cut.baseline_sha == baseline
+        assert terminal_supervisor._authenticated_terminal_progress(
+            runtime_cut, receipt
+        )
+        assert not terminal_supervisor._authenticated_terminal_progress(
+            runtime_cut.__class__(
+                **{**runtime_cut.__dict__, "baseline_sha": moved_parent}
+            ),
+            receipt,
+        )
+
+        recovered = run_dispatch(
+            dispatch,
+            artifacts_dir=tmp_path / "artifacts",
+            run_id=run_id,
+            manage_worktrees=True,
+            resume=True,
+        )
+        assert recovered.states == {"stopped": "[x]"}
+        assert store.cut("stopped")["provider_run_id"] != provider_run_id
+    finally:
+        if worker.is_alive():
+            try:
+                if provider_run_id:
+                    workflow.stop_run(
+                        provider_run_id, reason="test cleanup", grace_seconds=0
+                    )
+            except (ValueError, OSError):
+                pass
+        worker.join(timeout=15)
+
+
 def test_public_concurrent_resumes_preserve_live_siblings_then_retry_killed_child(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from vibecrafted_core.control_plane import lookup_run
+from vibecrafted_core.control_plane import lookup_run, lookup_runtime_run_meta
 from vibecrafted_core.delivery.model import ExecutionEnvelope
 from vibecrafted_core.process_control import validate_process_identity
 from vibecrafted_core.report_contract import (
@@ -1104,6 +1104,19 @@ class DispatchSupervisor:
     ) -> bool:
         run_id = str(receipt.get("provider_run_id") or "")
         canonical = lookup_run(run_id) if run_id else None
+        # ``lookup_run`` is a derived control-plane projection.  Settlement
+        # events may legitimately replace presentation fields there (for
+        # example, ``skill`` with ``settlement``), but those fields are part of
+        # dispatch identity.  The runtime record is the writer-owned source
+        # for that identity, so prefer its complete record when it is for this
+        # exact run.  Never merge the two records: a complete, internally
+        # consistent record is required to admit preserved worker progress.
+        runtime_meta = lookup_runtime_run_meta(run_id) if run_id else None
+        if (
+            isinstance(runtime_meta, dict)
+            and str(runtime_meta.get("run_id") or "") == run_id
+        ):
+            canonical = runtime_meta
         attempt = str(receipt.get("attempt") or "")
         identity_ok = (
             isinstance(canonical, dict)
