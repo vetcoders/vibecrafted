@@ -200,11 +200,11 @@ class PaneHost:
         self.stubs = tmp_path / "pane-stubs"
         _write(self.stubs / "codex", PROVIDER_STUB)
         self.events = tmp_path / "provider-events.jsonl"
-        self.repo = tmp_path / "declared-project"
-        self.repo.mkdir()
-        subprocess.run(
-            ["/usr/bin/git", "init", "-q", str(self.repo)],
-            check=True,
+        # The composer resolves the default `--base HEAD` to one commit
+        # (repo_selection.resolve_repository_base, 5b25a6cd): an empty
+        # `git init` is refused before any command is composed.
+        self.repo = _entry._fixtures.commit_fixture_repo(
+            tmp_path / "declared-project",
             env={"PATH": "/usr/bin:/bin", "HOME": str(self.home)},
         )
         self.elsewhere = tmp_path / "elsewhere"
@@ -352,7 +352,16 @@ def _assert_reached_once(host: PaneHost, result, root: Path) -> dict:
     assert event["project_python"], event
     assert event["core_import_rc"] != 0, event
     argv = host.provider_argv()
-    assert PROMPT in argv, argv
+    # 36614036: the prompt reaches the provider through the run's private task
+    # file (spawn.launch_interactive_workspace), never as argv.
+    assert PROMPT not in argv, argv
+    pointers = [
+        a for a in argv if a.startswith("Read and follow the private task file: ")
+    ]
+    assert len(pointers) == 1, argv
+    task_file = Path(pointers[0].split(": ", 1)[1])
+    assert task_file.parent.name == event["run_id"], (task_file, event)
+    assert PROMPT in task_file.read_text(encoding="utf-8"), task_file
     receipts = [r for r in host.receipts() if r.get("run_id") == event["run_id"]]
     assert len(receipts) == 1, host.receipts()
     receipt = receipts[0]
@@ -395,9 +404,19 @@ def test_shared_owner_invocation_reaches_the_provider_from_a_fresh_login_shell(
         ("--operator", "none"),
         ("--continuity", "fresh"),
         ("--root", str(host.repo.resolve())),
-        ("--prompt", PROMPT),
     ):
         assert command[command.index(option[0]) + 1] == option[1], command
+    # 36614036: the prompt is no longer argv. The composer admits the run and
+    # names its private admission; the byte-exact prompt is its source snapshot.
+    assert "--prompt" not in command and PROMPT not in command, command
+    admission = _entry._fixtures.read_admission(
+        command[command.index("interactive-launch") :]
+    )
+    assert (admission["agent"], admission["skill"]) == ("codex", "init"), admission
+    assert Path(admission["root"]).resolve() == host.repo.resolve(), admission
+    assert Path(admission["source_snapshot"]).read_text(encoding="utf-8") == PROMPT, (
+        admission
+    )
 
     script = host.write_pane_script("vc-spawn-cmd.sh", shlex.join(command))
     result = host.run_pane(script)
@@ -425,7 +444,14 @@ def test_raw_interpreter_form_of_the_same_invocation_still_fails_like_the_candid
         result.stderr,
     )
     assert host.provider_events() == [], host.provider_events()
-    assert host.receipts() == [], host.receipts()
+    # Composing admits the run (36614036: a `prepared` receipt exists before
+    # any pane does). The raw form must never get past that admission: no
+    # receipt advances and no provider execution is ever claimed.
+    receipts = host.receipts()
+    assert all(r.get("status") == "prepared" for r in receipts), receipts
+    assert not any(
+        _entry._fixtures.claimed(host.home / ".vibecrafted", r) for r in receipts
+    ), receipts
 
 
 # --------------------------------------------------------------------------
@@ -446,7 +472,7 @@ def test_public_deck_tab_script_reaches_the_provider_from_an_installed_generatio
     scene = DeckScene(
         tmp_path, packaged_generation, live=[FOREIGN_LIVE], project="declared"
     )
-    scene.root.rmdir()
+    shutil.rmtree(scene.root)  # DeckScene seeds its own committed repository
     scene.root = host.repo
     _write(scene.stubs / "codex", PROVIDER_STUB)
     result = scene.run(
@@ -466,6 +492,11 @@ def test_public_deck_tab_script_reaches_the_provider_from_an_installed_generatio
             "VIBECRAFTED_PYTHON": str(packaged_generation / "bin" / "python3"),
             "VIBECRAFTED_RUNTIME_BIN": str(packaged_generation / "bin"),
             "VC_FIXTURE_EVENTS": str(host.events),
+            # The admitted command is bound to the control plane that admitted
+            # it (spawn.py interactive-launch: "interactive admission does not
+            # belong to this run", 36614036). On a host the deck and the
+            # Frame's login shell share the user's VIBECRAFTED_HOME; so do they.
+            "VIBECRAFTED_HOME": str(host.home / ".vibecrafted"),
         },
     )
     calls = scene.calls()
@@ -483,7 +514,12 @@ def test_public_deck_tab_script_reaches_the_provider_from_an_installed_generatio
         in text
     ), text
     assert "PYTHONPATH" not in text, text
-    assert "--token-budget unmetered" in text and f"/vc-{verb}" in text, text
+    assert "--token-budget unmetered" in text, text
+    # The face is not argv since 36614036: the tab names a private admission
+    # and interactive-launch re-enters with `/vc-<skill>` from it.
+    _inner, admission = _entry._fixtures.script_handoff(text)
+    assert (admission["agent"], admission["skill"]) == ("codex", verb), admission
+    assert PROMPT not in text, text
     assert f"{packaged_generation}/python/bin/{RAW_INTERPRETER}" not in text, text
 
     pane = host.run_pane(script)
