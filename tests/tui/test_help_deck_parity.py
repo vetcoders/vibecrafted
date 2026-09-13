@@ -111,6 +111,7 @@ def _packaged_deck(tmp_path: Path) -> Path:
     shutil.copytree(
         REPO_ROOT / "vibecrafted-core" / "vibecrafted_core",
         generation / "vibecrafted-core" / "vibecrafted_core",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
     version = "4.3.0+g1234567"
     assert version_is_stamped(version)

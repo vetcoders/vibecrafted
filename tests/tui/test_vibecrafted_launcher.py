@@ -140,6 +140,7 @@ def _installed_public_generation(
     shutil.copytree(
         REPO_ROOT / "vibecrafted-core/vibecrafted_core",
         generation / "vibecrafted-core" / "vibecrafted_core",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
     (generation / "VERSION").write_text("4.3.0+g1234567\n", encoding="utf-8")
     (generation / "runtime-manifest.json").write_text("{}\n", encoding="utf-8")

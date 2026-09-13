@@ -52,6 +52,11 @@ PRIMARY_SHELL = REPO_ROOT / "config" / "alacritty" / "launch-primary-shell.zsh"
 OWNER_MARK = "GENERATION"
 SOURCE_MARK = "SOURCE_CHECKOUT"
 
+# Host bytecode is not part of the tree under test, and every case in this file
+# copies the core package twice. Carrying __pycache__ along costs 3.6 MB per
+# copy and risks a fixture answering from a .pyc compiled against another path.
+_NO_BYTECODE = shutil.ignore_patterns("__pycache__", "*.pyc")
+
 
 def _write(path: Path, body: str, *, executable: bool = True) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -76,7 +81,9 @@ def _installed_generation(base: Path, log: Path, capture: Path) -> Path:
     # dispatch.  A generation therefore contains the whole core package, not
     # merely its runtime helpers.
     shutil.copytree(
-        REPO_ROOT / "vibecrafted-core" / "vibecrafted_core", generation / CORE
+        REPO_ROOT / "vibecrafted-core" / "vibecrafted_core",
+        generation / CORE,
+        ignore=_NO_BYTECODE,
     )
     _mark_facade(generation / CORE / "runtime", OWNER_MARK, log)
     # The installer's receipt, and no .git: the boundary the shell layer already
@@ -122,7 +129,9 @@ def _source_checkout(base: Path, log: Path) -> Path:
     shutil.copy2(DECK, _ensure_dir(checkout / "scripts") / "vibecrafted")
     (checkout / "scripts" / "vibecrafted").chmod(0o755)
     shutil.copytree(
-        REPO_ROOT / "vibecrafted-core" / "vibecrafted_core", checkout / CORE
+        REPO_ROOT / "vibecrafted-core" / "vibecrafted_core",
+        checkout / CORE,
+        ignore=_NO_BYTECODE,
     )
     _mark_facade(checkout / CORE / "runtime", SOURCE_MARK, log)
     _write(checkout / "VERSION", "9.9.9-source\n", executable=False)

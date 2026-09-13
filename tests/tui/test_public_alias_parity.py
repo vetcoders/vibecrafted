@@ -430,6 +430,7 @@ def _installed_generation(tmp_path: Path, home: Path, frame_source: Path) -> Pat
     shutil.copytree(
         REPO_ROOT / "vibecrafted-core/vibecrafted_core",
         generation / "vibecrafted-core" / "vibecrafted_core",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
     # Same immutable stamp the production guard requires: X.Y.Z+g + hex SHA.
     # `+gtest` is not stamped (`s` is outside hex). Receipt file is the

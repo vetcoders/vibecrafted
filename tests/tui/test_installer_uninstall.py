@@ -586,8 +586,17 @@ def test_generation_owned_mcp_launcher_reports_generation_over_stdio(
     generation = tmp_path / "runtime" / "4.3.1+gdeadbeef"
     runtime_mcp = generation / "vibecrafted-mcp" / "vibecrafted_mcp"
     runtime_core = generation / "vibecrafted-core" / "vibecrafted_core"
-    shutil.copytree(REPO_ROOT / "vibecrafted-mcp" / "vibecrafted_mcp", runtime_mcp)
-    shutil.copytree(REPO_ROOT / "vibecrafted-core" / "vibecrafted_core", runtime_core)
+    no_bytecode = shutil.ignore_patterns("__pycache__", "*.pyc")
+    shutil.copytree(
+        REPO_ROOT / "vibecrafted-mcp" / "vibecrafted_mcp",
+        runtime_mcp,
+        ignore=no_bytecode,
+    )
+    shutil.copytree(
+        REPO_ROOT / "vibecrafted-core" / "vibecrafted_core",
+        runtime_core,
+        ignore=no_bytecode,
+    )
     expected_version = "4.3.1+gdeadbeef"
     (runtime_mcp / "VERSION").write_text(expected_version + "\n", encoding="utf-8")
 
