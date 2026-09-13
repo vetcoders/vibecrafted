@@ -5,7 +5,7 @@
 //! human labels, no second liveness census.
 
 use serde::Deserialize;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 /// Canonical product origin — the loopback bind vc-server and server_config
 /// default to (`127.0.0.1:3024`; 3025 is only the leptos reload port). A
@@ -352,14 +352,10 @@ fn truncate(value: &str, width: usize) -> String {
         + "…"
 }
 
-#[allow(dead_code)]
-fn _unix_now_for_tests() -> SystemTime {
-    UNIX_EPOCH + Duration::from_secs(1_787_000_000)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::UNIX_EPOCH;
 
     #[test]
     fn parse_live_payload_uses_human_labels() {

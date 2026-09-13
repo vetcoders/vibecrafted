@@ -123,10 +123,6 @@ final class AppModel {
       availableActions: availableActions)
   }
 
-  func beginRecovery(reason: String) {
-    transition(to: .recovering(reason))
-  }
-
   func block(reason: String) {
     invalidateEndpoint()
     transition(to: .blocked(reason))
