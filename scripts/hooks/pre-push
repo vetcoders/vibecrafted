@@ -24,8 +24,16 @@ while IFS= read -r file; do
 done <<< "$ALL_FILES"
 
 echo "▸ vc_frame pane targeting guard"
+# The spawn libraries live under the core package. The old root path matched
+# nothing and 2>/dev/null hid it, so this guard passed blind; an empty target
+# now refuses the push instead.
+pane_guard_dir="vibecrafted-core/vibecrafted_core/runtime/scripts/lib"
+if ! compgen -G "$pane_guard_dir/*.sh" >/dev/null; then
+    printf 'pre-push: pane targeting guard found no spawn libraries under %s\n' "$pane_guard_dir" >&2
+    exit 1
+fi
 leaks="$(
-    grep -nE 'vc_frame[^|]*action new-pane' runtime/scripts/lib/*.sh 2>/dev/null \
+    grep -nE 'vc_frame[^|]*action new-pane' "$pane_guard_dir"/*.sh \
         | grep -vE 'tab-id|tab_id|--floating|# OPERATOR_TAB_OK' \
         || true
 )"
