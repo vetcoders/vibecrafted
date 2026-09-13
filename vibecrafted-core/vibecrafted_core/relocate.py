@@ -24,6 +24,11 @@ What the snapshot promises
 * **Bytes, not text.** Patches are captured and written as raw bytes. Git calls
   a file binary only when it finds a NUL in the first 8k, so a perfectly ordinary
   high-byte file is "text" to git and undecodable to Python.
+* **A file's mode travels with it.** Untracked work is re-created by the restore,
+  not extracted, so the execute bit only survives because the manifest states it.
+* **An incomplete snapshot says so.** Anything not carried is listed in the
+  manifest, in ``RESTORE.md`` and on the CLI, which exits ``2`` rather than
+  claiming a full capture it did not make.
 * **The snapshot never writes to the source.**
 
 What the restore promises
@@ -31,10 +36,21 @@ What the restore promises
 
 * **A manifest is input, not a trusted artifact.** Transcript paths, archive
   members and untracked paths are all refused unless they provably land inside
-  their destination root. A refused archive is refused before the first write.
+  their destination root — dangling symlinks and symlinked intermediate
+  directories included. A refused archive is refused before the first write.
 * **Nothing at the destination is overwritten.** Foreign content under a name
-  the snapshot also carries is left alone and reported as unresolved.
+  the snapshot also carries is left alone and reported as unresolved; only
+  byte-identical content is a silent, successful skip.
+* **The recorded digest is checked.** Untracked bytes that no longer hash to
+  what the manifest recorded are refused, not restored.
 * **A failed restore exits nonzero**, per worktree, saying what did not land.
+
+Known gap
+---------
+
+Paths are restored where the source machine had them. A worktree that lives
+under a different root on the target is reported as *absent here* with its
+artefacts left addressable — cross-machine path mapping is not implemented.
 """
 
 from __future__ import annotations
@@ -45,6 +61,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -169,7 +186,16 @@ def contained_path(root: Path, rel: str) -> Path | None:
 
     The lexical check is not enough: a symlinked directory anywhere along the
     way is what turns a clean-looking relative path into a write outside the
-    store, so the deepest existing ancestor is re-resolved before answering.
+    store, so the deepest *present* ancestor is re-resolved before answering.
+
+    "Present" has to mean ``lexists``, not ``exists``. ``exists()`` follows the
+    link, so a **dangling** symlink — ``store/link -> /outside/nothing.yet`` —
+    reads as an absence, the walk steps straight over it, containment is
+    measured for the parent directory and the caller's ``write_bytes`` then
+    creates ``/outside/nothing.yet``. The same hole swallows an intermediate
+    chain (``store/chain -> /outside/nodir`` plus ``chain/inner.txt``). Stopping
+    *on* the link instead lets ``realpath`` resolve it out of the root, which is
+    what makes the refusal happen.
     """
     safe = safe_relative(rel)
     if safe is None:
@@ -177,12 +203,46 @@ def contained_path(root: Path, rel: str) -> Path | None:
     root_real = Path(os.path.realpath(root))
     candidate = root_real / safe
     probe = candidate
-    while probe != root_real and not probe.exists():
+    while probe != root_real and not os.path.lexists(probe):
         probe = probe.parent
     probe_real = Path(os.path.realpath(probe))
     if probe_real != root_real and root_real not in probe_real.parents:
         return None
     return candidate
+
+
+def _apply_recorded_mode(path: Path, mode: object) -> None:
+    """Put back the file mode the snapshot recorded, minus anything privileged.
+
+    ``write_bytes`` creates at the umask default, so a dirty ``run.sh`` used to
+    come back unexecutable — the file survived the move and the thing it was
+    *for* did not. Only the nine rwx bits travel: setuid, setgid and sticky are
+    masked off, because a manifest is untrusted input and must not be able to
+    hand out privilege on the target machine.
+    """
+    if not isinstance(mode, int) or isinstance(mode, bool):
+        return
+    try:
+        os.chmod(path, mode & 0o777)
+    except OSError:
+        pass
+
+
+def _same_file_bytes(a: Path, b: Path) -> bool:
+    """Byte equality for two regular files, cheap size check first.
+
+    Neither side may be a symlink: a link at the destination name is foreign
+    content, not a copy of ours, and following it would let the answer be about
+    a file somewhere else entirely.
+    """
+    if a.is_symlink() or b.is_symlink() or not (a.is_file() and b.is_file()):
+        return False
+    try:
+        if a.stat().st_size != b.stat().st_size:
+            return False
+        return a.read_bytes() == b.read_bytes()
+    except OSError:
+        return False
 
 
 def safe_extract(tar_path: Path, dest: Path) -> tuple[bool, list[str]]:
@@ -250,11 +310,12 @@ def capture_untracked(wt: str, dest_root: Path) -> list[dict]:
             entry["reason"] = "not a regular file"
         else:
             try:
-                size = src.stat().st_size
+                st = src.stat()
             except OSError as exc:
                 entry["reason"] = f"stat failed: {exc.strerror}"
                 inventory.append(entry)
                 continue
+            size = st.st_size
             if size > UNTRACKED_MAX_BYTES:
                 entry["reason"] = f"larger than {UNTRACKED_MAX_BYTES} bytes"
                 entry["size"] = size
@@ -274,6 +335,11 @@ def capture_untracked(wt: str, dest_root: Path) -> list[dict]:
                     entry["captured"] = True
                     entry["size"] = len(data)
                     entry["sha256"] = hashlib.sha256(data).hexdigest()
+                    # The tarball cannot carry this: untracked files are written
+                    # with ``write_bytes`` here and re-created with ``open(.., "wb")``
+                    # on extraction, so both ends default to the umask and the
+                    # execute bit is lost unless the manifest states it.
+                    entry["mode"] = stat.S_IMODE(st.st_mode) & 0o777
         inventory.append(entry)
     return inventory
 
@@ -421,6 +487,34 @@ def collect_worktrees(repos: Sequence[Path], home: Path) -> list[dict]:
     return entries
 
 
+def snapshot_omissions(worktrees: Sequence[dict]) -> list[str]:
+    """Everything the snapshot could not carry, named one line per item.
+
+    A skipped 200MB untracked file and a repo with no HEAD to diff against were
+    both recorded deep inside the manifest and nowhere else, so ``relocate
+    snapshot`` printed a tarball path and exited 0 — a full-snapshot promise the
+    archive does not keep. The caller turns this list into an explicit status.
+    """
+    omissions: list[str] = []
+    for w in worktrees:
+        if w.get("patch_unavailable"):
+            omissions.append(
+                f"{w['path']}: dirty work has no patch ({w['patch_unavailable']})"
+            )
+        for u in w.get("untracked") or []:
+            if not u.get("captured"):
+                omissions.append(
+                    f"{w['path']}: untracked {u.get('path')!r} not captured "
+                    f"— {u.get('reason', 'unknown reason')}"
+                )
+    return omissions
+
+
+def snapshot_dir_for(tarball: Path) -> Path:
+    """The snapshot directory ``do_snapshot`` built next to its tarball."""
+    return tarball.parent / tarball.name.removesuffix(".tar.gz")
+
+
 def do_snapshot(
     out_root: Path | None, home: Path, repos: Sequence[Path] | None = None
 ) -> Path:
@@ -491,11 +585,14 @@ def do_snapshot(
                 (wt_dir / f"{slug}.unpushed.patch").write_bytes(fp)
         w["untracked"] = capture_untracked(w["path"], wt_dir / slug / "untracked")
 
+    omissions = snapshot_omissions(worktrees)
     manifest = {
         "schema": SNAPSHOT_SCHEMA,
         "created_at": now.astimezone().isoformat(),
         "host": os.uname().nodename,
         "home": str(home),
+        "complete": not omissions,
+        "omissions": omissions,
         "sessions": sessions,
         "leases": leases,
         "worktrees": worktrees,
@@ -508,6 +605,14 @@ def do_snapshot(
         "",
         f"Snapshot: {stamp} from {os.uname().nodename}",
         "",
+    ]
+    if omissions:
+        lines += [
+            f"> **INCOMPLETE — {len(omissions)} item(s) are not in this archive.**",
+            "> The list is below and in `manifest.json` under `omissions`.",
+            "",
+        ]
+    lines += [
         "## Quick restore on the new machine",
         "",
         "```bash",
@@ -536,6 +641,9 @@ def do_snapshot(
         for u in untracked:
             if not u.get("captured"):
                 lines.append(f"  - NOT captured: `{u['path']}` — {u.get('reason')}")
+    if omissions:
+        lines += ["", "## NOT captured", ""]
+        lines += [f"- {item}" for item in omissions]
     (snap_dir / "RESTORE.md").write_text("\n".join(lines) + "\n")
 
     tarball = root / f"relocate-{stamp}.tar.gz"
@@ -587,8 +695,21 @@ def _restore_untracked(
             problems.append(f"{w['path']}: untracked {rel!r} missing from snapshot")
             continue
         data = source.read_bytes()
-        if dst.exists():
-            if dst.is_file() and dst.read_bytes() == data:
+        # The manifest recorded a sha256 at snapshot time and nothing ever read
+        # it back, so a truncated or edited tarball restored silently and
+        # returned 0. A digest that is written but never checked is decoration.
+        expected = entry.get("sha256")
+        if isinstance(expected, str) and expected:
+            actual = hashlib.sha256(data).hexdigest()
+            if actual != expected:
+                problems.append(
+                    f"{w['path']}: untracked {rel!r} is corrupt — the snapshot "
+                    f"bytes hash to {actual[:12]}, the manifest recorded "
+                    f"{expected[:12]}"
+                )
+                continue
+        if os.path.lexists(dst):
+            if _same_file_bytes(dst, source):
                 notes.append(f"untracked {rel}: already present, identical")
             else:
                 problems.append(
@@ -598,6 +719,7 @@ def _restore_untracked(
             continue
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_bytes(data)
+        _apply_recorded_mode(dst, entry.get("mode"))
         restored += 1
     return restored, notes, problems
 
@@ -707,8 +829,18 @@ def do_restore(src: Path, target_home: Path, apply_patches: bool) -> int:
             problems.append(f"session {sid}: transcript missing from snapshot")
             continue
         dst.parent.mkdir(parents=True, exist_ok=True)
-        if dst.exists():
-            print(f"skip (exists): {dst}")
+        if os.path.lexists(dst):
+            # "Exists" alone was not an answer. Re-running a restore has to be
+            # idempotent, but a *different* transcript under the same session id
+            # is the snapshot's work failing to land — and that used to print
+            # "skip" and return 0, which reads as "your sessions are here".
+            if _same_file_bytes(dst, source):
+                print(f"skip (identical): {dst}")
+                continue
+            problems.append(
+                f"session {sid}: {dst} already holds different content — left untouched"
+            )
+            print(f"conflict (differs): {dst}")
             continue
         shutil.copy2(source, dst)
         restored += 1
@@ -821,5 +953,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.cmd == "snapshot":
         tarball = do_snapshot(args.out, home)
         print(f"snapshot: {tarball}")
+        try:
+            manifest = json.loads(
+                (snapshot_dir_for(tarball) / "manifest.json").read_text()
+            )
+        except (OSError, ValueError):
+            manifest = {}
+        omissions = manifest.get("omissions") or []
+        if omissions:
+            # Exit 2, not 1: the tarball above is real and worth moving. It just
+            # is not everything, and a caller that only checks `rc == 0` must
+            # not be told otherwise.
+            print(f"status: INCOMPLETE — {len(omissions)} item(s) not captured")
+            print("\n== Not in this snapshot ==", file=sys.stderr)
+            for item in omissions:
+                print(f"  - {item}", file=sys.stderr)
+            return 2
+        print("status: complete")
         return 0
     return do_restore(args.src, args.target_home, args.apply_patches)
