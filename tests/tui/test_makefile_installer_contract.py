@@ -205,7 +205,13 @@ def test_ci_workflows_select_the_platforms_canonical_carrier() -> None:
     assert "genpkey -algorithm RSA" in install_linux
     assert "genpkey -algorithm ED25519" not in install_linux
     assert "VIBECRAFTED_RUNTIME_PACK_PUBLIC_KEY" in install_linux
-    assert 'bash install.sh --runtime-pack-file "$pack" install' in install_linux
+    # install.sh is handed the closed exact-source tuple: the archive whose
+    # provenance it must trust and the pack it must install, in one call. A
+    # pack without its archive trips the channel-manifest refusal (W4).
+    assert (
+        'bash install.sh --archive-file "$archive" --runtime-pack-file "$pack" install'
+        in install_linux
+    )
     assert "actions/upload-artifact@" in install_linux
     assert "actions/download-artifact@" in install_linux
     assert "ubuntu-22.04" in install_linux
@@ -669,7 +675,11 @@ def test_control_plane_staging_delegates_to_distribution_manifest(
     monkeypatch.setattr(
         installer,
         "_materialize_runtime_generation_vc_terminal_entry",
-        lambda runtime_root: seen.update(vc_terminal_entry_materialized=runtime_root),
+        # The real symbol grew a require_native_host keyword; the double has to
+        # absorb it or the staging call raises TypeError before it asserts.
+        lambda runtime_root, **_kwargs: seen.update(
+            vc_terminal_entry_materialized=runtime_root
+        ),
     )
     monkeypatch.setattr(
         installer,

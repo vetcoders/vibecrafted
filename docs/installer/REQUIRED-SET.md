@@ -202,7 +202,7 @@ removed and not backed up.
 
 _𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI_
 
-## 5. Two guards added 2026-08-28 (dragon incident)
+## 5. Two guards added 2026-08-28 (build-host incident)
 
 - **Socket namespace is uid-keyed.** `/tmp/vc-frame-<uid>` belongs to the
   machine, not to `$HOME`. Uninstall resolves it through

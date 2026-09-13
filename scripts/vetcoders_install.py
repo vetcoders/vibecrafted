@@ -14978,7 +14978,7 @@ def _uninstall_run_is_ghost(meta: Mapping[str, Any]) -> str:
 
     The server-owned board replays retained snapshots, so it keeps reporting
     runs whose dispatcher meta is already terminal or whose worker is dead
-    (MEASURED 2026-08-28: 7/7 "active" runs on dragon were ghosts and the
+    (MEASURED 2026-08-28: 7/7 "active" runs on the build host were ghosts and the
     drain died on `stop swarm`). A run without meta stays active: teardown
     fails closed on unknown liveness.
     """

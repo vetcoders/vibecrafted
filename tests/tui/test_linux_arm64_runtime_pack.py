@@ -133,8 +133,11 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     assert "@loctree/aicx-linux-x64-gnu" in foundations
     assert "@loctree/loctree-linux-x64-gnu" in foundations
     # The candidate stager is the newer npm-integrity iteration: published
-    # tarballs verified by sha512 integrity, no cargo at all.
+    # tarballs verified by sha512 integrity, no cargo at all. It clears the
+    # donor work trees first so a stale checkout cannot survive into the pack.
     assert "stage_npm_binaries" in foundations
+    assert 'rm -rf "$WORK/loctree"' in foundations
+    assert 'rm -rf "$WORK/aicx"' in foundations
     assert "cargo build --manifest-path" not in foundations
     assert "cargo install" not in foundations
 

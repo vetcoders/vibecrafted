@@ -9,6 +9,11 @@
 # Alacritty does not expand ${HOME} in [terminal].shell.program; the private
 # config is not a product surface.
 #
+# Finder treats a naked unix executable as Terminal.app's job. When a
+# generation or App helper ships vc-terminal.app, exec that bundle's
+# Contents/MacOS/alacritty so Dock/LaunchServices identity and logo attach.
+# libexec/vc-terminal remains the required native host and the fallback.
+#
 # 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI
 set -euo pipefail
 
@@ -23,7 +28,7 @@ elif [[ "$_vc_terminal_scripts" == "$_vc_terminal_entry" ]]; then
 fi
 root="$(cd "${_vc_terminal_scripts}/.." && pwd -P)"
 unset _vc_terminal_entry _vc_terminal_scripts
-host="$root/libexec/vc-terminal"
+native_host="$root/libexec/vc-terminal"
 config="$HOME/.config/vibecrafted/vc-terminal/vc-terminal.toml"
 
 # This terminal starts a fresh interactive shell. Old Runtime Pack bins from
@@ -85,8 +90,42 @@ _vc_terminal_sanitize_inherited_path() {
   export PATH
 }
 
+_vc_terminal_is_bundle_host() {
+  local candidate="${1:-}" macos contents bundle
+  [[ "$candidate" == /* ]] || return 1
+  [[ "$candidate" == */vc-terminal.app/Contents/MacOS/alacritty ]] || return 1
+  macos="${candidate%/*}"
+  contents="${macos%/*}"
+  bundle="${contents%/*}"
+  [[ "${bundle##*/}" == "vc-terminal.app" ]] || return 1
+  [[ -f "$candidate" && -x "$candidate" && ! -L "$candidate" ]] || return 1
+  [[ ! -L "$macos" && ! -L "$contents" && ! -L "$bundle" ]] || return 1
+  [[ -f "$bundle/Contents/Info.plist" && ! -L "$bundle/Contents/Info.plist" ]] || return 1
+}
+
+_vc_terminal_select_host() {
+  local fallback="$1" candidate
+  for candidate in \
+    "$root/libexec/vc-terminal.app/Contents/MacOS/alacritty" \
+    "${VIBECRAFTED_TERMINAL_HOST:-}"
+  do
+    if _vc_terminal_is_bundle_host "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  printf '%s\n' "$fallback"
+}
+
 _vc_terminal_sanitize_inherited_path
-unset -f _vc_terminal_runtime_home _vc_terminal_is_owned_generation_bin _vc_terminal_sanitize_inherited_path
+if [[ "$native_host" != /* || ! -x "$native_host" || -L "$native_host" || -L "$root/libexec" ]]; then
+  printf 'vc-terminal: native host missing: %s\n' "$native_host" >&2
+  exit 127
+fi
+host="$(_vc_terminal_select_host "$native_host")"
+unset -f _vc_terminal_runtime_home _vc_terminal_is_owned_generation_bin \
+  _vc_terminal_sanitize_inherited_path _vc_terminal_is_bundle_host \
+  _vc_terminal_select_host
 
 export VIBECRAFTED_RUNTIME_ROOT="$root"
 export VIBECRAFTED_ROOT="$root"
@@ -96,7 +135,7 @@ export XDG_CONFIG_HOME="$HOME/.config"
 export VIBECRAFTED_PYTHON="$root/bin/python3"
 export VIBECRAFTED_VC_FRAME_BIN="$root/libexec/vc-frame"
 export VC_FRAME_CONFIG_DIR="$HOME/.config/vibecrafted/vc-frame"
-unset VC_FRAME_CONFIG_FILE PYTHONPATH PYTHONHOME
+unset VC_FRAME_CONFIG_FILE PYTHONPATH PYTHONHOME native_host
 
 # This wrapper creates a new native terminal, so it must not pass through an
 # attachment identity from the non-interactive caller.  The child may start a
@@ -107,12 +146,14 @@ unset VC_FRAME_CONFIG_FILE PYTHONPATH PYTHONHOME
 unset VC_FRAME VC_FRAME_PANE_ID VC_FRAME_SESSION_NAME
 unset ZELLIJ ZELLIJ_PANE_ID ZELLIJ_SESSION_NAME
 
-if [[ "$host" != /* || ! -x "$host" || -L "$host" || -L "$root/libexec" ]]; then
+if [[ "$host" != /* || ! -x "$host" || -L "$host" ]]; then
   printf 'vc-terminal: native host missing: %s\n' "$host" >&2
   exit 127
 fi
-# Identity probes must work before runtime-install writes the product
-# config. A pack assembler that asks `--version` is not a launch.
+# Identity probe: --version answers from the host binary without opening a
+# window or reading any config, so it must not require the installed product
+# config. The Runtime Pack inventory calls bin/vc-terminal --version on build
+# hosts that have no ~/.config/vibecrafted at all.
 if [[ $# -eq 1 ]]; then
   case "$1" in
     --version | -V | --help | -h)
