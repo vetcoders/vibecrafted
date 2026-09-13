@@ -40,9 +40,7 @@ _vetcoders_marbles() {
   loop_label="${VIBECRAFTED_LOOP_LABEL:-Marbles}"
   loop_file_prefix="${VIBECRAFTED_LOOP_FILE_PREFIX:-$loop_skill_name}"
 
-  # shellcheck disable=SC2031
   [[ -n "${VIBECRAFTED_SKILL_NAME:-}" ]] || export VIBECRAFTED_SKILL_NAME="$loop_skill_name"
-  # shellcheck disable=SC2031
   export VIBECRAFTED_SKILL_CODE="$loop_skill_code"
 
   root_dir="${_vetcoders_contract_root:-$(_vetcoders_repo_root)}"
