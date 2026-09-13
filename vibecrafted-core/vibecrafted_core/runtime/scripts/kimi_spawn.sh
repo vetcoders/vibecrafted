@@ -106,7 +106,7 @@ qlast_message="$(spawn_shell_quote "${SPAWN_TRANSCRIPT%.log}.last-message.md")"
 qmodel="$(spawn_shell_quote "$model")"
 filter_core="$(spawn_python_core_path 2>/dev/null || { cd "$SCRIPT_DIR/../../.." && pwd; })"
 
-# shellcheck disable=SC2016
+# shellcheck disable=SC2016  # hook source is expanded by the launcher when the hook runs
 kimi_success_hook='
   if [[ ! -s "$report" ]]; then
     spawn_write_frontmatter "$report" "$SPAWN_AGENT" "unknown" "completed"
@@ -119,7 +119,7 @@ ${transcript%.log}.last-message.md
 TXT
   fi'
 
-# shellcheck disable=SC2016
+# shellcheck disable=SC2016  # hook source is expanded by the launcher when the hook runs
 kimi_failure_hook='
   if [[ ! -s "$report" ]]; then
     spawn_write_frontmatter "$report" "$SPAWN_AGENT" "unknown" "failed"
@@ -155,7 +155,6 @@ salvage_success_report="if [[ \$pipeline_status -eq 0 && ! -s $qreport && -s $ql
 salvage_failure_report="if [[ \$pipeline_status -ne 0 && ! -s $qreport ]]; then { printf '%s\n' '---'; printf 'run_id: %s\n' \"\${SPAWN_RUN_ID:-unknown}\"; printf 'prompt_id: %s\n' \"\${SPAWN_PROMPT_ID:-unknown}\"; printf 'agent: %s\n' \"\${SPAWN_AGENT:-kimi}\"; printf 'skill: %s\n' \"\${SPAWN_SKILL_CODE:-unknown}\"; printf 'model: %s\n' \"\${SPAWN_MODEL:-unknown}\"; printf 'status: failed\n'; printf 'session_id: %s\n' \"\${SPAWN_SESSION_ID:-pending}\"; printf 'repo_path: %s\n' \"\${SPAWN_ROOT:-unknown}\"; printf 'tokens_input: 0\n'; printf 'tokens_output: 0\n'; printf 'tokens_total: 0\n'; printf 'cost_usd: unknown\n'; printf '%s\n\n' '---'; if [[ -s $qlast_message ]]; then cat $qlast_message; else printf '%s\n' 'Kimi failed before writing a standalone report file, and no final message was captured.'; printf '%s\n' 'See transcript for the full event stream:'; printf '%s\n' $qtranscript; printf '%s\n' 'Last message path checked:'; printf '%s\n' $qlast_message; fi; } > $qreport; fi;"
 # kimi -p implies print mode (never-ask): no permission flags exist that
 # combine with --prompt. The prompt is inlined on argv from the private file.
-# shellcheck disable=SC2016
 launch_cmd="set -o pipefail && cd $qroot && { rm -f $qlast_message; kimi -p \"\$(cat $qprompt)\" --output-format stream-json $model_flag 2>&1 | tee -a $qtranscript | $qfilter_cmd; pipeline_status=\$?; $last_message_extract $salvage_success_report $salvage_failure_report exit \$pipeline_status; }"
 
 combined_success="${kimi_success_hook}${success_hook_extra:+
