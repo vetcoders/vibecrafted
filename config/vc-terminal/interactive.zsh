@@ -107,16 +107,28 @@ reload() {
 typeset -g _VC_TERMINAL_PROFILE_LOADED=1
 
 HISTFILE="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}/shell/zsh_history"
-HISTSIZE=20000
-SAVEHIST=20000
+HISTSIZE=100000
+SAVEHIST=100000
 mkdir -p "${HISTFILE:h}"
 _vc_terminal_pin_product_env
-setopt appendhistory histignorespace
+# Keep the useful host-shell history semantics, but only inside the product
+# state root above.  In particular, never borrow ~/.zsh_history or a personal
+# ZDOTDIR to obtain this behaviour.
+setopt extendedhistory incappendhistory sharehistory histignoredups \
+  histignorealldups histverify appendhistory histignorespace
 path=("$HOME/.local/bin" $path)
 typeset -U path
 bindkey -e
 bindkey '^[b' backward-word
 bindkey '^[f' forward-word
+
+# Completion belongs to this profile even when the user has no personal zsh
+# configuration.  `menu select` keeps Tab navigation deliberate; the matcher
+# makes command and option completion case-insensitive without altering the
+# command line itself.
+zstyle ':completion:*' matcher-list 'm:{a-z}={A-Z}'
+zstyle ':completion:*' menu select
+[[ -z ${LS_COLORS:-} ]] || zstyle ':completion:*' list-colors "${(s.:.)LS_COLORS}"
 
 # One bounded snapshot, containing component names and statuses only. Never
 # capture init output: a third-party tool can print private configuration.
@@ -192,6 +204,41 @@ for vc_tool in zoxide atuin starship; do
   fi
 done
 unset vc_tool vc_tool_args vc_tool_init
+
+# Atuin owns the interactive search widgets it exports from `init zsh`; keep
+# the Up binding explicit because init ran with its stock Up binding disabled.
+# A multiline buffer is editor text, not a search query: native Up then moves
+# within it.  If Atuin is absent (or its init failed), all three keys retain
+# useful built-in history behaviour.
+if (( $+functions[_atuin_search] && $+functions[atuin-search] )); then
+  _vc_terminal_atuin_up_or_history() {
+    emulate -L zsh
+    if [[ $BUFFER == *$'\n'* ]]; then
+      zle up-line-or-history
+    else
+      _atuin_search --shell-up-key-binding "$@"
+    fi
+  }
+  zle -N _vc_terminal_atuin_up_or_history
+  bindkey '^[[A' _vc_terminal_atuin_up_or_history
+  bindkey '^[OA' _vc_terminal_atuin_up_or_history
+  bindkey '^[[B' down-line-or-history
+  bindkey '^[OB' down-line-or-history
+  bindkey '^R' atuin-search
+  (( ! $+functions[atuin-search-viins] )) || bindkey -M viins '^R' atuin-search-viins
+  (( ! $+functions[atuin-search-vicmd] )) || bindkey -M vicmd '/' atuin-search-vicmd
+else
+  bindkey '^[[A' up-line-or-beginning-search
+  bindkey '^[OA' up-line-or-beginning-search
+  bindkey '^[[B' down-line-or-beginning-search
+  bindkey '^[OB' down-line-or-beginning-search
+  bindkey '^R' history-incremental-search-backward
+fi
+
+# These plugins are already supplied by the product/host package paths.  Set
+# preferences before sourcing so their initialisation sees the intended order.
+ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=244'
+ZSH_AUTOSUGGEST_STRATEGY=(history completion)
 if [[ -n ${VC_TERMINAL_PLUGIN_PREFIXES:-} ]]; then
   vc_plugin_prefixes=(${=VC_TERMINAL_PLUGIN_PREFIXES})
 else
