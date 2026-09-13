@@ -504,6 +504,83 @@ exit 0
         )
 
 
+@pytest.mark.parametrize("provider", ["claude", "grok"])
+def test_bare_interactive_fork_sends_no_synthetic_task_marker(
+    tmp_path, monkeypatch, provider
+):
+    """A bare fork carries no task input. Only the codex branch dropped the
+    shell's synthetic /vc-fork marker; claude and grok children opened on a
+    private task file that said nothing but "/vc-fork" and spent their first
+    turn asking what to do."""
+    import os
+
+    from vibecrafted_core.spawn import launch_interactive_workspace
+
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "baseline",
+        ],
+        check=True,
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    capture = tmp_path / "argv"
+    fake = fake_bin / provider
+    fake.write_text("""#!/bin/sh
+case "$*" in
+  *--help*) echo '--resume --fork-session --print --prompt-file --session-id'; exit 0;;
+  *--version*) echo '9.9.9 (fixture)'; exit 0;;
+esac
+printf '%s\\n' "$@" > "$SMOKE_CAPTURE"
+exit 0
+""")
+    fake.chmod(0o755)
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(tmp_path / "vc"))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_BIN", str(fake_bin))
+    monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("SMOKE_CAPTURE", str(capture))
+
+    result = launch_interactive_workspace(
+        provider,
+        "/vc-fork",
+        "local-native",
+        "bypass",
+        repo,
+        "unmetered",
+        continuity="bare-fork",
+        parent_session_id="source-native",
+        admission={"skill": "fork"},
+    )
+
+    # The fixture exits without ever acknowledging a child identity, so the run
+    # settles as an unconfirmed native fork; the argv below is what is pinned.
+    receipt = json.loads(
+        next(
+            (tmp_path / "vc/control_plane/runtime_runs").glob("*/meta.json")
+        ).read_text()
+    )
+    assert result == 1
+    assert receipt["fork_source_session_id"] == "source-native"
+    assert receipt["native_identity_status"] == "pending"
+    argv = capture.read_text().splitlines()
+    assert argv[argv.index("--resume") + 1] == "source-native"
+    assert "--fork-session" in argv
+    assert "/vc-fork" not in argv
+    assert not any("private task file" in item for item in argv), argv
+
+
 @pytest.mark.parametrize("selector", ["source-native", "current", "last"])
 def test_bare_resume_admission_retains_original_selection(
     tmp_path, monkeypatch, selector

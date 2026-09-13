@@ -1845,6 +1845,15 @@ def launch_interactive_workspace(
         provider_session_id=provider_session_id,
         continuity_policy=continuity_policy,
     )
+    if (
+        continuity_policy.mode == "bare-fork"
+        and admission.get("skill") == "fork"
+        and provider != "codex"
+    ):
+        # The public bare fork has no task input. Open the native child idle:
+        # the task-file pointer would only carry the shell's synthetic /vc-fork
+        # marker. Codex drops it after its acknowledged thread/fork below.
+        command.pop()
     native_session = str(admission.get("agent_session_id") or "")
     if native_session:
         if provider == "claude":
