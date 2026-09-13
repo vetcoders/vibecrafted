@@ -591,6 +591,50 @@ sign_helper_scripts() {
   done < <(find "$APP/Contents/Helpers" -maxdepth 1 -type f -print0)
 }
 
+# materialize_vc_terminal_app_bundle <bundle> <terminal binary> <role>
+#
+# The product's Finder/Dock terminal identity, materialized the one way. Two
+# payloads carry a vc-terminal.app — Vibecrafted.app in Contents/Helpers, and
+# the Runtime Pack beside its flat native host in libexec — and until this
+# boundary existed they were assembled by two copies of the same block. They
+# had already drifted: the helper was stamped VC Terminal while the Runtime
+# Pack bundle shipped the donor's own CFBundleName, so the same binary appeared
+# in the Dock under two names depending on which payload the operator installed.
+# One function, one identity, both callers; the role only names the payload in
+# a failure message.
+materialize_vc_terminal_app_bundle() {
+  local terminal_app="$1" terminal_binary="$2" role="$3"
+  /usr/bin/ditto "$TERMINAL_REPO/extra/osx/vc-terminal.app" "$terminal_app"
+  mkdir -p "$terminal_app/Contents/MacOS" "$terminal_app/Contents/Resources"
+  install -m 0755 "$terminal_binary" "$terminal_app/Contents/MacOS/alacritty"
+  "$SOURCE_ROOT/scripts/build-vibecrafted-icon.sh" \
+    "$TERMINAL_REPO/assets/icon/vc-terminal-icon.png" \
+    "$terminal_app/Contents/Resources/alacritty.icns" \
+    "$TERMINAL_REPO/assets/icon/terminal.png"
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' \
+    "$terminal_app/Contents/Info.plist")" == "alacritty" ]] \
+    || die "$role vc-terminal bundle executable contract is invalid"
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' \
+    "$terminal_app/Contents/Info.plist")" == "alacritty.icns" ]] \
+    || die "$role vc-terminal bundle icon contract is invalid"
+  [[ -s "$terminal_app/Contents/Resources/alacritty.icns" ]] \
+    || die "$role vc-terminal bundle icon is missing"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName VC Terminal" \
+    "$terminal_app/Contents/Info.plist" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string VC Terminal" \
+      "$terminal_app/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleName VC Terminal" \
+    "$terminal_app/Contents/Info.plist" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleName string VC Terminal" \
+      "$terminal_app/Contents/Info.plist"
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' \
+    "$terminal_app/Contents/Info.plist")" == "VC Terminal" ]] \
+    || die "$role vc-terminal display name is not canonical"
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' \
+    "$terminal_app/Contents/Info.plist")" == "VC Terminal" ]] \
+    || die "$role vc-terminal bundle name is not canonical"
+}
+
 remove_ambient_swift_rpath() {
   local executable="$APP/Contents/MacOS/Vibecrafted"
   local rpaths
@@ -765,22 +809,8 @@ materialize_runtime_payload() {
   # install as well.  Linux keeps the flat native host because .app identity is
   # a Darwin-only product contract.
   if [[ "$RUNTIME_PACK_PLATFORM" == darwin-* ]]; then
-    local terminal_app="$runtime/libexec/vc-terminal.app"
-    /usr/bin/ditto "$TERMINAL_REPO/extra/osx/vc-terminal.app" "$terminal_app"
-    mkdir -p "$terminal_app/Contents/MacOS" "$terminal_app/Contents/Resources"
-    install -m 0755 "$terminal_source" "$terminal_app/Contents/MacOS/alacritty"
-    "$SOURCE_ROOT/scripts/build-vibecrafted-icon.sh" \
-      "$TERMINAL_REPO/assets/icon/vc-terminal-icon.png" \
-      "$terminal_app/Contents/Resources/alacritty.icns" \
-      "$TERMINAL_REPO/assets/icon/terminal.png"
-    [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' \
-      "$terminal_app/Contents/Info.plist")" == "alacritty" ]] \
-      || die "Runtime Pack vc-terminal bundle executable contract is invalid"
-    [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' \
-      "$terminal_app/Contents/Info.plist")" == "alacritty.icns" ]] \
-      || die "Runtime Pack vc-terminal bundle icon contract is invalid"
-    [[ -s "$terminal_app/Contents/Resources/alacritty.icns" ]] \
-      || die "Runtime Pack vc-terminal bundle icon is missing"
+    materialize_vc_terminal_app_bundle "$runtime/libexec/vc-terminal.app" \
+      "$terminal_source" "Runtime Pack"
   fi
   install -m 0755 "$runtime/scripts/vc-terminal-product-entry.sh" \
     "$runtime/bin/vc-terminal"
@@ -1026,33 +1056,7 @@ build_product() {
   local terminal_app="$APP/Contents/Helpers/vc-terminal.app"
   mkdir -p "$APP/Contents/Helpers" "$resources/terminal"
   /usr/bin/ditto "$RUNTIME_PAYLOAD" "$runtime"
-  /usr/bin/ditto "$TERMINAL_REPO/extra/osx/vc-terminal.app" "$terminal_app"
-  mkdir -p "$terminal_app/Contents/MacOS" "$terminal_app/Contents/Resources"
-  install -m 0755 "$terminal_source" "$terminal_app/Contents/MacOS/alacritty"
-  "$SOURCE_ROOT/scripts/build-vibecrafted-icon.sh" \
-    "$TERMINAL_REPO/assets/icon/vc-terminal-icon.png" \
-    "$terminal_app/Contents/Resources/alacritty.icns" \
-    "$TERMINAL_REPO/assets/icon/terminal.png"
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' \
-    "$terminal_app/Contents/Info.plist")" == "alacritty" ]] \
-    || die "vc-terminal helper bundle executable contract is invalid"
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' \
-    "$terminal_app/Contents/Info.plist")" == "alacritty.icns" ]] \
-    || die "vc-terminal helper bundle icon contract is invalid"
-  /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName VC Terminal" \
-    "$terminal_app/Contents/Info.plist" 2>/dev/null \
-    || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string VC Terminal" \
-      "$terminal_app/Contents/Info.plist"
-  /usr/libexec/PlistBuddy -c "Set :CFBundleName VC Terminal" \
-    "$terminal_app/Contents/Info.plist" 2>/dev/null \
-    || /usr/libexec/PlistBuddy -c "Add :CFBundleName string VC Terminal" \
-      "$terminal_app/Contents/Info.plist"
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' \
-    "$terminal_app/Contents/Info.plist")" == "VC Terminal" ]] \
-    || die "vc-terminal helper display name is not canonical"
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' \
-    "$terminal_app/Contents/Info.plist")" == "VC Terminal" ]] \
-    || die "vc-terminal helper bundle name is not canonical"
+  materialize_vc_terminal_app_bundle "$terminal_app" "$terminal_source" "helper"
   install -m 0755 "$frame_source" "$APP/Contents/Helpers/vc-frame"
   install -m 0755 "$SOURCE_ROOT/scripts/vc-app-update.sh" "$APP/Contents/Helpers/vc-app-update"
 

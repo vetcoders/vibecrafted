@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -1131,6 +1132,244 @@ def test_release_strips_linker_paths_and_pins_frame_source_identity() -> None:
     app_gate = builder.index('assert_payload_is_anonymous "$APP"')
     app_signing = builder.index('sign_macho_tree "$APP/Contents"')
     assert app_strip_call < app_gate < app_signing
+
+
+_BUNDLE_SIGNING_DRIVER = """
+set -euo pipefail
+. "$1/scripts/lib/macho-signing.sh"
+root="$2"
+SIGNING_IDENTITY="Developer ID Application: Fixture"
+CODESIGN_KEYCHAIN_ARGS=(--keychain "$3")
+sign_macho_tree "$root"
+sign_macho_app_bundles "$root"
+verify_macho_tree "$root" 1
+"""
+
+
+def _seed_signing_fixture_tree(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A pack-shaped tree: a flat native host plus a real .app beside it.
+
+    The Mach-O is a copy of /usr/bin/true, so `is_macho_file` reads genuine
+    bytes through the real /usr/bin/file — the helper calls that by absolute
+    path and a shim could not reach it anyway. Only `codesign` is faked, and
+    only to record the order it was called in.
+    """
+
+    # copy2 replicates st_flags, and /usr/bin/true carries SF_RESTRICTED under
+    # SIP: chflags on the copy fails with EPERM. The bytes are the point here,
+    # so copy those and set the mode explicitly.
+    def _donor(destination: Path) -> None:
+        destination.write_bytes(Path("/usr/bin/true").read_bytes())
+        destination.chmod(0o755)
+
+    root = tmp_path / "VibecraftedRuntime"
+    (root / "libexec").mkdir(parents=True)
+    _donor(root / "libexec/vc-terminal")
+    bundle = root / "libexec/vc-terminal.app"
+    (bundle / "Contents/MacOS").mkdir(parents=True)
+    (bundle / "Contents/Resources").mkdir(parents=True)
+    _donor(bundle / "Contents/MacOS/alacritty")
+    (bundle / "Contents/Resources/alacritty.icns").write_bytes(b"icns-fixture")
+    (bundle / "Contents/Info.plist").write_text(
+        '<?xml version="1.0"?><plist version="1.0"><dict>'
+        "<key>CFBundleExecutable</key><string>alacritty</string>"
+        "</dict></plist>\n",
+        encoding="utf-8",
+    )
+
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    log = tmp_path / "codesign.log"
+    codesign = fake_bin / "codesign"
+    codesign.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "' + str(log) + '"\n'
+        # Sealing a bundle is what writes CodeResources; sealing a file does not.
+        'for argument in "$@"; do\n'
+        '  case "$argument" in\n'
+        "    -*) continue ;;\n"
+        "  esac\n"
+        '  if [ -d "$argument/Contents" ]; then\n'
+        '    case "$*" in\n'
+        "      *--verify*) : ;;\n"
+        '      *) mkdir -p "$argument/Contents/_CodeSignature"\n'
+        '         printf "sealed\\n" > "$argument/Contents/_CodeSignature/CodeResources" ;;\n'
+        "    esac\n"
+        "  fi\n"
+        "done\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    codesign.chmod(0o755)
+    return root, fake_bin, log
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="Mach-O donors and bundle seals are a Darwin boundary",
+)
+def test_bundle_seal_follows_the_inner_macho_and_verification_demands_it(
+    tmp_path: Path,
+) -> None:
+    """Signing a bundle's executable is not signing the bundle.
+
+    `sign_macho_tree` walks `find -type f`, so inside an .app it reaches the
+    inner Mach-O and signs that FILE. Contents/_CodeSignature/CodeResources —
+    the seal that covers Info.plist and the icon, i.e. the Finder/Dock identity
+    the bundle exists for — is written only when codesign is handed the bundle
+    DIRECTORY. This proves the packager now does both, in that order, and that
+    verification refuses a tree where the second step did not happen.
+    """
+    root, fake_bin, log = _seed_signing_fixture_tree(tmp_path)
+    bundle = root / "libexec/vc-terminal.app"
+    keychain = tmp_path / "fixture.keychain"
+    keychain.write_bytes(b"")
+    environment = {
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "HOME": str(tmp_path / "home"),
+    }
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _BUNDLE_SIGNING_DRIVER,
+            "driver",
+            str(REPO_ROOT),
+            str(root),
+            str(keychain),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+    )
+    assert result.returncode == 0, result.stderr
+
+    calls = log.read_text(encoding="utf-8").splitlines()
+    signed = [line for line in calls if "--verify" not in line]
+    inner = next(
+        index
+        for index, line in enumerate(signed)
+        if line.endswith("vc-terminal.app/Contents/MacOS/alacritty")
+    )
+    sealed = next(
+        index for index, line in enumerate(signed) if line.endswith("vc-terminal.app")
+    )
+    assert inner < sealed, "the bundle was sealed before its own executable"
+    assert any(line.endswith("libexec/vc-terminal") for line in signed), (
+        "the flat native host beside the bundle stopped being signed"
+    )
+    assert (bundle / "Contents/_CodeSignature/CodeResources").is_file()
+    verified = [line for line in calls if "--verify" in line]
+    assert any(line.endswith("vc-terminal.app") for line in verified)
+
+    # Strip only the seal and the same verification must refuse the tree.
+    shutil.rmtree(bundle / "Contents/_CodeSignature")
+    refusal = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                'set -euo pipefail\n. "$1/scripts/lib/macho-signing.sh"\n'
+                'verify_macho_tree "$2" 1\n'
+            ),
+            "driver",
+            str(REPO_ROOT),
+            str(root),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+    )
+    assert refusal.returncode != 0
+    assert "not sealed as a bundle" in refusal.stderr
+
+
+def test_runtime_pack_seals_its_app_bundles_before_the_inventory_closes() -> None:
+    """The pack's own vc-terminal.app must be sealed inside the byte owner.
+
+    Vibecrafted.app has always closed this through sign_nested_app_bundles.
+    The standalone pack gained libexec/vc-terminal.app and had no equivalent
+    step, so it shipped a signed executable inside an unsealed shell — and the
+    closed inventory and provenance then recorded exactly those bytes. The seal
+    therefore has to land before refresh-foundations, not after.
+    """
+    packager = (REPO_ROOT / "scripts/package-runtime-pack.sh").read_text(
+        encoding="utf-8"
+    )
+    helper = (REPO_ROOT / "scripts/lib/macho-signing.sh").read_text(encoding="utf-8")
+
+    signed = packager.index('sign_macho_tree "$root"')
+    sealed = packager.index('sign_macho_app_bundles "$root"')
+    verified = packager.index('verify_macho_tree "$root" 1')
+    foundations = packager.index("refresh-foundations")
+    inventoried = packager.index("vibecrafted_core.runtime_pack_contract write")
+    archived = packager.index('-czf "$candidate"')
+    assert signed < sealed < verified < foundations < inventoried < archived
+
+    assert "sign_macho_app_bundles() {" in helper
+    assert "verify_macho_app_bundles() {" in helper
+    # -depth hands children over before parents: a nested bundle is sealed
+    # before the bundle enclosing it, the same inside-out order the loose
+    # Mach-O files are signed in.
+    assert helper.count("find \"$root\" -depth -type d -name '*.app' -print0") == 2
+    # One verification boundary: everything that calls verify_macho_tree — the
+    # packager on its staging tree and the archive preflight the App runs on
+    # the embedded carrier — inherits the bundle proof.
+    assert 'verify_macho_app_bundles "$root" || return 1' in helper
+    assert helper.index("verify_macho_app_bundles() {") < helper.index(
+        "verify_macho_tree() {"
+    )
+    assert "_CodeSignature/CodeResources" in helper
+
+
+def test_vc_terminal_bundle_identity_has_a_single_materializer() -> None:
+    """Both payloads' bundles are stamped by one function, or they drift.
+
+    Measured on 5ff2c4c5: the App helper was stamped VC Terminal and the new
+    Runtime Pack bundle kept the donor's CFBundleName, so the same binary
+    reached the Dock under two names depending on which payload was installed.
+    """
+    builder = (REPO_ROOT / "scripts/build-vibecrafted-release.sh").read_text(
+        encoding="utf-8"
+    )
+    entry = (REPO_ROOT / "scripts/vc-terminal-product-entry.sh").read_text(
+        encoding="utf-8"
+    )
+    installer_source = (REPO_ROOT / "scripts/vetcoders_install.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        builder.count('/usr/bin/ditto "$TERMINAL_REPO/extra/osx/vc-terminal.app"') == 1
+    )
+    assert builder.count("Set :CFBundleDisplayName VC Terminal") == 1
+    assert builder.count("Set :CFBundleName VC Terminal") == 1
+    assert (
+        builder.count(
+            'materialize_vc_terminal_app_bundle "$runtime/libexec/vc-terminal.app"'
+        )
+        == 1
+    )
+    assert builder.count('materialize_vc_terminal_app_bundle "$terminal_app"') == 1
+    # The pack bundle is a Darwin-only product contract; Linux keeps the flat
+    # native host, so the call has to stay inside the platform guard.
+    materializer = builder.split("materialize_runtime_payload() {", 1)[1].split(
+        "\nbuild_product() {", 1
+    )[0]
+    guard = materializer.index('if [[ "$RUNTIME_PACK_PLATFORM" == darwin-* ]]; then')
+    call = materializer.index("materialize_vc_terminal_app_bundle")
+    assert guard < call < materializer.index("\n  fi\n", guard)
+
+    # The two admission predicates read the same stamp.
+    assert '"$bundle/Contents/Info.plist" 2>/dev/null)" == "VC Terminal"' in entry
+    assert '_TERMINAL_BUNDLE_DISPLAY_NAME = "VC Terminal"' in installer_source
+    assert (
+        'document.get("CFBundleName") == _TERMINAL_BUNDLE_DISPLAY_NAME'
+        in installer_source
+    )
 
 
 def test_windows_entry_point_does_not_drift_between_its_two_copies() -> None:
