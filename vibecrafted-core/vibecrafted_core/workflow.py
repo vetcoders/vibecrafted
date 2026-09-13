@@ -35,6 +35,7 @@ from .control_plane import (
     ensure_session_id,
     lookup_run,
     lookup_run_snapshot,
+    lookup_runtime_run_meta,
     normalize_run_root,
     record_stop_transition,
     resolve_run,
@@ -96,6 +97,15 @@ TERMINAL_STATES = {
     "stopped",
     "timed_out",
     "ghost",
+}
+# Identity-validation reasons that positively prove the recorded process is not
+# the one we are asking about — it is gone, or the pid now carries another
+# generation. Every other failure reason (receipt invalid, receipt mismatch,
+# capture unavailable) is doubt, and doubt never settles a claim as stale.
+FOREIGN_PROCESS_IDENTITY_REASONS = {
+    "process_identity_gone",
+    "process_identity_mismatch",
+    "process_run_id_mismatch",
 }
 LAUNCH_IDEMPOTENCY_SCHEMA = "vibecrafted.launch-idempotency.v1"
 LAUNCH_IDEMPOTENCY_KEY_ENV = "VIBECRAFTED_LAUNCH_IDEMPOTENCY_KEY"
@@ -2318,6 +2328,86 @@ def _write_launch_idempotency_record(key: str, payload: dict[str, Any]) -> None:
         atomic_write_json(_launch_idempotency_path(key), record)
 
 
+def _process_liveness_evidence(run_id: str, payload: dict[str, Any]) -> str:
+    """Classify the worker/launcher process evidence carried by ``payload``.
+
+    Four answers, deliberately not collapsed into a boolean:
+
+    * ``current`` — a recorded process is alive *and* its canonical identity
+      receipt still qualifies for ``run_id``.
+    * ``unknown`` — a recorded process is alive but we cannot prove whose it
+      is (no receipt, or a receipt that never reached a decisive capture).
+    * ``stale`` — every recorded process is gone, or the pid was positively
+      identified as another generation.
+    * ``none`` — the payload records no process at all.
+
+    A dead pid ends the question before identity validation: there is no live
+    claim left to protect, so an unreadable receipt over a corpse is ``stale``
+    rather than permanent doubt.
+    """
+    seen = False
+    for prefix in ("worker", "launcher"):
+        receipt = payload.get(f"{prefix}_identity")
+        pid = _coerce_positive_int(payload.get(f"{prefix}_pid"))
+        if pid is None and isinstance(receipt, dict):
+            pid = _coerce_positive_int(receipt.get("pid"))
+        if pid is None:
+            continue
+        seen = True
+        if not _pid_is_alive(pid):
+            continue
+        if not isinstance(receipt, dict):
+            return "unknown"
+        current, reason, _identity = _validate_recorded_identity(run_id, receipt, pid)
+        if current:
+            return "current"
+        if reason in FOREIGN_PROCESS_IDENTITY_REASONS:
+            continue
+        return "unknown"
+    return "stale" if seen else "none"
+
+
+def _validate_recorded_identity(
+    run_id: str, receipt: dict[str, Any], pid: int
+) -> tuple[bool, str, Any]:
+    """Run the canonical identity check for one recorded process receipt."""
+    pgid = _coerce_positive_int(receipt.get("pgid"))
+    return validate_process_identity(
+        receipt,
+        expected_pid=pid,
+        expected_pgid=pgid,
+        expected_run_id=run_id,
+    )
+
+
+def _terminal_projection_veto(run_id: str, run: dict[str, Any]) -> str:
+    """Reason a terminal projection must not be believed, or '' when it may be.
+
+    The ``runs/<id>.json`` projection is a lagging view: it can still read
+    ``completed`` while the canonical runtime record and the process table say
+    the worker is running. Deleting a claim is irreversible, so the two
+    canonical sources outrank the projection here and may veto it. Missing
+    canonical evidence is not a veto (there is nothing contradicting the
+    projection), but evidence that is unreadable, non-terminal, or attached to
+    an unidentifiable live process is — unknown liveness retains.
+    """
+    evidence = _process_liveness_evidence(run_id, run)
+    if evidence in {"current", "unknown"}:
+        return f"snapshot_process_liveness_{evidence}"
+    meta = lookup_runtime_run_meta(run_id)
+    if meta is None:
+        return ""
+    if not meta:
+        return "runtime_meta_unreadable"
+    evidence = _process_liveness_evidence(run_id, meta)
+    if evidence in {"current", "unknown"}:
+        return f"runtime_meta_process_liveness_{evidence}"
+    state = str(meta.get("state") or meta.get("status") or "")
+    if state in TERMINAL_STATES or meta.get("exit_code") is not None:
+        return ""
+    return f"runtime_meta_state_{state or 'unknown'}"
+
+
 def _prune_launch_idempotency_registry(*, now: float | None = None) -> int:
     """Bound failed/proven-terminal history without discovering legacy runs.
 
@@ -2326,6 +2416,11 @@ def _prune_launch_idempotency_registry(*, now: float | None = None) -> int:
     that synchronizes state and can recursively walk legacy artifacts while
     the registry mutation lock is held. No snapshot means unknown, so retain
     the record until a normal control-plane projection proves it terminal.
+
+    A terminal projection is necessary but not sufficient: it is corroborated
+    against the canonical runtime meta and the process table
+    (:func:`_terminal_projection_veto`) with two bounded direct reads, so a
+    stale ``completed`` snapshot can no longer delete a live launch claim.
     """
     with run_mutation_locks(control_plane_home(), run_id="launch-idempotency-registry"):
         registry = _launch_idempotency_registry()
@@ -2340,6 +2435,8 @@ def _prune_launch_idempotency_registry(*, now: float | None = None) -> int:
                 run_id = str(payload.get("run_id") or "")
                 run = lookup_run_snapshot(run_id) if run_id else None
                 if run is None or not _run_is_terminal(run):
+                    continue
+                if _terminal_projection_veto(run_id, run):
                     continue
             else:
                 continue
@@ -2466,11 +2563,7 @@ def _classify_record_owner(record: dict[str, Any]) -> tuple[str, str]:
     )
     if current:
         return "current", reason or "process_identity_current"
-    if reason in {
-        "process_identity_gone",
-        "process_identity_mismatch",
-        "process_run_id_mismatch",
-    }:
+    if reason in FOREIGN_PROCESS_IDENTITY_REASONS:
         return "stale", reason
     return "ambiguous", reason or "process_identity_unknown"
 

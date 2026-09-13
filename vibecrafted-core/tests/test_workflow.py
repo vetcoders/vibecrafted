@@ -1153,6 +1153,230 @@ def test_launch_registry_prune_uses_only_direct_snapshots_for_dispatched_history
     assert workflow._launch_idempotency_path("missing-legacy-0").exists()
 
 
+def _write_dispatched_launch_record(key: str, run_id: str) -> None:
+    """Persist one accepted dispatched claim in the launch-idempotency registry."""
+    workflow._write_launch_idempotency_record(
+        key,
+        {
+            "run_id": run_id,
+            "state": "dispatched",
+            "accepted": True,
+            "receipt": {"accepted": True, "status": "launching"},
+        },
+    )
+
+
+def _write_run_projection(
+    run_id: str, payload: dict[str, Any], *, archived: bool = False
+) -> Path:
+    """Write one control-plane run snapshot (live or archived)."""
+    directory = control_plane.run_snapshot_dir()
+    if archived:
+        directory = directory / "archive"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{run_id}.json"
+    path.write_text(json.dumps({"run_id": run_id, **payload}), encoding="utf-8")
+    return path
+
+
+def _write_runtime_run_meta(run_id: str, payload: dict[str, Any]) -> Path:
+    """Write one canonical runtime meta.json for ``run_id``."""
+    run_dir = control_plane._runtime_runs_dir() / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / "meta.json"
+    path.write_text(json.dumps({"run_id": run_id, **payload}), encoding="utf-8")
+    return path
+
+
+def _expire_launch_registry(now: float) -> None:
+    """Age every registry record past the terminal TTL."""
+    for path in workflow._launch_idempotency_registry().glob("*.json"):
+        os.utime(path, (now - 3_600, now - 3_600))
+
+
+def _forbid_legacy_run_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail the test if registry maintenance reaches for the expensive lookups."""
+    monkeypatch.setattr(
+        workflow,
+        "lookup_run",
+        lambda _run_id: pytest.fail("registry prune must not sync/discover runs"),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "sync_state",
+        lambda *args, **kwargs: pytest.fail("registry prune must not sync state"),
+    )
+    monkeypatch.setattr(
+        control_plane,
+        "_resolve_run_in_artifacts",
+        lambda _run_id: pytest.fail(
+            "registry prune must not recursively scan artifacts"
+        ),
+    )
+
+
+def _prepare_prune_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
+    """Point the prune at an isolated home with zero terminal retention budget."""
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setattr(workflow, "LAUNCH_IDEMPOTENCY_MAX_TERMINAL_RECORDS", 0)
+    monkeypatch.setattr(workflow, "LAUNCH_IDEMPOTENCY_TERMINAL_TTL_SECONDS", 10)
+
+
+def test_launch_registry_prune_retains_live_claim_contradicting_stale_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A lagging `completed` projection must not delete a running launch claim.
+
+    Root counterexample (`launch-prune-stale-snapshot-probe`): the projection
+    says completed/exit 0 while the canonical runtime meta still says running
+    with a live worker pid. Snapshot-only pruning loses the live claim.
+    """
+    _prepare_prune_home(monkeypatch, tmp_path / ".vibecrafted")
+    run_id = "live-after-stale-projection"
+    _write_dispatched_launch_record(run_id, run_id)
+    _write_run_projection(run_id, {"state": "completed", "exit_code": 0})
+    _write_runtime_run_meta(
+        run_id,
+        {"status": "running", "worker_pid": os.getpid(), "exit_code": None},
+    )
+    now = time.time()
+    _expire_launch_registry(now)
+    _forbid_legacy_run_discovery(monkeypatch)
+
+    removed = workflow._prune_launch_idempotency_registry(now=now)
+
+    assert removed == 0
+    assert workflow._launch_idempotency_path(run_id).exists()
+
+
+def test_launch_registry_prune_retains_claim_when_archived_snapshot_is_contradicted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An archived terminal snapshot loses to a live canonical runtime record."""
+    _prepare_prune_home(monkeypatch, tmp_path / ".vibecrafted")
+    run_id = "archived-completed-still-running"
+    _write_dispatched_launch_record(run_id, run_id)
+    _write_run_projection(run_id, {"state": "completed", "exit_code": 0}, archived=True)
+    _write_runtime_run_meta(run_id, {"status": "running", "worker_pid": os.getpid()})
+    now = time.time()
+    _expire_launch_registry(now)
+    _forbid_legacy_run_discovery(monkeypatch)
+
+    removed = workflow._prune_launch_idempotency_registry(now=now)
+
+    assert removed == 0
+    assert workflow._launch_idempotency_path(run_id).exists()
+
+
+def test_launch_registry_prune_retains_claim_when_runtime_meta_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Doubt is not terminality: a corrupt canonical record retains the claim."""
+    _prepare_prune_home(monkeypatch, tmp_path / ".vibecrafted")
+    run_id = "runtime-meta-corrupt"
+    _write_dispatched_launch_record(run_id, run_id)
+    _write_run_projection(run_id, {"state": "completed", "exit_code": 0})
+    meta_path = _write_runtime_run_meta(run_id, {"state": "completed"})
+    meta_path.write_text("{ truncated", encoding="utf-8")
+    now = time.time()
+    _expire_launch_registry(now)
+    _forbid_legacy_run_discovery(monkeypatch)
+
+    removed = workflow._prune_launch_idempotency_registry(now=now)
+
+    assert removed == 0
+    assert workflow._launch_idempotency_path(run_id).exists()
+
+
+def test_launch_registry_prune_rejects_traversing_run_ids(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A registry run id must never compose a read outside the snapshot dir."""
+    _prepare_prune_home(monkeypatch, tmp_path / ".vibecrafted")
+    run_id = "../../outside"
+    _write_dispatched_launch_record("traversal-claim", run_id)
+    outside = tmp_path / ".vibecrafted" / "outside.json"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text(
+        json.dumps({"run_id": run_id, "state": "completed", "exit_code": 0}),
+        encoding="utf-8",
+    )
+    assert (
+        control_plane.run_snapshot_dir() / f"{run_id}.json"
+    ).resolve() == outside.resolve()
+    now = time.time()
+    _expire_launch_registry(now)
+    _forbid_legacy_run_discovery(monkeypatch)
+
+    removed = workflow._prune_launch_idempotency_registry(now=now)
+
+    assert removed == 0
+    assert workflow._launch_idempotency_path("traversal-claim").exists()
+    assert control_plane.lookup_run_snapshot(run_id) is None
+    assert control_plane.lookup_runtime_run_meta(run_id) is None
+    assert outside.exists()
+
+
+def test_launch_registry_prune_removes_terminal_record_when_pid_is_a_new_generation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A live pid that provably belongs to another generation blocks nothing."""
+    _prepare_prune_home(monkeypatch, tmp_path / ".vibecrafted")
+    run_id = "terminal-with-recycled-pid"
+    receipt = process_control.process_identity_receipt(os.getpid(), run_id=run_id)
+    assert receipt is not None
+    foreign_receipt = {**receipt, "start_token": "1990-01-01T00:00:00Z"}
+    _write_dispatched_launch_record(run_id, run_id)
+    _write_run_projection(run_id, {"state": "completed", "exit_code": 0})
+    _write_runtime_run_meta(
+        run_id,
+        {
+            "state": "completed",
+            "exit_code": 0,
+            "worker_pid": os.getpid(),
+            "worker_identity": foreign_receipt,
+        },
+    )
+    now = time.time()
+    _expire_launch_registry(now)
+    _forbid_legacy_run_discovery(monkeypatch)
+
+    assert (
+        workflow._process_liveness_evidence(
+            run_id, {"worker_pid": os.getpid(), "worker_identity": foreign_receipt}
+        )
+        == "stale"
+    )
+    removed = workflow._prune_launch_idempotency_registry(now=now)
+
+    assert removed == 1
+    assert not workflow._launch_idempotency_path(run_id).exists()
+
+
+def test_launch_registry_prune_removes_truly_finished_expired_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Projection and canonical runtime record agree terminal: history is bounded."""
+    _prepare_prune_home(monkeypatch, tmp_path / ".vibecrafted")
+    run_id = "truly-finished"
+    child = subprocess.Popen([sys.executable, "-c", ""])
+    child.wait()
+    _write_dispatched_launch_record(run_id, run_id)
+    _write_run_projection(run_id, {"state": "completed", "exit_code": 0})
+    _write_runtime_run_meta(
+        run_id,
+        {"state": "completed", "exit_code": 0, "worker_pid": child.pid},
+    )
+    now = time.time()
+    _expire_launch_registry(now)
+    _forbid_legacy_run_discovery(monkeypatch)
+
+    removed = workflow._prune_launch_idempotency_registry(now=now)
+
+    assert removed == 1
+    assert not workflow._launch_idempotency_path(run_id).exists()
+
+
 def test_launch_registry_never_persists_prompt_text(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
