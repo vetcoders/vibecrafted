@@ -306,6 +306,88 @@ def test_product_shell_pty_routes_single_line_up_to_atuin_but_not_multiline(
         os.close(descriptor)
 
 
+def test_product_shell_pty_recalls_history_without_atuin(tmp_path: Path) -> None:
+    """No-Atuin fallback registers widgets that recall history through a PTY."""
+    _stage_product_profile(tmp_path)
+    profile = tmp_path / ".config/vibecrafted/vc-terminal/.zshrc"
+    profile.write_text(
+        profile.read_text(encoding="utf-8")
+        + "precmd() { print -r -- PROMPT_READY; }\nprint -r -- PTY_READY\n"
+    )
+    events = tmp_path / "history-events"
+    pid, descriptor = pty.fork()
+    if pid == 0:
+        os.chdir(tmp_path)
+        os.execve(
+            "/bin/zsh",
+            ["/bin/zsh", "-li"],
+            {
+                "HOME": str(tmp_path),
+                "PATH": "/usr/bin:/bin",
+                "TERM": "xterm",
+                "ZDOTDIR": str(tmp_path / ".config/vibecrafted/vc-terminal"),
+                "VIBECRAFTED_HOME": str(tmp_path / ".vibecrafted"),
+                "VC_TERMINAL_PLUGIN_PREFIXES": str(tmp_path / "missing-plugins"),
+            },
+        )
+
+    output = bytearray()
+
+    def read_until(predicate, message: str) -> None:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            if select.select([descriptor], [], [], 0.1)[0]:
+                output.extend(os.read(descriptor, 65536))
+        pytest.fail(f"{message}: {output.decode(errors='replace')}")
+
+    try:
+        read_until(lambda: b"PTY_READY" in output, "interactive shell did not start")
+        os.write(
+            descriptor,
+            (
+                b'print -r -- first >> "$HOME/history-events"\n'
+                b'print -r -- second >> "$HOME/history-events"\n'
+            ),
+        )
+        read_until(
+            lambda: (
+                events.exists()
+                and events.read_text().splitlines() == ["first", "second"]
+            ),
+            "history commands did not run",
+        )
+        os.write(descriptor, b"\x1b[A\n")
+        read_until(
+            lambda: events.read_text().splitlines() == ["first", "second", "second"],
+            "Up did not recall the most recent history command",
+        )
+        os.write(descriptor, b"\x1b[A\x1b[A\n")
+        read_until(
+            lambda: (
+                events.read_text().splitlines()
+                == ["first", "second", "second", "first"]
+            ),
+            "repeated Up did not reach older product-shell history",
+        )
+        os.write(
+            descriptor,
+            b'\x1b[A\x1b[Bprint -r -- down-cleared >> "$HOME/history-events"\n',
+        )
+        read_until(
+            lambda: (
+                events.read_text().splitlines()
+                == ["first", "second", "second", "first", "down-cleared"]
+            ),
+            "Down did not return from product-shell history selection",
+        )
+    finally:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        os.close(descriptor)
+
+
 def test_tab_completes_workspace_option_without_launching_workspace(
     tmp_path: Path,
 ) -> None:
