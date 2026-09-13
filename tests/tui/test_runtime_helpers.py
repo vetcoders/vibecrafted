@@ -115,7 +115,9 @@ def _install_runtime_probe_helper(helper_root: Path, marker: str) -> None:
     )
 
 
-def test_vetcoders_shim_prefers_runtime_helper_from_repo_root(tmp_path: Path) -> None:
+def test_vetcoders_shim_loads_its_own_checkout_helper_not_an_ambient_root(
+    tmp_path: Path,
+) -> None:
     # 65c7db7a (core.sh `_vetcoders_runtime_helper_candidates` /
     # `_vetcoders_source_runtime_helpers`): the facade sources exactly one
     # helper -- the one adjacent to its own physical owner root -- and binds
@@ -143,7 +145,9 @@ def test_vetcoders_shim_prefers_runtime_helper_from_repo_root(tmp_path: Path) ->
     ]
 
 
-def test_vetcoders_shim_prefers_staged_tools_runtime_helper(tmp_path: Path) -> None:
+def test_vetcoders_shim_staged_facade_loads_its_helper_and_stray_copy_fails_closed(
+    tmp_path: Path,
+) -> None:
     # Same owner rule (65c7db7a): a facade loads the helper of the tree it
     # physically lives in. The staged tools generation's helper therefore wins
     # for the staged facade itself, while a stray facade copy with no adjacent

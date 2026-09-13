@@ -202,7 +202,7 @@ def test_shell_helper_prefers_current_control_plane_over_home_store(
     assert ranked.stdout.strip() == str(current_store)
 
 
-def test_vc_frontier_paths_mix_repo_prompt_with_companion_vc_frame(
+def test_vc_frontier_paths_mix_repo_prompt_but_read_frame_config_from_product_home(
     tmp_path: Path,
 ) -> None:
     home = tmp_path / "home"
@@ -254,7 +254,7 @@ def test_vc_frontier_paths_mix_repo_prompt_with_companion_vc_frame(
     assert str(vc_frame_config.parent) not in installed
 
 
-def test_vc_dashboard_mixes_companion_vc_frame_config_with_repo_layout(
+def test_vc_dashboard_repo_layout_arrives_with_the_repo_frame_config(
     tmp_path: Path,
 ) -> None:
     """The repo layout now arrives with the repo's own Frame config.
