@@ -758,6 +758,30 @@ materialize_runtime_payload() {
   install -m 0755 "$server_source" "$runtime/bin/vibecrafted-server-web"
   install -m 0755 "$scaffold_doctor_source" "$runtime/bin/scaffold-doctor"
   install -m 0755 "$terminal_source" "$runtime/libexec/vc-terminal"
+  # A Runtime Pack is independently launchable: it cannot borrow the enclosing
+  # Vibecrafted.app helper merely to retain Finder/Dock identity.  Materialize
+  # the same branded bundle beside the generation's native fallback so the
+  # public product entry selects generation-owned bytes after a standalone
+  # install as well.  Linux keeps the flat native host because .app identity is
+  # a Darwin-only product contract.
+  if [[ "$RUNTIME_PACK_PLATFORM" == darwin-* ]]; then
+    local terminal_app="$runtime/libexec/vc-terminal.app"
+    /usr/bin/ditto "$TERMINAL_REPO/extra/osx/vc-terminal.app" "$terminal_app"
+    mkdir -p "$terminal_app/Contents/MacOS" "$terminal_app/Contents/Resources"
+    install -m 0755 "$terminal_source" "$terminal_app/Contents/MacOS/alacritty"
+    "$SOURCE_ROOT/scripts/build-vibecrafted-icon.sh" \
+      "$TERMINAL_REPO/assets/icon/vc-terminal-icon.png" \
+      "$terminal_app/Contents/Resources/alacritty.icns" \
+      "$TERMINAL_REPO/assets/icon/terminal.png"
+    [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' \
+      "$terminal_app/Contents/Info.plist")" == "alacritty" ]] \
+      || die "Runtime Pack vc-terminal bundle executable contract is invalid"
+    [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' \
+      "$terminal_app/Contents/Info.plist")" == "alacritty.icns" ]] \
+      || die "Runtime Pack vc-terminal bundle icon contract is invalid"
+    [[ -s "$terminal_app/Contents/Resources/alacritty.icns" ]] \
+      || die "Runtime Pack vc-terminal bundle icon is missing"
+  fi
   install -m 0755 "$runtime/scripts/vc-terminal-product-entry.sh" \
     "$runtime/bin/vc-terminal"
   install -m 0755 "$frame_source" "$runtime/libexec/vc-frame"

@@ -52,6 +52,24 @@ def _write_native_stub(path: Path, payload: bytes = b"pack-terminal") -> None:
     path.chmod(0o755)
 
 
+def _write_terminal_bundle_host(path: Path) -> None:
+    _write_native_stub(path)
+    with (path.parents[1] / "Info.plist").open("wb") as handle:
+        plistlib.dump(
+            {
+                "CFBundleIdentifier": "io.vetcoders.vc-terminal",
+                "CFBundleExecutable": "alacritty",
+                "CFBundleIconFile": "alacritty.icns",
+                "CFBundleDisplayName": "VC Terminal",
+                "CFBundleName": "VC Terminal",
+            },
+            handle,
+        )
+    icon = path.parents[1] / "Resources/alacritty.icns"
+    icon.parent.mkdir(parents=True, exist_ok=True)
+    icon.write_bytes(b"fixture-icon")
+
+
 def _runtime_pack_fixture(root: Path) -> tuple[Path, Path, Path]:
     payload = seed_runtime_pack(root / "runtime-pack")
     terminal_host = root / "Vibecrafted.app/Contents/Helpers/vc-terminal"
@@ -426,19 +444,7 @@ def test_runtime_install_uses_helper_app_as_public_terminal_host(
         tmp_path
         / "Vibecrafted.app/Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
     )
-    helper.parent.mkdir(parents=True, exist_ok=True)
-    helper.write_bytes(_MACHO_MAGIC + b"helper-app")
-    helper.chmod(0o755)
-    with (helper.parents[1] / "Info.plist").open("wb") as handle:
-        plistlib.dump(
-            {
-                "CFBundleIdentifier": "io.vetcoders.vc-terminal",
-                "CFBundleExecutable": "alacritty",
-                "CFBundleDisplayName": "VC Terminal",
-                "CFBundleName": "VC Terminal",
-            },
-            handle,
-        )
+    _write_terminal_bundle_host(helper)
     app_root = tmp_path / "Vibecrafted.app"
     assert (
         installer.cmd_runtime_install(
@@ -461,6 +467,51 @@ def test_runtime_install_uses_helper_app_as_public_terminal_host(
     assert str(helper) in path_wrapper
     assert str(generation / "libexec/vc-terminal") not in path_wrapper
     assert str(generation / "bin/vc-terminal") in path_wrapper
+
+
+def test_runtime_install_uses_generation_bundle_without_app_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A standalone generation supplies its own Finder/Dock terminal identity."""
+    home = tmp_path / "home"
+    runtime_home = home / ".local/share/vibecrafted"
+    launcher_home = home / ".local/bin"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBECRAFTED_RUNTIME_HOME", str(runtime_home))
+    monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(launcher_home))
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home / ".vibecrafted"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    monkeypatch.setattr(
+        installer, "_teardown_owned_runtime_for_uninstall", lambda *_args, **_kwargs: []
+    )
+    payload, _ignored_host, _frame_helper = _runtime_pack_fixture(tmp_path)
+    payload_host = payload / "libexec/vc-terminal.app/Contents/MacOS/alacritty"
+    _write_terminal_bundle_host(payload_host)
+
+    assert (
+        installer.cmd_runtime_install(
+            Namespace(
+                payload_root=str(payload),
+                app_root=None,
+                terminal_host=None,
+                frame_helper=None,
+            )
+        )
+        == 0
+    )
+    installed = json.loads(capsys.readouterr().out)
+    generation = runtime_home / "releases/9.9.9+g12345678"
+    generation_host = generation / "libexec/vc-terminal.app/Contents/MacOS/alacritty"
+    assert installed["app_root"] == ""
+    assert Path(installed["terminal_host"]) == generation_host
+    assert installer._is_product_bundle_terminal_host(generation_host)
+    assert (generation_host.parents[1] / "Info.plist").is_file()
+    assert (generation_host.parents[1] / "Resources/alacritty.icns").is_file()
+    launcher = (launcher_home / "vc-terminal").read_text(encoding="utf-8")
+    assert f"VIBECRAFTED_TERMINAL_HOST={generation_host}" in launcher
+
+    (generation_host.parents[1] / "Resources/alacritty.icns").unlink()
+    assert not installer._is_product_bundle_terminal_host(generation_host)
 
 
 def test_runtime_pack_uninstall_prunes_only_created_empty_xdg_parents(

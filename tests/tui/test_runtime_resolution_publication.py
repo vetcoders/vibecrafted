@@ -1017,9 +1017,14 @@ def _bundle_capture_host(path: Path, python: str) -> None:
     plist.write_text(
         '<?xml version="1.0"?><plist version="1.0"><dict>'
         "<key>CFBundleIdentifier</key><string>io.vetcoders.vc-terminal</string>"
+        "<key>CFBundleExecutable</key><string>alacritty</string>"
+        "<key>CFBundleIconFile</key><string>alacritty.icns</string>"
         "</dict></plist>\n",
         encoding="utf-8",
     )
+    icon = path.parents[1] / "Resources/alacritty.icns"
+    icon.parent.mkdir(parents=True, exist_ok=True)
+    icon.write_bytes(b"fixture-icon")
 
 
 def test_terminal_wrapper_execs_product_bundle_host_not_naked_libexec(
@@ -1060,13 +1065,21 @@ def test_terminal_wrapper_execs_product_bundle_host_not_naked_libexec(
 
     generation_bundle = generation / "libexec/vc-terminal.app/Contents/MacOS/alacritty"
     _bundle_capture_host(generation_bundle, sys.executable)
-    monkeypatch.setenv("VIBECRAFTED_TERMINAL_HOST", str(bundle_host))
+    monkeypatch.delenv("VIBECRAFTED_TERMINAL_HOST")
     result = subprocess.run(
         [str(wrapper), "-e", "true"], capture_output=True, text=True, check=False
     )
     assert result.returncode == 0, result.stderr
     capture = json.loads(result.stdout)
     assert capture["host"] == str(generation_bundle)
+
+    # An incomplete bundle must not masquerade as a valid branded host.
+    (generation_bundle.parents[1] / "Resources/alacritty.icns").unlink()
+    result = subprocess.run(
+        [str(wrapper), "-e", "true"], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "libexec-ran\n"
 
 
 # MARK: - Configuration self-repair
