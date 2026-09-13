@@ -457,6 +457,7 @@ def _stage_product_profile(tmp_path: Path) -> Path:
     shutil.copy2(
         root / "config/vc-terminal/interactive.zsh", product / "interactive.zsh"
     )
+    shutil.copytree(root / "config/vc-terminal/bin", product / "bin")
     shutil.copy2(ENTRY, product / "launch-primary-shell.zsh")
     shutil.copy2(
         root / "config/starship.toml",
@@ -745,6 +746,8 @@ def test_product_shell_typed_python3_uses_generation_not_host(
     generation_python.parent.mkdir(parents=True)
     generation_python.symlink_to(sys.executable)
     door_python = tmp_path / ".config/vibecrafted/vc-terminal/bin/python3"
+    door_python_before = door_python.stat()
+    door_python_bytes = door_python.read_bytes()
     result = _zsh_profile(
         tmp_path,
         (
@@ -755,6 +758,10 @@ def test_product_shell_typed_python3_uses_generation_not_host(
             'python3 -c "import sys; print(\\"used=\\" + sys.executable)"; '
             'command python3 -c "import sys; print(\\"command_used=\\" + sys.executable)"; '
             '/usr/bin/env python3 -c "import sys; print(\\"env_used=\\" + sys.executable)"; '
+            'script="$HOME/door-shebang.py"; '
+            'printf "#!/usr/bin/env python3\\nimport sys; print(\\"shebang_used=\\" + sys.executable)\\n" > "$script"; '
+            'chmod 755 "$script"; "$script"; '
+            "reload; "
             "print -r -- READY"
         ),
         path=f"{hostile_bin}:/usr/bin:/bin",
@@ -771,13 +778,17 @@ def test_product_shell_typed_python3_uses_generation_not_host(
     path_line = result.stdout.split("PATH=", 1)[1].splitlines()[0]
     assert str(generation_python.parent) not in path_line.split(":")
     assert str(door_python.parent) in path_line.split(":")
-    for key in ("used=", "command_used=", "env_used="):
+    for key in ("used=", "command_used=", "env_used=", "shebang_used="):
         used = next(
             line.split(key, 1)[1]
             for line in result.stdout.splitlines()
             if line.startswith(key)
         )
         assert Path(used).resolve() == Path(sys.executable).resolve()
+    door_python_after = door_python.stat()
+    assert door_python.read_bytes() == door_python_bytes
+    assert door_python_after.st_mode == door_python_before.st_mode
+    assert door_python_after.st_mtime_ns == door_python_before.st_mtime_ns
 
 
 def test_product_shell_typed_python3_refuses_host_without_generation(
