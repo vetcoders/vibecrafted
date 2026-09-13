@@ -59,7 +59,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
@@ -16077,6 +16077,40 @@ _TOML_MISSING = object()
 # and representation must not change setting identity.
 _TOML_ATOMIC_RECORD_PATHS = frozenset({"terminal.shell"})
 
+# These are deliberately narrower than all terminal-policy settings.  A
+# Founder-owned choice of chrome or font must survive a shipped default that
+# temporarily has the same value: otherwise the next upgrade cannot tell a
+# deliberate preference from the old default and silently takes it away.  Keep
+# only setting identities in the receipt; preference values remain private.
+_TERMINAL_POLICY_PRESERVED_KEYS = frozenset(
+    {
+        "window.blur",
+        "window.opacity",
+        "window.decorations",
+    }
+)
+
+
+def _is_preserved_terminal_policy_key(key: str) -> bool:
+    return key in _TERMINAL_POLICY_PRESERVED_KEYS or key.startswith("font.")
+
+
+def _terminal_policy_user_override_keys(
+    previous: Mapping[str, Any], destination: Path
+) -> set[str]:
+    """Read only redacted terminal preference identities from a prior receipt."""
+    recorded = previous.get("terminal_policy_user_overrides", {})
+    if not isinstance(recorded, Mapping):
+        return set()
+    keys = recorded.get(str(destination), [])
+    if not isinstance(keys, list):
+        return set()
+    return {
+        key
+        for key in keys
+        if isinstance(key, str) and _is_preserved_terminal_policy_key(key)
+    }
+
 
 def _toml_is_atomic_record_path(dotted: str) -> bool:
     return dotted in _TOML_ATOMIC_RECORD_PATHS
@@ -16655,7 +16689,13 @@ def _toml_delete_assignment(text: str, dotted: str) -> str:
 
 
 def _merge_toml_runtime_preferences(
-    previous: str, current: str, incoming: str, *, choice: str | None = None
+    previous: str,
+    current: str,
+    incoming: str,
+    *,
+    choice: str | None = None,
+    preserve_current_keys: Collection[str] = (),
+    preserve_terminal_policy_keys: bool = False,
 ) -> str:
     """Three-way TOML merge by setting identity, then text overlay on incoming."""
     import tomllib
@@ -16664,12 +16704,20 @@ def _merge_toml_runtime_preferences(
     current_values = _toml_flatten(tomllib.loads(current))
     incoming_values = _toml_flatten(tomllib.loads(incoming))
     keys = set(previous_values) | set(current_values) | set(incoming_values)
+    persisted = set(preserve_current_keys)
     resolved: dict[str, Any] = {}
     conflicts: list[str] = []
     for key in sorted(keys):
         prev = previous_values.get(key, _TOML_MISSING)
         curr = current_values.get(key, _TOML_MISSING)
         inc = incoming_values.get(key, _TOML_MISSING)
+        if (
+            preserve_terminal_policy_keys
+            and key in persisted
+            and curr is not _TOML_MISSING
+        ):
+            resolved[key] = curr
+            continue
         if curr == inc:
             if curr is not _TOML_MISSING:
                 resolved[key] = curr
@@ -16690,6 +16738,15 @@ def _merge_toml_runtime_preferences(
             and _preference_shell_accepts_incoming(prev, curr, inc)
         ):
             resolved[key] = inc
+            continue
+        if (
+            preserve_terminal_policy_keys
+            and _is_preserved_terminal_policy_key(key)
+            and prev is not _TOML_MISSING
+            and curr is not _TOML_MISSING
+            and inc is not _TOML_MISSING
+        ):
+            resolved[key] = curr
             continue
         conflicts.append(key)
         if choice == "keep-current" and curr is not _TOML_MISSING:
@@ -16805,6 +16862,8 @@ def _merge_runtime_preferences(
     kdl: bool = False,
     toml: bool = False,
     choice: str | None = None,
+    preserve_current_keys: Collection[str] = (),
+    preserve_terminal_policy_keys: bool = False,
 ) -> str:
     """Carry independent user edits onto new defaults; refuse ambiguous overlap.
 
@@ -16831,7 +16890,12 @@ def _merge_runtime_preferences(
         return current
     if toml:
         return _merge_toml_runtime_preferences(
-            previous, current, incoming, choice=choice
+            previous,
+            current,
+            incoming,
+            choice=choice,
+            preserve_current_keys=preserve_current_keys,
+            preserve_terminal_policy_keys=preserve_terminal_policy_keys,
         )
     if choice in PREFERENCE_CHOICES:
         return current if choice == "keep-current" else incoming
@@ -17110,6 +17174,9 @@ def _reconcile_runtime_preference(
     old = defaults.get(str(destination), {})
     baseline: str | None = None
     baseline_source: Path | None = None
+    prior_terminal_overrides = _terminal_policy_user_override_keys(
+        previous, destination
+    )
     outcome: dict[str, Any] = {
         "path": destination,
         "backup_destination": destination,
@@ -17123,6 +17190,7 @@ def _reconcile_runtime_preference(
         "error": None,
         "settings": [],
         "mergeable": True,
+        "user_override_keys": [],
     }
     try:
         aliases = [
@@ -17212,6 +17280,9 @@ def _reconcile_runtime_preference(
                     kdl=destination.suffix == ".kdl",
                     toml=destination.suffix == ".toml",
                     choice=selected,
+                    preserve_current_keys=prior_terminal_overrides,
+                    preserve_terminal_policy_keys=destination.name
+                    == "terminal-policy.toml",
                 )
             )
 
@@ -17244,6 +17315,24 @@ def _reconcile_runtime_preference(
             import tomllib
 
             tomllib.loads(body)
+            if (
+                destination.name == "terminal-policy.toml"
+                and current is not None
+                and baseline is not None
+            ):
+                previous_values = _toml_flatten(tomllib.loads(baseline))
+                current_values = _toml_flatten(tomllib.loads(current))
+                observed = {
+                    key
+                    for key in set(previous_values) | set(current_values)
+                    if _is_preserved_terminal_policy_key(key)
+                    and current_values.get(key, _TOML_MISSING) is not _TOML_MISSING
+                    and current_values.get(key, _TOML_MISSING)
+                    != previous_values.get(key, _TOML_MISSING)
+                }
+                outcome["user_override_keys"] = sorted(
+                    prior_terminal_overrides | observed
+                )
     except (OSError, UnicodeError, ValueError) as exc:
         message = str(exc)
         outcome["error"] = message
@@ -17469,6 +17558,7 @@ def _prepare_runtime_preferences(
             "body": outcome["body"],
             "current_sha256": outcome["current_sha256"],
             "defaults": outcome["defaults"],
+            "user_override_keys": outcome["user_override_keys"],
         }
     if conflicts:
         previous_available = _abandon_unpublished_preference_conflicts(
@@ -20349,6 +20439,10 @@ def _stage_runtime_product_config(
         target = staged / path.relative_to(product)
         target.write_bytes(preference["body"].encode("utf-8"))
         receipt.setdefault("config_defaults", {})[str(path)] = preference["defaults"]
+        if path.name == "terminal-policy.toml":
+            receipt.setdefault("terminal_policy_user_overrides", {})[str(path)] = (
+                preference["user_override_keys"]
+            )
 
     theme = staged / "terminal-theme.toml"
     if not theme.exists():
@@ -22156,6 +22250,9 @@ def _install_runtime_pack(
             json.dumps(previous.get("drift_backup_history", {}))
         ),
         "config_defaults": dict(previous.get("config_defaults", {})),
+        "terminal_policy_user_overrides": json.loads(
+            json.dumps(previous.get("terminal_policy_user_overrides", {}))
+        ),
         "config_pending": dict(previous.get("config_pending", {})),
         "foundation_service_pending": json.loads(
             json.dumps(previous.get("foundation_service_pending", {}))
