@@ -6,13 +6,17 @@ import os
 import subprocess
 from pathlib import Path
 
-import pytest
-
 REPO = Path(__file__).resolve().parents[2]
-SCRIPT = REPO / "runtime" / "scripts" / "install-frontier-config.sh"
+SCRIPT = (
+    REPO
+    / "vibecrafted-core"
+    / "vibecrafted_core"
+    / "runtime"
+    / "scripts"
+    / "install-frontier-config.sh"
+)
 
 
-@pytest.mark.skipif(not SCRIPT.is_file(), reason="install-frontier-config.sh missing")
 def test_frontier_install_leaves_vc_frame_to_delivery_owner(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
@@ -36,7 +40,6 @@ def test_frontier_install_leaves_vc_frame_to_delivery_owner(tmp_path: Path) -> N
     assert not (root / "vc-frame").exists()
 
 
-@pytest.mark.skipif(not SCRIPT.is_file(), reason="install-frontier-config.sh missing")
 def test_frontier_install_never_traverses_vc_frame_parent_symlinks(
     tmp_path: Path,
 ) -> None:
@@ -78,7 +81,6 @@ def test_frontier_install_never_traverses_vc_frame_parent_symlinks(
     assert list(sentinel.rglob("*.bak.*")) == []
 
 
-@pytest.mark.skipif(not SCRIPT.is_file(), reason="install-frontier-config.sh missing")
 def test_frontier_removes_dangling_zellij_links(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
@@ -110,7 +112,6 @@ def test_frontier_removes_dangling_zellij_links(tmp_path: Path) -> None:
     assert healthy.stat().st_mtime == mtime
 
 
-@pytest.mark.skipif(not SCRIPT.is_file(), reason="install-frontier-config.sh missing")
 def test_frontier_materializes_legacy_backup_symlinks(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
