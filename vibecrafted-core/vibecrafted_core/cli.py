@@ -1695,6 +1695,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         # --prompt/--file are extra seed context, never launch_workflow.
         is_lifecycle = True
 
+    if sys.platform == "win32" and raw_args and raw_args[0] == "server":
+        from .windows_server import main as windows_server_main
+
+        return windows_server_main(raw_args[1:])
+
     if is_lifecycle:
         from .runtime_paths import vibecrafted_tools_home
 

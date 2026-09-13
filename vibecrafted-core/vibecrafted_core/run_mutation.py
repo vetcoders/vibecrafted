@@ -11,7 +11,10 @@ while giving both surfaces the same filesystem-backed exclusion boundary.
 
 from __future__ import annotations
 
-import fcntl
+try:
+    import fcntl
+except ImportError:  # native Windows — flock-shaped portable_lock
+    from . import portable_lock as fcntl
 import hashlib
 import json
 import os
