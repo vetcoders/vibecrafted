@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. command deck
 set -euo pipefail
+# shellcheck disable=SC2034  # marker the installer and staged-tools tests read from this file
 readonly VIBECRAFTED_SERVICE_LIFECYCLE_LOCK_CONTRACT=1
 
 _vc_source_launcher_ulimits() {
@@ -11,7 +12,6 @@ _vc_source_launcher_ulimits() {
     printf 'vibecrafted: selected launcher limit helper missing: %s\n' "$candidate" >&2
     return 1
   fi
-  # shellcheck disable=SC1090
   source "$candidate" || return $?
   vc_raise_launcher_limits
 }
@@ -81,7 +81,6 @@ _red='\033[31m'
 _reset='\033[0m'
 
 _agents=(claude codex agy junie grok cursor kimi)
-_modes=(implement research review plan prompt observe await stop resume)
 _skills=(audit canary decorate delegate dou followup guard hydrate implement intents justdo marbles ownership partner polarize prune release research review scaffold trust workflow)
 
 _script_repo_root() {
@@ -279,15 +278,6 @@ _require_agent_cli() {
   return 1
 }
 
-_has_mode() {
-  local candidate="${1:-}"
-  local mode
-  for mode in "${_modes[@]}"; do
-    [[ "$candidate" == "$mode" ]] && return 0
-  done
-  return 1
-}
-
 _has_skill() {
   local candidate="${1:-}"
   local skill
@@ -303,49 +293,6 @@ _is_marbles_control_subcommand() {
     pause|stop|resume|session|inspect|delete) return 0 ;;
     *) return 1 ;;
   esac
-}
-
-_skill_candidates() {
-  local skill="$1"
-  local runtime="${2:-}"
-  local repo_source package_root
-  repo_source="$(_repo_source_root 2>/dev/null || true)"
-  package_root="$(_package_resource_root 2>/dev/null || true)"
-
-  if [[ -n "$repo_source" ]]; then
-    printf '%s\n' "$repo_source/skills/${skill}/SKILL.md"
-    printf '%s\n' "$repo_source/vibecrafted-core/vibecrafted_core/skills/${skill}/SKILL.md"
-  fi
-
-  if [[ -n "$package_root" ]]; then
-    printf '%s\n' "$package_root/skills/${skill}/SKILL.md"
-  fi
-
-  if [[ -n "$runtime" ]]; then
-    printf '%s\n' "$HOME/.${runtime}/skills/${skill}/SKILL.md"
-  fi
-
-  printf '%s\n' \
-    "$crafted_tools/skills/${skill}/SKILL.md" \
-    "$crafted_skills/${skill}/SKILL.md" \
-    "$HOME/.agents/skills/${skill}/SKILL.md"
-}
-
-_resolve_skill_path() {
-  local skill="$1"
-  local runtime="${2:-}"
-  local candidate
-
-  while IFS= read -r candidate; do
-    [[ -r "$candidate" ]] || continue
-    printf '%s\n' "$candidate"
-    return 0
-  done < <(_skill_candidates "$skill" "$runtime")
-
-  printf '%b✗%b Could not find %s.\n' "$_red" "$_reset" "$skill" >&2
-  printf '  Expected one of:\n' >&2
-  _skill_candidates "$skill" "$runtime" | sed 's/^/    - /' >&2
-  return 1
 }
 
 _helper_candidates() {
@@ -422,7 +369,6 @@ _ensure_helpers_loaded() {
       unset VIBECRAFTED_RUNTIME_ROOT VIBECRAFTED_RUNTIME_BIN VIBECRAFTED_RUNTIME_HOME
       export VIBECRAFTED_PREFER_REPO_SPAWN=1
     fi
-    # shellcheck disable=SC1090
     source "$helper" || return $?
     return 0
   fi
@@ -436,7 +382,6 @@ _ensure_helpers_loaded() {
   fi
   while IFS= read -r helper; do
     [[ -r "$helper" ]] || continue
-    # shellcheck disable=SC1090
     source "$helper" || return $?
     return 0
   done < <(_helper_candidates)
@@ -671,11 +616,6 @@ _voc_app_dir() {
     return 0
   done
   return 1
-}
-
-# Legacy name kept for older call sites; resolves the product TUI workspace.
-_operator_tui_dir() {
-  _voc_app_dir
 }
 
 _resolve_voc_binary() {
@@ -5033,6 +4973,7 @@ cmd_start() {
     return 1
   fi
   _vetcoders_start_prepare_arguments "$@" || return $?
+  # shellcheck disable=SC2154  # set by _vetcoders_start_prepare_arguments (dashboard.sh) just above
   _vetcoders_start_entry ${_vetcoders_start_frame_argv[@]+"${_vetcoders_start_frame_argv[@]}"}
 }
 
@@ -6385,35 +6326,6 @@ run_mode() {
   esac
   _ensure_helpers_loaded || return 1
   _run_helper "${agent}-${mode}" "$@"
-}
-
-# True when the argument vector carries `--worktree` / `--worktree=<word>`
-# before the greedy `--prompt` / `-p` or the literal `--` tail.
-_argv_requests_worktree() {
-  local arg
-  for arg in "$@"; do
-    case "$arg" in
-      -p|--prompt|--) return 1 ;;
-      --worktree|--worktree=*) return 0 ;;
-    esac
-  done
-  return 1
-}
-
-# True when the argument vector carries a public execution control
-# (`--permissions <policy>` / `--sandbox [word]`) before the prompt tail. Only
-# the core launcher resolves these against the installed provider CLI
-# (execution_controls.resolve_execution_controls) and refuses what cannot be
-# enforced; the shell skill helper would accept-and-ignore them.
-_argv_requests_execution_controls() {
-  local arg
-  for arg in "$@"; do
-    case "$arg" in
-      -p|--prompt|--) return 1 ;;
-      --permissions|--permissions=*|--sandbox|--sandbox=*) return 0 ;;
-    esac
-  done
-  return 1
 }
 
 run_skill() {

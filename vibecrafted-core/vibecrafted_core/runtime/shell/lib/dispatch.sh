@@ -376,19 +376,6 @@ _vetcoders_skill_dispatch() {
   _vetcoders_no_deck_report "$skill"
 }
 
-_vetcoders_command_dispatch() {
-  local command_name="$1"
-  local deck_command="$2"
-  shift 2 || true
-  local deck_bin
-  deck_bin="$(_vetcoders_resolve_deck_bin)"
-  if [ -n "$deck_bin" ] && [ -x "$deck_bin" ]; then
-    "$deck_bin" "$deck_command" "$@"
-    return
-  fi
-  _vetcoders_no_deck_report "$command_name"
-}
-
 # Shell dotfiles commonly alias vc/vc-* (old container templates did); zsh
 # refuses to define a function whose name is an active alias. Drop any such
 # alias before defining the canonical functions.
@@ -449,75 +436,6 @@ vc-operator() { _vetcoders_vc_passthrough operator "$@"; }
 vc-help() {
   _vetcoders_vc_passthrough help "$@"
   return $?
-}
-
-# Legacy multi-page help body retained only for offline/docs greps — not used
-# by the public vc-help entrypoint (pass-through above).
-_vetcoders_legacy_vc_help_body() {
-  local crafted_home="${VIBECRAFTED_HOME:-$HOME/.vibecrafted}"
-  cat <<'HELP'
-𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. Framework — Skills & Helpers
-
-Pipeline:  scaffold → init → workflow → implement → followup → marbles → audit → dou → decorate → hydrate → release
-Modes:     partner (shared steering) | ownership (take the wheel)
-Research:  research (triple-agent) | delegate (in-session)
-Quality:   audit (plan falsification) | review (bounded diff/PR/commit) | followup (post-implementation direction) | prune
-Video:     screenscribe (foundation)
-
-Spawn helpers (per agent):
-  <agent>-implement <plan.md>    Full implementation from plan
-  <agent>-review <plan.md>       Bounded PR, branch, commit-range, or artifact review
-  <agent>-plan <plan.md>         Planning only
-  <agent>-prompt "text"          Quick one-shot prompt
-  <agent>-scaffold                Architecture planning
-  <agent>-followup               Post-implementation direction audit
-  <agent>-skill-audit            Plan-vs-code falsification
-  <agent>-dou                    Definition of Undone audit
-  <agent>-hydrate                Market packaging
-  <agent>-marbles                Convergence loop
-  <agent>-decorate               Visual polish
-  <agent>-release                Ship to market
-  <agent>-prune                  Repo pruning
-  <agent>-skill-implement        Autonomous e2e implementation (vc-implement)
-  <agent>-justdo                 Alias for autonomous e2e implementation
-  <agent>-partner                Collaborative partner mode with the user in the loop
-  <agent>-observe --last         Check last report
-  <agent>-await --last           Wait for metadata completion + summary
-
-Swarm launchers:
-  vc-research --prompt "text"    Triple-agent research swarm
-  vc-research-await --last       Wait for the latest research swarm
-
-Command deck:
-  vibecrafted help               Main command surface
-  vibecrafted <skill> <agent>    Run a repo skill via the launcher
-  vibecrafted resume <agent>     Resume a previous session
-  vibecrafted loop start --file plan.md --completion-promise READY
-  vibecrafted cron line --root "$(pwd)" --every-minutes 10
-  vibecrafted workflow claude -p "Plan and implement auth"
-  vibecrafted marbles codex --count 3 --depth 3
-  vibecrafted init claude        First-context entrypoint
-
-Uniform skill flags:
-  -p, --prompt <text>            Inline prompt; captures the rest of the command line
-  -f, --file <path.md>           Input file as prompt context
-  --count <n>                    Marbles / Polarize loop count (default: 3)
-  --depth <n>                    Marbles plan crawl depth (default: 3)
-  --session <id>                 Resume session id
-
-Utilities:
-  vc-git                         Git truth + visible worktree inventory
-  repo-full                      Legacy full git context helper
-  skills-sync                    Sync skills to agents
-  vc-frontier-paths              Show frontier config paths
-  vc-frontier-install            Install frontier presets (starship/atuin/vc_frame)
-  vc-help                        This help
-
-Frontier docs:  docs/FRONTIER.md (starship, atuin, optional vc_frame)
-HELP
-  printf '\nInbox:     %s/inbox/\n' "$crafted_home"
-  printf 'Artifacts: %s/artifacts/<org>/<repo>/<YYYY_MMDD>/\n' "$crafted_home"
-  printf 'Skills:    %s/skills/ (16 installed)\n' "$crafted_home"
 }
 
 skills-sync() {
@@ -707,7 +625,7 @@ repo-full() {
   [[ -z "$default_branch" ]] && default_branch="$(git remote show "$default_remote" 2>/dev/null | sed -n '/HEAD branch/s/.*: //p' | head -n 1)"
   [[ -z "$default_branch" ]] && default_branch="unknown"
 
-  # shellcheck disable=SC1083 # @{u} is git upstream ref syntax, not shell braces
+  # @{u} is git upstream ref syntax, not shell braces
   if git rev-parse '@{u}' >/dev/null 2>&1; then
     if read -r upstream_ahead upstream_behind <<< "$(git rev-list --left-right --count HEAD...'@{u}' 2>/dev/null)" && [[ "$upstream_ahead" =~ ^[0-9]+$ && "$upstream_behind" =~ ^[0-9]+$ ]]; then
       upstream_status="known"
@@ -927,6 +845,7 @@ vc-start() {
   # One parser, one owner: the create-only workspace contract in dashboard.sh
   # (root → name → live inventory → exclusive create → enter / VC Terminal).
   _vetcoders_start_prepare_arguments "$@" || return $?
+  # shellcheck disable=SC2154  # set by _vetcoders_start_prepare_arguments (dashboard.sh) just above
   _vetcoders_start_entry "${_vetcoders_start_frame_argv[@]}"
 }
 
