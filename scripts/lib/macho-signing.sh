@@ -232,7 +232,7 @@ sign_macho_app_bundles() {
     codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
       "${CODESIGN_KEYCHAIN_ARGS[@]}" "$bundle" \
       || macho_signing_die "could not seal bundle ${bundle#"$root"/}" || return 1
-  done < <(find "$root" -depth -type d -name '*.app' -print0)
+  done < <(find "$root" -depth -type d -iname '*.app' -print0)
 }
 
 # verify_macho_app_bundles <root> — every .app under the tree carries its own
@@ -250,7 +250,7 @@ verify_macho_app_bundles() {
       || return 1
     codesign --verify --strict --verbose=2 "$bundle" \
       || macho_signing_die "invalid bundle signature: ${bundle#"$root"/}" || return 1
-  done < <(find "$root" -depth -type d -name '*.app' -print0)
+  done < <(find "$root" -depth -type d -iname '*.app' -print0)
 }
 
 sign_macho_tree() {

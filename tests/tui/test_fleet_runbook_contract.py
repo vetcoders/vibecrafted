@@ -65,7 +65,7 @@ def test_runbook_commands_are_backed_by_public_dispatch_and_ship_parsers() -> No
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
-        (["start", "--help"], "Start the operator vc-frame session"),
+        (["start", "--help"], "Create a vc-frame workspace for a repository"),
         (["status", "--help"], "Show today's runs"),
         (["await", "--help"], "Join the shared vc-server monitor"),
         (["observe", "--help"], "Check an agent report or transcript"),

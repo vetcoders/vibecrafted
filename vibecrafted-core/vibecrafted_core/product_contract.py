@@ -2176,8 +2176,12 @@ def verify_app(app_path: str | Path, *, require_clean: bool = False) -> dict[str
         _fail(E_BUNDLE, "Info.plist marketing version does not match product manifest")
     if plist.get("CFBundleVersion") != build:
         _fail(E_BUNDLE, "Info.plist build version does not match product manifest")
+    # Bundle suffixes are case-insensitive to LaunchServices on the default
+    # APFS volume; `Stranger.APP` is still an application bundle.
     nested_apps = sorted(
-        path.relative_to(app).as_posix() for path in app.rglob("*.app") if path.is_dir()
+        path.relative_to(app).as_posix()
+        for path in app.rglob("*")
+        if path.is_dir() and path.suffix.lower() == ".app"
     )
     if nested_apps != sorted(TERMINAL_APP_BUNDLES):
         _fail(E_BUNDLE, f"nested customer app bundles are forbidden: {nested_apps}")
@@ -3584,7 +3588,9 @@ def _scenario_start_here(
     help_output = _scenario_command(
         scenario, [scenario.launchers / "vc-start", "--help"]
     ).stdout
-    if b"Start the operator vc-frame session" not in help_output:
+    # The onboarding help `vibecrafted start --help` prints today (5b25a6cd
+    # retired "Start the operator vc-frame session").
+    if b"Create a vc-frame workspace for a repository" not in help_output:
         raise RuntimeError("installed vc-start onboarding help is unavailable")
     return {"onboarding_reachable": hashlib.sha256(payload + help_output).hexdigest()}
 

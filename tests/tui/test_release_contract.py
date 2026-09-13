@@ -1319,8 +1319,10 @@ def test_runtime_pack_seals_its_app_bundles_before_the_inventory_closes() -> Non
     assert "verify_macho_app_bundles() {" in helper
     # -depth hands children over before parents: a nested bundle is sealed
     # before the bundle enclosing it, the same inside-out order the loose
-    # Mach-O files are signed in.
-    assert helper.count("find \"$root\" -depth -type d -name '*.app' -print0") == 2
+    # Mach-O files are signed in. The suffix match is case-insensitive: macOS
+    # still treats `Stranger.APP` as an application bundle.
+    assert helper.count("find \"$root\" -depth -type d -iname '*.app' -print0") == 2
+    assert "-name '*.app'" not in helper
     # One verification boundary: everything that calls verify_macho_tree — the
     # packager on its staging tree and the archive preflight the App runs on
     # the embedded carrier — inherits the bundle proof.

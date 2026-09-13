@@ -2212,7 +2212,9 @@ def test_app_accepts_both_declared_terminal_bundles(
     manifest = _app_fixture(app, macho_executable)
 
     nested = sorted(
-        path.relative_to(app).as_posix() for path in app.rglob("*.app") if path.is_dir()
+        path.relative_to(app).as_posix()
+        for path in app.rglob("*")
+        if path.is_dir() and path.suffix.lower() == ".app"
     )
     assert nested == sorted(contract.TERMINAL_APP_BUNDLES)
     declared = {entry["path"] for entry in manifest["files"]}
@@ -2226,6 +2228,58 @@ def test_app_accepts_both_declared_terminal_bundles(
         )
 
     assert contract.verify_app(app) == manifest
+
+
+@pytest.mark.parametrize("stranger", ["Stranger.app", "Stranger.APP"])
+def test_app_refuses_an_undeclared_nested_bundle_in_any_suffix_case(
+    tmp_path: Path, macho_executable: Path, stranger: str
+) -> None:
+    """An inventoried, sealed stranger bundle is contraband whatever its case.
+
+    LaunchServices treats `Stranger.APP` as an application on the default
+    case-insensitive volume; a case-sensitive `*.app` walk accepted it.
+    """
+    app = tmp_path / "Vibecrafted.app"
+    manifest = _app_fixture(app, macho_executable)
+    plist_rel = f"Contents/Resources/{stranger}/Contents/Info.plist"
+    exe_rel = f"Contents/Resources/{stranger}/Contents/MacOS/stranger"
+    (app / exe_rel).parent.mkdir(parents=True)
+    with (app / plist_rel).open("wb") as handle:
+        plistlib.dump(
+            {
+                "CFBundleIdentifier": "io.example.stranger",
+                "CFBundleExecutable": "stranger",
+                "CFBundlePackageType": "APPL",
+            },
+            handle,
+        )
+    shutil.copy2(macho_executable, app / exe_rel)
+    _codesign_macho(app / exe_rel)
+    manifest["files"].append(_entry(app, plist_rel, kind="config"))
+    manifest["files"].append(_entry(app, exe_rel, kind="executable"))
+    manifest["files"].sort(key=lambda item: item["path"])
+    _write_app_manifest(app, manifest, sign=True)
+    # A real producer inventories the stranger's seal too; declare it and
+    # re-sign until the nested seal bytes settle, so the only remaining
+    # objection is the bundle itself.
+    seal_rel = f"Contents/Resources/{stranger}/Contents/_CodeSignature/CodeResources"
+    for _ in range(3):
+        if not (app / seal_rel).is_file():
+            break
+        fresh = _entry(app, seal_rel, kind="config")
+        manifest["files"] = [
+            item for item in manifest["files"] if item["path"] != seal_rel
+        ] + [fresh]
+        manifest["files"].sort(key=lambda item: item["path"])
+        _write_app_manifest(app, manifest, sign=True)
+        if _entry(app, seal_rel, kind="config") == fresh:
+            break
+
+    with pytest.raises(contract.ProductContractError) as refused:
+        contract.verify_app(app)
+
+    assert refused.value.code == contract.E_BUNDLE
+    assert f"Contents/Resources/{stranger}" in str(refused.value)
 
 
 @pytest.mark.parametrize("bundle", contract.TERMINAL_APP_BUNDLES)
