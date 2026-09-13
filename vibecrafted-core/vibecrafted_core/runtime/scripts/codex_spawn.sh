@@ -123,7 +123,7 @@ failure_report_fallback="if [[ \$pipeline_status -ne 0 && ! -s $qreport ]]; then
 # finalization cannot race ahead of the minimal failure report.
 launch_cmd="set -o pipefail && cd $qroot && { rm -f $qlast_message; codex exec -C $qroot --json --dangerously-bypass-approvals-and-sandbox $model_flag --output-last-message $qlast_message - < $qruntime 2>&1 | $qpython $qbridge --transcript $qtranscript ${bridge_flags}; pipeline_status=\$?; $last_message_fallback $missing_report_guard $failure_report_fallback echo; { grep -oE '\\[[0-9]{2}:[0-9]{2}:[0-9]{2}\\] session: [[:alnum:]-]+' $qtranscript 2>/dev/null | tail -1 | awk '{print \$3}' | xargs -I{} printf '\\n\\033[33m━━━ session: {} ━━━\\033[0m\\n'; } || true; exit \$pipeline_status; }"
 
-# shellcheck disable=SC2016
+# shellcheck disable=SC2016  # hook source is expanded by the launcher when the hook runs
 codex_success_hook='
   if [[ ! -s "$report" ]] || ! awk "BEGIN { body=0; in_front=0 } NR==1 && \$0==\"---\" { in_front=1; next } in_front && \$0==\"---\" { in_front=0; next } in_front { next } NF { body=1 } END { exit body ? 0 : 1 }" "$report"; then
     spawn_write_frontmatter "$report" "$SPAWN_AGENT" "${SPAWN_MODEL:-unknown}" "completed"
@@ -134,7 +134,7 @@ codex_success_hook='
     } >> "$report"
   fi'
 
-# shellcheck disable=SC2016
+# shellcheck disable=SC2016  # hook source is expanded by the launcher when the hook runs
 codex_failure_hook='
   if [[ ! -s "$report" ]] || ! awk "BEGIN { body=0; in_front=0 } NR==1 && \$0==\"---\" { in_front=1; next } in_front && \$0==\"---\" { in_front=0; next } in_front { next } NF { body=1 } END { exit body ? 0 : 1 }" "$report"; then
     spawn_write_frontmatter "$report" "$SPAWN_AGENT" "${SPAWN_MODEL:-unknown}" "failed"
