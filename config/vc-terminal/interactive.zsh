@@ -36,12 +36,46 @@ _vc_terminal_apply_fallback_prompt() {
   RPROMPT=''
 }
 
+_vc_terminal_python_door="$HOME/.config/vibecrafted/vc-terminal/bin"
+
+_vc_terminal_write_python_door() {
+  # Config-home wrappers only. Not generation bin. Not ~/.local/bin/python3.
+  local dir="$_vc_terminal_python_door"
+  mkdir -p "$dir"
+  <<'EOF' >"$dir/python3"
+#!/bin/sh
+bin="${VIBECRAFTED_PYTHON:-}"
+if [ -z "$bin" ] || [ "${bin#/}" = "$bin" ] || [ ! -x "$bin" ] || [ -d "$bin" ]; then
+  printf '%s\n' 'Vibecrafted: python3 needs VIBECRAFTED_PYTHON as an absolute generation interpreter (>=3.11). Host python3 (macOS 3.9.6) is not a product interpreter.' >&2
+  exit 127
+fi
+if ! "$bin" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+  printf '%s\n' 'Vibecrafted: VIBECRAFTED_PYTHON is not Python >=3.11. Host python3 (macOS 3.9.6) is not a product interpreter.' >&2
+  exit 127
+fi
+exec "$bin" "$@"
+EOF
+  <<'EOF' >"$dir/python"
+#!/bin/sh
+bin="${VIBECRAFTED_PYTHON:-}"
+if [ -z "$bin" ] || [ "${bin#/}" = "$bin" ] || [ ! -x "$bin" ] || [ -d "$bin" ]; then
+  printf '%s\n' 'Vibecrafted: python3 needs VIBECRAFTED_PYTHON as an absolute generation interpreter (>=3.11). Host python3 (macOS 3.9.6) is not a product interpreter.' >&2
+  exit 127
+fi
+if ! "$bin" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+  printf '%s\n' 'Vibecrafted: VIBECRAFTED_PYTHON is not Python >=3.11. Host python3 (macOS 3.9.6) is not a product interpreter.' >&2
+  exit 127
+fi
+exec "$bin" "$@"
+EOF
+  chmod 755 "$dir/python3" "$dir/python"
+}
+
 _vc_terminal_bind_owned_python() {
-  # Door PATH stays ~/.local/bin only. Do not prepend generation bin and do
-  # not write python3 into ~/.local/bin. Typed python / python3 in this
-  # ZDOTDIR profile exec the interpreter vc-terminal-product-entry already
-  # pinned as VIBECRAFTED_PYTHON (generation CPython >=3.11). Bare PATH
-  # python3 remains the Founder's file for command -v / env.
+  # Typed python / python3 exec VIBECRAFTED_PYTHON (generation CPython >=3.11).
+  # env/command/shebang use ZDOTDIR/bin wrappers on PATH. Do not prepend
+  # generation bin. Do not write python3 into ~/.local/bin.
+
   unalias python python3 2>/dev/null || true
   python3() {
     local bin="${VIBECRAFTED_PYTHON:-}"
@@ -88,6 +122,7 @@ _vc_terminal_load_owned_layer() {
     print -r -- 'python'
     print -r -- '  python  python3  generation CPython (not host 3.9.6)'
   }
+  _vc_terminal_write_python_door
   _vc_terminal_bind_owned_python
   _vc_terminal_apply_fallback_prompt
 }
@@ -112,7 +147,8 @@ SAVEHIST=20000
 mkdir -p "${HISTFILE:h}"
 _vc_terminal_pin_product_env
 setopt appendhistory histignorespace
-path=("$HOME/.local/bin" $path)
+_vc_terminal_write_python_door
+path=("$_vc_terminal_python_door" "$HOME/.local/bin" $path)
 typeset -U path
 bindkey -e
 bindkey '^[b' backward-word
@@ -123,8 +159,8 @@ bindkey '^[f' forward-word
 typeset -ga _VC_TERMINAL_WARNINGS=()
 
 # Public VC commands remain the installed PATH launchers. No automatic Frame
-# attach/create, provider process, or private Python path export belongs here.
-# Typed python3 is a ZDOTDIR function over VIBECRAFTED_PYTHON, not a PATH pin.
+# attach/create, provider process, or private generation-bin export belongs here.
+# Door python names are ZDOTDIR/bin wrappers plus functions over VIBECRAFTED_PYTHON.
 # Keep broken external completion installations out of this shell's scan.
 # Do not repair or unlink files owned by another product. compinit still audits
 # the remaining directories; -i excludes insecure entries instead of prompting.

@@ -224,6 +224,7 @@ def test_runtime_install_reclaims_leftover_alacritty_and_alt_screen(
     )
     assert names == [
         ".zshrc",
+        "bin",
         "interactive.zsh",
         "launch-primary-shell.zsh",
         "vc-terminal.toml",
