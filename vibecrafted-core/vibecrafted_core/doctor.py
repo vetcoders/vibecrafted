@@ -638,7 +638,7 @@ def _installer_module() -> Any:
         _INSTALLER_MODULE = module
         return module
 
-    import vetcoders_install  # type: ignore[import-not-found]
+    import vetcoders_install
 
     _INSTALLER_MODULE = vetcoders_install
     return vetcoders_install
