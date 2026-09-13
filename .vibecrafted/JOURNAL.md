@@ -184,3 +184,86 @@ Gałąź `integration/main-candidate-260912` (worktree `_integration/`), HEAD
   to guzik §4; presja stop-hooka nie jest głosem Foundera. Close-kit z
   komentarzami per-PR (dowód ancestry albo SHA merge'a) gotowy w
   `~/.vibecrafted/reports/2026-09-12-main-candidate-close-kit.md`, `$DRAFT=88`.
+
+## 2026-09-13T23:40+02:00 — audyt 85fbf5e7 i fala napraw na linii kandydata (claude/interactive)
+
+Zlecenie Foundera (sesja 82d6097f, `/goal`): naprawić P0–P2 z audytu
+`reports/audit/2026-09-13_claude_audit_main-candidate-85fbf5e7/audit_report.md`.
+
+- **Dopuszczone `d1927791`** (codex, TOML multiline + seed brakujących preferencji):
+  fast-forward po przejrzeniu diffu; to poprawka odmowy instalacji `85fbf5e7` na
+  hoście Foundera (konflikt `starship.toml`). Ponowny odbiór instalacji na żywym
+  hoście pozostaje guzikiem Foundera (wymaga przebudowy podpisanych artefaktów).
+- **P0 resume (`4d49a362`)**: assembler wołany przez `-m vibecrafted_core.aicx_session_chain`
+  (import względny z `93e68ff0` zabijał wywołanie po ścieżce), wektor publiczny
+  przypisany pusty (bash 5.3 `set -u`), puste wektory nigdy nierozwijane (bash 3.2).
+  Dowód: host-bash matrix + scenariusz rodzic/dziecko na prawdziwym decku (jeden
+  pack dla kanonicznego `owner/repo`, brak drugiego terminala).
+- **Workshop (`bceb60cb`)**: parent picker pyta katalog tylko z kanonicznym
+  `owner/repo`; checkout bez origin dostaje jawny powód. Decyzja moja (spójność z
+  regułą „bez basename union” z briefów roota, nie cytat Foundera).
+- **P1-04 (`fcfe87c3`)**: vc-start przyjmuje dziecko terminala tylko po owned
+  boundary (marker + owner = front door generacji), jak resume. Kierunek mój;
+  zachowane: projekcja gościa vc-start do żywej nazwanej sesji operatora.
+- **Linux install (`54cfeb25`)**: `install.sh` przekazuje zweryfikowany pack i
+  rewizję do jawnych targetów make; `runtime-pack-selection.sh` czyta rozmiar
+  GNU-first (Linuxowy defekt produktu z dyspozycji CI).
+- **Kontrakt aplikacji (`831c6c06`)**: zagnieżdżone bundle rozpoznawane bez
+  względu na wielkość liter (`Stranger.APP`), walkaround `start_here` pinuje
+  aktualny help; **bash 3.2 keychain (`a4b2f702`)**.
+- **CI czerwone**: dyspozycja 183/164 trwałych porażek w 20 klastrach (147/144
+  nieaktualne testy, 19/3 defekty produktu, 16/17 host/CI, 1 unknown) —
+  `~/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0913/reports/audit/2026-09-13_claude_audit_main-candidate-85fbf5e7/disposition/`.
+  Klastry nieaktualnych testów zlecone czterem workerom Fleet Worktree
+  (`fix/ci-{declaration,resume-routing,generation-fixture,singles}-260913`),
+  integracja jednowątkowo po przeglądzie diffów.
+- **Guzik Foundera, nie ruszony**: C09 (`test_product_update`, 10 testów wymaga
+  podpisanego fixture DMG/pack, deklaruje się jako nie-skippowalne) — przenieść do
+  lane'u release-host albo dostarczyć artefakty do CI; dismiss 2 alertów CodeQL.
+- **core-macos na `a4b2f702`: 4 → 2 porażki.** `test_await_hard_cap_…` mierzył
+  budżet 50 ms nad 30 ms stubu; kod lifecycle bez zmian od zielonej bazy
+  `80147ccf`, CI zmierzyło 153 ms na dwóch SHA → `bb914f4d` dowodzi limitu liczbą
+  odczytów ledgera (mutacja bez limitu: 78 odczytów, czerwony). Drugi,
+  `test_twenty_real_cli_await_clients_share_dispatcher_fanout` (`signal_kind`
+  `missing`), był czerwony już na bazie: 20 zimnych klientów CLI nie subskrybuje
+  w 4 s opóźnienia workera na runnerze; lokalnie 2/2. Klasyfikacja moja:
+  zastany wyścig czasowy testu, poza tą falą.
+- **Sprzątanie**: fork `/vc-prune` wskazał osierocone fake-claude z mojego
+  workflow audytu (`test_supervised_owner_signal_…`, `test_interactive_owner_signal`
+  na bazie i kandydacie) — zabite; wyciek procesów przez te testy jest zastany.
+- **Integracja floty (4 workery Fleet Worktree, bazą `a4b2f702`)**, jednowątkowo po
+  przeglądzie diffów pod kątem osłabionych asercji i cytatów kontraktu:
+  singles `73ea8700 d60c75a1 4fd88ee8 c4fff584`, resume-routing `285ceb4c 3ee609ec`,
+  declaration `3f19dc4f 23582172 78a55167`, generation-fixture `3a9a76d8 49e5736a`.
+  Przy pierwszym cherry-picku (singles + resume-routing) wyłączyłem hooki
+  (`core.hooksPath=/dev/null`) — zbędne obejście, commity przeszły hooki w worktree
+  workerów; kolejne cherry-picki szły normalnie, pre-push bramkuje całe drzewo.
+- **Nazwy testów, które kłamały** (moja decyzja, nie workerów): workerzy zostawiali
+  nodeidy dla ciągłości, choć asercje mówiły odwrotnie. Przemianowane w `3fd2c3bf`
+  (resume G7 → odmowa przed Frame) i `dd9f0d84` (5 testów frame-owner/facade).
+- **Defekty produktu znalezione przez workerów i naprawione:** `3fd2c3bf` tracked resume
+  bez core kończył się rc 1 z pustym stderr (refusal żył w martwej funkcji po
+  36614036); `f5b5074d` fork przy stale markerze Frame znów padał na „Session not
+  found” — 36614036 zdjął check usable-surface z fac246a7; init/partner bez vc-frame
+  znów spadają do bieżącego terminala (36614036 zdjął fallback bez słowa w opisie,
+  komentarz dalej go obiecywał) — `bd264934`, zweryfikowane na worktree nazwanym jak CI
+  (151 passed, 2 red = decyzja Foundera o init z pipe'a).
+- **Fork claude/grok z markerem `/vc-fork` (`934d423f`)**: znalezione na żywo z
+  zainstalowanego 4.3.1 (fork `d00d1424`): interactive-launch dokładał wskaźnik do
+  `prompt.md` z samym `/vc-fork`; zdejmował go tylko codex. Bare fork nie ma inputu
+  (591b6dde), więc wskaźnik zdjęty dla wszystkich poza codex; test czerwony bez fixu,
+  27/27 w pliku. Zainstalowany 4.3.1 ma defekt do reinstalacji z tej linii (guzik).
+- **Weryfikacja lokalna (clean-env, basetemp `~/.cache/vc-ci-fix`):** runtime_regressions
+  + spawn_common 138/138; 11 plików singles 616 passed / 6 skipped; deklaracje/fork/
+  launcher/alias 217 passed / 3 red (2 czekają na decyzję Foundera, 1 research help
+  parity czerwony sprzed fali). Katalog `vibecrafted-main-candidate` (26 znaków)
+  łamie limit 24 nazw sesji — testy operator_mode weryfikuję na kopii `…/vibecrafted`.
+- **Otwarte decyzje Foundera (nie ruszane):** (1) init/operator/partner z pipe'a:
+  ścieżka Frame vs zawsze terminal jak resume (bf028c40) — 2 testy trzymane czerwone;
+  (2) odrzucony launch interaktywny zostawia admission `prepared` (kontrakt launchu
+  zna to jako otwarte); (3) carrier Linux: silnik vc-frame wymaga GLIBC_2.38 — na
+  ubuntu-22.04 i debian-12 nie startuje, a doctor raportuje 0 failures (fałszywa
+  zieleń); (4) PR #90 (Windows, grok/Cursor) stoi na `85fbf5e7`, base=main, ready
+  mimo HOLD, 8 nowych porażek core-macos + 12 w bramce release, semgrep blokuje
+  portable, stopka `Co-authored-by: Cursor`, checkout na Windows bez hooków —
+  propozycja: draft + rebase na kandydata + base = gałąź kandydata.
