@@ -811,10 +811,34 @@ def _public_key_spki_sha256(public_key: Path) -> str:
     return hashlib.sha256(result.stdout).hexdigest()
 
 
+def _capture_stat_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    """Stable identity for one captured file.
+
+    Windows ``fstat`` and ``lstat`` disagree on ``st_ctime_ns`` (birth vs
+    change time). POSIX still includes ctime.
+    """
+    identity = (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+    )
+    if sys.platform != "win32":
+        return (*identity, metadata.st_ctime_ns)
+    return identity
+
+
 def _capture_proof_artifact(path: Path, *, context: str) -> _CapturedProofArtifact:
     absolute_path = Path(os.path.abspath(path))
     resolved = os.path.realpath(absolute_path)
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
     try:
         descriptor = os.open(absolute_path, flags)
     except OSError as exc:
@@ -834,44 +858,12 @@ def _capture_proof_artifact(path: Path, *, context: str) -> _CapturedProofArtifa
         resolved_after = os.path.realpath(absolute_path)
         if len(payload) > _MAX_SIGNED_PAYLOAD_BYTES:
             _fail(E_SIZE, f"{context} exceeds the 64 MiB signed-payload limit")
-        if (
-            (
-                before.st_dev,
-                before.st_ino,
-                before.st_mode,
-                before.st_nlink,
-                before.st_size,
-                before.st_mtime_ns,
-                before.st_ctime_ns,
-            )
-            != (
-                after.st_dev,
-                after.st_ino,
-                after.st_mode,
-                after.st_nlink,
-                after.st_size,
-                after.st_mtime_ns,
-                after.st_ctime_ns,
-            )
-            or resolved_after != resolved
-            or (
-                after.st_dev,
-                after.st_ino,
-                after.st_mode,
-                after.st_nlink,
-                after.st_size,
-                after.st_mtime_ns,
-                after.st_ctime_ns,
-            )
-            != (
-                path_after.st_dev,
-                path_after.st_ino,
-                path_after.st_mode,
-                path_after.st_nlink,
-                path_after.st_size,
-                path_after.st_mtime_ns,
-                path_after.st_ctime_ns,
-            )
+        if _capture_stat_identity(before) != _capture_stat_identity(after):
+            _fail(E_PROOF, f"{context} changed while it was captured")
+        if resolved_after != resolved:
+            _fail(E_PROOF, f"{context} changed while it was captured")
+        if sys.platform != "win32" and (
+            _capture_stat_identity(after) != _capture_stat_identity(path_after)
         ):
             _fail(E_PROOF, f"{context} changed while it was captured")
         return _CapturedProofArtifact(
@@ -933,6 +925,11 @@ def _verify_release_signature(
 
 
 def _release_openssl() -> str:
+    if sys.platform == "win32":
+        found = shutil.which("openssl")
+        if not found:
+            _fail(E_PROOF, "fixed system OpenSSL verifier is unavailable")
+        return found
     openssl = Path("/usr/bin/openssl")
     if not openssl.is_file() or openssl.is_symlink() or not os.access(openssl, os.X_OK):
         _fail(E_PROOF, "fixed system OpenSSL verifier is unavailable")

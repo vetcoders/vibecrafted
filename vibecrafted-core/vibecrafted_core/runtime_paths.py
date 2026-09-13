@@ -7,7 +7,9 @@ callers never hardcode a user's layout; ``resolve_env_path`` is the shared knob.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -53,6 +55,12 @@ VIBECRAFTED_HOME_FOUNDER_DATA = frozenset(
     }
 )
 
+ACTIVE_RUNTIME_SCHEMA = "vibecrafted.active-runtime.v1"
+
+
+class GenerationResolutionError(RuntimeError):
+    """Raised when active.json and vibecrafted-current disagree or neither exists."""
+
 
 def classify_vibecrafted_home_child(child: str | Path) -> str:
     """Classify one direct state-home child for product uninstall.
@@ -68,6 +76,73 @@ def classify_vibecrafted_home_child(child: str | Path) -> str:
     if name in VIBECRAFTED_HOME_FOUNDER_DATA:
         return "founder-data"
     return "unknown"
+
+
+def is_windows() -> bool:
+    """True on native Windows."""
+    return sys.platform == "win32"
+
+
+def windows_profile_home() -> Path:
+    """Operator profile root: ``USERPROFILE``, then ``HOME``, then ``Path.home()``."""
+    for name in ("USERPROFILE", "HOME"):
+        raw = str(os.environ.get(name, "")).strip()
+        if raw:
+            return Path(raw).expanduser()
+    return Path.home()
+
+
+def windows_local_app_data() -> Path:
+    """``LOCALAPPDATA`` or ``<profile>\\AppData\\Local`` — never a hardcoded user."""
+    raw = str(os.environ.get("LOCALAPPDATA", "")).strip()
+    if raw:
+        return Path(raw).expanduser()
+    return windows_profile_home() / "AppData" / "Local"
+
+
+def windows_roaming_app_data() -> Path:
+    """``APPDATA`` or ``<profile>\\AppData\\Roaming``."""
+    raw = str(os.environ.get("APPDATA", "")).strip()
+    if raw:
+        return Path(raw).expanduser()
+    return windows_profile_home() / "AppData" / "Roaming"
+
+
+def canonical_vibecrafted_runtime_home() -> Path:
+    """OS default runtime home, ignoring ``VIBECRAFTED_RUNTIME_HOME`` / ``XDG_*``."""
+    if is_windows():
+        return windows_local_app_data() / "Vibecrafted"
+    return Path.home() / ".local" / "share" / "vibecrafted"
+
+
+def canonical_vibecrafted_home() -> Path:
+    """OS default control-plane root, ignoring ``VIBECRAFTED_HOME``."""
+    if is_windows():
+        return canonical_vibecrafted_runtime_home() / "home"
+    return Path.home() / ".vibecrafted"
+
+
+def canonical_vibecrafted_launcher_bin() -> Path:
+    """OS default launcher bin, ignoring ``VIBECRAFTED_LAUNCHER_BIN``."""
+    if is_windows():
+        return canonical_vibecrafted_runtime_home() / "bin"
+    return Path.home() / ".local" / "bin"
+
+
+def canonical_vibecrafted_product_config_home() -> Path:
+    """OS default product config directory."""
+    if is_windows():
+        return windows_roaming_app_data() / "Vibecrafted"
+    return Path.home() / ".config" / "vibecrafted"
+
+
+def vibecrafted_product_config_home() -> Path:
+    """``$XDG_CONFIG_HOME/vibecrafted`` or native ``APPDATA\\Vibecrafted``."""
+    if os.environ.get("XDG_CONFIG_HOME"):
+        return xdg_config_home() / "vibecrafted"
+    if is_windows():
+        return canonical_vibecrafted_product_config_home()
+    return xdg_config_home() / "vibecrafted"
 
 
 def read_version_file(root: str | Path) -> str:
@@ -95,16 +170,15 @@ def version_is_stamped(version: str) -> bool:
 
 
 def read_staged_tools_version() -> str:
-    """VERSION stamped by ``make install`` into tools/vibecrafted-current.
-
-    Prefer the root VERSION, then the package-local file next to the staged
-    ``vibecrafted_core`` package (mirrors how the live package reads itself).
-    """
-    current = vibecrafted_tools_home() / "vibecrafted-current"
+    """VERSION stamped into the active generation (active.json, then current)."""
+    try:
+        generation = resolve_active_generation()
+    except GenerationResolutionError:
+        generation = vibecrafted_tools_home() / "vibecrafted-current"
     for candidate in (
-        current / "VERSION",
-        current / "vibecrafted-core" / "vibecrafted_core" / "VERSION",
-        current / "vibecrafted-core" / "VERSION",
+        generation / "VERSION",
+        generation / "vibecrafted-core" / "vibecrafted_core" / "VERSION",
+        generation / "vibecrafted-core" / "VERSION",
     ):
         if candidate.is_file():
             text = candidate.read_text(encoding="utf-8").strip()
@@ -122,20 +196,30 @@ def resolve_env_path(name: str, default: Path) -> Path:
 
 
 def xdg_config_home() -> Path:
-    """``$XDG_CONFIG_HOME`` or ``~/.config``."""
-    return resolve_env_path("XDG_CONFIG_HOME", Path.home() / ".config")
+    """``$XDG_CONFIG_HOME``, else native config home (``APPDATA`` on Windows)."""
+    raw = os.environ.get("XDG_CONFIG_HOME")
+    if raw:
+        return Path(raw).expanduser()
+    if is_windows():
+        return windows_roaming_app_data()
+    return (Path.home() / ".config").expanduser()
 
 
 def xdg_data_home() -> Path:
-    """``$XDG_DATA_HOME`` or ``~/.local/share``."""
-    return resolve_env_path("XDG_DATA_HOME", Path.home() / ".local" / "share")
+    """``$XDG_DATA_HOME``, else native data home (``LOCALAPPDATA`` on Windows)."""
+    raw = os.environ.get("XDG_DATA_HOME")
+    if raw:
+        return Path(raw).expanduser()
+    if is_windows():
+        return windows_local_app_data()
+    return (Path.home() / ".local" / "share").expanduser()
 
 
 def vibecrafted_home() -> Path:
-    """``$VIBECRAFTED_HOME`` or ``~/.vibecrafted`` — the control-plane root."""
+    """``$VIBECRAFTED_HOME`` or the platform control-plane root."""
     if os.environ.get("VIBECRAFTED_HOME"):
         return Path(os.environ["VIBECRAFTED_HOME"]).expanduser()
-    return Path.home() / ".vibecrafted"
+    return canonical_vibecrafted_home()
 
 
 def run_signal_socket_path(run_id: str) -> Path:
@@ -147,7 +231,8 @@ def run_signal_socket_path(run_id: str) -> Path:
     """
     identity = f"{vibecrafted_home().resolve()}\0{run_id}".encode()
     digest = hashlib.sha256(identity).hexdigest()[:24]
-    return Path("/tmp") / f"vc-cp-{os.getuid()}" / f"{digest}.sock"
+    uid = getattr(os, "getuid", lambda: 0)()
+    return Path("/tmp") / f"vc-cp-{uid}" / f"{digest}.sock"
 
 
 def vibecrafted_backups_home() -> Path:
@@ -156,8 +241,14 @@ def vibecrafted_backups_home() -> Path:
 
 
 def vibecrafted_runtime_home() -> Path:
-    """``$VIBECRAFTED_RUNTIME_HOME`` or ``<xdg_data_home>/vibecrafted``."""
-    return resolve_env_path("VIBECRAFTED_RUNTIME_HOME", xdg_data_home() / "vibecrafted")
+    """``$VIBECRAFTED_RUNTIME_HOME`` or the platform runtime home."""
+    if os.environ.get("VIBECRAFTED_RUNTIME_HOME"):
+        return Path(os.environ["VIBECRAFTED_RUNTIME_HOME"]).expanduser()
+    if os.environ.get("XDG_DATA_HOME"):
+        return xdg_data_home() / "vibecrafted"
+    if is_windows():
+        return canonical_vibecrafted_runtime_home()
+    return xdg_data_home() / "vibecrafted"
 
 
 def vibecrafted_tools_home() -> Path:
@@ -210,16 +301,19 @@ def selected_runtime_environment(
 
     version = read_version_file(root)
     runtime_bin = root / "bin"
-    runtime_python = runtime_bin / "python3"
+    if is_windows():
+        runtime_python = runtime_bin / "python.exe"
+        if not runtime_python.is_file():
+            runtime_python = runtime_bin / "python3.exe"
+        python_ok = runtime_python.is_file()
+    else:
+        runtime_python = runtime_bin / "python3"
+        python_ok = runtime_python.is_file() and os.access(runtime_python, os.X_OK)
     if not root.is_dir() or not version_is_stamped(version):
         raise ValueError(
             f"selected runtime root is not an immutable stamped generation: {root}"
         )
-    if (
-        not runtime_bin.is_dir()
-        or not runtime_python.is_file()
-        or not os.access(runtime_python, os.X_OK)
-    ):
+    if not runtime_bin.is_dir() or not python_ok:
         raise ValueError(
             "selected runtime generation is incomplete; expected executable "
             f"{runtime_python}"
@@ -277,8 +371,10 @@ def is_operator_home_root(
 
 
 def vibecrafted_launcher_bin() -> Path:
-    """``$VIBECRAFTED_LAUNCHER_BIN`` or ``~/.local/bin`` — where shims land on PATH."""
-    return resolve_env_path("VIBECRAFTED_LAUNCHER_BIN", Path.home() / ".local" / "bin")
+    """``$VIBECRAFTED_LAUNCHER_BIN`` or the platform launcher directory."""
+    if os.environ.get("VIBECRAFTED_LAUNCHER_BIN"):
+        return Path(os.environ["VIBECRAFTED_LAUNCHER_BIN"]).expanduser()
+    return canonical_vibecrafted_launcher_bin()
 
 
 def _owned_runtime_homes(environment: Mapping[str, str]) -> list[str]:
@@ -293,36 +389,43 @@ def _owned_runtime_homes(environment: Mapping[str, str]) -> list[str]:
     raw_home = str(environment.get("HOME", "")).strip()
     home = Path(raw_home).expanduser() if raw_home else Path.home()
     raw_xdg_data = str(environment.get("XDG_DATA_HOME", "")).strip()
-    xdg_data = (
-        Path(raw_xdg_data).expanduser() if raw_xdg_data else home / ".local/share"
-    )
     raw_runtime_home = str(environment.get("VIBECRAFTED_RUNTIME_HOME", "")).strip()
 
     homes: list[str] = []
     if raw_runtime_home:
-        homes.append(str(Path(raw_runtime_home).expanduser()).rstrip("/"))
-    homes.append(str(xdg_data / "vibecrafted").rstrip("/"))
+        homes.append(str(Path(raw_runtime_home).expanduser()))
+    if raw_xdg_data:
+        homes.append(str(Path(raw_xdg_data).expanduser() / "vibecrafted"))
+    elif is_windows():
+        raw_local = str(environment.get("LOCALAPPDATA", "")).strip()
+        if raw_local:
+            homes.append(str(Path(raw_local).expanduser() / "Vibecrafted"))
+        else:
+            profile = str(
+                environment.get("USERPROFILE") or environment.get("HOME") or ""
+            ).strip()
+            root = Path(profile).expanduser() if profile else Path.home()
+            homes.append(str(root / "AppData" / "Local" / "Vibecrafted"))
+    else:
+        homes.append(str(home / ".local/share" / "vibecrafted"))
     return homes
 
 
 def _is_owned_generation_bin(entry: str, environment: Mapping[str, str]) -> bool:
     """True for the selected root's bin or ``<owned home>/releases/<gen>/bin``."""
 
-    candidate = entry.rstrip("/")
-    if not candidate.endswith("/bin"):
+    candidate = Path(entry)
+    if candidate.name != "bin":
         return False
-    generation = candidate[: -len("/bin")]
+    generation = candidate.parent
 
-    selected = str(environment.get("VIBECRAFTED_RUNTIME_ROOT", "")).strip().rstrip("/")
-    if selected and generation == selected:
+    selected = str(environment.get("VIBECRAFTED_RUNTIME_ROOT", "")).strip()
+    if selected and generation == Path(selected).expanduser():
         return True
 
     for runtime_home in _owned_runtime_homes(environment):
-        prefix = f"{runtime_home}/releases/"
-        if not generation.startswith(prefix):
-            continue
-        leaf = generation[len(prefix) :]
-        if leaf and "/" not in leaf:
+        releases = Path(runtime_home) / "releases"
+        if generation.parent == releases and generation.name:
             return True
     return False
 
@@ -337,20 +440,23 @@ def is_owned_generation_path(entry: str, environment: Mapping[str, str]) -> bool
     provider spawned by the runtime must not inherit them (HAK-32).
     """
 
-    candidate = entry.rstrip("/")
-    if not candidate:
+    if not str(entry).strip():
         return False
+    candidate = Path(entry)
 
-    selected = str(environment.get("VIBECRAFTED_RUNTIME_ROOT", "")).strip().rstrip("/")
-    if selected and (candidate == selected or candidate.startswith(selected + "/")):
-        return True
+    selected = str(environment.get("VIBECRAFTED_RUNTIME_ROOT", "")).strip()
+    if selected:
+        selected_root = Path(selected).expanduser()
+        if candidate == selected_root or selected_root in candidate.parents:
+            return True
 
     for runtime_home in _owned_runtime_homes(environment):
-        prefix = f"{runtime_home}/releases/"
-        if not candidate.startswith(prefix):
+        releases = Path(runtime_home) / "releases"
+        try:
+            relative = candidate.relative_to(releases)
+        except ValueError:
             continue
-        leaf = candidate[len(prefix) :].split("/", 1)[0]
-        if leaf:
+        if relative.parts:
             return True
     return False
 
@@ -365,6 +471,23 @@ def _host_agent_bin_dirs(environment: Mapping[str, str]) -> list[Path]:
 
     raw_home = str(environment.get("HOME", "")).strip()
     home = Path(raw_home).expanduser() if raw_home else Path.home()
+    if is_windows():
+        system_root = Path(
+            environment.get("SystemRoot") or os.environ.get("SystemRoot") or r"C:\Windows"
+        )
+        launcher = (
+            Path(environment["VIBECRAFTED_LAUNCHER_BIN"]).expanduser()
+            if str(environment.get("VIBECRAFTED_LAUNCHER_BIN", "")).strip()
+            else Path(environment.get("LOCALAPPDATA", "")).expanduser() / "Vibecrafted" / "bin"
+            if str(environment.get("LOCALAPPDATA", "")).strip()
+            else home / "AppData" / "Local" / "Vibecrafted" / "bin"
+        )
+        return [
+            launcher,
+            home / ".cargo" / "bin",
+            system_root / "System32",
+            system_root,
+        ]
     return [
         home / ".local/bin",
         home / ".cargo/bin",
@@ -423,3 +546,116 @@ def agent_tool_search_path(environment: Mapping[str, str] | None = None) -> str:
         resolved.append(text)
 
     return os.pathsep.join(resolved)
+
+
+def active_runtime_pointer(runtime_home: Path | None = None) -> Path:
+    """Path to the one active-generation JSON pointer."""
+    return (runtime_home or vibecrafted_runtime_home()) / "active.json"
+
+
+def current_generation_projection(runtime_home: Path | None = None) -> Path:
+    """Filesystem projection of the active generation (symlink or junction)."""
+    tools = (
+        vibecrafted_tools_home()
+        if runtime_home is None
+        else resolve_env_path("VIBECRAFTED_TOOLS_HOME", runtime_home / "tools")
+    )
+    return tools / "vibecrafted-current"
+
+
+def _read_active_runtime_root(pointer: Path, runtime_home: Path) -> Path | None:
+    if pointer.is_symlink():
+        raise GenerationResolutionError("active.json must not be a symlink")
+    if not pointer.is_file():
+        return None
+    try:
+        payload = json.loads(pointer.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise GenerationResolutionError(
+            f"active runtime pointer is unreadable: {pointer}"
+        ) from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema") != ACTIVE_RUNTIME_SCHEMA
+        or not isinstance(payload.get("runtime_root"), str)
+        or not payload["runtime_root"]
+    ):
+        raise GenerationResolutionError(f"active runtime pointer is invalid: {pointer}")
+    generation = Path(payload["runtime_root"]).expanduser()
+    if not generation.is_absolute():
+        raise GenerationResolutionError("active runtime_root must be absolute")
+    try:
+        resolved = generation.resolve(strict=True)
+        home = runtime_home.resolve(strict=False)
+    except OSError as exc:
+        raise GenerationResolutionError(
+            f"active runtime_root cannot be resolved: {exc}"
+        ) from exc
+    if resolved != home and home not in resolved.parents:
+        raise GenerationResolutionError(
+            f"active runtime_root escapes runtime home: {resolved}"
+        )
+    return resolved
+
+
+def _is_generation_pointer(path: Path) -> bool:
+    """True for a unix symlink or a Windows directory junction."""
+    if path.is_symlink():
+        return True
+    junction = getattr(path, "is_junction", None)
+    if junction is None:
+        return False
+    try:
+        return bool(junction())
+    except OSError:
+        return False
+
+
+def resolve_active_generation(runtime_home: Path | None = None) -> Path:
+    """Return the one installed generation. ``active.json`` is authority.
+
+    ``tools/vibecrafted-current`` is a projection. When both exist they must
+    name the same directory; disagreement is split-brain and fail-closed.
+    """
+    home = (runtime_home or vibecrafted_runtime_home()).expanduser()
+    pointer = active_runtime_pointer(home)
+    current = current_generation_projection(home)
+    active_root = _read_active_runtime_root(pointer, home) if pointer.exists() else None
+    current_root: Path | None = None
+    pointer_present = (
+        current.exists() or current.is_symlink() or _is_generation_pointer(current)
+    )
+    if pointer_present:
+        if not _is_generation_pointer(current):
+            raise GenerationResolutionError(
+                f"{current} is not an atomic generation pointer"
+            )
+        try:
+            current_root = current.resolve(strict=True)
+        except OSError as exc:
+            raise GenerationResolutionError(
+                f"cannot resolve current runtime generation: {exc}"
+            ) from exc
+    if active_root is not None and current_root is not None:
+        if active_root != current_root:
+            raise GenerationResolutionError(
+                f"split-brain: active.json names {active_root} but "
+                f"vibecrafted-current names {current_root}"
+            )
+        return active_root
+    if active_root is not None:
+        return active_root
+    if current_root is not None:
+        if is_windows():
+            raise GenerationResolutionError(
+                "vibecrafted-current exists without active.json"
+            )
+        return current_root
+    raise GenerationResolutionError("no active Runtime Pack generation")
+
+
+def launcher_name(name: str) -> str:
+    """Public launcher filename on this platform (``.cmd`` on Windows)."""
+    if is_windows() and not name.lower().endswith((".cmd", ".bat", ".exe")):
+        return f"{name}.cmd"
+    return name
