@@ -241,7 +241,6 @@ VIMRC_CARET_COLOR
 
 if [[ -n "${VC_COMPOSER:-}" ]]; then
   # Operator override is a full command line (e.g. pensieve --wait).
-  # shellcheck disable=SC2086
   ${VC_COMPOSER} "$f"
 else
   editor="${EDITOR:-vim}"
