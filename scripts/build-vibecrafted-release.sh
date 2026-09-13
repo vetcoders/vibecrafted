@@ -579,7 +579,7 @@ sign_nested_app_bundles() {
   while IFS= read -r -d '' nested_app; do
     codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
       "${CODESIGN_KEYCHAIN_ARGS[@]}" "$nested_app"
-  done < <(find "$APP/Contents" -mindepth 2 -type d -name '*.app' -print0)
+  done < <(find "$APP/Contents" -mindepth 2 -type d -iname '*.app' -print0)
 }
 
 # Helpers/vc-app-update is a shebang script, not Mach-O, so sign_macho_tree
