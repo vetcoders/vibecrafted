@@ -388,7 +388,7 @@ def search(
     if mcp_call is not None:
         try:
             payload = mcp_call(query, ns, limit)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - an injected MCP transport may raise anything; recall degrades
             _logger.warning("memex MCP call failed: %s", exc)
             return []
         return _parse_chunks(payload, namespace=ns, retrieved_at=retrieved_at)
