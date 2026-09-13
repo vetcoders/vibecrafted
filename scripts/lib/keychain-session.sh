@@ -271,7 +271,7 @@ keychain_session_begin() {
   # our own keychain basename and no longer exist on disk. Scoped to our own
   # name — a stranger's stale entry is the doctor's business to report, not
   # ours to silently remove.
-  for entry in "${current[@]}"; do
+  for entry in ${current[@]+"${current[@]}"}; do
     if [[ "${entry##*/}" == "${label}.keychain-db" && ! -e "$entry" ]]; then
       _ks_log "dropping a stale ${label} entry left by an earlier run"
       continue
@@ -292,7 +292,7 @@ keychain_session_begin() {
 
   if [[ "$KEYCHAIN_SESSION_REGISTER_SEARCH_LIST" == "1" ]]; then
     _ks_log "legacy opt-in: registering the ephemeral keychain in the user search list"
-    _ks_write_search_list "$KEYCHAIN_SESSION_PATH" "${kept[@]}" \
+    _ks_write_search_list "$KEYCHAIN_SESSION_PATH" ${kept[@]+"${kept[@]}"} \
       || _ks_die "could not install the ephemeral keychain into the search list"
   fi
 
@@ -404,7 +404,7 @@ keychain_session_end() {
   # 1. UNLIST FIRST. This is the whole lesson of the incident: the search-list
   #    entry must go even if the keychain file was already destroyed with it.
   while IFS= read -r entry; do current+=("$entry"); done < <(_ks_read_search_list)
-  for entry in "${current[@]}"; do
+  for entry in ${current[@]+"${current[@]}"}; do
     [[ "$entry" == "$owned" ]] && continue
     kept+=("$entry")
   done
@@ -415,7 +415,7 @@ keychain_session_end() {
       candidate="$(_ks_login_keychain)"
       [[ -n "$candidate" ]] && kept=("$candidate")
     fi
-    _ks_write_search_list "${kept[@]}" || _ks_log "search-list restore failed"
+    _ks_write_search_list ${kept[@]+"${kept[@]}"} || _ks_log "search-list restore failed"
   fi
 
   # 2. Default keychain: only ours to move, and only to a path that exists.
@@ -428,7 +428,7 @@ keychain_session_end() {
     if [[ -n "$snapshot_default" && "$snapshot_default" != "$owned" && -e "$snapshot_default" ]]; then
       candidate="$snapshot_default"
     else
-      for entry in "${kept[@]}"; do
+      for entry in ${kept[@]+"${kept[@]}"}; do
         if [[ -e "$entry" ]]; then candidate="$entry"; break; fi
       done
       [[ -n "$candidate" ]] || candidate="$(_ks_login_keychain)"
