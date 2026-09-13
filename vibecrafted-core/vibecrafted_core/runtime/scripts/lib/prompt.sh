@@ -7,7 +7,6 @@ spawn_write_command_script() {
 
   shell_bin="$(spawn_preferred_shell)"
   mkdir -p "$(dirname "$script_path")"
-  # shellcheck disable=SC2016
   printf '#!/usr/bin/env bash
 set -euo pipefail
 %s -lc %s
@@ -249,7 +248,7 @@ spawn_build_runtime_prompt() {
   # Strip existing frontmatter (so we don't have double) and append the plan
   spawn_append_prompt_body "$source_file" "$runtime_file"
 
-  # shellcheck disable=SC2129
+  # shellcheck disable=SC2129  # separate sections; the next heredoc needs a quoted delimiter
   cat >> "$runtime_file" <<EOF_LABEL
 ---
 ## VC Agents Worker Charter

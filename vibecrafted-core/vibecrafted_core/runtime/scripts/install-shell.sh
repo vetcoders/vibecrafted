@@ -107,7 +107,6 @@ _vibecrafted_source_helper() {
   local helper
   while IFS= read -r helper; do
     [[ -n "\$helper" && -r "\$helper" ]] || continue
-    # shellcheck disable=SC1090
     source "\$helper"
     return 0
   done < <(_vibecrafted_helper_candidates)

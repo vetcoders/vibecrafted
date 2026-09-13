@@ -133,7 +133,8 @@ _loop_child_plan() {
 
 _find_meta_for_loop() {
   local loop_nr="$1"
-  local expected_run_id="${run_id}-$(printf '%03d' "$loop_nr")"
+  local expected_run_id
+  expected_run_id="${run_id}-$(printf '%03d' "$loop_nr")"
   spawn_find_meta_for_run_id "$store/reports" "$expected_run_id"
 }
 
@@ -439,7 +440,8 @@ _write_missing_report_failure() {
   local loop_nr="$1"
   local reason="$2"
   local loop_agent="$3"
-  local convergence="$(_convergence_path)"
+  local convergence
+  convergence="$(_convergence_path)"
 
   cat > "$convergence" <<CONV
 ---
@@ -476,7 +478,8 @@ _write_report_failed_convergence() {
   local report_status="$4"
   local meta_status="$5"
   local reason="$6"
-  local convergence="$(_convergence_path)"
+  local convergence
+  convergence="$(_convergence_path)"
 
   cat > "$convergence" <<CONV
 ---
@@ -514,7 +517,8 @@ CONV
 _write_invalid_ancestor_failure() {
   local loop_nr="$1"
   local invalid_agent="$2"
-  local convergence="$(_convergence_path)"
+  local convergence
+  convergence="$(_convergence_path)"
 
   cat > "$convergence" <<CONV
 ---
@@ -660,13 +664,15 @@ _write_spawn_failure_artifacts() {
   local loop_plan="$3"
   local reason="$4"
   local exit_code="${5:-1}"
-  local loop_run_id="${run_id}-$(printf '%03d' "$loop_nr")"
+  local loop_run_id
+  loop_run_id="${run_id}-$(printf '%03d' "$loop_nr")"
   local stamp=""
   local base=""
   local report_path=""
   local transcript_path=""
   local meta_path=""
-  local prompt_id="${loop_file_prefix}-ancestor_L${loop_nr}_$(date +%Y%m%d)"
+  local prompt_id
+  prompt_id="${loop_file_prefix}-ancestor_L${loop_nr}_$(date +%Y%m%d)"
 
   stamp="$(spawn_timestamp)"
   # Include loop_run_id (unique per dispatch+loop, has PID suffix) so parallel
@@ -762,7 +768,8 @@ _launch_next_loop() {
   local loop_agent="$2"
   local loop_model="$3"
   local loop_plan="$4"
-  local loop_run_id="${run_id}-$(printf '%03d' "$loop_nr")"
+  local loop_run_id
+  loop_run_id="${run_id}-$(printf '%03d' "$loop_nr")"
   local q_state=""
   local q_root=""
   local q_runtime=""
