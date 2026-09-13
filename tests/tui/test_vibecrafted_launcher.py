@@ -3177,6 +3177,37 @@ def _write_fake_aicx_sessions(bin_dir: Path, current_id: str, previous_id: str) 
     script.chmod(0o755)
 
 
+def _write_fake_codex(bin_dir: Path) -> Path:
+    """Hermetic codex CLI: answers the capability probes and nothing else.
+
+    CI runners carry no codex, so the deck's `_require_agent_cli` refused
+    ("codex CLI is not available") while a developer host passed only because
+    its real codex sat on the inherited PATH. The admission probe reads its
+    markers from `codex --help` (continuity/capabilities.py:583-596 requires
+    `exec` and `resume`). Every other invocation is refused loudly, so no
+    provider session can start, and each call is recorded beside the fake.
+    """
+    script = bin_dir / "codex"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "$*" >> "$0.calls"\n'
+        'case "$*" in\n'
+        '  --version) printf "codex-cli 0.0.0-fixture\\n" ;;\n'
+        "  --help)\n"
+        '    printf "Usage: codex [OPTIONS] [PROMPT]\\n\\nCommands:\\n"\n'
+        '    printf "  exec    Run Codex non-interactively\\n"\n'
+        '    printf "  resume  Resume a previous interactive session\\n"\n'
+        '    printf "  fork    Fork a previous interactive session\\n" ;;\n'
+        "  *)\n"
+        '    printf "fixture codex: unexpected invocation: %s\\n" "$*" >&2\n'
+        "    exit 97 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
+
+
 @pytest.mark.parametrize(
     ("selector", "expected_session"),
     [("current", "current-codex-session"), ("last", "last-codex-session")],
@@ -3193,6 +3224,7 @@ def test_fork_codex_opens_named_pane_in_current_vc_frame_tab(
     root.mkdir(parents=True)
     _write_fake_vc_frame_with_live_session(fake_bin, capture_file, "operator-test")
     _write_fake_aicx_sessions(fake_bin, "current-codex-session", "last-codex-session")
+    _write_fake_codex(fake_bin)
     generation = _installed_public_generation(tmp_path, home, fake_bin / "vc-frame")
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     subprocess.run(
@@ -3261,6 +3293,11 @@ def test_fork_codex_opens_named_pane_in_current_vc_frame_tab(
         capture_output=True,
         text=True,
     )
+    # Admission consulted the fixture CLI, not whatever the host has installed.
+    assert set((fake_bin / "codex.calls").read_text().splitlines()) == {
+        "--version",
+        "--help",
+    }
     payload = capture_file.read_text(encoding="utf-8").splitlines()
     assert payload[:3] == ["--session", "operator-test", "action"]
     assert "new-pane" in payload
@@ -3295,6 +3332,7 @@ def test_fork_codex_supports_floating_same_tab_placement(tmp_path: Path) -> None
     home.mkdir()
     fake_bin.mkdir()
     _write_fake_vc_frame_with_live_session(fake_bin, capture_file, "operator-test")
+    _write_fake_codex(fake_bin)
 
     env = os.environ.copy()
     env["HOME"] = str(home)
@@ -3328,6 +3366,11 @@ def test_fork_codex_supports_floating_same_tab_placement(tmp_path: Path) -> None
         env=env,
     )
 
+    # Admission consulted the fixture CLI, not whatever the host has installed.
+    assert set((fake_bin / "codex.calls").read_text().splitlines()) == {
+        "--version",
+        "--help",
+    }
     payload = capture_file.read_text(encoding="utf-8").splitlines()
     assert "new-pane" in payload
     assert "--floating" in payload
