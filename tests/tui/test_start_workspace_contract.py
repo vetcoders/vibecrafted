@@ -2637,11 +2637,31 @@ def test_both_entrypoints_parse_once_and_enter_the_same_owner() -> None:
     start_body = dispatch.split("vc-start()")[1].split("vc-dashboard()")[0]
     deck = DECK.read_text(encoding="utf-8")
     deck_body = deck.split("cmd_start()")[1].split("\n}\n")[0]
+    # Both enter the one owner with the parsed argv. 88ea1097 guarded the deck
+    # expansion (`${a[@]+"${a[@]}"}`): a bare `vibecrafted start` leaves the
+    # array empty and the plain form dies with `unbound variable` under
+    # `set -u` on macOS /bin/bash 3.2. The shell function may keep the plain
+    # form; the deck, which runs under `set -u`, must carry the guard.
+    plain_entry = '_vetcoders_start_entry "${_vetcoders_start_frame_argv[@]}"'
+    guarded_entry = (
+        "_vetcoders_start_entry "
+        '${_vetcoders_start_frame_argv[@]+"${_vetcoders_start_frame_argv[@]}"}'
+    )
     for body in (start_body, deck_body):
         assert '_vetcoders_start_prepare_arguments "$@"' in body
-        assert '_vetcoders_start_entry "${_vetcoders_start_frame_argv[@]}"' in body
+        entries = [
+            line.strip()
+            for line in body.splitlines()
+            if line.strip().startswith("_vetcoders_start_entry ")
+        ]
+        assert len(entries) == 1, entries
+        assert entries[0] in (plain_entry, guarded_entry), entries
+        assert body.index('_vetcoders_start_prepare_arguments "$@"') < body.index(
+            entries[0]
+        )
         assert "_vetcoders_launch_dashboard" not in body
         assert "_vetcoders_start_open_terminal_if_needed" not in body
+    assert guarded_entry in deck_body
     assert (REPO_ROOT / "scripts" / "vibecrafted").read_text(encoding="utf-8") == deck
 
 
