@@ -16321,33 +16321,24 @@ def _toml_assignment_key(line: str) -> str | None:
     return _toml_unquote_key(body.split("=", 1)[0])
 
 
-def _toml_assignment_is_complete(line: str) -> bool:
-    body = _toml_line_without_comment(line)
-    if "=" not in body:
-        return True
-    value = body.split("=", 1)[1].strip()
-    if value.startswith(('"""', "'''")):
-        closer = value[:3]
-        return value.count(closer) >= 2
-    opens = value.count("[") + value.count("{")
-    closes = value.count("]") + value.count("}")
-    if opens != closes:
-        return False
-    quoted: str | None = None
-    escaped = False
-    for char in value:
-        if escaped:
-            escaped = False
+def _toml_assignment_end(lines: Sequence[str], start: int) -> int:
+    """Return the exclusive end of one assignment, including multiline values.
+
+    TOML permits basic/literal strings, arrays, and inline values to continue
+    across physical lines.  Let ``tomllib`` establish that boundary instead of
+    treating the first physical line as the whole setting.
+    """
+    if _toml_assignment_key(lines[start]) is None:
+        raise ValueError("unsupported TOML preference value")
+    raw = ""
+    for end in range(start + 1, len(lines) + 1):
+        raw += lines[end - 1]
+        try:
+            _toml_loads_value(raw.split("=", 1)[1].strip())
+        except ValueError:
             continue
-        if quoted:
-            if char == "\\":
-                escaped = True
-            elif char == quoted:
-                quoted = None
-            continue
-        if char in {'"', "'"}:
-            quoted = char
-    return quoted is None
+        return end
+    raise ValueError("unterminated TOML preference value")
 
 
 def _toml_root_insert_index(lines: list[str]) -> int:
@@ -16433,6 +16424,7 @@ class _TomlSettingLocation:
 
     kind: str
     index: int = -1
+    assignment_end: int = -1
     start: int = -1
     end: int = -1
     key: str = ""
@@ -16561,34 +16553,37 @@ def _toml_locate_setting(lines: list[str], dotted: str) -> _TomlSettingLocation 
         if nest is not None:
             return _TomlSettingLocation(kind="nested_table", start=nest[0], end=nest[1])
     current_table = ""
-    for index, line in enumerate(lines):
+    index = 0
+    while index < len(lines):
+        line = lines[index]
         header = _toml_header_name(line)
         if header is not None and not line.lstrip().startswith("[["):
             current_table = header
+            index += 1
             continue
         key = _toml_assignment_key(line)
         if key is None:
+            index += 1
             continue
         table_parts = [part for part in current_table.split(".") if part]
         try:
             key_parts = _toml_split_dotted_keys(key)
         except ValueError:
+            index += 1
             continue
         assigned = table_parts + key_parts
+        assignment_end = _toml_assignment_end(lines, index)
+        raw_assignment = "".join(lines[index:assignment_end])
         if assigned == parts:
-            if not _toml_assignment_is_complete(line):
-                raise ValueError(
-                    "multiline TOML assignment cannot be merged by setting identity"
-                )
             return _TomlSettingLocation(
-                kind="assignment", index=index, key=key, table=current_table
+                kind="assignment",
+                index=index,
+                assignment_end=assignment_end,
+                key=key,
+                table=current_table,
             )
         if len(assigned) < len(parts) and assigned == parts[: len(assigned)]:
-            if not _toml_assignment_is_complete(line):
-                raise ValueError(
-                    "multiline TOML assignment cannot be merged by setting identity"
-                )
-            value = _toml_loads_value(_toml_assignment_value_text(line))
+            value = _toml_loads_value(raw_assignment.split("=", 1)[1].strip())
             if not isinstance(value, dict):
                 raise ValueError(
                     "TOML merge could not represent the resolved preference tree"
@@ -16602,19 +16597,27 @@ def _toml_locate_setting(lines: list[str], dotted: str) -> _TomlSettingLocation 
                 inner_parts=rest,
                 present=_toml_dict_has_path(value, rest),
             )
+        index = assignment_end
     return None
 
 
 def _toml_delete_line_and_empty_table(lines: list[str], index: int) -> None:
+    _toml_delete_assignment_span_and_empty_table(lines, index, index + 1)
+
+
+def _toml_delete_assignment_span_and_empty_table(
+    lines: list[str], start: int, end: int
+) -> None:
+    """Delete an assignment span and its now-empty enclosing table."""
     header_index = -1
     table = ""
-    for cursor in range(index, -1, -1):
+    for cursor in range(start, -1, -1):
         header = _toml_header_name(lines[cursor])
         if header is not None and not lines[cursor].lstrip().startswith("[["):
             header_index = cursor
             table = header
             break
-    del lines[index]
+    del lines[start:end]
     if (
         table
         and header_index >= 0
@@ -16659,7 +16662,9 @@ def _toml_replace_or_insert(text: str, dotted: str, literal: str) -> str:
         text = _toml_remove_nested_table("".join(lines), dotted)
         return _toml_insert_assignment(text, dotted, literal)
     if loc is not None and loc.kind == "assignment":
-        lines[loc.index] = _toml_rewrite_assignment_line(lines[loc.index], literal)
+        lines[loc.index : loc.assignment_end] = [
+            _toml_rewrite_assignment_line(lines[loc.index], literal)
+        ]
         return "".join(lines)
     if loc is not None and loc.kind == "inline_field":
         rewritten = _toml_update_inline_field(
@@ -16685,7 +16690,7 @@ def _toml_raw_assignment(text: str, dotted: str) -> str | None:
     if loc.kind == "nested_table":
         return "".join(lines[loc.start : loc.end])
     if loc.kind == "assignment":
-        return lines[loc.index]
+        return "".join(lines[loc.index : loc.assignment_end])
     return None
 
 
@@ -16700,7 +16705,9 @@ def _toml_delete_assignment(text: str, dotted: str) -> str:
     if loc.kind == "nested_table":
         return _toml_remove_nested_table(text, dotted)
     if loc.kind == "assignment":
-        _toml_delete_line_and_empty_table(lines, loc.index)
+        _toml_delete_assignment_span_and_empty_table(
+            lines, loc.index, loc.assignment_end
+        )
         return "".join(lines)
     if loc.kind == "inline_field":
         if not loc.present:
@@ -16829,8 +16836,10 @@ def _toml_adapt_assignment_spelling(line: str, raw_assignment: str) -> str:
     key = _toml_assignment_key(line)
     if key is None:
         raise ValueError("unsupported TOML preference value")
-    literal = _toml_assignment_value_text(raw_assignment)
-    comment = _toml_hash_comment(line) or _toml_hash_comment(raw_assignment)
+    literal = raw_assignment.split("=", 1)[1].strip()
+    comment = _toml_hash_comment(line)
+    if not comment and "\n" not in raw_assignment.rstrip("\n"):
+        comment = _toml_hash_comment(raw_assignment)
     indent = line[: len(line) - len(line.lstrip())]
     newline = "\n" if line.endswith("\n") else ""
     suffix = f" {comment}" if comment else ""
@@ -16854,22 +16863,12 @@ def _overlay_toml_assignment(text: str, dotted: str, raw_assignment: str) -> str
         return text + (
             raw_assignment if raw_assignment.endswith("\n") else raw_assignment + "\n"
         )
-    table, _, leaf = dotted.rpartition(".")
-    if not leaf:
-        table, leaf = "", dotted
-    current_table = ""
-    for index, line in enumerate(lines):
-        header = _toml_header_name(line)
-        if header is not None and not line.lstrip().startswith("[["):
-            current_table = header
-            continue
-        if current_table == table and _toml_assignment_key(line) == leaf:
-            if not _toml_assignment_is_complete(line):
-                raise ValueError(
-                    "multiline TOML assignment cannot be merged by setting identity"
-                )
-            lines[index] = _toml_adapt_assignment_spelling(line, raw_assignment)
-            return "".join(lines)
+    loc = _toml_locate_setting(lines, dotted)
+    if loc is not None and loc.kind == "assignment":
+        lines[loc.index : loc.assignment_end] = [
+            _toml_adapt_assignment_spelling(lines[loc.index], raw_assignment)
+        ]
+        return "".join(lines)
     text = _toml_remove_nested_table("".join(lines), dotted)
     if "=" in raw_assignment and not raw_assignment.lstrip().startswith("["):
         return _toml_replace_or_insert(
@@ -17242,7 +17241,11 @@ def _reconcile_runtime_preference(
                 "backup recovery; per-file markers cannot prove a complete install"
             )
         old_generation = old.get("generation", prior_generation)
-        if old_generation:
+        # A missing product preference has no user bytes to reconcile.  Seed
+        # the already-validated incoming default without requiring a legacy
+        # generation to prove a three-way baseline it will never consume.
+        # Present preferences keep the strict lineage and digest checks below.
+        if old_generation and current_raw is not None:
             old_root = Path(old_generation)
             if (
                 not old_root.is_absolute()
