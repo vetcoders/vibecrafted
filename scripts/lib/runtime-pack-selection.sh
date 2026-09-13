@@ -72,7 +72,18 @@ runtime_pack_selection_sha256() {
 
 runtime_pack_selection_size() {
   # BSD and GNU stat disagree; both ship on the platforms that build packs.
-  stat -f %z "$1" 2>/dev/null || stat -c %s "$1" 2>/dev/null
+  # GNU first, and only a number counts: GNU `stat -f` is --file-system and
+  # SUCCEEDS with a filesystem dump, so BSD-first recorded that dump as a size
+  # on Linux (same trap as _stat_uid in install-runtime-pack.sh).
+  local size
+  size="$(stat -c %s "$1" 2>/dev/null || true)"
+  if [[ "$size" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$size"
+    return 0
+  fi
+  size="$(stat -f %z "$1" 2>/dev/null)" || return 1
+  [[ "$size" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$size"
 }
 
 # A relative VIBECRAFTED_RELEASE_DIR is a supported way to put the carrier
