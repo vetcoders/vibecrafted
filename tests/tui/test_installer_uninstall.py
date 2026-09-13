@@ -216,6 +216,11 @@ def test_runtime_install_reclaims_leftover_alacritty_and_alt_screen(
     )
     assert (product_config / "vc-terminal/vc-terminal.toml").is_file()
     assert (product_config / "vc-terminal/launch-primary-shell.zsh").is_file()
+    for name in ("python", "python3"):
+        installed_door = product_config / "vc-terminal/bin" / name
+        source_door = payload / "config/vc-terminal/bin" / name
+        assert installed_door.read_bytes() == source_door.read_bytes()
+        assert installed_door.stat().st_mode & 0o777 == 0o755
     assert not (debris_dir / "alacritty.toml").exists()
     assert not (debris_dir / "launch-alt-screen.zsh").exists()
     assert not (product_config / "terminal-entry.toml").exists()
