@@ -9,7 +9,7 @@ a running `.app`.
 ## Sparkle review (why it is not pinned)
 
 Codescribe's owner was read at
-`/Volumes/vc-workspace/vetcoders/codescribe/macos/Codescribe/Services/UpdaterService.swift`:
+`<workspace>/codescribe/macos/Codescribe/Services/UpdaterService.swift`:
 
 - Sparkle 2 `SPUStandardUpdaterController(startingUpdater: true)`
 - Feed `SUFeedURL` = `https://codescribe.vetcoders.io/appcast.xml`

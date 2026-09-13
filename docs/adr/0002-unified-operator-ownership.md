@@ -52,7 +52,7 @@ through named projections.
 ### Plan artifacts — files are the owner (operator decision 2026-07-29)
 
 Every write path for plan artifacts (mission, atlas, briefs, tracker, reports) terminates in the
-files under `/Users/polyversai/.vibecrafted/artifacts/<org>/<repo>/<day>/plans/`. The scaffold API/editor is a
+files under `~/.vibecrafted/artifacts/<org>/<repo>/<day>/plans/`. The scaffold API/editor is a
 convenience **client** of that write surface — and the only path for remote integrations without
 filesystem access — never a required mediator. The scaffold store's changes/checkpoints ledger is a
 derived, best-effort observation of the files; it is never authoritative over them. Rationale: all
