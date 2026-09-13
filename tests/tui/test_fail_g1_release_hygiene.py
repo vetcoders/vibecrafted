@@ -293,5 +293,5 @@ def test_fail_g1_release_prefers_rustup_cargo_before_cargo_runs() -> None:
         "for command in cargo codesign"
     )
     assert helper.index("wasm32-unknown-unknown") < helper.index(
-        'make -C "$REPO_ROOT" CARGO_BUILD_ROOT='
+        'make -C "$SOURCE_ROOT" CARGO_BUILD_ROOT='
     )
