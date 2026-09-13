@@ -2201,6 +2201,57 @@ def test_toml_overlay_dotted_raw_keeps_nested_table_path():
     assert "window.opacity" not in after_header
 
 
+def test_toml_merge_keep_current_replaces_top_level_multiline_assignment():
+    """A hash-bound keep-current choice may carry a triple-quoted preference."""
+    previous = 'add_newline = true\nformat = """$directory\n$character"""\n'
+    current = 'add_newline = false\nformat = """$time$fill\n$character"""\n'
+    incoming = (
+        'add_newline = true\nformat = """$directory\n$character"""\n\n'
+        "[python]\ndisabled = true\n"
+    )
+
+    merged = installer._merge_toml_runtime_preferences(
+        previous, current, incoming, choice="keep-current"
+    )
+
+    _assert_toml_tree(
+        merged,
+        {
+            "add_newline": False,
+            "format": "$time$fill\n$character",
+            "python": {"disabled": True},
+        },
+    )
+    assert 'format = """$time$fill\n$character"""' in merged
+
+
+def test_toml_locator_skips_table_and_assignment_looking_multiline_content():
+    text = (
+        'format = """literal payload\n[not-a-table]\nkey = "still literal"\n"""\n'
+        "\n[real]\nvalue = 1\n"
+    )
+
+    location = installer._toml_locate_setting(
+        text.splitlines(keepends=True), "real.value"
+    )
+
+    assert location is not None
+    assert location.kind == "assignment"
+    assert tomllib.loads(text) == {
+        "format": 'literal payload\n[not-a-table]\nkey = "still literal"\n',
+        "real": {"value": 1},
+    }
+
+
+def test_toml_delete_multiline_assignment_removes_empty_table():
+    text = '[custom]\nformat = """line one\nline two"""\n\n[other]\nvalue = 1\n'
+
+    deleted = installer._toml_delete_assignment(text, "custom.format")
+
+    assert "[custom]" not in deleted
+    assert tomllib.loads(deleted) == {"other": {"value": 1}}
+
+
 @pytest.mark.parametrize(
     "previous_form,current_form,incoming_form", _TOML_WINDOW_FORM_TRIPLES
 )
@@ -2406,3 +2457,65 @@ def test_unhashed_previous_starship_keeps_current_on_bound_retry(
     assert starship.read_text(encoding="utf-8") == user
     selected = (roots["runtime_home"] / "tools/vibecrafted-current").resolve()
     assert selected.name == "9.9.10+b"
+
+
+def test_missing_starship_seeds_incoming_without_unproven_legacy_baseline(
+    tmp_path, roots, capsys
+):
+    """An absent preference needs no legacy bytes for a three-way merge."""
+    first = seed_runtime_pack(tmp_path / "pack-a", version="9.9.9+a")
+    _install(first, capsys)
+    starship = roots["product_config"] / "starship.toml"
+    starship.unlink()
+    generation = (roots["runtime_home"] / "tools/vibecrafted-current").resolve()
+    manifest_path = generation / installer._RUNTIME_GENERATION_MANIFEST
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["hashes"].pop("config/starship.toml", None)
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    receipt_path = installer._runtime_receipt_path(roots["runtime_home"])
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt.get("config_defaults", {}).pop(str(starship), None)
+    receipt.get("owned_files", {}).pop(str(starship), None)
+    receipt_path.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+
+    incoming = 'add_newline = true\nformat = "$character"\n'
+    second = seed_runtime_pack(
+        tmp_path / "pack-b",
+        version="9.9.10+b",
+        before_source_seal=lambda root: (root / "config/starship.toml").write_text(
+            incoming, encoding="utf-8"
+        ),
+    )
+
+    _install(second, capsys)
+
+    assert starship.read_text(encoding="utf-8") == incoming
+
+
+def test_present_starship_still_refuses_unproven_legacy_baseline(
+    tmp_path, roots, capsys
+):
+    """Only an absent preference may bypass a legacy baseline digest."""
+    first = seed_runtime_pack(tmp_path / "pack-a", version="9.9.9+a")
+    _install(first, capsys)
+    starship = roots["product_config"] / "starship.toml"
+    generation = (roots["runtime_home"] / "tools/vibecrafted-current").resolve()
+    manifest_path = generation / installer._RUNTIME_GENERATION_MANIFEST
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["hashes"].pop("config/starship.toml", None)
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    receipt_path = installer._runtime_receipt_path(roots["runtime_home"])
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt.get("config_defaults", {}).pop(str(starship), None)
+    receipt.get("owned_files", {}).pop(str(starship), None)
+    receipt_path.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+
+    second = seed_runtime_pack(tmp_path / "pack-b", version="9.9.10+b")
+    conflict = _install_conflict(second, capsys)
+
+    file_hit = next(
+        item
+        for item in conflict.envelope["files"]
+        if item["path"].endswith("starship.toml")
+    )
+    assert file_hit["reason"] == "previous shipped defaults are unavailable"
