@@ -135,3 +135,34 @@ lokalnie do HEAD, push na origin, podział pracy (agent: stack; Founder: pozosta
 - Otwarte: #77/#75 Linux CI bez Runtime Packa (stara linia bez build-joba);
   core-macos 4 testy na #80 i entry_escalation na Linuksie — ocena po świeżym
   runie CI z tej paczki.
+
+## 2026-09-14T02:30+02:00 — vc-prune na Living Tree: bramki przechodzące na ślepo, silencery, martwy kod (claude/interactive)
+
+Wywołanie Foundera w sesji: `/vc-prune na ostro poprosi vibecrafted szczerze`. Fork sesji
+vibecrafted-1e; linia kandydata (#88), jej workery i CI zostają przy rodzicu.
+
+- **Zakres i kolizje (decyzja agenta):** cięcia na bieżącej gałęzi Living Tree
+  (`agent/fix-supervisor-in-process-probe`). W plikach zmienianych też przez
+  `integration/main-candidate-260912` tylko przy czystym `git merge-file` z wersją
+  kandydata (12 plików, rc=0). Cięcia przypięte testami w gorących plikach czekają na #88.
+- **Bramki na ślepo:** hook pre-push (pane guard) grepował nieistniejące `runtime/scripts/lib`
+  z `2>/dev/null`; 4 testy frontier skipowały się wszędzie na starej ścieżce; noga faz PL
+  lokalizacji porównywała z `data-phase`, którego HTML nigdy nie miał (faktyczny konsument:
+  `PHASES[].name` w `framework.js`). Wszystkie trzy uzbrojone i zielone.
+- **Globalne wykluczenia shellcheck** SC2155/SC2034/SC2154/SC2015 zdjęte (zostały
+  SC1090/SC1091). Ujawniły 46 znalezisk, w tym SC2154 na `vc_frame.sh:477` — wektor P0
+  z audytu 85fbf5e7. 71 zbędnych dyrektyw usuniętych, 36 dostało powód.
+- **Wyciek procesów w testach:** teardown ownera zabijał tylko PID; providerzy żyli pod PID 1
+  godzinami. Teraz `killpg` grupy sesji w 5 miejscach.
+- **Nie wycięte, pytania do Foundera:** iTerm2 + Hammerspoon, mux/tray, `bin/` vs
+  renderowane launchery, homebrew (tap nie istnieje), ACP, trzy instalatory, mypy-teatr
+  (102 błędy, zero bramek), `COMPILE_EMBARGO` vs `--no-verify`, wymagany check
+  „docker build" na obrazie v1.x.
+- **Korekta własna:** pierwszy pomiar `nosemgrep` i `RUF100` był nieważny (zsh nie rozbił
+  listy plików); bieg kontrolny pokazał 18 realnie tłumionych trafień semgrep. Żadnego
+  `nosemgrep` nie wycięto. Wpis w `vibecrafted-fail.md`.
+- Commity `ecd64e97..7eadd7bb` (16, wszystkie przez normalne hooki). Dowód: bramka shell
+  179 plików czysto; clippy `-D warnings` tui-agent czysto; 33 pliki tests/tui drzewo po
+  cięciu vs klon bazowy e6b94ac2: 148 vs 149 porażek, zero nowych, passed 1051 → 1058,
+  skipped 13 → 7; testy core 495 passed w obu (placeholder −3 skip).
+- Raporty: `~/.vibecrafted/artifacts/vetcoders/vibecrafted/2026_0914/reports/prune/`.
