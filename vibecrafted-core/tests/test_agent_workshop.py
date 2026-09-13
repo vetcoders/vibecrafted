@@ -408,23 +408,34 @@ def test_dashboard_projects_only_active_agent_faces_from_agents_tab() -> None:
     ]
 
 
-def test_dashboard_excludes_exited_and_non_agent_panes_and_reports_unknown() -> None:
+def test_dashboard_uses_explicit_frame_exited_schema_without_claiming_provider_liveness() -> (
+    None
+):
     workshop = _load()
     presence = workshop.agent_presence_from_payload(
         [
             {
+                "id": 41,
                 "tab_name": "Agents",
-                "pane_title": "codex · partner · codescribe",
+                "title": "codex · partner · codescribe",
                 "exited": True,
                 "exit_status": 1,
             },
-            {"tab_name": "Agents", "pane_title": "ordinary shell", "state": "running"},
             {
+                "id": 42,
                 "tab_name": "Agents",
-                "pane_title": "claude · init · vibecrafted",
-                "state": "running",
+                "title": "claude · init · vibecrafted",
+                "exited": False,
+                "exit_status": None,
             },
-            {"tab_name": "Agents", "pane_title": "codex · init · vibecrafted"},
+            {
+                "id": 43,
+                "tab_name": "Agents",
+                "title": "ordinary shell",
+                "exited": False,
+                "exit_status": None,
+            },
+            {"id": 44, "tab_name": "Agents", "title": "codex · init · vibecrafted"},
         ]
     )
 
@@ -433,11 +444,11 @@ def test_dashboard_excludes_exited_and_non_agent_panes_and_reports_unknown() -> 
 
 
 @pytest.mark.parametrize("width", [58, 92])
-def test_launcher_choice_redraw_stays_inside_card_on_terminal_resize(
+def test_launcher_choice_redraw_preserves_final_cells_and_selected_row_styling(
     width: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     workshop = _load()
-    writes: list[tuple[int, int, str]] = []
+    writes: list[tuple[int, int, str, int]] = []
 
     class FakeWindow:
         def getmaxyx(self) -> tuple[int, int]:
@@ -450,7 +461,7 @@ def test_launcher_choice_redraw_stays_inside_card_on_terminal_resize(
             pass
 
         def addstr(self, row: int, col: int, text: str, _attr: int = 0) -> None:
-            writes.append((row, col, text))
+            writes.append((row, col, text, _attr))
 
     capabilities = {
         "local-native": {"available": True, "reason": ""},
@@ -479,21 +490,59 @@ def test_launcher_choice_redraw_stays_inside_card_on_terminal_resize(
             supported=_permissions == "bypass", reason="unsupported"
         ),
     )
+    monkeypatch.setattr(
+        workshop,
+        "mode_capabilities",
+        lambda *_args, **_kwargs: {
+            name: {"available": name != "resume", "reason": "unavailable"}
+            for name in workshop.LAUNCH_MODES
+        },
+    )
 
     picker = workshop.Workshop(FakeWindow(), mode="launcher")
+    picker.row = 1
+    picker.runtime = 0
+    picker.continuity = 1
     picker.draw_launcher()
 
     assert writes
-    assert all(0 <= col < width and col + len(text) <= width for _, col, text in writes)
+    assert all(
+        0 <= col < width and col + len(text) <= width for _, col, text, _ in writes
+    )
     card_width = min(max(58, width - 4), 92)
     left = max(1, (width - card_width) // 2)
     card_right = left + card_width - 1
     choice_rows = {7, 8, 9, 10}
     assert all(
         col + len(text) <= card_right
-        for row, col, text in writes
+        for row, col, text, _ in writes
         if row in choice_rows and text.startswith("× ")
     )
+    grid = [[(" ", 0) for _ in range(width)] for _ in range(24)]
+    for row, col, text, attr in writes:
+        for offset, character in enumerate(text):
+            if 0 <= row < len(grid) and 0 <= col + offset < width:
+                grid[row][col + offset] = (character, attr)
+
+    top = max(1, (24 - 15) // 2)
+    expected = {
+        top + 2: "  mode     • init × resume partner operator",
+        top + 3: "  runtime  • local-native × local-worktrees × local-vm × cloud-soon",
+        top + 4: "  permits  • bypass × auto × accept-edits × read-only",
+        top + 5: "  memory   × full-lineage • fresh × bare-fork",
+    }
+    for row, text in expected.items():
+        start = left + 2
+        exact_visible = (
+            text if len(text) <= card_width - 4 else text[: card_width - 5] + "…"
+        )
+        visible = "".join(
+            character for character, _ in grid[row][start : start + len(exact_visible)]
+        )
+        assert visible == exact_visible
+
+    selected_col = left + 2 + len("  mode     ")
+    assert grid[top + 2][selected_col][1] & workshop.curses.A_REVERSE
 
 
 def _host_python_without_core() -> Path | None:
