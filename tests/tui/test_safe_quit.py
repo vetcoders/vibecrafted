@@ -103,7 +103,18 @@ def test_app_quit_is_ui_only_and_stop_has_native_confirmation() -> None:
     assert "NSApp.terminate(nil)" in request_quit
     assert "activeRunSummary" not in request_quit
     assert "productUpdate?.interrupt()" in delegate
-    assert "requestUIOnlyQuit: { [weak self] in self?.requestQuit() }" in delegate
+    # e5b72f80 renamed the update coordinator's UI-only quit dependency from
+    # `requestUIOnlyQuit` to `closeUIAfterHelperArmed`; it still routes to the
+    # UI-only `requestQuit` above, and the coordinator calls it only once the
+    # replacement helper is armed.
+    assert "closeUIAfterHelperArmed: { [weak self] in self?.requestQuit() }" in delegate
+    coordinator = (
+        REPO_ROOT
+        / "vibecrafted-app/shell-agent/app/Vibecrafted/ProductUpdateCoordinator.swift"
+    ).read_text(encoding="utf-8")
+    assert "var closeUIAfterHelperArmed: () -> Void" in coordinator
+    assert "self.dependencies.closeUIAfterHelperArmed()" in coordinator
+    assert "requestUIOnlyQuit" not in delegate + coordinator
     assert "case .checkForUpdates: checkForUpdatesFromMenu()" in delegate
     assert "Stop Runtime" not in request_quit
     install_update = delegate[
@@ -111,7 +122,15 @@ def test_app_quit_is_ui_only_and_stop_has_native_confirmation() -> None:
             "private func showProductUpdatePanel()"
         )
     ]
-    assert "Receipts are not deleted here" in delegate
+    # The receipts promise belongs to the owner that publishes the pack: since
+    # e5b72f80 it is the doc comment of installProductUpdate itself
+    # (AppDelegate.swift:2165-2167), not free prose anywhere in the delegate --
+    # "Receipts are not deleted here" was only ever this test's wording.
+    install_doc = delegate[: delegate.index("private func installProductUpdate(")]
+    install_doc = install_doc.rsplit("\n\n", 1)[-1]
+    assert install_doc.lstrip().startswith("///"), install_doc
+    assert "Receipts are not deleted" in install_doc
+    assert "conflict checks stay inside the installer" in install_doc
     assert "Refusing to publish a Runtime Pack that does not match" in install_update
     assert "Bundle.main.bundleURL" in install_update
     assert 'arguments: ["--uninstall"]' not in install_update

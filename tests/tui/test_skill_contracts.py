@@ -81,20 +81,38 @@ def test_vc_operator_uses_one_repository_local_operator_journal() -> None:
 
 def test_vc_scaffold_emits_dispatch_and_preserves_embargo_recovery_contract() -> None:
     skills = REPO_ROOT / "vibecrafted-core/vibecrafted_core/skills"
+    # b9ef0329 rewrote compile-embargo.md from a Founder-authorized
+    # "Phase-Aware Recovery Contract" (policy-aware hook policy, worker/
+    # structural-admission/verified-delivery table) into "W2 Integration
+    # Responsibility": a phase contract where workers checkpoint, the W2
+    # integrator records W2_STRUCTURALLY_CLOSED against the exact SHA and
+    # restores every gate. The same five obligations are pinned in their
+    # current wording, plus the two that replaced "policy-aware": hook adapters
+    # never widen a bypass, and a failed gate is repaired, never weakened.
+    # Markers are compared whitespace-normalized so re-wrapping is not drift.
     variants = [
         (
             skills / "vc-scaffold",
             (
                 (
-                    "For a local worker checkpoint under a declared embargo, "
-                    "`--no-verify` is fully authorized."
+                    "A local checkpoint may use `git commit --no-verify` when hooks "
+                    "would run gates."
                 ),
-                "No push, publication, or remote `embargo/<plan-id>` ref.",
-                "runs Semgrep plus secret/security review",
-                "this is neither security-clean nor verified delivery.",
+                "It does not authorize a push, publication or release.",
                 (
-                    "Full language-appropriate deferred and normal gates pass and are "
-                    "recorded against the exact admitted SHA."
+                    "restores and runs the full applicable gates, including security "
+                    "and secret checks skipped by checkpoint hooks"
+                ),
+                "A checkpoint preserves work; it does not certify correctness or security.",
+                (
+                    "the integrator must complete every required gate and real product "
+                    "acceptance on the exact delivered generation."
+                ),
+                "records `W2_STRUCTURALLY_CLOSED` against the exact assembled SHA",
+                "A malformed marker is an error, never permission to widen a bypass.",
+                (
+                    "A failed gate after closure calls for implementation repair, not "
+                    "weaker assertions"
                 ),
             ),
         ),
@@ -102,15 +120,24 @@ def test_vc_scaffold_emits_dispatch_and_preserves_embargo_recovery_contract() ->
             skills / "pl/vc-scaffold",
             (
                 (
-                    "Przy lokalnym checkpoincie workera pod zadeklarowanym embargiem "
-                    "`--no-verify` jest w pełni\nautoryzowany."
+                    "Checkpoint może użyć `git commit --no-verify`, gdy hooki "
+                    "uruchamiałyby bramki."
                 ),
-                "Bez push, publikacji ani zdalnego refa `embargo/<plan-id>`.",
-                "uruchamia Semgrep oraz przegląd sekretów/bezpieczeństwa",
-                "to nie jest security-clean ani verified delivery.",
+                "nie uprawnia do pushu, publikacji ani wydania.",
                 (
-                    "Pełne, odpowiednie dla języka bramki odroczone i normalne "
-                    "przechodzą i są zapisane dla dokładnego dopuszczonego SHA."
+                    "przywraca i uruchamia pełne właściwe bramki, w tym kontrolę "
+                    "bezpieczeństwa i sekretów pominiętą przez checkpointy"
+                ),
+                "Checkpoint zachowuje pracę, nie potwierdza jakości ani bezpieczeństwa",
+                (
+                    "Przed wydaniem integrator rozlicza wszystkie wymagane bramki i "
+                    "rzeczywiste scenariusze produktu dla dokładnej dostarczanej generacji."
+                ),
+                "zapisuje `W2_STRUCTURALLY_CLOSED` dla dokładnego złożonego SHA",
+                "Błędny marker nie rozszerza uprawnień.",
+                (
+                    "Nieudana bramka po closure wymaga naprawy implementacji, nie "
+                    "osłabienia asercji"
                 ),
             ),
         ),
@@ -138,8 +165,9 @@ def test_vc_scaffold_emits_dispatch_and_preserves_embargo_recovery_contract() ->
         )
         assert "founder_interview_evidence:" in template
         assert "AICX" in skill
-        assert "policy-aware" in embargo
+        normalized_embargo = " ".join(embargo.split())
+        assert "policy-aware" not in embargo
         for marker in embargo_contract:
-            assert marker in embargo, (
+            assert marker in normalized_embargo, (
                 f"{scaffold.relative_to(REPO_ROOT)} missing embargo contract: {marker!r}"
             )
