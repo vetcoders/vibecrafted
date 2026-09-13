@@ -398,7 +398,6 @@ spawn_in_marbles_tab() {
   local operator_tab_id=""
   local marbles_tab_id=""
   local cmd_script=""
-  local launch_cmd="bash '$launcher'"
   local pane_direction="$direction"
   local pane_lifecycle_args=(--stacked)
   local vc_frame_bin=""
@@ -697,7 +696,6 @@ spawn_in_vc_frame_pane() {
   local launcher="$1"
   local pane_name="${2:-agent}"
   local direction="${VIBECRAFTED_VC_FRAME_SPAWN_DIRECTION:-$(spawn_pane_direction)}"
-  local launch_cmd="bash '$launcher'"
   local cmd_script
   local launch_lock=""
   local vc_frame_bin=""
@@ -803,7 +801,7 @@ spawn_await_status_is_active() {
 
 spawn_await_watch_pane() {
   vc_raise_launcher_limits
-  local run_tab_id="$1" run_tab_name="$2" worker_pane_name="$3"
+  local run_tab_id="$1" run_tab_name="$2"
   command -v jq >/dev/null 2>&1 || return 0
   [[ -n "${SPAWN_RUN_ID:-}" ]] || return 0
   [[ -n "${SPAWN_META:-}" && -f "${SPAWN_META:-}" ]] || return 0
@@ -850,7 +848,6 @@ spawn_in_operator_session() {
   local session_name=""
   local direction="${VIBECRAFTED_VC_FRAME_SPAWN_DIRECTION:-$(spawn_pane_direction)}"
   local effective_direction="$direction"
-  local launch_cmd="bash '$launcher'"
   local cmd_script
   local launch_lock=""
   local vc_frame_bin=""

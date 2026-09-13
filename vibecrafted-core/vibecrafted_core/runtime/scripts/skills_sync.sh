@@ -118,7 +118,7 @@ done
 }
 [[ -d "$repo_root" ]] || die "Repo root not found: $repo_root"
 
-# shellcheck disable=SC2016
+# shellcheck disable=SC2016  # written into rc files; expands at shell startup
 source_line='[[ -r "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh" ]] && source "${XDG_CONFIG_HOME:-$HOME/.config}/vetcoders/vc-skills.sh"'
 
 skills=()
@@ -155,13 +155,13 @@ if (( mirror )); then
 fi
 
 printf 'Syncing skills from %s to %s\n' "$repo_root" "$host"
-# shellcheck disable=SC2088,SC2016
+# shellcheck disable=SC2088,SC2016  # expands on the remote host over ssh
 remote_tools_target='$HOME/.local/share/vibecrafted/tools/vibecrafted-local'
-# shellcheck disable=SC2088,SC2016
+# shellcheck disable=SC2088,SC2016  # expands on the remote host over ssh
 remote_current_link='$HOME/.local/share/vibecrafted/tools/vibecrafted-current'
-# shellcheck disable=SC2088,SC2016
+# shellcheck disable=SC2088,SC2016  # expands on the remote host over ssh
 remote_package_target='$HOME/.local/share/vibecrafted/tools/vibecrafted-local/vibecrafted-core/vibecrafted_core/skills'
-# shellcheck disable=SC2088,SC2016
+# shellcheck disable=SC2088,SC2016  # expands on the remote host over ssh
 remote_shared_target='$HOME/.local/share/vibecrafted/tools/vibecrafted-current/vibecrafted-core/vibecrafted_core/skills'
 printf -- '-- canonical staged tools -> %s:%s\n' "$host" "$remote_shared_target"
 if (( dry_run )); then
@@ -249,7 +249,7 @@ if (( with_shell )); then
   shell_source="$repo_root/vibecrafted-core/vibecrafted_core/runtime/shell/vetcoders.sh"
   [[ -f "$shell_source" ]] || die "Shell helper file not found: $shell_source"
 
-  # shellcheck disable=SC2016
+  # shellcheck disable=SC2016  # expands on the remote host over ssh
   remote_config_root='${XDG_CONFIG_HOME:-$HOME/.config}'
   remote_helper_dir="$remote_config_root/vetcoders"
   remote_shell_target="$remote_helper_dir/vc-skills.sh"
@@ -275,7 +275,7 @@ if (( with_shell )); then
   fi
 
   if (( shell_no_zshrc )); then
-    # shellcheck disable=SC2016
+    # shellcheck disable=SC2016  # literal path shown to the operator
     printf 'Skipping remote $HOME/.zshrc update (--no-zshrc).\n'
   else
     remote_zshrc="\$HOME/.zshrc"
@@ -288,7 +288,7 @@ if (( with_shell )); then
   fi
 
   if (( shell_no_bashrc )); then
-    # shellcheck disable=SC2016
+    # shellcheck disable=SC2016  # literal path shown to the operator
     printf 'Skipping remote $HOME/.bashrc update (--no-bashrc).\n'
   else
     remote_bashrc="\$HOME/.bashrc"
