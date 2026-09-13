@@ -177,6 +177,7 @@ _vetcoders_host_agent_bin_dirs() {
   for dir in \
     "${home:+$home/.local/bin}" \
     "${home:+$home/.cargo/bin}" \
+    "${home:+$home/.kimi-code/bin}" \
     "${home:+$home/tools/scripts}" \
     /opt/homebrew/bin \
     /opt/homebrew/sbin \

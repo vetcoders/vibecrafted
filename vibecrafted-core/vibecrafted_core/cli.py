@@ -57,7 +57,7 @@ from .workflow import (
     resolve_session_selection,
 )
 
-AGENTS = {"claude", "codex", "agy", "junie", "grok", "cursor", "swarm"}
+AGENTS = {"claude", "codex", "agy", "junie", "grok", "cursor", "kimi", "swarm"}
 RESEARCH_ARITY = {"uno": 1, "duo": 2, "trio": 3}
 LAUNCHERS = (
     "audit",
