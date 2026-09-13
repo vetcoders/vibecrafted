@@ -20383,6 +20383,17 @@ def _stage_runtime_product_config(
     shutil.copy2(
         generation / "config/vc-terminal/interactive.zsh", terminal / "interactive.zsh"
     )
+    python_door = generation / "config/vc-terminal/bin"
+    if python_door.is_dir():
+        (terminal / "bin").mkdir(exist_ok=True)
+        for src in python_door.iterdir():
+            if (
+                src.is_file()
+                and not src.is_symlink()
+                and src.name in {"python", "python3"}
+            ):
+                shutil.copy2(src, terminal / "bin" / src.name)
+                (terminal / "bin" / src.name).chmod(0o755)
     (terminal / ".zshrc").write_text(
         'source "$HOME/.config/vibecrafted/vc-terminal/launch-primary-shell.zsh"\n',
         encoding="utf-8",

@@ -493,7 +493,7 @@ _NEEDS_GENERATION_PYTHON = pytest.mark.skipif(
 def test_product_shell_typed_python3_uses_generation_not_host(
     tmp_path: Path,
 ) -> None:
-    """Door PATH stays Founder's python3; typed python3 execs generation."""
+    """Door PATH stays off generation bin; python3 names exec generation."""
 
     _stage_product_profile(tmp_path)
     hostile_bin = tmp_path / "hostile-bin"
@@ -501,6 +501,7 @@ def test_product_shell_typed_python3_uses_generation_not_host(
     generation_python = tmp_path / "releases" / "4.3.1" / "bin" / "python3"
     generation_python.parent.mkdir(parents=True)
     generation_python.symlink_to(sys.executable)
+    door_python = tmp_path / ".config/vibecrafted/vc-terminal/bin/python3"
     result = _zsh_profile(
         tmp_path,
         (
@@ -509,6 +510,8 @@ def test_product_shell_typed_python3_uses_generation_not_host(
             'print -r -- "path_python3=$(whence -p python3)"; '
             'print -r -- "PATH=$PATH"; '
             'python3 -c "import sys; print(\\"used=\\" + sys.executable)"; '
+            'command python3 -c "import sys; print(\\"command_used=\\" + sys.executable)"; '
+            '/usr/bin/env python3 -c "import sys; print(\\"env_used=\\" + sys.executable)"; '
             "print -r -- READY"
         ),
         path=f"{hostile_bin}:/usr/bin:/bin",
@@ -521,16 +524,17 @@ def test_product_shell_typed_python3_uses_generation_not_host(
     assert "READY" in result.stdout
     assert "HOST_PYTHON_SELECTED" not in result.stdout + result.stderr
     assert "kind=python3: function" in result.stdout
-    assert f"path_python3={hostile_bin / 'python3'}" in result.stdout
-    assert str(generation_python.parent) not in result.stdout.split("PATH=", 1)[
-        1
-    ].splitlines()[0].split(":")
-    used = next(
-        line.split("used=", 1)[1]
-        for line in result.stdout.splitlines()
-        if line.startswith("used=")
-    )
-    assert Path(used).resolve() == Path(sys.executable).resolve()
+    assert f"path_python3={door_python}" in result.stdout
+    path_line = result.stdout.split("PATH=", 1)[1].splitlines()[0]
+    assert str(generation_python.parent) not in path_line.split(":")
+    assert str(door_python.parent) in path_line.split(":")
+    for key in ("used=", "command_used=", "env_used="):
+        used = next(
+            line.split(key, 1)[1]
+            for line in result.stdout.splitlines()
+            if line.startswith(key)
+        )
+        assert Path(used).resolve() == Path(sys.executable).resolve()
 
 
 def test_product_shell_typed_python3_refuses_host_without_generation(
@@ -546,12 +550,15 @@ def test_product_shell_typed_python3_refuses_host_without_generation(
         (
             'source "$HOME/.config/vibecrafted/vc-terminal/interactive.zsh"; '
             "python3 -c 'print(1)'; "
-            'print -r -- "missing_exit=$?"'
+            'print -r -- "missing_exit=$?"; '
+            "/usr/bin/env python3 -c 'print(1)'; "
+            'print -r -- "env_missing_exit=$?"'
         ),
         path=f"{hostile_bin}:/usr/bin:/bin",
     )
     assert missing.returncode == 0, missing.stderr
     assert "missing_exit=127" in missing.stdout
+    assert "env_missing_exit=127" in missing.stdout
     assert "HOST_PYTHON_SELECTED" not in missing.stdout + missing.stderr
     assert "VIBECRAFTED_PYTHON" in missing.stderr
     assert "3.9.6" in missing.stderr
