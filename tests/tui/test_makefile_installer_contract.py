@@ -365,9 +365,16 @@ def test_runtime_pack_cleanup_retries_without_overwriting_success(
     installer_text = (REPO_ROOT / "scripts/install-runtime-pack.sh").read_text(
         encoding="utf-8"
     )
-    cleanup_body = installer_text.split("cleanup() {", 1)[1].split(
-        "\n}\ntrap cleanup", 1
-    )[0]
+    # The function body ends at its own closing brace. `trap cleanup` no longer
+    # follows it directly: terminate_installer_child() sits in between (the
+    # TERM/INT/HUP owner, 5aab748f), so splitting on "\n}\ntrap cleanup" dragged
+    # top-level installer code (`$operation`) into the harness.
+    assert "\ncleanup() {\n" in installer_text
+    cleanup_body = installer_text.split("\ncleanup() {", 1)[1].split("\n}\n", 1)[0]
+    assert "terminate_installer_child" not in cleanup_body
+    assert 'rm -rf -- "$temporary"' in cleanup_body
+    # The installer still hands the real EXIT path to this very function.
+    assert "\ntrap cleanup EXIT\n" in installer_text
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
