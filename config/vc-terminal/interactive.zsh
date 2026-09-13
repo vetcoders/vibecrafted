@@ -228,6 +228,12 @@ if (( $+functions[_atuin_search] && $+functions[atuin-search] )); then
   (( ! $+functions[atuin-search-viins] )) || bindkey -M viins '^R' atuin-search-viins
   (( ! $+functions[atuin-search-vicmd] )) || bindkey -M vicmd '/' atuin-search-vicmd
 else
+  # These built-in history widgets are autoloaded rather than registered in a
+  # minimal `zsh -f` environment.  Register them before binding so the product
+  # shell retains real Up/Down history recall when Atuin is unavailable.
+  autoload -Uz up-line-or-beginning-search down-line-or-beginning-search
+  zle -N up-line-or-beginning-search
+  zle -N down-line-or-beginning-search
   bindkey '^[[A' up-line-or-beginning-search
   bindkey '^[OA' up-line-or-beginning-search
   bindkey '^[[B' down-line-or-beginning-search
