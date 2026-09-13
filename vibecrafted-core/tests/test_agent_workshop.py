@@ -158,8 +158,40 @@ def test_partner_operator_and_path_are_preserved_in_launch_argv(
     assert resume[-2:] == ["--root", str(tmp_path)]
 
 
+def _git_checkout(path: Path, origin: str | None) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    if origin is not None:
+        subprocess.run(
+            ["git", "-C", str(path), "remote", "add", "origin", origin], check=True
+        )
+    return path.resolve()
+
+
+def test_parent_picker_refuses_a_basename_guess_without_origin(
+    tmp_path: Path,
+) -> None:
+    workshop = _load()
+    root = _git_checkout(tmp_path / "shared-name", origin=None)
+
+    class ForbiddenChain(workshop.SessionChain):
+        def list_sessions(self, **kwargs: object) -> SimpleNamespace:
+            raise AssertionError(f"catalog queried without identity: {kwargs}")
+
+    choices, reason = workshop.parent_session_choices(
+        "claude", root, chain=ForbiddenChain()
+    )
+
+    assert choices == []
+    assert "no canonical owner/repo for shared-name" in reason
+
+
 def test_parent_picker_uses_canonical_session_catalog(tmp_path: Path) -> None:
     workshop = _load()
+    tmp_path = _git_checkout(
+        tmp_path / "workshop-parent",
+        origin="https://github.com/Fixture/workshop-parent.git",
+    )
     older = workshop.SessionRecord(
         session_id="older-session",
         agent="claude",
@@ -175,7 +207,7 @@ def test_parent_picker_uses_canonical_session_catalog(tmp_path: Path) -> None:
 
     class FakeChain(workshop.SessionChain):
         def list_sessions(self, **kwargs: object) -> SimpleNamespace:
-            assert kwargs["project"] == f"/{tmp_path.name}"
+            assert kwargs["project"] == "Fixture/workshop-parent"
             assert kwargs["root"] == tmp_path
             assert kwargs["agent"] == "claude"
             return SimpleNamespace(
