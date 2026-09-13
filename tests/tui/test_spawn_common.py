@@ -749,6 +749,11 @@ def test_terminal_spawn_refuses_osascript_fallback_when_vc_frame_fails(
             set -euo pipefail
             export HOME="{home}"
             export PATH="{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
+            # The degraded path detaches through spawn_python_bin (util.sh,
+            # bfbd1309), which fails closed on macOS /usr/bin/python3 3.9.
+            # Pin the owner to the test interpreter so this PATH cannot
+            # select the host python.
+            export VIBECRAFTED_PYTHON="{sys.executable}"
             export VC_FRAME_CAPTURE="{vc_frame_capture}"
             export OSA_CAPTURE="{osa_capture}"
             export VIBECRAFTED_OPERATOR_SESSION="operator-session"
@@ -2251,16 +2256,15 @@ def test_vc_resume_can_infer_agent_from_session_meta(tmp_path: Path) -> None:
 
     assert "MANUAL EXPLICIT RESUME RECEIPT" in result.stdout
     assert "agent_session_id:   sess-abc-123" in result.stdout
+    # Native continuation (marbles.sh, 5b25a6cd): core resolves the checkout
+    # and its own source, so an undeclared resume names neither --root/--repo
+    # nor --source-dir; the inferred agent is the only routing the shell adds.
     assert _read_nul_argv(core_argv) == [
         "resume-session",
         "codex",
         "--agent-session-id",
         "sess-abc-123",
         "--prompt-stdin",
-        "--root",
-        str(REPO_ROOT),
-        "--source-dir",
-        str(core_source),
     ]
     assert core_prompt.read_text(encoding="utf-8") == "hello"
     assert not provider_called.exists()
