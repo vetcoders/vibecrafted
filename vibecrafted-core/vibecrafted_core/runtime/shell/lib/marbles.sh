@@ -209,7 +209,12 @@ _vetcoders_core_python_spec() {
 
 _vetcoders_run_core_cli() {
   local python_spec py import_root
-  python_spec="$(_vetcoders_core_python_spec)" || return 1
+  # The owned interpreter/import-root lookups can fail without a word; every
+  # tracked route (resume-session, workflow) must still say why it refused.
+  python_spec="$(_vetcoders_core_python_spec)" || {
+    echo "Vibecrafted core is unavailable: no owned interpreter imports vibecrafted_core." >&2
+    return 1
+  }
   py="${python_spec%%$'\t'*}"
   import_root="${python_spec#*$'\t'}"
   if [[ -n "$import_root" ]]; then
@@ -244,19 +249,6 @@ from vibecrafted_core.cursor_admission import cursor_permission_flag_string
 
 print(cursor_permission_flag_string(timeout=float(sys.argv[1])))
 PY
-  fi
-}
-
-_vetcoders_core_source_dir() {
-  local python_spec py import_root
-  python_spec="$(_vetcoders_core_python_spec)" || return 1
-  py="${python_spec%%$'\t'*}"
-  import_root="${python_spec#*$'\t'}"
-  if [[ -n "$import_root" ]]; then
-    PYTHONPATH="$import_root" \
-      "$py" -c 'from vibecrafted_core.package_resources import package_root; print(package_root())'
-  else
-    "$py" -c 'from vibecrafted_core.package_resources import package_root; print(package_root())'
   fi
 }
 
@@ -389,48 +381,6 @@ _vetcoders_fresh_session_command() {
       return 1
       ;;
   esac
-}
-
-_vetcoders_launch_tracked_resume() {
-  local tool="$1"
-  local agent_session_id="$2"
-  local prompt_text="$3"
-  local model="${4:-}"
-  local root_dir source_dir
-  local -a core_args
-  root_dir="${_vetcoders_contract_root:-$(_vetcoders_repo_root)}"
-  source_dir="$(_vetcoders_core_source_dir)" || {
-    echo "Tracked resume refused: Vibecrafted core is unavailable." >&2
-    return 1
-  }
-  [[ -n "$prompt_text" ]] || {
-    echo "Tracked resume requires explicit input or an AICX continuity pack." >&2
-    return 1
-  }
-
-  if [[ -n "$agent_session_id" ]]; then
-    core_args=(
-      resume-session "$tool"
-      --agent-session-id "$agent_session_id"
-      --prompt-stdin
-      --root "$root_dir"
-      --source-dir "$source_dir"
-    )
-    [[ -n "$model" ]] && core_args+=(--model "$model")
-    printf '%s' "$prompt_text" | _vetcoders_run_core_cli "${core_args[@]}"
-    return $?
-  fi
-
-  core_args=(
-    workflow "$tool"
-    --prompt-stdin
-    --runtime headless
-    --root "$root_dir"
-    --source-dir "$source_dir"
-    --mode resume-new-session
-  )
-  [[ -n "$model" ]] && core_args+=(--model "$model")
-  printf '%s' "$prompt_text" | _vetcoders_run_core_cli "${core_args[@]}"
 }
 
 _vetcoders_looks_like_run_id() {
