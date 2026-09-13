@@ -17,6 +17,16 @@ from typing import Any
 from vibecrafted_core import product_contract as contract
 from vibecrafted_core import runtime_pack_contract
 
+# Product code whose kind the walker must not have to guess. Every declared
+# vc-terminal.app is named from the contract's own tuple, so adding a payload
+# that carries the bundle cannot leave its executable inventoried as a resource.
+_DECLARED_CODE = {
+    "Contents/Helpers/vc-frame",
+    "Contents/Resources/runtime/bin/vc-start",
+    "Contents/Resources/runtime/libexec/prview",
+    *(f"{bundle}/Contents/MacOS/alacritty" for bundle in contract.TERMINAL_APP_BUNDLES),
+}
+
 
 def _write(path: Path, payload: dict[str, Any], *, canonical: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -31,12 +41,7 @@ def _write(path: Path, payload: dict[str, Any], *, canonical: bool = False) -> N
 def _entry(root: Path, relative: str, *, kind: str | None = None) -> dict[str, Any]:
     path = root / relative
     if kind is None:
-        if relative in {
-            "Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty",
-            "Contents/Helpers/vc-frame",
-            "Contents/Resources/runtime/bin/vc-start",
-            "Contents/Resources/runtime/libexec/prview",
-        }:
+        if relative in _DECLARED_CODE:
             kind = "executable"
         elif path.suffix == ".dylib":
             kind = "dylib"
@@ -175,12 +180,15 @@ def produce_app(args: argparse.Namespace) -> None:
     for path in sorted(app.rglob("*")):
         relative = path.relative_to(app)
         relative_text = relative.as_posix()
+        # Not "anything called _CodeSignature": that blanket rule would also
+        # exempt an undeclared nested bundle from ever being inventoried, and
+        # the verifier would then be arguing with a manifest that never named
+        # it. Ask the contract for the exact paths the signer owns.
         if (
             not path.is_file()
             or path.is_symlink()
             or relative_text in excluded
-            or "Contents/_CodeSignature" in relative_text
-            or relative.name == "CodeResources"
+            or contract.is_signature_inventory_artifact(relative_text)
         ):
             continue
         files.append(_entry(app, relative_text))
