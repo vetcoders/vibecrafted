@@ -304,6 +304,12 @@ def _agent_label(pane: dict[str, Any]) -> str:
 
 
 def _pane_liveness(pane: dict[str, Any]) -> str:
+    # vc-frame's public list-panes schema explicitly carries `exited` even
+    # when it does not serialize a separate lifecycle/state field.  A false
+    # value means the pane is presently running; it is intentionally only pane
+    # truth, not a claim that the provider child is still running.
+    if pane.get("exited") is False:
+        return "active"
     if pane.get("exited") is True or pane.get("exit_status") is not None:
         return "inactive"
     state = (
@@ -437,19 +443,21 @@ def _dim_unavailable_choices(
     col: int,
     choices: tuple[str, ...],
     available: tuple[bool, ...],
+    selected: int,
     end_col: int,
 ) -> None:
     """Redraw disabled choice tokens with terminal-native dim styling."""
-    for token, enabled in zip(
-        _choice_tokens(choices, selected=-1, available=available),
-        available,
-        strict=True,
-    ):
-        if col >= end_col:
-            return
+    tokens = _choice_tokens(choices, selected=selected, available=available)
+    # The base line clips the *whole* token sequence.  Slice that same rendered
+    # sequence before applying dim attributes so a trailing disabled token cannot
+    # overwrite its ellipsis or drift relative to a selected bullet.
+    visible = _clip(" ".join(tokens), end_col - col)
+    offset = 0
+    for token, enabled in zip(tokens, available, strict=True):
+        fragment = visible[offset : offset + len(token)]
         if not enabled:
-            _safe_addstr(window, row, col, _clip(token, end_col - col), curses.A_DIM)
-        col += len(token) + 1
+            _safe_addstr(window, row, col + offset, fragment, curses.A_DIM)
+        offset += len(token) + 1
 
 
 def _choice_tokens(
@@ -697,6 +705,7 @@ class Workshop:
             left + 2 + len("  mode     "),
             LAUNCH_MODES,
             mode_available,
+            self.launch_mode,
             left + card_width - 2,
         )
         _dim_unavailable_choices(
@@ -705,6 +714,7 @@ class Workshop:
             left + 2 + len("  runtime  "),
             RUNTIME_POLICIES,
             runtime_available,
+            self.runtime,
             left + card_width - 2,
         )
         _dim_unavailable_choices(
@@ -713,6 +723,7 @@ class Workshop:
             left + 2 + len("  memory   "),
             CONTINUITY_MODES,
             continuity_available,
+            self.continuity,
             left + card_width - 2,
         )
         _dim_unavailable_choices(
@@ -721,6 +732,7 @@ class Workshop:
             left + 2 + len("  permits  "),
             PERMISSION_POLICIES,
             permission_available,
+            self.permissions,
             left + card_width - 2,
         )
         runtime_help = RUNTIME_HELP[RUNTIME_POLICIES[self.runtime]]
