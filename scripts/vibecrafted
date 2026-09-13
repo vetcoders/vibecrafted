@@ -6185,7 +6185,10 @@ cmd_fork() {
   _vetcoders_enter_admitted_interactive fork "$command_text" || admission_status=$?
   case "$admission_status" in 0) return 0 ;; 1) return 1 ;; esac
   root_dir="$_vetcoders_contract_root"
-  if ! _vetcoders_in_vc_frame; then
+  # A stale Frame marker is the environment's claim, not a surface: only an
+  # engine-confirmed pane may host the same-tab fork (fac246a7). Anything else
+  # declares the repository workspace instead of asking a dead session for a pane.
+  if ! _vetcoders_in_vc_frame || ! _vetcoders_has_usable_vc_frame_surface; then
     if [[ "$runtime" == terminal ]]; then
       _vetcoders_init_in_current_terminal "$agent" "$command_text" plain fork
     else
