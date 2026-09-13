@@ -150,7 +150,7 @@ _vetcoders_marbles() {
 _vetcoders_aicx_resume_fallback() {
   local agent="$1"
   local root="${2:-$(_vetcoders_repo_root)}"
-  local hours="${VIBECRAFTED_RESUME_AICX_HOURS:-48}"
+  local hours="${VIBECRAFTED_RESUME_AICX_HOURS:-96}"
   local tmp_dir context_file meta_file aicx_bin python_spec py import_root module source_dir
   aicx_bin="$(_vetcoders_aicx_bin 2>/dev/null)" || {
     echo "aicx foundation not found in the Vibecrafted runtime, ~/.local/bin, ~/.cargo/bin, or PATH." >&2
@@ -459,7 +459,12 @@ _vetcoders_resume_agent() {
   shift
   # Keep the caller's public vector for a possible no-TTY handoff. The parsed
   # contract projection intentionally does not retain every public spelling.
-  local -a _vetcoders_resume_public_argv=("$@")
+  # Bash 3.2 with `set -u` rejects an empty declared-array expansion. Keep an
+  # actually empty public vector empty; it must not become one blank argument.
+  local -a _vetcoders_resume_public_argv
+  if (( $# )); then
+    _vetcoders_resume_public_argv=("$@")
+  fi
   local _vetcoders_contract_allow_model=1
   local _vetcoders_contract_single_prompt=1
   _vetcoders_parse_contract "$@" || return 1
@@ -628,18 +633,22 @@ _vetcoders_resume_agent() {
   # each side effect exactly once.
   local runtime="${_vetcoders_contract_runtime:-terminal}"
   local _resume_terminal_admission=0
-  _vetcoders_declaration_escalate_if_needed resume "$tool" \
-    "${_vetcoders_resume_public_argv[@]}" || _resume_terminal_admission=$?
+  if (( ${#_vetcoders_resume_public_argv[@]} )); then
+    _vetcoders_declaration_escalate_if_needed resume "$tool" \
+      "${_vetcoders_resume_public_argv[@]}" || _resume_terminal_admission=$?
+  else
+    _vetcoders_declaration_escalate_if_needed resume "$tool" || _resume_terminal_admission=$?
+  fi
   case "$_resume_terminal_admission" in 0) return 0 ;; 1) return 1 ;; esac
 
   local aicx_fallback_mode=""
   local aicx_context_file=""
   if [[ -z "$_vetcoders_contract_session" && -z "${_vetcoders_contract_run_id:-}${_vetcoders_contract_last:-}" && -z "$resume_explicit_input" ]]; then
-    # No session id: compose multi-agent continuity from AICX (48h default).
+    # No session id: compose project intentions plus supplementary continuity.
     local root_dir fallback_lines
     root_dir="${_vetcoders_contract_root:-$(_vetcoders_repo_root)}"
     printf 'No --session: assembling AICX multi-agent continuity (last %sh)...\n' \
-      "${VIBECRAFTED_RESUME_AICX_HOURS:-48}" >&2
+      "${VIBECRAFTED_RESUME_AICX_HOURS:-96}" >&2
     fallback_lines="$(_vetcoders_aicx_resume_fallback "$tool" "$root_dir")" || return 1
     local line key val
     while IFS= read -r line; do
@@ -665,7 +674,7 @@ _vetcoders_resume_agent() {
       fi
       _vetcoders_contract_file="$aicx_context_file"
       printf '  context: %s\n' "$aicx_context_file" >&2
-      printf '  NEW session with continuity pack (no implicit native attach)\n' >&2
+      printf '  NEW session with project intentions (no implicit native attach)\n' >&2
     fi
     aicx_fallback_mode="new_session"
   fi
@@ -700,7 +709,7 @@ _vetcoders_resume_agent() {
       if [[ -n "$_vetcoders_contract_session" ]]; then
         printf '  session: %s\n' "$_vetcoders_contract_session"
       else
-        printf '  session: (new — aicx 48h multi-agent continuity)\n'
+        printf '  session: (new — aicx %sh project intentions)\n' "${VIBECRAFTED_RESUME_AICX_HOURS:-96}"
       fi
       [[ -n "$aicx_fallback_mode" ]] && printf '  mode:    %s\n' "$aicx_fallback_mode"
       [[ -n "$aicx_context_file" ]] && printf '  pack:    %s\n' "$aicx_context_file"
@@ -880,7 +889,7 @@ vc-resume() {
   local tool="${1:-}"
   [[ -n "$tool" ]] || {
     echo "Usage: vc-resume <claude|codex|agy|junie|grok|cursor> [<session_id>] [prompt ...] | --session <session_id> [--prompt <text>] [--file <path>]" >&2
-    echo "  Without --session: NEW interactive session + AICX continuity pack (last ${VIBECRAFTED_RESUME_AICX_HOURS:-48}h). Never native attach." >&2
+    echo "  Without --session: NEW interactive session + AICX project intentions (last ${VIBECRAFTED_RESUME_AICX_HOURS:-96}h). Never native attach." >&2
     return 1
   }
   if [[ "$tool" == "--session" ]]; then
