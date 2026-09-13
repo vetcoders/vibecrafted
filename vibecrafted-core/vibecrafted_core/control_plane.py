@@ -2859,6 +2859,26 @@ def _select_run(snapshot: dict[str, Any], run_id: str) -> dict[str, Any] | None:
     return None
 
 
+_BARE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def bare_run_id(run_id: str) -> str:
+    """Return ``run_id`` only when it is a bare, filesystem-safe token, else ''.
+
+    Run ids reach the bounded lookups below from registry records the control
+    plane does not own end to end. A single-segment token keeps ``<dir>/<id>``
+    joins inside their directory: no separators, no drive letters, no leading
+    dot, so ``..`` and absolute paths can never be composed.
+    """
+    target = str(run_id or "").strip()
+    if not _BARE_RUN_ID_RE.match(target):
+        return ""
+    separators = {os.sep, os.altsep, "/", "\\"} - {None, ""}
+    if any(separator in target for separator in separators):
+        return ""
+    return target
+
+
 def lookup_run_snapshot(run_id: str) -> dict[str, Any] | None:
     """Read one already-projected run snapshot without rebuilding the board.
 
@@ -2866,8 +2886,13 @@ def lookup_run_snapshot(run_id: str) -> dict[str, Any] | None:
     need durable, already-known run facts must not turn a registry-maintenance
     pass into an artifact discovery walk. A missing snapshot is unknown, not
     evidence that a legacy run is terminal.
+
+    A projection is also not the last word on liveness: it can lag behind the
+    canonical runtime record (see :func:`lookup_runtime_run_meta`), so callers
+    deciding to *delete* a claim must corroborate a terminal projection instead
+    of trusting it alone.
     """
-    target = str(run_id or "").strip()
+    target = bare_run_id(run_id)
     if not target:
         return None
     payload = _read_json(_snapshot_path(target))
@@ -2877,6 +2902,29 @@ def lookup_run_snapshot(run_id: str) -> dict[str, Any] | None:
     if str(archived.get("run_id") or "") == target:
         return archived
     return None
+
+
+def lookup_runtime_run_meta(run_id: str) -> dict[str, Any] | None:
+    """Read one run's canonical runtime meta directly; no sync, no discovery.
+
+    ``runtime_runs/<run_id>/meta.json`` is what the dispatcher and the worker
+    supervisor actually write, so it leads the ``runs/<run_id>.json``
+    projection. Three distinguishable answers, because callers must be able to
+    tell absence from doubt:
+
+    * ``None`` — no canonical runtime record exists for this id (nothing to
+      contradict a projection).
+    * ``{}`` — the record exists but could not be read as an object (doubt).
+    * payload — the canonical facts.
+    """
+    target = bare_run_id(run_id)
+    if not target:
+        return None
+    run_dir = _runtime_runs_dir() / target
+    if not run_dir.is_dir():
+        return None
+    payload = _read_json(run_dir / "meta.json")
+    return payload if isinstance(payload, dict) else {}
 
 
 # Fields that drift between consecutive sync_state() passes without
