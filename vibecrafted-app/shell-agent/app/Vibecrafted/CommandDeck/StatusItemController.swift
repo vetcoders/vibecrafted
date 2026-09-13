@@ -116,8 +116,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     super.init()
   }
 
-  var isInstalled: Bool { statusItem != nil }
-
   /// Install the one shell status item. Idempotent.
   func install() {
     guard statusItem == nil else {

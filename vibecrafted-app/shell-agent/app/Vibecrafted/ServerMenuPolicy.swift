@@ -35,10 +35,6 @@ struct ServerNavigationState {
   let server: URL?
   let workspaces: URL?
   let unavailableReason: String?
-
-  var isAvailable: Bool {
-    server != nil && workspaces != nil
-  }
 }
 
 /// The `vibecrafted.caretaker.v1` envelope as the tray consumes it. Every
