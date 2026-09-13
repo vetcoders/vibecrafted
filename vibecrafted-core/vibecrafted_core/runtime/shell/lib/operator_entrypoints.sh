@@ -62,7 +62,7 @@ _vetcoders_skill_init() {
   # the agent itself, so run it right here in the caller's terminal. A fresh
   # install without vc-frame must not dead-end on "run vc-start first" when
   # vc-start needs the very same binary.
-  if [[ "$runtime" == "plain" ]]; then
+  if [[ "$runtime" == "plain" ]] || ! _vetcoders_vc_frame_bin >/dev/null; then
     _vetcoders_init_in_current_terminal "$tool" "$command_text" "$runtime" "init"
     return
   fi
@@ -177,7 +177,7 @@ _vetcoders_skill_partner() {
   _vetcoders_enter_admitted_interactive partner "$command_text" || escalation=$?
   case "$escalation" in 0) return 0 ;; 1) return 1 ;; esac
 
-  if [[ "$runtime" == "plain" ]]; then
+  if [[ "$runtime" == "plain" ]] || ! _vetcoders_vc_frame_bin >/dev/null; then
     _vetcoders_init_in_current_terminal "$tool" "$command_text" "$runtime" "partner"
     return
   fi
