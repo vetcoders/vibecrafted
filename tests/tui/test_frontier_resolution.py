@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import shutil
@@ -9,6 +10,16 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_VC_FRAME_CONFIG = (
+    REPO_ROOT / "vibecrafted-core" / "vibecrafted_core" / "config" / "vc-frame"
+)
+
+_GENERATION_FIXTURE_SPEC = importlib.util.spec_from_file_location(
+    "tui_generation_fixture", Path(__file__).with_name("_generation_fixture.py")
+)
+assert _GENERATION_FIXTURE_SPEC is not None and _GENERATION_FIXTURE_SPEC.loader
+gen = importlib.util.module_from_spec(_GENERATION_FIXTURE_SPEC)
+_GENERATION_FIXTURE_SPEC.loader.exec_module(gen)
 HELPER_SCRIPT = (
     REPO_ROOT
     / "vibecrafted-core"
@@ -134,6 +145,12 @@ def test_shell_helper_prefers_current_control_plane_over_home_store(
     env["HOME"] = str(home)
     env.pop("VIBECRAFTED_ROOT", None)
 
+    # 65c7db7a (core.sh `_vetcoders_source_runtime_helpers`): the sourced facade
+    # binds VIBECRAFTED_ROOT to its own physical owner, and an owner that is a
+    # checkout or generation (it carries VERSION) answers with its own runtime
+    # before any store is ranked. Neither the installed current store nor the
+    # stale home store can capture a facade loaded from this checkout, whatever
+    # the caller's cwd.
     result = subprocess.run(
         [
             "bash",
@@ -147,7 +164,42 @@ def test_shell_helper_prefers_current_control_plane_over_home_store(
         text=True,
     )
 
-    assert result.stdout.strip() == str(current_store)
+    assert result.stdout.strip() == str(
+        REPO_ROOT / "vibecrafted-core" / "vibecrafted_core" / "runtime"
+    )
+
+    # The store ranking itself is unchanged for an owner without VERSION
+    # (runtime/helpers/vetcoders-runtime-core.sh `_vetcoders_spawn_home`): the
+    # installed current control plane still beats the stale home store.
+    runtime_helper = (
+        REPO_ROOT
+        / "vibecrafted-core"
+        / "vibecrafted_core"
+        / "runtime"
+        / "helpers"
+        / "vetcoders-runtime-core.sh"
+    )
+    storeless_owner = tmp_path / "storeless-owner"
+    storeless_owner.mkdir()
+    ranked = subprocess.run(
+        [
+            "bash",
+            "-lc",
+            (
+                f'source "{runtime_helper}"; '
+                f'export VIBECRAFTED_ROOT="{storeless_owner}"; '
+                "_vetcoders_spawn_home codex"
+            ),
+        ],
+        check=True,
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert not (storeless_owner / "VERSION").exists()
+    assert ranked.stdout.strip() == str(current_store)
 
 
 def test_vc_frontier_paths_mix_repo_prompt_with_companion_vc_frame(
@@ -168,27 +220,52 @@ def test_vc_frontier_paths_mix_repo_prompt_with_companion_vc_frame(
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env.pop("STARSHIP_CONFIG", None)
     env.pop("VC_FRAME_CONFIG_DIR", None)
+    env.pop("VIBECRAFTED_PREFER_REPO_VC_FRAME", None)
 
-    result = subprocess.run(
-        ["bash", "-lc", f'source "{HELPER_SCRIPT}"; vc-frontier-paths'],
-        check=True,
-        cwd=REPO_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-    )
+    def frontier_paths() -> str:
+        return subprocess.run(
+            ["bash", "-lc", f'source "{HELPER_SCRIPT}"; vc-frontier-paths'],
+            check=True,
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+        ).stdout
 
-    assert f"STARSHIP_CONFIG={REPO_ROOT / 'config' / 'starship.toml'}" in result.stdout
+    # Prompt/history presets keep their independent frontier resolution, so the
+    # repo-owned Starship/Atuin files still mix in. Frame config does not
+    # (3d9da4dc, frontier.sh `_vetcoders_frontier_file` vc-frame/* branch): it is
+    # read only from the pinned product home, so the companion's vc-frame/ alone
+    # yields no VC_FRAME_CONFIG_DIR at all...
+    companion_only = frontier_paths()
+    assert f"STARSHIP_CONFIG={REPO_ROOT / 'config' / 'starship.toml'}" in companion_only
     assert (
         f"ATUIN_CONFIG={REPO_ROOT / 'config' / 'atuin' / 'config.toml'}"
-        in result.stdout
+        in companion_only
     )
-    assert f"VC_FRAME_CONFIG_DIR={vc_frame_config.parent}" in result.stdout
+    assert "VC_FRAME_CONFIG_DIR=" not in companion_only
+    assert str(vc_frame_config.parent) not in companion_only
+
+    # ...and once the installer-owned product config exists, it is the answer.
+    product_config = gen.install_product_vc_frame_config(home)
+    installed = frontier_paths()
+    assert f"STARSHIP_CONFIG={REPO_ROOT / 'config' / 'starship.toml'}" in installed
+    assert f"VC_FRAME_CONFIG_DIR={product_config}\n" in installed
+    assert str(vc_frame_config.parent) not in installed
 
 
 def test_vc_dashboard_mixes_companion_vc_frame_config_with_repo_layout(
     tmp_path: Path,
 ) -> None:
+    """The repo layout now arrives with the repo's own Frame config.
+
+    Developer mode (VIBECRAFTED_PREFER_REPO_VC_FRAME=1 on this Git checkout) is
+    the one remaining route to the checkout's layouts, and it pins
+    VC_FRAME_CONFIG_DIR to the SAME owner (frontier.sh
+    `_vetcoders_vc_frame_config_dir`, 3d9da4dc: "Frame assets all come from the
+    selected product view (or explicit source entry)"). A companion vc-frame/
+    config is no longer mixed in with that layout.
+    """
     home = tmp_path / "home"
     xdg_config_home = tmp_path / "xdg"
     fake_bin = tmp_path / "bin"
@@ -209,6 +286,7 @@ def test_vc_dashboard_mixes_companion_vc_frame_config_with_repo_layout(
     env["XDG_CONFIG_HOME"] = str(xdg_config_home)
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env["CAPTURE_FILE"] = str(capture_file)
+    env.update(gen.developer_mode_env(fake_bin / "vc-frame"))
     env.pop("VC_FRAME_CONFIG_DIR", None)
     env.pop("VC_FRAME", None)
     env.pop("VC_FRAME_PANE_ID", None)
@@ -229,19 +307,9 @@ def test_vc_dashboard_mixes_companion_vc_frame_config_with_repo_layout(
     assert _expected_operator_session() in payload
     assert f"{_expected_operator_session()}-marbles" not in payload
     assert "--new-session-with-layout" in payload
-    assert (
-        str(
-            REPO_ROOT
-            / "vibecrafted-core"
-            / "vibecrafted_core"
-            / "config"
-            / "vc-frame"
-            / "layouts"
-            / "marbles.kdl"
-        )
-        in payload
-    )
-    assert f"VC_FRAME_CONFIG_DIR={vc_frame_config.parent}" in payload
+    assert str(REPO_VC_FRAME_CONFIG / "layouts" / "marbles.kdl") in payload
+    assert f"VC_FRAME_CONFIG_DIR={REPO_VC_FRAME_CONFIG}" in payload
+    assert not any(str(vc_frame_config.parent) in line for line in payload)
 
 
 def test_vc_dashboard_uses_place_session_without_layout_suffix(
@@ -268,6 +336,9 @@ def test_vc_dashboard_uses_place_session_without_layout_suffix(
     env["XDG_CONFIG_HOME"] = str(xdg_config_home)
     env["VIBECRAFTED_ROOT"] = str(REPO_ROOT)
     env["CAPTURE_FILE"] = str(capture_file)
+    # The engine is no longer found on PATH; developer mode on this checkout
+    # names it explicitly and supplies the checkout's marbles layout (3d9da4dc).
+    env.update(gen.developer_mode_env(fake_bin / "vc-frame"))
     env["VIBECRAFTED_RUN_ID"] = "marb-014520"
     env.pop("VC_FRAME_CONFIG_DIR", None)
     env.pop("VC_FRAME", None)
@@ -468,6 +539,7 @@ def test_sourcing_helper_exports_frontier_sidecars_per_asset(
     env.pop("STARSHIP_CONFIG", None)
     env.pop("ATUIN_CONFIG", None)
     env.pop("VC_FRAME_CONFIG_DIR", None)
+    env.pop("VIBECRAFTED_PREFER_REPO_VC_FRAME", None)
 
     result = subprocess.run(
         [
@@ -492,7 +564,13 @@ def test_sourcing_helper_exports_frontier_sidecars_per_asset(
         f"ATUIN_CONFIG={REPO_ROOT / 'config' / 'atuin' / 'config.toml'}"
         in result.stdout
     )
-    assert f"VC_FRAME_CONFIG_DIR={vc_frame_config.parent}" in result.stdout
+    # Per-asset resolution still applies to Starship/Atuin. vc-frame is no
+    # longer one of those assets: its config dir is pinned to the product home
+    # (frontier.sh `_vetcoders_pin_vc_frame_config_dir`, 3d9da4dc) and the
+    # companion's vc-frame/ is ignored.
+    product_config = gen.product_vc_frame_config_dir(home)
+    assert f"VC_FRAME_CONFIG_DIR={product_config}\n" in result.stdout
+    assert str(vc_frame_config.parent) not in result.stdout
 
 
 def test_frontier_install_dry_run_stages_host_sidecars_without_global_takeover(
