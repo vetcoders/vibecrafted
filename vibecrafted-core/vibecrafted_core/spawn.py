@@ -491,6 +491,7 @@ def _materialize_continuity(
     if policy.mode != "full-lineage":
         return ContinuityMaterial(policy=policy, prompt=prompt)
     from .aicx_session_chain import (
+        DEFAULT_RESUME_AICX_HOURS,
         CliSessionChain,
         assemble_resume_continuity_pack,
         pack_contains_recover_instruction,
@@ -531,7 +532,7 @@ def _materialize_continuity(
     pack = assemble_resume_continuity_pack(
         agent=provider,
         root=root,
-        hours=48,
+        hours=DEFAULT_RESUME_AICX_HOURS,
         context_file=context_path,
         meta_file=meta_path,
         chain=CliSessionChain(aicx_bin),
