@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 
 def _generation_python_candidates() -> list[str]:
@@ -129,8 +129,8 @@ RUNTIME_HELP = {
         "Shared checkout, no worktrees — for deliberate control.",
     ),
     "local-worktrees": (
-        "Safe recommended local default; one canonical worktree per Agent launch.",
-        "Maximum local concurrency; unattended pipelines require an Operator Agent via --operator auto or claude.",
+        "One canonical worktree per Agent launch when its admission proof is available.",
+        "Requires a verified live child-usage source; otherwise select local-native.",
     ),
     "local-vm": (
         "Coming in H2b3; disabled until selected-workspace container launch and live proof exist.",
@@ -286,25 +286,62 @@ def _pane_rows(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
-def agent_faces_from_payload(payload: Any) -> list[str]:
-    """Project vc-frame's pane JSON into human-facing Agents-tab faces."""
+class AgentPresence(NamedTuple):
+    """State-aware projection of agent panes; unknown is never counted active."""
+
+    active: tuple[str, ...]
+    unknown: tuple[str, ...]
+
+
+def _agent_label(pane: dict[str, Any]) -> str:
+    title = str(
+        pane.get("pane_title") or pane.get("title") or pane.get("name") or ""
+    ).strip()
+    # Pane titles are the public identity contract.  Do not project raw commands
+    # (which can contain prompts or private paths) and do not count shells.
+    identity = title.split(" · ", 1)[0].casefold()
+    return title if title and identity in AGENTS else ""
+
+
+def _pane_liveness(pane: dict[str, Any]) -> str:
+    if pane.get("exited") is True or pane.get("exit_status") is not None:
+        return "inactive"
+    state = (
+        str(pane.get("state") or pane.get("lifecycle") or pane.get("status") or "")
+        .strip()
+        .casefold()
+    )
+    if state in {"running", "active", "alive", "connected"}:
+        return "active"
+    if state in {"exited", "closed", "dead", "terminated", "failed"}:
+        return "inactive"
+    return "unknown"
+
+
+def agent_presence_from_payload(payload: Any) -> AgentPresence:
+    """Project Agents-tab panes without inventing liveness from a title."""
     faces: list[str] = []
+    unknown: list[str] = []
     for pane in _pane_rows(payload):
         if pane.get("is_plugin"):
             continue
         tab_name = str(pane.get("tab_name") or pane.get("tab") or "")
         if tab_name and tab_name.casefold() != "agents":
             continue
-        title = str(
-            pane.get("pane_title") or pane.get("title") or pane.get("name") or ""
-        )
-        command = str(pane.get("command") or pane.get("pane_command") or "")
-        label = title.strip() or Path(command).name.strip()
-        if not label or label.casefold() in {"agent workspaces", "new agent"}:
+        label = _agent_label(pane)
+        if not label:
             continue
-        if label not in faces:
+        liveness = _pane_liveness(pane)
+        if liveness == "active":
             faces.append(label)
-    return faces
+        elif liveness == "unknown":
+            unknown.append(label)
+    return AgentPresence(tuple(faces), tuple(unknown))
+
+
+def agent_faces_from_payload(payload: Any) -> list[str]:
+    """Backward-compatible active-agent-only view for the dashboard."""
+    return list(agent_presence_from_payload(payload).active)
 
 
 def current_faces() -> list[str]:
@@ -329,6 +366,30 @@ def current_faces() -> list[str]:
         return agent_faces_from_payload(json.loads(result.stdout))
     except (FileNotFoundError, json.JSONDecodeError, subprocess.TimeoutExpired):
         return []
+
+
+def current_agent_presence() -> AgentPresence:
+    try:
+        result = subprocess.run(
+            [
+                "vc-frame",
+                "action",
+                "list-panes",
+                "--json",
+                "--state",
+                "--tab",
+                "--command",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+        )
+        if result.returncode != 0:
+            return AgentPresence((), ())
+        return agent_presence_from_payload(json.loads(result.stdout))
+    except (FileNotFoundError, json.JSONDecodeError, subprocess.TimeoutExpired):
+        return AgentPresence((), ())
 
 
 # Curses pair 0 is COLOR_BLACK. Signed palettes put purple-navy `#26233a` in
@@ -376,6 +437,7 @@ def _dim_unavailable_choices(
     col: int,
     choices: tuple[str, ...],
     available: tuple[bool, ...],
+    end_col: int,
 ) -> None:
     """Redraw disabled choice tokens with terminal-native dim styling."""
     for token, enabled in zip(
@@ -383,8 +445,10 @@ def _dim_unavailable_choices(
         available,
         strict=True,
     ):
+        if col >= end_col:
+            return
         if not enabled:
-            _safe_addstr(window, row, col, token, curses.A_DIM)
+            _safe_addstr(window, row, col, _clip(token, end_col - col), curses.A_DIM)
         col += len(token) + 1
 
 
@@ -424,6 +488,7 @@ class Workshop:
         self.mouse_targets: list[tuple[int, int, int, int, str]] = []
         self.last_faces_at = 0.0
         self.faces: list[str] = []
+        self.unknown_faces: list[str] = []
 
     def configure(self) -> None:
         try:
@@ -495,7 +560,9 @@ class Workshop:
 
         now = time.monotonic()
         if now - self.last_faces_at > 2:
-            self.faces = current_faces()
+            presence = current_agent_presence()
+            self.faces = list(presence.active)
+            self.unknown_faces = list(presence.unknown)
             self.last_faces_at = now
         _safe_addstr(
             self.window,
@@ -513,6 +580,14 @@ class Workshop:
                 top + 11,
                 left + 2,
                 "No Agent faces yet — New agent opens the first interactive TTY.",
+                curses.A_DIM,
+            )
+        if self.unknown_faces:
+            _safe_addstr(
+                self.window,
+                min(height - 3, top + 12 + len(self.faces)),
+                left + 2,
+                f"Unknown agent state ({len(self.unknown_faces)}) — not counted here",
                 curses.A_DIM,
             )
         _safe_addstr(
@@ -622,6 +697,7 @@ class Workshop:
             left + 2 + len("  mode     "),
             LAUNCH_MODES,
             mode_available,
+            left + card_width - 2,
         )
         _dim_unavailable_choices(
             self.window,
@@ -629,6 +705,7 @@ class Workshop:
             left + 2 + len("  runtime  "),
             RUNTIME_POLICIES,
             runtime_available,
+            left + card_width - 2,
         )
         _dim_unavailable_choices(
             self.window,
@@ -636,6 +713,7 @@ class Workshop:
             left + 2 + len("  memory   "),
             CONTINUITY_MODES,
             continuity_available,
+            left + card_width - 2,
         )
         _dim_unavailable_choices(
             self.window,
@@ -643,6 +721,7 @@ class Workshop:
             left + 2 + len("  permits  "),
             PERMISSION_POLICIES,
             permission_available,
+            left + card_width - 2,
         )
         runtime_help = RUNTIME_HELP[RUNTIME_POLICIES[self.runtime]]
         _safe_addstr(

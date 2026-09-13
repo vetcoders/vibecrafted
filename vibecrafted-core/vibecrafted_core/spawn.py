@@ -927,15 +927,24 @@ def runtime_policy_capabilities(provider: str) -> dict[str, dict[str, Any]]:
             "reason": ("" if provider_found else f"{provider} executable not found"),
         },
         "local-worktrees": {
-            "available": provider_found and worktree_substrate,
+            # A worktree is a launch substrate, not proof that the resulting
+            # child can be admitted.  Interactive worktree launches carry a
+            # bounded quota, which requires an attributable live usage source.
+            # Keep this predicate here so every picker and launcher consumes
+            # the same admission truth.
+            "available": provider_found and worktree_substrate and usage.supported,
             "substrate": worktree_substrate,
             "usage_capability": usage.as_dict(),
             "reason": ""
-            if provider_found and worktree_substrate
+            if provider_found and worktree_substrate and usage.supported
             else (
                 f"{provider} executable not found"
                 if not provider_found
-                else "git/dispatch manage_worktrees unavailable"
+                else (
+                    "git/dispatch manage_worktrees unavailable"
+                    if not worktree_substrate
+                    else usage.reason
+                )
             ),
         },
         "local-vm": {

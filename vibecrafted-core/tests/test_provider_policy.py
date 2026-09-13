@@ -1811,21 +1811,36 @@ def test_full_lineage_rejects_degraded_material_before_spawn(
         )
 
 
-def test_runtime_policy_capabilities_reports_availability_without_requiring_live_usage(
+def test_runtime_policy_capabilities_require_live_usage_for_worktree_admission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from vibecrafted_core.spawn import runtime_policy_capabilities
+    from vibecrafted_core import spawn
+
+    unsupported = spawn.ProviderUsageCapability(
+        "controlled-provider",
+        False,
+        reason=(
+            "controlled provider exposes no verified live, child-attributable, "
+            "monotonic usage side channel"
+        ),
+    )
 
     monkeypatch.setattr(
         "vibecrafted_core.spawn.which",
         lambda cmd, path=None: f"/mock/bin/{cmd}",
     )
+    monkeypatch.setattr(
+        spawn,
+        "resolve_provider_usage_capability",
+        lambda *_args, **_kwargs: unsupported,
+    )
     for provider in ("codex", "grok", "cursor", "agy", "junie"):
-        caps = runtime_policy_capabilities(provider)
+        caps = spawn.runtime_policy_capabilities(provider)
         assert caps["local-native"]["available"] is True
         assert caps["local-native"]["reason"] == ""
-        assert caps["local-worktrees"]["available"] is True
+        assert caps["local-worktrees"]["available"] is False
         assert caps["local-native"]["usage_capability"]["supported"] is False
+        assert "child-attributable" in caps["local-worktrees"]["reason"]
 
 
 def test_interactive_workspace_command_defaults_to_unmetered_for_providers_without_usage_sidechannel(

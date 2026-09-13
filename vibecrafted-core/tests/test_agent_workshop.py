@@ -269,6 +269,36 @@ def test_successful_launch_renames_and_replaces_the_form(
     ]
 
 
+def test_launch_refuses_unadmittable_worktree_before_invoking_launcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workshop = _load()
+    launched = workshop.Workshop(SimpleNamespace(), mode="launcher")
+    launched.path = str(tmp_path)
+    launched.agent = workshop.AGENTS.index("codex")
+    launched.runtime = workshop.RUNTIME_POLICIES.index("local-worktrees")
+    message = (
+        "codex exposes no verified live, child-attributable, monotonic usage "
+        "side channel compatible with inherited interactive TTY"
+    )
+    monkeypatch.setattr(
+        workshop,
+        "runtime_policy_capabilities",
+        lambda _agent: {
+            "local-worktrees": {"available": False, "reason": message},
+        },
+    )
+    monkeypatch.setattr(
+        workshop.os,
+        "execvpe",
+        lambda *_args: pytest.fail("unadmittable worktree must not execute"),
+    )
+
+    launched.launch()
+
+    assert launched.error == message
+
+
 def test_launcher_projects_explicit_continuity_selection() -> None:
     workshop = _load()
 
@@ -316,7 +346,7 @@ def test_launcher_refuses_unsupported_policy_instead_of_approximating() -> None:
         workshop.launch_argv("claude", "resume", "local-worktrees", "auto")
 
 
-def test_runtime_help_preserves_product_truth_and_recommended_default() -> None:
+def test_runtime_help_describes_admission_truth_without_false_recommendation() -> None:
     workshop = _load()
     help_text = " ".join(
         line for detail in workshop.RUNTIME_HELP.values() for line in detail
@@ -325,11 +355,10 @@ def test_runtime_help_preserves_product_truth_and_recommended_default() -> None:
     assert "no isolation" in help_text
     assert "full disk scope per provider permissions" in help_text
     assert "Shared checkout, no worktrees" in help_text
-    assert "Safe recommended local default" in help_text
-    assert "one canonical worktree per Agent launch" in help_text
-    assert "Maximum local concurrency" in help_text
-    assert "unattended pipelines require an Operator Agent" in help_text
-    assert "--operator auto or claude" in help_text
+    assert "Safe recommended local default" not in help_text
+    assert "One canonical worktree per Agent launch" in help_text
+    assert "verified live child-usage source" in help_text
+    assert "select local-native" in help_text
     assert "Coming in H2b3" in help_text
     assert "selected-workspace container launch and live proof" in help_text
     assert "Coming soon; disabled" in help_text
@@ -345,7 +374,7 @@ def test_workspace_path_is_full_resolved_and_must_exist(tmp_path: Path) -> None:
         workshop.normalized_workspace("missing", base=tmp_path)
 
 
-def test_dashboard_projects_only_human_agent_faces_from_agents_tab() -> None:
+def test_dashboard_projects_only_active_agent_faces_from_agents_tab() -> None:
     workshop = _load()
     payload = [
         {
@@ -353,17 +382,118 @@ def test_dashboard_projects_only_human_agent_faces_from_agents_tab() -> None:
             "title": "Sessions",
             "is_plugin": True,
         },
-        {"tab_name": "Agents", "pane_title": "Agent Workspaces"},
-        {"tab_name": "Agents", "pane_title": "codex · resume · vibecrafted"},
-        {"tab_name": "Agents", "pane_title": "claude · init · vibecrafted"},
-        {"tab_name": "Shell", "pane_title": "Shell"},
-        {"tab_name": "Agents", "pane_title": "codex · resume · vibecrafted"},
+        {"tab_name": "Agents", "pane_title": "Agent Workspaces", "state": "running"},
+        {
+            "tab_name": "Agents",
+            "pane_title": "codex · resume · vibecrafted",
+            "state": "running",
+        },
+        {
+            "tab_name": "Agents",
+            "pane_title": "claude · init · vibecrafted",
+            "state": "active",
+        },
+        {"tab_name": "Shell", "pane_title": "Shell", "state": "running"},
+        {
+            "tab_name": "Agents",
+            "pane_title": "codex · resume · vibecrafted",
+            "state": "running",
+        },
     ]
 
     assert workshop.agent_faces_from_payload(payload) == [
         "codex · resume · vibecrafted",
         "claude · init · vibecrafted",
+        "codex · resume · vibecrafted",
     ]
+
+
+def test_dashboard_excludes_exited_and_non_agent_panes_and_reports_unknown() -> None:
+    workshop = _load()
+    presence = workshop.agent_presence_from_payload(
+        [
+            {
+                "tab_name": "Agents",
+                "pane_title": "codex · partner · codescribe",
+                "exited": True,
+                "exit_status": 1,
+            },
+            {"tab_name": "Agents", "pane_title": "ordinary shell", "state": "running"},
+            {
+                "tab_name": "Agents",
+                "pane_title": "claude · init · vibecrafted",
+                "state": "running",
+            },
+            {"tab_name": "Agents", "pane_title": "codex · init · vibecrafted"},
+        ]
+    )
+
+    assert presence.active == ("claude · init · vibecrafted",)
+    assert presence.unknown == ("codex · init · vibecrafted",)
+
+
+@pytest.mark.parametrize("width", [58, 92])
+def test_launcher_choice_redraw_stays_inside_card_on_terminal_resize(
+    width: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workshop = _load()
+    writes: list[tuple[int, int, str]] = []
+
+    class FakeWindow:
+        def getmaxyx(self) -> tuple[int, int]:
+            return (24, width)
+
+        def erase(self) -> None:
+            pass
+
+        def refresh(self) -> None:
+            pass
+
+        def addstr(self, row: int, col: int, text: str, _attr: int = 0) -> None:
+            writes.append((row, col, text))
+
+    capabilities = {
+        "local-native": {"available": True, "reason": ""},
+        "local-worktrees": {
+            "available": False,
+            "reason": "codex exposes no verified live child-attributable monotonic usage side channel",
+        },
+        "local-vm": {"available": False, "reason": "no canonical VM entrypoint"},
+        "cloud-soon": {"available": False, "reason": "coming soon"},
+    }
+    monkeypatch.setattr(
+        workshop, "runtime_policy_capabilities", lambda _agent: capabilities
+    )
+    monkeypatch.setattr(
+        workshop,
+        "continuity_policy_capabilities",
+        lambda *_args, **_kwargs: {
+            name: {"available": name == "fresh", "reason": "unavailable"}
+            for name in workshop.CONTINUITY_MODES
+        },
+    )
+    monkeypatch.setattr(
+        workshop,
+        "resolve_provider_policy",
+        lambda _agent, _runtime, _permissions, _mode: SimpleNamespace(
+            supported=_permissions == "bypass", reason="unsupported"
+        ),
+    )
+
+    picker = workshop.Workshop(FakeWindow(), mode="launcher")
+    picker.draw_launcher()
+
+    assert writes
+    assert all(0 <= col < width and col + len(text) <= width for _, col, text in writes)
+    card_width = min(max(58, width - 4), 92)
+    left = max(1, (width - card_width) // 2)
+    card_right = left + card_width - 1
+    choice_rows = {7, 8, 9, 10}
+    assert all(
+        col + len(text) <= card_right
+        for row, col, text in writes
+        if row in choice_rows and text.startswith("× ")
+    )
 
 
 def _host_python_without_core() -> Path | None:
