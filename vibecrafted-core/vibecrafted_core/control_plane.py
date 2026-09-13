@@ -2895,11 +2895,20 @@ def lookup_run_snapshot(run_id: str) -> dict[str, Any] | None:
     target = bare_run_id(run_id)
     if not target:
         return None
-    payload = _read_json(_snapshot_path(target))
-    if str(payload.get("run_id") or "") == target:
-        return payload
+    snapshot_path = _snapshot_path(target)
+    # `_read_json` deliberately remains a permissive general-purpose reader:
+    # json.loads() can yield any JSON value.  Here, however, an existing
+    # malformed or mismatched current projection is uncertainty about this
+    # run, not a reason to let an older archive make a destructive decision.
+    if snapshot_path.exists():
+        payload = _read_json(snapshot_path)
+        if not isinstance(payload, dict):
+            return None
+        if str(payload.get("run_id") or "") == target:
+            return payload
+        return None
     archived = _read_json(_snapshot_archive_dir() / f"{target}.json")
-    if str(archived.get("run_id") or "") == target:
+    if isinstance(archived, dict) and str(archived.get("run_id") or "") == target:
         return archived
     return None
 
