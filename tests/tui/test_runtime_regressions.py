@@ -922,7 +922,7 @@ def test_public_and_packaged_resume_help_describe_provider_neutral_contract() ->
         assert "native-resumes it with the pack as prompt" not in result.stdout
 
 
-def test_resume_terminal_runtime_routes_headless_codex_into_worker_session(
+def test_resume_terminal_runtime_refuses_task_input_before_any_frame_surface(
     tmp_path: Path,
 ) -> None:
     fake_bin = tmp_path / "bin"
@@ -1136,7 +1136,6 @@ def test_resume_prompt_never_creates_temp_file_when_core_fails_under_errexit(
             "\n".join(
                 [
                     f'source "{SHELL_SH}"',
-                    "_vetcoders_core_source_dir() { printf '/tmp\\n'; }",
                     "_vetcoders_run_core_cli() { return 7; }",
                     "vc-resume codex --runtime headless --prompt 'secret input'",
                 ]
@@ -1174,7 +1173,6 @@ def test_resume_prompt_never_creates_temp_file_when_shell_is_terminated(
             "\n".join(
                 [
                     f'source "{SHELL_SH}"',
-                    "_vetcoders_core_source_dir() { printf '/tmp\\n'; }",
                     '_vetcoders_run_core_cli() { kill -TERM "$$"; }',
                     "vc-resume codex --runtime headless --prompt 'secret input'",
                 ]
