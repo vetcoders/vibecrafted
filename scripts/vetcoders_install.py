@@ -8670,14 +8670,24 @@ def _is_product_bundle_terminal_host(path: Path) -> bool:
         ):
             return False
         plist = contents / "Info.plist"
+        icon = contents / "Resources" / "alacritty.icns"
         metadata = path.lstat()
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o111 == 0:
             return False
-        for node in (path, macos, contents, bundle, plist):
+        for node in (path, macos, contents, bundle, plist, icon):
             if node.is_symlink():
                 return False
-        return plist.is_file()
+        if not plist.is_file() or not icon.is_file() or icon.stat().st_size == 0:
+            return False
+        with plist.open("rb") as stream:
+            metadata = plistlib.load(stream)
+        return _is_native_executable(path) and (
+            metadata.get("CFBundleExecutable") == "alacritty"
+            and metadata.get("CFBundleIconFile") == "alacritty.icns"
+        )
     except OSError:
+        return False
+    except (plistlib.InvalidFileException, ValueError, TypeError):
         return False
 
 
