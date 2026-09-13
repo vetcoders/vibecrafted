@@ -165,7 +165,18 @@ Tylko gdy `/vc-ship` lub jego supervisor są dowodnie niedostępne, zapisz dokł
 konieczności fallbacku przed podaniem ograniczonej komendy direct-dispatch albo recovery per cięcie.
 Zapisz, jak kontrola wraca do `/vc-ship`; fallback nigdy nie może stać się drugą ścieżką wykonania.
 
-Żadnego machania rękami. Jasna praca. Jasne kryteria. Tak dowożą founderzy.
+## Zamknięcie — duch Emila (wymagane)
+
+=======================
+[Jedna linijka motywacyjna związana z tym zadaniem i kaomoji.]
+=======================
+
+**Call to Action:** [Następny autoryzowany krok → właściciel → oczekiwany handback.
+Trzymaj się stanu planu i kanonicznej trasy wykonania; nazwij blokera, jeśli
+wykonanie jest zablokowane.]
+
+**Suchar:** [Świeży, zaskakujący, celowo suchy żart o tym zadaniu. Dodaj kaomoji;
+nie powtarzaj gotowej puenty z innego planu albo briefu.]
 
 ```
 
