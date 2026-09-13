@@ -14,6 +14,11 @@ from pathlib import Path
 import pytest
 import tomllib
 from _runtime_pack_fixture import REPO_ROOT, seed_runtime_pack
+from vibecrafted_core.vc_frame_staging import (
+    resolve_clipboard_command,
+    resolve_pane_shell,
+    substitute_host_commands,
+)
 
 from scripts import vetcoders_install as installer
 
@@ -54,11 +59,38 @@ def roots(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("VIBECRAFTED_LAUNCHER_BIN", str(home / ".local/bin"))
     monkeypatch.setenv("VIBECRAFTED_HOME", str(home / ".vibecrafted"))
     monkeypatch.setenv("VC_FRAME_SOCKET_DIR", str(tmp_path / "frame-sockets"))
+    # e1d7a791: the installer projects the shipped KDL through
+    # vc_frame_staging.substitute_host_commands, which rewrites
+    # `copy_command "pbcopy"` when the host has no pbcopy (a Linux runner gets
+    # an xclip line or a comment). The KDL merge tests edit that very line the
+    # way a user would, so pin the host clipboard to the shipped command with a
+    # hermetic stand-in. It is only looked up on PATH, never executed.
+    host_bin = tmp_path / "host-clipboard-bin"
+    host_bin.mkdir()
+    pbcopy = host_bin / "pbcopy"
+    pbcopy.write_text("#!/bin/sh\ncat >/dev/null\n", encoding="utf-8")
+    pbcopy.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{host_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    assert resolve_clipboard_command() == "pbcopy"
     # Model the external lifecycle boundary only. Filesystem and validators run real.
     monkeypatch.setattr(
         installer, "_teardown_owned_runtime_for_uninstall", lambda *_a, **_k: ()
     )
     return installer._runtime_install_paths()
+
+
+def _host_projection(kdl_text: str) -> str:
+    """Shipped KDL as the installer projects it onto this host (e1d7a791)."""
+    return substitute_host_commands(
+        kdl_text, resolve_pane_shell(), resolve_clipboard_command()
+    )
+
+
+def _user_edit(config: Path, old: bytes, new: bytes) -> None:
+    """Apply a user's edit and prove it landed: a no-op replace proves nothing."""
+    before = config.read_bytes()
+    assert old in before, f"user edit anchor is not in the installed config: {old!r}"
+    config.write_bytes(before.replace(old, new))
 
 
 def _install(payload: Path, capsys, **choice) -> dict:
@@ -329,17 +361,18 @@ def test_non_overlapping_kdl_upgrade_merges_user_preference_and_new_defaults(
         capsys,
     )
     config = roots["product_config"] / "vc-frame/config.kdl"
-    config.write_bytes(
-        config.read_bytes().replace(
-            b'copy_command "pbcopy"',
-            b'copy_command "pbcopy"\ncopy_on_select true',
-        )
+    _user_edit(
+        config,
+        b'copy_command "pbcopy"',
+        b'copy_command "pbcopy"\ncopy_on_select true',
     )
     payload_b = seed_runtime_pack(tmp_path / "pack-b", version="9.9.10+b")
     upgraded = _install(payload_b, capsys)
-    expected = incoming.replace(
-        'copy_command "pbcopy"', 'copy_command "pbcopy"\ncopy_on_select true'
-    ).encode()
+    expected = (
+        _host_projection(incoming)
+        .replace('copy_command "pbcopy"', 'copy_command "pbcopy"\ncopy_on_select true')
+        .encode()
+    )
     assert config.read_bytes() == expected
     assert upgraded["root"] != initial["root"]
     _install(payload_b, capsys)
@@ -371,21 +404,24 @@ def test_kdl_upgrade_merges_user_scalar_with_shipped_nested_keybinds_and_retries
         capsys,
     )
     config = roots["product_config"] / "vc-frame/config.kdl"
-    config.write_bytes(
-        config.read_bytes().replace(
-            reproducer["user_anchor"].encode(),
-            f"{reproducer['user_anchor']}\n{reproducer['user_scalar']}".encode(),
-        )
+    _user_edit(
+        config,
+        reproducer["user_anchor"].encode(),
+        f"{reproducer['user_anchor']}\n{reproducer['user_scalar']}".encode(),
     )
     payload_b = seed_runtime_pack(
         tmp_path / "pack-b", version="9.9.10+b", frame_config=incoming
     )
 
     upgraded = _install(payload_b, capsys)
-    expected = incoming.replace(
-        reproducer["user_anchor"],
-        f"{reproducer['user_anchor']}\n{reproducer['user_scalar']}",
-    ).encode()
+    expected = (
+        _host_projection(incoming)
+        .replace(
+            reproducer["user_anchor"],
+            f"{reproducer['user_anchor']}\n{reproducer['user_scalar']}",
+        )
+        .encode()
+    )
     assert config.read_bytes() == expected
     assert b'bind "Super n" {' in config.read_bytes()
     assert b'bind "Super Shift ." {' in config.read_bytes()
@@ -509,10 +545,10 @@ def test_unsupported_changed_kdl_scalar_syntax_refuses_publication(
     paths, _, result = installed
     product = paths["product_config"]
     config = product / "vc-frame/config.kdl"
-    config.write_bytes(
-        config.read_bytes().replace(
-            b'copy_command "pbcopy"', b'copy_command "pbcopy"; copy_on_select true'
-        )
+    _user_edit(
+        config,
+        b'copy_command "pbcopy"',
+        b'copy_command "pbcopy"; copy_on_select true',
     )
     before = _snapshot(product)
     active = (paths["runtime_home"] / "active.json").read_bytes()
