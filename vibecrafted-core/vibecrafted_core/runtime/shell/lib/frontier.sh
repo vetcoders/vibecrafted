@@ -23,19 +23,6 @@ _vetcoders_frontier_candidates() {
   done
 }
 
-_vetcoders_frontier_root() {
-  local candidate
-  while IFS= read -r candidate; do
-    if [[ -f "$candidate/starship.toml" ]]; then
-      printf '%s' "$candidate"
-      return 0
-    fi
-  done < <(_vetcoders_frontier_candidates)
-
-  echo "𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. frontier config not found. Run vc-frontier-install from the repo checkout." >&2
-  return 1
-}
-
 # Optional prompt/history presets retain their independent frontier resolution.
 # Frame assets all come from the selected product view (or explicit source entry).
 _vetcoders_frontier_file() {

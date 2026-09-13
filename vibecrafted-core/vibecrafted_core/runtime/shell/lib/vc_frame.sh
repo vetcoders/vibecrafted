@@ -520,34 +520,8 @@ _vetcoders_launch_interactive_declaration() {
   [[ -z "$receipt" ]] || printf '%s\n' "$receipt"
   # The tab exists, so the terminal may now be handed over. This blocks until
   # the Founder detaches, which is exactly what they asked for.
-  # shellcheck disable=SC2119 # No override: attach the prepared ambient target.
+  # No override: attach the prepared ambient target.
   _vetcoders_attach_prepared_vc_frame_session
-}
-
-# vc-frame needs a real PTY to enable raw mode. When stdin/stdout are pipes
-# (curl|bash, ssh without -t, agent subprocess), vc-frame panics with an
-# unhelpful Rust traceback. Catch the missing-TTY case early and return a
-# user-actionable message instead.
-_vetcoders_require_tty() {
-  if [[ -t 0 && -t 1 ]]; then
-    return 0
-  fi
-  cat >&2 <<'EOF'
-
-vc-init requires an interactive terminal (TTY) to spawn a vc-frame session.
-
-Detected: stdin or stdout is not a TTY (pipe, redirect, or non-interactive
-SSH/agent context). vc-frame needs a real PTY to switch into raw mode.
-
-To proceed:
-  - Local terminal:        run `vibecrafted init <agent>` directly
-  - SSH:                   add `-t`, e.g. `ssh -t user@host vibecrafted init claude`
-  - Inside another agent:  vc-frame cannot start from a piped subprocess.
-                           Use `vibecrafted <action> <agent>` (no vc-frame wrapper)
-                           or run vc-init in a separate user-attached shell.
-
-EOF
-  return 1
 }
 
 _vetcoders_in_vc_frame() {
@@ -1190,7 +1164,7 @@ _vetcoders_mark_pending_vc_frame_attach() {
 # create path above already uses (env -u ... attach --create-background) —
 # so the parent shell's targeting state and the explicit session argument are
 # untouched, only the child's inherited attachment context is.
-# shellcheck disable=SC2120 # Optional prepared target override for direct callers.
+# Optional prepared target override for direct callers.
 _vetcoders_attach_prepared_vc_frame_session() {
   # Declared-workspace entry from a LIVE attached client elsewhere: move that
   # client onto the prepared session (Frame's own switch-session, the same
