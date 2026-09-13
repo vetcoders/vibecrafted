@@ -11,11 +11,8 @@ set -euo pipefail
 HUSKY_HOOK_NAME="pre-push"
 
 HUSKY_LIB="${BASH_SOURCE[0]%/*}/lib"
-# shellcheck disable=SC1090,SC1091
 . "$HUSKY_LIB/core.sh"
-# shellcheck disable=SC1090,SC1091
 . "$HUSKY_LIB/secrets.sh"
-# shellcheck disable=SC1090,SC1091
 . "$HUSKY_LIB/lint-routing.sh"
 
 husky_init
