@@ -142,6 +142,78 @@ def test_linux_builder_uses_pinned_public_inputs_for_arm64_and_x64() -> None:
     assert "cargo install" not in foundations
 
 
+def test_linux_carrier_provisions_wasi_targets_for_the_assembler_toolchain(
+    tmp_path: Path,
+) -> None:
+    """A divergent ambient rustup default must not hide a missing donor target."""
+    workflow = (REPO_ROOT / ".github/workflows/install-linux.yml").read_text(
+        encoding="utf-8"
+    )
+    assembler = (REPO_ROOT / "scripts/build-linux-arm64-runtime-pack.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-1.97.0}"' in assembler
+    assert 'RUSTUP_TOOLCHAIN: "1.97.0"' in workflow
+    assert 'rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal' in workflow
+    assert 'rustup target add --toolchain "$RUSTUP_TOOLCHAIN"' in workflow
+    assert "wasm32-unknown-unknown wasm32-wasip1" in workflow
+    assert 'rustup target list --installed --toolchain "$RUSTUP_TOOLCHAIN"' in workflow
+    assert 'grep -Fx "$target"' in workflow
+    assert "rustup target add wasm32-unknown-unknown wasm32-wasip1" not in workflow
+
+    # Exercise the actual workflow preflight body with an ambient default that
+    # never participates. The fake rustup exposes only the selected toolchain;
+    # omitting WASI must fail here, before any carrier cargo invocation.
+    preflight_start = workflow.index("          rustup toolchain install")
+    preflight_end = workflow.index("          curl -L", preflight_start)
+    preflight = "\n".join(
+        line.removeprefix("          ")
+        for line in workflow[preflight_start:preflight_end].splitlines()
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    calls = tmp_path / "rustup-calls"
+    _executable(
+        fake_bin / "rustup",
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "$RUSTUP_CALLS"\n'
+        'case "$1 $2" in\n'
+        '  "toolchain install"|"target add") exit 0 ;;\n'
+        '  "target list")\n'
+        "    echo wasm32-unknown-unknown\n"
+        '    [ "${MISSING_WASI:-0}" = 1 ] || echo wasm32-wasip1\n'
+        "    exit 0 ;;\n"
+        "esac\n"
+        "exit 99\n",
+    )
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "RUSTUP_TOOLCHAIN": "1.97.0",
+        "RUSTUP_CALLS": str(calls),
+    }
+    success = subprocess.run(
+        ["bash", "-c", f"set -euo pipefail\n{preflight}"],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert success.returncode == 0, success.stderr
+    assert "target add --toolchain 1.97.0" in calls.read_text(encoding="utf-8")
+
+    missing = subprocess.run(
+        ["bash", "-c", f"set -euo pipefail\n{preflight}"],
+        env={**env, "MISSING_WASI": "1"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert missing.returncode != 0
+    assert "FATAL: wasm32-wasip1 missing from 1.97.0" in missing.stderr
+
+
 def test_linux_x86_64_host_expects_carrier_architecture_x64() -> None:
     """uname -m is x86_64; the Runtime Pack carrier slug is x64 / linux-x64."""
     installer = (REPO_ROOT / "scripts/install-runtime-pack.sh").read_text(
