@@ -1445,6 +1445,66 @@ def test_disjoint_toml_edits_still_merge(installed, tmp_path, capsys):
     _resolve(paths, capsys, status="ready")
 
 
+def test_terminal_chrome_and_font_overrides_survive_matching_default_then_retry(
+    tmp_path, roots, capsys
+):
+    """A temporary matching shipped default must not erase user ownership."""
+    base = _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
+    user = (
+        base.replace("blur = true", "blur = false")
+        .replace("opacity = 0.9", "opacity = 0.75")
+        .replace('decorations = "Transparent"', 'decorations = "None"')
+        .replace('family = "Spot Mono"', 'family = "Founder Mono"')
+    )
+    first_update = (
+        base.replace("blur = true", "blur = false")
+        .replace("opacity = 0.9", "opacity = 0.85")
+        .replace('decorations = "Transparent"', 'decorations = "Full"')
+        .replace('family = "Spot Mono"', 'family = "Shipped Mono"')
+    )
+    second_update = base.replace("opacity = 0.9", "opacity = 0.95").replace(
+        'family = "Spot Mono"', 'family = "Future Mono"'
+    )
+
+    _install(
+        seed_runtime_pack(tmp_path / "pack-a", version="9.9.9+a", terminal_policy=base),
+        capsys,
+    )
+    policy = roots["product_config"] / "terminal-policy.toml"
+    policy.write_text(user, encoding="utf-8")
+
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-b", version="9.9.10+b", terminal_policy=first_update
+        ),
+        capsys,
+    )
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-c", version="9.9.11+c", terminal_policy=second_update
+        ),
+        capsys,
+    )
+
+    preserved = tomllib.loads(policy.read_text(encoding="utf-8"))
+    assert preserved["window"] == {
+        **preserved["window"],
+        "blur": False,
+        "opacity": 0.75,
+        "decorations": "None",
+    }
+    assert {
+        preserved["font"][face]["family"] for face in ("normal", "bold", "italic")
+    } == {"Founder Mono"}
+    receipt = json.loads(
+        (roots["runtime_home"] / installer.RUNTIME_INSTALL_RECEIPT).read_text()
+    )
+    overrides = receipt["terminal_policy_user_overrides"][str(policy)]
+    assert {"window.blur", "window.opacity", "window.decorations"} <= set(overrides)
+    assert "Founder Mono" not in json.dumps(receipt)
+    _resolve(roots, capsys, status="ready")
+
+
 def test_explicit_shell_preference_stays_a_bound_choice(tmp_path, roots, capsys):
     previous = _previous_terminal_policy()
     incoming = _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
