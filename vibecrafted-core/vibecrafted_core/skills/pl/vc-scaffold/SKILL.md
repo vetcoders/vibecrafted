@@ -338,6 +338,27 @@ to wyzwala recovery-vector** (fallback/failover/handsoff). Pełen alfabet + mark
 - **Trzymaj zależności płytkie.** Preferuj niezależne strumienie pracy; sekwencyjne A→B→C zabija równoległość.
 - **Żadnej przedwczesnej optymalizacji / żadnych wymyślonych wzorców.** Najlepsza architektura to ta, która dowozi.
 
+## Obowiązkowe zamknięcie planu — duch Emila
+
+Founder potwierdził to ponownie 2026-09-07; wcześniejsza, napisana przez Foundera
+instrukcja Emil Kurier leży w sesji AICX Claude `2b73c9c1-87ef-49ce-a43f-3dc980d7816a`
+(2026-05-26): CTA, celowo suchy żart motywacyjny i kaomoji mają być zaskakujące
+i unikalne.
+
+Każdy master plan, DRIVER i wykonawczy brief cięcia kończy się:
+
+- Krótką, związaną z zadaniem linijką motywacyjną z kaomoji.
+- **Call to Action:** konkretny następny autoryzowany krok, jego właściciel i to, co
+  ma zwrócić. Dopasuj do bieżącego stanu planu i kanonicznej trasy wykonania; plan
+  zablokowany woła o rozwiązanie blokera, a nie udaje, że jest gotowy do startu.
+- **Suchar:** świeży, celowo suchy żart związany z tym zadaniem, z kaomoji.
+  Napisz go pod ten plan; nie recyklinguj gotowej puenty w całej paczce.
+
+Do prezentacji użyj istniejącej
+[klamry końcowej Emila](../vc-operator/DISPATCH.md#klamra-końcowa--domyślny-blok-emila).
+Zachowaj ten głos w planach polskich i angielskich. Trzymaj zamknięcie krótko;
+humor nigdy nie zastępuje kryteriów akceptacji ani nie ogłasza niezweryfikowanego sukcesu.
+
 ## Jak wygląda sukces
 
 - Zimna flota (albo człowiek) wykonuje plan **bez zadawania pytania** w locie.
