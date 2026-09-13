@@ -1191,6 +1191,11 @@ def _compose_bounded_pack(
     """
     separator = "\n\n"
     frame = len(header) + len(instruction) + 2 * len(separator)
+    if frame > MAX_PACK_CHARS:
+        raise ValueError(
+            "resume pack mandatory frame exceeds "
+            f"MAX_PACK_CHARS ({frame} > {MAX_PACK_CHARS})"
+        )
     remaining = (MAX_PACK_CHARS - frame) // _ALLOWANCE_GRAIN * _ALLOWANCE_GRAIN
 
     rendered: dict[str, str] = {}
@@ -1407,9 +1412,11 @@ def assemble_resume_continuity_pack(
     catalog_lines = ["## Session catalog (evidence, not a picker)", ""]
     if listing.empty_kind == "empty_project":
         catalog_lines.append(
-            f"_(empty_project: `{project_filter}` has no sessions in this "
-            f"window; scanned={listing.scanned}, matched=0. This is not a "
-            "parser miss and not a license to use another project's sessions.)_"
+            f"_(empty_project: the session catalog returned no matching rows for "
+            f"`{project_filter}` in this window; scanned={listing.scanned}, "
+            "matched=0. This is a catalog fact, not a claim that the project "
+            "has no history: project intentions are retrieved separately. It is "
+            "not a parser miss and not a license to use another project's sessions.)_"
         )
     elif listing.empty_kind == "retrieval_unavailable":
         catalog_lines.append(

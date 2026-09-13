@@ -24,6 +24,7 @@ from vibecrafted_core.aicx_session_chain import (
     SessionChainError,
     SessionListResult,
     SessionRecord,
+    _compose_bounded_pack,
     _merge_project_intents,
     _render_intents_section,
     assemble_resume_continuity_pack,
@@ -605,6 +606,43 @@ def test_intent_entries_keep_provenance_and_are_not_called_founder_decisions(
     assert "5 further entries exist in the window" in pack.body
 
 
+def test_empty_session_catalog_does_not_erase_retrieved_project_intentions(
+    tmp_path: Path,
+) -> None:
+    """A valid empty catalog is not evidence that project history is absent."""
+    repo = make_checkout(tmp_path / "vibecrafted", "vetcoders/vibecrafted")
+
+    def runner(
+        cmd: list[str], timeout: float, cwd: Path | None
+    ) -> tuple[int, str, str]:
+        if cmd[1:3] == ["sessions", "list"]:
+            return 0, "[]", ""
+        if cmd[1] == "intents":
+            return 0, _intents_payload(2, available=2, summary="mission"), ""
+        if cmd[1:3] == ["continuity", "show"]:
+            return 0, "## NOW\ncontinuity", ""
+        return 1, "", "declined"
+
+    pack = assemble_resume_continuity_pack(
+        agent="codex",
+        root=repo,
+        hours=DEFAULT_RESUME_AICX_HOURS,
+        context_file=tmp_path / "pack.md",
+        meta_file=tmp_path / "pack.meta.json",
+        chain=CliSessionChain("aicx", runner=runner),
+    )
+
+    assert "session catalog returned no matching rows" in pack.body
+    assert "has no sessions in this window" not in pack.body
+    assert "## Project intentions (primary mission, repo-scoped)" in pack.body
+    assert "session-0000" in pack.body
+    meta = json.loads(pack.meta_file.read_text(encoding="utf-8"))
+    assert meta["empty_kind"] == "empty_project"
+    assert meta["session_count"] == 0
+    assert meta["project_mission"]["available"] is True
+    assert meta["project_mission"]["returned"] == 2
+
+
 def test_live_supplement_timeout_costs_freshness_not_the_mission(
     tmp_path: Path,
 ) -> None:
@@ -719,6 +757,20 @@ def test_whole_pack_including_frame_never_exceeds_the_character_cap(
     meta = json.loads(pack.meta_file.read_text(encoding="utf-8"))
     assert meta["pack_chars"] == len(body)
     assert meta["max_pack_chars"] == MAX_PACK_CHARS
+
+
+def test_impossible_mandatory_frame_fails_before_any_oversized_pack_is_written() -> (
+    None
+):
+    with pytest.raises(ValueError, match=r"mandatory frame exceeds MAX_PACK_CHARS"):
+        _compose_bounded_pack(
+            header="H" * MAX_PACK_CHARS,
+            instruction="INSTRUCTION",
+            content={
+                name: lambda _budget: ""
+                for name in ("intents", "continuity", "catalog")
+            },
+        )
 
 
 def test_an_oversized_pack_still_carries_content_not_only_a_pointer(
