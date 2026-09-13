@@ -34,6 +34,7 @@ from .control_plane import (
     control_plane_home,
     ensure_session_id,
     lookup_run,
+    lookup_run_snapshot,
     normalize_run_root,
     record_stop_transition,
     resolve_run,
@@ -2318,7 +2319,14 @@ def _write_launch_idempotency_record(key: str, payload: dict[str, Any]) -> None:
 
 
 def _prune_launch_idempotency_registry(*, now: float | None = None) -> int:
-    """Bound failed/terminal history without deleting live or ambiguous claims."""
+    """Bound failed/proven-terminal history without discovering legacy runs.
+
+    Registry maintenance runs on the launch receipt path. It may use an
+    already-projected canonical snapshot, but must not call ``lookup_run()``:
+    that synchronizes state and can recursively walk legacy artifacts while
+    the registry mutation lock is held. No snapshot means unknown, so retain
+    the record until a normal control-plane projection proves it terminal.
+    """
     with run_mutation_locks(control_plane_home(), run_id="launch-idempotency-registry"):
         registry = _launch_idempotency_registry()
         current_time = time.time() if now is None else now
@@ -2330,7 +2338,7 @@ def _prune_launch_idempotency_registry(*, now: float | None = None) -> int:
                 pass
             elif state == "dispatched":
                 run_id = str(payload.get("run_id") or "")
-                run = lookup_run(run_id) if run_id else None
+                run = lookup_run_snapshot(run_id) if run_id else None
                 if run is None or not _run_is_terminal(run):
                     continue
             else:
