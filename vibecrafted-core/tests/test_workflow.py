@@ -1096,6 +1096,63 @@ def test_launch_registry_prunes_only_bounded_failed_or_terminal_history(
     assert workflow._launch_idempotency_path("reserved-live-or-ambiguous").exists()
 
 
+def test_launch_registry_prune_uses_only_direct_snapshots_for_dispatched_history(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A launch receipt must not trigger legacy artifact discovery per record."""
+    home = tmp_path / ".vibecrafted"
+    monkeypatch.setenv("VIBECRAFTED_HOME", str(home))
+    monkeypatch.setattr(workflow, "LAUNCH_IDEMPOTENCY_MAX_TERMINAL_RECORDS", 1)
+    monkeypatch.setattr(workflow, "LAUNCH_IDEMPOTENCY_TERMINAL_TTL_SECONDS", 10)
+    for index in range(64):
+        workflow._write_launch_idempotency_record(
+            f"missing-legacy-{index}",
+            {
+                "run_id": f"missing-legacy-{index}",
+                "state": "dispatched",
+                "accepted": True,
+                "receipt": {"accepted": True, "status": "launching"},
+            },
+        )
+    workflow._write_launch_idempotency_record(
+        "terminal-snapshot",
+        {
+            "run_id": "terminal-snapshot-run",
+            "state": "dispatched",
+            "accepted": True,
+            "receipt": {"accepted": True, "status": "launching"},
+        },
+    )
+    snapshot = control_plane.run_snapshot_dir() / "terminal-snapshot-run.json"
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    snapshot.write_text(
+        json.dumps({"run_id": "terminal-snapshot-run", "state": "completed"}),
+        encoding="utf-8",
+    )
+    now = time.time()
+    for path in workflow._launch_idempotency_registry().glob("*.json"):
+        os.utime(path, (now - 20, now - 20))
+
+    monkeypatch.setattr(
+        workflow,
+        "lookup_run",
+        lambda _run_id: pytest.fail("registry prune must not sync/discover runs"),
+    )
+    monkeypatch.setattr(
+        control_plane,
+        "_resolve_run_in_artifacts",
+        lambda _run_id: pytest.fail(
+            "registry prune must not recursively scan artifacts"
+        ),
+    )
+
+    removed = workflow._prune_launch_idempotency_registry(now=now)
+
+    assert removed == 1
+    assert not workflow._launch_idempotency_path("terminal-snapshot").exists()
+    assert workflow._launch_idempotency_path("missing-legacy-0").exists()
+
+
 def test_launch_registry_never_persists_prompt_text(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

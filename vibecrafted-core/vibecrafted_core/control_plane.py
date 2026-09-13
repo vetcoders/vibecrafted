@@ -2859,6 +2859,26 @@ def _select_run(snapshot: dict[str, Any], run_id: str) -> dict[str, Any] | None:
     return None
 
 
+def lookup_run_snapshot(run_id: str) -> dict[str, Any] | None:
+    """Read one already-projected run snapshot without rebuilding the board.
+
+    This is intentionally narrower than :func:`lookup_run`: callers that only
+    need durable, already-known run facts must not turn a registry-maintenance
+    pass into an artifact discovery walk. A missing snapshot is unknown, not
+    evidence that a legacy run is terminal.
+    """
+    target = str(run_id or "").strip()
+    if not target:
+        return None
+    payload = _read_json(_snapshot_path(target))
+    if str(payload.get("run_id") or "") == target:
+        return payload
+    archived = _read_json(_snapshot_archive_dir() / f"{target}.json")
+    if str(archived.get("run_id") or "") == target:
+        return archived
+    return None
+
+
 # Fields that drift between consecutive sync_state() passes without
 # representing a meaningful lifecycle change (timestamps re-derived from the
 # event stream, provenance of the winning source, transcript delta counters).
