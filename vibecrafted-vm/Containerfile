@@ -1,8 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # H2b3a selector carrier. The Runtime Pack is built and sealed outside this
-# image; this image only verifies and installs those exact bytes. The separate
-# docker/runtime tailnet deployment does not consume this Containerfile.
+# image; this image only verifies and installs those exact bytes.
 FROM node:22.19.0-bookworm-slim@sha256:4a4884e8a44826194dff92ba316264f392056cbe243dcc9fd3551e71cea02b90
 
 ARG RUNTIME_PACK_ARCHIVE=build/Vibecrafted_RuntimePack_linux-arm64.tar.gz
