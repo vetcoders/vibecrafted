@@ -707,14 +707,17 @@ observe_tuple() {
   fi
   if [[ -d "$PREPARED" && ! -L "$PREPARED" ]]; then
     PREPARED_PRESENT=1
+    # shellcheck disable=SC2034  # bound in 0e14be00 for resume identity; nothing compares it yet (prune report, VERIFY-FIRST)
     PREPARED_IDENTITY="$(app_identity_token "$PREPARED" || true)"
   fi
   if [[ -d "$DISPLACED" && ! -L "$DISPLACED" ]]; then
     DISPLACED_PRESENT=1
+    # shellcheck disable=SC2034  # bound in 0e14be00 for resume identity; nothing compares it yet (prune report, VERIFY-FIRST)
     DISPLACED_IDENTITY="$(app_identity_token "$DISPLACED" || true)"
   fi
   if [[ -d "$PRIOR" && ! -L "$PRIOR" ]]; then
     PRIOR_PRESENT=1
+    # shellcheck disable=SC2034  # bound in 0e14be00 for resume identity; nothing compares it yet (prune report, VERIFY-FIRST)
     PRIOR_LIVE_IDENTITY="$(app_identity_token "$PRIOR" || true)"
   fi
   if [[ -d "$FAILED_NEW" && ! -L "$FAILED_NEW" ]]; then
