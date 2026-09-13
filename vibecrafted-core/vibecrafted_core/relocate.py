@@ -13,11 +13,34 @@ with the native provider command as fallback).
 
 The tarball embeds a copy of the standalone restore entry point so a bare
 target machine only needs ``tar`` and ``python3``.
+
+What the snapshot promises
+--------------------------
+
+* **Dirty work travels whole.** Staged and unstaged changes ship as two separate
+  patches — a single ``git diff HEAD`` collapses them and loses which work was
+  staged — and untracked files ship as files, because no form of ``git diff``
+  carries them. Every skipped file is named in the manifest with a reason.
+* **Bytes, not text.** Patches are captured and written as raw bytes. Git calls
+  a file binary only when it finds a NUL in the first 8k, so a perfectly ordinary
+  high-byte file is "text" to git and undecodable to Python.
+* **The snapshot never writes to the source.**
+
+What the restore promises
+-------------------------
+
+* **A manifest is input, not a trusted artifact.** Transcript paths, archive
+  members and untracked paths are all refused unless they provably land inside
+  their destination root. A refused archive is refused before the first write.
+* **Nothing at the destination is overwritten.** Foreign content under a name
+  the snapshot also carries is left alone and reported as unresolved.
+* **A failed restore exits nonzero**, per worktree, saying what did not land.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -28,9 +51,18 @@ import tarfile
 import tempfile
 from collections.abc import Sequence
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 DAY_S = 86400
+
+SNAPSHOT_SCHEMA = "vc-relocate.snapshot.v2"
+# v1 snapshots carry a single collapsed ``git diff HEAD`` patch and no untracked
+# inventory; restore still reads them, it just cannot promise what it never got.
+SUPPORTED_SCHEMAS = {"vc-relocate.snapshot.v1", SNAPSHOT_SCHEMA}
+
+# Untracked work above this size is recorded as skipped rather than copied, so a
+# stray build artifact cannot quietly turn a session snapshot into a disk image.
+UNTRACKED_MAX_BYTES = 64 * 1024 * 1024
 
 PROVIDER_STORES = {
     "cursor": ".cursor/projects",
@@ -63,10 +95,187 @@ def code_repos() -> list[Path]:
     return []
 
 
+def _sh_bytes(args: list[str], cwd: Path | None = None) -> bytes:
+    return subprocess.run(args, cwd=cwd, capture_output=True, check=False).stdout
+
+
 def _sh(args: list[str], cwd: Path | None = None) -> str:
-    return subprocess.run(
-        args, cwd=cwd, capture_output=True, text=True, check=False
-    ).stdout
+    """Text view of a command, tolerant of undecodable bytes.
+
+    Patches must never travel through here: ``git diff`` emits the *file bytes*
+    for everything git considers text, and git only calls a file binary when it
+    finds a NUL in the first 8k. A file of 0xaa bytes is text to git and
+    undecodable to Python, so a text-mode capture raises on real dirty work.
+    """
+    return _sh_bytes(args, cwd).decode("utf-8", "replace")
+
+
+def _git(wt: str, *args: str) -> list[str]:
+    """A git invocation pinned away from the operator's own diff config.
+
+    ``diff.mnemonicPrefix`` (``c/`` ``w/``), ``diff.noprefix`` and rename
+    detection all travel into the patch bytes and decide whether that patch
+    still applies on the target machine. A snapshot must not inherit them.
+    """
+    return [
+        "git",
+        "-c",
+        "diff.mnemonicPrefix=false",
+        "-c",
+        "diff.noprefix=false",
+        "-c",
+        "core.quotePath=false",
+        "-C",
+        wt,
+        *args,
+    ]
+
+
+def worktree_slug(path: str) -> str:
+    """Stable artifact name for one worktree.
+
+    The sanitized tail alone collides for any two checkouts sharing their last
+    80 characters — sibling fleet worktrees do — and a collision silently
+    overwrites one worktree's patch with another's.
+    """
+    sanitized = re.sub(r"[^A-Za-z0-9_.-]+", "_", path).strip("_")[-71:]
+    digest = hashlib.sha256(path.encode("utf-8", "surrogateescape")).hexdigest()[:8]
+    return f"{sanitized}-{digest}"
+
+
+def legacy_worktree_slug(path: str) -> str:
+    """Slug shape written by ``vc-relocate.snapshot.v1`` snapshots."""
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", path).strip("_")[-80:]
+
+
+def safe_relative(rel: str) -> PurePosixPath | None:
+    """A manifest-supplied relative path, or ``None`` when it cannot be trusted.
+
+    Rejects absolute paths, drive letters, and any ``.``/``..`` component before
+    it can be joined onto a destination root.
+    """
+    if not rel or rel.startswith(("/", "\\")) or ":" in rel[:2]:
+        return None
+    parts = PurePosixPath(rel.replace("\\", "/")).parts
+    if not parts:
+        return None
+    if any(part in {"", ".", ".."} or part.startswith("/") for part in parts):
+        return None
+    return PurePosixPath(*parts)
+
+
+def contained_path(root: Path, rel: str) -> Path | None:
+    """``root/rel`` only when it provably lands inside ``root``.
+
+    The lexical check is not enough: a symlinked directory anywhere along the
+    way is what turns a clean-looking relative path into a write outside the
+    store, so the deepest existing ancestor is re-resolved before answering.
+    """
+    safe = safe_relative(rel)
+    if safe is None:
+        return None
+    root_real = Path(os.path.realpath(root))
+    candidate = root_real / safe
+    probe = candidate
+    while probe != root_real and not probe.exists():
+        probe = probe.parent
+    probe_real = Path(os.path.realpath(probe))
+    if probe_real != root_real and root_real not in probe_real.parents:
+        return None
+    return candidate
+
+
+def safe_extract(tar_path: Path, dest: Path) -> tuple[bool, list[str]]:
+    """Extract a snapshot tarball, refusing the whole archive on any escape.
+
+    The previous call site justified ``shutil.unpack_archive`` with "tarball is
+    self-produced by snapshot" — but the tarball is a CLI argument, so that
+    describes the happy path, not the input. Every member is validated *before*
+    the first byte is written, so a refusal leaves nothing behind.
+    """
+    rejected: list[str] = []
+    accepted: list[tarfile.TarInfo] = []
+    with tarfile.open(tar_path) as tar:
+        for member in tar.getmembers():
+            if not (member.isfile() or member.isdir()):
+                rejected.append(f"{member.name}: unsupported member type")
+                continue
+            if safe_relative(member.name) is None:
+                rejected.append(f"{member.name}: escapes the extraction root")
+                continue
+            accepted.append(member)
+        if rejected:
+            return False, rejected
+        dest.mkdir(parents=True, exist_ok=True)
+        for member in accepted:
+            target = contained_path(dest, member.name)
+            if target is None:
+                return False, [f"{member.name}: escapes the extraction root"]
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            handle = tar.extractfile(member)
+            if handle is None:
+                return False, [f"{member.name}: unreadable member"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with open(target, "wb") as out:
+                shutil.copyfileobj(handle, out)
+    return True, rejected
+
+
+def _untracked_files(wt: str) -> list[str]:
+    raw = _sh_bytes(_git(wt, "ls-files", "--others", "--exclude-standard", "-z"))
+    return [
+        chunk.decode("utf-8", "surrogateescape")
+        for chunk in raw.split(b"\x00")
+        if chunk
+    ]
+
+
+def capture_untracked(wt: str, dest_root: Path) -> list[dict]:
+    """Copy untracked work into the snapshot and inventory what was refused.
+
+    ``git diff`` in any form never carries untracked files, so this is the only
+    transport for them. Every skip is recorded with a reason: a snapshot that
+    silently drops work is worse than one that admits the gap.
+    """
+    inventory: list[dict] = []
+    src_root = Path(wt)
+    for rel in _untracked_files(wt):
+        entry: dict = {"path": rel, "captured": False}
+        src = contained_path(src_root, rel)
+        if src is None:
+            entry["reason"] = "path escapes the worktree"
+        elif src.is_symlink() or not src.is_file():
+            entry["reason"] = "not a regular file"
+        else:
+            try:
+                size = src.stat().st_size
+            except OSError as exc:
+                entry["reason"] = f"stat failed: {exc.strerror}"
+                inventory.append(entry)
+                continue
+            if size > UNTRACKED_MAX_BYTES:
+                entry["reason"] = f"larger than {UNTRACKED_MAX_BYTES} bytes"
+                entry["size"] = size
+            else:
+                dst = contained_path(dest_root, rel)
+                if dst is None:
+                    entry["reason"] = "path escapes the snapshot root"
+                else:
+                    try:
+                        data = src.read_bytes()
+                    except OSError as exc:
+                        entry["reason"] = f"read failed: {exc.strerror}"
+                        inventory.append(entry)
+                        continue
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    dst.write_bytes(data)
+                    entry["captured"] = True
+                    entry["size"] = len(data)
+                    entry["sha256"] = hashlib.sha256(data).hexdigest()
+        inventory.append(entry)
+    return inventory
 
 
 def _read_lease(path: Path) -> dict | None:
@@ -90,7 +299,7 @@ def active_leases(home: Path) -> list[dict]:
 
 
 def _cursor_project_cwd(slug: str) -> str:
-    # slug: Users-vetcoder-vibecrafted -> /Users/vetcoder/vibecrafted (best effort)
+    # slug: Users-<account>-vibecrafted -> /Users/<account>/vibecrafted (best effort)
     parts = slug.split("-")
     for i in range(1, len(parts)):
         candidate = Path("/" + "/".join(parts[:i]) + "/" + "-".join(parts[i:]))
@@ -179,7 +388,7 @@ def collect_worktrees(repos: Sequence[Path], home: Path) -> list[dict]:
         if not (repo / ".git").exists() and not (repo / "HEAD").exists():
             continue
         for line in _sh(
-            ["git", "-C", str(repo), "worktree", "list", "--porcelain"]
+            _git(str(repo), "worktree", "list", "--porcelain")
         ).splitlines():
             if not line.startswith("worktree "):
                 continue
@@ -187,29 +396,20 @@ def collect_worktrees(repos: Sequence[Path], home: Path) -> list[dict]:
             if wt in seen:
                 continue
             seen.add(wt)
-            branch = _sh(["git", "-C", wt, "rev-parse", "--abbrev-ref", "HEAD"]).strip()
-            head = _sh(["git", "-C", wt, "rev-parse", "HEAD"]).strip()
-            status = _sh(["git", "-C", wt, "status", "--porcelain"]).strip()
+            branch = _sh(_git(wt, "rev-parse", "--abbrev-ref", "HEAD")).strip()
+            head = _sh(_git(wt, "rev-parse", "HEAD")).strip()
+            status = _sh(_git(wt, "status", "--porcelain")).strip()
             upstream = _sh(
-                [
-                    "git",
-                    "-C",
-                    wt,
-                    "rev-parse",
-                    "--abbrev-ref",
-                    "--symbolic-full-name",
-                    "@{u}",
-                ]
+                _git(wt, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
             ).strip()
             unpushed = ""
             if upstream:
-                unpushed = _sh(
-                    ["git", "-C", wt, "log", "--format=%H %s", "@{u}..HEAD"]
-                ).strip()
+                unpushed = _sh(_git(wt, "log", "--format=%H %s", "@{u}..HEAD")).strip()
             entries.append(
                 {
                     "path": wt,
                     "repo": str(repo),
+                    "slug": worktree_slug(wt),
                     "branch": branch,
                     "head": head,
                     "dirty": bool(status),
@@ -255,27 +455,44 @@ def do_snapshot(
     wt_dir = snap_dir / "worktrees"
     wt_dir.mkdir(exist_ok=True)
     for w in worktrees:
-        slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", w["path"]).strip("_")[-80:]
-        if w["dirty"]:
-            patch = _sh(["git", "-C", w["path"], "diff", "HEAD"])
-            if patch:
-                (wt_dir / f"{slug}.patch").write_text(patch)
+        slug = w.setdefault("slug", worktree_slug(w["path"]))
+        if w["dirty"] and w["head"]:
+            # Two patches, not one. ``git diff HEAD`` collapses index and
+            # worktree into a single hunk set, so restoring it loses which work
+            # was staged — and staging is a decision, not a formatting detail.
+            for kind, extra in (("staged", ("--cached", "HEAD")), ("unstaged", ())):
+                patch = _sh_bytes(
+                    _git(
+                        w["path"],
+                        "diff",
+                        "--binary",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        "--no-renames",
+                        *extra,
+                    )
+                )
+                if patch:
+                    (wt_dir / f"{slug}.{kind}.patch").write_bytes(patch)
+        elif w["dirty"]:
+            w["patch_unavailable"] = "no HEAD commit to diff against"
         if w["unpushed"] and w["upstream"]:
-            fp = _sh(
-                [
-                    "git",
-                    "-C",
+            fp = _sh_bytes(
+                _git(
                     w["path"],
                     "format-patch",
+                    "--binary",
+                    "--no-renames",
                     "--stdout",
                     f"{w['upstream']}..HEAD",
-                ]
+                )
             )
             if fp:
-                (wt_dir / f"{slug}.unpushed.patch").write_text(fp)
+                (wt_dir / f"{slug}.unpushed.patch").write_bytes(fp)
+        w["untracked"] = capture_untracked(w["path"], wt_dir / slug / "untracked")
 
     manifest = {
-        "schema": "vc-relocate.snapshot.v1",
+        "schema": SNAPSHOT_SCHEMA,
         "created_at": now.astimezone().isoformat(),
         "host": os.uname().nodename,
         "home": str(home),
@@ -308,10 +525,17 @@ def do_snapshot(
         lines.append(f"  `{s['resume']}`")
     lines += ["", "## Dirty worktrees", ""]
     for w in worktrees:
-        if w["dirty"] or w["unpushed"]:
-            lines.append(
-                f"- `{w['path']}` [{w['branch']}] dirty={w['dirty']} unpushed={len(w['unpushed'])}"
-            )
+        if not (w["dirty"] or w["unpushed"]):
+            continue
+        untracked = w.get("untracked", [])
+        kept = sum(1 for u in untracked if u.get("captured"))
+        lines.append(
+            f"- `{w['path']}` [{w['branch']}] dirty={w['dirty']} "
+            f"unpushed={len(w['unpushed'])} untracked={kept}/{len(untracked)}"
+        )
+        for u in untracked:
+            if not u.get("captured"):
+                lines.append(f"  - NOT captured: `{u['path']}` — {u.get('reason')}")
     (snap_dir / "RESTORE.md").write_text("\n".join(lines) + "\n")
 
     tarball = root / f"relocate-{stamp}.tar.gz"
@@ -320,36 +544,186 @@ def do_snapshot(
     return tarball
 
 
+def _snapshot_slug(w: dict, worktrees_dir: Path) -> str:
+    """Slug for one worktree: the one the snapshot recorded, else the v1 shape."""
+    recorded = w.get("slug")
+    if isinstance(recorded, str) and recorded:
+        return recorded
+    legacy = legacy_worktree_slug(w["path"])
+    if any(worktrees_dir.glob(f"{legacy}.*")):
+        return legacy
+    return worktree_slug(w["path"])
+
+
+def _restore_untracked(
+    snapshot_root: Path, w: dict, slug: str
+) -> tuple[int, list[str], list[str]]:
+    """Put untracked work back without ever overwriting what is already there.
+
+    Returns ``(restored, notes, problems)``. A destination file whose bytes
+    differ is a *conflict*, not a skip: the snapshot carries work that did not
+    land, and the caller has to exit nonzero for it.
+    """
+    inventory = w.get("untracked") or []
+    restored = 0
+    notes: list[str] = []
+    problems: list[str] = []
+    src_root = snapshot_root / "worktrees" / slug / "untracked"
+    wt_root = Path(w["path"])
+    for entry in inventory:
+        rel = entry.get("path", "")
+        if not entry.get("captured"):
+            problems.append(
+                f"{w['path']}: untracked {rel!r} was never captured "
+                f"({entry.get('reason', 'unknown reason')})"
+            )
+            continue
+        source = contained_path(src_root, rel)
+        dst = contained_path(wt_root, rel)
+        if source is None or dst is None:
+            problems.append(f"{w['path']}: refused untracked path {rel!r}")
+            continue
+        if not source.is_file():
+            problems.append(f"{w['path']}: untracked {rel!r} missing from snapshot")
+            continue
+        data = source.read_bytes()
+        if dst.exists():
+            if dst.is_file() and dst.read_bytes() == data:
+                notes.append(f"untracked {rel}: already present, identical")
+            else:
+                problems.append(
+                    f"{w['path']}: untracked {rel!r} exists on the target with "
+                    "different content — left untouched"
+                )
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(data)
+        restored += 1
+    return restored, notes, problems
+
+
+def _apply_worktree_patches(
+    snapshot_root: Path, w: dict, slug: str
+) -> tuple[list[str], list[str]]:
+    """Apply a worktree's patches in index-then-worktree order.
+
+    ``--3way`` implies ``--index``, which is exactly right for the staged patch
+    (the index has to move) and exactly wrong for the unstaged one (the index
+    has to stay), so the two are not applied the same way.
+    """
+    wt_dir = snapshot_root / "worktrees"
+    staged = wt_dir / f"{slug}.staged.patch"
+    unstaged = wt_dir / f"{slug}.unstaged.patch"
+    plan: list[tuple[str, Path, bool]] = [
+        ("unpushed", wt_dir / f"{slug}.unpushed.patch", True)
+    ]
+    if staged.exists() or unstaged.exists():
+        plan += [("staged", staged, True), ("unstaged", unstaged, False)]
+    else:
+        # v1 snapshot: one collapsed `git diff HEAD`, index separation lost.
+        plan += [("collapsed", wt_dir / f"{slug}.patch", True)]
+
+    notes: list[str] = []
+    problems: list[str] = []
+    for kind, path, three_way in plan:
+        if not path.exists():
+            continue
+        args = ["apply", "--binary"]
+        if three_way:
+            args.append("--3way")
+        result = subprocess.run(
+            _git(w["path"], *args, str(path)), capture_output=True, check=False
+        )
+        if result.returncode == 0:
+            notes.append(f"{kind}: applied")
+            continue
+        detail = result.stderr.decode("utf-8", "replace").strip().splitlines()
+        problems.append(
+            f"{w['path']}: {kind} patch failed (git apply exit {result.returncode})"
+            + (f": {detail[-1]}" if detail else "")
+        )
+        notes.append(f"{kind}: FAILED (exit {result.returncode})")
+    return notes, problems
+
+
 def do_restore(src: Path, target_home: Path, apply_patches: bool) -> int:
+    problems: list[str] = []
     if src.is_file():
         tmp = Path(tempfile.mkdtemp(prefix="vc-relocate-"))
-        shutil.unpack_archive(src, tmp)  # tarball is self-produced by `snapshot`
+        ok, rejected = safe_extract(src, tmp)
+        if not ok:
+            print(f"error: refusing snapshot {src}", file=sys.stderr)
+            for item in rejected:
+                print(f"  unsafe archive member — {item}", file=sys.stderr)
+            shutil.rmtree(tmp, ignore_errors=True)
+            return 1
         dirs = [d for d in tmp.iterdir() if d.is_dir()]
         if not dirs:
             print(f"error: no snapshot directory in {src}", file=sys.stderr)
             return 1
         src = dirs[0]
-    manifest = json.loads((src / "manifest.json").read_text())
+    try:
+        manifest = json.loads((src / "manifest.json").read_text())
+    except (OSError, ValueError) as exc:
+        print(f"error: unreadable manifest in {src}: {exc}", file=sys.stderr)
+        return 1
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema") not in SUPPORTED_SCHEMAS
+    ):
+        print(
+            f"error: unsupported snapshot schema {manifest.get('schema')!r}"
+            if isinstance(manifest, dict)
+            else "error: manifest is not an object",
+            file=sys.stderr,
+        )
+        return 1
+    sessions = manifest.get("sessions") or []
+    worktrees = manifest.get("worktrees") or []
+
     real_home = Path.home()
     restored = 0
-    for s in manifest["sessions"]:
-        rel = s["rel_transcript"]
-        provider = s["provider"]
+    for s in sessions:
+        sid = s.get("session_id", "<unknown>")
+        rel = s.get("rel_transcript") or ""
+        provider = s.get("provider")
+        if provider not in PROVIDER_STORES:
+            problems.append(f"session {sid}: unknown provider {provider!r}")
+            continue
+        # The manifest is input, not a trusted self-produced artifact: a
+        # `rel_transcript` of `claude/../../x` used to write outside the store.
+        safe = safe_relative(rel)
+        if safe is None or len(safe.parts) < 2 or safe.parts[0] != provider:
+            problems.append(f"session {sid}: refused transcript path {rel!r}")
+            continue
         store = target_home / PROVIDER_STORES[provider]
-        dst = store / Path(rel).relative_to(provider)
+        store.mkdir(parents=True, exist_ok=True)
+        source = contained_path(src / "transcripts", str(safe))
+        dst = contained_path(store, str(PurePosixPath(*safe.parts[1:])))
+        if source is None or dst is None:
+            problems.append(f"session {sid}: refused transcript path {rel!r}")
+            continue
+        if not source.is_file():
+            problems.append(f"session {sid}: transcript missing from snapshot")
+            continue
         dst.parent.mkdir(parents=True, exist_ok=True)
         if dst.exists():
             print(f"skip (exists): {dst}")
             continue
-        shutil.copy2(src / "transcripts" / rel, dst)
+        shutil.copy2(source, dst)
         restored += 1
+
     lease_src = src / "codescribe/leases"
     if lease_src.is_dir():
         lease_dst = target_home / ".codescribe/agent-bridge/leases"
         lease_dst.mkdir(parents=True, exist_ok=True)
         for f in lease_src.glob("*.json"):
-            if not (lease_dst / f.name).exists():
-                shutil.copy2(f, lease_dst / f.name)
+            dst = contained_path(lease_dst, f.name)
+            if dst is None:
+                problems.append(f"lease {f.name}: refused destination path")
+                continue
+            if not dst.exists():
+                shutil.copy2(f, dst)
 
     print(f"\nrestored {restored} session transcripts into {target_home}\n")
 
@@ -373,27 +747,62 @@ def do_restore(src: Path, target_home: Path, apply_patches: bool) -> int:
         )
 
     print("\n== Resume plan (vc-frame first, native fallback) ==")
-    for s in manifest["sessions"]:
-        print(f"[{s['provider']:6}] {s['session_id']}  ({s['mtime'][:16]})")
-        print(f"         frame : {s['resume']}")
+    for s in sessions:
+        print(
+            f"[{s.get('provider', '?'):6}] {s.get('session_id')}  ({s.get('mtime', '')[:16]})"
+        )
+        print(f"         frame : {s.get('resume', '-')}")
         print(f"         native: {s.get('resume_native', '-')}")
-    dirty = [w for w in manifest["worktrees"] if w["dirty"] or w["unpushed"]]
+
+    dirty = [w for w in worktrees if w.get("dirty") or w.get("unpushed")]
     if dirty:
         print("\n== Worktrees with state ==")
-        for w in dirty:
-            slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", w["path"]).strip("_")[-80:]
-            print(f"- {w['path']} [{w['branch']}]")
-            for suffix in (".unpushed.patch", ".patch"):
-                p = src / "worktrees" / f"{slug}{suffix}"
-                if not p.exists():
-                    continue
-                if apply_patches and Path(w["path"]).is_dir():
-                    r = subprocess.run(
-                        ["git", "-C", w["path"], "apply", "--3way", str(p)], check=False
-                    )
-                    print(f"    applied {p.name}: exit {r.returncode}")
-                else:
-                    print(f"    patch: {p} (run with --apply-patches to apply)")
+    for w in dirty:
+        slug = _snapshot_slug(w, src / "worktrees")
+        print(f"- {w['path']} [{w.get('branch', '?')}]")
+        if w.get("patch_unavailable"):
+            problems.append(
+                f"{w['path']}: no patch in snapshot ({w['patch_unavailable']})"
+            )
+            print(f"    patches   : NONE — {w['patch_unavailable']}")
+        if not Path(w["path"]).is_dir():
+            # Not a failure: on a fresh machine the checkout simply is not there
+            # yet. The artefacts stay addressable instead of being called lost.
+            print(f"    worktree  : absent here — artefacts under {src / 'worktrees'}")
+            continue
+        if not apply_patches:
+            for name in sorted((src / "worktrees").glob(f"{slug}.*patch")):
+                print(f"    patch     : {name} (run with --apply-patches to apply)")
+            kept = sum(1 for u in (w.get("untracked") or []) if u.get("captured"))
+            if kept:
+                print(
+                    f"    untracked : {kept} file(s) under "
+                    f"{src / 'worktrees' / slug / 'untracked'} "
+                    "(run with --apply-patches to restore)"
+                )
+            continue
+        notes, patch_problems = _apply_worktree_patches(src, w, slug)
+        problems += patch_problems
+        count, untracked_notes, untracked_problems = _restore_untracked(src, w, slug)
+        problems += untracked_problems
+        for note in notes:
+            print(f"    {note}")
+        if w.get("untracked"):
+            print(
+                f"    untracked : {count} restored, {len(untracked_problems)} unresolved"
+            )
+        for note in untracked_notes:
+            print(f"      {note}")
+
+    if problems:
+        print("\n== Incomplete restore ==", file=sys.stderr)
+        for item in problems:
+            print(f"  - {item}", file=sys.stderr)
+        print(
+            f"\n{len(problems)} item(s) did not land; the snapshot still holds them.",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
