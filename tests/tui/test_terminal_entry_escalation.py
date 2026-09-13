@@ -2709,14 +2709,28 @@ def test_terminal_host_survives_synthetic_caller_group_death(tmp_path: Path) -> 
     project_dir = tmp_path / "project"
     project_dir.mkdir(parents=True, exist_ok=True)
     survived = tmp_path / "survived.marker"
+    started = tmp_path / "started.marker"
+    release = tmp_path / "release.marker"
     capture = tmp_path / "terminal-launch.json"
     generation = _fake_generation(tmp_path, capture)
-    # Outlive the 1.5s bounded admission window before proving survival --
-    # a host that exits inside that window would pass even under the bug.
+    # The host must be alive past the caller's return AND past the teardown of
+    # the caller's group, then prove it is the same process. A fixed `sleep 2`
+    # raced a slow runner: the caller itself outlived two seconds and the host
+    # finished inside the caller's lifetime, proving nothing. Here the host
+    # announces itself, then blocks until the test says the group is gone, so
+    # it cannot finish early on any runner -- and under the bug it is reaped by
+    # that teardown and never answers. The wait is bounded so a failed run
+    # cannot leave it behind.
     _write(
         generation / "bin" / "vc-terminal",
         "#!/bin/bash\n"
-        "sleep 2\n"
+        f"printf '%s\\n' \"$$\" > {shlex.quote(str(started))}\n"
+        "waited=0\n"
+        f"while [[ ! -e {shlex.quote(str(release))} ]]; do\n"
+        "  ((waited < 1200)) || exit 3\n"
+        "  sleep 0.05\n"
+        "  waited=$((waited + 1))\n"
+        "done\n"
         f"printf '%s\\n' \"$$\" > {shlex.quote(str(survived))}\n"
         "exit 0\n",
     )
@@ -2772,6 +2786,11 @@ def test_terminal_host_survives_synthetic_caller_group_death(tmp_path: Path) -> 
         assert recorded_pid == caller.pid, (
             "pid mismatch -- refusing to signal an unverified group"
         )
+        deadline = time.monotonic() + 30.0
+        while not started.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert started.exists(), "the terminal host never started"
+        host_pid = int(started.read_text().strip())
         assert not survived.exists(), (
             "the fake host finished inside the caller's own lifetime -- "
             "this proves nothing about surviving the caller's group death"
@@ -2786,7 +2805,9 @@ def test_terminal_host_survives_synthetic_caller_group_death(tmp_path: Path) -> 
         except ProcessLookupError:
             pass  # nothing left in that group -- the host already detached out of it
 
-        deadline = time.monotonic() + 5.0
+        # Only now may the host finish: the group it could have died with is gone.
+        release.touch()
+        deadline = time.monotonic() + 10.0
         while not survived.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
 
@@ -2795,7 +2816,13 @@ def test_terminal_host_survives_synthetic_caller_group_death(tmp_path: Path) -> 
             "being torn down -- it is still coupled to the caller's "
             "session/pgid"
         )
+        assert int(survived.read_text().strip()) == host_pid, (
+            "a different process answered -- the host that existed before the "
+            "group teardown did not survive it"
+        )
     finally:
+        # Unblock a host a failed assertion left waiting; it exits on its own.
+        release.touch()
         if caller.poll() is None:
             try:
                 os.killpg(caller_pgid, signal.SIGKILL)
