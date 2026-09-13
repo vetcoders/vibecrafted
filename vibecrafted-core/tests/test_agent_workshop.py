@@ -443,6 +443,49 @@ def test_dashboard_uses_explicit_frame_exited_schema_without_claiming_provider_l
     assert presence.unknown == ("codex · init · vibecrafted",)
 
 
+def test_dashboard_terminal_exit_evidence_overrides_conflicting_open_flag() -> None:
+    workshop = _load()
+    presence = workshop.agent_presence_from_payload(
+        [
+            {
+                "tab_name": "Agents",
+                "title": "codex · partner · vibecrafted",
+                "exited": False,
+                "exit_status": 1,
+            }
+        ]
+    )
+
+    assert presence.active == ()
+    assert presence.unknown == ()
+
+
+def test_dashboard_displays_open_pane_count_without_provider_liveness_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workshop = _load()
+    writes: list[str] = []
+
+    class FakeWindow:
+        def getmaxyx(self) -> tuple[int, int]:
+            return (30, 100)
+
+        def addstr(self, _row: int, _col: int, text: str, _attr: int = 0) -> None:
+            writes.append(text)
+
+    monkeypatch.setattr(
+        workshop,
+        "current_agent_presence",
+        lambda: workshop.AgentPresence(("codex · init · vibecrafted",), ()),
+    )
+    dashboard = workshop.Workshop(FakeWindow(), mode="home")
+    dashboard.draw_home()
+
+    assert "Open agent panes (1)" in writes
+    assert "Provider status unverified — pane state only." in writes
+    assert "• codex · init · vibecrafted" in writes
+
+
 @pytest.mark.parametrize("width", [58, 92])
 def test_launcher_choice_redraw_preserves_final_cells_and_selected_row_styling(
     width: int, monkeypatch: pytest.MonkeyPatch

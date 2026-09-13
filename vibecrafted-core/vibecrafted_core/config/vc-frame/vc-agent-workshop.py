@@ -305,13 +305,15 @@ def _agent_label(pane: dict[str, Any]) -> str:
 
 def _pane_liveness(pane: dict[str, Any]) -> str:
     # vc-frame's public list-panes schema explicitly carries `exited` even
-    # when it does not serialize a separate lifecycle/state field.  A false
-    # value means the pane is presently running; it is intentionally only pane
-    # truth, not a claim that the provider child is still running.
+    # when it does not serialize a separate lifecycle/state field.  Terminal
+    # exit evidence is authoritative if fields conflict: `exited: false` then
+    # describes neither an open pane nor a live provider child.  A false value
+    # without terminal evidence is only pane truth, not a provider-liveness
+    # claim.
+    if pane.get("exit_status") is not None or pane.get("exited") is True:
+        return "inactive"
     if pane.get("exited") is False:
         return "active"
-    if pane.get("exited") is True or pane.get("exit_status") is not None:
-        return "inactive"
     state = (
         str(pane.get("state") or pane.get("lifecycle") or pane.get("status") or "")
         .strip()
@@ -576,24 +578,31 @@ class Workshop:
             self.window,
             top + 10,
             left,
-            f"Agents here ({len(self.faces)})",
+            f"Open agent panes ({len(self.faces)})",
+            curses.A_DIM,
+        )
+        _safe_addstr(
+            self.window,
+            top + 11,
+            left + 2,
+            "Provider status unverified — pane state only.",
             curses.A_DIM,
         )
         if self.faces:
             for offset, face in enumerate(self.faces[: max(1, height - top - 14)]):
-                _safe_addstr(self.window, top + 11 + offset, left + 2, f"• {face}")
+                _safe_addstr(self.window, top + 12 + offset, left + 2, f"• {face}")
         else:
             _safe_addstr(
                 self.window,
-                top + 11,
+                top + 12,
                 left + 2,
-                "No Agent faces yet — New agent opens the first interactive TTY.",
+                "No open agent panes yet — New agent opens the first interactive TTY.",
                 curses.A_DIM,
             )
         if self.unknown_faces:
             _safe_addstr(
                 self.window,
-                min(height - 3, top + 12 + len(self.faces)),
+                min(height - 3, top + 13 + len(self.faces)),
                 left + 2,
                 f"Unknown agent state ({len(self.unknown_faces)}) — not counted here",
                 curses.A_DIM,
