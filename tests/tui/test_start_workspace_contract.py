@@ -93,6 +93,7 @@ IDENTITY_ENV = (
     "VIBECRAFTED_START_BASELINE_SHA",
     "VIBECRAFTED_START_PARENT_ROOT",
     "VIBECRAFTED_TERMINAL_ENTRY",
+    "VIBECRAFTED_TERMINAL_ENTRY_OWNER",
     "VIBECRAFTED_TEST_ALLOW_NON_TTY_VC_FRAME",
     "VIBECRAFTED_PRODUCT_ENTRY",
     "VIBECRAFTED_PRODUCT_ENTRY_PROBE",
@@ -1069,8 +1070,18 @@ def _wait_owned_daemon_pid(child_pid_path: Path, *, timeout: float = 3.0) -> int
 
 
 def _create_lock_holder_pids(lock_file: Path) -> list[int]:
+    lsof = next(
+        (
+            candidate
+            for candidate in ("/usr/sbin/lsof", "/usr/bin/lsof", "/bin/lsof")
+            if os.path.exists(candidate)
+        ),
+        None,
+    )
+    if lsof is None:
+        pytest.skip("lsof is required to observe create-lock holders")
     result = subprocess.run(
-        ["/usr/sbin/lsof", "-n", "-P", "-t", str(lock_file)],
+        [lsof, "-n", "-P", "-t", str(lock_file)],
         check=False,
         capture_output=True,
         text=True,

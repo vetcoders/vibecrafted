@@ -78,6 +78,7 @@ PUBLIC_ENTRY_ISOLATE_ENV = (
     *WORKSPACE_IDENTITY_ENV,
     "VIBECRAFTED_START_CREATED_SESSION",
     "VIBECRAFTED_TERMINAL_ENTRY",
+    "VIBECRAFTED_TERMINAL_ENTRY_OWNER",
     "VIBECRAFTED_ROOT",
     "VIBECRAFTED_RUNTIME_ROOT",
     "VIBECRAFTED_RUNTIME_BIN",
@@ -1950,11 +1951,16 @@ def test_missing_terminal_host_fails_actionably(
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("invocation", ["vc-resume codex"])
-def test_reentry_boundary_stops_a_terminal_launch_loop(
+@pytest.mark.parametrize("invocation", ["vc-resume codex", "vc-start"])
+def test_raw_inherited_marker_is_not_a_reentry_boundary(
     tmp_path: Path, invocation: str
 ) -> None:
-    """A raw inherited marker is not a terminal-owned re-entry boundary."""
+    """A raw inherited marker is not a terminal-owned re-entry boundary.
+
+    Start and resume share one admission proof: `VIBECRAFTED_TERMINAL_ENTRY=1`
+    without the owner the product exported is agent ancestry, so a pipe still
+    gets its visible terminal.
+    """
     result, launch = _run_entry(
         tmp_path,
         invocation,
@@ -1964,6 +1970,51 @@ def test_reentry_boundary_stops_a_terminal_launch_loop(
 
     assert result.returncode == 0, result.stderr
     assert launch is not None, "a raw marker bypassed public admission"
+
+
+@pytest.mark.parametrize("invocation", ["vc-resume codex", "vc-start"])
+def test_owned_reentry_boundary_stops_a_terminal_launch_loop(
+    tmp_path: Path, invocation: str
+) -> None:
+    """The child the product terminal opened never opens another terminal.
+
+    The owned boundary is the marker plus the owner the launcher exported: this
+    generation's own `vibecrafted` front door. It holds even when the host
+    failed to hand the child a PTY.
+    """
+    owner = tmp_path / "generation" / "bin" / "vibecrafted"
+    _result, launch = _run_entry(
+        tmp_path,
+        invocation,
+        extra_env={
+            "VIBECRAFTED_TERMINAL_ENTRY": "1",
+            "VIBECRAFTED_TERMINAL_ENTRY_OWNER": str(owner),
+        },
+        expect_launch=False,
+    )
+
+    assert launch is None, "the owned terminal child opened another terminal"
+
+
+def test_start_projects_into_a_live_named_operator_session(tmp_path: Path) -> None:
+    """vc-start inside a live Frame host projects a guest into that host.
+
+    Distinct from the resume declaration below: a live named operator session
+    is start's guest-projection route, not a terminal it owes the caller.
+    """
+    live = tmp_path / "live-sessions.txt"
+    live.write_text("mlx-batch-runner\n", encoding="utf-8")
+    _result, launch = _run_entry(
+        tmp_path,
+        "vc-start",
+        extra_env={
+            "VIBECRAFTED_OPERATOR_SESSION": "mlx-batch-runner",
+            "VC_FRAME_LIVE": str(live),
+        },
+        expect_launch=False,
+    )
+
+    assert launch is None, "start opened a terminal instead of projecting a guest"
 
 
 @pytest.mark.parametrize("invocation", ["vc-resume codex"])

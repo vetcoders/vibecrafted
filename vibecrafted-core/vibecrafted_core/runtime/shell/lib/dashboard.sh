@@ -483,6 +483,15 @@ _vetcoders_start_apply_launch_spec() {
 #              (_vetcoders_needs_vc_terminal_entry), unchanged by this cut.
 # $2 = project root (the terminal's working directory); the rest is the argv
 # the child replays.
+# The terminal child we opened carries the product-owned re-entry boundary
+# (marker AND owner = this generation's vibecrafted front door). A bare
+# `VIBECRAFTED_TERMINAL_ENTRY=1` is inherited ancestry, not a surface: start and
+# resume share one admission proof (_vetcoders_has_owned_vc_terminal_entry).
+_vetcoders_start_is_owned_terminal_child() {
+  command -v _vetcoders_has_owned_vc_terminal_entry >/dev/null 2>&1 &&
+    _vetcoders_has_owned_vc_terminal_entry
+}
+
 _vetcoders_start_open_terminal_if_needed() {
   local mode="${1:-strict}" project_root="${2:-}"
   shift 2 || shift $#
@@ -496,9 +505,9 @@ _vetcoders_start_open_terminal_if_needed() {
       fi
       ;;
     *)
-      # The child we open re-enters this very entry; the boundary stops the
-      # loop even if the host somehow fails to hand it a PTY.
-      [[ -z "${VIBECRAFTED_TERMINAL_ENTRY:-}" ]] || return 0
+      # The child we open re-enters this very entry; the owned boundary stops
+      # the loop even if the host somehow fails to hand it a PTY.
+      ! _vetcoders_start_is_owned_terminal_child || return 0
       # A real controlling terminal is the direct path -- and the only proof.
       [[ ! -t 0 || ! -t 1 ]] || return 0
       ;;
@@ -1713,7 +1722,7 @@ _vetcoders_start_entry() {
   fi
 
   # 4+5 without a surface: create here, then open the terminal that enters.
-  if [[ -z "${VIBECRAFTED_TERMINAL_ENTRY:-}" ]] && [[ ! -t 0 || ! -t 1 ]]; then
+  if ! _vetcoders_start_is_owned_terminal_child && [[ ! -t 0 || ! -t 1 ]]; then
     if [[ "$state" != "live" ]]; then
       _vetcoders_start_create_before_terminal "$session_name" "$root" || return $?
       printf 'vc-start: created workspace %s for %s\n' \
