@@ -31,8 +31,9 @@ SCHEMA = "vibecrafted.resume.aicx_fallback.v2"
 # this budget; nothing is measured "except the frame".
 MAX_PACK_CHARS = 18_000
 
-# Founder's rooted proposal from their own example. 720h was explicitly
-# rejected as too much history for a fresh resume. Callers still override.
+# Chosen by the root agent for a fresh resume: four days is enough history to
+# name the current mission without paying for a week of noise. The Founder
+# rejected 720h as too much; they did not pick this number. Callers override.
 DEFAULT_RESUME_AICX_HOURS = 96
 
 # AICX scans live session sources automatically only for windows <= 48h.
@@ -564,11 +565,16 @@ def _merge_project_intents(
     merged.sort(key=lambda entry: entry.date or "", reverse=True)
     warnings = list(durable.warnings)
     warnings.extend(w for w in live.warnings if w not in warnings)
+    # Two complete halves do not make a complete union: the limit is applied
+    # again after the merge, so entries either side had retrieved whole can be
+    # dropped here. Saying "complete" then would hide exactly the omission the
+    # ``omitted`` count is reporting.
+    truncated_by_merge = len(merged) > limit
     return ProjectIntents(
         items=merged[:limit],
         available=max(durable.available, live.available, len(merged)),
         limit=limit,
-        complete=durable.complete and live.complete,
+        complete=durable.complete and live.complete and not truncated_by_merge,
         matched_buckets=sorted({*durable.matched_buckets, *live.matched_buckets}),
         match_mode=live.match_mode or durable.match_mode,
         identity_source=live.identity_source or durable.identity_source,
@@ -951,6 +957,12 @@ def _in_window(record: SessionRecord, cutoff: dt.datetime) -> bool:
 
 TRIM_MARKER = "\n\n_(trimmed to the injection budget; full source linked above)_"
 
+# Content allowances are rounded down to this grain. Every provider must get
+# the same assembly, and the only thing that differs between providers is the
+# length of the agent name inside the frame -- a difference of a few characters
+# that must not be able to move an entry's summary boundary.
+_ALLOWANCE_GRAIN = 64
+
 # The frame stays whole even under pressure; only content sections shrink.
 _CONTENT_SHARES: tuple[tuple[str, float], ...] = (
     ("intents", 0.55),
@@ -962,6 +974,16 @@ _CONTENT_SHARES: tuple[tuple[str, float], ...] = (
 # names its session and source file remains actionable, a bare sentence does
 # not. Below this, drop the whole item and count it as omitted instead.
 MIN_INTENT_SUMMARY_CHARS = 240
+
+# Printed inside the entry when its summary did not fit whole. A shortened
+# mission that admits it is shortened is usable; a silently clipped one is a
+# claim about what the project wanted that nobody can check.
+SHORTENED_SUMMARY_NOTE = (
+    "- summary: shortened to the injection budget; the linked source has it whole"
+)
+
+# Joins blocks to each other and to the section footer.
+_SECTION_JOIN = "\n\n"
 
 
 def _fit_to_budget(text: str, budget: int, *, marker: str = TRIM_MARKER) -> str:
@@ -1022,43 +1044,33 @@ def _render_intent_item(item: IntentItem, ordinal: int, *, budget: int) -> str:
         return ""
     summary = item.summary
     if len(summary) > summary_room:
+        # The honesty note is paid for out of the same budget, never out of
+        # the provenance lines -- so it is only added when the summary still
+        # clears the floor with the note inside the entry.
+        noted_tail = tail + "\n" + SHORTENED_SUMMARY_NOTE
+        noted_room = budget - (len(heading) + len(noted_tail) + 4)
+        if noted_room >= MIN_INTENT_SUMMARY_CHARS:
+            tail, summary_room = noted_tail, noted_room
         summary = summary[: summary_room - 3].rstrip() + "..."
     return f"{heading}\n{summary}\n\n{tail}"
 
 
-def _render_intents_section(intents: ProjectIntents, *, budget: int) -> str:
-    """Whole entries only. What does not fit is counted, never half-printed."""
-    preamble = [
-        "## Project intentions (primary mission, repo-scoped)",
-        "",
-        (
-            "Fresh sessions start here. The `user_msg` lane carries direct "
-            "human input, operator agent briefs and peer transport alike, so "
-            "read each entry's origin and source before treating it as a "
-            "Founder decision. AICX has not verified any of these claims."
-        ),
-        "",
-    ]
-    head = "\n".join(preamble)
-    remaining = budget - len(head)
-    if remaining <= 0:
-        return ""
+_INTENTS_PREAMBLE = (
+    "## Project intentions (primary mission, repo-scoped)\n"
+    "\n"
+    "Fresh sessions start here. The `user_msg` lane carries direct "
+    "human input, operator agent briefs and peer transport alike, so "
+    "read each entry's origin and source before treating it as a "
+    "Founder decision. AICX has not verified any of these claims.\n"
+)
 
-    blocks: list[str] = []
-    shown = 0
-    for ordinal, item in enumerate(intents.items, start=1):
-        # Keep room for the stats footer we are obliged to print.
-        block = _render_intent_item(item, ordinal, budget=remaining - 200)
-        if not block:
-            break
-        cost = len(block) + 2
-        if cost > remaining - 200:
-            break
-        blocks.append(block)
-        remaining -= cost
-        shown += 1
+_NO_ENTRY_NOTE = "_(no entry fit the injection budget; read the full source.)_"
 
-    dropped_for_budget = len(intents.items) - shown
+
+def _render_intents_footer(
+    intents: ProjectIntents, *, shown: int, dropped_for_budget: int
+) -> str:
+    """Retrieval stats plus every omission this section is obliged to admit."""
     stats = (
         "_retrieval: {shown} shown of {returned} returned, {available} available "
         "in window (limit {limit}); identity `{identity}`, match `{mode}`, "
@@ -1093,14 +1105,69 @@ def _render_intents_section(intents: ProjectIntents, *, budget: int) -> str:
         )
     for warning in intents.warnings:
         stats += f"\n_warning: {warning}_"
+    return stats
 
+
+def _intents_footer_reserve(intents: ProjectIntents) -> int:
+    """How much room the footer can actually take, not a round number.
+
+    The footer grows with the omission notes and every retrieval warning, so
+    reserving a fixed 200 characters for it meant the section could overrun
+    its allowance and lose the footer to the outer trim -- the one line that
+    makes the omission honest. The counts are the only thing not yet known, so
+    the reserve is the worst of every count this section could end up printing.
+    """
+    total = len(intents.items)
+    return max(
+        len(_render_intents_footer(intents, shown=n, dropped_for_budget=total - n))
+        for n in range(total + 1)
+    )
+
+
+def _render_intents_section(intents: ProjectIntents, *, budget: int) -> str:
+    """Whole entries with a fair share of the budget each.
+
+    An entry is never half-printed: it arrives with its provenance attached or
+    it is counted as omitted. Its summary may be shortened to the share it was
+    given, and when it is, the entry says so.
+    """
+    head = _INTENTS_PREAMBLE
+    footer_reserve = _intents_footer_reserve(intents)
+    # Preamble, the join before the footer and the footer itself are reserved
+    # before a single entry is rendered, so an entry can safely spend every
+    # character it is offered.
+    frame = len(head) + len(_SECTION_JOIN) + footer_reserve
+    if frame >= budget:
+        # No room to print the mission and admit what was left out. A section
+        # that cannot do both does not belong in the pack at all.
+        return ""
+    block_budget = budget - frame
+
+    blocks: list[str] = []
+    pending = len(intents.items)
+    for ordinal, item in enumerate(intents.items, start=1):
+        # A fair share, not "everything left": one oversized summary must not
+        # be able to eat the budget of every entry behind it. Whatever a short
+        # entry leaves unspent rolls forward to the next one.
+        share = block_budget // pending if pending > 0 else 0
+        pending -= 1
+        room = share - (len(_SECTION_JOIN) if blocks else 0)
+        block = _render_intent_item(item, ordinal, budget=room) if room > 0 else ""
+        if not block:
+            # Not a stop: the next entry may be short enough to fit, and it is
+            # counted as omitted either way.
+            continue
+        block_budget -= len(block) + (len(_SECTION_JOIN) if blocks else 0)
+        blocks.append(block)
+
+    shown = len(blocks)
+    footer = _render_intents_footer(
+        intents, shown=shown, dropped_for_budget=len(intents.items) - shown
+    )
     if not blocks:
-        return (
-            head
-            + "_(no entry fit the injection budget; read the full source.)_\n\n"
-            + stats
-        )
-    return head + "\n\n".join(blocks) + "\n\n" + stats
+        note = _NO_ENTRY_NOTE if len(_NO_ENTRY_NOTE) <= max(0, block_budget) else ""
+        return head + note + _SECTION_JOIN + footer
+    return head + _SECTION_JOIN.join(blocks) + _SECTION_JOIN + footer
 
 
 def _compose_bounded_pack(
@@ -1124,7 +1191,7 @@ def _compose_bounded_pack(
     """
     separator = "\n\n"
     frame = len(header) + len(instruction) + 2 * len(separator)
-    remaining = MAX_PACK_CHARS - frame
+    remaining = (MAX_PACK_CHARS - frame) // _ALLOWANCE_GRAIN * _ALLOWANCE_GRAIN
 
     rendered: dict[str, str] = {}
     if remaining > 0:
@@ -1136,21 +1203,61 @@ def _compose_bounded_pack(
                 if other != name and other not in rendered
             )
             allowance = max(0, remaining - reserved - len(separator))
-            fitted = _fit_to_budget(content[name](allowance), allowance)
+            fitted = _render_section_within(content[name], allowance)
             rendered[name] = fitted
             if fitted:
                 remaining -= len(fitted) + len(separator)
 
-    parts = [header]
-    for name, _share in _CONTENT_SHARES:
-        if rendered.get(name):
-            parts.append(rendered[name])
-    parts.append(instruction)
-    body = separator.join(parts)
+    body = _join_pack(header, instruction, rendered, separator)
     if len(body) > MAX_PACK_CHARS:
-        # Last-resort guard: the cap is a contract, not a target.
-        body = _fit_to_budget(body, MAX_PACK_CHARS)
+        # The cap is a contract, and the frame is not what gives way to keep
+        # it. Drop whole content sections from the lowest priority up rather
+        # than trimming the operator instruction off the end of the pack.
+        for name, _share in reversed(_CONTENT_SHARES):
+            if len(body) <= MAX_PACK_CHARS:
+                break
+            rendered[name] = ""
+            body = _join_pack(header, instruction, rendered, separator)
     return body
+
+
+def _join_pack(
+    header: str, instruction: str, rendered: Mapping[str, str], separator: str
+) -> str:
+    parts = [header]
+    parts.extend(
+        rendered[name] for name, _share in _CONTENT_SHARES if rendered.get(name)
+    )
+    parts.append(instruction)
+    return separator.join(parts)
+
+
+def _render_section_within(render: Callable[[int], str], allowance: int) -> str:
+    """Ask a section to fit itself before any blunt trim is considered.
+
+    A trim takes the tail, and the tail of a structured section is its
+    omission footer and its last entry's provenance -- precisely what must not
+    be the thing that disappears. So an overrunning section is asked again
+    with the overrun subtracted from its budget; the character trim stays as a
+    guard for renderers that do not honour one at all.
+    """
+    if allowance <= 0:
+        return ""
+    budget = allowance
+    text = render(budget)
+    for _attempt in range(2):
+        if len(text) <= allowance:
+            return text
+        budget -= len(text) - allowance
+        if budget <= 0:
+            break
+        shrunk = render(budget)
+        if len(shrunk) >= len(text):
+            # This renderer does not budget itself at all; trimming it is the
+            # only thing left, and it is why the guard still exists.
+            break
+        text = shrunk
+    return _fit_to_budget(text, allowance)
 
 
 def assemble_resume_continuity_pack(
@@ -1379,8 +1486,8 @@ def assemble_resume_continuity_pack(
         instruction=instruction_section,
         content={
             "intents": render_intents,
-            "continuity": lambda _budget: continuity_section,
-            "catalog": lambda _budget: catalog_section,
+            "continuity": lambda budget: _fit_to_budget(continuity_section, budget),
+            "catalog": lambda budget: _fit_to_budget(catalog_section, budget),
         },
     )
     if pack_contains_recover_instruction(body):
