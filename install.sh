@@ -1481,6 +1481,17 @@ fi
 
 post_install_banner
 info "▸ Running make ${target}…"
-vinfo "  make --no-print-directory -C $candidate_root $target"
+# An explicit make target still installs the Runtime Pack this bootstrap
+# verified: hand it over, with the source revision it was proven against.
+# Without this, `--runtime-pack-file … install` silently dropped the pack.
+make_pack_args=()
+if [[ -n "$selected_runtime_pack" ]]; then
+  make_pack_args=(
+    "RUNTIME_PACK=$selected_runtime_pack"
+    "RUNTIME_PACK_EXPECTED_SOURCE_REVISION=$expected_revision"
+  )
+fi
+vinfo "  make --no-print-directory -C $candidate_root $target ${make_pack_args[*]+${make_pack_args[*]}}"
 
-run_candidate_command make --no-print-directory -C "$candidate_root" "$target"
+run_candidate_command make --no-print-directory -C "$candidate_root" "$target" \
+  ${make_pack_args[@]+"${make_pack_args[@]}"}

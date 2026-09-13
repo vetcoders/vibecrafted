@@ -309,9 +309,11 @@ install-auto: install
 # signed generation on purpose. Left empty, the installer asks the build
 # selection record which pack the last `make runtime-pack` actually completed;
 # an incomplete or foreign build fails visibly there rather than resolving into
-# some older archive that merely looks plausible.
+# some older archive that merely looks plausible. install.sh hands a verified
+# public candidate's pack over as RUNTIME_PACK together with the source
+# revision it proved (RUNTIME_PACK_EXPECTED_SOURCE_REVISION).
 install:
-	@VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)" bash "$(RUNTIME_PACK_INSTALLER)"
+	@VIBECRAFTED_RUNTIME_PACK="$(RUNTIME_PACK)" bash "$(RUNTIME_PACK_INSTALLER)" $(if $(RUNTIME_PACK_EXPECTED_SOURCE_REVISION),--expected-source-revision "$(RUNTIME_PACK_EXPECTED_SOURCE_REVISION)")
 	@$(MAKE) --no-print-directory reconcile-server-service
 
 # Retained public spelling: configuration and runtime publication have one
