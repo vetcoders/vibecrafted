@@ -109,7 +109,7 @@ def test_ensure_vc_frame_session_uses_frontier_config_not_user_vc_frame(
     assert str(frontier_vc_frame) not in payload
 
 
-def test_sourcing_helper_respects_existing_user_config(
+def test_sourcing_helper_keeps_user_prompt_configs_and_pins_frame_to_product_home(
     tmp_path: Path,
 ) -> None:
     """Existing Starship/Atuin env is never overridden -- frontier configs are
