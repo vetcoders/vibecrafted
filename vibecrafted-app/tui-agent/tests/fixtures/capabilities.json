@@ -6,6 +6,7 @@
   "cursor",
   "grok",
   "junie",
+  "kimi",
   "swarm"
  ],
  "environments": {
@@ -1166,6 +1167,155 @@
     "supported": false
    },
    "permissions_default": "auto",
+   "reason": ""
+  },
+  "kimi": {
+   "available": true,
+   "binary": "kimi",
+   "controls": [
+    {
+     "permissions": "",
+     "permissions_effective": "bypass",
+     "provider_flags": [],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "kimi: kimi 0.42.0 exposes no sandbox control, so --sandbox true cannot be enforced. Omit --sandbox.",
+     "sandbox": "true",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "kimi: kimi 0.42.0 exposes no sandbox control, so --sandbox false cannot be enforced. Omit --sandbox.",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "bypass",
+     "provider_flags": [],
+     "reason": "",
+     "sandbox": "",
+     "sandbox_effective": "provider-default",
+     "supported": true
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "kimi: kimi 0.42.0 exposes no sandbox control, so --sandbox true cannot be enforced. Omit --sandbox.",
+     "sandbox": "true",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "bypass",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "kimi: kimi 0.42.0 exposes no sandbox control, so --sandbox false cannot be enforced. Omit --sandbox.",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "kimi: cannot enforce --permissions auto (kimi auto is interactive-only: --prompt rejects the flag and print mode never prompts (omit --permissions for the never-ask print default)); supported: bypass",
+     "sandbox": "",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "kimi: cannot enforce --permissions auto (kimi auto is interactive-only: --prompt rejects the flag and print mode never prompts (omit --permissions for the never-ask print default)); supported: bypass",
+     "sandbox": "true",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "auto",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "kimi: cannot enforce --permissions auto (kimi auto is interactive-only: --prompt rejects the flag and print mode never prompts (omit --permissions for the never-ask print default)); supported: bypass",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "kimi: cannot enforce --permissions accept-edits (kimi exposes no native accept-edits policy); supported: bypass",
+     "sandbox": "",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "kimi: cannot enforce --permissions accept-edits (kimi exposes no native accept-edits policy); supported: bypass",
+     "sandbox": "true",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "accept-edits",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "kimi: cannot enforce --permissions accept-edits (kimi exposes no native accept-edits policy); supported: bypass",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "kimi: cannot enforce --permissions read-only (kimi read-only is interactive-only: --prompt rejects the flag and print mode never prompts (omit --permissions for the never-ask print default)); supported: bypass",
+     "sandbox": "",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "kimi: cannot enforce --permissions read-only (kimi read-only is interactive-only: --prompt rejects the flag and print mode never prompts (omit --permissions for the never-ask print default)); supported: bypass",
+     "sandbox": "true",
+     "sandbox_effective": "",
+     "supported": false
+    },
+    {
+     "permissions": "read-only",
+     "permissions_effective": "",
+     "provider_flags": [],
+     "reason": "kimi: cannot enforce --permissions read-only (kimi read-only is interactive-only: --prompt rejects the flag and print mode never prompts (omit --permissions for the never-ask print default)); supported: bypass",
+     "sandbox": "false",
+     "sandbox_effective": "",
+     "supported": false
+    }
+   ],
+   "executable": "/opt/agents/bin/kimi",
+   "model_override": {
+    "flag": "--model",
+    "reason": "",
+    "supported": true
+   },
+   "permissions_default": "bypass",
    "reason": ""
   }
  },

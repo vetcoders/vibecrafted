@@ -17,7 +17,7 @@ from .workflows.registry import workflow_definition, workflow_manifest
 # Canonical fleet display order. Membership is derived from SUPPORTED_AGENTS so
 # a fleet change lands here automatically; `swarm` is a research meta-lane, not
 # a provider CLI, so it never appears in agent selectors.
-_FLEET_AGENT_ORDER = ("claude", "codex", "agy", "junie", "grok", "cursor")
+_FLEET_AGENT_ORDER = ("claude", "codex", "agy", "junie", "grok", "cursor", "kimi")
 FLEET_AGENTS = tuple(agent for agent in _FLEET_AGENT_ORDER if agent in SUPPORTED_AGENTS)
 AGENT_SELECTOR = "<" + "|".join(FLEET_AGENTS) + ">"
 AGENTS_LINE = " · ".join(FLEET_AGENTS)

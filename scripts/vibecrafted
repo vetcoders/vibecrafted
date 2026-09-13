@@ -80,7 +80,7 @@ _cyan='\033[36m'
 _red='\033[31m'
 _reset='\033[0m'
 
-_agents=(claude codex agy junie grok cursor)
+_agents=(claude codex agy junie grok cursor kimi)
 _modes=(implement research review plan prompt observe await stop resume)
 _skills=(audit canary decorate delegate dou followup guard hydrate implement intents justdo marbles ownership partner polarize prune release research review scaffold trust workflow)
 
@@ -230,7 +230,7 @@ PY
 _has_agent() {
   local candidate="${1:-}"
   case "$candidate" in
-    claude|codex|agy|junie|grok|cursor) return 0 ;;
+    claude|codex|agy|junie|grok|cursor|kimi) return 0 ;;
     gemini) return 1 ;;  # deprecated - see migration error below
     *) return 1 ;;
   esac
@@ -272,6 +272,7 @@ _require_agent_cli() {
       grok) printf '    npm install -g @xai-official/grok\n' >&2 ;;
       agy) printf '    install Google Antigravity CLI, then: agy install\n' >&2 ;;
       cursor) printf '    curl https://cursor.com/install -fsS | bash\n' >&2 ;;
+      kimi) printf '    curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash\n' >&2 ;;
     esac
     printf '  Or check the whole fleet: vibecrafted doctor\n' >&2
   fi
@@ -814,7 +815,7 @@ _print_ship_path() {
 
 cmd_skill_help() {
   local skill="$1"
-  local agent="${2:-<claude|codex|agy|junie|grok|cursor>}"
+  local agent="${2:-<claude|codex|agy|junie|grok|cursor|kimi>}"
   local wrapper="vc-$skill"
   local display_skill="$skill"
   local version=""
@@ -1145,9 +1146,9 @@ cmd_resume_help() {
   printf '  Resume a stopped control-plane run, a provider session, or AICX continuity.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted resume <claude|codex|agy|junie|grok|cursor> --run-id <work-...> [flags]\n'
-  printf '  vibecrafted resume <claude|codex|agy|junie|grok|cursor> --session <provider-uuid> [flags]\n'
-  printf '  vibecrafted resume <claude|codex|agy|junie|grok|cursor> [flags]\n'
+  printf '  vibecrafted resume <claude|codex|agy|junie|grok|cursor|kimi> --run-id <work-...> [flags]\n'
+  printf '  vibecrafted resume <claude|codex|agy|junie|grok|cursor|kimi> --session <provider-uuid> [flags]\n'
+  printf '  vibecrafted resume <claude|codex|agy|junie|grok|cursor|kimi> [flags]\n'
   printf '\n'
   printf '%bAfter stop:%b\n' "$_bold" "$_reset"
   printf '  Stop kills the process group. There is no same-PGID restart.\n'
@@ -1228,8 +1229,8 @@ cmd_init_help() {
   printf '  Start an interactive repository orientation session with an agent.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted init [claude|codex|agy|junie|grok|cursor] [--runtime terminal|visible|plain] [--policy-runtime local-native|local-worktrees|local-vm|cloud-soon] [--permissions bypass|auto|accept-edits|read-only] [--token-budget safe|unlimited|N] [--continuity full-lineage|fresh|bare-fork] [--prompt "<context>"]\n'
-  printf '  vc-init [claude|codex|agy|junie|grok|cursor]\n'
+  printf '  vibecrafted init [claude|codex|agy|junie|grok|cursor|kimi] [--runtime terminal|visible|plain] [--policy-runtime local-native|local-worktrees|local-vm|cloud-soon] [--permissions bypass|auto|accept-edits|read-only] [--token-budget safe|unlimited|N] [--continuity full-lineage|fresh|bare-fork] [--prompt "<context>"]\n'
+  printf '  vc-init [claude|codex|agy|junie|grok|cursor|kimi]\n'
   printf '\n'
   printf '%bRuntime:%b\n' "$_bold" "$_reset"
   printf '  terminal  (default) open a tab in the vc-frame cockpit; missing host support refuses\n'
@@ -1263,8 +1264,8 @@ cmd_partner_help() {
   printf '  --prompt/--file remain interactive; without a TTY the canonical VC Terminal handoff is used.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted partner [claude|codex|agy|junie|grok|cursor] [--runtime terminal|visible|plain]\n'
-  printf '  vc-partner [claude|codex|agy|junie|grok|cursor]\n'
+  printf '  vibecrafted partner [claude|codex|agy|junie|grok|cursor|kimi] [--runtime terminal|visible|plain]\n'
+  printf '  vc-partner [claude|codex|agy|junie|grok|cursor|kimi]\n'
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted partner claude\n'
@@ -1281,8 +1282,8 @@ cmd_operator_help() {
   printf '  Opens a TTY face with /vc-operator — same family as init, not a worker job.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  vibecrafted operator [claude|codex|agy|junie|grok|cursor] [--runtime terminal|visible]\n'
-  printf '  vc-operator [claude|codex|agy|junie|grok|cursor]\n'
+  printf '  vibecrafted operator [claude|codex|agy|junie|grok|cursor|kimi] [--runtime terminal|visible]\n'
+  printf '  vc-operator [claude|codex|agy|junie|grok|cursor|kimi]\n'
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted operator claude\n'
@@ -1390,8 +1391,8 @@ cmd_telemetry_help() {
   printf '  Smoke the marbles telemetry path through the installed command deck.\n'
   printf '\n'
   printf '%bUsage:%b\n' "$_bold" "$_reset"
-  printf '  telemetry smoke [--agent <claude|codex|agy|junie|grok|cursor>] [--count <n>] [--repo <path>] [--no-watch|--watch]\n'
-  printf '  vibecrafted telemetry smoke [--agent <claude|codex|agy|junie|grok|cursor>] [--count <n>] [--repo <path>] [--no-watch|--watch]\n'
+  printf '  telemetry smoke [--agent <claude|codex|agy|junie|grok|cursor|kimi>] [--count <n>] [--repo <path>] [--no-watch|--watch]\n'
+  printf '  vibecrafted telemetry smoke [--agent <claude|codex|agy|junie|grok|cursor|kimi>] [--count <n>] [--repo <path>] [--no-watch|--watch]\n'
   printf '  (--root is the legacy spelling of --repo; the smoke root may be created on demand)\n'
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
@@ -4687,7 +4688,7 @@ cmd_help() {
   case "$topic" in
     ""|-h|--help)
       ;;
-    claude|codex|agy|junie|grok|cursor)
+    claude|codex|agy|junie|grok|cursor|kimi)
       cmd_agent_help "$topic"
       return
       ;;
@@ -4838,7 +4839,7 @@ cmd_help() {
   printf '  scaffold → implement → review → workflow → followup → marbles → audit → polarize → dou → hydrate → release\n'
   printf '  %b14 more skills: vibecrafted help --all%b\n' "$_dim" "$_reset"
   printf '\n'
-  printf '%bAgents:%b  claude · codex · agy · junie · grok · cursor\n' "$_bold" "$_reset"
+  printf '%bAgents:%b  claude · codex · agy · junie · grok · cursor · kimi\n' "$_bold" "$_reset"
   printf '\n'
   printf '%bExamples:%b\n' "$_bold" "$_reset"
   printf '  vibecrafted init claude\n'
@@ -4925,7 +4926,7 @@ cmd_help_full() {
   printf '  %bvibecrafted tui%b                       Rust operator console over shared state\n' "$_cyan" "$_reset"
   printf '  %bvibecrafted server%b <action>           Manage local control-plane viewer server\n' "$_cyan" "$_reset"
   printf '\n'
-  printf '%b  Agents: claude · codex · agy · junie · grok · cursor%b\n' "$_bold" "$_reset"
+  printf '%b  Agents: claude · codex · agy · junie · grok · cursor · kimi%b\n' "$_bold" "$_reset"
   printf '\n'
   printf '%b=== ADDITIONAL SKILLS ===%b\n' "$_bold" "$_reset"
   printf '\n'
@@ -6291,7 +6292,7 @@ cmd_capabilities() {
 
 cmd_lifecycle_help() {
   local verb="$1"
-  local agent="${2:-<claude|codex|agy|junie|grok|cursor>}"
+  local agent="${2:-<claude|codex|agy|junie|grok|cursor|kimi>}"
   local description=""
   local flags="--last|--run-id <id>"
   case "$verb" in
@@ -6669,7 +6670,7 @@ main() {
     version|--version|-v) printf 'vibecrafted %s\n' "$(_version)" ;;
     agents) cmd_agents "$@" ;;
     swarm) cmd_swarm "$@" ;;
-    claude|codex|gemini|agy|junie|grok|cursor)
+    claude|codex|gemini|agy|junie|grok|cursor|kimi)
       local action="${1:-<action>}"
       printf '%b✗%b Agent-first grammar was removed: vibecrafted %s %s\n' "$_red" "$_reset" "$cmd" "$action" >&2
       if [[ "$action" == "<action>" ]] || _is_help_flag "$action"; then

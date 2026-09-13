@@ -66,13 +66,22 @@ from .report_contract import CLAIM_DIGEST_ENV, reserve_launcher_report_template
 from .research_config import ResearchAgentSelection, resolve_research_runtime_config
 from .run_mutation import mutate_run_meta, run_mutation_locks
 from .runtime_paths import agent_tool_search_path, selected_runtime_environment
-from .spawn import _resolve_agent_command, _stdin_command
+from .spawn import _default_command, _resolve_agent_command, _stdin_command
 from .workflow_runtime import WORKER_SIGNAL_DISCIPLINE, native_resume_argv
 from .workflows import registry as workflow_registry
 
 SUPPORTED_WORKFLOWS = workflow_registry.SUPPORTED_WORKFLOWS
 WORKFLOW_ALIASES = workflow_registry.WORKFLOW_ALIASES
-SUPPORTED_AGENTS = {"claude", "codex", "agy", "junie", "grok", "cursor", "swarm"}
+SUPPORTED_AGENTS = {
+    "claude",
+    "codex",
+    "agy",
+    "junie",
+    "grok",
+    "cursor",
+    "kimi",
+    "swarm",
+}
 SUPPORTED_RUNTIMES = {"headless", "terminal", "visible"}
 _TERMINAL_ORIGIN_ENV = {
     "VIBECRAFTED_WORKER_SESSION",
@@ -2020,6 +2029,25 @@ def build_launch_command(
 
     worker_agent = spec.agent
     controls = launch_execution_controls(spec)
+    if worker_agent == "kimi":
+        # kimi print mode has no stdin prompt lane: ``-p`` takes the prompt as
+        # its argv value (kimi 0.42.0). The supervised stdin contract cannot
+        # carry kimi, so the prompt is inlined from the materialized prompt
+        # file (ps/ARG_MAX tradeoff documented in prompt_transport); the
+        # supervisor still wires the 0600 prompt file to stdin, which kimi
+        # ignores.
+        prompt_text = spec.prompt
+        if prompt_path and Path(prompt_path).is_file():
+            prompt_text = Path(prompt_path).read_text(encoding="utf-8")
+        return _with_model_override(
+            worker_agent,
+            _default_command(
+                worker_agent,
+                prompt_text,
+                controls if controls is not None and controls.requested else None,
+            ),
+            spec.model,
+        )
     # The default shape stays byte-identical to the historical command; the
     # resolved argv is injected only when the caller asked for a control.
     if controls is not None and controls.requested:

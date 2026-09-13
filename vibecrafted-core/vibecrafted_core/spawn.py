@@ -58,7 +58,7 @@ from .telemetry import estimate_cost_usd
 
 EventCallback = Callable[[dict[str, Any]], None]
 
-POLICY_PROVIDERS = ("codex", "claude", "agy", "grok", "junie", "cursor")
+POLICY_PROVIDERS = ("codex", "claude", "agy", "grok", "junie", "cursor", "kimi")
 # Fleet agent key → installed CLI binary when they differ (key stays the UX
 # name: `vibecrafted implement cursor`, binary remains `cursor-agent`).
 AGENT_BINARY_NAMES: dict[str, str] = {
@@ -341,6 +341,24 @@ _PERMISSION_CONTRACT: dict[str, dict[str, tuple[tuple[str, ...], str] | None]] =
             "ask mode is read-only Q&A; no edits or execution",
         ),
     },
+    # kimi 0.42.0: unlike agy's single opt-in flag, kimi exposes BOTH
+    # directions as explicit startup modes — --auto (Never Ask) and --yolo
+    # (Ask When Needed) — plus --plan for read-only. All three are
+    # interactive-only: the binary rejects every one of them with -p/--prompt
+    # (OptionConflictError), and print mode always runs under kimi's auto
+    # (never-ask) policy. See the headless overlay below.
+    "kimi": {
+        "bypass": (
+            ("--auto",),
+            "Never Ask mode: everything runs and is decided automatically",
+        ),
+        "auto": (
+            ("--yolo",),
+            "Ask When Needed: routine actions run automatically; risky actions, questions and plans still ask",
+        ),
+        "accept-edits": None,
+        "read-only": (("--plan",), "plan mode prevents edits and execution"),
+    },
 }
 
 
@@ -358,6 +376,22 @@ _HEADLESS_PERMISSION_CONTRACT: dict[str, dict[str, tuple[tuple[str, ...], str]]]
         "read-only": (
             ("--sandbox", "read-only"),
             "read-only sandbox; writes and escalations fail closed",
+        ),
+    },
+    # kimi print mode never prompts (it always runs under the provider's auto
+    # / never-ask policy, with static deny rules still in effect), and the
+    # binary rejects --yolo/--auto/--plan combined with -p. Headless bypass is
+    # therefore the no-flag truth: nothing to emit, nothing downgraded.
+    # Headless auto / read-only stay refused in resolve_provider_policy —
+    # "Ask When Needed" and plan mode are interactive-only surfaces.
+    "kimi": {
+        "bypass": (
+            (),
+            (
+                "kimi print mode never prompts: it always runs under the provider's "
+                "auto (never-ask) permission policy; --yolo/--auto/--plan cannot "
+                "combine with --prompt, so no flag is emitted"
+            ),
         ),
     },
 }
@@ -859,6 +893,26 @@ def resolve_provider_policy(
             False,
             reason=f"junie {permissions} is interactive-only",
         )
+    if (
+        provider == "kimi"
+        and mode == "headless"
+        and permissions in {"auto", "read-only"}
+    ):
+        # kimi 0.42.0 rejects --yolo/--plan combined with -p/--prompt
+        # (OptionConflictError); print mode never requests approval, so an
+        # "Ask When Needed" or plan-mode promise would be a receipted lie.
+        return ProviderPolicy(
+            provider,
+            runtime,
+            permissions,
+            mode,
+            False,
+            reason=(
+                f"kimi {permissions} is interactive-only: --prompt rejects the "
+                "flag and print mode never prompts (omit --permissions for the "
+                "never-ask print default)"
+            ),
+        )
     flags, behavior = cell
     return ProviderPolicy(provider, runtime, permissions, mode, True, flags, behavior)
 
@@ -1038,6 +1092,11 @@ def interactive_policy_command(
             "--no-alt-screen",
             prompt,
         ]
+    if provider == "kimi":
+        # Interactive kimi starts the TUI with no prompt on argv (a prompt
+        # exists only as -p, which is non-interactive and conflicts with
+        # --auto/--yolo/--plan); the operator types the slash command inside.
+        return ["kimi", *flags]
     raise ValueError(f"unsupported provider: {provider}")
 
 
@@ -3559,6 +3618,19 @@ def _default_command(
             *flags,
             prompt,
         ]
+    if agent == "kimi":
+        # kimi print mode has no stdin prompt lane (0.42.0): ``-p`` takes the
+        # prompt as its argv value — the only headless input kimi offers.
+        # ps-visible and ARG_MAX-bound by construction; documented in
+        # prompt_transport (ARGV_TRANSPORT).
+        return [
+            "kimi",
+            *flags,
+            "-p",
+            prompt,
+            "--output-format",
+            "stream-json",
+        ]
     raise ValueError(f"unsupported agent: {agent}")
 
 
@@ -3650,6 +3722,19 @@ def _stdin_command(agent: str, controls: ExecutionControls | None = None) -> lis
             "stream-json",
             *flags,
         ]
+    if agent == "kimi":
+        # kimi print mode cannot consume a prompt from stdin (0.42.0: ``-p``
+        # requires its value on argv; a bare ``-p`` is a parse error). The
+        # private stdin contract has no kimi shape — refusing here keeps the
+        # argv-inline builder (``_default_command`` via
+        # ``workflow.build_launch_command``) as the only kimi lane instead of
+        # launching a TUI that silently ignores the wired prompt.
+        raise ValueError(
+            "kimi print mode has no stdin prompt lane: -p takes the prompt "
+            "as its argv value. Supervised kimi launches inline the prompt "
+            "from the materialized prompt file (workflow.build_launch_command "
+            "kimi branch); the stdin contract cannot carry kimi."
+        )
     raise ValueError(f"unsupported agent: {agent}")
 
 

@@ -2319,6 +2319,24 @@ mod tests {
     }
 
     #[test]
+    fn kimi_refusals_carry_the_provider_reason() {
+        let refused = br#"{"schema":"vibecrafted.launch_receipt.v1","accepted":false,"run_id":"","status":"rejected","message":"Failed to launch workflow: kimi: kimi 0.42.0 exposes no sandbox control, so --sandbox false cannot be enforced. Omit --sandbox."}"#;
+        let req = request(LaunchKind::Workflow);
+        let outcome = LaunchOutcome::from_run(
+            "p".to_string(),
+            LaunchExpectation::new(&req, None),
+            completed(refused, b""),
+        );
+        assert_eq!(outcome.admission(), Admission::Refused);
+        assert!(
+            outcome
+                .detail_lines()
+                .iter()
+                .any(|line| line.contains("exposes no sandbox control"))
+        );
+    }
+
+    #[test]
     fn an_acceptance_without_a_run_id_is_unknown_not_accepted() {
         let nameless =
             br#"{"schema":"vibecrafted.launch_receipt.v1","accepted":true,"run_id":"   "}"#;

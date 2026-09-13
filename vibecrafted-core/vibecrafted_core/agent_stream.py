@@ -1,4 +1,4 @@
-"""Parse agent streaming-json output (Claude/Codex/Gemini/Junie/Grok) into pane text."""
+"""Parse agent streaming-json output (Claude/Codex/Gemini/Junie/Grok/Kimi) into pane text."""
 
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ MODEL_ENV_VARS = (
     "GROK_MODEL",
     "JUNIE_MODEL",
     "AGY_MODEL",
+    "KIMI_MODEL",
 )
 MODEL_PLACEHOLDERS = {"", "none", "null", "unknown", "pending"}
 COST_PATTERNS = (
@@ -197,7 +198,7 @@ class AgentStreamParser:
     """
 
     def __init__(self, agent: str, *, default_model: str = "") -> None:
-        """Initialize parser state for ``agent`` (claude/codex/gemini/junie/grok/agy)."""
+        """Initialize parser state for ``agent`` (claude/codex/gemini/junie/grok/agy/kimi)."""
         self.agent = agent
         self.session_id = ""
         self._rendered_session_ids: set[str] = set()
@@ -208,7 +209,8 @@ class AgentStreamParser:
         self.tokens_output = 0
         self.cost_usd: float | None = None
         self.cost_source: str | None = None
-        # Final assistant answer of a stream that reports one (agy `result.response`).
+        # Final assistant answer of a stream that reports one (agy
+        # `result.response`; kimi's last assistant `content`).
         self.final_response: str = ""
 
     def feed_line(self, chunk: bytes) -> str:
@@ -245,6 +247,8 @@ class AgentStreamParser:
             return f"cd {root_text} && gemini --resume {session}"
         if self.agent == "agy":
             return f"cd {root_text} && agy --conversation {session}"
+        if self.agent == "kimi":
+            return f"cd {root_text} && kimi -S {session}"
         if self.agent == "junie":
             return f"cd {root_text} && junie --resume --session-id {session}"
         if self.agent == "grok":
@@ -413,6 +417,8 @@ class AgentStreamParser:
         """Dispatch a decoded JSON event to the formatter for ``self.agent``."""
         if self.agent == "agy" and "event" in event:
             return self._format_agy_event(event)
+        if self.agent == "kimi":
+            return self._format_kimi_event(event)
         if self.agent in {"claude", "agy", "cursor"}:
             if self.agent == "cursor":
                 thinking = self._format_cursor_thinking(event)
@@ -714,6 +720,71 @@ class AgentStreamParser:
             return f"\n\x1b[31m[{stamp()} error] {_stringish(message) or 'unknown'}\x1b[0m\n"
         return ""
 
+    def _format_kimi_event(self, event: dict[str, Any]) -> str:
+        """Render one kimi stream-json event (assistant/tool/meta; goal.summary).
+
+        kimi 0.42.0 print mode (``kimi -p --output-format stream-json``)
+        speaks NDJSON keyed by ``role``: ``assistant`` carries ``content``
+        and/or ``tool_calls`` (OpenAI-shaped ``function`` blocks), ``tool``
+        carries one tool result, ``meta`` carries ``system.version`` (stream
+        head), ``turn.step.retrying`` (provider retries) and
+        ``session.resume_hint`` (stream tail — the only session-id carrier).
+        Goal runs close with a ``goal.summary`` object. The stream reports no
+        usage and no model field, and thinking never reaches the JSONL
+        (kimi docs), so the pane shows text, tool tags and the closing
+        session banner. The last assistant ``content`` is the final answer.
+        """
+        role = str(event.get("role") or "")
+        if role == "assistant":
+            out: list[str] = []
+            tool_calls = event.get("tool_calls")
+            if isinstance(tool_calls, list):
+                for call in tool_calls:
+                    if not isinstance(call, dict):
+                        continue
+                    function = call.get("function")
+                    name = (
+                        function.get("name")
+                        if isinstance(function, dict)
+                        else call.get("name")
+                    )
+                    out.append("\n" + tool_tag(_stringish(name) or "?"))
+            content = str(event.get("content") or "")
+            if content:
+                out.append("\n" + content + "\n")
+                self.final_response = content
+            return "".join(out)
+        if role == "tool":
+            output = _stringish(event.get("content"))
+            return _truncate_block(output) if output else ""
+        if role == "meta":
+            meta_type = str(event.get("type") or "")
+            if meta_type == "system.version":
+                version = str(event.get("version") or "").strip()
+                return f"\x1b[2m[{stamp()}] kimi {version}\x1b[0m\n" if version else ""
+            if meta_type == "session.resume_hint":
+                return self._session_banner(str(event.get("session_id") or ""))
+            if meta_type == "turn.step.retrying":
+                detail = (
+                    _stringish(event.get("error_message"))
+                    or _stringish(event.get("error_name"))
+                    or "transient provider error"
+                )
+                next_attempt = _as_int(event.get("next_attempt"))
+                max_attempts = _as_int(event.get("max_attempts"))
+                attempt = (
+                    f" (attempt {next_attempt}/{max_attempts})"
+                    if next_attempt and max_attempts
+                    else ""
+                )
+                return f"\x1b[33m[{stamp()} retry]{attempt} {detail}\x1b[0m\n"
+            return ""
+        if str(event.get("type") or "") == "goal.summary":
+            status = str(event.get("status") or "done")
+            color = "32" if status == "complete" else "31"
+            return f"\n\x1b[{color}m[{stamp()}] goal: {status}\x1b[0m\n"
+        return ""
+
     def _format_grok_event(self, event: dict[str, Any]) -> str:
         """Render one Grok streaming-json event (thought/text/tool/diff/error/message)."""
         self._record_nested_telemetry(event)
@@ -770,8 +841,9 @@ def filter_stream(
     Optional ``raw_file`` tees the unparsed stream for await/transcript parse
     while the pane only sees AgentStreamParser output. Optional
     ``last_message_file`` receives the stream's final assistant answer when
-    the agent reports one (agy ``result.response``); it is left absent
-    otherwise so callers can fall back to the transcript.
+    the agent reports one (agy ``result.response``; kimi's last assistant
+    ``content``); it is left absent otherwise so callers can fall back to the
+    transcript.
     """
     import sys as _sys
 
@@ -822,7 +894,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--agent",
         required=True,
-        help="Agent family: grok, claude, codex, gemini, junie, agy",
+        help="Agent family: grok, claude, codex, gemini, junie, agy, kimi",
     )
     parser.add_argument(
         "--raw-file",
@@ -837,7 +909,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--last-message",
         default="",
-        help="Optional path that receives the stream's final assistant answer (agy result.response)",
+        help="Optional path that receives the stream's final assistant answer (agy result.response, kimi's last assistant content)",
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
     agent = str(args.agent or "").strip().lower()
