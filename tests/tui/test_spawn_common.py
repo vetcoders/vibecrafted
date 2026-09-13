@@ -618,7 +618,7 @@ def test_internal_python_owner_refuses_macos_host_python39(tmp_path: Path) -> No
           exit 11
         fi
         printf 'refused=1\\n'
-        printf 'stderr=%s\\n' "$(/usr/bin/cat {shlex.quote(str(err_file))})"
+        printf 'stderr=%s\\n' "$(/bin/cat {shlex.quote(str(err_file))})"
         """
     )
 
