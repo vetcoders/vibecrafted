@@ -1268,6 +1268,49 @@ def test_launch_registry_prune_retains_claim_when_archived_snapshot_is_contradic
     assert workflow._launch_idempotency_path(run_id).exists()
 
 
+@pytest.mark.parametrize("malformed_snapshot", [None, [], "invalid", 0, False])
+def test_launch_registry_prune_retains_claim_when_primary_snapshot_is_not_object(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, malformed_snapshot: Any
+) -> None:
+    """An invalid current projection is uncertainty, even with old terminal archive."""
+    _prepare_prune_home(monkeypatch, tmp_path / ".vibecrafted")
+    run_id = "malformed-primary-with-terminal-archive"
+    _write_dispatched_launch_record(run_id, run_id)
+    current = control_plane.run_snapshot_dir() / f"{run_id}.json"
+    current.parent.mkdir(parents=True, exist_ok=True)
+    current.write_text(json.dumps(malformed_snapshot), encoding="utf-8")
+    _write_run_projection(run_id, {"state": "completed", "exit_code": 0}, archived=True)
+    now = time.time()
+    _expire_launch_registry(now)
+    _forbid_legacy_run_discovery(monkeypatch)
+
+    removed = workflow._prune_launch_idempotency_registry(now=now)
+
+    assert removed == 0
+    assert workflow._launch_idempotency_path(run_id).exists()
+
+
+@pytest.mark.parametrize("malformed_snapshot", [None, [], "invalid", 0, False])
+def test_launch_registry_prune_retains_claim_when_archived_snapshot_is_not_object(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, malformed_snapshot: Any
+) -> None:
+    """An invalid archived projection must be treated as unknown, never crash."""
+    _prepare_prune_home(monkeypatch, tmp_path / ".vibecrafted")
+    run_id = "malformed-archived-snapshot"
+    _write_dispatched_launch_record(run_id, run_id)
+    archive = control_plane.run_snapshot_dir() / "archive" / f"{run_id}.json"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    archive.write_text(json.dumps(malformed_snapshot), encoding="utf-8")
+    now = time.time()
+    _expire_launch_registry(now)
+    _forbid_legacy_run_discovery(monkeypatch)
+
+    removed = workflow._prune_launch_idempotency_registry(now=now)
+
+    assert removed == 0
+    assert workflow._launch_idempotency_path(run_id).exists()
+
+
 def test_launch_registry_prune_retains_claim_when_runtime_meta_is_unreadable(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
