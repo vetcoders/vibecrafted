@@ -8,6 +8,8 @@ import subprocess
 import textwrap
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HELPER_SCRIPT = (
     REPO_ROOT
@@ -474,7 +476,7 @@ def test_await_pane_targets_operator_tab_with_bundled_vc_frame_without_path_leak
 
 def test_compact_session_name_is_zsh_compatible() -> None:
     if shutil.which("zsh") is None:
-        return
+        pytest.skip("zsh is required for the compact session name contract")
 
     result = subprocess.run(
         [
