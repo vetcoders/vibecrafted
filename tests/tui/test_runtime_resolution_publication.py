@@ -1371,7 +1371,7 @@ def _previous_terminal_policy() -> str:
     return (
         _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
         .replace(_INCOMING_SHELL, _PREVIOUS_SHELL)
-        .replace("padding = { x = 8, y = 24 }", "padding = { x = 0, y = 0 }")
+        .replace("padding = { x = 8, y = 8 }", "padding = { x = 0, y = 0 }")
     )
 
 
@@ -1412,7 +1412,7 @@ def test_three_way_shell_correction_keeps_user_chrome_and_accepts_new_defaults(
     )
     text = policy.read_text(encoding="utf-8")
     assert _INCOMING_SHELL in text
-    assert "padding = { x = 8, y = 24 }" in text
+    assert "padding = { x = 8, y = 8 }" in text
     assert 'family = "User Mono"' in text
     assert 'background = "#111111"' in text
     assert 'mods = "Control"' in text
@@ -1453,13 +1453,13 @@ def test_terminal_chrome_and_font_overrides_survive_matching_default_then_retry(
     user = (
         base.replace("blur = true", "blur = false")
         .replace("opacity = 0.9", "opacity = 0.75")
-        .replace('decorations = "Transparent"', 'decorations = "None"')
+        .replace('decorations = "None"', 'decorations = "Full"')
         .replace('family = "Spot Mono"', 'family = "Founder Mono"')
     )
     first_update = (
         base.replace("blur = true", "blur = false")
         .replace("opacity = 0.9", "opacity = 0.85")
-        .replace('decorations = "Transparent"', 'decorations = "Full"')
+        .replace('decorations = "None"', 'decorations = "Transparent"')
         .replace('family = "Spot Mono"', 'family = "Shipped Mono"')
     )
     second_update = base.replace("opacity = 0.9", "opacity = 0.95").replace(
@@ -1491,7 +1491,7 @@ def test_terminal_chrome_and_font_overrides_survive_matching_default_then_retry(
         **preserved["window"],
         "blur": False,
         "opacity": 0.75,
-        "decorations": "None",
+        "decorations": "Full",
     }
     assert {
         preserved["font"][face]["family"] for face in ("normal", "bold", "italic")
@@ -1502,6 +1502,109 @@ def test_terminal_chrome_and_font_overrides_survive_matching_default_then_retry(
     overrides = receipt["terminal_policy_user_overrides"][str(policy)]
     assert {"window.blur", "window.opacity", "window.decorations"} <= set(overrides)
     assert "Founder Mono" not in json.dumps(receipt)
+    _resolve(roots, capsys, status="ready")
+
+
+# The Founder-stated product chrome. Written as literal expected values rather
+# than read back out of the shipped file, so a silent edit to the default is a
+# failing test and not a self-fulfilling assertion.
+_PRODUCT_WINDOW_DEFAULTS = {
+    "blur": True,
+    "opacity": 0.9,
+    "decorations": "None",
+}
+_PRODUCT_FONT_FAMILY = "Spot Mono"
+
+
+def _installed_policy(roots) -> dict:
+    return tomllib.loads(
+        (roots["product_config"] / "terminal-policy.toml").read_text(encoding="utf-8")
+    )
+
+
+def test_fresh_install_lands_the_product_chrome_and_font(tmp_path, roots, capsys):
+    """A first install must produce the chrome the product promises."""
+    _install(
+        seed_runtime_pack(tmp_path / "pack-a", version="9.9.9+a"),
+        capsys,
+    )
+    policy = _installed_policy(roots)
+    assert {
+        key: policy["window"][key] for key in _PRODUCT_WINDOW_DEFAULTS
+    } == _PRODUCT_WINDOW_DEFAULTS
+    assert {
+        policy["font"][face]["family"] for face in ("normal", "bold", "italic")
+    } == {_PRODUCT_FONT_FAMILY}
+    _resolve(roots, capsys, status="ready")
+
+
+def test_upgrade_keeps_the_product_chrome_when_the_owner_never_touched_it(
+    tmp_path, roots, capsys
+):
+    """Untouched defaults follow the product; they are not frozen on install."""
+    base = _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
+    shipped_before = base.replace('decorations = "None"', 'decorations = "Transparent"')
+    assert shipped_before != base
+
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-a", version="9.9.9+a", terminal_policy=shipped_before
+        ),
+        capsys,
+    )
+    assert _installed_policy(roots)["window"]["decorations"] == "Transparent"
+
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-b", version="9.9.10+b", terminal_policy=base
+        ),
+        capsys,
+    )
+    policy = _installed_policy(roots)
+    assert {
+        key: policy["window"][key] for key in _PRODUCT_WINDOW_DEFAULTS
+    } == _PRODUCT_WINDOW_DEFAULTS
+    _resolve(roots, capsys, status="ready")
+
+
+def test_upgrade_to_borderless_default_keeps_an_explicit_decoration_choice(
+    tmp_path, roots, capsys
+):
+    """The correction to the default must not overwrite a deliberate answer."""
+    base = _REPO_TERMINAL_POLICY.read_text(encoding="utf-8")
+    shipped_before = base.replace('decorations = "None"', 'decorations = "Transparent"')
+
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-a", version="9.9.9+a", terminal_policy=shipped_before
+        ),
+        capsys,
+    )
+    policy_path = roots["product_config"] / "terminal-policy.toml"
+    policy_path.write_text(
+        policy_path.read_text(encoding="utf-8").replace(
+            'decorations = "Transparent"', 'decorations = "Full"'
+        ),
+        encoding="utf-8",
+    )
+
+    _install(
+        seed_runtime_pack(
+            tmp_path / "pack-b", version="9.9.10+b", terminal_policy=base
+        ),
+        capsys,
+    )
+    policy = _installed_policy(roots)
+    assert policy["window"]["decorations"] == "Full"
+    # Chrome the owner never answered for still follows the product.
+    assert policy["window"]["blur"] is True
+    assert policy["window"]["opacity"] == 0.9
+    receipt = json.loads(
+        (roots["runtime_home"] / installer.RUNTIME_INSTALL_RECEIPT).read_text()
+    )
+    overrides = receipt["terminal_policy_user_overrides"][str(policy_path)]
+    assert "window.decorations" in overrides
+    assert "Full" not in json.dumps(receipt), "the receipt records identity, not value"
     _resolve(roots, capsys, status="ready")
 
 
@@ -1567,7 +1670,7 @@ def test_explicit_shell_preference_stays_a_bound_choice(tmp_path, roots, capsys)
             preference_path=str(policy),
         )
         assert _EXPLICIT_FISH_SHELL in policy.read_text(encoding="utf-8")
-        assert "padding = { x = 8, y = 24 }" in policy.read_text(encoding="utf-8")
+        assert "padding = { x = 8, y = 8 }" in policy.read_text(encoding="utf-8")
         _resolve(roots, capsys, status="ready")
 
 
