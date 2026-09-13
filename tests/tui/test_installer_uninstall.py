@@ -514,6 +514,80 @@ def test_runtime_install_uses_generation_bundle_without_app_root(
     assert not installer._is_product_bundle_terminal_host(generation_host)
 
 
+def test_bundle_terminal_host_admission_refuses_every_broken_metadata_shape(
+    tmp_path: Path,
+) -> None:
+    """Admission reads untrusted bytes: a bad bundle is `False`, never a crash.
+
+    `_is_product_bundle_terminal_host` runs inside `cmd_runtime_install` over
+    a path an installed generation — or an ambient `--terminal-host` — hands
+    over. Every shape below is reachable on a real disk: a plist whose root is
+    an array or a string parses cleanly and then has no `.get`, and truncated
+    XML reaches expat, whose error is not a `ValueError`. Before this boundary
+    was closed the first two raised `AttributeError` and the third raised
+    `ExpatError`, either of which aborts the install rather than falling back
+    to the flat native host.
+    """
+    bundle_root = tmp_path / "generation/libexec/vc-terminal.app"
+    host = bundle_root / "Contents/MacOS/alacritty"
+    plist = bundle_root / "Contents/Info.plist"
+    icon = bundle_root / "Contents/Resources/alacritty.icns"
+
+    _write_terminal_bundle_host(host)
+    assert installer._is_product_bundle_terminal_host(host)
+
+    broken_plists = {
+        "array root": b'<?xml version="1.0"?><plist version="1.0">'
+        b"<array><string>x</string></array></plist>",
+        "string root": b'<?xml version="1.0"?><plist version="1.0">'
+        b"<string>x</string></plist>",
+        "truncated xml": b'<?xml version="1.0"?><plist version="1.0"><dict><key>a',
+        "not a plist": b"not a plist at all",
+        "empty": b"",
+    }
+    for label, payload in broken_plists.items():
+        plist.write_bytes(payload)
+        assert not installer._is_product_bundle_terminal_host(host), label
+
+    # The donor's own identity is a complete, parseable plist — and still not
+    # this product's Finder/Dock host.
+    with plist.open("wb") as handle:
+        plistlib.dump(
+            {
+                "CFBundleIdentifier": "io.vetcoders.vc-terminal",
+                "CFBundleExecutable": "alacritty",
+                "CFBundleIconFile": "alacritty.icns",
+                "CFBundleDisplayName": "Alacritty",
+                "CFBundleName": "Alacritty",
+            },
+            handle,
+        )
+    assert not installer._is_product_bundle_terminal_host(host)
+
+    _write_terminal_bundle_host(host)
+    assert installer._is_product_bundle_terminal_host(host)
+
+    # A declared icon that is absent, empty, or a symlink is not a resource the
+    # bundle's seal can cover, so the bundle is not a branded host either.
+    icon.write_bytes(b"")
+    assert not installer._is_product_bundle_terminal_host(host)
+    icon.unlink()
+    assert not installer._is_product_bundle_terminal_host(host)
+    elsewhere = tmp_path / "elsewhere.icns"
+    elsewhere.write_bytes(b"fixture-icon")
+    icon.symlink_to(elsewhere)
+    assert not installer._is_product_bundle_terminal_host(host)
+
+    icon.unlink()
+    icon.write_bytes(b"fixture-icon")
+    assert installer._is_product_bundle_terminal_host(host)
+
+    # A shell script at the inner path is not a native host, however branded.
+    host.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    host.chmod(0o755)
+    assert not installer._is_product_bundle_terminal_host(host)
+
+
 def test_runtime_pack_uninstall_prunes_only_created_empty_xdg_parents(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

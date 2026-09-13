@@ -1006,7 +1006,14 @@ def test_terminal_wrapper_pins_physical_owner_and_preserves_payload_argv(
         assert not result.stdout
 
 
-def _bundle_capture_host(path: Path, python: str) -> None:
+def _bundle_capture_host(path: Path, python: str, *, name: str = "VC Terminal") -> None:
+    """A complete branded bundle whose inner binary reports how it was invoked.
+
+    `name` is a parameter because the donor's own CFBundleName is the exact
+    shape the wrapper has to refuse: the release builder stamps VC Terminal
+    into both payloads' bundles, so anything else at a bundle-shaped path is
+    not this product's Dock identity.
+    """
     path.parent.mkdir(parents=True)
     path.write_text(
         f"#!{python}\nimport json, os, sys\nprint(json.dumps({{'argv':sys.argv[1:], 'host':sys.argv[0]}}))\n",
@@ -1019,6 +1026,8 @@ def _bundle_capture_host(path: Path, python: str) -> None:
         "<key>CFBundleIdentifier</key><string>io.vetcoders.vc-terminal</string>"
         "<key>CFBundleExecutable</key><string>alacritty</string>"
         "<key>CFBundleIconFile</key><string>alacritty.icns</string>"
+        f"<key>CFBundleName</key><string>{name}</string>"
+        f"<key>CFBundleDisplayName</key><string>{name}</string>"
         "</dict></plist>\n",
         encoding="utf-8",
     )
@@ -1027,15 +1036,10 @@ def _bundle_capture_host(path: Path, python: str) -> None:
     icon.write_bytes(b"fixture-icon")
 
 
-def test_terminal_wrapper_execs_product_bundle_host_not_naked_libexec(
-    tmp_path, monkeypatch
-):
+def _terminal_wrapper_generation(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Generation with the product wrapper on bin and a flat native host."""
     import shutil
 
-    home = tmp_path / "home"
-    entry = home / ".config/vibecrafted/vc-terminal/vc-terminal.toml"
-    entry.parent.mkdir(parents=True)
-    entry.write_text("[general]\n")
     generation = tmp_path / "generation"
     (generation / "bin").mkdir(parents=True)
     (generation / "libexec").mkdir()
@@ -1048,6 +1052,21 @@ def test_terminal_wrapper_execs_product_bundle_host_not_naked_libexec(
     libexec = generation / "libexec/vc-terminal"
     libexec.write_text("#!/bin/sh\nprintf 'libexec-ran\\n'\n")
     libexec.chmod(0o755)
+    return generation, wrapper, libexec
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason=".app is a Darwin identity mechanism; other platforms keep the flat host",
+)
+def test_terminal_wrapper_execs_product_bundle_host_not_naked_libexec(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    entry = home / ".config/vibecrafted/vc-terminal/vc-terminal.toml"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("[general]\n")
+    generation, wrapper, _libexec = _terminal_wrapper_generation(tmp_path)
     bundle_host = (
         tmp_path
         / "Vibecrafted.app/Contents/Helpers/vc-terminal.app/Contents/MacOS/alacritty"
@@ -1075,6 +1094,47 @@ def test_terminal_wrapper_execs_product_bundle_host_not_naked_libexec(
 
     # An incomplete bundle must not masquerade as a valid branded host.
     (generation_bundle.parents[1] / "Resources/alacritty.icns").unlink()
+    result = subprocess.run(
+        [str(wrapper), "-e", "true"], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "libexec-ran\n"
+
+    # Nor may a complete bundle that never received the canonical stamp: the
+    # donor ships its own CFBundleName and the builder overwrites it in both
+    # payloads, so an unstamped bundle is somebody else's app.
+    donor_bundle = tmp_path / "donor/vc-terminal.app/Contents/MacOS/alacritty"
+    _bundle_capture_host(donor_bundle, sys.executable, name="Alacritty")
+    monkeypatch.setenv("VIBECRAFTED_TERMINAL_HOST", str(donor_bundle))
+    result = subprocess.run(
+        [str(wrapper), "-e", "true"], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "libexec-ran\n"
+
+
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="Darwin is the platform that owns .app selection",
+)
+def test_terminal_wrapper_keeps_flat_native_host_off_darwin(tmp_path, monkeypatch):
+    """Linux and friends run the generation's flat native host, always.
+
+    A Runtime Pack built for Linux carries no bundle, but a polluted
+    environment can still name one, and a shared home can still hold a
+    macOS-shaped tree. Platform, not path shape, decides.
+    """
+    home = tmp_path / "home"
+    entry = home / ".config/vibecrafted/vc-terminal/vc-terminal.toml"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("[general]\n")
+    generation, wrapper, _libexec = _terminal_wrapper_generation(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+
+    generation_bundle = generation / "libexec/vc-terminal.app/Contents/MacOS/alacritty"
+    _bundle_capture_host(generation_bundle, sys.executable)
+    monkeypatch.setenv("VIBECRAFTED_TERMINAL_HOST", str(generation_bundle))
+
     result = subprocess.run(
         [str(wrapper), "-e", "true"], capture_output=True, text=True, check=False
     )

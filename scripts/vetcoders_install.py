@@ -8655,6 +8655,13 @@ def _is_native_executable(path: Path) -> bool:
     return magic in _NATIVE_EXECUTABLE_MAGIC
 
 
+# The one name the release builder stamps into every vc-terminal.app it
+# materializes — Vibecrafted.app's helper and the Runtime Pack generation's
+# bundle alike. A bundle carrying the donor's name is not this product's
+# Finder/Dock identity, so it is not admitted as the public terminal host.
+_TERMINAL_BUNDLE_DISPLAY_NAME = "VC Terminal"
+
+
 def _is_product_bundle_terminal_host(path: Path) -> bool:
     """True when `path` is the inner binary of a physical vc-terminal.app."""
     try:
@@ -8680,14 +8687,25 @@ def _is_product_bundle_terminal_host(path: Path) -> bool:
         if not plist.is_file() or not icon.is_file() or icon.stat().st_size == 0:
             return False
         with plist.open("rb") as stream:
-            metadata = plistlib.load(stream)
+            document = plistlib.load(stream)
+        # A plist whose root is an array or a string parses cleanly and then
+        # has no `.get`. Admission is a predicate on untrusted bytes under a
+        # path an installed generation hands us, so every shape that is not a
+        # dictionary is simply "not a branded host" — never an AttributeError
+        # escaping into cmd_runtime_install.
+        if not isinstance(document, dict):
+            return False
         return _is_native_executable(path) and (
-            metadata.get("CFBundleExecutable") == "alacritty"
-            and metadata.get("CFBundleIconFile") == "alacritty.icns"
+            document.get("CFBundleExecutable") == "alacritty"
+            and document.get("CFBundleIconFile") == "alacritty.icns"
+            and document.get("CFBundleName") == _TERMINAL_BUNDLE_DISPLAY_NAME
+            and document.get("CFBundleDisplayName") == _TERMINAL_BUNDLE_DISPLAY_NAME
         )
     except OSError:
         return False
-    except (plistlib.InvalidFileException, ValueError, TypeError):
+    # Truncated or malformed XML reaches expat, which raises ExpatError — not a
+    # ValueError, so InvalidFileException alone never covered it.
+    except (plistlib.InvalidFileException, ExpatError, ValueError, TypeError):
         return False
 
 

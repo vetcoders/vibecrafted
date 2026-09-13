@@ -107,6 +107,14 @@ if [[ -n "$codesign_identity" ]]; then
     CODESIGN_KEYCHAIN_ARGS=(--keychain "$codesign_keychain")
   fi
   sign_macho_tree "$root" || die "could not sign final Runtime Pack Mach-O payload"
+  # libexec/vc-terminal.app is the pack's own Finder/Dock identity, so the pack
+  # must seal it as a BUNDLE. Signing the inner Mach-O covers the executable
+  # and nothing else: Info.plist and the icon — the identity itself — are
+  # sealed only by codesign on the bundle directory. Runs after the loose
+  # Mach-O files and before verification, so the inside-out order matches the
+  # release builder's sign_macho_tree → sign_nested_app_bundles.
+  sign_macho_app_bundles "$root" \
+    || die "could not seal the final Runtime Pack .app bundles"
   verify_macho_tree "$root" 1 \
     || die "final Runtime Pack Mach-O signature preflight failed"
 elif [[ -n "$codesign_keychain" ]]; then

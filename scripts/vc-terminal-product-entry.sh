@@ -110,6 +110,13 @@ _vc_terminal_is_bundle_host() {
     "$bundle/Contents/Info.plist" 2>/dev/null)" == "alacritty" ]] || return 1
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' \
     "$bundle/Contents/Info.plist" 2>/dev/null)" == "alacritty.icns" ]] || return 1
+  # Both payloads' bundles are stamped VC Terminal by the one builder helper.
+  # A bundle still carrying the donor's name is somebody else's app sitting at
+  # a path shaped like ours; it does not get to be the product's Dock identity.
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' \
+    "$bundle/Contents/Info.plist" 2>/dev/null)" == "VC Terminal" ]] || return 1
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' \
+    "$bundle/Contents/Info.plist" 2>/dev/null)" == "VC Terminal" ]] || return 1
 }
 
 _vc_terminal_select_host() {

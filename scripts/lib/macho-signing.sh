@@ -208,6 +208,51 @@ strip_macho_debug_tree() {
   fi
 }
 
+# sign_macho_app_bundles <root>
+#
+# `sign_macho_tree` walks `find -type f`: for an .app it reaches the inner
+# Mach-O and signs that FILE. A bundle seal is a different object — codesign
+# only writes Contents/_CodeSignature/CodeResources when the path it is handed
+# is the bundle DIRECTORY, and that seal is what covers Info.plist and the icon,
+# i.e. exactly the Finder/Dock identity a .app exists for. Vibecrafted.app has
+# always closed this through sign_nested_app_bundles in the release builder; the
+# standalone Runtime Pack gained its own libexec/vc-terminal.app and had no such
+# step, so the bundle shipped with a signed executable inside an unsealed shell.
+#
+# `-depth` hands over children before parents, so a nested bundle is sealed
+# before the bundle enclosing it — the same inside-out order the loose Mach-O
+# files are signed in. Non-Darwin payloads carry no .app at all and this is a
+# no-op there.
+sign_macho_app_bundles() {
+  local root="$1" bundle
+  [[ -d "$root" ]] || macho_signing_die "missing tree: $root" || return 1
+  [[ -n "${SIGNING_IDENTITY:-}" ]] \
+    || macho_signing_die "SIGNING_IDENTITY is empty" || return 1
+  while IFS= read -r -d '' bundle; do
+    codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
+      "${CODESIGN_KEYCHAIN_ARGS[@]}" "$bundle" \
+      || macho_signing_die "could not seal bundle ${bundle#"$root"/}" || return 1
+  done < <(find "$root" -depth -type d -name '*.app' -print0)
+}
+
+# verify_macho_app_bundles <root> — every .app under the tree carries its own
+# seal, not merely a signed executable inside it. CodeResources is checked
+# first because its absence is the precise failure this boundary exists for and
+# names it plainly; `codesign --verify --strict` then re-reads the seal and the
+# nested code it covers.
+verify_macho_app_bundles() {
+  local root="$1" bundle
+  [[ -d "$root" ]] \
+    || macho_signing_die "missing verification tree: $root" || return 1
+  while IFS= read -r -d '' bundle; do
+    [[ -f "$bundle/Contents/_CodeSignature/CodeResources" ]] \
+      || macho_signing_die "bundle is not sealed as a bundle: ${bundle#"$root"/}" \
+      || return 1
+    codesign --verify --strict --verbose=2 "$bundle" \
+      || macho_signing_die "invalid bundle signature: ${bundle#"$root"/}" || return 1
+  done < <(find "$root" -depth -type d -name '*.app' -print0)
+}
+
 sign_macho_tree() {
   local root="$1" excluded="${2:-}" candidate
   [[ -d "$root" ]] || macho_signing_die "missing tree: $root" || return 1
@@ -223,9 +268,14 @@ sign_macho_tree() {
   done < <(find "$root" -type f -print0)
 }
 
+# Bundle seals are verified first, inside-out, so every caller of this
+# boundary — the packager on its staging tree, and the archive preflight the
+# App runs on the embedded carrier — inherits the same proof without a second
+# verification system.
 verify_macho_tree() {
   local root="$1" require_macho="${2:-0}" candidate found=0
   [[ -d "$root" ]] || macho_signing_die "missing verification tree: $root" || return 1
+  verify_macho_app_bundles "$root" || return 1
   while IFS= read -r -d '' candidate; do
     if is_macho_file "$candidate"; then
       found=1
