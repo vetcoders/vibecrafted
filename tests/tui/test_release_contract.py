@@ -701,9 +701,13 @@ def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
     assert 'background = "#fafafa"' in light
     assert 'chars = "\\u001b[101;9u"' in terminal
     assert "/Users/" not in terminal
-    assert "Contents/Resources/fonts/SpotMono.ttc" in app_delegate
-    assert "CTFontManagerRegisterFontsForURL" in app_delegate
-    assert "kCTFontFamilyNameAttribute as String" in app_delegate
+    # Font ownership belongs to the process that draws the glyphs. The app used
+    # to register SpotMono.ttc for the whole login session on its way to
+    # spawning the terminal, which reached unrelated processes and outranked the
+    # owner's own installed copy. See tests/tui/test_terminal_font_ownership.py
+    # for the measured evidence behind this line.
+    assert "CTFontManagerRegisterFontsForURL" not in app_delegate
+    assert "Contents/Resources/fonts/SpotMono.ttc" not in app_delegate
     assert 'CTFontDescriptorCreateWithNameAndSize("Spot Mono"' not in app_delegate
     assert "_RUNTIME_PREFERENCE_SOURCES" in installer
     assert (
@@ -730,6 +734,8 @@ def test_release_bundle_binds_the_canonical_terminal_policy_and_font() -> None:
     assert (
         'install -m 0644 "$SPOT_MONO_FONT" "$resources/fonts/SpotMono.ttc"' in builder
     )
+    assert 'embed_terminal_font_resources "$terminal_app"' in builder
+    assert "Add :ATSApplicationFontsPath string fonts" in builder
     assert "missing licensed Spot Mono input" in builder
     assert "(OpenType|TrueType) font collection data" in builder
 
