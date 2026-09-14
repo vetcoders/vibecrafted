@@ -7,10 +7,9 @@ copies and preferences live under ~/.config/vibecrafted.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
-from .runtime_paths import vibecrafted_tools_home, xdg_config_home
+from .runtime_paths import vibecrafted_tools_home
 
 _FENCE_BEGIN = "# >>> vibecrafted >>>"
 _FENCE_END = "# <<< vibecrafted <<<"
@@ -95,45 +94,3 @@ def ensure_zshrc(home: Path | None = None, *, dry_run: bool = False) -> dict[str
         suffix = "" if text.endswith("\n") else "\n"
         zshrc.write_text(text + suffix + "\n" + _FENCED_BLOCK, encoding="utf-8")
     return result
-
-
-# ---------------------------------------------------------------------------
-# Frontier zombies (W2-B helpers usable from doctor)
-# ---------------------------------------------------------------------------
-
-
-def frontier_root(home: Path | None = None) -> Path:
-    """Root of the frontier config projection (``VC_FRAME_CONFIG_DIR`` target)."""
-    if home is not None:
-        xdg = os.environ.get("XDG_CONFIG_HOME")
-        if xdg:
-            return Path(xdg).expanduser() / "vetcoders" / "frontier"
-        return home / ".config" / "vetcoders" / "frontier"
-    return xdg_config_home() / "vetcoders" / "frontier"
-
-
-def list_dangling_frontier_links(root: Path | None = None) -> list[Path]:
-    """Recursively find symlinks under the frontier root whose target no longer exists."""
-    base = root if root is not None else frontier_root()
-    dangling: list[Path] = []
-    if not base.exists():
-        return dangling
-    for path in base.rglob("*"):
-        if path.is_symlink():
-            try:
-                path.resolve(strict=True)
-            except OSError:
-                dangling.append(path)
-    return dangling
-
-
-def remove_dangling_frontier_links(
-    root: Path | None = None, *, dry_run: bool = False
-) -> list[Path]:
-    """Delete dangling frontier symlinks (or, if ``dry_run``, just report them)."""
-    removed: list[Path] = []
-    for path in list_dangling_frontier_links(root):
-        removed.append(path)
-        if not dry_run:
-            path.unlink(missing_ok=True)
-    return removed
