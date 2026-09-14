@@ -361,30 +361,6 @@ def agent_faces_from_payload(payload: Any) -> list[str]:
     return list(agent_presence_from_payload(payload).active)
 
 
-def current_faces() -> list[str]:
-    try:
-        result = subprocess.run(
-            [
-                "vc-frame",
-                "action",
-                "list-panes",
-                "--json",
-                "--state",
-                "--tab",
-                "--command",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=1.5,
-        )
-        if result.returncode != 0:
-            return []
-        return agent_faces_from_payload(json.loads(result.stdout))
-    except (FileNotFoundError, json.JSONDecodeError, subprocess.TimeoutExpired):
-        return []
-
-
 def current_agent_presence() -> AgentPresence:
     try:
         result = subprocess.run(
@@ -407,6 +383,51 @@ def current_agent_presence() -> AgentPresence:
         return agent_presence_from_payload(json.loads(result.stdout))
     except (FileNotFoundError, json.JSONDecodeError, subprocess.TimeoutExpired):
         return AgentPresence((), ())
+
+
+# Every presence probe is a short-lived `vc-frame action` CLI client.  Each
+# attach makes the server broadcast Tab/Pane/Session updates to every plugin in
+# the session (Plugin Manager, rail, bars), so a 2 s poll made the whole chrome
+# flicker in every session.  The dashboard redraws every 500 ms without asking
+# vc-frame anything; it probes on first draw, on User input (never faster than
+# the on-demand floor), and otherwise on a slow cadence that doubles up to the
+# ceiling while the answer is unchanged.
+PRESENCE_REFRESH_SECONDS = 15.0
+PRESENCE_MAX_REFRESH_SECONDS = 60.0
+PRESENCE_ON_DEMAND_FLOOR_SECONDS = 2.0
+
+
+class PresenceSchedule:
+    """Decide when the dashboard may spawn a pane-state probe."""
+
+    def __init__(
+        self,
+        *,
+        base: float = PRESENCE_REFRESH_SECONDS,
+        ceiling: float = PRESENCE_MAX_REFRESH_SECONDS,
+        floor: float = PRESENCE_ON_DEMAND_FLOOR_SECONDS,
+    ) -> None:
+        self.base = base
+        self.ceiling = ceiling
+        self.floor = floor
+        self.interval = base
+        self.last_at: float | None = None
+        self.requested = False
+
+    def request(self) -> None:
+        """Ask for a probe on the next draw that clears the on-demand floor."""
+        self.requested = True
+
+    def due(self, now: float) -> bool:
+        if self.last_at is None:
+            return True
+        elapsed = now - self.last_at
+        return elapsed >= (self.floor if self.requested else self.interval)
+
+    def record(self, now: float, *, changed: bool) -> None:
+        self.last_at = now
+        self.requested = False
+        self.interval = self.base if changed else min(self.ceiling, self.interval * 2)
 
 
 # Curses pair 0 is COLOR_BLACK. Signed palettes put purple-navy `#26233a` in
@@ -505,7 +526,7 @@ class Workshop:
         self.path = str(Path.cwd())
         self.error = ""
         self.mouse_targets: list[tuple[int, int, int, int, str]] = []
-        self.last_faces_at = 0.0
+        self.presence_schedule = PresenceSchedule()
         self.faces: list[str] = []
         self.unknown_faces: list[str] = []
 
@@ -535,10 +556,11 @@ class Workshop:
             key = self.window.getch()
             if key == -1:
                 continue
-            if key == curses.KEY_RESIZE:
-                continue
             if key == curses.KEY_MOUSE:
                 self.handle_mouse()
+                continue
+            self.presence_schedule.request()
+            if key == curses.KEY_RESIZE:
                 continue
             if self.mode == "home":
                 self.handle_home_key(key)
@@ -578,11 +600,17 @@ class Workshop:
             col += len(text) + 2
 
         now = time.monotonic()
-        if now - self.last_faces_at > 2:
+        if self.presence_schedule.due(now):
             presence = current_agent_presence()
-            self.faces = list(presence.active)
-            self.unknown_faces = list(presence.unknown)
-            self.last_faces_at = now
+            faces = list(presence.active)
+            unknown = list(presence.unknown)
+            changed = self.presence_schedule.last_at is None or (faces, unknown) != (
+                self.faces,
+                self.unknown_faces,
+            )
+            self.faces = faces
+            self.unknown_faces = unknown
+            self.presence_schedule.record(now, changed=changed)
         _safe_addstr(
             self.window,
             top + 10,
@@ -994,6 +1022,10 @@ class Workshop:
             return
         if not state:
             return
+        # Pointer motion reports arrive continuously while hovering; only a
+        # button event is User intent worth a pane-state probe.
+        if state & ~curses.REPORT_MOUSE_POSITION:
+            self.presence_schedule.request()
         for row, start, end, index, kind in self.mouse_targets:
             if kind == "home" and y == row and start <= x < end:
                 self.home_choice = index
